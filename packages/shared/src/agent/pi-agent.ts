@@ -380,14 +380,16 @@ export class PiAgent extends BaseAgent {
       }
     }
 
-    // Retrieve auth credentials for the subprocess.
+    // Retrieve auth credentials for the subprocess. Connection-scoped keys are
+    // allowed for custom endpoints, but global fallback stays disabled there.
     // Custom endpoint mode must NOT fall back to global API keys — keyless local endpoints
-    // are valid, and non-local endpoints should fail explicitly instead of using unrelated creds.
     const piAuth = await this.getPiAuth();
     const isCustomEndpointMode = !!runtime.customEndpoint;
-    const legacyApiKey = (!piAuth && !isCustomEndpointMode) ? await this.getApiKey() : undefined;
+    const legacyApiKey = !piAuth
+      ? await this.getApiKey({ allowGlobalFallback: !isCustomEndpointMode })
+      : undefined;
     if (isCustomEndpointMode && !piAuth) {
-      this.debug('Custom endpoint mode: no provider credential configured, sending empty API key');
+      this.debug(`Custom endpoint mode: ${legacyApiKey ? 'using connection-scoped API key' : 'no provider credential configured, sending empty API key'}`);
     }
 
     // Derive AWS env vars from the piAuth credential (single fetch, no race).
@@ -751,16 +753,29 @@ export class PiAgent extends BaseAgent {
    * Legacy fallback when piAuthProvider is not set.
    * The subprocess expects a single API key string (passed via init.apiKey).
    */
-  private async getApiKey(): Promise<string | null> {
+  private async getApiKey(options: { allowGlobalFallback?: boolean } = {}): Promise<string | null> {
     try {
       const credentialManager = getCredentialManager();
       const slug = this.config.connectionSlug || 'pi';
+
+      // Prefer connection-scoped API keys. Custom endpoint credentials are stored here,
+      // and using this first keeps per-connection auth isolated from global defaults.
+      const llmApiKey = await credentialManager.getLlmApiKey(slug);
+      if (llmApiKey) {
+        this.debug('Retrieved API key from LLM connection');
+        return llmApiKey;
+      }
 
       // Try LLM OAuth first (for OAuth-based connections)
       const oauth = await credentialManager.getLlmOAuth(slug);
       if (oauth?.accessToken) {
         this.debug('Retrieved API key from LLM OAuth');
         return oauth.accessToken;
+      }
+
+      if (options.allowGlobalFallback === false) {
+        this.debug('No connection-scoped API key found for Pi agent');
+        return null;
       }
 
       // Try Anthropic API key

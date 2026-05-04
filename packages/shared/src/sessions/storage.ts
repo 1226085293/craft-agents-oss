@@ -403,7 +403,7 @@ function headerToMetadata(header: SessionHeader, workspaceRootPath: string): Ses
 
     // Destructure fields that don't exist on SessionMetadata or need overrides
     const {
-      enabledSourceSlugs: _es, pendingPlanExecution: _pp,
+      pendingPlanExecution: _pp,
       sessionStatus: _ss, workingDirectory: _wd, sdkCwd: _sc,
       workspaceRootPath: _wrp, ...headerFields
     } = header;

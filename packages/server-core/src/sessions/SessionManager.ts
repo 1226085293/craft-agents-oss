@@ -1633,7 +1633,6 @@ export class SessionManager implements ISessionManager {
           // This dramatically reduces memory usage at startup - messages are loaded
           // when getSession() is called for a specific session
           const managed = createManagedSession(meta, workspace, {
-            enabledSourceSlugs: undefined,  // Loaded with messages
             workingDirectory: meta.workingDirectory ?? wsDefaultWorkingDir,
           })
 
@@ -2434,6 +2433,7 @@ export class SessionManager implements ISessionManager {
       name: options?.name,
       permissionMode: defaultPermissionMode,
       workingDirectory: resolvedWorkingDir,
+      enabledSourceSlugs: defaultEnabledSourceSlugs,
       hidden: options?.hidden,
       sessionStatus: options?.sessionStatus,
       labels: options?.labels,
@@ -2570,6 +2570,8 @@ export class SessionManager implements ISessionManager {
         sessionName: managed.name,
       })
     }
+
+    this.sendEvent({ type: 'session_created', sessionId: storedSession.id }, workspace.id)
 
     return managedToSession(managed, isBranch ? { messages: managed.messages } : undefined)
   }

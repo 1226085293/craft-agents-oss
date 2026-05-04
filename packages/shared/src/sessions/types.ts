@@ -326,6 +326,8 @@ export interface SessionMetadata {
   permissionMode?: PermissionMode;
   /** Previous permission mode (used to preserve modeTransition context across restarts) */
   previousPermissionMode?: PermissionMode;
+  /** Sources enabled for this session */
+  enabledSourceSlugs?: string[];
   /** Number of plan files for this session */
   planCount?: number;
   /** Shared viewer URL (if shared via viewer) */

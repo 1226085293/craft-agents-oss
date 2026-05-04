@@ -190,12 +190,36 @@ export class SourceManager {
     // Active sources line - include warning for sources with failed builds
     if (activeSlugs.length > 0) {
       const activeWithStatus = activeSlugs.map((slug) => {
+        const source = this.allSources.find((s) => s.config.slug === slug);
+        if (source?.config.type === 'local') {
+          const localPath = source.config.local?.path;
+          return localPath ? `${slug} (local: ${localPath})` : `${slug} (local)`;
+        }
+
         const hasWorkingTools = this.activeSlugs.has(slug);
         return hasWorkingTools ? slug : `${slug} (no tools)`;
       });
       parts.push(`Active: ${activeWithStatus.join(', ')}`);
     } else {
       parts.push('Active: none');
+    }
+
+    // Local sources do not create MCP/API tools; expose their configured
+    // filesystem path persistently so the model can refer to the source without guessing.
+    const activeLocalSources = activeSources.filter(
+      (s) => s.config.type === 'local' && s.config.local?.path
+    );
+    if (activeLocalSources.length > 0) {
+      parts.push('Local source folders:');
+      for (const s of activeLocalSources) {
+        const localPath = s.config.local?.path;
+        if (localPath) {
+          parts.push(
+            `- ${s.config.slug}: ${localPath} ` +
+            '(configured local folder; use filesystem tools for this source)'
+          );
+        }
+      }
     }
 
     // Inactive sources with reason
@@ -230,6 +254,9 @@ export class SourceManager {
       for (const s of unseenSources) {
         const tagline = s.config.tagline || s.config.provider;
         parts.push(`- ${s.config.slug}: ${tagline}`);
+        if (s.config.type === 'local' && s.config.local?.path) {
+          parts.push(`  Local path: ${s.config.local.path}`);
+        }
         // Add guide path for sources that have guides (excluding internal sources)
         if (s.guide?.raw && !GUIDE_EXEMPT_SLUGS.has(s.config.slug)) {
           parts.push(`  Guide: ${join(s.folderPath, 'guide.md')}`);

@@ -213,6 +213,44 @@ describe('SourceManager', () => {
 
       expect(formatted).toContain('github (no tools)');
     });
+
+    it('should expose local source paths instead of marking them as failed tools', () => {
+      sourceManager.setAllSources([
+        createMockSource('repo', {
+          provider: 'filesystem',
+          type: 'local',
+          local: { path: '/projects/repo' },
+          tagline: 'Local project repository',
+        }),
+      ]);
+      sourceManager.updateActiveState([], [], ['repo']);
+
+      const formatted = sourceManager.formatSourceState();
+
+      expect(formatted).toContain('Active: repo (local: /projects/repo)');
+      expect(formatted).toContain('Local source folders:');
+      expect(formatted).toContain('- repo: /projects/repo (configured local folder; use filesystem tools for this source)');
+      expect(formatted).toContain('Local path: /projects/repo');
+      expect(formatted).not.toContain('repo (no tools)');
+    });
+
+    it('should keep local source paths in context after the source has been introduced', () => {
+      sourceManager.setAllSources([
+        createMockSource('repo', {
+          provider: 'filesystem',
+          type: 'local',
+          local: { path: '/projects/repo' },
+        }),
+      ]);
+      sourceManager.updateActiveState([], [], ['repo']);
+
+      sourceManager.formatSourceState();
+      const formatted = sourceManager.formatSourceState();
+
+      expect(formatted).toContain('Active: repo (local: /projects/repo)');
+      expect(formatted).toContain('- repo: /projects/repo (configured local folder; use filesystem tools for this source)');
+      expect(formatted).not.toContain('Local path: /projects/repo');
+    });
   });
 
   describe('Authentication Utilities', () => {

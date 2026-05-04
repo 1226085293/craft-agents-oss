@@ -58,7 +58,13 @@ setBedrockProviderModule(bedrockProviderModule);
 // Model resolution (extracted for testability + custom-endpoint precedence)
 import { resolvePiModel, isDeniedMiniModelId, isModelNotFoundError } from './model-resolution.ts';
 import { pickProviderAppropriateMiniModel } from './pick-mini-model.ts';
-import { buildCustomEndpointModelDef, type CustomEndpointModelOverrides } from './custom-endpoint-models.ts';
+import {
+  buildCustomEndpointModelDef,
+  normalizeCustomEndpointModelEntry,
+  stripPiPrefix,
+  type CustomEndpointModelEntry,
+  type CustomEndpointModelOverrides,
+} from './custom-endpoint-models.ts';
 
 // Direct source imports from shared (bundled by bun build)
 import { handleLargeResponse, estimateTokens, TOKEN_LIMIT } from '../../shared/src/utils/large-response.ts';
@@ -70,6 +76,7 @@ import { getDefaultSummarizationModel } from '../../shared/src/config/models.ts'
 import { createWebFetchTool } from './tools/web-fetch.ts';
 import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
 import { createSearchTool } from './tools/search/create-search-tool.ts';
+import { allowCraftMetadataProperties, stripCraftMetadata } from './craft-metadata-schema.ts';
 
 // ============================================================
 // Types — JSONL Protocol
@@ -366,11 +373,6 @@ function setInterceptorApiHints(model: { api?: string; provider?: string; baseUr
   );
 }
 
-/** Strip bare model IDs (remove pi/ prefix if present) */
-function stripPiPrefix(id: string): string {
-  return id.startsWith('pi/') ? id.slice(3) : id;
-}
-
 /**
  * Resolve the API key for custom endpoint auth.
  * Returns empty string for local endpoints (Ollama etc.) that don't need auth.
@@ -406,10 +408,6 @@ function isLocalhostUrl(url: string): boolean {
 /** Model IDs currently registered under the custom-endpoint provider */
 let customEndpointModelIds: Set<string> = new Set();
 
-interface CustomModelEntry extends CustomEndpointModelOverrides {
-  id: string;
-}
-
 /**
  * Register (or re-register) the custom-endpoint provider with the given models.
  * Note: registerProvider replaces the entire provider, so we maintain a Set of all
@@ -421,7 +419,7 @@ function registerCustomEndpointModels(
   registry: PiModelRegistry,
   api: CustomEndpointApi,
   baseUrl: string,
-  models: CustomModelEntry[],
+  models: CustomEndpointModelEntry[],
 ): void {
   for (const m of models) {
     customEndpointModelIds.add(m.id);
@@ -483,12 +481,10 @@ function createAuthenticatedRegistry(): {
   const hasCustomEndpoint = !!initConfig?.baseUrl?.trim();
   if (hasCustomEndpoint && initConfig?.customEndpoint) {
     const { api } = initConfig.customEndpoint;
-    const modelEntries: CustomModelEntry[] = (initConfig.customModels?.length
+    const modelEntries: CustomEndpointModelEntry[] = (initConfig.customModels?.length
       ? initConfig.customModels
       : [initConfig.model || 'default']
-    ).map(m => typeof m === 'string'
-      ? { id: stripPiPrefix(m) }
-      : { id: stripPiPrefix(m.id), contextWindow: m.contextWindow });
+    ).map(normalizeCustomEndpointModelEntry);
     customEndpointModelIds = new Set();  // Reset on fresh registry creation
     registerCustomEndpointModels(modelRegistry, api, initConfig.baseUrl!.trim(), modelEntries);
   } else if (hasCustomEndpoint && !initConfig?.customEndpoint) {
@@ -711,6 +707,7 @@ function makeErrorResult(message: string): AgentToolResult<any> {
 
 function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any> {
   const originalExecute = tool.execute;
+  const parameters = allowCraftMetadataProperties(tool.parameters);
 
   const wrappedExecute: ToolDefinition<any, any>['execute'] = async (
     toolCallId,
@@ -733,6 +730,11 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
 
     // Send to main process for permission checking + transforms
     inputObj = await requestPreToolUseApproval(sdkToolName, inputObj, toolCallId);
+
+    // Metadata is for Craft UI only. Keep a final defensive strip here so the
+    // upstream Pi tool implementation always receives clean executable args,
+    // even if a future pre-tool-use path returns `allow` without modification.
+    inputObj = stripCraftMetadata(inputObj);
 
     // Execute original tool with (potentially modified) input
     const result = await originalExecute(toolCallId, inputObj, signal, onUpdate, ctx);
@@ -781,6 +783,7 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
 
   return {
     ...tool,
+    parameters,
     execute: wrappedExecute,
   };
 }

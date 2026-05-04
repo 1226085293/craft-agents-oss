@@ -525,7 +525,7 @@ export interface ClaudeOAuthResult {
 // ---------------------------------------------------------------------------
 
 export type TestAutomationAction =
-  | { type: 'prompt'; prompt: string; llmConnection?: string; model?: string }
+  | { type: 'prompt'; prompt: string; llmConnection?: string; model?: string; thinkingLevel?: ThinkingLevel }
   | { type: 'webhook'; url: string; method?: string; headers?: Record<string, string>; bodyFormat?: 'json' | 'form' | 'raw'; body?: unknown; captureResponse?: boolean; auth?: { type: 'basic'; username: string; password: string } | { type: 'bearer'; token: string } }
 
 export interface TestAutomationPayload {
@@ -535,6 +535,8 @@ export interface TestAutomationPayload {
   actions: TestAutomationAction[]
   permissionMode?: PermissionMode
   labels?: string[]
+  /** Forwarded from the matcher; routes test-run sessions into a Telegram topic when paired. */
+  telegramTopic?: string
 }
 
 export type TestAutomationActionResult =

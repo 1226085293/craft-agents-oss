@@ -287,11 +287,12 @@ export class TelegramAdapter implements PlatformAdapter {
       await this.messageHandler(msg)
     })
 
-    // Attachment handlers — photos, documents, voice, video, audio.
-    // Each maps Telegram's source field onto a single helper that
-    // downloads the blob to a temp file, then emits one IncomingMessage
-    // with `attachments[0].localPath` set. The router resolves the path
-    // via readFileAttachment() and forwards a FileAttachment to the session.
+    // Attachment handlers — photos, documents, voice, video, audio,
+    // animations/GIFs, video notes, and stickers. Each maps Telegram's
+    // source field onto a single helper that downloads the blob to a temp
+    // file, then emits one IncomingMessage with `attachments[0].localPath`
+    // set. The router resolves the path via readFileAttachment() and
+    // forwards a FileAttachment to the session.
     this.bot.on('message:photo', async (ctx: Context) => {
       if (!isAcceptedChat(ctx, this.supergroupChatId)) {
         this.logRejectedChat('message:photo', ctx)
@@ -369,6 +370,59 @@ export class TelegramAdapter implements PlatformAdapter {
         fileName: audio.file_name,
         fileSize: audio.file_size,
         mimeType: audio.mime_type ?? 'audio/mpeg',
+      })
+    })
+
+    this.bot.on('message:animation', async (ctx: Context) => {
+      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+        this.logRejectedChat('message:animation', ctx)
+        return
+      }
+      const animation = ctx.message?.animation
+      if (!animation) return
+      await this.emitAttachmentMessage(ctx, {
+        type: 'animation',
+        fileId: animation.file_id,
+        fileName: animation.file_name,
+        fileSize: animation.file_size,
+        mimeType: animation.mime_type ?? 'video/mp4',
+      })
+    })
+
+    this.bot.on('message:video_note', async (ctx: Context) => {
+      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+        this.logRejectedChat('message:video_note', ctx)
+        return
+      }
+      const videoNote = ctx.message?.video_note
+      if (!videoNote) return
+      await this.emitAttachmentMessage(ctx, {
+        type: 'video_note',
+        fileId: videoNote.file_id,
+        fileName: `video-note-${ctx.message?.message_id ?? Date.now()}.mp4`,
+        fileSize: videoNote.file_size,
+        mimeType: 'video/mp4',
+      })
+    })
+
+    this.bot.on('message:sticker', async (ctx: Context) => {
+      if (!isAcceptedChat(ctx, this.supergroupChatId)) {
+        this.logRejectedChat('message:sticker', ctx)
+        return
+      }
+      const sticker = ctx.message?.sticker
+      if (!sticker) return
+      const mimeType = sticker.is_video
+        ? 'video/webm'
+        : sticker.is_animated
+          ? 'application/x-tgsticker'
+          : 'image/webp'
+      await this.emitAttachmentMessage(ctx, {
+        type: 'sticker',
+        fileId: sticker.file_id,
+        fileName: `sticker-${ctx.message?.message_id ?? Date.now()}${stickerFileExtension(sticker)}`,
+        fileSize: sticker.file_size,
+        mimeType,
       })
     })
 
@@ -573,7 +627,7 @@ export class TelegramAdapter implements PlatformAdapter {
     let fileName = fallbackName
     if (!extname(fileName)) fileName = `${fileName}${ext}`
 
-    const url = `https://api.telegram.org/file/bot${this.bot.token}/${file.file_path}`
+    const url = `https://api.telegram.org/file/bot${this.bot.token}/${encodeTelegramFilePath(file.file_path)}`
     const res = await fetch(url)
     if (!res.ok) {
       throw new Error(`download failed: ${res.status} ${res.statusText}`)
@@ -724,4 +778,17 @@ export class TelegramAdapter implements PlatformAdapter {
 function threadParams(opts?: SendOptions): { message_thread_id?: number } {
   if (opts?.threadId === undefined) return {}
   return { message_thread_id: opts.threadId }
+}
+
+function encodeTelegramFilePath(filePath: string): string {
+  return filePath
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/')
+}
+
+function stickerFileExtension(sticker: { is_video?: boolean; is_animated?: boolean }): string {
+  if (sticker.is_video) return '.webm'
+  if (sticker.is_animated) return '.tgs'
+  return '.webp'
 }

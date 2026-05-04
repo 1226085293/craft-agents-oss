@@ -158,6 +158,10 @@ dmg:
 
 win:
   icon: resources/icon.ico
+  # Local/dev builds are intentionally unsigned. This also avoids downloading
+  # winCodeSign, whose archive contains symlinks that fail to extract on
+  # Windows without developer-mode/admin privileges.
+  signAndEditExecutable: false
   target:
     - target: nsis
       arch:

@@ -100,59 +100,77 @@ try {
     Pop-Location
 }
 
-# 3. Download Bun binary for Windows
-# Use baseline build - works on all x64 CPUs (no AVX2 requirement)
-Write-Host "Downloading Bun $BunVersion for Windows x64 (baseline)..."
+# 3. Stage Bun binary for Windows.
+# Prefer the already-installed local bun.exe so local packaging does not depend
+# on GitHub downloads (the previous build stopped here with Invoke-WebRequest
+# exiting 255). Download only as a fallback when no local bun.exe is available.
+Write-Host "Staging Bun for Windows x64..."
 New-Item -ItemType Directory -Force -Path "$ElectronDir\vendor\bun" | Out-Null
 
-$BunDownload = "bun-windows-x64-baseline"
-$TempDir = Join-Path $env:TEMP "bun-download-$(Get-Random)"
-New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
-
-try {
-    # Download binary and checksums
-    $ZipUrl = "https://github.com/oven-sh/bun/releases/download/$BunVersion/$BunDownload.zip"
-    $ChecksumUrl = "https://github.com/oven-sh/bun/releases/download/$BunVersion/SHASUMS256.txt"
-
-    Write-Host "Downloading from $ZipUrl..."
-    Invoke-WebRequest -Uri $ZipUrl -OutFile "$TempDir\$BunDownload.zip"
-    Invoke-WebRequest -Uri $ChecksumUrl -OutFile "$TempDir\SHASUMS256.txt"
-
-    # Verify checksum
-    Write-Host "Verifying checksum..."
-    $ExpectedHash = (Get-Content "$TempDir\SHASUMS256.txt" | Select-String "$BunDownload.zip").ToString().Split(" ")[0]
-    $ActualHash = (Get-FileHash "$TempDir\$BunDownload.zip" -Algorithm SHA256).Hash.ToLower()
-
-    if ($ActualHash -ne $ExpectedHash) {
-        throw "Checksum verification failed! Expected: $ExpectedHash, Got: $ActualHash"
-    }
-    Write-Host "Checksum verified successfully" -ForegroundColor Green
-
-    # Extract and install using robocopy for better file handle management
-    Write-Host "Extracting Bun..."
-    Expand-Archive -Path "$TempDir\$BunDownload.zip" -DestinationPath $TempDir -Force
-
-    # Unblock in temp first (before copy)
-    Unblock-File -Path "$TempDir\$BunDownload\bun.exe" -ErrorAction SilentlyContinue
-
-    # Use robocopy with retries - handles transient file locks better than Copy-Item
-    # /R:5 = 5 retries, /W:3 = 3 second wait between retries, /NP = no progress, /NFL /NDL = quiet
-    Write-Host "Copying bun.exe with robocopy..."
-    $robocopyResult = robocopy "$TempDir\$BunDownload" "$ElectronDir\vendor\bun" "bun.exe" /R:5 /W:3 /NP /NFL /NDL
-    # Robocopy exit codes: 0-7 are success, 8+ are errors
-    if ($LASTEXITCODE -ge 8) {
-        throw "robocopy failed with exit code $LASTEXITCODE"
-    }
-
-    $BunExePath = "$ElectronDir\vendor\bun\bun.exe"
-    Write-Host "Bun extracted to: $BunExePath" -ForegroundColor Green
-
-    # Give Windows time to release any file handles from the copy
-    Write-Host "Waiting for file handles to release..."
-    Start-Sleep -Seconds 3
-} finally {
-    Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
+$BunExePath = "$ElectronDir\vendor\bun\bun.exe"
+$LocalBun = $env:CRAFT_BUILD_BUN_EXE
+if (-not $LocalBun) {
+    $BunCommand = Get-Command bun -ErrorAction SilentlyContinue
+    if ($BunCommand) { $LocalBun = $BunCommand.Source }
 }
+
+if ($LocalBun -and (Test-Path $LocalBun)) {
+    Write-Host "Using local Bun: $LocalBun"
+    Copy-Item -Force $LocalBun $BunExePath
+    Unblock-File -Path $BunExePath -ErrorAction SilentlyContinue
+    Write-Host "Bun staged to: $BunExePath" -ForegroundColor Green
+} else {
+    # Use baseline build - works on all x64 CPUs (no AVX2 requirement)
+    Write-Host "Local Bun not found; downloading Bun $BunVersion for Windows x64 (baseline)..."
+
+    $BunDownload = "bun-windows-x64-baseline"
+    $TempDir = Join-Path $env:TEMP "bun-download-$(Get-Random)"
+    New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+
+    try {
+        # Download binary and checksums
+        $ZipUrl = "https://github.com/oven-sh/bun/releases/download/$BunVersion/$BunDownload.zip"
+        $ChecksumUrl = "https://github.com/oven-sh/bun/releases/download/$BunVersion/SHASUMS256.txt"
+
+        Write-Host "Downloading from $ZipUrl..."
+        Invoke-WebRequest -Uri $ZipUrl -OutFile "$TempDir\$BunDownload.zip" -TimeoutSec 120
+        Invoke-WebRequest -Uri $ChecksumUrl -OutFile "$TempDir\SHASUMS256.txt" -TimeoutSec 60
+
+        # Verify checksum
+        Write-Host "Verifying checksum..."
+        $ExpectedHash = (Get-Content "$TempDir\SHASUMS256.txt" | Select-String "$BunDownload.zip").ToString().Split(" ")[0]
+        $ActualHash = (Get-FileHash "$TempDir\$BunDownload.zip" -Algorithm SHA256).Hash.ToLower()
+
+        if ($ActualHash -ne $ExpectedHash) {
+            throw "Checksum verification failed! Expected: $ExpectedHash, Got: $ActualHash"
+        }
+        Write-Host "Checksum verified successfully" -ForegroundColor Green
+
+        # Extract and install using robocopy for better file handle management
+        Write-Host "Extracting Bun..."
+        Expand-Archive -Path "$TempDir\$BunDownload.zip" -DestinationPath $TempDir -Force
+
+        # Unblock in temp first (before copy)
+        Unblock-File -Path "$TempDir\$BunDownload\bun.exe" -ErrorAction SilentlyContinue
+
+        # Use robocopy with retries - handles transient file locks better than Copy-Item
+        # /R:5 = 5 retries, /W:3 = 3 second wait between retries, /NP = no progress, /NFL /NDL = quiet
+        Write-Host "Copying bun.exe with robocopy..."
+        $robocopyResult = robocopy "$TempDir\$BunDownload" "$ElectronDir\vendor\bun" "bun.exe" /R:5 /W:3 /NP /NFL /NDL
+        # Robocopy exit codes: 0-7 are success, 8+ are errors
+        if ($LASTEXITCODE -ge 8) {
+            throw "robocopy failed with exit code $LASTEXITCODE"
+        }
+
+        Write-Host "Bun extracted to: $BunExePath" -ForegroundColor Green
+    } finally {
+        Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
+    }
+}
+
+# Give Windows time to release any file handles from the copy
+Write-Host "Waiting for file handles to release..."
+Start-Sleep -Seconds 3
 
 # 4. Copy SDK from root node_modules (monorepo hoisting).
 # Since SDK 0.2.113: thin core + per-platform binary package.
@@ -244,6 +262,17 @@ foreach ($dep in @("interceptor-common.ts", "feature-flags.ts", "interceptor-req
 # 6. Build Electron app
 Write-Host "Building Electron app..."
 
+# Build WhatsApp worker bundle before packaging. electron-builder.yml includes
+# packages/messaging-whatsapp-worker/dist/worker.cjs as an extraResource.
+Write-Host "  Building WhatsApp worker..."
+Push-Location $RootDir
+try {
+    bun run build:wa-worker
+    if ($LASTEXITCODE -ne 0) { throw "WhatsApp worker build failed" }
+} finally {
+    Pop-Location
+}
+
 # Build main process with OAuth credentials
 Write-Host "  Building main process..."
 $MainArgs = @(
@@ -252,7 +281,12 @@ $MainArgs = @(
     "--platform=node",
     "--format=cjs",
     "--outfile=apps/electron/dist/main.cjs",
-    "--external:electron"
+    "--external:electron",
+    # Replace grammY's bundled polyfills (node-fetch@2 + abort-controller@3)
+    # with native Node globals. Without this, packaged Telegram API calls can
+    # fail before polling or file download starts.
+    "--alias:node-fetch=./apps/electron/src/main/shims/node-fetch.cjs",
+    "--alias:abort-controller=./apps/electron/src/main/shims/abort-controller.cjs"
 )
 # Add OAuth defines if env vars are set
 if ($env:GOOGLE_OAUTH_CLIENT_ID) {

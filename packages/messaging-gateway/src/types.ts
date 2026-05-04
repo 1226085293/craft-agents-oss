@@ -97,7 +97,7 @@ export interface IncomingMessage {
 }
 
 export interface IncomingAttachment {
-  type: 'photo' | 'document' | 'voice' | 'video' | 'audio'
+  type: 'photo' | 'document' | 'voice' | 'video' | 'audio' | 'animation' | 'video_note' | 'sticker'
   fileId: string
   fileName?: string
   mimeType?: string

@@ -5,6 +5,8 @@
   "apiSetup.format.anthropicCompatible": "Anthropic 互換",
   "apiSetup.format.openaiCompatible": "OpenAI 互換",
   "apiSetup.loadingModels": "モデルを読み込み中...",
+  "apiSetup.supportsImages": "画像理解をサポート",
+  "apiSetup.supportsImagesDesc": "画像添付をこのモデルに送信します。エンドポイントが画像入力に対応している場合のみ有効にしてください。",
   "apiSetup.modelTier.balanced": "バランス",
   "apiSetup.modelTier.balancedDesc": "日常的な用途に適しています",
   "apiSetup.modelTier.best": "最高",

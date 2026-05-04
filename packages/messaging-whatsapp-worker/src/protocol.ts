@@ -132,7 +132,17 @@ export interface IncomingEvent {
   senderId: string
   senderName?: string
   text: string
+  attachments?: IncomingAttachmentEvent[]
   timestamp: number
+}
+
+export interface IncomingAttachmentEvent {
+  type: 'photo' | 'document' | 'voice' | 'video' | 'audio'
+  fileId: string
+  fileName?: string
+  mimeType?: string
+  fileSize?: number
+  localPath?: string
 }
 
 export interface SendResultEvent {

@@ -3,6 +3,7 @@ import {
   bareJid,
   classifyInbound,
   extractText,
+  hasSupportedMedia,
   rememberSentId,
   MAX_SENT_IDS,
   type ClassifyContext,
@@ -110,6 +111,23 @@ describe('extractText', () => {
   })
 })
 
+describe('hasSupportedMedia', () => {
+  test('detects image and document messages', () => {
+    expect(hasSupportedMedia({
+      key: { id: 'x', remoteJid: OTHER, fromMe: false },
+      message: { imageMessage: { mimetype: 'image/jpeg' } },
+    })).toBe(true)
+    expect(hasSupportedMedia({
+      key: { id: 'x', remoteJid: OTHER, fromMe: false },
+      message: { documentMessage: { mimetype: 'application/pdf' } },
+    })).toBe(true)
+  })
+
+  test('returns false for text-only messages', () => {
+    expect(hasSupportedMedia(makeMsg({ text: 'hello' }))).toBe(false)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // classifyInbound
 // ---------------------------------------------------------------------------
@@ -162,6 +180,17 @@ describe('classifyInbound — fromMe=true echo filtering', () => {
       ctx(),
     )
     expect(d).toEqual({ action: 'emit', text: 'hello me' })
+  })
+
+  test('emits caption-less media in the self-chat', () => {
+    const d = classifyInbound(
+      {
+        key: { id: 'MID-media', remoteJid: SELF_BARE, fromMe: true },
+        message: { documentMessage: { mimetype: 'application/pdf' } },
+      },
+      ctx(),
+    )
+    expect(d).toEqual({ action: 'emit', text: '' })
   })
 
   test('matches self-chat even when remoteJid carries a device suffix', () => {

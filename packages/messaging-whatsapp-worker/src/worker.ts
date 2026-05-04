@@ -14,11 +14,15 @@
  * crypto deps (libsignal, curve25519) resolve correctly.
  */
 
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { Buffer } from 'node:buffer'
+import { randomBytes } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import { extname, join } from 'node:path'
 import {
   encodeMessage,
   parseFrames,
+  type IncomingAttachmentEvent,
   type WorkerCommand,
   type WorkerEvent,
 } from './protocol'
@@ -95,6 +99,12 @@ interface BaileysModule {
   DisconnectReason: Record<string, number>
   Browsers: { macOS: (name: string) => [string, string, string] }
   fetchLatestBaileysVersion: () => Promise<{ version: number[]; isLatest: boolean }>
+  downloadMediaMessage: (
+    message: unknown,
+    type: 'buffer',
+    options: Record<string, unknown>,
+    ctx?: { reuploadRequest: (msg: unknown) => Promise<unknown>; logger: SilentLogger },
+  ) => Promise<Buffer>
 }
 
 type BaileysSock = {
@@ -146,6 +156,25 @@ let session: SessionState | null = null
 /** Cap retries so a permanently-broken credential set doesn't loop forever. */
 const MAX_RECONNECT_ATTEMPTS = 10
 
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+
+const MIME_EXT_FALLBACK: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+  'image/heic': '.heic',
+  'application/pdf': '.pdf',
+  'audio/ogg': '.ogg',
+  'audio/mpeg': '.mp3',
+  'audio/mp4': '.m4a',
+  'video/mp4': '.mp4',
+  'video/quicktime': '.mov',
+  'text/plain': '.txt',
+  'text/csv': '.csv',
+  'application/json': '.json',
+}
+
 /** Fallback prefix when selfChatMode is on but caller didn't specify one. */
 const DEFAULT_RESPONSE_PREFIX = '🤖'
 
@@ -175,6 +204,133 @@ function applyPrefixIfSelfChat(state: SessionState, channelId: string, text: str
   if (!isSelfChat) return text
   if (text.startsWith(state.responsePrefix)) return text
   return `${state.responsePrefix} ${text}`
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : undefined
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'bigint') return Number(value)
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  const record = asRecord(value)
+  if (record && typeof record.low === 'number' && Number.isFinite(record.low)) return record.low
+  return undefined
+}
+
+function extensionFor(mimeType: string | undefined, fileName: string | undefined): string {
+  const namedExt = fileName ? extname(fileName) : ''
+  if (namedExt) return namedExt
+  if (mimeType && MIME_EXT_FALLBACK[mimeType]) return MIME_EXT_FALLBACK[mimeType]
+  return '.bin'
+}
+
+function mediaMetadata(msg: Record<string, unknown>): Omit<IncomingAttachmentEvent, 'localPath'> | null {
+  const m = asRecord(msg.message)
+  if (!m) return null
+  const key = asRecord(msg.key)
+  const id = optionalString(key?.id) ?? randomBytes(4).toString('hex')
+
+  const image = asRecord(m.imageMessage)
+  if (image) {
+    const mimeType = optionalString(image.mimetype) ?? 'image/jpeg'
+    const fileName = `whatsapp-image-${id}${extensionFor(mimeType, undefined)}`
+    return {
+      type: 'photo',
+      fileId: id,
+      fileName,
+      mimeType,
+      fileSize: optionalNumber(image.fileLength),
+    }
+  }
+
+  const document = asRecord(m.documentMessage)
+  if (document) {
+    const mimeType = optionalString(document.mimetype)
+    const sourceName = optionalString(document.fileName)
+    const fileName = sourceName ?? `whatsapp-file-${id}${extensionFor(mimeType, sourceName)}`
+    return {
+      type: 'document',
+      fileId: id,
+      fileName,
+      mimeType,
+      fileSize: optionalNumber(document.fileLength),
+    }
+  }
+
+  const video = asRecord(m.videoMessage)
+  if (video) {
+    const mimeType = optionalString(video.mimetype) ?? 'video/mp4'
+    const fileName = optionalString(video.fileName) ?? `whatsapp-video-${id}${extensionFor(mimeType, undefined)}`
+    return {
+      type: 'video',
+      fileId: id,
+      fileName,
+      mimeType,
+      fileSize: optionalNumber(video.fileLength),
+    }
+  }
+
+  const audio = asRecord(m.audioMessage)
+  if (audio) {
+    const mimeType = optionalString(audio.mimetype) ?? 'audio/ogg'
+    const type = audio.ptt === true ? 'voice' : 'audio'
+    const fileName = `whatsapp-${type}-${id}${extensionFor(mimeType, undefined)}`
+    return {
+      type,
+      fileId: id,
+      fileName,
+      mimeType,
+      fileSize: optionalNumber(audio.fileLength),
+    }
+  }
+
+  return null
+}
+
+async function downloadIncomingAttachment(
+  state: SessionState,
+  msg: Record<string, unknown>,
+): Promise<IncomingAttachmentEvent | null> {
+  const meta = mediaMetadata(msg)
+  if (!meta) return null
+  if (meta.fileSize !== undefined && meta.fileSize > MAX_ATTACHMENT_BYTES) {
+    log(`attachment too large, dropping (${meta.fileSize} bytes)`)
+    return null
+  }
+  try {
+    const buf = await state.baileys.downloadMediaMessage(
+      msg,
+      'buffer',
+      {},
+      { reuploadRequest: async (m) => m, logger: silentLogger },
+    )
+    if (buf.byteLength > MAX_ATTACHMENT_BYTES) {
+      log(`attachment too large after download, dropping (${buf.byteLength} bytes)`)
+      return null
+    }
+    const localPath = join(
+      tmpdir(),
+      `craft-agent-whatsapp-${randomBytes(8).toString('hex')}${extensionFor(meta.mimeType, meta.fileName)}`,
+    )
+    writeFileSync(localPath, buf)
+    return {
+      ...meta,
+      fileSize: buf.byteLength,
+      localPath,
+    }
+  } catch (err) {
+    log('attachment download failed:', err instanceof Error ? err.message : String(err))
+    return null
+  }
 }
 
 async function loadBaileys(): Promise<BaileysModule | null> {
@@ -348,7 +504,8 @@ async function startSession(
       // History-sync guard: Baileys re-emits old messages as 'append' on
       // every connect. Only route messages newer than the last open
       // timestamp, with a 5s grace for clock skew.
-      const cutoff = session.connectedAtSec - 5
+      const currentSession = session
+      const cutoff = currentSession.connectedAtSec - 5
       const selfJid = bareJid(sock.user?.id)
       const selfLid = bareJid(sock.user?.lid)
 
@@ -376,26 +533,39 @@ async function startSession(
         )
 
         const decision = classifyInbound(msg, {
-          selfChatMode: session.selfChatMode,
-          responsePrefix: session.responsePrefix,
+          selfChatMode: currentSession.selfChatMode,
+          responsePrefix: currentSession.responsePrefix,
           selfJid,
           selfLid,
-          sentIds: session.sentIds,
+          sentIds: currentSession.sentIds,
         })
         if (decision.action === 'skip') {
           log(`upsert skip: ${decision.reason}`)
           continue
         }
-        const key = msg.key as { remoteJid?: string; id?: string }
-        log(`upsert emit: channelId=${key.remoteJid} textLen=${decision.text.length}`)
-        emit({
-          type: 'incoming',
-          channelId: key.remoteJid!,
-          messageId: key.id!,
-          senderId: key.remoteJid!,
-          senderName: (msg.pushName as string | undefined) ?? undefined,
-          text: decision.text,
-          timestamp: Number(msg.messageTimestamp) * 1000 || Date.now(),
+        void (async () => {
+          const attachment = await downloadIncomingAttachment(currentSession, msg)
+          if (!decision.text && !attachment) {
+            log('upsert skip: media_download_failed')
+            return
+          }
+          const key = msg.key as { remoteJid?: string; id?: string }
+          log(
+            `upsert emit: channelId=${key.remoteJid} textLen=${decision.text.length} ` +
+              `attachments=${attachment ? 1 : 0}`,
+          )
+          emit({
+            type: 'incoming',
+            channelId: key.remoteJid!,
+            messageId: key.id!,
+            senderId: key.remoteJid!,
+            senderName: (msg.pushName as string | undefined) ?? undefined,
+            text: decision.text,
+            ...(attachment ? { attachments: [attachment] } : {}),
+            timestamp: Number(msg.messageTimestamp) * 1000 || Date.now(),
+          })
+        })().catch((err) => {
+          log('upsert async handler failed:', err instanceof Error ? err.message : String(err))
         })
       }
     })

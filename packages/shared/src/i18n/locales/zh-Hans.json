@@ -5,6 +5,8 @@
   "apiSetup.format.anthropicCompatible": "Anthropic 兼容",
   "apiSetup.format.openaiCompatible": "OpenAI 兼容",
   "apiSetup.loadingModels": "正在加载模型...",
+  "apiSetup.supportsImages": "支持图片理解",
+  "apiSetup.supportsImagesDesc": "将图片附件发送给此模型。仅在端点支持视觉输入时启用。",
   "apiSetup.modelTier.balanced": "均衡",
   "apiSetup.modelTier.balancedDesc": "适合日常使用",
   "apiSetup.modelTier.best": "最佳",

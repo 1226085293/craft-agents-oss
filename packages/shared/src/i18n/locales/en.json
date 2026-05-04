@@ -5,6 +5,8 @@
   "apiSetup.format.anthropicCompatible": "Anthropic Compatible",
   "apiSetup.format.openaiCompatible": "OpenAI Compatible",
   "apiSetup.loadingModels": "Loading models...",
+  "apiSetup.supportsImages": "Supports image understanding",
+  "apiSetup.supportsImagesDesc": "Send image attachments to this model. Enable only if the endpoint supports vision inputs.",
   "apiSetup.modelTier.balanced": "Balanced",
   "apiSetup.modelTier.balancedDesc": "good for everyday use",
   "apiSetup.modelTier.best": "Best",

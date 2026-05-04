@@ -15,6 +15,7 @@ import { useTranslation } from "react-i18next"
 import { Command as CommandPrimitive } from "cmdk"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -79,6 +80,8 @@ export interface ApiKeyInputProps {
     models?: string[]
     /** Pre-fill the protocol toggle for custom endpoints */
     customApi?: CustomEndpointApi
+    /** Whether this custom endpoint/model accepts image inputs */
+    supportsImages?: boolean
   }
 }
 
@@ -193,6 +196,7 @@ export function ApiKeyInput({
   )
   const [connectionDefaultModel, setConnectionDefaultModel] = useState(initialValues?.connectionDefaultModel ?? '')
   const [customApi, setCustomApi] = useState<CustomEndpointApi>(initialValues?.customApi ?? 'openai-completions')
+  const [supportsImages, setSupportsImages] = useState(initialValues?.supportsImages ?? false)
   const [modelError, setModelError] = useState<string | null>(null)
 
   // Bedrock auth state
@@ -386,7 +390,9 @@ export function ApiKeyInput({
 
     // Include custom endpoint protocol when user configured a custom base URL
     const isCustomEndpoint = activePreset === 'custom' && !!effectiveBaseUrl
-    const customEndpoint = isCustomEndpoint ? { api: customApi } : undefined
+    const customEndpoint = isCustomEndpoint
+      ? { api: customApi, ...(supportsImages ? { supportsImages: true } : {}) }
+      : undefined
     const resolvedPiAuthProvider = isCustomEndpoint
       ? (customApi === 'anthropic-messages' ? 'anthropic' : 'openai')
       : effectivePiAuthProvider
@@ -801,6 +807,28 @@ export function ApiKeyInput({
             <p className="text-xs text-foreground/30">
               Required for custom endpoints. Use the provider-specific model ID.
             </p>
+          )}
+          {activePreset === 'custom' && (
+            <div className={cn(
+              "flex items-center justify-between gap-3 rounded-md px-3 py-2",
+              "bg-foreground-2 shadow-minimal",
+              isDisabled && "opacity-50"
+            )}>
+              <div className="min-w-0">
+                <Label htmlFor="supports-images" className="text-sm font-normal">
+                  {t("apiSetup.supportsImages")}
+                </Label>
+                <p className="mt-0.5 text-xs text-foreground/30">
+                  {t("apiSetup.supportsImagesDesc")}
+                </p>
+              </div>
+              <Switch
+                id="supports-images"
+                checked={supportsImages}
+                onCheckedChange={setSupportsImages}
+                disabled={isDisabled}
+              />
+            </div>
           )}
         </div>
       )}

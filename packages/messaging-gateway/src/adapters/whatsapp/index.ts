@@ -472,6 +472,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
             senderId: ev.senderId,
             senderName: ev.senderName,
             text: ev.text,
+            attachments: ev.attachments,
             timestamp: ev.timestamp,
             raw: ev,
           }

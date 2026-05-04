@@ -5,6 +5,8 @@
   "apiSetup.format.anthropicCompatible": "Anthropic kompatibilis",
   "apiSetup.format.openaiCompatible": "OpenAI kompatibilis",
   "apiSetup.loadingModels": "Modellek betöltése...",
+  "apiSetup.supportsImages": "Támogatja a képek értelmezését",
+  "apiSetup.supportsImagesDesc": "Képmellékleteket küld ennek a modellnek. Csak akkor engedélyezd, ha a végpont támogatja a vizuális bemeneteket.",
   "apiSetup.modelTier.balanced": "Kiegyensúlyozott",
   "apiSetup.modelTier.balancedDesc": "mindennapi használatra ideális",
   "apiSetup.modelTier.best": "Legjobb",

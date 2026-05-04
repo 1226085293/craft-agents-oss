@@ -42,6 +42,7 @@ interface CredentialsStepProps {
     activePreset?: string
     models?: string[]
     customApi?: CustomEndpointApi
+    supportsImages?: boolean
   }
 }
 
@@ -272,6 +273,7 @@ export function CredentialsStep({
     editInitialValues?.connectionDefaultModel ?? '',
     (editInitialValues?.models ?? []).join('|'),
     editInitialValues?.customApi ?? '',
+    String(editInitialValues?.supportsImages ?? false),
   ].join('::')
 
   return (

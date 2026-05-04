@@ -572,6 +572,7 @@ export default function AiSettingsPage() {
     activePreset?: string
     models?: string[]
     customApi?: CustomEndpointApi
+    supportsImages?: boolean
   } | undefined>(undefined)
   const setFullscreenOverlayOpen = useSetAtom(fullscreenOverlayOpenAtom)
 
@@ -767,6 +768,7 @@ export default function AiSettingsPage() {
       activePreset: isCustomEndpointConnection ? 'custom' : (connection.piAuthProvider || undefined),
       models: modelIds,
       customApi: connection.customEndpoint?.api,
+      supportsImages: connection.customEndpoint?.supportsImages ?? false,
     })
 
     // Open overlay and jump directly to credentials step (no reset — jumpToCredentials sets state)

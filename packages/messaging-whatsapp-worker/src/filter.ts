@@ -42,6 +42,17 @@ export function extractText(msg: Record<string, unknown>): string {
   return ''
 }
 
+export function hasSupportedMedia(msg: Record<string, unknown>): boolean {
+  const m = msg.message as Record<string, unknown> | undefined
+  if (!m) return false
+  return Boolean(
+    m.imageMessage ||
+    m.documentMessage ||
+    m.videoMessage ||
+    m.audioMessage,
+  )
+}
+
 export interface ClassifyContext {
   selfChatMode: boolean
   responsePrefix: string
@@ -124,7 +135,7 @@ export function classifyInbound(
       return { action: 'skip', reason: 'own_echo_prefix' }
     }
 
-    if (!text) return { action: 'skip', reason: 'empty' }
+    if (!text && !hasSupportedMedia(msg)) return { action: 'skip', reason: 'empty' }
     return { action: 'emit', text }
   }
 
@@ -132,7 +143,7 @@ export function classifyInbound(
     return { action: 'skip', reason: 'non_self_chat_inbound' }
   }
 
-  if (!text) return { action: 'skip', reason: 'empty' }
+  if (!text && !hasSupportedMedia(msg)) return { action: 'skip', reason: 'empty' }
   return { action: 'emit', text }
 }
 

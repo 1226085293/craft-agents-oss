@@ -40,7 +40,7 @@ import { getModelById } from '../config/models.ts';
 
 // BaseAgent provides common functionality
 import { BaseAgent } from './base-agent.ts';
-import type { Workspace } from '../config/storage.ts';
+import { getGitBashPath, type Workspace } from '../config/storage.ts';
 
 // Event adapter
 import { PiEventAdapter } from './backend/pi/event-adapter.ts';
@@ -137,6 +137,7 @@ export class PiAgent extends BaseAgent {
 
   // Pi session ID (managed by subprocess, reported back)
   private piSessionId: string | null = null;
+  private subprocessShellPath: string | undefined;
 
   // Callback server port (managed by subprocess)
   private callbackPort: number = 0;
@@ -328,11 +329,21 @@ export class PiAgent extends BaseAgent {
    */
   private async ensureSubprocess(): Promise<void> {
     if (this.subprocess && this.subprocessReady) {
-      await this.subprocessReady;
-      return;
+      const currentShellPath = this.getConfiguredShellPath();
+      if (currentShellPath !== this.subprocessShellPath && !this._isProcessing) {
+        this.debug('Restarting Pi subprocess after Bash shell path changed');
+        this.killSubprocess();
+      } else {
+        await this.subprocessReady;
+        return;
+      }
     }
 
     await this.spawnSubprocess();
+  }
+
+  private getConfiguredShellPath(): string | undefined {
+    return getGitBashPath() || process.env.CLAUDE_CODE_GIT_BASH_PATH;
   }
 
   /**
@@ -399,6 +410,7 @@ export class PiAgent extends BaseAgent {
 
     // Derive AWS env vars from the piAuth credential (single fetch, no race).
     const awsEnv = this.buildAwsEnv(piAuth, runtime);
+    const shellPath = this.getConfiguredShellPath();
 
     // Spawn the subprocess
     const child = spawn(nodePath, args, {
@@ -411,6 +423,7 @@ export class PiAgent extends BaseAgent {
         ...awsEnv,
         // Pass session dir for cross-process toolMetadataStore
         ...(sessionDir ? { CRAFT_SESSION_DIR: sessionDir } : {}),
+        ...(shellPath ? { CLAUDE_CODE_GIT_BASH_PATH: shellPath } : {}),
         // Propagate debug mode
         CRAFT_DEBUG: (process.argv.includes('--debug') || process.env.CRAFT_DEBUG === '1') ? '1' : '0',
       },
@@ -457,6 +470,7 @@ export class PiAgent extends BaseAgent {
       : '';
     const plansFolderPath = getSessionPlansPath(this.config.workspace.rootPath, sessionId);
     const workingDirectory = this.config.session?.workingDirectory || cwd;
+    this.subprocessShellPath = shellPath;
 
     // Send init command (flat structure matching subprocess InboundMessage type)
     this.send({
@@ -470,6 +484,7 @@ export class PiAgent extends BaseAgent {
       sessionPath,
       workingDirectory,
       plansFolderPath,
+      shellPath,
       miniModel: this.config.miniModel,
       providerType: this.config.providerType,
       authType: this.config.authType,
@@ -1606,6 +1621,7 @@ export class PiAgent extends BaseAgent {
 
     this.subprocess = null;
     this.readline = null;
+    this.subprocessShellPath = undefined;
     this.resetSubprocessErrorDedup();
     this.subprocessReady = null;
     this.subprocessReadyResolve = null;
@@ -2190,6 +2206,7 @@ export class PiAgent extends BaseAgent {
 
     this.subprocessReady = null;
     this.subprocessReadyResolve = null;
+    this.subprocessShellPath = undefined;
     this.callbackPort = 0;
     this.preToolMetadataByCallId.clear();
   }

@@ -174,6 +174,9 @@ export default function WorkspaceSettingsPage() {
 
       try {
         await window.electronAPI.updateWorkspaceSetting(activeWorkspaceId, key, value)
+        window.dispatchEvent(new CustomEvent('craft:workspace-settings-updated', {
+          detail: { workspaceId: activeWorkspaceId, key, value },
+        }))
         return true
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error'

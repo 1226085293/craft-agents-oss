@@ -43,6 +43,8 @@ export interface AppShellContextType {
   llmConnections: LlmConnectionWithStatus[]
   /** Default LLM connection slug for the current workspace */
   workspaceDefaultLlmConnection?: string
+  /** Default session options for the current workspace */
+  workspaceDefaultSessionOptions?: SessionOptions
   /** Refresh LLM connections from config */
   refreshLlmConnections: () => Promise<void>
   pendingPermissions: Map<string, PermissionRequest[]>
@@ -248,9 +250,9 @@ export function useSessionOptionsFor(sessionId: string): {
   setPermissionMode: (mode: PermissionMode) => void
   isSafeModeActive: () => boolean
 } {
-  const { sessionOptions, onSessionOptionsChange } = useAppShellContext()
+  const { sessionOptions, onSessionOptionsChange, workspaceDefaultSessionOptions } = useAppShellContext()
 
-  const options = sessionOptions.get(sessionId) ?? defaultSessionOptions
+  const options = sessionOptions.get(sessionId) ?? workspaceDefaultSessionOptions ?? defaultSessionOptions
 
   const setOption = useCallback(<K extends keyof SessionOptions>(
     key: K,

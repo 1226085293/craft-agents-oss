@@ -103,6 +103,7 @@ interface InitMessage {
   sessionPath: string;
   workingDirectory: string;
   plansFolderPath: string;
+  shellPath?: string;
   miniModel?: string;
   agentDir?: string;
   providerType?: string;
@@ -558,7 +559,7 @@ async function ensureSession(): Promise<AgentSession> {
   //     then `.has(name)` returns false for every string lookup → zero tools active.
   const builtinDefs = [
     createReadToolDefinition(cwd),
-    createBashToolDefinition(cwd),
+    createBashToolDefinition(cwd, { shellPath: initConfig.shellPath }),
     createEditToolDefinition(cwd),
     createWriteToolDefinition(cwd),
     createGrepToolDefinition(cwd),

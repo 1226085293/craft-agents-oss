@@ -1088,7 +1088,7 @@ function AppShellContent({
 
   useAction('chat.cyclePermissionMode', () => {
     if (effectiveSessionId) {
-      const currentOptions = contextValue.sessionOptions.get(effectiveSessionId)
+      const currentOptions = contextValue.sessionOptions.get(effectiveSessionId) ?? contextValue.workspaceDefaultSessionOptions
       const currentMode = currentOptions?.permissionMode ?? 'ask'
       // Cycle through enabled permission modes
       const modes = enabledModes.length >= 2 ? enabledModes : ['safe', 'ask', 'allow-all'] as PermissionMode[]

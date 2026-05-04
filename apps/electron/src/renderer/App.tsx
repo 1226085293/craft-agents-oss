@@ -292,6 +292,8 @@ export default function App() {
   const [llmConnections, setLlmConnections] = useState<LlmConnectionWithStatus[]>([])
   // Workspace default LLM connection (for new sessions)
   const [workspaceDefaultLlmConnection, setWorkspaceDefaultLlmConnection] = useState<string | undefined>()
+  // Workspace default session options (used while newly-created sessions are hydrating)
+  const [workspaceDefaultSessionOptions, setWorkspaceDefaultSessionOptions] = useState<SessionOptions>(defaultSessionOptions)
   // Global default LLM connection slug (from app config)
   const [defaultLlmConnectionSlug, setDefaultLlmConnectionSlug] = useState<string | undefined>()
 
@@ -427,10 +429,10 @@ export default function App() {
         thinkingLevel: session.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
       }
 
-      const hasNonDefaultMode = merged.permissionMode !== defaultSessionOptions.permissionMode
+      const hasExplicitMode = session.permissionMode != null
       const hasNonDefaultThinking = merged.thinkingLevel !== DEFAULT_THINKING_LEVEL
 
-      if (!hasNonDefaultMode && !hasNonDefaultThinking && merged.permissionModeVersion == null) {
+      if (!hasExplicitMode && !hasNonDefaultThinking && merged.permissionModeVersion == null) {
         next.delete(session.id)
       } else {
         next.set(session.id, merged)
@@ -475,11 +477,11 @@ export default function App() {
       // Initialize unified sessionOptions from session data
       const optionsMap = new Map<string, SessionOptions>()
       for (const s of loadedSessions) {
-        const hasNonDefaultMode = s.permissionMode && s.permissionMode !== 'ask'
+        const hasExplicitMode = s.permissionMode != null
         const hasNonDefaultThinking = s.thinkingLevel && s.thinkingLevel !== DEFAULT_THINKING_LEVEL
-        if (hasNonDefaultMode || hasNonDefaultThinking) {
+        if (hasExplicitMode || hasNonDefaultThinking) {
           optionsMap.set(s.id, {
-            permissionMode: s.permissionMode ?? 'ask',
+            permissionMode: s.permissionMode ?? defaultSessionOptions.permissionMode,
             thinkingLevel: s.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
           })
         }
@@ -603,6 +605,10 @@ export default function App() {
     if (windowWorkspaceId) {
       const settings = await window.electronAPI.getWorkspaceSettings(windowWorkspaceId)
       setWorkspaceDefaultLlmConnection(settings?.defaultLlmConnection)
+      setWorkspaceDefaultSessionOptions({
+        permissionMode: settings?.permissionMode ?? defaultSessionOptions.permissionMode,
+        thinkingLevel: settings?.thinkingLevel ?? defaultSessionOptions.thinkingLevel,
+      })
     }
   }, [resolveDefaultConnectionSlug, windowWorkspaceId])
 
@@ -763,6 +769,19 @@ export default function App() {
       refreshLlmConnections()
     }
   }, [windowWorkspaceId, refreshLlmConnections])
+
+  // Settings pages save through IPC; refresh cached workspace defaults immediately
+  // so the next blank/new session badge matches the workspace default without a restart.
+  useEffect(() => {
+    const handleWorkspaceSettingsUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ workspaceId?: string }>).detail
+      if (!detail?.workspaceId || detail.workspaceId === windowWorkspaceId) {
+        refreshLlmConnections()
+      }
+    }
+    window.addEventListener('craft:workspace-settings-updated', handleWorkspaceSettingsUpdated)
+    return () => window.removeEventListener('craft:workspace-settings-updated', handleWorkspaceSettingsUpdated)
+  }, [refreshLlmConnections, windowWorkspaceId])
 
   // Listen for session events - uses centralized event processor for consistent state transitions
   //
@@ -1784,6 +1803,7 @@ export default function App() {
     activeWorkspaceSlug: windowWorkspaceSlug,
     llmConnections,
     workspaceDefaultLlmConnection,
+    workspaceDefaultSessionOptions,
     refreshLlmConnections,
     pendingPermissions,
     pendingCredentials,
@@ -1830,6 +1850,7 @@ export default function App() {
     windowWorkspaceSlug,
     llmConnections,
     workspaceDefaultLlmConnection,
+    workspaceDefaultSessionOptions,
     refreshLlmConnections,
     pendingPermissions,
     pendingCredentials,

@@ -103,6 +103,7 @@ export class Router {
       const att = readFileAttachment(a.localPath) as FileAttachment | null
       if (!att) continue
       if (a.fileName) att.name = a.fileName
+      if (a.mimeType) att.mimeType = a.mimeType
       built.push(att)
     }
     return built.length > 0 ? built : undefined

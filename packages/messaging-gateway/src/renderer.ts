@@ -25,7 +25,7 @@
  * and emits the prompt/error as a distinct message regardless of mode.
  */
 
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { basename, isAbsolute, resolve } from 'node:path'
 
@@ -113,18 +113,23 @@ export type PlanMessageRecorder = (
   messageId: string,
 ) => void
 
+export type FileBaseDirResolver = (binding: ChannelBinding) => string[]
+
 export class Renderer {
   /** Per-binding render state. Keyed by binding.id */
   private states = new Map<string, RenderState>()
   private readonly planTokens: PlanTokenRegistry | undefined
   private readonly recordPlanMessage: PlanMessageRecorder | undefined
+  private readonly resolveFileBaseDirs: FileBaseDirResolver | undefined
 
   constructor(deps?: {
     planTokens?: PlanTokenRegistry
     recordPlanMessage?: PlanMessageRecorder
+    resolveFileBaseDirs?: FileBaseDirResolver
   }) {
     this.planTokens = deps?.planTokens
     this.recordPlanMessage = deps?.recordPlanMessage
+    this.resolveFileBaseDirs = deps?.resolveFileBaseDirs
   }
 
   private getState(bindingId: string): RenderState {
@@ -655,7 +660,10 @@ Approve in the desktop app to continue.`,
     text: string,
     editTarget?: { editMessageId: string; state: RenderState },
   ): Promise<SentMessage | undefined> {
-    const { text: cleanedText, files } = extractOutboundFiles(text)
+    const { text: cleanedText, files } = extractOutboundFiles(
+      text,
+      this.resolveFileBaseDirs?.(binding) ?? [],
+    )
     const opts = bindingOpts(binding)
     let last: SentMessage | undefined
 
@@ -777,26 +785,36 @@ interface OutboundFileRef {
   caption?: string
 }
 
-function extractOutboundFiles(text: string): { text: string; files: OutboundFileRef[] } {
+function extractOutboundFiles(
+  text: string,
+  baseDirs: string[] = [],
+): { text: string; files: OutboundFileRef[] } {
   const files: OutboundFileRef[] = []
+  const seen = new Set<string>()
   const blockPattern = /```(image-preview|pdf-preview|html-preview|datatable|spreadsheet)\s*\n([\s\S]*?)```/g
 
   const cleaned = text.replace(blockPattern, (block, blockType: string, rawJson: string) => {
-    const file = parsePreviewBlock(blockType, rawJson)
+    const file = parsePreviewBlock(blockType, rawJson, baseDirs)
     if (!file) return block
-    files.push(file)
+    addOutboundFile(files, seen, file)
     return ''
   })
 
-  return { text: collapseBlankLines(cleaned), files }
+  const linkCleaned = extractMarkdownFileLinks(cleaned, baseDirs, files, seen)
+
+  return { text: collapseBlankLines(linkCleaned), files }
 }
 
-function parsePreviewBlock(blockType: string, rawJson: string): OutboundFileRef | null {
+function parsePreviewBlock(
+  blockType: string,
+  rawJson: string,
+  baseDirs: string[],
+): OutboundFileRef | null {
   try {
     const parsed = JSON.parse(rawJson.trim()) as { src?: unknown; title?: unknown; name?: unknown }
     if (typeof parsed.src !== 'string' || parsed.src.length === 0) return null
 
-    const filePath = resolveOutboundPath(parsed.src)
+    const filePath = resolveOutboundPath(parsed.src, baseDirs)
     if (!filePath) return null
 
     const title = typeof parsed.title === 'string' ? parsed.title : undefined
@@ -811,15 +829,81 @@ function parsePreviewBlock(blockType: string, rawJson: string): OutboundFileRef 
   }
 }
 
-function resolveOutboundPath(src: string): string | null {
+function extractMarkdownFileLinks(
+  text: string,
+  baseDirs: string[],
+  files: OutboundFileRef[],
+  seen: Set<string>,
+): string {
+  const linkPattern = /!?\[([^\]\n]+)\]\(([^)\n]+)\)/g
+
+  return text.replace(linkPattern, (match, label: string, rawHref: string) => {
+    const href = normalizeMarkdownHref(rawHref)
+    if (!href || isRemoteHref(href)) return match
+
+    const filePath = resolveOutboundPath(href, baseDirs)
+    if (!filePath) return match
+
+    addOutboundFile(files, seen, {
+      path: filePath,
+      filename: safeFilename(label) || basename(filePath),
+      caption: label,
+    })
+    return ''
+  })
+}
+
+function normalizeMarkdownHref(rawHref: string): string | null {
+  const trimmed = rawHref.trim()
+  if (!trimmed) return null
+
+  const unwrapped =
+    trimmed.startsWith('<') && trimmed.endsWith('>')
+      ? trimmed.slice(1, -1).trim()
+      : trimmed
+
+  try {
+    return decodeURI(unwrapped)
+  } catch {
+    return unwrapped
+  }
+}
+
+function isRemoteHref(href: string): boolean {
+  if (/^[a-zA-Z]:[\\/]/.test(href)) return false
+  return /^[a-z][a-z0-9+.-]*:/i.test(href) && !href.toLowerCase().startsWith('file://')
+}
+
+function addOutboundFile(
+  files: OutboundFileRef[],
+  seen: Set<string>,
+  file: OutboundFileRef,
+): void {
+  const key = file.path.toLowerCase()
+  if (seen.has(key)) return
+  seen.add(key)
+  files.push(file)
+}
+
+function resolveOutboundPath(src: string, baseDirs: string[] = []): string | null {
   const normalized = src.startsWith('file://') ? fileUrlToPathOrNull(src) : src
   if (!normalized) return null
 
-  const candidates = isAbsolute(normalized) ? [normalized] : [resolve(process.cwd(), normalized)]
+  const candidates = isAbsolute(normalized)
+    ? [normalized]
+    : [...baseDirs, process.cwd()].map((baseDir) => resolve(baseDir, normalized))
   for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate
+    if (isExistingFile(candidate)) return candidate
   }
   return null
+}
+
+function isExistingFile(path: string): boolean {
+  try {
+    return existsSync(path) && statSync(path).isFile()
+  } catch {
+    return false
+  }
 }
 
 function fileUrlToPathOrNull(src: string): string | null {

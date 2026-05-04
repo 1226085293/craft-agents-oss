@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync, writeFileSync, unlinkSync, mkdtempS
 import { extname, basename, resolve, join, relative } from 'path';
 import { execSync } from 'child_process';
 import { tmpdir } from 'os';
+import { looksLikeBinary } from './binary-detection.ts';
 
 /**
  * Strip UTF-8 BOM (Byte Order Mark) from a string.
@@ -278,7 +279,8 @@ export function resolvePath(filePath: string): string {
 
 /**
  * Determine the type of a file based on extension
- * Falls back to 'text' for unknown extensions (will try to read as text)
+ * Falls back to 'text' for unknown extensions; readFileAttachment verifies
+ * the bytes before exposing text so binary files are kept as unknown files.
  */
 export function getFileType(filePath: string): 'image' | 'text' | 'pdf' | 'office' | 'unknown' {
   const ext = extname(filePath).toLowerCase();
@@ -348,7 +350,7 @@ export function readFileAttachment(filePath: string): FileAttachment | null {
       throw new Error(`File too large: ${basename(resolved)} (${Math.round(stats.size / 1024 / 1024)}MB > 20MB limit)`);
     }
 
-    const type = getFileType(resolved);
+    let type = getFileType(resolved);
     const mimeType = getMimeType(resolved);
     const name = basename(resolved);
 
@@ -365,14 +367,19 @@ export function readFileAttachment(filePath: string): FileAttachment | null {
       const buffer = readFileSync(resolved);
       attachment.base64 = buffer.toString('base64');
     } else if (type === 'text') {
+      const buffer = readFileSync(resolved);
+      if (looksLikeBinary(buffer)) {
+        attachment.type = 'unknown';
+        return attachment;
+      }
+
       // Read as text for text files (with size limit)
       if (stats.size > MAX_TEXT_SIZE) {
         // Read only first part of large text files
-        const buffer = readFileSync(resolved);
         attachment.text = buffer.toString('utf-8').slice(0, MAX_TEXT_SIZE) +
           `\n\n[File truncated - showing first ${MAX_TEXT_SIZE / 1024}KB of ${Math.round(stats.size / 1024)}KB]`;
       } else {
-        attachment.text = readFileSync(resolved, 'utf-8');
+        attachment.text = buffer.toString('utf-8');
       }
     } else if (type === 'pdf') {
       // Read PDF as base64

@@ -333,6 +333,59 @@ describe('Renderer — final_only mode', () => {
     expect(files).toHaveLength(1)
     expect(files[0]!.filename).toBe('screenshot.jpg')
   })
+
+  it('extracts local markdown file links and sends referenced files', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-renderer-'))
+    const textPath = join(dir, 'desktop-items.txt')
+    writeFileSync(textPath, Buffer.from('fake text'))
+
+    const renderer = new Renderer({
+      resolveFileBaseDirs: () => [dir],
+    })
+    const adapter = makeAdapter()
+    const binding = makeBinding({ responseMode: 'final_only' as ResponseMode })
+    await play(renderer, binding, adapter, [
+      ev.final('Generated file:\n\n[desktop-items.txt](desktop-items.txt)'),
+      ev.complete(),
+    ])
+
+    const sends = adapter.calls.filter((c) => c.kind === 'sendText')
+    const files = adapter.calls.filter((c) => c.kind === 'sendFile')
+    expect(sends.map((s) => s.text)).toEqual(['Generated file:'])
+    expect(files).toHaveLength(1)
+    expect(files[0]!.filename).toBe('desktop-items.txt')
+  })
+
+  it('extracts absolute local markdown file links and sends referenced files', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-renderer-'))
+    const textPath = join(dir, 'report.txt')
+    writeFileSync(textPath, Buffer.from('fake text'))
+
+    const adapter = makeAdapter()
+    const binding = makeBinding({ responseMode: 'final_only' as ResponseMode })
+    await play(renderer, binding, adapter, [
+      ev.final(`Generated file:\n\n[report.txt](${textPath})`),
+      ev.complete(),
+    ])
+
+    const files = adapter.calls.filter((c) => c.kind === 'sendFile')
+    expect(files).toHaveLength(1)
+    expect(files[0]!.filename).toBe('report.txt')
+  })
+
+  it('keeps remote markdown links as text', async () => {
+    const adapter = makeAdapter()
+    const binding = makeBinding({ responseMode: 'final_only' as ResponseMode })
+    await play(renderer, binding, adapter, [
+      ev.final('Read [docs](https://example.com/docs).'),
+      ev.complete(),
+    ])
+
+    const sends = adapter.calls.filter((c) => c.kind === 'sendText')
+    const files = adapter.calls.filter((c) => c.kind === 'sendFile')
+    expect(sends.map((s) => s.text)).toEqual(['Read [docs](https://example.com/docs).'])
+    expect(files).toHaveLength(0)
+  })
 })
 
 // ---------------------------------------------------------------------------

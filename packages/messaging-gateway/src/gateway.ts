@@ -121,6 +121,17 @@ export class MessagingGateway {
     this.planTokens = new PlanTokenRegistry()
     this.renderer = new Renderer({
       planTokens: this.planTokens,
+      resolveFileBaseDirs: (binding) => {
+        const dirs: string[] = []
+        const sessionPath = this.sessionManager.getSessionPath(binding.sessionId)
+        if (sessionPath) dirs.push(sessionPath)
+        const workspaceRoot = this.sessionManager
+          .getWorkspaces()
+          .find((workspace) => workspace.id === binding.workspaceId)
+          ?.rootPath
+        if (workspaceRoot) dirs.push(workspaceRoot)
+        return Array.from(new Set(dirs))
+      },
       // The renderer hands us the exact binding that sent the message.
       // We must not resolve it ourselves — `findBySession` returns every
       // binding and picking the first Telegram binding attributes the

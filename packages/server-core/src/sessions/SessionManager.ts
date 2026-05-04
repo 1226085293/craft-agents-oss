@@ -1,10 +1,10 @@
 import type { EventSink } from '@craft-agent/server-core/transport'
 import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput } from '@craft-agent/server-core/handlers'
-import { validateFilePath, getWorkspaceAllowedDirs } from '@craft-agent/server-core/handlers'
+import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@craft-agent/server-core/handlers'
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
 import { basename, dirname, join } from 'path'
 import { existsSync } from 'fs'
-import { readFile, writeFile, mkdir } from 'fs/promises'
+import { copyFile, readFile, writeFile, mkdir, stat } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
 import { type AgentEvent, setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary } from '@craft-agent/shared/agent'
 import {
@@ -4824,6 +4824,61 @@ export class SessionManager implements ISessionManager {
     sessionLog.info(`Deleted session ${sessionId}`)
   }
 
+  private async persistTransientAttachments(
+    managed: ManagedSession,
+    sessionId: string,
+    attachments: FileAttachment[],
+  ): Promise<{ attachments: FileAttachment[]; storedAttachments: StoredAttachment[] }> {
+    const attachmentsDir = getSessionAttachmentsPath(managed.workspace.rootPath, sessionId)
+    const hydratedAttachments: FileAttachment[] = []
+    const storedAttachments: StoredAttachment[] = []
+
+    for (const attachment of attachments) {
+      try {
+        const sourcePath = attachment.storedPath || attachment.path
+        const sourceStats = await stat(sourcePath)
+        if (!sourceStats.isFile()) {
+          sessionLog.warn(`Skipping non-file attachment: ${sourcePath}`)
+          continue
+        }
+
+        await mkdir(attachmentsDir, { recursive: true })
+
+        const id = randomUUID()
+        const safeName = sanitizeFilename(attachment.name || basename(sourcePath))
+        const storedFileName = `${id}_${safeName}`
+        const storedPath = join(attachmentsDir, storedFileName)
+
+        if (sourcePath !== storedPath) {
+          await copyFile(sourcePath, storedPath)
+        }
+
+        const hydrated: FileAttachment = {
+          ...attachment,
+          name: attachment.name || basename(sourcePath),
+          size: sourceStats.size,
+          storedPath,
+        }
+        hydratedAttachments.push(hydrated)
+
+        storedAttachments.push({
+          id,
+          type: hydrated.type,
+          name: hydrated.name,
+          mimeType: hydrated.mimeType,
+          size: sourceStats.size,
+          storedPath,
+          markdownPath: hydrated.markdownPath,
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        sessionLog.warn(`Failed to persist attachment "${attachment.name}": ${message}`)
+      }
+    }
+
+    return { attachments: hydratedAttachments, storedAttachments }
+  }
+
   async sendMessage(
     sessionId: string,
     message: string,
@@ -4853,6 +4908,12 @@ export class SessionManager implements ISessionManager {
 
     // Ensure messages are loaded before we try to add new ones
     await this.ensureMessagesLoaded(managed)
+
+    if (attachments?.length && (!storedAttachments || storedAttachments.length === 0)) {
+      const persisted = await this.persistTransientAttachments(managed, sessionId, attachments)
+      attachments = persisted.attachments.length > 0 ? persisted.attachments : undefined
+      storedAttachments = persisted.storedAttachments.length > 0 ? persisted.storedAttachments : undefined
+    }
 
     // If currently processing, redirect mid-stream. Each backend decides its strategy:
     // - Pi: steers (injects message, events continue through existing stream)

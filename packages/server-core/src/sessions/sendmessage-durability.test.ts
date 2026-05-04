@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { dirname, isAbsolute, join } from 'path'
 import { getSessionFilePath } from '@craft-agent/shared/sessions/storage'
 import { SessionManager, createManagedSession } from './SessionManager.ts'
 
@@ -53,6 +53,13 @@ describe('sendMessage durability', () => {
     return lines.slice(1).map(l => JSON.parse(l)).map(m => m.id as string)
   }
 
+  function readPersistedMessages(sessionId: string): Array<Record<string, any>> {
+    const path = getSessionFilePath(tmpRoot, sessionId)
+    if (!existsSync(path)) return []
+    const lines = readFileSync(path, 'utf-8').trim().split('\n')
+    return lines.slice(1).map(l => JSON.parse(l))
+  }
+
   it('user message is on disk before onAck fires (normal branch)', async () => {
     const sessionId = 'durability-normal'
     buildSession(sessionId)
@@ -82,6 +89,48 @@ describe('sendMessage durability', () => {
 
     expect(ackedMessageId).not.toBeNull()
     expect(onDiskAtAck).toBe(true)
+  })
+
+  it('attachments passed without stored metadata are copied into the session before ack', async () => {
+    const sessionId = 'durability-attachment'
+    buildSession(sessionId)
+
+    const sourcePath = join(tmpRoot, 'incoming.mp4')
+    writeFileSync(sourcePath, Buffer.from([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]))
+
+    let storedPathAtAck: string | undefined
+
+    await sm
+      .sendMessage(
+        sessionId,
+        '',
+        [{
+          type: 'unknown',
+          path: sourcePath,
+          name: 'incoming.mp4',
+          mimeType: 'video/mp4',
+          size: 8,
+        }],
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        () => {
+          const [message] = readPersistedMessages(sessionId)
+          storedPathAtAck = message?.attachments?.[0]?.storedPath
+        },
+      )
+      .catch(() => { /* expected post-ack agent-init failure */ })
+
+    expect(storedPathAtAck).toBeTruthy()
+    expect(storedPathAtAck).not.toBe(sourcePath)
+    const sessionDir = dirname(getSessionFilePath(tmpRoot, sessionId))
+    const expandedStoredPath = storedPathAtAck!.replace('{{SESSION_PATH}}', sessionDir)
+    const onDiskPath = isAbsolute(expandedStoredPath)
+      ? expandedStoredPath
+      : join(sessionDir, expandedStoredPath)
+    expect(existsSync(onDiskPath)).toBe(true)
+    expect(onDiskPath).toContain(join('attachments', ''))
   })
 
   it('user message is on disk before onAck fires (mid-stream / queued branch)', async () => {

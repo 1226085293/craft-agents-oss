@@ -321,6 +321,10 @@ export interface FileAttachment {
   text?: string
   size: number
   thumbnailBase64?: string
+  /** Path where file is stored in session attachments folder */
+  storedPath?: string
+  /** Path to converted markdown version, when available */
+  markdownPath?: string
 }
 
 export interface SessionFile {

@@ -47,6 +47,17 @@ function writeTinyPng(): string {
   return path
 }
 
+function writeTinyMp4(): string {
+  const path = join(fileDir, 'tiny.mp4')
+  writeFileSync(path, Buffer.from([
+    0x00, 0x00, 0x00, 0x18,
+    0x66, 0x74, 0x79, 0x70,
+    0x6d, 0x70, 0x34, 0x32,
+    0x00, 0x00, 0x00, 0x00,
+  ]))
+  return path
+}
+
 function baseMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   return {
     platform: 'telegram',
@@ -151,6 +162,39 @@ describe('Router', () => {
     expect(first.type).toBe('image')
     expect(first.name).toBe('my-photo.png')
     expect(first.base64 && first.base64.length).toBeGreaterThan(0)
+  })
+
+  it('keeps binary video attachments as files instead of reading them as text', async () => {
+    const { router, sessionManager } = makeRouter()
+    const mp4Path = writeTinyMp4()
+    await router.route(
+      makeFakeAdapter(),
+      baseMsg({
+        text: '',
+        attachments: [
+          {
+            type: 'video',
+            fileId: 'gif-as-video',
+            fileName: 'animated.gif.mp4',
+            mimeType: 'video/mp4',
+            localPath: mp4Path,
+          },
+        ],
+      }),
+    )
+    expect(sessionManager.sendMessage).toHaveBeenCalledTimes(1)
+    const args = sessionManager.sendMessage.mock.calls[0]!
+    const fileAttachments = args[2] as Array<{
+      type: string
+      name: string
+      mimeType?: string
+      text?: string
+    }>
+    expect(fileAttachments).toHaveLength(1)
+    expect(fileAttachments[0]!.type).toBe('unknown')
+    expect(fileAttachments[0]!.name).toBe('animated.gif.mp4')
+    expect(fileAttachments[0]!.mimeType).toBe('video/mp4')
+    expect(fileAttachments[0]!.text).toBeUndefined()
   })
 
   it('drops attachments that have no localPath', async () => {

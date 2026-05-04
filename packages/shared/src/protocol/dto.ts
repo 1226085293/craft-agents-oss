@@ -369,6 +369,7 @@ export interface LlmConnectionSetup {
 export interface TestLlmConnectionParams {
   provider: 'anthropic' | 'pi'
   apiKey: string
+  connectionSlug?: string
   baseUrl?: string
   model?: string
   piAuthProvider?: string

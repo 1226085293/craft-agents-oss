@@ -19,6 +19,11 @@ import type { AgentEvent } from '@craft-agent/core/types';
 import type { FileAttachment } from '../utils/files.ts';
 import { getProxyEnvVars } from '../config/proxy-env.ts';
 
+function isMaskedCredential(value: string | null | undefined): boolean {
+  if (!value) return false;
+  return /[\u2022\u25cf\u25e6\u2219*]/.test(value);
+}
+
 import type {
   BackendConfig,
   ChatOptions,
@@ -557,7 +562,7 @@ export class PiAgent extends BaseAgent {
 
       if (this.config.authType === 'oauth') {
         const oauth = await credentialManager.getLlmOAuth(slug);
-        if (oauth?.accessToken) {
+        if (oauth?.accessToken && !isMaskedCredential(oauth.accessToken)) {
           // Copilot: pass full OAuth credential so the Pi SDK can derive the
           // correct API endpoint from the Copilot token's proxy-ep field.
           // The refresh token is the GitHub access token used to obtain fresh
@@ -605,7 +610,7 @@ export class PiAgent extends BaseAgent {
         // intentionally falls through here, finds no API key, and returns null.
         // The subprocess inherits process.env which contains the AWS credential chain.
         const apiKey = await credentialManager.getLlmApiKey(slug);
-        if (apiKey) {
+        if (apiKey && !isMaskedCredential(apiKey)) {
           this.debug(`Retrieved API key credential for Pi provider: ${piAuthProvider}`);
           return {
             provider: piAuthProvider,
@@ -761,14 +766,14 @@ export class PiAgent extends BaseAgent {
       // Prefer connection-scoped API keys. Custom endpoint credentials are stored here,
       // and using this first keeps per-connection auth isolated from global defaults.
       const llmApiKey = await credentialManager.getLlmApiKey(slug);
-      if (llmApiKey) {
+      if (llmApiKey && !isMaskedCredential(llmApiKey)) {
         this.debug('Retrieved API key from LLM connection');
         return llmApiKey;
       }
 
       // Try LLM OAuth first (for OAuth-based connections)
       const oauth = await credentialManager.getLlmOAuth(slug);
-      if (oauth?.accessToken) {
+      if (oauth?.accessToken && !isMaskedCredential(oauth.accessToken)) {
         this.debug('Retrieved API key from LLM OAuth');
         return oauth.accessToken;
       }
@@ -780,7 +785,7 @@ export class PiAgent extends BaseAgent {
 
       // Try Anthropic API key
       const apiKey = await credentialManager.getApiKey();
-      if (apiKey) {
+      if (apiKey && !isMaskedCredential(apiKey)) {
         this.debug('Retrieved Anthropic API key');
         return apiKey;
       }

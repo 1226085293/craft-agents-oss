@@ -379,9 +379,16 @@ function setInterceptorApiHints(model: { api?: string; provider?: string; baseUr
  */
 function resolveCustomEndpointApiKey(): string {
   if (initConfig?.piAuth?.credential?.type === 'api_key') {
-    return initConfig.piAuth.credential.key;
+    const key = initConfig.piAuth.credential.key;
+    if (!isMaskedCredential(key)) return key;
+    debugLog('[custom-endpoint] Ignoring masked API key placeholder from piAuth');
+    return '';
   }
   const key = initConfig?.apiKey || '';
+  if (isMaskedCredential(key)) {
+    debugLog('[custom-endpoint] Ignoring masked API key placeholder from init config');
+    return '';
+  }
   if (!key && initConfig?.baseUrl) {
     if (isLocalhostUrl(initConfig.baseUrl)) {
       // Local endpoints (Ollama, LM Studio) don't need auth.
@@ -391,6 +398,11 @@ function resolveCustomEndpointApiKey(): string {
     debugLog('[custom-endpoint] Warning: no API key found for non-localhost endpoint — requests will likely fail');
   }
   return key;
+}
+
+function isMaskedCredential(value: string | undefined): boolean {
+  if (!value) return false;
+  return /[\u2022\u25cf\u25e6\u2219*]/.test(value);
 }
 
 function isLocalhostUrl(url: string): boolean {
@@ -466,11 +478,19 @@ function createAuthenticatedRegistry(): {
     // include 'iam' as a first-class member, but the auth storage accepts it at runtime
     // — the Bedrock provider module reads AWS env directly; this `set` keeps Pi SDK's
     // internal provider-tracking consistent regardless of credential shape.
-    authStorage.set(provider, credential as unknown as AuthCredential);
-    debugLog(`Injected ${credential.type} credential for provider: ${provider}`);
+    if (credential.type === 'api_key' && isMaskedCredential(credential.key)) {
+      debugLog(`Skipped masked api_key credential for provider: ${provider}`);
+    } else {
+      authStorage.set(provider, credential as unknown as AuthCredential);
+      debugLog(`Injected ${credential.type} credential for provider: ${provider}`);
+    }
   } else if (initConfig?.apiKey) {
-    authStorage.set('anthropic', { type: 'api_key', key: initConfig.apiKey });
-    debugLog('Injected API key into auth storage (legacy fallback)');
+    if (isMaskedCredential(initConfig.apiKey)) {
+      debugLog('Skipped masked API key in auth storage (legacy fallback)');
+    } else {
+      authStorage.set('anthropic', { type: 'api_key', key: initConfig.apiKey });
+      debugLog('Injected API key into auth storage (legacy fallback)');
+    }
   }
 
   const modelRegistry = PiModelRegistry.inMemory(authStorage);

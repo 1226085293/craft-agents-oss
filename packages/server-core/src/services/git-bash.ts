@@ -1,22 +1,32 @@
 import { stat } from 'fs/promises'
 
 /**
- * Basic file-name validation for Git Bash executable paths.
- * Accepts Windows-style and POSIX-style separators to support cross-platform tests.
+ * Basic file-name validation for Bash executable paths.
+ * Windows requires bash.exe; Unix-like platforms require bash.
  */
-export function isGitBashExecutablePath(filePath: string): boolean {
-  return /(?:^|[\\/])bash\.exe$/i.test(filePath.trim())
+export function isGitBashExecutablePath(
+  filePath: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const trimmedPath = filePath.trim()
+  return platform === 'win32'
+    ? /(?:^|[\\/])bash\.exe$/i.test(trimmedPath)
+    : /(?:^|[\\/])bash$/i.test(trimmedPath)
 }
 
 /**
- * Validate a user-provided Git Bash executable path.
- * Enforces bash.exe filename and existence on disk.
+ * Validate a user-provided Bash executable path.
+ * Enforces the platform-specific filename and existence on disk.
  */
-export async function validateGitBashPath(filePath: string): Promise<{ valid: true; path: string } | { valid: false; error: string }> {
+export async function validateGitBashPath(
+  filePath: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<{ valid: true; path: string } | { valid: false; error: string }> {
   const trimmedPath = filePath.trim()
+  const expectedName = platform === 'win32' ? 'bash.exe' : 'bash'
 
-  if (!isGitBashExecutablePath(trimmedPath)) {
-    return { valid: false, error: 'Path must point to bash.exe' }
+  if (!isGitBashExecutablePath(trimmedPath, platform)) {
+    return { valid: false, error: `Path must point to ${expectedName}` }
   }
 
   try {
@@ -31,9 +41,12 @@ export async function validateGitBashPath(filePath: string): Promise<{ valid: tr
 }
 
 /**
- * Check if a Git Bash path is usable without returning UI-facing errors.
+ * Check if a Bash path is usable without returning UI-facing errors.
  */
-export async function isUsableGitBashPath(filePath: string): Promise<boolean> {
-  const result = await validateGitBashPath(filePath)
+export async function isUsableGitBashPath(
+  filePath: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  const result = await validateGitBashPath(filePath, platform)
   return result.valid
 }

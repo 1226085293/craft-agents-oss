@@ -19,6 +19,8 @@ describe('git-bash helpers', () => {
     expect(isGitBashExecutablePath('C:\\Program Files\\Git\\bin\\bash.exe')).toBe(true)
     expect(isGitBashExecutablePath('/tmp/git/bin/bash.exe')).toBe(true)
     expect(isGitBashExecutablePath('/tmp/git/bin/sh.exe')).toBe(false)
+    expect(isGitBashExecutablePath('/bin/bash', 'darwin')).toBe(true)
+    expect(isGitBashExecutablePath('/bin/bash.exe', 'darwin')).toBe(false)
   })
 
   it('rejects non-bash executable names', async () => {

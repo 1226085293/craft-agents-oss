@@ -112,6 +112,7 @@ export async function requestClientConfirmDialog(
 /** Spec for a file/folder picker dialog (maps to Electron's OpenDialogOptions). */
 export interface FileDialogSpec {
   title?: string
+  buttonLabel?: string
   defaultPath?: string
   properties?: string[]
   filters?: Array<{ name: string; extensions: string[] }>

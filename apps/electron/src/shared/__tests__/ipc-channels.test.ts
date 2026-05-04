@@ -95,6 +95,7 @@ const EXPECTED_CHANNELS: string[] = [
   'git:getBranch',
   'gitbash:browse',
   'gitbash:check',
+  'gitbash:openPath',
   'gitbash:setPath',
   'input:getAutoCapitalisation',
   'input:getSendMessageKey',

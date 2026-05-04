@@ -15,7 +15,9 @@ import { useTranslation } from 'react-i18next'
 import { PanelHeader } from '@/components/app-shell/PanelHeader'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { HeaderMenu } from '@/components/ui/HeaderMenu'
-import { Loader2 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { FolderOpen, Loader2, Search } from 'lucide-react'
+import { toast } from 'sonner'
 import { useAppShellContext, useActiveWorkspace } from '@/context/AppShellContext'
 import { type PermissionsConfigFile } from '@craft-agent/shared/agent/modes'
 import {
@@ -25,6 +27,7 @@ import {
 import {
   SettingsSection,
   SettingsCard,
+  SettingsRow,
 } from '@/components/settings'
 import { EditPopover, EditButton, getEditConfig } from '@/components/ui/EditPopover'
 import { getDocUrl } from '@craft-agent/shared/docs/doc-links'
@@ -140,6 +143,8 @@ export default function PermissionsSettingsPage() {
   const [defaultConfig, setDefaultConfig] = useState<PermissionsConfigFile | null>(null)
   const [defaultPermissionsPath, setDefaultPermissionsPath] = useState<string | null>(null)
   const [customConfig, setCustomConfig] = useState<PermissionsConfigFile | null>(null)
+  const [bashPath, setBashPath] = useState<string>('')
+  const [isSelectingBash, setIsSelectingBash] = useState(false)
 
   // Build default permissions data from ~/.craft-agent/permissions/default.json
   const defaultPermissionsData = useMemo(() => buildDefaultPermissionsData(defaultConfig), [defaultConfig])
@@ -173,6 +178,8 @@ export default function PermissionsSettingsPage() {
         const { config: defaults, path: defaultsPath } = await window.electronAPI.getDefaultPermissionsConfig()
         setDefaultConfig(defaults)
         setDefaultPermissionsPath(defaultsPath)
+        const bashStatus = await window.electronAPI.checkGitBash()
+        setBashPath(bashStatus.path || '')
 
         // Load workspace permissions if we have an active workspace
         if (activeWorkspaceId) {
@@ -201,6 +208,47 @@ export default function PermissionsSettingsPage() {
 
     return unsubscribe
   }, [])
+
+  const handleOpenBashPath = async () => {
+    if (!bashPath.trim()) return
+    try {
+      await window.electronAPI.openGitBashPath(bashPath.trim())
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      toast.error(t("settings.permissions.bashOpenFailed"), { description: message })
+    }
+  }
+
+  const handleSelectBashPath = async () => {
+    if (!window.electronAPI) return
+
+    setIsSelectingBash(true)
+    try {
+      const selectedPath = await window.electronAPI.browseForGitBash({
+        title: t("settings.permissions.bashSelectDialogTitle"),
+        buttonLabel: t("settings.permissions.selectBash"),
+        filterName: t("settings.permissions.bashExecutableFilter"),
+      })
+      if (!selectedPath) return
+
+      const result = await window.electronAPI.setGitBashPath(selectedPath)
+      if (!result.success) {
+        toast.error(t("settings.permissions.bashSaveFailed"), {
+          description: result.error || t("common.error"),
+        })
+        return
+      }
+
+      const bashStatus = await window.electronAPI.checkGitBash()
+      setBashPath(bashStatus.path || selectedPath)
+      toast.success(t("settings.permissions.bashSaved"))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      toast.error(t("settings.permissions.bashSaveFailed"), { description: message })
+    } finally {
+      setIsSelectingBash(false)
+    }
+  }
 
   return (
     <div className="h-full flex flex-col">
@@ -235,6 +283,40 @@ export default function PermissionsSettingsPage() {
                           </button>
                         </p>
                       </div>
+                    </SettingsCard>
+                  </SettingsSection>
+
+                  {/* Bash Path Section */}
+                  <SettingsSection
+                    title={t("settings.permissions.bashPathTitle")}
+                    description={t("settings.permissions.bashPathDesc")}
+                  >
+                    <SettingsCard>
+                      <SettingsRow
+                        label={t("settings.permissions.bashPathLabel")}
+                        description={bashPath || t("settings.permissions.noBashPath")}
+                      >
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={handleOpenBashPath}
+                          disabled={!bashPath.trim()}
+                        >
+                          <FolderOpen className="size-4" />
+                          {t("common.open")}
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={handleSelectBashPath}
+                          disabled={isSelectingBash}
+                        >
+                          <Search className="size-4" />
+                          {isSelectingBash ? t("common.loading") : t("settings.permissions.selectBash")}
+                        </Button>
+                      </SettingsRow>
                     </SettingsCard>
                   </SettingsSection>
 

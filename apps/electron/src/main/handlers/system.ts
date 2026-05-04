@@ -1,5 +1,4 @@
-import { resolve } from 'path'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { homedir } from 'os'
 import { execSync } from 'child_process'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
@@ -31,7 +30,48 @@ export const CORE_HANDLED_CHANNELS = [
   RPC_CHANNELS.gitbash.CHECK,
   RPC_CHANNELS.gitbash.BROWSE,
   RPC_CHANNELS.gitbash.SET_PATH,
+  RPC_CHANNELS.gitbash.OPEN_PATH,
 ] as const
+
+interface BrowseForBashOptions {
+  title?: string
+  buttonLabel?: string
+  filterName?: string
+}
+
+function getBashExecutableName(platform: NodeJS.Platform): 'bash.exe' | 'bash' {
+  return platform === 'win32' ? 'bash.exe' : 'bash'
+}
+
+function getCommonBashPaths(platform: NodeJS.Platform): string[] {
+  if (platform === 'win32') {
+    return [
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+      join(process.env.LOCALAPPDATA || '', 'Programs', 'Git', 'bin', 'bash.exe'),
+      join(process.env.PROGRAMFILES || '', 'Git', 'bin', 'bash.exe'),
+    ]
+  }
+
+  if (platform === 'darwin') {
+    return [
+      '/bin/bash',
+      '/opt/homebrew/bin/bash',
+      '/usr/local/bin/bash',
+    ]
+  }
+
+  return [
+    '/bin/bash',
+    '/usr/bin/bash',
+  ]
+}
+
+function getBashDialogDefaultPath(platform: NodeJS.Platform): string {
+  if (platform === 'win32') return 'C:\\Program Files\\Git\\bin'
+  if (platform === 'darwin') return '/bin'
+  return '/usr/bin'
+}
 
 export const GUI_HANDLED_CHANNELS = [
   RPC_CHANNELS.update.CHECK,
@@ -119,47 +159,43 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
     }
   })
 
-  // Git Bash detection and configuration (Windows only)
+  // Bash detection and configuration. Windows uses Git Bash's bash.exe.
   server.handle(RPC_CHANNELS.gitbash.CHECK, async () => {
     const platform = process.platform as 'win32' | 'darwin' | 'linux'
 
-    if (platform !== 'win32') {
-      return { found: true, path: null, platform }
-    }
-
-    const commonPaths = [
-      'C:\\Program Files\\Git\\bin\\bash.exe',
-      'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
-      join(process.env.LOCALAPPDATA || '', 'Programs', 'Git', 'bin', 'bash.exe'),
-      join(process.env.PROGRAMFILES || '', 'Git', 'bin', 'bash.exe'),
-    ]
-
     const persistedPath = getGitBashPath()
     if (persistedPath) {
-      if (await isUsableGitBashPath(persistedPath)) {
-        process.env.CLAUDE_CODE_GIT_BASH_PATH = persistedPath.trim()
+      if (await isUsableGitBashPath(persistedPath, platform)) {
+        if (platform === 'win32') {
+          process.env.CLAUDE_CODE_GIT_BASH_PATH = persistedPath.trim()
+        }
         return { found: true, path: persistedPath, platform }
       }
       clearGitBashPath()
     }
 
-    for (const bashPath of commonPaths) {
-      if (await isUsableGitBashPath(bashPath)) {
-        process.env.CLAUDE_CODE_GIT_BASH_PATH = bashPath
+    for (const bashPath of getCommonBashPaths(platform)) {
+      if (await isUsableGitBashPath(bashPath, platform)) {
+        if (platform === 'win32') {
+          process.env.CLAUDE_CODE_GIT_BASH_PATH = bashPath
+        }
         setGitBashPath(bashPath)
         return { found: true, path: bashPath, platform }
       }
     }
 
     try {
-      const result = execSync('where bash', {
+      const result = execSync(platform === 'win32' ? 'where bash' : 'command -v bash', {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: 5000,
       }).trim()
       const firstPath = result.split('\n')[0]?.trim()
-      if (firstPath && firstPath.toLowerCase().includes('git') && await isUsableGitBashPath(firstPath)) {
-        process.env.CLAUDE_CODE_GIT_BASH_PATH = firstPath
+      const isExpectedWindowsBash = platform !== 'win32' || firstPath.toLowerCase().includes('git')
+      if (firstPath && isExpectedWindowsBash && await isUsableGitBashPath(firstPath, platform)) {
+        if (platform === 'win32') {
+          process.env.CLAUDE_CODE_GIT_BASH_PATH = firstPath
+        }
         setGitBashPath(firstPath)
         return { found: true, path: firstPath, platform }
       }
@@ -171,12 +207,17 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
     return { found: false, path: null, platform }
   })
 
-  server.handle(RPC_CHANNELS.gitbash.BROWSE, async (ctx) => {
+  server.handle(RPC_CHANNELS.gitbash.BROWSE, async (ctx, options?: BrowseForBashOptions) => {
+    const platform = process.platform as 'win32' | 'darwin' | 'linux'
+    const executableName = getBashExecutableName(platform)
     const result = await requestClientOpenFileDialog(server, ctx.clientId, {
-      title: 'Select bash.exe',
-      filters: [{ name: 'Executable', extensions: ['exe'] }],
+      title: options?.title || `Select ${executableName}`,
+      buttonLabel: options?.buttonLabel,
+      filters: platform === 'win32'
+        ? [{ name: options?.filterName || 'Executable', extensions: ['exe'] }]
+        : [{ name: options?.filterName || 'Bash executable', extensions: ['*'] }],
       properties: ['openFile'],
-      defaultPath: 'C:\\Program Files\\Git\\bin',
+      defaultPath: getBashDialogDefaultPath(platform),
     })
 
     if (result.canceled || result.filePaths.length === 0) {
@@ -187,14 +228,27 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
   })
 
   server.handle(RPC_CHANNELS.gitbash.SET_PATH, async (_ctx, bashPath: string) => {
-    const validation = await validateGitBashPath(bashPath)
+    const platform = process.platform as 'win32' | 'darwin' | 'linux'
+    const validation = await validateGitBashPath(bashPath, platform)
     if (!validation.valid) {
       return { success: false, error: validation.error }
     }
 
     setGitBashPath(validation.path)
-    process.env.CLAUDE_CODE_GIT_BASH_PATH = validation.path
+    if (platform === 'win32') {
+      process.env.CLAUDE_CODE_GIT_BASH_PATH = validation.path
+    }
     return { success: true }
+  })
+
+  server.handle(RPC_CHANNELS.gitbash.OPEN_PATH, async (ctx, bashPath: string) => {
+    const platform = process.platform as 'win32' | 'darwin' | 'linux'
+    const validation = await validateGitBashPath(bashPath, platform)
+    if (!validation.valid) {
+      throw new Error(validation.error)
+    }
+
+    await requestClientShowInFolder(server, ctx.clientId, validation.path)
   })
 
   // Debug logging from renderer -> main log file (fire-and-forget, no response)

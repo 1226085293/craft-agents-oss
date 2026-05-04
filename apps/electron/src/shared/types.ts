@@ -579,8 +579,9 @@ export interface ElectronAPI {
 
   // Git Bash (Windows)
   checkGitBash(): Promise<GitBashStatus>
-  browseForGitBash(): Promise<string | null>
+  browseForGitBash(options?: { title?: string; buttonLabel?: string; filterName?: string }): Promise<string | null>
   setGitBashPath(path: string): Promise<{ success: boolean; error?: string }>
+  openGitBashPath(path: string): Promise<void>
 
   // Menu actions (from renderer to main)
   menuQuit(): Promise<void>

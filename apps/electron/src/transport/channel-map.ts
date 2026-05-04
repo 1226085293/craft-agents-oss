@@ -321,6 +321,7 @@ export const CHANNEL_MAP = {
   checkGitBash: invoke(RPC_CHANNELS.gitbash.CHECK),
   browseForGitBash: invoke(RPC_CHANNELS.gitbash.BROWSE),
   setGitBashPath: invoke(RPC_CHANNELS.gitbash.SET_PATH),
+  openGitBashPath: invoke(RPC_CHANNELS.gitbash.OPEN_PATH),
 
   // Menu actions
   menuQuit: invoke(RPC_CHANNELS.menu.QUIT),

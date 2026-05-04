@@ -186,6 +186,7 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   RPC_CHANNELS.gitbash.CHECK,
   RPC_CHANNELS.gitbash.BROWSE,
   RPC_CHANNELS.gitbash.SET_PATH,
+  RPC_CHANNELS.gitbash.OPEN_PATH,
 
   // debug — local debug logging
   RPC_CHANNELS.debug.LOG,

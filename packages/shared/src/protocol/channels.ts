@@ -334,6 +334,7 @@ export const RPC_CHANNELS = {
     CHECK: 'gitbash:check',
     BROWSE: 'gitbash:browse',
     SET_PATH: 'gitbash:setPath',
+    OPEN_PATH: 'gitbash:openPath',
   },
   browserPane: {
     CREATE: 'browser-pane:create',

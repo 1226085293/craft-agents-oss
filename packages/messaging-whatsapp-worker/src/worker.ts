@@ -479,12 +479,11 @@ async function handleCommand(cmd: WorkerCommand): Promise<void> {
         const caption = cmd.caption !== undefined
           ? applyPrefixIfSelfChat(session, cmd.channelId, cmd.caption)
           : undefined
-        const res = await session.sock.sendMessage(cmd.channelId, {
-          document: buf,
-          fileName: cmd.filename,
-          mimetype: cmd.mimeType ?? 'application/octet-stream',
-          caption,
-        })
+        const mimeType = cmd.mimeType ?? 'application/octet-stream'
+        const message = mimeType.startsWith('image/')
+          ? { image: buf, mimetype: mimeType, caption }
+          : { document: buf, fileName: cmd.filename, mimetype: mimeType, caption }
+        const res = await session.sock.sendMessage(cmd.channelId, message)
         if (res?.key?.id) rememberSentId(session.sentIds, res.key.id)
         emit({ type: 'send_result', id: cmd.id, ok: true, messageId: res?.key?.id })
       } catch (err) {

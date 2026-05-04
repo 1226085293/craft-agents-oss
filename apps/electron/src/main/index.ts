@@ -299,6 +299,7 @@ if (!gotTheLock) {
       if (windows.length > 0) {
         const win = windows[0].window
         if (win.isMinimized()) win.restore()
+        if (!win.isVisible()) win.show()
         win.focus()
       }
     }

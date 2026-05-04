@@ -8,6 +8,7 @@ import type { SavedWindow } from './window-state'
 
 // Vite dev server URL for hot reload
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
+const READY_TO_SHOW_FALLBACK_MS = 3000
 
 /**
  * Get the appropriate background material for Windows transparency effects
@@ -97,6 +98,12 @@ export class WindowManager {
     }
   }
 
+  private revealWindow(window: BrowserWindow): void {
+    if (window.isDestroyed()) return
+    if (window.isMinimized()) window.restore()
+    if (!window.isVisible()) window.show()
+  }
+
   /**
    * Create a new window for a workspace
    * @param options - Window creation options
@@ -173,8 +180,11 @@ export class WindowManager {
 
     // Show window when first paint is ready (faster perceived startup)
     window.once('ready-to-show', () => {
-      window.show()
+      this.revealWindow(window)
     })
+    setTimeout(() => {
+      this.revealWindow(window)
+    }, READY_TO_SHOW_FALLBACK_MS)
 
     // Open external links in default browser
     window.webContents.setWindowOpenHandler((details) => {
@@ -558,9 +568,7 @@ export class WindowManager {
   focusOrCreateWindow(workspaceId: string): BrowserWindow {
     const existing = this.getWindowByWorkspace(workspaceId)
     if (existing) {
-      if (existing.isMinimized()) {
-        existing.restore()
-      }
+      this.revealWindow(existing)
       existing.focus()
       return existing
     }

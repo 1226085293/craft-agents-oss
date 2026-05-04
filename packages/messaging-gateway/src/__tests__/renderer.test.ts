@@ -11,6 +11,10 @@
  * Permissions and errors are mode-agnostic and tested separately.
  */
 
+import { mkdtempSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { describe, expect, it, beforeEach } from 'bun:test'
 import { Renderer, type SessionEvent } from '../renderer'
 import {
@@ -28,10 +32,12 @@ import {
 // ---------------------------------------------------------------------------
 
 interface Call {
-  kind: 'sendText' | 'editMessage' | 'sendButtons' | 'sendTyping'
+  kind: 'sendText' | 'editMessage' | 'sendButtons' | 'sendTyping' | 'sendFile'
   channelId: string
   messageId?: string
   text?: string
+  filename?: string
+  caption?: string
 }
 
 function makeAdapter(
@@ -77,8 +83,14 @@ function makeAdapter(
     async sendTyping(channelId: string): Promise<void> {
       calls.push({ kind: 'sendTyping', channelId })
     },
-    async sendFile(channelId: string): Promise<SentMessage> {
+    async sendFile(
+      channelId: string,
+      _file: Buffer,
+      filename: string,
+      caption?: string,
+    ): Promise<SentMessage> {
       const messageId = String(nextId++)
+      calls.push({ kind: 'sendFile', channelId, filename, caption, messageId })
       return { platform: 'telegram', channelId, messageId }
     },
   }
@@ -298,6 +310,28 @@ describe('Renderer — final_only mode', () => {
     const sends = adapter.calls.filter((c) => c.kind === 'sendText')
     expect(sends.length).toBe(1)
     expect(sends[0]!.text).toBe('legacy-shape-text')
+  })
+
+  it('extracts image-preview blocks and sends referenced files', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-renderer-'))
+    const imagePath = join(dir, 'screenshot.jpg')
+    writeFileSync(imagePath, Buffer.from('fake image'))
+
+    const adapter = makeAdapter()
+    const binding = makeBinding({ responseMode: 'final_only' as ResponseMode })
+    await play(renderer, binding, adapter, [
+      ev.final(`Here is the screenshot.\n\n\`\`\`image-preview\n${JSON.stringify({
+        src: imagePath,
+        title: 'screenshot.jpg',
+      })}\n\`\`\``),
+      ev.complete(),
+    ])
+
+    const sends = adapter.calls.filter((c) => c.kind === 'sendText')
+    const files = adapter.calls.filter((c) => c.kind === 'sendFile')
+    expect(sends.map((s) => s.text)).toEqual(['Here is the screenshot.'])
+    expect(files).toHaveLength(1)
+    expect(files[0]!.filename).toBe('screenshot.jpg')
   })
 })
 

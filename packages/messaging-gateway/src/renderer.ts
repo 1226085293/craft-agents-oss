@@ -25,6 +25,10 @@
  * and emits the prompt/error as a distinct message regardless of mode.
  */
 
+import { existsSync, readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { basename, isAbsolute, resolve } from 'node:path'
+
 import type {
   PlatformAdapter,
   ChannelBinding,
@@ -208,10 +212,13 @@ export class Renderer {
 
         if (state.streamingMessageId && adapter.capabilities.messageEditing) {
           if (text.trim()) {
-            await this.tryEditMessage(adapter, binding, state.streamingMessageId, text.trim(), state)
+            await this.sendResponse(adapter, binding, text.trim(), {
+              editMessageId: state.streamingMessageId,
+              state,
+            })
           }
         } else if (text.trim()) {
-          await this.sendText(adapter, binding, text.trim())
+          await this.sendResponse(adapter, binding, text.trim())
         }
 
         state.textBuffer = ''
@@ -223,7 +230,7 @@ export class Renderer {
       case 'complete': {
         this.cancelEditTimer(state)
         if (state.textBuffer.trim() && !state.streamingMessageId) {
-          await this.sendText(adapter, binding, state.textBuffer.trim())
+          await this.sendResponse(adapter, binding, state.textBuffer.trim())
         }
         this.resetRun(state)
         break
@@ -352,20 +359,17 @@ export class Renderer {
         const finalText = state.finalBuffer.trim()
         if (state.progressMessageId && adapter.capabilities.messageEditing) {
           if (finalText) {
-            await this.tryEditMessage(
-              adapter,
-              binding,
-              state.progressMessageId,
-              truncateForAdapter(finalText, adapter),
+            await this.sendResponse(adapter, binding, finalText, {
+              editMessageId: state.progressMessageId,
               state,
-            )
+            })
           }
           // If the run ended with no final text, leave the last status in
           // place rather than deleting/editing to an empty string — avoids
           // Telegram "message is not modified" errors and keeps a trace.
         } else if (finalText) {
           // Adapter can't edit (WhatsApp) — send one message at the end.
-          await this.sendText(adapter, binding, finalText)
+          await this.sendResponse(adapter, binding, finalText)
         }
         this.resetRun(state)
         return
@@ -427,7 +431,7 @@ export class Renderer {
       case 'complete': {
         const finalText = state.finalBuffer.trim()
         if (finalText) {
-          await this.sendText(adapter, binding, finalText)
+          await this.sendResponse(adapter, binding, finalText)
         }
         this.resetRun(state)
         return
@@ -644,6 +648,54 @@ Approve in the desktop app to continue.`,
     state.progressStatus = null
   }
 
+  /** Send a final assistant response, extracting preview blocks into chat files. */
+  private async sendResponse(
+    adapter: PlatformAdapter,
+    binding: ChannelBinding,
+    text: string,
+    editTarget?: { editMessageId: string; state: RenderState },
+  ): Promise<SentMessage | undefined> {
+    const { text: cleanedText, files } = extractOutboundFiles(text)
+    const opts = bindingOpts(binding)
+    let last: SentMessage | undefined
+
+    if (editTarget) {
+      const replacement = cleanedText || attachmentOnlyNotice(files.length)
+      await this.tryEditMessage(
+        adapter,
+        binding,
+        editTarget.editMessageId,
+        truncateForAdapter(replacement, adapter),
+        editTarget.state,
+      )
+    } else if (cleanedText) {
+      last = await this.sendText(adapter, binding, cleanedText)
+    }
+
+    for (const file of files) {
+      try {
+        const buffer = readFileSync(file.path)
+        last = await adapter.sendFile(
+          binding.channelId,
+          buffer,
+          file.filename,
+          cleanedText ? undefined : file.caption,
+          opts,
+        )
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : 'unknown error'
+        last = await this.sendText(
+          adapter,
+          binding,
+          `⚠️ Failed to send attachment ${file.filename}: ${reason}`,
+        )
+      }
+    }
+
+    if (!cleanedText && files.length === 0 && !editTarget) return undefined
+    return last
+  }
+
   /** Send text, splitting if it exceeds platform limits. */
   private async sendText(
     adapter: PlatformAdapter,
@@ -717,6 +769,101 @@ function splitText(text: string, maxLen: number): string[] {
   }
 
   return chunks
+}
+
+interface OutboundFileRef {
+  path: string
+  filename: string
+  caption?: string
+}
+
+function extractOutboundFiles(text: string): { text: string; files: OutboundFileRef[] } {
+  const files: OutboundFileRef[] = []
+  const blockPattern = /```(image-preview|pdf-preview|html-preview|datatable|spreadsheet)\s*\n([\s\S]*?)```/g
+
+  const cleaned = text.replace(blockPattern, (block, blockType: string, rawJson: string) => {
+    const file = parsePreviewBlock(blockType, rawJson)
+    if (!file) return block
+    files.push(file)
+    return ''
+  })
+
+  return { text: collapseBlankLines(cleaned), files }
+}
+
+function parsePreviewBlock(blockType: string, rawJson: string): OutboundFileRef | null {
+  try {
+    const parsed = JSON.parse(rawJson.trim()) as { src?: unknown; title?: unknown; name?: unknown }
+    if (typeof parsed.src !== 'string' || parsed.src.length === 0) return null
+
+    const filePath = resolveOutboundPath(parsed.src)
+    if (!filePath) return null
+
+    const title = typeof parsed.title === 'string' ? parsed.title : undefined
+    const name = typeof parsed.name === 'string' ? parsed.name : undefined
+    return {
+      path: filePath,
+      filename: safeFilename(title || name) || basename(filePath),
+      caption: title || previewCaption(blockType),
+    }
+  } catch {
+    return null
+  }
+}
+
+function resolveOutboundPath(src: string): string | null {
+  const normalized = src.startsWith('file://') ? fileUrlToPathOrNull(src) : src
+  if (!normalized) return null
+
+  const candidates = isAbsolute(normalized) ? [normalized] : [resolve(process.cwd(), normalized)]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  return null
+}
+
+function fileUrlToPathOrNull(src: string): string | null {
+  try {
+    return fileURLToPath(src)
+  } catch {
+    return null
+  }
+}
+
+function safeFilename(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  const name = basename(value).trim()
+  if (!name || name === '.' || name === '..') return undefined
+  return name
+}
+
+function collapseBlankLines(text: string): string {
+  return text
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function attachmentOnlyNotice(count: number): string {
+  if (count <= 0) return '📎 Attachment'
+  return count === 1 ? '📎 Sent 1 attachment.' : `📎 Sent ${count} attachments.`
+}
+
+function previewCaption(blockType: string): string {
+  switch (blockType) {
+    case 'image-preview':
+      return 'Image preview'
+    case 'pdf-preview':
+      return 'PDF preview'
+    case 'html-preview':
+      return 'HTML preview'
+    case 'datatable':
+      return 'Data table'
+    case 'spreadsheet':
+      return 'Spreadsheet'
+    default:
+      return 'Attachment'
+  }
 }
 
 function extractErrorMessage(err: unknown): string {

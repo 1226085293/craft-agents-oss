@@ -54,6 +54,20 @@ const NOOP_LOGGER: MessagingLogger = {
  */
 const DEFAULT_SEND_TIMEOUT_MS = 30_000
 
+function inferMimeType(filename: string): string | undefined {
+  const lower = filename.toLowerCase()
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg'
+  if (lower.endsWith('.png')) return 'image/png'
+  if (lower.endsWith('.gif')) return 'image/gif'
+  if (lower.endsWith('.webp')) return 'image/webp'
+  if (lower.endsWith('.pdf')) return 'application/pdf'
+  if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'text/html'
+  if (lower.endsWith('.json')) return 'application/json'
+  if (lower.endsWith('.csv')) return 'text/csv'
+  if (lower.endsWith('.txt') || lower.endsWith('.md')) return 'text/plain'
+  return undefined
+}
+
 type PendingEntry = {
   resolve: (r: { ok: boolean; messageId?: string; error?: string }) => void
   timer: ReturnType<typeof setTimeout>
@@ -329,6 +343,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
       dataBase64: file.toString('base64'),
       filename,
       caption,
+      mimeType: inferMimeType(filename),
     })
     if (!result.ok) throw new Error(result.error ?? 'Send failed')
     return {

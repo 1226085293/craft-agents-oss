@@ -8,7 +8,7 @@ import {
   validateStoredBackendConnection,
 } from '@craft-agent/shared/agent/backend'
 import { getModelRefreshService } from '@craft-agent/server-core/model-fetchers'
-import { parseTestConnectionError, createBuiltInConnection, validateModelList, piAuthProviderDisplayName, validateSetupTestInput, setupTestRequiresApiKey, isLoopbackBaseUrl } from '@craft-agent/server-core/domain'
+import { parseTestConnectionError, createBuiltInConnection, validateModelList, piAuthProviderDisplayName, validateSetupTestInput, setupTestRequiresApiKey, resolveCustomEndpointSetup } from '@craft-agent/server-core/domain'
 import { getWorkspaceOrThrow, buildBackendHostRuntimeContext } from '@craft-agent/server-core/handlers'
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
@@ -17,6 +17,11 @@ import { CLIENT_OPEN_EXTERNAL } from '@craft-agent/server-core/transport'
 
 // Local OAuth state
 let copilotOAuthAbort: AbortController | null = null
+
+export function isMaskedCredential(value: string | undefined): boolean {
+  if (!value) return false
+  return /[\u2022\u25cf\u25e6\u2219*]/.test(value)
+}
 
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.llmConnections.LIST,
@@ -52,6 +57,7 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
   server.handle(RPC_CHANNELS.settings.SETUP_LLM_CONNECTION, async (_ctx, setup: LlmConnectionSetup): Promise<{ success: boolean; error?: string }> => {
     try {
       const manager = getCredentialManager()
+      const credential = isMaskedCredential(setup.credential) ? undefined : setup.credential
 
       // Ensure connection exists in config
       let connection = getLlmConnection(setup.slug)
@@ -107,20 +113,15 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
       const isCustomEndpointCompat = !!customEndpoint
       if (customEndpoint) {
         updates.customEndpoint = customEndpoint
-        // Route custom OpenAI/Anthropic-compatible endpoints through PiAgent.
         updates.providerType = 'pi_compat'
-        // Local loopback endpoints (Ollama, LM Studio) don't need API keys.
-        updates.authType = (isLoopbackBaseUrl(setup.baseUrl ?? undefined) && !setup.credential)
-          ? 'none'
-          : 'api_key_with_endpoint'
-        if (isLoopbackBaseUrl(setup.baseUrl ?? undefined)) {
-          // Local models use the OpenAI protocol but aren't "OpenAI".
-          // Leave piAuthProvider unset → generic icon in the selector.
-          updates.name = 'Local Model'
-        } else {
-          // Remote custom endpoints: keep provider hint for correct icon.
-          updates.piAuthProvider = customEndpoint.api === 'anthropic-messages' ? 'anthropic' : 'openai'
-        }
+        const branch = resolveCustomEndpointSetup({
+          baseUrl: setup.baseUrl ?? undefined,
+          credential,
+          customEndpointApi: customEndpoint.api,
+        })
+        updates.authType = branch.authType
+        if (branch.name !== undefined) updates.name = branch.name
+        if (branch.piAuthProvider !== undefined) updates.piAuthProvider = branch.piAuthProvider
       } else if (setup.baseUrl !== undefined) {
         // Base URL was explicitly updated without custom protocol config.
         // Treat this as non-custom mode and clear stale custom endpoint metadata.
@@ -234,15 +235,16 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
         deps.platform.logger?.info(`Updated LLM connection settings: ${setup.slug}`)
       }
 
-      // Store credential if provided (skip masked placeholders from GET_API_KEY)
-      const isMasked = setup.credential?.includes('••')
-      if (setup.credential && !isMasked) {
+      // Store credential only when the user entered a real new value.
+      // Edit forms receive masked placeholders from GET_API_KEY; those must not
+      // overwrite the saved secret or be passed to custom endpoint auth.
+      if (credential) {
         const authType = pendingConnection.authType
         if (authType === 'oauth') {
-          await manager.setLlmOAuth(setup.slug, { accessToken: setup.credential })
+          await manager.setLlmOAuth(setup.slug, { accessToken: credential })
           deps.platform.logger?.info('Saved OAuth access token to LLM connection')
         } else {
-          await manager.setLlmApiKey(setup.slug, setup.credential)
+          await manager.setLlmApiKey(setup.slug, credential)
           deps.platform.logger?.info('Saved API key to LLM connection')
         }
       }
@@ -297,8 +299,14 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
   // Unified connection test — uses the agent factory to spawn a real agent subprocess
   // and validate credentials via runMiniCompletion(). Same code path as actual chat.
   server.handle(RPC_CHANNELS.settings.TEST_LLM_CONNECTION_SETUP, async (_ctx, params: import('@craft-agent/shared/protocol').TestLlmConnectionParams): Promise<import('@craft-agent/shared/protocol').TestLlmConnectionResult> => {
-    const { provider, apiKey, baseUrl, model, piAuthProvider, customEndpoint } = params
-    const trimmedKey = apiKey?.trim() ?? ''
+    const { provider, apiKey, connectionSlug, baseUrl, model, piAuthProvider, customEndpoint } = params
+    const submittedKey = apiKey?.trim() ?? ''
+    const storedKey = isMaskedCredential(submittedKey) && connectionSlug
+      ? await getCredentialManager().getLlmApiKey(connectionSlug).catch(() => null)
+      : null
+    const trimmedKey = isMaskedCredential(submittedKey)
+      ? (storedKey?.trim() ?? '')
+      : submittedKey
     const allowEmptyApiKey = !setupTestRequiresApiKey(baseUrl)
 
     if (!trimmedKey && !allowEmptyApiKey) {

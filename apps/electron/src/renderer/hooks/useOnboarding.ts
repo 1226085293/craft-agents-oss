@@ -134,6 +134,11 @@ function isLoopbackEndpoint(baseUrl?: string): boolean {
   }
 }
 
+function isMaskedCredential(value: string | undefined): boolean {
+  if (!value) return false
+  return /[\u2022\u25cf\u25e6\u2219*]/.test(value)
+}
+
 export function apiSetupMethodToConnectionSetup(
   method: ApiSetupMethod,
   options: {
@@ -425,8 +430,9 @@ export function useOnboarding({
       // - Local/loopback custom endpoints may be keyless (e.g. Ollama)
       // - Non-local endpoints require an API key
       const isLoopbackCustomEndpoint = isLoopbackEndpoint(data.baseUrl)
+      const isMaskedApiKey = isMaskedCredential(data.apiKey)
       if (isPiApiKeyFlow) {
-        if (!data.apiKey.trim() && !isLoopbackCustomEndpoint) {
+        if (!data.apiKey.trim() && !isMaskedApiKey && !isLoopbackCustomEndpoint) {
           setState(s => ({
             ...s,
             credentialStatus: 'error',
@@ -435,7 +441,7 @@ export function useOnboarding({
           return
         }
       } else {
-        if (!data.apiKey.trim() && !isLoopbackCustomEndpoint) {
+        if (!data.apiKey.trim() && !isMaskedApiKey && !isLoopbackCustomEndpoint) {
           setState(s => ({
             ...s,
             credentialStatus: 'error',
@@ -451,6 +457,7 @@ export function useOnboarding({
       const testResult = await window.electronAPI.testLlmConnectionSetup({
         provider: setupTestProvider,
         apiKey: data.apiKey,
+        connectionSlug: editingSlug ?? undefined,
         baseUrl: data.baseUrl,
         model: data.models?.[0],
         piAuthProvider: data.piAuthProvider,

@@ -11,7 +11,7 @@
  * Run: bun scripts/copy-assets.ts
  */
 
-import { cpSync, copyFileSync, mkdirSync } from 'fs';
+import { cpSync, copyFileSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 
 // Copy all resources (icons, themes, docs, permissions, tool-icons, etc.)
@@ -30,4 +30,27 @@ try {
 } catch (err) {
   // Only warn - PowerShell validation is optional on non-Windows platforms
   console.log('⚠ powershell-parser.ps1 copy skipped (not critical on non-Windows)');
+}
+
+const bundledServerOutputs = [
+  {
+    name: 'session-mcp-server',
+    src: join('..', '..', 'packages', 'session-mcp-server', 'dist', 'index.js'),
+  },
+  {
+    name: 'pi-agent-server',
+    src: join('..', '..', 'packages', 'pi-agent-server', 'dist', 'index.js'),
+  },
+];
+
+for (const server of bundledServerOutputs) {
+  if (!existsSync(server.src)) {
+    console.log(`Warning: ${server.name} copy skipped (dist output not found)`);
+    continue;
+  }
+
+  const destDir = join('dist', 'resources', server.name);
+  mkdirSync(destDir, { recursive: true });
+  copyFileSync(server.src, join(destDir, 'index.js'));
+  console.log(`Copied ${server.name} to dist/resources/${server.name}/`);
 }

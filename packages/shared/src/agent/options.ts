@@ -188,10 +188,17 @@ export function buildClaudeSubprocessEnv(
     const env: NodeJS.ProcessEnv = {
         ...process.env,
         ...getProxyEnvVars(),
-        ...envOverrides,
         // Propagate debug mode from argv flag OR existing env var
         CRAFT_DEBUG: (process.argv.includes('--debug') || process.env.CRAFT_DEBUG === '1') ? '1' : '0',
     };
+
+    // Claude auth/routing values are session-scoped. Never inherit these from
+    // the main process: concurrent sessions may use different connections, and
+    // mutating process.env globally makes the last initialized session win.
+    delete env.ANTHROPIC_API_KEY;
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    delete env.ANTHROPIC_BASE_URL;
+    delete env.ANTHROPIC_DEFAULT_HAIKU_MODEL;
 
     // Bedrock must never be routed through the Claude SDK path.
     // Strip only Claude-specific Bedrock routing vars here; keep generic AWS_*
@@ -199,6 +206,8 @@ export function buildClaudeSubprocessEnv(
     delete env.CLAUDE_CODE_USE_BEDROCK;
     delete env.AWS_BEARER_TOKEN_BEDROCK;
     delete env.ANTHROPIC_BEDROCK_BASE_URL;
+
+    Object.assign(env, envOverrides);
 
     return env;
 }

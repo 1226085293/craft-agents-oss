@@ -2925,10 +2925,10 @@ export class SessionManager implements ISessionManager {
       }
 
       // Set session directory for tool metadata cross-process sharing.
-      // The SDK subprocess reads CRAFT_SESSION_DIR to write tool-metadata.json;
-      // the main process reads it via toolMetadataStore.setSessionDir().
+      // Keep this per-agent/per-subprocess: mutating process.env here makes
+      // concurrently-created sessions race and can point a later subprocess at
+      // the wrong session's tool-metadata.json.
       const sessionDirForMetadata = getSessionStoragePath(managed.workspace.rootPath, managed.id)
-      process.env.CRAFT_SESSION_DIR = sessionDirForMetadata
       toolMetadataStore.setSessionDir(sessionDirForMetadata)
 
       // Set up agentReady promise so title generation can await agent creation
@@ -2964,6 +2964,7 @@ export class SessionManager implements ISessionManager {
       const miniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
       const envOverrides: Record<string, string> = {
         CRAFT_WORKSPACE_PATH: managed.workspace.rootPath,
+        CRAFT_SESSION_DIR: sessionDirForMetadata,
         // Pass mini model to SDK subprocess so built-in tools like WebFetch
         // use the correct model for summarization (instead of hardcoded Haiku)
         ...(miniModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: miniModel } : {}),
@@ -5272,10 +5273,10 @@ export class SessionManager implements ISessionManager {
     // `midStreamBehavior` (resolved via {@link resolveMidStreamBehavior},
     // defaults to provider-appropriate value):
     //
-    // - 'steer': try to deliver into the in-flight turn. Pi steers natively;
-    //   Claude emulates via PreToolUse hook. If `redirect()` returns false
-    //   (Claude with no live query, or backend can't steer), the backend has
-    //   already called forceAbort(Redirect) and we queue for replay.
+    // - 'steer': interrupt the in-flight turn and replay the new message next.
+    //   This gives phone/messaging "guidance" real correction semantics: a
+    //   follow-up like “改为 3 分钟后” must stop the old long-running tool (for
+    //   example a Bash sleep for 5 minutes) instead of waiting until it ends.
     // - 'queue': hold the message untouched; the current turn keeps running
     //   to natural completion; replay as a new turn afterwards. NO call to
     //   `agent.redirect()`, NO forceAbort, NO interruption.
@@ -5293,9 +5294,9 @@ export class SessionManager implements ISessionManager {
       const agent = managed.agent
       let steered = false
       if (behavior === 'steer') {
-        steered = agent?.redirect(message) ?? false
+        agent?.forceAbort(AbortReason.Redirect)
       }
-      // For 'queue': skip redirect entirely. The current turn is undisturbed.
+      // For 'queue': skip abort entirely. The current turn is undisturbed.
 
       sessionLog.info('mid-stream send', {
         sessionId,
@@ -5317,8 +5318,9 @@ export class SessionManager implements ISessionManager {
       }
       managed.messages.push(userMessage)
 
-      // Emit to UI — 'accepted' iff a steer succeeded; 'queued' otherwise
-      // (covers both queue-direct and queue-after-abort paths).
+      // Emit to UI as queued while the interrupted turn drains; replay will
+      // transition it to processing. This avoids claiming guidance was applied
+      // while the old long-running tool is still active.
       this.sendEvent({
         type: 'user_message',
         sessionId,
@@ -5327,12 +5329,11 @@ export class SessionManager implements ISessionManager {
         optimisticMessageId: options?.optimisticMessageId
       }, managed.workspace.id)
 
-      if (!steered) {
-        // Push for FIFO replay on next onProcessingStopped tick. Same shape
-        // for both queue-direct (current turn still running) and
-        // queue-after-abort (backend already aborted) — the replay path in
-        // processNextQueuedMessage is identical.
-        managed.messageQueue.push({ message, attachments, storedAttachments, options, messageId: userMessage.id, optimisticMessageId: options?.optimisticMessageId })
+      // Push for FIFO replay on next onProcessingStopped tick. Same shape
+      // for both queue-direct (current turn still running) and queue-after-abort
+      // (steer behavior) — the replay path in processNextQueuedMessage is identical.
+      managed.messageQueue.push({ message, attachments, storedAttachments, options, messageId: userMessage.id, optimisticMessageId: options?.optimisticMessageId })
+      if (behavior === 'steer') {
         managed.wasInterrupted = true
       }
 

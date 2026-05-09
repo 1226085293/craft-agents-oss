@@ -25,7 +25,8 @@ describe('sendMessage durability', () => {
     sm = new SessionManager()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    await sm.flushAllSessions()
     rmSync(tmpRoot, { recursive: true, force: true })
   })
 
@@ -159,5 +160,86 @@ describe('sendMessage durability', () => {
 
     expect(ackedMessageId).not.toBeNull()
     expect(onDiskAtAck).toBe(true)
+  })
+
+  it('steer mid-stream interrupts the running turn and queues the guidance for immediate replay', async () => {
+    const sessionId = 'steer-interrupts'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+
+    const forceAbortReasons: string[] = []
+    managed.agent = {
+      redirect: () => { throw new Error('redirect should not be used for interrupting guidance') },
+      forceAbort: (reason: string) => { forceAbortReasons.push(reason) },
+    } as never
+
+    let ackedMessageId: string | undefined
+
+    await sm.sendMessage(
+      sessionId,
+      '改为 3 分钟后发消息',
+      undefined,
+      undefined,
+      { midStreamBehavior: 'steer' },
+      undefined,
+      undefined,
+      (messageId) => { ackedMessageId = messageId },
+    )
+
+    expect(forceAbortReasons).toEqual(['redirect'])
+    expect(managed.messageQueue).toHaveLength(1)
+    expect(managed.messageQueue[0]?.message).toBe('改为 3 分钟后发消息')
+    expect(managed.messageQueue[0]?.messageId).toBe(ackedMessageId)
+  })
+
+  it('runs agent chats for different sessions concurrently', async () => {
+    const first = buildSession('concurrent-one')
+    const second = buildSession('concurrent-two')
+
+    let activeChats = 0
+    let maxActiveChats = 0
+    let bothStarted!: () => void
+    const bothStartedPromise = new Promise<void>(resolve => { bothStarted = resolve })
+    let releaseChats!: () => void
+    const releaseChatsPromise = new Promise<void>(resolve => { releaseChats = resolve })
+
+    function makeAgent(label: string) {
+      return {
+        supportsBranching: true,
+        isProcessing: () => false,
+        updateRuntimeConfig: async () => true,
+        setAllSources: () => undefined,
+        setSourceServers: async () => undefined,
+        getSummarizeCallback: () => undefined,
+        getModel: () => `test-model-${label}`,
+        getSessionId: () => `sdk-${label}`,
+        async *chat() {
+          activeChats++
+          maxActiveChats = Math.max(maxActiveChats, activeChats)
+          if (activeChats === 2) bothStarted()
+          await releaseChatsPromise
+          try {
+            yield { type: 'complete' }
+          } finally {
+            activeChats--
+          }
+        },
+        redirect: () => false,
+        forceAbort: () => undefined,
+        dispose: () => undefined,
+      }
+    }
+
+    first.agent = makeAgent('one') as never
+    second.agent = makeAgent('two') as never
+
+    const firstSend = sm.sendMessage(first.id, 'first')
+    const secondSend = sm.sendMessage(second.id, 'second')
+
+    await bothStartedPromise
+    expect(maxActiveChats).toBe(2)
+
+    releaseChats()
+    await Promise.all([firstSend, secondSend])
   })
 })

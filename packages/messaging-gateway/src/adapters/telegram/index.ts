@@ -196,6 +196,36 @@ export class TelegramAdapter implements PlatformAdapter {
     })
   }
 
+  /**
+   * Dispatch inbound work without awaiting it from grammY's update handler.
+   *
+   * grammY long-polling processes update middleware in-order. If we await the
+   * gateway route here, `SessionManager.sendMessage()` can keep the middleware
+   * promise pending until an agent run completes. That serialises unrelated
+   * Telegram chats/topics behind the first active session. WhatsApp already
+   * uses fire-and-forget dispatch from its worker event loop; Telegram must do
+   * the same so separate sessions remain independent.
+   */
+  private dispatchMessage(msg: IncomingMessage): void {
+    const handler = this.messageHandler
+    if (!handler) return
+    setImmediate(() => {
+      void handler(msg).catch((err) => {
+        this.log.error('[telegram] async message handler failed:', describeError(err))
+      })
+    })
+  }
+
+  private dispatchButtonPress(press: ButtonPress): void {
+    const handler = this.buttonHandler
+    if (!handler) return
+    setImmediate(() => {
+      void handler(press).catch((err) => {
+        this.log.error('[telegram] async button handler failed:', describeError(err))
+      })
+    })
+  }
+
   /** Idempotent runtime reconfigure for the accepted supergroup chatId. */
   setAcceptedSupergroupChatId(chatId: string | undefined): void {
     this.supergroupChatId = chatId
@@ -328,7 +358,7 @@ export class TelegramAdapter implements PlatformAdapter {
         raw: ctx.message,
       }
 
-      await this.messageHandler(msg)
+      this.dispatchMessage(msg)
     })
 
     // Attachment handlers — photos, documents, voice, video, audio,
@@ -503,7 +533,7 @@ export class TelegramAdapter implements PlatformAdapter {
         data: ctx.callbackQuery.data ?? undefined,
       }
 
-      await this.buttonHandler(press)
+      this.dispatchButtonPress(press)
     })
 
     this.log.info('[telegram] initializing')
@@ -681,7 +711,7 @@ export class TelegramAdapter implements PlatformAdapter {
       raw: ctx.message,
     }
 
-    await this.messageHandler(msg)
+    this.dispatchMessage(msg)
   }
 
   /**

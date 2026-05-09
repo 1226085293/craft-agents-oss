@@ -335,7 +335,7 @@ describe('Renderer — final_only mode', () => {
     expect(files[0]!.filename).toBe('screenshot.jpg')
   })
 
-  it('extracts local markdown file links and sends referenced files', async () => {
+  it('keeps local markdown file links as text instead of auto-sending files', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'craft-renderer-'))
     const textPath = join(dir, 'desktop-items.txt')
     writeFileSync(textPath, Buffer.from('fake text'))
@@ -352,12 +352,13 @@ describe('Renderer — final_only mode', () => {
 
     const sends = adapter.calls.filter((c) => c.kind === 'sendText')
     const files = adapter.calls.filter((c) => c.kind === 'sendFile')
-    expect(sends.map((s) => s.text)).toEqual(['Generated file:'])
-    expect(files).toHaveLength(1)
-    expect(files[0]!.filename).toBe('desktop-items.txt')
+    expect(sends.map((s) => s.text)).toEqual([
+      'Generated file:\n\n[desktop-items.txt](desktop-items.txt)',
+    ])
+    expect(files).toHaveLength(0)
   })
 
-  it('extracts absolute local markdown file links and sends referenced files', async () => {
+  it('keeps absolute local markdown file links as text instead of auto-sending files', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'craft-renderer-'))
     const textPath = join(dir, 'report.txt')
     writeFileSync(textPath, Buffer.from('fake text'))
@@ -369,9 +370,10 @@ describe('Renderer — final_only mode', () => {
       ev.complete(),
     ])
 
+    const sends = adapter.calls.filter((c) => c.kind === 'sendText')
     const files = adapter.calls.filter((c) => c.kind === 'sendFile')
-    expect(files).toHaveLength(1)
-    expect(files[0]!.filename).toBe('report.txt')
+    expect(sends.map((s) => s.text)).toEqual([`Generated file:\n\n[report.txt](${textPath})`])
+    expect(files).toHaveLength(0)
   })
 
   it('keeps remote markdown links as text', async () => {

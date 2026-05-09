@@ -806,9 +806,13 @@ function extractOutboundFiles(
     return ''
   })
 
-  const linkCleaned = extractMarkdownFileLinks(cleaned, baseDirs, files, seen)
-
-  return { text: collapseBlankLines(linkCleaned), files }
+  // Do not turn ordinary Markdown links to local files into chat attachments.
+  // Assistant responses often include clickable local paths for desktop users
+  // (for example installer/log paths). Auto-uploading those links to bound
+  // Telegram/WhatsApp channels is surprising and can leak large/sensitive
+  // local files. Attachments are still supported through explicit preview
+  // blocks above and through the dedicated deliver_file tool.
+  return { text: collapseBlankLines(cleaned), files }
 }
 
 function parsePreviewBlock(

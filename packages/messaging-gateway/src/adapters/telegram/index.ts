@@ -171,6 +171,8 @@ export class TelegramAdapter implements PlatformAdapter {
   private messageHandler: ((msg: IncomingMessage) => Promise<void>) | null = null
   private buttonHandler: ((press: ButtonPress) => Promise<void>) | null = null
   private connected = false
+  private destroyed = false
+  private pollingRestartTimer: ReturnType<typeof setTimeout> | null = null
   private log: MessagingLogger = NOOP_LOGGER
   /**
    * The supergroup chatId this adapter accepts non-DM messages from.
@@ -249,10 +251,42 @@ export class TelegramAdapter implements PlatformAdapter {
     }
 
     this.log = config.logger ?? NOOP_LOGGER
+    this.destroyed = false
+    this.clearPollingRestartTimer()
     this.bot = new Bot(config.token)
     if (config.acceptedSupergroupChatId) {
       this.supergroupChatId = config.acceptedSupergroupChatId
     }
+
+    // Diagnostic middleware: log every Telegram message update before any
+    // filter-specific handler runs. This is intentionally lightweight and
+    // structured so production support can distinguish "Telegram never sent
+    // the bot an update" from "Craft received it but dropped/misrouted it",
+    // especially for forum topics where privacy settings and thread ids are
+    // frequent sources of confusion.
+    this.bot.use(async (ctx, next) => {
+      if (ctx.message) {
+        const text = 'text' in ctx.message && typeof ctx.message.text === 'string'
+          ? ctx.message.text
+          : undefined
+        const caption = 'caption' in ctx.message && typeof ctx.message.caption === 'string'
+          ? ctx.message.caption
+          : undefined
+        this.log.info('[telegram] inbound message update', {
+          event: 'telegram_inbound_update',
+          chatId: ctx.chat?.id,
+          chatType: ctx.chat?.type,
+          threadId: this.extractThreadId(ctx) ?? null,
+          messageId: ctx.message.message_id,
+          fromId: ctx.from?.id,
+          fromIsBot: ctx.from?.is_bot ?? false,
+          hasText: text !== undefined,
+          hasCaption: caption !== undefined,
+          textPreview: text?.slice(0, 80) ?? caption?.slice(0, 80) ?? null,
+        })
+      }
+      await next()
+    })
 
     // Handle incoming text messages.
     //
@@ -272,6 +306,14 @@ export class TelegramAdapter implements PlatformAdapter {
       }
 
       const threadId = this.extractThreadId(ctx)
+      this.log.info('[telegram] routing text update', {
+        event: 'telegram_text_update_accepted',
+        chatId: ctx.chat.id,
+        chatType: ctx.chat.type,
+        threadId: threadId ?? null,
+        messageId: ctx.message.message_id,
+        textPreview: text.slice(0, 80),
+      })
       const msg: IncomingMessage = {
         platform: 'telegram',
         channelId: String(ctx.chat.id),
@@ -497,30 +539,72 @@ export class TelegramAdapter implements PlatformAdapter {
       throw err
     }
 
-    // Launch polling in the background. grammY's bot.start() returns a
-    // long-lived Promise that only resolves on stop() and rejects on fatal
-    // polling errors (most commonly 409 Conflict from overlapping pollers
-    // sharing the same token). We MUST catch it so the rejection doesn't
-    // become an unhandled promise and so `connected` reflects reality.
-    this.bot.start({
+    this.startPolling()
+    // Do NOT set this.connected = true here — wait for onStart.
+  }
+
+  /**
+   * Start Telegram long polling and keep it alive.
+   *
+   * grammY's `bot.start()` returns a promise that resolves when polling stops
+   * normally and rejects on fatal polling errors. In production we observed a
+   * state where outbound Bot API calls still worked, but inbound updates no
+   * longer reached Craft because polling had silently stopped after startup.
+   * Treat any stop while this adapter is still live as unexpected: log it,
+   * mark the adapter disconnected, and restart polling after a short backoff.
+   */
+  private startPolling(): void {
+    const bot = this.bot
+    if (!bot || this.destroyed) return
+
+    bot.start({
       onStart: () => {
+        if (this.bot !== bot || this.destroyed) return
         this.connected = true
-        this.log.info('[telegram] polling started')
+        this.log.info('[telegram] polling started', {
+          event: 'telegram_polling_started',
+        })
         // Diagnostic: confirm webhook is really gone + show backlog once.
         // Fire-and-forget; errors here are not fatal to polling.
-        this.bot?.api.getWebhookInfo().then(
+        bot.api.getWebhookInfo().then(
           (info) => this.log.info('[telegram] webhook state after start:', {
+            event: 'telegram_webhook_state',
             url: info.url || null,
             pending_update_count: info.pending_update_count,
           }),
           () => {},
         )
       },
-    }).catch((err: unknown) => {
+    }).then(() => {
+      if (this.bot !== bot || this.destroyed) return
       this.connected = false
-      this.log.error('[telegram] polling stopped with error:', describeError(err))
+      this.log.warn('[telegram] polling stopped unexpectedly; restarting', {
+        event: 'telegram_polling_stopped_unexpectedly',
+      })
+      this.schedulePollingRestart()
+    }).catch((err: unknown) => {
+      if (this.bot !== bot || this.destroyed) return
+      this.connected = false
+      this.log.error('[telegram] polling stopped with error; restarting', {
+        event: 'telegram_polling_stopped_error',
+        error: describeError(err),
+      })
+      this.schedulePollingRestart()
     })
-    // Do NOT set this.connected = true here — wait for onStart.
+  }
+
+  private schedulePollingRestart(): void {
+    if (this.destroyed || !this.bot || this.pollingRestartTimer) return
+    this.pollingRestartTimer = setTimeout(() => {
+      this.pollingRestartTimer = null
+      this.startPolling()
+    }, 1_000)
+  }
+
+  private clearPollingRestartTimer(): void {
+    if (!this.pollingRestartTimer) return
+    clearTimeout(this.pollingRestartTimer)
+    this.pollingRestartTimer = null
   }
 
   /**
@@ -653,7 +737,9 @@ export class TelegramAdapter implements PlatformAdapter {
   }
 
   async destroy(): Promise<void> {
+    this.destroyed = true
     this.connected = false
+    this.clearPollingRestartTimer()
     if (this.bot) {
       await this.bot.stop()
       this.bot = null

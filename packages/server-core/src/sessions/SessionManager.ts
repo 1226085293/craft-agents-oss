@@ -5281,9 +5281,14 @@ export class SessionManager implements ISessionManager {
     //   `agent.redirect()`, NO forceAbort, NO interruption.
     if (managed.isProcessing) {
       const connection = resolveSessionConnection(managed.llmConnection, undefined)
+      // Per-send override wins over the connection default. Desktop submits
+      // busy-session messages as queue by default, while messaging channels
+      // submit them as steer/guidance by default.
       // Fallback to 'steer' when no connection is resolvable — preserves
       // today's exact behavior (call redirect, take whatever it returns).
-      const behavior = connection ? resolveMidStreamBehavior(connection) : 'steer'
+      const behavior = options?.midStreamBehavior === 'queue' || options?.midStreamBehavior === 'steer'
+        ? options.midStreamBehavior
+        : connection ? resolveMidStreamBehavior(connection) : 'steer'
 
       const agent = managed.agent
       let steered = false

@@ -214,6 +214,12 @@ export interface SendMessageOptions {
   skillSlugs?: string[]
   badges?: ContentBadge[]
   optimisticMessageId?: string
+  /**
+   * Per-send override for messages submitted while a session is already
+   * processing. Desktop uses this for Codex-style queue-vs-steer controls;
+   * messaging channels use it to keep phone follow-ups as in-flight guidance.
+   */
+  midStreamBehavior?: 'steer' | 'queue'
 }
 
 // ---------------------------------------------------------------------------

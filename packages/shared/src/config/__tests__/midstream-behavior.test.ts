@@ -14,8 +14,8 @@ import {
 // ============================================================
 
 describe('defaultMidStreamBehavior', () => {
-  it("returns 'queue' for anthropic (Claude's emulated steer is fragile)", () => {
-    expect(defaultMidStreamBehavior('anthropic')).toBe('queue')
+  it("returns 'steer' for anthropic so busy follow-ups default to guidance", () => {
+    expect(defaultMidStreamBehavior('anthropic')).toBe('steer')
   })
 
   it("returns 'steer' for pi (Pi's native steer is non-destructive)", () => {
@@ -39,15 +39,15 @@ describe('resolveMidStreamBehavior', () => {
     expect(resolveMidStreamBehavior({ ...basePi, midStreamBehavior: 'queue' })).toBe('queue')
   })
 
-  it('falls back to default when midStreamBehavior is undefined (legacy connection)', () => {
-    expect(resolveMidStreamBehavior(baseAnthropic)).toBe('queue')
+  it('falls back to steer when midStreamBehavior is undefined (legacy connection)', () => {
+    expect(resolveMidStreamBehavior(baseAnthropic)).toBe('steer')
     expect(resolveMidStreamBehavior(basePi)).toBe('steer')
   })
 
-  it('falls back to default when midStreamBehavior has an unknown value (corrupt config.json)', () => {
+  it('falls back to steer when midStreamBehavior has an unknown value (corrupt config.json)', () => {
     const corruptAnthropic = { ...baseAnthropic, midStreamBehavior: 'invalid' as never }
     const corruptPi = { ...basePi, midStreamBehavior: '' as never }
-    expect(resolveMidStreamBehavior(corruptAnthropic)).toBe('queue')
+    expect(resolveMidStreamBehavior(corruptAnthropic)).toBe('steer')
     expect(resolveMidStreamBehavior(corruptPi)).toBe('steer')
   })
 })

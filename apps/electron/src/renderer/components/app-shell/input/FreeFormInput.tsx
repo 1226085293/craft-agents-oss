@@ -150,7 +150,7 @@ export interface FreeFormInputProps {
   /** Whether the session is currently processing */
   isProcessing?: boolean
   /** Callback when message is submitted (skillSlugs from @mentions) */
-  onSubmit: (message: string, attachments?: FileAttachment[], skillSlugs?: string[]) => void
+  onSubmit: (message: string, attachments?: FileAttachment[], skillSlugs?: string[], options?: { midStreamBehavior?: 'steer' | 'queue' }) => void
   /** Callback to stop processing. Pass silent=true to skip "Response interrupted" message */
   onStop?: (silent?: boolean) => void
   /** External ref for the input */
@@ -1268,7 +1268,7 @@ export function FreeFormInput({
   }
 
   // Submit message - backend handles queueing and interruption
-  const submitMessage = React.useCallback(() => {
+  const submitMessage = React.useCallback((options?: { midStreamBehavior?: 'steer' | 'queue' }) => {
     const hasContent = input.trim() || attachments.length > 0 || followUpItems.length > 0
     if (!hasContent || disabled) return false
 
@@ -1294,7 +1294,8 @@ export function FreeFormInput({
     onSubmit(
       input.trim(),
       attachmentSnapshot.length > 0 ? attachmentSnapshot : undefined,
-      mentions.skills.length > 0 ? mentions.skills : undefined
+      mentions.skills.length > 0 ? mentions.skills : undefined,
+      options,
     )
     setInput('')
     setAttachments([])
@@ -1311,6 +1312,21 @@ export function FreeFormInput({
 
     return true
   }, [input, attachments, followUpItems, disabled, disableSend, onInputChange, onAttachmentsChange, onSubmit, skills, sources, optimisticSourceSlugs, onSourcesChange, onWorkingDirectoryChange, homeDir])
+
+  const cancelDraft = React.useCallback(() => {
+    setInput('')
+    setAttachments([])
+    if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current)
+    onInputChange?.('')
+    onAttachmentsChange?.([])
+    prevInputValueRef.current = ''
+    requestAnimationFrame(() => {
+      richInputRef.current?.focus()
+    })
+  }, [onAttachmentsChange, onInputChange])
+
+  const submitQueuedMessage = React.useCallback(() => submitMessage({ midStreamBehavior: 'queue' }), [submitMessage])
+  const submitSteerMessage = React.useCallback(() => submitMessage({ midStreamBehavior: 'steer' }), [submitMessage])
 
   // Listen for craft:submit-input events (simulate pressing the Send button)
   React.useEffect(() => {
@@ -2417,8 +2433,59 @@ export function FreeFormInput({
             )
           })()}
 
-          {/* 6. Send/Stop Button - Always show stop when processing */}
-          {isProcessing ? (
+          {/* 6. Send/Stop controls. While processing, desktop defaults to
+              queue-on-send but exposes Codex-style Guide + Cancel controls. */}
+          {isProcessing && hasContent ? (
+            <div className="flex items-center gap-1.5 ml-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                aria-label="Cancel send"
+                title="Cancel send"
+                className="h-7 px-2 rounded-full text-xs"
+                onClick={cancelDraft}
+                disabled={disabled || disableSend}
+              >
+                <X className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                aria-label="Guide current task"
+                title="Guide current task"
+                className="h-7 px-2.5 rounded-full text-xs"
+                onClick={submitSteerMessage}
+                disabled={disabled || disableSend}
+              >
+                Guide
+              </Button>
+              <Button
+                type="button"
+                size="icon"
+                aria-label="Queue message"
+                title="Queue message"
+                className="send-btn h-7 w-7 rounded-full shrink-0"
+                onClick={submitQueuedMessage}
+                disabled={disabled || disableSend}
+                data-tutorial="send-button"
+              >
+                <ArrowUp className="h-4 w-4" />
+              </Button>
+              <Button
+                type="button"
+                size="icon"
+                variant="secondary"
+                aria-label={t('chat.stopResponse')}
+                title={t('chat.stopResponse')}
+                className="send-btn h-7 w-7 rounded-full shrink-0 hover:bg-foreground/15 active:bg-foreground/20"
+                onClick={() => handleStop(false)}
+              >
+                <Square className="h-3 w-3 fill-current" />
+              </Button>
+            </div>
+          ) : isProcessing ? (
             <Button
               type="button"
               size="icon"

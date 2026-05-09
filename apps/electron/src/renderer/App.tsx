@@ -1223,12 +1223,15 @@ export default function App() {
     window.electronAPI.sessionCommand(sessionId, { type: 'rename', name })
   }, [updateSessionById])
 
-  const handleSendMessage = useCallback(async (sessionId: string, message: string, attachments?: FileAttachment[], skillSlugs?: string[], externalBadges?: ContentBadge[]) => {
+  const handleSendMessage = useCallback(async (sessionId: string, message: string, attachments?: FileAttachment[], skillSlugs?: string[], externalBadges?: ContentBadge[], sendOptions?: { midStreamBehavior?: 'steer' | 'queue' }) => {
     try {
       // Capture pre-send processing state so we can flag mid-stream sends
       // for the queued badge (#616 follow-up — covers Pi steer path which
       // returns status 'accepted', not 'queued').
       const sendingMidStream = store.get(sessionAtomFamily(sessionId))?.isProcessing === true
+      const midStreamBehavior = sendingMidStream
+        ? (sendOptions?.midStreamBehavior ?? 'queue')
+        : sendOptions?.midStreamBehavior
 
       // Step 1: Store attachments and get persistent metadata
       let storedAttachments: StoredAttachment[] | undefined
@@ -1356,7 +1359,7 @@ export default function App() {
         attachments: storedAttachments,
         badges: badges.length > 0 ? badges : undefined,
         isPending: true,  // Optimistic - will be confirmed by backend
-        isQueued: sendingMidStream,
+        isQueued: sendingMidStream && midStreamBehavior !== 'steer',
       }
 
       // Optimistic UI update - add user message and set processing state
@@ -1371,6 +1374,7 @@ export default function App() {
         skillSlugs,
         badges: badges.length > 0 ? badges : undefined,
         optimisticMessageId: userMessage.id,
+        ...(midStreamBehavior ? { midStreamBehavior } : {}),
       })
     } catch (error) {
       console.error('Failed to send message:', error)

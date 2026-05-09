@@ -453,16 +453,15 @@ export function isPiProvider(providerType: LlmProviderType): boolean {
 /**
  * Default mid-stream send behavior for a given provider type.
  *
- * - 'anthropic' → 'queue': Claude's emulated steer (PreToolUse hook injection)
- *   has a real failure mode — if no tool fires before the turn ends, the steer
- *   becomes `steer_undelivered` and gets re-queued anyway, paying for the
- *   original turn's tokens for nothing. Default to queue for predictability.
- * - 'pi' / 'pi_compat' → 'steer': Pi's native `.steer()` is non-destructive
- *   (delivers after the current tool finishes, keeps full context). No
- *   downside to defaulting to immediate steering.
+ * Default to 'steer' for every provider: when the user sends a follow-up while
+ * a turn is still running, treat it as guidance for the in-flight turn instead
+ * of silently waiting behind it. Backends that cannot actually inject the
+ * guidance fall back through the existing `steer_undelivered` / queue replay
+ * path, and users can still explicitly choose 'queue' per connection when they
+ * want strict FIFO behavior.
  */
-export function defaultMidStreamBehavior(providerType: LlmProviderType): MidStreamBehavior {
-  return providerType === 'anthropic' ? 'queue' : 'steer';
+export function defaultMidStreamBehavior(_providerType: LlmProviderType): MidStreamBehavior {
+  return 'steer';
 }
 
 /**

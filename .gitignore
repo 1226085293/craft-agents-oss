@@ -72,3 +72,6 @@ credentials.enc
 # act (local GitHub Actions runner)
 .secrets
 .actrc
+
+# Pi agent local settings
+.pi/

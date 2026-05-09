@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "jsxImportSource": "react",
+    "allowJs": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "types": ["bun", "node"],
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noPropertyAccessFromIndexSignature": false,
+    "baseUrl": ".",
+    "paths": {
+      "@craft-agent/core": ["packages/core/src/index.ts"],
+      "@craft-agent/core/*": ["packages/core/src/*"],
+      "@craft-agent/shared": ["packages/shared/src/index.ts"],
+      "@craft-agent/shared/*": ["packages/shared/src/*"],
+      "@craft-agent/server-core": ["packages/server-core/src/index.ts"],
+      "@craft-agent/server-core/*": ["packages/server-core/src/*"],
+      "@craft-agent/session-tools-core": ["packages/session-tools-core/src/index.ts"],
+      "@craft-agent/session-tools-core/*": ["packages/session-tools-core/src/*"]
+    }
+  }
+}

@@ -17,7 +17,6 @@ import { runErrorDiagnostics } from './diagnostics.ts';
 import { loadStoredConfig, loadConfigDefaults, type Workspace, type AuthType, getDefaultLlmConnection, getLlmConnection } from '../config/storage.ts';
 import { getValidClaudeOAuthToken } from '../auth/state.ts';
 import {
-  clearClaudeBedrockRoutingEnvVars,
   resolveAuthEnvVars,
 } from '../config/llm-connections.ts';
 import type { McpClientPool } from '../mcp/mcp-pool.ts';
@@ -645,8 +644,9 @@ export class ClaudeAgent extends BaseAgent {
 
   /**
    * Post-construction auth setup.
-   * Fetches credentials and sets process.env before the SDK subprocess spawns.
-   * The subprocess spawns lazily on first chat(), so postInit() is early enough.
+   * Fetches credentials and stores them in this agent's per-session
+   * envOverrides before the SDK subprocess spawns. Do not mutate process.env:
+   * multiple sessions can initialize concurrently with different connections.
    */
   override async postInit(): Promise<PostInitResult> {
     const slug = this.config.connectionSlug;
@@ -659,14 +659,6 @@ export class ClaudeAgent extends BaseAgent {
       return { authInjected: false, authWarning: `Connection not found: ${slug}`, authWarningLevel: 'error' };
     }
 
-    // Clear all auth env vars first for clean state.
-    // Claude subprocesses must never inherit Bedrock-routing toggles from a
-    // previous connection or parent process environment.
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
-    delete process.env.ANTHROPIC_BASE_URL;
-    clearClaudeBedrockRoutingEnvVars();
-
     // Resolve auth env vars via shared utility
     const manager = getCredentialManager();
     const result = await resolveAuthEnvVars(connection, slug, manager, getValidClaudeOAuthToken);
@@ -675,18 +667,36 @@ export class ClaudeAgent extends BaseAgent {
       return { authInjected: false, authWarning: result.warning, authWarningLevel: 'error' };
     }
 
-    // Apply env vars to process.env (for SDK subprocess) and envOverrides (per-session isolation)
-    for (const [key, value] of Object.entries(result.envVars)) {
-      process.env[key] = value;
+    const envOverrides: Record<string, string> = {
+      ...(this.config.envOverrides ?? {}),
+    };
+
+    // Environment-auth connections intentionally snapshot credentials from the
+    // parent process into this agent's envOverrides. buildClaudeSubprocessEnv()
+    // clears global Claude auth vars before applying overrides, so every
+    // subprocess gets the env for its own connection instead of whichever
+    // session initialized last.
+    if (connection.authType === 'environment') {
+      for (const key of ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL']) {
+        const value = process.env[key];
+        if (value) envOverrides[key] = value;
+      }
     }
+
+    Object.assign(envOverrides, result.envVars);
 
     // Pass mini model to SDK subprocess so built-in tools like WebFetch
     // use the correct summarization model (instead of hardcoded Haiku).
     // This is critical for custom providers where the default Haiku model ID
     // doesn't exist on the provider's endpoint.
     if (this.config.miniModel) {
-      process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = this.config.miniModel;
+      envOverrides.ANTHROPIC_DEFAULT_HAIKU_MODEL = this.config.miniModel;
     }
+
+    this.config = {
+      ...this.config,
+      envOverrides,
+    };
 
     return { authInjected: true };
   }

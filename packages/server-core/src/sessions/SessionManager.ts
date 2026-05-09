@@ -2925,10 +2925,10 @@ export class SessionManager implements ISessionManager {
       }
 
       // Set session directory for tool metadata cross-process sharing.
-      // The SDK subprocess reads CRAFT_SESSION_DIR to write tool-metadata.json;
-      // the main process reads it via toolMetadataStore.setSessionDir().
+      // Keep this per-agent/per-subprocess: mutating process.env here makes
+      // concurrently-created sessions race and can point a later subprocess at
+      // the wrong session's tool-metadata.json.
       const sessionDirForMetadata = getSessionStoragePath(managed.workspace.rootPath, managed.id)
-      process.env.CRAFT_SESSION_DIR = sessionDirForMetadata
       toolMetadataStore.setSessionDir(sessionDirForMetadata)
 
       // Set up agentReady promise so title generation can await agent creation
@@ -2964,6 +2964,7 @@ export class SessionManager implements ISessionManager {
       const miniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
       const envOverrides: Record<string, string> = {
         CRAFT_WORKSPACE_PATH: managed.workspace.rootPath,
+        CRAFT_SESSION_DIR: sessionDirForMetadata,
         // Pass mini model to SDK subprocess so built-in tools like WebFetch
         // use the correct model for summarization (instead of hardcoded Haiku)
         ...(miniModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: miniModel } : {}),

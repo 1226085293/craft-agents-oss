@@ -94,6 +94,7 @@ import { extractLabelId, resolveSessionLabels } from '@craft-agent/shared/labels
 import { ensureLabelsExist } from '@craft-agent/shared/labels/crud'
 import { loadStatusConfig } from '@craft-agent/shared/statuses/storage'
 import { AutomationSystem, createPromptHistoryEntry, appendAutomationHistoryEntry, type AutomationSystemMetadataSnapshot } from '@craft-agent/shared/automations'
+import type { IMessagingGatewayRegistry } from '@craft-agent/server-core/handlers'
 
 // Import from server-core domain utilities
 import { sanitizeForTitle, shouldActivateBrowserOverlay, normalizeBrowserToolName, rollbackFailedBranchCreation, releaseBrowserOwnershipOnForcedStop } from '@craft-agent/server-core/domain'
@@ -1042,6 +1043,9 @@ export class SessionManager implements ISessionManager {
     topicName: string
   }) => Promise<void>
 
+  /** Messaging gateway registry, injected by the host after bootstrap. */
+  private messagingRegistry: IMessagingGatewayRegistry | null = null
+
   /**
    * Centralized setter for session processing state.
    * Automatically notifies the power manager on transitions (true→false, false→true)
@@ -1072,6 +1076,10 @@ export class SessionManager implements ISessionManager {
     fn: (input: { workspaceId: string; sessionId: string; topicName: string }) => Promise<void>,
   ): void {
     this.automationBinder = fn
+  }
+
+  setMessagingRegistry(registry: IMessagingGatewayRegistry): void {
+    this.messagingRegistry = registry
   }
 
   private browserPaneManager: IBrowserPaneManager | null = null
@@ -3596,6 +3604,43 @@ export class SessionManager implements ISessionManager {
           }
 
           await this.sendMessage(sessionId, message, fileAttachments)
+        },
+        getMessagingBindingsFn: (sessionId: string) => {
+          const registry = this.messagingRegistry
+          if (!registry) return []
+          return registry
+            .getBindings(managed.workspace.id)
+            .filter((b) => b.sessionId === sessionId)
+            .map((b) => ({
+              platform: b.platform,
+              channelId: b.channelId,
+              threadId: b.threadId,
+              channelName: b.channelName,
+              enabled: b.enabled,
+            }))
+        },
+        unbindMessagingChannelFn: (sessionId: string, platform?: string) => {
+          const registry = this.messagingRegistry
+          if (!registry) return 0
+          const before = registry
+            .getBindings(managed.workspace.id)
+            .filter((b) => b.sessionId === sessionId && (!platform || b.platform === platform)).length
+          registry.unbindSession(managed.workspace.id, sessionId, platform)
+          return before
+        },
+        deliverFileToMessagingFn: async (args) => {
+          const registry = this.messagingRegistry
+          if (!registry) throw new Error('Messaging is not configured for this workspace')
+          const extraDirs = getWorkspaceAllowedDirs(managed.workspace.id)
+          const safePath = await validateFilePath(args.path, extraDirs)
+          return registry.deliverFileToSessionBindings({
+            workspaceId: managed.workspace.id,
+            sessionId: managed.id,
+            filePath: safePath,
+            filename: args.filename,
+            caption: args.caption,
+            platform: args.platform,
+          })
         },
         activateSourceInSessionFn: async (sourceSlug: string) => {
           const cb = managed.agent?.onSourceActivationRequest

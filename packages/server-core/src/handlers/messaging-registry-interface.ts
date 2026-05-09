@@ -118,6 +118,21 @@ export interface IMessagingGatewayRegistry {
   /** Unbind one specific binding row by ID. */
   unbindBinding(workspaceId: string, bindingId: string): boolean
 
+  /** Deliver a local file to enabled messaging bindings for a session. */
+  deliverFileToSessionBindings(args: {
+    workspaceId: string
+    sessionId: string
+    filePath: string
+    filename?: string
+    caption?: string
+    platform?: string
+  }): Promise<{
+    filename: string
+    sent: number
+    failed: number
+    failures: Array<{ platform: string; channelId: string; error: string }>
+  }>
+
   /** Test a Telegram bot token. */
   testTelegramToken(token: string): Promise<{ success: boolean; botName?: string; botUsername?: string; error?: string }>
 

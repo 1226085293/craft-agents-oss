@@ -664,6 +664,7 @@ app.whenReady().then(async () => {
               pairingMode: 'qr',
             },
           })
+          sm.setMessagingRegistry?.(messagingHandle.registry)
           return {
             sessionManager: sm,
             platform: p,

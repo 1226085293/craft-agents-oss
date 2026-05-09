@@ -11,6 +11,7 @@ import type { StoredAttachment, AnnotationV1 } from '@craft-agent/core/types'
 import type { PermissionMode } from '@craft-agent/shared/agent/mode-types'
 import type { ThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import type { AuthResult } from '@craft-agent/shared/agent'
+import type { IMessagingGatewayRegistry } from './messaging-registry-interface'
 import type {
   Session,
   SessionStatus,
@@ -235,6 +236,9 @@ export interface ISessionManager {
   setAutomationBinder?(
     fn: (input: { workspaceId: string; sessionId: string; topicName: string }) => Promise<void>,
   ): void
+
+  /** Inject messaging registry for session-scoped messaging tools. */
+  setMessagingRegistry?(registry: IMessagingGatewayRegistry): void
 }
 
 /**

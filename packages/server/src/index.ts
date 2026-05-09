@@ -218,6 +218,7 @@ const instance = await (async () => {
             pairingMode: 'qr',
           },
         })
+        sessionManager.setMessagingRegistry?.(messagingHandle.registry)
         return {
           sessionManager,
           platform,

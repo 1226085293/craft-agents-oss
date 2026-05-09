@@ -114,6 +114,14 @@ export function attachSessionSelfManagementBindings(
     enumerable: true,
   });
 
+  Object.defineProperty(context, 'deliverFileToMessaging', {
+    get() {
+      return getSessionScopedToolCallbacks(sessionId)?.deliverFileToMessagingFn;
+    },
+    configurable: true,
+    enumerable: true,
+  });
+
   // getSessionInfo needs wrapping to default sid → sessionId
   Object.defineProperty(context, 'getSessionInfo', {
     get() {

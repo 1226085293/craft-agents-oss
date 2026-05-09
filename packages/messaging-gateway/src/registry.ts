@@ -321,6 +321,36 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     return removed
   }
 
+  async deliverFileToSessionBindings(args: {
+    workspaceId: string
+    sessionId: string
+    filePath: string
+    filename?: string
+    caption?: string
+    platform?: string
+  }): Promise<{
+    filename: string
+    sent: number
+    failed: number
+    failures: Array<{ platform: string; channelId: string; error: string }>
+  }> {
+    const state = this.workspaces.get(args.workspaceId)
+    if (!state) {
+      throw new Error(`Messaging is not initialized for workspace ${args.workspaceId}`)
+    }
+    const platform = args.platform
+    if (platform !== undefined && !isKnownPlatform(platform)) {
+      throw new Error(`Unknown messaging platform: ${platform}`)
+    }
+    return state.gateway.deliverFileToSessionBindings({
+      sessionId: args.sessionId,
+      filePath: args.filePath,
+      filename: args.filename,
+      caption: args.caption,
+      platform,
+    })
+  }
+
   // -------------------------------------------------------------------------
   // IMessagingGatewayRegistry — pairing
   // -------------------------------------------------------------------------

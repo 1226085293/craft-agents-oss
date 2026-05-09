@@ -5,6 +5,8 @@
  * renderer, and binding store together. One instance per workspace.
  */
 
+import { readFileSync } from 'node:fs'
+import { basename } from 'node:path'
 import type { ISessionManager } from '@craft-agent/server-core/handlers'
 import type { PushTarget } from '@craft-agent/shared/protocol'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
@@ -76,6 +78,10 @@ interface PendingCompactAccept {
 
 const COMPACT_ACCEPT_TTL_MS = 10 * 60 * 1000
 
+function bindingOpts(binding: { threadId?: number }): { threadId?: number } {
+  return binding.threadId !== undefined ? { threadId: binding.threadId } : {}
+}
+
 export class MessagingGateway {
   private readonly sessionManager: ISessionManager
   private readonly workspaceId: string
@@ -87,6 +93,7 @@ export class MessagingGateway {
   private readonly planMessages = new Map<string, PlanMessageRecord>()
   private readonly pendingCompactAccepts = new Map<string, PendingCompactAccept>()
   private readonly adapters = new Map<PlatformType, PlatformAdapter>()
+  private readonly renderQueues = new Map<string, Promise<void>>()
   private readonly log: MessagingLogger
   private started = false
 
@@ -277,7 +284,20 @@ export class MessagingGateway {
     for (const binding of bindings) {
       const adapter = this.adapters.get(binding.platform)
       if (!adapter || !adapter.isConnected()) continue
-      this.renderer.handle(event, binding, adapter).catch((err) => {
+      this.enqueueRender(event, binding, adapter)
+    }
+  }
+
+  private enqueueRender(
+    event: SessionEvent,
+    binding: ReturnType<BindingStore['findBySession']>[number],
+    adapter: PlatformAdapter,
+  ): void {
+    const previous = this.renderQueues.get(binding.id) ?? Promise.resolve()
+    const next = previous
+      .catch(() => {})
+      .then(() => this.renderer.handle(event, binding, adapter))
+      .catch((err) => {
         this.log.error('renderer failed to emit event to chat', {
           event: 'renderer_failed',
           sessionId: event.sessionId,
@@ -287,7 +307,13 @@ export class MessagingGateway {
           error: err,
         })
       })
-    }
+
+    this.renderQueues.set(binding.id, next)
+    next.finally(() => {
+      if (this.renderQueues.get(binding.id) === next) {
+        this.renderQueues.delete(binding.id)
+      }
+    })
   }
 
   // -------------------------------------------------------------------------
@@ -495,6 +521,63 @@ export class MessagingGateway {
         )
       }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // File delivery
+  // -------------------------------------------------------------------------
+
+  async deliverFileToSessionBindings(args: {
+    sessionId: string
+    filePath: string
+    filename?: string
+    caption?: string
+    platform?: PlatformType
+  }): Promise<{
+    filename: string
+    sent: number
+    failed: number
+    failures: Array<{ platform: string; channelId: string; error: string }>
+  }> {
+    const filename = args.filename?.trim() || basename(args.filePath)
+    const file = readFileSync(args.filePath)
+    const bindings = this.bindingStore
+      .findBySession(args.sessionId)
+      .filter((b) => b.enabled && (!args.platform || b.platform === args.platform))
+
+    let sent = 0
+    const failures: Array<{ platform: string; channelId: string; error: string }> = []
+
+    for (const binding of bindings) {
+      const adapter = this.adapters.get(binding.platform)
+      if (!adapter || !adapter.isConnected()) {
+        failures.push({
+          platform: binding.platform,
+          channelId: binding.channelId,
+          error: 'adapter is not connected',
+        })
+        continue
+      }
+
+      try {
+        await adapter.sendFile(
+          binding.channelId,
+          file,
+          filename,
+          args.caption,
+          bindingOpts(binding),
+        )
+        sent += 1
+      } catch (err) {
+        failures.push({
+          platform: binding.platform,
+          channelId: binding.channelId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
+
+    return { filename, sent, failed: failures.length, failures }
   }
 
   // -------------------------------------------------------------------------

@@ -79,6 +79,19 @@ export interface SessionScopedToolCallbacks {
   getMessagingBindingsFn?: (sessionId: string) => Array<{ platform: string; channelId: string; threadId?: number; channelName?: string; enabled: boolean }>;
   /** Unbind messaging channels from a session. Returns count of removed bindings. */
   unbindMessagingChannelFn?: (sessionId: string, platform?: string) => number;
+  /** Deliver a local file to messaging channels bound to this session. */
+  deliverFileToMessagingFn?: (args: {
+    path: string;
+    filename?: string;
+    caption?: string;
+    target?: 'active_channel' | 'mobile' | 'all_bound_channels';
+    platform?: 'telegram' | 'whatsapp' | 'lark';
+  }) => Promise<{
+    filename: string;
+    sent: number;
+    failed: number;
+    failures: Array<{ platform: string; channelId: string; error: string }>;
+  }>;
 }
 
 // Registry of callbacks keyed by sessionId

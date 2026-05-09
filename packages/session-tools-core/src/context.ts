@@ -372,6 +372,20 @@ export interface SessionToolContext {
   /** Unbind messaging channels from a session. Returns count of removed bindings. */
   unbindMessagingChannel?(sessionId: string, platform?: string): number;
 
+  /** Deliver a local file to messaging channels bound to the current session. */
+  deliverFileToMessaging?(args: {
+    path: string;
+    filename?: string;
+    caption?: string;
+    target?: 'active_channel' | 'mobile' | 'all_bound_channels';
+    platform?: 'telegram' | 'whatsapp' | 'lark';
+  }): Promise<{
+    filename: string;
+    sent: number;
+    failed: number;
+    failures: Array<{ platform: string; channelId: string; error: string }>;
+  }>;
+
   // ============================================================
   // Session Paths (for transform_data / render_template)
   // ============================================================

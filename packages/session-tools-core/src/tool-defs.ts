@@ -39,6 +39,7 @@ import { handleSetSessionStatus } from './handlers/set-session-status.ts';
 import { handleGetSessionInfo } from './handlers/get-session-info.ts';
 import { handleListSessions } from './handlers/list-sessions.ts';
 import { handleSendAgentMessage } from './handlers/send-agent-message.ts';
+import { handleDeliverFile } from './handlers/deliver-file.ts';
 import { handleListMessagingChannels, handleUnbindMessagingChannel } from './handlers/messaging.ts';
 
 // ============================================================
@@ -211,6 +212,14 @@ export const SendAgentMessageSchema = z.object({
     path: z.string().describe('Absolute file path on disk'),
     name: z.string().optional().describe('Display name (defaults to file basename)'),
   })).optional().describe('Files to include with the message'),
+});
+
+export const DeliverFileSchema = z.object({
+  path: z.string().describe('Absolute or session/workspace-relative path to the file to deliver.'),
+  filename: z.string().optional().describe('Attachment filename shown to the recipient. Defaults to the file basename.'),
+  caption: z.string().optional().describe('Optional caption sent with the file when the channel supports it.'),
+  target: z.enum(['active_channel', 'mobile', 'all_bound_channels']).optional().describe('Delivery target. Defaults to active_channel, which means the messaging channel(s) bound to this session.'),
+  platform: z.enum(['telegram', 'whatsapp', 'lark']).optional().describe('Optionally restrict delivery to one messaging platform.'),
 });
 
 export const ListMessagingChannelsSchema = z.object({
@@ -478,8 +487,11 @@ Use list_sessions to find session IDs, or use the sessionId returned by spawn_se
 
 The target session receives your message with a sender envelope containing your session ID, so it can use send_agent_message to reply.`,
 
-  list_messaging_channels: `List messaging channels (Telegram, WhatsApp) bound to a session.
-Shows which external chat apps are connected and can send/receive messages.`,
+  deliver_file: `Deliver a local file as an attachment to messaging channels bound to the current session.
+Use this when the user asks to send, forward, or deliver a generated/downloaded file (PNG, PDF, CSV, etc.) to their phone or external chat app. Prefer this over merely printing a local path or Markdown link when a real attachment is requested.`,
+
+  list_messaging_channels: `List messaging channels (Telegram, WhatsApp, Lark/Feishu) bound to a session.
+Shows which external chat apps are connected and can send/receive messages/files.`,
 
   unbind_messaging_channel: `Disconnect a messaging channel from the current session.
 Messages will no longer be forwarded between the chat app and this session.`,
@@ -556,6 +568,7 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   // Inter-session messaging
   { name: 'send_agent_message', description: TOOL_DESCRIPTIONS.send_agent_message, inputSchema: SendAgentMessageSchema, executionMode: 'registry', safeMode: 'block', handler: handleSendAgentMessage },
   // Messaging gateway tools
+  { name: 'deliver_file', description: TOOL_DESCRIPTIONS.deliver_file, inputSchema: DeliverFileSchema, executionMode: 'registry', safeMode: 'block', handler: handleDeliverFile },
   { name: 'list_messaging_channels', description: TOOL_DESCRIPTIONS.list_messaging_channels, inputSchema: ListMessagingChannelsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListMessagingChannels },
   { name: 'unbind_messaging_channel', description: TOOL_DESCRIPTIONS.unbind_messaging_channel, inputSchema: UnbindMessagingChannelSchema, executionMode: 'registry', safeMode: 'block', handler: handleUnbindMessagingChannel },
 ];

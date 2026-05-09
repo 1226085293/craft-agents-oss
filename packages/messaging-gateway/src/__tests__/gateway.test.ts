@@ -120,6 +120,6 @@ describe('MessagingGateway — outbound ordering', () => {
 
     await delay(120)
 
-    expect(adapter.texts).toEqual(['🔧 Read…', 'The answer is 42.'])
+    expect(adapter.texts).toEqual(['The answer is 42.'])
   })
 })

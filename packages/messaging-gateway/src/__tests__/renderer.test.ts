@@ -243,9 +243,10 @@ describe('Renderer — progress mode (default)', () => {
 
     const sends = adapter.calls.filter((c) => c.kind === 'sendText')
     const edits = adapter.calls.filter((c) => c.kind === 'editMessage')
-    // Bubble is posted (status only, cannot edit) + one final send via complete.
+    // No transient bubble/status messages on non-edit adapters; otherwise
+    // WhatsApp self-chat leaves multiple permanent "thinking" messages.
     expect(edits.length).toBe(0)
-    expect(sends.map((s) => s.text)).toEqual(['🔧 Read…', 'The answer is 42.'])
+    expect(sends.map((s) => s.text)).toEqual(['The answer is 42.'])
   })
 
   it('collapses redundant status edits (same status twice = one edit total)', async () => {

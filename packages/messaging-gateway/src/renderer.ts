@@ -386,6 +386,11 @@ export class Renderer {
    * Post the progress bubble if needed, and edit it to `status` if the
    * status has changed since the last write. Collapses redundant edits so
    * we stay under Telegram's per-chat edit budget.
+   *
+   * Platforms without message editing (notably WhatsApp) cannot evolve a
+   * single bubble. For those adapters, progress mode intentionally degrades
+   * to final-only output: do not emit transient thinking/tool-status messages
+   * that would remain as separate chat messages forever.
    */
   private async ensureProgressBubble(
     state: RenderState,
@@ -393,6 +398,8 @@ export class Renderer {
     adapter: PlatformAdapter,
     status: string,
   ): Promise<void> {
+    if (!adapter.capabilities.messageEditing) return
+
     if (!state.progressMessageId) {
       try {
         const sent = await adapter.sendText(binding.channelId, status, bindingOpts(binding))
@@ -403,7 +410,6 @@ export class Renderer {
       }
       return
     }
-    if (!adapter.capabilities.messageEditing) return
     if (state.progressStatus === status) return
     await this.tryEditMessage(adapter, binding, state.progressMessageId, status, state)
     state.progressStatus = status

@@ -395,6 +395,15 @@ export interface UserMessageEvent {
 }
 
 /**
+ * Message removed event - backend removed a queued user message.
+ */
+export interface MessageRemovedEvent {
+  type: 'message_removed'
+  sessionId: string
+  messageId: string
+}
+
+/**
  * Message annotation update event
  */
 export interface MessageAnnotationsUpdatedEvent {
@@ -507,6 +516,7 @@ export type AgentEvent =
   | TaskProgressEvent
   | TaskCompletedEvent
   | UserMessageEvent
+  | MessageRemovedEvent
   | MessageAnnotationsUpdatedEvent
   | SessionSharedEvent
   | SessionUnsharedEvent

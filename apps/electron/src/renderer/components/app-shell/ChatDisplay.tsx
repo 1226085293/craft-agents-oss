@@ -668,15 +668,22 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
       turnId = getTurnKey(turn)
 
       if (turn.type === 'user') {
-        const content = turn.message.content as unknown
-        if (typeof content === 'string') {
-          textContent = content
-        } else if (Array.isArray(content)) {
-          textContent = content
-            .filter((block: { type?: string }) => block.type === 'text')
-            .map((block: { text?: string }) => block.text || '')
-            .join('\n')
+        const userTexts: string[] = []
+        const collectUserText = (content: unknown) => {
+          if (typeof content === 'string') {
+            userTexts.push(content)
+          } else if (Array.isArray(content)) {
+            userTexts.push(content
+              .filter((block: { type?: string }) => block.type === 'text')
+              .map((block: { text?: string }) => block.text || '')
+              .join('\n'))
+          }
         }
+        collectUserText(turn.message.content as unknown)
+        for (const guidance of turn.guidanceMessages || []) {
+          collectUserText(guidance.content as unknown)
+        }
+        textContent = userTexts.filter(Boolean).join('\n')
       } else if (turn.type === 'assistant') {
         if (turn.response?.text) {
           textContent = turn.response.text
@@ -1211,6 +1218,26 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     })
   }, [session?.id, messageCount, lastMessageId, lastMessageRole])
 
+  const handleCancelQueuedMessage = useCallback(async (messageId: string) => {
+    if (!session) return
+    try {
+      await window.electronAPI.sessionCommand(session.id, { type: 'cancelQueuedMessage', messageId })
+    } catch (error) {
+      console.error('[ChatDisplay] Failed to cancel queued message:', error)
+      toast.error('Failed to cancel queued message')
+    }
+  }, [session?.id])
+
+  const handleGuideQueuedMessage = useCallback(async (messageId: string) => {
+    if (!session) return
+    try {
+      await window.electronAPI.sessionCommand(session.id, { type: 'guideQueuedMessage', messageId })
+    } catch (error) {
+      console.error('[ChatDisplay] Failed to guide queued message:', error)
+      toast.error('Failed to guide queued message')
+    }
+  }, [session?.id])
+
   // Handle message submission from InputContainer
   // Backend handles interruption and queueing if currently processing
   const handleSubmit = (message: string, attachments?: FileAttachment[], skillSlugs?: string[], options?: { midStreamBehavior?: 'steer' | 'queue' }) => {
@@ -1603,13 +1630,28 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                             isAnyMatch && !isCurrentMatch && "ring-1 ring-info/30"
                           )}
                         >
-                          <MemoizedMessageBubble
-                            message={turn.message}
-                            onOpenFile={onOpenFile}
-                            onOpenUrl={onOpenUrl}
-                            sessionId={session?.id}
-                            compactMode={compactMode}
-                          />
+                          <div className="flex flex-col gap-1">
+                            <MemoizedMessageBubble
+                              message={turn.message}
+                              onOpenFile={onOpenFile}
+                              onOpenUrl={onOpenUrl}
+                              sessionId={session?.id}
+                              compactMode={compactMode}
+                              onCancelQueued={handleCancelQueuedMessage}
+                              onGuideQueued={handleGuideQueuedMessage}
+                            />
+                            {turn.guidanceMessages?.map((guidanceMessage) => (
+                              <div key={guidanceMessage.id} className="pl-6 opacity-90">
+                                <MemoizedMessageBubble
+                                  message={guidanceMessage}
+                                  onOpenFile={onOpenFile}
+                                  onOpenUrl={onOpenUrl}
+                                  sessionId={session?.id}
+                                  compactMode={compactMode}
+                                />
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       )
                     }
@@ -2118,6 +2160,10 @@ interface MessageBubbleProps {
   compactMode?: boolean
   /** Callback to resend the user message that preceded an error */
   onRetry?: () => void
+  /** Callback to cancel/remove a queued user message */
+  onCancelQueued?: (messageId: string) => void
+  /** Callback to promote a queued user message into immediate guidance */
+  onGuideQueued?: (messageId: string) => void
 }
 
 /**
@@ -2205,6 +2251,8 @@ function MessageBubble({
   onPopOut,
   compactMode,
   onRetry,
+  onCancelQueued,
+  onGuideQueued,
 }: MessageBubbleProps) {
   const { t } = useTranslation()
 
@@ -2217,6 +2265,8 @@ function MessageBubble({
         badges={message.badges}
         isPending={message.isPending}
         isQueued={message.isQueued}
+        onGuideQueued={message.isQueued ? () => onGuideQueued?.(message.id) : undefined}
+        onCancelQueued={message.isQueued ? () => onCancelQueued?.(message.id) : undefined}
         onUrlClick={onOpenUrl}
         onFileClick={onOpenFile}
         compactMode={compactMode}
@@ -2354,7 +2404,11 @@ const MemoizedMessageBubble = React.memo(MessageBubble, (prev, next) => {
     prev.message.id === next.message.id &&
     prev.message.content === next.message.content &&
     prev.message.role === next.message.role &&
+    prev.message.isQueued === next.message.isQueued &&
+    prev.message.isPending === next.message.isPending &&
     prev.sessionId === next.sessionId &&
-    prev.compactMode === next.compactMode
+    prev.compactMode === next.compactMode &&
+    prev.onCancelQueued === next.onCancelQueued &&
+    prev.onGuideQueued === next.onGuideQueued
   )
 })

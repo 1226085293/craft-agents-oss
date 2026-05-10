@@ -22,6 +22,7 @@ import {
   Pencil,
   FilePenLine,
   GitBranch,
+  CornerDownRight,
 } from 'lucide-react'
 import { cn } from '../../lib/utils'
 import { Markdown } from '../markdown'
@@ -946,26 +947,32 @@ function ActivityRow({ activity, onOpenDetails, isLastChild, sessionFolderPath, 
     )
   }
 
-  // Status activities (e.g., compacting) - system-level with distinct styling
+  // Status activities (e.g., compacting, guidance) - system-level with distinct styling
   if (activity.type === 'status') {
     const isRunning = activity.status === 'running'
+    const isGuidance = activity.statusType === 'guidance'
     return (
       <div className="flex items-stretch">
         <TreeViewConnector depth={depth} isLastChild={isLastChild} />
         <div
           className={cn(
             "flex items-center gap-2 py-0.5 text-muted-foreground flex-1 min-w-0",
+            isGuidance && "text-foreground/80",
             SIZE_CONFIG.fontSize
           )}
         >
           <div className={cn(SIZE_CONFIG.iconSize, "flex items-center justify-center shrink-0")}>
             {isRunning ? (
               <Spinner className={SIZE_CONFIG.spinnerSizeSmall} />
+            ) : isGuidance ? (
+              <CornerDownRight className={cn(SIZE_CONFIG.iconSize, "text-info")} />
             ) : (
               <CheckCircle2 className={cn(SIZE_CONFIG.iconSize, "text-success")} />
             )}
           </div>
-          <span className="truncate">{activity.content}</span>
+          <span className="truncate">
+            {isGuidance ? `${i18n.t('chat.queuedAction.guide')}: ${activity.content}` : activity.content}
+          </span>
         </div>
       </div>
     )

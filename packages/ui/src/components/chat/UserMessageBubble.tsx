@@ -12,7 +12,7 @@
  */
 
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Clock } from 'lucide-react'
+import { Clock, CornerDownRight, X } from 'lucide-react'
 import type { StoredAttachment, ContentBadge } from '@craft-agent/core'
 import { normalizePath } from '@craft-agent/core/utils'
 import { cn } from '../../lib/utils'
@@ -319,6 +319,10 @@ export interface UserMessageBubbleProps {
   isPending?: boolean
   /** Whether the message is queued (badge shown) */
   isQueued?: boolean
+  /** Callback to promote an already-sent queued message to guidance */
+  onGuideQueued?: () => void
+  /** Callback to cancel/remove an already-sent queued message */
+  onCancelQueued?: () => void
   /** Compact mode - reduces padding for popover embedding */
   compactMode?: boolean
 }
@@ -337,6 +341,8 @@ export function UserMessageBubble({
   attachments,
   badges,
   isQueued,
+  onGuideQueued,
+  onCancelQueued,
   compactMode,
 }: UserMessageBubbleProps) {
   const { t } = useTranslation()
@@ -492,12 +498,48 @@ export function UserMessageBubble({
       >
         {showQueued && (
           <div
-            className="flex items-center gap-1.5 text-foreground/55 mb-1.5"
+            className="mb-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-foreground/55"
             role="status"
             aria-live="polite"
           >
-            <Clock className="h-3 w-3 animate-pulse" aria-hidden="true" />
-            <span className="text-[11px] italic">{t('chat.queuedBadge')}</span>
+            <div className="flex min-w-0 items-center gap-1.5">
+              <Clock className="h-3 w-3 shrink-0 animate-pulse" aria-hidden="true" />
+              <span className="text-[11px] italic leading-none">{t('chat.queuedBadge')}</span>
+            </div>
+            {(onGuideQueued || onCancelQueued) && (
+              <div className="flex shrink-0 items-center gap-1 rounded-full bg-background/45 p-0.5 shadow-minimal ring-1 ring-foreground/8">
+                {onGuideQueued && (
+                  <button
+                    type="button"
+                    className="inline-flex h-5 items-center gap-1 rounded-full px-2 text-[11px] font-medium leading-none text-foreground/75 transition-colors hover:bg-background hover:text-foreground"
+                    title={t('chat.queuedAction.guideLabel')}
+                    aria-label={t('chat.queuedAction.guideLabel')}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onGuideQueued()
+                    }}
+                  >
+                    <CornerDownRight className="h-3 w-3" aria-hidden="true" />
+                    {t('chat.queuedAction.guide')}
+                  </button>
+                )}
+                {onCancelQueued && (
+                  <button
+                    type="button"
+                    className="inline-flex h-5 items-center gap-1 rounded-full px-2 text-[11px] font-medium leading-none text-foreground/60 transition-colors hover:bg-destructive/10 hover:text-destructive"
+                    title={t('chat.queuedAction.cancelLabel')}
+                    aria-label={t('chat.queuedAction.cancelLabel')}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onCancelQueued()
+                    }}
+                  >
+                    <X className="h-3 w-3" aria-hidden="true" />
+                    {t('chat.queuedAction.cancel')}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
         {hasInlineBadges

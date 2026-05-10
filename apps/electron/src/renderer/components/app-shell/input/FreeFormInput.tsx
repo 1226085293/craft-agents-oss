@@ -1313,20 +1313,7 @@ export function FreeFormInput({
     return true
   }, [input, attachments, followUpItems, disabled, disableSend, onInputChange, onAttachmentsChange, onSubmit, skills, sources, optimisticSourceSlugs, onSourcesChange, onWorkingDirectoryChange, homeDir])
 
-  const cancelDraft = React.useCallback(() => {
-    setInput('')
-    setAttachments([])
-    if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current)
-    onInputChange?.('')
-    onAttachmentsChange?.([])
-    prevInputValueRef.current = ''
-    requestAnimationFrame(() => {
-      richInputRef.current?.focus()
-    })
-  }, [onAttachmentsChange, onInputChange])
-
   const submitQueuedMessage = React.useCallback(() => submitMessage({ midStreamBehavior: 'queue' }), [submitMessage])
-  const submitSteerMessage = React.useCallback(() => submitMessage({ midStreamBehavior: 'steer' }), [submitMessage])
 
   // Listen for craft:submit-input events (simulate pressing the Send button)
   React.useEffect(() => {
@@ -2434,33 +2421,9 @@ export function FreeFormInput({
           })()}
 
           {/* 6. Send/Stop controls. While processing, desktop defaults to
-              queue-on-send but exposes Codex-style Guide + Cancel controls. */}
+              queue-on-send. Guide/Cancel live on already-sent queued bubbles. */}
           {isProcessing && hasContent ? (
             <div className="flex items-center gap-1.5 ml-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                aria-label="Cancel send"
-                title="Cancel send"
-                className="h-7 px-2 rounded-full text-xs"
-                onClick={cancelDraft}
-                disabled={disabled || disableSend}
-              >
-                <X className="h-3.5 w-3.5" />
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                aria-label="Guide current task"
-                title="Guide current task"
-                className="h-7 px-2.5 rounded-full text-xs"
-                onClick={submitSteerMessage}
-                disabled={disabled || disableSend}
-              >
-                Guide
-              </Button>
               <Button
                 type="button"
                 size="icon"

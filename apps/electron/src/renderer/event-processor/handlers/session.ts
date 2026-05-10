@@ -554,8 +554,13 @@ export function handleUserMessage(
       if (i === existingIndex) {
         return {
           ...m,
+          ...message,
+          // Preserve the optimistic id to avoid remounting the bubble; copy the
+          // backend fields (notably isGuidance) onto the existing UI message.
+          id: m.id,
           isPending: false,
           isQueued: status === 'queued',
+          isGuidance: message.isGuidance ?? m.isGuidance,
         }
       }
       return m
@@ -579,6 +584,26 @@ export function handleUserMessage(
         lastMessageRole: 'user',  // Clear plan badge when user responds
         // Set isProcessing when message is accepted/processing (enables multi-window sync)
         isProcessing: status === 'accepted' || status === 'processing',
+      },
+      streaming,
+    },
+    effects: [],
+  }
+}
+
+/**
+ * Handle message_removed - remove a queued message canceled from another control/window.
+ */
+export function handleMessageRemoved(
+  state: SessionState,
+  event: { messageId: string }
+): ProcessResult {
+  const { session, streaming } = state
+  return {
+    state: {
+      session: {
+        ...session,
+        messages: session.messages.filter(m => m.id !== event.messageId),
       },
       streaming,
     },

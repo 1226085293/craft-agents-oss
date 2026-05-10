@@ -373,3 +373,69 @@ describe('edge cases', () => {
     expect(deriveTurnPhase(turn)).toBe('awaiting')
   })
 })
+
+it('renders queued user messages after the active assistant process block', () => {
+  const base = Date.now()
+  const messages = [
+    { id: 'u1', role: 'user', content: '1分钟后给我发消息', timestamp: base } as Message,
+    { id: 'tool1', role: 'tool', content: 'Running Bash...', timestamp: base + 100, toolName: 'Bash', toolUseId: 'call-1', toolStatus: 'running' } as Message,
+    { id: 'q1', role: 'user', content: '再帮我查一下天气', timestamp: base + 200, isQueued: true } as Message,
+  ]
+
+  const turns = groupMessagesByTurn(messages)
+  expect(turns).toHaveLength(3)
+  expect(turns[0]?.type).toBe('user')
+  expect(turns[1]?.type).toBe('assistant')
+  expect(turns[2]?.type).toBe('user')
+  if (turns[0]?.type !== 'user') throw new Error('expected first user turn')
+  if (turns[1]?.type !== 'assistant') throw new Error('expected assistant turn')
+  if (turns[2]?.type !== 'user') throw new Error('expected queued user turn')
+
+  expect(turns[0].message.id).toBe('u1')
+  expect(turns[1].activities.map(a => a.id)).toEqual(['tool1'])
+  expect(turns[1].isComplete).toBe(false)
+  expect(turns[2].message.id).toBe('q1')
+  expect(turns[2].message.isQueued).toBe(true)
+})
+
+it('keeps queued user messages after the assistant block even if they arrive before first activity', () => {
+  const base = Date.now()
+  const messages = [
+    { id: 'u1', role: 'user', content: '1分钟后给我发消息', timestamp: base } as Message,
+    { id: 'q1', role: 'user', content: '再帮我查一下天气', timestamp: base + 100, isQueued: true } as Message,
+    { id: 'tool1', role: 'tool', content: 'Running Bash...', timestamp: base + 200, toolName: 'Bash', toolUseId: 'call-1', toolStatus: 'running' } as Message,
+  ]
+
+  const turns = groupMessagesByTurn(messages)
+  expect(turns).toHaveLength(3)
+  expect(turns[0]?.type).toBe('user')
+  expect(turns[1]?.type).toBe('assistant')
+  expect(turns[2]?.type).toBe('user')
+  if (turns[1]?.type !== 'assistant') throw new Error('expected assistant turn')
+  if (turns[2]?.type !== 'user') throw new Error('expected queued user turn')
+
+  expect(turns[1].activities.map(a => a.id)).toEqual(['tool1'])
+  expect(turns[2].message.id).toBe('q1')
+})
+
+it('keeps steered guidance under the original user turn without splitting assistant activities', () => {
+  const base = Date.now()
+  const messages = [
+    { id: 'u1', role: 'user', content: '1分钟后给我发消息', timestamp: base } as Message,
+    { id: 'tool1', role: 'tool', content: 'Running Bash...', timestamp: base + 100, toolName: 'Bash', toolUseId: 'call-1', toolStatus: 'completed', toolResult: '(no output)' } as Message,
+    { id: 'g1', role: 'user', content: '改为两分钟', timestamp: base + 200, isGuidance: true } as Message,
+    { id: 'a1', role: 'assistant', content: '好的，改为 2 分钟后。', timestamp: base + 300, isIntermediate: true } as Message,
+    { id: 'tool2', role: 'tool', content: 'Running Bash...', timestamp: base + 400, toolName: 'Bash', toolUseId: 'call-2', toolStatus: 'executing' } as Message,
+  ]
+
+  const turns = groupMessagesByTurn(messages)
+  expect(turns).toHaveLength(2)
+  expect(turns[0]?.type).toBe('user')
+  if (turns[0]?.type !== 'user') throw new Error('expected user turn')
+  expect(turns[0].message.id).toBe('u1')
+  expect(turns[0].guidanceMessages?.map(m => m.id)).toEqual(['g1'])
+  expect(turns[1]?.type).toBe('assistant')
+  if (turns[1]?.type !== 'assistant') throw new Error('expected assistant turn')
+  expect(turns[1].activities.map(a => a.id)).toEqual(['tool1', 'g1', 'a1', 'tool2'])
+  expect(turns[1].activities.find(a => a.id === 'g1')?.statusType).toBe('guidance')
+})

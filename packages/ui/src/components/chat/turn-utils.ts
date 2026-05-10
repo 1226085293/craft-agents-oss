@@ -57,6 +57,8 @@ export interface AssistantTurn {
 export interface UserTurn {
   type: 'user'
   message: Message
+  /** Guidance messages steered into the active assistant turn after this user message */
+  guidanceMessages?: Message[]
   timestamp: number
 }
 
@@ -350,6 +352,17 @@ export function groupMessagesByTurn(messages: Message[]): Turn[] {
 
   const turns: Turn[] = []
   let currentTurn: AssistantTurn | null = null
+  let lastUserTurn: UserTurn | null = null
+  let deferredQueuedUserTurns: UserTurn[] = []
+
+  const flushDeferredQueuedUserTurns = () => {
+    if (deferredQueuedUserTurns.length === 0) return
+    for (const userTurn of deferredQueuedUserTurns) {
+      turns.push(userTurn)
+      lastUserTurn = userTurn
+    }
+    deferredQueuedUserTurns = []
+  }
 
   const flushCurrentTurn = (interrupted = false) => {
     if (currentTurn) {
@@ -404,6 +417,7 @@ export function groupMessagesByTurn(messages: Message[]): Turn[] {
 
       turns.push(currentTurn)
       currentTurn = null
+      flushDeferredQueuedUserTurns()
     }
   }
 
@@ -421,16 +435,62 @@ export function groupMessagesByTurn(messages: Message[]): Turn[] {
       continue
     }
 
-    // User messages are their own turn
+    // User messages are their own turn. Guided/steered user messages are an
+    // exception: they are injected into the active assistant turn, so they
+    // should be displayed under the original user message without flushing the
+    // current assistant process block.
     if (message.role === 'user') {
-      // If there's a current turn, it's complete (something follows it)
-      if (currentTurn) currentTurn.isComplete = true
-      flushCurrentTurn()
-      turns.push({
+      if (message.isGuidance && lastUserTurn) {
+        lastUserTurn.guidanceMessages = [...(lastUserTurn.guidanceMessages || []), message]
+        if (!currentTurn) {
+          currentTurn = {
+            type: 'assistant',
+            turnId: message.turnId || message.id,
+            activities: [],
+            response: undefined,
+            intent: undefined,
+            isStreaming: true,
+            isComplete: false,
+            timestamp: message.timestamp,
+          }
+        }
+        currentTurn.activities.push({
+          id: message.id,
+          type: 'status',
+          status: 'completed',
+          content: message.content,
+          displayName: 'Guidance',
+          timestamp: message.timestamp,
+          statusType: 'guidance',
+          depth: 0,
+        })
+        continue
+      }
+
+      const userTurn: UserTurn = {
         type: 'user',
         message,
         timestamp: message.timestamp,
-      })
+      }
+
+      // Queued messages are not a new active turn yet. They should appear after
+      // the currently-running assistant process block, not between the original
+      // user message and its process block. Defer them until the active turn is
+      // flushed. This keeps the visible order as:
+      //   user → assistant process → queued user
+      // instead of:
+      //   user → queued user → assistant process
+      if (message.isQueued && lastUserTurn) {
+        deferredQueuedUserTurns.push(userTurn)
+        continue
+      }
+
+      // If there's a current turn, it's complete (something follows it)
+      if (currentTurn) currentTurn.isComplete = true
+      flushCurrentTurn()
+
+      turns.push(userTurn)
+      lastUserTurn = userTurn
       continue
     }
 
@@ -633,8 +693,10 @@ export function groupMessagesByTurn(messages: Message[]): Turn[] {
     }
   }
 
-  // Flush any remaining turn
+  // Flush any remaining turn, then any queued user messages that were deferred
+  // before the assistant turn produced visible activity.
   flushCurrentTurn()
+  flushDeferredQueuedUserTurns()
 
   return turns
 }

@@ -2247,9 +2247,9 @@ export class PiAgent extends BaseAgent {
 
   /**
    * Redirect mid-stream via Pi SDK's steer().
-   * Delivers the message after the current tool finishes, skips remaining
-   * queued tools, and continues with full context intact.
-   * Events flow through the existing generator — no abort needed.
+   * The subprocess keeps the agent turn alive and may ask the model whether
+   * guidance conflicts with a currently-running tool. Only conflicting tools
+   * are interrupted; otherwise guidance is delivered before the next LLM call.
    */
   override redirect(message: string): boolean {
     if (!this._isProcessing || !this.subprocess) {

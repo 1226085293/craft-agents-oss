@@ -17,7 +17,7 @@
 import http from 'node:http';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
-import { mkdirSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 
 // Pi SDK
@@ -274,6 +274,21 @@ function isPrefetchableTool(toolName: string): boolean {
 // Flag: proxy tools changed since last session creation — session needs recreation
 let toolsChanged = false;
 
+interface ActiveToolExecution {
+  toolCallId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  intent?: string;
+  startedAt: number;
+  abort: () => void;
+  signal: AbortSignal;
+}
+
+// Tools currently executing inside the Pi SDK loop. Used by steer handling to
+// let the model decide whether guidance conflicts with a running tool and, only
+// in that case, cancel the tool so the same agent turn can replan immediately.
+const activeToolExecutions = new Map<string, ActiveToolExecution>();
+
 // Callback server for call_llm
 let callbackServer: http.Server | null = null;
 let callbackPort = 0;
@@ -289,7 +304,21 @@ function send(msg: OutboundMessage): void {
 
 function debugLog(message: string): void {
   // Write debug messages to stderr so they don't interfere with JSONL protocol
-  process.stderr.write(`[pi-server] ${message}\n`);
+  const line = `[pi-server] ${message}\n`;
+  process.stderr.write(line);
+
+  // Persist a copy under the session data folder when available. This makes
+  // mid-stream steering/tool-interrupt bugs diagnosable after the fact; stderr
+  // ring buffers are otherwise only in-memory.
+  try {
+    if (initConfig?.sessionPath) {
+      const dataDir = join(initConfig.sessionPath, 'data');
+      mkdirSync(dataDir, { recursive: true });
+      appendFileSync(join(dataDir, 'pi-agent-server.log'), `${new Date().toISOString()} ${line}`);
+    }
+  } catch {
+    // Best-effort diagnostics only.
+  }
 }
 
 /** Find the most recent .jsonl session file in a directory. */
@@ -778,8 +807,34 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
     // even if a future pre-tool-use path returns `allow` without modification.
     inputObj = stripCraftMetadata(inputObj);
 
-    // Execute original tool with (potentially modified) input
-    const result = await originalExecute(toolCallId, inputObj, signal, onUpdate, ctx);
+    // Execute original tool with a tool-local AbortController. The parent agent
+    // signal still cancels the tool, but steer can cancel just this tool without
+    // aborting the whole agent turn.
+    const toolAbortController = new AbortController();
+    const parentSignal = signal;
+    const abortFromParent = () => toolAbortController.abort(parentSignal?.reason);
+    if (parentSignal?.aborted) abortFromParent();
+    else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+
+    activeToolExecutions.set(toolCallId, {
+      toolCallId,
+      toolName: sdkToolName,
+      input: inputObj,
+      intent,
+      startedAt: Date.now(),
+      abort: () => toolAbortController.abort(new Error('Interrupted by user guidance')),
+      signal: toolAbortController.signal,
+    });
+    debugLog(`Active tool registered: ${sdkToolName}/${toolCallId} intent=${intent || '(none)'} input=${JSON.stringify(inputObj).slice(0, 500)}`);
+
+    let result: AgentToolResult<any>;
+    try {
+      result = await originalExecute(toolCallId, inputObj, toolAbortController.signal, onUpdate, ctx);
+    } finally {
+      parentSignal?.removeEventListener('abort', abortFromParent);
+      activeToolExecutions.delete(toolCallId);
+      debugLog(`Active tool cleared: ${sdkToolName}/${toolCallId} aborted=${toolAbortController.signal.aborted}`);
+    }
 
     // --- Post-execute: large response summarization ---
 
@@ -1400,6 +1455,54 @@ async function handleAbort(): Promise<void> {
   prefetchCache.clear();
 }
 
+async function shouldInterruptActiveToolForGuidance(
+  guidance: string,
+  active: ActiveToolExecution,
+): Promise<boolean> {
+  // If the tool has already settled or was parent-aborted, don't do anything.
+  if (active.signal.aborted) return false;
+
+  try {
+    const result = await queryLlm({
+      temperature: 0,
+      maxTokens: 80,
+      outputSchema: {
+        type: 'object',
+        properties: {
+          interrupt: { type: 'boolean' },
+          reason: { type: 'string' },
+        },
+        required: ['interrupt', 'reason'],
+      },
+      systemPrompt: 'You decide whether new user guidance conflicts with a currently running tool. Return JSON only.',
+      prompt: [
+        'A tool is currently running in an AI agent turn.',
+        'Decide whether the new user guidance requires interrupting/canceling this running tool now.',
+        '',
+        'Interrupt only when continuing the current tool would directly conflict with or wastefully duplicate the guidance.',
+        'Examples: changing a timer duration while a sleep/timer tool is running => interrupt. Asking an unrelated follow-up while a short read/search runs => do not interrupt.',
+        '',
+        `Running tool: ${active.toolName}`,
+        `Tool intent: ${active.intent || '(none)'}`,
+        `Tool input: ${JSON.stringify(active.input).slice(0, 2000)}`,
+        `Elapsed seconds: ${Math.round((Date.now() - active.startedAt) / 1000)}`,
+        `User guidance: ${guidance}`,
+      ].join('\n'),
+    });
+
+    const raw = result.text.trim();
+    debugLog(`Raw steer/tool interrupt decision for ${active.toolName}/${active.toolCallId}: ${raw.slice(0, 500)}`);
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    const jsonText = jsonMatch ? jsonMatch[0] : raw;
+    const parsed = JSON.parse(jsonText) as { interrupt?: boolean; reason?: string };
+    debugLog(`Steer/tool interrupt decision for ${active.toolName}/${active.toolCallId}: interrupt=${parsed.interrupt} reason=${parsed.reason || ''}`);
+    return parsed.interrupt === true;
+  } catch (error) {
+    debugLog(`Steer/tool interrupt decision failed, not interrupting: ${error instanceof Error ? error.message : String(error)}`);
+    return false;
+  }
+}
+
 async function handleMiniCompletion(msg: Extract<InboundMessage, { type: 'mini_completion' }>): Promise<void> {
   // Call queryLlm directly (not runMiniCompletion) so auth errors propagate
   // as 'error' messages instead of being swallowed and returned as null.
@@ -1705,8 +1808,22 @@ async function processMessage(msg: InboundMessage): Promise<void> {
 
     case 'steer':
       if (piSession) {
-        debugLog(`Steering with: "${msg.message.slice(0, 100)}"`);
+        debugLog(`Steering with: "${msg.message.slice(0, 100)}" activeTools=${activeToolExecutions.size}`);
         await piSession.steer(msg.message);
+        debugLog(`Steer queued; evaluating ${activeToolExecutions.size} active tool(s) for interruption`);
+
+        // Pi SDK steer queues the guidance for the active reasoning loop, but
+        // does not inspect a currently-running tool until that tool returns.
+        // Ask the model whether the guidance conflicts with each active tool;
+        // only then cancel that tool. The agent turn remains alive, and the
+        // canceled tool result becomes context for the next reasoning step.
+        for (const active of [...activeToolExecutions.values()]) {
+          if (await shouldInterruptActiveToolForGuidance(msg.message, active)) {
+            debugLog(`Interrupting active tool due to guidance: ${active.toolName}/${active.toolCallId}`);
+            active.abort();
+            debugLog(`Abort signaled for active tool: ${active.toolName}/${active.toolCallId} aborted=${active.signal.aborted}`);
+          }
+        }
       } else {
         debugLog('Steer ignored — no active session');
       }

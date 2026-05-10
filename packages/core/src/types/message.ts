@@ -285,6 +285,8 @@ export interface Message {
   isPending?: boolean;
   // Queued: user message that is waiting to be processed (sent during ongoing response)
   isQueued?: boolean;
+  // Guidance: user message steered into an active turn (Codex/Pi-style)
+  isGuidance?: boolean;
   // Intermediate text (commentary between tool calls, not final response)
   isIntermediate?: boolean;
   // Turn ID: Correlation ID from the API's message.id, groups all messages in an assistant turn
@@ -410,6 +412,8 @@ export interface StoredMessage {
   authWorkspace?: string;
   // Queued: user message that is waiting to be processed (persisted for recovery)
   isQueued?: boolean;
+  // Guidance: user message steered into an active turn (persisted for UI grouping)
+  isGuidance?: boolean;
 }
 
 /**

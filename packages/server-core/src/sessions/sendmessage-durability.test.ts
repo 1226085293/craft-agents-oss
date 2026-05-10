@@ -162,14 +162,45 @@ describe('sendMessage durability', () => {
     expect(onDiskAtAck).toBe(true)
   })
 
-  it('steer mid-stream interrupts the running turn and queues the guidance for immediate replay', async () => {
-    const sessionId = 'steer-interrupts'
+  it('steer mid-stream uses native redirect when the backend supports it', async () => {
+    const sessionId = 'steer-native'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+
+    const redirected: string[] = []
+    const forceAbortReasons: string[] = []
+    managed.agent = {
+      redirect: (message: string) => { redirected.push(message); return true },
+      forceAbort: (reason: string) => { forceAbortReasons.push(reason) },
+    } as never
+
+    let ackedMessageId: string | undefined
+
+    await sm.sendMessage(
+      sessionId,
+      '改为 3 分钟后发消息',
+      undefined,
+      undefined,
+      { midStreamBehavior: 'steer' },
+      undefined,
+      undefined,
+      (messageId) => { ackedMessageId = messageId },
+    )
+
+    expect(redirected).toEqual(['改为 3 分钟后发消息'])
+    expect(forceAbortReasons).toEqual([])
+    expect(managed.messageQueue).toHaveLength(0)
+    expect(managed.messages.some(m => m.id === ackedMessageId && m.role === 'user')).toBe(true)
+  })
+
+  it('steer mid-stream falls back to queued replay when native redirect is unavailable', async () => {
+    const sessionId = 'steer-fallback'
     const managed = buildSession(sessionId)
     managed.isProcessing = true
 
     const forceAbortReasons: string[] = []
     managed.agent = {
-      redirect: () => { throw new Error('redirect should not be used for interrupting guidance') },
+      redirect: () => { forceAbortReasons.push('redirect'); return false },
       forceAbort: (reason: string) => { forceAbortReasons.push(reason) },
     } as never
 
@@ -190,6 +221,117 @@ describe('sendMessage durability', () => {
     expect(managed.messageQueue).toHaveLength(1)
     expect(managed.messageQueue[0]?.message).toBe('改为 3 分钟后发消息')
     expect(managed.messageQueue[0]?.messageId).toBe(ackedMessageId)
+  })
+
+  it('cancels an already-queued user message without stopping the active turn', async () => {
+    const sessionId = 'cancel-queued-message'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+
+    let queuedMessageId: string | undefined
+    await sm.sendMessage(
+      sessionId,
+      'queued but canceled',
+      undefined,
+      undefined,
+      { midStreamBehavior: 'queue', optimisticMessageId: 'optimistic-cancel' },
+      undefined,
+      undefined,
+      (messageId) => { queuedMessageId = messageId },
+    )
+
+    expect(queuedMessageId).toBeTruthy()
+    expect(managed.messageQueue).toHaveLength(1)
+    expect(readPersistedMessageIds(sessionId)).toContain(queuedMessageId!)
+
+    await sm.cancelQueuedMessage(sessionId, 'optimistic-cancel')
+
+    expect(managed.isProcessing).toBe(true)
+    expect(managed.messageQueue).toHaveLength(0)
+    expect(managed.messages.some(m => m.id === queuedMessageId)).toBe(false)
+    expect(readPersistedMessageIds(sessionId)).not.toContain(queuedMessageId!)
+  })
+
+  it('promotes an already-queued message to immediate guidance when native steer is unavailable', async () => {
+    const sessionId = 'guide-queued-message'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+
+    const forceAbortReasons: string[] = []
+    managed.agent = {
+      redirect: () => { forceAbortReasons.push('redirect'); return false },
+      forceAbort: (reason: string) => { forceAbortReasons.push(reason) },
+    } as never
+
+    let firstId: string | undefined
+    let secondId: string | undefined
+    await sm.sendMessage(sessionId, 'first queued', undefined, undefined, { midStreamBehavior: 'queue' }, undefined, undefined, id => { firstId = id })
+    await sm.sendMessage(sessionId, 'second queued', undefined, undefined, { midStreamBehavior: 'queue', optimisticMessageId: 'optimistic-second' }, undefined, undefined, id => { secondId = id })
+
+    await sm.guideQueuedMessage(sessionId, 'optimistic-second')
+
+    expect(forceAbortReasons).toEqual(['redirect'])
+    expect(managed.wasInterrupted).toBe(true)
+    expect(managed.messageQueue.map(q => q.messageId)).toEqual([secondId, firstId])
+    expect(managed.messageQueue[0]?.options?.midStreamBehavior).toBe('steer')
+  })
+
+  it('guides an already-queued message through native steer without interrupting the turn', async () => {
+    const sessionId = 'guide-queued-native'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+
+    const redirected: string[] = []
+    const forceAbortReasons: string[] = []
+    managed.agent = {
+      redirect: (message: string) => { redirected.push(message); return true },
+      forceAbort: (reason: string) => { forceAbortReasons.push(reason) },
+    } as never
+
+    let queuedId: string | undefined
+    await sm.sendMessage(sessionId, 'native queued guidance', undefined, undefined, { midStreamBehavior: 'queue', optimisticMessageId: 'optimistic-native' }, undefined, undefined, id => { queuedId = id })
+
+    await sm.guideQueuedMessage(sessionId, 'optimistic-native')
+
+    expect(redirected).toEqual(['native queued guidance'])
+    expect(forceAbortReasons).toEqual([])
+    expect(managed.wasInterrupted).not.toBe(true)
+    expect(managed.messageQueue).toHaveLength(0)
+    expect(managed.messages.some(m => m.id === queuedId && m.role === 'user')).toBe(true)
+  })
+
+  it('replays a guided queued message after the interrupted turn stops', async () => {
+    const sessionId = 'guide-queued-replay'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+
+    managed.agent = {
+      redirect: () => false,
+      forceAbort: () => undefined,
+    } as never
+
+    let queuedId: string | undefined
+    await sm.sendMessage(sessionId, 'queued guidance', undefined, undefined, { midStreamBehavior: 'queue', optimisticMessageId: 'optimistic-guidance' }, undefined, undefined, id => { queuedId = id })
+    await sm.guideQueuedMessage(sessionId, 'optimistic-guidance')
+
+    const replayed: Array<{ message: string; existingMessageId?: string; optimisticMessageId?: string }> = []
+    const originalSendMessage = sm.sendMessage.bind(sm)
+    ;(sm as unknown as { sendMessage: SessionManager['sendMessage'] }).sendMessage = (async (
+      _sessionId,
+      message,
+      _attachments,
+      _storedAttachments,
+      options,
+      existingMessageId,
+    ) => {
+      replayed.push({ message, existingMessageId, optimisticMessageId: options?.optimisticMessageId })
+    }) as SessionManager['sendMessage']
+
+    await (sm as unknown as { onProcessingStopped: (id: string, reason: 'interrupted') => Promise<void> }).onProcessingStopped(sessionId, 'interrupted')
+    await new Promise(resolve => setImmediate(resolve))
+
+    expect(replayed).toEqual([{ message: 'queued guidance', existingMessageId: queuedId, optimisticMessageId: 'optimistic-guidance' }])
+    ;(sm as unknown as { sendMessage: SessionManager['sendMessage'] }).sendMessage = originalSendMessage
   })
 
   it('runs agent chats for different sessions concurrently', async () => {

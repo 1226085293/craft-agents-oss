@@ -90,6 +90,8 @@ export interface ISessionManager {
     onAck?: (messageId: string) => void,
   ): Promise<void>
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>
+  cancelQueuedMessage(sessionId: string, messageId: string): Promise<void>
+  guideQueuedMessage(sessionId: string, messageId: string): Promise<void>
   killShell(sessionId: string, shellId: string): Promise<{ success: boolean; error?: string }>
   getTaskOutput(taskId: string): Promise<string | null>
   addMessageAnnotation(sessionId: string, messageId: string, annotation: AnnotationV1): void

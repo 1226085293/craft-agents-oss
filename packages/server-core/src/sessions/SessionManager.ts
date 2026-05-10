@@ -5273,10 +5273,10 @@ export class SessionManager implements ISessionManager {
     // `midStreamBehavior` (resolved via {@link resolveMidStreamBehavior},
     // defaults to provider-appropriate value):
     //
-    // - 'steer': interrupt the in-flight turn and replay the new message next.
-    //   This gives phone/messaging "guidance" real correction semantics: a
-    //   follow-up like “改为 3 分钟后” must stop the old long-running tool (for
-    //   example a Bash sleep for 5 minutes) instead of waiting until it ends.
+    // - 'steer': deliver the follow-up through the backend's native redirect
+    //   path when available (Codex/Pi-style guidance inserted into the active
+    //   reasoning flow). If the backend cannot steer, fall back to aborting the
+    //   current turn and replaying this message next.
     // - 'queue': hold the message untouched; the current turn keeps running
     //   to natural completion; replay as a new turn afterwards. NO call to
     //   `agent.redirect()`, NO forceAbort, NO interruption.
@@ -5292,22 +5292,10 @@ export class SessionManager implements ISessionManager {
         : connection ? resolveMidStreamBehavior(connection) : 'steer'
 
       const agent = managed.agent
-      let steered = false
-      if (behavior === 'steer') {
-        agent?.forceAbort(AbortReason.Redirect)
-      }
-      // For 'queue': skip abort entirely. The current turn is undisturbed.
 
-      sessionLog.info('mid-stream send', {
-        sessionId,
-        behavior,
-        steered,
-        queueLengthBefore: managed.messageQueue.length,
-        backend: agent ? agent.constructor.name : 'none',
-        connectionSlug: connection?.slug,
-      })
-
-      // Create user message for UI
+      // Create user message for UI/persistence first. Native steer backends keep
+      // the existing generator alive, so this message represents guidance that
+      // is inserted into the active turn rather than a separate replayed turn.
       const userMessage: Message = {
         id: generateMessageId(),
         role: 'user',
@@ -5318,9 +5306,24 @@ export class SessionManager implements ISessionManager {
       }
       managed.messages.push(userMessage)
 
-      // Emit to UI as queued while the interrupted turn drains; replay will
-      // transition it to processing. This avoids claiming guidance was applied
-      // while the old long-running tool is still active.
+      let steered = false
+      if (behavior === 'steer') {
+        steered = agent?.redirect(message) === true
+      }
+      // For 'queue': skip redirect entirely. The current turn is undisturbed.
+      if (steered) {
+        userMessage.isGuidance = true
+      }
+
+      sessionLog.info('mid-stream send', {
+        sessionId,
+        behavior,
+        steered,
+        queueLengthBefore: managed.messageQueue.length,
+        backend: agent ? agent.constructor.name : 'none',
+        connectionSlug: connection?.slug,
+      })
+
       this.sendEvent({
         type: 'user_message',
         sessionId,
@@ -5329,12 +5332,17 @@ export class SessionManager implements ISessionManager {
         optimisticMessageId: options?.optimisticMessageId
       }, managed.workspace.id)
 
-      // Push for FIFO replay on next onProcessingStopped tick. Same shape
-      // for both queue-direct (current turn still running) and queue-after-abort
-      // (steer behavior) — the replay path in processNextQueuedMessage is identical.
-      managed.messageQueue.push({ message, attachments, storedAttachments, options, messageId: userMessage.id, optimisticMessageId: options?.optimisticMessageId })
-      if (behavior === 'steer') {
-        managed.wasInterrupted = true
+      // If the backend accepted native steering, events continue through the
+      // current generator and no replay queue entry is needed. Otherwise, queue
+      // for FIFO replay. BaseAgent/Claude fallback redirects force-abort before
+      // returning false; queue replay then runs from onProcessingStopped.
+      if (steered) {
+        // Already marked as guidance before the event so the renderer can regroup it immediately.
+      } else {
+        managed.messageQueue.push({ message, attachments, storedAttachments, options, messageId: userMessage.id, optimisticMessageId: options?.optimisticMessageId })
+        if (behavior === 'steer') {
+          managed.wasInterrupted = true
+        }
       }
 
       this.persistSession(managed)
@@ -5828,6 +5836,107 @@ export class SessionManager implements ISessionManager {
         sendSpan.end()
         this.onProcessingStopped(sessionId, 'interrupted')
       }
+    }
+  }
+
+  async cancelQueuedMessage(sessionId: string, messageId: string): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return
+
+    const queueIndex = managed.messageQueue.findIndex(q =>
+      q.messageId === messageId || q.optimisticMessageId === messageId
+    )
+    if (queueIndex === -1) {
+      sessionLog.warn('Cannot cancel queued message: message not found in queue', { sessionId, messageId })
+      return
+    }
+
+    const [queued] = managed.messageQueue.splice(queueIndex, 1)
+    const canonicalMessageId = queued?.messageId ?? messageId
+    managed.messages = managed.messages.filter(m => m.id !== canonicalMessageId && m.id !== messageId)
+
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+
+    this.sendEvent({
+      type: 'message_removed',
+      sessionId,
+      messageId,
+    }, managed.workspace.id)
+    if (canonicalMessageId !== messageId) {
+      this.sendEvent({
+        type: 'message_removed',
+        sessionId,
+        messageId: canonicalMessageId,
+      }, managed.workspace.id)
+    }
+  }
+
+  async guideQueuedMessage(sessionId: string, messageId: string): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return
+
+    const queueIndex = managed.messageQueue.findIndex(q =>
+      q.messageId === messageId || q.optimisticMessageId === messageId
+    )
+    if (queueIndex === -1) {
+      sessionLog.warn('Cannot guide queued message: message not found in queue', { sessionId, messageId })
+      return
+    }
+
+    const [queued] = managed.messageQueue.splice(queueIndex, 1)
+    if (!queued) return
+
+    // Guide should behave like Codex/Pi native steering when supported: inject
+    // this already-sent queued bubble into the active reasoning flow without
+    // hard-aborting the current turn. Only fall back to abort + replay when the
+    // active backend reports that it cannot steer.
+    if (managed.isProcessing && managed.agent?.redirect(queued.message) === true) {
+      queued.options = {
+        ...queued.options,
+        midStreamBehavior: 'steer',
+      }
+      const guidanceMessage = managed.messages.find(m => m.id === queued.messageId)
+      if (guidanceMessage) {
+        guidanceMessage.isQueued = false
+        guidanceMessage.isGuidance = true
+      }
+      this.sendEvent({
+        type: 'user_message',
+        sessionId,
+        message: guidanceMessage ?? {
+          id: queued.messageId ?? messageId,
+          role: 'user',
+          content: queued.message,
+          timestamp: this.monotonic(),
+          isGuidance: true,
+        },
+        status: 'accepted',
+        optimisticMessageId: queued.optimisticMessageId,
+      }, managed.workspace.id)
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+      return
+    }
+
+    // Fallback: promote this already-sent queued bubble to the front and make
+    // it the next replayed turn. BaseAgent/Claude redirect fallback already
+    // force-aborted before returning false; if there is no agent, replay starts
+    // when processing stops or immediately when idle.
+    queued.options = {
+      ...queued.options,
+      midStreamBehavior: 'steer',
+    }
+    managed.messageQueue.unshift(queued)
+    managed.wasInterrupted = true
+
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+
+    if (!managed.isProcessing) {
+      setImmediate(() => this.processNextQueuedMessage(sessionId))
+    } else if (!managed.agent) {
+      sessionLog.warn('Queued guide requested while processing but no agent is attached', { sessionId, messageId })
     }
   }
 

@@ -367,6 +367,10 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
         return sessionManager.markPendingPlanExecutionDispatched(sessionId)
       case 'clearPendingPlanExecution':
         return sessionManager.clearPendingPlanExecution(sessionId)
+      case 'cancelQueuedMessage':
+        return sessionManager.cancelQueuedMessage(sessionId, command.messageId)
+      case 'guideQueuedMessage':
+        return sessionManager.guideQueuedMessage(sessionId, command.messageId)
       case 'addAnnotation':
         return sessionManager.addMessageAnnotation(sessionId, command.messageId, command.annotation)
       case 'removeAnnotation':

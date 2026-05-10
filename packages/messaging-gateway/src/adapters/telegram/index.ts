@@ -841,6 +841,13 @@ export class TelegramAdapter implements PlatformAdapter {
       .catch(() => {})
   }
 
+  async deleteMessage(channelId: string, messageId: string, _opts?: SendOptions): Promise<void> {
+    if (!this.bot) return
+    // deleteMessage is keyed by (chat_id, message_id); Telegram does not use
+    // message_thread_id for deletion. Errors are handled by the renderer.
+    await this.bot.api.deleteMessage(Number(channelId), Number(messageId))
+  }
+
   async sendFile(channelId: string, file: Buffer, filename: string, caption?: string, opts?: SendOptions): Promise<SentMessage> {
     if (!this.bot) throw new Error('Telegram adapter not initialized')
 

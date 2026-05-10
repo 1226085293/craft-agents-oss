@@ -32,7 +32,7 @@ import {
 // ---------------------------------------------------------------------------
 
 interface Call {
-  kind: 'sendText' | 'editMessage' | 'sendButtons' | 'sendTyping' | 'sendFile'
+  kind: 'sendText' | 'editMessage' | 'deleteMessage' | 'sendButtons' | 'sendTyping' | 'sendFile'
   channelId: string
   messageId?: string
   text?: string
@@ -74,6 +74,9 @@ function makeAdapter(
     },
     async editMessage(channelId: string, messageId: string, text: string): Promise<void> {
       calls.push({ kind: 'editMessage', channelId, messageId, text })
+    },
+    async deleteMessage(channelId: string, messageId: string): Promise<void> {
+      calls.push({ kind: 'deleteMessage', channelId, messageId })
     },
     async sendButtons(channelId: string, text: string): Promise<SentMessage> {
       const messageId = String(nextId++)
@@ -175,7 +178,7 @@ describe('Renderer — progress mode (default)', () => {
     renderer = new Renderer()
   })
 
-  it('happy path: tool run → evolving bubble → final text edit', async () => {
+  it('happy path: tool run → evolving transient bubble → fresh final message', async () => {
     const adapter = makeAdapter()
     const binding = makeBinding() // default = progress
     await play(renderer, binding, adapter, [
@@ -185,17 +188,17 @@ describe('Renderer — progress mode (default)', () => {
       ev.complete(),
     ])
 
-    // Exactly one send (the initial bubble) + edits for status transitions + final.
     const sends = adapter.calls.filter((c) => c.kind === 'sendText')
-    expect(sends.length).toBe(1)
-    expect(sends[0]!.text).toBe('🔧 Read…')
+    expect(sends.map((s) => s.text)).toEqual(['🔧 Read…', 'The answer is 42.'])
 
     const edits = adapter.calls.filter((c) => c.kind === 'editMessage')
-    // tool_result → '💭 thinking…', then complete → final text.
-    expect(edits.map((e) => e.text)).toEqual(['💭 thinking…', 'The answer is 42.'])
+    expect(edits.map((e) => e.text)).toEqual(['💭 thinking…'])
+
+    const deletes = adapter.calls.filter((c) => c.kind === 'deleteMessage')
+    expect(deletes.map((d) => d.messageId)).toEqual([sends[0]!.messageId])
   })
 
-  it('text-only run: one send + one edit with final', async () => {
+  it('text-only run: fresh final message and deleted thinking bubble', async () => {
     const adapter = makeAdapter()
     const binding = makeBinding()
     await play(renderer, binding, adapter, [
@@ -207,10 +210,10 @@ describe('Renderer — progress mode (default)', () => {
 
     const sends = adapter.calls.filter((c) => c.kind === 'sendText')
     const edits = adapter.calls.filter((c) => c.kind === 'editMessage')
-    expect(sends.length).toBe(1)
-    expect(sends[0]!.text).toBe('💭 thinking…')
-    expect(edits.length).toBe(1)
-    expect(edits[0]!.text).toBe('hello world')
+    const deletes = adapter.calls.filter((c) => c.kind === 'deleteMessage')
+    expect(sends.map((s) => s.text)).toEqual(['💭 thinking…', 'hello world'])
+    expect(edits.length).toBe(0)
+    expect(deletes.map((d) => d.messageId)).toEqual([sends[0]!.messageId])
   })
 
   it('drops intermediate text — never appears in any message', async () => {
@@ -261,10 +264,11 @@ describe('Renderer — progress mode (default)', () => {
     ])
 
     const edits = adapter.calls.filter((c) => c.kind === 'editMessage')
-    // thinking (from first tool_result) + final (from complete) = 2
-    expect(edits.length).toBe(2)
+    // Only the status transition is edited; final answers are sent as fresh messages.
+    expect(edits.length).toBe(1)
     expect(edits[0]!.text).toBe('💭 thinking…')
-    expect(edits[1]!.text).toBe('done')
+    const sends = adapter.calls.filter((c) => c.kind === 'sendText')
+    expect(sends.map((s) => s.text)).toEqual(['🔧 Read…', 'done'])
   })
 })
 

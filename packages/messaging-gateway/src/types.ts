@@ -200,6 +200,13 @@ export interface PlatformAdapter {
   sendFile(channelId: string, file: Buffer, filename: string, caption?: string, opts?: SendOptions): Promise<SentMessage>
 
   /**
+   * Delete a previously-sent message. Optional because not every platform or
+   * bot integration can remove messages. Renderers use this only for transient
+   * progress/status messages; failure must not prevent final delivery.
+   */
+  deleteMessage?(channelId: string, messageId: string, opts?: SendOptions): Promise<void>
+
+  /**
    * Clear the inline keyboard on a previously-sent message. Optional because
    * only platforms with inline-button support (currently Telegram) need it.
    * Errors are the caller's concern — most implementations should swallow

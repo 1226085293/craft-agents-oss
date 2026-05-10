@@ -9,10 +9,12 @@
  *     produces multiple messages. On platforms without editing, accumulates
  *     per turn and sends on each `text_complete`.
  *
- *   - `progress` (default): one evolving message per run. Posts
+ *   - `progress` (default): one transient status message per run. Posts
  *     "💭 thinking…" on first activity, edits to "🔧 <tool>…" on each
- *     `tool_start`, back to "💭 thinking…" on `tool_result`, and replaces
- *     the whole bubble with the final text on `complete`. Intermediate
+ *     `tool_start`, back to "💭 thinking…" on `tool_result`, then sends the
+ *     final answer as a fresh message on `complete` so mobile clients produce
+ *     a normal new-message notification. If the adapter supports deletion, the
+ *     transient status message is removed after final delivery. Intermediate
  *     assistant text (`text_complete` with `isIntermediate`) is dropped.
  *     On adapters without `messageEditing`, degrades to a single
  *     send-on-complete (identical to `final_only`).
@@ -362,20 +364,20 @@ export class Renderer {
 
       case 'complete': {
         const finalText = state.finalBuffer.trim()
-        if (state.progressMessageId && adapter.capabilities.messageEditing) {
-          if (finalText) {
-            await this.sendResponse(adapter, binding, finalText, {
-              editMessageId: state.progressMessageId,
-              state,
-            })
-          }
-          // If the run ended with no final text, leave the last status in
-          // place rather than deleting/editing to an empty string — avoids
-          // Telegram "message is not modified" errors and keeps a trace.
-        } else if (finalText) {
-          // Adapter can't edit (WhatsApp) — send one message at the end.
+        const progressMessageId = state.progressMessageId
+        if (finalText) {
+          // Always send the final answer as a fresh message. Editing the
+          // transient "thinking" bubble into the final answer suppresses normal
+          // new-message notifications on clients such as Telegram mobile.
           await this.sendResponse(adapter, binding, finalText)
+
+          if (progressMessageId) {
+            await this.tryDeleteMessage(adapter, binding, progressMessageId)
+          }
         }
+        // If the run ended with no final text, leave the last status in place
+        // rather than deleting/editing to an empty string — avoids Telegram
+        // "message is not modified" errors and keeps a trace.
         this.resetRun(state)
         return
       }
@@ -637,6 +639,20 @@ Approve in the desktop app to continue.`,
         }, BACKOFF_RESET_MS)
       }
       // Other errors: silently skip — text_complete / complete will retry.
+    }
+  }
+
+  private async tryDeleteMessage(
+    adapter: PlatformAdapter,
+    binding: ChannelBinding,
+    messageId: string,
+  ): Promise<void> {
+    if (!adapter.deleteMessage) return
+    try {
+      await adapter.deleteMessage(binding.channelId, messageId, bindingOpts(binding))
+    } catch {
+      // Non-fatal: the progress message may already be gone, too old to delete,
+      // or deletion may be denied by the platform.
     }
   }
 

@@ -801,7 +801,10 @@ interface ManagedSession {
   // Message queue for handling new messages while processing
   // When a message arrives during processing, we interrupt and queue
   messageQueue: Array<{
+    /** User-visible message text. Keep this as the original user message. */
     message: string
+    /** Optional internal prompt sent to the model when replaying recovered work. */
+    internalMessage?: string
     attachments?: FileAttachment[]
     storedAttachments?: StoredAttachment[]
     options?: SendMessageOptions
@@ -1780,7 +1783,8 @@ export class SessionManager implements ISessionManager {
       // promotes this exact message to `processing` and clears the flag.
       msg.isQueued = true
       managed.messageQueue.push({
-        message: this.buildRecoveredTurnPrompt(managed.messages, msg),
+        message: msg.content,
+        internalMessage: this.buildRecoveredTurnPrompt(managed.messages, msg),
         messageId: msg.id,
         attachments: undefined,
         storedAttachments: msg.attachments,
@@ -6292,7 +6296,7 @@ export class SessionManager implements ISessionManager {
     setImmediate(() => {
       this.sendMessage(
         sessionId,
-        next.message,
+        next.internalMessage ?? next.message,
         next.attachments,
         next.storedAttachments,
         next.options,

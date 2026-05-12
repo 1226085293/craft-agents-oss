@@ -332,9 +332,9 @@ describe('sendMessage durability', () => {
 
     expect(managed.messageQueue).toHaveLength(1)
     expect(managed.messageQueue[0]?.messageId).toBe('restart-user')
-    expect(managed.messageQueue[0]?.message).toContain('Continue the previous user request')
-    expect(managed.messageQueue[0]?.message).toContain('重启 Craft 然后告诉我好了')
-    expect(managed.messageQueue[0]?.message).not.toBe('重启 Craft 然后告诉我好了')
+    expect(managed.messageQueue[0]?.message).toBe('重启 Craft 然后告诉我好了')
+    expect(managed.messageQueue[0]?.internalMessage).toContain('Continue the previous user request')
+    expect(managed.messageQueue[0]?.internalMessage).toContain('重启 Craft 然后告诉我好了')
   })
 
   it('does not recover guidance or user messages before a terminal response', () => {

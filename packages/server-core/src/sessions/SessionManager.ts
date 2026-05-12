@@ -1780,7 +1780,7 @@ export class SessionManager implements ISessionManager {
       // promotes this exact message to `processing` and clears the flag.
       msg.isQueued = true
       managed.messageQueue.push({
-        message: msg.content,
+        message: this.buildRecoveredTurnPrompt(managed.messages, msg),
         messageId: msg.id,
         attachments: undefined,
         storedAttachments: msg.attachments,
@@ -1796,6 +1796,37 @@ export class SessionManager implements ISessionManager {
         this.processNextQueuedMessage(managed.id)
       })
     }
+  }
+
+  private buildRecoveredTurnPrompt(messages: Message[], userMessage: Message): string {
+    const userIndex = messages.findIndex(m => m.id === userMessage.id)
+    if (userIndex === -1) return userMessage.content
+
+    const hasInProgressArtifacts = messages.slice(userIndex + 1).some(m =>
+      m.role === 'tool' ||
+      m.role === 'status' ||
+      m.role === 'info' ||
+      m.role === 'warning' ||
+      (m.role === 'assistant' && m.isIntermediate === true)
+    )
+
+    if (!hasInProgressArtifacts) {
+      // The user message was accepted but the agent apparently never started.
+      // Replay the original request exactly.
+      return userMessage.content
+    }
+
+    return [
+      'Continue the previous user request that was interrupted by an application restart or agent shutdown.',
+      '',
+      'Original user request:',
+      userMessage.content,
+      '',
+      'Important recovery instructions:',
+      '- Do not blindly repeat side-effectful work that may already have completed before the restart.',
+      '- Inspect the current state and the prior visible conversation/tool history, then continue from the unfinished point.',
+      '- If the remaining task was to report completion after a restart, verify the app/session is running and then send the completion response.',
+    ].join('\n')
   }
 
   // Build the StoredSession snapshot and hand it to the persistence queue.

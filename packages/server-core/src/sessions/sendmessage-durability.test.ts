@@ -318,6 +318,25 @@ describe('sendMessage durability', () => {
     expect(managed.messages.find(m => m.id === 'user-two')?.isQueued).toBe(true)
   })
 
+  it('resumes instead of replaying a user turn that already started tool work', () => {
+    const sessionId = 'recover-in-progress-turn'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'assistant-before', role: 'assistant', content: 'done', timestamp: 1 },
+      { id: 'restart-user', role: 'user', content: '重启 Craft 然后告诉我好了', timestamp: 2 },
+      { id: 'restart-tool', role: 'tool', content: 'Running Bash...', timestamp: 3, toolName: 'Bash' },
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue).toHaveLength(1)
+    expect(managed.messageQueue[0]?.messageId).toBe('restart-user')
+    expect(managed.messageQueue[0]?.message).toContain('Continue the previous user request')
+    expect(managed.messageQueue[0]?.message).toContain('重启 Craft 然后告诉我好了')
+    expect(managed.messageQueue[0]?.message).not.toBe('重启 Craft 然后告诉我好了')
+  })
+
   it('does not recover guidance or user messages before a terminal response', () => {
     const sessionId = 'recover-skip-guidance'
     const managed = buildSession(sessionId)

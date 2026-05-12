@@ -300,6 +300,44 @@ describe('sendMessage durability', () => {
     expect(managed.messages.some(m => m.id === queuedId && m.role === 'user')).toBe(true)
   })
 
+  it('recovers ordinary unanswered user messages after a restart gap', () => {
+    const sessionId = 'recover-unanswered-user'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true // prevent the test from auto-draining the recovered queue
+    managed.messages.push(
+      { id: 'assistant-before', role: 'assistant', content: 'done', timestamp: 1 },
+      { id: 'user-one', role: 'user', content: '好了吗？', timestamp: 2 },
+      { id: 'user-two', role: 'user', content: '回答我！', timestamp: 3 },
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue.map(q => q.messageId)).toEqual(['user-one', 'user-two'])
+    expect(managed.messageQueue.map(q => q.message)).toEqual(['好了吗？', '回答我！'])
+    expect(managed.messages.find(m => m.id === 'user-one')?.isQueued).toBe(true)
+    expect(managed.messages.find(m => m.id === 'user-two')?.isQueued).toBe(true)
+  })
+
+  it('does not recover guidance or user messages before a terminal response', () => {
+    const sessionId = 'recover-skip-guidance'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'old-user', role: 'user', content: 'old', timestamp: 1 },
+      { id: 'assistant-final', role: 'assistant', content: 'answered', timestamp: 2 },
+      { id: 'handled-user', role: 'user', content: 'bad request', timestamp: 3 },
+      { id: 'terminal-error', role: 'error', content: 'failed', timestamp: 4 },
+      { id: 'guided-user', role: 'user', content: '改为两分钟', timestamp: 5, isGuidance: true },
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue).toHaveLength(0)
+    expect(managed.messages.find(m => m.id === 'old-user')?.isQueued).not.toBe(true)
+    expect(managed.messages.find(m => m.id === 'handled-user')?.isQueued).not.toBe(true)
+    expect(managed.messages.find(m => m.id === 'guided-user')?.isQueued).not.toBe(true)
+  })
+
   it('replays a guided queued message after the interrupted turn stops', async () => {
     const sessionId = 'guide-queued-replay'
     const managed = buildSession(sessionId)

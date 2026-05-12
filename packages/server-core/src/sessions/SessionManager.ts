@@ -1738,30 +1738,64 @@ export class SessionManager implements ISessionManager {
       if (managed.transferredSessionSummary === undefined) managed.transferredSessionSummary = stored.transferredSessionSummary
       if (managed.transferredSessionSummaryApplied === undefined) managed.transferredSessionSummaryApplied = stored.transferredSessionSummaryApplied
 
-      // Queue recovery: find orphaned queued messages from crash/restart and re-queue them.
-      const orphanedQueued = managed.messages.filter(m =>
-        m.role === 'user' && m.isQueued === true
-      )
-      if (orphanedQueued.length > 0) {
-        sessionLog.info(`Recovering ${orphanedQueued.length} queued message(s) for session ${managed.id}`)
-        for (const msg of orphanedQueued) {
-          managed.messageQueue.push({
-            message: msg.content,
-            messageId: msg.id,
-            attachments: undefined,
-            storedAttachments: msg.attachments,
-            options: undefined,
-          })
-        }
-        if (!managed.isProcessing && managed.messageQueue.length > 0) {
-          setImmediate(() => {
-            this.processNextQueuedMessage(managed.id)
-          })
-        }
-      }
+      this.recoverPendingUserTurns(managed)
       sessionLog.debug(`Cold-hydrated ${managed.messages.length} messages for session ${managed.id}`)
     }
     managed.messagesLoaded = true
+  }
+
+  /**
+   * Recover user messages that were accepted to disk but never reached a
+   * terminal response/handoff. This closes the gap where a crash/restart happens
+   * after the durable user-message ack but before (or during) agent startup: the
+   * message is no longer marked `isQueued`, yet it still represents unfinished
+   * work. On the next lazy load/cold persist, replay every non-guidance user
+   * message after the last terminal response in FIFO order.
+   */
+  private recoverPendingUserTurns(managed: ManagedSession): void {
+    const existingQueuedIds = new Set(managed.messageQueue.map(q => q.messageId).filter(Boolean))
+    const lastTerminalResponseIndex = managed.messages.findLastIndex(m =>
+      (m.role === 'assistant' && !m.isIntermediate) ||
+      m.role === 'error' ||
+      m.role === 'plan' ||
+      m.role === 'auth-request'
+    )
+    const candidateMessages = managed.messages.slice(lastTerminalResponseIndex + 1)
+    const recoverable = candidateMessages.filter(m =>
+      m.role === 'user' &&
+      m.isGuidance !== true &&
+      !existingQueuedIds.has(m.id)
+    )
+
+    if (recoverable.length === 0) return
+
+    sessionLog.info('Recovering pending user turn(s) without final assistant response', {
+      sessionId: managed.id,
+      count: recoverable.length,
+      messageIds: recoverable.map(m => m.id),
+    })
+
+    for (const msg of recoverable) {
+      // Keep queued styling/recovery semantics until processNextQueuedMessage
+      // promotes this exact message to `processing` and clears the flag.
+      msg.isQueued = true
+      managed.messageQueue.push({
+        message: msg.content,
+        messageId: msg.id,
+        attachments: undefined,
+        storedAttachments: msg.attachments,
+        options: undefined,
+      })
+    }
+
+    // Process queue when the session becomes active (lazy load) or when a cold
+    // persist forced hydration. Use setImmediate to avoid re-entering the load
+    // stack and to allow any current sendMessage caller to settle first.
+    if (!managed.isProcessing && managed.messageQueue.length > 0) {
+      setImmediate(() => {
+        this.processNextQueuedMessage(managed.id)
+      })
+    }
   }
 
   // Build the StoredSession snapshot and hand it to the persistence queue.
@@ -2218,29 +2252,7 @@ export class SessionManager implements ISessionManager {
       managed.transferredSessionSummaryApplied = storedSession.transferredSessionSummaryApplied
       sessionLog.debug(`Lazy-loaded ${managed.messages.length} messages for session ${managed.id}`)
 
-      // Queue recovery: find orphaned queued messages from crash/restart and re-queue them
-      const orphanedQueued = managed.messages.filter(m =>
-        m.role === 'user' && m.isQueued === true
-      )
-      if (orphanedQueued.length > 0) {
-        sessionLog.info(`Recovering ${orphanedQueued.length} queued message(s) for session ${managed.id}`)
-        for (const msg of orphanedQueued) {
-          managed.messageQueue.push({
-            message: msg.content,
-            messageId: msg.id,
-            attachments: undefined,  // Attachments already stored on disk
-            storedAttachments: msg.attachments,
-            options: undefined,
-          })
-        }
-        // Process queue when session becomes active (will be triggered by first message or interaction)
-        // Use setImmediate to avoid blocking the load and allow session state to settle
-        if (!managed.isProcessing && managed.messageQueue.length > 0) {
-          setImmediate(() => {
-            this.processNextQueuedMessage(managed.id)
-          })
-        }
-      }
+      this.recoverPendingUserTurns(managed)
     }
     managed.messagesLoaded = true
   }
@@ -6212,6 +6224,13 @@ export class SessionManager implements ISessionManager {
   private processNextQueuedMessage(sessionId: string): void {
     const managed = this.sessions.get(sessionId)
     if (!managed || managed.messageQueue.length === 0) return
+    if (managed.isProcessing) {
+      sessionLog.debug('Deferring queued replay because session is already processing', {
+        sessionId,
+        queueLength: managed.messageQueue.length,
+      })
+      return
+    }
 
     const next = managed.messageQueue.shift()!
     sessionLog.info('replay queued', {

@@ -121,4 +121,52 @@ describe('PiAgent subprocess error handling', () => {
 
     agent.destroy()
   })
+
+  it('unblocks the chat queue when the Pi stream goes idle after a tool finishes', async () => {
+    const previousTimeout = process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS
+    process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS = '10'
+
+    const agent = new PiAgent(createConfig())
+    const queue = (agent as any).eventQueue
+    const drained: any[] = []
+    const drainPromise = (async () => {
+      for await (const event of queue.drain()) {
+        drained.push(event)
+      }
+    })()
+
+    try {
+      ;(agent as any)._isProcessing = true
+      ;(agent as any).adapter.startTurn()
+
+      ;(agent as any).handleSubprocessEvent({
+        type: 'tool_execution_start',
+        toolName: 'Grep',
+        toolCallId: 'tool-1',
+        args: {},
+      })
+      ;(agent as any).handleSubprocessEvent({
+        type: 'tool_execution_end',
+        toolName: 'Grep',
+        toolCallId: 'tool-1',
+        result: 'done',
+        isError: false,
+      })
+
+      await Promise.race([
+        drainPromise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('event queue did not unblock')), 200)),
+      ])
+
+      expect(drained.some(event => event.type === 'error' && event.message.includes('stream stalled'))).toBe(true)
+      expect(drained.at(-1)?.type).toBe('complete')
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS
+      } else {
+        process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS = previousTimeout
+      }
+      agent.destroy()
+    }
+  })
 })

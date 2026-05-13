@@ -158,10 +158,81 @@ export class PiAgent extends BaseAgent {
   private lastSubprocessError: string | null = null;
   private subprocessErrorRepeatCount = 0;
   private static readonly MAX_IDENTICAL_SUBPROCESS_ERRORS = 3;
+  private static readonly DEFAULT_TURN_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+  private activeTurnToolIds = new Set<string>();
+  private turnIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastTurnEventAt = 0;
 
   private resetSubprocessErrorDedup(): void {
     this.lastSubprocessError = null;
     this.subprocessErrorRepeatCount = 0;
+  }
+
+  private getTurnIdleTimeoutMs(): number {
+    const raw = process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS;
+    if (!raw) return PiAgent.DEFAULT_TURN_IDLE_TIMEOUT_MS;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) ? Math.max(0, parsed) : PiAgent.DEFAULT_TURN_IDLE_TIMEOUT_MS;
+  }
+
+  private clearTurnIdleWatchdog(): void {
+    if (this.turnIdleTimer) {
+      clearTimeout(this.turnIdleTimer);
+      this.turnIdleTimer = null;
+    }
+  }
+
+  private refreshTurnIdleWatchdog(): void {
+    this.clearTurnIdleWatchdog();
+
+    if (!this._isProcessing || this.eventQueue.isComplete || this.activeTurnToolIds.size > 0) {
+      return;
+    }
+
+    const timeoutMs = this.getTurnIdleTimeoutMs();
+    if (timeoutMs <= 0) return;
+
+    this.turnIdleTimer = setTimeout(() => {
+      this.handleTurnIdleTimeout(timeoutMs);
+    }, timeoutMs);
+    (this.turnIdleTimer as { unref?: () => void }).unref?.();
+  }
+
+  private handleTurnIdleTimeout(timeoutMs: number): void {
+    this.turnIdleTimer = null;
+
+    if (!this._isProcessing || this.eventQueue.isComplete) return;
+    if (this.activeTurnToolIds.size > 0) {
+      this.refreshTurnIdleWatchdog();
+      return;
+    }
+
+    const idleSeconds = Math.max(1, Math.round((Date.now() - this.lastTurnEventAt) / 1000));
+    const timeoutSeconds = Math.max(1, Math.round(timeoutMs / 1000));
+    const message = `Pi agent stream stalled for ${idleSeconds}s with no events after all tools completed (timeout ${timeoutSeconds}s). Please retry the message.`;
+
+    this.debug(message);
+    this.eventQueue.enqueue({ type: 'error', message });
+    this.eventQueue.enqueue({ type: 'complete' });
+    this.eventQueue.complete();
+  }
+
+  private recordSubprocessTurnProgress(eventType: string, event: Record<string, unknown>): void {
+    this.lastTurnEventAt = Date.now();
+
+    const toolCallId = event.toolCallId as string | undefined;
+    if (eventType === 'tool_execution_start' && toolCallId) {
+      this.activeTurnToolIds.add(toolCallId);
+    } else if (eventType === 'tool_execution_end' && toolCallId) {
+      this.activeTurnToolIds.delete(toolCallId);
+    } else if (eventType === 'agent_end') {
+      this.activeTurnToolIds.clear();
+      this.clearTurnIdleWatchdog();
+      return;
+    }
+
+    this.refreshTurnIdleWatchdog();
   }
 
   // Ring buffer of recent subprocess stderr. Always on (independent of CRAFT_DEBUG)
@@ -1062,6 +1133,7 @@ export class PiAgent extends BaseAgent {
     // Detect session MCP tool completions (same pattern as in-process version)
     const eventType = event.type as string;
     let adaptedEvent = event;
+    this.recordSubprocessTurnProgress(eventType, event);
 
     if (eventType === 'tool_execution_start') {
       const toolName = event.toolName as string;
@@ -1675,6 +1747,8 @@ export class PiAgent extends BaseAgent {
     this.resetSubprocessErrorDedup();
     this.subprocessReady = null;
     this.subprocessReadyResolve = null;
+    this.clearTurnIdleWatchdog();
+    this.activeTurnToolIds.clear();
 
     // If we were processing, emit error + complete
     if (this._isProcessing) {
@@ -1905,6 +1979,9 @@ export class PiAgent extends BaseAgent {
     this._isProcessing = true;
     this.abortReason = undefined;
     this.eventQueue.reset();
+    this.activeTurnToolIds.clear();
+    this.clearTurnIdleWatchdog();
+    this.lastTurnEventAt = Date.now();
     this.currentUserMessage = message;
     this.adapter.startTurn();
 
@@ -2043,6 +2120,7 @@ export class PiAgent extends BaseAgent {
         systemPrompt: fullSystemPrompt,
         images: images.length > 0 ? images : undefined,
       });
+      this.refreshTurnIdleWatchdog();
 
       // Yield events as they arrive. After each tool_result, check whether
       // a session-scoped tool (source_test) activated a new source — if so,
@@ -2088,6 +2166,8 @@ export class PiAgent extends BaseAgent {
 
       yield { type: 'complete' };
     } finally {
+      this.clearTurnIdleWatchdog();
+      this.activeTurnToolIds.clear();
       this._isProcessing = false;
     }
   }
@@ -2205,6 +2285,8 @@ export class PiAgent extends BaseAgent {
 
     // Send abort to subprocess
     this.send({ type: 'abort' });
+    this.clearTurnIdleWatchdog();
+    this.activeTurnToolIds.clear();
     this.eventQueue.complete();
 
     // Clear bridge cache for this interrupted turn.
@@ -2217,6 +2299,8 @@ export class PiAgent extends BaseAgent {
 
     this.abortReason = reason;
     this._isProcessing = false;
+    this.clearTurnIdleWatchdog();
+    this.activeTurnToolIds.clear();
 
     // Reject all pending permissions
     for (const [, pending] of this.pendingPermissions) {
@@ -2259,6 +2343,7 @@ export class PiAgent extends BaseAgent {
     }
     this.debug(`Steering mid-stream: "${message.slice(0, 100)}"`);
     this.send({ type: 'steer', message });
+    this.refreshTurnIdleWatchdog();
     return true;
   }
 
@@ -2374,6 +2459,8 @@ export class PiAgent extends BaseAgent {
     this.subprocessReadyResolve = null;
     this.callbackPort = 0;
     this.preToolMetadataByCallId.clear();
+    this.clearTurnIdleWatchdog();
+    this.activeTurnToolIds.clear();
     this.adapter.resetOverflowState();
 
     if (result) {
@@ -2408,6 +2495,8 @@ export class PiAgent extends BaseAgent {
     this.subprocessShellPath = undefined;
     this.callbackPort = 0;
     this.preToolMetadataByCallId.clear();
+    this.clearTurnIdleWatchdog();
+    this.activeTurnToolIds.clear();
 
     // Clear any in-flight overflow-recovery state so a stale fallback timer
     // doesn't fire on a torn-down adapter.

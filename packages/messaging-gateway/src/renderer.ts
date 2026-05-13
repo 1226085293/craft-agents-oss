@@ -49,6 +49,10 @@ import type {
 function bindingOpts(binding: ChannelBinding): SendOptions {
   return binding.threadId !== undefined ? { threadId: binding.threadId } : {}
 }
+
+function silentBindingOpts(binding: ChannelBinding): SendOptions {
+  return { ...bindingOpts(binding), silent: true }
+}
 import type { PlanTokenRegistry } from './plan-tokens'
 
 /** Session event shape (subset of the full SessionEvent from server-core). */
@@ -427,7 +431,7 @@ export class Renderer {
 
     if (!state.progressMessageId) {
       try {
-        const sent = await adapter.sendText(binding.channelId, status, bindingOpts(binding))
+        const sent = await adapter.sendText(binding.channelId, status, silentBindingOpts(binding))
         state.progressMessageId = sent.messageId
         state.progressStatus = status
         this.savePersistedProgressMessage(binding, sent.messageId, status)

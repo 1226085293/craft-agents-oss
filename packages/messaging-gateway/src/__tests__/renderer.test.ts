@@ -38,6 +38,7 @@ interface Call {
   text?: string
   filename?: string
   caption?: string
+  opts?: unknown
 }
 
 function makeAdapter(
@@ -67,9 +68,9 @@ function makeAdapter(
     },
     onMessage() {},
     onButtonPress() {},
-    async sendText(channelId: string, text: string): Promise<SentMessage> {
+    async sendText(channelId: string, text: string, opts?: unknown): Promise<SentMessage> {
       const messageId = String(nextId++)
-      calls.push({ kind: 'sendText', channelId, text, messageId })
+      calls.push({ kind: 'sendText', channelId, text, messageId, opts })
       return { platform: 'telegram', channelId, messageId }
     },
     async editMessage(channelId: string, messageId: string, text: string): Promise<void> {
@@ -190,6 +191,8 @@ describe('Renderer — progress mode (default)', () => {
 
     const sends = adapter.calls.filter((c) => c.kind === 'sendText')
     expect(sends.map((s) => s.text)).toEqual(['🔧 Read…', 'The answer is 42.'])
+    expect(sends[0]?.opts).toEqual({ silent: true })
+    expect(sends[1]?.opts).toEqual({})
 
     const edits = adapter.calls.filter((c) => c.kind === 'editMessage')
     expect(edits.map((e) => e.text)).toEqual(['💭 thinking…'])

@@ -794,7 +794,7 @@ export class TelegramAdapter implements PlatformAdapter {
     const sent = await this.bot.api.sendMessage(
       Number(channelId),
       formatted,
-      threadParams(opts),
+      sendParams(opts),
     )
     return {
       platform: 'telegram',
@@ -824,7 +824,7 @@ export class TelegramAdapter implements PlatformAdapter {
 
     const sent = await this.bot.api.sendMessage(Number(channelId), text, {
       reply_markup: keyboard,
-      ...threadParams(opts),
+      ...sendParams(opts),
     })
 
     return {
@@ -908,6 +908,13 @@ export class TelegramAdapter implements PlatformAdapter {
 function threadParams(opts?: SendOptions): { message_thread_id?: number } {
   if (opts?.threadId === undefined) return {}
   return { message_thread_id: opts.threadId }
+}
+
+function sendParams(opts?: SendOptions): { message_thread_id?: number; disable_notification?: boolean } {
+  return {
+    ...threadParams(opts),
+    ...(opts?.silent ? { disable_notification: true } : {}),
+  }
 }
 
 function encodeTelegramFilePath(filePath: string): string {

@@ -161,6 +161,8 @@ export interface ButtonPress {
 export interface SendOptions {
   /** Telegram forum topic to post into. Undefined → DM or General topic. */
   threadId?: number
+  /** Telegram only: send without push notification sound/banner. */
+  silent?: boolean
 }
 
 // ---------------------------------------------------------------------------

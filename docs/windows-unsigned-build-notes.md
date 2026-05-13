@@ -19,6 +19,35 @@ Final expected artifact:
 apps/electron/release/Craft-Agents-x64.exe
 ```
 
+## Build, install, and restart the local app
+
+When validating a fix from inside Craft Agents, use the repository-root helper instead of only running the installer manually:
+
+```powershell
+cd E:\craft-agents-oss
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-install-restart-win.ps1
+```
+
+The helper:
+
+1. Runs `apps/electron/scripts/build-win.ps1` with unsigned-build signing environment variables.
+2. Finds the newest `apps/electron/release/Craft-Agents-*.exe` installer.
+3. Starts a detached PowerShell helper for install/restart because the installer can close the currently running Craft Agents process, including the agent session that launched the script.
+4. Stops existing `Craft Agents` processes, runs the installer with `/S`, and starts the installed app from `%LOCALAPPDATA%\Programs\@craft-agentelectron\Craft Agents.exe`.
+5. Writes a helper log to `%TEMP%\craft-agents-install-restart-*.log`.
+
+Useful options:
+
+```powershell
+# Use an already-built installer, then install and restart.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-install-restart-win.ps1 -SkipBuild
+
+# Build only; do not install or restart.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build-install-restart-win.ps1 -NoInstall
+```
+
+Expect the current Craft Agents UI/session to disconnect during the restart step. After the app comes back, verify the installed bundle or behavior before reporting completion.
+
 ## Failure 1: build stuck or exited while downloading Bun
 
 ### Symptom

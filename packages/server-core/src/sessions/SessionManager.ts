@@ -4,7 +4,7 @@ import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@cr
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
 import { basename, dirname, join } from 'path'
 import { existsSync } from 'fs'
-import { copyFile, readFile, writeFile, mkdir, stat } from 'fs/promises'
+import { copyFile, readFile, writeFile, mkdir, stat, rm } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
 import { type AgentEvent, setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary } from '@craft-agent/shared/agent'
 import {
@@ -5314,6 +5314,27 @@ export class SessionManager implements ISessionManager {
     sessionLog.info(`Deleted session ${sessionId}`)
   }
 
+  private async clearBackendPersistentContext(managed: ManagedSession): Promise<void> {
+    const sessionPath = getSessionStoragePath(managed.workspace.rootPath, managed.id)
+    const transientContextPaths = [
+      // Pi backend conversation history used by PiSessionManager.continueRecent(...).
+      join(sessionPath, '.pi-sessions'),
+      // Tool metadata and oversized tool outputs can contain previous user/tool context.
+      join(sessionPath, 'tool-metadata.json'),
+      join(sessionPath, 'long_responses'),
+      // Turn anchor sidecars only make sense for messages that are being cleared.
+      join(sessionPath, 'meta'),
+    ]
+
+    for (const artifactPath of transientContextPaths) {
+      try {
+        await rm(artifactPath, { recursive: true, force: true })
+      } catch (error) {
+        sessionLog.warn(`Failed to clear session context artifact ${artifactPath} for ${managed.id}: ${error instanceof Error ? error.message : error}`)
+      }
+    }
+  }
+
   async clearSessionMessages(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
@@ -5325,6 +5346,7 @@ export class SessionManager implements ISessionManager {
 
     await this.ensureMessagesLoaded(managed)
     await this.disposeManagedAgentRuntime(managed, 'clear session context')
+    await this.clearBackendPersistentContext(managed)
 
     const timer = this.deltaFlushTimers.get(sessionId)
     if (timer) {

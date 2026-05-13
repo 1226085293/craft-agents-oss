@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it, mock } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -15,6 +15,7 @@ function makeSession(id: string, name: string, lastMessageAt: number): Session {
     workspaceId: 'ws1',
     workspaceName: 'Workspace',
     messages: [],
+    isProcessing: false,
     createdAt: lastMessageAt - 1000,
     updatedAt: lastMessageAt,
     lastMessageAt,
@@ -22,14 +23,19 @@ function makeSession(id: string, name: string, lastMessageAt: number): Session {
   } as unknown as Session
 }
 
-function makeSessionManager(sessions: Session[]): ISessionManager {
+function makeSessionManager(
+  sessions: Session[],
+  overrides: Partial<ISessionManager> = {},
+): ISessionManager {
   return {
     getSessions: () => sessions,
     getSession: async (sessionId: string) => sessions.find((session) => session.id === sessionId) ?? null,
     createSession: async () => { throw new Error('not implemented') },
     sendMessage: async () => {},
+    clearSessionMessages: async () => {},
     cancelProcessing: async () => {},
     respondToPermission: () => true,
+    ...overrides,
   } as unknown as ISessionManager
 }
 
@@ -121,5 +127,98 @@ describe('Commands', () => {
 
     expect(adapter.sent[0]).toContain('1. Beta (sess-2)')
     expect(adapter.sent[0]).toContain('/bind <number>')
+  })
+
+  it('compacts the currently bound session from chat', async () => {
+    const sessions = [makeSession('sess-1', 'Alpha', 100)]
+    const sendMessage = mock(async () => {})
+    const store = makeStore()
+    store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+    const commands = new Commands(
+      makeSessionManager(sessions, { sendMessage } as Partial<ISessionManager>),
+      store,
+      'ws1',
+    )
+    const adapter = makeAdapter('telegram', true)
+
+    await commands.handleCommand(adapter, { ...makeMessage('/compact'), platform: 'telegram' })
+
+    expect(sendMessage).toHaveBeenCalledWith('sess-1', '/compact')
+    expect(adapter.sent.at(-1)).toContain('Compacting conversation context')
+  })
+
+  it('rejects /compact when the chat is not bound', async () => {
+    const sessions = [makeSession('sess-1', 'Alpha', 100)]
+    const sendMessage = mock(async () => {})
+    const store = makeStore()
+    const commands = new Commands(
+      makeSessionManager(sessions, { sendMessage } as Partial<ISessionManager>),
+      store,
+      'ws1',
+    )
+    const adapter = makeAdapter('telegram', true)
+
+    await commands.handleCommand(adapter, { ...makeMessage('/compact'), platform: 'telegram' })
+
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(adapter.sent.at(-1)).toBe('No session bound.')
+  })
+
+  it('does not compact while the bound session is processing', async () => {
+    const session = makeSession('sess-1', 'Alpha', 100)
+    session.isProcessing = true
+    const sendMessage = mock(async () => {})
+    const store = makeStore()
+    store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+    const commands = new Commands(
+      makeSessionManager([session], { sendMessage } as Partial<ISessionManager>),
+      store,
+      'ws1',
+    )
+    const adapter = makeAdapter('telegram', true)
+
+    await commands.handleCommand(adapter, { ...makeMessage('/compact'), platform: 'telegram' })
+
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect(adapter.sent.at(-1)).toContain('Session is busy')
+    expect(adapter.sent.at(-1)).toContain('/stop')
+  })
+
+  it('clears the currently bound session from chat', async () => {
+    const sessions = [makeSession('sess-1', 'Alpha', 100)]
+    const clearSessionMessages = mock(async () => {})
+    const store = makeStore()
+    store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+    const commands = new Commands(
+      makeSessionManager(sessions, { clearSessionMessages } as Partial<ISessionManager>),
+      store,
+      'ws1',
+    )
+    const adapter = makeAdapter('telegram', true)
+
+    await commands.handleCommand(adapter, { ...makeMessage('/clear'), platform: 'telegram' })
+
+    expect(clearSessionMessages).toHaveBeenCalledWith('sess-1')
+    expect(adapter.sent.at(-1)).toContain('Context cleared')
+  })
+
+  it('does not clear while the bound session is processing', async () => {
+    const session = makeSession('sess-1', 'Alpha', 100)
+    session.isProcessing = true
+    const clearSessionMessages = mock(async () => {})
+    const store = makeStore()
+    store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+    const commands = new Commands(
+      makeSessionManager([session], { clearSessionMessages } as Partial<ISessionManager>),
+      store,
+      'ws1',
+    )
+    const adapter = makeAdapter('telegram', true)
+
+    await commands.handleCommand(adapter, { ...makeMessage('/clear'), platform: 'telegram' })
+
+    expect(clearSessionMessages).not.toHaveBeenCalled()
+    expect(adapter.sent.at(-1)).toContain('Session is busy')
+    expect(adapter.sent.at(-1)).toContain('/stop')
   })
 })

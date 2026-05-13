@@ -33,6 +33,7 @@ import type {
   SessionModelChangedEvent,
   LLMConnectionChangedEvent,
   UserMessageEvent,
+  SessionClearedEvent,
   MessageAnnotationsUpdatedEvent,
   SessionSharedEvent,
   SessionUnsharedEvent,
@@ -612,6 +613,41 @@ export function handleMessageRemoved(
 }
 
 /**
+ * Handle session_cleared - remove visible messages and reset runtime context state.
+ */
+export function handleSessionCleared(
+  state: SessionState,
+  _event: SessionClearedEvent
+): ProcessResult {
+  const { session } = state
+  return {
+    state: {
+      session: {
+        ...session,
+        messages: [],
+        isProcessing: false,
+        currentStatus: undefined,
+        tokenUsage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          contextTokens: 0,
+          costUsd: 0,
+        },
+        lastMessageRole: undefined,
+        lastFinalMessageId: undefined,
+        preview: undefined,
+        messageCount: 0,
+        hasUnread: false,
+        lastReadMessageId: undefined,
+      },
+      streaming: null,
+    },
+    effects: [],
+  }
+}
+
+/**
  * Handle message_annotations_updated - update annotations on a specific message.
  */
 export function handleMessageAnnotationsUpdated(
@@ -971,4 +1007,3 @@ export function handleUsageUpdate(
     effects: [],
   }
 }
-

@@ -8,10 +8,16 @@
  * used by every handler — and rely on typecheck + code review to confirm
  * each handler calls it.
  */
-import { describe, it, expect } from 'bun:test'
+import { describe, it, expect, mock } from 'bun:test'
 import type { Context } from 'grammy'
 import type { IncomingMessage } from '../../types'
-import { TelegramAdapter, isPrivateChat } from './index'
+import {
+  TELEGRAM_BOT_COMMANDS,
+  TelegramAdapter,
+  isPrivateChat,
+  registerTelegramBotCommands,
+  type TelegramCommandApi,
+} from './index'
 
 function ctxWithChatType(type: string | undefined): Context {
   return { chat: type ? { type } : undefined } as unknown as Context
@@ -70,5 +76,23 @@ describe('TelegramAdapter inbound dispatch', () => {
     release()
     await Promise.resolve()
     expect(completed).toBe(true)
+  })
+})
+
+describe('Telegram bot command registration', () => {
+  it('publishes clear in Telegram slash suggestions', async () => {
+    const setMyCommands = mock(async (
+      _commands: Parameters<TelegramCommandApi['setMyCommands']>[0],
+    ) => true as const)
+
+    await registerTelegramBotCommands({ setMyCommands })
+
+    expect(setMyCommands).toHaveBeenCalledTimes(1)
+    const registered = setMyCommands.mock.calls[0]?.[0] ?? []
+    expect(registered).toEqual(TELEGRAM_BOT_COMMANDS)
+    expect(registered).toContainEqual({
+      command: 'clear',
+      description: 'Clear current context',
+    })
   })
 })

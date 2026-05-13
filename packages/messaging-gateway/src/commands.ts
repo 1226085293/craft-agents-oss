@@ -8,6 +8,8 @@
  * /help          — show available commands
  * /status        — show current binding
  * /stop          — abort the current agent run
+ * /compact       — compact the current session context into a summary
+ * /clear         — clear the current session context
  */
 
 import type { ISessionManager } from '@craft-agent/server-core/handlers'
@@ -241,6 +243,12 @@ export class Commands {
         return true
       case '/stop':
         await this.handleStop(adapter, msg)
+        return true
+      case '/compact':
+        await this.handleCompact(adapter, msg)
+        return true
+      case '/clear':
+        await this.handleClear(adapter, msg)
         return true
       default:
         return false
@@ -639,6 +647,78 @@ export class Commands {
     }
   }
 
+  private async handleCompact(adapter: PlatformAdapter, msg: IncomingMessage): Promise<void> {
+    const replyOpts = msg.threadId !== undefined ? { threadId: msg.threadId } : {}
+    const binding = this.bindingStore.findByChannel(adapter.platform, msg.channelId, msg.threadId)
+    if (!binding) {
+      await adapter.sendText(msg.channelId, 'No session bound.', replyOpts)
+      return
+    }
+
+    try {
+      const session = await this.sessionManager.getSession(binding.sessionId)
+      if (session?.isProcessing) {
+        await adapter.sendText(
+          msg.channelId,
+          'Session is busy. Use /stop first, or wait for the current task to finish, then send /compact again.',
+          replyOpts,
+        )
+        return
+      }
+
+      await this.sessionManager.sendMessage(binding.sessionId, '/compact')
+      await adapter.sendText(msg.channelId, 'Compacting conversation context...', replyOpts)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'unknown error'
+      this.log.error('compact command failed', {
+        event: 'command_compact_failed',
+        workspaceId: this.workspaceId,
+        sessionId: binding.sessionId,
+        platform: adapter.platform,
+        channelId: msg.channelId,
+        threadId: msg.threadId,
+        error: err,
+      })
+      await adapter.sendText(msg.channelId, `Couldn't compact context: ${message}`, replyOpts)
+    }
+  }
+
+  private async handleClear(adapter: PlatformAdapter, msg: IncomingMessage): Promise<void> {
+    const replyOpts = msg.threadId !== undefined ? { threadId: msg.threadId } : {}
+    const binding = this.bindingStore.findByChannel(adapter.platform, msg.channelId, msg.threadId)
+    if (!binding) {
+      await adapter.sendText(msg.channelId, 'No session bound.', replyOpts)
+      return
+    }
+
+    try {
+      const session = await this.sessionManager.getSession(binding.sessionId)
+      if (session?.isProcessing) {
+        await adapter.sendText(
+          msg.channelId,
+          'Session is busy. Use /stop first, or wait for the current task to finish, then send /clear again.',
+          replyOpts,
+        )
+        return
+      }
+
+      await this.sessionManager.clearSessionMessages(binding.sessionId)
+      await adapter.sendText(msg.channelId, 'Context cleared. Your next message will start fresh in this session.', replyOpts)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'unknown error'
+      this.log.error('clear command failed', {
+        event: 'command_clear_failed',
+        workspaceId: this.workspaceId,
+        sessionId: binding.sessionId,
+        platform: adapter.platform,
+        channelId: msg.channelId,
+        threadId: msg.threadId,
+        error: err,
+      })
+      await adapter.sendText(msg.channelId, `Couldn't clear context: ${message}`, replyOpts)
+    }
+  }
+
   private async handleHelp(adapter: PlatformAdapter, msg: IncomingMessage): Promise<void> {
     const bindLine = adapter.platform === 'whatsapp'
       ? '/bind — list recent sessions (then use /bind <number>)\n'
@@ -655,6 +735,8 @@ export class Commands {
       '/unbind — disconnect this chat\n' +
       '/status — show current binding\n' +
       '/stop — abort current agent run\n' +
+      '/compact — compact current context into a summary\n' +
+      '/clear — clear current context and messages\n' +
       '/help — show this message',
       replyOpts,
     )

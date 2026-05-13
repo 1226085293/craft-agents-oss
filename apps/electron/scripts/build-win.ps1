@@ -232,9 +232,17 @@ Write-Host "  Native binary: $([math]::Round($BinSize / 1MB)) MB"
 
 # 5. Copy ripgrep (sourced from @vscode/ripgrep since 0.2.113).
 $RgSource = "$RootDir\node_modules\@vscode\ripgrep"
-if (-not (Test-Path $RgSource) -or -not (Test-Path "$RgSource\bin\rg.exe")) {
+$RgBinary = "$RgSource\bin\rg.exe"
+if ((Test-Path $RgSource) -and -not (Test-Path $RgBinary)) {
+    $PlatformRgBinary = "$RootDir\node_modules\@vscode\ripgrep-win32-x64\bin\rg.exe"
+    if (Test-Path $PlatformRgBinary) {
+        New-Item -ItemType Directory -Force -Path "$RgSource\bin" | Out-Null
+        Copy-Item -Force $PlatformRgBinary $RgBinary
+    }
+}
+if (-not (Test-Path $RgSource) -or -not (Test-Path $RgBinary)) {
     Write-Host "ERROR: @vscode/ripgrep not installed or postinstall did not run" -ForegroundColor Red
-    Write-Host "Run 'bun install' and 'bun pm trust @vscode/ripgrep'."
+    Write-Host "Run 'bun install' and ensure @vscode/ripgrep-win32-x64 is installed."
     exit 1
 }
 Write-Host "Copying @vscode/ripgrep..."

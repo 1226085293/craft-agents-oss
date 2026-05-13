@@ -5314,6 +5314,71 @@ export class SessionManager implements ISessionManager {
     sessionLog.info(`Deleted session ${sessionId}`)
   }
 
+  async clearSessionMessages(sessionId: string): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) {
+      throw new Error(`Session ${sessionId} not found`)
+    }
+    if (managed.isProcessing) {
+      throw new Error('Session is busy')
+    }
+
+    await this.ensureMessagesLoaded(managed)
+    await this.disposeManagedAgentRuntime(managed, 'clear session context')
+
+    const timer = this.deltaFlushTimers.get(sessionId)
+    if (timer) {
+      clearTimeout(timer)
+      this.deltaFlushTimers.delete(sessionId)
+    }
+    this.pendingDeltas.delete(sessionId)
+    this.messageLoadingPromises.delete(sessionId)
+    this.clearAdminRememberApprovalsForSession(sessionId)
+    this.clearPendingPermissionRequestsForSession(sessionId)
+    await clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
+
+    managed.messages = []
+    managed.streamingText = ''
+    managed.messageQueue = []
+    managed.pendingRecoveryTool = undefined
+    managed.sdkSessionId = undefined
+    managed.tokenUsage = { ...DEFAULT_TOKEN_USAGE }
+    managed.lastReadMessageId = undefined
+    managed.hasUnread = false
+    managed.lastMessageRole = undefined
+    managed.lastFinalMessageId = undefined
+    managed.preview = undefined
+    managed.messageCount = 0
+    managed.branchFromMessageId = undefined
+    managed.branchFromSdkSessionId = undefined
+    managed.branchFromSessionPath = undefined
+    managed.branchFromSdkCwd = undefined
+    managed.branchFromSdkTurnId = undefined
+    managed.branchSeedApplied = undefined
+    managed.transferredSessionSummary = undefined
+    managed.transferredSessionSummaryApplied = undefined
+    managed.lastMessageAt = Date.now()
+    managed.messagesLoaded = true
+
+    if (this.browserPaneManager) {
+      await this.browserPaneManager.clearVisualsForSession(sessionId)
+    }
+
+    this.persistSession(managed)
+    await this.flushSession(sessionId)
+    this.sendEvent({ type: 'session_cleared', sessionId }, managed.workspace.id)
+    this.sendEvent({
+      type: 'usage_update',
+      sessionId,
+      tokenUsage: {
+        inputTokens: 0,
+        contextWindow: undefined,
+      },
+    }, managed.workspace.id)
+    this.emitUnreadSummaryChanged()
+    sessionLog.info(`Cleared session context ${sessionId}`)
+  }
+
   private async persistTransientAttachments(
     managed: ManagedSession,
     sessionId: string,

@@ -6,6 +6,7 @@ import { $ } from 'bun';
 import { execSync } from 'child_process';
 import {
   existsSync,
+  chmodSync,
   mkdirSync,
   rmSync,
   copyFileSync,
@@ -409,11 +410,25 @@ export function copyRipgrep(config: BuildConfig): void {
   const rgSource = join(rootDir, 'node_modules', '@vscode', 'ripgrep');
   const binaryName = config.platform === 'win32' ? 'rg.exe' : 'rg';
   const rgBinary = join(rgSource, 'bin', binaryName);
+  const platformRgBinary = join(
+    rootDir,
+    'node_modules',
+    '@vscode',
+    `ripgrep-${getPlatformKey(config.platform, config.arch)}`,
+    'bin',
+    binaryName,
+  );
+
+  if (existsSync(rgSource) && !existsSync(rgBinary) && existsSync(platformRgBinary)) {
+    mkdirSync(dirname(rgBinary), { recursive: true });
+    copyFileSync(platformRgBinary, rgBinary);
+    chmodSync(rgBinary, lstatSync(platformRgBinary).mode);
+  }
 
   if (!existsSync(rgSource) || !existsSync(rgBinary)) {
     throw new Error(
       `@vscode/ripgrep not installed or postinstall did not run. ` +
-      `Run 'bun install' and 'bun pm trust @vscode/ripgrep'.`,
+      `Run 'bun install' and ensure @vscode/ripgrep-${getPlatformKey(config.platform, config.arch)} is installed.`,
     );
   }
 

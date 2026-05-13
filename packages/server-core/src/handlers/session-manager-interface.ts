@@ -89,6 +89,7 @@ export interface ISessionManager {
     _isAuthRetry?: boolean,
     onAck?: (messageId: string) => void,
   ): Promise<void>
+  clearSessionMessages(sessionId: string): Promise<void>
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>
   cancelQueuedMessage(sessionId: string, messageId: string): Promise<void>
   guideQueuedMessage(sessionId: string, messageId: string): Promise<void>

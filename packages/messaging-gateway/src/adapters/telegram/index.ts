@@ -8,7 +8,7 @@ import { writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { extname, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { Bot, InputFile, type Context } from 'grammy'
+import { Bot, InputFile, type Api, type Context } from 'grammy'
 import type {
   PlatformAdapter,
   PlatformConfig,
@@ -57,6 +57,26 @@ const MIME_EXT_FALLBACK: Record<string, string> = {
   'audio/mp4': '.m4a',
   'video/mp4': '.mp4',
   'video/quicktime': '.mov',
+}
+
+type TelegramBotCommand = Parameters<Api['setMyCommands']>[0][number]
+
+export const TELEGRAM_BOT_COMMANDS = [
+  { command: 'new', description: 'Create and bind a new session' },
+  { command: 'bind', description: 'Connect to an existing session' },
+  { command: 'pair', description: 'Redeem app pairing code' },
+  { command: 'unbind', description: 'Disconnect this chat' },
+  { command: 'status', description: 'Show current binding' },
+  { command: 'stop', description: 'Stop current agent run' },
+  { command: 'compact', description: 'Compact context into summary' },
+  { command: 'clear', description: 'Clear current context' },
+  { command: 'help', description: 'Show available commands' },
+] as const satisfies readonly TelegramBotCommand[]
+
+export type TelegramCommandApi = Pick<Api, 'setMyCommands'>
+
+export async function registerTelegramBotCommands(api: TelegramCommandApi): Promise<void> {
+  await api.setMyCommands(TELEGRAM_BOT_COMMANDS)
 }
 
 const NOOP_LOGGER: MessagingLogger = {
@@ -567,6 +587,20 @@ export class TelegramAdapter implements PlatformAdapter {
     } catch (err) {
       this.log.error('[telegram] bot.init failed:', describeError(err))
       throw err
+    }
+
+    try {
+      await withTimeout(
+        registerTelegramBotCommands(this.bot.api),
+        10_000,
+        'setMyCommands',
+      )
+      this.log.info('[telegram] setMyCommands ok', {
+        event: 'telegram_commands_registered',
+        commands: TELEGRAM_BOT_COMMANDS.map((command) => command.command),
+      })
+    } catch (err) {
+      this.log.warn('[telegram] setMyCommands failed (non-fatal):', describeError(err))
     }
 
     this.startPolling()

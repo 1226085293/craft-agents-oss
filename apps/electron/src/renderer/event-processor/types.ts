@@ -406,6 +406,14 @@ export interface MessageRemovedEvent {
 }
 
 /**
+ * Session cleared event - messages/context were reset while preserving session metadata.
+ */
+export interface SessionClearedEvent {
+  type: 'session_cleared'
+  sessionId: string
+}
+
+/**
  * Message annotation update event
  */
 export interface MessageAnnotationsUpdatedEvent {
@@ -519,6 +527,7 @@ export type AgentEvent =
   | TaskCompletedEvent
   | UserMessageEvent
   | MessageRemovedEvent
+  | SessionClearedEvent
   | MessageAnnotationsUpdatedEvent
   | SessionSharedEvent
   | SessionUnsharedEvent

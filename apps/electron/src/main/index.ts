@@ -94,6 +94,7 @@ import { setBundledAssetsRoot } from '@craft-agent/shared/utils'
 import { initializeBackendHostRuntime } from '@craft-agent/shared/agent/backend'
 import { setPowerShellValidatorRoot } from '@craft-agent/shared/agent'
 import { handleDeepLink } from './deep-link'
+import { focusOrCreateWindowForSecondInstance } from './second-instance'
 import { BrowserPaneManager } from './browser-pane-manager'
 import { OAuthFlowStore } from '@craft-agent/shared/auth'
 import { registerThumbnailScheme, registerThumbnailHandler } from './thumbnail-protocol'
@@ -294,14 +295,9 @@ if (!gotTheLock) {
         mainLog.error('Failed to handle deep link:', err)
       })
     } else if (windowManager) {
-      // No deep link - just focus the first window
-      const windows = windowManager.getAllWindows()
-      if (windows.length > 0) {
-        const win = windows[0].window
-        if (win.isMinimized()) win.restore()
-        if (!win.isVisible()) win.show()
-        win.focus()
-      }
+      // No deep link - focus an existing window, or recreate one if the
+      // running instance only has background windows left.
+      focusOrCreateWindowForSecondInstance({ windowManager, getWorkspaces })
     }
   })
 }

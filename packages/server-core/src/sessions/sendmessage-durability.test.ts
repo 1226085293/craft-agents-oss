@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, isAbsolute, join } from 'path'
 import { getSessionFilePath } from '@craft-agent/shared/sessions/storage'
@@ -337,6 +337,287 @@ describe('sendMessage durability', () => {
     expect(managed.messageQueue[0]?.internalMessage).toContain('重启 Craft 然后告诉我好了')
   })
 
+  it('records the unfinished tool row so restart recovery can continue the same process message', () => {
+    const sessionId = 'recover-tool-anchor'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'assistant-before', role: 'assistant', content: 'done', timestamp: 1 },
+      { id: 'restart-user', role: 'user', content: '重新打包安装并重启', timestamp: 2 },
+      { id: 'build-tool', role: 'tool', content: 'Running mcp__session__bash...', timestamp: 3, toolName: 'mcp__session__bash', toolStatus: 'executing', turnId: 'old-turn' },
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue).toHaveLength(1)
+    expect(managed.messageQueue[0]?.resumeToolMessageId).toBe('build-tool')
+    expect(managed.messageQueue[0]?.resumeToolName).toBe('mcp__session__bash')
+    expect(managed.messageQueue[0]?.resumeTurnId).toBe('old-turn')
+  })
+
+  it('reuses the unfinished tool row for the first matching recovered tool_start', async () => {
+    const sessionId = 'reuse-recovered-tool-row'
+    const managed = buildSession(sessionId)
+    managed.pendingRecoveryTool = {
+      messageId: 'build-tool',
+      toolName: 'mcp__session__bash',
+      turnId: 'old-turn',
+    }
+    managed.messages.push(
+      { id: 'restart-user', role: 'user', content: '重新打包安装并重启', timestamp: 1 },
+      { id: 'build-tool', role: 'tool', content: 'Running mcp__session__bash...', timestamp: 2, toolName: 'mcp__session__bash', toolStatus: 'executing', turnId: 'old-turn' },
+    )
+
+    await (sm as unknown as { processEvent: (managed: any, event: any) => Promise<void> }).processEvent(managed, {
+      type: 'tool_start',
+      toolName: 'mcp__session__bash',
+      toolUseId: 'new-tool-use-id',
+      input: { command: 'echo ok' },
+      intent: 'Continue the build/install/restart verification',
+      displayName: 'Build Install Restart',
+      turnId: 'new-turn',
+    })
+
+    const toolMessages = managed.messages.filter(m => m.role === 'tool')
+    expect(toolMessages).toHaveLength(1)
+    expect(toolMessages[0]?.id).toBe('build-tool')
+    expect(toolMessages[0]?.toolUseId).toBe('new-tool-use-id')
+    expect(toolMessages[0]?.turnId).toBe('new-turn')
+    expect(toolMessages[0]?.toolStatus).toBe('executing')
+    expect(managed.pendingRecoveryTool).toBeUndefined()
+  })
+
+  it('reuses legacy unfinished tool-like rows that were persisted without role/type', async () => {
+    const sessionId = 'reuse-legacy-tool-row'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'assistant-before', role: 'assistant', content: 'done', timestamp: 1 },
+      { id: 'restart-user', role: 'user', content: '重新打包安装并重启', timestamp: 2 },
+      { id: 'legacy-build-tool', content: 'Running mcp__session__bash...', timestamp: 3, toolName: 'mcp__session__bash', toolStatus: 'executing', turnId: 'old-turn' } as any,
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue).toHaveLength(1)
+    expect(managed.messageQueue[0]?.resumeToolMessageId).toBe('legacy-build-tool')
+    expect(managed.messageQueue[0]?.resumeToolName).toBe('mcp__session__bash')
+
+    managed.pendingRecoveryTool = {
+      messageId: managed.messageQueue[0]!.resumeToolMessageId!,
+      toolName: managed.messageQueue[0]!.resumeToolName!,
+      turnId: managed.messageQueue[0]!.resumeTurnId,
+    }
+
+    await (sm as unknown as { processEvent: (managed: any, event: any) => Promise<void> }).processEvent(managed, {
+      type: 'tool_start',
+      toolName: 'mcp__session__bash',
+      toolUseId: 'new-tool-use-id',
+      input: { command: 'echo ok' },
+      displayName: 'Build Install Restart',
+      turnId: 'new-turn',
+    })
+
+    const reused = managed.messages.find(m => m.id === 'legacy-build-tool')
+    expect(reused?.toolUseId).toBe('new-tool-use-id')
+    expect(reused?.turnId).toBe('new-turn')
+    expect(reused?.toolStatus).toBe('executing')
+    expect(managed.messages.filter(m => m.toolName === 'mcp__session__bash')).toHaveLength(1)
+  })
+
+  it('keeps a direct recovery prompt model-only instead of persisting it as a visible user message', async () => {
+    const sessionId = 'direct-recovery-prompt-guard'
+    const managed = buildSession(sessionId)
+    const recoveryPrompt = [
+      'Continue the previous user request that was interrupted by an application restart or agent shutdown.',
+      '',
+      'Original user request:',
+      '重启 Craft 后回复你好',
+      '',
+      'Important recovery instructions:',
+      '- Continue safely.',
+    ].join('\n')
+
+    let seenPrompt = ''
+    managed.agent = {
+      supportsBranching: true,
+      isProcessing: () => false,
+      updateRuntimeConfig: async () => true,
+      setAllSources: () => undefined,
+      setSourceServers: async () => undefined,
+      getSummarizeCallback: () => undefined,
+      getModel: () => 'test-model',
+      getSessionId: () => 'sdk-test',
+      async *chat(message: string) {
+        seenPrompt = message
+        yield { type: 'complete' }
+      },
+      redirect: () => false,
+      forceAbort: () => undefined,
+      dispose: () => undefined,
+    } as never
+
+    await sm.sendMessage(sessionId, recoveryPrompt)
+
+    const visibleUser = managed.messages.find(m => m.role === 'user')
+    expect(visibleUser?.content).toBe('重启 Craft 后回复你好')
+    expect(visibleUser?.content).not.toContain('Continue the previous user request')
+    expect(seenPrompt).toBe(recoveryPrompt)
+  })
+
+  it('does not persist a recovery prompt as visible guidance during mid-stream steer', async () => {
+    const sessionId = 'midstream-recovery-prompt-guard'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+    const redirected: string[] = []
+    managed.agent = {
+      redirect: (message: string) => { redirected.push(message); return true },
+      forceAbort: () => undefined,
+    } as never
+    const recoveryPrompt = [
+      'Continue the previous user request that was interrupted by an application restart or agent shutdown.',
+      '',
+      'Original user request:',
+      '重启 Craft 后回复你好',
+      '',
+      'Important recovery instructions:',
+      '- Continue safely.',
+    ].join('\n')
+
+    await sm.sendMessage(sessionId, recoveryPrompt, undefined, undefined, { midStreamBehavior: 'steer' })
+
+    const visibleUser = managed.messages.find(m => m.role === 'user')
+    expect(visibleUser?.content).toBe('重启 Craft 后回复你好')
+    expect(visibleUser?.content).not.toContain('Continue the previous user request')
+    expect(visibleUser?.isGuidance).toBe(true)
+    expect(redirected).toEqual([recoveryPrompt])
+  })
+
+  it('startup recovery hydrates assistant-intermediate unfinished sessions without waiting for user activity', async () => {
+    const sessionId = 'startup-assistant-intermediate'
+    const workspace = {
+      id: 'ws_test',
+      name: 'Test Workspace',
+      rootPath: tmpRoot,
+      createdAt: Date.now(),
+    }
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        name: 'startup assistant intermediate test',
+        lastMessageRole: 'assistant',
+        lastMessageAt: Date.now(),
+        messageCount: 3,
+      },
+      workspace as never,
+      { messagesLoaded: false },
+    )
+    managed.isProcessing = true
+    ;(sm as unknown as { sessions: Map<string, unknown> }).sessions.set(sessionId, managed)
+
+    const file = getSessionFilePath(tmpRoot, sessionId)
+    mkdirSync(dirname(file), { recursive: true })
+    const tokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 }
+    const header = {
+      id: sessionId,
+      workspaceRootPath: tmpRoot,
+      name: 'startup assistant intermediate test',
+      createdAt: 1,
+      lastUsedAt: Date.now(),
+      messageCount: 3,
+      lastMessageRole: 'assistant',
+      tokenUsage,
+    }
+    const messages = [
+      { id: 'assistant-before', type: 'assistant', content: 'done', timestamp: 1 },
+      { id: 'startup-user', type: 'user', content: '重启 Craft 后回复你好', timestamp: 2 },
+      { id: 'startup-thinking', type: 'assistant', content: '好的，我现在重启 Craft', timestamp: 3, isIntermediate: true },
+    ]
+    writeFileSync(file, [JSON.stringify(header), ...messages.map(m => JSON.stringify(m))].join('\n') + '\n', 'utf-8')
+
+    ;(sm as unknown as { scheduleStartupPendingTurnRecovery: () => void }).scheduleStartupPendingTurnRecovery()
+    await new Promise(resolve => setImmediate(resolve))
+
+    expect(managed.messagesLoaded).toBe(true)
+    expect(managed.messageQueue).toHaveLength(1)
+    expect(managed.messageQueue[0]?.message).toBe('重启 Craft 后回复你好')
+    expect(managed.messageQueue[0]?.internalMessage).toContain('Continue the previous user request')
+  })
+
+  it('startup recovery also scans already-loaded sessions', async () => {
+    const sessionId = 'startup-loaded-unfinished-turn'
+    const managed = buildSession(sessionId)
+    managed.messagesLoaded = true
+    managed.lastMessageRole = 'tool'
+    managed.lastMessageAt = Date.now()
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'assistant-before', role: 'assistant', content: 'done', timestamp: 1 },
+      { id: 'startup-user', role: 'user', content: '重启 Craft 后回复你好', timestamp: 2 },
+      { id: 'startup-tool', role: 'tool', content: 'Running Bash...', timestamp: 3, toolName: 'Bash', toolUseId: 'tool-1', toolStatus: 'executing' },
+    )
+
+    ;(sm as unknown as { scheduleStartupPendingTurnRecovery: () => void }).scheduleStartupPendingTurnRecovery()
+    await new Promise(resolve => setImmediate(resolve))
+
+    expect(managed.messageQueue).toHaveLength(1)
+    expect(managed.messageQueue[0]?.message).toBe('重启 Craft 后回复你好')
+    expect(managed.messageQueue[0]?.internalMessage).toContain('Continue the previous user request')
+    expect(managed.messageQueue[0]?.resumeToolMessageId).toBe('startup-tool')
+  })
+
+  it('startup recovery hydrates likely unfinished sessions without waiting for user activity', async () => {
+    const sessionId = 'startup-unfinished-turn'
+    const workspace = {
+      id: 'ws_test',
+      name: 'Test Workspace',
+      rootPath: tmpRoot,
+      createdAt: Date.now(),
+    }
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        name: 'startup test',
+        lastMessageRole: 'tool',
+        lastMessageAt: Date.now(),
+        messageCount: 3,
+      },
+      workspace as never,
+      { messagesLoaded: false },
+    )
+    // Keep the queue from auto-replaying; this test only verifies startup scan/hydration.
+    managed.isProcessing = true
+    ;(sm as unknown as { sessions: Map<string, unknown> }).sessions.set(sessionId, managed)
+
+    const file = getSessionFilePath(tmpRoot, sessionId)
+    mkdirSync(dirname(file), { recursive: true })
+    const tokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 }
+    const header = {
+      id: sessionId,
+      workspaceRootPath: tmpRoot,
+      name: 'startup test',
+      createdAt: 1,
+      lastUsedAt: Date.now(),
+      messageCount: 3,
+      lastMessageRole: 'tool',
+      tokenUsage,
+    }
+    const messages = [
+      { id: 'assistant-before', type: 'assistant', content: 'done', timestamp: 1 },
+      { id: 'startup-user', type: 'user', content: '重启 Craft 然后告诉我好了', timestamp: 2 },
+      { id: 'startup-tool', type: 'tool', content: 'Running Bash...', timestamp: 3, toolName: 'Bash' },
+    ]
+    writeFileSync(file, [JSON.stringify(header), ...messages.map(m => JSON.stringify(m))].join('\n') + '\n', 'utf-8')
+
+    ;(sm as unknown as { scheduleStartupPendingTurnRecovery: () => void }).scheduleStartupPendingTurnRecovery()
+    await new Promise(resolve => setImmediate(resolve))
+
+    expect(managed.messagesLoaded).toBe(true)
+    expect(managed.messageQueue).toHaveLength(1)
+    expect(managed.messageQueue[0]?.message).toBe('重启 Craft 然后告诉我好了')
+    expect(managed.messageQueue[0]?.internalMessage).toContain('Continue the previous user request')
+  })
+
   it('does not recover guidance or user messages before a terminal response', () => {
     const sessionId = 'recover-skip-guidance'
     const managed = buildSession(sessionId)
@@ -371,7 +652,7 @@ describe('sendMessage durability', () => {
     await sm.sendMessage(sessionId, 'queued guidance', undefined, undefined, { midStreamBehavior: 'queue', optimisticMessageId: 'optimistic-guidance' }, undefined, undefined, id => { queuedId = id })
     await sm.guideQueuedMessage(sessionId, 'optimistic-guidance')
 
-    const replayed: Array<{ message: string; existingMessageId?: string; optimisticMessageId?: string }> = []
+    const replayed: Array<{ message: string; existingMessageId?: string; optimisticMessageId?: string; modelMessageOverride?: string }> = []
     const originalSendMessage = sm.sendMessage.bind(sm)
     ;(sm as unknown as { sendMessage: SessionManager['sendMessage'] }).sendMessage = (async (
       _sessionId,
@@ -380,14 +661,17 @@ describe('sendMessage durability', () => {
       _storedAttachments,
       options,
       existingMessageId,
+      _isAuthRetry,
+      _onAck,
+      modelMessageOverride,
     ) => {
-      replayed.push({ message, existingMessageId, optimisticMessageId: options?.optimisticMessageId })
+      replayed.push({ message, existingMessageId, optimisticMessageId: options?.optimisticMessageId, modelMessageOverride })
     }) as SessionManager['sendMessage']
 
     await (sm as unknown as { onProcessingStopped: (id: string, reason: 'interrupted') => Promise<void> }).onProcessingStopped(sessionId, 'interrupted')
     await new Promise(resolve => setImmediate(resolve))
 
-    expect(replayed).toEqual([{ message: 'queued guidance', existingMessageId: queuedId, optimisticMessageId: 'optimistic-guidance' }])
+    expect(replayed).toEqual([{ message: 'queued guidance', existingMessageId: queuedId, optimisticMessageId: 'optimistic-guidance', modelMessageOverride: undefined }])
     ;(sm as unknown as { sendMessage: SessionManager['sendMessage'] }).sendMessage = originalSendMessage
   })
 

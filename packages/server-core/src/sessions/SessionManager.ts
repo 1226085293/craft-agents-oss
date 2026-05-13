@@ -805,12 +805,22 @@ interface ManagedSession {
     message: string
     /** Optional internal prompt sent to the model when replaying recovered work. */
     internalMessage?: string
+    /** Existing unfinished tool message to continue updating when replaying recovered work. */
+    resumeToolMessageId?: string
+    resumeToolName?: string
+    resumeTurnId?: string
     attachments?: FileAttachment[]
     storedAttachments?: StoredAttachment[]
     options?: SendMessageOptions
     messageId?: string  // Pre-generated ID for matching with UI
     optimisticMessageId?: string  // Frontend's ID for reliable event matching
   }>
+  /** Runtime-only anchor for the first tool_start of a recovered replay. */
+  pendingRecoveryTool?: {
+    messageId: string
+    toolName: string
+    turnId?: string
+  }
   // Map of shellId -> command for killing background shells
   backgroundShellCommands: Map<string, string>
   // Map of taskId -> output info for background task results
@@ -1625,10 +1635,57 @@ export class SessionManager implements ISessionManager {
 
       // Signal that initialization is complete — IPC handlers waiting on initGate will proceed
       this.initGate.markReady()
+
+      // After a process restart, no user action may arrive to lazy-load the
+      // interrupted session. Proactively scan likely unfinished sessions and
+      // resume any user turn that was accepted/started but never reached a
+      // terminal assistant/error/plan/auth response.
+      this.scheduleStartupPendingTurnRecovery()
     } catch (error) {
       this.initGate.markFailed(error)
       throw error
     }
+  }
+
+  private scheduleStartupPendingTurnRecovery(): void {
+    setImmediate(() => {
+      const candidates = Array.from(this.sessions.values())
+        .filter(managed =>
+          managed.hidden !== true &&
+          managed.isArchived !== true &&
+          (
+            managed.lastMessageRole === 'user' ||
+            managed.lastMessageRole === 'tool' ||
+            // Restarts can happen after intermediate assistant text is persisted
+            // but before any tool_start/final assistant response. Hydration is
+            // cheap and recoverPendingUserTurns() no-ops if the assistant was final.
+            managed.lastMessageRole === 'assistant'
+          )
+        )
+        .sort((a, b) => (b.lastMessageAt ?? b.createdAt ?? 0) - (a.lastMessageAt ?? a.createdAt ?? 0))
+
+      if (candidates.length === 0) return
+
+      sessionLog.info('Scanning unfinished session(s) for restart recovery', {
+        count: candidates.length,
+        sessionIds: candidates.map(s => s.id),
+      })
+
+      for (const managed of candidates) {
+        try {
+          if (managed.messagesLoaded) {
+            this.recoverPendingUserTurns(managed)
+          } else {
+            this.hydrateMessagesForColdPersist(managed)
+          }
+        } catch (error) {
+          sessionLog.warn('Failed to scan session for restart recovery', {
+            sessionId: managed.id,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+    })
   }
 
   // Load all existing sessions from disk into memory (metadata only - messages are lazy-loaded)
@@ -1779,12 +1836,16 @@ export class SessionManager implements ISessionManager {
     })
 
     for (const msg of recoverable) {
+      const resumeTool = this.findRecoverableToolAnchor(managed.messages, msg)
       // Keep queued styling/recovery semantics until processNextQueuedMessage
       // promotes this exact message to `processing` and clears the flag.
       msg.isQueued = true
       managed.messageQueue.push({
         message: msg.content,
         internalMessage: this.buildRecoveredTurnPrompt(managed.messages, msg),
+        resumeToolMessageId: resumeTool?.id,
+        resumeToolName: resumeTool?.toolName,
+        resumeTurnId: resumeTool?.turnId,
         messageId: msg.id,
         attachments: undefined,
         storedAttachments: msg.attachments,
@@ -1802,12 +1863,40 @@ export class SessionManager implements ISessionManager {
     }
   }
 
+  private isToolLikeMessage(message: Message): boolean {
+    // Modern runtime messages use role="tool". Some older/legacy persisted
+    // rows were written without type/role but still have toolName/toolUseId/toolStatus.
+    // Treat them as tool messages so restart recovery can reuse their visible
+    // process rows instead of creating duplicate process cards after a restart.
+    return message.role === 'tool' || !!message.toolName || !!message.toolUseId || !!message.toolStatus
+  }
+
+  private findRecoverableToolAnchor(messages: Message[], userMessage: Message): Message | undefined {
+    const userIndex = messages.findIndex(m => m.id === userMessage.id)
+    if (userIndex === -1) return undefined
+
+    const nextUserIndex = messages.findIndex((m, index) => index > userIndex && m.role === 'user')
+    const endIndex = nextUserIndex === -1 ? messages.length : nextUserIndex
+    const turnMessages = messages.slice(userIndex + 1, endIndex)
+
+    // A restarted replay should keep updating the same visible process item
+    // only when we have a single unfinished tool anchor from that interrupted
+    // turn. Matching by the next tool_start's toolName prevents merging a
+    // different recovery action into an unrelated old tool row.
+    return [...turnMessages].reverse().find(m =>
+      this.isToolLikeMessage(m) &&
+      m.toolName &&
+      m.toolStatus !== 'completed' &&
+      m.toolStatus !== 'error'
+    )
+  }
+
   private buildRecoveredTurnPrompt(messages: Message[], userMessage: Message): string {
     const userIndex = messages.findIndex(m => m.id === userMessage.id)
     if (userIndex === -1) return userMessage.content
 
     const hasInProgressArtifacts = messages.slice(userIndex + 1).some(m =>
-      m.role === 'tool' ||
+      this.isToolLikeMessage(m) ||
       m.role === 'status' ||
       m.role === 'info' ||
       m.role === 'warning' ||
@@ -5296,6 +5385,8 @@ export class SessionManager implements ISessionManager {
      * (#616). Pre-persist errors still reject the outer promise as before.
      */
     onAck?: (messageId: string) => void,
+    /** Optional model-only prompt. UI/persistence keeps `message` visible. */
+    modelMessageOverride?: string,
   ): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
@@ -5314,6 +5405,28 @@ export class SessionManager implements ISessionManager {
       const persisted = await this.persistTransientAttachments(managed, sessionId, attachments)
       attachments = persisted.attachments.length > 0 ? persisted.attachments : undefined
       storedAttachments = persisted.storedAttachments.length > 0 ? persisted.storedAttachments : undefined
+    }
+
+    const RECOVERY_PROMPT_PREFIX = 'Continue the previous user request that was interrupted by an application restart or agent shutdown.'
+    let visibleMessage = message
+    let modelOnlyMessage = modelMessageOverride
+
+    // Hard guard: recovery prompts are implementation details. Even if an old
+    // queue entry or an unusual race calls sendMessage(prompt) directly, never
+    // persist/emit that prompt as a user or guidance bubble. Keep it model-only
+    // and recover the visible text from the existing queued user message when
+    // possible.
+    if (!modelOnlyMessage && message.startsWith(RECOVERY_PROMPT_PREFIX)) {
+      modelOnlyMessage = message
+      const existingVisible = existingMessageId
+        ? managed.messages.find(m => m.id === existingMessageId && m.role === 'user')?.content
+        : undefined
+      const originalMatch = message.match(/Original user request:\n([\s\S]*?)(?:\n\nImportant recovery instructions:|$)/)
+      visibleMessage = existingVisible ?? originalMatch?.[1]?.trim() ?? 'Continue interrupted request'
+      sessionLog.warn('Converted leaked recovery prompt into model-only message', {
+        sessionId,
+        existingMessageId,
+      })
     }
 
     // If currently processing, behavior depends on the connection's
@@ -5346,7 +5459,7 @@ export class SessionManager implements ISessionManager {
       const userMessage: Message = {
         id: generateMessageId(),
         role: 'user',
-        content: message,
+        content: visibleMessage,
         timestamp: this.monotonic(),
         attachments: storedAttachments,
         badges: options?.badges,
@@ -5355,7 +5468,7 @@ export class SessionManager implements ISessionManager {
 
       let steered = false
       if (behavior === 'steer') {
-        steered = agent?.redirect(message) === true
+        steered = agent?.redirect(modelOnlyMessage ?? visibleMessage) === true
       }
       // For 'queue': skip redirect entirely. The current turn is undisturbed.
       if (steered) {
@@ -5386,7 +5499,7 @@ export class SessionManager implements ISessionManager {
       if (steered) {
         // Already marked as guidance before the event so the renderer can regroup it immediately.
       } else {
-        managed.messageQueue.push({ message, attachments, storedAttachments, options, messageId: userMessage.id, optimisticMessageId: options?.optimisticMessageId })
+        managed.messageQueue.push({ message: visibleMessage, internalMessage: modelOnlyMessage, attachments, storedAttachments, options, messageId: userMessage.id, optimisticMessageId: options?.optimisticMessageId })
         if (behavior === 'steer') {
           managed.wasInterrupted = true
         }
@@ -5415,7 +5528,7 @@ export class SessionManager implements ISessionManager {
       userMessage = {
         id: generateMessageId(),
         role: 'user',
-        content: message,
+        content: visibleMessage,
         timestamp: this.monotonic(),
         attachments: storedAttachments, // Include for persistence (has thumbnailBase64)
         badges: options?.badges,  // Include content badges (sources, skills with embedded icons)
@@ -5448,7 +5561,7 @@ export class SessionManager implements ISessionManager {
       if (isFirstUserMessage && !managed.name && !managed.triggeredBy) {
         // Replace bracket mentions with their display labels (e.g. [skill:ws:commit] -> "Commit")
         // so titles show human-readable names instead of raw IDs
-        let titleSource = message
+        let titleSource = visibleMessage
         if (options?.badges) {
           for (const badge of options.badges) {
             if (badge.rawText && badge.label) {
@@ -5471,7 +5584,7 @@ export class SessionManager implements ISessionManager {
 
         // Generate AI title asynchronously using agent's SDK
         // (waits briefly for agent creation if needed)
-        this.generateTitle(managed, message)
+        this.generateTitle(managed, visibleMessage)
       }
     }
 
@@ -5480,7 +5593,7 @@ export class SessionManager implements ISessionManager {
     // then merges any new matches into the session's label array.
     try {
       const labelTree = listLabels(managed.workspace.rootPath)
-      const autoMatches = evaluateAutoLabels(message, labelTree)
+      const autoMatches = evaluateAutoLabels(visibleMessage, labelTree)
 
       if (autoMatches.length > 0) {
         const existingLabels = managed.labels ?? []
@@ -5519,7 +5632,7 @@ export class SessionManager implements ISessionManager {
     // Store message/attachments for potential retry after auth refresh
     // (SDK subprocess caches token at startup, so if it expires mid-session,
     // we need to recreate the agent and retry the message)
-    managed.lastSentMessage = message
+    managed.lastSentMessage = visibleMessage
     managed.lastSentAttachments = attachments
     managed.lastSentStoredAttachments = storedAttachments
     managed.lastSentOptions = options
@@ -5646,7 +5759,7 @@ export class SessionManager implements ISessionManager {
     try {
       sessionLog.info('Starting chat for session:', sessionId)
       sessionLog.info('Workspace:', JSON.stringify(managed.workspace, null, 2))
-      sessionLog.info('Message:', message)
+      sessionLog.info('Message:', visibleMessage)
       sessionLog.info('Agent model:', agent.getModel())
       sessionLog.info('process.cwd():', process.cwd())
 
@@ -5670,9 +5783,9 @@ export class SessionManager implements ISessionManager {
       // Uses <system-reminder> tags so the LLM treats it as transient system guidance
       // rather than part of the user's message content. The original message is stored
       // in session JSONL (line ~3952); this only affects the SDK's in-process context.
-      let effectiveMessage = message
+      let effectiveMessage = modelOnlyMessage ?? visibleMessage
       if (managed.wasInterrupted) {
-        effectiveMessage = `${message}\n\n<system-reminder>The previous assistant response was interrupted by the user and may be incomplete. Do not repeat or continue the interrupted response unless asked. Focus on the new message above.</system-reminder>`
+        effectiveMessage = `${effectiveMessage}\n\n<system-reminder>The previous assistant response was interrupted by the user and may be incomplete. Do not repeat or continue the interrupted response unless asked. Focus on the new message above.</system-reminder>`
         managed.wasInterrupted = false
       }
 
@@ -6268,9 +6381,17 @@ export class SessionManager implements ISessionManager {
     }
 
     const next = managed.messageQueue.shift()!
+    managed.pendingRecoveryTool = next.resumeToolMessageId && next.resumeToolName
+      ? {
+        messageId: next.resumeToolMessageId,
+        toolName: next.resumeToolName,
+        turnId: next.resumeTurnId,
+      }
+      : undefined
     sessionLog.info('replay queued', {
       sessionId,
       messageId: next.messageId,
+      resumeToolMessageId: next.resumeToolMessageId,
       queueLengthAfterShift: managed.messageQueue.length,
     })
 
@@ -6294,13 +6415,28 @@ export class SessionManager implements ISessionManager {
 
     // Process message (use setImmediate to allow current stack to clear)
     setImmediate(() => {
+      const latest = this.sessions.get(sessionId)
+      if (!latest) return
+      if (latest.isProcessing) {
+        latest.messageQueue.unshift(next)
+        latest.pendingRecoveryTool = undefined
+        sessionLog.debug('Queued replay deferred after async handoff because session started processing', {
+          sessionId,
+          messageId: next.messageId,
+        })
+        return
+      }
+
       this.sendMessage(
         sessionId,
-        next.internalMessage ?? next.message,
+        next.message,
         next.attachments,
         next.storedAttachments,
         next.options,
-        next.messageId
+        next.messageId,
+        undefined,
+        undefined,
+        next.internalMessage
       ).catch(err => {
         sessionLog.error('replay failed', {
           sessionId,
@@ -6861,7 +6997,35 @@ export class SessionManager implements ISessionManager {
         // Check if a message with this toolUseId already exists FIRST
         // SDK sends two events per tool: first from stream_event (empty input),
         // second from assistant message (complete input)
-        const existingStartMsg = managed.messages.find(m => m.toolUseId === event.toolUseId)
+        let existingStartMsg = managed.messages.find(m => m.toolUseId === event.toolUseId)
+        let resumedToolMessageId: string | undefined
+        const pendingRecoveryTool = managed.pendingRecoveryTool
+        if (!existingStartMsg && pendingRecoveryTool?.toolName === event.toolName) {
+          const recoverableMsg = managed.messages.find(m =>
+            m.id === pendingRecoveryTool.messageId &&
+            this.isToolLikeMessage(m) &&
+            m.toolName === event.toolName &&
+            m.toolStatus !== 'completed' &&
+            m.toolStatus !== 'error'
+          )
+          if (recoverableMsg) {
+            recoverableMsg.toolUseId = event.toolUseId
+            recoverableMsg.turnId = event.turnId ?? pendingRecoveryTool.turnId ?? recoverableMsg.turnId
+            recoverableMsg.toolStatus = 'executing'
+            recoverableMsg.isError = false
+            resumedToolMessageId = recoverableMsg.id
+            existingStartMsg = recoverableMsg
+            managed.pendingRecoveryTool = undefined
+            sessionLog.info('Resuming recovered tool message for restarted turn', {
+              sessionId,
+              messageId: recoverableMsg.id,
+              toolName: event.toolName,
+              toolUseId: event.toolUseId,
+            })
+          }
+        } else if (pendingRecoveryTool) {
+          managed.pendingRecoveryTool = undefined
+        }
         const isDuplicateEvent = !!existingStartMsg
 
         // Use parentToolUseId directly from the event — CraftAgent resolves this
@@ -6955,6 +7119,7 @@ export class SessionManager implements ISessionManager {
             turnId: event.turnId,
             parentToolUseId,
             timestamp,
+            messageId: resumedToolMessageId,
           }, workspaceId)
         }
         break

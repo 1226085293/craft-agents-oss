@@ -27,9 +27,9 @@
  * and emits the prompt/error as a distinct message regardless of mode.
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { basename, isAbsolute, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, resolve } from 'node:path'
 
 import type {
   PlatformAdapter,
@@ -65,6 +65,21 @@ interface PermissionRequest {
   command?: string
   description: string
   type?: string
+}
+
+interface PersistedProgressMessage {
+  bindingId: string
+  sessionId: string
+  platform: string
+  channelId: string
+  threadId?: number
+  messageId: string
+  status: string
+  updatedAt: number
+}
+
+interface PersistedRenderStateFile {
+  progressMessages?: Record<string, PersistedProgressMessage>
 }
 
 interface RenderState {
@@ -123,15 +138,20 @@ export class Renderer {
   private readonly planTokens: PlanTokenRegistry | undefined
   private readonly recordPlanMessage: PlanMessageRecorder | undefined
   private readonly resolveFileBaseDirs: FileBaseDirResolver | undefined
+  private readonly progressStateFile: string | undefined
+  private persistedProgressMessages: Record<string, PersistedProgressMessage> = {}
 
   constructor(deps?: {
     planTokens?: PlanTokenRegistry
     recordPlanMessage?: PlanMessageRecorder
     resolveFileBaseDirs?: FileBaseDirResolver
+    progressStateFile?: string
   }) {
     this.planTokens = deps?.planTokens
     this.recordPlanMessage = deps?.recordPlanMessage
     this.resolveFileBaseDirs = deps?.resolveFileBaseDirs
+    this.progressStateFile = deps?.progressStateFile
+    this.loadPersistedProgressMessages()
   }
 
   private getState(bindingId: string): RenderState {
@@ -324,6 +344,7 @@ export class Renderer {
     adapter: PlatformAdapter,
   ): Promise<void> {
     const state = this.getState(binding.id)
+    this.hydrateProgressBubbleFromDisk(state, binding, event)
 
     switch (event.type) {
       case 'text_delta':
@@ -370,14 +391,16 @@ export class Renderer {
           // transient "thinking" bubble into the final answer suppresses normal
           // new-message notifications on clients such as Telegram mobile.
           await this.sendResponse(adapter, binding, finalText)
-
-          if (progressMessageId) {
-            await this.tryDeleteMessage(adapter, binding, progressMessageId)
-          }
         }
-        // If the run ended with no final text, leave the last status in place
-        // rather than deleting/editing to an empty string — avoids Telegram
-        // "message is not modified" errors and keeps a trace.
+
+        // The progress bubble is transient. Even if the run completes without
+        // final text (for example an interrupted/recovered turn whose backend
+        // emits only `complete`), do not leave a permanent Telegram
+        // "thinking…"/tool-status message behind.
+        if (progressMessageId) {
+          await this.tryDeleteMessage(adapter, binding, progressMessageId)
+          this.clearPersistedProgressMessage(binding)
+        }
         this.resetRun(state)
         return
       }
@@ -407,6 +430,7 @@ export class Renderer {
         const sent = await adapter.sendText(binding.channelId, status, bindingOpts(binding))
         state.progressMessageId = sent.messageId
         state.progressStatus = status
+        this.savePersistedProgressMessage(binding, sent.messageId, status)
       } catch {
         // If posting fails, we'll try again on the next event.
       }
@@ -415,6 +439,76 @@ export class Renderer {
     if (state.progressStatus === status) return
     await this.tryEditMessage(adapter, binding, state.progressMessageId, status, state)
     state.progressStatus = status
+    this.savePersistedProgressMessage(binding, state.progressMessageId, status)
+  }
+
+  private hydrateProgressBubbleFromDisk(
+    state: RenderState,
+    binding: ChannelBinding,
+    event: SessionEvent,
+  ): void {
+    if (state.progressMessageId) return
+    const persisted = this.persistedProgressMessages[binding.id]
+    if (!persisted) return
+    if (persisted.sessionId !== event.sessionId) return
+    if (persisted.platform !== binding.platform) return
+    if (persisted.channelId !== binding.channelId) return
+    if ((persisted.threadId ?? undefined) !== (binding.threadId ?? undefined)) return
+
+    state.progressMessageId = persisted.messageId
+    state.progressStatus = persisted.status
+  }
+
+  private loadPersistedProgressMessages(): void {
+    if (!this.progressStateFile || !existsSync(this.progressStateFile)) return
+    try {
+      const parsed = JSON.parse(readFileSync(this.progressStateFile, 'utf-8')) as PersistedRenderStateFile
+      this.persistedProgressMessages = parsed.progressMessages && typeof parsed.progressMessages === 'object'
+        ? parsed.progressMessages
+        : {}
+    } catch {
+      this.persistedProgressMessages = {}
+    }
+  }
+
+  private flushPersistedProgressMessages(): void {
+    if (!this.progressStateFile) return
+    try {
+      if (!Object.keys(this.persistedProgressMessages).length) {
+        if (existsSync(this.progressStateFile)) unlinkSync(this.progressStateFile)
+        return
+      }
+      mkdirSync(dirname(this.progressStateFile), { recursive: true })
+      writeFileSync(
+        this.progressStateFile,
+        JSON.stringify({ progressMessages: this.persistedProgressMessages }, null, 2),
+        'utf-8',
+      )
+    } catch {
+      // Best-effort persistence only. Rendering must continue even if disk is unavailable.
+    }
+  }
+
+  private savePersistedProgressMessage(binding: ChannelBinding, messageId: string, status: string): void {
+    if (!this.progressStateFile) return
+    this.persistedProgressMessages[binding.id] = {
+      bindingId: binding.id,
+      sessionId: binding.sessionId,
+      platform: binding.platform,
+      channelId: binding.channelId,
+      ...(binding.threadId !== undefined ? { threadId: binding.threadId } : {}),
+      messageId,
+      status,
+      updatedAt: Date.now(),
+    }
+    this.flushPersistedProgressMessages()
+  }
+
+  private clearPersistedProgressMessage(binding: ChannelBinding): void {
+    if (!this.progressStateFile) return
+    if (!this.persistedProgressMessages[binding.id]) return
+    delete this.persistedProgressMessages[binding.id]
+    this.flushPersistedProgressMessages()
   }
 
   // ---------------------------------------------------------------------------
@@ -605,8 +699,13 @@ Approve in the desktop app to continue.`,
     state: RenderState,
   ): Promise<void> {
     const errorMsg = extractErrorMessage(event.error)
+    const progressMessageId = state.progressMessageId
     this.cancelEditTimer(state)
     await adapter.sendText(binding.channelId, `❌ ${errorMsg}`, bindingOpts(binding))
+    if (progressMessageId) {
+      await this.tryDeleteMessage(adapter, binding, progressMessageId)
+      this.clearPersistedProgressMessage(binding)
+    }
     this.resetRun(state)
   }
 

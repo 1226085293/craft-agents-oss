@@ -62,6 +62,8 @@ export interface ToolStartEvent {
   toolInput?: Record<string, unknown>
   /** Timestamp from main process for consistent ordering */
   timestamp?: number
+  /** Existing tool message to update, used when restart recovery resumes a visible process row. */
+  messageId?: string
   turnId?: string
   parentToolUseId?: string
   toolIntent?: string

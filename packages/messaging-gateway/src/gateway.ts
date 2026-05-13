@@ -6,7 +6,7 @@
  */
 
 import { readFileSync } from 'node:fs'
-import { basename } from 'node:path'
+import { basename, join } from 'node:path'
 import type { ISessionManager } from '@craft-agent/server-core/handlers'
 import type { PushTarget } from '@craft-agent/shared/protocol'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
@@ -213,6 +213,7 @@ export class MessagingGateway {
           messageId,
         })
       },
+      progressStateFile: join(opts.storageDir, 'render-state.json'),
     })
   }
 

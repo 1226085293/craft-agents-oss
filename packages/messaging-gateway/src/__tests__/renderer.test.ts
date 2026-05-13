@@ -11,7 +11,7 @@
  * Permissions and errors are mode-agnostic and tested separately.
  */
 
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -269,6 +269,57 @@ describe('Renderer — progress mode (default)', () => {
     expect(edits[0]!.text).toBe('💭 thinking…')
     const sends = adapter.calls.filter((c) => c.kind === 'sendText')
     expect(sends.map((s) => s.text)).toEqual(['🔧 Read…', 'done'])
+  })
+
+  it('reuses a persisted transient progress message after renderer restart', async () => {
+    const adapter = makeAdapter()
+    const binding = { ...makeBinding(), sessionId: 's' }
+    const dir = mkdtempSync(join(tmpdir(), 'renderer-progress-'))
+    const progressStateFile = join(dir, 'render-state.json')
+
+    const beforeRestart = new Renderer({ progressStateFile })
+    await play(beforeRestart, binding, adapter, [ev.toolStart('Build Install Restart')])
+
+    const firstSend = adapter.calls.find((c) => c.kind === 'sendText')
+    expect(firstSend?.text).toBe('🔧 Build Install Restart…')
+    expect(firstSend?.messageId).toBe('1')
+    expect(readFileSync(progressStateFile, 'utf-8')).toContain('"messageId": "1"')
+
+    const afterRestart = new Renderer({ progressStateFile })
+    await play(afterRestart, binding, adapter, [
+      ev.toolStart('Build Install Restart'),
+      ev.final('installed'),
+      ev.complete(),
+    ])
+
+    const sends = adapter.calls.filter((c) => c.kind === 'sendText')
+    expect(sends.map((s) => s.text)).toEqual(['🔧 Build Install Restart…', 'installed'])
+    const edits = adapter.calls.filter((c) => c.kind === 'editMessage')
+    // If the recovered status is identical, no edit is necessary; the critical
+    // behavior is that we did not send a second transient process message.
+    expect(edits.every((e) => e.messageId === '1')).toBe(true)
+    const deletes = adapter.calls.filter((c) => c.kind === 'deleteMessage')
+    expect(deletes.map((d) => d.messageId)).toEqual(['1'])
+    expect(existsSync(progressStateFile)).toBe(false)
+  })
+
+  it('deletes persisted transient progress when a recovered run completes without final text', async () => {
+    const adapter = makeAdapter()
+    const binding = { ...makeBinding(), sessionId: 's' }
+    const dir = mkdtempSync(join(tmpdir(), 'renderer-progress-empty-'))
+    const progressStateFile = join(dir, 'render-state.json')
+
+    const beforeRestart = new Renderer({ progressStateFile })
+    await play(beforeRestart, binding, adapter, [ev.toolStart('Build Install Restart')])
+
+    const afterRestart = new Renderer({ progressStateFile })
+    await play(afterRestart, binding, adapter, [ev.complete()])
+
+    const sends = adapter.calls.filter((c) => c.kind === 'sendText')
+    expect(sends.map((s) => s.text)).toEqual(['🔧 Build Install Restart…'])
+    const deletes = adapter.calls.filter((c) => c.kind === 'deleteMessage')
+    expect(deletes.map((d) => d.messageId)).toEqual(['1'])
+    expect(existsSync(progressStateFile)).toBe(false)
   })
 })
 

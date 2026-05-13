@@ -27,18 +27,29 @@ export function handleToolStart(
 ): SessionState {
   const { session, streaming } = state
 
-  // Check if tool message already exists (SDK sends two events)
-  const existingIndex = findToolMessage(session.messages, event.toolUseId)
+  // Check if tool message already exists (SDK sends two events). Restart
+  // recovery can also explicitly target the old unfinished tool message by id
+  // so the visible process row continues instead of duplicating.
+  const messageIdIndex = event.messageId
+    ? session.messages.findIndex(m => m.id === event.messageId && m.role === 'tool')
+    : -1
+  const existingIndex = messageIdIndex !== -1
+    ? messageIdIndex
+    : findToolMessage(session.messages, event.toolUseId)
 
   if (existingIndex !== -1) {
     // Update with complete input (second event has full input)
     const updatedSession = updateMessageAt(session, existingIndex, {
+      toolUseId: event.toolUseId,
+      toolName: event.toolName,
       toolInput: event.toolInput,
       toolIntent: event.toolIntent,
       toolDisplayName: event.toolDisplayName,
       toolDisplayMeta: event.toolDisplayMeta,
       turnId: event.turnId,
       parentToolUseId: event.parentToolUseId,
+      toolStatus: 'executing',
+      isError: false,
     })
     return { session: updatedSession, streaming }
   }

@@ -90,6 +90,90 @@ describe('session message loading atoms', () => {
     expect(store.get(loadedSessionsAtom).has(sessionId)).toBe(true)
   })
 
+  it('merges persisted terminal tool state into active in-memory messages on force reload', async () => {
+    const store = createStore()
+    const sessionId = 'session-1'
+
+    const localTool: Message = {
+      ...msg('tool-1', 'tool'),
+      toolUseId: 'call-1',
+      toolName: 'Bash',
+      toolStatus: 'executing',
+      toolResult: undefined,
+    }
+    const persistedTool: Message = {
+      ...localTool,
+      toolStatus: 'completed',
+      toolResult: 'done',
+      isError: false,
+    }
+
+    globalThis.window = {
+      electronAPI: {
+        getSessionMessages: async (id: string) => makeSession({
+          id,
+          isProcessing: false,
+          messages: [persistedTool],
+        }),
+      },
+    } as unknown as typeof window
+
+    store.set(sessionAtomFamily(sessionId), makeSession({
+      id: sessionId,
+      isProcessing: true,
+      messages: [localTool],
+    }))
+    store.set(loadedSessionsAtom, new Set([sessionId]))
+
+    const forcedResult = await store.set(forceSessionMessagesReloadAtom, sessionId)
+    const tool = forcedResult?.messages[0]
+    expect(tool?.toolStatus).toBe('completed')
+    expect(tool?.toolResult).toBe('done')
+    expect(store.get(sessionAtomFamily(sessionId))?.messages[0]?.toolStatus).toBe('completed')
+  })
+
+  it('merges persisted terminal state for legacy tool-like messages without role', async () => {
+    const store = createStore()
+    const sessionId = 'session-legacy-tool'
+
+    const localTool = {
+      id: 'legacy-tool-1',
+      content: 'Running Bash...',
+      timestamp: Date.now(),
+      toolUseId: 'call-legacy',
+      toolName: 'Bash',
+      toolStatus: 'executing',
+    } as unknown as Message
+    const persistedTool = {
+      ...localTool,
+      toolStatus: 'completed',
+      toolResult: 'done',
+      isError: false,
+    } as unknown as Message
+
+    globalThis.window = {
+      electronAPI: {
+        getSessionMessages: async (id: string) => makeSession({
+          id,
+          messages: [persistedTool],
+        }),
+      },
+    } as unknown as typeof window
+
+    store.set(sessionAtomFamily(sessionId), makeSession({
+      id: sessionId,
+      isProcessing: true,
+      messages: [localTool],
+    }))
+    store.set(loadedSessionsAtom, new Set([sessionId]))
+
+    const forcedResult = await store.set(forceSessionMessagesReloadAtom, sessionId)
+    const tool = forcedResult?.messages[0]
+    expect(tool?.role).toBe('tool')
+    expect(tool?.toolStatus).toBe('completed')
+    expect(tool?.toolResult).toBe('done')
+  })
+
   it('does not mark stale empty-response fallback as loaded', async () => {
     const store = createStore()
     const sessionId = 'session-1'

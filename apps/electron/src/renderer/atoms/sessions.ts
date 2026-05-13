@@ -91,6 +91,42 @@ function findLastFinalMessageId(messages: Message[]): string | undefined {
   return undefined
 }
 
+const TERMINAL_TOOL_STATUSES = new Set(['completed', 'error'])
+
+function isToolLikeMessage(message: Message): boolean {
+  return message.role === 'tool' || !!message.toolName || !!message.toolUseId || !!message.toolStatus
+}
+
+function mergePersistedToolTerminalStates(existingMessages: Message[], persistedMessages: Message[]): Message[] {
+  const terminalById = new Map<string, Message>()
+  const terminalByToolUseId = new Map<string, Message>()
+
+  for (const message of persistedMessages) {
+    if (!isToolLikeMessage(message) || !TERMINAL_TOOL_STATUSES.has(message.toolStatus ?? '')) continue
+    terminalById.set(message.id, message)
+    if (message.toolUseId) terminalByToolUseId.set(message.toolUseId, message)
+  }
+
+  if (terminalById.size === 0 && terminalByToolUseId.size === 0) return existingMessages
+
+  return existingMessages.map(message => {
+    if (!isToolLikeMessage(message)) return message
+    if (TERMINAL_TOOL_STATUSES.has(message.toolStatus ?? '')) return message
+
+    const persisted = terminalById.get(message.id) || (message.toolUseId ? terminalByToolUseId.get(message.toolUseId) : undefined)
+    if (!persisted) return message
+
+    return {
+      ...message,
+      role: message.role ?? 'tool',
+      toolStatus: persisted.toolStatus,
+      toolResult: persisted.toolResult ?? message.toolResult ?? '',
+      isError: persisted.isError,
+      errorCode: persisted.errorCode,
+    }
+  })
+}
+
 /**
  * Extract metadata from a full session object
  */
@@ -607,10 +643,14 @@ async function loadSessionMessages(
           // (which has full history from main process memory) must be used.
           // Also guard against sleep/wake edge case: the server may return
           // empty messages if the session subprocess hasn't finished lazy-loading.
+          // However, terminal tool states from persisted/main-process messages are
+          // authoritative after a restart: without this narrow merge, stale renderer
+          // process cards can remain stuck at "executing" forever even though the
+          // backend JSONL already has completed/error.
           messages: preservedStaleMessages
-            ? existingSession.messages
+            ? mergePersistedToolTerminalStates(existingSession.messages, loadedSession.messages)
             : existingSession.isProcessing && existingSession.messages.length > 0
-              ? existingSession.messages
+              ? mergePersistedToolTerminalStates(existingSession.messages, loadedSession.messages)
               : loadedSession.messages,
           tokenUsage: loadedSession.tokenUsage ?? existingSession.tokenUsage,
           sessionFolderPath: loadedSession.sessionFolderPath ?? existingSession.sessionFolderPath,

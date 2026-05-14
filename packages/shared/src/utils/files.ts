@@ -47,7 +47,7 @@ export function atomicWriteFileSync(filePath: string, data: string): void {
 }
 
 export interface FileAttachment {
-  type: 'image' | 'text' | 'pdf' | 'office' | 'unknown';
+  type: 'image' | 'text' | 'pdf' | 'office' | 'audio' | 'unknown';
   path: string;
   name: string;
   mimeType: string;
@@ -95,6 +95,19 @@ const OFFICE_EXTENSIONS: Record<string, string> = {
   '.doc': 'application/msword',
   '.xls': 'application/vnd.ms-excel',
   '.ppt': 'application/vnd.ms-powerpoint',
+};
+
+// Audio file extensions (forwarded as base64; backends decide how to handle)
+const AUDIO_EXTENSIONS: Record<string, string> = {
+  '.ogg': 'audio/ogg',
+  '.opus': 'audio/ogg',
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac',
+  '.weba': 'audio/webm',
+  '.webm': 'audio/webm',
 };
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB limit
@@ -282,7 +295,7 @@ export function resolvePath(filePath: string): string {
  * Falls back to 'text' for unknown extensions; readFileAttachment verifies
  * the bytes before exposing text so binary files are kept as unknown files.
  */
-export function getFileType(filePath: string): 'image' | 'text' | 'pdf' | 'office' | 'unknown' {
+export function getFileType(filePath: string): 'image' | 'text' | 'pdf' | 'office' | 'audio' | 'unknown' {
   const ext = extname(filePath).toLowerCase();
 
   if (ext in IMAGE_EXTENSIONS) {
@@ -293,6 +306,9 @@ export function getFileType(filePath: string): 'image' | 'text' | 'pdf' | 'offic
   }
   if (ext in OFFICE_EXTENSIONS) {
     return 'office';
+  }
+  if (ext in AUDIO_EXTENSIONS) {
+    return 'audio';
   }
   if (TEXT_EXTENSIONS.has(ext)) {
     return 'text';
@@ -319,6 +335,10 @@ export function getMimeType(filePath: string): string {
   const officeMime = OFFICE_EXTENSIONS[ext];
   if (officeMime) {
     return officeMime;
+  }
+  const audioMime = AUDIO_EXTENSIONS[ext];
+  if (audioMime) {
+    return audioMime;
   }
 
   // Default to text for known text extensions
@@ -387,6 +407,13 @@ export function readFileAttachment(filePath: string): FileAttachment | null {
       attachment.base64 = buffer.toString('base64');
     } else if (type === 'office') {
       // Read Office files as base64 (will be converted to markdown later)
+      const buffer = readFileSync(resolved);
+      attachment.base64 = buffer.toString('base64');
+    } else if (type === 'audio') {
+      // Read audio as base64 — backends that recognize 'audio' decide how to
+      // forward it (transcription, native audio input, etc). Backends that
+      // don't recognize 'audio' fall through to their existing 'unknown'
+      // branches so the attachment is at least visible.
       const buffer = readFileSync(resolved);
       attachment.base64 = buffer.toString('base64');
     }

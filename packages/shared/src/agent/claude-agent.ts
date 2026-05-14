@@ -463,6 +463,10 @@ export class ClaudeAgent extends BaseAgent {
   private currentQueryAbortController: AbortController | null = null;
   private lastAbortReason: AbortReason | null = null;
   private sessionId: string | null = null;
+  // Whether the most recent user turn included image/PDF attachments. Read by
+  // mapSDKErrorToTypedError to decide whether attachment-related hints belong
+  // in the invalid_request error message.
+  private lastTurnHadAttachments: boolean = false;
   private branchFromSdkSessionId: string | null = null;
   private branchFromSdkCwd: string | null = null;
   private branchFromSdkTurnId: string | null = null;
@@ -835,6 +839,7 @@ export class ClaudeAgent extends BaseAgent {
 
       // Check if we have binary attachments that need the AsyncIterable interface
       const hasBinaryAttachments = attachments?.some(a => a.type === 'image' || a.type === 'pdf');
+      this.lastTurnHadAttachments = !!hasBinaryAttachments;
 
       // Validate we have something to send
       if (!userMessage.trim() && (!attachments || attachments.length === 0)) {
@@ -2356,6 +2361,7 @@ This is a branched conversation. All prior messages in this conversation are par
     const error = mapClaudeSdkAssistantError(errorCode, {
       actualError,
       capturedApiError,
+      userTurnHadAttachments: this.lastTurnHadAttachments,
     });
 
     return {

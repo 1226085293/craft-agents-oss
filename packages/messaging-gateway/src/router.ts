@@ -79,6 +79,21 @@ export class Router {
 
       try {
         const fileAttachments = this.resolveAttachments(msg)
+        const attachmentCount = fileAttachments?.length ?? 0
+        const isBusy = typeof this.sessionManager.isSessionProcessing === 'function'
+          ? this.sessionManager.isSessionProcessing(binding.sessionId)
+          : false
+
+        if (
+          isBusy &&
+          attachmentCount === 0 &&
+          binding.config.busyMessagePolicy === 'agent_decide' &&
+          this.sessionManager.decideBusyMessage
+        ) {
+          const handled = await this.tryHandleBusyMessage(adapter, msg, binding.sessionId, binding.channelName)
+          if (handled) return
+        }
+
         this.log.info('routing inbound chat message to session', {
           event: 'message_routed',
           platform: msg.platform,
@@ -86,14 +101,20 @@ export class Router {
           threadId: msg.threadId,
           sessionId: binding.sessionId,
           bindingId: binding.id,
-          attachmentCount: fileAttachments?.length ?? 0,
+          attachmentCount,
+          busy: isBusy,
         })
         await this.sessionManager.sendMessage(
           binding.sessionId,
           msg.text,
           fileAttachments,
           undefined, // storedAttachments (handled by session layer)
-          { midStreamBehavior: 'steer' },
+          {
+            midStreamBehavior:
+              isBusy && binding.config.busyMessagePolicy === 'agent_decide'
+                ? 'queue'
+                : 'steer',
+          },
         )
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : 'Unknown error'
@@ -123,6 +144,47 @@ export class Router {
       messageId: msg.messageId,
     })
     await this.commands.handle(adapter, msg)
+  }
+
+  private async tryHandleBusyMessage(
+    adapter: PlatformAdapter,
+    msg: IncomingMessage,
+    sessionId: string,
+    channelName?: string,
+  ): Promise<boolean> {
+    if (!this.sessionManager.decideBusyMessage) return false
+
+    const decision = await this.sessionManager.decideBusyMessage({
+      platform: msg.platform,
+      userMessage: msg.text,
+      sessionId,
+      ...(channelName ? { channelName } : {}),
+      isBusy: true,
+    })
+
+    this.log.info('busy inbound chat message decision', {
+      event: 'message_busy_decision',
+      platform: msg.platform,
+      channelId: msg.channelId,
+      threadId: msg.threadId,
+      sessionId,
+      action: decision.action,
+      replied: !!decision.replyText,
+    })
+
+    if (decision.action === 'ignore') return true
+
+    if (decision.action === 'reply') {
+      const replyText = decision.replyText?.trim()
+      if (!replyText) return true
+      await adapter.sendText(msg.channelId, replyText, { threadId: msg.threadId })
+      return true
+    }
+
+    // `queue` means: leave the active run undisturbed and replay the follow-up
+    // as the next normal turn. Returning false lets the caller use sendMessage
+    // with midStreamBehavior='queue'.
+    return false
   }
 
   /**

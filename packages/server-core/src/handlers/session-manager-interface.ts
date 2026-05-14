@@ -27,6 +27,21 @@ import type {
 import type { SessionBundle, DispatchMode } from '@craft-agent/shared/sessions'
 import type { EventSink } from '../transport'
 
+export type BusyMessageDecisionAction = 'reply' | 'ignore' | 'queue'
+
+export interface BusyMessageDecisionInput {
+  platform: string
+  userMessage: string
+  sessionId: string
+  channelName?: string
+  isBusy: true
+}
+
+export interface BusyMessageDecision {
+  action: BusyMessageDecisionAction
+  replyText?: string
+}
+
 export interface ISessionManager {
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -89,6 +104,14 @@ export interface ISessionManager {
     _isAuthRetry?: boolean,
     onAck?: (messageId: string) => void,
   ): Promise<void>
+  /** Return the in-memory processing flag without hydrating full messages. */
+  isSessionProcessing?(sessionId: string): boolean
+  /**
+   * Lightweight side-channel decision used by messaging adapters when a user
+   * sends a follow-up while the session is already running. Implementations
+   * should not mutate visible history or interrupt the active run.
+   */
+  decideBusyMessage?(input: BusyMessageDecisionInput): Promise<BusyMessageDecision>
   clearSessionMessages(sessionId: string): Promise<void>
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>
   cancelQueuedMessage(sessionId: string, messageId: string): Promise<void>

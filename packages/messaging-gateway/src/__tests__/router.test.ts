@@ -71,13 +71,13 @@ function baseMsg(overrides: Partial<IncomingMessage> = {}): IncomingMessage {
   }
 }
 
-function makeFakeAdapter(): PlatformAdapter {
-  // Only sendText is exercised by Router (for error branch); rest are unused.
+function makeFakeAdapter(platform: 'telegram' | 'whatsapp' = 'telegram'): PlatformAdapter {
+  // Only sendText is exercised by Router (for error/busy branches); rest are unused.
   const noop = async () => {
     throw new Error('unused')
   }
   return {
-    platform: 'telegram',
+    platform,
     capabilities: {
       messageEditing: true,
       inlineButtons: true,
@@ -91,7 +91,7 @@ function makeFakeAdapter(): PlatformAdapter {
     isConnected: () => true,
     onMessage: () => {},
     onButtonPress: () => {},
-    sendText: mock(async () => ({ platform: 'telegram', channelId: 'chat-1', messageId: 'm' })),
+    sendText: mock(async () => ({ platform, channelId: 'chat-1', messageId: 'm' })),
     editMessage: noop,
     sendButtons: noop,
     sendTyping: async () => {},
@@ -99,8 +99,16 @@ function makeFakeAdapter(): PlatformAdapter {
   } as unknown as PlatformAdapter
 }
 
-function makeFakeSessionManager(): { sendMessage: ReturnType<typeof mock> } {
-  return { sendMessage: mock(async () => {}) }
+function makeFakeSessionManager(overrides: Record<string, unknown> = {}): {
+  sendMessage: ReturnType<typeof mock>
+  isSessionProcessing: ReturnType<typeof mock>
+  decideBusyMessage?: ReturnType<typeof mock>
+} {
+  return {
+    sendMessage: mock(async () => {}),
+    isSessionProcessing: mock(() => false),
+    ...overrides,
+  }
 }
 
 function makeFakeCommands(): { handle: ReturnType<typeof mock> } {
@@ -238,6 +246,82 @@ describe('Router', () => {
     )
     expect(sessionManager.sendMessage).not.toHaveBeenCalled()
     expect(commands.handle).toHaveBeenCalledTimes(1)
+  })
+
+  it('lets the agent decide and send an immediate Telegram busy reply without routing to the session', async () => {
+    const store = new BindingStore(storeDir)
+    store.bind('ws1', 'sess-A', 'telegram', 'chat-1')
+    const sessionManager = makeFakeSessionManager({
+      isSessionProcessing: mock(() => true),
+      decideBusyMessage: mock(async () => ({ action: 'reply', replyText: '还没完成，仍在处理中。' })),
+    })
+    const commands = makeFakeCommands()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const router = new Router(sessionManager as any, store, commands as unknown as Commands)
+    const adapter = makeFakeAdapter('telegram')
+
+    await router.route(adapter, baseMsg({ text: '中途问一下' }))
+
+    expect(sessionManager.decideBusyMessage).toHaveBeenCalledTimes(1)
+    expect(adapter.sendText).toHaveBeenCalledTimes(1)
+    expect(adapter.sendText).toHaveBeenCalledWith('chat-1', '还没完成，仍在处理中。', { threadId: undefined })
+    expect(sessionManager.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('lets the agent ignore a Telegram busy follow-up without adding another message', async () => {
+    const store = new BindingStore(storeDir)
+    store.bind('ws1', 'sess-A', 'telegram', 'chat-1')
+    const sessionManager = makeFakeSessionManager({
+      isSessionProcessing: mock(() => true),
+      decideBusyMessage: mock(async () => ({ action: 'ignore' })),
+    })
+    const commands = makeFakeCommands()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const router = new Router(sessionManager as any, store, commands as unknown as Commands)
+    const adapter = makeFakeAdapter('telegram')
+
+    await router.route(adapter, baseMsg({ text: '继续' }))
+
+    expect(sessionManager.decideBusyMessage).toHaveBeenCalledTimes(1)
+    expect(adapter.sendText).not.toHaveBeenCalled()
+    expect(sessionManager.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('queues substantive busy follow-ups when the agent decision says queue', async () => {
+    const store = new BindingStore(storeDir)
+    store.bind('ws1', 'sess-A', 'telegram', 'chat-1')
+    const sessionManager = makeFakeSessionManager({
+      isSessionProcessing: mock(() => true),
+      decideBusyMessage: mock(async () => ({ action: 'queue' })),
+    })
+    const commands = makeFakeCommands()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const router = new Router(sessionManager as any, store, commands as unknown as Commands)
+
+    await router.route(makeFakeAdapter('telegram'), baseMsg({ text: '顺便也检查企业微信' }))
+
+    expect(sessionManager.decideBusyMessage).toHaveBeenCalledTimes(1)
+    expect(sessionManager.sendMessage).toHaveBeenCalledTimes(1)
+    expect(sessionManager.sendMessage.mock.calls[0]?.[4]).toEqual({ midStreamBehavior: 'queue' })
+  })
+
+  it('supports WhatsApp busy replies without introducing progress bubbles', async () => {
+    const store = new BindingStore(storeDir)
+    store.bind('ws1', 'sess-W', 'whatsapp', 'wa-chat')
+    const sessionManager = makeFakeSessionManager({
+      isSessionProcessing: mock(() => true),
+      decideBusyMessage: mock(async () => ({ action: 'reply', replyText: 'Still working on it.' })),
+    })
+    const commands = makeFakeCommands()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const router = new Router(sessionManager as any, store, commands as unknown as Commands)
+    const adapter = makeFakeAdapter('whatsapp')
+
+    await router.route(adapter, baseMsg({ platform: 'whatsapp', channelId: 'wa-chat', text: 'done?' }))
+
+    expect(sessionManager.decideBusyMessage).toHaveBeenCalledTimes(1)
+    expect(adapter.sendText).toHaveBeenCalledWith('wa-chat', 'Still working on it.', { threadId: undefined })
+    expect(sessionManager.sendMessage).not.toHaveBeenCalled()
   })
 
   // -------------------------------------------------------------------------

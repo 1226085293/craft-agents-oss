@@ -256,6 +256,18 @@ export interface PlatformAdapter {
 export type ResponseMode = 'streaming' | 'progress' | 'final_only'
 
 /**
+ * How inbound messages are handled while the bound session is already running.
+ *
+ * - `steer` — legacy messaging behaviour: pass the message to the session
+ *   immediately with mid-stream steering enabled.
+ * - `agent_decide` — ask a lightweight agent/LLM decision whether this
+ *   message needs an immediate side-channel reply, should be ignored, or
+ *   should be queued until the current run completes. This avoids brittle
+ *   keyword/regex status matching while keeping chat channels responsive.
+ */
+export type BusyMessagePolicy = 'steer' | 'agent_decide'
+
+/**
  * Per-binding access policy.
  *
  * - `inherit`     — defer to the platform's owners list (default for new bindings).
@@ -295,6 +307,8 @@ export interface BindingConfig {
    * as a string).
    */
   allowedSenderIds: string[]
+  /** Policy for inbound messages while the session is already processing. */
+  busyMessagePolicy: BusyMessagePolicy
 }
 
 export const DEFAULT_BINDING_CONFIG: BindingConfig = {
@@ -305,12 +319,17 @@ export const DEFAULT_BINDING_CONFIG: BindingConfig = {
   editIntervalMs: 3500,
   accessMode: 'inherit',
   allowedSenderIds: [],
+  busyMessagePolicy: 'steer',
 }
 
 export function getDefaultBindingConfig(platform: PlatformType): BindingConfig {
   return {
     ...DEFAULT_BINDING_CONFIG,
     approvalChannel: platform === 'whatsapp' ? 'app' : DEFAULT_BINDING_CONFIG.approvalChannel,
+    busyMessagePolicy:
+      platform === 'telegram' || platform === 'whatsapp'
+        ? 'agent_decide'
+        : DEFAULT_BINDING_CONFIG.busyMessagePolicy,
   }
 }
 
@@ -340,6 +359,7 @@ export function normalizeBindingConfig(
     approvalChannel: platform === 'whatsapp' ? 'app' : (config?.approvalChannel ?? base.approvalChannel),
     accessMode,
     allowedSenderIds,
+    busyMessagePolicy: config?.busyMessagePolicy ?? base.busyMessagePolicy,
   }
 }
 

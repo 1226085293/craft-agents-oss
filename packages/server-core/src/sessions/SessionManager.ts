@@ -1,5 +1,5 @@
 import type { EventSink } from '@craft-agent/server-core/transport'
-import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput } from '@craft-agent/server-core/handlers'
+import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, BusyMessageDecision, BusyMessageDecisionInput } from '@craft-agent/server-core/handlers'
 import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@craft-agent/server-core/handlers'
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
 import { basename, dirname, join } from 'path'
@@ -711,6 +711,8 @@ interface ManagedSession {
   // Incremented each time a new message starts processing.
   // Used to detect if a follow-up message has superseded the current one (stale-request guard).
   processingGeneration: number
+  /** Runtime-only timestamp for the currently active agent run. */
+  currentRunStartedAt?: number
   // NOTE: Parent-child tracking state (pendingTools, parentToolStack, toolToParentMap,
   // pendingTextParent) has been removed. CraftAgent now provides parentToolUseId
   // directly on all events using the SDK's authoritative parent_tool_use_id field.
@@ -2322,6 +2324,152 @@ export class SessionManager implements ISessionManager {
     await this.ensureMessagesLoaded(m)
 
     return managedToSession(m, { messages: m.messages })
+  }
+
+  isSessionProcessing(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.isProcessing === true
+  }
+
+  async decideBusyMessage(input: BusyMessageDecisionInput): Promise<BusyMessageDecision> {
+    const managed = this.sessions.get(input.sessionId)
+    if (!managed) return { action: 'queue' }
+
+    await this.ensureMessagesLoaded(managed)
+
+    const runStartedAt = managed.currentRunStartedAt ?? managed.lastMessageAt
+    const elapsedSeconds = managed.isProcessing
+      ? Math.max(0, Math.round((Date.now() - runStartedAt) / 1000))
+      : 0
+    const currentActivity = this.describeCurrentActivity(managed)
+    const recentContext = this.formatRecentConversationForBusyDecision(managed)
+
+    const prompt = [
+      'You are deciding how Craft should respond in an external chat while an agent session is already busy running a previous request.',
+      '',
+      'Return ONLY compact JSON with this shape:',
+      '{"action":"reply"|"ignore"|"queue","replyText":"optional short text"}',
+      '',
+      'Decision policy:',
+      '- Use your semantic judgment. Do not rely on keyword or regular-expression matching.',
+      '- Choose "reply" only when the user expects an immediate side-channel response while the main run continues.',
+      '- Choose "ignore" for acknowledgements, encouragement, or messages that do not need a response and do not change the task.',
+      '- Choose "queue" when the user provides substantive new instructions or context that should be handled after the current run.',
+      '- If replying, keep it brief, in the same language as the user, and make clear the main task is still running when relevant.',
+      '- Do not claim the task is complete unless the provided state says it is complete.',
+      '',
+      `Platform: ${input.platform}`,
+      `Session id: ${input.sessionId}`,
+      `Session busy: ${managed.isProcessing ? 'yes' : 'no'}`,
+      `Elapsed seconds: ${elapsedSeconds}`,
+      `Current activity: ${currentActivity}`,
+      input.channelName ? `Channel: ${input.channelName}` : undefined,
+      '',
+      'Recent session context:',
+      recentContext || '(no recent context)',
+      '',
+      'New user message received while busy:',
+      input.userMessage,
+    ].filter((line): line is string => line !== undefined).join('\n')
+
+    let agent: AgentInstance | null = managed.agent
+    let temporaryAgent: AgentInstance | null = null
+
+    if (!agent && managed.llmConnection) {
+      try {
+        const connection = getLlmConnection(managed.llmConnection)
+        const resolvedMiniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
+        temporaryAgent = createBackendFromConnection(managed.llmConnection, {
+          workspace: managed.workspace,
+          miniModel: resolvedMiniModel,
+          session: {
+            id: `busy-decision-${managed.id}`,
+            workspaceRootPath: managed.workspace.rootPath,
+            llmConnection: managed.llmConnection,
+            createdAt: Date.now(),
+            lastUsedAt: Date.now(),
+          },
+          isHeadless: true,
+        }, buildBackendHostRuntimeContext()) as AgentInstance
+        await temporaryAgent.postInit()
+        agent = temporaryAgent
+      } catch (error) {
+        sessionLog.warn('Failed to create temporary agent for busy message decision', { sessionId: managed.id, error })
+        return { action: 'queue' }
+      }
+    }
+
+    if (!agent) return { action: 'queue' }
+
+    try {
+      const raw = await Promise.race([
+        agent.runMiniCompletion(prompt),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
+      ])
+      const decision = this.parseBusyMessageDecision(raw)
+      sessionLog.info('Busy message decision completed', {
+        sessionId: managed.id,
+        platform: input.platform,
+        action: decision.action,
+        replied: !!decision.replyText,
+      })
+      return decision
+    } catch (error) {
+      sessionLog.warn('Busy message decision failed; queueing message', { sessionId: managed.id, error })
+      return { action: 'queue' }
+    } finally {
+      temporaryAgent?.destroy()
+    }
+  }
+
+  private describeCurrentActivity(managed: ManagedSession): string {
+    const messages = managed.messages
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i]!
+      if (message.role === 'tool' || message.toolName || message.toolStatus) {
+        const label = message.toolDisplayName || message.toolName || 'tool'
+        if (message.toolStatus && message.toolStatus !== 'completed') {
+          return `${label} (${message.toolStatus})`
+        }
+        return `${label}`
+      }
+      if (message.role === 'assistant' && message.isIntermediate && message.content.trim()) {
+        return message.content.trim().slice(0, 240)
+      }
+    }
+    return managed.isProcessing ? 'processing' : 'idle'
+  }
+
+  private formatRecentConversationForBusyDecision(managed: ManagedSession): string {
+    return managed.messages
+      .slice(-10)
+      .map((message) => {
+        const role = message.role === 'tool'
+          ? `tool:${message.toolDisplayName || message.toolName || 'tool'}`
+          : message.role
+        const status = message.toolStatus ? ` [${message.toolStatus}]` : ''
+        const content = (message.content || message.toolIntent || message.toolResult || '').replace(/\s+/g, ' ').trim()
+        return `${role}${status}: ${content.slice(0, 300)}`
+      })
+      .filter(Boolean)
+      .join('\n')
+  }
+
+  private parseBusyMessageDecision(raw: string | null): BusyMessageDecision {
+    if (!raw) return { action: 'queue' }
+    try {
+      const start = raw.indexOf('{')
+      const end = raw.lastIndexOf('}')
+      const json = start >= 0 && end > start ? raw.slice(start, end + 1) : raw
+      const parsed = JSON.parse(json) as Partial<BusyMessageDecision>
+      const action = parsed.action === 'reply' || parsed.action === 'ignore' || parsed.action === 'queue'
+        ? parsed.action
+        : 'queue'
+      const replyText = typeof parsed.replyText === 'string' ? parsed.replyText.trim() : undefined
+      if (action === 'reply' && !replyText) return { action: 'ignore' }
+      return replyText ? { action, replyText } : { action }
+    } catch {
+      return { action: 'queue' }
+    }
   }
 
   /**
@@ -5704,6 +5852,7 @@ export class SessionManager implements ISessionManager {
 
     managed.lastMessageAt = Date.now()
     this.setProcessing(managed, true)
+    managed.currentRunStartedAt = Date.now()
     managed.streamingText = ''
     managed.processingGeneration++
     managed.turnStartFinalMessageId = this.getLastFinalAssistantMessageId(managed.messages)
@@ -6375,6 +6524,7 @@ export class SessionManager implements ISessionManager {
 
     // 1. Cleanup state
     this.setProcessing(managed, false)
+    managed.currentRunStartedAt = undefined
     managed.stopRequested = false  // Reset for next turn
 
     const turnStartFinalMessageId = managed.turnStartFinalMessageId

@@ -130,6 +130,10 @@ async function play(
   }
 }
 
+async function waitForDelayedProgress(): Promise<void> {
+  await Bun.sleep(1250)
+}
+
 const ev = {
   delta: (s: string): SessionEvent => ({ type: 'text_delta', sessionId: 's', delta: s }),
   intermediate: (text: string): SessionEvent => ({
@@ -179,11 +183,13 @@ describe('Renderer — progress mode (default)', () => {
     renderer = new Renderer()
   })
 
-  it('happy path: tool run → evolving transient bubble → fresh final message', async () => {
+  it('happy path: long tool run → delayed transient bubble → delete before fresh final message', async () => {
     const adapter = makeAdapter()
     const binding = makeBinding() // default = progress
+
+    await renderer.handle(ev.toolStart('Read'), binding, adapter)
+    await waitForDelayedProgress()
     await play(renderer, binding, adapter, [
-      ev.toolStart('Read'),
       ev.toolResult(),
       ev.final('The answer is 42.'),
       ev.complete(),
@@ -197,11 +203,15 @@ describe('Renderer — progress mode (default)', () => {
     const edits = adapter.calls.filter((c) => c.kind === 'editMessage')
     expect(edits.map((e) => e.text)).toEqual(['💭 thinking…'])
 
+    const deleteIndex = adapter.calls.findIndex((c) => c.kind === 'deleteMessage')
+    const finalIndex = adapter.calls.findIndex((c) => c.kind === 'sendText' && c.text === 'The answer is 42.')
+    expect(deleteIndex).toBeGreaterThan(-1)
+    expect(deleteIndex).toBeLessThan(finalIndex)
     const deletes = adapter.calls.filter((c) => c.kind === 'deleteMessage')
     expect(deletes.map((d) => d.messageId)).toEqual([sends[0]!.messageId])
   })
 
-  it('text-only run: fresh final message and deleted thinking bubble', async () => {
+  it('fast text-only run: skips transient thinking bubble and sends only the final answer', async () => {
     const adapter = makeAdapter()
     const binding = makeBinding()
     await play(renderer, binding, adapter, [
@@ -214,9 +224,9 @@ describe('Renderer — progress mode (default)', () => {
     const sends = adapter.calls.filter((c) => c.kind === 'sendText')
     const edits = adapter.calls.filter((c) => c.kind === 'editMessage')
     const deletes = adapter.calls.filter((c) => c.kind === 'deleteMessage')
-    expect(sends.map((s) => s.text)).toEqual(['💭 thinking…', 'hello world'])
+    expect(sends.map((s) => s.text)).toEqual(['hello world'])
     expect(edits.length).toBe(0)
-    expect(deletes.map((d) => d.messageId)).toEqual([sends[0]!.messageId])
+    expect(deletes.length).toBe(0)
   })
 
   it('drops intermediate text — never appears in any message', async () => {
@@ -258,8 +268,9 @@ describe('Renderer — progress mode (default)', () => {
   it('collapses redundant status edits (same status twice = one edit total)', async () => {
     const adapter = makeAdapter()
     const binding = makeBinding()
+    await renderer.handle(ev.toolStart('Read'), binding, adapter)
+    await waitForDelayedProgress()
     await play(renderer, binding, adapter, [
-      ev.toolStart('Read'),
       ev.toolResult(),
       ev.toolResult(), // duplicate → should NOT emit a second edit to thinking
       ev.final('done'),
@@ -282,6 +293,7 @@ describe('Renderer — progress mode (default)', () => {
 
     const beforeRestart = new Renderer({ progressStateFile })
     await play(beforeRestart, binding, adapter, [ev.toolStart('Build Install Restart')])
+    await waitForDelayedProgress()
 
     const firstSend = adapter.calls.find((c) => c.kind === 'sendText')
     expect(firstSend?.text).toBe('🔧 Build Install Restart…')
@@ -314,6 +326,7 @@ describe('Renderer — progress mode (default)', () => {
 
     const beforeRestart = new Renderer({ progressStateFile })
     await play(beforeRestart, binding, adapter, [ev.toolStart('Build Install Restart')])
+    await waitForDelayedProgress()
 
     const afterRestart = new Renderer({ progressStateFile })
     await play(afterRestart, binding, adapter, [ev.complete()])
@@ -556,10 +569,11 @@ describe('Renderer — permissions and errors', () => {
       ev.complete(), // should be a no-op after reset
     ])
     const sends = adapter.calls.filter((c) => c.kind === 'sendText')
-    // First send: the progress bubble. Second send: the error message.
-    expect(sends.length).toBe(2)
-    expect(sends[1]!.text).toContain('❌')
-    expect(sends[1]!.text).toContain('boom')
+    // Fast errors cancel the delayed progress bubble instead of leaving a
+    // transient status message behind.
+    expect(sends.length).toBe(1)
+    expect(sends[0]!.text).toContain('❌')
+    expect(sends[0]!.text).toContain('boom')
   })
 })
 

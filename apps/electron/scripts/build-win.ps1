@@ -1,6 +1,11 @@
 # Build script for Windows NSIS installer
 # Usage: powershell -ExecutionPolicy Bypass -File scripts/build-win.ps1
 
+[CmdletBinding()]
+param(
+    [switch]$SkipDependencyInstall
+)
+
 $ErrorActionPreference = "Stop"
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -92,12 +97,16 @@ foreach ($folder in $foldersToClean) {
 }
 
 # 2. Install dependencies
-Write-Host "Installing dependencies..."
-Push-Location $RootDir
-try {
-    bun install
-} finally {
-    Pop-Location
+if ($SkipDependencyInstall) {
+    Write-Host "Skipping dependency install because -SkipDependencyInstall was supplied." -ForegroundColor Yellow
+} else {
+    Write-Host "Installing dependencies..."
+    Push-Location $RootDir
+    try {
+        bun install
+    } finally {
+        Pop-Location
+    }
 }
 
 # 3. Stage Bun binary for Windows.
@@ -314,7 +323,12 @@ if ($env:MICROSOFT_OAUTH_CLIENT_ID) {
 }
 Push-Location $RootDir
 try {
-    & npx esbuild @MainArgs
+    $EsbuildExe = Join-Path $RootDir "node_modules\.bin\esbuild.exe"
+    if (Test-Path $EsbuildExe) {
+        & $EsbuildExe @MainArgs
+    } else {
+        & npx esbuild @MainArgs
+    }
     if ($LASTEXITCODE -ne 0) { throw "Main process build failed" }
 } finally {
     Pop-Location
@@ -339,7 +353,12 @@ try {
     if (Test-Path $RendererDir) { Remove-Item -Recurse -Force $RendererDir }
 
     # Run vite build
-    npx vite build --config apps/electron/vite.config.ts
+    $ViteExe = Join-Path $RootDir "node_modules\.bin\vite.exe"
+    if (Test-Path $ViteExe) {
+        & $ViteExe build --config apps/electron/vite.config.ts
+    } else {
+        npx vite build --config apps/electron/vite.config.ts
+    }
     if ($LASTEXITCODE -ne 0) { throw "Renderer build failed" }
 
     # Verify renderer was built

@@ -12,6 +12,7 @@
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
+    [switch]$SkipDependencyInstall,
     [switch]$NoInstall,
     [int]$RestartDelaySeconds = 2
 )
@@ -40,7 +41,9 @@ Remove-Item Env:CSC_LINK -ErrorAction SilentlyContinue
 if (-not $SkipBuild) {
     Write-Host ""
     Write-Host "=== Building installer ===" -ForegroundColor Cyan
-    & $BuildScript
+    $BuildArgs = @()
+    if ($SkipDependencyInstall) { $BuildArgs += "-SkipDependencyInstall" }
+    & $BuildScript @BuildArgs
     if ($LASTEXITCODE -ne 0) {
         throw "build-win.ps1 failed with exit code $LASTEXITCODE"
     }

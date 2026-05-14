@@ -9,12 +9,13 @@
  *     produces multiple messages. On platforms without editing, accumulates
  *     per turn and sends on each `text_complete`.
  *
- *   - `progress` (default): one transient status message per run. Posts
- *     "💭 thinking…" on first activity, edits to "🔧 <tool>…" on each
- *     `tool_start`, back to "💭 thinking…" on `tool_result`, then sends the
- *     final answer as a fresh message on `complete` so mobile clients produce
- *     a normal new-message notification. If the adapter supports deletion, the
- *     transient status message is removed after final delivery. Intermediate
+ *   - `progress` (default): one transient status message per run. Schedules
+ *     "💭 thinking…" or "🔧 <tool>…" shortly after first activity so fast
+ *     replies can complete without posting a throwaway status bubble. Once
+ *     posted, the bubble is edited on status changes. On `complete`, the
+ *     transient status message is removed before the final answer is sent as a
+ *     fresh message so mobile clients produce a normal new-message
+ *     notification. Intermediate
  *     assistant text (`text_complete` with `isIntermediate`) is dropped.
  *     On adapters without `messageEditing`, degrades to a single
  *     send-on-complete (identical to `final_only`).
@@ -108,9 +109,16 @@ interface RenderState {
   progressMessageId: string | null
   /** Progress: last status label written to the bubble, to avoid redundant edits. */
   progressStatus: string | null
+  /** Progress: timer that delays posting the first transient bubble for fast runs. */
+  progressTimer: ReturnType<typeof setTimeout> | null
+  /** Progress: status to post when the delayed progress timer fires. */
+  pendingProgressStatus: string | null
+  /** Progress: in-flight send for the delayed first transient bubble. */
+  progressSendPromise: Promise<void> | null
 }
 
 const DEFAULT_EDIT_INTERVAL_MS = 3500
+const PROGRESS_BUBBLE_DELAY_MS = 1200
 const BACKOFF_RESET_MS = 30_000
 
 const THINKING_LABEL = '💭 thinking…'
@@ -171,6 +179,9 @@ export class Renderer {
         finalBuffer: '',
         progressMessageId: null,
         progressStatus: null,
+        progressTimer: null,
+        pendingProgressStatus: null,
+        progressSendPromise: null,
       }
       this.states.set(bindingId, state)
     }
@@ -389,7 +400,18 @@ export class Renderer {
 
       case 'complete': {
         const finalText = state.finalBuffer.trim()
+        this.cancelPendingProgressBubble(state)
+        await this.waitForProgressBubbleSend(state)
         const progressMessageId = state.progressMessageId
+
+        // The progress bubble is transient. Delete it before the final answer
+        // is posted so the first deletion attempt is not racing a just-sent
+        // final message in the same Telegram chat/topic.
+        if (progressMessageId) {
+          await this.tryDeleteMessage(adapter, binding, progressMessageId)
+          this.clearPersistedProgressMessage(binding)
+        }
+
         if (finalText) {
           // Always send the final answer as a fresh message. Editing the
           // transient "thinking" bubble into the final answer suppresses normal
@@ -397,14 +419,6 @@ export class Renderer {
           await this.sendResponse(adapter, binding, finalText)
         }
 
-        // The progress bubble is transient. Even if the run completes without
-        // final text (for example an interrupted/recovered turn whose backend
-        // emits only `complete`), do not leave a permanent Telegram
-        // "thinking…"/tool-status message behind.
-        if (progressMessageId) {
-          await this.tryDeleteMessage(adapter, binding, progressMessageId)
-          this.clearPersistedProgressMessage(binding)
-        }
         this.resetRun(state)
         return
       }
@@ -430,14 +444,7 @@ export class Renderer {
     if (!adapter.capabilities.messageEditing) return
 
     if (!state.progressMessageId) {
-      try {
-        const sent = await adapter.sendText(binding.channelId, status, silentBindingOpts(binding))
-        state.progressMessageId = sent.messageId
-        state.progressStatus = status
-        this.savePersistedProgressMessage(binding, sent.messageId, status)
-      } catch {
-        // If posting fails, we'll try again on the next event.
-      }
+      this.scheduleProgressBubble(state, binding, adapter, status)
       return
     }
     if (state.progressStatus === status) return
@@ -513,6 +520,68 @@ export class Renderer {
     if (!this.persistedProgressMessages[binding.id]) return
     delete this.persistedProgressMessages[binding.id]
     this.flushPersistedProgressMessages()
+  }
+
+  private scheduleProgressBubble(
+    state: RenderState,
+    binding: ChannelBinding,
+    adapter: PlatformAdapter,
+    status: string,
+  ): void {
+    state.pendingProgressStatus = status
+    if (state.progressTimer || state.progressSendPromise) return
+
+    state.progressTimer = setTimeout(() => {
+      state.progressTimer = null
+      const pendingStatus = state.pendingProgressStatus
+      if (!pendingStatus || state.progressMessageId) return
+
+      const sendPromise = this.postProgressBubble(state, binding, adapter, pendingStatus)
+      state.progressSendPromise = sendPromise
+      sendPromise.finally(() => {
+        if (state.progressSendPromise === sendPromise) {
+          state.progressSendPromise = null
+        }
+      })
+    }, PROGRESS_BUBBLE_DELAY_MS)
+  }
+
+  private async postProgressBubble(
+    state: RenderState,
+    binding: ChannelBinding,
+    adapter: PlatformAdapter,
+    status: string,
+  ): Promise<void> {
+    try {
+      const sent = await adapter.sendText(binding.channelId, status, silentBindingOpts(binding))
+      const latestStatus = state.pendingProgressStatus ?? status
+      state.progressMessageId = sent.messageId
+      state.progressStatus = status
+      state.pendingProgressStatus = null
+      this.savePersistedProgressMessage(binding, sent.messageId, status)
+
+      if (latestStatus !== status) {
+        await this.tryEditMessage(adapter, binding, sent.messageId, latestStatus, state)
+        state.progressStatus = latestStatus
+        this.savePersistedProgressMessage(binding, sent.messageId, latestStatus)
+      }
+    } catch {
+      // If posting fails, we'll try again on the next event.
+    }
+  }
+
+  private cancelPendingProgressBubble(state: RenderState): void {
+    if (state.progressTimer) {
+      clearTimeout(state.progressTimer)
+      state.progressTimer = null
+    }
+    state.pendingProgressStatus = null
+  }
+
+  private async waitForProgressBubbleSend(state: RenderState): Promise<void> {
+    if (state.progressSendPromise) {
+      await state.progressSendPromise
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -703,8 +772,10 @@ Approve in the desktop app to continue.`,
     state: RenderState,
   ): Promise<void> {
     const errorMsg = extractErrorMessage(event.error)
-    const progressMessageId = state.progressMessageId
     this.cancelEditTimer(state)
+    this.cancelPendingProgressBubble(state)
+    await this.waitForProgressBubbleSend(state)
+    const progressMessageId = state.progressMessageId
     await adapter.sendText(binding.channelId, `❌ ${errorMsg}`, bindingOpts(binding))
     if (progressMessageId) {
       await this.tryDeleteMessage(adapter, binding, progressMessageId)
@@ -769,6 +840,7 @@ Approve in the desktop app to continue.`,
   /** Reset per-run state (called on `complete`, `error`, etc.). */
   private resetRun(state: RenderState): void {
     this.cancelEditTimer(state)
+    this.cancelPendingProgressBubble(state)
     state.textBuffer = ''
     state.streamingMessageId = null
     state.lastEditedLength = 0
@@ -776,6 +848,7 @@ Approve in the desktop app to continue.`,
     state.finalBuffer = ''
     state.progressMessageId = null
     state.progressStatus = null
+    state.progressSendPromise = null
   }
 
   /** Send a final assistant response, extracting preview blocks into chat files. */
@@ -854,6 +927,7 @@ Approve in the desktop app to continue.`,
     const state = this.states.get(bindingId)
     if (state) {
       this.cancelEditTimer(state)
+      this.cancelPendingProgressBubble(state)
       this.states.delete(bindingId)
     }
   }

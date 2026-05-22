@@ -77,6 +77,20 @@ export interface GatewayOptions {
    * an event to the renderer. Mirrors `onBindingChanged`.
    */
   onPendingChanged?: () => void
+  /**
+   * Fired when a bound session emits output but the target platform adapter is
+   * unavailable. The registry uses this to surface an explicit Settings/UI
+   * status instead of leaving users with only a structured log line.
+   */
+  onDeliveryBlocked?: (info: {
+    platform: PlatformType
+    sessionId: string
+    bindingId: string
+    channelId: string
+    threadId?: number
+    eventType: string
+    reason: string
+  }) => void
   /** Optional logger — defaults to console. Pass a structured host logger in Electron. */
   logger?: MessagingLogger
 }
@@ -147,7 +161,9 @@ export class MessagingGateway {
   private readonly pendingCompactAccepts = new Map<string, PendingCompactAccept>()
   private readonly adapters = new Map<PlatformType, PlatformAdapter>()
   private readonly renderQueues = new Map<string, Promise<void>>()
+  private readonly disconnectedNoticeCooldown = new Map<string, number>()
   private readonly log: MessagingLogger
+  private readonly onDeliveryBlocked?: GatewayOptions['onDeliveryBlocked']
   private started = false
   /**
    * Access-control surface — `getWorkspaceConfig` is called per-button so
@@ -163,6 +179,7 @@ export class MessagingGateway {
   constructor(opts: GatewayOptions) {
     this.sessionManager = opts.sessionManager
     this.workspaceId = opts.workspaceId
+    this.onDeliveryBlocked = opts.onDeliveryBlocked
     this.log = (opts.logger ?? consoleLogger).child({
       component: 'gateway',
       workspaceId: opts.workspaceId,
@@ -388,16 +405,50 @@ export class MessagingGateway {
     for (const binding of bindings) {
       const adapter = this.adapters.get(binding.platform)
       if (!adapter || !adapter.isConnected()) {
+        const reason = `${binding.platform} adapter is not connected`
         this.log.warn('dropping session event — adapter not connected', {
           event: 'adapter_not_connected',
           sessionId: event.sessionId,
           platform: binding.platform,
           eventType: event.type,
+          bindingId: binding.id,
+          channelId: binding.channelId,
+          threadId: binding.threadId,
+        })
+        this.notifyDeliveryBlocked({
+          platform: binding.platform,
+          sessionId: event.sessionId,
+          bindingId: binding.id,
+          channelId: binding.channelId,
+          threadId: binding.threadId,
+          eventType: event.type,
+          reason,
         })
         continue
       }
       this.enqueueRender(event, binding, adapter)
     }
+  }
+
+  private notifyDeliveryBlocked(info: {
+    platform: PlatformType
+    sessionId: string
+    bindingId: string
+    channelId: string
+    threadId?: number
+    eventType: string
+    reason: string
+  }): void {
+    if (!this.onDeliveryBlocked) return
+
+    // Session streaming can emit hundreds of text_delta events. Surface the
+    // outage promptly but throttle by binding so the UI receives an actionable
+    // status instead of a flood.
+    const now = Date.now()
+    const last = this.disconnectedNoticeCooldown.get(info.bindingId) ?? 0
+    if (now - last < 60_000) return
+    this.disconnectedNoticeCooldown.set(info.bindingId, now)
+    this.onDeliveryBlocked(info)
   }
 
   private enqueueRender(

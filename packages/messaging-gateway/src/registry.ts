@@ -81,6 +81,16 @@ export interface MessagingGatewayRegistryOptions {
   logger?: MessagingLogger
 }
 
+interface TelegramBlockedNotice {
+  channelId: string
+  threadId?: number
+  sessionId: string
+  eventType: string
+  firstAt: number
+  lastAt: number
+  count: number
+}
+
 interface WorkspaceState {
   gateway: MessagingGateway
   configStore: ConfigStore
@@ -88,7 +98,19 @@ interface WorkspaceState {
   botUsernames: Partial<Record<PlatformType, string>>
   whatsapp: WhatsAppAdapter | null
   whatsappOffEvent?: () => void
+  telegramRetryTimer?: ReturnType<typeof setTimeout>
+  telegramRetryAttempt: number
+  telegramConnectInFlight?: Promise<void>
+  telegramBlockedNotices: Map<string, TelegramBlockedNotice>
   runtime: Record<PlatformType, MessagingPlatformRuntimeInfo>
+}
+
+const TELEGRAM_RETRY_DELAYS_MS = [15_000, 30_000, 60_000, 120_000, 300_000]
+
+function telegramRetryDelay(attempt: number): number {
+  const base = TELEGRAM_RETRY_DELAYS_MS[Math.min(attempt, TELEGRAM_RETRY_DELAYS_MS.length - 1)] ?? 300_000
+  // Add a small jitter so multiple workspaces do not stampede the Bot API.
+  return base + Math.floor(Math.random() * 2_500)
 }
 
 export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
@@ -142,13 +164,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         state: 'connecting',
         lastError: undefined,
       })
-      void this.tryConnectTelegram(workspaceId, state).catch((err) => {
-        this.log.error('background Telegram connect failed', {
-          event: 'telegram_connect_failed',
-          workspaceId,
-          error: err,
-        })
-      })
+      this.startTelegramConnectWithRetry(workspaceId, state, 'restore')
     }
 
     if (isPlatformConfigured(config, 'lark')) {
@@ -202,12 +218,14 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
   async removeWorkspace(workspaceId: string): Promise<void> {
     const state = this.workspaces.get(workspaceId)
     if (!state) return
+    this.clearTelegramRetry(state)
     await state.gateway.stop()
     this.pairing.clearWorkspace(workspaceId)
     this.workspaces.delete(workspaceId)
   }
 
   async stopAll(): Promise<void> {
+    for (const state of this.workspaces.values()) this.clearTelegramRetry(state)
     const stops = Array.from(this.workspaces.values()).map((s) => s.gateway.stop().catch(() => {}))
     await Promise.all(stops)
     this.workspaces.clear()
@@ -247,6 +265,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
 
     const cfg = state.configStore.get()
     if (!cfg.enabled) {
+      this.clearTelegramRetry(state)
       await state.gateway.unregisterAdapter('telegram').catch(() => {})
       await state.gateway.unregisterAdapter('whatsapp').catch(() => {})
       await state.gateway.unregisterAdapter('lark').catch(() => {})
@@ -279,6 +298,9 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
 
     for (const platform of ['telegram', 'whatsapp', 'lark'] as const) {
       const configured = isPlatformConfigured(cfg, platform)
+      if (!configured && platform === 'telegram') {
+        this.clearTelegramRetry(state)
+      }
       if (!configured && state.gateway.getAdapter(platform)) {
         await state.gateway.unregisterAdapter(platform).catch(() => {})
       }
@@ -554,7 +576,18 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     if (!supergroup?.chatId) return { ok: false, reason: 'no-supergroup' }
 
     const adapter = state.gateway.getAdapter('telegram') as TelegramAdapter | undefined
-    if (!adapter) return { ok: false, reason: 'no-adapter' }
+    if (!adapter || !adapter.isConnected()) {
+      const error = state.runtime.telegram.lastError
+        ? `Telegram adapter is not connected: ${state.runtime.telegram.lastError}`
+        : 'Telegram adapter is not connected. Automation topic binding will retry on the next automation run after Telegram reconnects.'
+      this.setPlatformRuntime(args.workspaceId, state, 'telegram', {
+        configured: true,
+        connected: false,
+        state: 'error',
+        lastError: error,
+      })
+      return { ok: false, reason: 'no-adapter', error }
+    }
 
     const beforeCacheHit = state.topicRegistry.get(trimmed)
 
@@ -664,7 +697,12 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       lastError: undefined,
     })
 
-    await this.tryConnectTelegram(workspaceId, state)
+    try {
+      await this.tryConnectTelegram(workspaceId, state)
+    } catch (err) {
+      this.scheduleTelegramReconnect(workspaceId, state, err, 'user_connect')
+      throw err
+    }
     await state.gateway.start()
   }
 
@@ -742,6 +780,10 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     if (!isKnownPlatform(platform)) return
     const state = this.workspaces.get(workspaceId)
     if (!state) return
+
+    if (platform === 'telegram') {
+      this.clearTelegramRetry(state)
+    }
 
     if (platform === 'whatsapp') {
       state.whatsappOffEvent?.()
@@ -1028,6 +1070,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         this.seedFirstOwner(workspaceId, platform, candidate),
       onBindingChanged: () => this.emitBindingChanged(workspaceId),
       onPendingChanged: () => this.emitPendingChanged(workspaceId),
+      onDeliveryBlocked: (info) => this.handleDeliveryBlocked(workspaceId, info),
     })
 
     const topicRegistry = new TopicRegistry(
@@ -1041,6 +1084,8 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       topicRegistry,
       botUsernames: {},
       whatsapp: null,
+      telegramRetryAttempt: 0,
+      telegramBlockedNotices: new Map(),
       runtime: {
         telegram: createRuntime('telegram', isPlatformConfigured(cfg, 'telegram')),
         whatsapp: createRuntime('whatsapp', isPlatformConfigured(cfg, 'whatsapp')),
@@ -1173,6 +1218,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       }
 
       state.gateway.registerAdapter(adapter)
+      this.clearTelegramRetry(state)
       this.setPlatformRuntime(workspaceId, state, 'telegram', {
         configured: true,
         connected: true,
@@ -1180,6 +1226,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         identity: state.botUsernames.telegram,
         lastError: undefined,
       })
+      void this.flushTelegramBlockedNotices(workspaceId, state, adapter)
     } catch (err) {
       this.log.error('failed to connect Telegram', {
         event: 'telegram_connect_failed',
@@ -1194,6 +1241,171 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       })
       throw err
     }
+  }
+
+  private startTelegramConnectWithRetry(
+    workspaceId: string,
+    state: WorkspaceState,
+    reason: 'restore' | 'retry' | 'user_connect' = 'restore',
+  ): void {
+    if (state.telegramConnectInFlight) return
+    this.clearTelegramRetry(state)
+    state.telegramRetryAttempt = 0
+    this.runTelegramConnectAttempt(workspaceId, state, reason)
+  }
+
+  private runTelegramConnectAttempt(
+    workspaceId: string,
+    state: WorkspaceState,
+    reason: 'restore' | 'retry' | 'user_connect',
+  ): void {
+    if (state.telegramConnectInFlight) return
+    if (!isPlatformConfigured(state.configStore.get(), 'telegram')) return
+
+    this.setPlatformRuntime(workspaceId, state, 'telegram', {
+      configured: true,
+      connected: false,
+      state: 'connecting',
+      lastError: undefined,
+    })
+
+    const attempt = state.telegramRetryAttempt + 1
+    this.log.info('connecting Telegram', {
+      event: 'telegram_connect_attempt',
+      workspaceId,
+      attempt,
+      reason,
+    })
+
+    const inFlight = this.tryConnectTelegram(workspaceId, state)
+    state.telegramConnectInFlight = inFlight
+    void inFlight
+      .catch((err) => {
+        this.scheduleTelegramReconnect(workspaceId, state, err, reason)
+      })
+      .finally(() => {
+        if (state.telegramConnectInFlight === inFlight) {
+          state.telegramConnectInFlight = undefined
+        }
+      })
+  }
+
+  private scheduleTelegramReconnect(
+    workspaceId: string,
+    state: WorkspaceState,
+    err: unknown,
+    reason: 'restore' | 'retry' | 'user_connect',
+  ): void {
+    if (!isPlatformConfigured(state.configStore.get(), 'telegram')) return
+    if (state.telegramRetryTimer) return
+
+    const message = err instanceof Error ? err.message : String(err)
+    const delayMs = telegramRetryDelay(state.telegramRetryAttempt)
+    state.telegramRetryAttempt += 1
+
+    this.setPlatformRuntime(workspaceId, state, 'telegram', {
+      configured: true,
+      connected: false,
+      state: 'error',
+      lastError: `Telegram connection failed: ${message}. Retrying in ${Math.ceil(delayMs / 1000)}s.`,
+    })
+
+    this.log.warn('scheduled Telegram reconnect', {
+      event: 'telegram_reconnect_scheduled',
+      workspaceId,
+      attempt: state.telegramRetryAttempt,
+      delayMs,
+      reason,
+      error: message,
+    })
+
+    state.telegramRetryTimer = setTimeout(() => {
+      state.telegramRetryTimer = undefined
+      this.runTelegramConnectAttempt(workspaceId, state, 'retry')
+    }, delayMs)
+  }
+
+  private clearTelegramRetry(state: WorkspaceState): void {
+    if (state.telegramRetryTimer) {
+      clearTimeout(state.telegramRetryTimer)
+      state.telegramRetryTimer = undefined
+    }
+    state.telegramRetryAttempt = 0
+  }
+
+  private async flushTelegramBlockedNotices(
+    workspaceId: string,
+    state: WorkspaceState,
+    adapter: TelegramAdapter,
+  ): Promise<void> {
+    if (state.telegramBlockedNotices.size === 0) return
+
+    const notices = Array.from(state.telegramBlockedNotices.values())
+    state.telegramBlockedNotices.clear()
+
+    for (const notice of notices) {
+      const topic = notice.threadId !== undefined ? ` in topic ${notice.threadId}` : ''
+      const text =
+        `⚠️ Craft Agent Telegram delivery recovered.\n\n` +
+        `Telegram was disconnected, so ${notice.count} event(s) from session ${notice.sessionId} ` +
+        `were not delivered${topic}. Future replies should deliver normally now.`
+      try {
+        await adapter.sendText(
+          notice.channelId,
+          text,
+          notice.threadId !== undefined ? { threadId: notice.threadId } : undefined,
+        )
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        this.log.warn('failed to send Telegram delivery recovery notice', {
+          event: 'telegram_delivery_notice_failed',
+          workspaceId,
+          channelId: notice.channelId,
+          threadId: notice.threadId,
+          error: message,
+        })
+      }
+    }
+  }
+
+  private handleDeliveryBlocked(
+    workspaceId: string,
+    info: {
+      platform: PlatformType
+      sessionId: string
+      bindingId: string
+      channelId: string
+      threadId?: number
+      eventType: string
+      reason: string
+    },
+  ): void {
+    const state = this.workspaces.get(workspaceId)
+    if (!state) return
+
+    if (info.platform === 'telegram') {
+      const now = Date.now()
+      const existing = state.telegramBlockedNotices.get(info.bindingId)
+      state.telegramBlockedNotices.set(info.bindingId, {
+        channelId: info.channelId,
+        threadId: info.threadId,
+        sessionId: info.sessionId,
+        eventType: info.eventType,
+        firstAt: existing?.firstAt ?? now,
+        lastAt: now,
+        count: (existing?.count ?? 0) + 1,
+      })
+    }
+
+    const threadSuffix = info.threadId !== undefined ? ` topic ${info.threadId}` : ' chat'
+    this.setPlatformRuntime(workspaceId, state, info.platform, {
+      configured: true,
+      connected: false,
+      state: 'error',
+      lastError:
+        `${capitalize(info.platform)} delivery is blocked: ${info.reason}. ` +
+        `Dropped ${info.eventType} from session ${info.sessionId} for ${info.platform}${threadSuffix}.`,
+    })
   }
 
   private setPlatformRuntime(

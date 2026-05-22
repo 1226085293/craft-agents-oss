@@ -411,6 +411,12 @@ export class WindowManager {
       this.windows.delete(webContentsId)
       this.focusedModeWindows.delete(webContentsId)
       windowLog.info(`Window closed for workspace ${workspaceId}`)
+
+      // Hidden auxiliary BrowserWindows, such as browser-pane keep-alive windows,
+      // prevent Electron's window-all-closed event from firing.
+      if (!this.isAppQuitting && process.platform !== 'darwin' && this.getAllWindows().length === 0) {
+        app.quit()
+      }
     })
 
     windowLog.info(`Created window for workspace ${workspaceId} (focused: ${focused})`)

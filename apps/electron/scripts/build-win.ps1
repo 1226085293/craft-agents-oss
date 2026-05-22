@@ -482,6 +482,7 @@ while (-not $builderSuccess -and $builderRetry -lt $maxBuilderRetries) {
         Remove-Item -Recurse -Force "$ElectronDir\release" -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 1
     }
+    New-Item -ItemType Directory -Force -Path "$ElectronDir\release" | Out-Null
 
     npx electron-builder --win --x64 2>&1 | Tee-Object -Variable builderOutput
 

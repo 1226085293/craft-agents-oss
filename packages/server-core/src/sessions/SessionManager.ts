@@ -3185,7 +3185,7 @@ export class SessionManager implements ISessionManager {
       name: options?.name,
       permissionMode: defaultPermissionMode,
       workingDirectory: resolvedWorkingDir,
-      enabledSourceSlugs: defaultEnabledSourceSlugs,
+      enabledSourceSlugs: options?.enabledSourceSlugs ?? defaultEnabledSourceSlugs,
       hidden: options?.hidden,
       sessionStatus: options?.sessionStatus,
       labels: options?.labels,
@@ -3196,10 +3196,6 @@ export class SessionManager implements ISessionManager {
       taskRunId: options?.taskRunId,
       taskNodeId: options?.taskNodeId,
       taskDraft: options?.taskDraft,
-      // Persist only an EXPLICIT selection (e.g. a task's spec.sources on its subtasks).
-      // The workspace-default fallback stays dynamic — freezing it into the header would
-      // pin every ordinary session to the defaults as of its creation time.
-      enabledSourceSlugs: options?.enabledSourceSlugs,
     })
 
     // Branch: copy messages from source session up to and including the branch point
@@ -6354,6 +6350,9 @@ export class SessionManager implements ISessionManager {
         timestamp: this.monotonic(),
         attachments: storedAttachments,
         badges: options?.badges,
+        // Hidden system-generated messages reach the model but never render as a
+        // transcript bubble (e.g. background-task-completion nudge).
+        ...(options?.hidden ? { hidden: true } : {}),
       }
       managed.messages.push(userMessage)
 
@@ -6374,20 +6373,6 @@ export class SessionManager implements ISessionManager {
         backend: agent ? agent.constructor.name : 'none',
         connectionSlug: connection?.slug,
       })
-
-      // Create user message for UI
-      const userMessage: Message = {
-        id: generateMessageId(),
-        role: 'user',
-        content: message,
-        timestamp: this.monotonic(),
-        attachments: storedAttachments,
-        badges: options?.badges,
-        // Hidden system-generated messages reach the model but never render as a
-        // transcript bubble (e.g. background-task-completion nudge).
-        ...(options?.hidden ? { hidden: true } : {}),
-      }
-      managed.messages.push(userMessage)
 
       const delivery = resolveMidStreamDeliveryOutcome(behavior, steered)
 

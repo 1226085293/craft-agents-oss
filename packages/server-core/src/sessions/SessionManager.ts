@@ -6260,7 +6260,6 @@ export class SessionManager implements ISessionManager {
     onAck?: (messageId: string) => void,
     /** Optional model-only prompt. UI/persistence keeps `message` visible. */
     modelMessageOverride?: string,
-=======
     /**
      * Optional transport context. The `sessions.sendMessage` RPC handler passes
      * `{ callerClientId: ctx.clientId }` so the SM can pin the desktop client

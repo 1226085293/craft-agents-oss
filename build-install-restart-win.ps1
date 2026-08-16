@@ -141,14 +141,19 @@ Write-Host "The current Craft Agents window/session may close during this step."
 Write-Host "Helper script: $HelperPath"
 Write-Host "Helper log: $LogPath"
 
+function Quote-ProcessArgument {
+    param([Parameter(Mandatory = $true)][string]$Value)
+    return '"{0}"' -f ($Value -replace '"', '\"')
+}
+
 $HelperArgs = @(
     "-NoProfile",
     "-ExecutionPolicy", "Bypass",
-    "-File", $HelperPath,
-    "-InstallerPath", $Installer.FullName,
-    "-InstalledExe", $InstalledExe,
+    "-File", (Quote-ProcessArgument $HelperPath),
+    "-InstallerPath", (Quote-ProcessArgument $Installer.FullName),
+    "-InstalledExe", (Quote-ProcessArgument $InstalledExe),
     "-RestartDelaySeconds", $RestartDelaySeconds,
-    "-LogPath", $LogPath
+    "-LogPath", (Quote-ProcessArgument $LogPath)
 )
 
 Start-Process -FilePath "powershell.exe" -ArgumentList $HelperArgs -WindowStyle Hidden

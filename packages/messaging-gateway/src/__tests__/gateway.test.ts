@@ -85,6 +85,49 @@ const noopLogger = {
   child: () => noopLogger,
 }
 
+describe('MessagingGateway — WhatsApp delivery recovery', () => {
+  it('renders the original reply after a disconnected WhatsApp adapter recovers', async () => {
+    const sessionManager = makeSessionManager()
+    const recoveredAdapter = makeSlowWhatsAppAdapter(0)
+    const disconnectedAdapter = {
+      ...makeSlowWhatsAppAdapter(0),
+      isConnected: () => false,
+    }
+    const recover = mock(async () => recoveredAdapter)
+    const blocked = mock(() => {})
+    const gateway = new MessagingGateway({
+      sessionManager: sessionManager as any,
+      workspaceId: 'ws1',
+      storageDir,
+      logger: noopLogger,
+      onRecoverDelivery: recover,
+      onDeliveryBlocked: blocked,
+    })
+    gateway.registerAdapter(disconnectedAdapter)
+    await gateway.start()
+    gateway.getBindingStore().bind('ws1', 'sess-A', 'whatsapp', 'chat-1', undefined, {
+      responseMode: 'progress',
+    })
+
+    gateway.onSessionEvent(RPC_CHANNELS.sessions.EVENT, {} as any, {
+      type: 'text_complete',
+      sessionId: 'sess-A',
+      text: 'Recovered normal reply.',
+      isIntermediate: false,
+    })
+    gateway.onSessionEvent(RPC_CHANNELS.sessions.EVENT, {} as any, {
+      type: 'complete',
+      sessionId: 'sess-A',
+    })
+
+    await delay(80)
+
+    expect(recover).toHaveBeenCalled()
+    expect(blocked).not.toHaveBeenCalled()
+    expect(recoveredAdapter.texts).toEqual(['Recovered normal reply.'])
+  })
+})
+
 describe('MessagingGateway — outbound ordering', () => {
   it('serializes session events per binding so final replies cannot overtake progress messages', async () => {
     const sessionManager = makeSessionManager()

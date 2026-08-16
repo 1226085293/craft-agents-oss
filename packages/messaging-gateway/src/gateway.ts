@@ -91,6 +91,20 @@ export interface GatewayOptions {
     eventType: string
     reason: string
   }) => void
+  /**
+   * Optional recovery hook invoked before dropping WhatsApp-bound session output
+   * when the adapter is disconnected. If it returns a connected adapter, the
+   * gateway renders the original session event normally with that adapter.
+   */
+  onRecoverDelivery?: (info: {
+    platform: PlatformType
+    sessionId: string
+    bindingId: string
+    channelId: string
+    threadId?: number
+    eventType: string
+    reason: string
+  }) => Promise<PlatformAdapter | undefined>
   /** Optional logger — defaults to console. Pass a structured host logger in Electron. */
   logger?: MessagingLogger
 }
@@ -164,6 +178,7 @@ export class MessagingGateway {
   private readonly disconnectedNoticeCooldown = new Map<string, number>()
   private readonly log: MessagingLogger
   private readonly onDeliveryBlocked?: GatewayOptions['onDeliveryBlocked']
+  private readonly onRecoverDelivery?: GatewayOptions['onRecoverDelivery']
   private started = false
   /**
    * Access-control surface — `getWorkspaceConfig` is called per-button so
@@ -180,6 +195,7 @@ export class MessagingGateway {
     this.sessionManager = opts.sessionManager
     this.workspaceId = opts.workspaceId
     this.onDeliveryBlocked = opts.onDeliveryBlocked
+    this.onRecoverDelivery = opts.onRecoverDelivery
     this.log = (opts.logger ?? consoleLogger).child({
       component: 'gateway',
       workspaceId: opts.workspaceId,
@@ -406,6 +422,10 @@ export class MessagingGateway {
       const adapter = this.adapters.get(binding.platform)
       if (!adapter || !adapter.isConnected()) {
         const reason = `${binding.platform} adapter is not connected`
+        if (binding.platform === 'whatsapp' && this.onRecoverDelivery) {
+          void this.recoverAndRender(event, binding, reason)
+          continue
+        }
         this.log.warn('dropping session event — adapter not connected', {
           event: 'adapter_not_connected',
           sessionId: event.sessionId,
@@ -449,6 +469,71 @@ export class MessagingGateway {
     if (now - last < 60_000) return
     this.disconnectedNoticeCooldown.set(info.bindingId, now)
     this.onDeliveryBlocked(info)
+  }
+
+  private async recoverAndRender(
+    event: SessionEvent,
+    binding: ReturnType<BindingStore['findBySession']>[number],
+    reason: string,
+  ): Promise<void> {
+    const info = {
+      platform: binding.platform,
+      sessionId: event.sessionId,
+      bindingId: binding.id,
+      channelId: binding.channelId,
+      threadId: binding.threadId,
+      eventType: event.type,
+      reason,
+    }
+
+    this.log.warn('attempting delivery recovery — adapter not connected', {
+      event: 'adapter_not_connected_recovery_started',
+      sessionId: event.sessionId,
+      platform: binding.platform,
+      eventType: event.type,
+      bindingId: binding.id,
+      channelId: binding.channelId,
+      threadId: binding.threadId,
+    })
+
+    try {
+      const recovered = await this.onRecoverDelivery?.(info)
+      if (recovered?.isConnected()) {
+        this.log.info('delivery recovery succeeded — rendering original event', {
+          event: 'adapter_not_connected_recovery_succeeded',
+          sessionId: event.sessionId,
+          platform: binding.platform,
+          eventType: event.type,
+          bindingId: binding.id,
+          channelId: binding.channelId,
+          threadId: binding.threadId,
+        })
+        this.enqueueRender(event, binding, recovered)
+        return
+      }
+    } catch (err) {
+      this.log.warn('delivery recovery threw', {
+        event: 'adapter_not_connected_recovery_threw',
+        sessionId: event.sessionId,
+        platform: binding.platform,
+        eventType: event.type,
+        bindingId: binding.id,
+        channelId: binding.channelId,
+        threadId: binding.threadId,
+        error: err,
+      })
+    }
+
+    this.log.warn('dropping session event — delivery recovery failed', {
+      event: 'adapter_not_connected_recovery_failed',
+      sessionId: event.sessionId,
+      platform: binding.platform,
+      eventType: event.type,
+      bindingId: binding.id,
+      channelId: binding.channelId,
+      threadId: binding.threadId,
+    })
+    this.notifyDeliveryBlocked(info)
   }
 
   private enqueueRender(

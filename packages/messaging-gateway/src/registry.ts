@@ -98,6 +98,7 @@ interface WorkspaceState {
   botUsernames: Partial<Record<PlatformType, string>>
   whatsapp: WhatsAppAdapter | null
   whatsappOffEvent?: () => void
+  whatsappRecoveryInFlight?: Promise<WhatsAppAdapter | undefined>
   telegramRetryTimer?: ReturnType<typeof setTimeout>
   telegramRetryAttempt: number
   telegramConnectInFlight?: Promise<void>
@@ -111,6 +112,10 @@ function telegramRetryDelay(attempt: number): number {
   const base = TELEGRAM_RETRY_DELAYS_MS[Math.min(attempt, TELEGRAM_RETRY_DELAYS_MS.length - 1)] ?? 300_000
   // Add a small jitter so multiple workspaces do not stampede the Bot API.
   return base + Math.floor(Math.random() * 2_500)
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
@@ -885,7 +890,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
   private async startWhatsAppAdapter(
     workspaceId: string,
     state: WorkspaceState,
-    options: { persistConfig: boolean; reason: 'restore' | 'user_connect' },
+    options: { persistConfig: boolean; reason: 'restore' | 'user_connect' | 'delivery_reconnect' },
   ): Promise<void> {
     const waConfig = this.opts.whatsapp
     if (!waConfig) {
@@ -1071,6 +1076,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       onBindingChanged: () => this.emitBindingChanged(workspaceId),
       onPendingChanged: () => this.emitPendingChanged(workspaceId),
       onDeliveryBlocked: (info) => this.handleDeliveryBlocked(workspaceId, info),
+      onRecoverDelivery: (info) => this.recoverWhatsAppDelivery(workspaceId, info),
     })
 
     const topicRegistry = new TopicRegistry(
@@ -1406,6 +1412,159 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         `${capitalize(info.platform)} delivery is blocked: ${info.reason}. ` +
         `Dropped ${info.eventType} from session ${info.sessionId} for ${info.platform}${threadSuffix}.`,
     })
+  }
+
+  private async recoverWhatsAppDelivery(
+    workspaceId: string,
+    info: {
+      platform: PlatformType
+      sessionId: string
+      bindingId: string
+      channelId: string
+      threadId?: number
+      eventType: string
+      reason: string
+    },
+  ): Promise<WhatsAppAdapter | undefined> {
+    if (info.platform !== 'whatsapp') return undefined
+
+    const state = this.workspaces.get(workspaceId)
+    if (!state) return undefined
+
+    const current = state.gateway.getAdapter('whatsapp')
+    if (current instanceof WhatsAppAdapter && current.isConnected()) return current
+
+    if (state.whatsappRecoveryInFlight) {
+      this.log.info('reusing in-flight WhatsApp delivery reconnect', {
+        event: 'whatsapp_delivery_reconnect_reused',
+        workspaceId,
+        sessionId: info.sessionId,
+        bindingId: info.bindingId,
+        channelId: info.channelId,
+      })
+      return state.whatsappRecoveryInFlight
+    }
+
+    state.whatsappRecoveryInFlight = this.runWhatsAppDeliveryRecovery(workspaceId, state, info)
+      .finally(() => {
+        state.whatsappRecoveryInFlight = undefined
+      })
+    return state.whatsappRecoveryInFlight
+  }
+
+  private async runWhatsAppDeliveryRecovery(
+    workspaceId: string,
+    state: WorkspaceState,
+    info: {
+      sessionId: string
+      bindingId: string
+      channelId: string
+      threadId?: number
+      eventType: string
+      reason: string
+    },
+  ): Promise<WhatsAppAdapter | undefined> {
+    this.log.warn('starting WhatsApp delivery reconnect', {
+      event: 'whatsapp_delivery_reconnect_started',
+      workspaceId,
+      sessionId: info.sessionId,
+      bindingId: info.bindingId,
+      channelId: info.channelId,
+      eventType: info.eventType,
+      reason: info.reason,
+    })
+
+    let lastError = info.reason
+    const delays = [1_000, 2_000, 4_000]
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      if (attempt > 1) {
+        await delay(delays[attempt - 2] ?? 4_000)
+      }
+
+      this.setPlatformRuntime(workspaceId, state, 'whatsapp', {
+        configured: true,
+        connected: false,
+        state: 'connecting',
+        lastError: `WhatsApp disconnected. Reconnect attempt ${attempt}/3 before delivering ${info.eventType}.`,
+      })
+
+      this.log.info('attempting WhatsApp delivery reconnect', {
+        event: 'whatsapp_delivery_reconnect_attempt',
+        workspaceId,
+        attempt,
+        sessionId: info.sessionId,
+        bindingId: info.bindingId,
+        channelId: info.channelId,
+      })
+
+      try {
+        await this.startWhatsAppAdapter(workspaceId, state, {
+          persistConfig: false,
+          reason: 'delivery_reconnect',
+        })
+        const adapter = await this.waitForWhatsAppConnected(state, 15_000)
+        if (adapter) {
+          this.log.info('WhatsApp delivery reconnect succeeded', {
+            event: 'whatsapp_delivery_reconnect_succeeded',
+            workspaceId,
+            attempt,
+            sessionId: info.sessionId,
+            bindingId: info.bindingId,
+            channelId: info.channelId,
+          })
+          return adapter
+        }
+        lastError = 'WhatsApp adapter restarted but did not become connected within 15s'
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err)
+        this.log.warn('WhatsApp delivery reconnect attempt failed', {
+          event: 'whatsapp_delivery_reconnect_attempt_failed',
+          workspaceId,
+          attempt,
+          sessionId: info.sessionId,
+          bindingId: info.bindingId,
+          channelId: info.channelId,
+          error: lastError,
+        })
+      }
+    }
+
+    this.log.error('WhatsApp delivery reconnect failed', {
+      event: 'whatsapp_delivery_reconnect_failed',
+      workspaceId,
+      attempts: 3,
+      sessionId: info.sessionId,
+      bindingId: info.bindingId,
+      channelId: info.channelId,
+      eventType: info.eventType,
+      error: lastError,
+    })
+
+    this.setPlatformRuntime(workspaceId, state, 'whatsapp', {
+      configured: true,
+      connected: false,
+      state: 'error',
+      lastError:
+        `WhatsApp delivery failed: adapter was disconnected and reconnect failed after 3 attempts. ` +
+        `Dropped ${info.eventType} from session ${info.sessionId}. Last error: ${lastError}`,
+    })
+
+    return undefined
+  }
+
+  private async waitForWhatsAppConnected(
+    state: WorkspaceState,
+    timeoutMs: number,
+  ): Promise<WhatsAppAdapter | undefined> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const adapter = state.gateway.getAdapter('whatsapp')
+      if (adapter instanceof WhatsAppAdapter && adapter.isConnected()) return adapter
+      await delay(250)
+    }
+    const adapter = state.gateway.getAdapter('whatsapp')
+    return adapter instanceof WhatsAppAdapter && adapter.isConnected() ? adapter : undefined
   }
 
   private setPlatformRuntime(

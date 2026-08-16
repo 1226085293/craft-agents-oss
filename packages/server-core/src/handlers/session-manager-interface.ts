@@ -132,6 +132,7 @@ export interface ISessionManager {
     existingMessageId?: string,
     _isAuthRetry?: boolean,
     onAck?: (messageId: string) => void,
+    modelMessageOverride?: string,
     rpcContext?: { callerClientId?: string },
   ): Promise<void>
   /** Return the in-memory processing flag without hydrating full messages. */

@@ -55,16 +55,20 @@ export interface SessionScopedToolCallbacks {
   setSessionLabelsFn?: (sessionId: string | undefined, labels: string[]) => void | Promise<void>;
   /** Set status on a session (defaults to current). */
   setSessionStatusFn?: (sessionId: string | undefined, status: string) => void | Promise<void>;
+  /** Archive (archived=true) or unarchive (archived=false) a session by ID. */
+  archiveSessionFn?: (sessionId: string, archived: boolean) => void | Promise<void>;
   /** Get detailed info about a session (defaults to current). */
   getSessionInfoFn?: (sessionId?: string) => import('@craft-agent/session-tools-core').SessionInfo | null;
   /** List sessions in the workspace with pagination. */
   listSessionsFn?: (options?: import('@craft-agent/session-tools-core').ListSessionsOptions) => import('@craft-agent/session-tools-core').ListSessionsResult;
+  /** List background tasks (running + terminal) for a session from the main-process registry. */
+  listBackgroundTasksFn?: (sessionId?: string) => import('@craft-agent/session-tools-core').BackgroundTaskInfo[];
   /** Resolve label display names to IDs. */
   resolveLabelsFn?: (labels: string[]) => import('@craft-agent/session-tools-core').ResolvedLabelsResult;
   /** Resolve a status display name to its ID. */
   resolveStatusFn?: (status: string) => import('@craft-agent/session-tools-core').ResolvedStatusResult;
-  /** Send a message to another session (inter-session messaging). */
-  sendAgentMessageFn?: (sessionId: string, message: string, attachments?: Array<{ path: string; name?: string }>) => Promise<void>;
+  /** Send a message to another session (inter-session messaging). Resolves with delivery status. */
+  sendAgentMessageFn?: (sessionId: string, message: string, attachments?: Array<{ path: string; name?: string }>) => Promise<import('@craft-agent/session-tools-core').SendAgentMessageResult>;
   /**
    * Activate a source in the running session (source_test auto-enable flow).
    * Wired by SessionManager to the per-session onSourceActivationRequest callback
@@ -92,6 +96,10 @@ export interface SessionScopedToolCallbacks {
     failed: number;
     failures: Array<{ platform: string; channelId: string; error: string }>;
   }>;
+  /** Create a Craft Agents Task (board card + task.yaml + orchestrator session) without running it. */
+  createTaskFn?: (
+    input: import('@craft-agent/session-tools-core').CreateTaskInput
+  ) => Promise<import('@craft-agent/session-tools-core').CreateTaskResult>;
 }
 
 // Registry of callbacks keyed by sessionId

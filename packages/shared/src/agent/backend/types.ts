@@ -272,7 +272,7 @@ export interface CoreBackendConfig {
    */
   onImageResize?: (filePath: string, maxSizeBytes: number) => Promise<string | null>;
 
-  /** Enable 1M context window for Opus 4.7. Default: true. Set false to use 200K and conserve usage limits. */
+  /** Enable 1M context window for current Opus models. Default: true. Set false to use 200K and conserve usage limits. */
   enable1MContext?: boolean;
 
   /**
@@ -368,6 +368,13 @@ export interface AgentBackend {
    * @param reason - AbortReason enum value
    */
   forceAbort(reason: AbortReason): void;
+
+  /**
+   * WS2: register a sink for background task events that arrive BETWEEN turns
+   * (when no chat() generator is being consumed) under keep-alive mode. Backends
+   * without a persistent cross-turn query may leave this unimplemented.
+   */
+  setBackgroundEventSink?(sink: ((event: AgentEvent) => void) | null): void;
 
   /**
    * Interrupt the current turn because control is being handed to the UI.
@@ -529,8 +536,9 @@ export interface AgentBackend {
   /**
    * Schedule a source-activation auto-restart. Consumed by the backend's
    * event loop after the next tool_result, which yields `source_activated`
-   * and `forceAbort`s the turn — triggering the renderer's existing
-   * auto_retry effect. Set by SessionManager after a successful mid-turn
+   * and `forceAbort`s the turn. SessionManager's `source_activated` handler
+   * then schedules the server-side resend with a "[{slug} activated]" suffix
+   * (craft-agents-oss#804). Set by SessionManager after a successful mid-turn
    * activation (source_test auto-enable).
    */
   setPendingSourceActivationRestart(pending: { sourceSlug: string; userMessage: string }): void;
@@ -637,9 +645,7 @@ export interface BackendConfig extends CoreBackendConfig {
    * Provider/SDK to use for this backend.
    * Determines which agent class is instantiated:
    * - 'anthropic' → ClaudeAgent (Anthropic SDK)
-   * - 'openai' → CodexAgent (OpenAI via app-server)
-   * - 'copilot' → CopilotAgent (GitHub Copilot via @github/copilot-sdk)
-   * - 'pi' → PiAgent (Pi via @mariozechner/pi-coding-agent)
+   * - 'pi' → PiAgent (Pi via @earendil-works/pi-coding-agent)
    */
   provider: AgentProvider;
 

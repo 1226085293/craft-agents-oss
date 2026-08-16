@@ -260,7 +260,7 @@ Remove-Item -Recurse -Force "$ElectronDir\node_modules\@vscode\ripgrep" -ErrorAc
 Copy-Item -Recurse -Force $RgSource "$ElectronDir\node_modules\@vscode\"
 
 # 6. Copy network interceptor sources (for Pi subprocess; Claude no longer
-#    uses --preload — see Phase 2 in plans/sdk-uplift-plan.md).
+#    uses --preload — Phase 2 will move that to SDK hooks or a local proxy).
 $InterceptorSource = "$RootDir\packages\shared\src\unified-network-interceptor.ts"
 if (-not (Test-Path $InterceptorSource)) {
     Write-Host "ERROR: Interceptor not found at $InterceptorSource" -ForegroundColor Red
@@ -299,11 +299,17 @@ $MainArgs = @(
     "--format=cjs",
     "--outfile=apps/electron/dist/main.cjs",
     "--external:electron",
-    # Replace grammY's bundled polyfills (node-fetch@2 + abort-controller@3)
-    # with native Node globals. Without this, packaged Telegram API calls can
-    # fail before polling or file download starts.
+    // Replace grammY's bundled polyfills (node-fetch@2 + abort-controller@3)
+    // with native Node globals. Without this, packaged Telegram API calls can
+    // fail before polling or file download starts.
     "--alias:node-fetch=./apps/electron/src/main/shims/node-fetch.cjs",
-    "--alias:abort-controller=./apps/electron/src/main/shims/abort-controller.cjs"
+    "--alias:abort-controller=./apps/electron/src/main/shims/abort-controller.cjs",
+    // SDK 0.3.x is pure ESM and calls createRequire(import.meta.url) at module init.
+    // esbuild's CJS bundling leaves import.meta.url undefined for inlined ESM, crashing
+    // the app on load (ERR_INVALID_ARG_VALUE). Externalize it so Node loads it natively
+    // as ESM — the SDK core is staged into the app's node_modules above (step 4).
+    // Must stay in sync with package.json build:main and scripts/electron-dev.ts.
+    "--external:@anthropic-ai/claude-agent-sdk"
 )
 # Add OAuth defines if env vars are set
 if ($env:GOOGLE_OAUTH_CLIENT_ID) {

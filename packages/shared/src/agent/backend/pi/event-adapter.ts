@@ -12,12 +12,12 @@
 import type { AgentEvent as CraftAgentEvent } from '@craft-agent/core/types';
 import type {
   AgentEvent as PiAgentEvent,
-} from '@mariozechner/pi-agent-core';
+} from '@earendil-works/pi-agent-core';
 import type {
   AgentSessionEvent,
-} from '@mariozechner/pi-coding-agent';
-import type { AssistantMessage, AssistantMessageEvent } from '@mariozechner/pi-ai';
-import { isContextOverflow } from '@mariozechner/pi-ai';
+} from '@earendil-works/pi-coding-agent';
+import type { AssistantMessage, AssistantMessageEvent } from '@earendil-works/pi-ai';
+import { isContextOverflow } from '@earendil-works/pi-ai';
 import { BaseEventAdapter } from '../base-event-adapter.ts';
 import { PI_TOOL_NAME_MAP } from './constants.ts';
 import { toolMetadataStore } from '../../../interceptor-common.ts';
@@ -25,7 +25,7 @@ import { parseError } from '../../errors.ts';
 
 /**
  * Pi SDK auto-compaction race signature — the AbortController crash described
- * in `_runAutoCompaction` (`@mariozechner/pi-coding-agent` agent-session.ts).
+ * in `_runAutoCompaction` (`@earendil-works/pi-coding-agent` agent-session.ts).
  * When two `_runAutoCompaction` calls overlap, one's `finally` clears the
  * shared `_autoCompactionAbortController` field while the other is still
  * suspended on an await; the next `.signal` read crashes. Matched against
@@ -71,7 +71,7 @@ export class PiEventAdapter extends BaseEventAdapter {
   // Track whether a final (non-intermediate) text_complete has been emitted this turn
   private hasEmittedFinalText: boolean = false;
 
-  // Sub-turnId isolation (same pattern as CopilotEventAdapter)
+  // Sub-turnId isolation for tool calls within a single Pi turn
   private subTurnCounter: number = 0;
   private messageSubTurnId: string | null = null;
 
@@ -218,6 +218,23 @@ export class PiEventAdapter extends BaseEventAdapter {
    * Adapt a Pi SDK event to zero or more Craft AgentEvents.
    */
   *adaptEvent(event: PiEvent): Generator<CraftAgentEvent> {
+    // Craft-injected event from pi-agent-server (not part of the Pi SDK).
+    // The subprocess emits this immediately after each `message_end` to deliver
+    // the correct `sdkTurnAnchor` (the leaf id AFTER the SDK has appended the
+    // assistant entry). We forward it through as-is — SessionManager correlates
+    // it to a Craft assistant message via `sdkMessageId`. See craft-agents-oss#782.
+    if ((event as { type?: string }).type === 'pi_turn_anchor') {
+      const e = event as unknown as { sdkMessageId?: string; sdkTurnAnchor?: string };
+      if (e.sdkMessageId && e.sdkTurnAnchor) {
+        yield {
+          type: 'pi_turn_anchor',
+          sdkMessageId: e.sdkMessageId,
+          sdkTurnAnchor: e.sdkTurnAnchor,
+        };
+      }
+      return;
+    }
+
     switch (event.type) {
       // ============================================================
       // Agent lifecycle events
@@ -311,8 +328,11 @@ export class PiEventAdapter extends BaseEventAdapter {
       case 'message_end': {
         // Pi SDK emits message_end for ALL messages (user, assistant, toolResult).
         // Only process assistant messages — skip user prompts and tool results.
-        const msg = event.message as { role?: string; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: { total: number } } } | undefined;
-        const sdkTurnAnchor = (event as { sdkTurnAnchor?: string }).sdkTurnAnchor;
+        const msg = event.message as { role?: string; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: { total: number } }; id?: string } | undefined;
+        // SDK message id, set by pi-agent-server when forwarding the event.
+        // SessionManager uses this to correlate the follow-up `pi_turn_anchor`
+        // event to the Craft assistant message created here (#782).
+        const sdkMessageId = (event as { sdkMessageId?: string }).sdkMessageId ?? msg?.id;
         if (msg?.role !== 'assistant') break;
 
         // Surface API errors — Pi SDK sets stopReason: 'error' and errorMessage on failures
@@ -357,7 +377,7 @@ export class PiEventAdapter extends BaseEventAdapter {
             text: textContent,
             isIntermediate,
             turnId: mTurnId,
-            sdkTurnAnchor,
+            sdkMessageId,
           };
           this.hasStreamedDeltas = false;
         }

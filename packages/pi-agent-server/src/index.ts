@@ -3,7 +3,7 @@
  * Pi Agent Server
  *
  * Out-of-process Pi agent server communicating via JSONL over stdio.
- * Wraps @mariozechner/pi-coding-agent SDK and communicates with the main
+ * Wraps @earendil-works/pi-coding-agent SDK and communicates with the main
  * Electron process using a line-delimited JSON protocol.
  *
  * The main process spawns this as a child process. All Pi SDK interactions
@@ -33,7 +33,7 @@ import {
   createGrepToolDefinition,
   createFindToolDefinition,
   createLsToolDefinition,
-} from '@mariozechner/pi-coding-agent';
+} from '@earendil-works/pi-coding-agent';
 import type {
   AgentSession,
   AgentSessionEvent,
@@ -41,18 +41,18 @@ import type {
   AuthCredential,
   CreateAgentSessionOptions,
   ToolDefinition,
-} from '@mariozechner/pi-coding-agent';
+} from '@earendil-works/pi-coding-agent';
 
 // Pi AI types
-import type { TextContent as PiTextContent } from '@mariozechner/pi-ai';
+import type { TextContent as PiTextContent } from '@earendil-works/pi-ai';
 
 // Pre-register the Bedrock provider module so the Pi SDK doesn't attempt a
 // dynamic import of "./amazon-bedrock.js" — which fails in the bundled output
 // because bun collapses everything into a single file.
-// With the current Pi SDK (0.70.0 here), pi-ai is deduped (single hoisted
-// copy), so one registration covers both pi-ai and pi-agent-core module scopes.
-import { setBedrockProviderModule } from '@mariozechner/pi-ai';
-import { bedrockProviderModule } from '@mariozechner/pi-ai/bedrock-provider';
+// pi-ai is deduped (single hoisted copy), so one registration covers both
+// pi-ai and pi-agent-core module scopes.
+import { setBedrockProviderModule } from '@earendil-works/pi-ai/api/bedrock-converse-stream.lazy';
+import { bedrockProviderModule } from '@earendil-works/pi-ai/bedrock-provider';
 setBedrockProviderModule(bedrockProviderModule);
 
 // Model resolution (extracted for testability + custom-endpoint precedence)
@@ -1202,15 +1202,48 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     }
 
     if (msg?.role === 'assistant' && piSession) {
-      const sdkTurnAnchor = piSession.sessionManager.getLeafId();
-      if (sdkTurnAnchor) {
-        // Enrichment: main process reads `sdkTurnAnchor` off the forwarded event to
-        // set branch cutoff points. The SDK's event shape doesn't declare this field,
-        // so the cast is intentional.
+      // CRITICAL: do NOT read `getLeafId()` here.
+      //
+      // The Pi SDK fires `message_end` synchronously BEFORE calling
+      // `appendMessage(event.message)` (see `agent-session.js:_processAgentEvent`).
+      // At this moment the assistant entry does not yet exist in the
+      // SessionManager — `leafId` still points at the *previous* leaf, which for
+      // a plain text turn is the user message that triggered the response.
+      // Recording that wrong anchor and using it for `branch()` makes the next
+      // turn a sibling of the assistant message, dropping the assistant reply
+      // from the LLM's view of history (craft-agents-oss#782).
+      //
+      // Instead, attach the SDK's message id to the forwarded event so the main
+      // process can correlate this turn, then queue a microtask to read the
+      // correct leaf AFTER `appendMessage` has run. The microtask drains before
+      // any subsequent SDK event is dispatched, so the follow-up
+      // `pi_turn_anchor` event is delivered to the main process in the right
+      // order (after this `message_end`, before the next event).
+      const sdkMessageId = (msg as { id?: string }).id;
+      if (sdkMessageId) {
         forwardedEvent = {
           ...(event as Record<string, unknown>),
-          sdkTurnAnchor,
+          sdkMessageId,
         } as unknown as OutboundAgentEvent;
+
+        const sessionManagerSnapshot = piSession.sessionManager;
+        queueMicrotask(() => {
+          // Defensive: session may have been disposed between the message_end
+          // emit and the microtask drain.
+          if (!piSession || piSession.sessionManager !== sessionManagerSnapshot) {
+            return;
+          }
+          const sdkTurnAnchor = sessionManagerSnapshot.getLeafId();
+          if (!sdkTurnAnchor) return;
+          send({
+            type: 'event',
+            event: {
+              type: 'pi_turn_anchor',
+              sdkMessageId,
+              sdkTurnAnchor,
+            } as unknown as OutboundAgentEvent,
+          });
+        });
       }
 
       // Speculative prefetch: if the assistant message contains 2+ prefetchable tool calls,
@@ -1394,8 +1427,9 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
 
     debugLog(`Prompt failed: ${errorMsg}`);
     send({ type: 'error', message: errorMsg, code: 'prompt_error' });
-    // Send synthetic agent_end so the main process event queue unblocks
-    send({ type: 'event', event: { type: 'agent_end', messages: [] } });
+    // Send synthetic agent_end so the main process event queue unblocks.
+    // willRetry: false — this is the terminal error path, no retry follows.
+    send({ type: 'event', event: { type: 'agent_end', messages: [], willRetry: false } });
   }
 }
 

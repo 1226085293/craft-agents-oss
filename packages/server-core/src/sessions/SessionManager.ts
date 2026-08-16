@@ -1,12 +1,14 @@
-import type { EventSink } from '@craft-agent/server-core/transport'
+import type { EventSink, RpcServer } from '@craft-agent/server-core/transport'
+import { CLIENT_BROWSER_INVOKE } from '@craft-agent/server-core/transport'
 import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, BusyMessageDecision, BusyMessageDecisionInput } from '@craft-agent/server-core/handlers'
+import { RemoteBrowserPaneManager } from './RemoteBrowserPaneManager'
 import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@craft-agent/server-core/handlers'
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
 import { basename, dirname, join } from 'path'
 import { existsSync } from 'fs'
 import { copyFile, readFile, writeFile, mkdir, stat, rm } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
-import { type AgentEvent, setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary } from '@craft-agent/shared/agent'
+import { type AgentEvent, setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
 import {
   resolveSessionConnection,
   createBackendFromConnection,
@@ -18,11 +20,12 @@ import {
   type BackendHostRuntimeContext,
   type PostInitResult,
 } from '@craft-agent/shared/agent/backend'
-import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, resolveMidStreamBehavior } from '@craft-agent/shared/config'
+import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, resolveMidStreamBehavior, getPersistedUiLanguage, resolveTitleLanguageName } from '@craft-agent/shared/config'
+import type { MidStreamBehavior } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
-import { i18n, LOCALE_REGISTRY, type LanguageCode } from '@craft-agent/shared/i18n'
+import { i18n } from '@craft-agent/shared/i18n'
 import {
   getWorkspaces,
   getWorkspaceByNameOrId,
@@ -71,6 +74,8 @@ import {
   pickSessionFields,
 } from '@craft-agent/shared/sessions'
 import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, getSourceServerBuilder, type SourceWithCredential, isApiOAuthProvider, hasRenewEndpoint, SERVER_BUILD_ERRORS, TokenRefreshManager, createTokenGetter } from '@craft-agent/shared/sources'
+import { listTaskSlugs, parseTaskSpec, uniqueTaskSlug } from '@craft-agent/shared/tasks'
+import { createTaskFromSpec, resolveCreateTaskProjectId } from '../tasks'
 import { ConfigWatcher, type ConfigWatcherCallbacks } from '@craft-agent/shared/config'
 import { getValidClaudeOAuthToken } from '@craft-agent/shared/auth'
 import { resolveAuthEnvVars } from '@craft-agent/shared/config'
@@ -80,7 +85,7 @@ import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/shared/mcp'
 import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
-import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta } from '@craft-agent/core/types'
+import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta, type TokenUsage } from '@craft-agent/core/types'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages, normalizePath } from '@craft-agent/shared/utils'
 import { loadAllSkills, loadSkillBySlug, invalidateSkillsCache, type LoadedSkill } from '@craft-agent/shared/skills'
 import { invalidateContextFileCache } from '@craft-agent/shared/prompts/system'
@@ -90,12 +95,13 @@ import type { SummarizeCallback } from '@craft-agent/shared/sources'
 import { type ThinkingLevel, DEFAULT_THINKING_LEVEL, normalizeThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import { evaluateAutoLabels } from '@craft-agent/shared/labels/auto'
 import { listLabels, loadLabelConfig } from '@craft-agent/shared/labels/storage'
-import { extractLabelId, resolveSessionLabels } from '@craft-agent/shared/labels'
-import { ensureLabelsExist } from '@craft-agent/shared/labels/crud'
+import { extractLabelId, resolveSessionLabels, findTaskItemLabelId } from '@craft-agent/shared/labels'
+import { ensureLabelsExist, ensureTaskItemLabel } from '@craft-agent/shared/labels/crud'
 import { loadStatusConfig } from '@craft-agent/shared/statuses/storage'
 import { AutomationSystem, createPromptHistoryEntry, appendAutomationHistoryEntry, type AutomationSystemMetadataSnapshot } from '@craft-agent/shared/automations'
 import type { IMessagingGatewayRegistry } from '@craft-agent/server-core/handlers'
 import { buildBackendRuntimeSignature, buildRestartRequiredSignature, filterAttachmentsForModelInput } from './runtime-config'
+import { validateArchiveTarget } from './archive-guards'
 
 // Import from server-core domain utilities
 import { sanitizeForTitle, shouldActivateBrowserOverlay, normalizeBrowserToolName, rollbackFailedBranchCreation, releaseBrowserOwnershipOnForcedStop } from '@craft-agent/server-core/domain'
@@ -197,7 +203,7 @@ function getPiTurnAnchorsPath(sessionPath: string): string {
   return join(sessionPath, 'meta', PI_TURN_ANCHORS_FILE)
 }
 
-async function loadPiTurnAnchors(sessionPath: string): Promise<PiTurnAnchorsIndex> {
+export async function loadPiTurnAnchors(sessionPath: string): Promise<PiTurnAnchorsIndex> {
   const filePath = getPiTurnAnchorsPath(sessionPath)
   try {
     const raw = await readFile(filePath, 'utf-8')
@@ -227,7 +233,7 @@ async function getPiTurnAnchor(sessionPath: string, messageId: string): Promise<
   return index.anchors[messageId]
 }
 
-async function savePiTurnAnchor(sessionPath: string, messageId: string, anchorId: string): Promise<void> {
+export async function savePiTurnAnchor(sessionPath: string, messageId: string, anchorId: string): Promise<void> {
   if (!messageId || !anchorId) return
 
   const index = await loadPiTurnAnchors(sessionPath)
@@ -238,6 +244,39 @@ async function savePiTurnAnchor(sessionPath: string, messageId: string, anchorId
   const filePath = getPiTurnAnchorsPath(sessionPath)
   await mkdir(join(sessionPath, 'meta'), { recursive: true })
   await writeFile(filePath, JSON.stringify(index), 'utf-8')
+}
+
+/**
+ * Copy Pi turn anchors from the source session into the branch session,
+ * filtered to the messages actually carried into the branch.
+ *
+ * Without this, branching a branch is silently lossy: the source branch's
+ * sidecar contains no anchors for messages copied from its own parent, so a
+ * downstream branch falls back to "full-history fork" — discarding the
+ * branch cutoff and producing a session whose visible history doesn't match
+ * what the LLM sees. See craft-agents-oss#782.
+ */
+export async function copyPiTurnAnchorsForBranch(
+  sourceSessionPath: string,
+  branchSessionPath: string,
+  branchedMessageIds: Iterable<string>,
+): Promise<void> {
+  const index = await loadPiTurnAnchors(sourceSessionPath)
+  if (Object.keys(index.anchors).length === 0) return
+  const idSet = new Set(branchedMessageIds)
+  const filtered: Record<string, string> = {}
+  for (const [messageId, anchor] of Object.entries(index.anchors)) {
+    if (idSet.has(messageId)) {
+      filtered[messageId] = anchor
+    }
+  }
+  if (Object.keys(filtered).length === 0) return
+  await mkdir(join(branchSessionPath, 'meta'), { recursive: true })
+  await writeFile(
+    getPiTurnAnchorsPath(branchSessionPath),
+    JSON.stringify({ version: PI_TURN_ANCHORS_VERSION, anchors: filtered }),
+    'utf-8',
+  )
 }
 
 const CLAUDE_TURN_ANCHORS_VERSION = 1
@@ -369,8 +408,34 @@ async function buildServersFromSources(
     return undefined
   }
 
+  // Per-request credential getter for non-OAuth / non-renew API sources
+  // (bearer / header / query / basic auth).
+  //
+  // Without this, the in-process API tool captures the credential as a static
+  // string at build time and keeps using it forever — meaning a fresh JWT
+  // entered via source_credential_prompt is ignored until session restart.
+  //
+  // With this getter, every API call reads the latest credential from the
+  // vault, so credential updates take effect on the next call. OAuth and
+  // renew-endpoint sources have their own refresh logic via TokenRefreshManager
+  // and are skipped here.
+  const getCredentialForSource = (source: LoadedSource) => {
+    if (source.config.type !== 'api') return undefined
+    if (source.config.api?.authType === 'none') return undefined
+    if (isApiOAuthProvider(source.config.provider)) return undefined
+    if (source.config.api?.authType === 'oauth') return undefined
+    if (hasRenewEndpoint(source)) return undefined
+    return async () => credManager.getApiCredential(source)
+  }
+
   // Pass sessionPath to enable saving large API responses to session folder
-  const result = await serverBuilder.buildAll(sourcesWithCreds, getTokenForSource, sessionPath, summarize)
+  const result = await serverBuilder.buildAll(
+    sourcesWithCreds,
+    getTokenForSource,
+    sessionPath,
+    summarize,
+    getCredentialForSource,
+  )
   span.mark('servers.built')
   span.setMetadata('mcpCount', Object.keys(result.mcpServers).length)
   span.setMetadata('apiCount', Object.keys(result.apiServers).length)
@@ -698,6 +763,40 @@ async function resolveToolDisplayMeta(
 /** Agent type - unified backend interface for all providers */
 type AgentInstance = AgentBackend
 
+/**
+ * Status of a background task in the main-process registry.
+ * - `running`   — backgrounded and no terminal notification seen yet.
+ * - `completed`/`failed`/`stopped` — a real SDK task_notification arrived.
+ * - `orphaned`  — the turn that owned the task ended before a terminal
+ *   notification arrived. With the (default) per-turn subprocess model the task
+ *   almost certainly died with the subprocess, so reporting it as still
+ *   "running" would be a lie. Once WS2 keep-alive is enabled these are no longer
+ *   produced because the query outlives the turn.
+ */
+type BackgroundTaskStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'orphaned'
+
+/** A background task tracked from launch, for cross-subprocess status queries. */
+interface RunningBackgroundTask {
+  taskId: string
+  toolUseId?: string
+  intent?: string
+  /** ms timestamp when the task was backgrounded */
+  startTime: number
+  /** ms timestamp of the last task_progress notification, if any */
+  lastProgressAt?: number
+  /** elapsed seconds from the most recent progress notification, if any */
+  elapsedSeconds?: number
+  status: BackgroundTaskStatus
+  /** ms timestamp when the task reached a terminal/orphaned status */
+  completedAt?: number
+  /** turn that launched the task (used to orphan on that turn's completion) */
+  turnId?: string
+  /** Workflow run id (wf_...) — set when this task is a Workflow launch. */
+  workflowId?: string
+  /** Count of workflow sub-agents completed so far (Workflow tasks only). */
+  agentsCompleted?: number
+}
+
 interface ManagedSession {
   id: string
   workspace: Workspace
@@ -761,6 +860,22 @@ interface ManagedSession {
   enabledSourceSlugs?: string[]
   // Labels applied to this session (additive tags, many-per-session)
   labels?: string[]
+  // Workspace-scoped project binding (undefined = unbound)
+  projectId?: string
+  // Parent session id — when set, this session is a subtask of the parent (undefined = top-level task)
+  parentSessionId?: string
+  // Kanban board column id ('todo' | 'in-progress' | 'done'); independent of sessionStatus
+  kanbanColumn?: string
+  // Tasks Conductor: slug of the task spec this session belongs to (orchestrator + child nodes)
+  taskSlug?: string
+  // Tasks Conductor: id of the run that spawned this child session (child nodes only)
+  taskRunId?: string
+  // Tasks Conductor: id of the DAG node this child session executes (child nodes only)
+  taskNodeId?: string
+  // Tasks Conductor: total DAG node count (orchestrator only) — stable board progress denominator
+  taskNodeCount?: number
+  // Tasks Conductor: hidden generate-time orchestrator awaiting validated adoption (off the board)
+  taskDraft?: boolean
   // Working directory for this session (used by agent for bash commands)
   workingDirectory?: string
   // SDK cwd for session storage - set once at creation, never changes.
@@ -827,6 +942,14 @@ interface ManagedSession {
   backgroundShellCommands: Map<string, string>
   // Map of taskId -> output info for background task results
   backgroundTaskOutputs: Map<string, { outputFile: string; summary: string; status: string; completedAt: number }>
+  // Registry of background tasks (running + recently-terminal) for this session.
+  // Unlike backgroundTaskOutputs (which only stores COMPLETED tasks for output
+  // retrieval), this tracks tasks from the moment they are backgrounded, so a
+  // cross-subprocess "status?" query can enumerate what is actually live. The
+  // SDK's in-subprocess task tools cannot answer this: their state dies with the
+  // subprocess at turn end, so this main-process registry is the real source of
+  // truth for background-task status. See RunningBackgroundTask.
+  backgroundTaskRegistry: Map<string, RunningBackgroundTask>
   // Whether messages have been loaded from disk (for lazy loading)
   messagesLoaded: boolean
   // Pending auth request tracking (for unified auth flow)
@@ -886,6 +1009,58 @@ interface ManagedSession {
   // Whether the previous turn was interrupted (for context injection on next message).
   // Ephemeral — not persisted to disk. Cleared after one-shot injection.
   wasInterrupted?: boolean
+  /**
+   * Runtime-only: Pi SDK message id → Craft assistant message id.
+   * Populated when a `text_complete` arrives carrying `sdkMessageId`, and read
+   * when the follow-up `pi_turn_anchor` event arrives (deferred by one microtask
+   * so the SDK's session-manager has updated its leaf — see craft-agents-oss#782).
+   * Capped at PI_SDK_MESSAGE_ID_CACHE_LIMIT to bound memory in long sessions.
+   */
+  piSdkMessageToCraftMessage?: Map<string, string>
+  // Source-activation auto-retry (craft-agents-oss#804). When a source activates
+  // mid-turn, we re-send the original message with a "[<slug> activated]" suffix
+  // after a short delay. The pending slot lets `sendMessage` dedup a duplicate
+  // RPC from a legacy renderer that still ships the client-side auto_retry.
+  autoRetryTimer?: ReturnType<typeof setTimeout>
+  autoRetryPending?: {
+    content: string
+    deadlineMs: number
+    /** True after the first matching sendMessage consumes the slot; later matches drop. */
+    committed: boolean
+  }
+}
+
+const PI_SDK_MESSAGE_ID_CACHE_LIMIT = 256
+
+export interface AutoRetryPendingHost {
+  autoRetryPending?: {
+    content: string
+    deadlineMs: number
+    committed: boolean
+  }
+}
+
+export function claimAutoRetryPending(
+  host: AutoRetryPendingHost,
+  message: string,
+  nowMs = Date.now(),
+): 'send' | 'drop' {
+  const pending = host.autoRetryPending
+  if (pending && message === pending.content) {
+    if (nowMs < pending.deadlineMs) {
+      if (pending.committed) return 'drop'
+      pending.committed = true
+      return 'send'
+    }
+    host.autoRetryPending = undefined
+    return 'send'
+  }
+
+  if (pending && nowMs >= pending.deadlineMs) {
+    host.autoRetryPending = undefined
+  }
+
+  return 'send'
 }
 
 /**
@@ -930,6 +1105,7 @@ export function createManagedSession(
     messageQueue: [],
     backgroundShellCommands: new Map(),
     backgroundTaskOutputs: new Map(),
+    backgroundTaskRegistry: new Map(),
     messagesLoaded: false,
     tokenRefreshManager: new TokenRefreshManager(getSourceCredentialManager(), {
       log: (msg) => sessionLog.debug(msg),
@@ -1002,6 +1178,46 @@ interface PendingDelta {
   turnId?: string
 }
 
+/**
+ * In-process session-completion signal for the Tasks Conductor.
+ *
+ * Emitted once per turn from `onProcessingStopped` when the session's message
+ * queue is empty (i.e. true completion, not a hand-off between queued turns),
+ * carrying the stop `reason`. This is an internal, side-effect-free seam — it is
+ * NOT a renderer event and NOT exposed to agents. The Conductor maps the reason
+ * onto a node run-state: complete→done, error/timeout→failed, interrupted→cancelled.
+ */
+export interface SessionCompletionEvent {
+  sessionId: string
+  workspaceId: string
+  reason: 'complete' | 'interrupted' | 'error' | 'timeout'
+  /** The final (non-intermediate) assistant message id for this turn, if any. */
+  finalMessageId?: string
+  /** Convenience copy of the final assistant message text (same as getSessionFinalText). */
+  finalText?: string
+  /** The session's cumulative token usage, so the Conductor can meter token_budget without re-fetching. */
+  tokenUsage?: TokenUsage
+}
+
+export interface MidStreamDeliveryOutcome {
+  shouldQueue: boolean
+  wasInterrupted: boolean
+}
+
+/**
+ * Translate backend delivery into queue/interruption semantics. Queue mode never
+ * aborts the active turn; a failed steer does, and must annotate the replay.
+ */
+export function resolveMidStreamDeliveryOutcome(
+  behavior: MidStreamBehavior,
+  steered: boolean,
+): MidStreamDeliveryOutcome {
+  return {
+    shouldQueue: !steered,
+    wasInterrupted: behavior === 'steer' && !steered,
+  }
+}
+
 export class SessionManager implements ISessionManager {
   private sessions: Map<string, ManagedSession> = new Map()
   // Delta batching for performance - reduces IPC events from 50+/sec to ~20/sec
@@ -1039,6 +1255,17 @@ export class SessionManager implements ISessionManager {
   private initGate = new InitGate()
   // O(1) index: taskId → sessionId for background task output lookup (avoids O(n) session scan)
   private taskOutputIndex: Map<string, string> = new Map()
+  /**
+   * WS2 keep-alive flag (default ON, opt-out via `CRAFT_KEEP_BG_AGENTS_ALIVE=0`).
+   * When true, a persistent streaming query keeps the subprocess alive across
+   * turns so background sub-agents survive, and orphaning is suppressed. When
+   * false (kill-switch), sub-agents are bound to a single turn's subprocess and
+   * die at turn end, so markOrphanedBackgroundTasks() flips still-running registry
+   * entries to `orphaned` on turn completion. Resolved via the shared
+   * `resolveKeepBackgroundTasksAlive` so the main process and the Claude backend
+   * can never disagree about whether keep-alive is on.
+   */
+  private readonly keepBackgroundTasksAlive: boolean = resolveKeepBackgroundTasksAlive()
   /**
    * Per-session in-flight runtime-refresh promise. Ensures `updateRuntimeConfig`
    * (or a dispose) cannot overlap with another refresh OR with a send-path
@@ -1104,6 +1331,10 @@ export class SessionManager implements ISessionManager {
   }
 
   private browserPaneManager: IBrowserPaneManager | null = null
+  private rpcServer: RpcServer | null = null
+  private remoteBpms = new Map<string, RemoteBrowserPaneManager>()
+  /** Pinned desktop client per session for `client:browser:invoke` routing. */
+  private browserHostByCanvas = new Map<string, string>()
   private eventSink: EventSink | null = null
 
   setEventSink(sink: EventSink): void {
@@ -1113,6 +1344,100 @@ export class SessionManager implements ISessionManager {
   setBrowserPaneManager(bpm: IBrowserPaneManager): void {
     this.browserPaneManager = bpm
     bpm.setSessionPathResolver((sessionId) => this.getSessionPath(sessionId))
+  }
+
+  /**
+   * Provide the WS RPC server so remote clients can host browser tools.
+   *
+   * When called, the SM activates the remote-bridge code path: per-session
+   * `RemoteBrowserPaneManager` instances are created lazily by
+   * {@link getBrowserPaneManagerForSession}, and the browser-host client is
+   * resolved via {@link getBrowserHostClient} with capability-aware fallback.
+   *
+   * Local Electron callers do not need to call this — they already
+   * call `setBrowserPaneManager(bpm)` with the in-process BPM, which takes
+   * precedence over the remote bridge in {@link getBrowserPaneManagerForSession}.
+   */
+  setRpcServer(server: RpcServer): void {
+    this.rpcServer = server
+    sessionLog.info('[browser-pane] setRpcServer called — remote browser bridge is now available')
+  }
+
+  /**
+   * Resolve the {@link IBrowserPaneManager} that owns the user's local browser
+   * for a given session. Returns:
+   *
+   * 1. The locally-injected `browserPaneManager` when present (Electron client co-located
+   *    with the agent), regardless of session.
+   * 2. A session-bound {@link RemoteBrowserPaneManager} when `rpcServer` is set.
+   *    Cached in `remoteBpms` so repeat lookups don't allocate.
+   * 3. `null` when there's neither a local BPM nor an RPC server.
+   */
+  getBrowserPaneManagerForSession(sid: string): IBrowserPaneManager | null {
+    if (this.browserPaneManager) return this.browserPaneManager
+    if (!this.rpcServer) return null
+
+    const cached = this.remoteBpms.get(sid)
+    if (cached) return cached
+
+    const session = this.sessions.get(sid)
+    if (!session) return null
+
+    const bridge = new RemoteBrowserPaneManager({
+      sessionId: sid,
+      workspaceId: session.workspace.id,
+      rpcServer: this.rpcServer,
+      getHostClient: () => this.getBrowserHostClient(sid),
+    })
+    this.remoteBpms.set(sid, bridge)
+    return bridge
+  }
+
+  /**
+   * Record which desktop client should host this session's browser. Called
+   * with `ctx.clientId` from the `sessions.sendMessage` RPC handler so the
+   * agent's browser_* tools route back to the client that posted the message.
+   *
+   * No-op when `callerClientId` is undefined — preserves the existing pin
+   * (lets reconnected clients continue holding the host role).
+   */
+  private setLastMessageClientId(sid: string, callerClientId: string | undefined): void {
+    if (!callerClientId) return
+    this.browserHostByCanvas.set(sid, callerClientId)
+  }
+
+  /**
+   * Called by the transport bootstrap on `onClientDisconnected`. Drops any
+   * pins held by `clientId` so the next browser tool call re-resolves via
+   * {@link findClientsWithCapability} instead of trying to ship to a dead client.
+   */
+  onClientDisconnected(clientId: string): void {
+    for (const [sid, pinned] of this.browserHostByCanvas) {
+      if (pinned === clientId) this.browserHostByCanvas.delete(sid)
+    }
+  }
+
+  /**
+   * Pinned client first, with fallback to any connected client for the workspace
+   * that advertises `client:browser:invoke`. The fallback handles reconnect-with-
+   * new-clientId so the agent isn't stuck waiting for another user message.
+   */
+  private getBrowserHostClient(sid: string): string | null {
+    if (!this.rpcServer) return null
+    const pinned = this.browserHostByCanvas.get(sid)
+    if (pinned && this.rpcServer.hasClientCapability(pinned, CLIENT_BROWSER_INVOKE)) {
+      return pinned
+    }
+    const session = this.sessions.get(sid)
+    if (!session) return null
+    const candidates = this.rpcServer.findClientsWithCapability(
+      CLIENT_BROWSER_INVOKE,
+      { workspaceId: session.workspace.id },
+    )
+    const fallback = candidates[0]
+    if (!fallback) return null
+    this.browserHostByCanvas.set(sid, fallback)
+    return fallback
   }
 
   /** Returns a strictly increasing timestamp (ms). When Date.now() collides with
@@ -1224,6 +1549,18 @@ export class SessionManager implements ISessionManager {
     if (managed.name !== header.name) {
       managed.name = header.name
       this.sendEvent({ type: 'name_changed', sessionId, name: header.name }, managed.workspace.id)
+      changed = true
+    }
+
+    // Project binding (no dedicated event today — handled via metaChanged broadcast)
+    if (managed.projectId !== header.projectId) {
+      managed.projectId = header.projectId
+      changed = true
+    }
+
+    // Kanban column (mutable via drag; reconcile external/multi-window changes)
+    if (managed.kanbanColumn !== header.kanbanColumn) {
+      managed.kanbanColumn = header.kanbanColumn
       changed = true
     }
 
@@ -1709,6 +2046,11 @@ export class SessionManager implements ISessionManager {
           // This dramatically reduces memory usage at startup - messages are loaded
           // when getSession() is called for a specific session
           const managed = createManagedSession(meta, workspace, {
+            // The header carries the session's explicit source selection (persisted at
+            // creation / by setSessionSources). Seed it now so the renderer's very first
+            // session list shows the right chips — sessions without one hydrate any legacy
+            // body value on message load (see hydrateMessagesForColdPersist).
+            enabledSourceSlugs: meta.enabledSourceSlugs,
             workingDirectory: meta.workingDirectory ?? wsDefaultWorkingDir,
           })
 
@@ -2538,7 +2880,15 @@ export class SessionManager implements ISessionManager {
     return getSessionStoragePath(managed.workspace.rootPath, sessionId)
   }
 
-  async createSession(workspaceId: string, options?: import('@craft-agent/shared/protocol').CreateSessionOptions): Promise<Session> {
+  async createSession(
+    workspaceId: string,
+    options?: import('@craft-agent/shared/protocol').CreateSessionOptions,
+    // Transport concern, deliberately NOT on the wire DTO: by default every created session is
+    // announced to the renderer (see notifySessionCreated). Callers that register the session
+    // themselves — the `sessions:create` RPC adds it from the return value — pass
+    // `{ emitCreatedEvent: false }` to avoid a redundant hydrate.
+    internal?: { emitCreatedEvent?: boolean },
+  ): Promise<Session> {
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) {
       throw new Error(`Workspace ${workspaceId} not found`)
@@ -2609,6 +2959,38 @@ export class SessionManager implements ISessionManager {
       resolvedWorkingDir = options.workingDirectory
     }
 
+    // Resolve project binding. When a projectId is provided and the project has a
+    // workingDirectory configured, inherit it (only when the caller didn't pass an
+    // explicit override). This lets "+ New session in {project}" reuse the project's
+    // bound directory without duplicating logic on the renderer side.
+    // Subtasks inherit the parent's project when the caller didn't bind one explicitly —
+    // a child of a project-bound task belongs to that project (board quick-add passes none),
+    // so project-scoped filtering sees the whole task family.
+    const inheritedProjectId = options?.parentSessionId
+      ? this.sessions.get(options.parentSessionId)?.projectId
+      : undefined
+    const requestedProjectId = options?.projectId ?? inheritedProjectId
+    let resolvedProjectId: string | undefined
+    if (requestedProjectId) {
+      const { loadProjectById } = await import('@craft-agent/shared/projects')
+      const project = loadProjectById(workspaceRootPath, requestedProjectId)
+      if (!project) {
+        // An EXPLICIT binding to a missing project is a caller bug; an inherited one
+        // (parent's project deleted since) just no-ops rather than failing the child.
+        if (options?.projectId) {
+          throw new Error(`Project ${options.projectId} not found in workspace ${workspaceId}`)
+        }
+      } else {
+        resolvedProjectId = project.config.id
+        if (
+          (options?.workingDirectory === undefined || options?.workingDirectory === 'user_default') &&
+          project.config.workingDirectory
+        ) {
+          resolvedWorkingDir = project.config.workingDirectory
+        }
+      }
+    }
+
     // Validate branch request up-front so branch metadata is only set for valid branches.
     // This prevents creating sessions that claim to be branched but don't have copied history.
     let validatedBranch: {
@@ -2621,6 +3003,7 @@ export class SessionManager implements ISessionManager {
       branchFromSessionPath?: string
       branchFromSdkCwd?: string
       branchFromSdkTurnId?: string
+      sourceProvider?: 'anthropic' | 'pi'
     } | undefined
 
     if (options?.branchFromSessionId || options?.branchFromMessageId) {
@@ -2784,6 +3167,7 @@ export class SessionManager implements ISessionManager {
         branchFromSessionPath,
         branchFromSdkCwd,
         branchFromSdkTurnId,
+        sourceProvider: sourceBackendContext.provider,
       }
 
       sessionLog.info('Branch validation succeeded', {
@@ -2806,6 +3190,16 @@ export class SessionManager implements ISessionManager {
       sessionStatus: options?.sessionStatus,
       labels: options?.labels,
       isFlagged: options?.isFlagged,
+      projectId: resolvedProjectId,
+      parentSessionId: options?.parentSessionId,
+      taskSlug: options?.taskSlug,
+      taskRunId: options?.taskRunId,
+      taskNodeId: options?.taskNodeId,
+      taskDraft: options?.taskDraft,
+      // Persist only an EXPLICIT selection (e.g. a task's spec.sources on its subtasks).
+      // The workspace-default fallback stays dynamic — freezing it into the header would
+      // pin every ordinary session to the defaults as of its creation time.
+      enabledSourceSlugs: options?.enabledSourceSlugs,
     })
 
     // Branch: copy messages from source session up to and including the branch point
@@ -2846,6 +3240,29 @@ export class SessionManager implements ISessionManager {
         delete branchedStored.branchFromSdkTurnId
       }
       await saveStoredSession(branchedStored)
+
+      // Propagate the Pi turn-anchor sidecar into the branch so a downstream
+      // branch can still resolve anchors for messages copied here from the
+      // source. Without this step, branch-of-branch silently falls back to
+      // full-history fork — see craft-agents-oss#782.
+      if (
+        validatedBranch.branchContextStrategy === 'sdk-fork' &&
+        validatedBranch.sourceProvider === 'pi'
+      ) {
+        try {
+          await copyPiTurnAnchorsForBranch(
+            sourceDir,
+            branchDir,
+            branchedStored.messages.map((m) => m.id),
+          )
+        } catch (err) {
+          sessionLog.warn('Failed to copy Pi turn-anchors sidecar to branch', {
+            err,
+            sourceSessionId: validatedBranch.sourceSessionId,
+            branchSessionId: storedSession.id,
+          })
+        }
+      }
     }
 
     // Resolve connection/provider/auth/model using the provider-agnostic backend resolver.
@@ -2906,6 +3323,12 @@ export class SessionManager implements ISessionManager {
             workspaceRootPath,
             sessionId: storedSession.id,
             deleteFromRuntimeSessions: (id) => {
+              const m = this.sessions.get(id)
+              if (m?.autoRetryTimer) {
+                clearTimeout(m.autoRetryTimer)
+                m.autoRetryTimer = undefined
+              }
+              if (m) m.autoRetryPending = undefined
               this.sessions.delete(id)
             },
             deleteStoredSession,
@@ -2939,9 +3362,47 @@ export class SessionManager implements ISessionManager {
       })
     }
 
-    this.sendEvent({ type: 'session_created', sessionId: storedSession.id }, workspace.id)
+    // Reserved "Task" label: task flows opt in so the tile (and its subtasks, which inherit the
+    // parent's number) are filterable as tasks from the moment they exist. Applied before the
+    // created-event so the renderer hydrates the label with the rest of the metadata. Fail-soft:
+    // a label problem must never abort session creation.
+    if (options?.applyTaskLabel) {
+      try {
+        await this.applyTaskLabel(storedSession.id, { parentSessionId: options?.parentSessionId })
+      } catch (error) {
+        sessionLog.warn('Failed to apply Task label to new session', {
+          sessionId: storedSession.id,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+
+    // Announce by default so the renderer hydrates full metadata (name, parentSessionId, …)
+    // instead of fabricating a titleless "New Chat" from the first streamed event. Emitted at
+    // the very end so a thrown branch-preflight failure above never announces an orphan.
+    if (internal?.emitCreatedEvent !== false) {
+      this.notifySessionCreated(workspaceId, storedSession.id)
+    }
 
     return managedToSession(managed, isBranch ? { messages: managed.messages } : undefined)
+  }
+
+  /**
+   * Announce a session to the renderer so it hydrates full metadata (name, parentSessionId, …)
+   * instead of fabricating a "New Chat" placeholder from the first streamed event.
+   *
+   * `createSession` calls this by default, so server-side creators get it for free. Use it
+   * directly only for sessions built outside `createSession` (e.g. the SessionBundle import
+   * path, which assembles a ManagedSession by hand). The renderer handler is idempotent.
+   */
+  notifySessionCreated(workspaceId: string, sessionId: string): void {
+    this.sendEvent({ type: 'session_created', sessionId }, workspaceId)
+  }
+
+  /** Resolved working directory of a live session (used by the Tasks Conductor so child
+   *  sessions inherit the orchestrator's cwd). Undefined if the session has none or is unknown. */
+  getSessionWorkingDirectory(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.workingDirectory
   }
 
   private async disposeManagedAgentRuntime(managed: ManagedSession, reason: string): Promise<void> {
@@ -3276,6 +3737,7 @@ export class SessionManager implements ISessionManager {
         llmConnection: managed.llmConnection,
         permissionMode: managed.permissionMode,
         previousPermissionMode: managed.previousPermissionMode,
+        projectId: managed.projectId,
       }
 
       const onSdkSessionIdUpdate = (sdkSessionId: string) => {
@@ -3493,20 +3955,42 @@ export class SessionManager implements ISessionManager {
       }
 
       // Wire up browser pane tools — merge BrowserPaneFns into session callbacks
-      // so browser_* tools can delegate to BrowserPaneManager
-      if (this.browserPaneManager) {
-        const bpm = this.browserPaneManager
+      // so browser_* tools can delegate to BrowserPaneManager.
+      //
+      // Always register when EITHER a local BPM is set OR an RPC server is
+      // available (which lets `getBrowserPaneManagerForSession` lazily build a
+      // RemoteBrowserPaneManager). Calls fail per-method with
+      // BROWSER_NO_CAPABLE_CLIENT if no desktop client is connected, instead
+      // of "tool unavailable".
+      sessionLog.info('[browser-pane] BPF gate check', {
+        sessionId: managed.id,
+        hasLocalBpm: !!this.browserPaneManager,
+        hasRpcServer: !!this.rpcServer,
+      })
+      if (this.browserPaneManager || this.rpcServer) {
         const sid = managed.id
+        const bpm = this.getBrowserPaneManagerForSession(sid)
+        if (!bpm) {
+          throw new Error('Browser pane manager unavailable despite passing the gate — this is a bug.')
+        }
+        sessionLog.info('[browser-pane] BPF block resolved BPM', {
+          sessionId: sid,
+          bpmKind: this.browserPaneManager === bpm ? 'local' : 'remote',
+        })
 
-        const resolveSessionBrowserInstance = (toolName: string, options?: { show?: boolean }): string => {
-          const instanceId = bpm.createForSession(sid, { show: options?.show ?? false })
-          const info = bpm.getInstance(instanceId)
+        const workspaceId = managed.workspace.id
+        const resolveSessionBrowserInstance = async (toolName: string, options?: { show?: boolean }): Promise<string> => {
+          const instanceId = await bpm.createForSessionAsync(sid, {
+            show: options?.show ?? false,
+            workspaceId,
+          })
+          const info = await bpm.getInstanceAsync(instanceId)
           sessionLog.info(`[browser-pane] tool target resolved: ${toolName} session=${sid} instance=${instanceId} ownerType=${info?.ownerType ?? 'unknown'} ownerSessionId=${info?.ownerSessionId ?? 'none'} visible=${info?.isVisible ?? false}`)
           return instanceId
         }
 
-        const resolveLifecycleWindowTarget = (command: 'release' | 'close' | 'hide', requestedInstanceId?: string) => {
-          const windows = bpm.listInstances()
+        const resolveLifecycleWindowTarget = async (command: 'release' | 'close' | 'hide', requestedInstanceId?: string) => {
+          const windows = await bpm.listInstancesAsync()
 
           if (windows.length === 0) {
             return { windows, reason: 'No browser windows are available. Use "open" first.' }
@@ -3551,110 +4035,111 @@ export class SessionManager implements ISessionManager {
           return { windows, target: validated.target }
         }
 
+        sessionLog.info('[browser-pane] BPF registering browserPaneFns', { sessionId: sid })
         mergeSessionScopedToolCallbacks(sid, {
           browserPaneFns: {
             openPanel: async (options) => {
               const instanceId = options?.background
-                ? bpm.createForSession(sid, { show: false })
-                : bpm.focusBoundForSession(sid)
-              const info = bpm.getInstance(instanceId)
+                ? await bpm.createForSessionAsync(sid, { show: false, workspaceId })
+                : await bpm.focusBoundForSessionAsync(sid, { workspaceId })
+              const info = await bpm.getInstanceAsync(instanceId)
               sessionLog.info(`[browser-pane] route decision: browser_open session=${sid} instance=${instanceId} background=${options?.background ?? false} ownerType=${info?.ownerType ?? 'unknown'} ownerSessionId=${info?.ownerSessionId ?? 'none'} visible=${info?.isVisible ?? false}`)
               return { instanceId }
             },
-            navigate: (url) => {
-              const instanceId = resolveSessionBrowserInstance('browser_navigate')
+            navigate: async (url) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_navigate')
               return bpm.navigate(instanceId, url)
             },
-            snapshot: () => {
-              const instanceId = resolveSessionBrowserInstance('browser_snapshot')
+            snapshot: async () => {
+              const instanceId = await resolveSessionBrowserInstance('browser_snapshot')
               return bpm.getAccessibilitySnapshot(instanceId)
             },
-            click: (ref, options) => {
-              const instanceId = resolveSessionBrowserInstance('browser_click')
+            click: async (ref, options) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_click')
               return bpm.clickElement(instanceId, ref, options)
             },
-            clickAt: (x, y) => {
-              const instanceId = resolveSessionBrowserInstance('browser_click_at')
+            clickAt: async (x, y) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_click_at')
               return bpm.clickAtCoordinates(instanceId, x, y)
             },
-            drag: (x1, y1, x2, y2) => {
-              const instanceId = resolveSessionBrowserInstance('browser_drag')
+            drag: async (x1, y1, x2, y2) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_drag')
               return bpm.drag(instanceId, x1, y1, x2, y2)
             },
-            fill: (ref, value) => {
-              const instanceId = resolveSessionBrowserInstance('browser_fill')
+            fill: async (ref, value) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_fill')
               return bpm.fillElement(instanceId, ref, value)
             },
-            type: (text) => {
-              const instanceId = resolveSessionBrowserInstance('browser_type')
+            type: async (text) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_type')
               return bpm.typeText(instanceId, text)
             },
-            select: (ref, value) => {
-              const instanceId = resolveSessionBrowserInstance('browser_select')
+            select: async (ref, value) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_select')
               return bpm.selectOption(instanceId, ref, value)
             },
-            setClipboard: (text) => {
-              const instanceId = resolveSessionBrowserInstance('browser_set_clipboard')
+            setClipboard: async (text) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_set_clipboard')
               return bpm.setClipboard(instanceId, text)
             },
-            getClipboard: () => {
-              const instanceId = resolveSessionBrowserInstance('browser_get_clipboard')
+            getClipboard: async () => {
+              const instanceId = await resolveSessionBrowserInstance('browser_get_clipboard')
               return bpm.getClipboard(instanceId)
             },
-            screenshot: (options) => {
-              const instanceId = resolveSessionBrowserInstance('browser_screenshot')
+            screenshot: async (options) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_screenshot')
               return bpm.screenshot(instanceId, options)
             },
-            screenshotRegion: (options) => {
-              const instanceId = resolveSessionBrowserInstance('browser_screenshot_region')
+            screenshotRegion: async (options) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_screenshot_region')
               return bpm.screenshotRegion(instanceId, options)
             },
-            getConsoleLogs: (options) => {
-              const instanceId = resolveSessionBrowserInstance('browser_console')
-              return Promise.resolve(bpm.getConsoleLogs(instanceId, options))
+            getConsoleLogs: async (options) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_console')
+              return bpm.getConsoleLogs(instanceId, options)
             },
-            windowResize: (options) => {
-              const instanceId = resolveSessionBrowserInstance('browser_window_resize')
-              return Promise.resolve(bpm.windowResize(instanceId, options.width, options.height))
+            windowResize: async (options) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_window_resize')
+              return bpm.windowResize(instanceId, options.width, options.height)
             },
-            getNetworkLogs: (options) => {
-              const instanceId = resolveSessionBrowserInstance('browser_network')
-              return Promise.resolve(bpm.getNetworkLogs(instanceId, options))
+            getNetworkLogs: async (options) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_network')
+              return bpm.getNetworkLogs(instanceId, options)
             },
-            waitFor: (options) => {
-              const instanceId = resolveSessionBrowserInstance('browser_wait')
+            waitFor: async (options) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_wait')
               return bpm.waitFor(instanceId, options)
             },
-            sendKey: (options) => {
-              const instanceId = resolveSessionBrowserInstance('browser_key')
+            sendKey: async (options) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_key')
               return bpm.sendKey(instanceId, options)
             },
-            getDownloads: (options) => {
-              const instanceId = resolveSessionBrowserInstance('browser_downloads')
+            getDownloads: async (options) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_downloads')
               return bpm.getDownloads(instanceId, options)
             },
-            upload: (ref, filePaths) => {
-              const instanceId = resolveSessionBrowserInstance('browser_upload')
+            upload: async (ref, filePaths) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_upload')
               return bpm.uploadFile(instanceId, ref, filePaths).then(() => {})
             },
-            scroll: (direction, amount) => {
-              const instanceId = resolveSessionBrowserInstance('browser_scroll')
+            scroll: async (direction, amount) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_scroll')
               return bpm.scroll(instanceId, direction, amount)
             },
-            goBack: () => {
-              const instanceId = resolveSessionBrowserInstance('browser_back')
+            goBack: async () => {
+              const instanceId = await resolveSessionBrowserInstance('browser_back')
               return bpm.goBack(instanceId)
             },
-            goForward: () => {
-              const instanceId = resolveSessionBrowserInstance('browser_forward')
+            goForward: async () => {
+              const instanceId = await resolveSessionBrowserInstance('browser_forward')
               return bpm.goForward(instanceId)
             },
-            evaluate: (expression) => {
-              const instanceId = resolveSessionBrowserInstance('browser_evaluate')
+            evaluate: async (expression) => {
+              const instanceId = await resolveSessionBrowserInstance('browser_evaluate')
               return bpm.evaluate(instanceId, expression)
             },
             focusWindow: async (targetInstanceId) => {
-              const windows = bpm.listInstances()
+              const windows = await bpm.listInstancesAsync()
               if (windows.length === 0) {
                 throw new Error('No browser windows available to focus. Use "open" first.')
               }
@@ -3676,11 +4161,11 @@ export class SessionManager implements ISessionManager {
               }
 
               if (!target.boundSessionId) {
-                bpm.bindSession(target.id, sid)
+                bpm.bindSession(target.id, sid, { workspaceId })
               }
 
               bpm.focus(target.id)
-              const focused = bpm.getInstance(target.id)
+              const focused = await bpm.getInstanceAsync(target.id)
               return {
                 instanceId: target.id,
                 title: focused?.title ?? target.title,
@@ -3689,10 +4174,10 @@ export class SessionManager implements ISessionManager {
             },
             releaseControl: async (requestedInstanceId) => {
               if (requestedInstanceId === 'all') {
-                const before = bpm.listInstances()
+                const before = await bpm.listInstancesAsync()
                 const beforeActive = before.filter((w) => !!w.agentControlActive).length
                 bpm.clearAgentControl(sid)
-                const after = bpm.listInstances()
+                const after = await bpm.listInstancesAsync()
                 const afterActive = after.filter((w) => !!w.agentControlActive).length
                 const released = afterActive < beforeActive
 
@@ -3706,7 +4191,7 @@ export class SessionManager implements ISessionManager {
                 }
               }
 
-              const resolution = resolveLifecycleWindowTarget('release', requestedInstanceId)
+              const resolution = await resolveLifecycleWindowTarget('release', requestedInstanceId)
               if (!resolution.target) {
                 sessionLog.info(`[browser-pane] lifecycle release session=${sid} requested=${requestedInstanceId ?? 'auto'} result=noop reason=${resolution.reason}`)
                 return {
@@ -3730,7 +4215,7 @@ export class SessionManager implements ISessionManager {
               }
             },
             closeWindow: async (requestedInstanceId) => {
-              const resolution = resolveLifecycleWindowTarget('close', requestedInstanceId)
+              const resolution = await resolveLifecycleWindowTarget('close', requestedInstanceId)
               if (!resolution.target) {
                 sessionLog.info(`[browser-pane] lifecycle close session=${sid} requested=${requestedInstanceId ?? 'auto'} result=noop reason=${resolution.reason}`)
                 return {
@@ -3752,7 +4237,7 @@ export class SessionManager implements ISessionManager {
               }
             },
             hideWindow: async (requestedInstanceId) => {
-              const resolution = resolveLifecycleWindowTarget('hide', requestedInstanceId)
+              const resolution = await resolveLifecycleWindowTarget('hide', requestedInstanceId)
               if (!resolution.target) {
                 sessionLog.info(`[browser-pane] lifecycle hide session=${sid} requested=${requestedInstanceId ?? 'auto'} result=noop reason=${resolution.reason}`)
                 return {
@@ -3774,10 +4259,10 @@ export class SessionManager implements ISessionManager {
               }
             },
             listWindows: async () => {
-              return bpm.listInstances()
+              return bpm.listInstancesAsync()
             },
             detectChallenge: async () => {
-              const instanceId = resolveSessionBrowserInstance('browser_detect_challenge')
+              const instanceId = await resolveSessionBrowserInstance('browser_detect_challenge')
               return bpm.detectSecurityChallenge(instanceId)
             },
           } satisfies BrowserPaneFns,
@@ -3947,10 +4432,13 @@ export class SessionManager implements ISessionManager {
 
             // Release browser overlay + session binding because the agent is no longer running.
             // Plan submission pauses execution until user review, so browser ownership should not remain locked.
-            await releaseBrowserOwnershipOnForcedStop(this.browserPaneManager, managed.id)
+            await releaseBrowserOwnershipOnForcedStop(
+              (sid) => this.getBrowserPaneManagerForSession(sid),
+              managed.id,
+            )
 
             // Send complete event so renderer knows processing stopped (include tokenUsage for real-time updates)
-            this.sendEvent({ type: 'complete', sessionId: managed.id, tokenUsage: managed.tokenUsage }, managed.workspace.id)
+            this.sendEvent({ type: 'complete', sessionId: managed.id, tokenUsage: managed.tokenUsage, backgroundTasksAlive: this.keepBackgroundTasksAlive }, managed.workspace.id)
 
             // Persist session state
             this.persistSession(managed)
@@ -4002,10 +4490,13 @@ export class SessionManager implements ISessionManager {
           this.setProcessing(managed, false)
 
           // Release browser overlay + session binding because the agent is paused awaiting user auth.
-          void releaseBrowserOwnershipOnForcedStop(this.browserPaneManager, managed.id)
+          void releaseBrowserOwnershipOnForcedStop(
+            (sid) => this.getBrowserPaneManagerForSession(sid),
+            managed.id,
+          )
 
           // Send complete event so renderer knows processing stopped (include tokenUsage for real-time updates)
-          this.sendEvent({ type: 'complete', sessionId: managed.id, tokenUsage: managed.tokenUsage }, managed.workspace.id)
+          this.sendEvent({ type: 'complete', sessionId: managed.id, tokenUsage: managed.tokenUsage, backgroundTasksAlive: this.keepBackgroundTasksAlive }, managed.workspace.id)
         }
 
         // Emit auth_request event to renderer
@@ -4036,6 +4527,9 @@ export class SessionManager implements ISessionManager {
           thinkingLevel: request.thinkingLevel ?? managed.thinkingLevel,
           labels: request.labels ?? managed.labels,
           workingDirectory: request.workingDirectory,
+          projectId: request.projectId ?? managed.projectId,
+          // Spawned sessions become subtasks of the spawning session.
+          parentSessionId: managed.id,
         })
 
         // Build FileAttachment[] from paths (if any)
@@ -4062,10 +4556,7 @@ export class SessionManager implements ISessionManager {
           if (attachments.length > 0) fileAttachments = attachments
         }
 
-        // Notify renderer to hydrate full session metadata (including name)
-        // before streaming events arrive. Without this, the renderer creates
-        // a synthetic empty session and shows "New Chat" in the sidebar.
-        this.sendEvent({ type: 'session_created', sessionId: session.id }, managed.workspace.id)
+        // (session_created is emitted by createSession above.)
 
         // Fire and forget — send the message but don't await completion
         this.sendMessage(session.id, request.prompt, fileAttachments).catch(err => {
@@ -4089,6 +4580,76 @@ export class SessionManager implements ISessionManager {
         setSessionStatusFn: async (sessionId: string | undefined, status: string) => {
           await this.setSessionStatus(sessionId ?? managed.id, status as SessionStatus)
         },
+        // archive_session — archive/unarchive ANOTHER session by ID. Scoped to the
+        // invoking session's workspace and blocked mid-turn (guard logic lives in
+        // archive-guards.ts so it is unit-testable); delegates to the existing
+        // archive/unarchive methods (which persist + emit events).
+        archiveSessionFn: async (sessionId: string, archived: boolean) => {
+          const target = this.sessions.get(sessionId)
+          const guardError = validateArchiveTarget(
+            target ? { workspaceId: target.workspace.id, isProcessing: target.isProcessing } : undefined,
+            managed.workspace.id,
+            sessionId,
+            archived
+          )
+          if (guardError) throw new Error(guardError)
+          if (archived) {
+            await this.archiveSession(sessionId)
+          } else {
+            await this.unarchiveSession(sessionId)
+          }
+        },
+        // create_task — create a Task (board card + task.yaml + orchestrator session)
+        // WITHOUT running it. Spec building happens here (not in session-tools-core,
+        // which must stay dependency-free of @craft-agent/shared); the creation flow
+        // itself is createTaskFromSpec, shared verbatim with the tasks:create RPC.
+        createTaskFn: async (input) => {
+          const ws = managed.workspace
+          // Match spawn_session: an explicit project wins, otherwise keep newly
+          // captured work in the project that owns the invoking session.
+          const projectId = resolveCreateTaskProjectId(input.projectId, managed.projectId)
+          // Slug is derived from the title and must never overwrite an existing task
+          // (unlike the TaskEditor, where re-saving the same slug is the edit flow).
+          const slug = uniqueTaskSlug(input.title, new Set(listTaskSlugs(ws.rootPath)))
+
+          // Fail-soft reference checks: unknown slugs warn, they don't block creation
+          // (matching the finish() philosophy in the tasks:create handler).
+          const warnings: string[] = []
+          if (input.sources?.length) {
+            const available = new Set(loadWorkspaceSources(ws.rootPath).map(s => s.config.slug))
+            const missing = input.sources.filter(s => !available.has(s))
+            if (missing.length) warnings.push(`Unknown sources (kept in the spec, but they don't exist in this workspace): ${missing.join(', ')}`)
+          }
+          if (input.skills?.length) {
+            // loadAllSkills matches dispatch-time [skill:slug] resolution (global + workspace).
+            const available = new Set(loadAllSkills(ws.rootPath).map(s => s.slug))
+            const missing = input.skills.filter(s => !available.has(s))
+            if (missing.length) warnings.push(`Unknown skills (kept in the spec, but they don't exist in this workspace): ${missing.join(', ')}`)
+          }
+
+          // A spec requires ≥1 node; synthesize the single executable node from the
+          // description. Multi-node DAG authoring stays with the TaskEditor/generate flow.
+          const parsed = parseTaskSpec({
+            id: slug,
+            title: input.title,
+            goal: input.description,
+            ...(input.acceptanceCriteria ? { acceptance_criteria: input.acceptanceCriteria } : {}),
+            ...(projectId ? { project: projectId } : {}),
+            ...(input.workingDirectory ? { cwd: input.workingDirectory } : {}),
+            ...(input.sources?.length ? { sources: input.sources } : {}),
+            ...(input.skills?.length ? { skills: input.skills } : {}),
+            ...(input.model || input.llmConnection
+              ? { defaults: { ...(input.model ? { model: input.model } : {}), ...(input.llmConnection ? { llmConnection: input.llmConnection } : {}) } }
+              : {}),
+            nodes: [{ id: 'main', title: input.title, prompt: input.description }],
+          })
+          if (!parsed.success) {
+            throw new Error(`Invalid task spec: ${parsed.error.issues.map(i => i.message).join('; ')}`)
+          }
+
+          const created = await createTaskFromSpec(this, ws.id, ws.rootPath, parsed.data)
+          return { ...created, warnings: [...warnings, ...created.warnings] }
+        },
         getSessionInfoFn: (sessionId?: string) => {
           const targetId = sessionId ?? managed.id
           const session = this.sessions.get(targetId)
@@ -4101,6 +4662,7 @@ export class SessionManager implements ISessionManager {
             permissionMode: session.permissionMode ?? 'ask',
             createdAt: session.createdAt ?? 0,
             workingDirectory: session.workingDirectory,
+            projectId: session.projectId,
             llmConnection: session.llmConnection,
             model: session.model,
             isActive: session.agent != null,
@@ -4150,8 +4712,27 @@ export class SessionManager implements ISessionManager {
               labels: s.labels ?? [],
               status: s.sessionStatus ?? 'todo',
               createdAt: s.createdAt ?? 0,
+              projectId: s.projectId,
             })),
           }
+        },
+        listBackgroundTasksFn: (sessionId?: string) => {
+          const targetId = sessionId ?? managed.id
+          const now = Date.now()
+          return this.listBackgroundTasks(targetId).map((t) => {
+            // Prefer wall-clock elapsed; running tasks tick off startTime, terminal
+            // tasks freeze at completion. Fall back to the last progress value.
+            const anchorEnd = t.status === 'running' ? now : (t.completedAt ?? now)
+            const wallElapsed = Math.max(0, Math.round((anchorEnd - t.startTime) / 1000))
+            return {
+              taskId: t.taskId,
+              intent: t.intent,
+              status: t.status,
+              startTime: t.startTime,
+              elapsedSeconds: t.elapsedSeconds ?? wallElapsed,
+              completedAt: t.completedAt,
+            }
+          })
         },
         resolveLabelsFn: (labels: string[]) => {
           const labelConfig = loadLabelConfig(managed.workspace.rootPath)
@@ -4164,10 +4745,10 @@ export class SessionManager implements ISessionManager {
 
           // Exact ID match
           const byId = allStatuses.find(s => s.id === status)
-          if (byId) return { resolved: byId.id, available }
+          if (byId) return { resolved: byId.id, available, category: byId.category }
           // Case-insensitive label → ID
           const byLabel = allStatuses.find(s => s.label.toLowerCase() === status.toLowerCase())
-          if (byLabel) return { resolved: byLabel.id, available }
+          if (byLabel) return { resolved: byLabel.id, available, category: byLabel.category }
 
           return { resolved: null, available }
         },
@@ -4193,7 +4774,17 @@ export class SessionManager implements ISessionManager {
             if (builtAttachments.length > 0) fileAttachments = builtAttachments
           }
 
+          // Capture the target's busy state BEFORE delivery so the sender gets a
+          // truthful ack. A busy (mid-turn) target queues the message and replays
+          // it after the current turn (anthropic defaults to 'queue'); an idle
+          // target starts processing immediately. sendMessage throws for an
+          // unknown session — that rejection propagates to the handler's catch.
+          const targetBusy = this.sessions.get(sessionId)?.isProcessing === true
           await this.sendMessage(sessionId, message, fileAttachments)
+          return {
+            delivery: targetBusy ? ('queued' as const) : ('delivered' as const),
+            targetBusy,
+          }
         },
         getMessagingBindingsFn: (sessionId: string) => {
           const registry = this.messagingRegistry
@@ -4248,16 +4839,26 @@ export class SessionManager implements ISessionManager {
           // Claude SDK freezes mcpServers at query() start; Pi only picks up new proxy
           // tool defs on the next handlePrompt (`toolsChanged` flag in pi-agent-server).
           // Mark a pending restart on the agent — ClaudeAgent/PiAgent consume it after
-          // the next tool_result, yield source_activated, and forceAbort. The renderer's
-          // auto_retry effect then resends the original user message with a
-          // "[{slug} activated]" suffix — landing in a fresh turn with tools live.
-          // Same machinery as the tool-call-error auto-retry path.
+          // the next tool_result, yield source_activated, and forceAbort. The
+          // `source_activated` handler in this class then schedules a server-side
+          // resend of the original user message with a "[{slug} activated]" suffix —
+          // landing in a fresh turn with tools live (craft-agents-oss#804).
           const userMessage = managed.agent?.getCurrentTurnUserMessage?.() ?? ''
           if (userMessage) {
             managed.agent?.setPendingSourceActivationRestart({ sourceSlug, userMessage })
           }
           return { ok: true, availability: 'next-turn' as const }
         },
+      })
+
+      // WS2 keep-alive: forward background task events that arrive BETWEEN turns
+      // (idle — no chat() generator consuming) into the normal event pipeline, so
+      // the running-task registry + renderer chips reflect a completion even when
+      // it lands while the session is idle. During a turn these events flow through
+      // the chat() generator as usual; this only covers the idle gap. No-op unless
+      // the backend supports a persistent cross-turn query (Claude keep-alive).
+      managed.agent.setBackgroundEventSink?.((event: AgentEvent) => {
+        void this.processEvent(managed, event)
       })
 
       // Wire up onSourceActivationRequest to auto-enable sources when agent tries to use them
@@ -4409,6 +5010,9 @@ export class SessionManager implements ISessionManager {
 
   async archiveSession(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
+    if (!managed) {
+      sessionLog.warn(`archiveSession: unknown session ${sessionId} — no-op`)
+    }
     if (managed) {
       managed.isArchived = true
       managed.archivedAt = Date.now()
@@ -4423,6 +5027,9 @@ export class SessionManager implements ISessionManager {
 
   async unarchiveSession(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
+    if (!managed) {
+      sessionLog.warn(`unarchiveSession: unknown session ${sessionId} — no-op`)
+    }
     if (managed) {
       managed.isArchived = false
       managed.archivedAt = undefined
@@ -4849,6 +5456,20 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Read a session's final assistant message TEXT (in-process output reader for
+   * the Tasks Conductor). `getLastFinalAssistantMessageId` is private and returns
+   * an id; this wraps it to return the message content. Never exposed to agents —
+   * child node output is read here, not via any tool/RPC.
+   */
+  getSessionFinalText(sessionId: string): string | undefined {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return undefined
+    const id = this.getLastFinalAssistantMessageId(managed.messages)
+    if (!id) return undefined
+    return managed.messages.find(m => m.id === id)?.content
+  }
+
+  /**
    * Set which session the user is actively viewing.
    * Called when user navigates to a session. Used to determine whether to mark
    * new messages as unread - if user is viewing, don't mark unread.
@@ -5010,10 +5631,16 @@ export class SessionManager implements ISessionManager {
 
     const assistantResponse = lastAssistantMsg?.content ?? ''
 
-    // Derive language from app's i18n setting for language-aware title generation
-    const titleLangCode = (i18n.resolvedLanguage ?? 'en') as LanguageCode
-    const titleLangEntry = LOCALE_REGISTRY[titleLangCode]
-    const titleOptions = { language: titleLangEntry?.nativeName }
+    // Resolve title language from the explicitly persisted UI language (disk-backed,
+    // race-free vs. main-process i18n async hydration); undefined => auto-detect (#885).
+    const titleLanguage = resolveTitleLanguageName()
+    const titleOptions = { language: titleLanguage }
+    sessionLog.info(`[refreshTitle] language at call time`, {
+      sessionId,
+      persistedUiLanguage: getPersistedUiLanguage() ?? null,
+      resolvedLanguage: i18n.resolvedLanguage ?? null,
+      titleLanguage: titleLanguage ?? null,
+    })
 
     // Use existing agent or create temporary one
     let agent: AgentInstance | null = managed.agent
@@ -5427,9 +6054,13 @@ export class SessionManager implements ISessionManager {
     unregisterSessionScopedToolCallbacks(sessionId)
 
     // Destroy browser instances bound to this session
-    if (this.browserPaneManager) {
-      this.browserPaneManager.destroyForSession(sessionId)
+    const sessionBpm = this.getBrowserPaneManagerForSession(sessionId)
+    if (sessionBpm) {
+      sessionBpm.destroyForSession(sessionId)
     }
+    // Drop the per-session remote bridge + host-client pin on destroy.
+    this.remoteBpms.delete(sessionId)
+    this.browserHostByCanvas.delete(sessionId)
 
     // Dispose agent to clean up ConfigWatchers, event listeners, MCP connections
     if (managed.agent) {
@@ -5442,6 +6073,13 @@ export class SessionManager implements ISessionManager {
         sessionLog.warn(`Failed to stop pool server for ${sessionId}: ${err instanceof Error ? err.message : err}`)
       })
     }
+
+    // Cancel any pending source-activation auto-retry timer (craft-agents-oss#804).
+    if (managed.autoRetryTimer) {
+      clearTimeout(managed.autoRetryTimer)
+      managed.autoRetryTimer = undefined
+    }
+    managed.autoRetryPending = undefined
 
     this.sessions.delete(sessionId)
 
@@ -5622,10 +6260,29 @@ export class SessionManager implements ISessionManager {
     onAck?: (messageId: string) => void,
     /** Optional model-only prompt. UI/persistence keeps `message` visible. */
     modelMessageOverride?: string,
+=======
+    /**
+     * Optional transport context. The `sessions.sendMessage` RPC handler passes
+     * `{ callerClientId: ctx.clientId }` so the SM can pin the desktop client
+     * that should host this session's browser tools. Pass undefined when calling
+     * directly (tests, intra-server flows) to leave the existing pin in place.
+     */
+    rpcContext?: { callerClientId?: string },
   ): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
       throw new Error(`Session ${sessionId} not found`)
+    }
+    this.setLastMessageClientId(sessionId, rpcContext?.callerClientId)
+
+    // Source-activation auto-retry dedup (craft-agents-oss#804). When the server
+    // has just scheduled or committed a "[<slug> activated]" retry, drop a matching
+    // duplicate that arrives from a legacy renderer still running the client-side
+    // auto_retry. The first matching caller wins (server timer or legacy RPC,
+    // whichever arrives first), subsequent matching calls within the deadline drop.
+    if (claimAutoRetryPending(managed, message) === 'drop') {
+      sessionLog.info(`sendMessage: dropped duplicate source-activation retry for ${sessionId}`)
+      return
     }
 
     // Clear any pending plan execution state when a new user message is sent.
@@ -5719,25 +6376,44 @@ export class SessionManager implements ISessionManager {
         connectionSlug: connection?.slug,
       })
 
+      // Create user message for UI
+      const userMessage: Message = {
+        id: generateMessageId(),
+        role: 'user',
+        content: message,
+        timestamp: this.monotonic(),
+        attachments: storedAttachments,
+        badges: options?.badges,
+        // Hidden system-generated messages reach the model but never render as a
+        // transcript bubble (e.g. background-task-completion nudge).
+        ...(options?.hidden ? { hidden: true } : {}),
+      }
+      managed.messages.push(userMessage)
+
+      const delivery = resolveMidStreamDeliveryOutcome(behavior, steered)
+
+      // Emit to UI — 'accepted' iff a steer succeeded; 'queued' otherwise
+      // (covers both queue-direct and queue-after-abort paths).
       this.sendEvent({
         type: 'user_message',
         sessionId,
         message: userMessage,
-        status: steered ? 'accepted' : 'queued',
+        status: delivery.shouldQueue ? 'queued' : 'accepted',
         optimisticMessageId: options?.optimisticMessageId
       }, managed.workspace.id)
 
-      // If the backend accepted native steering, events continue through the
-      // current generator and no replay queue entry is needed. Otherwise, queue
-      // for FIFO replay. BaseAgent/Claude fallback redirects force-abort before
-      // returning false; queue replay then runs from onProcessingStopped.
-      if (steered) {
-        // Already marked as guidance before the event so the renderer can regroup it immediately.
-      } else {
-        managed.messageQueue.push({ message: visibleMessage, internalMessage: modelOnlyMessage, attachments, storedAttachments, options, messageId: userMessage.id, optimisticMessageId: options?.optimisticMessageId })
-        if (behavior === 'steer') {
-          managed.wasInterrupted = true
-        }
+      if (delivery.shouldQueue) {
+        // Push for FIFO replay on next onProcessingStopped tick. Same shape
+        // for both queue-direct (current turn still running) and
+        // queue-after-abort (backend already aborted) — the replay path in
+        // processNextQueuedMessage is identical.
+        managed.messageQueue.push({ message, attachments, storedAttachments, options, messageId: userMessage.id, optimisticMessageId: options?.optimisticMessageId })
+        // Only claim interruption when a steer attempt actually aborted the
+        // in-flight turn. In 'queue' mode the current turn runs to natural
+        // completion, so the replayed turn must NOT inject the "previous response
+        // was interrupted" reminder (it would falsely tell the model its own
+        // complete answer was cut off → confusion).
+        if (delivery.wasInterrupted) managed.wasInterrupted = true
       }
 
       this.persistSession(managed)
@@ -5767,11 +6443,17 @@ export class SessionManager implements ISessionManager {
         timestamp: this.monotonic(),
         attachments: storedAttachments, // Include for persistence (has thumbnailBase64)
         badges: options?.badges,  // Include content badges (sources, skills with embedded icons)
+        // Hidden system-generated messages reach the model but never render as a
+        // transcript bubble (e.g. background-task-completion nudge).
+        ...(options?.hidden ? { hidden: true } : {}),
       }
       managed.messages.push(userMessage)
 
-      // Update lastMessageRole for badge display
-      managed.lastMessageRole = 'user'
+      // Update lastMessageRole for badge display. Skip for hidden messages so the
+      // session-list preview isn't briefly driven by an invisible system nudge.
+      if (!options?.hidden) {
+        managed.lastMessageRole = 'user'
+      }
 
       // Persist + flush before announcing — the user message must be
       // genuinely on disk before we tell the renderer "accepted", and
@@ -6005,10 +6687,9 @@ export class SessionManager implements ISessionManager {
         sessionLog.info('Attachments:', attachments.length)
       }
 
-      // Skills mentioned via @mentions are handled by the SDK's Skill tool.
-      // The UI layer (extractBadges in mentions.ts) injects fully-qualified names
-      // in the rawText, and canUseTool in craft-agent.ts provides a fallback
-      // to qualify short names. No transformation needed here.
+      // Skills mentioned via @mentions are resolved by the UI layer (extractBadges
+      // in mentions.ts), which injects fully-qualified names in the rawText.
+      // No transformation needed here.
 
       // Ensure main process reads tool metadata from the correct session directory.
       // This must be set before each chat() call since multiple sessions share the process.
@@ -6507,6 +7188,34 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Listeners for the in-process session-completion seam (see SessionCompletionEvent).
+   * Used by the Tasks Conductor; empty until something subscribes, so zero overhead otherwise.
+   */
+  private sessionCompletionListeners = new Set<(evt: SessionCompletionEvent) => void>()
+
+  /**
+   * Subscribe to in-process session completion (Tasks Conductor seam).
+   * Returns an unsubscribe function. Not a renderer event; not agent-facing.
+   */
+  onSessionComplete(listener: (evt: SessionCompletionEvent) => void): () => void {
+    this.sessionCompletionListeners.add(listener)
+    return () => {
+      this.sessionCompletionListeners.delete(listener)
+    }
+  }
+
+  private emitSessionComplete(evt: SessionCompletionEvent): void {
+    if (this.sessionCompletionListeners.size === 0) return
+    for (const listener of this.sessionCompletionListeners) {
+      try {
+        listener(evt)
+      } catch (err) {
+        sessionLog.error(`onSessionComplete listener threw for session ${evt.sessionId}:`, err)
+      }
+    }
+  }
+
+  /**
    * Central handler for when processing stops (any reason).
    * Single source of truth for cleanup and queue processing.
    *
@@ -6527,14 +7236,28 @@ export class SessionManager implements ISessionManager {
     managed.currentRunStartedAt = undefined
     managed.stopRequested = false  // Reset for next turn
 
+    // 1b. Orphan backstop: with the default per-turn subprocess model, any
+    // background sub-agent still marked `running` dies when this turn's
+    // subprocess is torn down. Flip those registry entries to `orphaned` so a
+    // later "status?" query never reports a dead task as running. Suppressed
+    // when WS2 keep-alive keeps the query alive across turns.
+    this.markOrphanedBackgroundTasks(sessionId)
+
     const turnStartFinalMessageId = managed.turnStartFinalMessageId
     managed.turnStartFinalMessageId = undefined
 
     // Clear agent control overlay between turns. The session keeps browser
     // ownership (boundSessionId) — only the visual overlay is removed.
     // Full unbind happens below when the queue is empty (session truly done).
-    if (this.browserPaneManager) {
-      await this.browserPaneManager.clearVisualsForSession(sessionId)
+    const turnBpm = this.getBrowserPaneManagerForSession(sessionId)
+    if (turnBpm) {
+      // Same guard as the queue-empty teardown below: a remote BPM throw on a
+      // headless server must not abort processing-stop handling.
+      try {
+        await turnBpm.clearVisualsForSession(sessionId)
+      } catch (err) {
+        sessionLog.warn(`Browser-pane visual clear failed for ${sessionId} (continuing):`, err)
+      }
     }
 
     // 2. Handle unread state based on whether user is viewing this session
@@ -6584,9 +7307,18 @@ export class SessionManager implements ISessionManager {
       // Session is truly done — release browser ownership.
       // The window stays alive (hidden) and becomes reusable by future sessions.
       // On the next turn, getOrCreateForSession() will re-bind it.
-      if (this.browserPaneManager) {
-        await this.browserPaneManager.clearVisualsForSession(sessionId)
-        this.browserPaneManager.unbindAllForSession(sessionId)
+      const doneBpm = this.getBrowserPaneManagerForSession(sessionId)
+      if (doneBpm) {
+        // Teardown must never block completion. On a headless/WebUI server the BPM is
+        // remote and these calls throw (BROWSER_NO_CAPABLE_CLIENT) when no desktop
+        // browser client is connected — which previously aborted onProcessingStopped
+        // before emitSessionComplete, hanging the Tasks Conductor completion seam.
+        try {
+          await doneBpm.clearVisualsForSession(sessionId)
+          doneBpm.unbindAllForSession(sessionId)
+        } catch (err) {
+          sessionLog.warn(`Browser-pane teardown failed for ${sessionId} (continuing to completion):`, err)
+        }
       }
 
       // No queue - emit complete to UI (include tokenUsage and hasUnread for state updates)
@@ -6595,7 +7327,26 @@ export class SessionManager implements ISessionManager {
         sessionId,
         tokenUsage: managed.tokenUsage,
         hasUnread: managed.hasUnread,  // Propagate unread state to renderer
+        // WS2: when keep-alive keeps the persistent query open across turns, the
+        // turn ending does NOT kill background sub-agents. Tell the renderer so its
+        // chip orphan-backstop does not falsely flip live tasks to `orphaned`; a
+        // real `task_completed` will arrive when the agent actually finishes.
+        backgroundTasksAlive: this.keepBackgroundTasksAlive,
       }, managed.workspace.id)
+
+      // Tasks Conductor seam: signal true completion (queue empty) with the stop
+      // reason + this turn's final assistant message, so the Conductor can advance
+      // the corresponding node. In-process only; never sent to the renderer/agents.
+      this.emitSessionComplete({
+        sessionId,
+        workspaceId: managed.workspace.id,
+        reason,
+        finalMessageId: currentFinalMessageId,
+        finalText: currentFinalMessageId
+          ? managed.messages.find(m => m.id === currentFinalMessageId)?.content
+          : undefined,
+        tokenUsage: managed.tokenUsage,
+      })
     }
 
     // 6. Always persist
@@ -6638,6 +7389,11 @@ export class SessionManager implements ISessionManager {
       if (existingMessage) {
         // Clear isQueued flag and persist - prevents re-queueing if crash during processing
         existingMessage.isQueued = false
+        // Re-stamp so this replayed message sorts AFTER the previous turn's
+        // finalized assistant reply. It was created mid-stream (an earlier
+        // timestamp) while queued; groupMessagesByTurn sorts by timestamp, so
+        // without this the prior turn's completed response would render BELOW it.
+        existingMessage.timestamp = this.monotonic()
         this.persistSession(managed)
 
         this.sendEvent({
@@ -6769,6 +7525,75 @@ export class SessionManager implements ISessionManager {
     }, managed.workspace.id)
 
     return { success: true }
+  }
+
+  /**
+   * Evict stale entries from both background-task maps to bound memory.
+   * - backgroundTaskOutputs: completed outputs older than 1h (existing behavior).
+   * - backgroundTaskRegistry: terminal/orphaned entries older than 1h. Running
+   *   entries are never evicted here (they are resolved on completion or orphaned
+   *   at turn end).
+   */
+  private evictStaleBackgroundTasks(managed: ManagedSession): void {
+    const ONE_HOUR = 3_600_000
+    const now = Date.now()
+    for (const [tid, info] of managed.backgroundTaskOutputs) {
+      if (now - info.completedAt > ONE_HOUR) {
+        managed.backgroundTaskOutputs.delete(tid)
+        this.taskOutputIndex.delete(tid)
+      }
+    }
+    for (const [tid, info] of managed.backgroundTaskRegistry) {
+      if (info.status !== 'running' && info.completedAt && now - info.completedAt > ONE_HOUR) {
+        managed.backgroundTaskRegistry.delete(tid)
+      }
+    }
+  }
+
+  /**
+   * Mark still-running background tasks for a session as `orphaned`.
+   *
+   * Called when a turn finishes (onProcessingStopped). With the default per-turn
+   * subprocess model, background sub-agents die when the query/subprocess is torn
+   * down at turn end, but their terminal notifications may never arrive (or arrive
+   * only on a later turn's subprocess). Marking them `orphaned` here keeps a
+   * "status?" query truthful — it must never report a dead task as "running".
+   *
+   * No-op once WS2 keep-alive is enabled: with a persistent query the tasks
+   * genuinely outlive the turn, so `keepBackgroundTasksAlive` short-circuits this.
+   */
+  private markOrphanedBackgroundTasks(sessionId: string): void {
+    if (this.keepBackgroundTasksAlive) return
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return
+    const now = Date.now()
+    let orphaned = 0
+    for (const info of managed.backgroundTaskRegistry.values()) {
+      if (info.status === 'running') {
+        info.status = 'orphaned'
+        info.completedAt = now
+        orphaned++
+      }
+    }
+    if (orphaned > 0) {
+      sessionLog.info(`[bg-lifecycle] turn ended — orphaned ${orphaned} still-running background task(s)`, {
+        sessionId,
+      })
+    }
+  }
+
+  /**
+   * Enumerate background tasks for a session for a "status?" query.
+   * Returns the main-process registry snapshot — the real source of truth across
+   * subprocess boundaries (the SDK's in-subprocess task tools cannot see tasks
+   * from a prior, torn-down subprocess).
+   */
+  listBackgroundTasks(sessionId: string): RunningBackgroundTask[] {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return []
+    return Array.from(managed.backgroundTaskRegistry.values())
+      .map((t) => ({ ...t }))
+      .sort((a, b) => b.startTime - a.startTime)
   }
 
   /**
@@ -7027,6 +7852,292 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Apply the reserved Task labeling to a session. Every task gets its own ITEM label —
+   * a child of the root "Task" label named `TASK-<slug>-<N>` (plain boolean, no value) —
+   * and the task's whole family carries that same item label, so one label filters one
+   * task. Top-level sessions mint a fresh item label from their name; a session with
+   * `parentSessionId` inherits the parent's item label — and a parent that lacks one (a
+   * plain chat gaining its first subtask) is labeled in the same pass, so "becoming a
+   * task" holds by construction. Idempotent: a session already carrying an item label
+   * keeps it. Returns the resolved ITEM label id — slugs can collide-shift, so callers
+   * MUST use it rather than deriving ids themselves.
+   */
+  async applyTaskLabel(
+    sessionId: string,
+    opts?: { parentSessionId?: string },
+  ): Promise<{ labelId: string } | undefined> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return undefined
+    const rootPath = managed.workspace.rootPath
+
+    const itemOf = (labels: string[] | undefined): string | undefined =>
+      findTaskItemLabelId(labels, loadLabelConfig(rootPath).labels)
+    const withItemEntry = (labels: string[] | undefined, itemId: string): string[] => [
+      ...(labels ?? []).filter(entry => extractLabelId(entry) !== itemId),
+      itemId,
+    ]
+
+    const existing = itemOf(managed.labels)
+    if (existing) return { labelId: existing }
+
+    let itemId: string
+    const parent = opts?.parentSessionId ? this.sessions.get(opts.parentSessionId) : undefined
+    if (parent) {
+      const parentItem = itemOf(parent.labels)
+      if (parentItem) {
+        itemId = parentItem
+      } else {
+        itemId = ensureTaskItemLabel(rootPath, parent.name || 'task').itemId
+        await this.setSessionLabels(parent.id, withItemEntry(parent.labels, itemId))
+      }
+    } else {
+      itemId = ensureTaskItemLabel(rootPath, managed.name || 'task').itemId
+    }
+
+    await this.setSessionLabels(sessionId, withItemEntry(managed.labels, itemId))
+    return { labelId: itemId }
+  }
+
+  /**
+   * Bind or unbind a session to/from a workspace project.
+   * Pass `null` to unbind. The session's working directory is NOT changed retroactively —
+   * the project binding is only used as a default for newly created sessions.
+   */
+  async setSessionProjectId(sessionId: string, projectId: string | null): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (managed) {
+      managed.projectId = projectId ?? undefined
+      this.setMetadataWriteGuard(managed)
+
+      this.sendEvent({
+        type: 'project_id_changed',
+        sessionId: managed.id,
+        projectId: managed.projectId ?? null,
+      }, managed.workspace.id)
+
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+      const watcher = this.configWatchers.get(managed.workspace.rootPath)
+      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
+    }
+  }
+
+  /**
+   * Set the kanban board column for a session ('todo' | 'in-progress' | 'done').
+   * Pass `null` to clear (board falls back to the default column). Independent of sessionStatus.
+   */
+  async setKanbanColumn(sessionId: string, column: string | null): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (managed) {
+      managed.kanbanColumn = column ?? undefined
+      this.setMetadataWriteGuard(managed)
+
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+      // Self-writes don't re-emit through the file watcher (kanbanColumn isn't in the header
+      // signature), so push a live metadata event for the board to consume.
+      this.sendEvent({ type: 'session_metadata_changed', sessionId, changes: { kanbanColumn: column ?? undefined } }, managed.workspace.id)
+      const watcher = this.configWatchers.get(managed.workspace.rootPath)
+      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
+    }
+  }
+
+  /**
+   * Record the total DAG node count on a Conductor orchestrator session. The board uses this as a
+   * stable progress denominator so it doesn't grow as child sessions are spawned lazily at dispatch.
+   */
+  async setTaskNodeCount(sessionId: string, count: number): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (managed) {
+      managed.taskNodeCount = count
+      this.setMetadataWriteGuard(managed)
+
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+      // Self-writes don't re-emit through the file watcher (taskNodeCount isn't in the header
+      // signature), so push a live metadata event so the progress denominator updates immediately.
+      this.sendEvent({ type: 'session_metadata_changed', sessionId, changes: { taskNodeCount: count } }, managed.workspace.id)
+      const watcher = this.configWatchers.get(managed.workspace.rootPath)
+      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
+    }
+  }
+
+  /**
+   * Promote a hidden generate-time orchestrator (`taskDraft`) into the real, board-visible
+   * orchestrator for `taskSlug`. This is the single narrow path that lets "Generate → Create & Run"
+   * reuse the draft session instead of minting a second top-level tile (#bug1).
+   *
+   * Returns `true` on success (including an idempotent re-adopt of the same slug). Returns `false`
+   * — leaving the session untouched — when the session is missing, isn't a draft, or is already
+   * bound to a *different* slug. Callers fall back to `createSession` on `false`.
+   *
+   * Deliberately does NOT touch tools/sources/capabilities: the orchestrator keeps everything it
+   * was created with so it can still author/verify the run.
+   */
+  async adoptGeneratedTaskOrchestrator(
+    sessionId: string,
+    taskSlug: string,
+    reconcile?: { name?: string; projectId?: string; workingDirectory?: string; model?: string; llmConnection?: string; permissionMode?: PermissionMode },
+  ): Promise<boolean> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) {
+      sessionLog.warn('adoptGeneratedTaskOrchestrator: session not found', { sessionId, taskSlug })
+      return false
+    }
+    // Idempotency: already bound to this slug → no-op success. Bound to a different slug → refuse,
+    // so a stale draft ref can't hijack an unrelated orchestrator.
+    if (managed.taskSlug) {
+      if (managed.taskSlug === taskSlug) return true
+      sessionLog.warn('adoptGeneratedTaskOrchestrator: slug mismatch, refusing to rebind', {
+        sessionId, existing: managed.taskSlug, requested: taskSlug,
+      })
+      return false
+    }
+    // Only hidden generate-time drafts are eligible. A non-draft session without a slug isn't a
+    // generate orchestrator and must not be silently captured.
+    if (!managed.taskDraft) {
+      sessionLog.warn('adoptGeneratedTaskOrchestrator: session is not a task draft', { sessionId, taskSlug })
+      return false
+    }
+
+    // What actually changes — so we fire canonical live-updates (agent + caches + per-field events)
+    // only when needed. With generate now seeding model/connection/mode, these are usually all false.
+    const modelChanged = Boolean(reconcile?.model && reconcile.model !== managed.model)
+    const connectionChanged = Boolean(
+      reconcile?.llmConnection && !managed.connectionLocked && reconcile.llmConnection !== managed.llmConnection,
+    )
+    const cwdChanged = Boolean(reconcile?.workingDirectory && reconcile.workingDirectory !== managed.workingDirectory)
+    const modeChanged = Boolean(reconcile?.permissionMode && reconcile.permissionMode !== managed.permissionMode)
+
+    // Promote task metadata (no canonical mutator for these). Connection is set directly because
+    // setSessionConnection() refuses a session that has already sent messages (a generate draft has);
+    // the connection_changed event below keeps the renderer in sync.
+    managed.taskSlug = taskSlug
+    managed.taskDraft = false
+    if (reconcile?.projectId !== undefined) managed.projectId = reconcile.projectId
+    if (connectionChanged) managed.llmConnection = reconcile!.llmConnection
+    const renamed = Boolean(reconcile?.name && reconcile.name !== managed.name)
+    if (renamed) managed.name = reconcile!.name!
+
+    // Route model / cwd / permission mode through the canonical mutators so the LIVE agent, caches,
+    // and per-field events stay consistent — not just the on-disk metadata (the split-brain the
+    // follow-up review flagged). Each targets only the changed field; persist below captures the mode.
+    if (modelChanged) await this.updateSessionModel(sessionId, managed.workspace.id, reconcile!.model!)
+    if (cwdChanged) this.updateWorkingDirectory(sessionId, reconcile!.workingDirectory!)
+    if (modeChanged) this.setSessionPermissionMode(sessionId, reconcile!.permissionMode!)
+
+    this.setMetadataWriteGuard(managed)
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+
+    // One-shot board promotion: clearing taskDraft (sent as `false`, never `undefined` — undefined
+    // is dropped over the JSON wire) reveals the already-announced tile; taskSlug/projectId
+    // reconcile its metadata. `false` is falsy for the board's `if (meta.taskDraft)` skip.
+    const changes: { taskDraft: boolean; taskSlug: string; projectId?: string } = { taskDraft: false, taskSlug }
+    if (reconcile?.projectId !== undefined) changes.projectId = reconcile.projectId
+    this.sendEvent({ type: 'session_metadata_changed', sessionId, changes }, managed.workspace.id)
+    if (renamed) {
+      this.sendEvent({ type: 'name_changed', sessionId, name: managed.name }, managed.workspace.id)
+    }
+    if (connectionChanged) {
+      this.sendEvent({
+        type: 'connection_changed',
+        sessionId,
+        connectionSlug: managed.llmConnection!,
+        supportsBranching: resolveSupportsBranching(managed),
+      }, managed.workspace.id)
+    }
+    const watcher = this.configWatchers.get(managed.workspace.rootPath)
+    watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
+    sessionLog.info('adoptGeneratedTaskOrchestrator: promoted draft', { sessionId, taskSlug, renamed, modelChanged, connectionChanged, cwdChanged, modeChanged })
+    return true
+  }
+
+  /**
+   * User-initiated bind of an *existing, visible* session (e.g. a quick-add tile) to a task slug.
+   *
+   * This is distinct from {@link adoptGeneratedTaskOrchestrator}, which is the narrow draft-only
+   * promotion path. A quick-add tile is a normal non-draft session with no `taskSlug`; the draft
+   * guard there correctly refuses it, so the editor's "save this spec onto this tile" flow needs
+   * its own path. The guard in the adopt method stays untouched.
+   *
+   * Returns `true` on success (including an idempotent re-bind of the same slug). Returns `false`
+   * — leaving the session untouched — when the session is missing or already bound to a *different*
+   * slug. Callers MUST treat `false` as a hard error and must NOT fall back to creating a fresh
+   * orchestrator (that would mint a duplicate tile).
+   *
+   * Unlike adopt, this reconciles `llmConnection` too (a fresh create sets it; adopt skips it) so
+   * the bound tile doesn't render a stale backend.
+   */
+  async bindExistingSessionToTask(
+    sessionId: string,
+    taskSlug: string,
+    reconcile?: { name?: string; projectId?: string; workingDirectory?: string; model?: string; llmConnection?: string; permissionMode?: PermissionMode },
+  ): Promise<boolean> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) {
+      sessionLog.warn('bindExistingSessionToTask: session not found', { sessionId, taskSlug })
+      return false
+    }
+    if (managed.taskSlug) {
+      if (managed.taskSlug === taskSlug) return true
+      sessionLog.warn('bindExistingSessionToTask: slug mismatch, refusing to rebind', {
+        sessionId, existing: managed.taskSlug, requested: taskSlug,
+      })
+      return false
+    }
+
+    // What actually changes — so we fire canonical live-updates (agent + caches + per-field events)
+    // only when needed. A quick-add tile is already live, so these keep its running agent in step.
+    const modelChanged = Boolean(reconcile?.model && reconcile.model !== managed.model)
+    const connectionChanged = Boolean(
+      reconcile?.llmConnection && !managed.connectionLocked && reconcile.llmConnection !== managed.llmConnection,
+    )
+    const cwdChanged = Boolean(reconcile?.workingDirectory && reconcile.workingDirectory !== managed.workingDirectory)
+    const modeChanged = Boolean(reconcile?.permissionMode && reconcile.permissionMode !== managed.permissionMode)
+
+    // Promote task metadata (no canonical mutator for these). Connection is set directly because
+    // setSessionConnection() refuses a session that has already sent messages (a quick-add tile has);
+    // the connection_changed event below keeps the renderer in sync.
+    managed.taskSlug = taskSlug
+    managed.taskDraft = false
+    if (reconcile?.projectId !== undefined) managed.projectId = reconcile.projectId
+    if (connectionChanged) managed.llmConnection = reconcile!.llmConnection
+    const renamed = Boolean(reconcile?.name && reconcile.name !== managed.name)
+    if (renamed) managed.name = reconcile!.name!
+
+    // Route model / cwd / permission mode through the canonical mutators so the LIVE agent, caches,
+    // and per-field events stay consistent — not just the on-disk metadata (the split-brain the
+    // follow-up review flagged). updateSessionModel emits session_model_changed itself.
+    if (modelChanged) await this.updateSessionModel(sessionId, managed.workspace.id, reconcile!.model!)
+    if (cwdChanged) this.updateWorkingDirectory(sessionId, reconcile!.workingDirectory!)
+    if (modeChanged) this.setSessionPermissionMode(sessionId, reconcile!.permissionMode!)
+
+    this.setMetadataWriteGuard(managed)
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+
+    const changes: { taskDraft: boolean; taskSlug: string; projectId?: string } = { taskDraft: false, taskSlug }
+    if (reconcile?.projectId !== undefined) changes.projectId = reconcile.projectId
+    this.sendEvent({ type: 'session_metadata_changed', sessionId, changes }, managed.workspace.id)
+    if (renamed) {
+      this.sendEvent({ type: 'name_changed', sessionId, name: managed.name }, managed.workspace.id)
+    }
+    if (connectionChanged) {
+      this.sendEvent({
+        type: 'connection_changed',
+        sessionId,
+        connectionSlug: managed.llmConnection!,
+        supportsBranching: resolveSupportsBranching(managed),
+      }, managed.workspace.id)
+    }
+    const watcher = this.configWatchers.get(managed.workspace.rootPath)
+    watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
+    sessionLog.info('bindExistingSessionToTask: bound existing session', { sessionId, taskSlug, renamed, modelChanged, connectionChanged, cwdChanged, modeChanged })
+    return true
+  }
+
+  /**
    * Set the thinking level for a session. See {@link ThinkingLevel} for valid values.
    * This is sticky and persisted across messages.
    */
@@ -7101,9 +8212,15 @@ export class SessionManager implements ISessionManager {
     }
 
     try {
-      const genLangCode = (i18n.resolvedLanguage ?? 'en') as LanguageCode
-      const genLangEntry = LOCALE_REGISTRY[genLangCode]
-      const title = await agent.generateTitle(userMessage, { language: genLangEntry?.nativeName })
+      // Race-free language resolution from persisted UI language; undefined => auto-detect (#885).
+      const titleLanguage = resolveTitleLanguageName()
+      sessionLog.info(`[generateTitle] language at call time`, {
+        sessionId: managed.id,
+        persistedUiLanguage: getPersistedUiLanguage() ?? null,
+        resolvedLanguage: i18n.resolvedLanguage ?? null,
+        titleLanguage: titleLanguage ?? null,
+      })
+      const title = await agent.generateTitle(userMessage, { language: titleLanguage })
       if (title) {
         managed.name = title
         this.persistSession(managed)
@@ -7187,13 +8304,22 @@ export class SessionManager implements ISessionManager {
             }
           }
 
-          // Pi branch-cutoff support: persist provider-native turn anchor in session sidecar.
-          // Keeps session.jsonl schema unchanged while enabling strict branch cutoffs later.
-          if (event.sdkTurnAnchor) {
-            try {
-              await savePiTurnAnchor(sessionPath, assistantMessage.id, event.sdkTurnAnchor)
-            } catch (error) {
-              sessionLog.warn(`Failed to persist Pi turn anchor for session ${sessionId}:`, error)
+          // Pi branch-cutoff support: remember the SDK message id → Craft
+          // assistant message id mapping. The actual anchor arrives as a
+          // separate `pi_turn_anchor` event one microtask later — the SDK
+          // updates its leaf only AFTER firing message_end (see #782).
+          if (event.sdkMessageId) {
+            let cache = managed.piSdkMessageToCraftMessage
+            if (!cache) {
+              cache = new Map()
+              managed.piSdkMessageToCraftMessage = cache
+            }
+            cache.set(event.sdkMessageId, assistantMessage.id)
+            // Prune oldest entries when over the cap. Map preserves insertion
+            // order, so the first key is the oldest.
+            if (cache.size > PI_SDK_MESSAGE_ID_CACHE_LIMIT) {
+              const oldest = cache.keys().next().value
+              if (oldest !== undefined) cache.delete(oldest)
             }
           }
         }
@@ -7202,6 +8328,27 @@ export class SessionManager implements ISessionManager {
 
         // Persist session after complete message to prevent data loss on quit
         this.persistSession(managed)
+        break
+      }
+
+      case 'pi_turn_anchor': {
+        // Follow-up to a `text_complete` from the Pi backend, carrying the
+        // correct leaf id captured AFTER the SDK appended its assistant entry
+        // (the synchronous `message_end` listener could not see it — #782).
+        // Look up the Craft assistant message id by SDK message id and
+        // persist the anchor to the sidecar.
+        const cache = managed.piSdkMessageToCraftMessage
+        const craftMessageId = cache?.get(event.sdkMessageId)
+        if (!craftMessageId) {
+          sessionLog.debug(`pi_turn_anchor for unknown sdkMessageId=${event.sdkMessageId}; ignoring`)
+          break
+        }
+        const sessionPath = getSessionStoragePath(managed.workspace.rootPath, sessionId)
+        try {
+          await savePiTurnAnchor(sessionPath, craftMessageId, event.sdkTurnAnchor)
+        } catch (error) {
+          sessionLog.warn(`Failed to persist Pi turn anchor for session ${sessionId}:`, error)
+        }
         break
       }
 
@@ -7328,17 +8475,19 @@ export class SessionManager implements ISessionManager {
           formattedToolInput,
         )
 
-        if (this.browserPaneManager && shouldActivateOverlay) {
+        const overlayBpm = this.getBrowserPaneManagerForSession(sessionId)
+        if (overlayBpm && shouldActivateOverlay) {
           // Ensure first browser action in a turn gets an instance before overlay activation.
-          this.browserPaneManager.getOrCreateForSession(sessionId)
+          overlayBpm.getOrCreateForSession(sessionId, { workspaceId })
 
           const resolvedDisplayName = toolDisplayMeta?.displayName
             ?? event.displayName
             ?? event.toolName
-          this.browserPaneManager.setAgentControl(sessionId, {
-            displayName: resolvedDisplayName,
-            intent: event.intent,
-          })
+          overlayBpm.setAgentControl(
+            sessionId,
+            { displayName: resolvedDisplayName, intent: event.intent },
+            { workspaceId },
+          )
         }
 
         // Send event to renderer on first occurrence OR when input data is updated
@@ -7631,15 +8780,90 @@ export class SessionManager implements ISessionManager {
         break
 
       case 'task_backgrounded':
-      case 'task_progress':
-        // Forward background task events directly to renderer
+        // Record in the running-task registry so a cross-subprocess "status?"
+        // query can enumerate live tasks (WS3). The renderer still shows the
+        // chip via its own atom; this is the main-process source of truth.
+        if (managed) {
+          managed.backgroundTaskRegistry.set(event.taskId, {
+            taskId: event.taskId,
+            toolUseId: event.toolUseId,
+            intent: event.intent,
+            startTime: Date.now(),
+            status: 'running',
+            turnId: event.turnId,
+            // Workflow launches carry a wf_ id + a live sub-agent completion count.
+            ...(event.workflowId ? { workflowId: event.workflowId } : {}),
+            ...(event.kind === 'workflow' ? { agentsCompleted: 0 } : {}),
+          })
+          sessionLog.info(`[bg-lifecycle] task backgrounded`, {
+            sessionId,
+            taskId: event.taskId,
+            intent: event.intent,
+            turnId: event.turnId,
+          })
+        }
+        // Forward background task event directly to renderer
         this.sendEvent({
           ...event,
           sessionId,
         }, workspaceId)
         break
 
-      case 'task_completed':
+      case 'workflow_agent_completed':
+        // One sub-agent of a running Workflow finished (SubagentStop, attributed
+        // by wf_ id). Bump the owning workflow chip's completed count so the user
+        // sees live fan-out progress. Lightweight: registry counter + renderer
+        // forward, no persistence (this can fire dozens of times per workflow).
+        if (managed) {
+          for (const info of managed.backgroundTaskRegistry.values()) {
+            if (info.workflowId && info.workflowId === event.workflowId) {
+              info.agentsCompleted = (info.agentsCompleted ?? 0) + 1
+              break
+            }
+          }
+        }
+        this.sendEvent({
+          ...event,
+          sessionId,
+        }, workspaceId)
+        break
+
+      case 'task_progress':
+        // Update elapsed/last-progress on the registry entry (best-effort — the
+        // async-by-default path may not emit progress; the renderer derives
+        // elapsed from startTime as a fallback).
+        if (managed) {
+          // task_progress is keyed by toolUseId, not taskId — find the entry.
+          for (const info of managed.backgroundTaskRegistry.values()) {
+            if (info.toolUseId && info.toolUseId === event.toolUseId) {
+              info.elapsedSeconds = event.elapsedSeconds
+              info.lastProgressAt = Date.now()
+              break
+            }
+          }
+        }
+        // Forward background task event directly to renderer
+        this.sendEvent({
+          ...event,
+          sessionId,
+        }, workspaceId)
+        break
+
+      case 'task_completed': {
+        // Capture whether we'd already recorded a terminal result for this task
+        // BEFORE mutating state below, so the idle auto-surface (further down)
+        // fires at most once even if a duplicate terminal notification arrives.
+        // A Workflow's completion notification may key on either the returned
+        // Task ID (the registry key) or the wf_ run id, so fall back to a
+        // workflowId match before giving up.
+        const priorEntry = managed
+          ? (managed.backgroundTaskRegistry.get(event.taskId)
+            ?? [...managed.backgroundTaskRegistry.values()].find(t => t.workflowId === event.taskId))
+          : undefined
+        const wasAlreadyTerminal = priorEntry
+          ? priorEntry.status !== 'running'
+          : this.taskOutputIndex.has(event.taskId)
+
         // Store output for later retrieval via getTaskOutput()
         if (managed) {
           managed.backgroundTaskOutputs.set(event.taskId, {
@@ -7650,24 +8874,79 @@ export class SessionManager implements ISessionManager {
           })
           // O(1) index for getTaskOutput() — avoids scanning all sessions
           this.taskOutputIndex.set(event.taskId, sessionId)
-          sessionLog.info(`Background task ${event.taskId} completed (status=${event.status})`)
 
-          // Evict stale entries older than 1 hour to bound memory growth
-          const ONE_HOUR = 3_600_000
-          const now = Date.now()
-          for (const [tid, info] of managed.backgroundTaskOutputs) {
-            if (now - info.completedAt > ONE_HOUR) {
-              managed.backgroundTaskOutputs.delete(tid)
-              this.taskOutputIndex.delete(tid)
-            }
+          // Resolve the running-task registry entry to its terminal status so a
+          // later "status?" query reflects reality instead of a stale "running".
+          // Match by taskId, or by workflowId (a workflow may complete under its
+          // wf_ run id rather than the returned Task ID).
+          const running = managed.backgroundTaskRegistry.get(event.taskId)
+            ?? [...managed.backgroundTaskRegistry.values()].find(t => t.workflowId === event.taskId)
+          if (running) {
+            running.status = event.status
+            running.completedAt = Date.now()
+          } else {
+            // Terminal notification for a task we never saw backgrounded (e.g.
+            // it completed in the same subprocess before task_backgrounded was
+            // matched). Record it so status queries are still truthful.
+            managed.backgroundTaskRegistry.set(event.taskId, {
+              taskId: event.taskId,
+              startTime: Date.now(),
+              status: event.status,
+              completedAt: Date.now(),
+            })
           }
+          sessionLog.info(`[bg-lifecycle] task completed`, {
+            sessionId,
+            taskId: event.taskId,
+            status: event.status,
+          })
+
+          this.evictStaleBackgroundTasks(managed)
         }
         // Forward to renderer for UI update
         this.sendEvent({
           ...event,
           sessionId,
         }, workspaceId)
+
+        // WS2 keep-alive: when a background agent finishes while the session is
+        // IDLE, nobody is consuming its result — the main agent already ended its
+        // turn, so the completion only updates the registry/chip and the findings
+        // never make it back into the conversation ("the agent never returned the
+        // result"). Wake the session with a system-generated follow-up so the agent
+        // reads the output and presents it. During an active turn (isProcessing)
+        // the terminal notification reaches the agent through the live stream, so
+        // we skip then. Gated on keep-alive because only that mode delivers this
+        // event between turns; guarded against duplicate notifications.
+        if (managed && this.keepBackgroundTasksAlive && !managed.isProcessing && !wasAlreadyTerminal) {
+          const taskIntent = managed.backgroundTaskRegistry.get(event.taskId)?.intent
+          const outputFile = event.outputFile || managed.backgroundTaskOutputs.get(event.taskId)?.outputFile
+          const label = taskIntent ? `"${taskIntent}"` : `task ${event.taskId}`
+          const nudge = event.status === 'completed'
+            ? [
+                `[background-task-completed] The background agent you launched (${label}) has finished.`,
+                outputFile ? `Its full output is saved at: ${outputFile}` : '',
+                `Read that output file and present the results to the user now. Do NOT spawn another background agent — just read the file and summarize the findings inline.`,
+              ].filter(Boolean).join('\n')
+            : [
+                `[background-task-${event.status}] The background agent you launched (${label}) ended with status "${event.status}".`,
+                outputFile ? `Any partial output is at: ${outputFile}.` : '',
+                `Briefly let the user know it did not complete successfully. Do NOT spawn another background agent.`,
+              ].filter(Boolean).join('\n')
+          sessionLog.info(`[bg-lifecycle] surfacing completed background task to idle session`, {
+            sessionId,
+            taskId: event.taskId,
+            status: event.status,
+          })
+          // Ride the normal turn machinery (resume + persistence). `hidden: true`
+          // keeps the nudge out of the transcript — the agent's response (the
+          // presented result) renders as a normal assistant turn.
+          void this.sendMessage(sessionId, nudge, [], [], { hidden: true }).catch((err) => {
+            sessionLog.error(`[bg-lifecycle] failed to surface completed task ${event.taskId}:`, err)
+          })
+        }
         break
+      }
 
       case 'shell_backgrounded':
         // Store the command for later process killing
@@ -7682,16 +8961,64 @@ export class SessionManager implements ISessionManager {
         }, workspaceId)
         break
 
-      case 'source_activated':
-        // A source was auto-activated mid-turn, forward to renderer for auto-retry
-        sessionLog.info(`Source "${event.sourceSlug}" activated, notifying renderer for auto-retry`)
+      case 'source_activated': {
+        // A source was auto-activated mid-turn. The server schedules a re-send of the
+        // original message with a "[<slug> activated]" suffix so headless deployments
+        // (WebUI, docker server) chain activations the same way the renderer used to.
+        // The renderer still receives the event to render activation feedback, but no
+        // longer fires its own auto_retry (see processor.ts).
+        sessionLog.info(`Source "${event.sourceSlug}" activated for session ${sessionId}, scheduling auto-retry`)
+
         this.sendEvent({
           type: 'source_activated',
           sessionId,
           sourceSlug: event.sourceSlug,
           originalMessage: event.originalMessage,
         }, workspaceId)
+
+        if (!managed) break
+
+        const originalMessage = event.originalMessage ?? ''
+        if (!originalMessage.trim()) {
+          sessionLog.warn(`Source "${event.sourceSlug}" activated for session ${sessionId}, but originalMessage was empty; skipping auto-retry`)
+          break
+        }
+
+        const messageWithSuffix = `${originalMessage}\n\n[${event.sourceSlug} activated]`
+        const messageCountAtSchedule = managed.messages.length
+
+        // Stash the retry payload so a duplicate sendMessage from a legacy renderer
+        // (mixed-version rollout: new server + v0.9.5 Electron client) gets deduped.
+        // 2s window covers WS latency tail on flaky mobile / proxy links.
+        managed.autoRetryPending = {
+          content: messageWithSuffix,
+          deadlineMs: Date.now() + 2000,
+          committed: false,
+        }
+
+        if (managed.autoRetryTimer) clearTimeout(managed.autoRetryTimer)
+        managed.autoRetryTimer = setTimeout(() => {
+          const current = this.sessions.get(sessionId)
+          if (!current) return
+          current.autoRetryTimer = undefined
+
+          // If a user follow-up arrived in the 100ms window, skip — they preempted us.
+          if (current.messages.length > messageCountAtSchedule) {
+            sessionLog.info(`Auto-retry skipped for ${sessionId}: follow-up message arrived first`)
+            current.autoRetryPending = undefined
+            return
+          }
+
+          // Note: do NOT clear autoRetryPending here — sendMessage() needs to see it
+          // so a legacy renderer's duplicate RPC arriving ~50ms later gets dropped.
+          // The pending slot is cleared by the deadline check in sendMessage, by the
+          // next matching sendMessage that drops as a duplicate, or by session deletion.
+          this.sendMessage(sessionId, messageWithSuffix).catch(err => {
+            sessionLog.error(`Auto-retry sendMessage failed for ${sessionId}:`, err)
+          })
+        }, 100)
         break
+      }
 
       case 'complete':
         // Complete event from CraftAgent - accumulate usage from this turn
@@ -7855,6 +9182,7 @@ export class SessionManager implements ISessionManager {
       thinkingLevel,
       automationName,
       telegramTopic,
+      waitForCompletion,
     } = input
 
     // Warn if llmConnection was specified but doesn't resolve
@@ -7896,10 +9224,8 @@ export class SessionManager implements ISessionManager {
       this.persistSession(managed)
     }
 
-    // Notify renderer to hydrate full session metadata (including title)
-    // before streaming events arrive. Without this, the renderer may create
-    // a synthetic empty session and temporarily show "New chat".
-    this.sendEvent({ type: 'session_created', sessionId: session.id }, workspaceId)
+    // (session_created is emitted by createSession above; triggeredBy is set synchronously
+    // before the renderer's hydrate round-trip resolves, so it is observed.)
 
     // Bind the new session to its Telegram forum topic if the matcher
     // declared `telegramTopic`. Done before `sendMessage` so the first
@@ -7921,7 +9247,24 @@ export class SessionManager implements ISessionManager {
       }
     }
 
-    // Send the prompt
+    // Send the prompt.
+    // Test runs pass `waitForCompletion: false` so we return as soon as the
+    // session exists and the prompt is dispatched — otherwise the RPC blocks
+    // until the entire turn (including tool calls) finishes and trips the 30s
+    // client timeout (craft-agents-oss#943). The session streams live either
+    // way; a background failure surfaces in the session UI and is logged here.
+    if (waitForCompletion === false) {
+      void this.sendMessage(session.id, prompt, undefined, undefined, {
+        skillSlugs: resolved?.skillSlugs,
+      }).catch((err) => {
+        sessionLog.error('[Automations] background sendMessage failed for test run', {
+          sessionId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      })
+      return { sessionId: session.id }
+    }
+
     await this.sendMessage(session.id, prompt, undefined, undefined, {
       skillSlugs: resolved?.skillSlugs,
     })
@@ -8304,8 +9647,8 @@ export class SessionManager implements ISessionManager {
       })
     }
 
-    // Emit session_created so renderer picks it up
-    this.sendEvent({ type: 'session_created', sessionId }, workspaceId)
+    // Built by hand (not via createSession), so announce it explicitly.
+    this.notifySessionCreated(workspaceId, sessionId)
 
     sessionLog.info(`[import] Complete: sessionId=${sessionId}, transferredSummary=${managed.transferredSessionSummary ? `${managed.transferredSessionSummary.length} chars` : 'none'}, applied=${managed.transferredSessionSummaryApplied}, warnings=${warnings.length > 0 ? warnings.join('; ') : 'none'}`)
     return { sessionId, warnings: warnings.length > 0 ? warnings : undefined }

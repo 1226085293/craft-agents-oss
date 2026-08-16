@@ -8,7 +8,7 @@
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAtomValue, useSetAtom } from 'jotai'
-import { AlertCircle, Globe, Copy, RefreshCw, Link2Off, Info } from 'lucide-react'
+import { AlertCircle, Globe, Copy, RefreshCw, Link2Off, Info, Pencil } from 'lucide-react'
 import { ChatDisplay, type ChatDisplayHandle } from '@/components/app-shell/ChatDisplay'
 import { PanelHeader } from '@/components/app-shell/PanelHeader'
 import { SessionMenu } from '@/components/app-shell/SessionMenu'
@@ -21,10 +21,12 @@ import { DropdownMenu, DropdownMenuTrigger } from '@/components/ui/dropdown-menu
 import { StyledDropdownMenuContent, StyledDropdownMenuItem, StyledDropdownMenuSeparator } from '@/components/ui/styled-dropdown'
 import { useAppShellContext, usePendingPermission, usePendingCredential, useSessionOptionsFor, useSession as useSessionData } from '@/context/AppShellContext'
 import { rendererPerf } from '@/lib/perf'
-import { routes } from '@/lib/navigate'
+import { isAbsolutePath } from '@/lib/drafts'
+import { navigate, routes } from '@/lib/navigate'
 import { coerceInputText } from '@/lib/input-text'
 import { deriveSessionMessagesLoadState, formatSessionLoadFailure } from '@/lib/session-load'
 import { ensureSessionMessagesLoadedAtom, forceSessionMessagesReloadAtom, loadedSessionsAtom, sessionMetaMapAtom } from '@/atoms/sessions'
+import { kanbanEditorTargetAtom } from '@/atoms/kanban'
 import { getSessionTitle } from '@/utils/session'
 // Model resolution: connection.defaultModel (no hardcoded defaults)
 import { resolveEffectiveConnectionSlug, isSessionConnectionUnavailable } from '@config/llm-connections'
@@ -334,7 +336,11 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
       // Resolve bare relative paths against session working directory,
       // or workspace root as a fallback when workingDirectory is not set.
       const resolved = (() => {
-        if (path.startsWith('/') || path.startsWith('~/')) return path
+        // Absolute paths (POSIX `/…`, Windows `C:\…`) and `~/…` are used as-is.
+        // Using a cross-platform check here fixes Windows preview failures where a
+        // `C:\…` path was wrongly treated as relative and re-prefixed with the
+        // workspace root, producing a doubled, non-existent path (#922/#875).
+        if (isAbsolutePath(path) || path.startsWith('~/')) return path
 
         const baseDir = workingDirectory || activeWorkspace?.rootPath
         if (!baseDir) return path
@@ -347,8 +353,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
       // Smart fallback for missing files in AI output:
       // if the exact path doesn't exist, search nearby for same basename
       // (e.g. markdown/linkify.test.ts -> markdown/__tests__/linkify.test.ts).
-      if (resolved.startsWith('/')) {
-        const lastSlash = resolved.lastIndexOf('/')
+      if (isAbsolutePath(resolved)) {
+        // Backslash-aware so the fallback also runs for `C:\…` paths (#922)
+        const lastSlash = Math.max(resolved.lastIndexOf('/'), resolved.lastIndexOf('\\'))
         if (lastSlash > 0 && lastSlash < resolved.length - 1) {
           const parentDir = resolved.slice(0, lastSlash)
           const fileName = resolved.slice(lastSlash + 1)
@@ -461,6 +468,24 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   const handleLabelsChange = React.useCallback((newLabels: string[]) => {
     onSessionLabelsChange?.(sessionId, newLabels)
   }, [sessionId, onSessionLabelsChange])
+
+  // Task orchestrator sessions (spec-backed, top-level) get an "Edit task" header action
+  // that opens the board's full-pane Task editor prefilled from task.yaml — the same
+  // surface as creation, so goal/acceptance criteria/subtasks can change and the whole
+  // task can be re-run (Save & Run mints a fresh Conductor run).
+  const taskSlug = sessionMeta?.taskSlug
+  const isTaskOrchestrator = !!taskSlug && !sessionMeta?.parentSessionId
+  const setKanbanEditorTarget = useSetAtom(kanbanEditorTargetAtom)
+  const handleEditTask = React.useCallback(() => {
+    if (!taskSlug) return
+    setKanbanEditorTarget({
+      mode: 'edit',
+      sessionId,
+      taskSlug,
+      initialTitle: sessionMeta ? getSessionTitle(sessionMeta) : undefined,
+    })
+    navigate(routes.view.board())
+  }, [taskSlug, sessionId, sessionMeta, setKanbanEditorTarget])
 
   const handleDelete = React.useCallback(async () => {
     await onDeleteSession(sessionId)
@@ -600,7 +625,26 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     )
   }, [isCompactMode, sessionId, session?.sessionFolderPath, sessionMeta])
 
-  const headerActions = isCompactMode ? compactInfoButton : shareButton
+  // Pencil opens the Task editor for orchestrator sessions; rendered before the
+  // share/info action. The slot div has no gap of its own, so compose with one here.
+  const editTaskButton = React.useMemo(() => {
+    if (!isTaskOrchestrator) return undefined
+    return (
+      <PanelHeaderCenterButton
+        icon={<Pencil className="h-4 w-4" />}
+        tooltip={t('kanban.editTask')}
+        onClick={handleEditTask}
+      />
+    )
+  }, [isTaskOrchestrator, handleEditTask, t])
+
+  const primaryHeaderAction = isCompactMode ? compactInfoButton : shareButton
+  const headerActions = editTaskButton ? (
+    <div className="flex items-center gap-1.5">
+      {editTaskButton}
+      {primaryHeaderAction}
+    </div>
+  ) : primaryHeaderAction
 
   // Build title menu content for chat sessions using shared SessionMenu.
   // Desktop uses Radix DropdownMenu via PanelHeader; compact mode uses a
@@ -738,6 +782,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
                 onMatchInfoChange={onChatMatchInfoChange}
                 connectionUnavailable={connectionUnavailable}
                 compactMode={!!isCompactMode}
+                enableCompactModelPicker={!!isCompactMode}
               />
             </div>
           </div>
@@ -817,6 +862,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
             onMatchInfoChange={onChatMatchInfoChange}
             connectionUnavailable={connectionUnavailable}
             compactMode={!!isCompactMode}
+            enableCompactModelPicker={!!isCompactMode}
           />
         </div>
       </div>

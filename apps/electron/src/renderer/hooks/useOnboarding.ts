@@ -19,7 +19,7 @@ import type { ProviderChoice } from '@/components/onboarding/ProviderSelectStep'
 import type { LocalModelSubmitData } from '@/components/onboarding/LocalModelStep'
 import type { ApiKeySubmitData } from '@/components/apisetup'
 import type { CustomEndpointConfig } from '@config/llm-connections'
-import type { SetupNeeds, LlmConnectionSetup } from '../../shared/types'
+import type { SetupNeeds, LlmConnectionSetup, ClaudeOAuthIdentityDto } from '../../shared/types'
 
 interface UseOnboardingOptions {
   /** Called when onboarding is complete */
@@ -152,6 +152,7 @@ export function apiSetupMethodToConnectionSetup(
     iamCredentials?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string }
     awsRegion?: string
     bedrockAuthMethod?: 'iam_credentials' | 'environment'
+    oauthIdentity?: ClaudeOAuthIdentityDto
   },
   editingSlug: string | null,
   existingSlugs: Set<string>,
@@ -172,6 +173,7 @@ export function apiSetupMethodToConnectionSetup(
       return {
         slug,
         credential: options.credential,
+        oauthIdentity: options.oauthIdentity,
       }
     case 'pi_chatgpt_oauth':
     case 'pi_copilot_oauth':
@@ -257,6 +259,7 @@ export function useOnboarding({
       iamCredentials?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string }
       awsRegion?: string
       bedrockAuthMethod?: 'iam_credentials' | 'environment'
+      oauthIdentity?: ClaudeOAuthIdentityDto
     },
     methodOverride?: ApiSetupMethod,
     connectionSlugOverride?: string,
@@ -282,6 +285,7 @@ export function useOnboarding({
         iamCredentials: options?.iamCredentials,
         awsRegion: options?.awsRegion,
         bedrockAuthMethod: options?.bedrockAuthMethod,
+        oauthIdentity: options?.oauthIdentity,
       }, connectionSlugOverride ?? editingSlug, existingSlugs)
       // Use new unified API
       const result = await window.electronAPI.setupLlmConnection(
@@ -506,8 +510,8 @@ export function useOnboarding({
   // `method` is passed explicitly to break the stale-closure chain — the OAuth
   // await crosses renders, so handleSaveConfig's closure may have an outdated
   // state.apiSetupMethod.
-  const saveAndValidateConnection = useCallback(async (connectionSlug: string, method: ApiSetupMethod, credential?: string, updateOnly?: boolean): Promise<boolean> => {
-    const saved = await handleSaveConfig(credential, undefined, method, connectionSlug, updateOnly)
+  const saveAndValidateConnection = useCallback(async (connectionSlug: string, method: ApiSetupMethod, credential?: string, updateOnly?: boolean, oauthIdentity?: ClaudeOAuthIdentityDto): Promise<boolean> => {
+    const saved = await handleSaveConfig(credential, oauthIdentity ? { oauthIdentity } : undefined, method, connectionSlug, updateOnly)
     if (!saved) {
       setState(s => ({ ...s, credentialStatus: 'error' }))
       return false
@@ -686,7 +690,7 @@ export function useOnboarding({
 
       if (result.success && result.token) {
         setIsWaitingForCode(false)
-        await saveAndValidateConnection(connectionSlug, 'claude_oauth', result.token, !!editingSlug)
+        await saveAndValidateConnection(connectionSlug, 'claude_oauth', result.token, !!editingSlug, result.identity)
       } else {
         setState(s => ({
           ...s,

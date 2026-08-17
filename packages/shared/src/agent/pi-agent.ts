@@ -538,7 +538,11 @@ export class PiAgent extends BaseAgent {
     const args = [piServerPath];
     const interceptorPath = runtime.paths?.interceptor;
     if (interceptorPath) {
-      args.unshift('--require', interceptorPath);
+      // Bun uses --preload; Node.js uses --require.
+      // Bun's --require does not reliably handle .ts source files on Linux
+      // (silent exit), while --preload works across all Bun versions.
+      const isBun = typeof process.versions.bun !== 'undefined'
+      args.unshift(isBun ? '--preload' : '--require', interceptorPath)
     }
 
     // Resolve credentials before spawning so we can derive AWS env vars

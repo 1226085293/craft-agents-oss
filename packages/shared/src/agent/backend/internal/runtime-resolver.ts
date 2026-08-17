@@ -152,9 +152,10 @@ function resolveInterceptorBundlePath(hostRuntime: BackendHostRuntimeContext): s
   }
 
   // In dev / monorepo runs, prefer the TypeScript source so changes are
-  // picked up without a manual `bun run build:interceptor`. Bun handles
-  // `--require <file>.ts` natively. Packaged builds always go through the
-  // pre-built `dist/interceptor.cjs` bundle.
+  // picked up without a manual `bun run build:interceptor`. The interceptor
+  // is loaded via `--preload` in Bun or `--require` in Node.js (see
+  // pi-agent.ts). Packaged builds always go through the pre-built
+  // `dist/interceptor.cjs` bundle.
   if (!hostRuntime.isPackaged) {
     const source = resolveUpwards(
       hostRuntime.appRootPath,

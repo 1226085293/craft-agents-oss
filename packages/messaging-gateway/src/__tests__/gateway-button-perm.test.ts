@@ -292,25 +292,28 @@ describe('MessagingGateway — perm: button (#726)', () => {
     expect(acks).toHaveLength(0)
   })
 
-  it('superseded prompt: a new permission_request for the same session sweeps the old entry', async () => {
+  it('concurrent prompts: a new permission_request does NOT sweep the old entry', async () => {
     const h = await makeHarness()
     await registerPrompt(h.gateway, { requestId: 'req-1' })
 
-    // Agent resolved req-1 silently and is now asking for a fresh permission.
+    // Agent fires multiple concurrent permission requests (e.g. batch operations).
+    // Old prompts stay visible so the user can approve each one individually.
     await registerPrompt(h.gateway, { requestId: 'req-2' })
 
-    // The old req-1 keyboard was cleared; req-2's keyboard is live.
-    expect(h.adapter.clearButtons).toHaveBeenCalledTimes(1)
+    // Neither keyboard was cleared — both prompts remain live.
+    expect(h.adapter.clearButtons).not.toHaveBeenCalled()
 
-    // A late tap on req-1 is a no-op.
+    // A tap on req-1 is honored.
     await h.adapter.fireButton(pressFor('perm:allow:req-1'))
-    expect(h.sessionManager.respondToPermission).not.toHaveBeenCalled()
-
-    // A tap on req-2 is honored.
-    await h.adapter.fireButton(pressFor('perm:allow:req-2'))
     expect(h.sessionManager.respondToPermission).toHaveBeenCalledTimes(1)
     const respondMock = h.sessionManager.respondToPermission as unknown as ReturnType<typeof mock>
-    expect(respondMock.mock.calls[0]?.[1]).toBe('req-2')
+    expect(respondMock.mock.calls[0]?.[1]).toBe('req-1')
+
+    // A tap on req-2 is also honored.
+    await h.adapter.fireButton(pressFor('perm:deny:req-2'))
+    expect(respondMock).toHaveBeenCalledTimes(2)
+    expect(respondMock.mock.calls[1]?.[1]).toBe('req-2')
+    expect(respondMock.mock.calls[1]?.[2]).toBe(false)
   })
 
   it('malformed buttonId: silently dropped (no entry, no respondToPermission)', async () => {

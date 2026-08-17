@@ -577,20 +577,15 @@ export class MessagingGateway {
   private sweepStalePermissions(event: SessionEvent): void {
     if (this.permissionMessages.size === 0) return
 
-    const eventRequestId =
-      event.type === 'permission_request'
-        ? ((event.request as { requestId?: string } | undefined)?.requestId ?? null)
-        : null
+    // Don't sweep older permission prompts when a new permission_request arrives.
+    // Multiple concurrent tool calls (e.g. batch delete sessions) each need their
+    // own approval — let all prompts stay visible so the user can respond to each
+    // one individually. Only sweep on non-permission events (agent moved on).
+    if (event.type === 'permission_request') return
 
     for (const [requestId, record] of this.permissionMessages) {
       if (record.sessionId !== event.sessionId) continue
-      if (requestId === eventRequestId) continue
       this.permissionMessages.delete(requestId)
-
-      // Reject the pending permission promise in the agent so it doesn't
-      // hang forever waiting for a response that can never come (the inline
-      // keyboard was cleared because the agent moved on or hit a display limit).
-      this.sessionManager.respondToPermission(record.sessionId, requestId, false, false)
 
       const adapter = this.adapters.get(record.platform)
       if (adapter?.clearButtons && adapter.isConnected()) {

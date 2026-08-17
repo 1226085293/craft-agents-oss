@@ -587,6 +587,11 @@ export class MessagingGateway {
       if (requestId === eventRequestId) continue
       this.permissionMessages.delete(requestId)
 
+      // Reject the pending permission promise in the agent so it doesn't
+      // hang forever waiting for a response that can never come (the inline
+      // keyboard was cleared because the agent moved on or hit a display limit).
+      this.sessionManager.respondToPermission(record.sessionId, requestId, false, false)
+
       const adapter = this.adapters.get(record.platform)
       if (adapter?.clearButtons && adapter.isConnected()) {
         adapter.clearButtons(record.channelId, record.messageId).catch(() => {})

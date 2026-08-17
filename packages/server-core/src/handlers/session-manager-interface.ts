@@ -27,7 +27,7 @@ import type {
 import type { SessionBundle, DispatchMode } from '@craft-agent/shared/sessions'
 import type { EventSink } from '../transport'
 
-export type BusyMessageDecisionAction = 'reply' | 'ignore' | 'queue'
+export type BusyMessageDecisionAction = 'reply' | 'ignore' | 'queue' | 'abort'
 
 export interface BusyMessageDecisionInput {
   platform: string

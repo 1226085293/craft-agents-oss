@@ -103,10 +103,12 @@ function makeFakeSessionManager(overrides: Record<string, unknown> = {}): {
   sendMessage: ReturnType<typeof mock>
   isSessionProcessing: ReturnType<typeof mock>
   decideBusyMessage?: ReturnType<typeof mock>
+  cancelProcessing?: ReturnType<typeof mock>
 } {
   return {
     sendMessage: mock(async () => {}),
     isSessionProcessing: mock(() => false),
+    cancelProcessing: mock(async () => {}),
     ...overrides,
   }
 }
@@ -287,7 +289,7 @@ describe('Router', () => {
     expect(sessionManager.sendMessage).not.toHaveBeenCalled()
   })
 
-  it('queues substantive busy follow-ups when the agent decision says queue', async () => {
+  it('steers busy follow-ups even when the agent decision says queue', async () => {
     const store = new BindingStore(storeDir)
     store.bind('ws1', 'sess-A', 'telegram', 'chat-1')
     const sessionManager = makeFakeSessionManager({
@@ -302,7 +304,29 @@ describe('Router', () => {
 
     expect(sessionManager.decideBusyMessage).toHaveBeenCalledTimes(1)
     expect(sessionManager.sendMessage).toHaveBeenCalledTimes(1)
-    expect(sessionManager.sendMessage.mock.calls[0]?.[4]).toEqual({ midStreamBehavior: 'queue' })
+    expect(sessionManager.sendMessage.mock.calls[0]?.[4]).toEqual({ midStreamBehavior: 'steer' })
+  })
+
+  it('aborts the session when the agent decides the message is a stop intent', async () => {
+    const store = new BindingStore(storeDir)
+    store.bind('ws1', 'sess-A', 'telegram', 'chat-1')
+    const sessionManager = makeFakeSessionManager({
+      isSessionProcessing: mock(() => true),
+      decideBusyMessage: mock(async () => ({ action: 'abort' })),
+      cancelProcessing: mock(async () => {}),
+    })
+    const commands = makeFakeCommands()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const router = new Router(sessionManager as any, store, commands as unknown as Commands)
+    const adapter = makeFakeAdapter('telegram')
+
+    await router.route(adapter, baseMsg({ text: '取消，别再做了' }))
+
+    expect(sessionManager.decideBusyMessage).toHaveBeenCalledTimes(1)
+    expect(sessionManager.cancelProcessing).toHaveBeenCalledTimes(1)
+    expect(sessionManager.cancelProcessing).toHaveBeenCalledWith('sess-A', true)
+    expect(sessionManager.sendMessage).not.toHaveBeenCalled()
+    expect(adapter.sendText).not.toHaveBeenCalled()
   })
 
   it('supports WhatsApp busy replies without introducing progress bubbles', async () => {

@@ -110,10 +110,10 @@ export class Router {
           fileAttachments,
           undefined, // storedAttachments (handled by session layer)
           {
-            midStreamBehavior:
-              isBusy && binding.config.busyMessagePolicy === 'agent_decide'
-                ? 'queue'
-                : 'steer',
+            // Non-desktop platforms (Telegram, WhatsApp) default to steer for
+            // mid-stream messages — injects the message into the active turn
+            // via agent.redirect() so the user can guide/interrupt the running task.
+            midStreamBehavior: isBusy ? 'steer' : undefined,
           },
         )
       } catch (err) {
@@ -181,9 +181,17 @@ export class Router {
       return true
     }
 
-    // `queue` means: leave the active run undisturbed and replay the follow-up
-    // as the next normal turn. Returning false lets the caller use sendMessage
-    // with midStreamBehavior='queue'.
+    if (decision.action === 'abort') {
+      // User explicitly wants to stop the current task. Force-abort the session
+      // so the subprocess and any child processes are terminated, then let the
+      // next user message start a fresh turn.
+      await this.sessionManager.cancelProcessing(sessionId, /* silent */ true)
+      return true
+    }
+
+    // Returning false means: the message was not handled (no reply sent, not ignored).
+    // The caller will use sendMessage with midStreamBehavior='steer' by default,
+    // which injects the message into the active turn via agent.redirect().
     return false
   }
 

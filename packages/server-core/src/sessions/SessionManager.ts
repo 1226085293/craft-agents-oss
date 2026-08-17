@@ -2689,10 +2689,11 @@ export class SessionManager implements ISessionManager {
       'You are deciding how Craft should respond in an external chat while an agent session is already busy running a previous request.',
       '',
       'Return ONLY compact JSON with this shape:',
-      '{"action":"reply"|"ignore"|"queue","replyText":"optional short text"}',
+      '{"action":"reply"|"ignore"|"queue"|"abort","replyText":"optional short text"}',
       '',
       'Decision policy:',
       '- Use your semantic judgment. Do not rely on keyword or regular-expression matching.',
+      '- Choose "abort" when the user explicitly wants to STOP, CANCEL, or INTERRUPT the current task — e.g. "取消", "stop", "cancel", "别管了", "interrupt", "停", "退出", "放弃", "算了", "never mind", "forget it". The user is telling you to stop what you are doing RIGHT NOW.',
       '- Choose "reply" only when the user expects an immediate side-channel response while the main run continues.',
       '- Choose "ignore" for acknowledgements, encouragement, or messages that do not need a response and do not change the task.',
       '- Choose "queue" when the user provides substantive new instructions or context that should be handled after the current run.',
@@ -2803,7 +2804,7 @@ export class SessionManager implements ISessionManager {
       const end = raw.lastIndexOf('}')
       const json = start >= 0 && end > start ? raw.slice(start, end + 1) : raw
       const parsed = JSON.parse(json) as Partial<BusyMessageDecision>
-      const action = parsed.action === 'reply' || parsed.action === 'ignore' || parsed.action === 'queue'
+      const action = parsed.action === 'reply' || parsed.action === 'ignore' || parsed.action === 'queue' || parsed.action === 'abort'
         ? parsed.action
         : 'queue'
       const replyText = typeof parsed.replyText === 'string' ? parsed.replyText.trim() : undefined
@@ -7039,6 +7040,17 @@ export class SessionManager implements ISessionManager {
       managed.agent.forceAbort(AbortReason.UserStop)
     }
 
+    // Kill any background shell processes (e.g. long-running scripts, Start-Sleep)
+    // so they don't continue running after the turn is aborted.
+    if (managed.backgroundShellCommands.size > 0) {
+      const shellIds = [...managed.backgroundShellCommands.keys()]
+      for (const shellId of shellIds) {
+        this.killShell(sessionId, shellId).catch((err) => {
+          sessionLog.warn(`Failed to kill background shell ${shellId}: ${err}`)
+        })
+      }
+    }
+
     // Only show "Response interrupted" message when user explicitly clicked Stop
     // Silent mode is used when redirecting (sending new message while processing)
     if (!silent) {
@@ -7466,30 +7478,52 @@ export class SessionManager implements ISessionManager {
 
         sessionLog.info(`Attempting to kill process with command: ${command.slice(0, 100)}...`)
 
-        // Use pgrep first to find the PID, then kill it
-        // This is safer than pkill -f which can match too broadly
-        try {
-          const { stdout } = await execAsync(`pgrep -f "${escapedCommand}"`)
-          const pids = stdout.trim().split('\n').filter(Boolean)
+        // Platform-aware process killing: Windows uses PowerShell, Unix uses pgrep/kill
+        const isWin = process.platform === 'win32'
+        let pids: string[] = []
 
-          if (pids.length > 0) {
-            sessionLog.info(`Found ${pids.length} process(es) to kill: ${pids.join(', ')}`)
-            // Kill each process
-            for (const pid of pids) {
-              try {
+        if (isWin) {
+          // On Windows, use PowerShell to find processes by command line
+          // Escape single quotes for PowerShell string literals and double quotes
+          // so they don't break the outer bash/PowerShell command wrapping.
+          try {
+            const safeCmd = escapedCommand
+              .replace(/'/g, "''")       // escape ' for PowerShell single-quote strings
+              .replace(/"/g, '\\"')    // escape " for the outer bash double-quoted argument
+            const psCmd = `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${safeCmd}*'} | Select-Object -ExpandProperty ProcessId`
+            const { stdout } = await execAsync(`powershell -NoProfile -Command "${psCmd}"`)
+            pids = stdout.trim().split('\n').map(s => s.trim()).filter(Boolean)
+          } catch (winPgrepErr) {
+            sessionLog.info(`No matching processes found (Windows process lookup failed: ${winPgrepErr})`)
+          }
+        } else {
+          // Unix: use pgrep -f to match against full command line
+          try {
+            const { stdout } = await execAsync(`pgrep -f "${escapedCommand}"`)
+            pids = stdout.trim().split('\n').filter(Boolean)
+          } catch (pgrepErr) {
+            // pgrep returns exit code 1 when no processes found, which is fine
+            sessionLog.info(`No matching processes found (pgrep returned no results)`)
+          }
+        }
+
+        if (pids.length > 0) {
+          sessionLog.info(`Found ${pids.length} process(es) to kill: ${pids.join(', ')}`)
+          for (const pid of pids) {
+            try {
+              if (isWin) {
+                await execAsync(`taskkill /F /PID ${pid}`)
+                sessionLog.info(`Killed Windows PID ${pid}`)
+              } else {
                 await execAsync(`kill -TERM ${pid}`)
                 sessionLog.info(`Sent SIGTERM to process ${pid}`)
-              } catch (killErr) {
-                // Process may have already exited
-                sessionLog.warn(`Failed to kill process ${pid}: ${killErr}`)
               }
+            } catch (killErr) {
+              sessionLog.warn(`Failed to kill process ${pid}: ${killErr}`)
             }
-          } else {
-            sessionLog.info(`No processes found matching command`)
           }
-        } catch (pgrepErr) {
-          // pgrep returns exit code 1 when no processes found, which is fine
-          sessionLog.info(`No matching processes found (pgrep returned no results)`)
+        } else {
+          sessionLog.info(`No matching processes found`)
         }
 
         // Clean up the stored command

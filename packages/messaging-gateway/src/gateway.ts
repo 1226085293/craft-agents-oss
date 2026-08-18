@@ -415,6 +415,10 @@ export class MessagingGateway {
     // which is the visible side of #726.
     this.sweepStalePermissions(event)
 
+    // permission_resolved is a bookkeeping event (a prompt was answered from
+    // another client). It has nothing to render, so don't fan it out to adapters.
+    if (event.type === 'permission_resolved') return
+
     const bindings = this.bindingStore.findBySession(event.sessionId)
     if (bindings.length === 0) return
 
@@ -580,8 +584,31 @@ export class MessagingGateway {
     // Don't sweep older permission prompts when a new permission_request arrives.
     // Multiple concurrent tool calls (e.g. batch delete sessions) each need their
     // own approval — let all prompts stay visible so the user can respond to each
-    // one individually. Only sweep on non-permission events (agent moved on).
+    // one individually.
     if (event.type === 'permission_request') return
+
+    // A permission_resolved event means exactly one prompt was answered (possibly
+    // from another client, e.g. an inline Telegram button). Clear just that prompt's
+    // keyboard, and keep the others visible so concurrent requests stay approvable.
+    if (event.type === 'permission_resolved') {
+      const requestId = event.requestId
+      if (typeof requestId === 'string') {
+        const record = this.permissionMessages.get(requestId)
+        if (record && record.sessionId === event.sessionId) {
+          this.permissionMessages.delete(requestId)
+          const adapter = this.adapters.get(record.platform)
+          if (adapter?.clearButtons && adapter.isConnected()) {
+            adapter.clearButtons(record.channelId, record.messageId).catch(() => {})
+          }
+          this.log.info('cleared resolved permission prompt', {
+            event: 'perm_prompt_cleared_resolved',
+            requestId,
+            sessionId: record.sessionId,
+          })
+        }
+      }
+      return
+    }
 
     for (const [requestId, record] of this.permissionMessages) {
       if (record.sessionId !== event.sessionId) continue

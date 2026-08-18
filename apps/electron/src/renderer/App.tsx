@@ -983,6 +983,26 @@ export default function App() {
         return
       }
 
+      // A permission was resolved from another client (e.g. an inline Telegram
+      // button). Drop the matching pending prompt so the desktop UI doesn't keep
+      // showing a request that was already answered elsewhere. Handled here
+      // (before the agent event processor) since it's bookkeeping, not a render.
+      if (event.type === 'permission_resolved') {
+        setPendingPermissions(prevPerms => {
+          const queue = prevPerms.get(sessionId)
+          if (!queue) return prevPerms
+          const remaining = queue.filter(r => r.requestId !== event.requestId)
+          const next = new Map(prevPerms)
+          if (remaining.length === 0) {
+            next.delete(sessionId)
+          } else {
+            next.set(sessionId, remaining)
+          }
+          return next
+        })
+        return
+      }
+
       const agentEvent = event as unknown as AgentEvent
 
       // Track activity for stale session watchdog

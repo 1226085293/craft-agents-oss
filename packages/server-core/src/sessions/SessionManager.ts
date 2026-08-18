@@ -7688,6 +7688,14 @@ export class SessionManager implements ISessionManager {
 
       sessionLog.info(`Permission response for ${requestId}: allowed=${allowed}, alwaysAllow=${alwaysAllow}`)
       managed.agent.respondToPermission(requestId, allowed, alwaysAllow)
+
+      // Broadcast so other clients (e.g. the desktop app) drop the matching
+      // pending prompt when the permission was resolved from another channel
+      // (e.g. an inline Telegram button).
+      this.sendEvent(
+        { type: 'permission_resolved', sessionId, requestId, allowed },
+        managed.workspace.id,
+      )
       return true
     } else {
       sessionLog.warn(`Cannot respond to permission - no agent for session ${sessionId}`)

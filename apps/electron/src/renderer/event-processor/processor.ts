@@ -192,6 +192,13 @@ export function processEvent(
     case 'permission_request':
       return handlePermissionRequest(state, event)
 
+    case 'permission_resolved':
+      // Permission was resolved from another client (e.g. an inline Telegram
+      // button). The renderer handles this directly in onSessionEvent (it's
+      // bookkeeping — drop the matching pending prompt), so there's no effect
+      // to emit here. Case exists so the processor handles the event type.
+      return { state, effects: [] }
+
     case 'credential_request':
       return handleCredentialRequest(state, event)
 

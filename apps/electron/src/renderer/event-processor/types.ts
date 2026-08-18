@@ -132,6 +132,17 @@ export interface PermissionRequestEvent {
 }
 
 /**
+ * Permission resolved event
+ * Broadcast when a permission prompt is answered from any client.
+ */
+export interface PermissionResolvedEvent {
+  type: 'permission_resolved'
+  sessionId: string
+  requestId: string
+  allowed: boolean
+}
+
+/**
  * Sources changed event
  */
 export interface SourcesChangedEvent {
@@ -542,6 +553,7 @@ export type AgentEvent =
   | ErrorEvent
   | TypedErrorEvent
   | PermissionRequestEvent
+  | PermissionResolvedEvent
   | CredentialRequestEvent
   | SourcesChangedEvent
   | LabelsChangedEvent

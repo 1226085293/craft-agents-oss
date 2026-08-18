@@ -364,4 +364,37 @@ describe('MessagingGateway — perm: button (#726)', () => {
     )
     expect(h.sessionManager.respondToPermission).toHaveBeenCalledTimes(1)
   })
+
+  it('permission_resolved event clears only the matching prompt, keeps other concurrent prompts', async () => {
+    const h = await makeHarness()
+    await registerPrompt(h.gateway, { requestId: 'req-1' })
+    await registerPrompt(h.gateway, { requestId: 'req-2' })
+
+    // A permission_resolved for req-1 (e.g. answered from the desktop) should
+    // clear req-1's keyboard but leave req-2's buttons visible.
+    h.gateway.onSessionEvent(
+      'session:event',
+      { to: 'workspace', workspaceId: 'ws-test' },
+      {
+        type: 'permission_resolved',
+        sessionId: 'sess-A',
+        requestId: 'req-1',
+        allowed: true,
+      } as SessionEvent,
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // Only req-1's keyboard cleared.
+    expect(h.adapter.clearButtons).toHaveBeenCalledTimes(1)
+
+    // req-1 is gone (stale tap no-ops), req-2 still honored.
+    await h.adapter.fireButton(pressFor('perm:allow:req-1'))
+    expect(h.sessionManager.respondToPermission).not.toHaveBeenCalled()
+
+    await h.adapter.fireButton(pressFor('perm:allow:req-2'))
+    expect(h.sessionManager.respondToPermission).toHaveBeenCalledTimes(1)
+    const respondMock = h.sessionManager.respondToPermission as unknown as ReturnType<typeof mock>
+    expect(respondMock.mock.calls[0]?.[1]).toBe('req-2')
+  })
 })

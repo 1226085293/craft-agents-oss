@@ -248,8 +248,23 @@ describe('MessagingGateway — perm: button (#726)', () => {
     const h = await makeHarness()
     await registerPrompt(h.gateway, { requestId: 'req-1' })
 
-    // Desktop resolves first → agent moves on, emitting a tool_start. The
-    // gateway sweep on this event drops the entry and clears the keyboard.
+    // Desktop resolves first → a permission_resolved event marks the prompt
+    // resolved and clears its keyboard immediately.
+    h.gateway.onSessionEvent(
+      'session:event',
+      { to: 'workspace', workspaceId: 'ws-test' },
+      {
+        type: 'permission_resolved',
+        sessionId: 'sess-A',
+        requestId: 'req-1',
+        allowed: true,
+      } as SessionEvent,
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // The agent then resumes and emits a tool_start; the fallback sweep
+    // finishes dropping the resolved record (clearButtons is idempotent).
     h.gateway.onSessionEvent(
       'session:event',
       { to: 'workspace', workspaceId: 'ws-test' },
@@ -258,7 +273,8 @@ describe('MessagingGateway — perm: button (#726)', () => {
     await Promise.resolve()
     await Promise.resolve()
 
-    expect(h.adapter.clearButtons).toHaveBeenCalledTimes(1)
+    // Cleared once on permission_resolved, once more on the fallback sweep.
+    expect(h.adapter.clearButtons).toHaveBeenCalledTimes(2)
 
     // Snapshot how many texts the renderer's progress bubble already posted
     // for the tool_start event, so we can isolate the press-side ack count.
@@ -346,7 +362,22 @@ describe('MessagingGateway — perm: button (#726)', () => {
     await registerPrompt(h.gateway, { sessionId: 'sess-A', requestId: 'req-A' })
     await registerPrompt(h.gateway, { sessionId: 'sess-B', requestId: 'req-B' })
 
-    // Event for sess-A only — must not touch sess-B's keyboard.
+    // sess-A's prompt is resolved first (e.g. answered on the desktop).
+    h.gateway.onSessionEvent(
+      'session:event',
+      { to: 'workspace', workspaceId: 'ws-test' },
+      {
+        type: 'permission_resolved',
+        sessionId: 'sess-A',
+        requestId: 'req-A',
+        allowed: true,
+      } as SessionEvent,
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // A non-permission event for sess-A only — the fallback finishes clearing
+    // sess-A's resolved prompt but must not touch sess-B's keyboard.
     h.gateway.onSessionEvent(
       'session:event',
       { to: 'workspace', workspaceId: 'ws-test' },
@@ -355,8 +386,9 @@ describe('MessagingGateway — perm: button (#726)', () => {
     await Promise.resolve()
     await Promise.resolve()
 
-    // Exactly one keyboard cleared (sess-A's).
-    expect(h.adapter.clearButtons).toHaveBeenCalledTimes(1)
+    // Cleared on permission_resolved, then again on the sess-A fallback sweep —
+    // never sess-B's prompt.
+    expect(h.adapter.clearButtons).toHaveBeenCalledTimes(2)
 
     // sess-B's button still works.
     await h.adapter.fireButton(
@@ -396,5 +428,55 @@ describe('MessagingGateway — perm: button (#726)', () => {
     expect(h.sessionManager.respondToPermission).toHaveBeenCalledTimes(1)
     const respondMock = h.sessionManager.respondToPermission as unknown as ReturnType<typeof mock>
     expect(respondMock.mock.calls[0]?.[1]).toBe('req-2')
+  })
+
+  it('concurrent prompts: approving one and the agent moving on does NOT clear the others', async () => {
+    // Regression for concurrent-permission bug: with req-1/req-2/req-3 all
+    // pending, approving req-1 makes the agent resume and emit a plain event
+    // (e.g. tool_start). That must not wipe out the still-pending req-2/req-3
+    // approval buttons.
+    const h = await makeHarness()
+    await registerPrompt(h.gateway, { requestId: 'req-1' })
+    await registerPrompt(h.gateway, { requestId: 'req-2' })
+    await registerPrompt(h.gateway, { requestId: 'req-3' })
+
+    // User approves req-1 (e.g. an inline Telegram button). The agent resumes
+    // and emits a permission_resolved for req-1 followed by a tool_start.
+    h.gateway.onSessionEvent(
+      'session:event',
+      { to: 'workspace', workspaceId: 'ws-test' },
+      {
+        type: 'permission_resolved',
+        sessionId: 'sess-A',
+        requestId: 'req-1',
+        allowed: true,
+      } as SessionEvent,
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    h.gateway.onSessionEvent(
+      'session:event',
+      { to: 'workspace', workspaceId: 'ws-test' },
+      { type: 'tool_start', sessionId: 'sess-A', toolName: 'Bash' } as SessionEvent,
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    // Only req-1's keyboard was cleared (once on permission_resolved, once on
+    // the fallback sweep). req-2/req-3 are still pending and must stay live.
+    expect(h.adapter.clearButtons).toHaveBeenCalledTimes(2)
+
+    // req-1 is gone — its stale tap no-ops.
+    await h.adapter.fireButton(pressFor('perm:allow:req-1'))
+    expect(h.sessionManager.respondToPermission).not.toHaveBeenCalled()
+
+    // req-2 and req-3 are still approvable.
+    await h.adapter.fireButton(pressFor('perm:allow:req-2'))
+    await h.adapter.fireButton(pressFor('perm:allow:req-3'))
+    expect(h.sessionManager.respondToPermission).toHaveBeenCalledTimes(2)
+    const respondMock = h.sessionManager.respondToPermission as unknown as ReturnType<typeof mock>
+    expect(respondMock.mock.calls[0]?.[1]).toBe('req-2')
+    expect(respondMock.mock.calls[1]?.[1]).toBe('req-3')
   })
 })

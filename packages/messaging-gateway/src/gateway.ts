@@ -139,6 +139,13 @@ interface PermissionMessageRecord {
   channelId: string
   messageId: string
   threadId?: number
+  /**
+   * True once this exact prompt was answered (from any channel) via a
+   * `permission_resolved` event. The prompt is kept in `permissionMessages`
+   * so the fallback sweep below can finish clearing its keyboard, while
+   * still-pending concurrent prompts (no flag) are left untouched.
+   */
+  resolved?: boolean
 }
 
 interface PendingCompactAccept {
@@ -588,14 +595,16 @@ export class MessagingGateway {
     if (event.type === 'permission_request') return
 
     // A permission_resolved event means exactly one prompt was answered (possibly
-    // from another client, e.g. an inline Telegram button). Clear just that prompt's
-    // keyboard, and keep the others visible so concurrent requests stay approvable.
+    // from another client, e.g. an inline Telegram button). Mark it resolved and
+    // clear just that prompt's keyboard now. We keep the record in
+    // `permissionMessages` so the fallback sweep below finishes its cleanup, but
+    // we never clear any other prompt here — concurrent requests stay approvable.
     if (event.type === 'permission_resolved') {
       const requestId = event.requestId
       if (typeof requestId === 'string') {
         const record = this.permissionMessages.get(requestId)
         if (record && record.sessionId === event.sessionId) {
-          this.permissionMessages.delete(requestId)
+          record.resolved = true
           const adapter = this.adapters.get(record.platform)
           if (adapter?.clearButtons && adapter.isConnected()) {
             adapter.clearButtons(record.channelId, record.messageId).catch(() => {})
@@ -610,8 +619,14 @@ export class MessagingGateway {
       return
     }
 
+    // Fallback sweep. Only clear prompts that have been explicitly resolved
+    // (marked above). The agent may still be waiting on the *other* concurrent
+    // prompts of this session, so a plain event (e.g. `tool_start` after the
+    // agent resumed one approval) must not wipe out prompts that are still
+    // pending user approval.
     for (const [requestId, record] of this.permissionMessages) {
       if (record.sessionId !== event.sessionId) continue
+      if (!record.resolved) continue
       this.permissionMessages.delete(requestId)
 
       const adapter = this.adapters.get(record.platform)
@@ -723,9 +738,11 @@ export class MessagingGateway {
 
     // Idempotency claim: remove the entry up-front. A concurrent second tap
     // (or a race with the stale-prompt sweep in onSessionEvent) finds nothing
-    // here and exits silently — no duplicate "✅ Allowed" message.
+    // here and exits silently — no duplicate "✅ Allowed" message. A record
+    // already marked `resolved` (answered from another channel, e.g. desktop)
+    // is likewise treated as stale: the pending prompt it represented is gone.
     const record = this.permissionMessages.get(requestId)
-    if (!record) {
+    if (!record || record.resolved) {
       this.log.info('perm press dropped: no live prompt for requestId', {
         event: 'perm_press_stale',
         requestId,

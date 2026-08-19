@@ -637,4 +637,3 @@ When spawning local MCP servers (stdio transport), sensitive environment variabl
 To explicitly pass an env var to a specific MCP server, use the `env` field in the source config.
 
 To report security vulnerabilities, please see [SECURITY.md](SECURITY.md).
-test

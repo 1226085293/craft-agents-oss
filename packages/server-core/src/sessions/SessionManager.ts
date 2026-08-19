@@ -34,6 +34,7 @@ import {
   migrateLegacyCredentials,
   migrateLegacyLlmConnectionsConfig,
   migrateOrphanedDefaultConnections,
+  syncLlmConnectionApiKeysFromConfig,
   MODEL_REGISTRY,
   type Workspace,
   type WorkspaceInfo,
@@ -1956,6 +1957,12 @@ export class SessionManager implements ISessionManager {
       // Migrate legacy credentials to LLM connection format (one-time migration)
       // This ensures credentials saved before LLM connections are available via the new system
       await migrateLegacyCredentials()
+
+      // Sync API keys from config.json's llmConnections[].auth.apiKey to the
+      // credential store. Users who manually edit config.json to change an
+      // API key should have it take effect without needing a separate
+      // settings:setupLlmConnection RPC call.
+      await syncLlmConnectionApiKeysFromConfig()
 
       // Set up authentication environment variables (critical for SDK to work)
       await this.reinitializeAuth()

@@ -2676,6 +2676,63 @@ export async function migrateLegacyCredentials(): Promise<void> {
 }
 
 /**
+ * Sync API keys from config.json's llmConnections to the credential store.
+ *
+ * Users may manually edit `~/.craft-agent/config.json` to update the API key of
+ * an LLM connection by adding an `auth` object with an `apiKey` field, e.g.:
+ *
+ * ```json
+ * {
+ *   "llmConnections": [{
+ *     "slug": "agnes-openai",
+ *     "authType": "api_key",
+ *     "auth": { "apiKey": "sk-..." }
+ *   }]
+ * }
+ * ```
+ *
+ * The credential store (credentials.enc) is a separate encrypted store that the
+ * pi-agent subprocess reads from. Editing the config.json alone does not update
+ * the credential store, so pi-agent would keep using the old API key. This
+ * function reconciles the two stores at server startup.
+ */
+export async function syncLlmConnectionApiKeysFromConfig(): Promise<void> {
+  const config = loadStoredConfig();
+  if (!config?.llmConnections) return;
+
+  const credentialManager = getCredentialManager();
+  let synced = 0;
+
+  for (const connection of config.llmConnections) {
+    // The auth field is not part of the typed LlmConnection but is
+    // allowed through the passthrough schema — cast to access it.
+    const auth = (connection as unknown as { auth?: { apiKey?: string } }).auth;
+    const apiKey = auth?.apiKey?.trim();
+    if (!apiKey) continue;
+
+    // Skip masked placeholders (e.g. '••••••••••' from UI edit forms) —
+    // these must not overwrite the real key in the credential store.
+    if (/[\u2022\u25cf\u25e6\u2219*]/.test(apiKey)) {
+      debug(`[storage] Skipped masked apiKey for connection: ${connection.slug}`);
+      continue;
+    }
+
+    try {
+      await credentialManager.setLlmApiKey(connection.slug, apiKey);
+      debug(`[storage] Synced apiKey from config.json for connection: ${connection.slug}`);
+      synced++;
+    } catch (error) {
+      debug(`[storage] Failed to sync apiKey for connection ${connection.slug}:`,
+        error instanceof Error ? error.message : error);
+    }
+  }
+
+  if (synced > 0) {
+    debug(`[storage] Synced ${synced} API key(s) from config.json to credential store`);
+  }
+}
+
+/**
  * Get all LLM connections.
  * Returns only user-added connections (no auto-populated built-ins).
  *

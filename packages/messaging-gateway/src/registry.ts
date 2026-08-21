@@ -1344,6 +1344,25 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     state: WorkspaceState,
     adapter: TelegramAdapter,
   ): Promise<void> {
+    // Render replies held during the outage FIRST, so the recovery notice
+    // (if any) lands after the missed content instead of replacing it.
+    try {
+      const flushed = state.gateway.flushPendingTelegramEvents(adapter)
+      if (flushed > 0) {
+        this.log.info('rendered telegram events held during outage', {
+          event: 'telegram_outage_events_rendered',
+          workspaceId,
+          count: flushed,
+        })
+      }
+    } catch (err) {
+      this.log.warn('failed to flush held telegram events', {
+        event: 'telegram_pending_flush_failed',
+        workspaceId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+
     if (state.telegramBlockedNotices.size === 0) return
 
     const notices = Array.from(state.telegramBlockedNotices.values())
@@ -1352,9 +1371,10 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     for (const notice of notices) {
       const topic = notice.threadId !== undefined ? ` in topic ${notice.threadId}` : ''
       const text =
-        `⚠️ Craft Agent Telegram delivery recovered.\n\n` +
-        `Telegram was disconnected, so ${notice.count} event(s) from session ${notice.sessionId} ` +
-        `were not delivered${topic}. Future replies should deliver normally now.`
+        `⚠️ Craft Agent Telegram reconnected after an outage.\n\n` +
+        `${notice.count} event(s) from session ${notice.sessionId} arrived while offline${topic}. ` +
+        `Held messages were re-delivered above; streaming fragments were dropped. ` +
+        `Future replies should deliver normally now.`
       try {
         await adapter.sendText(
           notice.channelId,

@@ -166,3 +166,105 @@ describe('MessagingGateway — outbound ordering', () => {
     expect(adapter.texts).toEqual(['The answer is 42.'])
   })
 })
+
+// ---------------------------------------------------------------------------
+// Telegram pending-event queue — replies survive adapter outages
+// ---------------------------------------------------------------------------
+
+function makeTelegramAdapter(connected: boolean): PlatformAdapter & { texts: string[] } {
+  const base = makeSlowWhatsAppAdapter(0)
+  return {
+    ...base,
+    platform: 'telegram',
+    isConnected: () => connected,
+    sendText: mock(async (channelId: string, text: string): Promise<SentMessage> => {
+      base.texts.push(text)
+      return { platform: 'telegram', channelId, messageId: `t${base.texts.length}` }
+    }),
+  } as unknown as PlatformAdapter & { texts: string[] }
+}
+
+describe('MessagingGateway — Telegram pending queue', () => {
+  it('holds final-form events while disconnected and flushes them after reconnect', async () => {
+    const sessionManager = makeSessionManager()
+    const blocked = mock(() => {})
+    const gateway = new MessagingGateway({
+      sessionManager: sessionManager as any,
+      workspaceId: 'ws1',
+      storageDir,
+      logger: noopLogger,
+      onDeliveryBlocked: blocked,
+    })
+    // Register a DISCONNECTED telegram adapter (restart window).
+    gateway.registerAdapter(makeTelegramAdapter(false))
+    await gateway.start()
+    gateway.getBindingStore().bind('ws1', 'sess-T', 'telegram', 'chat-9', undefined, {
+      responseMode: 'progress',
+    })
+
+    // Final-form event → held. Streaming delta → dropped silently.
+    gateway.onSessionEvent(RPC_CHANNELS.sessions.EVENT, {} as any, {
+      type: 'text_delta',
+      sessionId: 'sess-T',
+      delta: 'partial…',
+    })
+    gateway.onSessionEvent(RPC_CHANNELS.sessions.EVENT, {} as any, {
+      type: 'text_complete',
+      sessionId: 'sess-T',
+      text: 'Reply that must survive the restart.',
+      isIntermediate: false,
+    })
+    gateway.onSessionEvent(RPC_CHANNELS.sessions.EVENT, {} as any, {
+      type: 'complete',
+      sessionId: 'sess-T',
+    })
+    await delay(30)
+
+    expect(blocked).not.toHaveBeenCalled()
+
+    // Adapter "reconnects" → flush renders the held reply.
+    const reconnected = makeTelegramAdapter(true)
+    const flushed = gateway.flushPendingTelegramEvents(reconnected)
+    await delay(30)
+
+    expect(flushed).toBe(2)
+    // progress mode: text_complete buffers, complete delivers the final text
+    expect(reconnected.texts).toEqual(['Reply that must survive the restart.'])
+  })
+
+  it('drops held events older than the TTL instead of rendering stale output', async () => {
+    const sessionManager = makeSessionManager()
+    const gateway = new MessagingGateway({
+      sessionManager: sessionManager as any,
+      workspaceId: 'ws1',
+      storageDir,
+      logger: noopLogger,
+    })
+    gateway.registerAdapter(makeTelegramAdapter(false))
+    await gateway.start()
+    gateway.getBindingStore().bind('ws1', 'sess-U', 'telegram', 'chat-10', undefined, {
+      responseMode: 'progress',
+    })
+
+    gateway.onSessionEvent(RPC_CHANNELS.sessions.EVENT, {} as any, {
+      type: 'text_complete',
+      sessionId: 'sess-U',
+      text: 'Will expire.',
+      isIntermediate: false,
+    })
+
+    // Force-expire by flushing with a fresh queue whose entries predate the TTL.
+    const reconnected = makeTelegramAdapter(true)
+    // Reach into internals is avoided; instead simulate expiry via time travel:
+    const anyGateway = gateway as unknown as {
+      pendingTelegramEvents: Map<string, Array<{ queuedAt: number }>>
+    }
+    for (const queue of anyGateway.pendingTelegramEvents.values()) {
+      for (const entry of queue) entry.queuedAt -= 11 * 60 * 1000
+    }
+    const flushed = gateway.flushPendingTelegramEvents(reconnected)
+
+    expect(flushed).toBe(0)
+    expect(reconnected.texts).toEqual([])
+  })
+})

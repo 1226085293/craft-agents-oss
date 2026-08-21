@@ -161,6 +161,23 @@ interface PendingCompactAccept {
   createdAt: number
 }
 
+/** Max queued events per binding while the Telegram adapter is reconnecting. */
+const TELEGRAM_PENDING_MAX_PER_BINDING = 100
+/** Events older than this are dropped from the pending queue instead of rendered stale. */
+const TELEGRAM_PENDING_TTL_MS = 10 * 60 * 1000
+
+/**
+ * Session output held while the Telegram adapter is disconnected (backend
+ * restart, network blip). Unlike streaming intermediates these events have a
+ * final form — rendering them after reconnect gives the user the replies that
+ * used to vanish during every restart window.
+ */
+interface PendingTelegramEvent {
+  event: SessionEvent
+  binding: ReturnType<BindingStore['findBySession']>[number]
+  queuedAt: number
+}
+
 const COMPACT_ACCEPT_TTL_MS = 10 * 60 * 1000
 
 function bindingOpts(binding: { threadId?: number }): { threadId?: number } {
@@ -183,6 +200,8 @@ export class MessagingGateway {
   private readonly adapters = new Map<PlatformType, PlatformAdapter>()
   private readonly renderQueues = new Map<string, Promise<void>>()
   private readonly disconnectedNoticeCooldown = new Map<string, number>()
+  /** Telegram output queued while its adapter is down; flushed on reconnect. */
+  private readonly pendingTelegramEvents = new Map<string, PendingTelegramEvent[]>()
   private readonly log: MessagingLogger
   private readonly onDeliveryBlocked?: GatewayOptions['onDeliveryBlocked']
   private readonly onRecoverDelivery?: GatewayOptions['onRecoverDelivery']
@@ -437,6 +456,12 @@ export class MessagingGateway {
           void this.recoverAndRender(event, binding, reason)
           continue
         }
+        // Telegram: hold final-form events so replies survive restart windows
+        // instead of vanishing. Streaming intermediates are still dropped —
+        // they carry no information once the next final event renders.
+        if (binding.platform === 'telegram' && this.queuePendingTelegramEvent(event, binding)) {
+          continue
+        }
         this.log.warn('dropping session event — adapter not connected', {
           event: 'adapter_not_connected',
           sessionId: event.sessionId,
@@ -459,6 +484,106 @@ export class MessagingGateway {
       }
       this.enqueueRender(event, binding, adapter)
     }
+  }
+
+  /**
+   * Queue a Telegram-bound event for rendering after the adapter reconnects.
+   * Returns false only for non-telegram use — caller then falls back to
+   * drop+notify. Streaming intermediates are swallowed here on purpose.
+   */
+  private queuePendingTelegramEvent(
+    event: SessionEvent,
+    binding: ReturnType<BindingStore['findBySession']>[number],
+  ): boolean {
+    // Only final-form events are worth rendering after a gap. Deltas and
+    // progress ticks would render as stale fragments.
+    const HOLABLE = new Set([
+      'text_complete',
+      'tool_result',
+      'error',
+      'typed_error',
+      'info',
+      'complete',
+      'interrupted',
+      'permission_request',
+      'plan_submitted',
+      'user_message',
+    ])
+    // Streaming intermediates are silently discarded (no blocked-notice):
+    // they carry no information once the next final event renders.
+    if (!HOLABLE.has(event.type)) return true
+
+    const now = Date.now()
+    let queue = this.pendingTelegramEvents.get(binding.id)
+    if (!queue) {
+      queue = []
+      this.pendingTelegramEvents.set(binding.id, queue)
+    }
+
+    // TTL: drop everything too old to render meaningfully.
+    while (queue.length > 0 && now - queue[0].queuedAt > TELEGRAM_PENDING_TTL_MS) {
+      queue.shift()
+    }
+    if (queue.length >= TELEGRAM_PENDING_MAX_PER_BINDING) {
+      queue.shift()
+    }
+    queue.push({ event, binding, queuedAt: now })
+
+    this.log.info('holding session event until telegram reconnects', {
+      event: 'telegram_event_held',
+      sessionId: event.sessionId,
+      eventType: event.type,
+      bindingId: binding.id,
+      queued: queue.length,
+    })
+    return true
+  }
+
+  /**
+   * Render everything held for Telegram bindings while the adapter was down.
+   * Called by the registry right after a successful (re)connect, before the
+   * recovery notice — so held replies appear first, then at most one summary.
+   */
+  flushPendingTelegramEvents(adapter?: PlatformAdapter): number {
+    let flushed = 0
+    for (const [bindingId, queue] of this.pendingTelegramEvents) {
+      if (queue.length === 0) continue
+      const now = Date.now()
+      const fresh = queue.filter((p) => {
+        const live = now - p.queuedAt <= TELEGRAM_PENDING_TTL_MS
+        if (!live) {
+          this.log.warn('discarding stale held event', {
+            event: 'telegram_event_held_expired',
+            sessionId: p.event.sessionId,
+            eventType: p.event.type,
+            bindingId,
+            ageMs: now - p.queuedAt,
+          })
+        }
+        return live
+      })
+      this.pendingTelegramEvents.delete(bindingId)
+      for (const pending of fresh) {
+        // Prefer the live registered adapter (it may have reconnected after
+        // the events were queued); fall back to the caller-provided one.
+        const current = this.adapters.get('telegram')
+        const target = current && current.isConnected() ? current : adapter
+        if (!target || !target.isConnected()) {
+          // Still offline — re-queue and wait for the next flush.
+          this.pendingTelegramEvents.set(bindingId, [pending, ...fresh.slice(fresh.indexOf(pending) + 1)])
+          break
+        }
+        this.enqueueRender(pending.event, pending.binding, target)
+        flushed++
+      }
+    }
+    if (flushed > 0) {
+      this.log.info('flushed held telegram events after reconnect', {
+        event: 'telegram_pending_flushed',
+        count: flushed,
+      })
+    }
+    return flushed
   }
 
   private notifyDeliveryBlocked(info: {

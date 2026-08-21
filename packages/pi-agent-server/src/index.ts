@@ -28,6 +28,7 @@ import {
   ModelRegistry as PiModelRegistry,
   createReadToolDefinition,
   createBashToolDefinition,
+  createLocalBashOperations,
   createEditToolDefinition,
   createWriteToolDefinition,
   createGrepToolDefinition,
@@ -664,7 +665,18 @@ async function ensureSession(): Promise<AgentSession> {
   //     then `.has(name)` returns false for every string lookup → zero tools active.
   const builtinDefs = [
     createReadToolDefinition(cwd),
-    createBashToolDefinition(cwd, { shellPath: initConfig.shellPath }),
+    // Global default timeout: exec() only applies one when the model passes
+    // args.timeout; wrap local ops so every command gets a 300s ceiling unless
+    // overridden per-call (unit: seconds — the SDK multiplies by 1000).
+    createBashToolDefinition(cwd, {
+      operations: (() => {
+        const local = createLocalBashOperations({ shellPath: initConfig.shellPath });
+        return {
+          exec: (command, dir, opts) =>
+            local.exec(command, dir, { ...opts, timeout: opts.timeout ?? 300 }),
+        };
+      })(),
+    }),
     createEditToolDefinition(cwd),
     createWriteToolDefinition(cwd),
     createGrepToolDefinition(cwd),
@@ -1271,8 +1283,46 @@ function extractResultText(result: unknown): string {
   return '';
 }
 
+// --- Turn stall detection ---------------------------------------------------
+// A turn is killed only when NOTHING has happened for this long — not when
+// total elapsed time exceeds a cap. Legitimate turns can run 20+ minutes
+// (serial tool loops, long builds); a healthy stream emits events steadily,
+// so silence is the reliable stall signal.
+const TURN_STALL_TIMEOUT_MS = Number(process.env.CRAFT_PI_TURN_STALL_TIMEOUT_MS ?? 5 * 60 * 1000);
+let lastTurnActivityAt = 0;
+
+/**
+ * Await a turn's prompt promise with SILENCE-based stall detection.
+ *
+ * Rejects when no SDK event has updated `lastTurnActivityAt` for
+ * TURN_STALL_TIMEOUT_MS — silence is the reliable dead-turn signal, while
+ * legitimately long turns (serial tool loops, long builds) emit events
+ * steadily and are never killed. Caller must session.abort() on rejection
+ * to reset the SDK's internal turn state.
+ */
+async function awaitTurnWithStallDetection(promptPromise: Promise<unknown>): Promise<void> {
+  await Promise.race([
+    promptPromise,
+    new Promise<never>((_, reject) => {
+      const timer = setInterval(() => {
+        if (Date.now() - lastTurnActivityAt > TURN_STALL_TIMEOUT_MS) {
+          clearInterval(timer);
+          reject(new Error(`Turn stalled: no activity for ${TURN_STALL_TIMEOUT_MS / 1000}s — aborting`));
+        }
+      }, 1000);
+      // Stop polling once the prompt settles (prevents timer leak)
+      promptPromise.finally(() => clearInterval(timer)).catch(() => {});
+    }),
+  ]);
+}
+
 function handleSessionEvent(event: AgentSessionEvent): void {
   let forwardedEvent: OutboundAgentEvent = event;
+
+  // Activity tracking for stall detection (see prompt timeout below):
+  // ANY SDK event during a turn — stream deltas, tool start/end, message_end —
+  // proves the turn is alive and pushes back the idle deadline.
+  lastTurnActivityAt = Date.now();
 
   // Log API errors for debugging and attach provider-native turn anchor for branch cutoffs.
   if (event.type === 'message_end') {
@@ -1538,10 +1588,23 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
 
     // Fire prompt — use followUp when session is already streaming so the
     // message is queued instead of throwing "Agent is already processing".
-    await session.prompt(msg.message, {
+    // Stall protection: wait on the prompt promise, but poll for SILENCE.
+    // If no SDK event (stream delta / tool progress / message_end) arrives
+    // within TURN_STALL_TIMEOUT_MS, the turn is presumed dead: abort() to
+    // reset the SDK's internal state and surface an error. Total duration is
+    // unlimited — a busy turn keeps resetting the deadline.
+    const promptPromise = session.prompt(msg.message, {
       images: msg.images && msg.images.length > 0 ? msg.images : undefined,
       streamingBehavior: 'followUp',
     });
+    lastTurnActivityAt = Date.now();
+    try {
+      await awaitTurnWithStallDetection(promptPromise);
+    } catch (stallErr) {
+      debugLog(`[prompt] stalled or failed: ${stallErr instanceof Error ? stallErr.message : stallErr}; aborting session to reset state`);
+      try { await piSession?.abort(); } catch { /* already aborted */ }
+      throw stallErr;
+    }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
 

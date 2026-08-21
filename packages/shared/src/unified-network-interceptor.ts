@@ -868,6 +868,8 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
   let lineBuffer = '';
   /** Track whether we're currently buffering tool_call argument deltas */
   let bufferingToolCalls = false;
+  /** Track whether we've seen a finish_reason chunk (for synthetic finish injection) */
+  let hadFinishReason = false;
 
   function emitSseLine(dataStr: string, controller: TransformStreamDefaultController<Uint8Array>): void {
     if (DEBUG_SSE_RAW) debugLog(`[SSE RAW OUT openai] ${dataStr.slice(0, 4000)}`);
@@ -1109,6 +1111,10 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
 
     // On finish, flush buffered tool calls with clean args BEFORE emitting finish event
     const hasFinish = choices.some(choice => choice?.finish_reason === 'tool_calls' || choice?.finish_reason === 'stop');
+    // Track ANY terminal finish_reason (tool_calls / stop / length / …).
+    // Only a genuinely absent finish_reason should be synthesized on EOF.
+    const sawFinish = choices.some(choice => choice && choice.finish_reason != null);
+    if (sawFinish) hadFinishReason = true;
     if (hasFinish) {
       if (bufferingToolCalls) {
         flushTrackedCalls(controller);
@@ -1146,9 +1152,18 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
           processDataLine(trimmed.slice(6), controller);
         }
       }
-      // Flush any remaining tracked calls on stream end
+      // Flush any remaining tracked calls on stream end.
+      // If we buffered tool calls but never saw a finish_reason (stream cut
+      // off mid-response by upstream relay), synthesize one so the SDK does
+      // not throw "Stream ended without finish_reason". See #995 regression.
       if (trackedCalls.size > 0) {
         flushTrackedCalls(controller);
+        if (!hadFinishReason) {
+          const synthetic = JSON.stringify({
+            choices: [{ index: 0, finish_reason: 'tool_calls' }],
+          });
+          emitSseLine(synthetic, controller);
+        }
       }
       lineBuffer = '';
     },

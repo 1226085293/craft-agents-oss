@@ -40,6 +40,7 @@ export {
   type ComplexityResult,
   type ToolCallLike,
 } from './complexity-score.ts';
+export { FsWatch, type FsWriteEvidence } from './fs-watch.ts';
 export {
   State,
   SessionLifecycle,

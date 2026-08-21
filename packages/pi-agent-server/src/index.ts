@@ -363,7 +363,7 @@ function findMostRecentSessionFile(sessionDir: string): string | null {
  */
 function defenseReset(): void {
   if (defenseEnabled) {
-    defenseEvaluator = new DefenseEvaluator({ enabled: true });
+    defenseEvaluator = new DefenseEvaluator({ enabled: true, cwd: resolvedCwd() });
     debugLog('[defense] Enabled — DefenseEvaluator initialized');
   } else {
     defenseEvaluator = null;
@@ -376,10 +376,32 @@ function defenseReset(): void {
  * When an early-stop is suspected, appends a resume message to the SAME
  * session via followUp() so the SDK's post-run loop continues the turn.
  */
-async function runDefensePostStop(session: AgentSession): Promise<void> {
+async function runDefensePostStop(session: AgentSession, endMessages?: unknown[]): Promise<void> {
   if (!defenseEvaluator) return;
 
-  const result = defenseEvaluator.evaluate();
+  // Silent-stop detection: scan ALL assistant messages of the run. A long
+  // tool-call chain legitimately ends with a toolUse message, so checking
+  // only the final one would flag every pure-tool turn as "silent". The
+  // real question: did the assistant produce ANY visible text this run?
+  let runOutput: { hasVisibleText: boolean; aborted: boolean } | undefined;
+  if (Array.isArray(endMessages)) {
+    let anyText = false;
+    let aborted = false;
+    for (const raw of endMessages) {
+      const m = raw as { role?: string; content?: unknown; stopReason?: string };
+      if (m?.role !== 'assistant') continue;
+      if (m.stopReason === 'aborted') aborted = true;
+      if (Array.isArray(m.content)) {
+        const hasText = m.content.some(
+          (c) => (c as { type?: string })?.type === 'text' && String((c as { text?: string }).text ?? '').trim().length > 0,
+        );
+        if (hasText) anyText = true;
+      }
+    }
+    runOutput = { hasVisibleText: anyText, aborted };
+  }
+
+  const result = defenseEvaluator.evaluate(runOutput);
   debugLog(
     `[defense] Post-stop result: state=${result.state} evaluated=${result.evaluated} shouldResume=${result.shouldResume}`,
   );
@@ -1472,7 +1494,7 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     // event handler never blocks the SDK's event pipeline. The SDK's own
     // _runAgentPrompt loop drains follow-up messages after agent_end, so a
     // queued resume continues the SAME turn instead of spawning a new one.
-    runDefensePostStop(piSession).catch((error) => {
+    runDefensePostStop(piSession, (event as { messages?: unknown[] }).messages).catch((error) => {
       debugLog(`[defense] Post-stop evaluation failed: ${error instanceof Error ? error.message : String(error)}`);
     });
   }

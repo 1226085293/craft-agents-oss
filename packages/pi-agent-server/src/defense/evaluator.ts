@@ -11,6 +11,7 @@
  */
 
 import { complexityScore, type ToolCallLike } from './complexity-score.ts';
+import { FsWatch, type FsWriteEvidence } from './fs-watch.ts';
 import { SessionLifecycle, State, type SessionLifecycleOptions } from './session-lifecycle.ts';
 
 export interface DefenseEvaluationResult {
@@ -29,16 +30,22 @@ export interface DefenseEvaluationResult {
 export interface DefenseOptions extends SessionLifecycleOptions {
   /** Master switch. When false, DefenseEvaluator is a no-op. */
   enabled?: boolean;
+  /** Working directory for filesystem write detection. */
+  cwd?: string;
 }
 
 export class DefenseEvaluator {
   private readonly enabled: boolean;
   private readonly lifecycle: SessionLifecycle;
+  private readonly fsWatch: FsWatch;
+  private readonly cwd?: string;
   private toolCalls: ToolCallLike[] = [];
   private readOutputs: string[] = [];
 
   constructor(options: DefenseOptions = {}) {
     this.enabled = options.enabled ?? true;
+    this.cwd = options.cwd;
+    this.fsWatch = new FsWatch();
     this.lifecycle = new SessionLifecycle(options);
   }
 
@@ -80,12 +87,30 @@ export class DefenseEvaluator {
     this.toolCalls = [];
     this.readOutputs = [];
     this.lifecycle.reset();
+    // Anchor the fs mtime marker: anything modified after this point counts
+    // as a turn-caused write, regardless of which tool/script did it.
+    if (this.cwd) this.fsWatch.markTurnStart();
+  }
+
+  /**
+   * Filesystem-fact write evidence for this turn (null when cwd unknown).
+   * This is the ground truth for "did a write happen" — command-text regex
+   * classification is only a fallback for when the scan is unavailable.
+   */
+  detectFsWrites(): FsWriteEvidence | null {
+    if (!this.enabled || !this.cwd) return null;
+    return this.fsWatch.detectWrites(this.cwd);
   }
 
   /**
    * Post-stop evaluation. Returns whether a resume should be queued.
+   *
+   * `lastAssistantMessage` is the final assistant message from agent_end
+   * (when available). A turn whose assistant produced no visible text and
+   * was not user-aborted is treated as a silent stop — the strongest
+   * early-stop signal there is, regardless of tool history.
    */
-  evaluate(): DefenseEvaluationResult {
+  evaluate(lastAssistantMessage?: { hasVisibleText: boolean; aborted: boolean }): DefenseEvaluationResult {
     if (!this.enabled) {
       return { evaluated: false, shouldResume: false, state: State.IDLE };
     }
@@ -95,8 +120,22 @@ export class DefenseEvaluator {
     // a read tool that returned content counts as a read-back even though the
     // tool-execution event payload may not carry it.
     const effectiveVerify = complexity.hasVerify || this.readOutputs.length > 0;
-    const shouldResume = complexity.shouldResume && !effectiveVerify;
-    const stop = this.lifecycle.onStop(complexity.needsEvaluation);
+
+    // Ground-truth write detection: filesystem mtime evidence first,
+    // command-text regex as fallback (e.g. writes outside cwd).
+    const fsEvidence = this.detectFsWrites();
+    const fsWrite = !!fsEvidence && fsEvidence.modifiedFiles.length > 0;
+    const hasWrite = fsWrite || complexity.hasWrite;
+    const shouldResume = hasWrite && !effectiveVerify;
+
+    // Silent-stop detection: the turn ended without any assistant-visible
+    // text. The user sees nothing — indistinguishable from a hang. Not
+    // triggered on user aborts (that's intentional interruption).
+    const silentStop =
+      lastAssistantMessage != null && !lastAssistantMessage.hasVisibleText && !lastAssistantMessage.aborted;
+
+    const needsEvaluation = silentStop || shouldResume || complexity.needsEvaluation;
+    const stop = this.lifecycle.onStop(needsEvaluation);
 
     if (stop === 'abort') {
       return {
@@ -106,10 +145,10 @@ export class DefenseEvaluator {
       };
     }
 
-    // Rule-based evaluation: only a concrete early-stop signal (wrote but never
-    // read back) warrants an automatic resume. High complexity alone is
-    // informational — it doesn't prove the task was left incomplete.
-    if (stop === 'run' || !shouldResume) {
+    // Rule-based evaluation: only concrete early-stop signals warrant an
+    // automatic resume — silent stop (no output at all) or wrote-without-
+    // read-back. High complexity alone is informational.
+    if (stop === 'run' || (!shouldResume && !silentStop)) {
       this.lifecycle.markDone();
       return {
         evaluated: true,
@@ -119,7 +158,7 @@ export class DefenseEvaluator {
     }
 
     // needsEvaluation: build resume context and decide.
-    const resumeMessage = buildResumeMessage(complexity.hasWrite, this.toolCalls);
+    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop);
     const decision = this.lifecycle.decideResume(resumeMessage);
     if (decision === State.FAILED) {
       return {
@@ -141,16 +180,32 @@ export class DefenseEvaluator {
 }
 
 /** Build the differential resume message (resume ≠ rerun). */
-function buildResumeMessage(hasWrite: boolean, toolCalls: ToolCallLike[]): string {
+function buildResumeMessage(
+  hasWrite: boolean,
+  fsEvidence: FsWriteEvidence | null,
+  toolCalls: ToolCallLike[],
+  silentStop: boolean,
+): string {
   const writeCalls = toolCalls.filter((c) => ['write', 'edit', 'bash:write'].includes(c.type));
   const lines: string[] = [
     '[Defense] Detected a possible early stop. Please continue the task from where it left off.',
   ];
+  if (silentStop) {
+    lines.push(
+      `- Your previous turn ended WITHOUT any visible reply to the user. ` +
+      `Report your current progress/status to the user now, then continue any remaining work.`,
+    );
+  }
   if (hasWrite) {
     lines.push(
       `- Write/edit operations were performed but not verified by a read-back. ` +
       `Re-read the affected files and confirm the result.`,
     );
+  }
+  if (fsEvidence && fsEvidence.modifiedFiles.length > 0) {
+    const files = fsEvidence.modifiedFiles.slice(0, 5).join(', ');
+    const more = fsEvidence.modifiedFiles.length > 5 ? ` (+${fsEvidence.modifiedFiles.length - 5} more)` : '';
+    lines.push(`- Files modified during the turn (fs mtime evidence): ${files}${more}`);
   }
   if (writeCalls.length > 0) {
     lines.push(`- Affected targets: ${writeCalls.map((c) => (c.type === 'bash' ? (c.command ?? '').slice(0, 80) : c.type)).join(', ')}`);

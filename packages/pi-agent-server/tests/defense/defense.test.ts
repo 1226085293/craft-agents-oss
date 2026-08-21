@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test';
+import { afterAll, describe, expect, it } from 'bun:test';
 import {
   complexityScore,
   classify,
@@ -23,6 +23,10 @@ import {
   resolveDefenseEnabled,
   DEFAULT_DEFENSE_ENABLED,
 } from '../../src/defense/index.ts';
+import { FsWatch } from '../../src/defense/fs-watch.ts';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 describe('complexity-score', () => {
   it('read-only short tasks score low and never resume', () => {
@@ -235,5 +239,102 @@ describe('defense switch', () => {
     expect(resolveDefenseEnabled(undefined)).toBe(true);
     expect(resolveDefenseEnabled(true)).toBe(true);
     expect(resolveDefenseEnabled(false)).toBe(false);
+  });
+});
+
+
+describe('fs-watch (filesystem-fact write detection)', () => {
+  const tdir = mkdtempSync(join(tmpdir(), 'fs-watch-test-'));
+
+  it('detects files written after turn-start marker', async () => {
+    const fw = new FsWatch();
+    fw.markTurnStart();
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(join(tdir, 'a.txt'), 'x');
+    const ev = fw.detectWrites(tdir)!;
+    expect(ev.modifiedFiles).toContain('a.txt');
+    expect(ev.truncated).toBe(false);
+  });
+
+  it('ignores skipped dirs like node_modules', async () => {
+    const fw = new FsWatch();
+    fw.markTurnStart();
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(join(tdir, 'node_modules-x'), 'x'); // plain file fine
+    const ev = fw.detectWrites(tdir)!;
+    expect(ev.modifiedFiles.length).toBeGreaterThan(0);
+  });
+
+  it('ignores framework top-level dirs (sessions/, data/, .pi-sessions/) but watches deeper same-name dirs', async () => {
+    const fw = new FsWatch();
+    fw.markTurnStart();
+    await new Promise((r) => setTimeout(r, 20));
+    mkdirSync(join(tdir, 'sessions'), { recursive: true });
+    writeFileSync(join(tdir, 'sessions', 'session.jsonl'), 'noise');
+    writeFileSync(join(tdir, 'deep-sessions'), 'x'); // plain file fine
+    const ev = fw.detectWrites(tdir)!;
+    expect(ev.modifiedFiles.some((f) => f.startsWith('sessions/'))).toBe(false);
+  });
+
+  it('ignores framework noise files like events.jsonl at top level', async () => {
+    const fw = new FsWatch();
+    fw.markTurnStart();
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(join(tdir, 'events.jsonl'), '{"tick":1}');
+    writeFileSync(join(tdir, 'user-file.txt'), 'mine');
+    const ev = fw.detectWrites(tdir)!;
+    expect(ev.modifiedFiles).not.toContain('events.jsonl');
+    expect(ev.modifiedFiles).toContain('user-file.txt');
+  });
+
+  it('returns null without a turn-start anchor', () => {
+    const fw = new FsWatch();
+    expect(fw.detectWrites(tdir)).toBeNull();
+  });
+
+  it('catches regex-blind writes (python3 heredoc) via fs evidence', async () => {
+    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
+    evaluator.resetTurn();
+    await new Promise((r) => setTimeout(r, 20));
+    // python3 heredoc — WRITE_CMDS regex classifies this as bash:read
+    evaluator.recordToolCall({
+      type: 'bash',
+      command: "python3 << EOF\nopen('" + join(tdir, 'new.py') + "','w').write('x')\nEOF",
+    });
+    writeFileSync(join(tdir, 'new.py'), 'data');
+    const r = evaluator.evaluate({ hasVisibleText: false, aborted: false });
+    expect(r.shouldResume).toBe(true);
+    expect(r.resumeMessage).toContain('new.py');
+  });
+
+  it('resumes on silent stop even with no writes', () => {
+    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
+    evaluator.resetTurn();
+    evaluator.recordToolCall({ type: 'bash', command: 'ls /tmp' }); // read-only
+    const r = evaluator.evaluate({ hasVisibleText: false, aborted: false });
+    expect(r.shouldResume).toBe(true);
+    expect(r.resumeMessage).toContain('WITHOUT any visible reply');
+  });
+
+  it('does not resume on user abort', () => {
+    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
+    evaluator.resetTurn();
+    const r = evaluator.evaluate({ hasVisibleText: false, aborted: true });
+    expect(r.shouldResume).toBe(false);
+  });
+
+  it('normal completion (write + read-back + text) does not resume', async () => {
+    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
+    evaluator.resetTurn();
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(join(tdir, 'w.txt'), 'w');
+    evaluator.recordToolCall({ type: 'bash', command: 'cp x y' });
+    evaluator.recordReadOutput('file content here');
+    const r = evaluator.evaluate({ hasVisibleText: true, aborted: false });
+    expect(r.shouldResume).toBe(false);
+  });
+
+  afterAll(() => {
+    rmSync(tdir, { recursive: true, force: true });
   });
 });

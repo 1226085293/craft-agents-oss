@@ -166,6 +166,10 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   RPC_CHANNELS.tools.GET_BROWSER_TOOL_ENABLED,
   RPC_CHANNELS.tools.SET_BROWSER_TOOL_ENABLED,
 
+  // defense — local anti early-stop defense setting (applies to the local Pi subprocess)
+  RPC_CHANNELS.defense.GET_ENABLED,
+  RPC_CHANNELS.defense.SET_ENABLED,
+
   // browserPane — Electron BrowserView
   RPC_CHANNELS.browserPane.CREATE,
   RPC_CHANNELS.browserPane.DESTROY,

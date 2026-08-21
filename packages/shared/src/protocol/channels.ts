@@ -338,6 +338,10 @@ export const RPC_CHANNELS = {
     GET_STATUS: 'rtk:getStatus',
     GET_GAIN: 'rtk:getGain',
   },
+  defense: {
+    GET_ENABLED: 'defense:getEnabled',
+    SET_ENABLED: 'defense:setEnabled',
+  },
   badge: {
     REFRESH: 'badge:refresh',
     SET_ICON: 'badge:setIcon',

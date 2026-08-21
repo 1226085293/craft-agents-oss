@@ -1,5 +1,7 @@
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
 
+import { withExecutionDiscipline } from './defense/index.ts';
+
 /**
  * Force a system prompt onto a Pi AgentSession.
  *
@@ -25,4 +27,18 @@ export function applySystemPromptOverride(session: AgentSession, prompt: string)
   };
   mutable._baseSystemPrompt = prompt;
   mutable._rebuildSystemPrompt = () => prompt;
+}
+
+/**
+ * Apply a system prompt with Layer 1 execution discipline appended.
+ * Idempotent — re-applying the same prompt does not duplicate the discipline
+ * block. The discipline is only added when defense is enabled (defenseEnabled).
+ */
+export function applySystemPromptOverrideWithDefense(
+  session: AgentSession,
+  prompt: string,
+  defenseEnabled: boolean,
+): void {
+  const effective = defenseEnabled ? withExecutionDiscipline(prompt) : prompt;
+  applySystemPromptOverride(session, effective);
 }

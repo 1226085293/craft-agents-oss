@@ -77,6 +77,8 @@ const EXPECTED_CHANNELS: string[] = [
   'credentials:healthCheck',
   'debug:log',
   'deeplink:navigate',
+  'defense:getEnabled',
+  'defense:setEnabled',
   'dialog:openFolder',
   'drafts:delete',
   'drafts:get',

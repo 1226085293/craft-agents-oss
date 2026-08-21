@@ -104,6 +104,9 @@ export default function AppSettingsPage() {
   // Tools state
   const [browserToolEnabled, setBrowserToolEnabled] = useState(true)
 
+  // Anti early-stop defense state
+  const [defenseEnabled, setDefenseEnabled] = useState(true)
+
   // Proxy state
   const [proxyForm, setProxyForm] = useState<ProxyFormState>(EMPTY_PROXY_FORM)
   const [savedProxyForm, setSavedProxyForm] = useState<ProxyFormState>(EMPTY_PROXY_FORM)
@@ -128,15 +131,17 @@ export default function AppSettingsPage() {
   const loadSettings = useCallback(async () => {
     if (!window.electronAPI) return
     try {
-      const [notificationsOn, keepAwakeOn, browserToolOn, proxySettings] = await Promise.all([
+      const [notificationsOn, keepAwakeOn, browserToolOn, proxySettings, defenseOn] = await Promise.all([
         window.electronAPI.getNotificationsEnabled(),
         window.electronAPI.getKeepAwakeWhileRunning(),
         window.electronAPI.getBrowserToolEnabled(),
         window.electronAPI.getNetworkProxySettings(),
+        window.electronAPI.getDefenseEnabled(),
       ])
       setNotificationsEnabled(notificationsOn)
       setKeepAwakeEnabled(keepAwakeOn)
       setBrowserToolEnabled(browserToolOn)
+      setDefenseEnabled(defenseOn)
       const form = toProxyFormState(proxySettings)
       setProxyForm(form)
       setSavedProxyForm(form)
@@ -162,6 +167,11 @@ export default function AppSettingsPage() {
   const handleBrowserToolEnabledChange = useCallback(async (enabled: boolean) => {
     setBrowserToolEnabled(enabled)
     await window.electronAPI.setBrowserToolEnabled(enabled)
+  }, [])
+
+  const handleDefenseEnabledChange = useCallback(async (enabled: boolean) => {
+    setDefenseEnabled(enabled)
+    await window.electronAPI.setDefenseEnabled(enabled)
   }, [])
 
   // Proxy handlers
@@ -238,6 +248,12 @@ export default function AppSettingsPage() {
                     description={t("settings.tools.builtInBrowserDesc")}
                     checked={browserToolEnabled}
                     onCheckedChange={handleBrowserToolEnabledChange}
+                  />
+                  <SettingsToggle
+                    label={t("settings.tools.earlyStopDefense")}
+                    description={t("settings.tools.earlyStopDefenseDesc")}
+                    checked={defenseEnabled}
+                    onCheckedChange={handleDefenseEnabledChange}
                   />
                 </SettingsCard>
               </SettingsSection>

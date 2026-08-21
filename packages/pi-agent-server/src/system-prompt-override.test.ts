@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
-import { applySystemPromptOverride } from './system-prompt-override.ts';
+import { applySystemPromptOverride, applySystemPromptOverrideWithDefense } from './system-prompt-override.ts';
+import { DISCIPLINE_MARKER } from './defense/index.ts';
 
 /**
  * Regression contract for craft-agents-oss#648.
@@ -59,5 +60,23 @@ describe('applySystemPromptOverride', () => {
     expect(session.agent.state.systemPrompt).toBe('SECOND');
     expect(session._baseSystemPrompt).toBe('SECOND');
     expect(session._rebuildSystemPrompt!([])).toBe('SECOND');
+  });
+});
+
+describe('applySystemPromptOverrideWithDefense', () => {
+  it('appends discipline block when defense is enabled', () => {
+    const session = makeFakeSession();
+    applySystemPromptOverrideWithDefense(session as unknown as AgentSession, 'BASE', true);
+    expect(session.agent.state.systemPrompt).toContain(DISCIPLINE_MARKER);
+    expect(session._baseSystemPrompt).toContain(DISCIPLINE_MARKER);
+    expect(session._rebuildSystemPrompt!([])).toContain(DISCIPLINE_MARKER);
+  });
+
+  it('does not append discipline block when defense is disabled', () => {
+    const session = makeFakeSession();
+    applySystemPromptOverrideWithDefense(session as unknown as AgentSession, 'BASE', false);
+    expect(session.agent.state.systemPrompt).toBe('BASE');
+    expect(session._baseSystemPrompt).toBe('BASE');
+    expect(session._rebuildSystemPrompt!([])).toBe('BASE');
   });
 });

@@ -1178,6 +1178,8 @@
   "settings.shortcuts.title": "Atajos",
   "settings.tools.builtInBrowser": "Navegador integrado",
   "settings.tools.builtInBrowserDesc": "Desactiva si usas herramientas de navegador externas como Playwright, Puppeteer o servidores MCP de navegador.",
+  "settings.tools.earlyStopDefense": "Prevención de parada anticipada",
+  "settings.tools.earlyStopDefenseDesc": "Evita que el agente se detenga antes de completar todos los objetivos. Añade disciplina de ejecución y reanuda automáticamente ante una parada anticipada.",
   "settings.tools.title": "Herram.",
   "settings.workspace.advanced": "Avanzado",
   "settings.workspace.atLeast2Modes": "Se requieren al menos 2 modos",

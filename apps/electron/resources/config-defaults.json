@@ -11,7 +11,8 @@
     "richToolDescriptions": true,
     "extendedPromptCache": false,
     "browserToolEnabled": true,
-    "allowRemoteEvaluate": true
+    "allowRemoteEvaluate": true,
+    "defenseEnabled": true
   },
   "workspaceDefaults": {
     "thinkingLevel": "think",

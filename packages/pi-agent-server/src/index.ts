@@ -77,7 +77,8 @@ import { createWebFetchTool } from './tools/web-fetch.ts';
 import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
 import { createSearchTool } from './tools/search/create-search-tool.ts';
 import { allowCraftMetadataProperties, stripCraftMetadata } from './craft-metadata-schema.ts';
-import { applySystemPromptOverride } from './system-prompt-override.ts';
+import { applySystemPromptOverride, applySystemPromptOverrideWithDefense } from './system-prompt-override.ts';
+import { DefenseEvaluator, resolveDefenseEnabled } from './defense/index.ts';
 
 // ============================================================
 // Types — JSONL Protocol
@@ -117,6 +118,13 @@ interface InitMessage {
   customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean };
   customModels?: Array<string | { id: string; contextWindow?: number; supportsImages?: boolean }>;
   piAuth?: { provider: string; credential: PiCredential };
+
+  /**
+   * Defense master switch (init message). User-controlled boolean:
+   * `true` (default when omitted) enables L1 discipline + L2 evaluator,
+   * `false` disables both. No sub-policies (see issue #1).
+   */
+  defenseEnabled?: boolean;
 }
 
 interface RuntimeConfigUpdateMessage {
@@ -246,6 +254,12 @@ let unsubscribeEvents: (() => void) | null = null;
 // Init config (set on 'init' message)
 let initConfig: Extract<InboundMessage, { type: 'init' }> | null = null;
 
+// Defense master switch — resolved from initConfig.defenseEnabled (default: true).
+let defenseEnabled = resolveDefenseEnabled(undefined);
+
+// Post-stop defense evaluator (created only when defenseEnabled is true).
+let defenseEvaluator: DefenseEvaluator | null = null;
+
 // Mutable state
 let currentUserMessage = '';
 
@@ -334,6 +348,47 @@ function findMostRecentSessionFile(sessionDir: string): string | null {
     }
   }
   return best?.path ?? null;
+}
+
+// ============================================================
+// Defense Management
+// ============================================================
+
+/**
+ * Reset the defense evaluator based on the resolved defenseEnabled switch.
+ * - When enabled: creates a fresh DefenseEvaluator (L2) for the next turn.
+ * - When disabled: clears it — no evaluator, no post-stop evaluation.
+ * L1 (system-discipline) is gated by the same switch at prompt-build time.
+ */
+function defenseReset(): void {
+  if (defenseEnabled) {
+    defenseEvaluator = new DefenseEvaluator({ enabled: true });
+    debugLog('[defense] Enabled — DefenseEvaluator initialized');
+  } else {
+    defenseEvaluator = null;
+    debugLog('[defense] Disabled — DefenseEvaluator cleared');
+  }
+}
+
+/**
+ * Post-stop defense evaluation. Runs when the agent emits `agent_end`.
+ * When an early-stop is suspected, appends a resume message to the SAME
+ * session via followUp() so the SDK's post-run loop continues the turn.
+ */
+async function runDefensePostStop(session: AgentSession): Promise<void> {
+  if (!defenseEvaluator) return;
+
+  const result = defenseEvaluator.evaluate();
+  debugLog(
+    `[defense] Post-stop result: state=${result.state} evaluated=${result.evaluated} shouldResume=${result.shouldResume}`,
+  );
+
+  if (result.shouldResume && result.resumeMessage) {
+    // Resume ≠ rerun: followUp() queues the message for the same session and
+    // the SDK's _runAgentPrompt loop picks it up right after agent_end.
+    await session.followUp(result.resumeMessage);
+    debugLog('[defense] Resume message queued via followUp');
+  }
 }
 
 // ============================================================
@@ -1191,6 +1246,31 @@ function extractToolExecutionMetadata(args: Record<string, unknown> | undefined)
   };
 }
 
+/**
+ * Extract plain-text content from a Pi tool result for defense read-back
+ * verification. Handles both `{ content: string }` and
+ * `{ content: Array<{ type: 'text'; text: string }> }` shapes.
+ */
+function extractResultText(result: unknown): string {
+  if (result == null) return '';
+  if (typeof result === 'string') return result;
+  if (Array.isArray(result)) {
+    return result
+      .filter((c): c is { type: string; text?: string } => typeof c === 'object' && c !== null && 'text' in c)
+      .map((c) => c.text ?? '')
+      .join('');
+  }
+  const obj = result as Record<string, unknown>;
+  if (typeof obj.content === 'string') return obj.content;
+  if (Array.isArray(obj.content)) {
+    return (obj.content as unknown[])
+      .filter((c): c is { type: string; text?: string } => typeof c === 'object' && c !== null && 'text' in c)
+      .map((c) => c.text ?? '')
+      .join('');
+  }
+  return '';
+}
+
 function handleSessionEvent(event: AgentSessionEvent): void {
   let forwardedEvent: OutboundAgentEvent = event;
 
@@ -1287,6 +1367,17 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     }
 
     const toolMetadata = extractToolExecutionMetadata((event.args ?? {}) as Record<string, unknown>);
+
+    // Record the tool call for post-stop defense evaluation (L2).
+    // Bash calls carry the command string (side-effect classification);
+    // read/write/edit carry a `path` arg.
+    const args = (event.args ?? {}) as Record<string, unknown>;
+    defenseEvaluator?.recordToolCall({
+      type: toolName.toLowerCase(),
+      command: typeof args.command === 'string' ? args.command : undefined,
+      output: args.output,
+    });
+
     if (toolMetadata) {
       forwardedEvent = {
         ...event,
@@ -1306,6 +1397,34 @@ function handleSessionEvent(event: AgentSessionEvent): void {
         isError: !!event.isError,
       });
     }
+
+    // Capture read-back output for defense verification (hasVerify).
+    // A non-error read result with textual output counts as a read-back.
+    if (event.toolName.toLowerCase() === 'read' && !event.isError) {
+      const resultText = extractResultText(event.result);
+      if (resultText && defenseEvaluator) {
+        defenseEvaluator.recordReadOutput(resultText);
+      }
+    }
+  }
+
+  // Post-stop defense evaluation: when the agent run ends, decide whether the
+  // turn stopped early and, if so, queue a resume message on the same session.
+  // Skip when the SDK will retry the turn itself (willRetry) or when the FSM
+  // is already terminal for this turn.
+  if (
+    event.type === 'agent_end' &&
+    piSession &&
+    defenseEvaluator?.canEvaluate() &&
+    !(event as { willRetry?: boolean }).willRetry
+  ) {
+    // Fire-and-forget: queue the resume asynchronously so this synchronous
+    // event handler never blocks the SDK's event pipeline. The SDK's own
+    // _runAgentPrompt loop drains follow-up messages after agent_end, so a
+    // queued resume continues the SAME turn instead of spawning a new one.
+    runDefensePostStop(piSession).catch((error) => {
+      debugLog(`[defense] Post-stop evaluation failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
   // Forward all events to main process
@@ -1330,6 +1449,12 @@ async function handleInit(msg: Extract<InboundMessage, { type: 'init' }>): Promi
   }
 
   initConfig = msg;
+
+  // Resolve defense master switch from the init message (user-controlled).
+  // L1 discipline + L2 evaluator are gated by this single boolean — no sub-policies.
+  defenseEnabled = resolveDefenseEnabled(msg.defenseEnabled);
+  defenseReset();
+  debugLog(`[defense] defenseEnabled=${defenseEnabled}`);
 
   // Azure OpenAI requires a tenant-specific endpoint URL.
   // The Pi SDK (via Vercel AI SDK) reads AZURE_OPENAI_BASE_URL from env.
@@ -1391,11 +1516,15 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
 
     const session = await ensureSession();
 
+    // Reset per-turn defense buffers before the new prompt.
+    defenseEvaluator?.resetTurn();
+
     // Force the Craft-built system prompt onto the Pi session. Direct assignment
     // to `state.systemPrompt` is wiped on every `session.prompt()` call by the Pi
-    // SDK (see system-prompt-override.ts).
+    // SDK (see system-prompt-override.ts). When defense is enabled, the Layer 1
+    // execution-discipline block is appended.
     if (msg.systemPrompt) {
-      applySystemPromptOverride(session, msg.systemPrompt);
+      applySystemPromptOverrideWithDefense(session, msg.systemPrompt, defenseEnabled);
     }
 
     // Wire up event handler

@@ -83,6 +83,10 @@ export interface StoredConfig {
   enable1MContext?: boolean;  // Enable 1M context window for supported models (default: false — opt-in; requires Anthropic Tier 4+)
   // Token optimization
   rtkEnabled?: boolean;  // Route Bash commands through rtk to compress tool output (default: false). https://github.com/rtk-ai/rtk
+  // Anti early-stop defense (Pi backend). When enabled, the Pi agent server
+  // appends execution discipline (L1) and runs post-stop evaluation (L2).
+  // Defaults to true. User-controlled via Settings → Tools.
+  defenseEnabled?: boolean;
   // Network proxy
   networkProxy?: import('./types.ts').NetworkProxySettings;
   // Windows: path to Git Bash (bash.exe) for the SDK subprocess
@@ -124,6 +128,7 @@ const FALLBACK_CONFIG_DEFAULTS: ConfigDefaults = {
     richToolDescriptions: true,
     extendedPromptCache: false,
     browserToolEnabled: true,
+    defenseEnabled: true,
     allowRemoteEvaluate: true,
   },
   workspaceDefaults: {
@@ -584,6 +589,32 @@ export function setRtkEnabled(enabled: boolean): void {
   const config = loadStoredConfig();
   if (!config) return;
   config.rtkEnabled = enabled;
+  saveConfig(config);
+}
+
+/**
+ * Get whether the anti early-stop defense (L1 discipline + L2 post-stop
+ * evaluation) is enabled for the Pi agent backend.
+ * Defaults to true when not set — defense is a safety net, on by default.
+ */
+export function getDefenseEnabled(): boolean {
+  const config = loadStoredConfig();
+  if (config?.defenseEnabled !== undefined) {
+    return config.defenseEnabled;
+  }
+  const defaults = loadConfigDefaults();
+  return defaults.defaults.defenseEnabled ?? true;
+}
+
+/**
+ * Set whether the anti early-stop defense is enabled.
+ * Persists to config so it survives app restarts; the Pi agent subprocess
+ * reads it at init-time (defenseEnabled in the init message).
+ */
+export function setDefenseEnabled(enabled: boolean): void {
+  const config = loadStoredConfig();
+  if (!config) return;
+  config.defenseEnabled = enabled;
   saveConfig(config);
 }
 

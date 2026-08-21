@@ -360,6 +360,22 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
   })
 
   // ============================================================
+  // Anti Early-Stop Defense Settings
+  // ============================================================
+
+  // Get anti early-stop defense setting
+  server.handle(RPC_CHANNELS.defense.GET_ENABLED, async () => {
+    const { getDefenseEnabled } = await import('@craft-agent/shared/config/storage')
+    return getDefenseEnabled()
+  })
+
+  // Set anti early-stop defense setting
+  server.handle(RPC_CHANNELS.defense.SET_ENABLED, async (_ctx, enabled: boolean) => {
+    const { setDefenseEnabled } = await import('@craft-agent/shared/config/storage')
+    setDefenseEnabled(enabled)
+  })
+
+  // ============================================================
   // Network Proxy Settings
   // ============================================================
 

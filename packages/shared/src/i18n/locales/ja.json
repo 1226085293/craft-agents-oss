@@ -1178,6 +1178,8 @@
   "settings.shortcuts.title": "ショートカット",
   "settings.tools.builtInBrowser": "組み込みブラウザ",
   "settings.tools.builtInBrowserDesc": "Playwright、Puppeteer、またはブラウザMCPサーバーなどの外部ブラウザツールを使用する場合は無効にしてください。",
+  "settings.tools.earlyStopDefense": "早期停止の防止",
+  "settings.tools.earlyStopDefenseDesc": "エージェントがすべての目標を完了する前に停止するのを防ぎます。実行規律を追加し、早期停止が疑われる場合に自動的に再開します。",
   "settings.tools.title": "ツール",
   "settings.workspace.advanced": "詳細設定",
   "settings.workspace.atLeast2Modes": "少なくとも2つのモードが必要です",

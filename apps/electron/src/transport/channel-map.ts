@@ -324,6 +324,10 @@ export const CHANNEL_MAP = {
   getRtkStatus: invoke(RPC_CHANNELS.rtk.GET_STATUS),
   getRtkGain: invoke(RPC_CHANNELS.rtk.GET_GAIN),
 
+  // Anti early-stop defense
+  getDefenseEnabled: invoke(RPC_CHANNELS.defense.GET_ENABLED),
+  setDefenseEnabled: invoke(RPC_CHANNELS.defense.SET_ENABLED),
+
   // Badge
   refreshBadge: invoke(RPC_CHANNELS.badge.REFRESH),
   setDockIconWithBadge: invoke(RPC_CHANNELS.badge.SET_ICON),

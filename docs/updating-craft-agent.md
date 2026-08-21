@@ -104,6 +104,11 @@ sudo systemctl enable craft-server
 
 适用于已在运行中的开发/测试环境（如 `/tmp/craft-agents-tmp`）：
 
+> ⚠️ **给 AI agent 的硬性警告**：如果你正以 Craft Agent 会话的形式在这台服务器上工作，
+> 第 4 步的 `pkill` 会杀死**你自己正在运行的后端宿主进程**——你的会话会立刻中断，
+> 后续重启命令永远不会被执行。正确做法：完成第 1–3 步后**停下**，明确告知用户
+> "代码已就绪，请在会话外部执行第 4 步"，由用户或另一个 agent 完成重启。
+
 ```bash
 # 1. 从源码仓库拉取最新
 cd /tmp/craft-agents-oss

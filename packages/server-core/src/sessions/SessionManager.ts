@@ -7476,10 +7476,17 @@ export class SessionManager implements ISessionManager {
       if (latest.isProcessing) {
         latest.messageQueue.unshift(next)
         latest.pendingRecoveryTool = undefined
-        sessionLog.debug('Queued replay deferred after async handoff because session started processing', {
+        sessionLog.debug('Queued replay deferred after async handoff because session started processing — retrying in 1s', {
           sessionId,
           messageId: next.messageId,
         })
+        // Retry after a short delay instead of abandoning the queue. There is a
+        // race window between onProcessingStopped calling setProcessing(false)
+        // and this setImmediate callback: another RPC sendMessage can observe
+        // isProcessing=false and start processing, setting it back to true. If
+        // we just return here, the message is unshifted back into the queue but
+        // no one ever calls processNextQueuedMessage again — the queue stalls.
+        setTimeout(() => this.processNextQueuedMessage(sessionId), 1000)
         return
       }
 

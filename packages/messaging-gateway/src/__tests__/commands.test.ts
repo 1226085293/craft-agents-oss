@@ -230,7 +230,18 @@ describe('Commands', () => {
       ;(session as Record<string, unknown>).thinkingLevel = 'medium'
       const store = makeStore()
       store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
-      const commands = new Commands(makeSessionManager([session]), store, 'ws1')
+      const commands = new Commands(
+        makeSessionManager([session]),
+        store,
+        'ws1',
+        undefined,
+        undefined,
+        {
+          getWorkspaceConfig: () => ({ enabled: false, platforms: {} }),
+          seedOwnerOnFirstPair: async () => [],
+          resolveConnection: (slug) => (slug === 'litellm-proxy' ? { name: 'litellm-proxy' } : undefined),
+        },
+      )
       const adapter = makeAdapter('telegram', true)
 
       await commands.handleCommand(adapter, { ...makeMessage('/status'), platform: 'telegram' })
@@ -239,8 +250,64 @@ describe('Commands', () => {
       expect(out).toContain('Bound to "Alpha"')
       expect(out).toContain('Model: agnes-2.5-flash')
       expect(out).toContain('Connection: litellm-proxy')
+      expect(out).not.toContain('(removed')
       expect(out).toContain('Thinking: medium')
       expect(out).toContain('Status: idle')
+    })
+
+    it('shows connection display name when resolveConnection resolves the slug', async () => {
+      const session = makeSession('sess-1', 'Alpha', 100)
+      ;(session as Record<string, unknown>).model = 'default'
+      ;(session as Record<string, unknown>).llmConnection = 'litellm-proxy'
+      const store = makeStore()
+      store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+      const commands = new Commands(
+        makeSessionManager([session]),
+        store,
+        'ws1',
+        undefined,
+        undefined,
+        {
+          getWorkspaceConfig: () => ({ enabled: false, platforms: {} }),
+          seedOwnerOnFirstPair: async () => [],
+          resolveConnection: (slug) => (slug === 'litellm-proxy' ? { name: 'LiteLLM Proxy' } : undefined),
+        },
+      )
+      const adapter = makeAdapter('telegram', true)
+
+      await commands.handleCommand(adapter, { ...makeMessage('/status'), platform: 'telegram' })
+
+      const out = adapter.sent.at(-1) ?? ''
+      expect(out).toContain('Connection: LiteLLM Proxy')
+      expect(out).not.toContain('(removed')
+    })
+
+    it('flags a deleted connection and marks the model as fallback-to-default', async () => {
+      // Session created while 'agnes-openai' existed; connection since removed.
+      const session = makeSession('sess-1', 'Alpha', 100)
+      ;(session as Record<string, unknown>).model = 'agnes-2.5-flash'
+      ;(session as Record<string, unknown>).llmConnection = 'agnes-openai'
+      const store = makeStore()
+      store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+      const commands = new Commands(
+        makeSessionManager([session]),
+        store,
+        'ws1',
+        undefined,
+        undefined,
+        {
+          getWorkspaceConfig: () => ({ enabled: false, platforms: {} }),
+          seedOwnerOnFirstPair: async () => [],
+          resolveConnection: () => undefined, // slug no longer in config
+        },
+      )
+      const adapter = makeAdapter('telegram', true)
+
+      await commands.handleCommand(adapter, { ...makeMessage('/status'), platform: 'telegram' })
+
+      const out = adapter.sent.at(-1) ?? ''
+      expect(out).toContain('Connection: agnes-openai (removed — using default)')
+      expect(out).toContain('Model: (default) agnes-2.5-flash')
     })
 
     it('shows processing status with current activity', async () => {

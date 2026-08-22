@@ -34,7 +34,7 @@ import { bootstrapServer, startHealthHttpServer, generateServerToken } from '@cr
 import { validateSession, createWebuiHandler, nodeHttpAdapter } from '@craft-agent/server-core/webui'
 import type { WebuiHandler } from '@craft-agent/server-core/webui'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
-import { getWorkspaces } from '@craft-agent/shared/config'
+import { getWorkspaces, getLlmConnections } from '@craft-agent/shared/config'
 import { createMessagingBootstrap, type MessagingBootstrapHandle } from '@craft-agent/messaging-gateway'
 
 // --generate-token: print a crypto-random token and exit
@@ -217,6 +217,17 @@ const instance = await (async () => {
             workerEntry: waWorkerEntry,
             nodeBin: waNodeBin,
             pairingMode: 'qr',
+          },
+          // Live connection lookup for /status — reads config on every call
+          // so deleted/renamed connections are reflected immediately instead
+          // of parroting stale session metadata.
+          resolveConnection: (slug) => {
+            try {
+              const conn = getLlmConnections().find((c) => c.slug === slug)
+              return conn ? { name: conn.name } : undefined
+            } catch {
+              return undefined
+            }
           },
         })
         sessionManager.setMessagingRegistry?.(messagingHandle.registry)

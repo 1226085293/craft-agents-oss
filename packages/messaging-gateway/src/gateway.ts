@@ -64,6 +64,12 @@ export interface GatewayOptions {
    */
   getWorkspaceConfig?: () => MessagingConfig
   /**
+   * Resolves an LLM connection slug to its display name at call time.
+   * Returns undefined when the slug no longer exists (deleted connection).
+   * Used by /status to show live connection info; optional for tests.
+   */
+  resolveConnection?: (connectionSlug: string) => { name?: string } | undefined
+  /**
    * Append `candidate` to the platform's owners list iff the list is
    * currently empty. No-op otherwise. Used by Commands.handlePair to
    * bootstrap ownership the first time anyone redeems a code.
@@ -249,6 +255,7 @@ export class MessagingGateway {
       seedOwnerOnFirstPair:
         opts.seedOwnerOnFirstPair ?? (async () => []),
       pendingStore: this.pendingStore,
+      resolveConnection: opts.resolveConnection,
     }
 
     this.commands = new Commands(

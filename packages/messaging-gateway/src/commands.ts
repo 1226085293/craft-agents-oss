@@ -94,6 +94,13 @@ export interface AccessControlDeps {
   ) => Promise<PlatformOwner[]>
   /** Optional pending-senders store for recording rejected attempts. */
   pendingStore?: PendingSendersStore
+  /**
+   * Resolves an LLM connection slug to live connection info at call time.
+   * Returns undefined when the slug no longer exists (deleted connection).
+   * Used by `/status` to distinguish the persisted connection label from
+   * what's actually configured. Optional — omitted in most unit tests.
+   */
+  resolveConnection?: (connectionSlug: string) => { name?: string } | undefined
 }
 
 /**
@@ -628,9 +635,22 @@ export class Commands {
 
     // Runtime model info — the fields the user actually asks about when a
     // reply looks off. All optional: older sessions may not have them set.
+    //
+    // Connection caveat: session.model/llmConnection are PERSISTED labels
+    // (written at creation or last explicit switch). If the connection was
+    // deleted since, the runtime silently falls back to the workspace
+    // default connection — so verify against live config instead of
+    // parroting a stale label (users saw "agnes-2.5-flash" long after that
+    // connection was removed).
     if (session) {
-      if (session.model) lines.push(`Model: ${session.model}`)
-      if (session.llmConnection) lines.push(`Connection: ${session.llmConnection}`)
+      const conn = session.llmConnection ? this.access.resolveConnection?.(session.llmConnection) : undefined
+      const connMissing = !!session.llmConnection && !conn
+      if (session.llmConnection) {
+        lines.push(`Connection: ${conn?.name || session.llmConnection}${connMissing ? ' (removed — using default)' : ''}`)
+      }
+      if (session.model) {
+        lines.push(`Model: ${connMissing ? '(default) ' : ''}${session.model}`)
+      }
       if (session.thinkingLevel) lines.push(`Thinking: ${session.thinkingLevel}`)
       if (session.isProcessing) {
         const activity = session.currentStatus?.message

@@ -79,6 +79,12 @@ export interface MessagingGatewayRegistryOptions {
   }
   /** Optional logger — shared with the gateway and adapters. */
   logger?: MessagingLogger
+  /**
+   * Resolves an LLM connection slug to live connection info at call time.
+   * Returns undefined when the slug no longer exists. Passed through to
+   * each workspace's Commands for `/status` display.
+   */
+  resolveConnection?: (connectionSlug: string) => { name?: string } | undefined
 }
 
 interface TelegramBlockedNotice {
@@ -1071,6 +1077,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       },
       // Read live config so accessMode/owner toggles take effect immediately.
       getWorkspaceConfig: () => configStore.get(),
+      resolveConnection: this.opts.resolveConnection,
       seedOwnerOnFirstPair: async (platform, candidate) =>
         this.seedFirstOwner(workspaceId, platform, candidate),
       onBindingChanged: () => this.emitBindingChanged(workspaceId),

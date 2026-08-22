@@ -33,6 +33,13 @@ export interface MessagingBootstrapOptions {
   /** Optional legacy dir (pre-relocation) for one-shot migration. Headless omits this. */
   getLegacyMessagingDir?: (workspaceId: string) => string | undefined
   logger?: MessagingLogger
+  /**
+   * Resolves an LLM connection slug to live connection info at call time.
+   * Returns undefined when the slug no longer exists (deleted connection).
+   * Passed through to Commands so `/status` can distinguish persisted
+   * labels from live config.
+   */
+  resolveConnection?: (connectionSlug: string) => { name?: string } | undefined
   whatsapp: {
     /** Absolute path to the bundled worker.cjs. */
     workerEntry: string
@@ -72,6 +79,7 @@ export function createMessagingBootstrap(opts: MessagingBootstrapOptions): Messa
     getMessagingDir: opts.getMessagingDir,
     getLegacyMessagingDir: opts.getLegacyMessagingDir,
     logger: opts.logger,
+    resolveConnection: opts.resolveConnection,
     whatsapp: {
       workerEntry: opts.whatsapp.workerEntry,
       nodeBin: opts.whatsapp.nodeBin,

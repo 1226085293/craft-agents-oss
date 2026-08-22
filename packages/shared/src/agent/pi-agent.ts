@@ -100,7 +100,7 @@ import { parseError, type AgentError } from './errors.ts';
 // Centralized PreToolUse pipeline
 import { runPreToolUseChecks, type PreToolUseCheckResult } from './core/pre-tool-use.ts';
 import { getRtkPath } from './core/rtk-detector.ts';
-import { getRtkEnabled, getBrowserToolEnabled, getDefenseEnabled } from '../config/storage.ts';
+import { getRtkEnabled, getBrowserToolEnabled, getDefenseEnabled, getDefenseGuardrails } from '../config/storage.ts';
 import type { RtkContext } from './core/rtk-rewrite.ts';
 
 // Workspace slug extraction for skill qualification
@@ -385,6 +385,9 @@ export class PiAgent extends BaseAgent {
     reject: (error: Error) => void;
   }> = new Map();
 
+  // Pending hot connection switches (mid-session, see switchConnection).
+  private pendingSwitchConnections: Map<string, (result: { success: boolean; resolved?: string; errorMessage?: string }) => void> = new Map();
+
   // Metadata captured before PreToolUse stripping, keyed by toolCallId.
   // This provides a deterministic bridge when side-channel metadata store misses.
   private preToolMetadataByCallId: Map<string, {
@@ -660,6 +663,9 @@ export class PiAgent extends BaseAgent {
       // Anti early-stop defense — read from local config so the user's
       // Settings → Tools toggle binds to the subprocess init message.
       defenseEnabled: getDefenseEnabled(),
+      // Resume-chain budget (maxResumes user-configurable; iteration/duration
+      // caps stay internal). Read at init-time like the master switch.
+      defenseGuardrails: getDefenseGuardrails(),
       // Branch params for Pi SDK session fork
       branchFromSdkSessionId: this.config.session?.branchFromSdkSessionId,
       branchFromSessionPath: this.config.session?.branchFromSessionPath,
@@ -1102,6 +1108,20 @@ export class PiAgent extends BaseAgent {
         this.handleRuntimeConfigUpdateResult(msg);
         break;
 
+      case 'switch_connection_result': {
+        // Response to a hot connection switch request
+        const pendingSwitch = this.pendingSwitchConnections.get(msg.id as string);
+        if (pendingSwitch) {
+          this.pendingSwitchConnections.delete(msg.id as string);
+          pendingSwitch({
+            success: Boolean(msg.success),
+            resolved: msg.resolved as string | undefined,
+            errorMessage: msg.errorMessage as string | undefined,
+          });
+        }
+        break;
+      }
+
       case 'session_id_update':
         // Pi session ID changed
         if (msg.sessionId) {
@@ -1173,6 +1193,10 @@ export class PiAgent extends BaseAgent {
         for (const [id, pending] of this.pendingRuntimeConfigUpdates) {
           pending.reject(new Error(rawMessage));
           this.pendingRuntimeConfigUpdates.delete(id);
+        }
+        for (const [id, pending] of this.pendingSwitchConnections) {
+          pending({ success: false, errorMessage: rawMessage });
+          this.pendingSwitchConnections.delete(id);
         }
 
         // Suppress repeated identical errors to prevent a broken subprocess
@@ -2361,6 +2385,124 @@ export class PiAgent extends BaseAgent {
     } else {
       this.debug(`Model updated but no subprocess to forward to: ${previousModel} → ${model}`);
     }
+  }
+
+  /**
+   * Hot connection switch (mid-session). Injects the target connection's
+   * credential into the subprocess auth storage and applies the model —
+   * transcript untouched, context fully preserved. The new connection takes
+   * effect on the next turn.
+   *
+   * Unlike setConnection (which rebuilds config for the NEXT agent creation),
+   * this drives a live subprocess: credentials are fetched per-slug from the
+   * CredentialManager (not this.config.connectionSlug) so any configured
+n   * connection can be adopted mid-session.
+   */
+  async switchConnection(args: {
+    connectionSlug: string;
+    model: string;
+  }): Promise<void> {
+    const previousSlug = this.config.connectionSlug;
+    const { getLlmConnection } = await import('../config/storage.ts');
+    const connection = getLlmConnection(args.connectionSlug);
+    if (!connection) {
+      throw new Error(`LLM connection "${args.connectionSlug}" not found`);
+    }
+
+    // Build the target runtime payload the same way the pi driver does at
+    // agent creation (piAuthProvider / baseUrl / customEndpoint / customModels).
+    const runtime = {
+      piAuthProvider: connection.piAuthProvider,
+      baseUrl: connection.baseUrl,
+      customEndpoint: connection.customEndpoint,
+      customModels: connection.models?.map(m => {
+        if (typeof m === 'string') return m;
+        const supportsImages = typeof m.supportsImages === 'boolean' ? m.supportsImages : undefined;
+        if (m.contextWindow || supportsImages !== undefined || (m as { maxTokens?: number }).maxTokens) {
+          return {
+            id: m.id,
+            ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
+            ...(supportsImages !== undefined ? { supportsImages } : {}),
+            ...((m as { maxTokens?: number }).maxTokens ? { maxTokens: (m as { maxTokens?: number }).maxTokens } : {}),
+          };
+        }
+        return m.id;
+      }),
+    } as {
+      piAuthProvider?: string;
+      baseUrl?: string;
+      customEndpoint?: { api: string; supportsImages?: boolean };
+      customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>;
+    };
+
+    // Fetch the TARGET connection's credential by slug — same flow as
+    // getPiAuth but parameterized instead of using this.config.
+    let piAuth: { provider: string; credential: { type: 'api_key'; key: string } | { type: 'oauth'; access: string; refresh: string; expires: number } | { type: 'iam'; accessKeyId: string; secretAccessKey: string; region?: string; sessionToken?: string } } | null = null;
+    const provider = runtime.piAuthProvider;
+    if (provider && connection.authType !== 'environment') {
+      try {
+        const credentialManager = getCredentialManager();
+        const slug = args.connectionSlug;
+        if (connection.authType === 'oauth') {
+          const oauth = await credentialManager.getLlmOAuth(slug);
+          if (oauth?.accessToken && !isMaskedCredential(oauth.accessToken)) {
+            if (provider === 'github-copilot' && oauth.refreshToken) {
+              piAuth = { provider, credential: { type: 'oauth', access: oauth.accessToken, refresh: oauth.refreshToken, expires: oauth.expiresAt ?? 0 } };
+            } else {
+              piAuth = { provider, credential: { type: 'api_key', key: oauth.accessToken } };
+            }
+          }
+        } else if (connection.authType === 'iam_credentials') {
+          const iam = await credentialManager.getLlmIamCredentials(slug);
+          if (iam) {
+            piAuth = { provider, credential: { type: 'iam', accessKeyId: iam.accessKeyId, secretAccessKey: iam.secretAccessKey, region: iam.region, sessionToken: iam.sessionToken } };
+          }
+        } else {
+          const apiKey = await credentialManager.getLlmApiKey(slug);
+          if (apiKey && !isMaskedCredential(apiKey)) {
+            piAuth = { provider, credential: { type: 'api_key', key: apiKey } };
+          }
+        }
+      } catch (error) {
+        this.debug(`switchConnection: failed to fetch credential for "${args.connectionSlug}": ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    if (!this.subprocess) {
+      // No live subprocess yet: just adopt the connection locally.
+      this.config.connectionSlug = args.connectionSlug;
+      this.debug(`switchConnection: no subprocess; local adopt ${previousSlug} → ${args.connectionSlug}`);
+      return;
+    }
+
+    const id = `switch-connection-${++this.rpcIdCounter}`;
+    const result = await new Promise<{ success: boolean; resolved?: string; errorMessage?: string }>((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingSwitchConnections.delete(id);
+        resolve({ success: false, errorMessage: `switch_connection timed out after 15s` });
+      }, 15_000);
+      this.pendingSwitchConnections.set(id, (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      });
+      this.send({
+        type: 'switch_connection',
+        id,
+        model: args.model,
+        ...(piAuth ? { piAuth } : {}),
+        baseUrl: runtime.baseUrl,
+        customEndpoint: runtime.customEndpoint,
+        customModels: runtime.customModels,
+      });
+    });
+
+    if (!result.success) {
+      throw new Error(result.errorMessage || 'switch_connection failed');
+    }
+
+    // Commit the local config only after the subprocess confirms.
+    this.config.connectionSlug = args.connectionSlug;
+    this.debug(`switchConnection: subprocess confirmed ${previousSlug} → ${args.connectionSlug} (${result.resolved})`);
   }
 
   override setThinkingLevel(level: ThinkingLevel): void {

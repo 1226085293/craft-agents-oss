@@ -462,6 +462,14 @@ export interface AgentBackend {
   setModel(model: string): void;
 
   /**
+   * Hot connection switch (mid-session). Injects the target connection's
+   * credential into the live backend and applies the model without touching
+   * the transcript — context is fully preserved. Only implemented by backends
+   * that support mid-session credential swaps (PiAgent); callers must guard.
+   */
+  switchConnection?(args: { connectionSlug: string; model: string }): Promise<void>;
+
+  /**
    * Update runtime-affecting provider config without recreating the backend.
    * Backends return false when the update cannot be applied in-place and the
    * session manager should fall back to an idle restart.

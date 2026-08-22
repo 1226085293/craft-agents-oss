@@ -114,6 +114,8 @@ export interface ModelDefinition {
   supportsThinking?: boolean;
   /** Explicit per-model image input capability hint, primarily for custom endpoints. */
   supportsImages?: boolean;
+  /** Per-model max output tokens override (custom endpoints with tight limits). */
+  maxTokens?: number;
 }
 
 // ============================================

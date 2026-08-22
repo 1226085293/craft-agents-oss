@@ -126,6 +126,13 @@ interface InitMessage {
    * `false` disables both. No sub-policies (see issue #1).
    */
   defenseEnabled?: boolean;
+
+  /**
+   * Resume-chain budget (init message). Bounds RESUME LOOPS only — the
+   * first turn is unbounded (stall detection bounds runaway turns).
+   * Omitted fields fall back to SessionLifecycle defaults.
+   */
+  defenseGuardrails?: { maxResumes?: number; maxIterations?: number; maxDurationMs?: number };
 }
 
 interface RuntimeConfigUpdateMessage {
@@ -134,6 +141,23 @@ interface RuntimeConfigUpdateMessage {
   model: string;
   providerType?: string;
   authType?: string;
+  baseUrl?: string;
+  customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean };
+  customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>;
+}
+
+/**
+ * Hot connection switch (mid-session). Injects the target connection's
+ * credential into the subprocess auth storage, optionally registers a custom
+ * endpoint, then applies the model — all without touching the transcript.
+ * Context is preserved: the Pi SDK only swaps model/auth state between turns.
+ */
+interface SwitchConnectionMessage {
+  type: 'switch_connection';
+  id: string;
+  model: string;
+  piAuth?: { provider: string; credential: PiCredential };
+  apiKey?: string;
   baseUrl?: string;
   customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean };
   customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>;
@@ -155,6 +179,7 @@ type InboundMessage =
   | { type: 'compact'; id: string; customInstructions?: string }
   | { type: 'set_auto_compaction'; id: string; enabled: boolean }
   | RuntimeConfigUpdateMessage
+  | SwitchConnectionMessage
   | { type: 'steer'; message: string }
   | { type: 'token_update'; piAuth: { provider: string; credential: PiCredential } }
   | { type: 'shutdown' };
@@ -225,6 +250,14 @@ interface OutboundRuntimeConfigUpdateResult {
   updated: boolean;
   errorMessage?: string;
 }
+interface OutboundSwitchConnectionResult {
+  type: 'switch_connection_result';
+  id: string;
+  success: boolean;
+  /** Resolved "provider/model-id" on success. */
+  resolved?: string;
+  errorMessage?: string;
+}
 interface OutboundSessionIdUpdate { type: 'session_id_update'; sessionId: string }
 interface OutboundError { type: 'error'; message: string; code?: string }
 
@@ -240,6 +273,7 @@ type OutboundMessage =
   | OutboundCompactResult
   | OutboundSetAutoCompactionResult
   | OutboundRuntimeConfigUpdateResult
+  | OutboundSwitchConnectionResult
   | OutboundSessionIdUpdate
   | OutboundError;
 
@@ -363,8 +397,13 @@ function findMostRecentSessionFile(sessionDir: string): string | null {
  */
 function defenseReset(): void {
   if (defenseEnabled) {
-    defenseEvaluator = new DefenseEvaluator({ enabled: true, cwd: resolvedCwd() });
-    debugLog('[defense] Enabled — DefenseEvaluator initialized');
+    const guardrails = initConfig?.defenseGuardrails;
+    defenseEvaluator = new DefenseEvaluator({
+      enabled: true,
+      cwd: resolvedCwd(),
+      ...(guardrails ? { maxResumes: guardrails.maxResumes, maxIterations: guardrails.maxIterations, maxDurationMs: guardrails.maxDurationMs } : {}),
+    });
+    debugLog(`[defense] Enabled — DefenseEvaluator initialized (guardrails=${JSON.stringify(guardrails ?? {})})`);
   } else {
     defenseEvaluator = null;
     debugLog('[defense] Disabled — DefenseEvaluator cleared');
@@ -426,6 +465,20 @@ async function runDefensePostStop(session: AgentSession, endMessages?: unknown[]
       endsWithEmptyResponse = cleanStop && noContentBlocks;
     }
     runOutput = { hasVisibleText: anyText, aborted, endsWithEmptyResponse };
+
+    // Double-guard for the P0 abort rule (evaluator also short-circuits):
+    // a user-initiated stop is terminal. If ANY assistant message carries
+    // stopReason=aborted, skip evaluation entirely — never resume a turn the
+    // user deliberately interrupted, regardless of write/empty signals.
+    if (aborted) {
+      debugLog('[defense] Skipping post-stop evaluation: user abort detected');
+      return;
+    }
+  } else {
+    // No endMessages payload: cannot prove this was NOT an abort — do not
+    // risk reviving a user-stopped turn on incomplete evidence.
+    debugLog('[defense] Skipping post-stop evaluation: no endMessages payload');
+    return;
   }
 
   const result = defenseEvaluator.evaluate(runOutput);
@@ -1932,6 +1985,73 @@ async function handleUpdateRuntimeConfig(msg: RuntimeConfigUpdateMessage): Promi
   }
 }
 
+/**
+ * Hot connection switch (mid-session). Injects the target connection's
+ * credential into the subprocess auth storage, optionally re-registers a
+ * custom endpoint, then applies the model. Transcript untouched — context
+ * fully preserved; new model/auth take effect on the next turn.
+ */
+async function handleSwitchConnection(msg: SwitchConnectionMessage): Promise<void> {
+  try {
+    if (!initConfig) throw new Error('switch_connection received before init');
+
+    // 1. Credential: inject into the shared in-memory auth storage (same
+    // mechanism as token_update) and remember it as the active piAuth so
+    // later resolvePiModel calls prefer the right provider.
+    if (msg.piAuth && moduleAuthStorage) {
+      moduleAuthStorage.set(msg.piAuth.provider, msg.piAuth.credential as unknown as AuthCredential);
+      initConfig.piAuth = msg.piAuth;
+      debugLog(`[switch_connection] Injected ${msg.piAuth.credential.type} credential for provider: ${msg.piAuth.provider}`);
+    } else if (msg.apiKey && !isMaskedCredential(msg.apiKey)) {
+      moduleAuthStorage?.set('anthropic', { type: 'api_key', key: msg.apiKey });
+      debugLog('[switch_connection] Injected legacy API key');
+    }
+
+    // 2. Endpoint/baseUrl/custom models: update initConfig, then re-register
+    // the custom endpoint provider if one is configured.
+    initConfig = {
+      ...initConfig,
+      baseUrl: msg.baseUrl,
+      customEndpoint: msg.customEndpoint,
+      customModels: msg.customModels,
+    };
+    if (piModelRegistry && msg.baseUrl?.trim() && msg.customEndpoint) {
+      const modelEntries: CustomEndpointModelEntry[] = (msg.customModels?.length
+        ? msg.customModels
+        : [msg.model || 'default']
+      ).map(normalizeCustomEndpointModelEntry);
+      customEndpointModelIds = new Set();
+      customModelOverrides.clear();
+      registerCustomEndpointModels(piModelRegistry, msg.customEndpoint.api, msg.baseUrl.trim(), modelEntries);
+      debugLog(`[switch_connection] Registered ${modelEntries.length} custom endpoint model(s)`);
+    }
+
+    // 3. Resolve + apply the model (same flow as set_model).
+    if (!piSession || !piModelRegistry) {
+      throw new Error('No active session or model registry');
+    }
+    let piModel = resolvePiModel(piModelRegistry, msg.model, initConfig.piAuth?.provider, shouldPreferCustomEndpoint());
+    if (!piModel && msg.baseUrl?.trim() && msg.customEndpoint) {
+      const bareId = stripPiPrefix(msg.model);
+      registerCustomEndpointModels(piModelRegistry, msg.customEndpoint.api, msg.baseUrl.trim(), [{ id: bareId }]);
+      piModel = piModelRegistry.find('custom-endpoint', bareId) ?? undefined;
+      debugLog(`[switch_connection] Dynamically registered custom endpoint model: ${bareId}`);
+    }
+    if (!piModel) {
+      throw new Error(`Could not resolve model after switch: ${msg.model}`);
+    }
+    await piSession.setModel(piModel);
+    setInterceptorApiHints(piModel as { api?: string; provider?: string; baseUrl?: string });
+
+    send({ type: 'switch_connection_result', id: msg.id, success: true, resolved: `${piModel.provider}/${piModel.id}` });
+    debugLog(`[switch_connection] Switched to: ${msg.model} (resolved: ${piModel.provider}/${piModel.id})`);
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    debugLog(`[switch_connection] Failed: ${errorMsg}`);
+    send({ type: 'switch_connection_result', id: msg.id, success: false, errorMessage: errorMsg });
+  }
+}
+
 async function handleSetModel(msg: Extract<InboundMessage, { type: 'set_model' }>): Promise<void> {
   debugLog(`[set_model] Received: ${msg.model}`);
   if (!piSession || !piModelRegistry) {
@@ -2080,6 +2200,10 @@ async function processMessage(msg: InboundMessage): Promise<void> {
 
     case 'update_runtime_config':
       await handleUpdateRuntimeConfig(msg);
+      break;
+
+    case 'switch_connection':
+      await handleSwitchConnection(msg);
       break;
 
     case 'steer':

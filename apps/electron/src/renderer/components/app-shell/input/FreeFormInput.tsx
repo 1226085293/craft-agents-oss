@@ -2095,10 +2095,11 @@ export function FreeFormInput({
                 </div>
               ) : pickerMode === 'locked-single' && connectionDefaultModel ? (
                 (() => {
-                  // Single-model pi_compat connection on a non-empty session (or
-                  // when there's only one connection, so no switcher to show).
-                  // Model row is disabled (locked to this session); vision toggle
-                  // remains interactive.
+                  // Single-model pi_compat connection with only one connection
+                  // configured — there is genuinely nothing else to pick, so
+                  // the model row is rendered as locked; vision toggle remains
+                  // interactive. (Mid-session switching is now supported: with
+                  // ≥2 connections the switcher branch handles it.)
                   const showVisionToggle =
                     !!effectiveConnectionDetails && isCompatProvider(effectiveConnectionDetails.providerType)
                   const visionOn = showVisionToggle && modelSupportsImages(effectiveConnectionDetails!, connectionDefaultModel)
@@ -2154,7 +2155,7 @@ export function FreeFormInput({
                   )
                 })()
               ) : pickerMode === 'switcher' ? (
-                /* Hierarchical view: Provider → Connection → Models (empty session with multiple connections — lets the user switch BEFORE the first message locks the connection) */
+                /* Hierarchical view: Provider → Connection → Models (multiple connections — hot switching is engine-supported, works on empty AND non-empty sessions) */
                 connectionsByProvider.map(([providerName, connections], index) => (
                   <React.Fragment key={providerName}>
                     {/* Provider group label */}

@@ -289,15 +289,22 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     }
   }, [sessionId, activeWorkspaceId])
 
-  // Session connection change handler - can only change before first message
+  // Session connection change handler.
+  // Empty session: legacy setConnection (config-only, before first message).
+  // Non-empty session: hot switch — injects credentials into the live
+  // subprocess and applies the model in place; context is fully preserved.
   const handleConnectionChange = React.useCallback(async (connectionSlug: string) => {
     try {
-      await window.electronAPI.sessionCommand(sessionId, { type: 'setConnection', connectionSlug })
+      const hasMessages = !!(session?.messages?.length || sessionMeta?.lastFinalMessageId)
+      if (hasMessages) {
+        await window.electronAPI.switchSessionConnection(sessionId, connectionSlug)
+      } else {
+        await window.electronAPI.sessionCommand(sessionId, { type: 'setConnection', connectionSlug })
+      }
     } catch (error) {
-      // Connection change may fail if session already started or connection is invalid
       console.error('Failed to change connection:', error)
     }
-  }, [sessionId])
+  }, [sessionId, session, sessionMeta])
 
   // Check if session's locked connection has been removed
   const connectionUnavailable = React.useMemo(() =>

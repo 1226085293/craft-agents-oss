@@ -5817,6 +5817,64 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Hot connection switch (mid-session). Unlike setSessionConnection — which
+   * is only allowed before the first message and merely updates stored config
+   * — this drives a LIVE agent: credentials for the target connection are
+   * injected into the running subprocess and the model is applied in place.
+   * The transcript is untouched, so full context carries over to the next
+   * turn under the new connection.
+   */
+  async switchSessionConnection(sessionId: string, connectionSlug: string, model?: string): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) {
+      throw new Error(`Session ${sessionId} not found`)
+    }
+
+    // Validate the target connection exists
+    const { getLlmConnection } = await import('@craft-agent/shared/config/storage')
+    const connection = getLlmConnection(connectionSlug)
+    if (!connection) {
+      throw new Error(`LLM connection "${connectionSlug}" not found`)
+    }
+
+    // Resolve the model to apply: explicit arg > connection default > current session model
+    const resolvedModel = model || connection.defaultModel || managed.model
+    if (!resolvedModel) {
+      throw new Error(`No model specified and connection "${connectionSlug}" has no default model`)
+    }
+
+    if (managed.agent?.switchConnection) {
+      // Live subprocess: hot-swap credential + model without touching context
+      await managed.agent.switchConnection({ connectionSlug, model: resolvedModel })
+      sessionLog.info(`[switchSessionConnection] Hot-switched session ${sessionId}: ${connectionSlug}/${resolvedModel}`)
+    } else {
+      // No live agent (or backend lacks support): adopt config for next creation
+      managed.llmConnection = connectionSlug
+      managed.model = resolvedModel
+      await updateSessionMetadata(managed.workspace.rootPath, sessionId, {
+        llmConnection: connectionSlug,
+        model: resolvedModel,
+      })
+      sessionLog.info(`[switchSessionConnection] Session ${sessionId} config adopted (no live agent): ${connectionSlug}`)
+    }
+
+    // Commit session state + unlock the connection so future flows agree
+    managed.llmConnection = connectionSlug
+    managed.connectionLocked = false
+    this.persistSession(managed)
+
+    // Notify renderer (capabilities refresh, e.g. branching/vision support)
+    this.sendEvent({
+      type: 'connection_changed',
+      sessionId,
+      connectionSlug,
+      supportsBranching: resolveSupportsBranching(managed),
+    }, managed.workspace.id)
+    // Keep the model indicator in sync when the model changed too
+    this.sendEvent({ type: 'session_model_changed', sessionId, model: resolvedModel }, managed.workspace.id)
+  }
+
+  /**
    * Update the content of a specific message in a session
    * Used by preview window to save edited content back to the original message
    */

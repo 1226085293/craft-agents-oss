@@ -118,6 +118,8 @@ export interface ISessionManager {
   ): Promise<boolean>
   setSessionConnection(sessionId: string, connectionSlug: string): Promise<void>
   updateSessionModel(sessionId: string, workspaceId: string, model: string | null, connection?: string): Promise<void>
+  /** Hot connection switch (mid-session): live credential injection + model apply, context preserved. */
+  switchSessionConnection(sessionId: string, connectionSlug: string, model?: string): Promise<void>
 
   // ---------------------------------------------------------------------------
   // Messaging

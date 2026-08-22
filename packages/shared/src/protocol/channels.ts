@@ -36,6 +36,7 @@ export const RPC_CHANNELS = {
     EVENT: 'session:event',
     GET_MODEL: 'session:getModel',
     SET_MODEL: 'session:setModel',
+    SWITCH_CONNECTION: 'session:switchConnection',
     GET_FILES: 'sessions:getFiles',
     GET_NOTES: 'sessions:getNotes',
     SET_NOTES: 'sessions:setNotes',
@@ -341,6 +342,8 @@ export const RPC_CHANNELS = {
   defense: {
     GET_ENABLED: 'defense:getEnabled',
     SET_ENABLED: 'defense:setEnabled',
+    GET_GUARDRAILS: 'defense:getGuardrails',
+    SET_GUARDRAILS: 'defense:setGuardrails',
   },
   badge: {
     REFRESH: 'badge:refresh',

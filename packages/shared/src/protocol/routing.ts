@@ -169,6 +169,8 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   // defense — local anti early-stop defense setting (applies to the local Pi subprocess)
   RPC_CHANNELS.defense.GET_ENABLED,
   RPC_CHANNELS.defense.SET_ENABLED,
+  RPC_CHANNELS.defense.GET_GUARDRAILS,
+  RPC_CHANNELS.defense.SET_GUARDRAILS,
 
   // browserPane — Electron BrowserView
   RPC_CHANNELS.browserPane.CREATE,
@@ -249,6 +251,7 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.sessions.EVENT,
   RPC_CHANNELS.sessions.GET_MODEL,
   RPC_CHANNELS.sessions.SET_MODEL,
+  RPC_CHANNELS.sessions.SWITCH_CONNECTION,
   RPC_CHANNELS.sessions.SWITCH_CONNECTION,
   RPC_CHANNELS.sessions.GET_FILES,
   RPC_CHANNELS.sessions.GET_NOTES,

@@ -87,10 +87,12 @@ describe('buildCustomEndpointModelDef', () => {
     // on the upstream enters thinking mode and requires reasoning_content to
     // be echoed back on every assistant message in multi-turn chats, else
     // it 400s with "the reasoning_content in the thinking mode must be passed
-    // back".
+    // back". Finally, the relay only recognizes max_tokens (not the default
+    // max_completion_tokens o1/o3 field), so we pin maxTokensField.
     const model = buildCustomEndpointModelDef('my-model')
     expect(model.reasoning).toBe(true)
     expect(model.compat?.supportsDeveloperRole).toBe(false)
     expect(model.compat?.requiresReasoningContentOnAssistantMessages).toBe(true)
+    expect(model.compat?.maxTokensField).toBe('max_tokens')
   })
 })

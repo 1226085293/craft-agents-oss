@@ -93,6 +93,12 @@ export function buildCustomEndpointModelDef(
     reasoning: true,
     compat: {
       supportsDeveloperRole: false,
+      // maxTokensField: 'max_tokens' — pi-ai's detectCompat defaults to
+      // max_completion_tokens (o1/o3 family) for unknown endpoints, but our
+      // upstream relay (stealth/ox-alpha) only recognizes max_tokens and
+      // 400s with "Invalid max_tokens value, the valid range is [1, 393216]"
+      // when given max_completion_tokens.
+      maxTokensField: 'max_tokens',
       // requiresReasoningContentOnAssistantMessages: true — the upstream
       // relay (stealth/ox-alpha) enables thinking mode when the model
       // declares reasoning:true, and its multi-turn handshake requires

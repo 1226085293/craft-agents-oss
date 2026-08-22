@@ -976,6 +976,22 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
     if (DEBUG_SSE_RAW) debugLog(`[SSE RAW IN  openai] ${dataStr.slice(0, 4000)}`);
     if (dataStr === '[DONE]') {
       flushTrackedCalls(controller);
+      // Flush any buffered terminal finish_reason chunk (empty-stream guard)
+      // before emitting [DONE]. The upstream relay sends finish_reason then
+      // [DONE]; without this, pendingFinishLine is never emitted and the
+      // downstream SDK throws "Stream ended without finish_reason".
+      if (pendingFinishLine !== null) {
+        if (!sawVisibleDelta && !sawToolCallDelta) {
+          debugLog('[openai] Empty successful stream detected — swapping finish_reason for network_error (retryable)');
+          const retryable = JSON.stringify({
+            choices: [{ index: 0, delta: {}, finish_reason: 'network_error' }],
+          });
+          emitSseLine(retryable, controller);
+        } else {
+          emitSseLine(pendingFinishLine, controller);
+        }
+        pendingFinishLine = null;
+      }
       emitSseLine(dataStr, controller);
       return;
     }

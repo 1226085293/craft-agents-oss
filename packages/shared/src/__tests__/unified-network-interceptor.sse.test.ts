@@ -208,4 +208,67 @@ describe('unified-network-interceptor SSE processors', () => {
       expect(result).toBe('{}');
     });
   });
+
+  describe('empty successful stream guard (2026-08-22 incidents)', () => {
+    it('swaps finish_reason=stop for network_error when the stream had zero visible output', async () => {
+      // Upstream fault shape: clean finish but NO content/reasoning/toolCall
+      // deltas at all. The guard must rewrite the finish so pi-ai maps it to
+      // a retryable error instead of a silent normal stop.
+      const processor = createOpenAiSseStrippingStream();
+      const result = await runThroughProcessor(processor, [
+        'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        'data: [DONE]\n\n',
+      ]);
+      expect(result).toContain('"finish_reason":"network_error"');
+      expect(result).not.toContain('"finish_reason":"stop"');
+    });
+
+    it('swaps finish_reason=length for network_error on an invisible-reasoning truncation', async () => {
+      // Incident #2: length stop with zero visible deltas (reasoning burned
+      // server-side without being streamed).
+      const processor = createOpenAiSseStrippingStream();
+      const result = await runThroughProcessor(processor, [
+        'data: {"choices":[{"index":0,"delta":{"role":"assistant"}}]}\n\n',
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}\n\n',
+        'data: [DONE]\n\n',
+      ]);
+      expect(result).toContain('"finish_reason":"network_error"');
+    });
+
+    it('passes the finish chunk through unchanged when visible content was streamed', async () => {
+      const processor = createOpenAiSseStrippingStream();
+      const result = await runThroughProcessor(processor, [
+        'data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"}}]}\n\n',
+        'data: {"choices":[{"index":0,"delta":{"content":"lo"}}]}\n\n',
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        'data: [DONE]\n\n',
+      ]);
+      expect(result).toContain('"finish_reason":"stop"');
+      expect(result).not.toContain('network_error');
+      expect(result).toContain('"content":"Hel"');
+    });
+
+    it('passes the finish chunk through unchanged when reasoning_content deltas were streamed', async () => {
+      const processor = createOpenAiSseStrippingStream();
+      const result = await runThroughProcessor(processor, [
+        'data: {"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"thinking..."}}]}\n\n',
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}\n\n',
+        'data: [DONE]\n\n',
+      ]);
+      expect(result).toContain('"finish_reason":"length"');
+      expect(result).not.toContain('network_error');
+    });
+
+    it('passes the finish chunk through unchanged when tool calls were present', async () => {
+      const processor = createOpenAiSseStrippingStream();
+      const result = await runThroughProcessor(processor, [
+        'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"bash","arguments":"{}"}}]}}]}\n\n',
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        'data: [DONE]\n\n',
+      ]);
+      expect(result).toContain('"finish_reason":"tool_calls"');
+      expect(result).not.toContain('network_error');
+    });
+  });
 });

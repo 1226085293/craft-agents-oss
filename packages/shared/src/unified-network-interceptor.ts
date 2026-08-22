@@ -870,6 +870,28 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
   let bufferingToolCalls = false;
   /** Track whether we've seen a finish_reason chunk (for synthetic finish injection) */
   let hadFinishReason = false;
+  /**
+   * Empty-stream guard (2026-08-22 incidents): some upstream relays return a
+   * "successful" completion with finish_reason=stop/length but ZERO visible
+   * output — no content delta, no reasoning delta, no tool calls. The SDK
+   * treats it as a normal stop and the turn dies silently.
+   *
+   * We buffer the terminal finish chunk instead of forwarding it immediately,
+   * then at stream end: if nothing visible was ever seen, swap it for a
+   * network_error finish, which pi-ai maps to stopReason=error + errorMessage
+   * matching the retryable-error pattern → AgentSession auto-retries with
+   * backoff (up to retry.maxRetries) instead of ending the turn silently.
+   */
+  let sawVisibleDelta = false;
+  /** Whether any tool-call delta was seen this stream (survives flushTrackedCalls' clear). */
+  let sawToolCallDelta = false;
+  /**
+   * The buffered terminal finish_reason chunk (original string), or null.
+   * ALL finish chunks are buffered here — including length/tool_calls, which
+   * the hasFinish fast-path used to forward immediately — so that flush()
+   * can apply the empty-stream guard uniformly to every terminal shape.
+   */
+  let pendingFinishLine: string | null = null;
 
   function emitSseLine(dataStr: string, controller: TransformStreamDefaultController<Uint8Array>): void {
     if (DEBUG_SSE_RAW) debugLog(`[SSE RAW OUT openai] ${dataStr.slice(0, 4000)}`);
@@ -1023,6 +1045,7 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
         continue;
       }
       handledToolCalls = true;
+      sawToolCallDelta = true;
 
       const choiceIndex = choice.index ?? 0;
       for (const tc of toolCalls) {
@@ -1106,20 +1129,34 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
       return;
     }
 
+    // Empty-stream accounting: any non-tool visible delta counts. Tool-call
+    // chunks were handled above; what remains here can only be content /
+    // reasoning / role chunks.
+    for (const choice of choices) {
+      const d = choice?.delta as Record<string, unknown> | undefined;
+      if (!d) continue;
+      const c = d.content;
+      if (typeof c === 'string' && c.length > 0) sawVisibleDelta = true;
+      const r = (d as { reasoning_content?: unknown }).reasoning_content;
+      if (typeof r === 'string' && r.length > 0) sawVisibleDelta = true;
+      const r2 = (d as { reasoning?: unknown }).reasoning;
+      if (typeof r2 === 'string' && r2.length > 0) sawVisibleDelta = true;
+    }
+
     // Forward with the empty tool_calls key removed (re-serialized), or verbatim.
     const forwardStr = strippedEmptyToolCalls ? JSON.stringify(data) : dataStr;
 
-    // On finish, flush buffered tool calls with clean args BEFORE emitting finish event
-    const hasFinish = choices.some(choice => choice?.finish_reason === 'tool_calls' || choice?.finish_reason === 'stop');
-    // Track ANY terminal finish_reason (tool_calls / stop / length / …).
-    // Only a genuinely absent finish_reason should be synthesized on EOF.
-    const sawFinish = choices.some(choice => choice && choice.finish_reason != null);
-    if (sawFinish) hadFinishReason = true;
+    // Any terminal finish_reason chunk is BUFFERED (not forwarded immediately)
+    // so that flush() can apply the empty-stream guard uniformly to every
+    // terminal shape (stop / length / tool_calls). Tool-call consolidation is
+    // still flushed first so the consolidated events precede the finish.
+    const hasFinish = choices.some(choice => choice?.finish_reason != null);
     if (hasFinish) {
+      hadFinishReason = true;
       if (bufferingToolCalls) {
         flushTrackedCalls(controller);
       }
-      emitSseLine(forwardStr, controller);
+      pendingFinishLine = forwardStr;
       return;
     }
 
@@ -1164,6 +1201,23 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
           });
           emitSseLine(synthetic, controller);
         }
+      }
+      // Empty-stream guard: a buffered finish chunk that terminates a stream
+      // with ZERO visible output (no content/reasoning deltas, no tool calls)
+      // is an upstream fault, not a completion. Swap it for network_error so
+      // pi-ai maps it to stopReason=error with a retryable errorMessage and
+      // AgentSession retries the turn instead of ending it silently.
+      if (pendingFinishLine !== null) {
+        if (!sawVisibleDelta && !sawToolCallDelta) {
+          debugLog('[openai] Empty successful stream detected — swapping finish_reason for network_error (retryable)');
+          const retryable = JSON.stringify({
+            choices: [{ index: 0, delta: {}, finish_reason: 'network_error' }],
+          });
+          emitSseLine(retryable, controller);
+        } else {
+          emitSseLine(pendingFinishLine, controller);
+        }
+        pendingFinishLine = null;
       }
       lineBuffer = '';
     },

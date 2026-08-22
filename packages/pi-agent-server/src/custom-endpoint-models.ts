@@ -74,10 +74,16 @@ export function buildCustomEndpointModelDef(
   const supportsImages = overrides?.supportsImages ?? defaults?.supportsImages ?? false
   const input: CustomEndpointInput[] = supportsImages ? ['text', 'image'] : ['text']
 
+  // reasoning: true — declare the model as reasoning-capable so the user's
+  // session thinkingLevel actually reaches the request (getSupportedThinkingLevels
+  // returns only ['off'] when this is false, clamping e.g. 'medium' to off and
+  // dropping the reasoning_effort param entirely). pi-ai maps reasoning_content
+  // deltas to visible thinking blocks unconditionally, so streamed reasoning
+  // stays visible either way; declaring true just makes the REQUEST honest.
   return {
     id,
     name: id,
-    reasoning: false,
+    reasoning: true,
     input,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: overrides?.contextWindow ?? 131_072,

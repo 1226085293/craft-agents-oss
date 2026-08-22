@@ -101,6 +101,13 @@ export interface AccessControlDeps {
    * what's actually configured. Optional — omitted in most unit tests.
    */
   resolveConnection?: (connectionSlug: string) => { name?: string } | undefined
+  /**
+   * Returns the workspace default connection (slug + display name + default
+   * model) at call time, or undefined when none is configured. Used by
+   * `/status` to show what actually answers when a session's persisted
+   * connection was deleted.
+   */
+  resolveDefaultConnection?: () => { slug: string; name?: string; defaultModel?: string } | undefined
 }
 
 /**
@@ -637,19 +644,24 @@ export class Commands {
     // reply looks off. All optional: older sessions may not have them set.
     //
     // Connection caveat: session.model/llmConnection are PERSISTED labels
-    // (written at creation or last explicit switch). If the connection was
-    // deleted since, the runtime silently falls back to the workspace
-    // default connection — so verify against live config instead of
-    // parroting a stale label (users saw "agnes-2.5-flash" long after that
-    // connection was removed).
+    // (written at creation or last explicit switch). When the persisted
+    // connection no longer exists, the runtime silently falls back to the
+    // workspace default connection+model — so show THAT (what actually
+    // answers), not the stale label.
     if (session) {
       const conn = session.llmConnection ? this.access.resolveConnection?.(session.llmConnection) : undefined
-      const connMissing = !!session.llmConnection && !conn
-      if (session.llmConnection) {
-        lines.push(`Connection: ${conn?.name || session.llmConnection}${connMissing ? ' (removed — using default)' : ''}`)
-      }
       if (session.model) {
-        lines.push(`Model: ${connMissing ? '(default) ' : ''}${session.model}`)
+        if (session.llmConnection && !conn) {
+          // Persisted connection was deleted → runtime uses the default
+          // connection's default model. Resolve it live so /status shows
+          // what actually answers, prefixed to make the fallback visible.
+          const defaultConn = this.access.resolveDefaultConnection?.()
+          lines.push(`Connection: ${defaultConn?.name || defaultConn?.slug || '(workspace default)'}`)
+          lines.push(`Model: ${defaultConn?.defaultModel || '(default)'}${defaultConn ? '' : ` (${session.model})`}`)
+        } else {
+          if (session.llmConnection) lines.push(`Connection: ${conn?.name || session.llmConnection}`)
+          lines.push(`Model: ${session.model}`)
+        }
       }
       if (session.thinkingLevel) lines.push(`Thinking: ${session.thinkingLevel}`)
       if (session.isProcessing) {

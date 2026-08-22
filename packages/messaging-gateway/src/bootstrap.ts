@@ -40,6 +40,11 @@ export interface MessagingBootstrapOptions {
    * labels from live config.
    */
   resolveConnection?: (connectionSlug: string) => { name?: string } | undefined
+  /**
+   * Returns the workspace default connection (slug + name + default model)
+   * at call time, or undefined when none is configured. Used by `/status`.
+   */
+  resolveDefaultConnection?: () => { slug: string; name?: string; defaultModel?: string } | undefined
   whatsapp: {
     /** Absolute path to the bundled worker.cjs. */
     workerEntry: string
@@ -80,6 +85,7 @@ export function createMessagingBootstrap(opts: MessagingBootstrapOptions): Messa
     getLegacyMessagingDir: opts.getLegacyMessagingDir,
     logger: opts.logger,
     resolveConnection: opts.resolveConnection,
+    resolveDefaultConnection: opts.resolveDefaultConnection,
     whatsapp: {
       workerEntry: opts.whatsapp.workerEntry,
       nodeBin: opts.whatsapp.nodeBin,

@@ -225,9 +225,9 @@ describe('Commands', () => {
   describe('/status model info', () => {
     it('shows model, connection, thinking level and idle status when set', async () => {
       const session = makeSession('sess-1', 'Alpha', 100)
-      ;(session as Record<string, unknown>).model = 'agnes-2.5-flash'
-      ;(session as Record<string, unknown>).llmConnection = 'litellm-proxy'
-      ;(session as Record<string, unknown>).thinkingLevel = 'medium'
+      ;(session as unknown as Record<string, unknown>).model = 'agnes-2.5-flash'
+      ;(session as unknown as Record<string, unknown>).llmConnection = 'litellm-proxy'
+      ;(session as unknown as Record<string, unknown>).thinkingLevel = 'medium'
       const store = makeStore()
       store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
       const commands = new Commands(
@@ -257,8 +257,8 @@ describe('Commands', () => {
 
     it('shows connection display name when resolveConnection resolves the slug', async () => {
       const session = makeSession('sess-1', 'Alpha', 100)
-      ;(session as Record<string, unknown>).model = 'default'
-      ;(session as Record<string, unknown>).llmConnection = 'litellm-proxy'
+      ;(session as unknown as Record<string, unknown>).model = 'default'
+      ;(session as unknown as Record<string, unknown>).llmConnection = 'litellm-proxy'
       const store = makeStore()
       store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
       const commands = new Commands(
@@ -282,11 +282,13 @@ describe('Commands', () => {
       expect(out).not.toContain('(removed')
     })
 
-    it('flags a deleted connection and marks the model as fallback-to-default', async () => {
+    it('shows the live default connection/model when the persisted one was deleted', async () => {
       // Session created while 'agnes-openai' existed; connection since removed.
+      // /status must show what ACTUALLY answers now (the workspace default),
+      // not the stale label.
       const session = makeSession('sess-1', 'Alpha', 100)
-      ;(session as Record<string, unknown>).model = 'agnes-2.5-flash'
-      ;(session as Record<string, unknown>).llmConnection = 'agnes-openai'
+      ;(session as unknown as Record<string, unknown>).model = 'agnes-2.5-flash'
+      ;(session as unknown as Record<string, unknown>).llmConnection = 'agnes-openai'
       const store = makeStore()
       store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
       const commands = new Commands(
@@ -299,6 +301,11 @@ describe('Commands', () => {
           getWorkspaceConfig: () => ({ enabled: false, platforms: {} }),
           seedOwnerOnFirstPair: async () => [],
           resolveConnection: () => undefined, // slug no longer in config
+          resolveDefaultConnection: () => ({
+            slug: 'litellm-proxy',
+            name: 'LiteLLM Proxy',
+            defaultModel: 'default',
+          }),
         },
       )
       const adapter = makeAdapter('telegram', true)
@@ -306,14 +313,43 @@ describe('Commands', () => {
       await commands.handleCommand(adapter, { ...makeMessage('/status'), platform: 'telegram' })
 
       const out = adapter.sent.at(-1) ?? ''
-      expect(out).toContain('Connection: agnes-openai (removed — using default)')
-      expect(out).toContain('Model: (default) agnes-2.5-flash')
+      expect(out).toContain('Connection: LiteLLM Proxy')
+      expect(out).toContain('Model: default')
+      expect(out).not.toContain('agnes') // stale label must not leak through
+    })
+
+    it('falls back to a generic default hint when no default connection is configured', async () => {
+      const session = makeSession('sess-1', 'Alpha', 100)
+      ;(session as unknown as Record<string, unknown>).model = 'agnes-2.5-flash'
+      ;(session as unknown as Record<string, unknown>).llmConnection = 'agnes-openai'
+      const store = makeStore()
+      store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+      const commands = new Commands(
+        makeSessionManager([session]),
+        store,
+        'ws1',
+        undefined,
+        undefined,
+        {
+          getWorkspaceConfig: () => ({ enabled: false, platforms: {} }),
+          seedOwnerOnFirstPair: async () => [],
+          resolveConnection: () => undefined,
+          resolveDefaultConnection: () => undefined,
+        },
+      )
+      const adapter = makeAdapter('telegram', true)
+
+      await commands.handleCommand(adapter, { ...makeMessage('/status'), platform: 'telegram' })
+
+      const out = adapter.sent.at(-1) ?? ''
+      expect(out).toContain('Connection: (workspace default)')
+      expect(out).toContain('Model: (default) (agnes-2.5-flash)')
     })
 
     it('shows processing status with current activity', async () => {
       const session = makeSession('sess-1', 'Alpha', 100)
-      ;(session as Record<string, unknown>).isProcessing = true
-      ;(session as Record<string, unknown>).currentStatus = { message: 'Reading files' }
+      ;(session as unknown as Record<string, unknown>).isProcessing = true
+      ;(session as unknown as Record<string, unknown>).currentStatus = { message: 'Reading files' }
       const store = makeStore()
       store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
       const commands = new Commands(makeSessionManager([session]), store, 'ws1')

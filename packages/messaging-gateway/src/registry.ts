@@ -85,6 +85,12 @@ export interface MessagingGatewayRegistryOptions {
    * each workspace's Commands for `/status` display.
    */
   resolveConnection?: (connectionSlug: string) => { name?: string } | undefined
+  /**
+   * Returns the workspace default connection (slug + name + default model)
+   * at call time, or undefined when none is configured. Passed through to
+   * each workspace's Commands for `/status` display.
+   */
+  resolveDefaultConnection?: () => { slug: string; name?: string; defaultModel?: string } | undefined
 }
 
 interface TelegramBlockedNotice {
@@ -1078,6 +1084,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       // Read live config so accessMode/owner toggles take effect immediately.
       getWorkspaceConfig: () => configStore.get(),
       resolveConnection: this.opts.resolveConnection,
+      resolveDefaultConnection: this.opts.resolveDefaultConnection,
       seedOwnerOnFirstPair: async (platform, candidate) =>
         this.seedFirstOwner(workspaceId, platform, candidate),
       onBindingChanged: () => this.emitBindingChanged(workspaceId),

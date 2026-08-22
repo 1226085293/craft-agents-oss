@@ -70,6 +70,12 @@ export interface GatewayOptions {
    */
   resolveConnection?: (connectionSlug: string) => { name?: string } | undefined
   /**
+   * Returns the workspace default connection (slug + name + default model)
+   * at call time, or undefined when none is configured. Used by /status to
+   * show what actually answers after a session's connection was deleted.
+   */
+  resolveDefaultConnection?: () => { slug: string; name?: string; defaultModel?: string } | undefined
+  /**
    * Append `candidate` to the platform's owners list iff the list is
    * currently empty. No-op otherwise. Used by Commands.handlePair to
    * bootstrap ownership the first time anyone redeems a code.
@@ -256,6 +262,7 @@ export class MessagingGateway {
         opts.seedOwnerOnFirstPair ?? (async () => []),
       pendingStore: this.pendingStore,
       resolveConnection: opts.resolveConnection,
+      resolveDefaultConnection: opts.resolveDefaultConnection,
     }
 
     this.commands = new Commands(

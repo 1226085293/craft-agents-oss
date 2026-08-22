@@ -376,8 +376,30 @@ try {
     Pop-Location
 }
 
+# Rebuild the Pi Agent Server subprocess so the packaged product always embeds
+# the current source (incl. hot model/connection switching). copy-assets.ts copies
+# packages/pi-agent-server/dist/index.js verbatim, so we MUST regenerate it here —
+# otherwise a stale dist (built before a feature landed) ships silently and the Pi
+# subprocess rejects newer message types like 'switch_connection' at runtime.
+Write-Host "  Building Pi agent server (subprocess)..."
+$PiAgentSrc = "$RootDir\packages\pi-agent-server\src\index.ts"
+if (Test-Path $PiAgentSrc) {
+    Push-Location $RootDir
+    try {
+        $PiDistDir = "$RootDir\packages\pi-agent-server\dist"
+        if (-not (Test-Path $PiDistDir)) { New-Item -ItemType Directory -Force -Path $PiDistDir | Out-Null }
+        & bun build $PiAgentSrc --outfile="$PiDistDir\index.js" --target=bun --format=esm --external koffi
+        if ($LASTEXITCODE -ne 0) { throw "Pi agent server build failed" }
+    } finally {
+        Pop-Location
+    }
+    Write-Host "  Pi agent server built" -ForegroundColor Green
+} else {
+    Write-Host "  WARNING: Pi agent server source not found, using existing dist" -ForegroundColor Yellow
+}
+
 # Copy all resources and bundled assets using the shared script.
-# Single source of truth — matches Mac/Linux build (bun run build:copy).
+# NOTE: This is the single source of truth — matches Mac/Linux build (bun run build:copy).
 # Copies: resources (icons, DMG bg), docs, tool-icons, themes, permissions, config-defaults.
 Write-Host "  Copying resources and bundled assets..."
 Push-Location $ElectronDir

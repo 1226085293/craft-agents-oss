@@ -235,7 +235,7 @@ export interface FreeFormInputProps {
   /** Current LLM connection slug (locked after first message) */
   currentConnection?: string
   /** Callback when connection changes (only works when session is empty) */
-  onConnectionChange?: (connectionSlug: string) => void
+  onConnectionChange?: (connectionSlug: string, model?: string) => void
   /** When true, the session's locked connection has been removed */
   connectionUnavailable?: boolean
   /**
@@ -377,7 +377,11 @@ export function FreeFormInput({
 
   // Get display name for current model (full name, not short name)
   const currentModelDisplayName = React.useMemo(() => {
-    const modelToDisplay = connectionDefaultModel ?? currentModel
+    // Prefer the session's actual model when present; only fall back to the
+    // connection's default when no explicit session model is set (see
+    // CompactModelSelector for the same fix — reversed priority had old
+    // sessions show a newly-added default and ignored model switches back).
+    const modelToDisplay = currentModel || connectionDefaultModel || ''
     const model = availableModels.find(m =>
       typeof m === 'string' ? m === modelToDisplay : m.id === modelToDisplay
     )
@@ -2202,7 +2206,9 @@ export function FreeFormInput({
                                     onSelect={() => {
                                       // If selecting a different connection, update both connection and model
                                       if (!isCurrentConnection && onConnectionChange) {
-                                        onConnectionChange(conn.slug)
+                                        // Carry the chosen model through so hot-switching a connection
+                                        // applies THIS model, not the target connection's default.
+                                        onConnectionChange(conn.slug, modelId)
                                       }
                                       // Always pass connection with model for proper persistence
                                       onModelChange(modelId, conn.slug)

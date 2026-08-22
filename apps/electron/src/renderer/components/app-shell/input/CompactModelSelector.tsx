@@ -48,7 +48,7 @@ interface CompactModelSelectorProps {
   currentModel: string
   currentConnection?: string
   onModelChange: (model: string, connection?: string) => void
-  onConnectionChange?: (connectionSlug: string) => void
+  onConnectionChange?: (connectionSlug: string, model?: string) => void
   thinkingLevel?: ThinkingLevel
   onThinkingLevelChange?: (level: ThinkingLevel) => void
   isEmptySession?: boolean
@@ -114,7 +114,12 @@ export function CompactModelSelector({
   }, [effectiveConnectionDetails, connectionUnavailable])
 
   const currentModelDisplayName = React.useMemo(() => {
-    const modelToDisplay = connectionDefaultModel ?? currentModel
+    // Prefer the session's actual model when present; only fall back to the
+    // connection's default when no explicit session model is set. Priority was
+    // reversed so the connection default always won — which made old sessions
+    // show a newly-added default model and prevented the picker from ever
+    // reflecting a model switch back to a previous choice.
+    const modelToDisplay = currentModel || connectionDefaultModel || ''
     const model = availableModels.find(m =>
       typeof m === 'string' ? m === modelToDisplay : m.id === modelToDisplay,
     )
@@ -157,7 +162,10 @@ export function CompactModelSelector({
     (connSlug: string, modelId: string) => {
       const isCurrentConnection = effectiveConnection === connSlug
       if (!isCurrentConnection && onConnectionChange) {
-        onConnectionChange(connSlug)
+        // Carry the chosen model through so hot-switching a connection applies
+        // THIS model, not the target connection's default (which otherwise
+        // overwrites the selection and leaves the picker unchanged).
+        onConnectionChange(connSlug, modelId)
       }
       onModelChange(modelId, connSlug)
       setOpen(false)

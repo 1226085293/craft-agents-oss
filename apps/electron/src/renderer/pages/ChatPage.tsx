@@ -293,18 +293,26 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   // Empty session: legacy setConnection (config-only, before first message).
   // Non-empty session: hot switch — injects credentials into the live
   // subprocess and applies the model in place; context is fully preserved.
-  const handleConnectionChange = React.useCallback(async (connectionSlug: string) => {
+  // `model` (when provided) is the exact model the user picked, so the hot
+  // switch applies THAT model instead of falling back to the target
+  // connection's default (which otherwise overwrites the selection).
+  const handleConnectionChange = React.useCallback(async (connectionSlug: string, model?: string) => {
     try {
       const hasMessages = !!(session?.messages?.length || sessionMeta?.lastFinalMessageId)
       if (hasMessages) {
-        await window.electronAPI.switchSessionConnection(sessionId, connectionSlug)
+        await window.electronAPI.switchSessionConnection(sessionId, connectionSlug, model)
       } else {
         await window.electronAPI.sessionCommand(sessionId, { type: 'setConnection', connectionSlug })
+        // Keep an explicit pick on a fresh session too, so the model isn't lost
+        // when the user chose a specific one while switching connections.
+        if (model && activeWorkspaceId) {
+          await window.electronAPI.setSessionModel(sessionId, activeWorkspaceId, model, connectionSlug)
+        }
       }
     } catch (error) {
       console.error('Failed to change connection:', error)
     }
-  }, [sessionId, session, sessionMeta])
+  }, [sessionId, session, sessionMeta, activeWorkspaceId])
 
   // Check if session's locked connection has been removed
   const connectionUnavailable = React.useMemo(() =>

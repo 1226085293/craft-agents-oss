@@ -12,7 +12,7 @@
 # 宿主死亡不影响它继续工作。
 #
 # 用法（在 agent 会话内执行）：
-#   setsid nohup bash /tmp/craft-agents-tmp/scripts/self-update-restart.sh \
+#   setsid nohup bash /tmp/craft-agents-oss/scripts/self-update-restart.sh \
 #       [延迟秒数，默认20] >> /tmp/craft-self-update.log 2>&1 &
 #
 # ⚠️ 前提：调用前必须已完成源码同步和 dist 构建！本脚本只负责"切换"，不负责"构建"。

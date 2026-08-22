@@ -80,10 +80,18 @@ export function buildCustomEndpointModelDef(
   // dropping the reasoning_effort param entirely). pi-ai maps reasoning_content
   // deltas to visible thinking blocks unconditionally, so streamed reasoning
   // stays visible either way; declaring true just makes the REQUEST honest.
+  //
+  // compat.supportsDeveloperRole: false — pi-ai emits the developer role only
+  // when model.reasoning && compat.supportsDeveloperRole. Our upstream relay
+  // terminates at a model (stealth/ox-alpha) that rejects the developer role
+  // with a 400 ("developer is not one of [system,assistant,user,tool,function]").
+  // Detected compat leaves it enabled for standard OpenAI-compatible URLs, so we
+  // must explicitly disable it for custom endpoints to avoid that 400.
   return {
     id,
     name: id,
     reasoning: true,
+    compat: { supportsDeveloperRole: false },
     input,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: overrides?.contextWindow ?? 131_072,

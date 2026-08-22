@@ -77,4 +77,15 @@ describe('buildCustomEndpointModelDef', () => {
     const model = buildCustomEndpointModelDef('big-model', undefined, { maxTokens: 65_536 })
     expect(model.maxTokens).toBe(65_536)
   })
+
+  it('declares reasoning:true but disables the developer role (upstream 400s on developer role)', () => {
+    // Layer-2 fix: reasoning:true makes the session thinkingLevel reach the
+    // request, but pi-ai only emits the developer role when
+    // model.reasoning && compat.supportsDeveloperRole. Our upstream relay
+    // rejects the developer role with a 400, so custom endpoints must keep
+    // it disabled even though reasoning is on.
+    const model = buildCustomEndpointModelDef('my-model')
+    expect(model.reasoning).toBe(true)
+    expect(model.compat?.supportsDeveloperRole).toBe(false)
+  })
 })

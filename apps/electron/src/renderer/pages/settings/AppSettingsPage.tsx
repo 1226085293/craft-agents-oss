@@ -131,17 +131,21 @@ export default function AppSettingsPage() {
   const loadSettings = useCallback(async () => {
     if (!window.electronAPI) return
     try {
-      const [notificationsOn, keepAwakeOn, browserToolOn, proxySettings, defenseOn] = await Promise.all([
+      const [notificationsOn, keepAwakeOn, browserToolOn, proxySettings, defenseOn, defenseGuardrails] = await Promise.all([
         window.electronAPI.getNotificationsEnabled(),
         window.electronAPI.getKeepAwakeWhileRunning(),
         window.electronAPI.getBrowserToolEnabled(),
         window.electronAPI.getNetworkProxySettings(),
         window.electronAPI.getDefenseEnabled(),
+        window.electronAPI.getDefenseGuardrails(),
       ])
       setNotificationsEnabled(notificationsOn)
       setKeepAwakeEnabled(keepAwakeOn)
       setBrowserToolEnabled(browserToolOn)
       setDefenseEnabled(defenseOn)
+      if (defenseGuardrails) {
+        setDefenseMaxResumes(String(defenseGuardrails.maxResumes ?? 3))
+      }
       const form = toProxyFormState(proxySettings)
       setProxyForm(form)
       setSavedProxyForm(form)
@@ -172,6 +176,16 @@ export default function AppSettingsPage() {
   const handleDefenseEnabledChange = useCallback(async (enabled: boolean) => {
     setDefenseEnabled(enabled)
     await window.electronAPI.setDefenseEnabled(enabled)
+  }, [])
+
+  // Anti early-stop defense resume-chain budget (maxResumes)
+  const [defenseMaxResumes, setDefenseMaxResumes] = useState('3')
+  const handleDefenseMaxResumesChange = useCallback(async (value: string) => {
+    setDefenseMaxResumes(value)
+    const parsed = parseInt(value, 10)
+    if (!Number.isNaN(parsed) && parsed >= 1) {
+      await window.electronAPI.setDefenseGuardrails({ maxResumes: parsed })
+    }
   }, [])
 
   // Proxy handlers
@@ -255,6 +269,16 @@ export default function AppSettingsPage() {
                     checked={defenseEnabled}
                     onCheckedChange={handleDefenseEnabledChange}
                   />
+                  {defenseEnabled && (
+                    <SettingsInput
+                      label={t("settings.tools.defenseMaxResumes", "Auto-resume limit")}
+                      description={t("settings.tools.defenseMaxResumesDesc", "Maximum automatic resumes per turn when an early stop is suspected (default 3)")}
+                      value={defenseMaxResumes}
+                      onChange={handleDefenseMaxResumesChange}
+                      placeholder="3"
+                      inCard
+                    />
+                  )}
                 </SettingsCard>
               </SettingsSection>
 

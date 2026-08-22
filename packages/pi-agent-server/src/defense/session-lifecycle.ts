@@ -20,7 +20,9 @@ export enum State {
 }
 
 const TRANSITIONS: Record<State, State[]> = {
-  [State.IDLE]: [State.RUNNING],
+  // IDLE -> ABORTED: the user can stop a turn before any tool call runs;
+  // an explicit abort must be representable from every non-terminal state.
+  [State.IDLE]: [State.RUNNING, State.ABORTED],
   [State.RUNNING]: [State.EVALUATING, State.DONE, State.FAILED, State.ABORTED],
   [State.EVALUATING]: [State.RESUME_READY, State.DONE, State.FAILED],
   [State.RESUME_READY]: [State.RESUMING],
@@ -97,13 +99,30 @@ export class SessionLifecycle {
     return this.state;
   }
 
-  /** Record a tool call iteration. Throws ABORTED if the iteration cap is hit. */
+  /**
+   * Whether the turn is inside a resume chain (an automatic defense resume
+   * has already happened). The iteration/duration guardrails exist to bound
+   * RESUME LOOPS, not to police healthy single turns — a long serial tool
+   * chain (20+ min builds) must keep full protection instead of silently
+   * losing it at the cap. Stall detection (silence-based kill in the host)
+   * already bounds runaway turns.
+   */
+  private inResumeChain(): boolean {
+    return this.resumeCount > 0;
+  }
+
+  /** Record a tool call iteration. ABORTs only when a resume loop exceeds its budget. */
   recordIteration(): State {
     if (this.isTerminal()) return this.state;
     if (this.state === State.IDLE) {
       this.transition(State.RUNNING);
     }
     this.iterations += 1;
+    // Guardrails apply only inside resume chains: the first turn is
+    // unbounded (bounded by stall detection instead). See inResumeChain().
+    if (!this.inResumeChain()) {
+      return this.state;
+    }
     if (this.iterations > this.maxIterations) {
       return this.transition(State.ABORTED);
     }
@@ -122,7 +141,9 @@ export class SessionLifecycle {
    */
   onStop(complexityNeedsEvaluation: boolean): 'run' | 'evaluate' | 'abort' {
     if (this.isTerminal()) return 'abort';
-    if (this.iterations > this.maxIterations || this.elapsedMs() > this.maxDurationMs) {
+    // Same policy as recordIteration(): caps bound resume chains only.
+    if (this.inResumeChain() &&
+        (this.iterations > this.maxIterations || this.elapsedMs() > this.maxDurationMs)) {
       this.transition(State.ABORTED);
       return 'abort';
     }
@@ -175,6 +196,15 @@ export class SessionLifecycle {
   /** Failure. */
   markFailed(): State {
     return this.transition(State.FAILED);
+  }
+
+  /**
+   * User-initiated abort. Terminal for this turn: no post-stop evaluation,
+   * no resume — an explicit stop must never be overridden by heuristics.
+   */
+  markAborted(): State {
+    if (this.isTerminal()) return this.state;
+    return this.transition(State.ABORTED);
   }
 
   /**

@@ -182,6 +182,7 @@ export const CHANNEL_MAP = {
   // Session-specific model
   getSessionModel: invoke(RPC_CHANNELS.sessions.GET_MODEL),
   setSessionModel: invoke(RPC_CHANNELS.sessions.SET_MODEL),
+  switchSessionConnection: invoke(RPC_CHANNELS.sessions.SWITCH_CONNECTION),
 
   // Workspace Settings
   getWorkspaceSettings: invoke(RPC_CHANNELS.workspace.SETTINGS_GET),
@@ -327,6 +328,8 @@ export const CHANNEL_MAP = {
   // Anti early-stop defense
   getDefenseEnabled: invoke(RPC_CHANNELS.defense.GET_ENABLED),
   setDefenseEnabled: invoke(RPC_CHANNELS.defense.SET_ENABLED),
+  getDefenseGuardrails: invoke(RPC_CHANNELS.defense.GET_GUARDRAILS),
+  setDefenseGuardrails: invoke(RPC_CHANNELS.defense.SET_GUARDRAILS),
 
   // Badge
   refreshBadge: invoke(RPC_CHANNELS.badge.REFRESH),

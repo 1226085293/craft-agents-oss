@@ -1180,6 +1180,8 @@
   "settings.tools.builtInBrowserDesc": "如果使用外部浏览器工具 (如 Playwright、Puppeteer 或浏览器 MCP 服务器) 则禁用。",
   "settings.tools.earlyStopDefense": "防早停",
   "settings.tools.earlyStopDefenseDesc": "防止代理在完成所有目标前提前停止。添加执行纪律，并在检测到疑似早停时自动续跑。",
+  "settings.tools.defenseMaxResumes": "自动续跑上限",
+  "settings.tools.defenseMaxResumesDesc": "疑似早停时，单轮对话内最多自动续跑的次数（默认 3）",
   "settings.tools.title": "工具",
   "settings.workspace.advanced": "高级",
   "settings.workspace.atLeast2Modes": "至少需要 2 种模式",

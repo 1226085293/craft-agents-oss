@@ -87,6 +87,9 @@ export interface StoredConfig {
   // appends execution discipline (L1) and runs post-stop evaluation (L2).
   // Defaults to true. User-controlled via Settings → Tools.
   defenseEnabled?: boolean;
+  // Resume-chain budget for the defense. Caps bound RESUME LOOPS only —
+  // first-turn monitoring is unbounded (stall detection bounds it).
+  defenseGuardrails?: { maxResumes?: number; maxIterations?: number; maxDurationMs?: number };
   // Network proxy
   networkProxy?: import('./types.ts').NetworkProxySettings;
   // Windows: path to Git Bash (bash.exe) for the SDK subprocess
@@ -129,6 +132,7 @@ const FALLBACK_CONFIG_DEFAULTS: ConfigDefaults = {
     extendedPromptCache: false,
     browserToolEnabled: true,
     defenseEnabled: true,
+    defenseGuardrails: { maxResumes: 3 },
     allowRemoteEvaluate: true,
   },
   workspaceDefaults: {
@@ -615,6 +619,40 @@ export function setDefenseEnabled(enabled: boolean): void {
   const config = loadStoredConfig();
   if (!config) return;
   config.defenseEnabled = enabled;
+  saveConfig(config);
+}
+
+/** Defaults for the resume-chain budget (see SessionLifecycle). */
+const DEFENSE_GUARDRAIL_DEFAULTS = { maxResumes: 3 };
+
+/**
+ * Get the anti early-stop defense resume-chain budget.
+ * Only maxResumes is user-configurable today; iteration/duration caps stay
+ * internal defaults (they bound pathological loops, not normal usage).
+ */
+export function getDefenseGuardrails(): { maxResumes: number; maxIterations?: number; maxDurationMs?: number } {
+  const config = loadStoredConfig();
+  const defaults = loadConfigDefaults();
+  const stored = config?.defenseGuardrails
+    ?? (defaults.defaults as { defenseGuardrails?: { maxResumes?: number } }).defenseGuardrails
+    ?? DEFENSE_GUARDRAIL_DEFAULTS;
+  return {
+    maxResumes: typeof stored.maxResumes === 'number' && stored.maxResumes >= 1 ? Math.floor(stored.maxResumes) : 3,
+  };
+}
+
+/**
+ * Set the anti early-stop defense resume-chain budget.
+ * Persists to config; read by the Pi agent subprocess at init-time.
+ */
+export function setDefenseGuardrails(guardrails: { maxResumes?: number }): void {
+  const config = loadStoredConfig();
+  if (!config) return;
+  config.defenseGuardrails = {
+    ...DEFENSE_GUARDRAIL_DEFAULTS,
+    ...(config.defenseGuardrails ?? {}),
+    ...guardrails,
+  };
   saveConfig(config);
 }
 

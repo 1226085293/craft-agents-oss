@@ -46,14 +46,29 @@ export const EXECUTION_DISCIPLINE_EN = `
 export const DISCIPLINE_MARKER = '[EXECUTION_DISCIPLINE]';
 
 /**
+ * Detect whether the base prompt is predominantly Chinese and pick the
+ * matching discipline block. The EN mirror exists for English-first prompts;
+ * appending the Chinese block to an English prompt wastes context tokens and
+ * dilutes instruction-following.
+ */
+function isChinesePrompt(basePrompt: string): boolean {
+  const cjk = (basePrompt.match(/[\u4e00-\u9fff]/g) ?? []).length;
+  // >5% CJK chars among letter-ish content → treat as Chinese-context prompt.
+  return cjk > Math.max(20, basePrompt.length * 0.02);
+}
+
+/**
  * Append the execution-discipline block to a system prompt, idempotently.
  * Returns the input unchanged if the marker is already present.
+ * The discipline language follows the base prompt (Chinese default kept for
+ * backward compatibility with existing deployments).
  */
 export function withExecutionDiscipline(basePrompt: string): string {
   if (basePrompt.includes(DISCIPLINE_MARKER)) {
     return basePrompt;
   }
-  return `${basePrompt}\n\n${DISCIPLINE_MARKER}\n${EXECUTION_DISCIPLINE}`.trim();
+  const block = isChinesePrompt(basePrompt) ? EXECUTION_DISCIPLINE : EXECUTION_DISCIPLINE_EN;
+  return `${basePrompt}\n\n${DISCIPLINE_MARKER}\n${block}`.trim();
 }
 
 /** Remove the execution-discipline block if present (used by tests / disable path). */

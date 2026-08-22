@@ -126,14 +126,23 @@ describe('session-lifecycle', () => {
     expect(fsm.decideResume('same-ctx')).toBe(State.FAILED);
   });
 
-  it('iteration cap → aborted', () => {
+  it('iteration cap only bounds resume chains (first turn unbounded)', () => {
     const fsm = new SessionLifecycle({ maxIterations: 3 });
-    // First call transitions IDLE -> RUNNING, then increments.
+    // First turn (no resume yet): caps do NOT apply — a long healthy tool
+    // chain must keep full defense protection instead of going dark.
     fsm.onStop(false);
     expect(fsm.recordIteration()).toBe(State.RUNNING);
     expect(fsm.recordIteration()).toBe(State.RUNNING);
     expect(fsm.recordIteration()).toBe(State.RUNNING);
-    // 4th iteration exceeds maxIterations (3) → aborted.
+    expect(fsm.recordIteration()).toBe(State.RUNNING); // 4th > cap, still RUNNING
+    // Enter a resume chain: now the budget applies.
+    fsm.onStop(true);
+    fsm.decideResume('ctx-1');
+    fsm.markResumed();
+    // Iterations keep counting across the resume; exceeding the cap aborts.
+    fsm.recordIteration();
+    fsm.recordIteration();
+    fsm.recordIteration();
     expect(fsm.recordIteration()).toBe(State.ABORTED);
   });
 
@@ -321,6 +330,36 @@ describe('fs-watch (filesystem-fact write detection)', () => {
     evaluator.resetTurn();
     const r = evaluator.evaluate({ hasVisibleText: false, aborted: true });
     expect(r.shouldResume).toBe(false);
+  });
+
+  // P0 (2026-08-22): a user abort is an explicit stop. Every resume signal
+  // must yield to it — write-without-readback, empty terminal response, and
+  // silent stop alike. Before the short-circuit, aborted + write-no-verify
+  // returned shouldResume=true and the interrupted task was revived.
+  it('P0: abort short-circuits write-without-readback resume', () => {
+    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
+    evaluator.resetTurn();
+    evaluator.recordToolCall({ type: 'bash', command: 'rm /tmp/f.txt' }); // bash:write
+    const r = evaluator.evaluate({ hasVisibleText: true, aborted: true });
+    expect(r.shouldResume).toBe(false);
+    expect(r.state).toBe('aborted');
+  });
+
+  it('P0: abort short-circuits empty-terminal-response resume', () => {
+    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
+    evaluator.resetTurn();
+    evaluator.recordToolCall({ type: 'bash', command: 'rm /tmp/f.txt' });
+    const r = evaluator.evaluate({ hasVisibleText: false, aborted: true, endsWithEmptyResponse: true });
+    expect(r.shouldResume).toBe(false);
+    expect(r.state).toBe('aborted');
+  });
+
+  it('P0: abort marks the lifecycle terminal (no re-evaluation later in the turn)', () => {
+    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
+    evaluator.resetTurn();
+    evaluator.recordToolCall({ type: 'bash', command: 'rm /tmp/f.txt' });
+    evaluator.evaluate({ hasVisibleText: true, aborted: true });
+    expect(evaluator.canEvaluate()).toBe(false);
   });
 
   it('normal completion (write + read-back + text) does not resume', async () => {

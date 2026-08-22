@@ -1180,6 +1180,8 @@
   "settings.tools.builtInBrowserDesc": "Deaktivieren, wenn Sie externe Browser-Werkzeuge wie Playwright, Puppeteer oder Browser-MCP-Server verwenden.",
   "settings.tools.earlyStopDefense": "Vorzeitige Stopp-Verhinderung",
   "settings.tools.earlyStopDefenseDesc": "Verhindert, dass der Agent vor Abschluss aller Ziele stoppt. Fügt Ausführungsdisziplin hinzu und setzt bei vermutetem vorzeitigem Stopp automatisch fort.",
+  "settings.tools.defenseMaxResumes": "Auto-Fortsetzungslimit",
+  "settings.tools.defenseMaxResumesDesc": "Maximale automatische Fortsetzungen pro Runde bei vermutetem vorzeitigem Stopp (Standard 3)",
   "settings.tools.title": "Werkzeuge",
   "settings.workspace.advanced": "Erweitert",
   "settings.workspace.atLeast2Modes": "Mindestens 2 Modi erforderlich",

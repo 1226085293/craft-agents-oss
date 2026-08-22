@@ -447,6 +447,8 @@ export interface ElectronAPI {
   // Session-specific model (overrides global)
   getSessionModel(sessionId: string, workspaceId: string): Promise<string | null>
   setSessionModel(sessionId: string, workspaceId: string, model: string | null, connection?: string): Promise<void>
+  /** Hot connection switch (mid-session): live credential injection + model apply, context preserved. */
+  switchSessionConnection(sessionId: string, connectionSlug: string, model?: string): Promise<void>
 
   // Workspace Settings (per-workspace configuration)
   getWorkspaceSettings(workspaceId: string): Promise<WorkspaceSettings | null>
@@ -588,6 +590,8 @@ export interface ElectronAPI {
   // Anti early-stop defense
   getDefenseEnabled(): Promise<boolean>
   setDefenseEnabled(enabled: boolean): Promise<void>
+  getDefenseGuardrails(): Promise<{ maxResumes: number }>
+  setDefenseGuardrails(guardrails: { maxResumes?: number }): Promise<void>
 
   // Network proxy settings
   getNetworkProxySettings(): Promise<NetworkProxySettings | undefined>

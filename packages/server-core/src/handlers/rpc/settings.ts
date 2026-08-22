@@ -83,6 +83,13 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
     deps.platform.logger.info(`Session ${sessionId} model updated to: ${model}${connection ? ` (connection: ${connection})` : ''}`)
   })
 
+  // Hot connection switch (mid-session): injects credentials into the live
+  // subprocess and applies the model without touching the transcript.
+  server.handle(RPC_CHANNELS.sessions.SWITCH_CONNECTION, async (_ctx, sessionId: string, connectionSlug: string, model?: string) => {
+    await deps.sessionManager.switchSessionConnection(sessionId, connectionSlug, model)
+    deps.platform.logger.info(`Session ${sessionId} hot-switched to connection: ${connectionSlug}${model ? ` (model: ${model})` : ''}`)
+  })
+
   // Open native folder dialog for selecting working directory (routed to client)
   server.handle(RPC_CHANNELS.dialog.OPEN_FOLDER, async (ctx) => {
     const result = await requestClientOpenFileDialog(server, ctx.clientId, {
@@ -373,6 +380,18 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
   server.handle(RPC_CHANNELS.defense.SET_ENABLED, async (_ctx, enabled: boolean) => {
     const { setDefenseEnabled } = await import('@craft-agent/shared/config/storage')
     setDefenseEnabled(enabled)
+  })
+
+  // Get anti early-stop defense resume-chain budget
+  server.handle(RPC_CHANNELS.defense.GET_GUARDRAILS, async () => {
+    const { getDefenseGuardrails } = await import('@craft-agent/shared/config/storage')
+    return getDefenseGuardrails()
+  })
+
+  // Set anti early-stop defense resume-chain budget
+  server.handle(RPC_CHANNELS.defense.SET_GUARDRAILS, async (_ctx, guardrails: { maxResumes?: number }) => {
+    const { setDefenseGuardrails } = await import('@craft-agent/shared/config/storage')
+    setDefenseGuardrails(guardrails)
   })
 
   // ============================================================

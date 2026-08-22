@@ -1180,6 +1180,8 @@
   "settings.tools.builtInBrowserDesc": "Wyłącz, jeśli używasz zewnętrznych narzędzi przeglądarki, takich jak Playwright, Puppeteer lub serwery MCP przeglądarki.",
   "settings.tools.earlyStopDefense": "Ochrona przed przedwczesnym zatrzymaniem",
   "settings.tools.earlyStopDefenseDesc": "Zapobiega zatrzymaniu agenta przed ukończeniem wszystkich celów. Dodaje dyscyplinę wykonania i automatycznie wznawia przy podejrzeniu przedwczesnego zatrzymania.",
+  "settings.tools.defenseMaxResumes": "Limit automatycznego wznowienia",
+  "settings.tools.defenseMaxResumesDesc": "Maksymalna liczba automatycznych wznowień na turę przy podejrzeniu wczesnego zatrzymania (domyślnie 3)",
   "settings.tools.title": "Narzędzia",
   "settings.workspace.advanced": "Zaawansowane",
   "settings.workspace.atLeast2Modes": "Wymagane co najmniej 2 tryby",

@@ -128,6 +128,21 @@ export class DefenseEvaluator {
       return { evaluated: false, shouldResume: false, state: State.IDLE };
     }
 
+    // P0 guardrail (2026-08-22): a user abort is an explicit intent to stop.
+    // It must short-circuit EVERY resume signal — not just silentStop. Before
+    // this guard, a turn aborted mid-task with write-without-readback (or an
+    // empty final reply) was automatically resumed via followUp(), reviving a
+    // task the user had deliberately stopped and letting it keep mutating
+    // files. Abort wins over all heuristics.
+    if (lastAssistantMessage?.aborted === true) {
+      this.lifecycle.markAborted();
+      return {
+        evaluated: true,
+        shouldResume: false,
+        state: this.lifecycle.getState(),
+      };
+    }
+
     const complexity = complexityScore(this.toolCalls);
     // Merge separately-recorded read-back outputs into the verification check:
     // a read tool that returned content counts as a read-back even though the

@@ -103,7 +103,7 @@ sudo systemctl enable craft-server
 
 ### 方法 3：内联更新（修改源码后热替换，无需重建整个 dist）
 
-适用于已在运行中的开发/测试环境（如 `/tmp/craft-agents-tmp`）：
+适用于已在运行中的开发/测试环境（如 `/tmp/craft-agents-oss`）：
 
 #### 🤖 AI agent 自主更新（推荐）
 
@@ -119,8 +119,7 @@ setsid nohup bash /tmp/craft-agents-oss/scripts/self-update-restart.sh 20 \
 supervisord `autorestart=true` 自动拉起新进程 → 轮询 RPC 端口做健康检查 →
 结果写入 `/tmp/craft-self-update.log`。全程无需用户干预。
 
-前提条件：`/tmp/craft-agents-tmp/scripts/self-update-restart.sh` 已随部署存在
-（首次需从 oss 仓库 cp 过去），且 dist 已构建完毕——本脚本只负责"切换"。
+前提条件：`/tmp/craft-agents-oss/scripts/self-update-restart.sh` 已存在，且 dist 已构建完毕——本脚本只负责"切换"。
 
 > ⚠️ **给 AI agent 的硬性警告**：绝不要在会话内直接执行 `pkill -f "packages/server/src/index.ts"`——
 > 那会杀死你自己的宿主进程，会话立刻中断，后续重启命令永远不会被执行

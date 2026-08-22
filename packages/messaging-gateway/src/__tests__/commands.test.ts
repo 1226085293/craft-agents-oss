@@ -221,4 +221,58 @@ describe('Commands', () => {
     expect(adapter.sent.at(-1)).toContain('Session is busy')
     expect(adapter.sent.at(-1)).toContain('/stop')
   })
+
+  describe('/status model info', () => {
+    it('shows model, connection, thinking level and idle status when set', async () => {
+      const session = makeSession('sess-1', 'Alpha', 100)
+      ;(session as Record<string, unknown>).model = 'agnes-2.5-flash'
+      ;(session as Record<string, unknown>).llmConnection = 'litellm-proxy'
+      ;(session as Record<string, unknown>).thinkingLevel = 'medium'
+      const store = makeStore()
+      store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+      const commands = new Commands(makeSessionManager([session]), store, 'ws1')
+      const adapter = makeAdapter('telegram', true)
+
+      await commands.handleCommand(adapter, { ...makeMessage('/status'), platform: 'telegram' })
+
+      const out = adapter.sent.at(-1) ?? ''
+      expect(out).toContain('Bound to "Alpha"')
+      expect(out).toContain('Model: agnes-2.5-flash')
+      expect(out).toContain('Connection: litellm-proxy')
+      expect(out).toContain('Thinking: medium')
+      expect(out).toContain('Status: idle')
+    })
+
+    it('shows processing status with current activity', async () => {
+      const session = makeSession('sess-1', 'Alpha', 100)
+      ;(session as Record<string, unknown>).isProcessing = true
+      ;(session as Record<string, unknown>).currentStatus = { message: 'Reading files' }
+      const store = makeStore()
+      store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+      const commands = new Commands(makeSessionManager([session]), store, 'ws1')
+      const adapter = makeAdapter('telegram', true)
+
+      await commands.handleCommand(adapter, { ...makeMessage('/status'), platform: 'telegram' })
+
+      const out = adapter.sent.at(-1) ?? ''
+      expect(out).toContain('Status: processing — Reading files')
+    })
+
+    it('omits model lines for legacy sessions without them (binding info still shown)', async () => {
+      const session = makeSession('sess-1', 'Legacy', 100)
+      const store = makeStore()
+      store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+      const commands = new Commands(makeSessionManager([session]), store, 'ws1')
+      const adapter = makeAdapter('telegram', true)
+
+      await commands.handleCommand(adapter, { ...makeMessage('/status'), platform: 'telegram' })
+
+      const out = adapter.sent.at(-1) ?? ''
+      expect(out).toContain('Bound to "Legacy"')
+      expect(out).toContain('Approval:')
+      expect(out).not.toContain('Model:')
+      expect(out).not.toContain('Thinking:')
+      expect(out).toContain('Status: idle')
+    })
+  })
 })

@@ -6,7 +6,7 @@
  * /pair <code>   — finish a session-initiated pairing flow
  * /unbind        — disconnect channel
  * /help          — show available commands
- * /status        — show current binding
+ * /status        — show current binding + model/connection/thinking info
  * /stop          — abort the current agent run
  * /compact       — compact the current session context into a summary
  * /clear         — clear the current session context
@@ -624,11 +624,23 @@ export class Commands {
     const mode = binding.config.approvalChannel
     const responseMode = binding.config.responseMode
 
-    await adapter.sendText(
-      msg.channelId,
-      `Bound to "${name}"\nApproval: ${mode}\nResponse mode: ${responseMode}`,
-      replyOpts,
-    )
+    const lines = [`Bound to "${name}"`, `Approval: ${mode}`, `Response mode: ${responseMode}`]
+
+    // Runtime model info — the fields the user actually asks about when a
+    // reply looks off. All optional: older sessions may not have them set.
+    if (session) {
+      if (session.model) lines.push(`Model: ${session.model}`)
+      if (session.llmConnection) lines.push(`Connection: ${session.llmConnection}`)
+      if (session.thinkingLevel) lines.push(`Thinking: ${session.thinkingLevel}`)
+      if (session.isProcessing) {
+        const activity = session.currentStatus?.message
+        lines.push(`Status: processing${activity ? ` — ${activity}` : ''}`)
+      } else {
+        lines.push('Status: idle')
+      }
+    }
+
+    await adapter.sendText(msg.channelId, lines.join('\n'), replyOpts)
   }
 
   private async handleStop(adapter: PlatformAdapter, msg: IncomingMessage): Promise<void> {
@@ -733,7 +745,7 @@ export class Commands {
       '/bind <id> — bind to specific session\n' +
       '/pair <code> — redeem an app-generated pairing code\n' +
       '/unbind — disconnect this chat\n' +
-      '/status — show current binding\n' +
+      '/status — show current binding, model, thinking level\n' +
       '/stop — abort current agent run\n' +
       '/compact — compact current context into a summary\n' +
       '/clear — clear current context and messages\n' +

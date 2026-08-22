@@ -91,7 +91,17 @@ export function buildCustomEndpointModelDef(
     id,
     name: id,
     reasoning: true,
-    compat: { supportsDeveloperRole: false },
+    compat: {
+      supportsDeveloperRole: false,
+      // requiresReasoningContentOnAssistantMessages: true — the upstream
+      // relay (stealth/ox-alpha) enables thinking mode when the model
+      // declares reasoning:true, and its multi-turn handshake requires
+      // every assistant message to carry a reasoning_content field.
+      // Without this flag, pi-ai omits reasoning_content from assistant
+      // messages, and the upstream 400s with
+      // "the reasoning_content in the thinking mode must be passed back".
+      requiresReasoningContentOnAssistantMessages: true,
+    },
     input,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: overrides?.contextWindow ?? 131_072,

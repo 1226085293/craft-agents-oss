@@ -78,14 +78,19 @@ describe('buildCustomEndpointModelDef', () => {
     expect(model.maxTokens).toBe(65_536)
   })
 
-  it('declares reasoning:true but disables the developer role (upstream 400s on developer role)', () => {
+  it('declares reasoning:true but disables the developer role and requires reasoning_content back (upstream 400s otherwise)', () => {
     // Layer-2 fix: reasoning:true makes the session thinkingLevel reach the
     // request, but pi-ai only emits the developer role when
     // model.reasoning && compat.supportsDeveloperRole. Our upstream relay
     // rejects the developer role with a 400, so custom endpoints must keep
-    // it disabled even though reasoning is on.
+    // it disabled even though reasoning is on. Separately, once reasoning is
+    // on the upstream enters thinking mode and requires reasoning_content to
+    // be echoed back on every assistant message in multi-turn chats, else
+    // it 400s with "the reasoning_content in the thinking mode must be passed
+    // back".
     const model = buildCustomEndpointModelDef('my-model')
     expect(model.reasoning).toBe(true)
     expect(model.compat?.supportsDeveloperRole).toBe(false)
+    expect(model.compat?.requiresReasoningContentOnAssistantMessages).toBe(true)
   })
 })

@@ -65,6 +65,8 @@ cd /path/to/craft-agents-oss
 git pull origin main
 
 # 2. 构建子进程（MCP servers + Web UI）
+# ⚠️ 若 `bun` 不在 PATH（agent 会话内常见），先导出，否则子脚本报 bun: command not found
+# export PATH=/root/.bun/bin:$PATH
 bun run server:build:subprocess
 bun run webui:build
 

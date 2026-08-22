@@ -65,4 +65,16 @@ describe('buildCustomEndpointModelDef', () => {
     expect(model.input).toEqual(['text', 'image'])
     expect(model.contextWindow).toBe(262_144)
   })
+
+  it('defaults maxTokens to 65536 (was 8192, which truncated reasoning models)', () => {
+    const model = buildCustomEndpointModelDef('my-model')
+    expect(model.maxTokens).toBe(65_536)
+  })
+
+  it('lets per-model overrides set a custom maxTokens cap', () => {
+    const entry = normalizeCustomEndpointModelEntry({ id: 'pi/big-model', maxTokens: 65_536 })
+    expect(entry).toEqual({ id: 'big-model', maxTokens: 65_536 })
+    const model = buildCustomEndpointModelDef('big-model', undefined, { maxTokens: 65_536 })
+    expect(model.maxTokens).toBe(65_536)
+  })
 })

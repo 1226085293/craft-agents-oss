@@ -3571,11 +3571,13 @@ export class SessionManager implements ISessionManager {
             customModels: connection.models?.map(model => {
               if (typeof model === 'string') return model
               const supportsImages = typeof model.supportsImages === 'boolean' ? model.supportsImages : undefined
-              if (model.contextWindow || supportsImages !== undefined) {
+              const maxTokens = typeof model.maxTokens === 'number' ? model.maxTokens : undefined
+              if (model.contextWindow || supportsImages !== undefined || maxTokens !== undefined) {
                 return {
                   id: model.id,
                   ...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
                   ...(supportsImages !== undefined ? { supportsImages } : {}),
+                  ...(maxTokens !== undefined ? { maxTokens } : {}),
                 }
               }
               return model.id

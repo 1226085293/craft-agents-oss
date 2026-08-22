@@ -109,8 +109,21 @@ export class DefenseEvaluator {
    * (when available). A turn whose assistant produced no visible text and
    * was not user-aborted is treated as a silent stop — the strongest
    * early-stop signal there is, regardless of tool history.
+   *
+   * `endsWithEmptyResponse` flags the pathological case where the FINAL
+   * assistant message is an empty LLM response — no content blocks at all.
+   * Two observed variants: finish_reason=stop with 0 output tokens (gateway
+   * fault) and finish_reason=length with output burned on invisible
+   * reasoning (max_tokens truncation). Both are infrastructure faults, not
+   * real completions. Unlike silent-stop (which scans the whole run), this
+   * signal anchors strictly on the last message: earlier progress updates
+   * in a long tool chain must not mask it (2026-08-22 incidents).
    */
-  evaluate(lastAssistantMessage?: { hasVisibleText: boolean; aborted: boolean }): DefenseEvaluationResult {
+  evaluate(lastAssistantMessage?: {
+    hasVisibleText: boolean;
+    aborted: boolean;
+    endsWithEmptyResponse?: boolean;
+  }): DefenseEvaluationResult {
     if (!this.enabled) {
       return { evaluated: false, shouldResume: false, state: State.IDLE };
     }
@@ -134,7 +147,13 @@ export class DefenseEvaluator {
     const silentStop =
       lastAssistantMessage != null && !lastAssistantMessage.hasVisibleText && !lastAssistantMessage.aborted;
 
-    const needsEvaluation = silentStop || shouldResume || complexity.needsEvaluation;
+    // Empty terminal response: the very last model call returned zero tokens
+    // with a clean stop — an infrastructure fault, not an intentional finish.
+    // Independent of silentStop because long tool chains legitimately produce
+    // progress text early, which makes run-wide hasVisibleText useless here.
+    const emptyResponse = lastAssistantMessage?.endsWithEmptyResponse === true;
+
+    const needsEvaluation = silentStop || emptyResponse || shouldResume || complexity.needsEvaluation;
     const stop = this.lifecycle.onStop(needsEvaluation);
 
     if (stop === 'abort') {
@@ -148,7 +167,7 @@ export class DefenseEvaluator {
     // Rule-based evaluation: only concrete early-stop signals warrant an
     // automatic resume — silent stop (no output at all) or wrote-without-
     // read-back. High complexity alone is informational.
-    if (stop === 'run' || (!shouldResume && !silentStop)) {
+    if (stop === 'run' || (!shouldResume && !silentStop && !emptyResponse)) {
       this.lifecycle.markDone();
       return {
         evaluated: true,
@@ -158,7 +177,7 @@ export class DefenseEvaluator {
     }
 
     // needsEvaluation: build resume context and decide.
-    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop);
+    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop, emptyResponse);
     const decision = this.lifecycle.decideResume(resumeMessage);
     if (decision === State.FAILED) {
       return {
@@ -185,11 +204,19 @@ function buildResumeMessage(
   fsEvidence: FsWriteEvidence | null,
   toolCalls: ToolCallLike[],
   silentStop: boolean,
+  emptyResponse: boolean,
 ): string {
   const writeCalls = toolCalls.filter((c) => ['write', 'edit', 'bash:write'].includes(c.type));
   const lines: string[] = [
     '[Defense] Detected a possible early stop. Please continue the task from where it left off.',
   ];
+  if (emptyResponse) {
+    lines.push(
+      `- Your previous model call returned an EMPTY response (no visible content; ` +
+      `likely an upstream fault or max_tokens truncation burning invisible reasoning) — ` +
+      `NOT an intentional completion. Pick up exactly where you left off.`,
+    );
+  }
   if (silentStop) {
     lines.push(
       `- Your previous turn ended WITHOUT any visible reply to the user. ` +

@@ -6,8 +6,23 @@ export interface CustomEndpointModelDefaults {
 
 export interface CustomEndpointModelOverrides {
   contextWindow?: number
+  /** Per-model output token cap override. When omitted, DEFAULT_MAX_TOKENS applies. */
+  maxTokens?: number
   supportsImages?: boolean
 }
+
+/**
+ * Default output token cap for synthetic custom-endpoint models.
+ *
+ * Historical value was 8_192, which silently truncated reasoning-style models:
+ * hidden reasoning consumed the whole budget → finish_reason=length with an
+ * empty visible reply (2026-08-22 incident). This default is intentionally
+ * moderate: some strict OpenAI-compatible backends reject oversized
+ * `max_tokens` parameters outright, so a huge global default would break
+ * them. Users with generous endpoints should override per model via
+ * `models: [{ id, maxTokens }]` in config.
+ */
+export const DEFAULT_MAX_TOKENS = 65_536
 
 export interface CustomEndpointModelEntry extends CustomEndpointModelOverrides {
   id: string
@@ -16,6 +31,7 @@ export interface CustomEndpointModelEntry extends CustomEndpointModelOverrides {
 export type CustomEndpointModelConfig = string | {
   id: string
   contextWindow?: number
+  maxTokens?: number
   supportsImages?: boolean
 }
 
@@ -39,6 +55,7 @@ export function normalizeCustomEndpointModelEntry(model: CustomEndpointModelConf
   return {
     id: stripPiPrefix(model.id),
     ...(model.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
+    ...(model.maxTokens !== undefined ? { maxTokens: model.maxTokens } : {}),
     ...(model.supportsImages !== undefined ? { supportsImages: model.supportsImages } : {}),
   }
 }
@@ -64,6 +81,6 @@ export function buildCustomEndpointModelDef(
     input,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: overrides?.contextWindow ?? 131_072,
-    maxTokens: 8_192,
+    maxTokens: overrides?.maxTokens ?? DEFAULT_MAX_TOKENS,
   }
 }

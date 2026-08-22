@@ -117,7 +117,7 @@ interface InitMessage {
   branchFromSessionPath?: string;
   branchFromSdkTurnId?: string;
   customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean };
-  customModels?: Array<string | { id: string; contextWindow?: number; supportsImages?: boolean }>;
+  customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>;
   piAuth?: { provider: string; credential: PiCredential };
 
   /**
@@ -136,7 +136,7 @@ interface RuntimeConfigUpdateMessage {
   authType?: string;
   baseUrl?: string;
   customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean };
-  customModels?: Array<string | { id: string; contextWindow?: number; supportsImages?: boolean }>;
+  customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>;
 }
 
 /** Messages from main process (stdin) */
@@ -383,13 +383,24 @@ async function runDefensePostStop(session: AgentSession, endMessages?: unknown[]
   // tool-call chain legitimately ends with a toolUse message, so checking
   // only the final one would flag every pure-tool turn as "silent". The
   // real question: did the assistant produce ANY visible text this run?
-  let runOutput: { hasVisibleText: boolean; aborted: boolean } | undefined;
+  let runOutput: {
+    hasVisibleText: boolean;
+    aborted: boolean;
+    endsWithEmptyResponse: boolean;
+  } | undefined;
   if (Array.isArray(endMessages)) {
     let anyText = false;
     let aborted = false;
+    let lastAssistant: { content?: unknown; stopReason?: string; usage?: { output?: number } } | null = null;
     for (const raw of endMessages) {
-      const m = raw as { role?: string; content?: unknown; stopReason?: string };
+      const m = raw as {
+        role?: string;
+        content?: unknown;
+        stopReason?: string;
+        usage?: { output?: number };
+      };
       if (m?.role !== 'assistant') continue;
+      lastAssistant = m;
       if (m.stopReason === 'aborted') aborted = true;
       if (Array.isArray(m.content)) {
         const hasText = m.content.some(
@@ -398,7 +409,23 @@ async function runDefensePostStop(session: AgentSession, endMessages?: unknown[]
         if (hasText) anyText = true;
       }
     }
-    runOutput = { hasVisibleText: anyText, aborted };
+    // Empty terminal response (2026-08-22 incidents): the FINAL assistant
+    // message is an empty LLM completion — no content blocks at all and 0 or
+    // truncated-away output. Two observed variants:
+    //   - stopReason="stop" + 0 output tokens → upstream/gateway fault
+    //   - stopReason="length" + N output tokens → reasoning burned the whole
+    //     max_tokens budget without emitting a visible block (truncation)
+    // Both are infrastructure faults, not intentional finishes. Anchoring
+    // strictly on the LAST assistant message is essential: run-wide text
+    // scanning is already covered by hasVisibleText above and must not mask
+    // this signal. Healthy replies always carry at least one content block.
+    let endsWithEmptyResponse = false;
+    if (lastAssistant) {
+      const noContentBlocks = !Array.isArray(lastAssistant.content) || lastAssistant.content.length === 0;
+      const cleanStop = lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length';
+      endsWithEmptyResponse = cleanStop && noContentBlocks;
+    }
+    runOutput = { hasVisibleText: anyText, aborted, endsWithEmptyResponse };
   }
 
   const result = defenseEvaluator.evaluate(runOutput);
@@ -564,9 +591,10 @@ function registerCustomEndpointModels(
 ): void {
   for (const m of models) {
     customEndpointModelIds.add(m.id);
-    if (m.contextWindow || m.supportsImages !== undefined) {
+    if (m.contextWindow || m.maxTokens || m.supportsImages !== undefined) {
       customModelOverrides.set(m.id, {
         ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
+        ...(m.maxTokens ? { maxTokens: m.maxTokens } : {}),
         ...(m.supportsImages !== undefined ? { supportsImages: m.supportsImages } : {}),
       });
     }

@@ -1312,4 +1312,82 @@ describe('PiEventAdapter', () => {
       expect(adapter.shouldCompleteQueue(false)).toBe(true);
     });
   });
+
+  // ============================================================
+  // Defense resume (pi-agent-server defense layer)
+  // ============================================================
+  //
+  // The subprocess annotates the FIRST agent_end with defenseResumePending=true
+  // when its post-stop defense queued a followUp() that continues the same turn.
+  // The queue must stay open across the resumed turn (its events arrive after
+  // this agent_end) and complete only on the FINAL agent_end (no flag).
+  // Regression for the 2026-08-23 incident: without this hold, the resumed
+  // answer landed in a closed event queue and was silently lost.
+
+  describe('defense resume holds the queue open', () => {
+    it('success path: holds on flagged agent_end, completes on final agent_end', () => {
+      // First agent_end — subprocess queued a defense resume.
+      const heldEvents = collect(adapter.adaptEvent({
+        type: 'agent_end',
+        messages: [],
+        defenseResumePending: true,
+      } as any));
+      // No `complete` is yielded — the UI must not see a finished turn yet.
+      expect(heldEvents).toHaveLength(0);
+      expect(adapter.shouldCompleteQueue(true, true)).toBe(false);
+
+      // Resumed turn streams an assistant reply.
+      const resumed = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'stop', content: 'Resumed answer' },
+      } as any));
+      expect(resumed).toMatchObject([{ type: 'text_complete', text: 'Resumed answer' }]);
+      expect(adapter.shouldCompleteQueue(false)).toBe(false);
+
+      // Final agent_end — no flag → normal completion.
+      const finalEvents = collect(adapter.adaptEvent({ type: 'agent_end', messages: [] } as any));
+      expect(finalEvents).toMatchObject([{ type: 'complete' }]);
+      expect(adapter.shouldCompleteQueue(true)).toBe(true);
+    });
+
+    it('flags only the first agent_end — a stale held flag cannot leak into the next turn', () => {
+      collect(adapter.adaptEvent({ type: 'agent_end', messages: [], defenseResumePending: true } as any));
+      adapter.shouldCompleteQueue(true, true);
+
+      // A second flagged agent_end (defensive / SDK retry) keeps holding.
+      expect(adapter.shouldCompleteQueue(true, true)).toBe(false);
+      // Unflagged agent_end clears the hold.
+      expect(adapter.shouldCompleteQueue(true, false)).toBe(true);
+      // And a subsequent normal agent_end still completes (no stale hold).
+      expect(adapter.shouldCompleteQueue(true, false)).toBe(true);
+    });
+
+    it('failure path: finalizeDefenseResumeHeld terminates the held queue', () => {
+      collect(adapter.adaptEvent({ type: 'agent_end', messages: [], defenseResumePending: true } as any));
+      expect(adapter.shouldCompleteQueue(true, true)).toBe(false);
+
+      // followUp failed — subprocess reports resumed:false.
+      adapter.finalizeDefenseResumeHeld();
+      // The next event terminates the iterator (like compaction_end failure).
+      expect(adapter.shouldCompleteQueue(false)).toBe(true);
+      // Consumed — subsequent calls return false.
+      expect(adapter.shouldCompleteQueue(false)).toBe(false);
+    });
+
+    it('regression: unflagged agent_end completes the queue as before', () => {
+      // Plain turn with no defense evaluation at all.
+      const events = collect(adapter.adaptEvent({ type: 'agent_end' } as any));
+      expect(events).toMatchObject([{ type: 'complete' }]);
+      expect(adapter.shouldCompleteQueue(true)).toBe(true);
+    });
+
+    it('resetOverflowState clears the defense hold too', () => {
+      collect(adapter.adaptEvent({ type: 'agent_end', messages: [], defenseResumePending: true } as any));
+      adapter.shouldCompleteQueue(true, true);
+
+      adapter.resetOverflowState();
+      // Hold cleared: an unflagged agent_end completes normally.
+      expect(adapter.shouldCompleteQueue(true)).toBe(true);
+    });
+  });
 });

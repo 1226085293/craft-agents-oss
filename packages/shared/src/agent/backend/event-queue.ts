@@ -22,6 +22,17 @@ export class EventQueue {
    * Enqueue an event and wake any waiting consumers.
    */
   enqueue(event: AgentEvent): void {
+    if (this.done) {
+      // Fallback diagnostic (2026-08-23): an event arriving after complete()
+      // has already drained is consumed by NOBODY — the chat() loop has
+      // exited and the next turn's reset() will discard it. This is the
+      // signature of a cross-process lifecycle mismatch (e.g. a defense
+      // resume / overflow recovery turn arriving after the queue closed).
+      // The main-process fixes hold the queue open across those flows; this
+      // warn is the last line of defense so a recurrence is visible in logs.
+      // eslint-disable-next-line no-console
+      console.warn(`[EventQueue] enqueue after complete — event dropped: ${event.type}`);
+    }
     this.queue.push(event);
     this.signal(false);
   }

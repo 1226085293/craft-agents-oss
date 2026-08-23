@@ -1130,6 +1130,23 @@ export class PiAgent extends BaseAgent {
         }
         break;
 
+      case 'defense_resume_status':
+        // Defense layer feedback from the subprocess: whether the queued
+        // followUp() resume actually materialized. The adapter holds the
+        // event queue open across a defense resume (agent_end annotated with
+        // defenseResumePending). If the resume failed, no further turn events
+        // will arrive — finalize the held queue immediately instead of
+        // leaving the UI stuck on the 10-min idle watchdog.
+        if (msg.resumed !== true) {
+          this.adapter.finalizeDefenseResumeHeld();
+          this.eventQueue.enqueue({
+            type: 'error',
+            message: 'Automatic recovery was interrupted — the turn ended without a response.',
+          });
+          this.eventQueue.complete();
+        }
+        break;
+
       case 'error': {
         const errorCode = typeof msg.code === 'string' ? msg.code : undefined;
         const rawMessage = String(msg.message || 'Unknown subprocess error');
@@ -1308,13 +1325,16 @@ export class PiAgent extends BaseAgent {
       this.eventQueue.enqueue(agentEvent);
     }
 
-    // Turn-completion is now adapter-driven so overflow recovery can hold the
-    // queue open across the SDK's compaction → agent.continue() sequence
-    // (see PiEventAdapter overflow state machine). The adapter returns true
-    // when the queue should terminate — either on a normal agent_end with no
-    // recovery in flight, or on a compaction_end failure that drains a held
-    // overflow.
-    if (this.adapter.shouldCompleteQueue(eventType === 'agent_end')) {
+    // Turn-completion is now adapter-driven so overflow recovery AND defense
+    // resumes can hold the queue open across the SDK's recovery sequence
+    // (see PiEventAdapter overflow + defense-resume state). The adapter
+    // returns true when the queue should terminate — on a normal `agent_end`
+    // with no recovery in flight, on the FINAL `agent_end` after a defense
+    // resume, or on a compaction_end failure that drains a held overflow.
+    if (this.adapter.shouldCompleteQueue(
+      eventType === 'agent_end',
+      eventType === 'agent_end' ? (event.defenseResumePending as boolean | undefined) : undefined,
+    )) {
       this.eventQueue.complete();
     }
   }

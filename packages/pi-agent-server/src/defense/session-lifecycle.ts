@@ -58,6 +58,16 @@ export class SessionLifecycle {
 
   private lastResumeHash: string | null = null;
   private startedAt: number;
+  /** Wall-clock time of the FIRST resume in the current chain (null until
+   *  then). The loop-bounding guardrails measure against THIS, not the turn
+   *  start: a long healthy first segment (20+ min research with browser
+   *  tools) must not eat into the resume budget — the caps exist to bound
+   *  RESUME LOOPS, and the chain only begins once the first resume fires.
+   *  See the 2026-08-23 incident: a 320 s turn was aborted on the 300 s
+   *  cap even though the resumed segment itself was only ~3 min and healthy. */
+  private chainStartedAt: number | null = null;
+  /** Tool iterations counted SINCE the first resume (chain-local). */
+  private chainIterations = 0;
   private readonly maxResumes: number;
   private readonly maxIterations: number;
   private readonly maxDurationMs: number;
@@ -108,7 +118,12 @@ export class SessionLifecycle {
    * already bounds runaway turns.
    */
   private inResumeChain(): boolean {
-    return this.resumeCount > 0;
+    return this.chainStartedAt !== null || this.resumeCount > 0;
+  }
+
+  /** Chain-local wall-clock budget consumed since the first resume. */
+  private chainElapsedMs(): number {
+    return this.chainStartedAt === null ? 0 : Date.now() - this.chainStartedAt;
   }
 
   /** Record a tool call iteration. ABORTs only when a resume loop exceeds its budget. */
@@ -123,10 +138,15 @@ export class SessionLifecycle {
     if (!this.inResumeChain()) {
       return this.state;
     }
-    if (this.iterations > this.maxIterations) {
+    // Count chain-local iterations only — pre-resume tool calls are part of
+    // the (unbounded) first segment, not the resume loop.
+    if (this.chainStartedAt !== null) {
+      this.chainIterations += 1;
+    }
+    if (this.chainIterations > this.maxIterations) {
       return this.transition(State.ABORTED);
     }
-    if (this.elapsedMs() > this.maxDurationMs) {
+    if (this.chainElapsedMs() > this.maxDurationMs) {
       return this.transition(State.ABORTED);
     }
     return this.state;
@@ -141,9 +161,11 @@ export class SessionLifecycle {
    */
   onStop(complexityNeedsEvaluation: boolean): 'run' | 'evaluate' | 'abort' {
     if (this.isTerminal()) return 'abort';
-    // Same policy as recordIteration(): caps bound resume chains only.
+    // Same policy as recordIteration(): caps bound resume chains only, and
+    // the chain budget is measured from the FIRST resume — a long first
+    // segment never counts against the loop caps.
     if (this.inResumeChain() &&
-        (this.iterations > this.maxIterations || this.elapsedMs() > this.maxDurationMs)) {
+        (this.chainIterations > this.maxIterations || this.chainElapsedMs() > this.maxDurationMs)) {
       this.transition(State.ABORTED);
       return 'abort';
     }
@@ -180,6 +202,12 @@ export class SessionLifecycle {
     }
     this.lastResumeHash = hash;
     this.resumeCount += 1;
+    // Anchor the chain budget at the FIRST resume: from here on, iterations
+    // and wall-clock time count toward the loop caps.
+    if (this.chainStartedAt === null) {
+      this.chainStartedAt = Date.now();
+      this.chainIterations = 0;
+    }
     return this.transition(State.RESUME_READY);
   }
 
@@ -217,5 +245,7 @@ export class SessionLifecycle {
     this.iterations = 0;
     this.lastResumeHash = null;
     this.startedAt = Date.now();
+    this.chainStartedAt = null;
+    this.chainIterations = 0;
   }
 }

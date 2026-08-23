@@ -260,6 +260,8 @@ interface OutboundSwitchConnectionResult {
 }
 interface OutboundSessionIdUpdate { type: 'session_id_update'; sessionId: string }
 interface OutboundError { type: 'error'; message: string; code?: string }
+/** Defense layer feedback: whether the queued followUp() resume materialized. */
+interface OutboundDefenseResumeStatus { type: 'defense_resume_status'; resumed: boolean }
 
 type OutboundMessage =
   | OutboundReady
@@ -275,6 +277,7 @@ type OutboundMessage =
   | OutboundRuntimeConfigUpdateResult
   | OutboundSwitchConnectionResult
   | OutboundSessionIdUpdate
+  | OutboundDefenseResumeStatus
   | OutboundError;
 
 // ============================================================
@@ -411,12 +414,25 @@ function defenseReset(): void {
 }
 
 /**
- * Post-stop defense evaluation. Runs when the agent emits `agent_end`.
- * When an early-stop is suspected, appends a resume message to the SAME
- * session via followUp() so the SDK's post-run loop continues the turn.
+ * Synchronous post-stop defense evaluation. Runs when the agent emits
+ * `agent_end`. Returns the early-stop decision WITHOUT awaiting anything so
+ * the forwarded `agent_end` event can be annotated with `defenseResumePending`
+ * BEFORE the main process closes its event queue.
+ *
+ * Why synchronous matters (2026-08-23 incident): the historical
+ * `runDefensePostStop` was fire-and-forget async — `agent_end` was forwarded
+ * to the main process immediately, which called `eventQueue.complete()`. The
+ * resume (queued via followUp() a tick later) continued the SAME turn, but
+ * the resumed events landed in a closed iterator and were silently lost. By
+ * evaluating synchronously here we attach the flag to the event itself, and
+ * the main process keeps its queue open until the FINAL `agent_end` (no
+ * flag) arrives.
+ *
+ * Returns null when evaluation must be skipped (no evaluator, missing
+ * endMessages payload, or user abort — see P0 abort rule below).
  */
-async function runDefensePostStop(session: AgentSession, endMessages?: unknown[]): Promise<void> {
-  if (!defenseEvaluator) return;
+function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boolean; resumeMessage?: string } | null {
+  if (!defenseEvaluator) return null;
 
   // Silent-stop detection: scan ALL assistant messages of the run. A long
   // tool-call chain legitimately ends with a toolUse message, so checking
@@ -472,26 +488,53 @@ async function runDefensePostStop(session: AgentSession, endMessages?: unknown[]
     // user deliberately interrupted, regardless of write/empty signals.
     if (aborted) {
       debugLog('[defense] Skipping post-stop evaluation: user abort detected');
-      return;
+      return null;
     }
   } else {
     // No endMessages payload: cannot prove this was NOT an abort — do not
     // risk reviving a user-stopped turn on incomplete evidence.
     debugLog('[defense] Skipping post-stop evaluation: no endMessages payload');
-    return;
+    return null;
   }
 
-  const result = defenseEvaluator.evaluate(runOutput);
-  debugLog(
-    `[defense] Post-stop result: state=${result.state} evaluated=${result.evaluated} shouldResume=${result.shouldResume}`,
-  );
-
-  if (result.shouldResume && result.resumeMessage) {
-    // Resume ≠ rerun: followUp() queues the message for the same session and
-    // the SDK's _runAgentPrompt loop picks it up right after agent_end.
-    await session.followUp(result.resumeMessage);
-    debugLog('[defense] Resume message queued via followUp');
+  try {
+    const result = defenseEvaluator.evaluate(runOutput);
+    debugLog(
+      `[defense] Post-stop result: state=${result.state} evaluated=${result.evaluated} shouldResume=${result.shouldResume}`,
+    );
+    if (result.shouldResume && result.resumeMessage) {
+      return { shouldResume: true, resumeMessage: result.resumeMessage };
+    }
+    return { shouldResume: false };
+  } catch (error) {
+    debugLog(`[defense] Post-stop evaluation threw: ${error instanceof Error ? error.message : String(error)}`);
+    return null;
   }
+}
+
+/**
+ * Queue the defense resume message on the SAME session (fire-and-forget —
+ * never block the SDK's event pipeline). Resume ≠ rerun: followUp() queues
+ * the message and the SDK's _runAgentPrompt loop picks it up right after
+ * `agent_end`, continuing the SAME turn.
+ *
+ * Reports the outcome back to the main process via `defense_resume_status`:
+ * - resumed=true  → the main process keeps its event queue held open for the
+ *                   resumed turn (final agent_end closes it).
+ * - resumed=false → the resume never materialized (followUp failed); the
+ *                   main process finalizes the held queue immediately instead
+ *                   of hanging on the idle watchdog.
+ */
+function queueDefenseResume(session: AgentSession, resumeMessage: string): void {
+  session.followUp(resumeMessage)
+    .then(() => {
+      debugLog('[defense] Resume message queued via followUp');
+      send({ type: 'defense_resume_status', resumed: true });
+    })
+    .catch((error) => {
+      debugLog(`[defense] Resume followUp failed: ${error instanceof Error ? error.message : String(error)}`);
+      send({ type: 'defense_resume_status', resumed: false });
+    });
 }
 
 // ============================================================
@@ -1565,19 +1608,31 @@ function handleSessionEvent(event: AgentSessionEvent): void {
   // turn stopped early and, if so, queue a resume message on the same session.
   // Skip when the SDK will retry the turn itself (willRetry) or when the FSM
   // is already terminal for this turn.
+  //
+  // IMPORTANT (2026-08-23 incident): the evaluation runs SYNCHRONOUSLY so the
+  // forwarded agent_end can carry the `defenseResumePending` flag. The main
+  // process closes its event queue on agent_end unless the flag says a resume
+  // is queued — without it, the resumed turn's events (the eventual answer)
+  // land in a closed iterator and are silently lost. Only the followUp() call
+  // itself is fire-and-forget (queueDefenseResume): it must not block the SDK's
+  // event pipeline, and the SDK's _runAgentPrompt loop drains follow-up
+  // messages after agent_end, continuing the SAME turn.
   if (
     event.type === 'agent_end' &&
     piSession &&
     defenseEvaluator?.canEvaluate() &&
     !(event as { willRetry?: boolean }).willRetry
   ) {
-    // Fire-and-forget: queue the resume asynchronously so this synchronous
-    // event handler never blocks the SDK's event pipeline. The SDK's own
-    // _runAgentPrompt loop drains follow-up messages after agent_end, so a
-    // queued resume continues the SAME turn instead of spawning a new one.
-    runDefensePostStop(piSession, (event as { messages?: unknown[] }).messages).catch((error) => {
-      debugLog(`[defense] Post-stop evaluation failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
+    const defenseResult = evaluateDefensePostStop((event as { messages?: unknown[] }).messages);
+    if (defenseResult) {
+      forwardedEvent = {
+        ...(event as Record<string, unknown>),
+        defenseResumePending: defenseResult.shouldResume,
+      } as unknown as OutboundAgentEvent;
+      if (defenseResult.shouldResume && defenseResult.resumeMessage) {
+        queueDefenseResume(piSession, defenseResult.resumeMessage);
+      }
+    }
   }
 
   // Forward all events to main process

@@ -146,6 +146,35 @@ describe('session-lifecycle', () => {
     expect(fsm.recordIteration()).toBe(State.ABORTED);
   });
 
+  it('duration cap bounds the resume CHAIN, not the whole turn (long first segment is safe)', async () => {
+    const fsm = new SessionLifecycle({ maxDurationMs: 100 });
+    // Long healthy first segment: run well past the 100 ms cap BEFORE any
+    // resume. The chain budget must NOT start at turn start — a long research
+    // turn (browser tools etc.) must not eat into the resume allowance.
+    fsm.recordIteration();
+    await new Promise((r) => setTimeout(r, 150));
+    expect(fsm.onStop(true)).toBe('evaluate');
+    expect(fsm.decideResume('ctx-1')).toBe(State.RESUME_READY);
+    fsm.markResumed();
+    // Resumed segment finishes promptly (well under the chain cap).
+    expect(fsm.onStop(false)).toBe('run');
+    fsm.markDone();
+    expect(fsm.isTerminal()).toBe(true);
+  });
+
+  it('duration cap still aborts a genuinely stuck resume chain', async () => {
+    const fsm = new SessionLifecycle({ maxDurationMs: 100 });
+    fsm.recordIteration();
+    fsm.onStop(true);
+    fsm.decideResume('ctx-1');
+    fsm.markResumed();
+    // The resumed segment stalls past the chain budget (counted from the
+    // FIRST resume — the second agent_end must abort).
+    await new Promise((r) => setTimeout(r, 150));
+    expect(fsm.onStop(true)).toBe('abort');
+    expect(fsm.getState()).toBe(State.ABORTED);
+  });
+
   it('fnv1a produces stable deterministic hashes', () => {
     expect(fnv1a('abc')).toBe(fnv1a('abc'));
     expect(fnv1a('abc')).not.toBe(fnv1a('abd'));

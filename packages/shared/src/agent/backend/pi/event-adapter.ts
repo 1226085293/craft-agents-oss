@@ -111,6 +111,12 @@ export class PiEventAdapter extends BaseEventAdapter {
    *  generator. */
   private onFallbackEvent: ((event: CraftAgentEvent) => void) | null = null;
   private onFallbackComplete: (() => void) | null = null;
+  /** Set while a defense resume is in flight: the subprocess annotated an
+   *  `agent_end` with `defenseResumePending: true` (it queued a followUp that
+   *  continues the same turn after this agent_end). The queue stays open until
+   *  the FINAL `agent_end` (no flag) arrives — the defense analog of
+   *  overflowState. See the subprocess defense layer in pi-agent-server. */
+  private defenseResumeHeld: boolean = false;
 
   constructor() {
     super('pi-event');
@@ -140,26 +146,54 @@ export class PiEventAdapter extends BaseEventAdapter {
   /**
    * Decide whether the caller should call `eventQueue.complete()` after
    * processing this SDK event. The historical rule was "always on
-   * `agent_end`"; with overflow recovery we defer completion until the
-   * recovered turn finishes (or recovery fails / times out).
+   * `agent_end`"; with overflow recovery AND defense resumes we defer
+   * completion until the recovered/resumed turn finishes (or recovery
+   * fails / times out).
+   *
+   * `defenseResumePending` is the subprocess-annotated flag on the raw
+   * `agent_end` event — true when a defense resume (followUp) is queued, so
+   * the queue must stay open for the resumed turn. The FINAL `agent_end`
+   * (no flag / false) clears the hold and completes normally.
    */
-  shouldCompleteQueue(isAgentEnd: boolean): boolean {
+  shouldCompleteQueue(isAgentEnd: boolean, defenseResumePending?: boolean): boolean {
     if (this.pendingQueueComplete) {
       this.pendingQueueComplete = false;
       return true;
     }
-    return isAgentEnd && this.overflowState === 'none';
+    if (isAgentEnd) {
+      if (defenseResumePending) {
+        // A defense resume is in flight — hold the queue open for the
+        // resumed turn's events (they arrive after this agent_end).
+        this.defenseResumeHeld = true;
+        return false;
+      }
+      this.defenseResumeHeld = false;
+      return this.overflowState === 'none';
+    }
+    return false;
   }
 
   /**
-   * Reset overflow-recovery state. Call from session disposal so a stale
-   * fallback timer doesn't fire on a torn-down adapter.
+   * Finalize a held defense resume when the subprocess reports the followUp
+   * failed (no resumed turn will arrive). Sets pendingQueueComplete so the
+   * next event terminates the iterator; the caller then enqueues a terminal
+   * error + calls `eventQueue.complete()` directly.
+   */
+  finalizeDefenseResumeHeld(): void {
+    this.defenseResumeHeld = false;
+    this.pendingQueueComplete = true;
+  }
+
+  /**
+   * Reset overflow-recovery + defense-resume state. Call from session
+   * disposal so a stale fallback timer doesn't fire on a torn-down adapter.
    */
   resetOverflowState(): void {
     this.cancelOverflowFallbackTimer();
     this.overflowState = 'none';
     this.heldOverflowError = null;
     this.pendingQueueComplete = false;
+    this.defenseResumeHeld = false;
   }
 
   private armOverflowFallbackTimer(): void {
@@ -263,6 +297,18 @@ export class PiEventAdapter extends BaseEventAdapter {
           // Recovered turn just finished — fall through to normal completion.
           this.overflowState = 'none';
         }
+        // Defense resume (pi-agent-server defense layer): the subprocess
+        // annotates the FIRST agent_end with defenseResumePending=true when it
+        // queued a followUp() that continues the SAME turn after this event.
+        // Hold the queue open — mirroring overflow recovery — and DO NOT emit
+        // `complete` here, or the UI would mark the turn done and then receive
+        // the resumed turn's events out of order. The FINAL agent_end (no flag)
+        // falls through to normal completion below.
+        if ((event as { defenseResumePending?: boolean }).defenseResumePending) {
+          this.defenseResumeHeld = true;
+          break;
+        }
+        this.defenseResumeHeld = false;
         if (this.lastUsage) {
           const inputTokens = this.lastUsage.input + (this.lastUsage.cacheRead || 0);
           yield {

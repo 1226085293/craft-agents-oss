@@ -130,8 +130,8 @@ const ERROR_DEFINITIONS: Record<ErrorCode, Omit<AgentError, 'code' | 'originalEr
     retryDelayMs: 2000,
   },
   network_error: {
-    title: 'Connection Error',
-    message: 'Could not reach the AI service. Check your internet connection or VPN settings.',
+    title: 'AI Service Unreachable',
+    message: 'The AI service returned an empty or failed response. This is usually a temporary upstream issue (provider overload or empty stream), not your network. Try again in a moment.',
     actions: [
       { key: 'r', label: 'Retry', action: 'retry' },
     ],

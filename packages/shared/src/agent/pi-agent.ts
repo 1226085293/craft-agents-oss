@@ -2604,16 +2604,25 @@ n   * connection can be adopted mid-session.
     }
     this.pendingToolExecutions.clear();
 
-    // Signal turn complete to wake up any waiting consumers
-    this.eventQueue.complete();
-
     // Clear bridge cache for aborted turn.
     this.preToolMetadataByCallId.clear();
 
-    // For PlanSubmitted and AuthRequest, just interrupt the turn
+    // For PlanSubmitted and AuthRequest, just interrupt the turn — do NOT
+    // close the event queue. The subprocess keeps running (no abort sent to
+    // it) and will emit a final agent_end that the adapter's
+    // shouldCompleteQueue() puts through the normal lifecycle. If we
+    // eventQueue.complete() here, the resumed turn's events (defense resume,
+    // or the tool_execute_response for the handoff tool itself) arrive after
+    // the queue is closed and are silently dropped. See the 2026-08-24
+    // auth-handoff incident.
     if (reason === AbortReason.PlanSubmitted || reason === AbortReason.AuthRequest) {
       return;
     }
+
+    // Signal turn complete to wake up any waiting consumers.
+    // For all other reasons, the subprocess has been (or will be) aborted
+    // and no more events are coming.
+    this.eventQueue.complete();
 
     // For other reasons, send abort to subprocess
     this.send({ type: 'abort' });

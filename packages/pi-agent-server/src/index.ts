@@ -428,9 +428,26 @@ function defenseReset(): void {
  * the main process keeps its queue open until the FINAL `agent_end` (no
  * flag) arrives.
  *
+ * Auth-handoff tools pause the turn for user input (credential entry or
+ * OAuth): the agent called them deliberately to WAIT for the user — the
+ * turn ending right after is a legitimate pause, not an early stop.
+ * Resuming after one of these would re-invoke the same auth tool (the
+ * subprocess context still holds the pending request), producing the
+ * interrupt → resume → re-auth → interrupt loop observed 2026-08-24.
+ *
  * Returns null when evaluation must be skipped (no evaluator, missing
- * endMessages payload, or user abort — see P0 abort rule below).
+ * endMessages payload, auth handoff awaiting user input, or user abort —
+ * see P0 abort rule below).
  */
+/** Bare tool names of auth-handoff session tools (mcp__session__ prefix stripped). */
+const AUTH_HANDOFF_TOOLS = new Set([
+  'source_credential_prompt',
+  'source_oauth_trigger',
+  'source_google_oauth_trigger',
+  'source_slack_oauth_trigger',
+  'source_microsoft_oauth_trigger',
+]);
+
 function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boolean; resumeMessage?: string } | null {
   if (!defenseEvaluator) return null;
 
@@ -446,6 +463,7 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
   if (Array.isArray(endMessages)) {
     let anyText = false;
     let aborted = false;
+    let authHandoff = false;
     let lastAssistant: { content?: unknown; stopReason?: string; usage?: { output?: number } } | null = null;
     for (const raw of endMessages) {
       const m = raw as {
@@ -462,6 +480,18 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
           (c) => (c as { type?: string })?.type === 'text' && String((c as { text?: string }).text ?? '').trim().length > 0,
         );
         if (hasText) anyText = true;
+        // Auth-handoff detection: the LAST assistant message carries a
+        // toolCall for one of the auth tools. This is the subprocess-side
+        // proof that the turn ended to await user credentials — the same
+        // signal that fired onAuthRequest in the main process.
+        const toolCalls = m.content.filter((c) => (c as { type?: string })?.type === 'toolCall');
+        const lastTool = toolCalls[toolCalls.length - 1] as { name?: string } | undefined;
+        if (lastTool?.name) {
+          const bareName = lastTool.name.startsWith('mcp__session__')
+            ? lastTool.name.slice('mcp__session__'.length)
+            : lastTool.name;
+          if (AUTH_HANDOFF_TOOLS.has(bareName)) authHandoff = true;
+        }
       }
     }
     // Empty terminal response (2026-08-22 incidents): the FINAL assistant
@@ -488,6 +518,15 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
     // user deliberately interrupted, regardless of write/empty signals.
     if (aborted) {
       debugLog('[defense] Skipping post-stop evaluation: user abort detected');
+      return null;
+    }
+
+    // Auth-handoff pause (2026-08-24): the agent ended the turn by calling
+    // an auth tool to await user credentials/OAuth — a deliberate pause, not
+    // an early stop. Resuming here would re-invoke the same auth tool and
+    // loop. Skip evaluation entirely.
+    if (authHandoff) {
+      debugLog('[defense] Skipping post-stop evaluation: auth handoff awaiting user input');
       return null;
     }
   } else {

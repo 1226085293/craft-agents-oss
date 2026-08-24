@@ -64,11 +64,13 @@ cd /path/to/craft-agents-oss
 # 1. 拉取最新代码
 git pull origin main
 
-# 2. 构建子进程（MCP servers + Web UI）
+# 2. 构建子进程（MCP servers）
 # ⚠️ 若 `bun` 不在 PATH（agent 会话内常见），先导出，否则子脚本报 bun: command not found
 # export PATH=/root/.bun/bin:$PATH
 bun run server:build:subprocess
-bun run webui:build
+# 2b. 可选：构建 Web UI（默认跳过，除非主动要求）
+#     原因：Web UI 仅浏览器客户端使用；Telegram/API 场景无需它。构建耗时且可能 OOM（2026-08-24 实测）。
+# bun run webui:build
 
 # 3. 停止旧进程并重启（⚠️ agent 会话内勿直接执行 pkill——会杀死自己的宿主，
 #    见方法 3 的警告；应使用 scripts/self-update-restart.sh 或交由用户执行）
@@ -122,6 +124,11 @@ supervisord `autorestart=true` 自动拉起新进程 → 轮询 RPC 端口做健
 结果写入 `/tmp/craft-self-update.log`。全程无需用户干预。
 
 前提条件：`/tmp/craft-agents-oss/scripts/self-update-restart.sh` 已存在，且 dist 已构建完毕——本脚本只负责"切换"。
+
+> **Web UI 构建（默认跳过）**：内联更新时默认**不**执行 `bun run webui:build`，
+> 除非用户主动要求。原因：Web UI 仅供浏览器客户端使用，Telegram/API 场景完全
+> 依赖后端 + 子进程，不需要 Web UI 产物；且该构建耗时长、曾因内存不足 OOM 被杀
+> （2026-08-24 实测）。需要时单独执行 `bun run webui:build` 即可，不影响已运行服务。
 
 > ⚠️ **给 AI agent 的硬性警告**：绝不要在会话内直接执行 `pkill -f "packages/server/src/index.ts"`——
 > 那会杀死你自己的宿主进程，会话立刻中断，后续重启命令永远不会被执行

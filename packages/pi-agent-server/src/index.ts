@@ -1285,6 +1285,18 @@ async function queryLlm(request: LLMQueryRequest): Promise<LLMQueryResult> {
       debugLog(`[queryLlm] Failed to set model on ephemeral session, proceeding with default`);
     }
 
+    // Force a low thinking level for mini completions (titles, summaries, etc.).
+    // These tasks need no deep reasoning; with reasoning models like deepseek-v4-flash,
+    // inheriting the session's high/max thinking level burns the entire output budget
+    // on invisible reasoning tokens, yielding an empty response that trips the
+    // empty-stream guard and surfaces as a misleading network_error.
+    try {
+      ephemeralSession.setThinkingLevel('off');
+      debugLog(`[queryLlm] Forced thinking level: off (mini completion)`);
+    } catch {
+      debugLog(`[queryLlm] Failed to set thinking level on ephemeral session`);
+    }
+
     debugLog(`[queryLlm] Created ephemeral session: ${ephemeralSession.sessionId}`);
 
     // Force the system prompt — see system-prompt-override.ts for why direct

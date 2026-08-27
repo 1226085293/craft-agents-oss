@@ -6477,6 +6477,22 @@ export class SessionManager implements ISessionManager {
     let visibleMessage = message
     let modelOnlyMessage = modelMessageOverride
 
+    // Per-platform reply-format guidance injected into the model prompt for
+    // messages routed from a messaging channel. Kept here next to the sendMessage
+    // entry so platform behavior stays discoverable in one place.
+    const PLATFORM_HINTS: Record<string, string> = {
+      telegram:
+        'Telegram renders Markdown formatting. Prefer simple Markdown (bold, code, links) and send files via the deliver_file tool when the user asks for a file, image or document.',
+      qq:
+        'QQ chats are plain text: Markdown syntax (\n, **bold**, [link](url), ```, tables) will be shown literally to the user. Write plain readable text. When the user asks for a file, image or document, send it via the deliver_file tool — do NOT reply with Markdown links.',
+      wechat:
+        'WeChat chats are plain text: Markdown syntax will be shown literally to the user. Write plain readable text. When the user asks for a file, image or document, send it via the deliver_file tool — do NOT reply with Markdown links.',
+      whatsapp:
+        'WhatsApp renders basic Markdown (bold, italic, monospace). Keep formatting simple and send files via the deliver_file tool when the user asks for a file, image or document.',
+      lark:
+        'Lark renders rich text. Send files via the deliver_file tool when the user asks for a file, image or document.',
+    }
+
     // Hard guard: recovery prompts are implementation details. Even if an old
     // queue entry or an unusual race calls sendMessage(prompt) directly, never
     // persist/emit that prompt as a user or guidance bubble. Keep it model-only
@@ -6899,6 +6915,17 @@ export class SessionManager implements ISessionManager {
       // rather than part of the user's message content. The original message is stored
       // in session JSONL (line ~3952); this only affects the SDK's in-process context.
       let effectiveMessage = modelOnlyMessage ?? visibleMessage
+      // Inject messaging-platform context so the LLM knows which chat the user is
+      // on and can adapt reply format: plain-text platforms (QQ/WeChat) cannot
+      // render Markdown, and files must be sent via the deliver_file tool rather
+      // than as Markdown links. Only applies to messages routed from a messaging
+      // channel (router passes options.platform); desktop sessions have no platform.
+      if (options?.platform) {
+        const platformHint = PLATFORM_HINTS[options.platform]
+        if (platformHint) {
+          effectiveMessage = `${effectiveMessage}\n\n<system-reminder>This message arrived from the ${options.platform} messaging channel. ${platformHint}</system-reminder>`
+        }
+      }
       if (managed.wasInterrupted) {
         effectiveMessage = `${effectiveMessage}\n\n<system-reminder>The previous assistant response was interrupted by the user and may be incomplete. Do not repeat or continue the interrupted response unless asked. Focus on the new message above.</system-reminder>`
         managed.wasInterrupted = false

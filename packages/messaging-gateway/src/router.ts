@@ -142,6 +142,10 @@ export class Router {
             // (override only tightens, never loosens) and `/exec` remains the
             // explicit way to switch modes for real.
             permissionModeOverride: 'safe',
+            // Let the agent know which messaging platform this message came from
+            // so it can adapt reply format (files via deliver_file on plain-text
+            // platforms like QQ/WeChat, MarkdownV2 on Telegram, etc.).
+            platform: msg.platform,
           },
         )
       } catch (err) {

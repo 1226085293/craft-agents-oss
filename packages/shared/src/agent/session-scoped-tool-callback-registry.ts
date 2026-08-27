@@ -89,7 +89,7 @@ export interface SessionScopedToolCallbacks {
     filename?: string;
     caption?: string;
     target?: 'active_channel' | 'mobile' | 'all_bound_channels';
-    platform?: 'telegram' | 'whatsapp' | 'lark';
+    platform?: 'telegram' | 'whatsapp' | 'lark' | 'qq' | 'wechat';
   }) => Promise<{
     filename: string;
     sent: number;

@@ -242,7 +242,7 @@ export const DeliverFileSchema = z.object({
   filename: z.string().optional().describe('Attachment filename shown to the recipient. Defaults to the file basename.'),
   caption: z.string().optional().describe('Optional caption sent with the file when the channel supports it.'),
   target: z.enum(['active_channel', 'mobile', 'all_bound_channels']).optional().describe('Delivery target. Defaults to active_channel, which means the messaging channel(s) bound to this session.'),
-  platform: z.enum(['telegram', 'whatsapp', 'lark']).optional().describe('Optionally restrict delivery to one messaging platform.'),
+  platform: z.enum(['telegram', 'whatsapp', 'lark', 'qq', 'wechat']).optional().describe('Optionally restrict delivery to one messaging platform.'),
 });
 
 export const ListMessagingChannelsSchema = z.object({
@@ -539,7 +539,7 @@ The target session receives your message with a sender envelope containing your 
   deliver_file: `Deliver a local file as an attachment to messaging channels bound to the current session.
 Use this when the user asks to send, forward, or deliver a generated/downloaded file (PNG, PDF, CSV, etc.) to their phone or external chat app. Prefer this over merely printing a local path or Markdown link when a real attachment is requested.`,
 
-  list_messaging_channels: `List messaging channels (Telegram, WhatsApp, Lark/Feishu) bound to a session.
+  list_messaging_channels: `List messaging channels (Telegram, WhatsApp, Lark/Feishu, QQ, WeChat) bound to a session.
 Shows which external chat apps are connected and can send/receive messages/files.`,
 
   unbind_messaging_channel: `Disconnect a messaging channel from the current session.

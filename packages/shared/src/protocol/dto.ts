@@ -448,6 +448,13 @@ export interface SendMessageOptions {
    * the desktop mode. Cleared when the turn completes.
    */
   permissionModeOverride?: PermissionMode
+  /**
+   * Messaging platform the message arrived from (telegram/qq/whatsapp/wechat/
+   * lark). When set, the session injects platform-aware context so the agent
+   * knows where the user is chatting and can adapt its reply format (e.g. use
+   * deliver_file for files instead of Markdown links on plain-text platforms).
+   */
+  platform?: string
 }
 
 // ---------------------------------------------------------------------------

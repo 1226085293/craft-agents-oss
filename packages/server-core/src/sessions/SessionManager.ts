@@ -1,6 +1,6 @@
 import type { EventSink, RpcServer } from '@craft-agent/server-core/transport'
 import { CLIENT_BROWSER_INVOKE } from '@craft-agent/server-core/transport'
-import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, BusyMessageDecision, BusyMessageDecisionInput } from '@craft-agent/server-core/handlers'
+import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, BusyMessageDecision, BusyMessageDecisionInput, GroupChatDecision, GroupChatDecisionInput, GroupChatDecisionAction } from '@craft-agent/server-core/handlers'
 import { RemoteBrowserPaneManager } from './RemoteBrowserPaneManager'
 import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@craft-agent/server-core/handlers'
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
@@ -8,7 +8,7 @@ import { basename, dirname, join } from 'path'
 import { existsSync } from 'fs'
 import { copyFile, readFile, writeFile, mkdir, stat, rm } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
-import { type AgentEvent, setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
+import { type AgentEvent, setPermissionMode, setTransientPermissionMode, clearTransientPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
 import {
   resolveSessionConnection,
   createBackendFromConnection,
@@ -899,6 +899,12 @@ interface ManagedSession {
   lastFinalMessageId?: string
   // Turn baseline: last final assistant message ID at turn start (runtime-only, not persisted)
   turnStartFinalMessageId?: string
+  /**
+   * Transient permission-mode override applied for the CURRENT turn, plus the
+   * message that introduced it. Cleared when that turn completes. Persisted
+   * mode stays untouched (see SendMessageOptions.permissionModeOverride).
+   */
+  activeModeOverride?: { mode: PermissionMode; messageId: string }
   // External session metadata updates seen while processing (applied after turn stop)
   pendingExternalMetadata?: SessionHeader
   // Guard: suppress external metadata revert after programmatic writes (setSessionStatus/setSessionLabels).
@@ -2784,6 +2790,114 @@ export class SessionManager implements ISessionManager {
       }
     }
     return managed.isProcessing ? 'processing' : 'idle'
+  }
+
+  /**
+   * Group-chat participation decision: should the bot reply to a plain
+   * (non-@) group message? Mirrors `decideBusyMessage`'s mini-completion
+   * pattern but is semantically about whether the bot has anything
+   * worthwhile to say, so the bot behaves like a real group member rather
+   * than echoing every message.
+   */
+  async decideGroupChat(input: GroupChatDecisionInput): Promise<GroupChatDecision> {
+    const managed = this.sessions.get(input.sessionId)
+    if (!managed) return { action: 'ignore' }
+
+    await this.ensureMessagesLoaded(managed)
+    const recentContext = this.formatRecentConversationForBusyDecision(managed)
+
+    const prompt = [
+      'You are deciding whether Craft (a helpful AI assistant in a group chat) should respond to a message it was NOT directly @-mentioned in.',
+      '',
+      'Return ONLY compact JSON: {"action":"reply"|"ignore"}',
+      '',
+      'Reply (action "reply") when ANY of these hold:',
+      '- The message is clearly addressed to the bot — it greets, calls the bot, asks a direct question, or requests help (even without an @)',
+      '- The message reads like someone trying to get the bot\'s attention ("hi", "在吗？", "有人吗", calling the bot by name)',
+      '- The sender is the workspace owner (below) — owners driving a group usually want a response',
+      '- The message asks something the bot genuinely knows and the answer adds real value',
+      '- The bot was previously asked to monitor this chat for a specific topic',
+      '',
+      'Ignore (action "ignore") when:',
+      '- The message is small talk between other members ("哈哈哈", "晚上吃啥") that does not seek a bot answer',
+      '- Someone is talking to another person specifically',
+      '- The bot already replied to this topic recently',
+      '- You are unsure whether a response is wanted',
+      '',
+      'Do NOT rely on keyword matching. Use semantic judgment like a real person deciding whether to join a conversation.',
+      '',
+      `Platform: ${input.platform}`,
+      `Session id: ${input.sessionId}`,
+      input.channelName ? `Group: ${input.channelName}` : undefined,
+      `Sender is workspace owner: ${input.senderIsOwner ? 'yes' : 'no'}`,
+      '',
+      'Recent session context:',
+      recentContext || '(no recent context)',
+      '',
+      'New group message (NOT @-mentioned):',
+      input.userMessage,
+    ].filter((line): line is string => line !== undefined).join('\n')
+
+    let agent: AgentInstance | null = managed.agent
+    let temporaryAgent: AgentInstance | null = null
+
+    if (!agent && managed.llmConnection) {
+      try {
+        const connection = getLlmConnection(managed.llmConnection)
+        const resolvedMiniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
+        temporaryAgent = createBackendFromConnection(managed.llmConnection, {
+          workspace: managed.workspace,
+          miniModel: resolvedMiniModel,
+          session: {
+            id: `group-decision-${managed.id}`,
+            workspaceRootPath: managed.workspace.rootPath,
+            llmConnection: managed.llmConnection,
+            createdAt: Date.now(),
+            lastUsedAt: Date.now(),
+          },
+          isHeadless: true,
+        }, buildBackendHostRuntimeContext()) as AgentInstance
+        await temporaryAgent.postInit()
+        agent = temporaryAgent
+      } catch (error) {
+        sessionLog.warn('Failed to create temporary agent for group chat decision', { sessionId: managed.id, error })
+        return { action: 'ignore' }
+      }
+    }
+
+    if (!agent) return { action: 'ignore' }
+
+    try {
+      const raw = await Promise.race([
+        agent.runMiniCompletion(prompt),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
+      ])
+      const action = this.parseGroupChatDecision(raw)
+      sessionLog.info('Group chat decision completed', {
+        sessionId: managed.id,
+        platform: input.platform,
+        action,
+      })
+      return { action }
+    } catch (error) {
+      sessionLog.warn('Group chat decision failed; ignoring message', { sessionId: managed.id, error })
+      return { action: 'ignore' }
+    } finally {
+      temporaryAgent?.destroy()
+    }
+  }
+
+  private parseGroupChatDecision(raw: string | null): GroupChatDecisionAction {
+    if (!raw) return 'ignore'
+    try {
+      const start = raw.indexOf('{')
+      const end = raw.lastIndexOf('}')
+      const json = start >= 0 && end > start ? raw.slice(start, end + 1) : raw
+      const parsed = JSON.parse(json) as Partial<GroupChatDecision>
+      return parsed.action === 'reply' ? 'reply' : 'ignore'
+    } catch {
+      return 'ignore'
+    }
   }
 
   private formatRecentConversationForBusyDecision(managed: ManagedSession): string {
@@ -6421,6 +6535,18 @@ export class SessionManager implements ISessionManager {
       }
       managed.messages.push(userMessage)
 
+      // Mid-stream mobile messages (steer/queue) also honor a per-send
+      // permission-mode override: subsequent tool calls in the active turn are
+      // clamped to the override (e.g. read-only) without mutating the persisted
+      // mode. `managed.activeModeOverride` is kept so the turn-end cleanup in
+      // onProcessingStopped clears it; a `queue` message re-applies its own
+      // override when replayed via sendMessage. Same clamp semantics as the
+      // idle-turn path: only applied when the persisted mode is 'ask'.
+      if (options?.permissionModeOverride && (managed.permissionMode ?? 'ask') === 'ask') {
+        setTransientPermissionMode(sessionId, options.permissionModeOverride)
+        managed.activeModeOverride = { mode: options.permissionModeOverride, messageId: userMessage.id }
+      }
+
       let steered = false
       if (behavior === 'steer') {
         steered = agent?.redirect(modelOnlyMessage ?? visibleMessage) === true
@@ -6587,6 +6713,29 @@ export class SessionManager implements ISessionManager {
     managed.streamingText = ''
     managed.processingGeneration++
     managed.turnStartFinalMessageId = this.getLastFinalAssistantMessageId(managed.messages)
+
+    // Apply a per-send permission-mode override for this turn only. The override
+    // is visible to the agent's effective-mode readsites (pre-tool-use) but does
+    // NOT touch the persisted/diagnostics mode, so a desktop `ask` session stays
+    // `ask` while a mobile-originated message is processed read-only. Cleared in
+    // onProcessingStopped when this turn completes. `managed.agent.setPermissionMode`
+    // is intentionally NOT called — the override is a transient effective-mode
+    // clamp, not a real mode change.
+    //
+    // Clamp semantics: an override only ever TIGHTENS. It is applied when the
+    // persisted mode is 'ask' (→ mobile chats run read-only). When the persisted
+    // mode is already 'safe' (no-op) or 'allow-all' (explicit /exec execute), the
+    // override is skipped so an execute session keeps full autonomy on mobile.
+    if (options?.permissionModeOverride && (managed.permissionMode ?? 'ask') === 'ask') {
+      setTransientPermissionMode(sessionId, options.permissionModeOverride)
+      managed.activeModeOverride = { mode: options.permissionModeOverride, messageId: userMessage.id }
+    } else {
+      // No override (or persisted mode isn't ask, so the clamp doesn't apply):
+      // make sure no stale override from a prior turn leaks into this one
+      // (e.g. a desktop message routed while a mobile turn's cleanup is pending).
+      clearTransientPermissionMode(sessionId)
+      managed.activeModeOverride = undefined
+    }
 
     // Reset auth retry flag for this new message (allows one retry per message)
     // IMPORTANT: Skip reset if this is an auth retry call - the flag is already true
@@ -7295,6 +7444,21 @@ export class SessionManager implements ISessionManager {
     this.setProcessing(managed, false)
     managed.currentRunStartedAt = undefined
     managed.stopRequested = false  // Reset for next turn
+
+    // Clear any per-send permission-mode override applied for the turn that
+    // just finished. The persisted/diagnostics mode is untouched — this only
+    // drops the transient effective-mode clamp so subsequent turns (desktop
+    // or mobile without an explicit override) see the real mode again.
+    if (managed.activeModeOverride) {
+      sessionLog.debug('clearing transient permission mode override', {
+        sessionId,
+        override: managed.activeModeOverride.mode,
+        messageId: managed.activeModeOverride.messageId,
+        reason,
+      })
+      clearTransientPermissionMode(sessionId)
+      managed.activeModeOverride = undefined
+    }
 
     // 1b. Orphan backstop: with the default per-turn subprocess model, any
     // background sub-agent still marked `running` dies when this turn's

@@ -42,6 +42,7 @@ import {
   isApiEndpointAllowed,
   isReadOnlyBashCommandWithConfig,
   getPermissionModeDiagnostics,
+  getEffectivePermissionMode,
   PERMISSION_MODE_CONFIG,
   type PermissionMode,
 } from '../mode-manager.ts';
@@ -726,7 +727,10 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
   // Canonical mode source of truth for this session.
   // Keep incoming permissionMode only for mismatch diagnostics.
   const diagnostics = getPermissionModeDiagnostics(sessionId);
-  const effectivePermissionMode = diagnostics.permissionMode;
+  // Effective mode honors a transient per-message override (mobile chats
+  // clamp a desktop `ask` session to read-only) without mutating the
+  // persisted mode or firing events.
+  const effectivePermissionMode = getEffectivePermissionMode(sessionId);
 
   if (permissionMode !== effectivePermissionMode) {
     onDebug?.(

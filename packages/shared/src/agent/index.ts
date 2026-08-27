@@ -41,6 +41,9 @@ export {
   // Permission Mode API (primary)
   getPermissionMode,
   setPermissionMode,
+  setTransientPermissionMode,
+  clearTransientPermissionMode,
+  getEffectivePermissionMode,
   cyclePermissionMode,
   subscribeModeChanges,
   PERMISSION_MODE_ORDER,

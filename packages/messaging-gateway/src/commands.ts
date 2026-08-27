@@ -10,6 +10,7 @@
  * /stop          — abort the current agent run
  * /compact       — compact the current session context into a summary
  * /clear         — clear the current session context
+ * /exec          — switch the bound session's permission mode (explore | execute)
  */
 
 import type { ISessionManager } from '@craft-agent/server-core/handlers'
@@ -83,6 +84,10 @@ export interface PairingCodeConsumer {
  */
 export interface AccessControlDeps {
   getWorkspaceConfig: () => MessagingConfig
+  /**
+   * Persist a partial update to the workspace messaging config.
+   */
+  updateWorkspaceConfig?: (partial: Partial<MessagingConfig>) => MessagingConfig
   /**
    * Append the sender to the platform's owners list iff the list is currently
    * empty for that platform. Returns the updated list (or the existing list
@@ -186,6 +191,8 @@ export class Commands {
       await this.handlePair(adapter, msg)
     } else if (cmd === '/unbind') {
       await this.handleUnbind(adapter, msg)
+    } else if (cmd === '/exec') {
+      await this.handleExec(adapter, msg)
     } else if (cmd === '/help') {
       await this.handleHelp(adapter, msg)
     } else {
@@ -248,6 +255,9 @@ export class Commands {
         return true
       case '/unbind':
         await this.handleUnbind(adapter, msg)
+        return true
+      case '/exec':
+        await this.handleExec(adapter, msg)
         return true
       case '/help':
         await this.handleHelp(adapter, msg)
@@ -674,6 +684,81 @@ export class Commands {
 
     await adapter.sendText(msg.channelId, lines.join('\n'), replyOpts)
   }
+  /**
+   * `/exec` — switch the bound session's permission mode from mobile chat.
+   * Only two modes are exposed on messaging channels (no `ask` — phone text
+   * Q&A approval is too slow and would spam the group; `ask` is a desktop
+   * click-to-approve interaction). Owner-only, enforced by the pre-binding gate.
+   *
+   *   /exec explore   → safe (read-only, no writes/execution)
+   *   /exec execute   → allow-all (full autonomous execution)
+   *
+   * The change is a REAL mode change (persisted + broadcast to the desktop
+   * UI) — unlike the per-message read-only clamp applied to `ask` sessions,
+   * this is an explicit user command that persists.
+   */
+  private async handleExec(adapter: PlatformAdapter, msg: IncomingMessage): Promise<void> {
+    const replyOpts = msg.threadId !== undefined ? { threadId: msg.threadId } : {}
+    const binding = this.bindingStore.findByChannel(adapter.platform, msg.channelId, msg.threadId)
+    if (!binding) {
+      await adapter.sendText(msg.channelId, 'No session bound. Use /bind, /new, or /pair.', replyOpts)
+      return
+    }
+
+    const { args } = parseCommand(msg.text)
+    const target = args.toLowerCase()
+
+    const modeLabel: Record<string, string> = {
+      explore: 'explore (read-only)',
+      execute: 'execute (full autonomy)',
+    }
+
+    if (target !== 'explore' && target !== 'execute') {
+      await adapter.sendText(
+        msg.channelId,
+        'Usage: /exec explore | execute\n\n' +
+        '  explore — read-only mode (no file writes, no command execution)\n' +
+        '  execute — full autonomy (all tools available)\n' +
+        '\nNote: ask mode is desktop-only and not available on messaging.',
+        replyOpts,
+      )
+      return
+    }
+
+    try {
+      const session = await this.sessionManager.getSession(binding.sessionId)
+      if (!session) {
+        await adapter.sendText(msg.channelId, 'Bound session not found.', replyOpts)
+        return
+      }
+
+      this.sessionManager.setSessionPermissionMode(binding.sessionId, target === 'explore' ? 'safe' : 'allow-all')
+      this.log.info('session permission mode changed from chat', {
+        event: 'session_mode_changed_from_chat',
+        workspaceId: this.workspaceId,
+        platform: adapter.platform,
+        channelId: msg.channelId,
+        sessionId: binding.sessionId,
+        mode: target === 'explore' ? 'safe' : 'allow-all',
+      })
+      await adapter.sendText(
+        msg.channelId,
+        `Permission mode set to ${modeLabel[target]}.`,
+        replyOpts,
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      this.log.error('failed to set session permission mode from chat', {
+        event: 'session_mode_change_failed',
+        workspaceId: this.workspaceId,
+        platform: adapter.platform,
+        channelId: msg.channelId,
+        sessionId: binding.sessionId,
+        error: message,
+      })
+      await adapter.sendText(msg.channelId, `Failed to change permission mode: ${message}`, replyOpts)
+    }
+  }
 
   private async handleStop(adapter: PlatformAdapter, msg: IncomingMessage): Promise<void> {
     const replyOpts = msg.threadId !== undefined ? { threadId: msg.threadId } : {}
@@ -778,6 +863,7 @@ export class Commands {
       '/pair <code> — redeem an app-generated pairing code\n' +
       '/unbind — disconnect this chat\n' +
       '/status — show current binding, model, thinking level\n' +
+      '/exec explore|execute — switch session permission mode\n' +
       '/stop — abort current agent run\n' +
       '/compact — compact current context into a summary\n' +
       '/clear — clear current context and messages\n' +

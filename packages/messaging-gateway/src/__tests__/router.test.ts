@@ -103,6 +103,7 @@ function makeFakeSessionManager(overrides: Record<string, unknown> = {}): {
   sendMessage: ReturnType<typeof mock>
   isSessionProcessing: ReturnType<typeof mock>
   decideBusyMessage?: ReturnType<typeof mock>
+  decideGroupChat?: ReturnType<typeof mock>
   cancelProcessing?: ReturnType<typeof mock>
 } {
   return {
@@ -304,7 +305,12 @@ describe('Router', () => {
 
     expect(sessionManager.decideBusyMessage).toHaveBeenCalledTimes(1)
     expect(sessionManager.sendMessage).toHaveBeenCalledTimes(1)
-    expect(sessionManager.sendMessage.mock.calls[0]?.[4]).toEqual({ midStreamBehavior: 'steer' })
+    // Messaging routes clamp a desktop `ask` session to read-only for this
+    // message (permissionModeOverride), while busy follow-ups still steer.
+    expect(sessionManager.sendMessage.mock.calls[0]?.[4]).toEqual({
+      midStreamBehavior: 'steer',
+      permissionModeOverride: 'safe',
+    })
   })
 
   it('aborts the session when the agent decides the message is a stop intent', async () => {
@@ -384,5 +390,158 @@ describe('Router', () => {
     await router.route(makeFakeAdapter(), baseMsg({ channelId: '-1001', threadId: 7, text: '/help' }))
     expect(sessionManager.sendMessage).not.toHaveBeenCalled()
     expect(commands.handle).toHaveBeenCalledTimes(1)
+  })
+  // -------------------------------------------------------------------------
+  // Group-chat decision gate (non-@ messages) — Phase: real-person behavior
+  // -------------------------------------------------------------------------
+
+  const qqOpenConfig = () => ({
+    enabled: true,
+    platforms: { qq: { enabled: true, accessMode: 'open' as const } },
+  })
+
+  it('routes plain (mentionKind none) group messages when the gate says reply', async () => {
+    const store = new BindingStore(storeDir)
+    store.bind('ws1', 'sess-A', 'qq', 'group:g1')
+    const sessionManager = makeFakeSessionManager({
+      decideGroupChat: mock(async () => ({ action: 'reply' })),
+    })
+    const commands = makeFakeCommands()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const router = new Router(sessionManager as any, store, commands as unknown as Commands, undefined, {
+      getWorkspaceConfig: qqOpenConfig,
+    })
+    const adapter = makeFakeAdapter('telegram') // adapter platform is only for sendText
+
+    await router.route(adapter, baseMsg({
+      platform: 'qq',
+      channelId: 'group:g1',
+      senderId: 'member-1',
+      text: '有人知道今天天气吗',
+      mentionKind: 'none',
+    }))
+
+    expect(sessionManager.decideGroupChat).toHaveBeenCalledTimes(1)
+    expect(sessionManager.sendMessage).toHaveBeenCalledTimes(1)
+    expect(sessionManager.sendMessage.mock.calls[0]?.[0]).toBe('sess-A')
+  })
+
+  it('routes rapid follow-ups immediately after a reply decision (no delay, no drop)', async () => {
+    const store = new BindingStore(storeDir)
+    store.bind('ws1', 'sess-A', 'qq', 'group:g1')
+    const sessionManager = makeFakeSessionManager({
+      decideGroupChat: mock(async () => ({ action: 'reply' })),
+    })
+    const commands = makeFakeCommands()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const router = new Router(sessionManager as any, store, commands as unknown as Commands, undefined, {
+      getWorkspaceConfig: qqOpenConfig,
+    })
+    const adapter = makeFakeAdapter('telegram')
+
+    await router.route(adapter, baseMsg({ platform: 'qq', channelId: 'group:g1', text: '小二', mentionKind: 'none' }))
+    await router.route(adapter, baseMsg({ platform: 'qq', channelId: 'group:g1', text: '给这位公子上盘菜', mentionKind: 'none' }))
+
+    // Only ONE decision (cooldown throttles the LLM call)…
+    expect(sessionManager.decideGroupChat).toHaveBeenCalledTimes(1)
+    // …but BOTH messages are routed immediately — the follow-up isn't dropped.
+    expect(sessionManager.sendMessage).toHaveBeenCalledTimes(2)
+    expect(sessionManager.sendMessage.mock.calls[0]?.[1]).toBe('小二')
+    expect(sessionManager.sendMessage.mock.calls[1]?.[1]).toBe('给这位公子上盘菜')
+  })
+
+  it('silently ignores plain group messages when the gate says ignore', async () => {
+    const store = new BindingStore(storeDir)
+    store.bind('ws1', 'sess-A', 'qq', 'group:g1')
+    const sessionManager = makeFakeSessionManager({
+      decideGroupChat: mock(async () => ({ action: 'ignore' })),
+    })
+    const commands = makeFakeCommands()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const router = new Router(sessionManager as any, store, commands as unknown as Commands, undefined, {
+      getWorkspaceConfig: qqOpenConfig,
+    })
+    const adapter = makeFakeAdapter('telegram')
+
+    await router.route(adapter, baseMsg({
+      platform: 'qq',
+      channelId: 'group:g1',
+      senderId: 'member-1',
+      text: '哈哈哈哈哈',
+      mentionKind: 'none',
+    }))
+
+    expect(sessionManager.decideGroupChat).toHaveBeenCalledTimes(1)
+    expect(sessionManager.sendMessage).not.toHaveBeenCalled()
+    expect(adapter.sendText).not.toHaveBeenCalled()
+  })
+
+  it('applies a per-group cooldown between decision-gate runs', async () => {
+    const store = new BindingStore(storeDir)
+    store.bind('ws1', 'sess-A', 'qq', 'group:g1')
+    const sessionManager = makeFakeSessionManager({
+      decideGroupChat: mock(async () => ({ action: 'ignore' })),
+    })
+    const commands = makeFakeCommands()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const router = new Router(sessionManager as any, store, commands as unknown as Commands, undefined, {
+      getWorkspaceConfig: qqOpenConfig,
+    })
+    const adapter = makeFakeAdapter('telegram')
+
+    await router.route(adapter, baseMsg({ platform: 'qq', channelId: 'group:g1', text: '第一条', mentionKind: 'none' }))
+    await router.route(adapter, baseMsg({ platform: 'qq', channelId: 'group:g1', text: '第二条', mentionKind: 'none' }))
+
+    // First message consumed a decision; the second hit the cooldown and
+    // was ignored without another LLM call.
+    expect(sessionManager.decideGroupChat).toHaveBeenCalledTimes(1)
+    expect(sessionManager.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('bypasses the gate for @-mentioned group messages (must reply)', async () => {
+    const store = new BindingStore(storeDir)
+    store.bind('ws1', 'sess-A', 'qq', 'group:g1')
+    const sessionManager = makeFakeSessionManager({
+      decideGroupChat: mock(async () => ({ action: 'ignore' })),
+    })
+    const commands = makeFakeCommands()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const router = new Router(sessionManager as any, store, commands as unknown as Commands, undefined, {
+      getWorkspaceConfig: qqOpenConfig,
+    })
+    const adapter = makeFakeAdapter('telegram')
+
+    await router.route(adapter, baseMsg({
+      platform: 'qq',
+      channelId: 'group:g1',
+      senderId: 'member-1',
+      text: '@bot 帮我查一下',
+      mentionKind: 'at',
+    }))
+
+    expect(sessionManager.decideGroupChat).not.toHaveBeenCalled()
+    expect(sessionManager.sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('falls back to routing when decideGroupChat is unavailable', async () => {
+    const store = new BindingStore(storeDir)
+    store.bind('ws1', 'sess-A', 'qq', 'group:g1')
+    const sessionManager = makeFakeSessionManager() // no decideGroupChat
+    const commands = makeFakeCommands()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const router = new Router(sessionManager as any, store, commands as unknown as Commands, undefined, {
+      getWorkspaceConfig: qqOpenConfig,
+    })
+    const adapter = makeFakeAdapter('telegram')
+
+    await router.route(adapter, baseMsg({
+      platform: 'qq',
+      channelId: 'group:g1',
+      text: '普通群消息',
+      mentionKind: 'none',
+    }))
+
+    // No decision function → gate skipped, message routed normally.
+    expect(sessionManager.sendMessage).toHaveBeenCalledTimes(1)
   })
 })

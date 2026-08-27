@@ -135,6 +135,29 @@ function describeError(err: unknown, depth = 0): Record<string, unknown> {
  * should call `isAcceptedChat()` which also accepts the workspace's
  * configured supergroup chat (forum).
  */
+/**
+ * Detect whether the bot is explicitly @-mentioned in a Telegram message.
+ * Checks entities for mention / text_mention types, and bot_command
+ * entities with a @BotUsername suffix targeting this bot. Returns true
+ * when the bot is clearly addressed.
+ */
+function isBotMentioned(ctx: Context, botUsername?: string): boolean {
+  const entities = ctx.message?.entities
+  if (!entities?.length) return false
+  const text = ctx.message?.text ?? ''
+  for (const e of entities) {
+    if (e.type === 'mention' || e.type === 'text_mention') return true
+    if (e.type === 'bot_command' && botUsername) {
+      // /cmd or /cmd@BotName - suffix must match this bot
+      const cmdText = text.slice(e.offset, e.offset + e.length)
+      const match = /^\/\w+@([A-Za-z0-9_]+)$/.exec(cmdText)
+      const target = match?.[1]
+      if (target && target.toLowerCase() === botUsername.toLowerCase()) return true
+    }
+  }
+  return false
+}
+
 export function isPrivateChat(ctx: Context): boolean {
   return ctx.chat?.type === 'private'
 }
@@ -377,6 +400,7 @@ export class TelegramAdapter implements PlatformAdapter {
         messageId: ctx.message.message_id,
         textPreview: text.slice(0, 80),
       })
+      const isGroup = ctx.chat.type !== 'private'
       const msg: IncomingMessage = {
         platform: 'telegram',
         channelId: String(ctx.chat.id),
@@ -389,6 +413,15 @@ export class TelegramAdapter implements PlatformAdapter {
         text: ctx.message.text ?? '',
         timestamp: ctx.message.date * 1000,
         raw: ctx.message,
+        // Group messages are flagged so the gateway can require an explicit
+        // @-mention before honoring slash commands (shared groups have many
+        // bots — an un-addressed /command is ambiguous). DMs are untouched.
+        ...(isGroup
+          ? {
+              chatKind: 'group' as const,
+              mentionKind: isBotMentioned(ctx, this.bot?.botInfo?.username) ? ('at' as const) : ('none' as const),
+            }
+          : { chatKind: 'private' as const }),
       }
 
       this.dispatchMessage(msg)

@@ -15,6 +15,7 @@ import type { FileAttachment } from '@craft-agent/shared/protocol'
 import {
   evaluateBindingAccess,
   executeRejection,
+  readPlatformOwners,
   type AccessRejectReason,
 } from './access-control'
 import type { BindingStore } from './binding-store'
@@ -46,6 +47,12 @@ export interface RouterDeps {
 export class Router {
   private readonly deps: RouterDeps
   private readonly recentRejectReplies = new Map<string, number>()
+  /** Last decision-gate timestamp per (platform, groupId) for throttling. */
+  private readonly groupChatDecisionAt = new Map<string, number>()
+  /** Last decision action per group ('reply' | 'ignore'). */
+  private readonly groupChatLastAction = new Map<string, 'reply' | 'ignore'>()
+  /** Cooldown between non-@ group-message decisions per group (ms). */
+  private static readonly GROUP_CHAT_DECISION_COOLDOWN_MS = 2 * 1000
 
   constructor(
     private readonly sessionManager: ISessionManager,
@@ -84,6 +91,21 @@ export class Router {
           ? this.sessionManager.isSessionProcessing(binding.sessionId)
           : false
 
+        // Group-chat decision gate: for plain (non-@) group messages, ask
+        // whether the bot should reply before routing into the session, so
+        // the bot behaves like a real group member instead of echoing
+        // every message. @-mentioned messages (`mentionKind: 'at'`) and
+        // DMs bypass this gate entirely.
+        if (
+          msg.mentionKind === 'none' &&
+          attachmentCount === 0 &&
+          !isBusy &&
+          this.sessionManager.decideGroupChat
+        ) {
+          const handled = await this.tryDecideGroupChat(adapter, msg, binding.sessionId, binding.channelName)
+          if (handled) return
+        }
+
         if (
           isBusy &&
           attachmentCount === 0 &&
@@ -114,6 +136,12 @@ export class Router {
             // mid-stream messages — injects the message into the active turn
             // via agent.redirect() so the user can guide/interrupt the running task.
             midStreamBehavior: isBusy ? 'steer' : undefined,
+            // Mobile chats clamp a desktop `ask` session to read-only for THIS
+            // message: the agent processes it under explore rules while the
+            // desktop UI keeps showing `ask`. `execute` sessions are unaffected
+            // (override only tightens, never loosens) and `/exec` remains the
+            // explicit way to switch modes for real.
+            permissionModeOverride: 'safe',
           },
         )
       } catch (err) {
@@ -196,6 +224,91 @@ export class Router {
   }
 
   /**
+   * Group-chat decision gate: decide whether the bot should reply to a
+   * plain (non-@) group message. Applies a per-group cooldown so a chatty
+   * group doesn't trigger a mini-LLM decision for every single message.
+   * Returns true when the message was handled (decision consumed it).
+   */
+  private async tryDecideGroupChat(
+    adapter: PlatformAdapter,
+    msg: IncomingMessage,
+    sessionId: string,
+    channelName?: string,
+  ): Promise<boolean> {
+    if (!this.sessionManager.decideGroupChat) return false
+
+    const gateKey = `${msg.platform}:${msg.channelId}`
+    const now = Date.now()
+    const lastDecision = this.groupChatDecisionAt.get(gateKey) ?? 0
+
+    // Cooldown window: don't re-run the LLM decision for every message,
+    // but DO NOT drop the message either — if the last decision was
+    // 'reply', the follow-up messages carry the user's real intent, so
+    // route them straight into the session (no delay). Only drop when the
+    // last decision said 'ignore' (chatty idle chatter).
+    if (now - lastDecision < Router.GROUP_CHAT_DECISION_COOLDOWN_MS) {
+      const lastAction = this.groupChatLastAction.get(gateKey)
+      if (lastAction === 'reply') {
+        this.log.info('group chat follow-up routed (last decision reply)', {
+          event: 'group_chat_followup_routed',
+          platform: msg.platform,
+          channelId: msg.channelId,
+          sessionId,
+          textPreview: (msg.text ?? '').slice(0, 60),
+        })
+        return false
+      }
+      this.log.info('group chat message ignored (decision cooldown)', {
+        event: 'group_chat_ignored_cooldown',
+        platform: msg.platform,
+        channelId: msg.channelId,
+        sessionId,
+      })
+      return true
+    }
+
+    // Not in cooldown — run the decision gate.
+    this.groupChatDecisionAt.set(gateKey, now)
+
+    try {
+      // NOTE: call the method on the receiver (this.sessionManager) so
+      // `this` stays bound — destructuring the method loses the receiver
+      // and breaks implementations that read instance state.
+      const decision = await this.sessionManager.decideGroupChat({
+        platform: msg.platform,
+        groupId: msg.channelId,
+        userMessage: msg.text,
+        sessionId,
+        senderIsOwner: this.isPlatformOwner(msg.platform, msg.senderId),
+        ...(channelName ? { channelName } : {}),
+      })
+
+      this.log.info('group chat message decision', {
+        event: 'group_chat_decision',
+        platform: msg.platform,
+        channelId: msg.channelId,
+        sessionId,
+        action: decision.action,
+      })
+
+      this.groupChatLastAction.set(gateKey, decision.action)
+
+      if (decision.action === 'ignore') return true
+      // 'reply' → fall through to the normal routing path (no delay).
+      return false
+    } catch (err) {
+      this.log.warn('group chat decision failed; ignoring message', {
+        event: 'group_chat_decision_failed',
+        platform: msg.platform,
+        channelId: msg.channelId,
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return true
+    }
+  }
+
+  /**
    * Common reject path for both bound (this file) and pre-binding (Commands)
    * gating. Delegates to the shared `executeRejection` so text and button
    * paths behave identically.
@@ -241,5 +354,17 @@ export class Router {
       built.push(att)
     }
     return built.length > 0 ? built : undefined
+  }
+
+  /**
+   * Whether the sender openid is listed as an owner of this platform in
+   * the workspace config. Used to bias the group-chat decision gate
+   * toward replying to the owner's messages.
+   */
+  private isPlatformOwner(platform: string, senderId: string): boolean {
+    if (!senderId) return false
+    const config = this.deps.getWorkspaceConfig()
+    const owners = readPlatformOwners(config, platform as IncomingMessage['platform'])
+    return owners.some((o) => o.userId === senderId)
   }
 }

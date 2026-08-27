@@ -231,6 +231,14 @@ class ModeManager {
   private states: Map<string, ModeState> = new Map();
   private callbacks: Map<string, ModeCallbacks> = new Map();
   private subscribers: Map<string, Set<() => void>> = new Map();
+  /**
+   * Transient per-message permission-mode overrides keyed by session id.
+   * These clamp the EFFECTIVE mode read by the agent (pre-tool-use) without
+   * mutating the persisted/diagnostics mode and without firing mode-change
+   * events or React subscribers — so a desktop `ask` session stays `ask` in
+   * the UI while a mobile-originated message is processed read-only.
+   */
+  private transientOverrides: Map<string, PermissionMode> = new Map();
 
   /**
    * Hydrate persisted transition context (previous mode) without mutating current mode/version.
@@ -312,6 +320,30 @@ class ModeManager {
   }
 
   /**
+   * Apply a transient (per-message) permission-mode override. Does NOT touch
+   * persisted state, modeVersion, lastChangedBy, callbacks, or subscribers.
+   * Effective immediately for `getPermissionMode` / `getPermissionModeDiagnostics`
+   * until cleared or superseded.
+   */
+  setTransientOverride(sessionId: string, mode: PermissionMode): void {
+    this.transientOverrides.set(sessionId, mode);
+  }
+
+  /**
+   * Remove a transient override, restoring the persisted mode as effective.
+   */
+  clearTransientOverride(sessionId: string): void {
+    this.transientOverrides.delete(sessionId);
+  }
+
+  /**
+   * The active transient override for a session, or undefined.
+   */
+  getTransientOverride(sessionId: string): PermissionMode | undefined {
+    return this.transientOverrides.get(sessionId);
+  }
+
+  /**
    * Mark the current user-origin mode change signal as consumed.
    * No-op unless the latest mode change was user-initiated.
    */
@@ -380,10 +412,47 @@ export const modeManager = new ModeManager();
 // ============================================================
 
 /**
- * Get the current permission mode for a session
+ * Get the current permission mode for a session.
+ * Returns the active transient override (if any) so per-message overrides
+ * are visible to every readsite, otherwise the persisted mode.
  */
 export function getPermissionMode(sessionId: string): PermissionMode {
-  return modeManager.getState(sessionId).permissionMode;
+  return modeManager.getTransientOverride(sessionId) ?? modeManager.getState(sessionId).permissionMode;
+}
+
+/**
+ * Apply a transient (per-message) permission-mode override. The override is
+ * visible to the agent's effective-mode readsites immediately, but does NOT
+ * persist, does NOT bump modeVersion, and does NOT fire events/subscribers —
+ * the desktop UI keeps showing the real mode.
+ */
+export function setTransientPermissionMode(sessionId: string, mode: PermissionMode): void {
+  modeManager.setTransientOverride(sessionId, mode);
+}
+
+/**
+ * Remove any active transient override, restoring the persisted mode as effective.
+ */
+export function clearTransientPermissionMode(sessionId: string): void {
+  modeManager.clearTransientOverride(sessionId);
+}
+
+/**
+ * True when a transient override is currently active for the session.
+ */
+export function hasTransientPermissionMode(sessionId: string): boolean {
+  return modeManager.getTransientOverride(sessionId) !== undefined;
+}
+
+/**
+ * The EFFECTIVE permission mode for agent execution: the transient per-message
+ * override when active, otherwise the persisted diagnostics mode. Readsites that
+ * decide what tools an agent may use (pre-tool-use) MUST use this, while readsites
+ * that reflect/repair persisted state (SessionManager diagnostics heal) keep using
+ * `getPermissionModeDiagnostics` so a transient override never looks like drift.
+ */
+export function getEffectivePermissionMode(sessionId: string): PermissionMode {
+  return modeManager.getTransientOverride(sessionId) ?? getPermissionModeDiagnostics(sessionId).permissionMode;
 }
 
 /**

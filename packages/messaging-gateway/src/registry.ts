@@ -30,6 +30,7 @@ import { PairingCodeManager } from './pairing'
 import { TelegramAdapter } from './adapters/telegram/index'
 import { WhatsAppAdapter, type WhatsAppEvent } from './adapters/whatsapp/index'
 import { LarkAdapter, parseLarkCredentials, type LarkCredentials } from './adapters/lark/index'
+import { QQAdapter, parseQQCredentials, type QQCredentials } from './adapters/qq/index'
 import { TopicRegistry } from './topic-registry'
 import type { SessionEvent } from './renderer'
 import type { EventSinkFn } from './event-fanout'
@@ -200,6 +201,22 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       })
     }
 
+    if (isPlatformConfigured(config, 'qq')) {
+      this.setPlatformRuntime(workspaceId, state, 'qq', {
+        configured: true,
+        connected: false,
+        state: 'connecting',
+        lastError: undefined,
+      })
+      void this.tryConnectQQ(workspaceId, state).catch((err) => {
+        this.log.error('background QQ connect failed', {
+          event: 'qq_connect_failed',
+          workspaceId,
+          error: err,
+        })
+      })
+    }
+
     if (isPlatformConfigured(config, 'whatsapp')) {
       if (this.hasWhatsAppAuthState(workspaceId)) {
         this.setPlatformRuntime(workspaceId, state, 'whatsapp', {
@@ -266,6 +283,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         telegram: cloneRuntime(state.runtime.telegram),
         whatsapp: cloneRuntime(state.runtime.whatsapp),
         lark: cloneRuntime(state.runtime.lark),
+        qq: cloneRuntime(state.runtime.qq),
       },
     }
   }
@@ -286,6 +304,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       await state.gateway.unregisterAdapter('telegram').catch(() => {})
       await state.gateway.unregisterAdapter('whatsapp').catch(() => {})
       await state.gateway.unregisterAdapter('lark').catch(() => {})
+      await state.gateway.unregisterAdapter('qq').catch(() => {})
       state.whatsappOffEvent?.()
       state.whatsappOffEvent = undefined
       state.whatsapp = null
@@ -310,10 +329,17 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         identity: undefined,
         lastError: undefined,
       })
+      this.setPlatformRuntime(workspaceId, state, 'qq', {
+        configured: false,
+        connected: false,
+        state: 'disconnected',
+        identity: undefined,
+        lastError: undefined,
+      })
       return
     }
 
-    for (const platform of ['telegram', 'whatsapp', 'lark'] as const) {
+    for (const platform of ['telegram', 'whatsapp', 'lark', 'qq'] as const) {
       const configured = isPlatformConfigured(cfg, platform)
       if (!configured && platform === 'telegram') {
         this.clearTelegramRetry(state)
@@ -793,6 +819,100 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     await state.gateway.start()
   }
 
+  /**
+   * Verify QQ AppID + AppSecret by exchanging them for an access token.
+   * QQ returns a structured error message we forward to the user when the
+   * credentials are bad — same pattern as Lark's tenant token exchange.
+   */
+  async testQQCredentials(creds: {
+    appId: string
+    appSecret: string
+  }): Promise<{ success: boolean; botName?: string; error?: string }> {
+    if (!creds.appId || !creds.appSecret) {
+      return { success: false, error: 'AppID or AppSecret is empty' }
+    }
+    try {
+      const res = await fetch('https://bots.qq.com/app/getAppAccessToken', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'QQBot/1.0' },
+        body: JSON.stringify({ appId: creds.appId, clientSecret: creds.appSecret }),
+        signal: AbortSignal.timeout(10_000),
+      })
+      const body = (await res.json()) as {
+        access_token?: string
+        code?: number
+        message?: string
+      }
+      if (!res.ok || !body.access_token) {
+        return {
+          success: false,
+          error: body.message ?? `HTTP ${res.status}`,
+        }
+      }
+      return { success: true, botName: creds.appId }
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : 'Network error',
+      }
+    }
+  }
+
+  /**
+   * Save QQ AppID/AppSecret + main-QQ openids and (re)initialize the adapter.
+   * Owners (main QQ) are preserved when reconfiguring; the passed openids
+   * update the list when provided.
+   */
+  async saveQQCredentials(
+    workspaceId: string,
+    creds: { appId: string; appSecret: string; mainQqOpenIds?: string[] },
+  ): Promise<void> {
+    if (!creds.appId || !creds.appSecret) throw new Error('AppID or AppSecret is empty')
+
+    const test = await this.testQQCredentials(creds)
+    if (!test.success) throw new Error(test.error ?? 'Invalid QQ credentials')
+
+    await this.opts.credentialManager.set(
+      {
+        type: 'messaging_bearer',
+        workspaceId,
+        name: 'qq',
+      },
+      { value: JSON.stringify({ appId: creds.appId, appSecret: creds.appSecret }) },
+    )
+
+    const state = this.workspaces.get(workspaceId) ?? this.bootstrapWorkspace(workspaceId)
+    const currentConfig = state.configStore.get()
+    const currentQq = currentConfig.platforms.qq
+    const nextOwners = Array.isArray(creds.mainQqOpenIds)
+      ? dedupeOwners(
+          creds.mainQqOpenIds.map((userId) => ({ userId, addedAt: Date.now() })),
+        )
+      : currentQq?.owners
+
+    state.configStore.update({
+      enabled: true,
+      platforms: {
+        ...currentConfig.platforms,
+        qq: {
+          enabled: true,
+          accessMode: currentQq?.accessMode ?? 'owner-only',
+          owners: nextOwners,
+        },
+      },
+    })
+
+    this.setPlatformRuntime(workspaceId, state, 'qq', {
+      configured: true,
+      connected: false,
+      state: 'connecting',
+      lastError: undefined,
+    })
+
+    await this.tryConnectQQ(workspaceId, state)
+    await state.gateway.start()
+  }
+
   async disconnectPlatform(workspaceId: string, platform: string): Promise<void> {
     if (!isKnownPlatform(platform)) return
     const state = this.workspaces.get(workspaceId)
@@ -1083,6 +1203,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       },
       // Read live config so accessMode/owner toggles take effect immediately.
       getWorkspaceConfig: () => configStore.get(),
+      updateWorkspaceConfig: (partial) => configStore.update(partial),
       resolveConnection: this.opts.resolveConnection,
       resolveDefaultConnection: this.opts.resolveDefaultConnection,
       seedOwnerOnFirstPair: async (platform, candidate) =>
@@ -1110,6 +1231,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         telegram: createRuntime('telegram', isPlatformConfigured(cfg, 'telegram')),
         whatsapp: createRuntime('whatsapp', isPlatformConfigured(cfg, 'whatsapp')),
         lark: createRuntime('lark', isPlatformConfigured(cfg, 'lark')),
+        qq: createRuntime('qq', isPlatformConfigured(cfg, 'qq')),
       },
     }
     this.workspaces.set(workspaceId, state)
@@ -1185,6 +1307,82 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         error: err,
       })
       this.setPlatformRuntime(workspaceId, state, 'lark', {
+        configured: true,
+        connected: false,
+        state: 'error',
+        lastError: err instanceof Error ? err.message : String(err),
+      })
+      throw err
+    }
+  }
+
+  private async tryConnectQQ(workspaceId: string, state: WorkspaceState): Promise<void> {
+    const cred = await this.opts.credentialManager
+      .get({ type: 'messaging_bearer', workspaceId, name: 'qq' })
+      .catch(() => null)
+
+    if (!cred?.value) {
+      this.setPlatformRuntime(workspaceId, state, 'qq', {
+        configured: true,
+        connected: false,
+        state: 'error',
+        lastError: 'QQ credentials are missing.',
+      })
+      return
+    }
+
+    let creds: QQCredentials
+    try {
+      creds = parseQQCredentials(cred.value)
+    } catch (err) {
+      this.setPlatformRuntime(workspaceId, state, 'qq', {
+        configured: true,
+        connected: false,
+        state: 'error',
+        lastError: err instanceof Error ? err.message : 'QQ credentials are malformed',
+      })
+      return
+    }
+
+    await state.gateway.unregisterAdapter('qq').catch((err) => {
+      this.log.warn('unregisterAdapter(qq) failed (non-fatal)', {
+        event: 'qq_unregister_failed',
+        workspaceId,
+        error: err,
+      })
+    })
+
+    try {
+      const adapter = new QQAdapter()
+      const qqCfg = state.configStore.get().platforms.qq
+      const owners = qqCfg?.owners ?? []
+      await adapter.initialize({
+        token: cred.value,
+        mainQqOpenIds: owners.map((o) => o.userId),
+        botOpenId: qqCfg?.botOpenId,
+        logger: this.log.child({
+          component: 'qq-adapter',
+          workspaceId,
+          platform: 'qq',
+        }),
+      })
+
+      state.botUsernames.qq = creds.appId
+      state.gateway.registerAdapter(adapter)
+      this.setPlatformRuntime(workspaceId, state, 'qq', {
+        configured: true,
+        connected: true,
+        state: 'connected',
+        identity: state.botUsernames.qq,
+        lastError: undefined,
+      })
+    } catch (err) {
+      this.log.error('failed to connect QQ', {
+        event: 'qq_connect_failed',
+        workspaceId,
+        error: err,
+      })
+      this.setPlatformRuntime(workspaceId, state, 'qq', {
         configured: true,
         connected: false,
         state: 'error',
@@ -1708,9 +1906,12 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
   }
 
   getPlatformOwners(workspaceId: string, platform: PlatformType): PlatformOwner[] {
-    if (platform !== 'telegram') return []
+    if (platform !== 'telegram' && platform !== 'qq') return []
     const state = this.workspaces.get(workspaceId) ?? this.bootstrapWorkspace(workspaceId)
-    return state.configStore.get().platforms.telegram?.owners ?? []
+    const owners = platform === 'telegram'
+      ? state.configStore.get().platforms.telegram?.owners
+      : state.configStore.get().platforms.qq?.owners
+    return owners ?? []
   }
 
   setPlatformOwners(
@@ -1718,19 +1919,42 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     platform: PlatformType,
     owners: PlatformOwner[],
   ): PlatformOwner[] {
-    if (platform !== 'telegram') {
-      throw new Error('Owner lists are only supported on Telegram in this build.')
+    if (platform !== 'telegram' && platform !== 'qq') {
+      throw new Error('Owner lists are only supported on Telegram and QQ in this build.')
     }
     const state = this.workspaces.get(workspaceId) ?? this.bootstrapWorkspace(workspaceId)
-    this.patchTelegramConfig(workspaceId, { owners: dedupeOwners(owners) })
+    const deduped = dedupeOwners(owners)
+    if (platform === 'telegram') {
+      this.patchTelegramConfig(workspaceId, { owners: deduped })
+    } else {
+      const cfg = state.configStore.get()
+      const qq = cfg.platforms.qq ?? { enabled: true }
+      state.configStore.update({
+        enabled: cfg.enabled,
+        platforms: {
+          ...cfg.platforms,
+          qq: { ...qq, owners: deduped },
+        },
+      })
+      // Runtime C2C filtering follows the main-QQ list without a reconnect.
+      const adapter = state.gateway.getAdapter('qq')
+      if (adapter && adapter.platform === 'qq') {
+        ;(adapter as unknown as QQAdapter).setMainQqOpenIds(deduped.map((o) => o.userId))
+      }
+    }
     this.emitBindingChanged(workspaceId)
-    return state.configStore.get().platforms.telegram?.owners ?? []
+    const saved = platform === 'telegram'
+      ? state.configStore.get().platforms.telegram?.owners
+      : state.configStore.get().platforms.qq?.owners
+    return saved ?? []
   }
 
   getPlatformAccessMode(workspaceId: string, platform: PlatformType): PlatformAccessMode {
-    if (platform !== 'telegram') return 'open'
     const state = this.workspaces.get(workspaceId) ?? this.bootstrapWorkspace(workspaceId)
-    return state.configStore.get().platforms.telegram?.accessMode ?? 'open'
+    const cfg = state.configStore.get()
+    if (platform === 'telegram') return cfg.platforms.telegram?.accessMode ?? 'open'
+    if (platform === 'qq') return cfg.platforms.qq?.accessMode ?? 'owner-only'
+    return 'open'
   }
 
   setPlatformAccessMode(
@@ -1738,10 +1962,23 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     platform: PlatformType,
     mode: PlatformAccessMode,
   ): void {
-    if (platform !== 'telegram') {
-      throw new Error('Access mode is only supported on Telegram in this build.')
+    if (platform !== 'telegram' && platform !== 'qq') {
+      throw new Error('Access mode is only supported on Telegram and QQ in this build.')
     }
-    this.patchTelegramConfig(workspaceId, { accessMode: mode })
+    if (platform === 'telegram') {
+      this.patchTelegramConfig(workspaceId, { accessMode: mode })
+    } else {
+      const state = this.workspaces.get(workspaceId) ?? this.bootstrapWorkspace(workspaceId)
+      const cfg = state.configStore.get()
+      const qq = cfg.platforms.qq ?? { enabled: true }
+      state.configStore.update({
+        enabled: cfg.enabled,
+        platforms: {
+          ...cfg.platforms,
+          qq: { ...qq, accessMode: mode },
+        },
+      })
+    }
 
     // Lock-down semantics: switching the workspace to `owner-only` must
     // also close any binding that's still in `open` mode, otherwise the
@@ -1756,8 +1993,8 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
   }
 
   /**
-   * Walk all Telegram bindings and flip any with `accessMode === 'open'`
-   * to `inherit` (the safe default). Used when locking down the workspace.
+   * Walk all bindings and flip any with `accessMode === 'open'` to
+   * `inherit` (the safe default). Used when locking down the workspace.
    * Telegram-only — other platforms don't yet have per-binding access.
    */
   private migrateOpenBindingsToInherit(workspaceId: string): void {
@@ -1765,7 +2002,6 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     if (!state) return
     const store = state.gateway.getBindingStore()
     for (const b of store.getAll()) {
-      if (b.platform !== 'telegram') continue
       if (b.config.accessMode !== 'open') continue
       store.updateBindingConfig(b.id, { accessMode: 'inherit', allowedSenderIds: [] })
     }
@@ -1966,7 +2202,7 @@ function toBindingInfo(b: ChannelBinding): MessagingBindingInfo {
 }
 
 function isKnownPlatform(p: string): p is PlatformType {
-  return p === 'telegram' || p === 'whatsapp' || p === 'lark'
+  return p === 'telegram' || p === 'whatsapp' || p === 'lark' || p === 'qq'
 }
 
 function capitalize(value: string): string {

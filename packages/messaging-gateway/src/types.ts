@@ -9,7 +9,7 @@
 // Platform types
 // ---------------------------------------------------------------------------
 
-export type PlatformType = 'telegram' | 'whatsapp' | 'lark'
+export type PlatformType = 'telegram' | 'whatsapp' | 'lark' | 'qq'
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -103,6 +103,19 @@ export interface IncomingMessage {
    */
   senderIsBot?: boolean
   text: string
+  /**
+   * Kind of chat this message originated from. `'group'` for supergroups /
+   * forum topics / QQ groups; `'private'` for DMs / C2C. Used by the gateway
+   * to enforce that group-chat commands must @-mention the bot.
+   */
+  chatKind?: 'private' | 'group'
+  /**
+   * Group-chat mention state. `'at'` — the bot was explicitly @-mentioned
+   * (must reply); `'none'` — a plain group message the bot MAY choose to
+   * reply to or ignore. Undefined for DMs / platforms that don't have
+   * mentions. Used by the router's group-chat decision gate.
+   */
+  mentionKind?: 'at' | 'none'
   attachments?: IncomingAttachment[]
   replyToMessageId?: string
   timestamp: number
@@ -537,6 +550,39 @@ export interface MessagingConfig {
        *  - `feishu` → open.feishu.cn (China)
        */
       domain?: 'lark' | 'feishu'
+    }
+    qq?: {
+      enabled: boolean
+      /**
+       * Workspace-level access policy. QQ defaults to `'owner-only'` so
+       * slash commands (and C2C DMs) are restricted to the configured main
+       * QQ by default. Missing field is treated as `'owner-only'` (unlike
+       * Telegram, where legacy workspaces default to `'open'`).
+       */
+      accessMode?: PlatformAccessMode
+      /**
+       * OpenIDs permitted to drive the bot at workspace level. The "main
+       * QQ" — gates slash commands in both group chats and C2C DMs, and
+       * serves as the default sender allow-list for bindings whose
+       * `accessMode === 'inherit'`.
+       *
+       * QQ Open Platform does not expose a QQ-number → openid lookup, so
+       * the operator must fill these from a C2C message the bot received
+       * (the sender's `user_openid` is visible in logs / the settings UI).
+       */
+      owners?: PlatformOwner[]
+      /**
+       * The bot's own OpenID in group chats. Needed when the QQ platform
+       * has enabled the "read all group messages" scope (which delivers
+       * GROUP_MESSAGE_CREATE events for every group message) so the
+       * adapter can filter out messages that don't @-mention the bot.
+       *
+       * When omitted, the adapter learns it from the first
+       * GROUP_AT_MESSAGE_CREATE event it receives, or — as a fallback —
+       * from an unambiguous single @-mention in a GROUP_MESSAGE_CREATE
+       * event whose author is not the mentioned user.
+       */
+      botOpenId?: string
     }
   }
 }

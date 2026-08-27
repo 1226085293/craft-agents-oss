@@ -7,7 +7,7 @@
  * existing owners).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -47,7 +47,7 @@ function makeSession(id: string): Session {
   } as unknown as Session
 }
 
-function makeSessionManager(sessions: Session[] = []): ISessionManager {
+function makeSessionManager(sessions: Session[] = [], overrides: Partial<ISessionManager> = {}): ISessionManager {
   return {
     getSessions: () => sessions,
     getSession: async (sessionId: string) => sessions.find((s) => s.id === sessionId) ?? null,
@@ -56,6 +56,8 @@ function makeSessionManager(sessions: Session[] = []): ISessionManager {
     sendMessage: async () => {},
     cancelProcessing: async () => {},
     respondToPermission: () => true,
+    setSessionPermissionMode: () => {},
+    ...overrides,
   } as unknown as ISessionManager
 }
 
@@ -156,9 +158,10 @@ function buildCommands(args: {
   ownerOnly?: boolean
   owners?: PlatformOwner[]
   pairingResult?: ReturnType<PairingCodeConsumer['consume']>
+  sessionManagerOverrides?: Partial<ISessionManager>
 }) {
   const sessions = [makeSession('sess-A')]
-  const sessionManager = makeSessionManager(sessions)
+  const sessionManager = makeSessionManager(sessions, args.sessionManagerOverrides)
   const store = new BindingStore(storeDir)
   const harness: AccessHarness = {
     config: {
@@ -386,5 +389,77 @@ describe('Commands.handle (unbound text path) — free-form gate', () => {
     const adapter = makeAdapter()
     await commands.handle(adapter, buildMsg({ text: 'hi', senderId: 'stranger' }))
     expect(adapter.sent.some((s) => s.includes('No session bound'))).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// /exec — switch the bound session's permission mode from chat
+// ---------------------------------------------------------------------------
+
+describe('Commands /exec', () => {
+  it('requires a bound session', async () => {
+    const { commands } = buildCommands({
+      ownerOnly: true,
+      owners: [{ userId: 'owner-1', addedAt: 0 }],
+    })
+    const adapter = makeAdapter()
+    await commands.handleCommand(adapter, buildMsg({ text: '/exec explore', senderId: 'owner-1' }))
+    expect(adapter.sent.some((s) => s.includes('No session bound'))).toBe(true)
+  })
+
+  it('sets explore mode to safe on the bound session', async () => {
+    const setMode = mock(() => {})
+    const { commands, store } = buildCommands({
+      ownerOnly: true,
+      owners: [{ userId: 'owner-1', addedAt: 0 }],
+      sessionManagerOverrides: { setSessionPermissionMode: setMode },
+    })
+    store.bind('ws1', 'sess-A', 'telegram', 'chan-1')
+    const adapter = makeAdapter()
+    await commands.handleCommand(adapter, buildMsg({ text: '/exec explore', senderId: 'owner-1' }))
+    expect(setMode).toHaveBeenCalledWith('sess-A', 'safe')
+    expect(adapter.sent.some((s) => s.includes('explore (read-only)'))).toBe(true)
+  })
+
+  it('sets execute mode to allow-all on the bound session', async () => {
+    const setMode = mock(() => {})
+    const { commands, store } = buildCommands({
+      ownerOnly: true,
+      owners: [{ userId: 'owner-1', addedAt: 0 }],
+      sessionManagerOverrides: { setSessionPermissionMode: setMode },
+    })
+    store.bind('ws1', 'sess-A', 'telegram', 'chan-1')
+    const adapter = makeAdapter()
+    await commands.handleCommand(adapter, buildMsg({ text: '/exec execute', senderId: 'owner-1' }))
+    expect(setMode).toHaveBeenCalledWith('sess-A', 'allow-all')
+    expect(adapter.sent.some((s) => s.includes('execute (full autonomy)'))).toBe(true)
+  })
+
+  it('rejects unknown /exec targets with usage help', async () => {
+    const setMode = mock(() => {})
+    const { commands, store } = buildCommands({
+      ownerOnly: true,
+      owners: [{ userId: 'owner-1', addedAt: 0 }],
+      sessionManagerOverrides: { setSessionPermissionMode: setMode },
+    })
+    store.bind('ws1', 'sess-A', 'telegram', 'chan-1')
+    const adapter = makeAdapter()
+    await commands.handleCommand(adapter, buildMsg({ text: '/exec ask', senderId: 'owner-1' }))
+    expect(setMode).not.toHaveBeenCalled()
+    expect(adapter.sent.some((s) => s.includes('Usage: /exec explore | execute'))).toBe(true)
+  })
+
+  it('rejects /exec from non-owner in a locked-down workspace', async () => {
+    const setMode = mock(() => {})
+    const { commands, store } = buildCommands({
+      ownerOnly: true,
+      owners: [{ userId: 'owner-1', addedAt: 0 }],
+      sessionManagerOverrides: { setSessionPermissionMode: setMode },
+    })
+    store.bind('ws1', 'sess-A', 'telegram', 'chan-1')
+    const adapter = makeAdapter()
+    await commands.handleCommand(adapter, buildMsg({ text: '/exec execute', senderId: 'stranger' }))
+    expect(setMode).not.toHaveBeenCalled()
+    expect(adapter.sent.some((s) => s.includes('private'))).toBe(true)
   })
 })

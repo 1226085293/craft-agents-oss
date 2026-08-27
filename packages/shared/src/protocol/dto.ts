@@ -440,6 +440,14 @@ export interface SendMessageOptions {
    * surfacing) that should wake the agent without looking user-authored.
    */
   hidden?: boolean
+  /**
+   * Per-send permission-mode override applied ONLY while this message's turn
+   * is processed. The persisted/diagnostics mode is untouched — no events,
+   * no UI change, no modeVersion bump. Messaging channels pass 'safe' so a
+   * desktop `ask` session processes mobile chats read-only without changing
+   * the desktop mode. Cleared when the turn completes.
+   */
+  permissionModeOverride?: PermissionMode
 }
 
 // ---------------------------------------------------------------------------

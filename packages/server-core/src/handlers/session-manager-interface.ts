@@ -42,6 +42,26 @@ export interface BusyMessageDecision {
   replyText?: string
 }
 
+export type GroupChatDecisionAction = 'reply' | 'ignore'
+
+export interface GroupChatDecisionInput {
+  platform: string
+  /** Group channel id (e.g. `group:<openid>`). */
+  groupId: string
+  userMessage: string
+  /** Display name of the group, when known. */
+  channelName?: string
+  sessionId: string
+  /** True when the sender is a workspace owner/main user — owner messages
+   *  in group chat are usually directed at the bot, so decisions should
+   *  lean toward replying. */
+  senderIsOwner?: boolean
+}
+
+export interface GroupChatDecision {
+  action: GroupChatDecisionAction
+}
+
 export interface ISessionManager {
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -145,6 +165,15 @@ export interface ISessionManager {
    * should not mutate visible history or interrupt the active run.
    */
   decideBusyMessage?(input: BusyMessageDecisionInput): Promise<BusyMessageDecision>
+  /**
+   * Group-chat participation decision: should the bot reply to a plain
+   * (non-@) group message? Used by the router's decision gate so the bot
+   * behaves like a real group member instead of echoing every message.
+   * Returns `{ action: 'reply' }` to route the message into the session,
+   * or `{ action: 'ignore' }` to skip it silently. Implementations should
+   * not mutate visible history.
+   */
+  decideGroupChat?(input: GroupChatDecisionInput): Promise<GroupChatDecision>
   clearSessionMessages(sessionId: string): Promise<void>
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>
   cancelQueuedMessage(sessionId: string, messageId: string): Promise<void>

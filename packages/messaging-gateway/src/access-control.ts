@@ -116,13 +116,18 @@ export function evaluateBindingAccess(input: BindingAccessInput): AccessDecision
 /**
  * Read the workspace's platform-level access mode, defaulting to `'open'`
  * for back-compat with configs that predate this field.
+ *
+ * QQ is the exception: it defaults to `'owner-only'` because the platform
+ * model is inherently private — only the configured main QQ should drive
+ * the bot (both group slash-commands and C2C DMs).
  */
 export function readPlatformAccessMode(
   config: MessagingConfig,
   platform: PlatformType,
 ): PlatformAccessMode {
-  if (platform !== 'telegram') return 'open'
-  return config.platforms.telegram?.accessMode ?? 'open'
+  if (platform === 'telegram') return config.platforms.telegram?.accessMode ?? 'open'
+  if (platform === 'qq') return config.platforms.qq?.accessMode ?? 'owner-only'
+  return 'open'
 }
 
 /** Read the platform's owners list (empty when not configured). */
@@ -130,8 +135,9 @@ export function readPlatformOwners(
   config: MessagingConfig,
   platform: PlatformType,
 ): PlatformOwner[] {
-  if (platform !== 'telegram') return []
-  return config.platforms.telegram?.owners ?? []
+  if (platform === 'telegram') return config.platforms.telegram?.owners ?? []
+  if (platform === 'qq') return config.platforms.qq?.owners ?? []
+  return []
 }
 
 /**

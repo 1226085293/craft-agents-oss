@@ -53,6 +53,22 @@ export function registerMessagingHandlers(server: RpcServer, deps: HandlerDeps):
     return { success: true }
   })
 
+  server.handle(RPC_CHANNELS.messaging.TEST_QQ, async (
+    _ctx,
+    creds: { appId: string; appSecret: string },
+  ) => {
+    return registry.testQQCredentials(creds)
+  })
+
+  server.handle(RPC_CHANNELS.messaging.SAVE_QQ, async (
+    ctx,
+    creds: { appId: string; appSecret: string; mainQqOpenIds?: string[] },
+  ) => {
+    if (!ctx.workspaceId) throw new Error('Missing workspaceId')
+    await registry.saveQQCredentials(ctx.workspaceId, creds)
+    return { success: true }
+  })
+
   server.handle(RPC_CHANNELS.messaging.DISCONNECT, async (ctx, platform: string) => {
     if (!ctx.workspaceId) throw new Error('Missing workspaceId')
     await registry.disconnectPlatform(ctx.workspaceId, platform)

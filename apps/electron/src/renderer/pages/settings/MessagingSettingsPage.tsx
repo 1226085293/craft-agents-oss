@@ -1,7 +1,7 @@
 /**
  * MessagingSettingsPage
  *
- * Configure messaging platform connections (Telegram, WhatsApp, Lark) and
+ * Configure messaging platform connections (Telegram, WhatsApp, Lark, QQ) and
  * view active session bindings.
  *
  * Layout:
@@ -12,7 +12,7 @@
  *    row, then a separator, then a collapsible Supergroup section that
  *    expands to show topic-bound bindings. Mirrors the chevron pattern
  *    used by AiSettingsPage's `WorkspaceOverrideCard`.
- *  - WhatsApp / Lark: bindings render as a flat list under their bot row.
+ *  - WhatsApp / Lark / QQ: bindings render as a flat list under their bot row.
  */
 
 import * as React from 'react'
@@ -51,6 +51,7 @@ import { SettingsSection, SettingsCard } from '@/components/settings'
 import { MessagingPlatformIcon } from '@/components/messaging/MessagingPlatformIcon'
 import { TelegramConnectDialog } from '@/components/messaging/TelegramConnectDialog'
 import { LarkConnectDialog } from '@/components/messaging/LarkConnectDialog'
+import { QQConnectDialog } from '@/components/messaging/QQConnectDialog'
 import { TelegramSupergroupPairingDialog } from '@/components/messaging/TelegramSupergroupPairingDialog'
 import { WhatsAppConnectDialog } from '@/components/messaging/WhatsAppConnectDialog'
 import {
@@ -124,6 +125,9 @@ export default function MessagingSettingsPage() {
             <SettingsCard>
               <PlatformRow platform="lark" workspaceId={activeWorkspace.id} />
             </SettingsCard>
+            <SettingsCard>
+              <PlatformRow platform="qq" workspaceId={activeWorkspace.id} />
+            </SettingsCard>
           </SettingsSection>
         </div>
       </ScrollArea>
@@ -135,12 +139,13 @@ export default function MessagingSettingsPage() {
 // Platform row
 // ---------------------------------------------------------------------------
 
-type Platform = 'telegram' | 'whatsapp' | 'lark'
+type Platform = 'telegram' | 'whatsapp' | 'lark' | 'qq'
 
 const PLATFORM_LABEL_KEYS: Record<Platform, string> = {
   telegram: 'settings.messaging.telegram.title',
   whatsapp: 'settings.messaging.whatsapp.title',
   lark: 'settings.messaging.lark.title',
+  qq: 'settings.messaging.qq.title',
 }
 
 // Row column geometry shared across the bot header and all child rows.
@@ -472,6 +477,9 @@ function PlatformRow({ platform, workspaceId }: { platform: Platform; workspaceI
       )}
       {platform === 'lark' && (
         <LarkConnectDialog open={connectOpen} onOpenChange={setConnectOpen} reconfigure={reconfigure} />
+      )}
+      {platform === 'qq' && (
+        <QQConnectDialog open={connectOpen} onOpenChange={setConnectOpen} reconfigure={reconfigure} />
       )}
     </>
   )

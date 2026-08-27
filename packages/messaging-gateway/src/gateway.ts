@@ -64,6 +64,10 @@ export interface GatewayOptions {
    */
   getWorkspaceConfig?: () => MessagingConfig
   /**
+   * Persists a partial update to the workspace messaging config.
+   */
+  updateWorkspaceConfig?: (partial: Partial<MessagingConfig>) => MessagingConfig
+  /**
    * Resolves an LLM connection slug to its display name at call time.
    * Returns undefined when the slug no longer exists (deleted connection).
    * Used by /status to show live connection info; optional for tests.
@@ -258,6 +262,7 @@ export class MessagingGateway {
     this.accessDeps = {
       getWorkspaceConfig:
         opts.getWorkspaceConfig ?? (() => ({ enabled: false, platforms: {} })),
+      updateWorkspaceConfig: opts.updateWorkspaceConfig,
       seedOwnerOnFirstPair:
         opts.seedOwnerOnFirstPair ?? (async () => []),
       pendingStore: this.pendingStore,
@@ -410,6 +415,22 @@ export class MessagingGateway {
     adapter.onMessage(async (msg: IncomingMessage) => {
       const isCommand = msg.text.trim().startsWith('/')
       if (isCommand) {
+        // In shared groups (many bots coexist) a slash command is only
+        // unambiguous when the bot is explicitly @-mentioned. An un-addressed
+        // /command is silently dropped so this bot doesn't answer commands
+        // aimed at another bot. DMs (and platforms that don't tag mentions)
+        // are untouched — there the bot is the only listener.
+        if (msg.chatKind === 'group' && msg.mentionKind !== 'at') {
+          this.log.info('group chat command ignored (bot not @-mentioned)', {
+            event: 'group_command_ignored_no_at',
+            platform: adapter.platform,
+            channelId: msg.channelId,
+            threadId: msg.threadId,
+            senderId: msg.senderId,
+            command: msg.text.trim().slice(0, 80),
+          })
+          return
+        }
         const handled = await this.commands.handleCommand(adapter, msg)
         if (handled) return
       }

@@ -46,6 +46,7 @@ function makeAdapter(platform: PlatformType = 'telegram'): PlatformAdapter & { c
     lark: 'lark-post',
     whatsapp: 'whatsapp',
     qq: 'v2',
+    wechat: 'v2',
   }
   const caps: AdapterCapabilities = {
     messageEditing: true,

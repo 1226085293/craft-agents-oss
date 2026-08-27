@@ -221,6 +221,14 @@ export interface IMessagingGatewayRegistry {
     mainQqOpenIds?: string[]
   }): Promise<void>
 
+  /** Save WeChat (ClawBot) credentials and (re)initialize the adapter. */
+  saveWeChatCredentials(workspaceId: string, creds: {
+    botToken: string
+    baseUrl?: string
+    botId?: string
+    userId?: string
+  }): Promise<void>
+
   /** Disable a platform for a workspace, preserving WhatsApp auth state unless forgotten separately. */
   disconnectPlatform(workspaceId: string, platform: string): Promise<void>
 

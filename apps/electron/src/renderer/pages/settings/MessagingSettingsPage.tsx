@@ -52,6 +52,7 @@ import { MessagingPlatformIcon } from '@/components/messaging/MessagingPlatformI
 import { TelegramConnectDialog } from '@/components/messaging/TelegramConnectDialog'
 import { LarkConnectDialog } from '@/components/messaging/LarkConnectDialog'
 import { QQConnectDialog } from '@/components/messaging/QQConnectDialog'
+import { WeChatConnectDialog } from '@/components/messaging/WeChatConnectDialog'
 import { TelegramSupergroupPairingDialog } from '@/components/messaging/TelegramSupergroupPairingDialog'
 import { WhatsAppConnectDialog } from '@/components/messaging/WhatsAppConnectDialog'
 import {
@@ -128,6 +129,9 @@ export default function MessagingSettingsPage() {
             <SettingsCard>
               <PlatformRow platform="qq" workspaceId={activeWorkspace.id} />
             </SettingsCard>
+            <SettingsCard>
+              <PlatformRow platform="wechat" workspaceId={activeWorkspace.id} />
+            </SettingsCard>
           </SettingsSection>
         </div>
       </ScrollArea>
@@ -139,13 +143,14 @@ export default function MessagingSettingsPage() {
 // Platform row
 // ---------------------------------------------------------------------------
 
-type Platform = 'telegram' | 'whatsapp' | 'lark' | 'qq'
+type Platform = 'telegram' | 'whatsapp' | 'lark' | 'qq' | 'wechat'
 
 const PLATFORM_LABEL_KEYS: Record<Platform, string> = {
   telegram: 'settings.messaging.telegram.title',
   whatsapp: 'settings.messaging.whatsapp.title',
   lark: 'settings.messaging.lark.title',
   qq: 'settings.messaging.qq.title',
+  wechat: 'settings.messaging.wechat.title',
 }
 
 // Row column geometry shared across the bot header and all child rows.
@@ -480,6 +485,9 @@ function PlatformRow({ platform, workspaceId }: { platform: Platform; workspaceI
       )}
       {platform === 'qq' && (
         <QQConnectDialog open={connectOpen} onOpenChange={setConnectOpen} reconfigure={reconfigure} />
+      )}
+      {platform === 'wechat' && (
+        <WeChatConnectDialog open={connectOpen} onOpenChange={setConnectOpen} reconfigure={reconfigure} />
       )}
     </>
   )

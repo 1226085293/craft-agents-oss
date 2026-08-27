@@ -426,6 +426,7 @@ export const CHANNEL_MAP = {
   saveLarkCredentials: invoke(RPC_CHANNELS.messaging.SAVE_LARK),
   testQQCredentials: invoke(RPC_CHANNELS.messaging.TEST_QQ),
   saveQQCredentials: invoke(RPC_CHANNELS.messaging.SAVE_QQ),
+  saveWeChatCredentials: invoke(RPC_CHANNELS.messaging.SAVE_WECHAT),
   disconnectMessagingPlatform: invoke(RPC_CHANNELS.messaging.DISCONNECT),
   forgetMessagingPlatform: invoke(RPC_CHANNELS.messaging.FORGET),
   getMessagingBindings: invoke(RPC_CHANNELS.messaging.GET_BINDINGS),

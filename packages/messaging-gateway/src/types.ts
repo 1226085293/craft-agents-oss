@@ -9,7 +9,7 @@
 // Platform types
 // ---------------------------------------------------------------------------
 
-export type PlatformType = 'telegram' | 'whatsapp' | 'lark' | 'qq'
+export type PlatformType = 'telegram' | 'whatsapp' | 'lark' | 'qq' | 'wechat'
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -583,6 +583,21 @@ export interface MessagingConfig {
        * event whose author is not the mentioned user.
        */
       botOpenId?: string
+    }
+    wechat?: {
+      enabled: boolean
+      /**
+       * Workspace-level access policy. WeChat is a personal-account bot
+       * (ClawBot) — anyone the account can talk to is implicitly a peer;
+       * defaults to `'open'` so DMs and group @-mentions route freely.
+       */
+      accessMode?: PlatformAccessMode
+      /**
+       * User IDs permitted to drive the bot at workspace level, when
+       * `accessMode` is `'owner-only'`. WeChat user ids are opaque
+       * strings issued by the iLink platform (see `from_user_id`).
+       */
+      owners?: PlatformOwner[]
     }
   }
 }

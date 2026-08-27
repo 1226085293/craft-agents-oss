@@ -440,6 +440,7 @@ export const RPC_CHANNELS = {
     SAVE_LARK: 'messaging:saveLark',
     TEST_QQ: 'messaging:testQq',
     SAVE_QQ: 'messaging:saveQq',
+    SAVE_WECHAT: 'messaging:saveWechat',
     DISCONNECT: 'messaging:disconnect',
     FORGET: 'messaging:forget',
     GET_BINDINGS: 'messaging:getBindings',

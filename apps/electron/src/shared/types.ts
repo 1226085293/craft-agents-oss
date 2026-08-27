@@ -716,6 +716,7 @@ export interface ElectronAPI {
   saveLarkCredentials(creds: { appId: string; appSecret: string; domain: 'lark' | 'feishu' }): Promise<void>
   testQQCredentials(creds: { appId: string; appSecret: string }): Promise<{ success: boolean; botName?: string; error?: string }>
   saveQQCredentials(creds: { appId: string; appSecret: string; mainQqOpenIds?: string[] }): Promise<void>
+  saveWeChatCredentials(creds: { botToken: string; baseUrl?: string; botId?: string; userId?: string }): Promise<void>
   disconnectMessagingPlatform(platform: string): Promise<void>
   forgetMessagingPlatform(platform: string): Promise<void>
   getMessagingBindings(): Promise<Array<{ id: string; workspaceId: string; sessionId: string; platform: string; channelId: string; threadId?: number; channelName?: string; enabled: boolean; createdAt: number; accessMode?: MessagingBindingAccessMode; allowedSenderIds?: string[] }>>

@@ -31,6 +31,7 @@ import { TelegramAdapter } from './adapters/telegram/index'
 import { WhatsAppAdapter, type WhatsAppEvent } from './adapters/whatsapp/index'
 import { LarkAdapter, parseLarkCredentials, type LarkCredentials } from './adapters/lark/index'
 import { QQAdapter, parseQQCredentials, type QQCredentials } from './adapters/qq/index'
+import { WeChatAdapter, parseWeChatCredentials, type WeChatCredentials } from './adapters/wechat/index'
 import { TopicRegistry } from './topic-registry'
 import type { SessionEvent } from './renderer'
 import type { EventSinkFn } from './event-fanout'
@@ -211,6 +212,22 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       void this.tryConnectQQ(workspaceId, state).catch((err) => {
         this.log.error('background QQ connect failed', {
           event: 'qq_connect_failed',
+          workspaceId,
+          error: err,
+        })
+      })
+    }
+
+    if (isPlatformConfigured(config, 'wechat')) {
+      this.setPlatformRuntime(workspaceId, state, 'wechat', {
+        configured: true,
+        connected: false,
+        state: 'connecting',
+        lastError: undefined,
+      })
+      void this.tryConnectWeChat(workspaceId, state).catch((err) => {
+        this.log.error('background WeChat connect failed', {
+          event: 'wechat_connect_failed',
           workspaceId,
           error: err,
         })
@@ -913,6 +930,53 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     await state.gateway.start()
   }
 
+  /**
+   * Save WeChat ClawBot credentials (bot_token + baseUrl from QR login) and
+   * (re)initialize the adapter. `creds` comes from a completed `startWeChatLogin`
+   * flow (botToken/baseUrl/botId/userId) or directly from stored values.
+   */
+  async saveWeChatCredentials(
+    workspaceId: string,
+    creds: { botToken: string; baseUrl?: string; botId?: string; userId?: string },
+  ): Promise<void> {
+    if (!creds.botToken) throw new Error('WeChat botToken is empty')
+
+    await this.opts.credentialManager.set(
+      {
+        type: 'messaging_bearer',
+        workspaceId,
+        name: 'wechat',
+      },
+      { value: JSON.stringify(creds) },
+    )
+
+    const state = this.workspaces.get(workspaceId) ?? this.bootstrapWorkspace(workspaceId)
+    const currentConfig = state.configStore.get()
+    const currentWechat = currentConfig.platforms.wechat
+
+    state.configStore.update({
+      enabled: true,
+      platforms: {
+        ...currentConfig.platforms,
+        wechat: {
+          enabled: true,
+          accessMode: currentWechat?.accessMode ?? 'open',
+          owners: currentWechat?.owners,
+        },
+      },
+    })
+
+    this.setPlatformRuntime(workspaceId, state, 'wechat', {
+      configured: true,
+      connected: false,
+      state: 'connecting',
+      lastError: undefined,
+    })
+
+    await this.tryConnectWeChat(workspaceId, state)
+    await state.gateway.start()
+  }
+
   async disconnectPlatform(workspaceId: string, platform: string): Promise<void> {
     if (!isKnownPlatform(platform)) return
     const state = this.workspaces.get(workspaceId)
@@ -1232,6 +1296,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         whatsapp: createRuntime('whatsapp', isPlatformConfigured(cfg, 'whatsapp')),
         lark: createRuntime('lark', isPlatformConfigured(cfg, 'lark')),
         qq: createRuntime('qq', isPlatformConfigured(cfg, 'qq')),
+        wechat: createRuntime('wechat', isPlatformConfigured(cfg, 'wechat')),
       },
     }
     this.workspaces.set(workspaceId, state)
@@ -1383,6 +1448,79 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         error: err,
       })
       this.setPlatformRuntime(workspaceId, state, 'qq', {
+        configured: true,
+        connected: false,
+        state: 'error',
+        lastError: err instanceof Error ? err.message : String(err),
+      })
+      throw err
+    }
+  }
+
+  private async tryConnectWeChat(workspaceId: string, state: WorkspaceState): Promise<void> {
+    const cred = await this.opts.credentialManager
+      .get({ type: 'messaging_bearer', workspaceId, name: 'wechat' })
+      .catch(() => null)
+
+    if (!cred?.value) {
+      this.setPlatformRuntime(workspaceId, state, 'wechat', {
+        configured: true,
+        connected: false,
+        state: 'error',
+        lastError: 'WeChat credentials are missing.',
+      })
+      return
+    }
+
+    let creds: WeChatCredentials
+    try {
+      creds = parseWeChatCredentials(cred.value)
+    } catch (err) {
+      this.setPlatformRuntime(workspaceId, state, 'wechat', {
+        configured: true,
+        connected: false,
+        state: 'error',
+        lastError: err instanceof Error ? err.message : 'WeChat credentials are malformed',
+      })
+      return
+    }
+
+    await state.gateway.unregisterAdapter('wechat').catch((err) => {
+      this.log.warn('unregisterAdapter(wechat) failed (non-fatal)', {
+        event: 'wechat_unregister_failed',
+        workspaceId,
+        error: err,
+      })
+    })
+
+    try {
+      const adapter = new WeChatAdapter()
+      const wechatCfg = state.configStore.get().platforms.wechat
+      await adapter.initialize({
+        token: cred.value,
+        logger: this.log.child({
+          component: 'wechat-adapter',
+          workspaceId,
+          platform: 'wechat',
+        }),
+      })
+
+      state.botUsernames.wechat = creds.botId ?? creds.userId ?? 'wechat'
+      state.gateway.registerAdapter(adapter)
+      this.setPlatformRuntime(workspaceId, state, 'wechat', {
+        configured: true,
+        connected: true,
+        state: 'connected',
+        identity: state.botUsernames.wechat,
+        lastError: undefined,
+      })
+    } catch (err) {
+      this.log.error('failed to connect WeChat', {
+        event: 'wechat_connect_failed',
+        workspaceId,
+        error: err,
+      })
+      this.setPlatformRuntime(workspaceId, state, 'wechat', {
         configured: true,
         connected: false,
         state: 'error',
@@ -2202,7 +2340,7 @@ function toBindingInfo(b: ChannelBinding): MessagingBindingInfo {
 }
 
 function isKnownPlatform(p: string): p is PlatformType {
-  return p === 'telegram' || p === 'whatsapp' || p === 'lark' || p === 'qq'
+  return p === 'telegram' || p === 'whatsapp' || p === 'lark' || p === 'qq' || p === 'wechat'
 }
 
 function capitalize(value: string): string {

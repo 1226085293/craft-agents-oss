@@ -462,6 +462,7 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.messaging.SAVE_LARK,
   RPC_CHANNELS.messaging.TEST_QQ,
   RPC_CHANNELS.messaging.SAVE_QQ,
+  RPC_CHANNELS.messaging.SAVE_WECHAT,
   RPC_CHANNELS.messaging.DISCONNECT,
   RPC_CHANNELS.messaging.FORGET,
   RPC_CHANNELS.messaging.GET_BINDINGS,

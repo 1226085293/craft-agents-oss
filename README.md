@@ -68,18 +68,18 @@ Yes. That's the core idea behind agent-native software. You describe what you wa
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://thecraftagents.com/install-app.sh | bash
+curl -fsSL https://github.com/1226085293/craft-agents-oss/releases/latest/download/install-app.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://thecraftagents.com/install-app.ps1 | iex
+irm https://github.com/1226085293/craft-agents-oss/releases/latest/download/install-app.ps1 | iex
 ```
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/lukilabs/craft-agents-oss.git
+git clone https://github.com/1226085293/craft-agents-oss.git
 cd craft-agents-oss
 bun install
 bun run electron:start

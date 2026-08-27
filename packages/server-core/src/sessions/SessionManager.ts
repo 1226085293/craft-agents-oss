@@ -6,7 +6,7 @@ import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@cr
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
 import { basename, dirname, join } from 'path'
 import { existsSync } from 'fs'
-import { copyFile, readFile, writeFile, mkdir, stat, rm } from 'fs/promises'
+import { copyFile, readFile, writeFile, mkdir, stat, rm, readdir } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
 import { type AgentEvent, setPermissionMode, setTransientPermissionMode, clearTransientPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
 import {
@@ -6296,6 +6296,48 @@ export class SessionManager implements ISessionManager {
     }
   }
 
+  /**
+   * Reset the session's working directory to its initial state.
+   *
+   * Removes all files and directories created during the session (e.g. files
+   * written by the agent's bash/write tools, orphaned attachments, plans, data,
+   * downloads) while preserving the session data file and agent runtime state.
+   * Standard subdirectories are recreated empty so the session folder matches a
+   * freshly-created session.
+   */
+  private async resetSessionDirectory(managed: ManagedSession): Promise<void> {
+    const sessionPath = getSessionStoragePath(managed.workspace.rootPath, managed.id)
+
+    // Entries that must survive a /clear.
+    const preservedEntries = new Set([
+      // The session data file — it is rewritten with the cleared messages.
+      'session.jsonl',
+      // Pi agent-server runtime state directory.
+      '.pi-agent',
+    ])
+
+    try {
+      const entries = await readdir(sessionPath, { withFileTypes: true })
+
+      for (const entry of entries) {
+        if (preservedEntries.has(entry.name)) continue
+
+        const entryPath = join(sessionPath, entry.name)
+        try {
+          await rm(entryPath, { recursive: true, force: true })
+        } catch (error) {
+          sessionLog.warn(`Failed to remove session directory entry ${entryPath} for ${managed.id}: ${error instanceof Error ? error.message : error}`)
+        }
+      }
+
+      // Recreate the standard subdirectory structure (plans/, attachments/,
+      // long_responses/, data/, downloads/).
+      ensureSessionDir(managed.workspace.rootPath, managed.id)
+    } catch (error) {
+      sessionLog.warn(`Failed to reset session directory for ${managed.id}: ${error instanceof Error ? error.message : error}`)
+    }
+  }
+
   async clearSessionMessages(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
@@ -6308,6 +6350,7 @@ export class SessionManager implements ISessionManager {
     await this.ensureMessagesLoaded(managed)
     await this.disposeManagedAgentRuntime(managed, 'clear session context')
     await this.clearBackendPersistentContext(managed)
+    await this.resetSessionDirectory(managed)
 
     const timer = this.deltaFlushTimers.get(sessionId)
     if (timer) {

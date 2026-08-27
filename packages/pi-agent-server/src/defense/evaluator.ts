@@ -118,11 +118,18 @@ export class DefenseEvaluator {
    * real completions. Unlike silent-stop (which scans the whole run), this
    * signal anchors strictly on the last message: earlier progress updates
    * in a long tool chain must not mask it (2026-08-22 incidents).
+   *
+   * `hasRepetitionLoop` flags the degeneration case where the FINAL
+   * assistant message carries text, but that text devolved into a
+   * repetition loop (a large share of exact-duplicate lines/sentences).
+   * Such a reply is a model failure, not an answer — it must resume like
+   * an empty response (2026-08-28 incident: 213K chars of 874 repeats).
    */
   evaluate(lastAssistantMessage?: {
     hasVisibleText: boolean;
     aborted: boolean;
     endsWithEmptyResponse?: boolean;
+    hasRepetitionLoop?: boolean;
   }): DefenseEvaluationResult {
     if (!this.enabled) {
       return { evaluated: false, shouldResume: false, state: State.IDLE };
@@ -168,7 +175,12 @@ export class DefenseEvaluator {
     // progress text early, which makes run-wide hasVisibleText useless here.
     const emptyResponse = lastAssistantMessage?.endsWithEmptyResponse === true;
 
-    const needsEvaluation = silentStop || emptyResponse || shouldResume || complexity.needsEvaluation;
+    // Degeneration loop: the final message is full of repeated text. Carries
+    // visible text, so silentStop/emptyResponse miss it; the reply is a
+    // model failure and must trigger a resume just like an empty response.
+    const repetitionLoop = lastAssistantMessage?.hasRepetitionLoop === true;
+
+    const needsEvaluation = silentStop || emptyResponse || repetitionLoop || shouldResume || complexity.needsEvaluation;
     const stop = this.lifecycle.onStop(needsEvaluation);
 
     if (stop === 'abort') {
@@ -182,7 +194,7 @@ export class DefenseEvaluator {
     // Rule-based evaluation: only concrete early-stop signals warrant an
     // automatic resume — silent stop (no output at all) or wrote-without-
     // read-back. High complexity alone is informational.
-    if (stop === 'run' || (!shouldResume && !silentStop && !emptyResponse)) {
+    if (stop === 'run' || (!shouldResume && !silentStop && !emptyResponse && !repetitionLoop)) {
       this.lifecycle.markDone();
       return {
         evaluated: true,
@@ -192,7 +204,7 @@ export class DefenseEvaluator {
     }
 
     // needsEvaluation: build resume context and decide.
-    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop, emptyResponse);
+    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop, emptyResponse, repetitionLoop);
     const decision = this.lifecycle.decideResume(resumeMessage);
     if (decision === State.FAILED) {
       return {
@@ -220,6 +232,7 @@ function buildResumeMessage(
   toolCalls: ToolCallLike[],
   silentStop: boolean,
   emptyResponse: boolean,
+  repetitionLoop: boolean,
 ): string {
   const writeCalls = toolCalls.filter((c) => ['write', 'edit', 'bash:write'].includes(c.type));
   const lines: string[] = [
@@ -230,6 +243,13 @@ function buildResumeMessage(
       `- Your previous model call returned an EMPTY response (no visible content; ` +
       `likely an upstream fault or max_tokens truncation burning invisible reasoning) — ` +
       `NOT an intentional completion. Pick up exactly where you left off.`,
+    );
+  }
+  if (repetitionLoop) {
+    lines.push(
+      `- Your previous reply devolved into a REPETITION LOOP (a large share of the output ` +
+      `was exact-duplicate text) — a model degeneration, not an answer. Give the user a ` +
+      `concise, non-repetitive reply covering the outstanding points.`,
     );
   }
   if (silentStop) {

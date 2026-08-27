@@ -80,6 +80,7 @@ import { createSearchTool } from './tools/search/create-search-tool.ts';
 import { allowCraftMetadataProperties, stripCraftMetadata } from './craft-metadata-schema.ts';
 import { applySystemPromptOverride, applySystemPromptOverrideWithDefense } from './system-prompt-override.ts';
 import { DefenseEvaluator, resolveDefenseEnabled } from './defense/index.ts';
+import { detectRepetitionLoop, extractAssistantText } from './defense/repetition-detector.ts';
 
 // ============================================================
 // Types — JSONL Protocol
@@ -459,6 +460,7 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
     hasVisibleText: boolean;
     aborted: boolean;
     endsWithEmptyResponse: boolean;
+    hasRepetitionLoop: boolean;
   } | undefined;
   if (Array.isArray(endMessages)) {
     let anyText = false;
@@ -510,7 +512,14 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
       const cleanStop = lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length';
       endsWithEmptyResponse = cleanStop && noContentBlocks;
     }
-    runOutput = { hasVisibleText: anyText, aborted, endsWithEmptyResponse };
+    // Repetition-loop (degeneration) detection (2026-08-28 incident): the
+    // final assistant message contains text, but the text devolved into a
+    // degenerate repeat loop (e.g. 213K chars = 874 copies of one sentence).
+    // Like endsWithEmptyResponse this anchors on the LAST assistant message;
+    // run-wide text presence must not mask a garbage terminal reply.
+    const lastText = lastAssistant ? extractAssistantText(lastAssistant.content) : '';
+    const hasRepetitionLoop = lastText.length > 0 && detectRepetitionLoop(lastText);
+    runOutput = { hasVisibleText: anyText, aborted, endsWithEmptyResponse, hasRepetitionLoop };
 
     // Double-guard for the P0 abort rule (evaluator also short-circuits):
     // a user-initiated stop is terminal. If ANY assistant message carries

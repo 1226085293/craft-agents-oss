@@ -806,6 +806,32 @@ function createAuthenticatedRegistry(): {
   return { authStorage, modelRegistry };
 }
 
+/**
+ * Apply LLM resilience overrides on a fresh Pi session (in-memory only —
+ * does not persist to settings.json). Ensures:
+ * 1. Auto-retry is on (Pi SDK retries connection/timeout errors — matches
+ *    upstream gateway failures like ConnectionResetError / request_timeout).
+ * 2. HTTP idle timeout is capped at 2 min (default is 5 min), so a stalled
+ *    upstream response (no data at all) can't hold a turn hostage.
+ * Combined with the LiteLLM gateway's 45s request_timeout, the worst case
+ * for a dead upstream is ~2-3 min instead of 10+ min.
+ */
+function applyPiResilienceSettings(session: AgentSession): void {
+  try {
+    session.settingsManager.applyOverrides({
+      retry: {
+        enabled: true,
+        maxRetries: 3,
+        baseDelayMs: 2000,
+      },
+      httpIdleTimeoutMs: 120_000,
+    });
+    debugLog('[resilience] Applied retry + 2min http idle timeout to Pi session');
+  } catch (error) {
+    debugLog(`[resilience] Could not apply settings: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 async function ensureSession(): Promise<AgentSession> {
   if (piSession) return piSession;
   if (!initConfig) throw new Error('Cannot create session: init not received');
@@ -966,6 +992,11 @@ async function ensureSession(): Promise<AgentSession> {
   // Create the session — tools flow through customTools + allowlist (see comment above).
   const { session } = await createAgentSession(sessionOptions);
   piSession = session;
+
+  // LLM resilience: apply retry + capped HTTP idle timeout in memory so every
+  // Craft session inherits the same client-side fallback against upstream
+  // gateway failures (LiteLLM connection resets / request timeouts).
+  applyPiResilienceSettings(session);
 
   toolsChanged = false;
   debugLog(`Created Pi session: ${session.sessionId} (${wrappedAll.length} tools)`);
@@ -1276,6 +1307,9 @@ async function queryLlm(request: LLMQueryRequest): Promise<LLMQueryResult> {
     };
 
     const { session: ephemeralSession } = await createAgentSession(ephemeralOptions);
+
+    // Same resilience overrides as the main session (retry + capped idle timeout).
+    applyPiResilienceSettings(ephemeralSession);
 
     // Pi SDK ignores options.model for ephemeral sessions (same issue as options.tools).
     // Explicitly set the model after creation to ensure the mini model is used.

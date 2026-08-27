@@ -173,6 +173,12 @@ export function WeChatConnectDialog({
                 </StatusRow>
               )}
 
+              {phase.kind === 'scanning' && (
+                <p className="max-w-[320px] text-center text-xs text-muted-foreground">
+                  {t('settings.messaging.wechat.scannedHint')}
+                </p>
+              )}
+
               {phase.kind === 'need_verifycode' && (
                 <div className="flex w-full max-w-[300px] flex-col gap-2">
                   <p className="text-center text-sm text-muted-foreground">

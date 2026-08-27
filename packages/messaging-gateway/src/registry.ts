@@ -1095,6 +1095,10 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
    * scan/verify/connected/error events until the flow completes or times out.
    */
   async startWeChatConnect(workspaceId: string): Promise<void> {
+    this.log.info('wechat start connect', {
+      event: 'wechat_start_connect',
+      workspaceId,
+    })
     const state = this.workspaces.get(workspaceId) ?? this.bootstrapWorkspace(workspaceId)
 
     // Abort any in-flight connect flow for this workspace.
@@ -1137,6 +1141,11 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     state.wechatConnect = conn
 
     this.emitWeChatEvent(workspaceId, { type: 'qr', qr: qr.qrcode_img_content })
+    this.log.info('wechat QR code emitted', {
+      event: 'wechat_qr_emitted',
+      workspaceId,
+      qrLen: qr.qrcode_img_content?.length ?? 0,
+    })
 
     // Fire-and-forget polling loop; errors are surfaced via UI events.
     void this.runWeChatConnectPoll(workspaceId, state, conn).catch((err) => {
@@ -1164,6 +1173,11 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     if (!trimmed) throw new Error('Verify code is empty')
     conn.pendingVerifyCode = trimmed
     conn.waitingVerifyCode = false
+    this.log.info('wechat verify code submitted', {
+      event: 'wechat_verify_code_submitted',
+      workspaceId,
+      codeLen: trimmed.length,
+    })
     this.emitWeChatEvent(workspaceId, { type: 'scanning' })
   }
 
@@ -1203,14 +1217,57 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
             break
 
           case 'scaned':
+            this.log.info('wechat QR scanned', {
+              event: 'wechat_qr_scaned',
+              workspaceId,
+              hadVerifyCode: Boolean(conn.pendingVerifyCode),
+            })
             conn.pendingVerifyCode = undefined
             this.emitWeChatEvent(workspaceId, { type: 'scanning' })
             break
 
           case 'need_verifycode':
+            this.log.info('wechat QR needs verify code', {
+              event: 'wechat_qr_need_verifycode',
+              workspaceId,
+              waiting: conn.waitingVerifyCode,
+            })
             if (!conn.waitingVerifyCode) {
               conn.waitingVerifyCode = true
               this.emitWeChatEvent(workspaceId, { type: 'need_verifycode' })
+            }
+            break
+
+          case 'verify_code_blocked':
+            this.log.warn('wechat QR verify code blocked', {
+              event: 'wechat_qr_verify_blocked',
+              workspaceId,
+            })
+            conn.pendingVerifyCode = undefined
+            conn.waitingVerifyCode = false
+            // Fall through to QR refresh (mirrors official plugin).
+            conn.qrRefreshCount += 1
+            if (conn.qrRefreshCount > WECHAT_MAX_QR_REFRESH) {
+              conn.active = false
+              this.emitWeChatEvent(workspaceId, {
+                type: 'error',
+                message: 'Too many incorrect verification codes. Please try again later.',
+              })
+              return
+            }
+            try {
+              const newQr = await wechatFetchQRCode(WECHAT_FIXED_BASE_URL, [])
+              conn.qrcode = newQr.qrcode
+              conn.pendingVerifyCode = undefined
+              conn.waitingVerifyCode = false
+              this.emitWeChatEvent(workspaceId, { type: 'qr', qr: newQr.qrcode_img_content })
+            } catch (err) {
+              conn.active = false
+              this.emitWeChatEvent(workspaceId, {
+                type: 'error',
+                message: err instanceof Error ? err.message : String(err),
+              })
+              return
             }
             break
 
@@ -1226,6 +1283,12 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
             break
 
           case 'expired':
+            this.log.info('wechat QR expired', {
+              event: 'wechat_qr_expired',
+              workspaceId,
+              refreshCount: conn.qrRefreshCount,
+              maxRefresh: WECHAT_MAX_QR_REFRESH,
+            })
             conn.qrRefreshCount += 1
             if (conn.qrRefreshCount > WECHAT_MAX_QR_REFRESH) {
               conn.active = false
@@ -1250,6 +1313,10 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
             break
 
           case 'binded_redirect':
+            this.log.info('wechat QR binded redirect', {
+              event: 'wechat_qr_binded_redirect',
+              workspaceId,
+            })
             conn.active = false
             this.emitWeChatEvent(workspaceId, {
               type: 'error',
@@ -1259,6 +1326,14 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
 
           case 'confirmed': {
             conn.active = false
+            this.log.info('wechat QR confirmed', {
+              event: 'wechat_qr_confirmed',
+              workspaceId,
+              hasBotToken: Boolean(status.bot_token),
+              hasBotId: Boolean(status.ilink_bot_id),
+              hasUserId: Boolean(status.ilink_user_id),
+              hasBaseUrl: Boolean(status.baseurl),
+            })
             const botToken = status.bot_token
             const botId = status.ilink_bot_id
             if (!botToken || !botId) {

@@ -12,6 +12,7 @@
  * gateways via initializeWorkspace() for every workspace that has messaging enabled.
  */
 
+import { randomBytes } from 'node:crypto'
 import { existsSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
@@ -113,6 +114,7 @@ interface WorkspaceState {
   whatsapp: WhatsAppAdapter | null
   whatsappOffEvent?: () => void
   whatsappRecoveryInFlight?: Promise<WhatsAppAdapter | undefined>
+  wechatConnect?: WeChatConnectState
   telegramRetryTimer?: ReturnType<typeof setTimeout>
   telegramRetryAttempt: number
   telegramConnectInFlight?: Promise<void>
@@ -130,6 +132,106 @@ function telegramRetryDelay(attempt: number): number {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// ---------------------------------------------------------------------------
+// WeChat QR login helpers (mirrors official @tencent-weixin/openclaw-weixin)
+// ---------------------------------------------------------------------------
+const WECHAT_FIXED_BASE_URL = 'https://ilinkai.weixin.qq.com'
+const WECHAT_BOT_TYPE = '3'
+const WECHAT_QR_POLL_TIMEOUT_MS = 35_000
+const WECHAT_LOGIN_TIMEOUT_MS = 480_000
+const WECHAT_MAX_QR_REFRESH = 3
+const WECHAT_ILINK_APP_ID = 'bot'
+const WECHAT_ILINK_APP_CLIENT_VERSION = '132102' // openclaw-weixin 2.4.6
+
+function randomWechatUin(): string {
+  const uint32 = randomBytes(4).readUInt32BE(0)
+  return Buffer.from(String(uint32), 'utf-8').toString('base64')
+}
+
+function wechatCommonHeaders(): Record<string, string> {
+  return {
+    'iLink-App-Id': WECHAT_ILINK_APP_ID,
+    'iLink-App-ClientVersion': WECHAT_ILINK_APP_CLIENT_VERSION,
+    'X-WECHAT-UIN': randomWechatUin(),
+  }
+}
+
+interface WeChatQrResponse {
+  qrcode: string
+  qrcode_img_content: string
+}
+
+async function wechatFetchQRCode(
+  baseUrl: string,
+  localTokenList: string[],
+): Promise<WeChatQrResponse> {
+  const res = await fetch(
+    `${baseUrl}/ilink/bot/get_bot_qrcode?bot_type=${encodeURIComponent(WECHAT_BOT_TYPE)}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...wechatCommonHeaders(),
+      },
+      body: JSON.stringify({ local_token_list: localTokenList }),
+      signal: AbortSignal.timeout(15_000),
+    },
+  )
+  if (!res.ok) {
+    throw new Error(`get_bot_qrcode HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
+  }
+  return (await res.json()) as WeChatQrResponse
+}
+
+interface WeChatQrStatusResponse {
+  status: string
+  bot_token?: string
+  ilink_bot_id?: string
+  baseurl?: string
+  ilink_user_id?: string
+  redirect_host?: string
+}
+
+async function wechatPollQRStatus(
+  baseUrl: string,
+  qrcode: string,
+  verifyCode?: string,
+): Promise<WeChatQrStatusResponse> {
+  let endpoint = `ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(qrcode)}`
+  if (verifyCode) endpoint += `&verify_code=${encodeURIComponent(verifyCode)}`
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), WECHAT_QR_POLL_TIMEOUT_MS)
+  try {
+    const res = await fetch(`${baseUrl}/${endpoint}`, {
+      method: 'GET',
+      headers: wechatCommonHeaders(),
+      signal: controller.signal,
+    })
+    clearTimeout(timer)
+    if (!res.ok) {
+      throw new Error(`get_qrcode_status HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
+    }
+    return (await res.json()) as WeChatQrStatusResponse
+  } catch (err) {
+    clearTimeout(timer)
+    if (err instanceof Error && err.name === 'AbortError') {
+      return { status: 'wait' }
+    }
+    throw err
+  }
+}
+
+/** In-progress WeChat QR login state, kept per-workspace. */
+interface WeChatConnectState {
+  qrcode: string
+  pendingVerifyCode?: string
+  waitingVerifyCode: boolean
+  currentBaseUrl: string
+  deadline: number
+  qrRefreshCount: number
+  active: boolean
 }
 
 export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
@@ -174,6 +276,16 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     this.log.info('gateway started for workspace', {
       event: 'gateway_started',
       workspaceId,
+    })
+
+    this.log.info('initializeWorkspace platform check', {
+      event: 'init_platform_check',
+      workspaceId,
+      platforms: Object.keys(config.platforms ?? {}),
+      qq: isPlatformConfigured(config, 'qq'),
+      wechat: isPlatformConfigured(config, 'wechat'),
+      telegram: isPlatformConfigured(config, 'telegram'),
+      whatsapp: isPlatformConfigured(config, 'whatsapp'),
     })
 
     if (isPlatformConfigured(config, 'telegram')) {
@@ -975,6 +1087,227 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
 
     await this.tryConnectWeChat(workspaceId, state)
     await state.gateway.start()
+  }
+
+  /**
+   * Start the WeChat QR login flow: fetch a bot QR code, broadcast it to the
+   * UI via WECHAT_UI_EVENT, then run an async long-poll loop that emits
+   * scan/verify/connected/error events until the flow completes or times out.
+   */
+  async startWeChatConnect(workspaceId: string): Promise<void> {
+    const state = this.workspaces.get(workspaceId) ?? this.bootstrapWorkspace(workspaceId)
+
+    // Abort any in-flight connect flow for this workspace.
+    if (state.wechatConnect) {
+      state.wechatConnect.active = false
+      state.wechatConnect = undefined
+    }
+
+    this.setPlatformRuntime(workspaceId, state, 'wechat', {
+      configured: true,
+      connected: false,
+      state: 'connecting',
+      lastError: undefined,
+    })
+
+    // Mirror the official plugin: pass the local bot-token list so the server
+    // can associate this login with previously-registered bots.
+    const localTokenList: string[] = []
+    const existing = await this.opts.credentialManager
+      .get({ type: 'messaging_bearer', workspaceId, name: 'wechat' })
+      .catch(() => null)
+    if (existing?.value) {
+      try {
+        const parsed = JSON.parse(existing.value) as { botToken?: string }
+        if (parsed.botToken) localTokenList.push(parsed.botToken)
+      } catch {
+        // ignore malformed existing creds
+      }
+    }
+
+    const qr = await wechatFetchQRCode(WECHAT_FIXED_BASE_URL, localTokenList)
+    const conn: WeChatConnectState = {
+      qrcode: qr.qrcode,
+      waitingVerifyCode: false,
+      currentBaseUrl: WECHAT_FIXED_BASE_URL,
+      deadline: Date.now() + WECHAT_LOGIN_TIMEOUT_MS,
+      qrRefreshCount: 0,
+      active: true,
+    }
+    state.wechatConnect = conn
+
+    this.emitWeChatEvent(workspaceId, { type: 'qr', qr: qr.qrcode_img_content })
+
+    // Fire-and-forget polling loop; errors are surfaced via UI events.
+    void this.runWeChatConnectPoll(workspaceId, state, conn).catch((err) => {
+      this.log.error('wechat QR connect poll failed', {
+        event: 'wechat_qr_poll_failed',
+        workspaceId,
+        error: err,
+      })
+      if (conn.active) {
+        conn.active = false
+        this.emitWeChatEvent(workspaceId, {
+          type: 'error',
+          message: err instanceof Error ? err.message : String(err),
+        })
+      }
+    })
+  }
+
+  /** Submit the 6-digit verify code shown in WeChat during QR login. */
+  async submitWeChatVerifyCode(workspaceId: string, code: string): Promise<void> {
+    const state = this.workspaces.get(workspaceId)
+    const conn = state?.wechatConnect
+    if (!conn || !conn.active) throw new Error('No active WeChat QR login flow')
+    const trimmed = code.trim()
+    if (!trimmed) throw new Error('Verify code is empty')
+    conn.pendingVerifyCode = trimmed
+    conn.waitingVerifyCode = false
+    this.emitWeChatEvent(workspaceId, { type: 'scanning' })
+  }
+
+  private emitWeChatEvent(
+    workspaceId: string,
+    event:
+      | { type: 'qr'; qr: string }
+      | { type: 'scanning' }
+      | { type: 'need_verifycode' }
+      | { type: 'connected'; botId: string; botToken: string; baseUrl: string; userId?: string }
+      | { type: 'expired' }
+      | { type: 'error'; message: string },
+  ): void {
+    this.opts.publishEvent?.(
+      RPC_CHANNELS.messaging.WECHAT_UI_EVENT,
+      { to: 'workspace', workspaceId },
+      { workspaceId, event },
+    )
+  }
+
+  private async runWeChatConnectPoll(
+    workspaceId: string,
+    state: WorkspaceState,
+    conn: WeChatConnectState,
+  ): Promise<void> {
+    while (Date.now() < conn.deadline) {
+      if (!conn.active) return
+      try {
+        const status = await wechatPollQRStatus(
+          conn.currentBaseUrl,
+          conn.qrcode,
+          conn.pendingVerifyCode,
+        )
+
+        switch (status.status) {
+          case 'wait':
+            break
+
+          case 'scaned':
+            conn.pendingVerifyCode = undefined
+            this.emitWeChatEvent(workspaceId, { type: 'scanning' })
+            break
+
+          case 'need_verifycode':
+            if (!conn.waitingVerifyCode) {
+              conn.waitingVerifyCode = true
+              this.emitWeChatEvent(workspaceId, { type: 'need_verifycode' })
+            }
+            break
+
+          case 'scaned_but_redirect':
+            if (status.redirect_host) {
+              conn.currentBaseUrl = `https://${status.redirect_host}`
+              this.log.info('wechat QR login redirected to IDC host', {
+                event: 'wechat_qr_redirect',
+                workspaceId,
+                redirectHost: status.redirect_host,
+              })
+            }
+            break
+
+          case 'expired':
+            conn.qrRefreshCount += 1
+            if (conn.qrRefreshCount > WECHAT_MAX_QR_REFRESH) {
+              conn.active = false
+              this.emitWeChatEvent(workspaceId, { type: 'expired' })
+              return
+            }
+            // Refresh the QR code and surface the new one to the UI.
+            try {
+              const newQr = await wechatFetchQRCode(WECHAT_FIXED_BASE_URL, [])
+              conn.qrcode = newQr.qrcode
+              conn.pendingVerifyCode = undefined
+              conn.waitingVerifyCode = false
+              this.emitWeChatEvent(workspaceId, { type: 'qr', qr: newQr.qrcode_img_content })
+            } catch (err) {
+              conn.active = false
+              this.emitWeChatEvent(workspaceId, {
+                type: 'error',
+                message: err instanceof Error ? err.message : String(err),
+              })
+              return
+            }
+            break
+
+          case 'binded_redirect':
+            conn.active = false
+            this.emitWeChatEvent(workspaceId, {
+              type: 'error',
+              message: 'This WeChat account is already bound to another bot — no new bot was created.',
+            })
+            return
+
+          case 'confirmed': {
+            conn.active = false
+            const botToken = status.bot_token
+            const botId = status.ilink_bot_id
+            if (!botToken || !botId) {
+              this.emitWeChatEvent(workspaceId, {
+                type: 'error',
+                message: 'Login confirmed but bot_token / bot_id missing from server response.',
+              })
+              return
+            }
+            const creds = {
+              botToken,
+              baseUrl: status.baseurl || conn.currentBaseUrl,
+              botId,
+              userId: status.ilink_user_id,
+            }
+            try {
+              await this.saveWeChatCredentials(workspaceId, creds)
+              this.emitWeChatEvent(workspaceId, {
+                type: 'connected',
+                botId,
+                botToken,
+                baseUrl: creds.baseUrl ?? '',
+                userId: creds.userId,
+              })
+            } catch (err) {
+              this.emitWeChatEvent(workspaceId, {
+                type: 'error',
+                message: err instanceof Error ? err.message : String(err),
+              })
+            }
+            return
+          }
+
+          default:
+            break
+        }
+      } catch (err) {
+        this.log.warn('wechat QR status poll error (retrying)', {
+          event: 'wechat_qr_poll_error',
+          workspaceId,
+          error: err,
+        })
+      }
+
+      await delay(1_000)
+    }
+
+    conn.active = false
+    this.emitWeChatEvent(workspaceId, { type: 'expired' })
   }
 
   async disconnectPlatform(workspaceId: string, platform: string): Promise<void> {

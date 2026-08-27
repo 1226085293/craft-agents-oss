@@ -1,17 +1,14 @@
 /**
- * WeChatConnectDialog — WeChat (ClawBot) connect flow.
+ * WeChatConnectDialog — WeChat (ClawBot) QR-scan connect flow.
  *
- * WeChat uses a QR-scan auth flow (personal WeChat account as the bot host).
- * The scan + token exchange is performed by a CLI helper that writes the
- * resulting credentials straight into the encrypted credential store; this
- * dialog lets the operator paste those credentials (or re-enter them) to
- * (re)initialize the WeChat adapter.
- *
- * Credential shape (JSON): { botToken, baseUrl?, botId?, userId? }
+ * Mirrors the WhatsApp pairing dialog: the renderer calls startWeChatConnect(),
+ * the gateway fetches a bot QR code and broadcasts progress via onWeChatEvent
+ * (qr → scanning → need_verifycode → connected | expired | error).
  */
 
 import * as React from 'react'
-import { toast } from 'sonner'
+import { Check } from 'lucide-react'
+import { QRCodeSVG } from 'qrcode.react'
 import { useTranslation } from 'react-i18next'
 import {
   Dialog,
@@ -19,10 +16,12 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
-  DialogFooter,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { Spinner } from '@craft-agent/ui'
+import { useActiveWorkspace } from '@/context/AppShellContext'
+import type { WeChatUiEvent } from '../../../shared/types'
 
 interface WeChatConnectDialogProps {
   open: boolean
@@ -32,6 +31,16 @@ interface WeChatConnectDialogProps {
   onSaved?: () => void
 }
 
+type Phase =
+  | { kind: 'idle' }
+  | { kind: 'starting' }
+  | { kind: 'show_qr'; qr: string }
+  | { kind: 'scanning'; qr: string }
+  | { kind: 'need_verifycode'; qr: string }
+  | { kind: 'connected'; botId?: string }
+  | { kind: 'expired' }
+  | { kind: 'error'; message: string }
+
 export function WeChatConnectDialog({
   open,
   onOpenChange,
@@ -39,107 +48,218 @@ export function WeChatConnectDialog({
   onSaved,
 }: WeChatConnectDialogProps) {
   const { t } = useTranslation()
-  const [credsJson, setCredsJson] = React.useState('')
-  const [saving, setSaving] = React.useState(false)
+  const activeWorkspace = useActiveWorkspace()
+  const activeWorkspaceId = activeWorkspace?.id
+  const [phase, setPhase] = React.useState<Phase>({ kind: 'idle' })
+  const [verifyCode, setVerifyCode] = React.useState('')
+  const [submittingCode, setSubmittingCode] = React.useState(false)
+
+  React.useEffect(() => {
+    if (!open || !activeWorkspaceId) return
+    const off = window.electronAPI.onWeChatEvent(({ workspaceId, event }) => {
+      if (workspaceId !== activeWorkspaceId) return
+      handleEvent(event)
+    })
+    return off
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, activeWorkspaceId])
+
+  React.useEffect(() => {
+    if (!open || phase.kind !== 'idle') return
+    setPhase({ kind: 'starting' })
+    setVerifyCode('')
+    window.electronAPI
+      .startWeChatConnect()
+      .catch((err) => setPhase({ kind: 'error', message: errorMsg(err) }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
   React.useEffect(() => {
     if (!open) {
-      setCredsJson('')
-      setSaving(false)
+      setPhase({ kind: 'idle' })
+      setVerifyCode('')
+      setSubmittingCode(false)
     }
   }, [open])
 
-  /** Parse the pasted JSON; returns parsed creds or throws with a friendly message. */
-  const parseCreds = (): { botToken: string; baseUrl?: string; botId?: string; userId?: string } => {
-    const raw = credsJson.trim()
-    if (!raw) throw new Error(t('settings.messaging.wechat.empty'))
-    let parsed: unknown
-    try {
-      parsed = JSON.parse(raw)
-    } catch {
-      throw new Error(t('settings.messaging.wechat.invalidJson'))
-    }
-    if (typeof parsed !== 'object' || parsed === null) {
-      throw new Error(t('settings.messaging.wechat.invalidJson'))
-    }
-    const obj = parsed as Record<string, unknown>
-    if (typeof obj.botToken !== 'string' || obj.botToken.length === 0) {
-      throw new Error(t('settings.messaging.wechat.missingToken'))
-    }
-    return {
-      botToken: obj.botToken,
-      baseUrl: typeof obj.baseUrl === 'string' ? obj.baseUrl : undefined,
-      botId: typeof obj.botId === 'string' ? obj.botId : undefined,
-      userId: typeof obj.userId === 'string' ? obj.userId : undefined,
+  const handleEvent = (event: WeChatUiEvent) => {
+    switch (event.type) {
+      case 'qr':
+        setPhase({ kind: 'show_qr', qr: event.qr })
+        setVerifyCode('')
+        setSubmittingCode(false)
+        return
+      case 'scanning':
+        setPhase((prev) =>
+          prev.kind === 'show_qr' || prev.kind === 'need_verifycode' || prev.kind === 'scanning'
+            ? { kind: 'scanning', qr: prev.qr }
+            : prev,
+        )
+        return
+      case 'need_verifycode':
+        setPhase((prev) =>
+          prev.kind === 'show_qr' || prev.kind === 'need_verifycode' || prev.kind === 'scanning'
+            ? { kind: 'need_verifycode', qr: prev.qr }
+            : prev,
+        )
+        return
+      case 'connected':
+        setPhase({ kind: 'connected', botId: event.botId })
+        setTimeout(() => {
+          onSaved?.()
+          onOpenChange(false)
+        }, 1200)
+        return
+      case 'expired':
+        setPhase({ kind: 'expired' })
+        return
+      case 'error':
+        setPhase({ kind: 'error', message: event.message })
+        return
     }
   }
 
-  const handleSave = async () => {
-    let creds: ReturnType<typeof parseCreds>
+  const handleSubmitCode = async () => {
+    if (!verifyCode.trim() || submittingCode) return
+    setSubmittingCode(true)
     try {
-      creds = parseCreds()
+      await window.electronAPI.submitWeChatVerifyCode(verifyCode)
+      // The gateway emits `scanning` once the code is accepted; keep the
+      // dialog showing the QR until then.
+      setPhase((prev) => (prev.kind === 'need_verifycode' ? { kind: 'scanning', qr: prev.qr } : prev))
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('settings.messaging.wechat.invalidJson'))
-      return
-    }
-    setSaving(true)
-    try {
-      await window.electronAPI.saveWeChatCredentials(creds)
-      toast.success(t('settings.messaging.wechat.saved'))
-      onSaved?.()
-      onOpenChange(false)
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('settings.messaging.wechat.saveFailed'))
+      setPhase({ kind: 'error', message: errorMsg(err) })
     } finally {
-      setSaving(false)
+      setSubmittingCode(false)
     }
   }
-
-  const placeholder =
-    '{\n  "botToken": "ilink_bot_token_xxx",\n  "baseUrl": "https://ilinkai.weixin.qq.com",\n  "botId": "ilink_bot_id",\n  "userId": "ilink_user_id"\n}'
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[520px]">
+      <DialogContent className="sm:max-w-[480px]">
         <DialogHeader>
           <DialogTitle>
             {reconfigure
               ? t('settings.messaging.wechat.reconfigureTitle')
               : t('settings.messaging.wechat.connectTitle')}
           </DialogTitle>
-          <DialogDescription className="whitespace-pre-line">
-            {t('settings.messaging.wechat.instructions')}
-          </DialogDescription>
+          <DialogDescription>{t('settings.messaging.wechat.description')}</DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-3 py-2">
-          <div>
-            <div className="mb-1.5 text-xs font-medium">
-              {t('settings.messaging.wechat.credentialsLabel')}
-            </div>
-            <textarea
-              className="h-36 w-full resize-y rounded-md border bg-background px-3 py-2 font-mono text-xs outline-none focus:ring-2 focus:ring-ring"
-              value={credsJson}
-              onChange={(e) => setCredsJson(e.target.value)}
-              placeholder={placeholder}
-              disabled={saving}
-              spellCheck={false}
-            />
-            <p className="mt-1 text-[11px] text-muted-foreground">
-              {t('settings.messaging.wechat.credentialsHint')}
-            </p>
-          </div>
-        </div>
+        <div className="flex flex-col gap-4 py-2">
+          {phase.kind === 'starting' && (
+            <StatusRow icon={<Spinner className="text-[16px]" />}>
+              {t('settings.messaging.wechat.starting')}
+            </StatusRow>
+          )}
 
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
-            {t('common.cancel')}
-          </Button>
-          <Button onClick={handleSave} disabled={saving}>
-            {saving ? <Spinner className="size-4" /> : t('settings.messaging.wechat.save')}
-          </Button>
-        </DialogFooter>
+          {(phase.kind === 'show_qr' ||
+            phase.kind === 'scanning' ||
+            phase.kind === 'need_verifycode') && (
+            <div className="flex flex-col items-center gap-3">
+              <div className="rounded-lg bg-white p-4">
+                <QRCodeSVG value={phase.qr} size={240} level="M" />
+              </div>
+
+              {phase.kind === 'show_qr' && (
+                <p className="whitespace-pre-line text-center text-sm text-muted-foreground">
+                  {t('settings.messaging.wechat.qrInstructions')}
+                </p>
+              )}
+
+              {phase.kind === 'scanning' && (
+                <StatusRow icon={<Spinner className="text-[16px]" />}>
+                  {t('settings.messaging.wechat.scanned')}
+                </StatusRow>
+              )}
+
+              {phase.kind === 'need_verifycode' && (
+                <div className="flex w-full max-w-[300px] flex-col gap-2">
+                  <p className="text-center text-sm text-muted-foreground">
+                    {t('settings.messaging.wechat.verifyCodeHint')}
+                  </p>
+                  <div className="flex gap-2">
+                    <Input
+                      value={verifyCode}
+                      onChange={(e) => setVerifyCode(e.target.value)}
+                      placeholder={t('settings.messaging.wechat.verifyCodePlaceholder')}
+                      inputMode="numeric"
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void handleSubmitCode()
+                      }}
+                    />
+                    <Button onClick={handleSubmitCode} disabled={submittingCode || !verifyCode.trim()}>
+                      {submittingCode ? (
+                        <Spinner className="size-4" />
+                      ) : (
+                        t('settings.messaging.wechat.verifyCodeSubmit')
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {phase.kind === 'connected' && (
+            <StatusRow icon={<Check className="h-4 w-4 text-emerald-500" />}>
+              {t('settings.messaging.wechat.connected')}
+            </StatusRow>
+          )}
+
+          {phase.kind === 'expired' && (
+            <div className="flex flex-col items-center gap-3">
+              <p className="text-sm text-muted-foreground">
+                {t('settings.messaging.wechat.expired')}
+              </p>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setPhase({ kind: 'starting' })
+                  window.electronAPI
+                    .startWeChatConnect()
+                    .catch((err) => setPhase({ kind: 'error', message: errorMsg(err) }))
+                }}
+              >
+                {t('settings.messaging.wechat.refresh')}
+              </Button>
+            </div>
+          )}
+
+          {phase.kind === 'error' && (
+            <div className="flex flex-col gap-3">
+              <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                {phase.message}
+              </div>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setPhase({ kind: 'starting' })
+                  window.electronAPI
+                    .startWeChatConnect()
+                    .catch((err) => setPhase({ kind: 'error', message: errorMsg(err) }))
+                }}
+              >
+                {t('settings.messaging.wechat.retry')}
+              </Button>
+            </div>
+          )}
+        </div>
       </DialogContent>
     </Dialog>
   )
+}
+
+function StatusRow({ icon, children }: { icon: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center gap-2 text-sm">
+      {icon}
+      <span>{children}</span>
+    </div>
+  )
+}
+
+function errorMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }

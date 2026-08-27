@@ -78,6 +78,18 @@ export function registerMessagingHandlers(server: RpcServer, deps: HandlerDeps):
     return { success: true }
   })
 
+  server.handle(RPC_CHANNELS.messaging.WECHAT_START_CONNECT, async (ctx) => {
+    if (!ctx.workspaceId) throw new Error('Missing workspaceId')
+    await registry.startWeChatConnect(ctx.workspaceId)
+    return { success: true }
+  })
+
+  server.handle(RPC_CHANNELS.messaging.WECHAT_SUBMIT_VERIFYCODE, async (ctx, code: string) => {
+    if (!ctx.workspaceId) throw new Error('Missing workspaceId')
+    await registry.submitWeChatVerifyCode(ctx.workspaceId, code)
+    return { success: true }
+  })
+
   server.handle(RPC_CHANNELS.messaging.DISCONNECT, async (ctx, platform: string) => {
     if (!ctx.workspaceId) throw new Error('Missing workspaceId')
     await registry.disconnectPlatform(ctx.workspaceId, platform)

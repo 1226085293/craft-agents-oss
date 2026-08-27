@@ -229,6 +229,15 @@ export interface IMessagingGatewayRegistry {
     userId?: string
   }): Promise<void>
 
+  /**
+   * Start the WeChat QR login flow. Fetches a bot QR code and broadcasts
+   * progress via WECHAT_UI_EVENT (qr → scanning → need_verifycode → connected).
+   */
+  startWeChatConnect(workspaceId: string): Promise<void>
+
+  /** Submit the verify code shown in WeChat during QR login. */
+  submitWeChatVerifyCode(workspaceId: string, code: string): Promise<void>
+
   /** Disable a platform for a workspace, preserving WhatsApp auth state unless forgotten separately. */
   disconnectPlatform(workspaceId: string, platform: string): Promise<void>
 

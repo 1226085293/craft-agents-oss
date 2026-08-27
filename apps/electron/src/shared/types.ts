@@ -717,6 +717,10 @@ export interface ElectronAPI {
   testQQCredentials(creds: { appId: string; appSecret: string }): Promise<{ success: boolean; botName?: string; error?: string }>
   saveQQCredentials(creds: { appId: string; appSecret: string; mainQqOpenIds?: string[] }): Promise<void>
   saveWeChatCredentials(creds: { botToken: string; baseUrl?: string; botId?: string; userId?: string }): Promise<void>
+  // WeChat QR login flow
+  startWeChatConnect(): Promise<{ success: boolean }>
+  submitWeChatVerifyCode(code: string): Promise<{ success: boolean }>
+  onWeChatEvent(callback: (payload: { workspaceId: string; event: WeChatUiEvent }) => void): () => void
   disconnectMessagingPlatform(platform: string): Promise<void>
   forgetMessagingPlatform(platform: string): Promise<void>
   getMessagingBindings(): Promise<Array<{ id: string; workspaceId: string; sessionId: string; platform: string; channelId: string; threadId?: number; channelName?: string; enabled: boolean; createdAt: number; accessMode?: MessagingBindingAccessMode; allowedSenderIds?: string[] }>>
@@ -800,6 +804,15 @@ export type WhatsAppUiEvent =
   | { type: 'connected'; jid?: string; name?: string }
   | { type: 'disconnected'; loggedOut: boolean; reason?: string }
   | { type: 'unavailable'; reason: string; message: string }
+  | { type: 'error'; message: string }
+
+/** Event payloads broadcast from the WeChat QR login flow to the UI. */
+export type WeChatUiEvent =
+  | { type: 'qr'; qr: string }
+  | { type: 'scanning' }
+  | { type: 'need_verifycode' }
+  | { type: 'connected'; botId: string; botToken: string; baseUrl: string; userId?: string }
+  | { type: 'expired' }
   | { type: 'error'; message: string }
 
 // =============================================================================

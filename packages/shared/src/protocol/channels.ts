@@ -451,6 +451,12 @@ export const RPC_CHANNELS = {
     GENERATE_SUPERGROUP_CODE: 'messaging:generateSupergroupCode',
     GET_SUPERGROUP: 'messaging:getSupergroup',
     UNBIND_SUPERGROUP: 'messaging:unbindSupergroup',
+    // UI ↔ Server — WeChat QR login flow
+    WECHAT_START_CONNECT: 'messaging:wechat:startConnect',
+    WECHAT_SUBMIT_VERIFYCODE: 'messaging:wechat:submitVerifyCode',
+    /** Broadcast to UI clients: QR string, scan status, connected, error. */
+    WECHAT_UI_EVENT: 'messaging:wechat:uiEvent',
+
     // UI ↔ Server — WhatsApp pairing/connection flow (Baileys subprocess adapter)
     WA_START_CONNECT: 'messaging:wa:startConnect',
     WA_SUBMIT_PHONE: 'messaging:wa:submitPhone',

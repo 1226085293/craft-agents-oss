@@ -13,13 +13,21 @@
  *   AuthorizationType:  ilink_bot_token
  *   X-WECHAT-UIN:       base64(random uint32)
  *   iLink-App-Id:       bot
- *   iLink-App-ClientVersion: 0x00020006 (2.4.6)
+ *   iLink-App-ClientVersion: 0x00020406 (2.4.6)
  *
  * Credentials (JSON in `config.token`):
  *   { "botToken": "...", "baseUrl": "https://ilinkai.weixin.qq.com", "botId": "...", "userId": "..." }
  */
 
 import { randomBytes, randomUUID } from 'node:crypto'
+
+/** Generate a client_id matching the official OpenClaw format. */
+function generateClientId(): string {
+  return `openclaw-weixin:${Date.now()}-${randomBytes(4).toString('hex')}`
+}
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import path from 'node:path'
 
 import type {
   AdapterCapabilities,
@@ -42,7 +50,41 @@ const NOOP_LOGGER: MessagingLogger = {
 const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com'
 const CHANNEL_VERSION = '2.4.6'
 const ILINK_APP_ID = 'bot'
-const ILINK_APP_CLIENT_VERSION = 0x00020006
+
+// ---- Persistence (mirrors official @tencent-weixin/openclaw-weixin) ----
+// context tokens + get_updates_buf survive gateway restarts so replies keep
+// working after a restart without waiting for a fresh inbound message.
+function wechatStateDir(): string {
+  return path.join(homedir(), '.craft-agent', 'wechat-state')
+}
+
+function contextTokensFilePath(botId: string): string {
+  return path.join(wechatStateDir(), `${botId}.context-tokens.json`)
+}
+
+function syncBufFilePath(botId: string): string {
+  return path.join(wechatStateDir(), `${botId}.sync.json`)
+}
+
+function loadJsonFile<T>(filePath: string): T | undefined {
+  try {
+    if (!existsSync(filePath)) return undefined
+    return JSON.parse(readFileSync(filePath, 'utf-8')) as T
+  } catch {
+    return undefined
+  }
+}
+
+function saveJsonFile(filePath: string, data: unknown): void {
+  try {
+    mkdirSync(path.dirname(filePath), { recursive: true })
+    writeFileSync(filePath, JSON.stringify(data), 'utf-8')
+  } catch {
+    // best-effort persistence
+  }
+}
+// buildClientVersion('2.4.6'): (major<<16) | (minor<<8) | patch = (2<<16)|(4<<8)|6 = 132102 = 0x00020406
+const ILINK_APP_CLIENT_VERSION = (2 << 16) | (4 << 8) | 6
 const LONG_POLL_TIMEOUT_MS = 35_000
 const API_TIMEOUT_MS = 15_000
 const CONFIG_TIMEOUT_MS = 10_000
@@ -104,6 +146,7 @@ interface WeixinMessage {
   message_state?: number
   item_list?: WeixinMessageItem[]
   context_token?: string
+  run_id?: string
 }
 
 interface WeixinMessageItem {
@@ -193,7 +236,9 @@ export class WeChatAdapter implements PlatformAdapter {
   private pollLoopPromise: Promise<void> | null = null
 
   // context_token per sender (key: from_user_id), refreshed on every inbound msg
+  // + persisted to disk so replies keep working after restarts (official behavior)
   private contextTokens = new Map<string, string>()
+  private botIdForState = ''
   // typing_ticket cached from getconfig
   private typingTicket: string | undefined
 
@@ -202,6 +247,27 @@ export class WeChatAdapter implements PlatformAdapter {
     const raw = typeof config.token === 'string' ? config.token : ''
     if (!raw) throw new Error('WeChat credentials are missing.')
     this.creds = parseWeChatCredentials(raw)
+
+    // Restore persisted context tokens + get_updates_buf (official restart behavior)
+    this.botIdForState = this.creds.botId ?? `wechat-${Buffer.from(this.creds.botToken).toString('hex').slice(0, 12)}`
+    const storedTokens = loadJsonFile<Record<string, string>>(contextTokensFilePath(this.botIdForState))
+    if (storedTokens) {
+      for (const [k, v] of Object.entries(storedTokens)) {
+        if (typeof v === 'string' && v) this.contextTokens.set(k, v)
+      }
+      this.log.info(`[wechat] restored ${this.contextTokens.size} context token(s) from disk`, {
+        event: 'wechat_restored_context_tokens',
+        count: this.contextTokens.size,
+      })
+    }
+    const storedBuf = loadJsonFile<{ get_updates_buf?: string }>(syncBufFilePath(this.botIdForState))
+    if (storedBuf?.get_updates_buf) {
+      this.updatesBuf = storedBuf.get_updates_buf
+      this.log.info(`[wechat] restored get_updates_buf (${this.updatesBuf.length} bytes) from disk`, {
+        event: 'wechat_restored_sync_buf',
+        bytes: this.updatesBuf.length,
+      })
+    }
 
     this.destroyed = false
     this.connected = true
@@ -294,6 +360,7 @@ export class WeChatAdapter implements PlatformAdapter {
       const resp = JSON.parse(raw) as GetUpdatesResp
       if (typeof resp.get_updates_buf === 'string' && resp.get_updates_buf.length > 0) {
         this.updatesBuf = resp.get_updates_buf
+        saveJsonFile(syncBufFilePath(this.botIdForState), { get_updates_buf: this.updatesBuf })
       }
       return resp
     } catch (err) {
@@ -325,9 +392,35 @@ export class WeChatAdapter implements PlatformAdapter {
     const groupId = msg.group_id
     const chatKind: 'private' | 'group' = groupId ? 'group' : 'private'
 
-    // Cache context_token for replying to this sender.
+    this.log.info('[wechat] inbound raw msg', {
+      event: 'wechat_inbound_raw',
+      sender: from,
+      seq: msg.seq ?? undefined,
+      messageId: msg.message_id ?? undefined,
+      sessionId: msg.session_id ?? undefined,
+      groupId: msg.group_id ?? undefined,
+      toUserId: msg.to_user_id ?? undefined,
+      clientId: msg.client_id ?? undefined,
+      messageType: msg.message_type ?? undefined,
+      messageState: msg.message_state ?? undefined,
+      contextToken: msg.context_token ? 'present' : 'none',
+      itemTypes: msg.item_list?.map((i) => i.type).join(',') ?? 'none',
+    })
+
+    // Cache context_token for replying to this sender (persisted for restarts).
     if (msg.context_token) {
       this.contextTokens.set(from, msg.context_token)
+      saveJsonFile(contextTokensFilePath(this.botIdForState), Object.fromEntries(this.contextTokens))
+      this.log.info(`[wechat] cached context_token for ${from}`, {
+        event: 'wechat_context_token_cached',
+        sender: from,
+      })
+    } else {
+      this.log.warn(`[wechat] inbound message WITHOUT context_token from ${from}`, {
+        event: 'wechat_no_context_token',
+        sender: from,
+        messageId: String(msg.message_id ?? msg.client_id ?? ''),
+      })
     }
 
     const text = extractBody(msg.item_list)
@@ -348,6 +441,11 @@ export class WeChatAdapter implements PlatformAdapter {
       timestamp: msg.create_time_ms ?? Date.now(),
       raw: msg,
     }
+    // Send a typing indicator immediately (fire-and-forget) so the WeChat
+    // client activates/opens the bot conversation. The official plugin does
+    // this on every inbound message; without it the client never surfaces
+    // the bot chat and replies go unseen.
+    this.sendTyping(incoming.channelId).catch(() => {})
     if (this.messageHandler) {
       await this.messageHandler(incoming)
     }
@@ -359,7 +457,7 @@ export class WeChatAdapter implements PlatformAdapter {
 
   async sendText(channelId: string, text: string, _opts?: SendOptions): Promise<SentMessage> {
     const { kind, id } = parseWeChatChannel(channelId)
-    const clientId = randomUUID()
+    const clientId = generateClientId()
     const msg: WeixinMessage = {
       from_user_id: '',
       to_user_id: id,
@@ -367,11 +465,31 @@ export class WeChatAdapter implements PlatformAdapter {
       message_type: MSG_BOT,
       message_state: STATE_FINISH,
       item_list: [{ type: ITEM_TEXT, text_item: { text } }],
+      run_id: randomUUID(),
     }
     if (kind === 'group') msg.group_id = id
     const ctx = this.contextTokens.get(id)
     if (ctx) msg.context_token = ctx
-    await this.sendMessageApi(msg)
+    else this.log.warn(`[wechat] sendText: no context_token for ${id} — sending without context`, {
+      event: 'wechat_send_no_context',
+      to: id,
+    })
+    try {
+      await this.sendMessageApi(msg)
+    } catch (err) {
+      this.log.error('[wechat] sendText failed', {
+        event: 'wechat_send_failed',
+        to: id,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      throw err
+    }
+    this.log.info(`[wechat] sendText ok to=${id} contextToken=${ctx ? 'yes' : 'no'} textLen=${text.length}`, {
+      event: 'wechat_send_ok',
+      to: id,
+      contextToken: ctx ? 'yes' : 'no',
+      textLen: text.length,
+    })
     return { platform: 'wechat', channelId, messageId: clientId }
   }
 
@@ -424,7 +542,7 @@ export class WeChatAdapter implements PlatformAdapter {
     // File/photo send requires CDN upload (getuploadurl + AES-128-ECB encrypt).
     // Fallback: send caption as text so users aren't left hanging.
     const { kind, id } = parseWeChatChannel(channelId)
-    const clientId = randomUUID()
+    const clientId = generateClientId()
     const msg: WeixinMessage = {
       from_user_id: '',
       to_user_id: id,
@@ -432,6 +550,7 @@ export class WeChatAdapter implements PlatformAdapter {
       message_type: MSG_BOT,
       message_state: STATE_FINISH,
       item_list: caption ? [{ type: ITEM_TEXT, text_item: { text: caption } }] : undefined,
+      run_id: randomUUID(),
     }
     if (kind === 'group') msg.group_id = id
     const ctx = this.contextTokens.get(id)
@@ -451,6 +570,12 @@ export class WeChatAdapter implements PlatformAdapter {
       API_TIMEOUT_MS,
     )
     const resp = JSON.parse(raw) as SendMessageResp
+    this.log.info('sendMessage raw response', {
+      event: 'wechat_sendmessage_raw',
+      ret: resp.ret,
+      errmsg: resp.errmsg,
+      raw: raw.slice(0, 500),
+    })
     if (resp.ret && resp.ret !== 0) {
       throw new Error(`sendMessage ret=${resp.ret} errmsg=${resp.errmsg ?? '(none)'}`)
     }
@@ -472,7 +597,7 @@ export class WeChatAdapter implements PlatformAdapter {
       },
       body: JSON.stringify({
         ...body,
-        base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'CraftAgents/1.0' },
+        base_info: { channel_version: CHANNEL_VERSION, bot_agent: 'OpenClaw' },
       }),
       signal: AbortSignal.timeout(timeoutMs),
     })

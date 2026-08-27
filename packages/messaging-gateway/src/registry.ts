@@ -1313,15 +1313,47 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
             break
 
           case 'binded_redirect':
-            this.log.info('wechat QR binded redirect', {
+            this.log.info('wechat QR binded redirect — reusing existing credentials', {
               event: 'wechat_qr_binded_redirect',
               workspaceId,
             })
             conn.active = false
-            this.emitWeChatEvent(workspaceId, {
-              type: 'error',
-              message: 'This WeChat account is already bound to another bot — no new bot was created.',
-            })
+            try {
+              const existing = await this.opts.credentialManager
+                .get({ type: 'messaging_bearer', workspaceId, name: 'wechat' })
+                .catch(() => null)
+              const parsed = existing?.value
+                ? (JSON.parse(existing.value) as { botToken?: string; baseUrl?: string; botId?: string; userId?: string })
+                : null
+              if (!parsed?.botToken) {
+                this.emitWeChatEvent(workspaceId, {
+                  type: 'error',
+                  message:
+                    'This WeChat account is already bound, but no local credentials were found. Please disconnect WeChat in Settings and try again.',
+                })
+                return
+              }
+              // Reuse the stored credentials: the server declined to create a new
+              // bot because this account already has one, so connect with it.
+              await this.saveWeChatCredentials(workspaceId, {
+                botToken: parsed.botToken,
+                baseUrl: parsed.baseUrl,
+                botId: parsed.botId,
+                userId: parsed.userId,
+              })
+              this.emitWeChatEvent(workspaceId, {
+                type: 'connected',
+                botId: parsed.botId ?? '',
+                botToken: parsed.botToken,
+                baseUrl: parsed.baseUrl ?? '',
+                userId: parsed.userId,
+              })
+            } catch (err) {
+              this.emitWeChatEvent(workspaceId, {
+                type: 'error',
+                message: err instanceof Error ? err.message : String(err),
+              })
+            }
             return
 
           case 'confirmed': {

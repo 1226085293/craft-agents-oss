@@ -153,9 +153,7 @@ export function WeChatConnectDialog({
             </StatusRow>
           )}
 
-          {(phase.kind === 'show_qr' ||
-            phase.kind === 'scanning' ||
-            phase.kind === 'need_verifycode') && (
+          {(phase.kind === 'show_qr' || phase.kind === 'need_verifycode') && (
             <div className="flex flex-col items-center gap-3">
               <div className="rounded-lg bg-white p-4">
                 <QRCodeSVG value={phase.qr} size={240} level="M" />
@@ -164,18 +162,6 @@ export function WeChatConnectDialog({
               {phase.kind === 'show_qr' && (
                 <p className="whitespace-pre-line text-center text-sm text-muted-foreground">
                   {t('settings.messaging.wechat.qrInstructions')}
-                </p>
-              )}
-
-              {phase.kind === 'scanning' && (
-                <StatusRow icon={<Spinner className="text-[16px]" />}>
-                  {t('settings.messaging.wechat.scanned')}
-                </StatusRow>
-              )}
-
-              {phase.kind === 'scanning' && (
-                <p className="max-w-[320px] text-center text-xs text-muted-foreground">
-                  {t('settings.messaging.wechat.scannedHint')}
                 </p>
               )}
 
@@ -205,6 +191,26 @@ export function WeChatConnectDialog({
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {phase.kind === 'scanning' && (
+            <div className="flex flex-col items-center gap-4 py-8">
+              <Spinner className="size-10 text-primary" />
+              <div className="flex flex-col items-center gap-1 text-center">
+                <p className="text-sm font-medium">
+                  {t('settings.messaging.wechat.connectingTitle')}
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  {t('settings.messaging.wechat.scanned')}
+                </p>
+                <p className="max-w-[320px] text-xs text-muted-foreground">
+                  {t('settings.messaging.wechat.connectingWait')}
+                </p>
+                <p className="max-w-[320px] text-xs text-muted-foreground">
+                  {t('settings.messaging.wechat.scannedHint')}
+                </p>
+              </div>
             </div>
           )}
 

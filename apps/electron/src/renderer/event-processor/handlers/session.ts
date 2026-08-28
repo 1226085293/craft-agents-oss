@@ -591,8 +591,14 @@ export function handleUserMessage(
         messages: updatedMessages,
         lastMessageAt: Date.now(),
         lastMessageRole: 'user',  // Clear plan badge when user responds
-        // Set isProcessing when message is accepted/processing (enables multi-window sync)
-        isProcessing: status === 'accepted' || status === 'processing',
+        // Set isProcessing when message is accepted/processing (enables multi-window sync).
+        // For 'queued' status the current turn is STILL running (the message was queued
+        // mid-stream while the agent continues), so preserve the existing value — flipping
+        // it false here would make groupMessagesByTurn treat the session as complete and
+        // prematurely promote the in-flight thinking text into a "final" reply box (#616).
+        isProcessing: status === 'accepted' || status === 'processing'
+          ? true
+          : session.isProcessing,
       },
       streaming,
     },

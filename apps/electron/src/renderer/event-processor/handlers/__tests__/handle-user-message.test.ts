@@ -102,4 +102,59 @@ describe('handleUserMessage queued replay', () => {
     expect(next.state.session.messages[0]?.timestamp).toBe(300)
     expect(next.state.session.messages[0]?.isQueued).toBe(false)
   })
+
+  it("preserves isProcessing=true on 'queued' while the current turn is still streaming", () => {
+    // The current assistant turn is still running (isProcessing=true) and a
+    // mid-stream send is queued. 'queued' must NOT flip isProcessing to false,
+    // otherwise groupMessagesByTurn treats the session as complete and promotes
+    // the in-flight thinking text into a "final" reply box (#616).
+    const state = makeState([
+      { id: 'user-1', role: 'user', content: 'first', timestamp: 100 },
+      {
+        id: 'optimistic-follow-up',
+        role: 'user',
+        content: 'follow up',
+        timestamp: 200,
+        isPending: false,
+        isQueued: true,
+      },
+    ])
+
+    const queuedEvent: UserMessageEvent = {
+      ...processingEvent(250),
+      status: 'queued',
+    }
+
+    const next = handleUserMessage(state, queuedEvent)
+
+    expect(next.state.session.isProcessing).toBe(true)
+    const message = next.state.session.messages.find(m => m.id === 'optimistic-follow-up')
+    expect(message?.isQueued).toBe(true)
+  })
+
+  it("preserves isProcessing=false on 'queued' after the current turn completed", () => {
+    // Queue-after-abort path: a 'complete' event already set isProcessing=false,
+    // then the 'queued' confirmation arrives. It must not flip it back to true.
+    const state = makeState([
+      { id: 'user-1', role: 'user', content: 'first', timestamp: 100 },
+      {
+        id: 'optimistic-follow-up',
+        role: 'user',
+        content: 'follow up',
+        timestamp: 200,
+        isPending: false,
+        isQueued: true,
+      },
+    ])
+    state.session.isProcessing = false
+
+    const queuedEvent: UserMessageEvent = {
+      ...processingEvent(250),
+      status: 'queued',
+    }
+
+    const next = handleUserMessage(state, queuedEvent)
+
+    expect(next.state.session.isProcessing).toBe(false)
+  })
 })

@@ -503,6 +503,8 @@ it('keeps steered guidance under the original user turn without splitting assist
   if (turns[1]?.type !== 'assistant') throw new Error('expected assistant turn')
   expect(turns[1].activities.map(a => a.id)).toEqual(['tool1', 'g1', 'a1', 'tool2'])
   expect(turns[1].activities.find(a => a.id === 'g1')?.statusType).toBe('guidance')
+})
+
 describe('hidden messages', () => {
   it('never render as a turn but the assistant reply they trigger still does', () => {
     resetCounters()
@@ -535,3 +537,30 @@ describe('hidden messages', () => {
 })
 
 it('renders queued user messages after the active assistant process block', () => {
+  const base = Date.now()
+  const messages = [
+    { id: 'u1', role: 'user', content: 'first question', timestamp: base } as Message,
+    { id: 'tool1', role: 'tool', content: 'Running Bash...', timestamp: base + 100, toolName: 'Bash', toolUseId: 'call-1', toolStatus: 'running' } as Message,
+    { id: 'a1', role: 'assistant', content: 'thinking...', timestamp: base + 200, isStreaming: true, isIntermediate: false } as Message,
+    { id: 'q1', role: 'user', content: 'queued follow-up', timestamp: base + 300, isQueued: true } as Message,
+  ]
+
+  // The queued user message must appear AFTER the assistant process block,
+  // not between the original user message and its assistant block.
+  const turns = groupMessagesByTurn(messages)
+  expect(turns).toHaveLength(3)
+  expect(turns[0]?.type).toBe('user')
+  expect(turns[1]?.type).toBe('assistant')
+  expect(turns[2]?.type).toBe('user')
+
+  if (turns[0]?.type !== 'user') throw new Error('expected first user turn')
+  if (turns[1]?.type !== 'assistant') throw new Error('expected assistant turn')
+  if (turns[2]?.type !== 'user') throw new Error('expected queued user turn')
+
+  expect(turns[0].message.id).toBe('u1')
+  expect(turns[1].activities.map(a => a.id)).toEqual(['tool1'])
+  expect((turns[1] as AssistantTurn).response?.messageId).toBe('a1')
+  expect((turns[1] as AssistantTurn).isComplete).toBe(false)
+  expect(turns[2].message.id).toBe('q1')
+  expect(turns[2].message.isQueued).toBe(true)
+})

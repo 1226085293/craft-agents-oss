@@ -154,9 +154,18 @@ function scan(evaluator: DefenseEvaluator, endMessages: unknown[]) {
   }
   let endsWithEmptyResponse = false;
   if (lastAssistant) {
-    const noContentBlocks = !Array.isArray(lastAssistant.content) || lastAssistant.content.length === 0;
+    const hasVisibleTextBlock = Array.isArray(lastAssistant.content)
+      && lastAssistant.content.some(
+        (c) => (c as { type?: string })?.type === 'text'
+          && String((c as { text?: unknown }).text ?? '').trim().length > 0,
+      );
     const cleanStop = lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length';
-    endsWithEmptyResponse = cleanStop && noContentBlocks;
+    if (lastAssistant.stopReason === 'length') {
+      endsWithEmptyResponse = !hasVisibleTextBlock;
+    } else {
+      const noContentBlocks = !Array.isArray(lastAssistant.content) || lastAssistant.content.length === 0;
+      endsWithEmptyResponse = cleanStop && noContentBlocks;
+    }
   }
   const lastText = lastAssistant ? extractAssistantText(lastAssistant.content) : '';
   const hasRepetitionLoop = lastText.length > 0 && detectRepetitionLoop(lastText);

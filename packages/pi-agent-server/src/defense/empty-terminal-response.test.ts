@@ -44,9 +44,18 @@ function scan(evaluator: DefenseEvaluator, endMessages: unknown[]) {
   }
   let endsWithEmptyResponse = false;
   if (lastAssistant) {
-    const noContentBlocks = !Array.isArray(lastAssistant.content) || lastAssistant.content.length === 0;
+    const hasVisibleTextBlock = Array.isArray(lastAssistant.content)
+      && lastAssistant.content.some(
+        (c) => (c as { type?: string })?.type === 'text'
+          && String((c as { text?: unknown }).text ?? '').trim().length > 0,
+      );
     const cleanStop = lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length';
-    endsWithEmptyResponse = cleanStop && noContentBlocks;
+    if (lastAssistant.stopReason === 'length') {
+      endsWithEmptyResponse = !hasVisibleTextBlock;
+    } else {
+      const noContentBlocks = !Array.isArray(lastAssistant.content) || lastAssistant.content.length === 0;
+      endsWithEmptyResponse = cleanStop && noContentBlocks;
+    }
   }
   return evaluator.evaluate({ hasVisibleText: anyText, aborted, endsWithEmptyResponse });
 }
@@ -72,6 +81,22 @@ describe('empty terminal response defense (2026-08-22 incidents)', () => {
       { role: 'assistant', content: [{ type: 'text', text: '最后查一下 Windows UI 相关的提交' }], stopReason: 'toolUse' },
       { role: 'toolResult', content: [{ type: 'text', text: 'feature-flags.ts...' }] },
       { role: 'assistant', content: [], stopReason: 'length', usage: { input: 680, output: 8192 } },
+    ]);
+    expect(result.shouldResume).toBe(true);
+    expect(result.resumeMessage).toContain('EMPTY response');
+  });
+
+  it('resumes when reasoning burns the budget invisibly (stopReason=length, thinking-only content)', () => {
+    // 2026-08-28 incident: the final assistant message carried ONLY a
+    // thinking block (content.length===1) so the old no-blocks check
+    // missed it entirely. With stopReason=length the budget died before
+    // any visible text was emitted — an infrastructure fault that must
+    // trigger an automatic resume.
+    const e = incidentEvaluator();
+    const result = scan(e, [
+      { role: 'assistant', content: [{ type: 'text', text: '让我检查关键前提' }], stopReason: 'toolUse' },
+      { role: 'toolResult', content: [{ type: 'text', text: 'messageCount: number' }] },
+      { role: 'assistant', content: [{ type: 'thinking', thinking: 'OK so the sessionMetaMapAtom is populated with messageCount...' }], stopReason: 'length', usage: { input: 108881, output: 0 } },
     ]);
     expect(result.shouldResume).toBe(true);
     expect(result.resumeMessage).toContain('EMPTY response');

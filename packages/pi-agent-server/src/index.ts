@@ -81,6 +81,7 @@ import { allowCraftMetadataProperties, stripCraftMetadata } from './craft-metada
 import { applySystemPromptOverride, applySystemPromptOverrideWithDefense } from './system-prompt-override.ts';
 import { DefenseEvaluator, resolveDefenseEnabled } from './defense/index.ts';
 import { detectRepetitionLoop, extractAssistantText } from './defense/repetition-detector.ts';
+import { applyForcedCompactionPatch } from './forced-compaction.ts';
 
 // ============================================================
 // Types — JSONL Protocol
@@ -497,20 +498,39 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
       }
     }
     // Empty terminal response (2026-08-22 incidents): the FINAL assistant
-    // message is an empty LLM completion — no content blocks at all and 0 or
-    // truncated-away output. Two observed variants:
+    // message is an empty LLM completion — no visible output and 0 or
+    // truncated-away tokens. Observed variants:
     //   - stopReason="stop" + 0 output tokens → upstream/gateway fault
     //   - stopReason="length" + N output tokens → reasoning burned the whole
     //     max_tokens budget without emitting a visible block (truncation)
+    //   - stopReason="length" + thinking-only content (2026-08-28 incident:
+    //     ~109K ctx, reasoning ate the budget, output=0) → the reasoning
+    //     block is NOT visible to the user, so the reply is still empty.
     // Both are infrastructure faults, not intentional finishes. Anchoring
     // strictly on the LAST assistant message is essential: run-wide text
     // scanning is already covered by hasVisibleText above and must not mask
-    // this signal. Healthy replies always carry at least one content block.
+    // this signal. Healthy replies always carry at least one visible text
+    // block (a bare toolCall-only assistant message ends with toolUse, not
+    // a clean stop, so it never reaches this branch).
     let endsWithEmptyResponse = false;
     if (lastAssistant) {
-      const noContentBlocks = !Array.isArray(lastAssistant.content) || lastAssistant.content.length === 0;
+      const hasVisibleTextBlock = Array.isArray(lastAssistant.content)
+        && lastAssistant.content.some(
+          (c) => (c as { type?: string })?.type === 'text'
+            && String((c as { text?: unknown }).text ?? '').trim().length > 0,
+        );
       const cleanStop = lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length';
-      endsWithEmptyResponse = cleanStop && noContentBlocks;
+      if (lastAssistant.stopReason === 'length') {
+        // Truncation: ANY final reply without visible text is a fault —
+        // empty content, or reasoning-only content that burned the whole
+        // budget (thinking blocks are invisible to the user).
+        endsWithEmptyResponse = !hasVisibleTextBlock;
+      } else {
+        // stop: keep the strict no-blocks rule — a model that deliberately
+        // ends with reasoning alone is a normal finish, not a fault.
+        const noContentBlocks = !Array.isArray(lastAssistant.content) || lastAssistant.content.length === 0;
+        endsWithEmptyResponse = cleanStop && noContentBlocks;
+      }
     }
     // Repetition-loop (degeneration) detection (2026-08-28 incident): the
     // final assistant message contains text, but the text devolved into a
@@ -1006,6 +1026,13 @@ async function ensureSession(): Promise<AgentSession> {
   // Craft session inherits the same client-side fallback against upstream
   // gateway failures (LiteLLM connection resets / request timeouts).
   applyPiResilienceSettings(session);
+
+  // Forced compaction: a terminal `stopReason="length"` with `usage.output === 0`
+  // means the model burned its output budget on hidden reasoning and produced no
+  // visible reply — even when context is below the SDK's shouldCompact threshold
+  // (2026-08-28 incident: model died at ~112K of a 131072 window). Force a
+  // compaction in that case so auto-resume has a smaller context to work with.
+  applyForcedCompactionPatch(session, (m) => debugLog(m));
 
   toolsChanged = false;
   debugLog(`Created Pi session: ${session.sessionId} (${wrappedAll.length} tools)`);

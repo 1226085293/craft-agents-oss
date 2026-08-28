@@ -85,7 +85,9 @@ export interface BindingAccessInput {
  *  3. Binding `accessMode === 'allow-list'` → allow iff sender is in
  *     `allowedSenderIds`.
  *  4. Binding `accessMode === 'inherit'` → defer to workspace policy:
- *     `'open'` allows; `'owner-only'` requires sender on `owners`.
+ *     - QQ 群聊（`chatKind === 'group'`）：允许所有人发消息（命令仍由
+ *       evaluatePreBindingAccess 限制为 owner）。
+ *     - 其他平台/私聊：`'open'` 允许；`'owner-only'` 要求 sender 在 owners 中。
  *
  * Note: a `'open'` workspace + `'inherit'` binding is the legacy/migration
  * path. It deliberately allows traffic so existing prod workspaces don't
@@ -105,6 +107,8 @@ export function evaluateBindingAccess(input: BindingAccessInput): AccessDecision
   }
 
   // mode === 'inherit'
+  // QQ 群聊：允许所有人发消息（命令仍由 evaluatePreBindingAccess 限制为 owner）
+  if (msg.platform === 'qq' && msg.chatKind === 'group') return { allow: true }
   const wsMode = readPlatformAccessMode(workspaceConfig, msg.platform)
   if (wsMode === 'open') return { allow: true }
   const owners = readPlatformOwners(workspaceConfig, msg.platform)

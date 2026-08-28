@@ -187,6 +187,45 @@ describe('evaluateBindingAccess', () => {
     expect(verdict.allow).toBe(true)
   })
 
+  it('QQ group chat with inherit binding allows any sender (member messages route)', () => {
+    const verdict = evaluateBindingAccess({
+      msg: buildMsg({
+        platform: 'qq',
+        channelId: 'group:g1',
+        senderId: STRANGER_ID,
+        chatKind: 'group',
+      }),
+      workspaceConfig: {
+        enabled: true,
+        platforms: {
+          qq: { enabled: true, accessMode: 'owner-only', owners: [OWNER] },
+        },
+      },
+      binding: bindingWith({ accessMode: 'inherit' }),
+    })
+    expect(verdict.allow).toBe(true)
+  })
+
+  it('QQ private chat with inherit binding still defers to workspace owners (DM stays owner-only)', () => {
+    const verdict = evaluateBindingAccess({
+      msg: buildMsg({
+        platform: 'qq',
+        channelId: 'user:111',
+        senderId: STRANGER_ID,
+        chatKind: 'private',
+      }),
+      workspaceConfig: {
+        enabled: true,
+        platforms: {
+          qq: { enabled: true, accessMode: 'owner-only', owners: [OWNER] },
+        },
+      },
+      binding: bindingWith({ accessMode: 'inherit' }),
+    })
+    expect(verdict.allow).toBe(false)
+    if (!verdict.allow) expect(verdict.reason).toBe('not-owner')
+  })
+
   it('rejects bot senders before any access mode logic runs', () => {
     const verdict = evaluateBindingAccess({
       msg: buildMsg({ senderId: OWNER_ID, senderIsBot: true }),

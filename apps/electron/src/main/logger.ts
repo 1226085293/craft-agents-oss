@@ -62,8 +62,6 @@ if (isDebugMode) {
   }
   log.transports.console.level = 'debug'
 } else {
-  // Disable file and console transports in production
-  log.transports.file.level = false
   log.transports.console.level = false
 }
 

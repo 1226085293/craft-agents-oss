@@ -200,8 +200,11 @@ export function InputContainer({
     }
   })
 
-  // Animate height changes using motion value
-  React.useEffect(() => {
+  // Animate height changes using motion value. useLayoutEffect: the first
+  // measurement (reported synchronously by FreeFormInput's layout effect)
+  // must be applied BEFORE the first paint, otherwise the container paints at
+  // the fallback height and jumps to the real height one frame later.
+  React.useLayoutEffect(() => {
     if (shouldAnimateHeight) {
       animate(heightMotionValue, targetHeight, {
         duration: TRANSITION_DURATION,

@@ -1040,6 +1040,13 @@ export function FreeFormInput({
   React.useLayoutEffect(() => {
     if (!onHeightChange || !containerRef.current) return
 
+    // Synchronously measure the natural height on mount (before first paint).
+    // The ResizeObserver's first callback is async (next frame), so without
+    // this the parent InputContainer renders at the small fallback height on
+    // the first frame and then jumps to the real height — a visible flash.
+    const h = containerRef.current.offsetHeight
+    if (h > 0) onHeightChange(h)
+
     const observer = new ResizeObserver((entries) => {
       for (const entry of entries) {
         onHeightChange(entry.contentRect.height)

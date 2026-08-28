@@ -410,17 +410,78 @@ function ProcessingIndicator({ startTime, statusMessage }: ProcessingIndicatorPr
  */
 function ScrollOnMount({
   targetRef,
+  scrollViewportRef,
   onScroll,
   skip = false
 }: {
   targetRef: React.RefObject<HTMLDivElement | null>
+  scrollViewportRef: React.RefObject<HTMLDivElement | null>
   onScroll?: () => void
   skip?: boolean
 }) {
   React.useLayoutEffect(() => {
     if (skip) return
-    targetRef.current?.scrollIntoView({ behavior: 'instant' })
-    onScroll?.()
+    // Find the viewport / end anchor via refs first, falling back to DOM
+    // queries (refs can be null on fresh mount due to React ref cleanup /
+    // re-attach race with AnimatePresence even though the DOM is committed).
+    const findVp = () => {
+      if (scrollViewportRef.current) return scrollViewportRef.current
+      // Fall back to DOM query. Scope via the ChatDisplay's own end-anchor
+      // (data-end-anchor is unique to ChatDisplay) so we don't accidentally
+      // scroll another panel's ScrollArea viewport — e.g. the session list
+      // viewport that also carries [data-radix-scroll-area-viewport] and sits
+      // earlier in the DOM.
+      const anchor = document.querySelector('[data-end-anchor]') as HTMLElement | null
+      return anchor?.closest('[data-radix-scroll-area-viewport]') as HTMLElement | null
+    }
+    const findTarget = () => targetRef.current ??
+      document.querySelector('[data-end-anchor]') as HTMLElement | null
+    let raf = 0
+    let lastSh = -1
+    let stableFrames = 0
+    const scrollFrame = () => {
+      const vp = findVp()
+      if (vp) {
+        // Direct viewport scroll lands at the true bottom; scrollIntoView
+        // (block:'start') stops 17px short due to the bottom padding below
+        // the end anchor.
+        vp.scrollTop = vp.scrollHeight
+        onScroll?.()
+        // Content may still be rendering (AnimatePresence enter phase / lazy
+        // turn mount), so scrollHeight can grow after the first scroll. Keep
+        // scrolling each frame until scrollHeight stops changing, then stop.
+        // (Do NOT return true on the first success — that left the viewport
+        // at a partial-content position and the retry loop never re-scrolled.)
+        if (vp.scrollHeight === lastSh) {
+          stableFrames++
+          return stableFrames >= 2
+        }
+        lastSh = vp.scrollHeight
+        stableFrames = 0
+        return false
+      }
+      const target = findTarget()
+      if (target) {
+        target.scrollIntoView({ behavior: 'instant' })
+        onScroll?.()
+        return true
+      }
+      return false
+    }
+    // Synchronous first scroll (before the first paint) so the initial frame
+    // is already at the current bottom — even if content is still rendering,
+    // the rAF loop below refines it once the content settles.
+    scrollFrame()
+    // Always go through rAF as well: the first frame's layout may not include
+    // the full content height yet.
+    const retry = () => {
+      if (scrollFrame()) return
+      raf = requestAnimationFrame(retry)
+    }
+    raf = requestAnimationFrame(retry)
+    return () => {
+      if (raf) cancelAnimationFrame(raf)
+    }
   }, [skip])
   return null
 }
@@ -510,7 +571,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   const prevSessionIdRef = React.useRef<string | null>(null)
   // Reverse pagination: show last N turns initially, load more on scroll up
   const TURNS_PER_PAGE = 20
-  const [visibleTurnCount, setVisibleTurnCount] = React.useState(TURNS_PER_PAGE)
+  // Start with only a handful of turns from the END of the conversation so the
+  // initial scroll-to-bottom is always reliable (tiny content), then grow to a
+  // full page once we're anchored at the bottom. Older turns load on scroll-up.
+  const INITIAL_TURN_COUNT = 5
+  const [visibleTurnCount, setVisibleTurnCount] = React.useState(INITIAL_TURN_COUNT)
   // Sticky-bottom: When true, auto-scroll on content changes. Toggled by user scroll behavior.
   const isStickToBottomRef = React.useRef(true)
   // Mirror isFocusedPanel into a ref so the ResizeObserver closure reads the latest value
@@ -518,6 +583,69 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   isFocusedPanelRef.current = isFocusedPanel
   // Skip smooth scroll briefly after session switch (instant scroll already happened)
   const skipSmoothScrollUntilRef = React.useRef(0)
+  // Armed on every session switch; disarmed once we've force-scrolled to the bottom
+  // after the real content settles. ScrollOnMount can fire before the loaded
+  // content is in the DOM (endRef null) and the load-more handler can flip
+  // isStickToBottom to false while the viewport is still at the top, so this is
+  // the reliable backstop that lands on the latest messages.
+  const initialBottomScrollPendingRef = React.useRef(false)
+  // Set by handleScroll when loading older turns near the top; consumed by the
+  // useLayoutEffect below AFTER React commits the prepended turns, so the
+  // viewport stays anchored to the same content instead of jumping.
+  const pendingLoadMoreAnchorRef = React.useRef<{ element: HTMLElement; viewportOffsetBefore: number } | null>(null)
+  // Mirrors visibleTurnCount so the useCallback([]) handleScroll can read the
+  // current value (its closure is stale by design).
+  const visibleTurnCountRef = React.useRef(visibleTurnCount)
+  React.useEffect(() => { visibleTurnCountRef.current = visibleTurnCount }, [visibleTurnCount])
+  // True while the Radix scrollbar thumb is being dragged. During a drag, Radix
+  // remaps scrollTop on every pointermove using the current scrollHeight, so any
+  // scroll anchoring is immediately overwritten. load-more is deferred until the
+  // drag ends (pointerup) so the anchoring can hold.
+  const scrollbarDragActiveRef = React.useRef(false)
+  // When the user is near the top during a scrollbar drag, this is set to true.
+  // On pointerup, if this is true, the deferred load-more is triggered.
+  const deferLoadMoreRef = React.useRef(false)
+  // Fallback for a missed pointerup: if the user stops scrolling near the top
+  // while a deferred load-more is pending, this timer fires ~350ms after the
+  // last scroll event and triggers the load. Cleared on pointerup/pointerdown.
+  const dragSettleTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Cooldown (ms) between drag-originated load-mores so the pointerup handler
+  // and the settle timer can't double-fire the same load.
+  const lastDragLoadAtRef = React.useRef(0)
+  // Baseline for a RELATIVE thumb-drag mapping (see the pointer handlers in the
+  // scroll-listener effect below). Radix maps the pointer to scrollTop
+  // absolutely using the current content height, so after a load-more prepend
+  // (content height grows) re-grabbing the thumb re-maps the same pointer
+  // position to a different scrollTop and the view jumps. Capturing the grab
+  // baseline and applying pointer-delta × ratio makes the drag continuous
+  // regardless of content-height changes — like a native scrollbar on a page
+  // that dynamically loads content.
+  const thumbDragRef = React.useRef<{
+    pointerId: number
+    startScrollTop: number
+    startClientY: number
+    ratio: number
+    viewport: HTMLElement
+  } | null>(null)
+  // Latest pointer Y during an active thumb drag; used to rebase the relative
+  // mapping onto the anchored position when a load-more lands mid-drag.
+  const lastDragPointerYRef = React.useRef(0)
+
+  // Extracted load-more logic: capture the anchor element and increment the
+  // visible turn count. Used by handleScroll (wheel) and the pointerup handler
+  // (drag end).
+  const triggerLoadMore = React.useCallback((viewport: HTMLElement, scrollTop: number) => {
+    const currentStartIndex = Math.max(0, totalTurnCountRef.current - visibleTurnCountRef.current)
+    if (currentStartIndex <= 0) return
+    const anchor = viewport.querySelector<HTMLElement>('[data-turn]')
+    if (anchor) {
+      pendingLoadMoreAnchorRef.current = {
+        element: anchor,
+        viewportOffsetBefore: anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top,
+      }
+    }
+    setVisibleTurnCount(prev => prev + TURNS_PER_PAGE)
+  }, [])
   // Track message commit boundaries so we can auto-scroll when a new user message
   // actually lands in state (important when attachments delay optimistic insertion).
   const prevLastMessageIdRef = React.useRef<string | null>(null)
@@ -1109,37 +1237,179 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     if (!viewport) return
     const { scrollTop, scrollHeight, clientHeight } = viewport
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight
+    // While the initial bottom-anchor is pending (session switch in progress),
+    // ignore scroll events entirely: the viewport can be at the top during the
+    // mount burst, which would spuriously flip sticky-bottom off and inflate
+    // visibleTurnCount before we've scrolled to the bottom.
+    if (initialBottomScrollPendingRef.current) return
+
     // 20px threshold for "at bottom" detection
     isStickToBottomRef.current = distanceFromBottom < 20
 
     // Load more turns when scrolling near top (within 100px)
     if (scrollTop < 100) {
-      setVisibleTurnCount(prev => {
-        // Check if there are more turns to load
-        const currentStartIndex = Math.max(0, totalTurnCountRef.current - prev)
-        if (currentStartIndex <= 0) return prev // Already showing all
-
-        // Remember scroll height before adding more items
-        const prevScrollHeight = viewport.scrollHeight
-
-        // Schedule scroll position adjustment after render
-        requestAnimationFrame(() => {
-          const newScrollHeight = viewport.scrollHeight
-          viewport.scrollTop = newScrollHeight - prevScrollHeight + scrollTop
-        })
-
-        return prev + TURNS_PER_PAGE
-      })
+      if (scrollbarDragActiveRef.current) {
+        // During a scrollbar drag, Radix remaps scrollTop on every pointermove
+        // using the current scrollHeight, so any anchoring is immediately
+        // overwritten and the viewport would jump. Defer the load until the
+        // drag ends (pointerup), then the element anchoring below holds.
+        deferLoadMoreRef.current = true
+        // Safety net: scroll events are async and may be coalesced, and a
+        // pointerup can be missed. If the user stops scrolling near the top,
+        // fire the deferred load ~350ms after the last scroll event.
+        if (dragSettleTimerRef.current) clearTimeout(dragSettleTimerRef.current)
+        dragSettleTimerRef.current = setTimeout(() => {
+          dragSettleTimerRef.current = null
+          if (!deferLoadMoreRef.current) return
+          deferLoadMoreRef.current = false
+          const vp = scrollViewportRef.current
+          if (vp && vp.scrollTop < 100 && Date.now() - lastDragLoadAtRef.current > 300) {
+            lastDragLoadAtRef.current = Date.now()
+            triggerLoadMore(vp, vp.scrollTop)
+          }
+        }, 350)
+      } else {
+        triggerLoadMore(viewport, scrollTop)
+      }
+    } else {
+      deferLoadMoreRef.current = false
     }
-  }, [])
+  }, [triggerLoadMore])
 
   // Set up scroll event listener
   React.useEffect(() => {
     const viewport = scrollViewportRef.current
     if (!viewport) return
     viewport.addEventListener('scroll', handleScroll)
-    return () => viewport.removeEventListener('scroll', handleScroll)
-  }, [handleScroll])
+
+    // Detect scrollbar thumb drags so load-more can be deferred until release
+    // (see handleScroll). Capture-phase listeners ensure we see the pointer
+    // events even though Radix stops propagation during the drag.
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Element | null
+      const scrollbarEl = target?.closest?.('[data-slot="scroll-bar"]') as HTMLElement | null
+      if (!scrollbarEl) return
+      scrollbarDragActiveRef.current = true
+      deferLoadMoreRef.current = false
+      if (dragSettleTimerRef.current) {
+        clearTimeout(dragSettleTimerRef.current)
+        dragSettleTimerRef.current = null
+      }
+      // Thumb grab (vs track click): capture the baseline for a RELATIVE drag
+      // mapping so the drag stays continuous across content-height changes.
+      const vp = scrollViewportRef.current
+      const thumbEl = scrollbarEl.querySelector<HTMLElement>('[data-state="visible"]')
+      if (vp && thumbEl && (thumbEl === target || thumbEl.contains(target as Node))) {
+        const sbStyle = window.getComputedStyle(scrollbarEl)
+        const padStart = parseFloat(sbStyle.paddingTop) || 0
+        const padEnd = parseFloat(sbStyle.paddingBottom) || 0
+        const maxThumbPos = scrollbarEl.clientHeight - padStart - padEnd - thumbEl.offsetHeight
+        const maxScrollPos = vp.scrollHeight - vp.clientHeight
+        thumbDragRef.current = {
+          pointerId: e.pointerId,
+          startScrollTop: vp.scrollTop,
+          startClientY: e.clientY,
+          ratio: maxThumbPos > 0 && maxScrollPos > 0 ? maxScrollPos / maxThumbPos : 0,
+          viewport: vp,
+        }
+        lastDragPointerYRef.current = e.clientY
+      } else {
+        thumbDragRef.current = null
+      }
+    }
+    // Relative thumb-drag mapping. Registered on window in the BUBBLE phase so
+    // it runs AFTER Radix's absolute mapping (Radix handles pointermove via a
+    // React-delegated listener at the root), overriding it. This keeps the drag
+    // continuous from the grab point regardless of content-height changes.
+    const onPointerMove = (e: PointerEvent) => {
+      const drag = thumbDragRef.current
+      if (!drag || e.pointerId !== drag.pointerId) return
+      lastDragPointerYRef.current = e.clientY
+      drag.viewport.scrollTop = drag.startScrollTop + (e.clientY - drag.startClientY) * drag.ratio
+    }
+    const onPointerUp = () => {
+      // The drag ended. Check the final position directly instead of relying on
+      // the defer flag — scroll events during a drag are async/coalesced and
+      // may not have set deferLoadMoreRef by the time the pointerup fires.
+      thumbDragRef.current = null
+      if (dragSettleTimerRef.current) {
+        clearTimeout(dragSettleTimerRef.current)
+        dragSettleTimerRef.current = null
+      }
+      if (!scrollbarDragActiveRef.current) return
+      scrollbarDragActiveRef.current = false
+      deferLoadMoreRef.current = false
+      const vp = scrollViewportRef.current
+      if (vp && vp.scrollTop < 100 && Date.now() - lastDragLoadAtRef.current > 300) {
+        lastDragLoadAtRef.current = Date.now()
+        triggerLoadMore(vp, vp.scrollTop)
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    window.addEventListener('pointermove', onPointerMove)
+    window.addEventListener('pointerup', onPointerUp, true)
+    return () => {
+      viewport.removeEventListener('scroll', handleScroll)
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('pointermove', onPointerMove)
+      window.removeEventListener('pointerup', onPointerUp, true)
+      if (dragSettleTimerRef.current) {
+        clearTimeout(dragSettleTimerRef.current)
+        dragSettleTimerRef.current = null
+      }
+    }
+  }, [handleScroll, triggerLoadMore])
+
+  // Keep the viewport anchored to the same content after older turns are
+  // prepended by load-more. Runs in useLayoutEffect (after React commits the DOM
+  // update but before paint). The anchor element was captured in handleScroll
+  // before the update; here we restore its viewport-relative position, so the
+  // messages stay exactly where they were. (The old requestAnimationFrame
+  // approach could fire before the commit and compute a zero height delta, which
+  // let the viewport jump to a different content position.)
+  React.useLayoutEffect(() => {
+    const pending = pendingLoadMoreAnchorRef.current
+    if (!pending) return
+    pendingLoadMoreAnchorRef.current = null
+    const viewport = scrollViewportRef.current
+    if (!viewport) return
+    const anchor = pending.element
+    if (!anchor.isConnected) return
+    const newOffset = anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top
+    const delta = newOffset - pending.viewportOffsetBefore
+    if (Math.abs(delta) > 0.5) {
+      viewport.scrollTop += delta
+    }
+    // If a thumb drag is still in progress (the settle-timer load can fire
+    // while the user keeps holding the thumb at the top), rebase the relative
+    // mapping onto the anchored position. Without this, the next pointermove
+    // would recompute scrollTop from the pre-load grab baseline and snap the
+    // view back to the top — exactly the reported jump.
+    const activeDrag = thumbDragRef.current
+    if (activeDrag && activeDrag.viewport === viewport) {
+      activeDrag.startScrollTop = viewport.scrollTop
+      activeDrag.startClientY = lastDragPointerYRef.current
+    }
+    // Force Radix to re-sync the scrollbar thumb with the updated content
+    // height. Radix only repositions the thumb on scroll events, using its
+    // internal `sizes` (content height) which updates via ResizeObserver after
+    // the prepend. Without a follow-up scroll event the thumb keeps a stale
+    // visual position, so the next thumb drag maps the pointer against the new
+    // content height and jumps. Dispatch one after layout/sizes settle.
+    setTimeout(() => {
+      viewport.dispatchEvent(new Event('scroll'))
+    }, 60)
+  }, [visibleTurnCount])
+
+  // Disable the browser's native scroll anchoring on this viewport: the manual
+  // useLayoutEffect above is the single source of truth for prepend anchoring,
+  // and native anchoring can fight it (or anchor to an arbitrary node) during
+  // the skeleton→real content swap.
+  React.useEffect(() => {
+    const viewport = scrollViewportRef.current
+    if (!viewport) return
+    viewport.style.setProperty('overflow-anchor', 'none')
+  }, [])
 
   // Auto-scroll using ResizeObserver for streaming content
   // Initial scroll is handled by ScrollOnMount (useLayoutEffect, before paint)
@@ -1153,7 +1423,25 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     // On session switch: reset UI state (scroll handled by ScrollOnMount)
     if (isSessionSwitch) {
       isStickToBottomRef.current = true
-      setVisibleTurnCount(TURNS_PER_PAGE)
+      // Render only the LAST few turns so the initial bottom scroll is reliable
+      // even for very long sessions. The content-settled effect below grows this
+      // back to a full page after we're anchored at the bottom.
+      setVisibleTurnCount(INITIAL_TURN_COUNT)
+      // Clear the skip window set by ScrollOnMount's onScroll callback.
+      // On fresh mount (cross-view navigation), ScrollOnMount fires before layout
+      // is fully settled and sets skipSmoothScrollUntilRef = Date.now() + 500.
+      // This would block the ResizeObserver's debounced scroll when real content
+      // loads shortly after, leaving the user at the top of the conversation.
+      // Resetting here ensures the ResizeObserver can still scroll to bottom
+      // once the content layout stabilizes.
+      skipSmoothScrollUntilRef.current = 0
+      // Arm the content-settled bottom scroll. The old single-shot double-rAF was
+      // too weak: ScrollOnMount can fire before the loaded content is in the DOM
+      // (endRef null), and the load-more handler can flip isStickToBottom to false
+      // while the viewport is still at the top, which blocked the rAF guard. The
+      // dedicated effect below waits until the real content is rendered, undoes
+      // any load-more turn inflation, and scrolls to the bottom regardless.
+      initialBottomScrollPendingRef.current = true
     }
 
     // Debounced scroll for streaming - waits for layout to settle
@@ -1167,13 +1455,17 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
       }
 
       // Focused panel: respect sticky-bottom preference
-      if (!isStickToBottomRef.current) return
+      if (!isStickToBottomRef.current) {
+        return
+      }
 
       // Clear pending scroll and wait for layout to settle
       if (debounceTimer) clearTimeout(debounceTimer)
       debounceTimer = setTimeout(() => {
         // Skip smooth scroll if we just did an instant scroll (session switch/lazy load)
-        if (Date.now() < skipSmoothScrollUntilRef.current) return
+        if (Date.now() < skipSmoothScrollUntilRef.current) {
+          return
+        }
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
       }, 200)
     })
@@ -1189,6 +1481,98 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
       if (debounceTimer) clearTimeout(debounceTimer)
     }
   }, [session?.id])
+
+  // Reliable bottom-anchor after a session switch (armed by the ResizeObserver
+  // effect above). ScrollOnMount can fire before the loaded content is in the DOM
+  // (endRef null), and the load-more handler can flip isStickToBottom to false
+  // while the viewport is still at the top — both of which leave the user at the
+  // top of a long conversation (~1/5 progress). This waits until the real content
+  // is rendered, undoes any load-more turn inflation, and scrolls to the bottom
+  // regardless of the stick state (which is unreliable during the mount burst).
+  React.useEffect(() => {
+    if (compactMode) return
+    if (!initialBottomScrollPendingRef.current) return
+    if (messagesLoading) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let retries = 0
+    const attempt = () => {
+      if (cancelled || !initialBottomScrollPendingRef.current) return
+      const endRef = messagesEndRef.current
+      if (!endRef) {
+        // Content not rendered yet — retry for up to ~10s (very long sessions can
+        // take a while to paint all turns), then give up.
+        if (++retries >= 100) {
+          initialBottomScrollPendingRef.current = false
+          return
+        }
+        timer = setTimeout(attempt, 100)
+        return
+      }
+      // messagesEndRef is a stable anchor rendered OUTSIDE the per-session
+      // AnimatePresence, so it exists even while the PREVIOUS session's content
+      // is still playing its exit animation (mode="wait"). Verify the NEW
+      // session's loaded content is actually in the DOM before anchoring —
+      // otherwise we'd scroll to the stale content's bottom, disarm this effect,
+      // and the real content would mount afterwards with nothing left to
+      // re-scroll (user lands mid-conversation).
+      const sessionId = session?.id ?? ''
+      const selector = `[data-session-id="${typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(sessionId) : sessionId}"]`
+      const loadedContent = scrollViewportRef.current?.querySelector(selector)
+      if (!loadedContent) {
+        if (++retries >= 100) {
+          initialBottomScrollPendingRef.current = false
+          return
+        }
+        timer = setTimeout(attempt, 100)
+        return
+      }
+      // New session's content is in the DOM. Grow from the initial few turns to
+      // a full page (content is added ABOVE the viewport so the bottom stays
+      // put), then scroll to the bottom — unconditionally, ignoring the stick
+      // state which is unreliable during the mount burst.
+      initialBottomScrollPendingRef.current = false
+      isStickToBottomRef.current = true
+      // Anchor the 5→20 growth so the bottom stays put BEFORE paint. The growth
+      // prepends turns above; without anchoring, the grown content can paint at
+      // the old (small) scrollTop — flashing older turns — before the rAF scroll
+      // below snaps back to the bottom. Anchoring messagesEndRef makes the
+      // synchronous anchor layout-effect adjust scrollTop pre-paint, so the very
+      // first paint of the full page is already the bottom (no flash).
+      const vpEl = scrollViewportRef.current
+      const endEl = messagesEndRef.current
+      if (vpEl && endEl) {
+        pendingLoadMoreAnchorRef.current = {
+          element: endEl,
+          viewportOffsetBefore: endEl.getBoundingClientRect().top - vpEl.getBoundingClientRect().top,
+        }
+      }
+      setVisibleTurnCount(TURNS_PER_PAGE)
+      requestAnimationFrame(() => {
+        if (cancelled) return
+        // Use viewport scrollHeight for the true bottom (scrollIntoView's
+        // block:'start' lands short by the bottom padding, which is then
+        // carried into the anchor delta and shows up as a post-paint nudge).
+        const vp = scrollViewportRef.current
+        if (vp) vp.scrollTop = vp.scrollHeight
+        // Late-layout safety net: markdown/code/images can grow the content
+        // after this scroll. One delayed correction re-anchors to the bottom
+        // unless the user has already scrolled away on their own.
+        timer = setTimeout(() => {
+          if (cancelled || !isStickToBottomRef.current) return
+          const vp = scrollViewportRef.current
+          if (!vp) return
+          const distance = vp.scrollHeight - vp.scrollTop - vp.clientHeight
+          if (distance > 40) messagesEndRef.current?.scrollIntoView({ behavior: 'instant' })
+        }, 250)
+      })
+    }
+    timer = setTimeout(attempt, 120)
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [session?.id, messagesLoading, compactMode])
 
   // Commit-time auto-scroll for new user messages.
   // This complements submit-time scrolling and covers cases where attachments delay
@@ -1345,11 +1729,17 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   }
 
   // Per-frame scroll compensation during input height animation
-  // Only compensate when user is "stuck to bottom" - otherwise let them control their scroll position
+  // Only compensate when user is "stuck to bottom" or during the initial mount
+  // burst (initialBottomScrollPendingRef) — in either case the user expects the
+  // view to stay pinned at the bottom.
   const handleAnimatedHeightChange = React.useCallback((delta: number) => {
-    if (!isStickToBottomRef.current) return
+    if (!isStickToBottomRef.current && !initialBottomScrollPendingRef.current) return
     const viewport = scrollViewportRef.current
     if (!viewport) return
+    // Force a synchronous layout recalculation so clientHeight reflects the
+    // new input height before we adjust scrollTop (otherwise the browser may
+    // clamp scrollTop against the stale, pre-growth clientHeight).
+    void viewport.clientHeight
     // Adjust scroll to maintain position relative to content
     viewport.scrollTop += delta
   }, [])
@@ -1595,6 +1985,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                     /* AnimatePresence handles the fade-in animation when transitioning from loading */
                     <motion.div
                       key={compactMode ? 'loaded-compact' : `loaded-${session?.id}`}
+                      data-session-id={session?.id ?? ''}
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       exit={{ opacity: 0 }}
@@ -1604,8 +1995,15 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                   {/* Skip when search is active on session switch - scroll to first match instead */}
                   <ScrollOnMount
                     targetRef={messagesEndRef}
+                    scrollViewportRef={scrollViewportRef}
                     skip={skipScrollToBottom}
                     onScroll={() => {
+                      // Scrolling to bottom implies stick-to-bottom. Setting it
+                      // here (pre-paint, in the layout effect) makes the input
+                      // height compensation fire during the mount burst, when
+                      // the RO-effect's post-paint isSessionSwitch branch hasn't
+                      // run yet.
+                      isStickToBottomRef.current = true
                       skipSmoothScrollUntilRef.current = Date.now() + 500
                     }}
                   />
@@ -1643,6 +2041,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                       return (
                         <div
                           key={turnKey}
+                          data-turn={turnKey}
                           ref={el => { if (el) turnRefs.current.set(turnKey, el); else turnRefs.current.delete(turnKey) }}
                           className={cn(
                             compactMode ? "pt-2 pb-1" : CHAT_LAYOUT.userMessagePadding,
@@ -1682,6 +2081,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                       return (
                         <div
                           key={turnKey}
+                          data-turn={turnKey}
                           ref={el => { if (el) turnRefs.current.set(turnKey, el); else turnRefs.current.delete(turnKey) }}
                           className={cn(
                             "rounded-lg transition-all duration-200",
@@ -1716,6 +2116,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                       return (
                         <div
                           key={turnKey}
+                          data-turn={turnKey}
                           ref={el => { if (el) turnRefs.current.set(turnKey, el); else turnRefs.current.delete(turnKey) }}
                           className={cn(
                             "mt-2 rounded-lg transition-all duration-200",
@@ -1741,6 +2142,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                     return (
                       <div
                         key={turnKey}
+                        data-turn={turnKey}
                         ref={el => { if (el) turnRefs.current.set(turnKey, el); else turnRefs.current.delete(turnKey) }}
                         className={cn(
                           "pt-2",
@@ -1948,7 +2350,8 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                   )
                 })()}
                 {/* Scroll Anchor: For auto-scroll to bottom */}
-                <div ref={messagesEndRef} />
+                {/* Stable anchor for ScrollOnMount DOM fallback (refs can be null during fresh mount). data-end-anchor is unique to ChatDisplay — used to scope the querySelector to the correct ScrollArea viewport. */}
+                <div ref={messagesEndRef} data-end-anchor="true" />
               </div>
               </ScrollArea>
             </div>

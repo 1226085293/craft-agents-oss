@@ -369,6 +369,9 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
         return sessionManager.setPendingPlanExecution(sessionId, command.planPath, command.draftInputSnapshot)
       case 'markCompactionComplete':
         return sessionManager.markCompactionComplete(sessionId)
+      case 'clearSession':
+        // Clear the session's message context (same as /clear on mobile)
+        return sessionManager.clearSessionMessages(sessionId)
       case 'markPendingPlanExecutionDispatched':
         return sessionManager.markPendingPlanExecutionDispatched(sessionId)
       case 'clearPendingPlanExecution':

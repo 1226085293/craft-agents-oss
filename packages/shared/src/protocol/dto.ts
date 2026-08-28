@@ -487,6 +487,7 @@ export type SessionCommand =
   | { type: 'setConnection'; connectionSlug: string }
   | { type: 'setPendingPlanExecution'; planPath: string; draftInputSnapshot?: string }
   | { type: 'markCompactionComplete' }
+  | { type: 'clearSession' }
   | { type: 'markPendingPlanExecutionDispatched' }
   | { type: 'clearPendingPlanExecution' }
   | { type: 'cancelQueuedMessage'; messageId: string }

@@ -937,7 +937,10 @@ export function FreeFormInput({
     else if (commandId === 'ask') onPermissionModeChange?.('ask')
     else if (commandId === 'allow-all') onPermissionModeChange?.('allow-all')
     else if (commandId === 'compact' && !isProcessing) onSubmit('/compact', undefined)
-  }, [onPermissionModeChange, isProcessing, onSubmit])
+    else if (commandId === 'clear' && sessionId && !isProcessing) {
+      window.electronAPI.sessionCommand(sessionId, { type: 'clearSession' })
+    }
+  }, [onPermissionModeChange, isProcessing, onSubmit, sessionId])
 
   // Handle folder selection from slash command menu
   const handleSlashFolderSelect = React.useCallback((path: string) => {

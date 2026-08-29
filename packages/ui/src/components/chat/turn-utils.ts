@@ -88,7 +88,19 @@ export type Turn = AssistantTurn | UserTurn | SystemTurn | AuthRequestTurn
  */
 export function getAssistantTurnUiKey(turn: AssistantTurn, index: number): string {
   if (turn.response?.messageId) {
-    return `assistant:msg:${turn.response.messageId}`
+    // When the response was promoted from the last intermediate activity (a turn
+    // that ended without a natural final reply — e.g. after restart recovery
+    // re-runs the interrupted request), the messageId belongs to that intermediate
+    // message, not a real assistant reply. Using it as the UI key would change
+    // the key between the in-flight (no response) and recovered (promoted) states,
+    // losing the persisted expanded/collapsed state and hiding the already
+    // completed steps inside the card after an app restart.
+    const promotedFromIntermediate = turn.activities.some(
+      a => a.id === turn.response?.messageId && a.type === 'intermediate'
+    )
+    if (!promotedFromIntermediate) {
+      return `assistant:msg:${turn.response.messageId}`
+    }
   }
   return `assistant:turn:${turn.turnId}:${turn.timestamp}:${index}`
 }

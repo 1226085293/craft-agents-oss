@@ -17,7 +17,7 @@ import type {
   AgentSessionEvent,
 } from '@earendil-works/pi-coding-agent';
 import type { AssistantMessage, AssistantMessageEvent } from '@earendil-works/pi-ai';
-import { isContextOverflow } from '@earendil-works/pi-ai';
+import { isContextOverflow, isRetryableAssistantError } from '@earendil-works/pi-ai';
 import { BaseEventAdapter } from '../base-event-adapter.ts';
 import { PI_TOOL_NAME_MAP } from './constants.ts';
 import { toolMetadataStore } from '../../../interceptor-common.ts';
@@ -124,6 +124,37 @@ export class PiEventAdapter extends BaseEventAdapter {
    *  as defenseResumeHeld). The FINAL `agent_end` (no flag) clears it. */
   private queuedFollowUpHeld: boolean = false;
 
+  // ============================================================
+  // Retryable-error deferral (auto-retry terminal-state reporting)
+  // ============================================================
+  //
+  // The Pi SDK's auto-retry sequence for a retryable assistant error
+  // (per `isRetryableAssistantError` — overloaded / 429 / 5xx / network /
+  // "terminated" …) is:
+  //   message_end(stopReason:'error')
+  //   → agent_end with willRetry:true  (SDK annotates every agent_end —
+  //     `_willRetryAfterAgentEnd`)
+  //   → auto_retry_start
+  //   → retried turn events … final agent_end (willRetry:false)
+  // When retries are exhausted the LAST agent_end carries willRetry:false and
+  // auto_retry_end(success:false) follows it. If the user aborts during the
+  // backoff sleep, auto_retry_end(success:false) is the terminal event and no
+  // second agent_end follows.
+  //
+  // Historic bug: the adapter surfaced the error immediately on message_end,
+  // so the UI (Telegram ❌) reported final failure while the SDK was still
+  // retrying — and the retried answer then arrived anyway. The state below
+  // defers retryable errors until an explicit failure terminal and reports
+  // them exactly once.
+  /** Buffered retryable error, deferred until the turn's failure terminal. */
+  private deferredRetryError: { message: string; parsed: ReturnType<typeof parseError> | null } | null = null;
+  /** True while an auto-retry is in flight after a held agent_end — keeps the
+   *  event queue open for the retried turn. */
+  private retryHoldActive: boolean = false;
+  /** Set once a terminal error has been reported this turn-cycle so late
+   *  auto_retry_end(success:false) events don't report a second failure. */
+  private hasEmittedTerminalError: boolean = false;
+
   constructor() {
     super('pi-event');
   }
@@ -193,6 +224,12 @@ export class PiEventAdapter extends BaseEventAdapter {
         return false;
       }
       this.queuedFollowUpHeld = false;
+      if (this.retryHoldActive) {
+        // The retry hold was already resolved in adaptEvent above (terminal
+        // agent_end surfaced the deferred error). A hold means this agent_end
+        // was the willRetry:true one — keep the queue open for the retried turn.
+        return false;
+      }
       return this.overflowState === 'none';
     }
     return false;
@@ -220,6 +257,9 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.pendingQueueComplete = false;
     this.defenseResumeHeld = false;
     this.queuedFollowUpHeld = false;
+    this.deferredRetryError = null;
+    this.retryHoldActive = false;
+    this.hasEmittedTerminalError = false;
   }
 
   private armOverflowFallbackTimer(): void {
@@ -271,6 +311,11 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.hasEmittedFinalText = false;
     this.subTurnCounter = 0;
     this.messageSubTurnId = null;
+    // A new agent-loop turn re-arms terminal-error dedup. NOTE: the deferred
+    // retry error buffer deliberately survives turn boundaries — the SDK's
+    // retry turn is a fresh turn_start…agent_end pair, and the buffered error
+    // must still surface if that turn fails terminally.
+    this.hasEmittedTerminalError = false;
     this.log.debug('Turn started', { turnIndex: this.turnIndex });
   }
 
@@ -322,6 +367,30 @@ export class PiEventAdapter extends BaseEventAdapter {
         if (this.overflowState === 'recovering') {
           // Recovered turn just finished — fall through to normal completion.
           this.overflowState = 'none';
+        }
+        // Retryable-error deferral: the SDK annotated this agent_end with
+        // willRetry:true — it is about to auto-retry the deferred error.
+        // Hold the queue open for the retried turn and surface nothing yet;
+        // the deferred error only reports if the retry NEVER succeeds
+        // (terminal agent_end, or auto_retry_end failure on abort).
+        if (
+          (event as { willRetry?: boolean }).willRetry === true &&
+          this.deferredRetryError
+        ) {
+          this.retryHoldActive = true;
+          break;
+        }
+        this.retryHoldActive = false;
+        // Terminal agent_end (willRetry false/absent): surface a buffered
+        // deferred error exactly once, right before the complete event —
+        // this is the ONLY point a deferred retryable error reaches the UI.
+        if (this.deferredRetryError) {
+          const buffered = this.deferredRetryError;
+          this.deferredRetryError = null;
+          this.hasEmittedTerminalError = true;
+          yield buffered.parsed
+            ? { type: 'typed_error', error: buffered.parsed }
+            : { type: 'error', message: buffered.message };
         }
         // Defense resume (pi-agent-server defense layer): the subprocess
         // annotates the FIRST agent_end with defenseResumePending=true when it
@@ -417,6 +486,15 @@ export class PiEventAdapter extends BaseEventAdapter {
         const sdkMessageId = (event as { sdkMessageId?: string }).sdkMessageId ?? msg?.id;
         if (msg?.role !== 'assistant') break;
 
+        // A NON-error assistant message_end means the SDK's auto-retry has
+        // recovered (the retried turn is producing real content). The buffered
+        // deferred error is obsolete now — drop it so it can never surface at
+        // a later terminal (mirrors the SDK resetting _retryAttempt on success).
+        if (msg.stopReason !== 'error' && this.deferredRetryError) {
+          this.deferredRetryError = null;
+          this.retryHoldActive = false;
+        }
+
         // Surface API errors — Pi SDK sets stopReason: 'error' and errorMessage on failures
         if (msg.stopReason === 'error' && msg.errorMessage) {
           // Context overflow: hand recovery to the SDK's _runAutoCompaction
@@ -431,10 +509,28 @@ export class PiEventAdapter extends BaseEventAdapter {
             break;
           }
 
+          // Retryable errors (overloaded / 429 / 5xx / network / "terminated"…)
+          // are DEFERRED: the SDK will auto-retry after the upcoming agent_end
+          // (which carries willRetry:true), so reporting here would flag the
+          // turn as failed while the retried answer is still coming. The error
+          // surfaces only at an explicit failure terminal (see agent_end and
+          // auto_retry_end handling). Uses the SAME classifier as the SDK's
+          // retry decision (`isRetryableAssistantError`) so deferral and retry
+          // cannot disagree.
+          if (!this.hasEmittedTerminalError && isRetryableAssistantError(event.message as AssistantMessage)) {
+            const parsed = parseError(new Error(msg.errorMessage));
+            this.deferredRetryError = {
+              message: msg.errorMessage,
+              parsed: parsed.code !== 'unknown_error' ? parsed : null,
+            };
+            break;
+          }
+
           // Classify the error — auth/billing errors should be typed so SessionManager
           // can trigger its auth-retry pipeline (refresh token + resend).
           const parsed = parseError(new Error(msg.errorMessage));
           const isClassified = parsed.code !== 'unknown_error';
+          this.hasEmittedTerminalError = true;
           if (isClassified) {
             yield { type: 'typed_error', error: parsed };
           } else {
@@ -694,7 +790,28 @@ export class PiEventAdapter extends BaseEventAdapter {
       case 'auto_retry_end': {
         const retryEndEvent = event as Extract<AgentSessionEvent, { type: 'auto_retry_end' }>;
         if (!retryEndEvent.success && retryEndEvent.finalError) {
-          yield { type: 'error', message: `Retry failed: ${retryEndEvent.finalError}` };
+          // Abort during the backoff sleep: the held agent_end never gets a
+          // terminal successor — auto_retry_end IS the failure terminal.
+          // Surface the buffered deferred error here and terminate the queue.
+          if (this.retryHoldActive && this.deferredRetryError) {
+            const buffered = this.deferredRetryError;
+            this.deferredRetryError = null;
+            this.retryHoldActive = false;
+            this.hasEmittedTerminalError = true;
+            yield buffered.parsed
+              ? { type: 'typed_error', error: buffered.parsed }
+              : { type: 'error', message: buffered.message };
+            yield { type: 'complete' };
+            this.pendingQueueComplete = true;
+            break;
+          }
+          // Otherwise the failure was already reported (terminal agent_end
+          // surfaced the deferred error, or message_end reported directly).
+          // Never report a second error for the same turn-cycle.
+          if (!this.hasEmittedTerminalError && !this.deferredRetryError) {
+            yield { type: 'error', message: `Retry failed: ${retryEndEvent.finalError}` };
+            this.hasEmittedTerminalError = true;
+          }
         }
         break;
       }

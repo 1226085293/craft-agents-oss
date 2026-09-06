@@ -571,7 +571,8 @@ describe('PiEventAdapter', () => {
       expect(events[0].error.code).toBe('billing_error');
     });
 
-    it('should emit typed_error for rate limit errors', () => {
+    it('should defer retryable rate limit errors to the terminal agent_end', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
       const events = collect(adapter.adaptEvent({
         type: 'message_end',
         message: {
@@ -581,9 +582,16 @@ describe('PiEventAdapter', () => {
         },
       } as any));
 
-      expect(events).toHaveLength(1);
-      expect(events[0].type).toBe('typed_error');
-      expect(events[0].error.code).toBe('rate_limited');
+      // Retryable errors are deferred — the SDK may auto-retry after the
+      // upcoming agent_end, so surfacing here would report ❌ prematurely.
+      expect(events).toHaveLength(0);
+
+      // Terminal agent_end (no retry follows) surfaces the deferred error
+      // exactly once, followed by complete.
+      const terminal = collect(adapter.adaptEvent({ type: 'agent_end', willRetry: false } as any));
+      expect(terminal[0].type).toBe('typed_error');
+      expect((terminal[0] as any).error.code).toBe('rate_limited');
+      expect(terminal[1]).toMatchObject({ type: 'complete' });
     });
 
     it('should not emit error without errorMessage even if stopReason is error', () => {
@@ -1267,7 +1275,7 @@ describe('PiEventAdapter', () => {
       }
     });
 
-    it('non-overflow regression: rate-limit error preserves existing behavior', () => {
+    it('non-overflow regression: rate-limit error defers and surfaces on terminal agent_end', () => {
       collect(adapter.adaptEvent({ type: 'turn_start' } as any));
 
       const events = collect(adapter.adaptEvent({
@@ -1279,13 +1287,14 @@ describe('PiEventAdapter', () => {
         },
       } as any));
 
-      // Rate-limit yields a typed_error (not held) — overflow state stays 'none'
-      // so a subsequent agent_end completes the queue normally.
-      expect(events).toHaveLength(1);
-      expect(events[0].type).toMatch(/^(error|typed_error)$/);
+      // Retryable (non-overflow) errors are deferred, NOT held as overflow.
+      expect(events).toHaveLength(0);
 
-      const agentEndEvents = collect(adapter.adaptEvent({ type: 'agent_end' } as any));
-      expect(agentEndEvents).toMatchObject([{ type: 'complete' }]);
+      // Terminal agent_end surfaces the deferred error, then completes
+      // normally — overflow state stays untouched.
+      const agentEndEvents = collect(adapter.adaptEvent({ type: 'agent_end', willRetry: false } as any));
+      expect(agentEndEvents[0].type).toMatch(/^(error|typed_error)$/);
+      expect(agentEndEvents[agentEndEvents.length - 1]).toMatchObject({ type: 'complete' });
       expect(adapter.shouldCompleteQueue(true)).toBe(true);
     });
 
@@ -1454,6 +1463,180 @@ describe('PiEventAdapter', () => {
 
       adapter.resetOverflowState();
       expect(adapter.shouldCompleteQueue(true)).toBe(true);
+    });
+  });
+
+  // ============================================================
+  // Retryable error deferral (auto-retry terminal-state reporting)
+  // ============================================================
+  //
+  // The Pi SDK's auto-retry sequence for a retryable assistant error is:
+  //   message_end(stopReason:'error')
+  //   → agent_end (willRetry: true — annotated by the SDK's _emit wrapper)
+  //   → auto_retry_start
+  //   → ...retried turn: message_end(success) ... final agent_end (willRetry: false)
+  // When retries are exhausted, the LAST agent_end carries willRetry: false and
+  // auto_retry_end(success: false) follows it.
+  //
+  // Historic bug: the adapter surfaced the error immediately on message_end,
+  // so the UI (Telegram ❌) reported final failure while the SDK was still
+  // retrying and the retried answer then arrived anyway.
+  //
+  // Fix: defer retryable errors until the terminal agent_end (willRetry: false
+  // or absent) and report exactly once. User aborts (stopReason 'aborted') are
+  // never deferred or recovered. See plans/termination-progress-fix.md step 1.
+
+  describe('retryable error deferral', () => {
+    const terminatedError = {
+      role: 'assistant',
+      stopReason: 'error',
+      errorMessage: 'terminated',
+    };
+
+    it('success path: defers terminated error, retry succeeds, original error never surfaces', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+
+      // 1. message_end with retryable error — deferred, nothing surfaces.
+      const deferred = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: terminatedError,
+      } as any));
+      expect(deferred).toHaveLength(0);
+
+      // 2. agent_end with willRetry: true — SDK will auto-retry. Queue stays
+      //    open for the retried turn; no complete is yielded.
+      const retryAgentEnd = collect(adapter.adaptEvent({ type: 'agent_end', willRetry: true } as any));
+      expect(retryAgentEnd).toHaveLength(0);
+      expect(adapter.shouldCompleteQueue(true)).toBe(false);
+
+      // 3. auto_retry_start — status only.
+      const retryStatus = collect(adapter.adaptEvent({
+        type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 1000,
+      } as any));
+      expect(retryStatus).toMatchObject([{ type: 'status', message: 'Retrying (attempt 1/3)...' }]);
+
+      // 4. Retried turn succeeds: final text + terminal agent_end.
+      const text = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'stop', content: 'Recovered answer after retry' },
+      } as any));
+      expect(text).toMatchObject([{ type: 'text_complete', text: 'Recovered answer after retry' }]);
+
+      const finalAgentEnd = collect(adapter.adaptEvent({ type: 'agent_end', willRetry: false } as any));
+      expect(finalAgentEnd).toMatchObject([{ type: 'complete' }]);
+      expect(adapter.shouldCompleteQueue(true)).toBe(true);
+
+      // The original 'terminated' error must NEVER reach the UI.
+      const allYields = [...deferred, ...retryAgentEnd, ...retryStatus, ...text, ...finalAgentEnd];
+      const errorYields = allYields.filter((e) => e.type === 'error' || e.type === 'typed_error');
+      expect(errorYields).toHaveLength(0);
+    });
+
+    it('exhaustion path: surfaces deferred error exactly once at the terminal agent_end', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+
+      // Attempt 1 fails → willRetry true.
+      collect(adapter.adaptEvent({ type: 'message_end', message: terminatedError } as any));
+      collect(adapter.adaptEvent({ type: 'agent_end', willRetry: true } as any));
+      collect(adapter.adaptEvent({ type: 'auto_retry_start', attempt: 1, maxAttempts: 3 } as any));
+
+      // Attempt 2 also fails, retries exhausted → terminal agent_end.
+      const secondFailure = collect(adapter.adaptEvent({ type: 'message_end', message: terminatedError } as any));
+      expect(secondFailure).toHaveLength(0); // still deferred
+
+      const terminalAgentEnd = collect(adapter.adaptEvent({ type: 'agent_end', willRetry: false } as any));
+      // Error surfaces exactly once, then complete.
+      const errorEvents = terminalAgentEnd.filter((e) => e.type === 'error' || e.type === 'typed_error');
+      expect(errorEvents).toHaveLength(1);
+      expect(errorEvents[0]).toMatchObject({ type: 'error', message: 'terminated' });
+      expect(terminalAgentEnd[terminalAgentEnd.length - 1]).toMatchObject({ type: 'complete' });
+      expect(adapter.shouldCompleteQueue(true)).toBe(true);
+
+      // The SDK's subsequent auto_retry_end(success:false) must NOT report a
+      // second error — the failure was already reported once.
+      const retryEnd = collect(adapter.adaptEvent({
+        type: 'auto_retry_end', success: false, attempt: 1, finalError: 'terminated',
+      } as any));
+      const dupErrors = retryEnd.filter((e) => e.type === 'error' || e.type === 'typed_error');
+      expect(dupErrors).toHaveLength(0);
+    });
+
+    it('auto_retry_end failure after an unrelated non-retryable turn does not double-report', () => {
+      // A turn that failed terminally WITHOUT deferral (e.g. auth error —
+      // non-retryable) already reported via typed_error on message_end.
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      const direct = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: '401 Unauthorized' },
+      } as any));
+      expect(direct).toHaveLength(1);
+      expect(direct[0].type).toBe('typed_error');
+
+      // A late auto_retry_end failure must not add a second error.
+      const retryEnd = collect(adapter.adaptEvent({
+        type: 'auto_retry_end', success: false, attempt: 1, finalError: '401 Unauthorized',
+      } as any));
+      expect(retryEnd.filter((e) => e.type === 'error' || e.type === 'typed_error')).toHaveLength(0);
+    });
+
+    it('user abort: stopReason aborted is never deferred or recovered', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+
+      // Aborted message_end — not an error, not deferred; falls through to
+      // normal text extraction (partial content still reaches the UI).
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'aborted', content: 'Partial answer' },
+      } as any));
+      expect(events).toMatchObject([{ type: 'text_complete', text: 'Partial answer' }]);
+
+      // agent_end with willRetry true (defensive) still completes — aborts
+      // must not hold the queue open.
+      collect(adapter.adaptEvent({ type: 'agent_end', willRetry: true } as any));
+      expect(adapter.shouldCompleteQueue(true)).toBe(true);
+    });
+
+    it('legacy agent_end without willRetry still completes (older SDK payloads)', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({ type: 'message_end', message: terminatedError } as any));
+
+      // No willRetry field (older payload) → treated as terminal.
+      const events = collect(adapter.adaptEvent({ type: 'agent_end' } as any));
+      const errorEvents = events.filter((e) => e.type === 'error' || e.type === 'typed_error');
+      expect(errorEvents).toHaveLength(1);
+      expect(events[events.length - 1]).toMatchObject({ type: 'complete' });
+      expect(adapter.shouldCompleteQueue(true)).toBe(true);
+    });
+
+    it('retryable network errors also defer (typed_error classification preserved)', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+
+      // 'fetch failed' is retryable per pi-ai; parseError classifies it as
+      // network_error. Both properties must hold: deferred now, typed at terminal.
+      const deferred = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: 'fetch failed' },
+      } as any));
+      expect(deferred).toHaveLength(0);
+
+      const terminal = collect(adapter.adaptEvent({ type: 'agent_end', willRetry: false } as any));
+      expect(terminal[0].type).toBe('typed_error');
+      expect((terminal[0] as any).error.code).toBe('network_error');
+      expect((terminal[0] as any).error.originalError).toBe('fetch failed');
+      expect(terminal[terminal.length - 1]).toMatchObject({ type: 'complete' });
+    });
+
+    it('resetOverflowState clears a pending deferred error (stale terminal guard)', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({ type: 'message_end', message: terminatedError } as any));
+      collect(adapter.adaptEvent({ type: 'agent_end', willRetry: true } as any));
+
+      // Session torn down before the retry finished — no stale error may
+      // leak into the next turn.
+      adapter.resetOverflowState();
+      const nextTurn = collect(adapter.adaptEvent({ type: 'agent_end', willRetry: false } as any));
+      expect(nextTurn.filter((e) => e.type === 'error' || e.type === 'typed_error')).toHaveLength(0);
+      expect(nextTurn).toMatchObject([{ type: 'complete' }]);
     });
   });
 });

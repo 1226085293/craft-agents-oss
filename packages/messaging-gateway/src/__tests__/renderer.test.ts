@@ -273,14 +273,23 @@ describe('Renderer — progress mode (default)', () => {
     await play(renderer, binding, adapter, [
       ev.intermediate('Sending the report now.'),
       ev.toolStart('SendTelegram'),
+    ])
+    await waitForDelayedProgress()
+    await play(renderer, binding, adapter, [
       ev.toolResult(),
       ev.complete(),
     ])
 
-    const edits = adapter.calls.filter((c) => c.kind === 'editMessage')
-    // Must NOT be left frozen on a status label; the last assistant text wins.
-    expect(edits.at(-1)!.text).toBe('Sending the report now.')
-    expect(edits.some((e) => e.text === '💭 thinking…')).toBe(true)
+    // Must NOT be left frozen on a status label; the last assistant text is
+    // delivered as a fresh final message (the bubble is deleted first so
+    // Telegram clients get a normal new-message notification).
+    const sends = adapter.calls.filter((c) => c.kind === 'sendText')
+    expect(sends.at(-1)!.text).toBe('Sending the report now.')
+    const deletes = adapter.calls.filter((c) => c.kind === 'deleteMessage')
+    expect(deletes.length).toBe(1)
+    const finalIndex = adapter.calls.findIndex((c) => c.kind === 'sendText' && c.text === 'Sending the report now.')
+    const deleteIndex = adapter.calls.findIndex((c) => c.kind === 'deleteMessage')
+    expect(deleteIndex).toBeLessThan(finalIndex)
   })
 
   it('still leaves status in place when the run produced no assistant text at all', async () => {
@@ -369,6 +378,52 @@ describe('Renderer — progress mode (default)', () => {
     const deletes = adapter.calls.filter((c) => c.kind === 'deleteMessage')
     expect(deletes.map((d) => d.messageId)).toEqual(['1'])
     expect(existsSync(progressStateFile)).toBe(false)
+  })
+
+  it('error event after restart deletes the persisted transient progress bubble and resets state', async () => {
+    const adapter = makeAdapter()
+    const binding = { ...makeBinding(), sessionId: 's' }
+    const dir = mkdtempSync(join(tmpdir(), 'renderer-progress-error-'))
+    const progressStateFile = join(dir, 'render-state.json')
+
+    const beforeRestart = new Renderer({ progressStateFile })
+    await play(beforeRestart, binding, adapter, [ev.toolStart('Read')])
+    await waitForDelayedProgress()
+    expect(existsSync(progressStateFile)).toBe(true)
+
+    // Crash/restart: a fresh renderer hydrates the bubble from disk, then the
+    // turn fails. The error path must delete the stale bubble and clear the
+    // persisted state file.
+    const afterRestart = new Renderer({ progressStateFile })
+    await play(afterRestart, binding, adapter, [{ type: 'error', sessionId: 's', error: 'terminated' }])
+
+    const errorSends = adapter.calls.filter((c) => c.kind === 'sendText' && c.text?.startsWith('❌'))
+    expect(errorSends.length).toBe(1)
+    const deletes = adapter.calls.filter((c) => c.kind === 'deleteMessage')
+    expect(deletes.map((d) => d.messageId)).toEqual(['1'])
+    expect(existsSync(progressStateFile)).toBe(false)
+  })
+
+  it('error delivery failure still deletes the progress bubble and resets run state', async () => {
+    const adapter = makeAdapter()
+    // Make the ❌ send itself fail — cleanup must not depend on it.
+    adapter.sendText = async (channelId: string, text: string) => {
+      if (text.startsWith('❌')) throw new Error('network down')
+      const messageId = String(adapter.calls.length + 1)
+      adapter.calls.push({ kind: 'sendText', channelId, text, messageId })
+      return { platform: 'telegram', channelId, messageId }
+    }
+    const binding = makeBinding()
+
+    await renderer.handle(ev.toolStart('Read'), binding, adapter)
+    await waitForDelayedProgress()
+    await renderer.handle({ type: 'error', sessionId: 's', error: 'terminated' }, binding, adapter)
+
+    // Bubble was still deleted and state file cleared even though the error
+    // text never went out.
+    const deletes = adapter.calls.filter((c) => c.kind === 'deleteMessage')
+    expect(deletes.length).toBe(1)
+    expect(adapter.calls.some((c) => c.kind === 'sendText' && c.text?.startsWith('❌'))).toBe(false)
   })
 })
 

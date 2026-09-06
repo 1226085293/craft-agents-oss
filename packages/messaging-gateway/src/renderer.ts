@@ -812,12 +812,20 @@ Approve in the desktop app to continue.`,
     adapter: PlatformAdapter,
     state: RenderState,
   ): Promise<void> {
+    // A crash/restart between bubble post and terminal event leaves the bubble
+    // only in the persisted state file — hydrate it so the cleanup below can
+    // actually delete it instead of leaving a stale "thinking…" in the chat.
+    this.hydrateProgressBubbleFromDisk(state, binding, event)
     const errorMsg = extractErrorMessage(event.error)
     this.cancelEditTimer(state)
     this.cancelPendingProgressBubble(state)
     await this.waitForProgressBubbleSend(state)
     const progressMessageId = state.progressMessageId
-    await adapter.sendText(binding.channelId, `❌ ${errorMsg}`, bindingOpts(binding))
+    try {
+      await adapter.sendText(binding.channelId, `❌ ${errorMsg}`, bindingOpts(binding))
+    } catch {
+      // Delivery failure must not strand the transient progress bubble or per-run state.
+    }
     if (progressMessageId) {
       await this.tryDeleteMessage(adapter, binding, progressMessageId)
       this.clearPersistedProgressMessage(binding)

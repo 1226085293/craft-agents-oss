@@ -125,6 +125,74 @@ should override per model via `models: [{ id, maxTokens }]` in `config.json`.
 - Prefer per-model `maxTokens` overrides over a very large global default to
   stay compatible with strict backends.
 
+## Incident 3: `terminated` errors and stale `💭 thinking…` bubble (2026-09-05)
+
+### Symptom
+
+Telegram runs showed repeated `❌ terminated` errors mid-tool-chain and a
+`💭 thinking…` progress bubble that never cleared. Session logs contained
+`Context compaction failed: ... terminated`, `completed without assistant
+response`, and `Processing stopped ...: complete`. Several terminations
+occurred ~121 s after request start (matches the 120 s HTTP idle timeout in
+`pi-agent-server` and `CALLBACK_TOOL_TIMEOUT_MS` in `session-mcp-server`).
+
+### Root cause (three stacked gaps)
+
+1. **Silent complete swallowed non-400 API errors.**
+   `SessionManager`'s complete handler only surfaced captured API errors when
+   `apiError.status === 400`; a run ending with no assistant reply due to a 5xx
+   or relay fault was still finalized as `reason: 'complete'`, so both the UI
+   and the defense evaluator treated it as a healthy finish.
+
+2. **Retryable Pi errors were reported immediately.**
+   For retryable failures the Pi SDK sequence is
+   `message_end(stopReason: error)` → `agent_end(willRetry: true)` →
+   `auto_retry_start` → successful retry. The event adapter yielded
+   `error`/`typed_error` at `message_end`, so Telegram posted `❌ terminated`
+   before a retry that usually succeeded.
+
+3. **Renderer error path missed restart-recovered bubbles.**
+   `handleError` sent the `❌` text **before** deleting the progress bubble; if
+   that send threw (or the app restarted between bubble post and terminal
+   event — the persisted state file was never hydrated on the error path),
+   cleanup was skipped and the bubble stayed in the chat forever.
+
+### Fixes
+
+- `packages/server-core/src/sessions/SessionManager.ts` — complete handler
+  surfaces **any** captured API error (`getLastApiError` has no status filter
+  now). 400 image errors keep their dedicated branch; everything else is
+  classified via `parseError` (5xx → `service_error`, 429 → `rate_limited`,
+  401 → auth codes that can trigger the auth-retry pipeline).
+- `packages/messaging-gateway/src/renderer.ts` — `handleError` now
+  hydrates the persisted bubble from disk first, wraps the `❌` send in
+  try/catch, and always deletes the bubble + clears persisted state + resets
+  run state.
+- `packages/shared/src/agent/backend/pi/event-adapter.ts` — retryable errors
+  (per the SDK's own `isRetryableAssistantError`) are now buffered and
+  deferred until a definite failure terminal instead of being reported at
+  `message_end`. The SDK sequence is `message_end(stopReason: error)` →
+  `agent_end(willRetry: true)` → `auto_retry_start` → retried turn → final
+  `agent_end(willRetry: false)`. The adapter holds the queue open on
+  `willRetry: true` (same pattern as `defenseResumePending`), surfaces the
+  buffered error exactly once on the failure terminal (final `agent_end`
+  without retry, or `auto_retry_end(success: false)` after an abort), clears
+  the buffer when a retry succeeds, never reports twice
+  (`hasEmittedTerminalError`), leaves user aborts untouched, and treats
+  legacy payloads without `willRetry` as terminal for backwards
+  compatibility.
+
+### Prevention
+
+- Treat `complete without assistant response` as an error signal, not a
+  normal finish, whenever a captured API error explains it.
+- Terminal-event cleanup in messaging renderers must never depend on a
+  prior network send succeeding, and must hydrate persisted state first so
+  post-restart events can clean pre-restart bubbles.
+- `terminated` from a relay is usually the 120 s idle timeout or upstream
+  fault, not a model stop. Check `httpIdleTimeoutMs` (120_000) and
+  `CALLBACK_TOOL_TIMEOUT_MS` (120000) before assuming a hung model.
+
 ## Related files
 
 - `packages/pi-agent-server/src/custom-endpoint-models.ts` — synthetic model
@@ -136,8 +204,13 @@ should override per model via `models: [{ id, maxTokens }]` in `config.json`.
   openai-completions`).
 - `@earendil-works/pi-ai/dist/api/openai-completions.js` — request-shaping logic
   (`supportsDeveloperRole`, `reasoning`).
+- `packages/server-core/src/sessions/SessionManager.ts` — complete handler
+  error surfacing (Incident 3).
+- `packages/messaging-gateway/src/renderer.ts` — progress bubble lifecycle and
+  error-path cleanup (Incident 3).
 - `packages/shared/src/agent/backend/pi/event-adapter.ts` — Pi event mapping;
-  queued-continuation hold (Incident 4).
+  retryable-error deferral (Incident 3) and queued-continuation hold
+  (Incident 4).
 - `packages/shared/src/agent/pi-agent.ts` — subprocess event loop; passes
   `defenseResumePending` / `queuedFollowUpPending` to the adapter (Incident 4).
 
@@ -158,7 +231,7 @@ the session JSONL. Log timeline: `completed without assistant response` at
 ### Root cause
 
 A cross-session message (`send_agent_message`) was delivered mid-stream via
-steer near the end of the turn. The SDK's runLoop drains steering inside
+steer near the end of the turn. The SDK's `runLoop` drains steering inside
 the inner loop, but when a steer lands after the last reasoning step it
 stays queued past `agent_end`. Then:
 
@@ -171,9 +244,10 @@ stays queued past `agent_end`. Then:
 3. The continuation's events (text deltas, tool starts/results, final
    answer) landed in the closed iterator and were silently lost.
 
-This is the same failure family as the overflow-recovery and
-`defenseResumeHeld` holds — every path where the SDK continues a turn after
-an `agent_end` needs a queue hold — but this one had no flag and no hold.
+This is the fourth member of the same family as `overflowState`,
+`defenseResumeHeld`, and `retryHoldActive` — every path where the SDK
+continues a turn after an `agent_end` needs a queue hold — but this one had
+no flag and no hold.
 
 ### Fix
 

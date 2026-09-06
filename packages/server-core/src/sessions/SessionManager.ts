@@ -94,6 +94,7 @@ import { getToolIconsDir, getMiniModel } from '@craft-agent/shared/config'
 import { getDefaultSummarizationModel } from '@craft-agent/shared/config/models'
 import type { SummarizeCallback } from '@craft-agent/shared/sources'
 import { type ThinkingLevel, DEFAULT_THINKING_LEVEL, normalizeThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
+import { parseError } from '@craft-agent/shared/agent/errors'
 import { evaluateAutoLabels } from '@craft-agent/shared/labels/auto'
 import { listLabels, loadLabelConfig } from '@craft-agent/shared/labels/storage'
 import { extractLabelId, resolveSessionLabels, findTaskItemLabelId } from '@craft-agent/shared/labels'
@@ -7071,38 +7072,64 @@ export class SessionManager implements ISessionManager {
             const sessionErrorPath = getSessionStoragePath(managed.workspace.rootPath, managed.id)
             const apiError = getLastApiError(sessionErrorPath)
 
-            if (apiError && apiError.status === 400) {
+            if (apiError) {
               const isImageError = apiError.message?.includes('image exceeds')
 
-              const errorMessage: Message = {
-                id: generateMessageId(),
-                role: 'error',
-                content: isImageError
-                  ? `Image Too Large: ${apiError.message}`
-                  : `Request Error: ${apiError.message}`,
-                timestamp: this.monotonic(),
-                errorCode: isImageError ? 'image_too_large' : 'invalid_request',
-                errorTitle: isImageError ? 'Image Too Large' : 'Invalid Request',
-                errorDetails: isImageError
-                  ? ['An image in the conversation exceeds the 5 MB API limit.',
+              if (isImageError) {
+                const errorMessage: Message = {
+                  id: generateMessageId(),
+                  role: 'error',
+                  content: `Image Too Large: ${apiError.message}`,
+                  timestamp: this.monotonic(),
+                  errorCode: 'image_too_large',
+                  errorTitle: 'Image Too Large',
+                  errorDetails: ['An image in the conversation exceeds the 5 MB API limit.',
                      'This session cannot recover — the image is embedded in the history.',
-                     'Please start a new session to continue.']
-                  : [apiError.message],
-                errorCanRetry: false,
+                     'Please start a new session to continue.'],
+                  errorCanRetry: false,
+                }
+                managed.messages.push(errorMessage)
+                this.sendEvent({
+                  type: 'typed_error',
+                  sessionId,
+                  error: {
+                    code: 'image_too_large' as const,
+                    title: errorMessage.errorTitle!,
+                    message: apiError.message,
+                    actions: [],
+                    canRetry: false,
+                    details: errorMessage.errorDetails,
+                  },
+                }, managed.workspace.id)
+              } else {
+                // Classify via parseError so non-400 stored errors (5xx, rate
+                // limits, auth) get the right code and canRetry semantics
+                // instead of a blanket invalid_request.
+                const parsed = parseError(new Error(`${apiError.status} ${apiError.statusText}: ${apiError.message}`))
+                const errorMessage: Message = {
+                  id: generateMessageId(),
+                  role: 'error',
+                  content: `Request Error: ${apiError.message}`,
+                  timestamp: this.monotonic(),
+                  errorCode: parsed.code,
+                  errorTitle: parsed.title,
+                  errorDetails: [apiError.message],
+                  errorCanRetry: parsed.canRetry,
+                }
+                managed.messages.push(errorMessage)
+                this.sendEvent({
+                  type: 'typed_error',
+                  sessionId,
+                  error: {
+                    code: parsed.code,
+                    title: parsed.title,
+                    message: apiError.message,
+                    actions: parsed.actions,
+                    canRetry: parsed.canRetry,
+                    details: errorMessage.errorDetails,
+                  },
+                }, managed.workspace.id)
               }
-              managed.messages.push(errorMessage)
-              this.sendEvent({
-                type: 'typed_error',
-                sessionId,
-                error: {
-                  code: isImageError ? 'image_too_large' as const : 'invalid_request' as const,
-                  title: errorMessage.errorTitle!,
-                  message: apiError.message,
-                  actions: [],
-                  canRetry: false,
-                  details: errorMessage.errorDetails,
-                },
-              }, managed.workspace.id)
             }
           }
 

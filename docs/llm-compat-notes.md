@@ -136,3 +136,64 @@ should override per model via `models: [{ id, maxTokens }]` in `config.json`.
   openai-completions`).
 - `@earendil-works/pi-ai/dist/api/openai-completions.js` — request-shaping logic
   (`supportsDeveloperRole`, `reasoning`).
+- `packages/shared/src/agent/backend/pi/event-adapter.ts` — Pi event mapping;
+  queued-continuation hold (Incident 4).
+- `packages/shared/src/agent/pi-agent.ts` — subprocess event loop; passes
+  `defenseResumePending` / `queuedFollowUpPending` to the adapter (Incident 4).
+
+## Incident 4: steer-after-`agent_end` invisible continuation loses events (2026-09-06)
+
+### Symptom
+
+Session `260906-golden-swamp`: the UI froze on the last intermediate assistant
+message while the subprocess kept making LLM calls and executing tools for
+~3 more minutes, until the stall watchdog killed the zombie turn
+(`Turn stalled: no activity for 300s — aborting`, prompt_error). Everything
+the continuation turn did (bun test runs, tsc, doc edits, set_session_status)
+was real — side effects landed — but none of it was rendered or persisted to
+the session JSONL. Log timeline: `completed without assistant response` at
+18:27:09 → `complete` / `Processing stopped` at 18:27:09 → tool executions
+18:27:51–18:29:57 → `Turn stalled` at 18:30:24.
+
+### Root cause
+
+A cross-session message (`send_agent_message`) was delivered mid-stream via
+steer near the end of the turn. The SDK's runLoop drains steering inside
+the inner loop, but when a steer lands after the last reasoning step it
+stays queued past `agent_end`. Then:
+
+1. `agent_end` fires with no flag (no `willRetry`, no
+   `defenseResumePending`, no overflow) → adapter completed the event queue
+   → UI marked the turn done.
+2. SDK `_runAgentPrompt` → `_handlePostAgentRun()` checks
+   `hasQueuedMessages()` AFTER `agent_end` and calls `agent.continue()` —
+   starting a continuation turn with no flag of its own.
+3. The continuation's events (text deltas, tool starts/results, final
+   answer) landed in the closed iterator and were silently lost.
+
+This is the same failure family as the overflow-recovery and
+`defenseResumeHeld` holds — every path where the SDK continues a turn after
+an `agent_end` needs a queue hold — but this one had no flag and no hold.
+
+### Fix
+
+- `packages/pi-agent-server/src/index.ts` — at `agent_end` forwarding time,
+  when `piSession.pendingMessageCount > 0` (steering + followUp still
+  queued), annotate the forwarded event with `queuedFollowUpPending: true`.
+  Checked after the defense branch so the flags stay consistent; the normal
+  path (steer drained inside the loop) annotates nothing.
+- `packages/shared/src/agent/backend/pi/event-adapter.ts` — new
+  `queuedFollowUpHeld` state, structurally identical to
+  `defenseResumeHeld`: `adaptEvent` holds the queue on the flagged
+  `agent_end`, `shouldCompleteQueue` gains a third parameter, the final
+  unflagged `agent_end` clears it, and `resetOverflowState` resets it.
+- `packages/shared/src/agent/pi-agent.ts` — passes the new flag through to
+  `shouldCompleteQueue`.
+
+### Prevention
+
+Any SDK mechanism that can continue a turn after `agent_end` (overflow
+recovery, defense resume, auto-retry, queued steering/followUp) must have a
+corresponding queue hold in the event adapter. When adding a new
+continuation path, treat "agent_end fired but the SDK may still emit events"
+as the invariant to preserve.

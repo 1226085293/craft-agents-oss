@@ -1756,6 +1756,36 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     }
   }
 
+  // Queued steering/followUp continuation (2026-09-06 golden-swamp incident):
+  // when the turn ends while steering/followUp messages are still queued, the
+  // SDK's _runAgentPrompt → _handlePostAgentRun() checks hasQueuedMessages()
+  // AFTER this agent_end and calls agent.continue() — a continuation turn
+  // with no flag of its own. Annotate the agent_end so the main process holds
+  // its event queue open; otherwise the continuation's events land in a
+  // closed iterator and are silently lost (UI freezes on the last
+  // intermediate while the subprocess keeps running until the stall watchdog
+  // kills it).
+  // Normal path: the agent loop drains steering inside the inner loop, so
+  // pendingMessageCount is 0 at agent_end and nothing is annotated.
+  // Defense-resume interplay: queueDefenseResume() above queues a followUp,
+  // making pendingMessageCount > 0 — but defenseResumePending already holds
+  // the queue, so the extra flag is harmless. Checking pendingMessageCount
+  // AFTER the defense branch keeps both flags consistent on the same event.
+  if (
+    event.type === 'agent_end' &&
+    piSession &&
+    !(event as { willRetry?: boolean }).willRetry &&
+    !(forwardedEvent as { defenseResumePending?: boolean }).defenseResumePending &&
+    typeof (piSession as unknown as { pendingMessageCount?: number }).pendingMessageCount === 'number' &&
+    (piSession as unknown as { pendingMessageCount: number }).pendingMessageCount > 0
+  ) {
+    forwardedEvent = {
+      ...(forwardedEvent as Record<string, unknown>),
+      queuedFollowUpPending: true,
+    } as unknown as OutboundAgentEvent;
+    debugLog(`[defense] agent_end annotated queuedFollowUpPending=true (pending=${(piSession as unknown as { pendingMessageCount: number }).pendingMessageCount})`);
+  }
+
   // Forward all events to main process
   send({ type: 'event', event: forwardedEvent });
 }

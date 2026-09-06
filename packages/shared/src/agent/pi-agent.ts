@@ -1334,6 +1334,7 @@ export class PiAgent extends BaseAgent {
     if (this.adapter.shouldCompleteQueue(
       eventType === 'agent_end',
       eventType === 'agent_end' ? (event.defenseResumePending as boolean | undefined) : undefined,
+      eventType === 'agent_end' ? (event.queuedFollowUpPending as boolean | undefined) : undefined,
     )) {
       this.eventQueue.complete();
     }

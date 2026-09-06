@@ -1390,4 +1390,70 @@ describe('PiEventAdapter', () => {
       expect(adapter.shouldCompleteQueue(true)).toBe(true);
     });
   });
+
+  // The subprocess annotates an agent_end with queuedFollowUpPending=true when
+  // the SDK still holds queued steering/followUp messages (pendingMessageCount
+  // > 0). The SDK's _handlePostAgentRun calls agent.continue() AFTER that
+  // agent_end — a continuation turn with no flag of its own. Regression for
+  // the 2026-09-06 golden-swamp incident: steer arrived near turn end, the
+  // queue completed anyway, and the continuation's events were silently lost.
+  describe('queued steering/followUp continuation holds the queue open', () => {
+    it('success path: holds on flagged agent_end, completes on final agent_end', () => {
+      // First agent_end — steer messages are still queued.
+      const heldEvents = collect(adapter.adaptEvent({
+        type: 'agent_end',
+        messages: [],
+        queuedFollowUpPending: true,
+      } as any));
+      expect(heldEvents).toHaveLength(0);
+      expect(adapter.shouldCompleteQueue(true, undefined, true)).toBe(false);
+
+      // Continuation turn streams an assistant reply.
+      const continued = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'stop', content: 'Continued answer' },
+      } as any));
+      expect(continued).toMatchObject([{ type: 'text_complete', text: 'Continued answer' }]);
+      expect(adapter.shouldCompleteQueue(false)).toBe(false);
+
+      // Final agent_end — no flag → normal completion.
+      const finalEvents = collect(adapter.adaptEvent({ type: 'agent_end', messages: [] } as any));
+      expect(finalEvents).toMatchObject([{ type: 'complete' }]);
+      expect(adapter.shouldCompleteQueue(true)).toBe(true);
+    });
+
+    it('coexists with defenseResumePending — either flag holds the queue', () => {
+      // Both flags on the same agent_end (defense queued a followUp AND
+      // steering messages were pending). The hold must survive.
+      const heldEvents = collect(adapter.adaptEvent({
+        type: 'agent_end',
+        messages: [],
+        defenseResumePending: true,
+        queuedFollowUpPending: true,
+      } as any));
+      expect(heldEvents).toHaveLength(0);
+      expect(adapter.shouldCompleteQueue(true, true, true)).toBe(false);
+
+      // Unflagged final agent_end completes.
+      expect(adapter.shouldCompleteQueue(true, false, false)).toBe(true);
+      expect(adapter.shouldCompleteQueue(true)).toBe(true);
+    });
+
+    it('unflagged agent_end clears the hold (no stale continuation leak)', () => {
+      collect(adapter.adaptEvent({ type: 'agent_end', messages: [], queuedFollowUpPending: true } as any));
+      expect(adapter.shouldCompleteQueue(true, undefined, true)).toBe(false);
+
+      // Next turn: a plain agent_end (queue drained inside the loop) completes.
+      expect(adapter.shouldCompleteQueue(true, undefined, false)).toBe(true);
+      expect(adapter.shouldCompleteQueue(true)).toBe(true);
+    });
+
+    it('resetOverflowState clears the continuation hold too', () => {
+      collect(adapter.adaptEvent({ type: 'agent_end', messages: [], queuedFollowUpPending: true } as any));
+      adapter.shouldCompleteQueue(true, undefined, true);
+
+      adapter.resetOverflowState();
+      expect(adapter.shouldCompleteQueue(true)).toBe(true);
+    });
+  });
 });

@@ -117,6 +117,12 @@ export class PiEventAdapter extends BaseEventAdapter {
    *  the FINAL `agent_end` (no flag) arrives — the defense analog of
    *  overflowState. See the subprocess defense layer in pi-agent-server. */
   private defenseResumeHeld: boolean = false;
+  /** Set when the subprocess annotated an `agent_end` with
+   *  `queuedFollowUpPending: true` — the SDK's _handlePostAgentRun will
+   *  `agent.continue()` with queued steering/followUp messages after this
+   *  agent_end. The queue stays open for that continuation turn (same shape
+   *  as defenseResumeHeld). The FINAL `agent_end` (no flag) clears it. */
+  private queuedFollowUpHeld: boolean = false;
 
   constructor() {
     super('pi-event');
@@ -154,8 +160,20 @@ export class PiEventAdapter extends BaseEventAdapter {
    * `agent_end` event — true when a defense resume (followUp) is queued, so
    * the queue must stay open for the resumed turn. The FINAL `agent_end`
    * (no flag / false) clears the hold and completes normally.
+   *
+   * `queuedFollowUpPending` is the subprocess-annotated flag set when the
+   * SDK still holds queued steering/followUp messages at agent_end
+   * (pendingMessageCount > 0). The SDK's `_handlePostAgentRun` will then
+   * call `agent.continue()` AFTER this agent_end — a continuation turn with
+   * no flag of its own. Hold the queue open for it (2026-09-06 golden-swamp
+   * incident: steer arrived near turn end; the continuation's events landed
+   * in a closed iterator and were silently lost).
    */
-  shouldCompleteQueue(isAgentEnd: boolean, defenseResumePending?: boolean): boolean {
+  shouldCompleteQueue(
+    isAgentEnd: boolean,
+    defenseResumePending?: boolean,
+    queuedFollowUpPending?: boolean,
+  ): boolean {
     if (this.pendingQueueComplete) {
       this.pendingQueueComplete = false;
       return true;
@@ -168,6 +186,13 @@ export class PiEventAdapter extends BaseEventAdapter {
         return false;
       }
       this.defenseResumeHeld = false;
+      if (queuedFollowUpPending) {
+        // The SDK will continue the turn with queued steering/followUp
+        // messages after this agent_end — hold the queue open.
+        this.queuedFollowUpHeld = true;
+        return false;
+      }
+      this.queuedFollowUpHeld = false;
       return this.overflowState === 'none';
     }
     return false;
@@ -194,6 +219,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.heldOverflowError = null;
     this.pendingQueueComplete = false;
     this.defenseResumeHeld = false;
+    this.queuedFollowUpHeld = false;
   }
 
   private armOverflowFallbackTimer(): void {
@@ -309,6 +335,16 @@ export class PiEventAdapter extends BaseEventAdapter {
           break;
         }
         this.defenseResumeHeld = false;
+        // Queued steering/followUp continuation (pi-agent-server): the
+        // subprocess annotated this agent_end with queuedFollowUpPending=true
+        // because pendingMessageCount > 0 — the SDK's _handlePostAgentRun
+        // will agent.continue() AFTER this event. Hold the queue open for the
+        // continuation turn; its FINAL agent_end (no flag) completes below.
+        if ((event as { queuedFollowUpPending?: boolean }).queuedFollowUpPending) {
+          this.queuedFollowUpHeld = true;
+          break;
+        }
+        this.queuedFollowUpHeld = false;
         if (this.lastUsage) {
           const inputTokens = this.lastUsage.input + (this.lastUsage.cacheRead || 0);
           yield {

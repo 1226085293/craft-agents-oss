@@ -144,7 +144,7 @@
   "chat.clickToOpen": "Kliknij, aby otworzyć {{name}}",
   "chat.connectionDefault": "Domyślne dla tego połączenia",
   "chat.connectionUnavailable": "Połączenie niedostępne",
-  "chat.connectionUnavailableDescription": "Połączenie używane przez tę sesję zostało usunięte. Utwórz nową sesję, aby kontynuować.",
+  "chat.connectionUnavailableDescription": "Połączenie używane przez tę sesję jest już niedostępne. Aby kontynuować, dodaj lub włącz połączenie w ustawieniach AI.",
   "chat.context": "Kontekst",
   "chat.contextBadge": "Odznaka kontekstu",
   "chat.enterSessionName": "Wprowadź nazwę sesji...",

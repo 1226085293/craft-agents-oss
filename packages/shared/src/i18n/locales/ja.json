@@ -144,7 +144,7 @@
   "chat.clickToOpen": "クリックして{{name}}を開く",
   "chat.connectionDefault": "この接続のデフォルト",
   "chat.connectionUnavailable": "接続を利用できません",
-  "chat.connectionUnavailableDescription": "このセッションで使用していた接続は削除されました。続行するには新しいセッションを作成してください。",
+  "chat.connectionUnavailableDescription": "このセッションで使用していた接続は利用できません。続行するには AI 設定で接続を追加または有効化してください。",
   "chat.context": "コンテキスト",
   "chat.contextBadge": "コンテキストバッジ",
   "chat.enterSessionName": "セッション名を入力...",

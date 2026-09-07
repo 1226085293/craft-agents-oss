@@ -15,6 +15,7 @@ import {
 import { Icon_Home, Spinner } from '@craft-agent/ui'
 
 import * as storage from '@/lib/local-storage'
+import { navigate, routes } from '@/lib/navigate'
 import { Button } from '@/components/ui/button'
 import {
   InlineSlashCommand,
@@ -2106,6 +2107,16 @@ export function FreeFormInput({
                   <div className="text-xs text-muted-foreground">
                     {t('chat.connectionUnavailableDescription')}
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setModelDropdownOpen(false)
+                      navigate(routes.view.settings('ai'))
+                    }}
+                    className="mt-3 text-xs underline text-foreground/70 hover:text-foreground"
+                  >
+                    {t('chat.modelPicker.openAiSettings')}
+                  </button>
                 </div>
               ) : pickerMode === 'locked-single' && connectionDefaultModel ? (
                 (() => {

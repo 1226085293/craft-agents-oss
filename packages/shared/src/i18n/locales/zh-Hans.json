@@ -144,7 +144,7 @@
   "chat.clickToOpen": "点击打开 {{name}}",
   "chat.connectionDefault": "此连接的默认值",
   "chat.connectionUnavailable": "连接不可用",
-  "chat.connectionUnavailableDescription": "此会话使用的连接已被删除。请创建一个新会话以继续。",
+  "chat.connectionUnavailableDescription": "此会话使用的连接已不可用。请在 AI 设置中添加或启用一个连接以继续。",
   "chat.context": "上下文",
   "chat.contextBadge": "上下文标记",
   "chat.enterSessionName": "输入会话名称...",

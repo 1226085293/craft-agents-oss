@@ -10,6 +10,13 @@
  * - `switcher` no longer requires an empty session;
  * - `locked-single` only fires when there is genuinely no alternative
  *   (single configured connection AND single-model compat default).
+ *
+ * 2026-09-07 semantics change (deleted-connection escape): a session whose
+ * locked connection was deleted no longer gets trapped in `unavailable`.
+ * The backend hot-switch only validates the TARGET connection, and the
+ * switcher is the only picker UI whose selection route (`onConnectionChange`)
+ * rebinds the session's connection — so with ≥1 connection remaining the
+ * switcher is offered; `unavailable` is reserved for zero connections.
  */
 
 import { describe, test, expect } from 'bun:test'
@@ -27,10 +34,10 @@ function input(overrides: Partial<PickerModeInput> = {}): PickerModeInput {
 
 describe('derivePickerMode', () => {
   // -------------------------------------------------------------------------
-  // Precedence: unavailable wins
+  // Precedence: connectionUnavailable only blocks when nothing remains
   // -------------------------------------------------------------------------
 
-  test('connectionUnavailable beats every other flag', () => {
+  test('connectionUnavailable + remaining connections → switcher (can rebind)', () => {
     expect(
       derivePickerMode(
         input({
@@ -38,6 +45,28 @@ describe('derivePickerMode', () => {
           connectionDefaultModel: 'mistral-7b',
           isEmptySession: true,
           connectionCount: 5,
+        }),
+      ),
+    ).toBe('switcher')
+  })
+
+  test('connectionUnavailable + single remaining connection → switcher (rebind via onConnectionChange)', () => {
+    expect(
+      derivePickerMode(
+        input({
+          connectionUnavailable: true,
+          connectionCount: 1,
+        }),
+      ),
+    ).toBe('switcher')
+  })
+
+  test('connectionUnavailable + zero connections → unavailable (true dead end)', () => {
+    expect(
+      derivePickerMode(
+        input({
+          connectionUnavailable: true,
+          connectionCount: 0,
         }),
       ),
     ).toBe('unavailable')

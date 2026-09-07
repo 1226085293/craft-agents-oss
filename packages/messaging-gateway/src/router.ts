@@ -96,10 +96,18 @@ export class Router {
         // the bot behaves like a real group member instead of echoing
         // every message. @-mentioned messages (`mentionKind: 'at'`) and
         // DMs bypass this gate entirely.
+        //
+        // Topic-bound sessions (`binding.threadId` set) bypass it too: the
+        // owner explicitly bound this forum topic, making it a dedicated
+        // 1:1 space with the agent — every message there is addressed to
+        // the bot, and gating it can silently drop real instructions
+        // (2026-09-08: both messages in a bound topic were judged 'ignore'
+        // and the session never received any input).
         if (
           msg.mentionKind === 'none' &&
           attachmentCount === 0 &&
           !isBusy &&
+          binding.threadId === undefined &&
           this.sessionManager.decideGroupChat
         ) {
           const handled = await this.tryDecideGroupChat(adapter, msg, binding.sessionId, binding.channelName)
@@ -293,6 +301,7 @@ export class Router {
         channelId: msg.channelId,
         sessionId,
         action: decision.action,
+        textPreview: (msg.text ?? '').slice(0, 60),
       })
 
       this.groupChatLastAction.set(gateKey, decision.action)

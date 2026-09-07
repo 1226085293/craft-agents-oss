@@ -7714,7 +7714,18 @@ export class SessionManager implements ISessionManager {
         // finalized assistant reply. It was created mid-stream (an earlier
         // timestamp) while queued; groupMessagesByTurn sorts by timestamp, so
         // without this the prior turn's completed response would render BELOW it.
-        existingMessage.timestamp = this.monotonic()
+        //
+        // Exception — restart recovery (internalMessage set by
+        // recoverPendingUserTurns): the interrupted turn kept producing
+        // messages AFTER the user's input (defense resume continued past it,
+        // then the app died mid-turn). Re-stamping here would jump the user
+        // message AHEAD of those post-restart-replayed process cards
+        // (2026-09-08 incident: the interrupted turn's thinking card rendered
+        // above the user's message). Chronological order is already correct
+        // for recovery — the user really did speak before those messages.
+        if (!next.internalMessage) {
+          existingMessage.timestamp = this.monotonic()
+        }
         this.persistSession(managed)
 
         this.sendEvent({

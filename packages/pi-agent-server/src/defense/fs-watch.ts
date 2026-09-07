@@ -18,7 +18,7 @@ import { join, relative } from 'node:path';
 /** Directories never worth watching (huge / irrelevant / session-internal). */
 const SKIP_DIRS = new Set([
   '.git', 'node_modules', 'dist', 'build', 'out', '.next', '.cache',
-  '.venv', 'venv', '__pycache__', '.turbo', 'coverage',
+  '.venv', 'venv', '__pycache__', '.turbo', 'coverage', '.pi-agent',
 ]);
 
 /**
@@ -30,13 +30,16 @@ const SKIP_DIRS = new Set([
  */
 const FRAMEWORK_TOP_LEVEL = new Set([
   'sessions', '.pi-sessions', 'data', 'labels', 'tasks', 'statuses',
-  '.claude-plugin',
+  '.claude-plugin', 'attachments', 'downloads', 'long_responses',
 ]);
 
 /** File names that are always runtime state, never user-work artifacts. */
 const NOISE_FILES = new Set([
   '.DS_Store', 'tool-metadata.json',
   'events.jsonl',   // framework event stream — appended every turn
+  'session.jsonl',  // session transcript — appended every turn (2026-09-08 incident:
+                    // cwd IS the session dir, so this poisoned write evidence
+                    // on every turn and force-resumed pure read-only Q&A turns)
   'config.json',    // framework workspace config
   'theme.json',     // framework theme
 ]);
@@ -59,9 +62,12 @@ export class FsWatch {
     this.skipDirs = skipDirs;
   }
 
-  /** Anchor the turn-start timestamp. Call when a new prompt begins. */
-  markTurnStart(): void {
-    this.turnStartMs = Date.now();
+  /** Anchor the turn-start timestamp. Call when a new prompt begins.
+   *  Accepts an explicit timestamp (tests backdate the anchor so mid-turn
+   *  writes have mtimes strictly greater than the marker despite coarse
+   *  filesystem mtime granularity). */
+  markTurnStart(atMs: number = Date.now()): void {
+    this.turnStartMs = atMs;
   }
 
   /**

@@ -25,6 +25,8 @@ export interface DefenseEvaluationResult {
   state: State;
   /** Failure reason when state === FAILED. */
   failureReason?: string;
+  /** Which signal(s) triggered the resume decision (diagnostics). */
+  reason?: string;
 }
 
 export interface DefenseOptions extends SessionLifecycleOptions {
@@ -100,6 +102,29 @@ export class DefenseEvaluator {
   detectFsWrites(): FsWriteEvidence | null {
     if (!this.enabled || !this.cwd) return null;
     return this.fsWatch.detectWrites(this.cwd);
+  }
+
+  /** Human-readable summary of which resume signal(s) fired (diagnostics). */
+  private describeSignals(
+    hasWrite: boolean,
+    fsEvidence: FsWriteEvidence | null,
+    silentStop: boolean,
+    emptyResponse: boolean,
+    repetitionLoop: boolean,
+  ): string {
+    const parts: string[] = [];
+    if (silentStop) parts.push('silentStop');
+    if (emptyResponse) parts.push('emptyResponse');
+    if (repetitionLoop) parts.push('repetitionLoop');
+    if (hasWrite) {
+      const fsFiles = fsEvidence?.modifiedFiles ?? [];
+      parts.push(
+        fsFiles.length > 0
+          ? `fsWrite(${fsFiles.slice(0, 5).join(', ')}${fsFiles.length > 5 ? ', …' : ''})`
+          : 'cmdWrite',
+      );
+    }
+    return parts.join('+') || 'none';
   }
 
   /**
@@ -212,6 +237,7 @@ export class DefenseEvaluator {
         shouldResume: false,
         state: State.FAILED,
         failureReason: 'Resume cap reached or no progress across consecutive resumes',
+        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop),
       };
     }
 
@@ -221,6 +247,7 @@ export class DefenseEvaluator {
       shouldResume: true,
       resumeMessage,
       state: this.lifecycle.getState(),
+      reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop),
     };
   }
 }

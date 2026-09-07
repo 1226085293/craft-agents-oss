@@ -573,7 +573,8 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
   try {
     const result = defenseEvaluator.evaluate(runOutput);
     debugLog(
-      `[defense] Post-stop result: state=${result.state} evaluated=${result.evaluated} shouldResume=${result.shouldResume}`,
+      `[defense] Post-stop result: state=${result.state} evaluated=${result.evaluated} shouldResume=${result.shouldResume}` +
+        (result.reason ? ` reason=${result.reason}` : ''),
     );
     if (result.shouldResume && result.resumeMessage) {
       return { shouldResume: true, resumeMessage: result.resumeMessage };

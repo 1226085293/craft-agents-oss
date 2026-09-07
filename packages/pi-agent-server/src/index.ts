@@ -915,7 +915,20 @@ async function ensureSession(): Promise<AgentSession> {
     // Global default timeout: exec() only applies one when the model passes
     // args.timeout; wrap local ops so every command gets a 300s ceiling unless
     // overridden per-call (unit: seconds — the SDK multiplies by 1000).
+    //
+    // Windows UTF-8 prefix: every bash invocation gets its own hidden console
+    // at the system OEM code page (GBK 936 on zh-CN, Shift-JIS on ja-JP, …).
+    // PowerShell/cmd emit output in that code page while tool output is
+    // decoded as UTF-8 → mojibake on every CJK-locale machine. The prefix
+    // switches each call's console to UTF-8 first; on Western locales it is a
+    // no-op (already 65001). This is machine-independent — no registry, no
+    // user config. Git Bash-native tools already emit UTF-8 and are unaffected
+    // by the extra line (verified: git, grep, sed, ls). The startup-time chcp
+    // (main()) alone cannot cover this because consoles are per-call.
     createBashToolDefinition(cwd, {
+      ...(process.platform === 'win32'
+        ? { commandPrefix: 'chcp.com 65001 >/dev/null 2>&1' }
+        : {}),
       operations: (() => {
         const local = createLocalBashOperations({ shellPath: initConfig.shellPath });
         return {

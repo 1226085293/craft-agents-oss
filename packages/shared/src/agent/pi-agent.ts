@@ -580,8 +580,15 @@ export class PiAgent extends BaseAgent {
     const shellPath = this.getConfiguredShellPath();
 
     // Spawn the subprocess
+    // windowsHide: on Windows the Electron main process is a GUI process —
+    // without a console, the server's own console-UTF8 init (chcp 65001 in
+    // pi-agent-server/src/index.ts) has nothing to attach to, and every
+    // bash-tool child would allocate a fresh hidden console with the system
+    // OEM code page (GBK on zh-CN) → mojibake. windowsHide allocates one
+    // hidden console for the server; all tool children inherit it.
     const child = spawn(nodePath, args, {
       cwd,
+      windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,

@@ -19,6 +19,7 @@ import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { appendFileSync, mkdirSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
+import { execSync } from 'node:child_process';
 
 // Pi SDK
 import {
@@ -2482,6 +2483,22 @@ async function processMessage(msg: InboundMessage): Promise<void> {
 
 function main(): void {
   debugLog('Pi agent server starting');
+
+  // Windows: switch the server's console code page to UTF-8 (chcp 65001).
+  // The server process owns the shared hidden console that all bash-tool
+  // child processes inherit. On CJK locales it defaults to the OEM code
+  // page (e.g. GBK 936), so PowerShell/cmd emit Chinese text as GBK bytes
+  // while tool output is decoded as UTF-8 → mojibake in every new session
+  // (2026-09-08 incident). Setting the code page once at startup fixes all
+  // descendant processes; failure is non-fatal (e.g. no console attached).
+  if (process.platform === 'win32') {
+    try {
+      execSync('chcp 65001 >nul 2>&1', { stdio: 'ignore', windowsHide: true });
+      debugLog('Console code page set to UTF-8 (65001)');
+    } catch {
+      debugLog('chcp 65001 failed (non-fatal) — continuing with default code page');
+    }
+  }
 
   const rl = createInterface({ input: process.stdin });
 

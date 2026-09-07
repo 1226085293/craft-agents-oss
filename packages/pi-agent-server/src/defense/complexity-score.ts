@@ -36,6 +36,19 @@ export const WEIGHTS: Record<string, number> = {
 export const WRITE_CMDS =
   /\b(rm|rmdir|mv|cp|git\s+push|git\s+commit|git\s+add|git\s+init|git\s+checkout\s+-b|npm\s+(i|install|publish|run\s+.*build)|bun\s+(i|install|add|publish|run\s+.*build)|docker\s+(build|push|run|compose)|curl\s+-X\s+(POST|DELETE|PUT|PATCH)|wget\s+-O|tee|dd|mkfs|kill|pkill|systemctl)\b/i;
 
+/**
+ * Bash commands whose OUTPUT is verification-grade evidence — the output
+ * itself is a read-back of the affected state. Examples: `git push` prints
+ * the updated ref, `git show --stat` / `git ls-remote` confirm the pushed
+ * commit, `bun test` confirms an edit. Without this, a turn that verifies
+ * its writes exclusively through bash (very common: git commits, builds,
+ * test runs) looks like "wrote but never read back" and triggers a false
+ * early-stop resume (2026-09-07 incident: a git push verified via
+ * `git show --stat` + `git ls-remote` still forced a second reply).
+ */
+export const VERIFY_OUTPUT_CMDS =
+  /\b(git\s+(push|commit|show|log|diff|status|ls-remote|rev-parse)|npm\s+run|bun\s+(run|test)|npx\s+|pytest|cargo\s+(test|check|build)|go\s+(test|build|vet))\b/i;
+
 /** Classify a single call into a weighted category. */
 export function classify(call: ToolCallLike): string {
   if (call.type === 'bash') {
@@ -74,7 +87,20 @@ export function complexityScore(toolCalls: ToolCallLike[]): ComplexityResult {
   const calls = toolCalls ?? [];
   const weighted = calls.reduce((sum, c) => sum + (WEIGHTS[classify(c)] ?? DEFAULT_WEIGHT), 0);
   const hasWrite = calls.some((c) => ['write', 'edit', 'bash:write'].includes(classify(c)));
-  const hasVerify = calls.some((c) => c.type === 'read' && c.output != null && String(c.output).length > 0);
+  // Read-back verification: an explicit read tool with output, OR a bash
+  // command whose output is verification-grade evidence (tests, git
+  // status/show/push refs, build results). Without the bash arm, a turn
+  // that verifies its writes exclusively through bash (git commits,
+  // builds, test runs) looks like "wrote but never read back" and
+  // triggers a false early-stop resume (2026-09-07 incident).
+  const hasVerify = calls.some(
+    (c) =>
+      (c.type === 'read' && c.output != null && String(c.output).length > 0) ||
+      (c.type === 'bash' &&
+        VERIFY_OUTPUT_CMDS.test(c.command ?? '') &&
+        c.output != null &&
+        String(c.output).length > 0),
+  );
 
   // Strongest early-stop signal: the agent wrote files but never read them back.
   const shouldResume = hasWrite && !hasVerify;

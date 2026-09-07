@@ -260,8 +260,10 @@ function buildResumeMessage(
   }
   if (hasWrite) {
     lines.push(
-      `- Write/edit operations were performed but not verified by a read-back. ` +
-      `Re-read the affected files and confirm the result.`,
+      `- Write/edit operations were performed but never followed by any read-back ` +
+      `(no file read, no verification command output). Verify the outcome actually ` +
+      `matches the user's request — re-read the affected files or run a status/test ` +
+      `check — then confirm or correct your final answer. Do NOT redo completed work.`,
     );
   }
   if (fsEvidence && fsEvidence.modifiedFiles.length > 0) {

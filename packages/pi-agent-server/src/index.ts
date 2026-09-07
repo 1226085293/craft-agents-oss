@@ -80,6 +80,7 @@ import { createSearchTool } from './tools/search/create-search-tool.ts';
 import { allowCraftMetadataProperties, stripCraftMetadata } from './craft-metadata-schema.ts';
 import { applySystemPromptOverride, applySystemPromptOverrideWithDefense } from './system-prompt-override.ts';
 import { DefenseEvaluator, resolveDefenseEnabled } from './defense/index.ts';
+import { VERIFY_OUTPUT_CMDS } from './defense/complexity-score.ts';
 import { detectRepetitionLoop, extractAssistantText } from './defense/repetition-detector.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
 
@@ -309,6 +310,10 @@ const pendingToolExecutions = new Map<string, { resolve: (result: { content: str
 
 // Pending session MCP tool calls for completion detection
 const pendingSessionToolCalls = new Map<string, { toolName: string; arguments: Record<string, unknown> }>();
+// tool_execution_end carries no args — cache bash commands from
+// tool_execution_start so verification-grade output can be recognized at
+// end time (defense hasVerify read-back evidence).
+const pendingBashCommands = new Map<string, string>();
 
 // Proxy tool definitions from main process
 let proxyToolDefs: ProxyToolDef[] = [];
@@ -1695,6 +1700,10 @@ function handleSessionEvent(event: AgentSessionEvent): void {
       output: args.output,
     });
 
+    if (toolName.toLowerCase() === 'bash' && typeof args.command === 'string') {
+      pendingBashCommands.set(event.toolCallId, args.command);
+    }
+
     if (toolMetadata) {
       forwardedEvent = {
         ...event,
@@ -1717,10 +1726,22 @@ function handleSessionEvent(event: AgentSessionEvent): void {
 
     // Capture read-back output for defense verification (hasVerify).
     // A non-error read result with textual output counts as a read-back.
-    if (event.toolName.toLowerCase() === 'read' && !event.isError) {
-      const resultText = extractResultText(event.result);
-      if (resultText && defenseEvaluator) {
-        defenseEvaluator.recordReadOutput(resultText);
+    // Bash output counts too when the command is verification-grade (git
+    // push/show/status, test/build runs): a turn that verifies its writes
+    // exclusively through bash must not be judged as "wrote but never read
+    // back" (2026-09-07 incident). tool_execution_end carries no args, so
+    // the command comes from the start-time cache.
+    if (!event.isError) {
+      const lowerToolName = event.toolName.toLowerCase();
+      const isReadTool = lowerToolName === 'read';
+      const bashCommand = lowerToolName === 'bash' ? pendingBashCommands.get(event.toolCallId) : undefined;
+      if (lowerToolName === 'bash') pendingBashCommands.delete(event.toolCallId);
+      const isVerifyBash = bashCommand != null && VERIFY_OUTPUT_CMDS.test(bashCommand);
+      if (isReadTool || isVerifyBash) {
+        const resultText = extractResultText(event.result);
+        if (resultText && defenseEvaluator) {
+          defenseEvaluator.recordReadOutput(resultText);
+        }
       }
     }
   }

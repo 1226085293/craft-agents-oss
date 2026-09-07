@@ -108,6 +108,23 @@ export function buildCustomEndpointModelDef(
       // "the reasoning_content in the thinking mode must be passed back".
       requiresReasoningContentOnAssistantMessages: true,
     },
+    // thinkingLevelMap — always-thinking GLM/z.ai-style relays reject any
+    // request without a valid reasoning_effort ("该模型始终思考，不支持关闭思考；
+    // 请使用 low、high 或 max", 2026-09-08). The SDK only sends
+    // reasoning_effort when the session level maps to a string; with no map,
+    // 'medium' went through raw (invalid) and 'off' sent nothing at all —
+    // both hard-400. Map every level onto the accepted set: 'off' falls to
+    // 'low' (thinking cannot be disabled), 'medium' rounds up to 'high',
+    // 'xhigh' to 'max'. low/high/max pass through.
+    thinkingLevelMap: {
+      off: 'low',
+      minimal: 'low',
+      low: 'low',
+      medium: 'high',
+      high: 'high',
+      xhigh: 'max',
+      max: 'max',
+    },
     input,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: overrides?.contextWindow ?? 131_072,

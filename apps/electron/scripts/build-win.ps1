@@ -276,6 +276,22 @@ foreach ($dep in @("interceptor-common.ts", "feature-flags.ts", "interceptor-req
     }
 }
 
+# 6a. Build the interceptor bundle used by the Pi subprocess in packaged builds.
+#     Copying the .ts sources is NOT enough — at runtime resolveInterceptorBundlePath()
+#     loads the pre-built dist/interceptor.cjs (runtime-resolver.ts). Without this
+#     step a stale bundle silently ships old interceptor code (2026-09-08 incident:
+#     empty-stream guard, pendingFinishLine flush and #995 synthetic finish_reason
+#     were missing from packaged builds).
+Write-Host "  Building interceptor bundle..."
+Push-Location $ElectronDir
+try {
+    bun run build:interceptor
+    if ($LASTEXITCODE -ne 0) { throw "Interceptor bundle build failed" }
+    Write-Host "  Interceptor bundle built" -ForegroundColor Green
+} finally {
+    Pop-Location
+}
+
 # 6. Build Electron app
 Write-Host "Building Electron app..."
 

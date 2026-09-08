@@ -337,6 +337,147 @@ describe('sendMessage durability', () => {
     expect(managed.messageQueue[0]?.internalMessage).toContain('重启 Craft 然后告诉我好了')
   })
 
+  it.each(['tool', 'assistant', 'legacy-tool'])('restart error recovery resumes continued work after transient errors (%s)', (activity) => {
+    const managed = buildSession(`recover-transient-${activity}`)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'previous-final', role: 'assistant', content: 'done', timestamp: 1 },
+      { id: 'original-user', role: 'user', content: '修复后安装重启，继续验证', timestamp: 2 },
+      { id: 'api-error', role: 'error', content: 'Invalid Request', timestamp: 3 },
+      { id: 'compact-error', role: 'error', content: 'Context compaction failed', timestamp: 4 },
+      { id: 'compacted', role: 'info', content: 'Compacted context to fit within limits', timestamp: 5 },
+      activity === 'assistant'
+        ? { id: 'continued', role: 'assistant', content: '继续验证', timestamp: 6, isIntermediate: true }
+        : { id: 'continued', role: activity === 'tool' ? 'tool' : undefined, content: 'Running Bash...', timestamp: 6, toolName: 'Bash', toolStatus: 'executing', turnId: 'interrupted-turn' } as any,
+    )
+
+    const recover = () => (sm as any).recoverPendingUserTurns(managed)
+    recover()
+    recover() // Rescanning must not duplicate the queued request.
+
+    expect(managed.messageQueue.map(q => q.messageId)).toEqual(['original-user'])
+    expect(managed.messageQueue[0]?.internalMessage).toContain('Continue the previous user request')
+    expect(managed.messageQueue[0]?.internalMessage).toContain('Do not blindly repeat side-effectful work')
+    if (activity !== 'assistant') {
+      expect(managed.messageQueue[0]?.resumeToolMessageId).toBe('continued')
+      expect(managed.messageQueue[0]?.resumeTurnId).toBe('interrupted-turn')
+    }
+  })
+
+  it.each(['error', 'info', 'new-user', 'final', 'plan', 'auth', 'stop', 'later-error', 'stop-without-error'])('restart error recovery respects terminal boundaries (%s)', (ending) => {
+    const managed = buildSession(`recover-terminal-${ending}`)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'old-user', role: 'user', content: 'old request', timestamp: 1 },
+      { id: 'failed', role: 'error', content: 'Invalid Request', timestamp: 2 },
+    )
+    if (ending === 'stop-without-error') managed.messages.pop()
+    if (ending === 'info') {
+      managed.messages.push({ id: 'info', role: 'info', content: 'Compacted context to fit within limits', timestamp: 3 })
+    } else if (ending !== 'error') {
+      if (ending === 'new-user') {
+        managed.messages.push({ id: 'new-user', role: 'user', content: 'new request', timestamp: 3 })
+      }
+      managed.messages.push({ id: 'continued-tool', role: 'tool', content: 'Running Bash...', timestamp: 4, toolName: 'Bash' })
+      if (ending === 'final') managed.messages.push({ id: 'final', role: 'assistant', content: 'done', timestamp: 5 })
+      if (ending === 'plan') managed.messages.push({ id: 'plan', role: 'plan', content: 'awaiting approval', timestamp: 5 })
+      if (ending === 'auth') managed.messages.push({ id: 'auth', role: 'auth-request', content: 'awaiting credentials', timestamp: 5 })
+      if (ending === 'later-error') managed.messages.push({ id: 'fatal', role: 'error', content: 'failed again', timestamp: 5 })
+      if (ending === 'stop' || ending === 'stop-without-error') {
+        managed.messages.push(
+          { id: 'stop', role: 'info', content: 'Response interrupted', timestamp: 5 },
+          // Events may drain after a user presses Stop; they must not resurrect it.
+          { id: 'late-tool', role: 'tool', content: 'finished draining', timestamp: 6, toolName: 'Bash' },
+        )
+      }
+    }
+
+    ;(sm as any).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue.map(q => q.messageId)).toEqual(ending === 'new-user' ? ['new-user'] : [])
+  })
+
+  it.each(['hidden', 'archived'])('startup recovery leaves %s sessions untouched even with an unknown header role', async (kind) => {
+    const managed = buildSession(`startup-excluded-${kind}`)
+    managed.hidden = kind === 'hidden'
+    managed.isArchived = kind === 'archived'
+    managed.lastMessageRole = undefined
+    managed.messageCount = 2
+    managed.messagesLoaded = false
+    ;(sm as any).scheduleStartupPendingTurnRecovery()
+    await new Promise(resolve => setImmediate(resolve))
+    expect(managed.messagesLoaded).toBe(false)
+    expect(managed.messageQueue).toHaveLength(0)
+  })
+
+  it.each(['tool', 'assistant', 'info'])('startup recovery automatically finishes a cold interrupted error turn without new user input (%s tail)', async (tail) => {
+    const sessionId = `startup-error-auto-${tail}`
+    const managed = buildSession(sessionId)
+    managed.messagesLoaded = false
+    managed.lastMessageRole = tail === 'info' ? undefined : tail
+    const messages = [
+      { id: 'previous-final', type: 'assistant', content: 'done', timestamp: 1 },
+      { id: 'original-user', type: 'user', content: '安装重启后验证结果，不要重新安装', timestamp: 2 },
+      { id: 'api-error', type: 'error', content: 'Invalid Request', timestamp: 3 },
+      { id: 'compact-error', type: 'error', content: 'Context compaction failed', timestamp: 4 },
+      { id: 'compacted', type: 'info', content: 'Compacted context to fit within limits', timestamp: 5 },
+      { id: 'continued', type: 'assistant', content: '继续构建', timestamp: 6, isIntermediate: true },
+      { id: 'build-tool', type: 'tool', content: 'Running Bash...', timestamp: 7, toolName: 'Bash', toolStatus: 'executing', turnId: 'old-turn' },
+      ...(tail === 'tool' ? [] : [{ id: 'tail', type: tail, content: 'still working', timestamp: 8, isIntermediate: true }]),
+    ]
+    managed.messageCount = messages.length
+    const file = getSessionFilePath(tmpRoot, sessionId)
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, [
+      JSON.stringify({ id: sessionId, workspaceRootPath: tmpRoot, createdAt: 1, lastUsedAt: Date.now(), messageCount: messages.length, lastMessageRole: managed.lastMessageRole, tokenUsage: { inputTokens: 0, outputTokens: 0, totalTokens: 0, contextTokens: 0, costUsd: 0 } }),
+      ...messages.map(m => JSON.stringify(m)),
+    ].join('\n') + '\n')
+
+    const prompts: string[] = []
+    managed.agent = {
+      supportsBranching: true,
+      isProcessing: () => false,
+      updateRuntimeConfig: async () => true,
+      setAllSources: () => undefined,
+      setSourceServers: async () => undefined,
+      getSummarizeCallback: () => undefined,
+      getModel: () => 'test-model',
+      getSessionId: () => 'sdk-test',
+      async *chat(message: string) {
+        prompts.push(message)
+        yield { type: 'text_complete', text: 'Recovered without user input', isIntermediate: false }
+        yield { type: 'complete' }
+      },
+      redirect: () => false,
+      forceAbort: () => undefined,
+      dispose: () => undefined,
+    } as never
+    let completed = false
+    const unsubscribe = sm.onSessionComplete(event => { if (event.sessionId === sessionId) completed = true })
+    try {
+      // Deliberately do not call sendMessage/getSession: boot must do all the work.
+      ;(sm as any).scheduleStartupPendingTurnRecovery()
+      const deadline = Date.now() + 2000
+      while (!completed && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+      expect(completed).toBe(true)
+      expect(prompts).toHaveLength(1)
+      expect(prompts[0]).toContain('Continue the previous user request')
+      expect(prompts[0]).toContain('安装重启后验证结果，不要重新安装')
+      expect(managed.messages.filter(m => m.role === 'user').map(m => m.id)).toEqual(['original-user'])
+      expect(managed.messages.find(m => m.id === 'original-user')?.timestamp).toBe(2)
+      expect(managed.messageQueue).toHaveLength(0)
+      expect(managed.isProcessing).toBe(false)
+      await sm.flushSession(sessionId)
+      expect(readPersistedMessages(sessionId).at(-1)?.content).toBe('Recovered without user input')
+      // A subsequent restart scan must not dispatch the completed turn again.
+      ;(sm as any).scheduleStartupPendingTurnRecovery()
+      await new Promise(resolve => setTimeout(resolve, 30))
+      expect(prompts).toHaveLength(1)
+    } finally {
+      unsubscribe()
+    }
+  })
+
   it('records the unfinished tool row so restart recovery can continue the same process message', () => {
     const sessionId = 'recover-tool-anchor'
     const managed = buildSession(sessionId)

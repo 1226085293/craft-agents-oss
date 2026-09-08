@@ -2009,7 +2009,10 @@ export class SessionManager implements ISessionManager {
             // Restarts can happen after intermediate assistant text is persisted
             // but before any tool_start/final assistant response. Hydration is
             // cheap and recoverPendingUserTurns() no-ops if the assistant was final.
-            managed.lastMessageRole === 'assistant'
+            managed.lastMessageRole === 'assistant' ||
+            // The badge header has no role for info/warning/legacy tool rows.
+            // A trailing compaction notice must not hide an interrupted turn.
+            (managed.lastMessageRole === undefined && (managed.messageCount ?? 0) > 0)
           )
         )
         .sort((a, b) => (b.lastMessageAt ?? b.createdAt ?? 0) - (a.lastMessageAt ?? a.createdAt ?? 0))
@@ -2169,12 +2172,32 @@ export class SessionManager implements ISessionManager {
    */
   private recoverPendingUserTurns(managed: ManagedSession): void {
     const existingQueuedIds = new Set(managed.messageQueue.map(q => q.messageId).filter(Boolean))
-    const lastTerminalResponseIndex = managed.messages.findLastIndex(m =>
-      (m.role === 'assistant' && !m.isIntermediate) ||
-      m.role === 'error' ||
-      m.role === 'plan' ||
-      m.role === 'auth-request'
-    )
+    let lastTerminalResponseIndex = -1
+    let continuedAfterError = false
+    // A persisted API/compaction error is not necessarily terminal: defense or
+    // a retry can continue the SAME request before the process is restarted.
+    // Scan backwards so all transient errors preceding that activity are ignored,
+    // but never borrow activity from a later, independent user request.
+    for (let i = managed.messages.length - 1; i >= 0; i--) {
+      const m = managed.messages[i]!
+      if (
+        (m.role === 'assistant' && !m.isIntermediate) ||
+        m.role === 'plan' ||
+        m.role === 'auth-request' ||
+        // cancelProcessing persists this marker for an explicit user Stop.
+        // Late draining tool events must not turn that stop into crash recovery.
+        (m.role === 'info' && m.content === 'Response interrupted') ||
+        (m.role === 'error' && !continuedAfterError)
+      ) {
+        lastTerminalResponseIndex = i
+        break
+      }
+      if (m.role === 'user' && m.isGuidance !== true) {
+        continuedAfterError = false
+      } else if (this.isToolLikeMessage(m) || (m.role === 'assistant' && m.isIntermediate === true)) {
+        continuedAfterError = true
+      }
+    }
     const candidateMessages = managed.messages.slice(lastTerminalResponseIndex + 1)
     const recoverable = candidateMessages.filter(m =>
       m.role === 'user' &&
@@ -2182,7 +2205,15 @@ export class SessionManager implements ISessionManager {
       !existingQueuedIds.has(m.id)
     )
 
-    if (recoverable.length === 0) return
+    if (recoverable.length === 0) {
+      sessionLog.debug('No pending user turns for restart recovery', {
+        sessionId: managed.id,
+        terminalMessageId: managed.messages[lastTerminalResponseIndex]?.id,
+        terminalRole: managed.messages[lastTerminalResponseIndex]?.role,
+        candidateMessageCount: candidateMessages.length,
+      })
+      return
+    }
 
     sessionLog.info('Recovering pending user turn(s) without final assistant response', {
       sessionId: managed.id,

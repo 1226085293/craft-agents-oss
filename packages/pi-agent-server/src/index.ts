@@ -468,7 +468,9 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
     aborted: boolean;
     endsWithEmptyResponse: boolean;
     hasRepetitionLoop: boolean;
+    stallAborted?: boolean;
   } | undefined;
+  let stallKillThisRun = false;
   if (Array.isArray(endMessages)) {
     let anyText = false;
     let aborted = false;
@@ -545,15 +547,28 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
     // run-wide text presence must not mask a garbage terminal reply.
     const lastText = lastAssistant ? extractAssistantText(lastAssistant.content) : '';
     const hasRepetitionLoop = lastText.length > 0 && detectRepetitionLoop(lastText);
-    runOutput = { hasVisibleText: anyText, aborted, endsWithEmptyResponse, hasRepetitionLoop };
+    runOutput = { hasVisibleText: anyText, aborted, endsWithEmptyResponse, hasRepetitionLoop, stallAborted: stallKillThisRun };
 
     // Double-guard for the P0 abort rule (evaluator also short-circuits):
     // a user-initiated stop is terminal. If ANY assistant message carries
     // stopReason=aborted, skip evaluation entirely — never resume a turn the
     // user deliberately interrupted, regardless of write/empty signals.
+    //
+    // Stall-attribution exception (2026-09-08 fit-pulsar incident): the stall
+    // watchdog kills turns via session.abort() too, stamping the identical
+    // stopReason='aborted'. Without attribution, a watchdog kill masqueraded
+    // as a user stop, the defense skipped evaluation, and a mid-task turn
+    // died silently. When stallAbortInProgress says the watchdog fired (and
+    // the user has not pressed stop on top of it), classify as stallAborted
+    // and evaluate normally — the evaluator's guardrails still bound resumes.
     if (aborted) {
-      debugLog('[defense] Skipping post-stop evaluation: user abort detected');
-      return null;
+      const stallKill = stallAbortInProgress && !userAbortRequested;
+      if (!stallKill) {
+        debugLog('[defense] Skipping post-stop evaluation: user abort detected');
+        return null;
+      }
+      debugLog('[defense] Post-stop evaluation: stall-watchdog abort (not a user stop) — evaluating');
+      stallKillThisRun = true;
     }
 
     // Auth-handoff pause (2026-08-24): the agent ended the turn by calling
@@ -601,6 +616,10 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
  *                   of hanging on the idle watchdog.
  */
 function queueDefenseResume(session: AgentSession, resumeMessage: string): void {
+  // Synchronous flag BEFORE the async followUp: the stall-abort catch reads
+  // this after session.abort() settles (which awaits the drained resume) to
+  // decide whether the turn recovered and must not be failed.
+  defenseResumeQueued = true;
   session.followUp(resumeMessage)
     .then(() => {
       debugLog('[defense] Resume message queued via followUp');
@@ -1578,6 +1597,36 @@ function extractResultText(result: unknown): string {
 const TURN_STALL_TIMEOUT_MS = Number(process.env.CRAFT_PI_TURN_STALL_TIMEOUT_MS ?? 5 * 60 * 1000);
 let lastTurnActivityAt = 0;
 
+// Tool-silence exemption state (2026-09-08 fit-pulsar incident): a single
+// long-running tool emits no SDK events between start and end, so silence is
+// NOT a reliable dead-turn signal while a tool runs. Each entry maps a
+// toolCallId to the timestamp until which the tool's own timeout budget keeps
+// the turn alive (start + declared timeout + grace), or null when the tool
+// registered no finite timeout (no exemption — the plain idle deadline
+// applies, so genuinely hung no-timeout tools are still killed).
+const activeToolSilenceDeadlines = new Map<string, number | null>();
+// Grace on top of a tool's declared timeout: the tool result (and its
+// tool_execution_end event) lands shortly after the timeout fires.
+const STALL_EXEMPTION_GRACE_MS = 30_000;
+
+// Abort-attribution flags (2026-09-08 fit-pulsar incident): the defense
+// post-stop evaluation skips EVERY resume signal when the last assistant
+// message carries stopReason='aborted' — that P0 rule exists to never revive
+// a turn the USER deliberately stopped. But the stall watchdog kills turns by
+// calling session.abort() too, stamping the very same stopReason on the
+// failure message. Without attribution, a watchdog kill masquerades as a user
+// stop, the defense skips evaluation, and a mid-task turn dies silently.
+// stallAbortInProgress is set around the watchdog's abort() so the defense
+// evaluation on the aborted agent_end knows the abort was system-initiated.
+// userAbortRequested outranks it: if the user pressed stop while the watchdog
+// path was still unwinding, it stays a user abort.
+let stallAbortInProgress = false;
+let userAbortRequested = false;
+// Set when the defense evaluator queues a resume followUp; read by the stall
+// catch to decide whether the turn was recovered (and must not be reported
+// as a terminal prompt error).
+let defenseResumeQueued = false;
+
 /**
  * Await a turn's prompt promise with SILENCE-based stall detection.
  *
@@ -1586,12 +1635,29 @@ let lastTurnActivityAt = 0;
  * legitimately long turns (serial tool loops, long builds) emit events
  * steadily and are never killed. Caller must session.abort() on rejection
  * to reset the SDK's internal turn state.
+ *
+ * Tool-silence exemption (2026-09-08 incident): between `tool_execution_start`
+ * and `tool_execution_end` the Pi SDK emits NO events, so a single long-running
+ * tool (a build, a training run, an LLM-heavy pipeline) looks exactly like a
+ * dead turn to the silence heuristic. While an active tool's own timeout
+ * budget is still in the future, the idle deadline is suspended — the tool's
+ * timeout is the authority on whether it is hung. Tools registered without a
+ * finite timeout get no exemption (they keep the plain idle deadline), so
+ * genuinely hung session/MCP tools are still killed.
  */
-async function awaitTurnWithStallDetection(promptPromise: Promise<unknown>): Promise<void> {
+async function awaitTurnWithStallDetection(
+  promptPromise: Promise<unknown>,
+  activeToolDeadline: () => number | null,
+): Promise<void> {
   await Promise.race([
     promptPromise,
     new Promise<never>((_, reject) => {
       const timer = setInterval(() => {
+        // Tool-silence exemption: an active tool with a finite timeout that
+        // has not expired yet keeps the turn alive (its own timeout will fire
+        // and produce a tool_execution_end event, refreshing the deadline).
+        const deadline = activeToolDeadline();
+        if (deadline != null && Date.now() < deadline) return;
         if (Date.now() - lastTurnActivityAt > TURN_STALL_TIMEOUT_MS) {
           clearInterval(timer);
           reject(new Error(`Turn stalled: no activity for ${TURN_STALL_TIMEOUT_MS / 1000}s — aborting`));
@@ -1695,6 +1761,19 @@ function handleSessionEvent(event: AgentSessionEvent): void {
   // Detect session MCP tool completions + enrich tool starts with canonical metadata
   if (event.type === 'tool_execution_start') {
     const toolName = event.toolName;
+
+    // Stall-detection exemption bookkeeping: remember each active tool's
+    // silence deadline (start + its timeout). Between tool_execution_start and
+    // tool_execution_end the SDK emits no events, so without this a single
+    // long-running tool is indistinguishable from a dead turn (2026-09-08).
+    {
+      const args = (event.args ?? {}) as Record<string, unknown>;
+      const rawTimeout = args.timeout;
+      const timeoutMs = typeof rawTimeout === 'number' && Number.isFinite(rawTimeout) && rawTimeout > 0
+        ? rawTimeout * 1000
+        : null;
+      activeToolSilenceDeadlines.set(event.toolCallId, timeoutMs == null ? null : Date.now() + timeoutMs + STALL_EXEMPTION_GRACE_MS);
+    }
     if (toolName.startsWith('session__') || toolName.startsWith('mcp__session__')) {
       const mcpToolName = toolName.replace(/^(mcp__session__|session__)/, '');
       pendingSessionToolCalls.set(event.toolCallId, {
@@ -1728,6 +1807,10 @@ function handleSessionEvent(event: AgentSessionEvent): void {
   }
 
   if (event.type === 'tool_execution_end') {
+    // Stall-detection exemption bookkeeping: the tool settled (success, error,
+    // or its own timeout firing) — its exemption dies with it.
+    activeToolSilenceDeadlines.delete(event.toolCallId);
+
     const pending = pendingSessionToolCalls.get(event.toolCallId);
     if (pending) {
       pendingSessionToolCalls.delete(event.toolCallId);
@@ -1938,17 +2021,69 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     // within TURN_STALL_TIMEOUT_MS, the turn is presumed dead: abort() to
     // reset the SDK's internal state and surface an error. Total duration is
     // unlimited — a busy turn keeps resetting the deadline.
+    // Fresh turn: drop stall-exemption entries leaked from a previous turn
+    // and reset abort attribution so stale flags can never misattribute the
+    // next turn's aborts.
+    activeToolSilenceDeadlines.clear();
+    stallAbortInProgress = false;
+    userAbortRequested = false;
+    defenseResumeQueued = false;
+
     const promptPromise = session.prompt(msg.message, {
       images: msg.images && msg.images.length > 0 ? msg.images : undefined,
       streamingBehavior: 'followUp',
     });
     lastTurnActivityAt = Date.now();
+    const activeToolDeadline = (): number | null => {
+      let latest: number | null = null;
+      for (const d of activeToolSilenceDeadlines.values()) {
+        if (d != null && (latest == null || d > latest)) latest = d;
+      }
+      return latest;
+    };
     try {
-      await awaitTurnWithStallDetection(promptPromise);
+      await awaitTurnWithStallDetection(promptPromise, activeToolDeadline);
     } catch (stallErr) {
       debugLog(`[prompt] stalled or failed: ${stallErr instanceof Error ? stallErr.message : stallErr}; aborting session to reset state`);
-      try { await piSession?.abort(); } catch { /* already aborted */ }
-      throw stallErr;
+      // SYSTEM-initiated abort, NOT a user stop: set the flag BEFORE abort()
+      // so the defense evaluation on the aborted agent_end (which fires
+      // synchronously inside abort()'s waitForIdle) attributes the abort to
+      // the watchdog and still evaluates instead of skipping.
+      stallAbortInProgress = true;
+      let finalError: unknown = stallErr;
+      // session.abort() waits for idle — INCLUDING any defense-queued
+      // continuation run (the SDK drains queued follow-ups via
+      // _handlePostAgentRun → agent.continue()). Re-arm the stall watchdog
+      // around that wait so a stalling continuation cannot hang this prompt
+      // forever. Each extra stall round aborts again; the defense
+      // guardrails (maxResumes) bound how many continuations can fire.
+      let abortedSettled = false;
+      for (let round = 0; round < 4 && !abortedSettled; round++) {
+        const abortPromise = (async () => {
+          try { await piSession?.abort(); } catch { /* already aborted */ }
+        })();
+        try {
+          await awaitTurnWithStallDetection(abortPromise, activeToolDeadline);
+          abortedSettled = true;
+        } catch (stallErrN) {
+          finalError = stallErrN;
+          debugLog(`[prompt] stall recovery round ${round + 1} stalled again: ${stallErrN instanceof Error ? stallErrN.message : stallErrN}`);
+        }
+      }
+      stallAbortInProgress = false;
+      const resumed = defenseResumeQueued;
+      defenseResumeQueued = false;
+      if (resumed && abortedSettled) {
+        // The defense evaluator queued (and the SDK already drained) a
+        // resume on the aborted agent_end: the turn recovered and its events
+        // — including the FINAL agent_end — were forwarded normally. Do NOT
+        // report a terminal prompt_error / synthetic agent_end: that would
+        // close the event queue the main process held open for the resumed
+        // turn and mark a recovered turn as failed.
+        debugLog('[prompt] stall aborted but defense resume completed — turn recovered, not failing the prompt');
+        return;
+      }
+      throw finalError;
     }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -2008,12 +2143,20 @@ function handlePreToolUseResponse(msg: Extract<InboundMessage, { type: 'pre_tool
 }
 
 async function handleAbort(): Promise<void> {
-  if (piSession) {
-    try {
-      await piSession.abort();
-    } catch (error) {
-      debugLog(`Abort failed: ${error instanceof Error ? error.message : String(error)}`);
+  // Explicit user stop: outranks stallAbortInProgress (the user may press
+  // stop while a stall-abort round is still unwinding). Cleared after the
+  // abort settles — every agent_end emitted in between is user-attributed.
+  userAbortRequested = true;
+  try {
+    if (piSession) {
+      try {
+        await piSession.abort();
+      } catch (error) {
+        debugLog(`Abort failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
+  } finally {
+    userAbortRequested = false;
   }
 
   // Reject all pending pre-tool-use requests

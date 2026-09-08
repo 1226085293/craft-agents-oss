@@ -155,10 +155,14 @@ export class DefenseEvaluator {
     aborted: boolean;
     endsWithEmptyResponse?: boolean;
     hasRepetitionLoop?: boolean;
+    /** True when the abort was issued by the stall watchdog, not the user. */
+    stallAborted?: boolean;
   }): DefenseEvaluationResult {
     if (!this.enabled) {
       return { evaluated: false, shouldResume: false, state: State.IDLE };
     }
+
+    const stallAborted = lastAssistantMessage?.stallAborted === true;
 
     // P0 guardrail (2026-08-22): a user abort is an explicit intent to stop.
     // It must short-circuit EVERY resume signal — not just silentStop. Before
@@ -166,7 +170,13 @@ export class DefenseEvaluator {
     // empty final reply) was automatically resumed via followUp(), reviving a
     // task the user had deliberately stopped and letting it keep mutating
     // files. Abort wins over all heuristics.
-    if (lastAssistantMessage?.aborted === true) {
+    //
+    // Stall-watchdog exception (2026-09-08 fit-pulsar incident): the watchdog
+    // kills stalled turns via session.abort(), stamping the identical
+    // stopReason='aborted'. That abort is an infrastructure fault, NOT user
+    // intent — treat it as an early-stop signal and evaluate (guardrails
+    // below still bound resumes).
+    if (lastAssistantMessage?.aborted === true && !stallAborted) {
       this.lifecycle.markAborted();
       return {
         evaluated: true,
@@ -190,9 +200,13 @@ export class DefenseEvaluator {
 
     // Silent-stop detection: the turn ended without any assistant-visible
     // text. The user sees nothing — indistinguishable from a hang. Not
-    // triggered on user aborts (that's intentional interruption).
+    // triggered on user aborts (that's intentional interruption) — but a
+    // stall-watchdog abort IS such a hang (system-initiated, not intent), so
+    // it triggers silent stop like any other infra fault.
     const silentStop =
-      lastAssistantMessage != null && !lastAssistantMessage.hasVisibleText && !lastAssistantMessage.aborted;
+      lastAssistantMessage != null
+      && !lastAssistantMessage.hasVisibleText
+      && (!lastAssistantMessage.aborted || stallAborted);
 
     // Empty terminal response: the very last model call returned zero tokens
     // with a clean stop — an infrastructure fault, not an intentional finish.
@@ -205,7 +219,11 @@ export class DefenseEvaluator {
     // model failure and must trigger a resume just like an empty response.
     const repetitionLoop = lastAssistantMessage?.hasRepetitionLoop === true;
 
-    const needsEvaluation = silentStop || emptyResponse || repetitionLoop || shouldResume || complexity.needsEvaluation;
+    // A stall-watchdog abort is itself an early-stop signal: the turn was
+    // killed mid-flight, so evaluation must run even when no other signal
+    // fired (e.g. visible text was already produced earlier in the run).
+    const needsEvaluation =
+      stallAborted || silentStop || emptyResponse || repetitionLoop || shouldResume || complexity.needsEvaluation;
     const stop = this.lifecycle.onStop(needsEvaluation);
 
     if (stop === 'abort') {
@@ -217,9 +235,13 @@ export class DefenseEvaluator {
     }
 
     // Rule-based evaluation: only concrete early-stop signals warrant an
-    // automatic resume — silent stop (no output at all) or wrote-without-
-    // read-back. High complexity alone is informational.
-    if (stop === 'run' || (!shouldResume && !silentStop && !emptyResponse && !repetitionLoop)) {
+    // automatic resume — silent stop (no output at all), wrote-without-
+    // read-back, or a stall-watchdog kill. High complexity alone is
+    // informational. stallAborted bypasses this gate even when visible text
+    // was produced earlier in the run: the watchdog killed a mid-flight turn
+    // (2026-09-08 fit-pulsar — progress text existed, the final verification
+    // run never came back), so "already said something" must not read as done.
+    if (stop === 'run' || (!stallAborted && !shouldResume && !silentStop && !emptyResponse && !repetitionLoop)) {
       this.lifecycle.markDone();
       return {
         evaluated: true,
@@ -229,7 +251,7 @@ export class DefenseEvaluator {
     }
 
     // needsEvaluation: build resume context and decide.
-    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop, emptyResponse, repetitionLoop);
+    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop, emptyResponse, repetitionLoop, stallAborted);
     const decision = this.lifecycle.decideResume(resumeMessage);
     if (decision === State.FAILED) {
       return {
@@ -260,11 +282,21 @@ function buildResumeMessage(
   silentStop: boolean,
   emptyResponse: boolean,
   repetitionLoop: boolean,
+  stallAborted = false,
 ): string {
   const writeCalls = toolCalls.filter((c) => ['write', 'edit', 'bash:write'].includes(c.type));
   const lines: string[] = [
     '[Defense] Detected a possible early stop. Please continue the task from where it left off.',
   ];
+  if (stallAborted) {
+    lines.push(
+      `- Your turn was ABORTED BY THE SYSTEM (stall watchdog: no activity for a long time, ` +
+      `a long-running tool was killed mid-execution) — NOT by the user. ` +
+      `Check whether the interrupted work actually completed (files written, partial output, ` +
+      `processes still running) before redoing anything, then continue from exactly where ` +
+      `it left off. Prefer re-running the interrupted step in smaller, resumable pieces.`,
+    );
+  }
   if (emptyResponse) {
     lines.push(
       `- Your previous model call returned an EMPTY response (no visible content; ` +

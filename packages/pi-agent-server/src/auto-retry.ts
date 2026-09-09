@@ -64,6 +64,11 @@ const PERMANENT_ERROR_PATTERNS: RegExp[] = [
   /context window exceeds limit/i,
   /exceeded model token limit/i,
   /context[_ ]length[_ ]exceeded/i,
+  // Upstream provider internal budget cap (e.g. Anthropic response budget,
+  // different from context-window overflow which is handled above).
+  // Permanent — retrying with the same context will always hit the same wall.
+  /upstream_response_budget_exhausted/i,
+  /response.*budget.*exhaust/i,
 ];
 
 /**

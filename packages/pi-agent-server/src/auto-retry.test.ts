@@ -61,6 +61,19 @@ describe('classifyAutoRetryError', () => {
     }
   });
 
+  it('classifies upstream_response_budget_exhausted as permanent (fit-pulsar incident)', () => {
+    // 2026-09-10: upstream provider returns 503 with this internal error when the
+    // response would exceed its per-request memory budget. Not a transient glitch —
+    // retrying with the same context will always fail. Should NOT enter auto-retry.
+    for (const text of [
+      'Error: Current provider response failed: upstream_response_budget_exhausted',
+      'upstream_response_budget_exhausted',
+      'response budget exhausted for current request',
+    ]) {
+      expect(classifyAutoRetryError(text)).toBe('permanent');
+    }
+  });
+
   it('classifies transient provider/gateway errors as transient', () => {
     for (const text of [
       '429 Too Many Requests',

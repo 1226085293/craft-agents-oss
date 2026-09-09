@@ -2071,8 +2071,21 @@ function handleSessionEvent(event: AgentSessionEvent): void {
   //   4. state null: eligible transient error → schedule the first retry.
   // The synthetic terminal path (giveUpAutoRetry) emits an agent_end with
   // autoRetryFinal so the adapter surfaces the buffered error exactly once.
+  //
+  // willRetry:true during a retry round (2026-09-10 fit-pulsar incident):
+  // the SDK's _willRetryAfterAgentEnd checks _retryAttempt < maxRetries, but
+  // _prepareRetry RESETS _retryAttempt to 0 after emitting auto_retry_end when
+  // it decides to give up (agent-session.js _handlePostAgentRun). Our
+  // agent.continue() bypasses _runAgentPrompt's post-run loop, so nobody ever
+  // acts on willRetry — the flag lies. If we skipped it, the failed round was
+  // invisible: round stayed 1 and the loop re-ran every ~2.3s forever. Inside
+  // a round, treat willRetry agent_end as that round's terminal outcome and
+  // let the state machine classify it (error tail → next round).
   let autoRetryClaimed = false;
-  if (event.type === 'agent_end' && !(event as { willRetry?: boolean }).willRetry) {
+  if (
+    event.type === 'agent_end' &&
+    (!(event as { willRetry?: boolean }).willRetry || autoRetryRoundInFlight)
+  ) {
     const messages = (event as { messages?: unknown[] }).messages;
     const last = extractLastAssistant(messages);
     const errorText = last?.stopReason === 'error' ? String(last.errorMessage ?? '') : '';

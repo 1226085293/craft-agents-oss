@@ -151,6 +151,10 @@ export class PiEventAdapter extends BaseEventAdapter {
   /** True while an auto-retry is in flight after a held agent_end — keeps the
    *  event queue open for the retried turn. */
   private retryHoldActive: boolean = false;
+  /** True while the SUBPROCESS-side auto-retry scheduler (transient LLM
+   *  errors) holds the turn open — agent_end annotated with
+   *  autoRetryPending. Mirrors retryHoldActive for the subprocess lane. */
+  private autoRetryHoldActive: boolean = false;
   /** Set once a terminal error has been reported this turn-cycle so late
    *  auto_retry_end(success:false) events don't report a second failure. */
   private hasEmittedTerminalError: boolean = false;
@@ -204,6 +208,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     isAgentEnd: boolean,
     defenseResumePending?: boolean,
     queuedFollowUpPending?: boolean,
+    autoRetryPending?: boolean,
   ): boolean {
     if (this.pendingQueueComplete) {
       this.pendingQueueComplete = false;
@@ -224,6 +229,13 @@ export class PiEventAdapter extends BaseEventAdapter {
         return false;
       }
       this.queuedFollowUpHeld = false;
+      if (autoRetryPending) {
+        // The subprocess auto-retry scheduler is about to run another round
+        // (2s/5min backoff) — hold the queue open for the retry turn.
+        this.autoRetryHoldActive = true;
+        return false;
+      }
+      this.autoRetryHoldActive = false;
       if (this.retryHoldActive) {
         // The retry hold was already resolved in adaptEvent above (terminal
         // agent_end surfaced the deferred error). A hold means this agent_end
@@ -247,6 +259,16 @@ export class PiEventAdapter extends BaseEventAdapter {
   }
 
   /**
+   * Drop a buffered transient error from the subprocess auto-retry lane
+   * (called when a retry round SUCCEEDS — the error is obsolete and must
+   * never surface at a later terminal).
+   */
+  clearAutoRetryDeferredError(): void {
+    this.deferredRetryError = null;
+    this.autoRetryHoldActive = false;
+  }
+
+  /**
    * Reset overflow-recovery + defense-resume state. Call from session
    * disposal so a stale fallback timer doesn't fire on a torn-down adapter.
    */
@@ -259,6 +281,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.queuedFollowUpHeld = false;
     this.deferredRetryError = null;
     this.retryHoldActive = false;
+    this.autoRetryHoldActive = false;
     this.hasEmittedTerminalError = false;
   }
 
@@ -381,6 +404,25 @@ export class PiEventAdapter extends BaseEventAdapter {
           break;
         }
         this.retryHoldActive = false;
+        // Subprocess auto-retry lane: an agent_end annotated with
+        // autoRetryPending means the subprocess scheduler will run another
+        // round — hold the queue and surface nothing yet. shouldCompleteQueue
+        // reads the same flag via its 4th parameter.
+        if ((event as { autoRetryPending?: boolean }).autoRetryPending) {
+          this.autoRetryHoldActive = true;
+          break;
+        }
+        // Synthetic terminal agent_end from the subprocess scheduler
+        // (give-up / cancel): clear the hold. When autoRetryCancelled is
+        // set (cancel path) the buffered error is dropped — a cancel is
+        // not a failure report. Give-up then falls through to the surfacing
+        // block below and normal completion.
+        if ((event as { autoRetryFinal?: boolean }).autoRetryFinal) {
+          this.autoRetryHoldActive = false;
+          if ((event as { autoRetryCancelled?: boolean }).autoRetryCancelled) {
+            this.deferredRetryError = null;
+          }
+        }
         // Terminal agent_end (willRetry false/absent): surface a buffered
         // deferred error exactly once, right before the complete event —
         // this is the ONLY point a deferred retryable error reaches the UI.
@@ -493,6 +535,7 @@ export class PiEventAdapter extends BaseEventAdapter {
         if (msg.stopReason !== 'error' && this.deferredRetryError) {
           this.deferredRetryError = null;
           this.retryHoldActive = false;
+          this.autoRetryHoldActive = false;
         }
 
         // Surface API errors — Pi SDK sets stopReason: 'error' and errorMessage on failures
@@ -517,7 +560,19 @@ export class PiEventAdapter extends BaseEventAdapter {
           // auto_retry_end handling). Uses the SAME classifier as the SDK's
           // retry decision (`isRetryableAssistantError`) so deferral and retry
           // cannot disagree.
-          if (!this.hasEmittedTerminalError && isRetryableAssistantError(event.message as AssistantMessage)) {
+          //
+          // Subprocess auto-retry lane: when the subprocess annotated this
+          // message_end with autoRetryPlanned (its own scheduler will retry
+          // after the SDK's fast retries are exhausted — a BROADER transient
+          // classifier than the SDK's), buffer the error and hold the queue
+          // with the same deferral semantics; the terminal may be several
+          // minutes away (5-min backoff rounds).
+          if (
+            !this.hasEmittedTerminalError &&
+            (isRetryableAssistantError(event.message as AssistantMessage) ||
+              (event as { autoRetryPlanned?: boolean }).autoRetryPlanned === true ||
+              this.autoRetryHoldActive)
+          ) {
             const parsed = parseError(new Error(msg.errorMessage));
             this.deferredRetryError = {
               message: msg.errorMessage,

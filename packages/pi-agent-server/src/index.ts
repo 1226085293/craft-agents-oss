@@ -47,6 +47,7 @@ import type {
 
 // Pi AI types
 import type { TextContent as PiTextContent } from '@earendil-works/pi-ai';
+import { isContextOverflow } from '@earendil-works/pi-ai';
 
 // Pre-register the Bedrock provider module so the Pi SDK doesn't attempt a
 // dynamic import of "./amazon-bedrock.js" — which fails in the bundled output
@@ -56,6 +57,18 @@ import type { TextContent as PiTextContent } from '@earendil-works/pi-ai';
 import { setBedrockProviderModule } from '@earendil-works/pi-ai/api/bedrock-converse-stream.lazy';
 import { bedrockProviderModule } from '@earendil-works/pi-ai/bedrock-provider';
 setBedrockProviderModule(bedrockProviderModule);
+
+// Auto-retry on transient LLM errors (see auto-retry.ts header): the
+// subprocess re-drives the turn itself on a 2s → 5min schedule.
+import {
+  AUTO_RETRY_DEADLINE_MS,
+  AUTO_RETRY_FIRST_DELAY_MS,
+  AUTO_RETRY_INTERVAL_MS,
+  AUTO_RETRY_MAX_ROUNDS,
+  classifyAutoRetryError,
+  extractLastAssistant,
+  stripTrailingErrorAssistant,
+} from './auto-retry.ts';
 
 // Model resolution (extracted for testability + custom-endpoint precedence)
 import { resolvePiModel, isDeniedMiniModelId, isModelNotFoundError } from './model-resolution.ts';
@@ -185,6 +198,7 @@ type InboundMessage =
   | RuntimeConfigUpdateMessage
   | SwitchConnectionMessage
   | { type: 'steer'; message: string }
+  | { type: 'cancel_auto_retry'; synthetic?: boolean }
   | { type: 'token_update'; piAuth: { provider: string; credential: PiCredential } }
   | { type: 'shutdown' };
 
@@ -266,6 +280,15 @@ interface OutboundSessionIdUpdate { type: 'session_id_update'; sessionId: string
 interface OutboundError { type: 'error'; message: string; code?: string }
 /** Defense layer feedback: whether the queued followUp() resume materialized. */
 interface OutboundDefenseResumeStatus { type: 'defense_resume_status'; resumed: boolean }
+/** Auto-retry (transient LLM error scheduler) lifecycle feedback. */
+interface OutboundAutoRetryStatus {
+  type: 'auto_retry_status';
+  phase: 'waiting' | 'running' | 'success' | 'final' | 'stopped';
+  round?: number;
+  delayMs?: number;
+  reason?: 'deadline' | 'max_rounds' | 'permanent_error' | 'dispatch_failed';
+  errorText?: string;
+}
 
 type OutboundMessage =
   | OutboundReady
@@ -282,6 +305,7 @@ type OutboundMessage =
   | OutboundSwitchConnectionResult
   | OutboundSessionIdUpdate
   | OutboundDefenseResumeStatus
+  | OutboundAutoRetryStatus
   | OutboundError;
 
 // ============================================================
@@ -1627,6 +1651,28 @@ let userAbortRequested = false;
 // as a terminal prompt error).
 let defenseResumeQueued = false;
 
+// ---- Auto-retry (transient LLM error scheduler) ----
+// Active retry cycle, if any. Null == no cycle scheduled. Mutated by the
+// handleSessionEvent agent_end hook (advance/give up) and the loop itself.
+interface AutoRetryState {
+  startedAt: number;
+  round: number;
+  lastErrorText: string;
+}
+let autoRetryState: AutoRetryState | null = null;
+// Set when a user cancel (message / abort / redirect) reaches the hook. Consumed
+// exactly once by the hook branch-1, then re-armed by loop entry / handleAbort
+// finally so a stale flag can never block a future cycle.
+let autoRetryCancelled = false;
+// True while runRetryTurn's agent.continue() is executing (loop drives it).
+let autoRetryRoundInFlight = false;
+// Settles when the current cycle ends (give-up / cancel); handlePrompt races it
+// with a timeout before starting a fresh turn.
+let autoRetrySettled: Promise<void> = Promise.resolve();
+// Set by the in-round stall watchdog just before aborting a hung retry round;
+// the agent_end hook treats it as a failed round (retry again), not a cancel.
+let autoRetryStallAbort = false;
+
 /**
  * Await a turn's prompt promise with SILENCE-based stall detection.
  *
@@ -1667,6 +1713,158 @@ async function awaitTurnWithStallDetection(
       promptPromise.finally(() => clearInterval(timer)).catch(() => {});
     }),
   ]);
+}
+
+// ============================================================
+// Auto-retry helpers (subprocess-side scheduler)
+// ============================================================
+// scheduleAutoRetryLoop is the ONLY scheduler; the agent_end hook below reacts
+// to round outcomes (success / permanent / transient / cancel / stall). All
+// transitions keep `autoRetryState` as the single source of truth.
+
+function sendAutoRetryStatus(
+  phase: 'waiting' | 'running' | 'success' | 'final' | 'stopped',
+  round?: number,
+  extra?: { delayMs?: number; reason?: 'deadline' | 'max_rounds' | 'permanent_error' | 'dispatch_failed'; errorText?: string },
+): void {
+  send({ type: 'auto_retry_status', phase, round, ...extra });
+}
+
+/** Plain setTimeout-based sleep. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Sleep that resolves false when the cycle was cancelled/superseded. */
+function sleepInterruptible(ms: number, state: AutoRetryState): Promise<boolean> {
+  return new Promise<boolean>((resolve) => {
+    const deadline = Date.now() + ms;
+    const timer = setInterval(() => {
+      if (autoRetryState !== state || autoRetryCancelled) {
+        clearInterval(timer);
+        resolve(false);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        clearInterval(timer);
+        resolve(true);
+      }
+    }, 250);
+  });
+}
+
+/** Execute one retry round: strip the trailing error assistant (mirrors the
+ *  SDK's _prepareRetry) then agent.continue(). Throws so the loop can give up
+ *  with dispatch_failed. An in-round stall watchdog aborts a round that hangs
+ *  without emitting any event for TURN_STALL_TIMEOUT_MS — continue() runs
+ *  OUTSIDE handlePrompt's stall detection, so it needs its own. */
+async function runRetryTurn(state: AutoRetryState): Promise<void> {
+  const session = piSession;
+  if (!session) throw new Error('no active session');
+  if (session.isStreaming) throw new Error('session still streaming');
+  if (!stripTrailingErrorAssistant(session.agent.state.messages)) {
+    throw new Error('no trailing error assistant to strip');
+  }
+  autoRetryRoundInFlight = true;
+  lastTurnActivityAt = Date.now();
+  const watchdog = setInterval(() => {
+    if (!autoRetryRoundInFlight || autoRetryState !== state) return;
+    if (Date.now() - lastTurnActivityAt > TURN_STALL_TIMEOUT_MS) {
+      debugLog(`auto-retry round ${state.round} stalled >${TURN_STALL_TIMEOUT_MS}ms; aborting round`);
+      autoRetryStallAbort = true;
+      void session.abort().catch(() => {});
+    }
+  }, 1000);
+  try {
+    await session.agent.continue();
+  } finally {
+    clearInterval(watchdog);
+    autoRetryRoundInFlight = false;
+  }
+}
+
+/** Terminal give-up: clear state, notify, and (when no round is unwinding)
+ *  send a synthetic agent_end so the main-side adapter surfaces the buffered
+ *  error and completes the held queue. */
+function giveUpAutoRetry(
+  state: AutoRetryState,
+  reason: 'deadline' | 'max_rounds' | 'dispatch_failed',
+  errorText?: string,
+): void {
+  if (autoRetryState !== state) return;
+  autoRetryState = null;
+  sendAutoRetryStatus('final', undefined, { reason, errorText: errorText ?? state.lastErrorText });
+  if (!autoRetryRoundInFlight) {
+    send({
+      type: 'event',
+      event: {
+        type: 'agent_end',
+        messages: [],
+        autoRetryFinal: true,
+      } as unknown as OutboundAgentEvent,
+    });
+  }
+}
+
+/** Cancel a pending/running cycle. When a round is mid-flight we abort it so
+ *  a new prompt can start promptly; the synthetic terminal agent_end is only
+ *  sent when no round is unwinding (a real aborted agent_end will arrive
+ *  otherwise and un-hold the queue). */
+function cancelAutoRetryLocal(synthetic: boolean): void {
+  const state = autoRetryState;
+  if (!state) return;
+  autoRetryState = null;
+  autoRetryCancelled = true;
+  sendAutoRetryStatus('stopped');
+  if (autoRetryRoundInFlight && piSession) {
+    void piSession.abort().catch(() => {});
+    return;
+  }
+  if (synthetic) {
+    send({
+      type: 'event',
+      event: {
+        type: 'agent_end',
+        messages: [],
+        autoRetryFinal: true,
+        autoRetryCancelled: true,
+      } as unknown as OutboundAgentEvent,
+    });
+  }
+}
+
+/** The retry loop: 2s first delay, then every 5 minutes, until the 2h
+ *  deadline or the round cap. Runs until autoRetryState stops pointing at
+ *  this cycle (success / permanent / cancel / give-up all clear it). */
+function scheduleAutoRetryLoop(state: AutoRetryState): void {
+  autoRetrySettled = (async () => {
+    debugLog('auto-retry loop scheduled');
+    while (autoRetryState === state) {
+      if (Date.now() - state.startedAt >= AUTO_RETRY_DEADLINE_MS) {
+        giveUpAutoRetry(state, 'deadline');
+        return;
+      }
+      if (state.round > AUTO_RETRY_MAX_ROUNDS) {
+        giveUpAutoRetry(state, 'max_rounds');
+        return;
+      }
+      const delayMs = state.round === 1 ? AUTO_RETRY_FIRST_DELAY_MS : AUTO_RETRY_INTERVAL_MS;
+      sendAutoRetryStatus('waiting', state.round, { delayMs });
+      if (!(await sleepInterruptible(delayMs, state))) return;
+      if (autoRetryState !== state) return;
+      if (Date.now() - state.startedAt >= AUTO_RETRY_DEADLINE_MS) {
+        giveUpAutoRetry(state, 'deadline');
+        return;
+      }
+      sendAutoRetryStatus('running', state.round);
+      try {
+        await runRetryTurn(state);
+      } catch (error) {
+        giveUpAutoRetry(state, 'dispatch_failed', error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
+  })();
 }
 
 function handleSessionEvent(event: AgentSessionEvent): void {
@@ -1727,6 +1925,24 @@ function handleSessionEvent(event: AgentSessionEvent): void {
             } as unknown as OutboundAgentEvent,
           });
         });
+      }
+
+      // Auto-retry planning: annotate transient LLM errors so the event
+      // adapter buffers them (instead of surfacing immediately) while the
+      // subprocess-side retry scheduler runs its rounds. Overflow and
+      // permanent errors (auth/billing) are left to the existing pipelines.
+      if (
+        msg.stopReason === 'error' &&
+        msg.errorMessage &&
+        !userAbortRequested &&
+        !stallAbortInProgress &&
+        !isContextOverflow(event.message as unknown as Parameters<typeof isContextOverflow>[0], piSession.agent.state.model?.contextWindow ?? 0) &&
+        classifyAutoRetryError(msg.errorMessage) === 'transient'
+      ) {
+        forwardedEvent = {
+          ...(forwardedEvent as Record<string, unknown>),
+          autoRetryPlanned: true,
+        } as unknown as OutboundAgentEvent;
       }
 
       // Speculative prefetch: if the assistant message contains 2+ prefetchable tool calls,
@@ -1844,6 +2060,95 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     }
   }
 
+  // Auto-retry (transient LLM error scheduler) — outranks the defense layer:
+  // a claimed agent_end never reaches defense evaluation. Branch order:
+  //   1. autoRetryStallAbort  — in-round watchdog killed a hung round; treat
+  //      as a failed round (retry again), NOT a cancel.
+  //   2. autoRetryCancelled   — user cancel consumed; stale flags re-armed by
+  //      loop entry / handleAbort finally.
+  //   3. state set: success (no error tail) / permanent / transient → next
+  //      round; user-abort / stall-kill → belt-clear.
+  //   4. state null: eligible transient error → schedule the first retry.
+  // The synthetic terminal path (giveUpAutoRetry) emits an agent_end with
+  // autoRetryFinal so the adapter surfaces the buffered error exactly once.
+  let autoRetryClaimed = false;
+  if (event.type === 'agent_end' && !(event as { willRetry?: boolean }).willRetry) {
+    const messages = (event as { messages?: unknown[] }).messages;
+    const last = extractLastAssistant(messages);
+    const errorText = last?.stopReason === 'error' ? String(last.errorMessage ?? '') : '';
+    const stallKilledRound = autoRetryStallAbort;
+    autoRetryStallAbort = false;
+    const abortedTurn = userAbortRequested || stallAbortInProgress || last?.stopReason === 'aborted';
+    if (autoRetryState) {
+      if (autoRetryCancelled) {
+        // Cancel consumed; a real agent_end for the aborted round (if any)
+        // must not un-hold the queue via the normal path.
+        autoRetryState = null;
+        autoRetryCancelled = false;
+        autoRetryClaimed = true;
+        debugLog('auto-retry: cancelled; cycle torn down');
+      } else if (stallKilledRound) {
+        // Watchdog killed a hung round: schedule another one.
+        autoRetryState.round += 1;
+        autoRetryState.lastErrorText = 'retry round stalled and was aborted';
+        forwardedEvent = {
+          ...(forwardedEvent as Record<string, unknown>),
+          autoRetryPending: true,
+        } as unknown as OutboundAgentEvent;
+        autoRetryClaimed = true;
+        debugLog(`auto-retry: round ${autoRetryState.round - 1} stalled; scheduling round ${autoRetryState.round}`);
+      } else if (abortedTurn) {
+        // User abort mid-cycle (handleAbort normally cleared state first —
+        // belt for races).
+        autoRetryState = null;
+        autoRetryClaimed = true;
+        debugLog('auto-retry: aborted turn; cycle torn down');
+      } else if (!errorText) {
+        const finishedRound = autoRetryState.round;
+        autoRetryState = null;
+        sendAutoRetryStatus('success', finishedRound);
+        // NOT claimed: the defense layer still evaluates the successful tail.
+        debugLog(`auto-retry: round ${finishedRound} succeeded`);
+      } else if (classifyAutoRetryError(errorText) === 'permanent') {
+        autoRetryState = null;
+        sendAutoRetryStatus('final', undefined, { reason: 'permanent_error', errorText });
+        // NOT claimed, no synthetic agent_end: the real terminal agent_end
+        // surfaces the buffered error through the adapter's existing path.
+        debugLog(`auto-retry: permanent error; giving up: ${errorText}`);
+      } else {
+        // Transient failure — schedule the next round.
+        autoRetryState.round += 1;
+        autoRetryState.lastErrorText = errorText;
+        forwardedEvent = {
+          ...(forwardedEvent as Record<string, unknown>),
+          autoRetryPending: true,
+        } as unknown as OutboundAgentEvent;
+        autoRetryClaimed = true;
+        debugLog(`auto-retry: round ${autoRetryState.round - 1} failed transiently; scheduling round ${autoRetryState.round}: ${errorText}`);
+      }
+    } else if (
+      piSession &&
+      errorText &&
+      !autoRetryCancelled &&
+      !autoRetryRoundInFlight &&
+      !userAbortRequested &&
+      !stallAbortInProgress &&
+      typeof (piSession as unknown as { pendingMessageCount?: number }).pendingMessageCount === 'number' &&
+      (piSession as unknown as { pendingMessageCount: number }).pendingMessageCount === 0 &&
+      !isContextOverflow(last as unknown as Parameters<typeof isContextOverflow>[0], piSession.agent.state.model?.contextWindow ?? 0) &&
+      classifyAutoRetryError(errorText) === 'transient'
+    ) {
+      autoRetryState = { startedAt: Date.now(), round: 1, lastErrorText: errorText };
+      scheduleAutoRetryLoop(autoRetryState);
+      forwardedEvent = {
+        ...(forwardedEvent as Record<string, unknown>),
+        autoRetryPending: true,
+      } as unknown as OutboundAgentEvent;
+      autoRetryClaimed = true;
+      debugLog(`auto-retry: scheduled round 1 after error: ${errorText}`);
+    }
+  }
+
   // Post-stop defense evaluation: when the agent run ends, decide whether the
   // turn stopped early and, if so, queue a resume message on the same session.
   // Skip when the SDK will retry the turn itself (willRetry) or when the FSM
@@ -1861,7 +2166,8 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     event.type === 'agent_end' &&
     piSession &&
     defenseEvaluator?.canEvaluate() &&
-    !(event as { willRetry?: boolean }).willRetry
+    !(event as { willRetry?: boolean }).willRetry &&
+    !autoRetryClaimed
   ) {
     const defenseResult = evaluateDefensePostStop((event as { messages?: unknown[] }).messages);
     if (defenseResult) {
@@ -1976,6 +2282,18 @@ async function waitForCompaction(session: { isCompacting: boolean }, timeoutMs =
 }
 
 async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): Promise<void> {
+  // A user message during an auto-retry cycle cancels the cycle (per spec:
+  // sending a message cancels the retry), then the fresh prompt proceeds.
+  if (autoRetryState) {
+    cancelAutoRetryLocal(true);
+    // Give the loop / in-flight round a short grace period to unwind so the
+    // fresh prompt never races the dying cycle.
+    await Promise.race([autoRetrySettled, sleep(5000)]);
+    autoRetryCancelled = false;
+  } else {
+    autoRetryCancelled = false;
+  }
+
   currentUserMessage = msg.message;
 
   try {
@@ -2143,6 +2461,14 @@ function handlePreToolUseResponse(msg: Extract<InboundMessage, { type: 'pre_tool
 }
 
 async function handleAbort(): Promise<void> {
+  // User stop also cancels any pending auto-retry cycle (per spec) and the
+  // flag is re-armed in the finally so a stale value can never block a
+  // future cycle's entry condition.
+  if (autoRetryState) {
+    cancelAutoRetryLocal(false);
+  }
+  autoRetryCancelled = false;
+
   // Explicit user stop: outranks stallAbortInProgress (the user may press
   // stop while a stall-abort round is still unwinding). Cleared after the
   // abort settles — every agent_end emitted in between is user-attributed.
@@ -2157,6 +2483,7 @@ async function handleAbort(): Promise<void> {
     }
   } finally {
     userAbortRequested = false;
+    autoRetryCancelled = false;
   }
 
   // Reject all pending pre-tool-use requests
@@ -2553,6 +2880,12 @@ async function processMessage(msg: InboundMessage): Promise<void> {
 
     case 'abort':
       await handleAbort();
+      break;
+
+    case 'cancel_auto_retry':
+      if (autoRetryState) {
+        cancelAutoRetryLocal(msg.synthetic === true);
+      }
       break;
 
     case 'mini_completion':

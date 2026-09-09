@@ -184,6 +184,10 @@ export class PiAgent extends BaseAgent {
   // State
   private _isProcessing: boolean = false;
   private abortReason?: AbortReason;
+  /** True while the subprocess-side auto-retry scheduler is active (waiting
+   *  or running a retry round) for the CURRENT turn. Drives redirect() veto
+   *  and SessionManager queue-time cancellation. */
+  private autoRetryActive = false;
 
   // Event adapter
   private adapter: PiEventAdapter;
@@ -1154,6 +1158,62 @@ export class PiAgent extends BaseAgent {
         }
         break;
 
+      case 'auto_retry_status': {
+        // Auto-retry lifecycle feedback from the subprocess scheduler. The
+        // event queue is held open across the retry rounds (agent_end
+        // annotated with autoRetryPending); these status lines are the ONLY
+        // events during a 5-min backoff sleep, so they must feed the turn
+        // idle watchdog or the 10-min watchdog would kill the held turn.
+        const phase = msg.phase as string;
+        const round = typeof msg.round === 'number' ? msg.round : undefined;
+        const delayMs = typeof msg.delayMs === 'number' ? msg.delayMs : undefined;
+        const reason = typeof msg.reason === 'string' ? msg.reason : undefined;
+        const errorText = typeof msg.errorText === 'string' ? msg.errorText : '';
+        this.autoRetryActive = phase === 'waiting' || phase === 'running';
+        this.lastTurnEventAt = Date.now();
+        this.refreshTurnIdleWatchdog();
+
+        const roundLabel = round !== undefined ? `（第 ${round} 轮）` : '';
+        let text: string;
+        switch (phase) {
+          case 'waiting': {
+            const delayLabel =
+              delayMs !== undefined && delayMs >= 60_000
+                ? `${Math.round(delayMs / 60_000)} 分钟`
+                : `${Math.max(1, Math.ceil((delayMs ?? 0) / 1000))} 秒`;
+            text = `⏳ LLM 暂时性错误，${delayLabel}后自动重试${roundLabel}。发送消息可取消重试。`;
+            break;
+          }
+          case 'running':
+            text = `🔄 正在自动重试${roundLabel}…`;
+            break;
+          case 'success':
+            text = `✅ 自动重试成功${roundLabel}。`;
+            // The retried turn succeeded — any buffered transient error is
+            // obsolete. Drop it so the success agent_end completes silently.
+            this.adapter.clearAutoRetryDeferredError();
+            break;
+          case 'final': {
+            const reasonText =
+              reason === 'deadline'
+                ? '已超过 2 小时重试上限'
+                : reason === 'max_rounds'
+                  ? '已达最大重试轮数（30 轮）'
+                  : reason === 'permanent_error'
+                    ? '错误为永久性，无法自动重试'
+                    : '重试调度失败';
+            text = `❌ 自动重试已放弃（${reasonText}）。${errorText ? `\n${errorText}` : ''}`;
+            break;
+          }
+          case 'stopped':
+          default:
+            text = '⏹ 自动重试已取消。';
+            break;
+        }
+        this.eventQueue.enqueue({ type: 'info', message: text });
+        break;
+      }
+
       case 'error': {
         const errorCode = typeof msg.code === 'string' ? msg.code : undefined;
         const rawMessage = String(msg.message || 'Unknown subprocess error');
@@ -1342,6 +1402,7 @@ export class PiAgent extends BaseAgent {
       eventType === 'agent_end',
       eventType === 'agent_end' ? (event.defenseResumePending as boolean | undefined) : undefined,
       eventType === 'agent_end' ? (event.queuedFollowUpPending as boolean | undefined) : undefined,
+      eventType === 'agent_end' ? (event.autoRetryPending as boolean | undefined) : undefined,
     )) {
       this.eventQueue.complete();
     }
@@ -2571,7 +2632,22 @@ n   * connection can be adopted mid-session.
     return this._isProcessing;
   }
 
+  /** True while the subprocess auto-retry scheduler holds this turn open. */
+  isAutoRetryActive(): boolean {
+    return this.autoRetryActive;
+  }
+
+  /** Cancel a pending/running auto-retry cycle (user message or redirect). */
+  cancelAutoRetry(): void {
+    if (!this.autoRetryActive) return;
+    this.autoRetryActive = false;
+    this.send({ type: 'cancel_auto_retry', synthetic: true });
+  }
+
   async abort(reason?: string): Promise<void> {
+    // User stop also cancels any pending auto-retry cycle.
+    this.autoRetryActive = false;
+
     // Fire Stop hook event (fire-and-forget)
     this.emitAutomationEvent('Stop', { hook_event_name: 'Stop' });
 
@@ -2592,6 +2668,9 @@ n   * connection can be adopted mid-session.
   }
 
   forceAbort(reason: AbortReason): void {
+    // Subprocess teardown also tears down any pending auto-retry cycle.
+    this.autoRetryActive = false;
+
     // Fire Stop hook event (fire-and-forget)
     this.emitAutomationEvent('Stop', { hook_event_name: 'Stop' });
 
@@ -2643,6 +2722,14 @@ n   * connection can be adopted mid-session.
    * are interrupted; otherwise guidance is delivered before the next LLM call.
    */
   override redirect(message: string): boolean {
+    // An active auto-retry cycle means the turn is NOT mid-stream — it's
+    // parked between rounds. Steering now would hit a non-processing agent
+    // (Pi SDK steer throws); cancel the cycle instead and let the caller's
+    // normal queue path replay the message as a fresh prompt.
+    if (this.autoRetryActive) {
+      this.cancelAutoRetry();
+      return false;
+    }
     if (!this._isProcessing || !this.subprocess) {
       // Not streaming or no subprocess — fall back to abort
       this.forceAbort(AbortReason.Redirect);
@@ -2781,6 +2868,9 @@ n   * connection can be adopted mid-session.
    * Kill the subprocess and clean up resources.
    */
   private killSubprocess(): void {
+    // Subprocess teardown also tears down any pending auto-retry cycle.
+    this.autoRetryActive = false;
+
     if (this.readline) {
       this.readline.close();
       this.readline = null;

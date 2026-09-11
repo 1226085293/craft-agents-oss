@@ -985,15 +985,45 @@ Approve in the desktop app to continue.`,
     const maxLen = adapter.capabilities.maxMessageLength
     const opts = bindingOpts(binding)
     if (text.length <= maxLen) {
-      return adapter.sendText(binding.channelId, text, opts)
+      return this.sendTextWithRetry(adapter, binding, text, opts)
     }
 
     const chunks = splitText(text, maxLen)
     let last: SentMessage | undefined
     for (const chunk of chunks) {
-      last = await adapter.sendText(binding.channelId, chunk, opts)
+      last = await this.sendTextWithRetry(adapter, binding, chunk, opts)
     }
     return last
+  }
+
+  /**
+   * Send one text chunk, retrying transient network failures with a short
+   * backoff. The whole final answer previously vanished when `sendMessage`
+   * failed mid-network-blip (2026-09-11 apt-cloud: a reply the desktop showed
+   * never reached the phone). Each chunk is retried independently — a chunk
+   * that already delivered is never re-sent, so there is no duplicate risk.
+   * After the attempts are exhausted the error propagates so the caller's
+   * `finally` still resets per-run state.
+   */
+  private async sendTextWithRetry(
+    adapter: PlatformAdapter,
+    binding: ChannelBinding,
+    text: string,
+    opts: SendOptions,
+  ): Promise<SentMessage | undefined> {
+    const MAX_ATTEMPTS = 3
+    let lastError: unknown
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        return await adapter.sendText(binding.channelId, text, opts)
+      } catch (err) {
+        lastError = err
+        if (attempt === MAX_ATTEMPTS || !isRetryableSendError(err)) throw err
+        // 500ms, then 1s — comfortably below any human-visible threshold.
+        await delay(500 * attempt)
+      }
+    }
+    throw lastError
   }
 
   /** Clean up state for a removed binding. */
@@ -1018,6 +1048,38 @@ function resolveResponseMode(
   if (responseMode) return responseMode
   // Legacy configs (pre-responseMode field): honour explicit streamResponses.
   return streamResponses === false ? 'final_only' : 'streaming'
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Decide whether a failed `sendText` is worth retrying. Network-level blips
+ * (the reported `sendMessage` HttpError, ECONNRESET/UND_ERR_SOCKET, TLS
+ * teardown, 429/5xx) are transient; permanent delivery errors — a blocked
+ * bot, a bad chat id, invalid markup — would fail identically on every
+ * attempt, so we surface them immediately instead of hammering the API.
+ */
+function isRetryableSendError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? '')
+  const lower = message.toLowerCase()
+  if (
+    lower.includes('network request') ||
+    lower.includes('fetch failed') ||
+    lower.includes('socket disconnected') ||
+    lower.includes('econnreset') ||
+    lower.includes('und_err_socket') ||
+    lower.includes('other side closed') ||
+    lower.includes('timeout') ||
+    lower.includes('etimedout')
+  ) {
+    return true
+  }
+  // HTTP status in the text: 429 (flood control) and 5xx are retryable.
+  const status = /\b(429|5\d\d)\b/.exec(lower)
+  if (status) return true
+  return false
 }
 
 function appendFinal(existing: string, next: string): string {

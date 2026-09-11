@@ -787,3 +787,137 @@ describe('Renderer — WhatsApp desktop-only approvals', () => {
     expect(sends[0]!.text).toContain('desktop app')
   })
 })
+
+// ---------------------------------------------------------------------------
+// Delivery-failure resilience (2026-09-11 incidents)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an adapter whose sendText fails the first N calls (with a
+ * network-shaped error) and succeeds afterwards.
+ */
+function makeFlakyAdapter(failures: number, errorMessage = "Network request for 'sendMessage' failed!") {
+  const adapter = makeAdapter()
+  let remainingFailures = failures
+  const original = adapter.sendText.bind(adapter)
+  let sendAttempts = 0
+  ;(adapter as any).sendText = async (channelId: string, text: string, opts?: unknown) => {
+    sendAttempts++
+    if (remainingFailures > 0) {
+      remainingFailures--
+      throw new Error(errorMessage)
+    }
+    return original(channelId, text, opts)
+  }
+  return { adapter, getSendAttempts: () => sendAttempts }
+}
+
+describe('Renderer — delivery failure resilience', () => {
+
+  // The gateway swallows renderer errors (enqueueRender .catch); tests that
+  // exercise delivery failures must therefore tolerate a thrown send.
+  async function playTolerant(
+    renderer: Renderer,
+    binding: ChannelBinding,
+    adapter: PlatformAdapter,
+    events: SessionEvent[],
+  ): Promise<void> {
+    for (const e of events) {
+      try {
+        await renderer.handle(e, binding, adapter)
+      } catch {
+        // Delivery failed — the gateway logs and moves on.
+      }
+    }
+  }
+  it('progress: a transient send failure is retried and the reply still arrives', async () => {
+    const renderer = new Renderer()
+    const { adapter, getSendAttempts } = makeFlakyAdapter(1)
+    const binding = makeBinding({ responseMode: 'progress' })
+
+    await playTolerant(renderer, binding, adapter, [
+      ev.final('第一条回复'),
+      ev.complete(),
+    ])
+
+    // One failed attempt + one successful retry.
+    expect(getSendAttempts()).toBeGreaterThanOrEqual(2)
+    const sends = adapter.calls.filter((c) => c.kind === 'sendText')
+    expect(sends.map((c) => c.text)).toContain('第一条回复')
+  })
+
+  it('progress: a failed send does not leak the buffer into the next turn (merged-reply bug)', async () => {
+    const renderer = new Renderer()
+    // Every send fails permanently — the reply cannot be delivered.
+    const { adapter } = makeFlakyAdapter(99, 'Forbidden: bot was blocked by the user')
+    const binding = makeBinding({ responseMode: 'progress' })
+
+    // Turn 1 delivers nothing.
+    await playTolerant(renderer, binding, adapter, [ev.final('第一条回复'), ev.complete()])
+
+    // Turn 2 must send ONLY its own text, never turn 1's text prepended.
+    const { adapter: adapter2 } = makeFlakyAdapter(0)
+    const allText: string[] = []
+    const originalSend = (adapter2 as any).sendText.bind(adapter2)
+    ;(adapter2 as any).sendText = async (c: string, t: string, o?: unknown) => {
+      allText.push(t)
+      return originalSend(c, t, o)
+    }
+
+    await playTolerant(renderer, binding, adapter2, [ev.final('第二条回复'), ev.complete()])
+
+    expect(allText).toEqual(['第二条回复'])
+    expect(allText.join('')).not.toContain('第一条回复')
+  })
+
+  it('final_only: a failed send does not leak the buffer into the next turn', async () => {
+    const renderer = new Renderer()
+    const { adapter } = makeFlakyAdapter(99, 'Forbidden: bot was blocked by the user')
+    const binding = makeBinding({ responseMode: 'final_only' })
+
+    await playTolerant(renderer, binding, adapter, [ev.final('第一条回复'), ev.complete()])
+
+    const { adapter: adapter2 } = makeFlakyAdapter(0)
+    const allText: string[] = []
+    const originalSend = (adapter2 as any).sendText.bind(adapter2)
+    ;(adapter2 as any).sendText = async (c: string, t: string, o?: unknown) => {
+      allText.push(t)
+      return originalSend(c, t, o)
+    }
+
+    await playTolerant(renderer, binding, adapter2, [ev.final('第二条回复'), ev.complete()])
+
+    expect(allText).toEqual(['第二条回复'])
+  })
+
+  it('streaming: a failed send does not leak the buffer into the next turn', async () => {
+    const renderer = new Renderer()
+    const { adapter } = makeFlakyAdapter(99, 'Forbidden: bot was blocked by the user')
+    const binding = makeBinding({ responseMode: 'streaming' })
+
+    await playTolerant(renderer, binding, adapter, [ev.final('第一条回复'), ev.complete()])
+
+    const { adapter: adapter2 } = makeFlakyAdapter(0)
+    const allText: string[] = []
+    const originalSend = (adapter2 as any).sendText.bind(adapter2)
+    ;(adapter2 as any).sendText = async (c: string, t: string, o?: unknown) => {
+      allText.push(t)
+      return originalSend(c, t, o)
+    }
+
+    await playTolerant(renderer, binding, adapter2, [ev.final('第二条回复'), ev.complete()])
+
+    expect(allText.join('')).not.toContain('第一条回复')
+  })
+
+  it('does NOT retry a non-retryable delivery error', async () => {
+    const renderer = new Renderer()
+    const { adapter, getSendAttempts } = makeFlakyAdapter(99, 'Bad Request: chat not found')
+    const binding = makeBinding({ responseMode: 'progress' })
+
+    await playTolerant(renderer, binding, adapter, [ev.final('hello'), ev.complete()])
+
+    // Single attempt — permanent errors must not be hammered.
+    expect(getSendAttempts()).toBe(1)
+  })
+})

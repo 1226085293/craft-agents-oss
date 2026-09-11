@@ -277,29 +277,38 @@ export class Renderer {
         const text = typeof event.text === 'string' ? event.text : state.textBuffer
         this.cancelEditTimer(state)
 
-        if (state.streamingMessageId && adapter.capabilities.messageEditing) {
-          if (text.trim()) {
-            await this.sendResponse(adapter, binding, text.trim(), {
-              editMessageId: state.streamingMessageId,
-              state,
-            })
+        // Delivery must never leak per-run state into the next turn: a failed
+        // send (Telegram/network HttpError) used to skip the buffer reset below,
+        // so the NEXT turn's `complete` re-sent this turn's text prepended to
+        // the new answer (2026-09-11 apt-cloud merged-reply incident).
+        try {
+          if (state.streamingMessageId && adapter.capabilities.messageEditing) {
+            if (text.trim()) {
+              await this.sendResponse(adapter, binding, text.trim(), {
+                editMessageId: state.streamingMessageId,
+                state,
+              })
+            }
+          } else if (text.trim()) {
+            await this.sendResponse(adapter, binding, text.trim())
           }
-        } else if (text.trim()) {
-          await this.sendResponse(adapter, binding, text.trim())
+        } finally {
+          state.textBuffer = ''
+          state.streamingMessageId = null
+          state.lastEditedLength = 0
         }
-
-        state.textBuffer = ''
-        state.streamingMessageId = null
-        state.lastEditedLength = 0
         break
       }
 
       case 'complete': {
         this.cancelEditTimer(state)
-        if (state.textBuffer.trim() && !state.streamingMessageId) {
-          await this.sendResponse(adapter, binding, state.textBuffer.trim())
+        try {
+          if (state.textBuffer.trim() && !state.streamingMessageId) {
+            await this.sendResponse(adapter, binding, state.textBuffer.trim())
+          }
+        } finally {
+          this.resetRun(state)
         }
-        this.resetRun(state)
         break
       }
 
@@ -433,26 +442,35 @@ export class Renderer {
         // assistant text so a tool-terminated run still delivers a message
         // instead of freezing the bubble on "thinking…".
         const finalText = (state.finalBuffer.trim() || state.lastAssistantText.trim())
-        this.cancelPendingProgressBubble(state)
-        await this.waitForProgressBubbleSend(state)
-        const progressMessageId = state.progressMessageId
 
-        // The progress bubble is transient. Delete it before the final answer
-        // is posted so the first deletion attempt is not racing a just-sent
-        // final message in the same Telegram chat/topic.
-        if (progressMessageId) {
-          await this.tryDeleteMessage(adapter, binding, progressMessageId)
-          this.clearPersistedProgressMessage(binding)
+        // Everything below must reset per-run state even when delivery fails.
+        // A failed `sendResponse` (network HttpError) previously escaped before
+        // `resetRun`, leaving `finalBuffer` populated; the next turn then
+        // appended to it and re-sent the stale answer merged with the new one
+        // (2026-09-11 apt-cloud: desktop showed two replies, phone showed one
+        // merged message — the retried send had prepended the missing reply).
+        try {
+          this.cancelPendingProgressBubble(state)
+          await this.waitForProgressBubbleSend(state)
+          const progressMessageId = state.progressMessageId
+
+          // The progress bubble is transient. Delete it before the final answer
+          // is posted so the first deletion attempt is not racing a just-sent
+          // final message in the same Telegram chat/topic.
+          if (progressMessageId) {
+            await this.tryDeleteMessage(adapter, binding, progressMessageId)
+            this.clearPersistedProgressMessage(binding)
+          }
+
+          if (finalText) {
+            // Always send the final answer as a fresh message. Editing the
+            // transient "thinking" bubble into the final answer suppresses normal
+            // new-message notifications on clients such as Telegram mobile.
+            await this.sendResponse(adapter, binding, finalText)
+          }
+        } finally {
+          this.resetRun(state)
         }
-
-        if (finalText) {
-          // Always send the final answer as a fresh message. Editing the
-          // transient "thinking" bubble into the final answer suppresses normal
-          // new-message notifications on clients such as Telegram mobile.
-          await this.sendResponse(adapter, binding, finalText)
-        }
-
-        this.resetRun(state)
         return
       }
     }
@@ -650,10 +668,16 @@ export class Renderer {
         // assistant text so final_only still delivers something rather than
         // staying silent when the run ends on a tool call.
         const finalText = (state.finalBuffer.trim() || state.lastAssistantText.trim())
-        if (finalText) {
-          await this.sendResponse(adapter, binding, finalText)
+        // Wrap so a failed send still clears the buffer — otherwise the
+        // stale final text is prepended to the next turn's reply (same
+        // merged-reply class as the progress mode fix above).
+        try {
+          if (finalText) {
+            await this.sendResponse(adapter, binding, finalText)
+          }
+        } finally {
+          this.resetRun(state)
         }
-        this.resetRun(state)
         return
       }
     }

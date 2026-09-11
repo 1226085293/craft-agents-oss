@@ -137,6 +137,35 @@ describe('PiEventAdapter — subprocess auto-retry lane', () => {
     expect(adapter.shouldCompleteQueue(true)).toBe(true);
   });
 
+  it('a give-up agent_end that still carries willRetry:true must not hold the queue', () => {
+    // Regression: 2026-09-11 fit-pulsar froze for 535 minutes after
+    // "budget error persisted >3 rounds". The subprocess abandoned its retry
+    // cycle but the forwarded agent_end still carried the SDK's stale
+    // willRetry:true. The adapter's willRetry branch set retryHoldActive and
+    // returned, so the queue never completed and no terminal ever surfaced.
+    //
+    // The subprocess fix forces willRetry:false + autoRetryFinal:true on the
+    // give-up event. This test locks in that such an event completes.
+    collect(adapter.adaptEvent(errorMessageEnd({ autoRetryPlanned: true })));
+
+    const terminal = collect(
+      adapter.adaptEvent(agentEnd({ willRetry: false, autoRetryFinal: true, messages: [] })),
+    );
+    const errors = terminal.filter((e) => e.type === 'error' || e.type === 'typed_error');
+    expect(errors).toHaveLength(1);
+    // The queue MUST complete — otherwise the UI spins forever.
+    expect(adapter.shouldCompleteQueue(true)).toBe(true);
+  });
+
+  it('demonstrates the hazard: willRetry:true alone holds the queue open', () => {
+    // Counter-example documenting WHY the subprocess must force willRetry
+    // false on give-up: the stale flag alone is enough to hang the queue.
+    collect(adapter.adaptEvent(errorMessageEnd({ autoRetryPlanned: true })));
+
+    collect(adapter.adaptEvent(agentEnd({ willRetry: true, messages: [] })));
+    expect(adapter.shouldCompleteQueue(true)).toBe(false);
+  });
+
   it('does not buffer an un-annotated transient error (SDK lane unchanged)', () => {
     // No autoRetryPlanned annotation: the SDK's own retry lane buffers it via
     // isRetryableAssistantError — same branch, same buffer, so this also

@@ -61,12 +61,14 @@ setBedrockProviderModule(bedrockProviderModule);
 // Auto-retry on transient LLM errors (see auto-retry.ts header): the
 // subprocess re-drives the turn itself on a 2s → 5min schedule.
 import {
+  AUTO_RETRY_BUDGET_MAX_ROUNDS,
   AUTO_RETRY_DEADLINE_MS,
   AUTO_RETRY_FIRST_DELAY_MS,
   AUTO_RETRY_INTERVAL_MS,
   AUTO_RETRY_MAX_ROUNDS,
   classifyAutoRetryError,
   extractLastAssistant,
+  isBudgetExhaustedError,
   stripTrailingErrorAssistant,
 } from './auto-retry.ts';
 
@@ -286,7 +288,7 @@ interface OutboundAutoRetryStatus {
   phase: 'waiting' | 'running' | 'success' | 'final' | 'stopped';
   round?: number;
   delayMs?: number;
-  reason?: 'deadline' | 'max_rounds' | 'permanent_error' | 'dispatch_failed';
+  reason?: 'deadline' | 'max_rounds' | 'permanent_error' | 'dispatch_failed' | 'budget_error_persistent';
   errorText?: string;
 }
 
@@ -1658,6 +1660,8 @@ interface AutoRetryState {
   startedAt: number;
   round: number;
   lastErrorText: string;
+  /** Consecutive upstream-budget-exhausted failures this cycle (tight cap). */
+  budgetRounds?: number;
 }
 let autoRetryState: AutoRetryState | null = null;
 // Set when a user cancel (message / abort / redirect) reaches the hook. Consumed
@@ -1725,7 +1729,7 @@ async function awaitTurnWithStallDetection(
 function sendAutoRetryStatus(
   phase: 'waiting' | 'running' | 'success' | 'final' | 'stopped',
   round?: number,
-  extra?: { delayMs?: number; reason?: 'deadline' | 'max_rounds' | 'permanent_error' | 'dispatch_failed'; errorText?: string },
+  extra?: { delayMs?: number; reason?: 'deadline' | 'max_rounds' | 'permanent_error' | 'dispatch_failed' | 'budget_error_persistent'; errorText?: string },
 ): void {
   send({ type: 'auto_retry_status', phase, round, ...extra });
 }
@@ -1937,7 +1941,7 @@ function handleSessionEvent(event: AgentSessionEvent): void {
         !userAbortRequested &&
         !stallAbortInProgress &&
         !isContextOverflow(event.message as unknown as Parameters<typeof isContextOverflow>[0], piSession.agent.state.model?.contextWindow ?? 0) &&
-        classifyAutoRetryError(msg.errorMessage) === 'transient'
+        classifyAutoRetryError(msg.errorMessage) !== 'permanent'
       ) {
         forwardedEvent = {
           ...(forwardedEvent as Record<string, unknown>),
@@ -2123,21 +2127,74 @@ function handleSessionEvent(event: AgentSessionEvent): void {
         // NOT claimed: the defense layer still evaluates the successful tail.
         debugLog(`auto-retry: round ${finishedRound} succeeded`);
       } else if (classifyAutoRetryError(errorText) === 'permanent') {
+        // Terminal give-up. Claim the event and clear the hold: the forwarded
+        // agent_end still carries the SDK's stale `willRetry:true` (the SDK
+        // computed it before we decided to abandon the cycle), which would
+        // make the adapter hold its queue open for a retry that never comes
+        // (2026-09-11 fit-pulsar: session froze for 500+ minutes).
         autoRetryState = null;
         sendAutoRetryStatus('final', undefined, { reason: 'permanent_error', errorText });
-        // NOT claimed, no synthetic agent_end: the real terminal agent_end
-        // surfaces the buffered error through the adapter's existing path.
-        debugLog(`auto-retry: permanent error; giving up: ${errorText}`);
-      } else {
-        // Transient failure — schedule the next round.
-        autoRetryState.round += 1;
-        autoRetryState.lastErrorText = errorText;
         forwardedEvent = {
           ...(forwardedEvent as Record<string, unknown>),
-          autoRetryPending: true,
+          // willRetry must be forced false: the SDK set it before we decided
+          // to abandon the cycle, and the adapter's willRetry branch runs
+          // BEFORE its autoRetryFinal branch — leaving it true would hold the
+          // queue open forever. autoRetryFinal lets the adapter drop the
+          // buffered error boundary and surface it exactly once.
+          willRetry: false,
+          autoRetryFinal: true,
         } as unknown as OutboundAgentEvent;
         autoRetryClaimed = true;
-        debugLog(`auto-retry: round ${autoRetryState.round - 1} failed transiently; scheduling round ${autoRetryState.round}: ${errorText}`);
+        debugLog(`auto-retry: permanent error; giving up: ${errorText}`);
+      } else {
+        // Transient failure — schedule the next round. Upstream gateway
+        // response-budget errors (transient_limited) are retried too, but with
+        // a tighter per-cycle cap: they are ambiguous (recoverable memory
+        // pressure vs deterministic per-request buffer wall), so after
+        // AUTO_RETRY_BUDGET_MAX_ROUNDS consecutive budget failures the cycle
+        // gives up instead of burning the full 2h/30-round budget.
+        if (
+          isBudgetExhaustedError(errorText) &&
+          (autoRetryState.budgetRounds ?? 0) + 1 > AUTO_RETRY_BUDGET_MAX_ROUNDS
+        ) {
+          // Terminal give-up. Claim the event and clear the hold: the
+          // forwarded agent_end still carries the SDK's stale `willRetry:true`
+          // (computed before we abandoned the cycle), which would otherwise
+          // make the adapter hold its queue open forever — no further events
+          // arrive, so the UI spins indefinitely (2026-09-11 fit-pulsar:
+          // 535 minutes frozen after "budget error persisted >3 rounds").
+          autoRetryState = null;
+          sendAutoRetryStatus('final', undefined, {
+            reason: 'budget_error_persistent',
+            errorText,
+          });
+          forwardedEvent = {
+            ...(forwardedEvent as Record<string, unknown>),
+            // See the permanent-error branch above: willRetry must be forced
+            // false or the adapter holds its queue for a retry that never
+            // comes (the 2026-09-11 fit-pulsar 535-minute freeze).
+            willRetry: false,
+            autoRetryFinal: true,
+          } as unknown as OutboundAgentEvent;
+          autoRetryClaimed = true;
+          debugLog(
+            `auto-retry: budget error persisted >${AUTO_RETRY_BUDGET_MAX_ROUNDS} rounds; giving up: ${errorText}`,
+          );
+        } else {
+          if (isBudgetExhaustedError(errorText)) {
+            autoRetryState.budgetRounds = (autoRetryState.budgetRounds ?? 0) + 1;
+          }
+          autoRetryState.round += 1;
+          autoRetryState.lastErrorText = errorText;
+          forwardedEvent = {
+            ...(forwardedEvent as Record<string, unknown>),
+            autoRetryPending: true,
+          } as unknown as OutboundAgentEvent;
+          autoRetryClaimed = true;
+          debugLog(
+            `auto-retry: round ${autoRetryState.round - 1} failed transiently; scheduling round ${autoRetryState.round}: ${errorText}`,
+          );
+        }
       }
     } else if (
       piSession &&
@@ -2149,9 +2206,14 @@ function handleSessionEvent(event: AgentSessionEvent): void {
       typeof (piSession as unknown as { pendingMessageCount?: number }).pendingMessageCount === 'number' &&
       (piSession as unknown as { pendingMessageCount: number }).pendingMessageCount === 0 &&
       !isContextOverflow(last as unknown as Parameters<typeof isContextOverflow>[0], piSession.agent.state.model?.contextWindow ?? 0) &&
-      classifyAutoRetryError(errorText) === 'transient'
+      classifyAutoRetryError(errorText) !== 'permanent'
     ) {
-      autoRetryState = { startedAt: Date.now(), round: 1, lastErrorText: errorText };
+      autoRetryState = {
+        startedAt: Date.now(),
+        round: 1,
+        lastErrorText: errorText,
+        budgetRounds: isBudgetExhaustedError(errorText) ? 1 : 0,
+      };
       scheduleAutoRetryLoop(autoRetryState);
       forwardedEvent = {
         ...(forwardedEvent as Record<string, unknown>),

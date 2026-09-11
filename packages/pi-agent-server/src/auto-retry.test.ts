@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'bun:test';
 import {
+  AUTO_RETRY_BUDGET_MAX_ROUNDS,
   AUTO_RETRY_FIRST_DELAY_MS,
   AUTO_RETRY_INTERVAL_MS,
   AUTO_RETRY_DEADLINE_MS,
   AUTO_RETRY_MAX_ROUNDS,
   classifyAutoRetryError,
   extractLastAssistant,
+  isBudgetExhaustedError,
   stripTrailingErrorAssistant,
 } from './auto-retry.ts';
 
@@ -15,6 +17,7 @@ describe('auto-retry constants', () => {
     expect(AUTO_RETRY_INTERVAL_MS).toBe(5 * 60_000);
     expect(AUTO_RETRY_DEADLINE_MS).toBe(2 * 60 * 60_000);
     expect(AUTO_RETRY_MAX_ROUNDS).toBe(30);
+    expect(AUTO_RETRY_BUDGET_MAX_ROUNDS).toBe(3);
   });
 });
 
@@ -61,17 +64,25 @@ describe('classifyAutoRetryError', () => {
     }
   });
 
-  it('classifies upstream_response_budget_exhausted as permanent (fit-pulsar incident)', () => {
-    // 2026-09-10: upstream provider returns 503 with this internal error when the
-    // response would exceed its per-request memory budget. Not a transient glitch —
-    // retrying with the same context will always fail. Should NOT enter auto-retry.
+  it("classifies upstream_response_budget_exhausted as 'transient_limited' (fit-pulsar incidents #1+#2)", () => {
+    // 2026-09-10 (#1): classified permanent — but that let a recoverable
+    // memory-pressure blip kill the session with zero retries (2026-09-11 #2).
+    // Whether the error is deterministic depends on which budget branch the
+    // gateway hit (per-request cap vs global pressure) and on channel health —
+    // unknowable client-side, and uni-api failover can land the retry on a
+    // healthy channel. So: retried like transient, but capped tightly
+    // (AUTO_RETRY_BUDGET_MAX_ROUNDS) by the retry loop.
     for (const text of [
       'Error: Current provider response failed: upstream_response_budget_exhausted',
       'upstream_response_budget_exhausted',
       'response budget exhausted for current request',
     ]) {
-      expect(classifyAutoRetryError(text)).toBe('permanent');
+      expect(classifyAutoRetryError(text)).toBe('transient_limited');
+      expect(isBudgetExhaustedError(text)).toBe(true);
     }
+    // The tight cap applies ONLY to budget errors.
+    expect(isBudgetExhaustedError('503 Service Unavailable')).toBe(false);
+    expect(classifyAutoRetryError('503 Service Unavailable')).toBe('transient');
   });
 
   it('classifies transient provider/gateway errors as transient', () => {

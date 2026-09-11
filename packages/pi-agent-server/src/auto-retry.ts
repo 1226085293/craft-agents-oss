@@ -12,6 +12,16 @@
  * as transient and retried — bounded by the 2h deadline and round cap, so a
  * misclassified permanent error costs at most 30 harmless retries, never data
  * loss or an infinite loop.
+ *
+ * Exception: upstream gateway response-budget 503s (e.g. agnes-apihub's
+ * "upstream_response_budget_exhausted") are classified 'transient_limited' —
+ * retried like transient errors, but the cycle gives up after
+ * AUTO_RETRY_BUDGET_MAX_ROUNDS consecutive budget failures. Whether the error
+ * is deterministic (per-request buffer cap) or transient (global memory
+ * pressure / channel failover) is unknowable client-side; the tight cap
+ * bounds the cost in both worlds (2026-09-11 fit-pulsar incident #2: the
+ * earlier 'permanent' classification let a recoverable memory-pressure blip
+ * kill the session outright with zero retries).
  */
 
 // First retry: short — the provider hiccup is often over in seconds.
@@ -64,11 +74,6 @@ const PERMANENT_ERROR_PATTERNS: RegExp[] = [
   /context window exceeds limit/i,
   /exceeded model token limit/i,
   /context[_ ]length[_ ]exceeded/i,
-  // Upstream provider internal budget cap (e.g. Anthropic response budget,
-  // different from context-window overflow which is handled above).
-  // Permanent — retrying with the same context will always hit the same wall.
-  /upstream_response_budget_exhausted/i,
-  /response.*budget.*exhaust/i,
 ];
 
 /**
@@ -112,7 +117,19 @@ export const TRANSIENT_ERROR_PATTERNS: RegExp[] = [
   /try again/i,
 ];
 
-export type AutoRetryErrorClass = 'transient' | 'permanent';
+// Upstream gateway response-budget caps (see header comment): ambiguous
+// permanent-vs-transient, so retried with a tight per-cycle round cap.
+export const AUTO_RETRY_BUDGET_MAX_ROUNDS = 3;
+
+const BUDGET_EXHAUSTED_ERROR_PATTERN =
+  /upstream_response_budget_exhausted|response.*budget.*exhaust/i;
+
+export function isBudgetExhaustedError(errorText: string | null | undefined): boolean {
+  if (!errorText) return false;
+  return BUDGET_EXHAUSTED_ERROR_PATTERN.test(errorText);
+}
+
+export type AutoRetryErrorClass = 'transient' | 'transient_limited' | 'permanent';
 
 /**
  * Classify an assistant error message for the auto-retry loop.
@@ -124,6 +141,7 @@ export function classifyAutoRetryError(errorText: string | null | undefined): Au
   for (const pattern of PERMANENT_ERROR_PATTERNS) {
     if (pattern.test(errorText)) return 'permanent';
   }
+  if (BUDGET_EXHAUSTED_ERROR_PATTERN.test(errorText)) return 'transient_limited';
   return 'transient';
 }
 

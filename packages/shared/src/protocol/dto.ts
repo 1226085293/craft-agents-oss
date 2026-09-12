@@ -22,6 +22,7 @@ import type {
   CredentialInputMode as SharedCredentialInputMode,
   CredentialAuthRequest as SharedCredentialAuthRequest,
 } from '../agent/index'
+import type { SdkMcpServerConfig } from '../agent/backend/types'
 
 // Re-export generateMessageId for handler convenience
 export { generateMessageId } from '@craft-agent/core/types'
@@ -169,6 +170,12 @@ export interface CreateSessionOptions {
    * number (labeling a plain-chat parent in the same pass). Task flows opt in; plain chats don't.
    */
   applyTaskLabel?: boolean
+  /**
+   * Explicit MCP server configurations for this session.
+   * When provided, the session uses an isolated MCP pool with only these servers,
+   * instead of building from enabledSourceSlugs.
+   */
+  mcpServerConfigs?: Record<string, SdkMcpServerConfig>;
 }
 
 export interface RemoteSessionTransferPayload {

@@ -859,6 +859,12 @@ interface ManagedSession {
   hasUnread?: boolean
   // Per-session source selection (slugs of enabled sources)
   enabledSourceSlugs?: string[]
+  /**
+   * Explicit MCP server configs for isolated execution.
+   * When set, the session uses a dedicated MCP pool with only these servers,
+   * instead of building from enabledSourceSlugs. Spawned sessions set this for isolation.
+   */
+  mcpServerConfigs?: Record<string, import('@craft-agent/shared/agent/backend').SdkMcpServerConfig>
   // Labels applied to this session (additive tags, many-per-session)
   labels?: string[]
   // Workspace-scoped project binding (undefined = unbound)
@@ -3835,14 +3841,29 @@ export class SessionManager implements ISessionManager {
       // ============================================================
 
       const sessionPath = getSessionStoragePath(managed.workspace.rootPath, managed.id)
-      const enabledSlugs = managed.enabledSourceSlugs || []
-      const allSources = loadAllSources(managed.workspace.rootPath)
-      const enabledSources = allSources.filter(s =>
-        enabledSlugs.includes(s.config.slug) && isSourceUsable(s)
-      )
 
       // Build server configs for enabled sources
-      const { mcpServers, apiServers } = await buildServersFromSources(enabledSources, sessionPath, managed.tokenRefreshManager)
+      // If mcpServerConfigs is explicitly set (spawned session with isolation), use those directly
+      let mcpServers: Record<string, import('@craft-agent/shared/agent/backend').SdkMcpServerConfig>
+      let apiServers: Record<string, import('@craft-agent/shared/mcp').ApiServerConfig>
+      let enabledSlugs = managed.enabledSourceSlugs || []
+      let enabledSources: import('@craft-agent/shared/sources').LoadedSource[] = []
+
+      if (managed.mcpServerConfigs && Object.keys(managed.mcpServerConfigs).length > 0) {
+        // Isolated MCP mode: use explicit configs, ignore enabledSourceSlugs for MCP
+        mcpServers = managed.mcpServerConfigs as Record<string, import('@craft-agent/shared/agent/backend').SdkMcpServerConfig>
+        apiServers = {}
+        sessionLog.info(`Session ${managed.id}: using isolated MCP pool with ${Object.keys(mcpServers).length} servers`)
+      } else {
+        // Shared MCP mode: build from enabled sources
+        const allSources = loadAllSources(managed.workspace.rootPath)
+        enabledSources = allSources.filter(s =>
+          enabledSlugs.includes(s.config.slug) && isSourceUsable(s)
+        )
+        const result = await buildServersFromSources(enabledSources, sessionPath, managed.tokenRefreshManager)
+        mcpServers = result.mcpServers
+        apiServers = result.apiServers
+      }
 
       // Create centralized MCP client pool (all backends use it)
       managed.mcpPool = new McpClientPool({ debug: (msg) => sessionLog.debug(msg), workspaceRootPath: managed.workspace.rootPath, sessionPath })
@@ -4681,6 +4702,8 @@ export class SessionManager implements ISessionManager {
           projectId: request.projectId ?? managed.projectId,
           // Spawned sessions become subtasks of the spawning session.
           parentSessionId: managed.id,
+          // Pass isolated MCP configs if provided
+          mcpServerConfigs: request.mcpServerConfigs,
         })
 
         // Build FileAttachment[] from paths (if any)

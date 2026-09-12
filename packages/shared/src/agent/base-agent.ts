@@ -127,6 +127,8 @@ export interface SpawnSessionRequest {
   /** Workspace project id to bind the spawned session to */
   projectId?: string;
   attachments?: Array<{ path: string; name?: string }>;
+  /** Explicit MCP server configs to activate (isolated from parent pool) */
+  mcpServerConfigs?: Record<string, SdkMcpServerConfig>;
 }
 
 export interface SpawnSessionResult {
@@ -151,6 +153,12 @@ export interface SpawnSessionHelpResult {
     name: string;
     type: string;
     enabled: boolean;
+  }>;
+  /** Available MCP servers that can be explicitly configured for spawned sessions */
+  availableMcpServers: Array<{
+    slug: string;
+    name: string;
+    type: 'mcp' | 'api';
   }>;
   defaults: {
     defaultConnection: string | null;
@@ -1365,6 +1373,7 @@ ${formattedMessages}
         : undefined,
       projectId: input.projectId as string | undefined,
       attachments: input.attachments as SpawnSessionRequest['attachments'],
+      mcpServerConfigs: input.mcpServerConfigs as Record<string, SdkMcpServerConfig> | undefined,
     };
 
     return this.onSpawnSession(request);
@@ -1378,6 +1387,15 @@ ${formattedMessages}
     const defaultConnectionSlug = getDefaultLlmConnection();
     const allSources = loadAllSources(this.config.workspace.rootPath);
     const activeSlugs = this.sourceManager.getActiveSlugs();
+
+    // Build list of available MCP servers from sources
+    const mcpServers = allSources
+      .filter(s => s.config.type === 'mcp' || s.config.type === 'api')
+      .map(s => ({
+        slug: s.config.slug,
+        name: s.config.name,
+        type: s.config.type as 'mcp' | 'api',
+      }));
 
     return {
       connections: connections.map(c => ({
@@ -1394,6 +1412,7 @@ ${formattedMessages}
         type: s.config.type,
         enabled: activeSlugs.has(s.config.slug),
       })),
+      availableMcpServers: mcpServers,
       defaults: {
         defaultConnection: defaultConnectionSlug,
         permissionMode: this.permissionManager.getPermissionMode(),

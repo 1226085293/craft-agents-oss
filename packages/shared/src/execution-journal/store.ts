@@ -327,3 +327,50 @@ export function getJournalStats(state: JournalState): {
     compactions: state.entries.filter(e => e.type === 'compaction').length,
   };
 }
+
+/**
+ * Preflight: Stub old large results before compaction to relieve context pressure.
+ *
+ * This is called BEFORE the SDK triggers compaction, replacing old large tool
+ * results with stubs so the context window has more room for recent turns.
+ */
+export interface PreflightResult {
+  stubsApplied: number;
+  tokensSaved: number;
+  prunedEntries: JournalEntry[];
+}
+
+export function preflightContextPressure(
+  state: JournalState,
+  currentTurn: number,
+  config: ContextPressureConfig = DEFAULT_CONTEXT_PRESSURE_CONFIG,
+): PreflightResult {
+  const prunable = findPrunableResults(state, currentTurn, config);
+  let stubsApplied = 0;
+  let tokensSaved = 0;
+
+  for (const entry of prunable) {
+    if (entry.type === 'tool_result' && entry.resultStubbed === false && entry.originalResultTokens && entry.toolResult) {
+      const stub = stubToolResult(entry.toolResult, entry.toolName || 'unknown', entry.originalResultTokens);
+      // Update the entry in place with stub content
+      entry.toolResult = stub.stub;
+      entry.resultStubbed = true;
+      stubsApplied++;
+      tokensSaved += entry.originalResultTokens - Math.ceil(stub.stub.length / 4);
+    }
+  }
+
+  // Persist a context_prune event if we applied any stubs
+  if (stubsApplied > 0) {
+    state.entries.push({
+      id: randomUUID(),
+      type: 'context_prune',
+      timestamp: new Date().toISOString(),
+      sessionId: state.entries[0]?.sessionId || '',
+      metadata: { prunedCount: stubsApplied, tokensSaved },
+    });
+    state.totalTokens = Math.max(0, state.totalTokens - tokensSaved);
+  }
+
+  return { stubsApplied, tokensSaved, prunedEntries: prunable };
+}

@@ -62,6 +62,30 @@ import type { AgentEvent as AutomationAgentEvent, SdkAutomationInput } from '../
 import { getSessionPlansPath, getSessionDataPath, getSessionPath } from '../sessions/storage.ts';
 import { getMiniAgentSystemPrompt } from '../prompts/system.ts';
 import { buildTitlePrompt, buildRegenerateTitlePrompt, validateTitle } from '../utils/title-generator.ts';
+// Memory module — cross-session persistent knowledge
+import {
+  loadMemoryStore,
+  saveMemoryStore,
+  selectRelevantMemories,
+  buildMemoryContext,
+  extractMemories,
+  type MemoryStore,
+  type MemoryExtractionInput,
+} from '../memory/index.ts';
+import { getMemoryStorePath } from '../memory/store.ts';
+import type { MemoryConfig } from '../memory/types.ts';
+import { DEFAULT_MEMORY_CONFIG } from '../memory/types.ts';
+// Execution journal — tool dispatch/outcome tracking
+import {
+  createJournalState,
+  loadJournalEntries,
+  recordToolStart,
+  recordToolResult,
+  recordToolError,
+  recordCompaction,
+  getJournalStats,
+  type JournalState,
+} from '../execution-journal/index.ts';
 
 // Skill extraction for Codex/Copilot backends (Claude uses native SDK Skill tool)
 import { parseMentions, resolveSkillMentions, resolveSourceMentions, resolveFileMentions } from '../mentions/index.ts';
@@ -263,6 +287,57 @@ export abstract class BaseAgent implements AgentBackend {
   onUsageUpdate: ((update: UsageUpdate) => void) | null = null;
   onBackendAuthRequired: ((reason: string) => void) | null = null;
   onSpawnSession: ((request: SpawnSessionRequest) => Promise<SpawnSessionResult>) | null = null;
+  // ============================================================
+  // Memory & Execution Journal (cross-session persistence)
+  // ============================================================
+  protected _memoryStore?: MemoryStore;
+  protected _memoryConfig: MemoryConfig = DEFAULT_MEMORY_CONFIG;
+  protected _journalState?: JournalState;
+
+  /** Get or lazily initialize the memory store for this agent's workspace */
+  get memoryStore(): MemoryStore {
+    if (!this._memoryStore) {
+      this._memoryStore = loadMemoryStore(this.config.workspace.rootPath);
+    }
+    return this._memoryStore;
+  }
+
+  set memoryConfig(config: MemoryConfig) {
+    this._memoryConfig = { ...DEFAULT_MEMORY_CONFIG, ...config };
+  }
+
+  get memoryConfig(): MemoryConfig {
+    return this._memoryConfig;
+  }
+
+  /** Get or lazily initialize the execution journal for this session */
+  get journalState(): JournalState {
+    if (!this._journalState) {
+      const sessionId = this.config.session?.id;
+      const workspaceRoot = this.config.workspace.rootPath;
+      const entries = sessionId && workspaceRoot
+        ? loadJournalEntries(workspaceRoot, sessionId)
+        : [];
+      this._journalState = createJournalState(sessionId || 'unknown');
+      this._journalState.entries = entries;
+    }
+    return this._journalState;
+  }
+
+  /** Persist memory store to disk */
+  persistMemoryStore(): void {
+    if (this._memoryStore) {
+      saveMemoryStore(this.config.workspace.rootPath, this._memoryStore);
+    }
+  }
+
+  /** Persist journal state to disk */
+  persistJournal(): void {
+    const sessionId = this.config.session?.id;
+    const workspaceRoot = this.config.workspace.rootPath;
+    if (!sessionId || !workspaceRoot || !this._journalState) return;
+  }
+
 
   // ============================================================
   // Constructor
@@ -1024,6 +1099,9 @@ ${formattedMessages}
       this.prerequisiteManager.registerSkillPrerequisites([...skillPaths.values()]);
     }
 
+    // Inject cross-session memories (if any are relevant)
+    const memoryContext = this.buildMemoryContext();
+
     // Prepend branch seed context (for seeded branch sessions) and transferred-session summary.
     const branchSeedContext = this.buildBranchSeedContext(this.config.getBranchSeedMessages?.());
     if (branchSeedContext) {
@@ -1040,7 +1118,7 @@ ${formattedMessages}
 
     // Prepend read directive to the message so the model reads SKILL.md first.
     const directive = this.formatSkillDirective(skillPaths);
-    const messageParts = [branchSeedContext, transferredSessionContext, directive, cleanMessage].filter(Boolean);
+    const messageParts = [memoryContext, branchSeedContext, transferredSessionContext, directive, cleanMessage].filter(Boolean);
     const effectiveMessage = messageParts.join('\n\n');
 
     // Capture the raw user message for source-activation auto-retry. `cleanMessage`
@@ -1051,6 +1129,99 @@ ${formattedMessages}
       yield* this.chatImpl(effectiveMessage, attachments, options);
     } finally {
       this.setCurrentTurnUserMessage(null);
+    }
+  }
+
+
+  // ============================================================
+  // Memory Injection
+  // ============================================================
+
+  /**
+   * Build memory context string from relevant cross-session memories.
+   * Returns empty string if no relevant memories found.
+   */
+  protected buildMemoryContext(): string {
+    const sessionId = this.config.session?.id;
+    if (!sessionId) return '';
+
+    try {
+      const store = this.memoryStore;
+      if (!store.entries.length) return '';
+
+      // Get recent messages for relevance scoring
+      const recentMessages = this.getRecentMessagesForInjection(5);
+      const memories = selectRelevantMemories(store, recentMessages);
+
+      if (memories.length === 0) return '';
+
+      return buildMemoryContext(memories, true);
+    } catch (error) {
+      this.onDebug?.(`[Memory] Failed to build context: ${error}`);
+      return '';
+    }
+  }
+
+  /**
+   * Get recent messages from the current session for memory relevance scoring.
+   */
+  protected getRecentMessagesForInjection(maxMessages: number): Array<{ role: string; content?: string }> {
+    const sessionId = this.config.session?.id;
+    if (!sessionId) return [];
+
+    try {
+      const { readSessionJsonl } = require('../sessions/jsonl.ts');
+      const jsonlPath = join(this.config.workspace.rootPath, 'sessions', sessionId, 'session.jsonl');
+      const { messages } = readSessionJsonl(jsonlPath);
+      return messages.slice(-maxMessages).map((m: any) => ({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Extract memories from the current session and save to workspace store.
+   * Called on session end or compaction.
+   */
+  async extractSessionMemories(options?: { strategy?: 'compaction' | 'session_end' }): Promise<{ extracted: number; discarded: number }> {
+    const sessionId = this.config.session?.id;
+    if (!sessionId) return { extracted: 0, discarded: 0 };
+    
+    // Check extraction strategy
+    const requestedStrategy = options?.strategy;
+    const configStrategy = this._memoryConfig.extractionStrategy;
+    if (requestedStrategy && configStrategy === 'compaction' && requestedStrategy !== 'compaction') return { extracted: 0, discarded: 0 };
+    if (requestedStrategy && configStrategy === 'session_end' && requestedStrategy !== 'session_end') return { extracted: 0, discarded: 0 };
+
+    try {
+      const { readSessionJsonl } = require('../sessions/jsonl.ts');
+      const jsonlPath = join(this.config.workspace.rootPath, 'sessions', sessionId, 'session.jsonl');
+      const { messages } = readSessionJsonl(jsonlPath);
+
+      const input: MemoryExtractionInput = {
+        sessionId,
+        messages: messages.map((m: any) => ({
+          role: m.role,
+          content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
+          toolName: (m as Record<string, unknown>).tool_name as string | undefined,
+        })),
+        sessionTitle: this.config.session?.name,
+        existingTags: this.memoryStore.entries.flatMap(e => e.tags),
+      };
+
+      const result = await extractMemories(input, this.memoryStore, {
+        runMiniCompletion: this.runMiniCompletion.bind(this),
+        existingEntries: this.memoryStore.entries,
+      });
+
+      this.persistMemoryStore();
+      return { extracted: result.factsExtracted, discarded: result.factsDiscarded };
+    } catch (error) {
+      this.onDebug?.(`[Memory] Extraction failed: ${error}`);
+      return { extracted: 0, discarded: 0 };
     }
   }
 

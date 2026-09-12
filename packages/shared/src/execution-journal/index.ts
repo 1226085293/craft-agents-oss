@@ -37,4 +37,6 @@ export {
   recordSessionEnd,
   findPrunableResults,
   getJournalStats,
+  preflightContextPressure,
+  type PreflightResult,
 } from './store.ts';

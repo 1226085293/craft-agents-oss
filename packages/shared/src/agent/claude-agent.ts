@@ -9,6 +9,7 @@ type ContentBlockParam =
 import { z } from 'zod';
 import { getSystemPrompt } from '../prompts/system.ts';
 import { BaseAgent, type MiniAgentConfig, MINI_AGENT_TOOLS, MINI_AGENT_MCP_KEYS } from './base-agent.ts';
+import { recordToolStart, recordToolDispatch, recordToolResult, recordToolError, recordCompaction, preflightContextPressure } from '../execution-journal/index.ts';
 import type { BackendConfig, PostInitResult, PermissionRequestType, SdkMcpServerConfig } from './backend/types.ts';
 // Plan types are used by UI components; not needed in craft-agent.ts since Safe Mode is user-controlled
 import { parseError, type AgentError } from './errors.ts';
@@ -1806,14 +1807,31 @@ This is a branched conversation. All prior messages in this conversation are par
               }
             }
 
-            // Reset prerequisite state on compaction (LLM loses guide content)
+            // Context Pressure Preflight: stub old results BEFORE compaction
             if (event.type === 'info' && event.message === 'Compacted Conversation') {
+              const preflight = preflightContextPressure(this.journalState, this.journalState.entries.length);
+              if (preflight.stubsApplied > 0) {
+                this.onDebug?.(`[Journal] Preflight stubbed ${preflight.stubsApplied} old results, saved ${preflight.tokensSaved} tokens`);
+              }
               this.resetPrerequisiteState();
+              // Record compaction in execution journal
+              recordCompaction(this.journalState, this.config.session?.id || 'unknown');
+              // Extract memories after compaction (context was lost, preserve key facts)
+              this.extractSessionMemories().catch(err => 
+                this.onDebug?.(`[Memory] Post-compaction extraction failed: ${err}`)
+              );
             }
 
             // Intercept large/binary/media-rich tool results — save assets to disk,
             // preserve original JSON when needed, and/or summarize oversized text.
             if (event.type === 'tool_result' && !event.isError && event.result) {
+              // Record in execution journal
+              recordToolResult(
+                this.journalState,
+                event.toolUseId || 'unknown',
+                event.result,
+              );
+
               const guarded = await guardLargeResult(event.result, {
                 sessionPath: metadataSessionDir,
                 toolName: event.toolName || 'unknown',
@@ -2406,6 +2424,14 @@ This is a branched conversation. All prior messages in this conversation are par
         debug(`[bg-lifecycle] chat() turn finished — persistent query kept alive`, { sessionId: this.config.session?.id, sdkSessionId: this.sessionId });
       } else {
         debug(`[bg-lifecycle] chat() finally — currentQuery nulled, subprocess torn down`, { sessionId: this.config.session?.id, sdkSessionId: this.sessionId, keepAlive: this.keepBackgroundTasksAlive });
+        
+        // Extract memories on session end if strategy allows
+        if (this.memoryConfig.extractionStrategy !== 'compaction') {
+          this.extractSessionMemories({ strategy: 'session_end' }).catch(err => 
+            this.onDebug?.(`[Memory] Session-end extraction failed: ${err}`)
+          );
+        }
+        
         this.currentQuery = null;
       }
 

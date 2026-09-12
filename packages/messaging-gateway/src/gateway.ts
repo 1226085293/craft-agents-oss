@@ -954,7 +954,7 @@ export class MessagingGateway {
     const parts = press.buttonId.split(':')
     const action = parts[1]
     const token = parts[2]
-    if (!token || (action !== 'accept' && action !== 'compact')) return
+    if (!token || !action || !['accept', 'compact', 'view', 'reject'].includes(action)) return
 
     const pressOpts = press.threadId !== undefined ? { threadId: press.threadId } : {}
 

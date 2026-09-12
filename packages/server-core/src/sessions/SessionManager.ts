@@ -89,6 +89,8 @@ import { type Session, type SessionEvent, type FileAttachment, type SendMessageO
 import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta, type TokenUsage } from '@craft-agent/core/types'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages, normalizePath } from '@craft-agent/shared/utils'
 import { loadAllSkills, loadSkillBySlug, invalidateSkillsCache, type LoadedSkill } from '@craft-agent/shared/skills'
+import { getMemoryStorePath, loadMemoryStore, saveMemoryStore, recordExtraction } from '@craft-agent/shared/memory';
+import { addMemoryEntry, deleteMemoryEntry, queryMemories, getMemoryStats as getMemStats } from '@craft-agent/shared/memory/store';
 import { invalidateContextFileCache } from '@craft-agent/shared/prompts/system'
 import { getToolIconsDir, getMiniModel } from '@craft-agent/shared/config'
 import { getDefaultSummarizationModel } from '@craft-agent/shared/config/models'
@@ -4708,7 +4710,25 @@ export class SessionManager implements ISessionManager {
         // (session_created is emitted by createSession above.)
 
         // Fire and forget — send the message but don't await completion
-        this.sendMessage(session.id, request.prompt, fileAttachments).catch(err => {
+        // Support customInstructions: prepend to prompt if provided
+        let finalPrompt = request.prompt;
+        if ((request as any).customInstructions) {
+          finalPrompt = `${(request as any).customInstructions}
+
+---
+
+${request.prompt}`;
+        }
+        // Support customInstructions and memory-enabled options
+
+
+
+
+
+
+
+
+        this.sendMessage(session.id, finalPrompt, fileAttachments).catch(err => {
           sessionLog.error(`Failed to send message to spawned session ${session.id}:`, err)
         })
 
@@ -5335,6 +5355,16 @@ export class SessionManager implements ISessionManager {
     }
 
     await this.sendMessage(sessionId, PLAN_APPROVAL_MESSAGE)
+  }
+
+  /**
+   * Reject a plan for a session. Notifies the user and pauses the session.
+   */
+  async rejectPlan(sessionId: string): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return
+    // Send a rejection message to pause the session
+    await this.sendMessage(sessionId, '/reject')
   }
 
   // ============================================
@@ -10118,6 +10148,7 @@ export class SessionManager implements ISessionManager {
     this.pendingPermissionRequests.clear()
     this.adminRememberApprovals.clear()
 
+
     // Clean up session-scoped tool callbacks for all sessions
     for (const sessionId of this.sessions.keys()) {
       unregisterSessionScopedToolCallbacks(sessionId)
@@ -10125,4 +10156,5 @@ export class SessionManager implements ISessionManager {
 
     sessionLog.info('Cleanup complete')
   }
+
 }

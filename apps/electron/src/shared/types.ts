@@ -754,6 +754,23 @@ export interface ElectronAPI {
   setMessagingBindingAccess(bindingId: string, access: { mode: MessagingBindingAccessMode; allowedSenderIds?: string[] }): Promise<{ success: boolean }>
   onMessagingPendingChanged(callback: (workspaceId: string) => void): () => void
 }
+// Memory types
+export type MemoryType = 'fact' | 'preference' | 'workflow' | 'reminder' | 'context';
+export interface MemoryEntry {
+  id: string;
+  type: MemoryType;
+  content: string;
+  tags: string[];
+  confidence: number;
+  createdAt: string;
+  sourceSessionId: string;
+}
+export interface MemoryStats {
+  totalEntries: number;
+  entriesByType: Record<string, number>;
+  totalExtractions: number;
+  lastExtractionAt?: string;
+}
 
 export interface MessagingPlatformRuntimeInfo {
   platform: string

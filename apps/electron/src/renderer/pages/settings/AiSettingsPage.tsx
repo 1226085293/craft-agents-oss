@@ -51,6 +51,7 @@ import { useOnboarding } from '@/hooks/useOnboarding'
 import { useWorkspaceIcon } from '@/hooks/useWorkspaceIcon'
 import { OnboardingWizard, type ApiSetupMethod } from '@/components/onboarding'
 import { RenameDialog } from '@/components/ui/rename-dialog'
+import { ModelManagerDialog } from '@/components/settings/ModelManagerDialog'
 import { useAppShellContext } from '@/context/AppShellContext'
 import { getModelShortName, type ModelDefinition } from '@config/models'
 import { getModelsForProviderType, resolveMidStreamBehavior, type CustomEndpointApi, type MidStreamBehavior } from '@config/llm-connections'
@@ -194,13 +195,14 @@ interface ConnectionRowProps {
   onReauthenticate: () => void
   onEdit: () => void
   onSetMidStreamBehavior: (behavior: MidStreamBehavior) => void
+  onManageModels: () => void
   validationState: ValidationState
   validationError?: string
   /** True when another OAuth connection resolves to the same Anthropic account (issue #838) */
   isDuplicateAccount?: boolean
 }
 
-function ConnectionRow({ connection, isLastConnection, onRenameClick, onDelete, onSetDefault, onValidate, onReauthenticate, onEdit, onSetMidStreamBehavior, validationState, validationError, isDuplicateAccount }: ConnectionRowProps) {
+function ConnectionRow({ connection, isLastConnection, onRenameClick, onDelete, onSetDefault, onValidate, onReauthenticate, onEdit, onSetMidStreamBehavior, onManageModels, validationState, validationError, isDuplicateAccount }: ConnectionRowProps) {
   const { t } = useTranslation()
   const [menuOpen, setMenuOpen] = useState(false)
   const [piBaseUrl, setPiBaseUrl] = useState<string | undefined>(undefined)
@@ -317,6 +319,15 @@ function ConnectionRow({ connection, isLastConnection, onRenameClick, onDelete, 
         </div>
       )}
       description={getDescription()}
+      action={
+        <button
+          type="button"
+          onClick={onManageModels}
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-md bg-background shadow-minimal hover:bg-foreground/[0.05] transition-colors text-foreground/70"
+        >
+          <span>{t("settings.ai.manageModels", { defaultValue: "Manage Models" })}</span>
+        </button>
+      }
     >
       <DropdownMenu modal={false} onOpenChange={setMenuOpen}>
         <DropdownMenuTrigger asChild>
@@ -667,6 +678,9 @@ export default function AiSettingsPage() {
   const [renameDialogOpen, setRenameDialogOpen] = useState(false)
   const [renamingConnection, setRenamingConnection] = useState<{ slug: string; name: string } | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  // Model manager dialog state
+  const [modelManagerOpen, setModelManagerOpen] = useState(false)
+  const [modelManagerConnection, setModelManagerConnection] = useState<LlmConnectionWithStatus | null>(null)
 
   // Load workspaces, default settings, and credential health
   useEffect(() => {
@@ -853,6 +867,12 @@ export default function AiSettingsPage() {
     const method = getApiKeyMethodForConnection(connection)
     apiSetupOnboarding.jumpToCredentials(method)
   }, [apiSetupOnboarding, openApiSetup])
+
+  // Open the model manager dialog for a connection
+  const openModelManager = useCallback((connection: LlmConnectionWithStatus) => {
+    setModelManagerConnection(connection)
+    setModelManagerOpen(true)
+  }, [])
 
   const handleDeleteConnection = useCallback(async (slug: string) => {
     if (!window.electronAPI) return
@@ -1135,6 +1155,7 @@ export default function AiSettingsPage() {
                         onReauthenticate={() => handleReauthenticateConnection(conn)}
                         onEdit={() => handleEditConnection(conn)}
                         onSetMidStreamBehavior={(behavior) => handleSetMidStreamBehavior(conn, behavior)}
+                        onManageModels={() => openModelManager(conn)}
                         validationState={validationStates[conn.slug]?.state || 'idle'}
                         validationError={validationStates[conn.slug]?.error}
                         isDuplicateAccount={!!conn.oauthAccountUuid && duplicateAccountUuids.has(conn.oauthAccountUuid)}
@@ -1275,6 +1296,19 @@ export default function AiSettingsPage() {
                 onSubmit={handleRenameSubmit}
                 placeholder={t("settings.ai.enterConnectionName")}
               />
+              
+              {/* Model Manager Dialog */}
+              {modelManagerConnection && (
+                <ModelManagerDialog
+                  open={modelManagerOpen}
+                  onOpenChange={setModelManagerOpen}
+                  connection={modelManagerConnection}
+                  onSuccess={() => {
+                    setModelManagerOpen(false)
+                    refreshLlmConnections?.()
+                  }}
+                />
+              )}
             </div>
           </div>
         </ScrollArea>

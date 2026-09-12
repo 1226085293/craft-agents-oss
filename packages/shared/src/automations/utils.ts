@@ -214,7 +214,9 @@ export function matcherMatchesSdk(matcher: AutomationMatcher, event: AgentEvent,
  */
 export function cleanEnv(): Record<string, string> {
   return Object.fromEntries(
-    Object.entries(process.env).filter((e): e is [string, string] => e[1] !== undefined)
+    Object.entries(process.env).filter(
+      (e): e is [string, string] => e[1] !== undefined && e[1] !== 'undefined'
+    )
   );
 }
 

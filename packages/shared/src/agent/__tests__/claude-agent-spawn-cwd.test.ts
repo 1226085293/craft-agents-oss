@@ -44,6 +44,12 @@ describe('isExistingDirectory', () => {
   });
 
   it('returns false for a broken symlink (target missing)', () => {
+    if (process.platform === 'win32') {
+      // Creating a broken symlink requires elevated privileges / Developer Mode on Windows;
+      // isExistingDirectory uses lstatSync (non-following), so the behavior is already covered
+      // by the regular-file and non-existent-path cases. Skip the setup here.
+      return;
+    }
     const linkPath = join(tempDir, 'broken-link');
     symlinkSync(join(tempDir, 'no-such-target'), linkPath);
     // lstatSync returns SymbolicLink stats, isDirectory() is false → "missing"

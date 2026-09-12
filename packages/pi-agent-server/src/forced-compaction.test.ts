@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'bun:test';
-import { shouldForceCompaction, contextTokens, FORCED_COMPACTION_MIN_TOKENS } from './forced-compaction.ts';
+import {
+  shouldForceCompaction,
+  shouldCompactForBudget,
+  contextTokens,
+  FORCED_COMPACTION_MIN_TOKENS,
+  BUDGET_COMPACTION_RATIO,
+} from './forced-compaction.ts';
 
 describe('contextTokens', () => {
   it('returns totalTokens when present', () => {
@@ -78,5 +84,50 @@ describe('shouldForceCompaction', () => {
 
   it('returns true for null message (graceful)', () => {
     expect(shouldForceCompaction(null as unknown as undefined, 0)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Channel budget lane (2026-09-13 lively-forest)
+//
+// A model's declared contextWindow and the largest request its CHANNEL accepts
+// are different numbers. Groq free tier: openai/gpt-oss-120b declares 131072
+// but rejects any request over 8000. The SDK only compacts at ~87.5% of the
+// declared window, so a 61K session died at 8K having never compacted.
+// ---------------------------------------------------------------------------
+describe('shouldCompactForBudget', () => {
+  it('is inert when no budget is configured', () => {
+    expect(shouldCompactForBudget(500_000, 0, 0)).toBe(false);
+    expect(shouldCompactForBudget(0, 8_000, 0)).toBe(false);
+  });
+
+  it('stays quiet well below the budget', () => {
+    // 61_426 is the exact request size Groq rejected; the trigger point is
+    // 0.9 * budget, so a budget comfortably above the context must not fire.
+    expect(shouldCompactForBudget(6_000, 8_000, 0)).toBe(false);
+  });
+
+  it('fires once context reaches the trigger ratio', () => {
+    const budget = 8_000;
+    const trigger = Math.ceil(budget * BUDGET_COMPACTION_RATIO);
+    expect(shouldCompactForBudget(trigger, budget, 0)).toBe(true);
+    expect(shouldCompactForBudget(trigger - 1, budget, 0)).toBe(false);
+  });
+
+  it('fires for any stopReason — the point is to compact BEFORE rejection', () => {
+    // Unlike shouldForceCompaction this lane is not gated on stopReason, so a
+    // healthy session approaching the ceiling still gets compacted.
+    expect(shouldCompactForBudget(7_500, 8_000, 0)).toBe(true);
+  });
+
+  it('refuses to loop when a previous budget compaction barely helped', () => {
+    // Compacted at 7_500, still 7_200 afterwards: delta 300 < 4000 tolerance.
+    // The session genuinely does not fit this channel — stop burning calls.
+    expect(shouldCompactForBudget(7_200, 8_000, 7_500)).toBe(false);
+  });
+
+  it('fires again after a compaction that actually shrank context', () => {
+    // Compacted from 30_000; context regrew to 7_500 — a real second pass.
+    expect(shouldCompactForBudget(7_500, 8_000, 30_000)).toBe(true);
   });
 });

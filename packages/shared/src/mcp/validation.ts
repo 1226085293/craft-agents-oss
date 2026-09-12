@@ -386,6 +386,14 @@ export async function validateStdioMcpConnection(
     });
   };
 
+  // The SDK swallows the underlying spawn failure: when the command does not
+  // exist, `client.connect` rejects with a generic "Connection closed" error
+  // rather than the ENOENT from `spawn`. Capture the raw spawn error (its
+  // `.code`/`message` still carries ENOENT, even if the message is localized on
+  // Windows) so we can surface a precise "command not found" message. Declared
+  // outside the try so the catch block can read it.
+  let spawnError: NodeJS.ErrnoException | null = null;
+
   try {
     transport = new StdioClientTransport({
       command,
@@ -393,6 +401,10 @@ export async function validateStdioMcpConnection(
       env: { ...processEnv, ...env },
       stderr: 'pipe',
     });
+
+    transport.onerror = (e: Error) => {
+      spawnError = e as NodeJS.ErrnoException;
+    };
 
     const watchdog = createConnectWatchdog(connectIdleMs, connectCeilingMs);
 
@@ -489,7 +501,15 @@ export async function validateStdioMcpConnection(
     const framingHint =
       'Check that the server speaks newline-delimited JSON-RPC (MCP stdio spec) on stdout, not LSP-style Content-Length framing.';
 
-    if (error.message.includes('ENOENT') || error.message.includes('not found')) {
+    // Prefer the underlying spawn error (captured above) when detecting a
+    // missing command, since the surfaced `error` may be a generic watchdog
+    // "Connection closed" message that hides the real ENOENT cause.
+    const cause = spawnError ?? (error as NodeJS.ErrnoException);
+    if (
+      cause.code === 'ENOENT' ||
+      cause.message.includes('ENOENT') ||
+      cause.message.toLowerCase().includes('not found')
+    ) {
       errorMessage = `Command not found: "${command}". Install the required dependency and try again.`;
     } else if (error.message.includes('EACCES') || error.message.includes('permission denied')) {
       errorMessage = `Permission denied running "${command}". Check file permissions.`;

@@ -104,14 +104,22 @@ describe('default thinking level storage', () => {
     expect(output).toBe('medium')
   })
 
-  it('supports every thinking level', () => {
-    const { configDir } = setupWorkspaceConfigDir()
-    for (const level of THINKING_LEVEL_IDS) {
-      runEval(configDir, `setDefaultThinkingLevel('${level}')`)
-      const output = runEval(configDir, "console.log(String(getDefaultThinkingLevel()))")
-      expect(output).toBe(level)
-    }
-  })
+  it(
+    'supports every thinking level',
+    () => {
+      // Each level spawns a child bun process; on Windows process startup is slower,
+      // so allow a generous per-test budget.
+      const { configDir } = setupWorkspaceConfigDir()
+      for (const level of THINKING_LEVEL_IDS) {
+        runEval(configDir, `setDefaultThinkingLevel('${level}')`)
+        const output = runEval(configDir, "console.log(String(getDefaultThinkingLevel()))")
+        expect(output).toBe(level)
+      }
+    },
+    // Bun's default per-test timeout is 5s; spawning one child bun per level
+    // (×2 per level) can exceed that on Windows. Give it plenty of slack.
+    120000,
+  )
 
   it('migrates legacy "think" value to "medium"', () => {
     const { configDir, configPath } = setupWorkspaceConfigDir()

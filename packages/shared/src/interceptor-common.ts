@@ -198,6 +198,10 @@ export function setStoredError(error: LastApiError | null): void {
     if (error) {
       writeFileSync(errorFile, JSON.stringify(error));
       debugLog(`[setStoredError] Wrote error to file: ${error.status} ${error.message}`);
+      // Record in the append-only history BEFORE the single-slot file is
+      // consumed: getStoredError() deletes api-error.json on read, so without
+      // this the error is gone before anyone can look at it.
+      appendErrorToHistory(error);
     } else {
       try {
         unlinkSync(errorFile);
@@ -225,6 +229,104 @@ export function getLastApiError(sessionDir?: string): LastApiError | null {
 
 export function clearLastApiError(): void {
   setStoredError(null);
+}
+
+// ============================================================================
+// API ERROR HISTORY
+// ============================================================================
+
+/**
+ * `api-error.json` is a single slot that `getStoredError()` DELETES on read,
+ * so a session's error trail is unrecoverable — the only surviving entry is
+ * whichever one nobody consumed yet. Debugging a session that failed several
+ * times (2026-09-13: 400 reasoning_content on the 12th, 413 TPM over-limit on
+ * the 13th, only the older one still on disk) meant cross-referencing two
+ * process logs by timestamp.
+ *
+ * This is an append-only ring buffer kept alongside it. Errors are never
+ * popped, so the trail survives; the buffer is capped by trimming the oldest
+ * lines.
+ */
+
+/** File name for the append-only error history (JSON Lines). */
+export const API_ERROR_HISTORY_FILE = 'api-errors.jsonl';
+
+/** Ring-buffer capacity. Roughly 3% of a 64KB budget per entry at ~2KB each. */
+export const API_ERROR_HISTORY_LIMIT = 50;
+
+function getErrorHistoryPath(sessionDir?: string): string {
+  const dir = sessionDir || _sessionDir || join(homedir(), '.craft-agent');
+  return join(dir, API_ERROR_HISTORY_FILE);
+}
+
+/**
+ * Append one error to the session's history, trimming to the last
+ * {@link API_ERROR_HISTORY_LIMIT} entries.
+ *
+ * Best-effort by design — diagnostics must never break the error path that
+ * produced them.
+ */
+export function appendErrorToHistory(error: LastApiError, sessionDir?: string): void {
+  const file = getErrorHistoryPath(sessionDir);
+  try {
+    // Trim first so a crash mid-append cannot grow the file without bound.
+    trimErrorHistory(file);
+    appendFileSync(file, `${JSON.stringify(error)}\n`, 'utf-8');
+  } catch (e) {
+    debugLog(`[appendErrorToHistory] Failed: ${e}`);
+  }
+}
+
+/** Keep only the last {@link API_ERROR_HISTORY_LIMIT} lines of a history file. */
+function trimErrorHistory(file: string): void {
+  try {
+    if (!existsSync(file)) return;
+    const lines = readFileSync(file, 'utf-8').split('\n').filter(l => l.trim().length > 0);
+    if (lines.length < API_ERROR_HISTORY_LIMIT) return; // +1 for the pending append
+    const kept = lines.slice(-(API_ERROR_HISTORY_LIMIT - 1));
+    // Write to a temp file and rename: a torn write must not corrupt history.
+    const tmp = `${file}.tmp`;
+    writeFileSync(tmp, `${kept.join('\n')}\n`, 'utf-8');
+    renameSync(tmp, file);
+  } catch (e) {
+    debugLog(`[trimErrorHistory] Failed: ${e}`);
+  }
+}
+
+/**
+ * Read the session's error history, oldest first. Returns an empty array when
+ * there is none — callers can treat "no history" as "no errors".
+ */
+export function readErrorHistory(sessionDir?: string, limit = API_ERROR_HISTORY_LIMIT): LastApiError[] {
+  const file = getErrorHistoryPath(sessionDir);
+  try {
+    if (!existsSync(file)) return [];
+    const lines = readFileSync(file, 'utf-8').split('\n').filter(l => l.trim().length > 0);
+    const out: LastApiError[] = [];
+    for (const line of lines.slice(-limit)) {
+      try {
+        out.push(JSON.parse(line) as LastApiError);
+      } catch {
+        // Skip a torn line rather than losing the whole trail.
+      }
+    }
+    return out;
+  } catch (e) {
+    debugLog(`[readErrorHistory] Failed: ${e}`);
+    return [];
+  }
+}
+
+/**
+ * Compact one-line summary of a history entry, for logs and diagnostics.
+ * Truncates the message so a runaway provider payload cannot flood output.
+ */
+export function formatErrorHistoryEntry(error: LastApiError, maxMessageLength = 160): string {
+  const when = new Date(error.timestamp).toISOString();
+  const message = (error.message || '').replace(/\s+/g, ' ').trim();
+  const truncated =
+    message.length > maxMessageLength ? `${message.slice(0, maxMessageLength)}…` : message;
+  return `${when} ${error.status} ${error.statusText}: ${truncated}`;
 }
 
 // ============================================================================

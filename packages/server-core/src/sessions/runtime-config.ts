@@ -28,6 +28,16 @@ function normalizeCustomModels(connection: LlmConnection): Array<Record<string, 
         id: model.id,
         contextWindow: model.contextWindow,
         supportsImages: typeof model.supportsImages === 'boolean' ? model.supportsImages : undefined,
+        requiresReasoningContentOnAssistantMessages:
+          typeof (model as { requiresReasoningContentOnAssistantMessages?: unknown })
+            .requiresReasoningContentOnAssistantMessages === 'boolean'
+            ? (model as { requiresReasoningContentOnAssistantMessages?: boolean })
+                .requiresReasoningContentOnAssistantMessages
+            : undefined,
+        contextTokenBudget:
+          typeof (model as { contextTokenBudget?: unknown }).contextTokenBudget === 'number'
+            ? (model as { contextTokenBudget?: number }).contextTokenBudget
+            : undefined,
       })
     })
     .sort((a, b) => String(a.id).localeCompare(String(b.id)))
@@ -81,6 +91,14 @@ export function buildBackendRuntimeSignature(input: BackendRuntimeSignatureInput
                     supportsImages: typeof connection.customEndpoint.supportsImages === 'boolean'
                       ? connection.customEndpoint.supportsImages
                       : undefined,
+                    requiresReasoningContentOnAssistantMessages:
+                      typeof connection.customEndpoint.requiresReasoningContentOnAssistantMessages === 'boolean'
+                        ? connection.customEndpoint.requiresReasoningContentOnAssistantMessages
+                        : undefined,
+                    contextTokenBudget:
+                      typeof connection.customEndpoint.contextTokenBudget === 'number'
+                        ? connection.customEndpoint.contextTokenBudget
+                        : undefined,
                   })
                 : undefined,
               models: normalizeCustomModels(connection),

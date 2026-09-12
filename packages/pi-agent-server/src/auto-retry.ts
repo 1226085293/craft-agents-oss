@@ -22,6 +22,20 @@
  * bounds the cost in both worlds (2026-09-11 fit-pulsar incident #2: the
  * earlier 'permanent' classification let a recoverable memory-pressure blip
  * kill the session outright with zero retries).
+ *
+ * Status-code layer (2026-09-13): the string-pattern approach above cannot
+ * enumerate every way a provider phrases a definitive rejection, and it
+ * defaults unknown text to transient. Since the retry loop re-sends the SAME
+ * history, any error that is a property of the request can never heal — it
+ * only burns the whole 2h/30-round budget while the UI reports "retrying".
+ * Per RFC 9110, 4xx means "the client must change the request" and 5xx means
+ * "the server may recover", so once a status code can be recovered from the
+ * error text it decides the class, with a small explicit allowlist of 4xx
+ * codes that are legitimately transient. Errors with no recoverable status
+ * code keep the conservative string-based default (2026-09-13 lively-forest:
+ * a deterministic `400 ... property 'reasoning_content' is unsupported` and a
+ * `413 Request too large ... Limit 8000, Requested 61426` were both classified
+ * transient and would have spun for two hours).
  */
 
 // First retry: short — the provider hiccup is often over in seconds.
@@ -74,6 +88,23 @@ const PERMANENT_ERROR_PATTERNS: RegExp[] = [
   /context window exceeds limit/i,
   /exceeded model token limit/i,
   /context[_ ]length[_ ]exceeded/i,
+  // Request-shape rejections (2026-09-13 lively-forest). The provider refuses
+  // a field or format that the retry loop will send byte-identical next time,
+  // so retrying can only reproduce it. Notably the SDK surfaces these via
+  // `errorMessage` ONLY — the HTTP status lives in a sibling field and never
+  // reaches this classifier, so the status-code layer below cannot see them.
+  // Deliberately NOT matching "is not supported": that phrasing appears in
+  // transient upstream notices ("User location is not supported").
+  /is unsupported\b/i,
+  /unsupported (?:parameter|field|property|value|argument)/i,
+  /must be satisfied/i,
+  // Request-size / throughput ceilings. When the request itself exceeds a
+  // fixed ceiling (Requested > Limit) it can never fit — unlike a 429, whose
+  // budget refills. Groq free tier: "Request too large ... Limit 8000,
+  // Requested 61426, please reduce your message size".
+  /request too large/i,
+  /payload too large/i,
+  /please reduce (?:your |the )?(?:message|prompt|input|request|context)/i,
 ];
 
 /**
@@ -132,9 +163,68 @@ export function isBudgetExhaustedError(errorText: string | null | undefined): bo
 export type AutoRetryErrorClass = 'transient' | 'transient_limited' | 'permanent';
 
 /**
+ * 4xx codes that CAN legitimately heal while the request stays identical.
+ *
+ * Everything else in the 4xx range means the request itself is wrong (or the
+ * account/model cannot serve it at all), so re-sending it verbatim can only
+ * reproduce the same rejection:
+ *  - 400 malformed/unsupported field, 401/403 auth, 404 unknown model
+ *  - 413 payload or rate limit that the client must reduce  (Groq free tier:
+ *    "Request too large ... Limit 8000, Requested 61426")
+ *  - 415/422 semantic validation, 431 headers too large
+ */
+export const TRANSIENT_4XX = new Set([
+  408, // Request Timeout — the server gave up waiting, not judging the request
+  409, // Conflict — resolving depends on server state that may change
+  425, // Too Early — replay protection, safe to replay
+  429, // Too Many Requests — the canonical transient 4xx
+]);
+
+/**
+ * Ordered most-specific first so contextual forms win over a bare number.
+ * Every capture is anchored to a 3-digit HTTP code with word boundaries, so
+ * unrelated numbers in the text (token counts, request ids) never match —
+ * see the 'generated 4013 tokens' regression test.
+ */
+const HTTP_STATUS_PATTERNS: RegExp[] = [
+  /\bHTTP\/?[\d.]*\s+([1-9]\d{2})\b/i,                 // "HTTP/1.1 400", "HTTP 400"
+  /\bstatus[_ ]?code\s*[:=]\s*([1-9]\d{2})\b/i,        // "status_code: 400"
+  /["']?status["']?\s*[:=]\s*([1-9]\d{2})\b/i,         // `"status": 400`
+  /\bstatus\s*[:=]?\s*([45]\d{2})\b/i,                 // "status 400"
+  /\berror\s+([45]\d{2})\b/i,                          // "Error 400 with provider ..."
+  /\bhttp[_ ]?status\s*[:=]?\s*([45]\d{2})\b/i,        // "http_status=413"
+  /\b([45]\d{2})\s+(?:bad request|unauthorized|payment required|forbidden|not found|request entity too large|payload too large|unsupported media type|too many requests|request header fields too large|unprocessable)/i,
+  /\b([45]\d{2})\b/,                                   // bare code — last resort
+];
+
+/**
+ * Best-effort recovery of an HTTP status code from a provider error string.
+ * Returns null when no code can be identified, in which case the caller falls
+ * back to string-pattern classification.
+ */
+export function extractHttpStatus(errorText: string | null | undefined): number | null {
+  if (!errorText) return null;
+  for (const pattern of HTTP_STATUS_PATTERNS) {
+    const m = errorText.match(pattern);
+    if (m?.[1]) {
+      const code = Number(m[1]);
+      if (Number.isInteger(code) && code >= 100 && code <= 599) return code;
+    }
+  }
+  return null;
+}
+
+/**
  * Classify an assistant error message for the auto-retry loop.
- * Permanent patterns win over transient ones (a 429 response that also
- * mentions billing is billing). Unknown errors default to transient.
+ *
+ * Order of precedence:
+ *  1. Explicit permanent phrases (auth / billing / quota / context overflow) —
+ *     a 429 that also mentions billing is billing.
+ *  2. Upstream response-budget errors — 'transient_limited'.
+ *  3. HTTP status code, when one can be recovered: 5xx → transient,
+ *     4xx → permanent unless it is in {@link TRANSIENT_4XX}.
+ *  4. Unknown text with no status code → transient (the conservative default,
+ *     which covers transport errors whose text carries no status at all).
  */
 export function classifyAutoRetryError(errorText: string | null | undefined): AutoRetryErrorClass {
   if (!errorText) return 'transient';
@@ -142,6 +232,12 @@ export function classifyAutoRetryError(errorText: string | null | undefined): Au
     if (pattern.test(errorText)) return 'permanent';
   }
   if (BUDGET_EXHAUSTED_ERROR_PATTERN.test(errorText)) return 'transient_limited';
+
+  const status = extractHttpStatus(errorText);
+  if (status !== null) {
+    if (status >= 500) return 'transient';
+    if (status >= 400) return TRANSIENT_4XX.has(status) ? 'transient' : 'permanent';
+  }
   return 'transient';
 }
 

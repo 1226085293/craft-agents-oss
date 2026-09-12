@@ -95,4 +95,26 @@ describe('buildCustomEndpointModelDef', () => {
     expect(model.compat?.requiresReasoningContentOnAssistantMessages).toBe(true)
     expect(model.compat?.maxTokensField).toBe('max_tokens')
   })
+
+  it('lets the connection opt out of the reasoning_content handshake (Groq rejects the property)', () => {
+    // 2026-09-13: upstreams disagree on this handshake. The default above is
+    // required by stealth/ox-alpha, but Groq answers
+    // "property 'reasoning_content' is unsupported" on any assistant message
+    // carrying it, so the connection must be able to turn it off.
+    const model = buildCustomEndpointModelDef('my-model', {
+      requiresReasoningContentOnAssistantMessages: false,
+    })
+    expect(model.compat?.requiresReasoningContentOnAssistantMessages).toBe(false)
+  })
+
+  it('lets a per-model override win over the connection default', () => {
+    expect(
+      buildCustomEndpointModelDef('m', { requiresReasoningContentOnAssistantMessages: true }, { requiresReasoningContentOnAssistantMessages: false })
+        .compat?.requiresReasoningContentOnAssistantMessages,
+    ).toBe(false)
+    expect(
+      buildCustomEndpointModelDef('m', { requiresReasoningContentOnAssistantMessages: false }, { requiresReasoningContentOnAssistantMessages: true })
+        .compat?.requiresReasoningContentOnAssistantMessages,
+    ).toBe(true)
+  })
 })

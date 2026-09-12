@@ -110,6 +110,22 @@ export interface CustomEndpointConfig {
   api: CustomEndpointApi;
   /** Explicit capability hint for arbitrary endpoints — never guessed automatically. */
   supportsImages?: boolean;
+  /**
+   * Multi-turn "thinking mode" handshake. `true` (default) makes every
+   * assistant message carry a `reasoning_content` field — required by relays
+   * such as stealth/ox-alpha, which otherwise 400 with "the reasoning_content
+   * in the thinking mode must be passed back". Set `false` for upstreams that
+   * reject the property, e.g. Groq:
+   * "property 'reasoning_content' is unsupported" (2026-09-13 incident).
+   */
+  requiresReasoningContentOnAssistantMessages?: boolean;
+  /**
+   * Largest single request this channel accepts, in tokens — the provider's
+   * real ceiling, which is often far below the model's `contextWindow`.
+   * Drives forced compaction so a session degrades instead of walling into a
+   * 413 (2026-09-13: Groq free tier declares 131072 but rejects at 8000).
+   */
+  contextTokenBudget?: number;
 }
 
 /**

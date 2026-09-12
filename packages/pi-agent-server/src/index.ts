@@ -78,8 +78,10 @@ import { pickProviderAppropriateMiniModel } from './pick-mini-model.ts';
 import {
   buildCustomEndpointModelDef,
   normalizeCustomEndpointModelEntry,
+  resolveContextTokenBudget,
   stripPiPrefix,
   type CustomEndpointModelEntry,
+  type CustomEndpointModelDefaults,
   type CustomEndpointModelOverrides,
 } from './custom-endpoint-models.ts';
 
@@ -99,6 +101,12 @@ import { DefenseEvaluator, resolveDefenseEnabled } from './defense/index.ts';
 import { VERIFY_OUTPUT_CMDS } from './defense/complexity-score.ts';
 import { detectRepetitionLoop, extractAssistantText } from './defense/repetition-detector.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
+import {
+  TOOL_PAYLOAD_WARN_TOKENS,
+  buildPromptSnippet,
+  measurePromptSnippetChars,
+  measureToolPayload,
+} from './tool-payload.ts';
 
 // ============================================================
 // Types — JSONL Protocol
@@ -135,8 +143,8 @@ interface InitMessage {
   branchFromSdkSessionId?: string;
   branchFromSessionPath?: string;
   branchFromSdkTurnId?: string;
-  customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean };
-  customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>;
+  customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean; requiresReasoningContentOnAssistantMessages?: boolean; contextTokenBudget?: number };
+  customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean; requiresReasoningContentOnAssistantMessages?: boolean; contextTokenBudget?: number }>;
   piAuth?: { provider: string; credential: PiCredential };
 
   /**
@@ -161,8 +169,8 @@ interface RuntimeConfigUpdateMessage {
   providerType?: string;
   authType?: string;
   baseUrl?: string;
-  customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean };
-  customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>;
+  customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean; requiresReasoningContentOnAssistantMessages?: boolean; contextTokenBudget?: number };
+  customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean; requiresReasoningContentOnAssistantMessages?: boolean; contextTokenBudget?: number }>;
 }
 
 /**
@@ -178,8 +186,8 @@ interface SwitchConnectionMessage {
   piAuth?: { provider: string; credential: PiCredential };
   apiKey?: string;
   baseUrl?: string;
-  customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean };
-  customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>;
+  customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean; requiresReasoningContentOnAssistantMessages?: boolean; contextTokenBudget?: number };
+  customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean; requiresReasoningContentOnAssistantMessages?: boolean; contextTokenBudget?: number }>;
 }
 
 /** Messages from main process (stdin) */
@@ -798,6 +806,20 @@ let customEndpointModelIds: Set<string> = new Set();
  * known model IDs and always pass the full set.
  */
 const customModelOverrides = new Map<string, CustomEndpointModelOverrides>();
+/** Connection-level custom-endpoint defaults, kept for lazy budget resolution. */
+let customEndpointDefaults: CustomEndpointModelDefaults = {};
+
+/**
+ * Effective per-request token ceiling for the model currently in use.
+ * Resolved lazily because the active model can change mid-session (set_model /
+ * switch_connection) after the compaction patch was installed.
+ */
+function resolveActiveContextTokenBudget(modelId?: string): number {
+  return resolveContextTokenBudget(
+    customEndpointDefaults,
+    modelId ? customModelOverrides.get(modelId) : undefined,
+  );
+}
 
 function registerCustomEndpointModels(
   registry: PiModelRegistry,
@@ -807,14 +829,30 @@ function registerCustomEndpointModels(
 ): void {
   for (const m of models) {
     customEndpointModelIds.add(m.id);
-    if (m.contextWindow || m.maxTokens || m.supportsImages !== undefined) {
+    if (m.contextWindow || m.maxTokens || m.supportsImages !== undefined
+        || m.requiresReasoningContentOnAssistantMessages !== undefined
+        || m.contextTokenBudget !== undefined) {
       customModelOverrides.set(m.id, {
         ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
         ...(m.maxTokens ? { maxTokens: m.maxTokens } : {}),
         ...(m.supportsImages !== undefined ? { supportsImages: m.supportsImages } : {}),
+        ...(m.requiresReasoningContentOnAssistantMessages !== undefined
+          ? { requiresReasoningContentOnAssistantMessages: m.requiresReasoningContentOnAssistantMessages }
+          : {}),
+        ...(m.contextTokenBudget !== undefined ? { contextTokenBudget: m.contextTokenBudget } : {}),
       });
     }
   }
+  const connectionDefaults: CustomEndpointModelDefaults = {
+    supportsImages: initConfig?.customEndpoint?.supportsImages === true,
+    ...(typeof initConfig?.customEndpoint?.requiresReasoningContentOnAssistantMessages === 'boolean'
+      ? { requiresReasoningContentOnAssistantMessages: initConfig.customEndpoint.requiresReasoningContentOnAssistantMessages }
+      : {}),
+    ...(initConfig?.customEndpoint?.contextTokenBudget !== undefined
+      ? { contextTokenBudget: initConfig.customEndpoint.contextTokenBudget }
+      : {}),
+  };
+  customEndpointDefaults = connectionDefaults;
   const allIds = [...customEndpointModelIds];
   registry.registerProvider('custom-endpoint', {
     baseUrl,
@@ -823,7 +861,7 @@ function registerCustomEndpointModels(
     authHeader: true,
     models: allIds.map(id => buildCustomEndpointModelDef(
       id,
-      { supportsImages: initConfig?.customEndpoint?.supportsImages === true },
+      connectionDefaults,
       customModelOverrides.get(id),
     )),
   });
@@ -993,6 +1031,25 @@ async function ensureSession(): Promise<AgentSession> {
   const toolAllowlist = wrappedAll.map(t => t.name);
   debugLog(`Session tools: ${builtinDefs.length} builtin + ${webTools.length} web + ${proxyTools.length} proxy = ${wrappedAll.length} total`);
 
+  // The tool preamble (names + descriptions + JSON Schemas) is serialised into
+  // EVERY request and charged against the channel's request ceiling, not just
+  // the model's context window. Log it so "my context is huge" can be split
+  // between conversation history and tools instead of guessed at.
+  const toolPayload = measureToolPayload(wrappedAll);
+  const toolSnippetChars = measurePromptSnippetChars(wrappedAll);
+  debugLog(
+    `Session tool payload: ${toolPayload.toolCount} tools, ~${toolPayload.approxTokens} tokens ` +
+      `(${toolPayload.chars} chars) + ${toolSnippetChars} chars of system-prompt index`,
+  );
+  if (toolPayload.approxTokens > TOOL_PAYLOAD_WARN_TOKENS) {
+    debugLog(
+      `[tool-payload] WARNING: the tool preamble alone is ~${toolPayload.approxTokens} tokens, ` +
+        `above the ${TOOL_PAYLOAD_WARN_TOKENS}-token warning threshold. On a channel with a small ` +
+        `request ceiling this can crowd out conversation before any message is sent — ` +
+        `consider disabling unused MCP servers.`,
+    );
+  }
+
   // Build session options
   const sessionOptions: CreateAgentSessionOptions = {
     cwd,
@@ -1097,7 +1154,15 @@ async function ensureSession(): Promise<AgentSession> {
   // visible reply — even when context is below the SDK's shouldCompact threshold
   // (2026-08-28 incident: model died at ~112K of a 131072 window). Force a
   // compaction in that case so auto-resume has a smaller context to work with.
-  applyForcedCompactionPatch(session, (m) => debugLog(m));
+  applyForcedCompactionPatch(session, {
+    log: (m) => debugLog(m),
+    // Resolved per compaction, not captured now: the active model (and hence a
+    // per-model budget override) can change mid-session.
+    resolveContextTokenBudget: () =>
+      resolveActiveContextTokenBudget(
+        (session.agent?.state?.model as { id?: string } | undefined)?.id,
+      ),
+  });
 
   toolsChanged = false;
   debugLog(`Created Pi session: ${session.sessionId} (${wrappedAll.length} tools)`);
@@ -1291,9 +1356,11 @@ function buildProxyTools(): ToolDefinition<any, any>[] {
     // Pi SDK omits tools without promptSnippet from the system prompt's
     // "Available tools" section, making them invisible to the LLM.
     // Derive a snippet from the description so proxy tools are listed.
-    promptSnippet: def.description.length > 200
-      ? def.description.slice(0, 197) + '...'
-      : def.description,
+    //
+    // Kept short on purpose: the SDK puts this text in the system prompt index
+    // AND `description` in each function schema, so an unbounded snippet sends
+    // every description twice on every request (see tool-payload.ts).
+    promptSnippet: buildPromptSnippet(def.description),
     parameters: def.inputSchema,
     execute: async (
       toolCallId: string,

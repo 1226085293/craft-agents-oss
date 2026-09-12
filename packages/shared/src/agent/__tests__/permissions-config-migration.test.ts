@@ -81,7 +81,16 @@ describe('ensureDefaultPermissions migration', () => {
     expect(blockedCommandHints.some(h => h.command === 'printf')).toBe(true);
     expect(blockedCommandHints.some(h => h.command === 'sed')).toBe(true);
 
-    rmSync(tempRoot, { recursive: true, force: true });
-    rmSync(tempConfig, { recursive: true, force: true });
+    // Best-effort cleanup; on Windows a just-written dir can briefly be locked (EBUSY).
+    for (const dir of [tempRoot, tempConfig]) {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          rmSync(dir, { recursive: true, force: true });
+          break;
+        } catch {
+          // retry after a short delay to let the OS release the handle
+        }
+      }
+    }
   });
 });

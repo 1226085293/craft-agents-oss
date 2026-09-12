@@ -2,6 +2,17 @@ export type CustomEndpointInput = 'text' | 'image'
 
 export interface CustomEndpointModelDefaults {
   supportsImages?: boolean
+  /**
+   * Connection-level default for whether every assistant message must carry a
+   * `reasoning_content` field. See the flag's definition below.
+   */
+  requiresReasoningContentOnAssistantMessages?: boolean
+  /**
+   * Connection-level ceiling on the size of a single request, in tokens — what
+   * the provider/gateway actually accepts, independent of the model's declared
+   * `contextWindow`. Drives forced compaction (see forced-compaction.ts).
+   */
+  contextTokenBudget?: number
 }
 
 export interface CustomEndpointModelOverrides {
@@ -9,6 +20,19 @@ export interface CustomEndpointModelOverrides {
   /** Per-model output token cap override. When omitted, DEFAULT_MAX_TOKENS applies. */
   maxTokens?: number
   supportsImages?: boolean
+  /** Per-model override of the assistant `reasoning_content` handshake. */
+  requiresReasoningContentOnAssistantMessages?: boolean
+  /** Per-model override of the channel request-size ceiling. */
+  contextTokenBudget?: number
+}
+
+/** Resolved per-request token ceiling for a model (0 = unknown/unbounded). */
+export function resolveContextTokenBudget(
+  defaults?: CustomEndpointModelDefaults,
+  overrides?: CustomEndpointModelOverrides,
+): number {
+  const raw = overrides?.contextTokenBudget ?? defaults?.contextTokenBudget;
+  return typeof raw === 'number' && raw > 0 ? raw : 0;
 }
 
 /**
@@ -99,14 +123,23 @@ export function buildCustomEndpointModelDef(
       // 400s with "Invalid max_tokens value, the valid range is [1, 393216]"
       // when given max_completion_tokens.
       maxTokensField: 'max_tokens',
-      // requiresReasoningContentOnAssistantMessages: true — the upstream
-      // relay (stealth/ox-alpha) enables thinking mode when the model
-      // declares reasoning:true, and its multi-turn handshake requires
-      // every assistant message to carry a reasoning_content field.
-      // Without this flag, pi-ai omits reasoning_content from assistant
-      // messages, and the upstream 400s with
-      // "the reasoning_content in the thinking mode must be passed back".
-      requiresReasoningContentOnAssistantMessages: true,
+      // requiresReasoningContentOnAssistantMessages — some upstreams run a
+      // multi-turn "thinking mode" handshake that REQUIRES every assistant
+      // message to carry a reasoning_content field (the stealth/ox-alpha
+      // relay 400s with "the reasoning_content in the thinking mode must be
+      // passed back" without it). Other upstreams do the exact opposite and
+      // reject the property outright — Groq answers
+      // "property 'reasoning_content' is unsupported" (2026-09-13).
+      //
+      // There is therefore no universally safe value: it must be configured
+      // per endpoint. Defaults to true to preserve the behavior the flag was
+      // introduced for; endpoints that reject the field set it false via
+      // `customEndpoint.requiresReasoningContentOnAssistantMessages` in
+      // config.json (or per model via `models: [{ id, ... }]`).
+      requiresReasoningContentOnAssistantMessages:
+        overrides?.requiresReasoningContentOnAssistantMessages
+        ?? defaults?.requiresReasoningContentOnAssistantMessages
+        ?? true,
     },
     // thinkingLevelMap — always-thinking GLM/z.ai-style relays reject any
     // request without a valid reasoning_effort ("该模型始终思考，不支持关闭思考；

@@ -200,7 +200,7 @@ export async function buildCallLlmRequest(
         );
       }
       if (result.type === 'text') {
-        textParts.push(`<file path="${result.filename}">\n${result.content}\n</file>`);
+        textParts.push(`<file path="${path.basename(result.filename)}">\n${result.content}\n</file>`);
       }
     }
   }
@@ -680,7 +680,7 @@ For large files (>2000 lines), use {path, startLine, endLine} to select a portio
               );
             }
 
-            textParts.push(`<file path="${result.filename}">\n${result.content}\n</file>`);
+            textParts.push(`<file path="${path.basename(result.filename)}">\n${result.content}\n</file>`);
           }
         }
       }

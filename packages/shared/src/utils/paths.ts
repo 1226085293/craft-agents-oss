@@ -66,6 +66,15 @@ export function expandPath(inputPath: string, basePath?: string): string {
 export function toPortablePath(absolutePath: string): string {
   if (!absolutePath) return absolutePath;
 
+  // Idempotent guard: if the path is already in portable form, return it as-is.
+  // Without this, a second conversion (e.g. the persistence queue converts the
+  // path to ~/... and then createSessionHeader converts it again) calls
+  // path.normalize, which on Windows turns the `~/` prefix into `~\`. expandPath
+  // only unwraps `~/`, so the path would fail to resolve on read.
+  if (absolutePath === '~' || absolutePath.startsWith('~/') || absolutePath.startsWith('~\\')) {
+    return absolutePath;
+  }
+
   const home = homedir();
   const normalized = normalize(absolutePath);
 

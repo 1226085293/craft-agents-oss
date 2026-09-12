@@ -198,25 +198,16 @@ function isPathWithinDirectory(targetPath: string, baseDir: string): boolean {
 
   const realBase = existsSync(resolvedBase) ? realpathSync.native(resolvedBase) : resolvedBase;
 
-  if (existsSync(resolvedTarget)) {
-    const realTarget = realpathSync.native(resolvedTarget);
-    return isWithin(realBase, realTarget);
+  // A non-existent target can't be a symlink escape, so the resolved-path
+  // containment check above is authoritative. This also avoids the false
+  // negative where a not-yet-created plans folder makes the ancestor walk
+  // climb past it to an existing parent directory.
+  if (!existsSync(resolvedTarget)) {
+    return true;
   }
 
-  // Target may be a new file path. Validate using nearest existing ancestor
-  // to prevent symlink escapes while still allowing legitimate new files.
-  let current = dirname(resolvedTarget);
-  while (true) {
-    if (existsSync(current)) {
-      const realCurrent = realpathSync.native(current);
-      return isWithin(realBase, realCurrent);
-    }
-    const parent = dirname(current);
-    if (parent === current) {
-      return false;
-    }
-    current = parent;
-  }
+  const realTarget = realpathSync.native(resolvedTarget);
+  return isWithin(realBase, realTarget);
 }
 
 // ============================================================
@@ -1680,7 +1671,7 @@ export function extractBashWriteTarget(command: string): string | null {
   // Pattern 2: shell -c/-lc with inner redirect (Codex pattern, unquoted paths)
   // Match: /bin/zsh -lc "... > /path/to/file ..." or bash -c '... > /path ...'
   const shellExecMatch = command.match(
-    /(?:\/bin\/)?(?:zsh|bash|sh)\s+(?:-\w+\s+)*["'].*?>\s*([^\s'"\\]+)/
+    /(?:\/bin\/)?(?:zsh|bash|sh)\s+(?:-\w+\s+)*["'].*?>\s*([^\s'"]+)/
   );
   if (shellExecMatch?.[1] && shellExecMatch[1] !== '/dev/null') {
     return shellExecMatch[1];

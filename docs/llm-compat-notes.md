@@ -193,6 +193,179 @@ occurred ~121 s after request start (matches the 120 s HTTP idle timeout in
   fault, not a model stop. Check `httpIdleTimeoutMs` (120_000) and
   `CALLBACK_TOOL_TIMEOUT_MS` (120000) before assuming a hung model.
 
+## Incident 5: `400 property 'reasoning_content' is unsupported` (2026-09-13)
+
+### Symptom
+
+With the custom endpoint pointed at a local uni-api gateway that routes to
+Groq (`openai/gpt-oss-120b`), every **multi-turn** request failed:
+
+```text
+Error 400 with provider groq-1 ... openai/gpt-oss-120b
+"'messages.2' : for 'role:assistant' the following must be satisfied
+ [('messages.2' : property 'reasoning_content' is unsupported)]"
+```
+
+First turn succeeded; the failure appeared as soon as a prior assistant
+message was echoed back in `messages`.
+
+### Root cause
+
+`buildCustomEndpointModelDef` hard-coded
+`compat.requiresReasoningContentOnAssistantMessages: true` for **every**
+custom endpoint. That flag was added for one specific relay
+(stealth/ox-alpha), whose thinking-mode handshake *requires* every assistant
+message to carry `reasoning_content` — without it the relay 400s with
+"the reasoning_content in the thinking mode must be passed back".
+
+Groq takes the exact opposite position and rejects the property outright.
+Because the flag was unconditional, there was no way to serve both: the
+value is genuinely upstream-specific, and no single setting is safe for all
+endpoints behind a proxy.
+
+This is the same class of mistake as Incident 1 (`supportsDeveloperRole`) —
+a value derived from one upstream baked into the synthetic definition for
+all of them.
+
+### Fix
+
+Made the flag configurable instead of hard-coded:
+
+- `packages/pi-agent-server/src/custom-endpoint-models.ts` — added
+  `requiresReasoningContentOnAssistantMessages` to both
+  `CustomEndpointModelDefaults` and `CustomEndpointModelOverrides`; the
+  builder now resolves `per-model override ?? connection default ?? true`.
+  Default stays `true` so the original relay keeps working.
+- `packages/pi-agent-server/src/index.ts` — plumbed the connection-level
+  value from `initConfig.customEndpoint` and the per-model value through
+  `customModelOverrides`.
+- `packages/shared/src/config/llm-connections.ts` — added the field to
+  `CustomEndpointConfig` so it can be set in `config.json`.
+- `packages/server-core/src/sessions/runtime-config.ts` — included it in
+  `buildBackendRuntimeSignature` so changing it rebuilds the backend instead
+  of being ignored by the in-place refresh path.
+
+Endpoints that reject the property now set it in `config.json`:
+
+```json
+{
+  "customEndpoint": {
+    "api": "openai-completions",
+    "requiresReasoningContentOnAssistantMessages": false
+  }
+}
+```
+
+### Prevention
+
+- A `compat.*` flag whose correct value **differs per upstream** must be
+  configurable, never hard-coded — even if today only one upstream needs the
+  non-default value. Incident 1 and Incident 5 are both instances of this.
+- When a gateway fans out to several providers (uni-api `auto`, LiteLLM),
+  assume the strictest common denominator: any per-provider field that isn't
+  universally accepted has to be opt-in.
+- Test multi-turn conversations, not just the first turn. Both Incident 1
+  and Incident 5 only manifest once history is echoed back.
+
+## Incident 6: deterministic 4xx errors retried for the full 2h budget (2026-09-13)
+
+### Symptom
+
+Same session as Incident 5. After the `reasoning_content` fix the failure
+changed — but the session *still* did not recover, and the UI kept reporting
+"retrying" with no error surfaced.
+
+### Root cause
+
+`classifyAutoRetryError` classified **both** real errors as `transient`:
+
+| Error | Was | Should be |
+|---|---|---|
+| `400 ... property 'reasoning_content' is unsupported` | transient | **permanent** |
+| `413 Request too large ... Limit 8000, Requested 61426` | transient | **permanent** |
+
+Two independent causes:
+
+1. **Unknown text defaulted to transient.** The classifier is a list of
+   "permanent" phrases; anything unmatched fell through to transient
+   ("conservative about giving up"). But the retry loop re-sends the *same*
+   history (`stripTrailingErrorAssistant` + `agent.continue()`), so any error
+   that is a property of the request reproduces forever. A misclassified
+   permanent error costs the entire 2h / 30-round budget, and it does so
+   silently.
+2. **The HTTP status never reached the classifier.** `errorText` is only
+   `msg.errorMessage`; the status lives in a sibling `status` field.
+   `api-error.json` for this session reads
+   `{"status":400,...,"message":"'messages.2' : ... is unsupported"}` — the
+   message contains no status code at all, so no status-based rule could fire.
+
+### Fix
+
+Two layers, both in `packages/pi-agent-server/src/auto-retry.ts`:
+
+- **Status-code layer.** `extractHttpStatus()` recovers a code from the
+  provider string (`HTTP/1.1 400`, `status_code=400`, `"status":400`,
+  `Error 400 with provider`, …). 5xx → transient; 4xx → permanent unless it is
+  in `TRANSIENT_4XX` (`408/409/425/429` — the codes that can legitimately heal
+  with an identical request). Per RFC 9110 this is the correct default: 4xx
+  means "change the request", 5xx means "the server may recover".
+- **Request-shape / request-size phrases.** Added to `PERMANENT_ERROR_PATTERNS`
+  for the status-free case: `is unsupported`, `must be satisfied`,
+  `request too large`, `please reduce your message`, … Notably **not**
+  `is not supported` — that phrasing appears in transient upstream notices
+  ("User location is not supported"), which the test suite pins.
+
+Verified by running the real classifier over both incident strings.
+
+### Prevention
+
+- The conservative default is right for **unknown strings** (transport errors
+  carry no status) but wrong for the **4xx class**. Prefer splitting on the
+  status-code layer when a code is available.
+- "Retry the same request" can only succeed if the failure was environmental.
+  Before classifying anything transient, ask: *can the next request differ?*
+- Test with the verbatim provider string, not a paraphrase. Both regressions
+  here were invisible until the exact text (status-free) was used.
+
+## Incident 7: context compaction ignores the channel's real ceiling (2026-09-13)
+
+### Symptom
+
+The session sat at ~61K tokens and was rejected with
+`Request too large ... Limit 8000, Requested 61426`. Auto-compaction never ran.
+
+### Root cause
+
+Two different numbers were being conflated:
+
+- the model's **declared `contextWindow`** (openai/gpt-oss-120b → 131072)
+- the **largest request the channel actually accepts** (Groq free tier → 8000)
+
+The SDK compacts at ~87.5% of the declared window (114688). The session died at
+8000 — **14x below the only threshold that exists** — so compaction never
+triggered. Nothing in the codebase represented "what this channel will accept".
+
+### Fix
+
+Added `contextTokenBudget` (connection-level in `customEndpoint`, or per model
+in `customModels`) stating the channel's real ceiling. `forced-compaction.ts`
+gained a budget lane: when context reaches 90% of the budget, compaction is
+forced regardless of stopReason, so the session degrades instead of walling
+into a 413. Reuses the existing anti-loop guard (skip if the last compaction
+shrank context by < 4000 tokens) and logs when the session is simply too big
+for the channel.
+
+Resolved lazily via `resolveContextTokenBudget()` because the active model can
+change mid-session.
+
+### Prevention
+
+- A model's context window and a channel's request ceiling are **orthogonal**
+  constraints. Anything that sizes work by the former will be wrong whenever a
+  gateway enforces the latter.
+- Prefer failing loudly ("this session needs a bigger channel") over silently
+  not compacting.
+
 ## Related files
 
 - `packages/pi-agent-server/src/custom-endpoint-models.ts` — synthetic model
@@ -204,6 +377,17 @@ occurred ~121 s after request start (matches the 120 s HTTP idle timeout in
   openai-completions`).
 - `@earendil-works/pi-ai/dist/api/openai-completions.js` — request-shaping logic
   (`supportsDeveloperRole`, `reasoning`).
+- `packages/shared/src/config/llm-connections.ts` — `CustomEndpointConfig`
+  (`requiresReasoningContentOnAssistantMessages` Incident 5,
+  `contextTokenBudget` Incident 7).
+- `packages/pi-agent-server/src/auto-retry.ts` — status-code classification
+  layer (`extractHttpStatus`, `TRANSIENT_4XX`, Incident 6).
+- `packages/pi-agent-server/src/forced-compaction.ts` — budget lane
+  (`shouldCompactForBudget`, Incident 7).
+- `packages/pi-agent-server/src/tool-payload.ts` — per-turn tool preamble
+  measurement + promptSnippet shaping.
+- `packages/shared/src/interceptor-common.ts` — append-only error history
+  (`api-errors.jsonl`) alongside the single-slot `api-error.json`.
 - `packages/server-core/src/sessions/SessionManager.ts` — complete handler
   error surfacing (Incident 3).
 - `packages/messaging-gateway/src/renderer.ts` — progress bubble lifecycle and

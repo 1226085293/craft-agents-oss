@@ -6,6 +6,7 @@ import {
   AUTO_RETRY_DEADLINE_MS,
   AUTO_RETRY_MAX_ROUNDS,
   classifyAutoRetryError,
+  extractHttpStatus,
   extractLastAssistant,
   isBudgetExhaustedError,
   stripTrailingErrorAssistant,
@@ -125,6 +126,106 @@ describe('classifyAutoRetryError', () => {
   it('does not misfire \b401\b inside longer numbers', () => {
     expect(classifyAutoRetryError('generated 4013 tokens')).toBe('transient');
     expect(classifyAutoRetryError('request id 14019 failed')).toBe('transient');
+  });
+
+  // -------------------------------------------------------------------------
+  // Status-code layer (2026-09-13 lively-forest).
+  //
+  // The retry loop re-sends the SAME history, so a rejection that is a
+  // property of the request can never heal. Both errors below were classified
+  // 'transient' before this layer existed, which would have burned the full
+  // 2h / 30-round budget while the UI reported "retrying".
+  // -------------------------------------------------------------------------
+
+  it('classifies a deterministic 400 as permanent (reasoning_content incident)', () => {
+    // Verbatim `message` field from sessions/260907-lively-forest/api-error.json.
+    // NOTE: no status code in the text — the SDK's `errorMessage` deliberately
+    // omits it (`status` lives in a sibling field), so this must be caught by
+    // the request-shape patterns, not the status-code layer.
+    const text =
+      "'messages.2' : for 'role:assistant' the following must be satisfied" +
+      "[('messages.2' : property 'reasoning_content' is unsupported)]";
+    expect(extractHttpStatus(text)).toBeNull();
+    expect(classifyAutoRetryError(text)).toBe('permanent');
+  });
+
+  it('classifies 413 payload/rate over-limit as permanent (Groq 8000 TPM incident)', () => {
+    // Verbatim Groq body — again status-free, so it must be caught by pattern.
+    const text =
+      'Request too large for model `openai/gpt-oss-120b` on tokens per minute (TPM): ' +
+      'Limit 8000, Requested 61426, please reduce your message size';
+    expect(extractHttpStatus(text)).toBeNull();
+    expect(classifyAutoRetryError(text)).toBe('permanent');
+  });
+
+  it('classifies other definitive 4xx codes as permanent', () => {
+    for (const text of [
+      '403 Forbidden: your key lacks access to this model',
+      '404 The model `gpt-9` does not exist',
+      '422 Unprocessable Entity: messages.0.content must be a string',
+      '415 Unsupported media type',
+      'HTTP/1.1 400 Bad Request',
+      'Error 400 with provider groq-1 (openai/gpt-oss-120b)',
+      '{"error":{"message":"bad request","status":400}}',
+      'upstream returned status_code=400',
+    ]) {
+      expect(classifyAutoRetryError(text)).toBe('permanent');
+    }
+  });
+
+  it('keeps genuinely transient 4xx codes transient', () => {
+    for (const text of [
+      '429 Rate limit reached for requests',
+      '429 Too Many Requests',
+      '408 Request Timeout',
+      '409 Conflict: resource is locked',
+      '425 Too Early',
+    ]) {
+      expect(classifyAutoRetryError(text)).toBe('transient');
+    }
+  });
+
+  it('classifies 5xx as transient regardless of phrasing', () => {
+    for (const text of [
+      '500 Internal Server Error',
+      '502 Bad Gateway',
+      '503 Service Temporarily Unavailable',
+      '504 Gateway Timeout',
+      'HTTP/1.1 500 Internal Server Error',
+    ]) {
+      expect(classifyAutoRetryError(text)).toBe('transient');
+    }
+  });
+
+  it('still defaults status-less unknown text to transient', () => {
+    for (const text of [
+      'socket hang up',
+      'fetch failed',
+      'upstream connect error or disconnect/reset before headers',
+      'some totally unknown gateway hiccup',
+    ]) {
+      expect(classifyAutoRetryError(text)).toBe('transient');
+    }
+  });
+});
+
+describe('extractHttpStatus', () => {
+  it('recovers the status from common provider shapes', () => {
+    expect(extractHttpStatus('HTTP/1.1 400 Bad Request')).toBe(400);
+    expect(extractHttpStatus('HTTP 413')).toBe(413);
+    expect(extractHttpStatus('Error 400 with provider groq-1')).toBe(400);
+    expect(extractHttpStatus('upstream returned status_code=400')).toBe(400);
+    expect(extractHttpStatus('{"error":{"message":"bad","status":400}}')).toBe(400);
+    expect(extractHttpStatus('500 Internal Server Error')).toBe(500);
+    expect(extractHttpStatus('429 Too Many Requests')).toBe(429);
+  });
+
+  it('ignores numbers that are not status codes', () => {
+    expect(extractHttpStatus('generated 4013 tokens')).toBeNull();
+    expect(extractHttpStatus('request id 14019 failed')).toBeNull();
+    expect(extractHttpStatus('Request too large: Limit 8000, Requested 61426')).toBeNull();
+    expect(extractHttpStatus('')).toBeNull();
+    expect(extractHttpStatus(undefined)).toBeNull();
   });
 });
 

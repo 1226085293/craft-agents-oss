@@ -472,6 +472,12 @@ export const RPC_CHANNELS = {
     ALLOW_PENDING_SENDER: 'messaging:access:allowPending',
     SET_BINDING_ACCESS: 'messaging:access:setBindingAccess',
   },
+  memory: {
+    MEMORY_GET_STATS: 'memory:getStats',
+    MEMORY_ADD: 'memory:add',
+    MEMORY_DELETE: 'memory:delete',
+    MEMORY_EXTRACT: 'memory:extract',
+  },
 } as const
 
 // IPC_CHANNELS compat alias removed — all consumers now use RPC_CHANNELS

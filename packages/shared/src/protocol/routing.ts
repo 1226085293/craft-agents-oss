@@ -487,6 +487,11 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.messaging.DISMISS_PENDING_SENDER,
   RPC_CHANNELS.messaging.ALLOW_PENDING_SENDER,
   RPC_CHANNELS.messaging.SET_BINDING_ACCESS,
+  // memory — local-only workspace memory management
+  RPC_CHANNELS.memory.MEMORY_GET_STATS,
+  RPC_CHANNELS.memory.MEMORY_ADD,
+  RPC_CHANNELS.memory.MEMORY_DELETE,
+  RPC_CHANNELS.memory.MEMORY_EXTRACT,
 ])
 
 // ---------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input'
 import { useAppShellContext, useSession } from '@/context/AppShellContext'
 import { cn } from '@/lib/utils'
 import { SessionFilesSection } from '../right-sidebar/SessionFilesSection'
+import { MemoryPanel } from './MemoryPanel'
 
 interface SessionInfoPopoverProps {
   sessionId: string
@@ -103,6 +104,7 @@ function SessionInfoPopoverContent({ sessionId, sessionFolderPath }: { sessionId
   const session = useSession(sessionId)
   const { onRenameSession } = useAppShellContext()
   const [name, setName] = React.useState('')
+  const [activeTab, setActiveTab] = React.useState<'files' | 'memory'>('files')
   const renameTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
   React.useEffect(() => {
@@ -135,27 +137,50 @@ function SessionInfoPopoverContent({ sessionId, sessionFolderPath }: { sessionId
 
   return (
     <div className="h-full min-h-0 flex flex-col">
-      <div className="shrink-0 p-3 border-b border-border/50">
-        <label className="text-xs font-medium text-muted-foreground block mb-1.5 select-none">
-          {t("chat.title")}
-        </label>
-        <div className="rounded-lg bg-foreground-2 has-[:focus]:bg-background shadow-minimal transition-colors">
-          <Input
-            value={name}
-            onChange={handleNameChange}
-            placeholder={t("chat.titlePlaceholder")}
-            className="h-9 py-2 text-sm border-0 shadow-none bg-transparent focus-visible:ring-0"
+      {/* Tabs */}
+      <div className="flex border-b border-border/50 shrink-0">
+        <button
+          className={cn(
+            "px-3 py-2 text-xs font-medium transition-colors",
+            activeTab === 'files'
+              ? "text-foreground border-b-2 border-primary"
+              : "text-muted-foreground hover:text-foreground"
+          )}
+          onClick={() => setActiveTab('files')}
+        >
+          {t('chat.files')}
+        </button>
+        <button
+          className={cn(
+            "px-3 py-2 text-xs font-medium transition-colors",
+            activeTab === 'memory'
+              ? "text-foreground border-b-2 border-primary"
+              : "text-muted-foreground hover:text-foreground"
+          )}
+          onClick={() => setActiveTab('memory')}
+        >
+          {t('memory.title')}
+        </button>
+      </div>
+
+      {activeTab === 'files' ? (
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <SessionFilesSection
+            sessionId={sessionId}
+            sessionFolderPath={sessionFolderPath}
+            hideHeader={false}
+            className="h-full min-h-0"
           />
         </div>
-      </div>
-      <div className="flex-1 min-h-0 overflow-hidden">
-        <SessionFilesSection
-          sessionId={sessionId}
-          sessionFolderPath={sessionFolderPath}
-          hideHeader={false}
-          className="h-full min-h-0"
-        />
-      </div>
+      ) : (
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <MemoryPanel
+            workspaceRootPath={sessionFolderPath}
+            sessionId={sessionId}
+            className="h-full"
+          />
+        </div>
+      )}
     </div>
   )
 }

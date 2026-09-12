@@ -10,7 +10,8 @@ import type {
   MemoryStore,
   MemoryInjectionConfig,
 } from './types.ts';
-import { DEFAULT_MEMORY_INJECTION_CONFIG, markMemoryInjected } from './types.ts';
+import { DEFAULT_MEMORY_INJECTION_CONFIG } from './types.ts';
+import { markMemoryInjected } from './store.ts';
 import { getMemoryStats } from './store.ts';
 
 // ============================================================================
@@ -185,7 +186,7 @@ export function buildMemoryContext(
 
   for (const entry of memories) {
     if (grouped[entry.type]) {
-      grouped[entry.type].push(entry);
+      grouped[entry.type]?.push(entry);
     }
   }
 
@@ -249,7 +250,7 @@ export function previewMemoryInjection(
   estimatedTokens: number;
   contextSnippet: string;
 } {
-  const selected = selectRelevantMemories(store, recentMessages, config);
+  const selected = selectRelevantMemories(store, recentMessages, config ?? DEFAULT_MEMORY_INJECTION_CONFIG);
   const context = buildMemoryContext(selected, false);
   const estimatedTokens = Math.ceil(context.length / 4);
 

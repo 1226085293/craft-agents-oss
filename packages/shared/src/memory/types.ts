@@ -179,3 +179,27 @@ export interface MemoryInjectAction {
 
 /** Union of all memory actions */
 export type MemoryAction = MemoryAddAction | MemoryUpdateAction | MemoryDeleteAction | MemoryInjectAction;
+
+// ============================================================================
+// Extraction Strategy
+// ============================================================================
+
+/** When to automatically extract memories from a session */
+export type MemoryExtractionStrategy = 'compaction' | 'session_end' | 'both'
+
+/** Configuration for memory extraction */
+export interface MemoryConfig {
+  /** When to trigger automatic extraction */
+  extractionStrategy?: MemoryExtractionStrategy
+  /** Maximum number of memories to extract per session */
+  maxMemoriesPerSession?: number
+  /** Minimum confidence threshold for auto-extracted memories */
+  minAutoConfidence?: number
+}
+
+/** Default configuration */
+export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
+  extractionStrategy: 'both',
+  maxMemoriesPerSession: 20,
+  minAutoConfidence: 0.5,
+}

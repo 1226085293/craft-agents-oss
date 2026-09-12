@@ -87,7 +87,7 @@ Examples:
 - "What does the user prefer about code style?" → query: "code style preference"
 - "What projects am I working on?" → query: "project" type: "context"
 - "What workflows have I learned?" → query: "workflow" type: "workflow"`,
-    inputSchema: MemoryQuerySchema.shape,
+    inputSchema: MemoryQuerySchema.shape as any,
   };
 }
 
@@ -109,7 +109,7 @@ Actions:
 - stats: Show memory statistics
 
 Use this to manually curate the knowledge base that persists across sessions.`,
-    inputSchema: MemoryManageSchema.shape,
+    inputSchema: MemoryManageSchema as any,
   };
 }
 
@@ -195,7 +195,7 @@ export async function handleMemoryManage(
         ? { type: 'update', id: args.id, content: args.content, tags: args.tags, confidence: args.confidence }
         : { type: 'delete', id: args.id };
 
-    const result = applyMemoryAction(store, action);
+    const result = applyMemoryAction(store, action as any);
     saveMemoryStore(workspaceRootPath, store);
 
     if (!result.success) {
@@ -212,7 +212,7 @@ export async function handleMemoryManage(
     };
 
     return {
-      content: [{ type: 'text', text: messages[action.type] }],
+      content: [{ type: 'text', text: messages[action.type] ?? 'Done.' }],
     };
   } catch (error) {
     return {

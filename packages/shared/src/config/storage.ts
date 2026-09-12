@@ -1747,7 +1747,7 @@ export function shouldRepairPiApiKeyCodexProvider(connection: Pick<LlmConnection
   return connection.authType === 'api_key' || connection.authType === 'api_key_with_endpoint';
 }
 
-function normalizeModelIds(models?: Array<{ id: string } | string>): string[] {
+export function normalizeModelIds(models?: Array<{ id: string } | string>): string[] {
   if (!models) return [];
   return models
     .map(m => typeof m === 'string' ? m : m.id)

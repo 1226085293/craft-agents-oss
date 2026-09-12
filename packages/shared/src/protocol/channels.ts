@@ -201,6 +201,9 @@ export const RPC_CHANNELS = {
     SET_WORKSPACE_DEFAULT: 'LLM_Connection:setWorkspaceDefault',
     REFRESH_MODELS: 'LLM_Connection:refreshModels',
     CHANGED: 'LLM_Connection:changed',
+    TOGGLE_MODEL: 'LLM_Connection:toggleModel',
+    ADD_CUSTOM_MODEL: 'LLM_Connection:addCustomModel',
+    UPDATE_MODEL_ENABLED: 'LLM_Connection:updateModelEnabled',
   },
   chatgpt: {
     START_OAUTH: 'chatgpt:startOAuth',

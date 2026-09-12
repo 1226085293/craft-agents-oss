@@ -222,6 +222,13 @@ export interface LlmConnection {
 
   /** Timestamp when connection was last used */
   lastUsedAt?: number;
+
+  /**
+   * Manually enabled model IDs for this connection.
+   * Empty array or undefined means all models are enabled.
+   * Used for fine-grained control over which models appear in selectors.
+   */
+  enabledModels?: string[];
 }
 
 /**

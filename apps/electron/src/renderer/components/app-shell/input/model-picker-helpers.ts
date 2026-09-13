@@ -3,6 +3,9 @@ import {
   type LlmConnection,
 } from '@config/llm-connections'
 
+/** A single entry of `LlmConnection.models` — either a full definition or a bare id. */
+type ConnectionModel = NonNullable<LlmConnection['models']>[number]
+
 /**
  * Format token count for display (e.g., 1500 -> "1.5k", 200000 -> "200k").
  * Shared by the desktop model dropdown and the compact (drawer) model picker.
@@ -23,6 +26,25 @@ export function formatTokenCount(tokens: number): string {
  */
 export function stripPiPrefixForDisplay(value: string): string {
   return value.startsWith('pi/') ? value.slice(3) : value
+}
+
+/**
+ * Models offered by a connection in the picker, honouring the per-connection
+ * `enabledModels` allowlist.
+ *
+ * `enabledModels` empty/absent means "everything is enabled" (back-compat with
+ * connections created before the allowlist existed), so the raw list is
+ * returned untouched in that case.
+ */
+export function getAvailableModels(
+  connection: Pick<LlmConnection, 'models' | 'enabledModels'> | null | undefined,
+  fallback: ConnectionModel[] = [],
+): ConnectionModel[] {
+  const models = connection?.models?.length ? connection.models : fallback
+  const enabled = connection?.enabledModels
+  if (!enabled?.length) return models
+  const allowlist = new Set(enabled)
+  return models.filter(m => allowlist.has(typeof m === 'string' ? m : m.id))
 }
 
 export type ConnectionGroup = [groupName: string, connections: LlmConnection[]]

@@ -160,6 +160,11 @@ export interface ISessionManager {
   /** Return the in-memory processing flag without hydrating full messages. */
   isSessionProcessing?(sessionId: string): boolean
   /**
+   * Live agent instance backing a session, or null when it hasn't been
+   * initialized yet. Used by handlers that invoke agent-owned operations.
+   */
+  getSessionAgent?(sessionId: string): { extractSessionMemories?: (options?: { strategy?: 'compaction' | 'session_end' }) => Promise<{ extracted: number; discarded: number }> } | null
+  /**
    * Lightweight side-channel decision used by messaging adapters when a user
    * sends a follow-up while the session is already running. Implementations
    * should not mutate visible history or interrupt the active run.

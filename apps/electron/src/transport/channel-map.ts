@@ -392,6 +392,13 @@ export const CHANNEL_MAP = {
   setWorkspaceDefaultLlmConnection: invoke(RPC_CHANNELS.llmConnections.SET_WORKSPACE_DEFAULT),
   toggleModel: invoke(RPC_CHANNELS.llmConnections.TOGGLE_MODEL),
   addCustomModel: invoke(RPC_CHANNELS.llmConnections.ADD_CUSTOM_MODEL),
+  updateModelEnabled: invoke(RPC_CHANNELS.llmConnections.UPDATE_MODEL_ENABLED),
+
+  // Memory (workspace-scoped cross-session memory)
+  getMemoryStats: invoke(RPC_CHANNELS.memory.MEMORY_GET_STATS),
+  addMemory: invoke(RPC_CHANNELS.memory.MEMORY_ADD),
+  deleteMemory: invoke(RPC_CHANNELS.memory.MEMORY_DELETE),
+  extractSessionMemories: invoke(RPC_CHANNELS.memory.MEMORY_EXTRACT),
 
   // Projects
   getProjects: invoke(RPC_CHANNELS.projects.GET),

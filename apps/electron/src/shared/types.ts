@@ -666,6 +666,13 @@ export interface ElectronAPI {
   setDefaultLlmConnection(slug: string): Promise<{ success: boolean; error?: string }>
   toggleModel(connectionSlug: string, modelId: string, enabled: boolean): Promise<{ success: boolean; error?: string }>
   addCustomModel(connectionSlug: string, model: { id: string; name: string; contextWindow?: number }): Promise<{ success: boolean; error?: string }>
+  updateModelEnabled(connectionSlug: string, modelId: string, enabled: boolean): Promise<{ success: boolean; error?: string }>
+
+  // Memory (workspace-scoped cross-session memory)
+  getMemoryStats(workspaceRootPath: string): Promise<{ entries: MemoryEntry[]; stats: MemoryStats }>
+  addMemory(workspaceRootPath: string, data: { content: string; type: MemoryType; tags?: string[]; confidence?: number }): Promise<{ id: string }>
+  deleteMemory(workspaceRootPath: string, id: string): Promise<{ success: boolean }>
+  extractSessionMemories(sessionId: string): Promise<{ extracted: number; discarded: number }>
   getDefaultThinkingLevel(): Promise<ThinkingLevel>
   setDefaultThinkingLevel(level: ThinkingLevel): Promise<{ success: boolean; error?: string }>
   setWorkspaceDefaultLlmConnection(workspaceId: string, slug: string | null): Promise<{ success: boolean; error?: string }>

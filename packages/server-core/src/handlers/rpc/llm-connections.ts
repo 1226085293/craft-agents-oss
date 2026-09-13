@@ -18,6 +18,18 @@ import { CLIENT_OPEN_EXTERNAL } from '@craft-agent/server-core/transport'
 // Local OAuth state
 let copilotOAuthAbort: AbortController | null = null
 
+/**
+ * Resolve the effective set of enabled model ids for a connection.
+ *
+ * `enabledModels` is an allowlist: empty/undefined means "everything in
+ * `models` is enabled". Expanding it before a toggle avoids turning a single
+ * disable into "only that model is enabled".
+ */
+function resolveEnabledModelIds(connection: LlmConnection): Set<string> {
+  if (connection.enabledModels?.length) return new Set(connection.enabledModels)
+  return new Set(normalizeModelIds(connection.models))
+}
+
 export function isMaskedCredential(value: string | undefined): boolean {
   if (!value) return false
   return /[\u2022\u25cf\u25e6\u2219*]/.test(value)
@@ -34,6 +46,9 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.llmConnections.SET_DEFAULT,
   RPC_CHANNELS.llmConnections.SET_WORKSPACE_DEFAULT,
   RPC_CHANNELS.llmConnections.REFRESH_MODELS,
+  RPC_CHANNELS.llmConnections.TOGGLE_MODEL,
+  RPC_CHANNELS.llmConnections.ADD_CUSTOM_MODEL,
+  RPC_CHANNELS.llmConnections.UPDATE_MODEL_ENABLED,
   RPC_CHANNELS.chatgpt.START_OAUTH,
   RPC_CHANNELS.chatgpt.COMPLETE_OAUTH,
   RPC_CHANNELS.chatgpt.CANCEL_OAUTH,
@@ -634,26 +649,23 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
   })
 
   // Toggle model enabled state for a connection
-  server.handle(RPC_CHANNELS.llmConnections.TOGGLE_MODEL, async (_ctx, params: { connectionSlug: string; modelId: string; enabled: boolean }): Promise<{ success: boolean; error?: string }> => {
+  // NOTE: RPC args are forwarded positionally (see WsRpcServer dispatch), so the
+  // signature must stay positional — a single params object would arrive as arg 0.
+  server.handle(RPC_CHANNELS.llmConnections.TOGGLE_MODEL, async (_ctx, connectionSlug: string, modelId: string, enabled: boolean): Promise<{ success: boolean; error?: string }> => {
     try {
-      const connection = getLlmConnection(params.connectionSlug)
+      const connection = getLlmConnection(connectionSlug)
       if (!connection) {
         return { success: false, error: 'Connection not found' }
       }
 
-      if (!connection.enabledModels) {
-        connection.enabledModels = []
-      }
-
-      if (params.enabled) {
-        if (!connection.enabledModels.includes(params.modelId)) {
-          connection.enabledModels.push(params.modelId)
-        }
+      const enabledModels = resolveEnabledModelIds(connection)
+      if (enabled) {
+        enabledModels.add(modelId)
       } else {
-        connection.enabledModels = connection.enabledModels.filter(id => id !== params.modelId)
+        enabledModels.delete(modelId)
       }
 
-      await updateLlmConnection(params.connectionSlug, { enabledModels: connection.enabledModels })
+      await updateLlmConnection(connectionSlug, { enabledModels: [...enabledModels] })
       return { success: true }
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error'
@@ -662,31 +674,38 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
   })
 
   // Add a custom model to a connection
-  server.handle(RPC_CHANNELS.llmConnections.ADD_CUSTOM_MODEL, async (_ctx, params: { connectionSlug: string; model: { id: string; name: string; contextWindow?: number } }): Promise<{ success: boolean; error?: string }> => {
+  server.handle(RPC_CHANNELS.llmConnections.ADD_CUSTOM_MODEL, async (_ctx, connectionSlug: string, model: { id: string; name: string; contextWindow?: number }): Promise<{ success: boolean; error?: string }> => {
     try {
-      const connection = getLlmConnection(params.connectionSlug)
+      const connection = getLlmConnection(connectionSlug)
       if (!connection) {
         return { success: false, error: 'Connection not found' }
       }
 
+      const id = model?.id?.trim()
+      if (!id) {
+        return { success: false, error: 'Model id is required' }
+      }
+
       // Get current models array
       const currentModels = normalizeModelIds(connection.models)
-      
+
       // Check if model already exists
-      if (currentModels.includes(params.model.id)) {
+      if (currentModels.includes(id)) {
         return { success: true } // Already exists
       }
 
       // Add custom model as string ID
-      currentModels.push(params.model.id)
-      await updateLlmConnection(params.connectionSlug, { models: currentModels })
-      
-      // Also add to enabledModels if not already there
-      if (!connection.enabledModels?.includes(params.model.id)) {
-        const enabledModels = connection.enabledModels ? [...connection.enabledModels, params.model.id] : [params.model.id]
-        await updateLlmConnection(params.connectionSlug, { enabledModels })
+      currentModels.push(id)
+      await updateLlmConnection(connectionSlug, { models: currentModels })
+
+      // A restricted allowlist must include the new model, otherwise it would be
+      // added but immediately filtered out of the picker.
+      if (connection.enabledModels?.length) {
+        const enabledModels = new Set(connection.enabledModels)
+        enabledModels.add(id)
+        await updateLlmConnection(connectionSlug, { enabledModels: [...enabledModels] })
       }
-      
+
       return { success: true }
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error'
@@ -694,27 +713,22 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
     }
   })
 
-  // Update model enabled state (alias for TOGGLE_MODEL with different param structure)
-  server.handle(RPC_CHANNELS.llmConnections.UPDATE_MODEL_ENABLED, async (_ctx, params: { connectionSlug: string; modelId: string; enabled: boolean }): Promise<{ success: boolean; error?: string }> => {
+  // Update model enabled state (batch alias for TOGGLE_MODEL)
+  server.handle(RPC_CHANNELS.llmConnections.UPDATE_MODEL_ENABLED, async (_ctx, connectionSlug: string, modelId: string, enabled: boolean): Promise<{ success: boolean; error?: string }> => {
     try {
-      const connection = getLlmConnection(params.connectionSlug)
+      const connection = getLlmConnection(connectionSlug)
       if (!connection) {
         return { success: false, error: 'Connection not found' }
       }
 
-      if (!connection.enabledModels) {
-        connection.enabledModels = []
-      }
-
-      if (params.enabled) {
-        if (!connection.enabledModels.includes(params.modelId)) {
-          connection.enabledModels.push(params.modelId)
-        }
+      const enabledModels = resolveEnabledModelIds(connection)
+      if (enabled) {
+        enabledModels.add(modelId)
       } else {
-        connection.enabledModels = connection.enabledModels.filter(id => id !== params.modelId)
+        enabledModels.delete(modelId)
       }
 
-      await updateLlmConnection(params.connectionSlug, { enabledModels: connection.enabledModels })
+      await updateLlmConnection(connectionSlug, { enabledModels: [...enabledModels] })
       return { success: true }
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unknown error'

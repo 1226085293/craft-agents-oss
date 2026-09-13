@@ -1304,7 +1304,7 @@ export default function AiSettingsPage() {
                   onOpenChange={setModelManagerOpen}
                   connection={modelManagerConnection}
                   onSuccess={() => {
-                    setModelManagerOpen(false)
+                    // Keep the dialog open — toggling one model shouldn't tear it down.
                     refreshLlmConnections?.()
                   }}
                 />

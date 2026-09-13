@@ -86,8 +86,10 @@ import {
 import { WorkingDirectorySelector, formatPathForDisplay } from './WorkingDirectorySelector'
 import { CompactPermissionModeSelector } from './CompactPermissionModeSelector'
 import { CompactModelSelector } from './CompactModelSelector'
+import { ContextUsageRing } from './ContextUsageRing'
 import {
   formatTokenCount,
+  getAvailableModels,
   groupConnectionsByProvider,
   stripPiPrefixForDisplay,
 } from './model-picker-helpers'
@@ -337,7 +339,7 @@ export function FreeFormInput({
     if (!conn) return null
     if (!isCompatProvider(conn.providerType)) return null
     // Allow model switching when connection has multiple models
-    if (conn.models && conn.models.length > 1) return null
+    if (getAvailableModels(conn).length > 1) return null
     return conn.defaultModel ?? null
   }, [currentConnection, workspaceDefaultConnection, llmConnections])
 
@@ -365,7 +367,7 @@ export function FreeFormInput({
       return ANTHROPIC_MODELS // Safety net — shouldn't happen
     }
 
-    return connection.models || ANTHROPIC_MODELS
+    return getAvailableModels(connection, ANTHROPIC_MODELS)
   }, [llmConnections, currentConnection, workspaceDefaultConnection, connectionUnavailable])
 
   const availableThinkingLevels = THINKING_LEVELS
@@ -2063,8 +2065,21 @@ export function FreeFormInput({
             <div className="flex-1" />
           )}
 
-          {/* Right side: Model + Send - never shrink so they're always visible */}
+          {/* Right side: Context usage + Model + Send - never shrink so they're always visible */}
           <div className="flex items-center shrink-0">
+          {/* 4.5 Context usage ring — sits to the left of the model switcher in the
+              bottom-right corner. Click to compact manually before the agent hits
+              its automatic compaction threshold. */}
+          <ContextUsageRing
+            inputTokens={contextStatus?.inputTokens}
+            contextWindow={contextStatus?.contextWindow}
+            fallbackContextWindow={getModelContextWindow(currentModel)}
+            isCompacting={contextStatus?.isCompacting}
+            disabled={isProcessing}
+            onCompact={() => onSubmit('/compact', [])}
+            className="mr-1"
+          />
+
           {/* 5. Model/Connection Selector - Hidden in compact mode (EditPopover embedding) */}
           {!compactMode && (
           <DropdownMenu open={modelDropdownOpen} onOpenChange={setModelDropdownOpen}>
@@ -2213,7 +2228,7 @@ export function FreeFormInput({
                           {isAuthenticated && (
                             <StyledDropdownMenuSubContent className="min-w-[220px]">
                               {/* Show models for this connection - use provider-specific models as fallback */}
-                              {(conn.models || ANTHROPIC_MODELS).map((model) => {
+                              {getAvailableModels(conn, ANTHROPIC_MODELS).map((model) => {
                                 const modelId = typeof model === 'string' ? model : model.id
                                 const modelName = typeof model === 'string'
                                   ? stripPiPrefixForDisplay(getModelShortName(model))
@@ -2431,57 +2446,6 @@ export function FreeFormInput({
             </StyledDropdownMenuContent>
           </DropdownMenu>
           )}
-
-          {/* 5.5 Context Usage Warning Badge - shows when approaching auto-compaction threshold */}
-          {(() => {
-            // Calculate usage percentage based on compaction threshold (~77.5% of context window),
-            // not the full context window - this gives users meaningful warnings before compaction kicks in.
-            // SDK triggers compaction at ~155k tokens for a 200k context window.
-            // Falls back to known per-model context window when SDK hasn't reported usage yet.
-            const effectiveContextWindow = contextStatus?.contextWindow || getModelContextWindow(currentModel)
-            const compactionThreshold = effectiveContextWindow
-              ? Math.round(effectiveContextWindow * 0.775)
-              : null
-            const usagePercent = contextStatus?.inputTokens && compactionThreshold
-              ? Math.min(99, Math.round((contextStatus.inputTokens / compactionThreshold) * 100))
-              : null
-            // Show badge when >= 80% of compaction threshold AND not currently compacting
-            // Hide for Codex and Copilot models which don't support context compaction
-            const showWarning = usagePercent !== null && usagePercent >= 80 && !contextStatus?.isCompacting
-
-            if (!showWarning) return null
-
-            const handleCompactClick = () => {
-              if (!isProcessing) {
-                onSubmit('/compact', [])
-              }
-            }
-
-            return (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={handleCompactClick}
-                    disabled={isProcessing}
-                    className="inline-flex items-center h-6 px-2 text-[12px] font-medium bg-info/10 rounded-[6px] shadow-tinted select-none cursor-pointer hover:bg-info/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    style={{
-                      '--shadow-color': 'var(--info-rgb)',
-                      color: 'color-mix(in oklab, var(--info) 30%, var(--foreground))',
-                    } as React.CSSProperties}
-                  >
-                    {usagePercent}%
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="top">
-                  {isProcessing
-                    ? `${usagePercent}% context used — wait for current operation`
-                    : `${usagePercent}% context used — click to compact`
-                  }
-                </TooltipContent>
-              </Tooltip>
-            )
-          })()}
 
           {/* 6. Send/Stop controls. While processing, desktop defaults to
               queue-on-send. Guide/Cancel live on already-sent queued bubbles. */}

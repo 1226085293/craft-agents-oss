@@ -39,6 +39,7 @@ import { ConnectionIcon } from '@/components/icons/ConnectionIcon'
 import { derivePickerMode } from './picker-mode'
 import {
   formatTokenCount,
+  getAvailableModels,
   groupConnectionsByProvider,
   stripPiPrefixForDisplay,
 } from './model-picker-helpers'
@@ -96,7 +97,7 @@ export function CompactModelSelector({
     const conn = effectiveConnectionDetails
     if (!conn) return null
     if (!isCompatProvider(conn.providerType)) return null
-    if (conn.models && conn.models.length > 1) return null
+    if (getAvailableModels(conn).length > 1) return null
     return conn.defaultModel ?? null
   }, [effectiveConnectionDetails])
 
@@ -110,7 +111,7 @@ export function CompactModelSelector({
   const availableModels = React.useMemo(() => {
     if (connectionUnavailable) return []
     if (!effectiveConnectionDetails) return ANTHROPIC_MODELS
-    return effectiveConnectionDetails.models || ANTHROPIC_MODELS
+    return getAvailableModels(effectiveConnectionDetails, ANTHROPIC_MODELS)
   }, [effectiveConnectionDetails, connectionUnavailable])
 
   const currentModelDisplayName = React.useMemo(() => {
@@ -289,7 +290,7 @@ export function CompactModelSelector({
                       </button>
                       {isAuthenticated && isExpanded && (
                         <div className="pl-6 flex flex-col gap-0.5">
-                          {(conn.models || ANTHROPIC_MODELS).map(model => {
+                          {getAvailableModels(conn, ANTHROPIC_MODELS).map(model => {
                             const modelId = typeof model === 'string' ? model : model.id
                             const modelName = typeof model === 'string'
                               ? stripPiPrefixForDisplay(getModelShortName(model))

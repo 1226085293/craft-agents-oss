@@ -4,7 +4,7 @@
  * Reads/writes workspace-scoped memory.json for structured memory management.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -76,10 +76,10 @@ export function saveMemoryStore(
     mkdirSync(workspaceRootPath, { recursive: true });
     writeFileSync(tmpPath, JSON.stringify(store, null, 2), 'utf-8');
     // Atomic rename
-    require('node:fs').renameSync(tmpPath, filePath);
+    renameSync(tmpPath, filePath);
   } catch (error) {
     // Clean up tmp file on failure
-    try { require('node:fs').unlinkSync(tmpPath); } catch {}
+    try { unlinkSync(tmpPath); } catch {}
     console.error('[Memory] Failed to save memory store:', error);
     throw error;
   }

@@ -12,9 +12,11 @@ interface MemoryPanelProps {
   className?: string
 }
 
+type MemoryType = 'fact' | 'preference' | 'workflow' | 'reminder' | 'context'
+
 interface MemoryEntry {
   id: string
-  type: 'fact' | 'preference' | 'workflow' | 'reminder' | 'context'
+  type: MemoryType
   content: string
   tags: string[]
   confidence: number
@@ -29,20 +31,14 @@ interface MemoryStats {
   lastExtractionAt?: string
 }
 
+const MEMORY_TYPES: MemoryType[] = ['fact', 'preference', 'workflow', 'reminder', 'context']
+
 const TYPE_COLORS: Record<string, string> = {
   fact: 'bg-blue-500/10 text-blue-500 border-blue-500/20',
   preference: 'bg-green-500/10 text-green-500 border-green-500/20',
   workflow: 'bg-purple-500/10 text-purple-500 border-purple-500/20',
   reminder: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
   context: 'bg-gray-500/10 text-gray-500 border-gray-500/20',
-}
-
-const TYPE_LABELS: Record<string, string> = {
-  fact: 'Fact',
-  preference: 'Preference',
-  workflow: 'Workflow',
-  reminder: 'Reminder',
-  context: 'Context',
 }
 
 export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryPanelProps) {
@@ -52,21 +48,26 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
   const [searchQuery, setSearchQuery] = React.useState('')
   const [isLoading, setIsLoading] = React.useState(false)
   const [isExtracting, setIsExtracting] = React.useState(false)
+  const [isSaving, setIsSaving] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
   const [newMemory, setNewMemory] = React.useState('')
-  const [newMemoryType, setNewMemoryType] = React.useState<'fact' | 'preference' | 'workflow' | 'reminder' | 'context'>('fact')
+  const [newMemoryType, setNewMemoryType] = React.useState<MemoryType>('fact')
   const [showAddForm, setShowAddForm] = React.useState(false)
+
+  const typeLabel = React.useCallback((type: string) => t(`memory.type.${type}`, { defaultValue: type }), [t])
 
   const loadMemories = React.useCallback(async () => {
     if (!workspaceRootPath) return
     setIsLoading(true)
+    setError(null)
     try {
-      const result = await (window as any).electronAPI?.getMemoryStats?.(workspaceRootPath)
+      const result = await window.electronAPI.getMemoryStats(workspaceRootPath)
       if (result) {
         setStats(result.stats)
         setMemories(result.entries || [])
       }
-    } catch (error) {
-      console.error('Failed to load memories:', error)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setIsLoading(false)
     }
@@ -87,8 +88,10 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
 
   const handleAddMemory = async () => {
     if (!newMemory.trim() || !workspaceRootPath) return
+    setIsSaving(true)
+    setError(null)
     try {
-      await (window as any).electronAPI?.addMemory?.(workspaceRootPath, {
+      await window.electronAPI.addMemory(workspaceRootPath, {
         content: newMemory.trim(),
         type: newMemoryType,
         tags: [],
@@ -96,30 +99,34 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
       })
       setNewMemory('')
       setShowAddForm(false)
-      loadMemories()
-    } catch (error) {
-      console.error('Failed to add memory:', error)
+      await loadMemories()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setIsSaving(false)
     }
   }
 
   const handleDeleteMemory = async (id: string) => {
     if (!workspaceRootPath) return
+    setError(null)
     try {
-      await (window as any).electronAPI?.deleteMemory?.(workspaceRootPath, id)
-      loadMemories()
-    } catch (error) {
-      console.error('Failed to delete memory:', error)
+      await window.electronAPI.deleteMemory(workspaceRootPath, id)
+      await loadMemories()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
     }
   }
 
   const handleExtractMemories = async () => {
     if (!sessionId) return
     setIsExtracting(true)
+    setError(null)
     try {
-      await (window as any).electronAPI?.extractSessionMemories?.(sessionId)
-      loadMemories()
-    } catch (error) {
-      console.error('Failed to extract memories:', error)
+      await window.electronAPI.extractSessionMemories(sessionId)
+      await loadMemories()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
     } finally {
       setIsExtracting(false)
     }
@@ -137,7 +144,7 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
     <div className={cn('flex flex-col gap-3 p-3', className)}>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Brain className="h-4 w-4 text-primary" />
+          <Brain className="h-4 w-4 text-accent" />
           <span className="text-sm font-medium">{t('memory.title')}</span>
           {stats && (
             <Badge variant="secondary" className="text-xs">
@@ -152,6 +159,7 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
             className="h-7 w-7 p-0"
             onClick={loadMemories}
             disabled={isLoading}
+            title={t('common.refresh')}
           >
             <RefreshCw className={cn('h-3 w-3', isLoading && 'animate-spin')} />
           </Button>
@@ -164,7 +172,7 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
               disabled={isExtracting}
               title={t('memory.extract')}
             >
-              <Plus className="h-3 w-3" />
+              <Plus className={cn('h-3 w-3', isExtracting && 'animate-spin')} />
             </Button>
           )}
         </div>
@@ -184,14 +192,12 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
         <div className="space-y-2">
           <select
             value={newMemoryType}
-            onChange={(e) => setNewMemoryType(e.target.value as any)}
+            onChange={(e) => setNewMemoryType(e.target.value as MemoryType)}
             className="w-full h-8 px-2 text-xs rounded-md border border-border bg-background"
           >
-            <option value="fact">{TYPE_LABELS.fact}</option>
-            <option value="preference">{TYPE_LABELS.preference}</option>
-            <option value="workflow">{TYPE_LABELS.workflow}</option>
-            <option value="reminder">{TYPE_LABELS.reminder}</option>
-            <option value="context">{TYPE_LABELS.context}</option>
+            {MEMORY_TYPES.map(type => (
+              <option key={type} value={type}>{typeLabel(type)}</option>
+            ))}
           </select>
           <Input
             value={newMemory}
@@ -201,7 +207,7 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
             onKeyDown={(e) => e.key === 'Enter' && handleAddMemory()}
           />
           <div className="flex gap-1">
-            <Button size="sm" className="h-7 text-xs" onClick={handleAddMemory}>
+            <Button size="sm" className="h-7 text-xs" onClick={handleAddMemory} disabled={isSaving}>
               {t('common.add')}
             </Button>
             <Button
@@ -228,6 +234,10 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
         </Button>
       )}
 
+      {error && (
+        <div className="text-xs text-destructive">{error}</div>
+      )}
+
       <div className="space-y-1.5 max-h-48 overflow-y-auto">
         {filteredMemories.length === 0 ? (
           <div className="text-center py-4 text-xs text-muted-foreground">
@@ -243,7 +253,7 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
                 variant="outline"
                 className={cn('shrink-0 text-[10px] px-1.5 py-0', TYPE_COLORS[memory.type])}
               >
-                {TYPE_LABELS[memory.type]}
+                {typeLabel(memory.type)}
               </Badge>
               <span className="flex-1 leading-relaxed break-words">{memory.content}</span>
               <button

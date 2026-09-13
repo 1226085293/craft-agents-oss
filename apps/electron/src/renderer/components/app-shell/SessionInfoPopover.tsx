@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Drawer, DrawerContent, DrawerHeader, DrawerTitle, DrawerTrigger } from '@/components/ui/drawer'
 import { Input } from '@/components/ui/input'
-import { useAppShellContext, useSession } from '@/context/AppShellContext'
+import { useAppShellContext, useSession, useActiveWorkspace } from '@/context/AppShellContext'
 import { cn } from '@/lib/utils'
 import { SessionFilesSection } from '../right-sidebar/SessionFilesSection'
 import { MemoryPanel } from './MemoryPanel'
@@ -103,6 +103,9 @@ function SessionInfoPopoverContent({ sessionId, sessionFolderPath }: { sessionId
   const { t } = useTranslation()
   const session = useSession(sessionId)
   const { onRenameSession } = useAppShellContext()
+  // Memory is stored at `<workspaceRoot>/memory.json` — the session folder is a
+  // child of it, so passing it here would read/write an unrelated store.
+  const activeWorkspace = useActiveWorkspace()
   const [name, setName] = React.useState('')
   const [activeTab, setActiveTab] = React.useState<'files' | 'memory'>('files')
   const renameTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -143,7 +146,7 @@ function SessionInfoPopoverContent({ sessionId, sessionFolderPath }: { sessionId
           className={cn(
             "px-3 py-2 text-xs font-medium transition-colors",
             activeTab === 'files'
-              ? "text-foreground border-b-2 border-primary"
+              ? "text-foreground border-b-2 border-accent"
               : "text-muted-foreground hover:text-foreground"
           )}
           onClick={() => setActiveTab('files')}
@@ -154,7 +157,7 @@ function SessionInfoPopoverContent({ sessionId, sessionFolderPath }: { sessionId
           className={cn(
             "px-3 py-2 text-xs font-medium transition-colors",
             activeTab === 'memory'
-              ? "text-foreground border-b-2 border-primary"
+              ? "text-foreground border-b-2 border-accent"
               : "text-muted-foreground hover:text-foreground"
           )}
           onClick={() => setActiveTab('memory')}
@@ -175,7 +178,7 @@ function SessionInfoPopoverContent({ sessionId, sessionFolderPath }: { sessionId
       ) : (
         <div className="flex-1 min-h-0 overflow-hidden">
           <MemoryPanel
-            workspaceRootPath={sessionFolderPath}
+            workspaceRootPath={activeWorkspace?.rootPath}
             sessionId={sessionId}
             className="h-full"
           />

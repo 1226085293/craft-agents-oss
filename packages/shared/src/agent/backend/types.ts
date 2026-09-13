@@ -451,6 +451,16 @@ export interface AgentBackend {
    */
   isProcessing(): boolean;
 
+  /**
+   * Extract durable facts from the current session into the workspace memory
+   * store. Implemented on BaseAgent; optional so backends that don't
+   * participate in cross-session memory can omit it.
+   *
+   * @param options.strategy - 'compaction' when triggered by auto-compaction,
+   *                           'session_end' when a turn finishes.
+   */
+  extractSessionMemories?(options?: { strategy?: 'compaction' | 'session_end' }): Promise<{ extracted: number; discarded: number }>;
+
   // ============================================================
   // Model & Thinking Configuration
   // ============================================================

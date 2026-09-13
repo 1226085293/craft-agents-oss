@@ -523,8 +523,19 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
     const divRef = React.useRef<HTMLDivElement>(null)
     const [isFocused, setIsFocused] = React.useState(false)
     const isComposing = React.useRef(false)
+    /**
+     * Render-visible mirror of `isComposing`.
+     *
+     * While composing, the IME writes the pre-edit text straight into the DOM but
+     * `handleInput` deliberately does not publish it (see below), so `value` is
+     * still empty. Anything derived from `value` alone would therefore style the
+     * pre-edit text as if it were a placeholder — i.e. paint it transparent.
+     */
+    const [isComposingRender, setIsComposingRender] = React.useState(false)
+    /** Timer used to defer reading the DOM until the IME has committed its text. */
+    const compositionEndTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
     const lastValueRef = React.useRef(safeValue)
-    const cursorPositionRef = React.useRef(0)
+    const cursorPositionRef = React.useRef(safeValue.length)
     const lastMentionSignatureRef = React.useRef('')
     const isInternalUpdate = React.useRef(false)
     // Pending cursor position to restore after external value update (e.g., after @mention selection)
@@ -618,13 +629,35 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
     }, [onChange, onInput, skills, sources, skillSlugs, sourceSlugs, workspaceId])
 
     // Handle composition (IME)
+    React.useEffect(() => () => {
+      if (compositionEndTimerRef.current !== null) clearTimeout(compositionEndTimerRef.current)
+    }, [])
+
     const handleCompositionStart = React.useCallback(() => {
+      if (compositionEndTimerRef.current !== null) {
+        clearTimeout(compositionEndTimerRef.current)
+        compositionEndTimerRef.current = null
+      }
       isComposing.current = true
+      setIsComposingRender(true)
     }, [])
 
     const handleCompositionEnd = React.useCallback(() => {
       isComposing.current = false
-      handleInput()
+      setIsComposingRender(false)
+      // Chromium can dispatch `compositionend` before the composed text is fully
+      // committed to the DOM. Reading the element synchronously publishes the raw
+      // pinyin/romaji pre-edit string as if it were committed, and the resulting
+      // re-render then leaves those letters in the DOM so the real commit lands
+      // next to them — the "duplicate letters after IME selection" bug. Wait for
+      // the trailing `input` event instead; it fires right after the commit.
+      if (compositionEndTimerRef.current !== null) clearTimeout(compositionEndTimerRef.current)
+      compositionEndTimerRef.current = setTimeout(() => {
+        compositionEndTimerRef.current = null
+        // A new composition may have started in the meantime.
+        if (isComposing.current) return
+        handleInput()
+      }, 0)
     }, [handleInput])
 
     const handleKeyDownInternal = React.useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -684,6 +717,10 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
     React.useEffect(() => {
       if (!divRef.current) return
       if (isInternalUpdate.current) return
+      // Never rewrite the DOM mid-composition: replacing innerHTML destroys the
+      // browser's composition node, which aborts the IME and strands the pre-edit
+      // letters as plain text. `handleInput()` re-syncs once the composition ends.
+      if (isComposing.current) return
       if (lastValueRef.current === safeValue) return
 
       // External value change - update content
@@ -757,8 +794,11 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
       return () => document.removeEventListener('selectionchange', handleSelectionChange)
     }, [])
 
-    // Show placeholder when input is empty (regardless of focus state)
-    const showPlaceholder = !safeValue
+    // Show placeholder when input is empty (regardless of focus state).
+    // Suppressed while composing: the IME's pre-edit text is already in the DOM
+    // but has not been published through `onChange` yet, so `safeValue` is still
+    // empty and the transparent placeholder styling would hide what the user types.
+    const showPlaceholder = !safeValue && !isComposingRender
 
     // Normalize placeholder to array for RotatingPlaceholder
     const placeholderArray = React.useMemo(() => {

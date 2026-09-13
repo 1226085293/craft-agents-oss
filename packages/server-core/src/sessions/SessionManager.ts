@@ -2722,6 +2722,15 @@ export class SessionManager implements ISessionManager {
     return this.sessions.get(sessionId)?.isProcessing === true
   }
 
+  /**
+   * Get the live agent instance backing a session, if it has been initialized.
+   * Used by RPC handlers that need to invoke agent-owned operations (e.g.
+   * memory extraction) without reaching into the private sessions map.
+   */
+  getSessionAgent(sessionId: string): AgentInstance | null {
+    return this.sessions.get(sessionId)?.agent ?? null
+  }
+
   async decideBusyMessage(input: BusyMessageDecisionInput): Promise<BusyMessageDecision> {
     const managed = this.sessions.get(input.sessionId)
     if (!managed) return { action: 'queue' }

@@ -60,6 +60,7 @@ import { PrerequisiteManager } from './core/prerequisite-manager.ts';
 import type { AutomationSystem } from '../automations/automation-system.ts';
 import type { AgentEvent as AutomationAgentEvent, SdkAutomationInput } from '../automations/types.ts';
 import { getSessionPlansPath, getSessionDataPath, getSessionPath } from '../sessions/storage.ts';
+import { readSessionJsonl } from '../sessions/jsonl.ts';
 import { getMiniAgentSystemPrompt } from '../prompts/system.ts';
 import { buildTitlePrompt, buildRegenerateTitlePrompt, validateTitle } from '../utils/title-generator.ts';
 // Memory module — cross-session persistent knowledge
@@ -1178,9 +1179,8 @@ ${formattedMessages}
     if (!sessionId) return [];
 
     try {
-      const { readSessionJsonl } = require('../sessions/jsonl.ts');
       const jsonlPath = join(this.config.workspace.rootPath, 'sessions', sessionId, 'session.jsonl');
-      const { messages } = readSessionJsonl(jsonlPath);
+      const messages = readSessionJsonl(jsonlPath)?.messages ?? [];
       return messages.slice(-maxMessages).map((m: any) => ({
         role: m.role,
         content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
@@ -1205,9 +1205,8 @@ ${formattedMessages}
     if (requestedStrategy && configStrategy === 'session_end' && requestedStrategy !== 'session_end') return { extracted: 0, discarded: 0 };
 
     try {
-      const { readSessionJsonl } = require('../sessions/jsonl.ts');
       const jsonlPath = join(this.config.workspace.rootPath, 'sessions', sessionId, 'session.jsonl');
-      const { messages } = readSessionJsonl(jsonlPath);
+      const messages = readSessionJsonl(jsonlPath)?.messages ?? [];
 
       const input: MemoryExtractionInput = {
         sessionId,

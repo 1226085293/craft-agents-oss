@@ -2762,7 +2762,7 @@ async function shouldInterruptActiveToolForGuidance(
   if (active.signal.aborted) return false;
 
   try {
-    const result = await queryLlm({
+    const result = await runEphemeralLlmQuery(nextLocalEphemeralQueryId('tool-interrupt'), {
       temperature: 0,
       maxTokens: 80,
       outputSchema: {
@@ -2973,12 +2973,16 @@ async function handleSwitchConnection(msg: SwitchConnectionMessage): Promise<voi
     // 1. Credential: inject into the shared in-memory auth storage (same
     // mechanism as token_update) and remember it as the active piAuth so
     // later resolvePiModel calls prefer the right provider.
-    if (msg.piAuth && moduleAuthStorage) {
-      moduleAuthStorage.set(msg.piAuth.provider, msg.piAuth.credential as unknown as AuthCredential);
-      initConfig.piAuth = msg.piAuth;
-      debugLog(`[switch_connection] Injected ${msg.piAuth.credential.type} credential for provider: ${msg.piAuth.provider}`);
+    if (msg.piAuth && moduleCredentialStore) {
+      const { provider, credential } = msg.piAuth;
+      const adapted = adaptCredentialForPiSdk(provider, credential);
+      if (adapted) {
+        await moduleCredentialStore.modify(provider, async () => adapted);
+        initConfig.piAuth = msg.piAuth;
+        debugLog(`[switch_connection] Injected ${credential.type} credential for provider: ${provider}`);
+      }
     } else if (msg.apiKey && !isMaskedCredential(msg.apiKey)) {
-      moduleAuthStorage?.set('anthropic', { type: 'api_key', key: msg.apiKey });
+      await moduleCredentialStore?.modify('anthropic', async () => ({ type: 'api_key', key: msg.apiKey }));
       debugLog('[switch_connection] Injected legacy API key');
     }
 

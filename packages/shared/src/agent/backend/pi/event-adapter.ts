@@ -335,6 +335,14 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.hasEmittedTerminalError = false;
   }
 
+  /**
+   * Local alias for `resetRecoveryState` — the pre-upstream name, still used
+   * by `PiAgent` teardown and the adapter's own tests.
+   */
+  resetOverflowState(): void {
+    this.resetRecoveryState();
+  }
+
   /** Whether an overflow recovery or auto-retry currently holds the turn open. */
   get isHoldingTurn(): boolean {
     return this.overflowState !== 'none' || this.retryState !== 'none';
@@ -529,15 +537,40 @@ export class PiEventAdapter extends BaseEventAdapter {
           // Recovered turn just finished — fall through to normal completion.
           this.overflowState = 'none';
         }
-        // Retryable-error deferral: the SDK annotated this agent_end with
-        // willRetry:true — it is about to auto-retry the deferred error.
-        // Hold the queue open for the retried turn and surface nothing yet;
-        // the deferred error only reports if the retry NEVER succeeds
-        // (terminal agent_end, or auto_retry_end failure on abort).
-        if (
-          (event as { willRetry?: boolean }).willRetry === true &&
-          this.deferredRetryError
-        ) {
+        // --- SDK retry lane (upstream) -------------------------------------
+        // AgentSession stamps `willRetry` on agent_end
+        // (`_willRetryAfterAgentEnd`). When true, `_prepareRetry` follows with
+        // auto_retry_start, sleeps the backoff and re-runs the turn, so this
+        // agent_end is NOT the end of the Craft turn.
+        const willRetry = (event as { willRetry?: boolean }).willRetry === true;
+        if (willRetry && this.retryState !== 'awaitingRetry' && this.retryState !== 'backoff') {
+          this.retryState = 'awaitingRetry';
+          this.armRetryFallbackTimer(
+            RETRY_START_FALLBACK_TIMEOUT_MS,
+            'no auto_retry_start followed agent_end { willRetry: true }',
+          );
+          break;
+        }
+        if (this.retryState === 'awaitingRetry' || this.retryState === 'backoff') {
+          // Defensive: no agent run is active in these states, so an agent_end
+          // is unexpected. Keep the queue open; the fallback timer drains it.
+          break;
+        }
+        if (this.retryState === 'held') {
+          // Retries disabled or exhausted: surface the parked error, then
+          // complete the turn normally below.
+          yield* this.releaseHeldRetryError();
+        } else if (this.retryState === 'recovering') {
+          // The retried run finished cleanly.
+          this.retryState = 'none';
+        }
+
+        // --- Subprocess auto-retry lane (local) ----------------------------
+        // willRetry:true with a buffered subprocess error — hold the queue open
+        // for the retried turn and surface nothing yet; the deferred error only
+        // reports if the retry NEVER succeeds (terminal agent_end, or
+        // auto_retry_end failure on abort).
+        if (willRetry && this.deferredRetryError) {
           this.retryHoldActive = true;
           break;
         }
@@ -700,25 +733,33 @@ export class PiEventAdapter extends BaseEventAdapter {
             break;
           }
 
-          // Retryable errors (overloaded / 429 / 5xx / network / "terminated"…)
-          // are DEFERRED: the SDK will auto-retry after the upcoming agent_end
-          // (which carries willRetry:true), so reporting here would flag the
-          // turn as failed while the retried answer is still coming. The error
-          // surfaces only at an explicit failure terminal (see agent_end and
-          // auto_retry_end handling). Uses the SAME classifier as the SDK's
-          // retry decision (`isRetryableAssistantError`) so deferral and retry
-          // cannot disagree.
-          //
-          // Subprocess auto-retry lane: when the subprocess annotated this
-          // message_end with autoRetryPlanned (its own scheduler will retry
-          // after the SDK's fast retries are exhausted — a BROADER transient
-          // classifier than the SDK's), buffer the error and hold the queue
-          // with the same deferral semantics; the terminal may be several
-          // minutes away (5-min backoff rounds).
+          // --- SDK retry lane (upstream) -----------------------------------
+          // The SDK's retry loop uses this same `isRetryableAssistantError`
+          // classifier, so it will retry unless retries are disabled or
+          // exhausted — and the following agent_end { willRetry } says which.
+          // Park the error instead of surfacing it now; agent_end either
+          // releases it or holds the queue open for the retried run.
+          const errorEvent = this.classifyAssistantError(event.message as AssistantMessage, msg.errorMessage);
+          if (
+            (this.retryState === 'none' || this.retryState === 'recovering') &&
+            isRetryableAssistantError(event.message as AssistantMessage)
+          ) {
+            this.retryState = 'held';
+            this.heldRetryError = errorEvent;
+            break;
+          }
+
+          // --- Subprocess auto-retry lane (local) --------------------------
+          // Reached when the SDK lane above did not take the error (not
+          // retryable by the SDK classifier, or retries already exhausted) but
+          // the subprocess scheduler annotated this message_end with
+          // autoRetryPlanned: its own scheduler will retry on a BROADER
+          // transient classifier and a much longer backoff (2s → 5min), so
+          // buffer the error and hold the queue — the terminal may be several
+          // minutes away.
           if (
             !this.hasEmittedTerminalError &&
-            (isRetryableAssistantError(event.message as AssistantMessage) ||
-              (event as { autoRetryPlanned?: boolean }).autoRetryPlanned === true ||
+            ((event as { autoRetryPlanned?: boolean }).autoRetryPlanned === true ||
               this.autoRetryHoldActive)
           ) {
             const parsed = parseError(new Error(msg.errorMessage));
@@ -739,8 +780,6 @@ export class PiEventAdapter extends BaseEventAdapter {
           } else {
             yield { type: 'error', message: msg.errorMessage };
           }
-
-          yield errorEvent;
           break;
         }
 

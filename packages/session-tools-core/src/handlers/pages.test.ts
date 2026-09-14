@@ -69,16 +69,16 @@ describe('pages handlers', () => {
       await handleDeletePage(ctx, { slug: 's' }),
     ]) {
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain('not available');
+      expect(result.content[0]!.text).toContain('not available');
     }
   });
 
   it('list_pages returns totals and supports the projectId filter', async () => {
     const { ctx } = createCtx();
-    const all = JSON.parse((await handleListPages(ctx, {})).content[0].text);
+    const all = JSON.parse((await handleListPages(ctx, {})).content[0]!.text);
     expect(all.total).toBe(2);
 
-    const filtered = JSON.parse((await handleListPages(ctx, { projectId: 'proj_1' })).content[0].text);
+    const filtered = JSON.parse((await handleListPages(ctx, { projectId: 'proj_1' })).content[0]!.text);
     expect(filtered.total).toBe(1);
     expect(filtered.pages[0].slug).toBe('build-health');
   });
@@ -87,11 +87,11 @@ describe('pages handlers', () => {
     const { ctx, calls } = createCtx();
     const ok = await handleGetPage(ctx, { slug: 'build-health', includeContent: true });
     expect(ok.isError).toBeFalsy();
-    expect(calls[0]).toEqual({ method: 'getPage', args: ['build-health', { includeContent: true }] });
+    expect(calls[0]!).toEqual({ method: 'getPage', args: ['build-health', { includeContent: true }] });
 
     const missing = await handleGetPage(ctx, { slug: 'nope' });
     expect(missing.isError).toBe(true);
-    expect(missing.content[0].text).toContain('list_pages');
+    expect(missing.content[0]!.text).toContain('list_pages');
   });
 
   it('create_page requires a name and returns the created details', async () => {
@@ -102,19 +102,19 @@ describe('pages handlers', () => {
 
     const created = await handleCreatePage(ctx, { name: 'Build Health', kind: 'live', content: '<!doctype html>' });
     expect(created.isError).toBeFalsy();
-    expect(JSON.parse(created.content[0].text).slug).toBe('build-health');
+    expect(JSON.parse(created.content[0]!.text).slug).toBe('build-health');
   });
 
   it('update_page rejects empty patches without calling the backend', async () => {
     const { ctx, calls } = createCtx();
     const empty = await handleUpdatePage(ctx, { slug: 'build-health' });
     expect(empty.isError).toBe(true);
-    expect(empty.content[0].text).toContain('Nothing to update');
+    expect(empty.content[0]!.text).toContain('Nothing to update');
     expect(calls).toHaveLength(0);
 
     const ok = await handleUpdatePage(ctx, { slug: 'build-health', projectId: null });
     expect(ok.isError).toBeFalsy();
-    expect(calls[0]).toEqual({ method: 'updatePage', args: ['build-health', { projectId: null }] });
+    expect(calls[0]!).toEqual({ method: 'updatePage', args: ['build-health', { projectId: null }] });
   });
 
   it('write_page_data separates slug from the patch and returns the summary', async () => {
@@ -125,20 +125,20 @@ describe('pages handlers', () => {
       appendSeries: { m: [{ v: 2 }] },
     });
     expect(result.isError).toBeFalsy();
-    expect(calls[0].args).toEqual(['build-health', { set: { a: 1 }, appendSeries: { m: [{ v: 2 }] } }]);
-    expect(JSON.parse(result.content[0].text).kvCount).toBe(2);
+    expect(calls[0]!.args).toEqual(['build-health', { set: { a: 1 }, appendSeries: { m: [{ v: 2 }] } }]);
+    expect(JSON.parse(result.content[0]!.text).kvCount).toBe(2);
   });
 
   it('delete_page reports the unpublish outcome and wraps backend failures', async () => {
     const { ctx } = createCtx();
     const ok = await handleDeletePage(ctx, { slug: 'build-health' });
-    expect(JSON.parse(ok.content[0].text)).toEqual({ deleted: true, publicCopyMayRemain: false });
+    expect(JSON.parse(ok.content[0]!.text)).toEqual({ deleted: true, publicCopyMayRemain: false });
 
     const { ctx: failingCtx } = createCtx({
       deletePage: async () => { throw new Error('Page not found: nope'); },
     });
     const failed = await handleDeletePage(failingCtx, { slug: 'nope' });
     expect(failed.isError).toBe(true);
-    expect(failed.content[0].text).toContain('Page not found');
+    expect(failed.content[0]!.text).toContain('Page not found');
   });
 });

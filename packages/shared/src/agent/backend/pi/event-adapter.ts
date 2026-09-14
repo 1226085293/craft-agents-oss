@@ -21,7 +21,7 @@ import { isContextOverflow, isRetryableAssistantError } from '@earendil-works/pi
 import { BaseEventAdapter } from '../base-event-adapter.ts';
 import { PI_TOOL_NAME_MAP } from './constants.ts';
 import { toolMetadataStore } from '../../../interceptor-common.ts';
-import { parseError } from '../../errors.ts';
+import { createAgentError, parseError } from '../../errors.ts';
 
 /**
  * Pi SDK auto-compaction race signature — the AbortController crash described
@@ -40,6 +40,24 @@ const SDK_AUTOCOMPACT_RACE_SIGNATURE = /_autoCompactionAbortController\.signal/;
  *  serialization — 5 s is well above any plausible jitter. */
 const OVERFLOW_FALLBACK_TIMEOUT_MS = 5_000;
 
+/** How long to wait after an `agent_end { willRetry: true }` for the SDK's
+ *  `auto_retry_start`. `_prepareRetry` emits it synchronously right after the
+ *  agent loop returns, so — as with overflow — only event serialization can
+ *  delay it. */
+const RETRY_START_FALLBACK_TIMEOUT_MS = 5_000;
+
+/** Grace added on top of the backoff the SDK announced in
+ *  `auto_retry_start.delayMs` before we stop waiting for the retried run's
+ *  `agent_start` and surface the parked error instead. */
+const RETRY_RUN_GRACE_MS = 15_000;
+
+/** Retryable provider errors that the shared `parseError` cannot classify are
+ *  split into provider-side incidents (surfaced as `service_error`) and
+ *  transport failures (surfaced as `network_error`). Patterns mirror the
+ *  provider-side group of pi-ai's `RETRYABLE_PROVIDER_ERROR_PATTERN`. */
+const RETRYABLE_PROVIDER_SIDE_PATTERN =
+  /overloaded|provider.?returned.?error|retry your request|request again|resource.?exhausted|retry delay|server.?error|internal.?error|service.?unavailable|exceeded request buffer limit/i;
+
 /**
  * Combined event type the adapter can handle.
  * AgentSessionEvent is a superset of PiAgentEvent (adds compaction_*, auto_retry_*, queue_update).
@@ -54,12 +72,13 @@ type PiEvent = PiAgentEvent | AgentSessionEvent;
  * - message_end → text_complete
  * - tool_execution_start → tool_start
  * - tool_execution_end → tool_result
- * - agent_end → complete
+ * - agent_end → complete (deferred while overflow recovery or an auto-retry is in flight)
  * - compaction_start → status (with "Compacting" keyword)
  * - compaction_end → info/error
- * - auto_retry_start → status
- * - auto_retry_end → status
- * - queue_update → ignored (no current UI consumer)
+ * - failed message_end → text_discard (only its unfinished text)
+ * - auto_retry_start / retried agent_start → retry (backoff / active)
+ * - auto_retry_end → retry (end) + info on success; releases errors on cancellation
+ * - queue_update / agent_settled / entry_appended / summarization_retry_* → ignored
  */
 export class PiEventAdapter extends BaseEventAdapter {
   // Track tool names from execution_start for proper tool_result correlation
@@ -102,12 +121,39 @@ export class PiEventAdapter extends BaseEventAdapter {
   private overflowState: 'none' | 'held' | 'awaiting' | 'compacting' | 'recovering' = 'none';
   private heldOverflowError: string | null = null;
   private fallbackTimerId: ReturnType<typeof setTimeout> | null = null;
+
+  // ============================================================
+  // Auto-retry state machine
+  // ============================================================
+  //
+  // The Pi SDK retries transient provider/transport errors on its own
+  // (`isRetryableAssistantError`: 429/5xx/overloaded, "fetch failed",
+  // "terminated", "socket hang up", …) with exponential backoff. The event
+  // sequence is: message_end(error) → agent_end { willRetry: true } →
+  // auto_retry_start → [backoff] → agent_start … agent_end. Exactly like
+  // overflow recovery, the retried run arrives AFTER an agent_end, so the
+  // adapter must not complete the queue on that agent_end. It also parks the
+  // classified error instead of surfacing it: the user sees a "retrying"
+  // status and either the recovered answer or, if every attempt fails, one
+  // error at the end.
+  //
+  //   none ──message_end(retryable)──► held
+  //   held ──agent_end{willRetry:false}──► none        (release error, complete)
+  //   held ──agent_end{willRetry:true}───► awaitingRetry (5 s fallback)
+  //   awaitingRetry ──auto_retry_start──► backoff      (delayMs + grace fallback)
+  //   backoff ──agent_start────────────► recovering
+  //   recovering ──agent_end───────────► none          (normal complete)
+  //   awaitingRetry|backoff ──auto_retry_end{success:false}──► none (release, complete)
+  private retryState: 'none' | 'held' | 'awaitingRetry' | 'backoff' | 'recovering' = 'none';
+  private heldRetryError: CraftAgentEvent | null = null;
+  private retryFallbackTimerId: ReturnType<typeof setTimeout> | null = null;
+
   /** Set when the adapter wants the caller to call `eventQueue.complete()`
-   *  on a non-`agent_end` event (e.g. `compaction_end` failure). Consumed by
-   *  `shouldCompleteQueue()`. */
+   *  on a non-`agent_end` event (e.g. `compaction_end` failure, cancelled
+   *  auto-retry). Consumed by `shouldCompleteQueue()`. */
   private pendingQueueComplete: boolean = false;
-  /** Caller-supplied callbacks for the asynchronous fallback timer path —
-   *  the timer fires outside `adaptEvent()` so we can't yield through the
+  /** Caller-supplied callbacks for the asynchronous fallback timer paths —
+   *  the timers fire outside `adaptEvent()` so we can't yield through the
    *  generator. */
   private onFallbackEvent: ((event: CraftAgentEvent) => void) | null = null;
   private onFallbackComplete: (() => void) | null = null;
@@ -171,12 +217,13 @@ export class PiEventAdapter extends BaseEventAdapter {
   }
 
   /**
-   * Register handlers invoked when the overflow-recovery fallback timer fires
-   * (the SDK didn't emit a `compaction_start` after a held overflow `agent_end`
-   * within `OVERFLOW_FALLBACK_TIMEOUT_MS`). Adapter calls `onEvent` to enqueue
-   * the buffered original error, then `onComplete` to terminate the iterator.
+   * Register handlers invoked when a recovery fallback timer fires — the SDK
+   * didn't emit a `compaction_start` after a held overflow `agent_end`, or no
+   * `auto_retry_start` / retried `agent_start` followed an
+   * `agent_end { willRetry: true }`. The adapter calls `onEvent` to enqueue the
+   * parked error, then `onComplete` to terminate the iterator.
    */
-  setOverflowFallbackHandlers(
+  setRecoveryFallbackHandlers(
     onEvent: (event: CraftAgentEvent) => void,
     onComplete: () => void,
   ): void {
@@ -272,10 +319,13 @@ export class PiEventAdapter extends BaseEventAdapter {
    * Reset overflow-recovery + defense-resume state. Call from session
    * disposal so a stale fallback timer doesn't fire on a torn-down adapter.
    */
-  resetOverflowState(): void {
+  resetRecoveryState(): void {
     this.cancelOverflowFallbackTimer();
     this.overflowState = 'none';
     this.heldOverflowError = null;
+    this.cancelRetryFallbackTimer();
+    this.retryState = 'none';
+    this.heldRetryError = null;
     this.pendingQueueComplete = false;
     this.defenseResumeHeld = false;
     this.queuedFollowUpHeld = false;
@@ -283,6 +333,86 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.retryHoldActive = false;
     this.autoRetryHoldActive = false;
     this.hasEmittedTerminalError = false;
+  }
+
+  /** Whether an overflow recovery or auto-retry currently holds the turn open. */
+  get isHoldingTurn(): boolean {
+    return this.overflowState !== 'none' || this.retryState !== 'none';
+  }
+
+  /**
+   * Yield the parked retryable error (if any) and leave the retry state
+   * machine. Used when the SDK will not retry (disabled/exhausted) or when a
+   * retry was cancelled.
+   */
+  private *releaseHeldRetryError(): Generator<CraftAgentEvent> {
+    const held = this.heldRetryError;
+    this.heldRetryError = null;
+    this.retryState = 'none';
+    this.cancelRetryFallbackTimer();
+    yield { type: 'retry', phase: 'end' };
+    if (held) yield held;
+  }
+
+  /**
+   * Arm the auto-retry fallback timer. Fires only if the state is unchanged
+   * when the timeout elapses (a late event may already have moved us on).
+   */
+  private armRetryFallbackTimer(timeoutMs: number, reason: string): void {
+    this.cancelRetryFallbackTimer();
+    const armedState = this.retryState;
+    this.retryFallbackTimerId = setTimeout(() => {
+      this.retryFallbackTimerId = null;
+      if (this.retryState !== armedState) return;
+      this.log.warn(`Auto-retry fallback fired — ${reason}`, { timeoutMs, state: armedState });
+      const held: CraftAgentEvent = this.heldRetryError ?? {
+        type: 'error',
+        message: 'The model request failed and the automatic retry did not start. Please try again.',
+      };
+      this.heldRetryError = null;
+      this.retryState = 'none';
+      this.onFallbackEvent?.({ type: 'retry', phase: 'end' });
+      this.onFallbackEvent?.(held);
+      this.onFallbackComplete?.();
+    }, timeoutMs);
+  }
+
+  private cancelRetryFallbackTimer(): void {
+    if (this.retryFallbackTimerId !== null) {
+      clearTimeout(this.retryFallbackTimerId);
+      this.retryFallbackTimerId = null;
+    }
+  }
+
+  /**
+   * Classify a failed assistant message for the UI.
+   *
+   * Auth/billing/rate-limit/5xx errors go through the shared `parseError` so
+   * SessionManager can run its auth-retry pipeline (refresh token + resend).
+   * Transient errors that parser doesn't know but the SDK retries ("terminated",
+   * "socket hang up", "stream ended before message_stop", …) become typed
+   * connection/service errors so the UI offers Retry instead of a raw string.
+   */
+  private classifyAssistantError(message: AssistantMessage, errorMessage: string): CraftAgentEvent {
+    const parsed = parseError(new Error(errorMessage));
+    if (parsed.code !== 'unknown_error') {
+      return { type: 'typed_error', error: parsed };
+    }
+    if (isRetryableAssistantError(message)) {
+      const code = RETRYABLE_PROVIDER_SIDE_PATTERN.test(errorMessage) ? 'service_error' : 'network_error';
+      return { type: 'typed_error', error: createAgentError(code, errorMessage) };
+    }
+    return { type: 'error', message: errorMessage };
+  }
+
+  /** Short human-readable label for the retry status line. */
+  private retryReasonLabel(sdkErrorMessage: string | undefined): string {
+    const held = this.heldRetryError;
+    if (held?.type === 'typed_error') return held.error.title;
+    const raw = (held?.type === 'error' ? held.message : sdkErrorMessage) ?? '';
+    const oneLine = raw.replace(/\s+/g, ' ').trim();
+    if (!oneLine) return 'Temporary model error';
+    return oneLine.length > 80 ? `${oneLine.slice(0, 77)}...` : oneLine;
   }
 
   private armOverflowFallbackTimer(): void {
@@ -369,10 +499,18 @@ export class PiEventAdapter extends BaseEventAdapter {
       // ============================================================
 
       case 'agent_start':
-        // Internal — agent run has started
+        // After an auto-retry backoff the SDK re-runs the turn via
+        // agent.continue(); this agent_start is the retried run. Stop waiting
+        // for it and let the run flow through normally.
+        if (this.retryState === 'backoff') {
+          this.cancelRetryFallbackTimer();
+          this.retryState = 'recovering';
+          this.heldRetryError = null;
+          yield { type: 'retry', phase: 'active' };
+        }
         break;
 
-      case 'agent_end':
+      case 'agent_end': {
         // Overflow recovery: hold the queue open while the SDK runs
         // _runAutoCompaction("overflow") + agent.continue(). The recovered
         // turn will arrive as a fresh agent_start … agent_end pair.
@@ -473,6 +611,7 @@ export class PiEventAdapter extends BaseEventAdapter {
           yield { type: 'complete' };
         }
         break;
+      }
 
       // ============================================================
       // Turn events
@@ -489,7 +628,8 @@ export class PiEventAdapter extends BaseEventAdapter {
         this.currentTurnId = null;
         this.hasStreamedDeltas = false;
         this.hasEmittedFinalText = false;
-        this.subTurnCounter = 0;
+        // Keep sub-turn IDs unique across SDK turns/retries within this Craft
+        // turn. startTurn() is the only place the counter resets.
         this.messageSubTurnId = null;
         break;
 
@@ -540,6 +680,14 @@ export class PiEventAdapter extends BaseEventAdapter {
 
         // Surface API errors — Pi SDK sets stopReason: 'error' and errorMessage on failures
         if (msg.stopReason === 'error' && msg.errorMessage) {
+          // Failed streams never become text_complete. Explicitly discard the
+          // partial before the SDK can retry (or terminate), including any
+          // pending server-side delta batch. Completed messages are untouched.
+          if (this.messageSubTurnId) {
+            yield { type: 'text_discard', turnId: this.messageSubTurnId };
+            this.messageSubTurnId = null;
+            this.hasStreamedDeltas = false;
+          }
           // Context overflow: hand recovery to the SDK's _runAutoCompaction
           // and keep the UI quiet until we know the outcome (recovered turn
           // arrives, or compaction fails). Suppress the raw provider error.
@@ -591,6 +739,8 @@ export class PiEventAdapter extends BaseEventAdapter {
           } else {
             yield { type: 'error', message: msg.errorMessage };
           }
+
+          yield errorEvent;
           break;
         }
 
@@ -835,9 +985,18 @@ export class PiEventAdapter extends BaseEventAdapter {
 
       case 'auto_retry_start': {
         const retryEvent = event as Extract<AgentSessionEvent, { type: 'auto_retry_start' }>;
+        // The SDK is about to sleep `delayMs` and re-run the turn. Keep the
+        // queue open until the retried run's agent_start arrives (plus grace).
+        const delayMs = typeof retryEvent.delayMs === 'number' ? retryEvent.delayMs : 0;
+        this.cancelRetryFallbackTimer();
+        this.retryState = 'backoff';
+        this.armRetryFallbackTimer(delayMs + RETRY_RUN_GRACE_MS, 'retried run did not start after the announced backoff');
+        const attempt = `attempt ${retryEvent.attempt}/${retryEvent.maxAttempts}`;
+        const wait = delayMs > 0 ? ` in ${Math.max(1, Math.round(delayMs / 1000))}s` : '';
         yield {
-          type: 'status',
-          message: `Retrying (attempt ${retryEvent.attempt}/${retryEvent.maxAttempts})...`,
+          type: 'retry',
+          phase: 'backoff',
+          message: `${this.retryReasonLabel(retryEvent.errorMessage)}. Retrying${wait} (${attempt})...`,
         };
         break;
       }
@@ -868,6 +1027,32 @@ export class PiEventAdapter extends BaseEventAdapter {
             this.hasEmittedTerminalError = true;
           }
         }
+        if (
+          this.retryState === 'held' ||
+          this.retryState === 'awaitingRetry' ||
+          this.retryState === 'backoff'
+        ) {
+          // The retry was cancelled (abort during backoff) or never ran while
+          // we were still holding the turn open. No agent_end follows on this
+          // path, so surface the parked error and finalize the turn here.
+          this.cancelRetryFallbackTimer();
+          if (this.heldRetryError) {
+            yield* this.releaseHeldRetryError();
+          } else {
+            this.retryState = 'none';
+            yield { type: 'retry', phase: 'end' };
+            if (retryEndEvent.finalError) {
+              yield { type: 'error', message: `Retry failed: ${retryEndEvent.finalError}` };
+            }
+          }
+          yield { type: 'complete' };
+          this.pendingQueueComplete = true;
+          break;
+        }
+        // Exhaustion ordering: the final agent_end { willRetry: false } already
+        // released the parked error and completed the turn; this trailing
+        // event describes the same failure. Stay quiet so the user gets one
+        // error, not two.
         break;
       }
 
@@ -875,6 +1060,19 @@ export class PiEventAdapter extends BaseEventAdapter {
         // Queue contents are currently reflected by existing session/message state.
         // Ignore the event explicitly so newer Pi SDK sessions don't log noisy
         // "Unknown Pi event" warnings until we add a dedicated UI consumer.
+        break;
+
+      case 'agent_settled':
+      case 'entry_appended':
+      case 'session_info_changed':
+      case 'thinking_level_changed':
+      case 'bash_execution_update':
+      case 'summarization_retry_scheduled':
+      case 'summarization_retry_attempt_start':
+      case 'summarization_retry_finished':
+        // Session bookkeeping and compaction/branch-summary retry telemetry
+        // (Pi SDK 0.84+/0.85). Compaction progress already surfaces through
+        // compaction_start/compaction_end; nothing to show for these.
         break;
 
       default:

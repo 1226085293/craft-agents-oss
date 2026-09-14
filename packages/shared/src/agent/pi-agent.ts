@@ -154,6 +154,12 @@ function mapBrowserToolErrorCode(code: string): string | null {
   }
 }
 
+interface PendingEphemeralRequest<T> {
+  resolve(value: T): void;
+  reject(error: Error): void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
 /**
  * Backend implementation using the Pi coding agent SDK via subprocess.
  *
@@ -351,19 +357,13 @@ export class PiAgent extends BaseAgent {
     reject: (error: Error) => void;
   }> = new Map();
 
-  // Pending mini completions (correlation map for subprocess mini_completion_result)
-  private pendingMiniCompletions: Map<string, {
-    resolve: (text: string | null) => void;
-    reject: (error: Error) => void;
-  }> = new Map();
+  // Pending utility requests own their timeout handles so every terminal path
+  // (result, error, timeout, exit, teardown) can release the timer immediately.
+  private pendingMiniCompletions = new Map<string, PendingEphemeralRequest<string | null>>();
 
-  // Pending llm_query calls (correlation map for subprocess llm_query_result).
   // Separate from pendingMiniCompletions because the payload shape differs:
   // queryLlm returns a full LLMQueryResult, not just text.
-  private pendingLlmQueries: Map<string, {
-    resolve: (result: LLMQueryResult) => void;
-    reject: (error: Error) => void;
-  }> = new Map();
+  private pendingLlmQueries = new Map<string, PendingEphemeralRequest<LLMQueryResult>>();
 
   // Pending ensure_session_ready requests (branch preflight handshake)
   private pendingEnsureSessionReady: Map<string, {
@@ -454,13 +454,15 @@ export class PiAgent extends BaseAgent {
       this.adapter.setSessionDir(join(config.workspace.rootPath, 'sessions', config.session.id));
     }
 
-    // Wire the adapter's async overflow fallback into the event queue. The
-    // fallback fires when the SDK doesn't emit a compaction_start after a
-    // held overflow agent_end (e.g. _overflowRecoveryAttempted was already
-    // true). It runs outside adaptEvent() so it can't yield through the
-    // generator — instead, it calls these callbacks to enqueue the buffered
-    // error and terminate the iterator.
-    this.adapter.setOverflowFallbackHandlers(
+    // Wire the adapter's async recovery fallbacks into the event queue. They
+    // fire when the SDK doesn't follow through on a recovery it announced:
+    // no compaction_start after a held overflow agent_end (e.g.
+    // _overflowRecoveryAttempted was already true), or no auto_retry_start /
+    // retried agent_start after an agent_end { willRetry: true }. They run
+    // outside adaptEvent() so they can't yield through the generator —
+    // instead, they call these callbacks to enqueue the parked error and
+    // terminate the iterator.
+    this.adapter.setRecoveryFallbackHandlers(
       (event) => this.eventQueue.enqueue(event),
       () => this.eventQueue.complete(),
     );
@@ -911,7 +913,7 @@ export class PiAgent extends BaseAgent {
       try {
         if (piAuthProvider === 'github-copilot') {
           // Copilot: refresh the short-lived Copilot token using the GitHub access token
-          const { refreshGitHubCopilotToken } = await import('@earendil-works/pi-ai/oauth');
+          const { refreshGitHubCopilotToken } = await import('../auth/github-copilot.ts');
           const newCreds = await refreshGitHubCopilotToken(stored.refreshToken);
           await credentialManager.setLlmOAuth(slug, {
             accessToken: newCreds.access,
@@ -1083,11 +1085,11 @@ export class PiAgent extends BaseAgent {
         break;
 
       case 'llm_query_result': {
-        // Response to an llm_query request
+        // Response to an llm_query request. A result arriving after host timeout
+        // has no pending entry and is intentionally ignored.
         const id = msg.id as string;
-        const pending = this.pendingLlmQueries.get(id);
+        const pending = this.takePendingEphemeral(this.pendingLlmQueries, id);
         if (pending) {
-          this.pendingLlmQueries.delete(id);
           const result = msg.result as LLMQueryResult | null;
           if (result) {
             pending.resolve(result);
@@ -1236,28 +1238,35 @@ export class PiAgent extends BaseAgent {
           });
         }
 
-        // Reject any pending mini completions so errors propagate immediately.
-        // mini_completion_error is an internal utility-path failure (title/summarization)
-        // and should not surface as a user-visible chat error.
-        for (const [id, pending] of this.pendingMiniCompletions) {
-          pending.reject(new Error(rawMessage));
-          this.pendingMiniCompletions.delete(id);
-        }
+        const requestId = typeof msg.id === 'string' ? msg.id : undefined;
 
-        // Same treatment for pending llm_query calls. llm_query_error is also an
-        // internal utility-path code (call_llm): the dual-emit from the subprocess
-        // means a targeted `llm_query_result` is sent alongside this generic `error`
-        // to reject the specific pending promise — this loop is the defensive cleanup
-        // for queries that never got a targeted result (subprocess crash, etc.).
-        for (const [id, pending] of this.pendingLlmQueries) {
-          pending.reject(new Error(rawMessage));
-          this.pendingLlmQueries.delete(id);
-        }
-
-        if (errorCode === 'mini_completion_error' || errorCode === 'llm_query_error') {
-          this.debug(`Ignoring ${errorCode} subprocess error in chat stream`);
+        // Utility errors are request-scoped. A late error for a timed-out query
+        // must not reject another concurrent query that is still healthy.
+        if (errorCode === 'mini_completion_error') {
+          if (requestId) {
+            this.takePendingEphemeral(this.pendingMiniCompletions, requestId)
+              ?.reject(new Error(rawMessage));
+          } else {
+            // Compatibility fallback for an older subprocess without error ids.
+            this.rejectPendingEphemeralMap(this.pendingMiniCompletions, new Error(rawMessage));
+          }
+          this.debug('Ignoring mini_completion_error subprocess error in chat stream');
           break;
         }
+        if (errorCode === 'llm_query_error') {
+          if (requestId) {
+            this.takePendingEphemeral(this.pendingLlmQueries, requestId)
+              ?.reject(new Error(rawMessage));
+          } else {
+            // Compatibility fallback for an older subprocess without error ids.
+            this.rejectPendingEphemeralMap(this.pendingLlmQueries, new Error(rawMessage));
+          }
+          this.debug('Ignoring llm_query_error subprocess error in chat stream');
+          break;
+        }
+
+        // An unscoped subprocess failure invalidates all outstanding utility work.
+        this.rejectAllPendingEphemeral(new Error(rawMessage));
 
         // Reject pending ensure_session_ready requests (used by branch preflight)
         for (const [id, pending] of this.pendingEnsureSessionReady) {
@@ -1854,17 +1863,40 @@ export class PiAgent extends BaseAgent {
     // Callbacks already handled by executeSessionTool() — no-op.
   }
 
+  private takePendingEphemeral<T>(
+    map: Map<string, PendingEphemeralRequest<T>>,
+    id: string,
+  ): PendingEphemeralRequest<T> | undefined {
+    const pending = map.get(id);
+    if (!pending) return undefined;
+    map.delete(id);
+    clearTimeout(pending.timeout);
+    return pending;
+  }
+
+  private rejectPendingEphemeralMap<T>(
+    map: Map<string, PendingEphemeralRequest<T>>,
+    error: Error,
+  ): void {
+    for (const [id, pending] of map) {
+      map.delete(id);
+      clearTimeout(pending.timeout);
+      pending.reject(error);
+    }
+  }
+
+  private rejectAllPendingEphemeral(error: Error): void {
+    this.rejectPendingEphemeralMap(this.pendingMiniCompletions, error);
+    this.rejectPendingEphemeralMap(this.pendingLlmQueries, error);
+  }
+
   /**
    * Handle mini_completion_result from subprocess.
    */
   private handleMiniCompletionResult(msg: Record<string, unknown>): void {
     const id = msg.id as string;
     const text = msg.text as string | null;
-    const pending = this.pendingMiniCompletions.get(id);
-    if (pending) {
-      this.pendingMiniCompletions.delete(id);
-      pending.resolve(text);
-    }
+    this.takePendingEphemeral(this.pendingMiniCompletions, id)?.resolve(text);
   }
 
   /**
@@ -1973,19 +2005,11 @@ export class PiAgent extends BaseAgent {
       this.eventQueue.complete();
     }
 
-    // Reject pending mini completions with error (not null) so callers
-    // get a meaningful error instead of silently returning "no response"
+    // Reject utility calls and clear their deadline timers.
     const exitReason = signal ? `signal ${signal}` : `code ${code}`;
-    for (const [, pending] of this.pendingMiniCompletions) {
-      pending.reject(new Error(`Pi subprocess exited unexpectedly (${exitReason})`));
-    }
-    this.pendingMiniCompletions.clear();
-
-    // Reject pending llm_query calls (call_llm in-flight during subprocess crash)
-    for (const [, pending] of this.pendingLlmQueries) {
-      pending.reject(new Error(`Pi subprocess exited unexpectedly (${exitReason})`));
-    }
-    this.pendingLlmQueries.clear();
+    this.rejectAllPendingEphemeral(
+      new Error(`Pi subprocess exited unexpectedly (${exitReason})`),
+    );
 
     // Reject pending ensure_session_ready requests
     for (const [, pending] of this.pendingEnsureSessionReady) {
@@ -2806,6 +2830,8 @@ n   * connection can be adopted mid-session.
    * Used before an idle runtime restart so we don't leave transient children behind.
    */
   private async killSubprocessGracefully(timeoutMs = 2_000): Promise<void> {
+    this.rejectAllPendingEphemeral(new Error('Pi subprocess stopped'));
+
     const child = this.subprocess;
     if (!child) {
       this.killSubprocess();
@@ -2895,9 +2921,9 @@ n   * connection can be adopted mid-session.
     this.clearTurnIdleWatchdog();
     this.activeTurnToolIds.clear();
 
-    // Clear any in-flight overflow-recovery state so a stale fallback timer
-    // doesn't fire on a torn-down adapter.
-    this.adapter.resetOverflowState();
+    // Clear any in-flight overflow/auto-retry recovery state so a stale
+    // fallback timer doesn't fire on a torn-down adapter.
+    this.adapter.resetRecoveryState();
   }
 
   // ============================================================
@@ -2914,23 +2940,20 @@ n   * connection can be adopted mid-session.
 
     const id = `mini-${++this.rpcIdCounter}`;
     const resultPromise = new Promise<string | null>((resolve, reject) => {
-      this.pendingMiniCompletions.set(id, { resolve, reject });
+      const timeout = setTimeout(() => {
+        const pending = this.takePendingEphemeral(this.pendingMiniCompletions, id);
+        if (!pending) return;
+
+        this.debug(`[runMiniCompletion] Timed out after ${LLM_QUERY_TIMEOUT_MS / 1000}s`);
+        this.send({ type: 'cancel_ephemeral_query', id });
+        pending.resolve(null);
+      }, LLM_QUERY_TIMEOUT_MS);
+      this.pendingMiniCompletions.set(id, { resolve, reject, timeout });
     });
 
     this.send({ type: 'mini_completion', id, prompt });
 
-    // Keep this aligned with the subprocess-side queryLlm timeout.
-    const timeout = new Promise<string | null>((resolve) => {
-      setTimeout(() => {
-        if (this.pendingMiniCompletions.has(id)) {
-          this.pendingMiniCompletions.delete(id);
-          this.debug(`[runMiniCompletion] Timed out after ${LLM_QUERY_TIMEOUT_MS / 1000}s`);
-          resolve(null);
-        }
-      }, LLM_QUERY_TIMEOUT_MS);
-    });
-
-    const text = await Promise.race([resultPromise, timeout]);
+    const text = await resultPromise;
     this.debug(`[runMiniCompletion] Result: ${text ? `"${text.slice(0, 200)}"` : 'null'}`);
     return text;
   }
@@ -2952,22 +2975,18 @@ n   * connection can be adopted mid-session.
 
     const id = `llm-${++this.rpcIdCounter}`;
     const resultPromise = new Promise<LLMQueryResult>((resolve, reject) => {
-      this.pendingLlmQueries.set(id, { resolve, reject });
+      const timeout = setTimeout(() => {
+        const pending = this.takePendingEphemeral(this.pendingLlmQueries, id);
+        if (!pending) return;
+
+        this.send({ type: 'cancel_ephemeral_query', id });
+        pending.reject(new Error(`queryLlm timed out after ${LLM_QUERY_TIMEOUT_MS / 1000}s`));
+      }, LLM_QUERY_TIMEOUT_MS);
+      this.pendingLlmQueries.set(id, { resolve, reject, timeout });
     });
 
     this.send({ type: 'llm_query', id, request });
-
-    // Keep this aligned with the subprocess-side queryLlm timeout.
-    const timeout = new Promise<LLMQueryResult>((_, reject) => {
-      setTimeout(() => {
-        if (this.pendingLlmQueries.has(id)) {
-          this.pendingLlmQueries.delete(id);
-          reject(new Error(`queryLlm timed out after ${LLM_QUERY_TIMEOUT_MS / 1000}s`));
-        }
-      }, LLM_QUERY_TIMEOUT_MS);
-    });
-
-    return Promise.race([resultPromise, timeout]);
+    return resultPromise;
   }
 
   // ============================================================

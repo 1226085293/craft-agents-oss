@@ -74,9 +74,11 @@ import {
   type SessionHeader,
   pickSessionFields,
 } from '@craft-agent/shared/sessions'
-import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, getSourceServerBuilder, type SourceWithCredential, isApiOAuthProvider, hasRenewEndpoint, SERVER_BUILD_ERRORS, TokenRefreshManager, createTokenGetter } from '@craft-agent/shared/sources'
+import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, TokenRefreshManager } from '@craft-agent/shared/sources'
 import { listTaskSlugs, parseTaskSpec, uniqueTaskSlug } from '@craft-agent/shared/tasks'
 import { createTaskFromSpec, resolveCreateTaskProjectId } from '../tasks'
+import { buildPagesToolCallbacks } from '../pages/tool-callbacks'
+import { buildServersFromSources as buildServersFromSourcesShared } from '../sources/build-servers'
 import { ConfigWatcher, type ConfigWatcherCallbacks } from '@craft-agent/shared/config'
 import { getValidClaudeOAuthToken } from '@craft-agent/shared/auth'
 import { resolveAuthEnvVars } from '@craft-agent/shared/config'
@@ -371,106 +373,19 @@ async function saveClaudeTurnAnchor(
  * @param sessionPath - Optional path to session folder for saving large API responses
  * @param tokenRefreshManager - Optional TokenRefreshManager for OAuth token refresh
  */
+/**
+ * Session-flavored wrapper around the shared builder: keeps the ~7 existing
+ * call sites unchanged while routing logs through sessionLog. The
+ * implementation lives in ../sources/build-servers.ts so the pages action
+ * executor uses the exact same credential path.
+ */
 async function buildServersFromSources(
   sources: LoadedSource[],
   sessionPath?: string,
   tokenRefreshManager?: TokenRefreshManager,
   summarize?: SummarizeCallback
 ) {
-  const span = perf.span('sources.buildServers', { count: sources.length })
-  const credManager = getSourceCredentialManager()
-  const serverBuilder = getSourceServerBuilder()
-
-  // Load credentials for all sources
-  const sourcesWithCreds: SourceWithCredential[] = await Promise.all(
-    sources.map(async (source) => ({
-      source,
-      token: await credManager.getToken(source),
-      credential: await credManager.getApiCredential(source),
-    }))
-  )
-  span.mark('credentials.loaded')
-
-  // Build token getter for refreshable sources (OAuth + renew-endpoint)
-  // Uses TokenRefreshManager for unified refresh logic (DRY principle)
-  const getTokenForSource = (source: LoadedSource) => {
-    const provider = source.config.provider
-    // Provider-specific OAuth (Google, Slack, Microsoft) or generic OAuth (authType: 'oauth')
-    if (isApiOAuthProvider(provider) || source.config.api?.authType === 'oauth') {
-      const manager = tokenRefreshManager ?? new TokenRefreshManager(credManager, {
-        log: (msg) => sessionLog.debug(msg),
-      })
-      return createTokenGetter(manager, source)
-    }
-    // API renew endpoint — non-OAuth token refresh
-    if (hasRenewEndpoint(source)) {
-      const manager = tokenRefreshManager ?? new TokenRefreshManager(credManager, {
-        log: (msg) => sessionLog.debug(msg),
-      })
-      return createTokenGetter(manager, source)
-    }
-    return undefined
-  }
-
-  // Per-request credential getter for non-OAuth / non-renew API sources
-  // (bearer / header / query / basic auth).
-  //
-  // Without this, the in-process API tool captures the credential as a static
-  // string at build time and keeps using it forever — meaning a fresh JWT
-  // entered via source_credential_prompt is ignored until session restart.
-  //
-  // With this getter, every API call reads the latest credential from the
-  // vault, so credential updates take effect on the next call. OAuth and
-  // renew-endpoint sources have their own refresh logic via TokenRefreshManager
-  // and are skipped here.
-  const getCredentialForSource = (source: LoadedSource) => {
-    if (source.config.type !== 'api') return undefined
-    if (source.config.api?.authType === 'none') return undefined
-    if (isApiOAuthProvider(source.config.provider)) return undefined
-    if (source.config.api?.authType === 'oauth') return undefined
-    if (hasRenewEndpoint(source)) return undefined
-    return async () => credManager.getApiCredential(source)
-  }
-
-  // Pass sessionPath to enable saving large API responses to session folder
-  const result = await serverBuilder.buildAll(
-    sourcesWithCreds,
-    getTokenForSource,
-    sessionPath,
-    summarize,
-    getCredentialForSource,
-  )
-  span.mark('servers.built')
-  span.setMetadata('mcpCount', Object.keys(result.mcpServers).length)
-  span.setMetadata('apiCount', Object.keys(result.apiServers).length)
-
-  // Update source configs for auth errors so UI reflects actual state.
-  // Re-classify AUTH_REQUIRED → TOKEN_EXPIRED when the credential is merely
-  // expired-but-refreshable; in that case the refresh cycle handles recovery
-  // and we must NOT prematurely mark the source as needing re-auth (#710).
-  for (const error of result.errors) {
-    if (error.error !== SERVER_BUILD_ERRORS.AUTH_REQUIRED) continue
-    const source = sources.find(s => s.config.slug === error.sourceSlug)
-    if (!source) continue
-
-    const cred = await credManager.load(source)
-    const isExpiredRefreshable =
-      cred &&
-      (credManager.isExpired(cred) || credManager.needsRefresh(cred)) &&
-      (cred.refreshToken || hasRenewEndpoint(source))
-
-    if (isExpiredRefreshable) {
-      error.error = SERVER_BUILD_ERRORS.TOKEN_EXPIRED
-      sessionLog.debug(`Source ${error.sourceSlug}: TOKEN_EXPIRED — refresh cycle will handle`)
-      continue
-    }
-
-    credManager.markSourceNeedsReauth(source, 'Token missing or expired')
-    sessionLog.info(`Marked source ${error.sourceSlug} as needing re-auth`)
-  }
-
-  span.end()
-  return result
+  return buildServersFromSourcesShared(sources, sessionPath, tokenRefreshManager, summarize, sessionLog)
 }
 
 /**
@@ -808,6 +723,8 @@ interface ManagedSession {
   stopRequested?: boolean
   lastMessageAt: number
   streamingText: string
+  /** Identity of the unfinished assistant text, used for retry discard boundaries. */
+  streamingTurnId?: string
   // Incremented each time a new message starts processing.
   // Used to detect if a follow-up message has superseded the current one (stale-request guard).
   processingGeneration: number
@@ -1344,6 +1261,7 @@ export class SessionManager implements ISessionManager {
   }
 
   private browserPaneManager: IBrowserPaneManager | null = null
+  private enqueuePageThumbnailFn?: (req: { workspaceId: string; workspaceRootPath: string; slug: string }) => void
   private rpcServer: RpcServer | null = null
   private remoteBpms = new Map<string, RemoteBrowserPaneManager>()
   /** Pinned desktop client per session for `client:browser:invoke` routing. */
@@ -1357,6 +1275,24 @@ export class SessionManager implements ISessionManager {
   setBrowserPaneManager(bpm: IBrowserPaneManager): void {
     this.browserPaneManager = bpm
     bpm.setSessionPathResolver((sessionId) => this.getSessionPath(sessionId))
+  }
+
+  /**
+   * Inject the page thumbnail capturer (Electron main only — needs a
+   * BrowserWindow). Headless/WebUI hosts never call this, so
+   * {@link enqueuePageThumbnail} no-ops and tiles fall back to the placeholder.
+   */
+  setPageThumbnailer(fn: (req: { workspaceId: string; workspaceRootPath: string; slug: string }) => void): void {
+    this.enqueuePageThumbnailFn = fn
+  }
+
+  /**
+   * Request a (re)capture of a page's preview poster. Fire-and-forget: the
+   * injected capturer queues it, writes thumbnail.jpg, and stamps page.json
+   * (which broadcasts pages:changed). No-op when no capturer is injected.
+   */
+  enqueuePageThumbnail(workspaceId: string, workspaceRootPath: string, slug: string): void {
+    this.enqueuePageThumbnailFn?.({ workspaceId, workspaceRootPath, slug })
   }
 
   /**
@@ -1657,6 +1593,13 @@ export class SessionManager implements ISessionManager {
         // Notify renderer to re-read automations.json
         this.broadcastAutomationsChanged(workspaceId)
       },
+      onPagesListChange: (pages) => {
+        sessionLog.info(`Pages changed in ${workspaceId} (${pages.length} pages)`)
+        // Rebuild the synthetic page-refresh cron matchers (page.json is the
+        // completion marker, so this also fires after every refresh run)
+        this.automationSystems.get(workspaceRootPath)?.reloadPageRefreshMatchers()
+        this.broadcastPagesChanged(workspaceId, pages)
+      },
       onLlmConnectionsChange: () => {
         sessionLog.info(`LLM connections changed in ${workspaceId}`)
         this.broadcastLlmConnectionsChanged()
@@ -1857,6 +1800,12 @@ export class SessionManager implements ISessionManager {
     if (!this.eventSink) return
     sessionLog.info(`Broadcasting skills changed (${skills.length} skills)`)
     this.eventSink(RPC_CHANNELS.skills.CHANGED, { to: 'workspace', workspaceId }, workspaceId, skills)
+  }
+
+  private broadcastPagesChanged(workspaceId: string, pages: import('@craft-agent/shared/pages').LoadedPage[]): void {
+    if (!this.eventSink) return
+    sessionLog.info(`Broadcasting pages changed (${pages.length} pages)`)
+    this.eventSink(RPC_CHANNELS.pages.CHANGED, { to: 'workspace', workspaceId }, workspaceId, pages)
   }
 
   private broadcastDefaultPermissionsChanged(): void {
@@ -4851,6 +4800,25 @@ ${request.prompt}`;
           const created = await createTaskFromSpec(this, ws.id, ws.rootPath, parsed.data)
           return { ...created, warnings: [...warnings, ...created.warnings] }
         },
+        // Pages tools (list_pages/get_page/create_page/update_page/
+        // write_page_data/delete_page) — grouped callbacks bound to the
+        // invoking session's workspace. Storage flows are shared with the
+        // pages RPC handlers; after each mutation we poke the watcher (Linux
+        // atomic-rename workaround) and broadcast pages:changed, exactly like
+        // those handlers do.
+        pages: buildPagesToolCallbacks({
+          workspaceId: managed.workspace.id,
+          workspaceRootPath: managed.workspace.rootPath,
+          log: (message: string) => sessionLog.info(message),
+          onPagesMutated: async (pageSlug: string) => {
+            this.notifyConfigFileChange(managed.workspace.rootPath, `pages/${pageSlug}/page.json`)
+            const { loadWorkspacePages } = await import('@craft-agent/shared/pages')
+            this.broadcastPagesChanged(managed.workspace.id, loadWorkspacePages(managed.workspace.rootPath))
+          },
+          onContentChanged: (pageSlug: string) => {
+            this.enqueuePageThumbnail(managed.workspace.id, managed.workspace.rootPath, pageSlug)
+          },
+        }),
         getSessionInfoFn: (sessionId?: string) => {
           const targetId = sessionId ?? managed.id
           const session = this.sessions.get(targetId)
@@ -6874,6 +6842,7 @@ ${request.prompt}`;
     this.setProcessing(managed, true)
     managed.currentRunStartedAt = Date.now()
     managed.streamingText = ''
+    managed.streamingTurnId = undefined
     managed.processingGeneration++
     managed.turnStartFinalMessageId = this.getLastFinalAssistantMessageId(managed.messages)
 
@@ -8739,8 +8708,25 @@ ${request.prompt}`;
     switch (event.type) {
       case 'text_delta':
         managed.streamingText += event.text
+        managed.streamingTurnId = event.turnId
         // Queue delta for batched sending (performance: reduces IPC from 50+/sec to ~20/sec)
         this.queueDelta(sessionId, workspaceId, event.text, event.turnId)
+        break
+
+      case 'text_discard':
+        // Discard, NEVER flush, the failed attempt's batch before announcing
+        // backoff. Otherwise a delayed failed token can arrive after retry start.
+        this.discardDelta(sessionId, event.turnId)
+        if (managed.streamingTurnId === event.turnId) {
+          managed.streamingText = ''
+          managed.streamingTurnId = undefined
+        }
+        this.sendEvent({ ...event, sessionId }, workspaceId)
+        break
+
+      case 'retry':
+        // Retry progress is transient; do not persist it as transcript history.
+        this.sendEvent({ ...event, sessionId }, workspaceId)
         break
 
       case 'text_complete': {
@@ -8758,6 +8744,7 @@ ${request.prompt}`;
         }
         managed.messages.push(assistantMessage)
         managed.streamingText = ''
+        managed.streamingTurnId = undefined
 
         // Update lastMessageRole and lastFinalMessageId for badge/unread display (only for final messages)
         if (!event.isIntermediate) {
@@ -9604,6 +9591,15 @@ ${request.prompt}`;
       }, DELTA_BATCH_INTERVAL_MS)
       this.deltaFlushTimers.set(sessionId, timer)
     }
+  }
+
+  /** Remove a failed assistant's unsent batch without affecting another stream. */
+  private discardDelta(sessionId: string, turnId: string): void {
+    if (this.pendingDeltas.get(sessionId)?.turnId !== turnId) return
+    const timer = this.deltaFlushTimers.get(sessionId)
+    if (timer) clearTimeout(timer)
+    this.deltaFlushTimers.delete(sessionId)
+    this.pendingDeltas.delete(sessionId)
   }
 
   /**

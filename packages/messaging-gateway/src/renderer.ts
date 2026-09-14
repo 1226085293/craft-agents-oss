@@ -6,8 +6,10 @@
  *   - `streaming` (legacy): on Telegram, posts on first `text_delta` and
  *     edits every ~editIntervalMs as tokens arrive; each `text_complete`
  *     finalises the current message, so one agent run with multiple turns
- *     produces multiple messages. On platforms without editing, accumulates
- *     per turn and sends on each `text_complete`.
+ *     produces multiple messages. Failed retry attempts are discarded by
+ *     turn ID and an already-posted partial is reused for retry status and
+ *     recovered output. On platforms without editing, accumulates per turn
+ *     and sends on each `text_complete`.
  *
  *   - `progress` (default): one transient status message per run. Schedules
  *     "💭 thinking…" or "🔧 <tool>…" shortly after first activity so fast
@@ -91,10 +93,14 @@ interface RenderState {
   // --- streaming mode ---------------------------------------------------
   /** Accumulated text for the current response (streaming mode). */
   textBuffer: string
+  /** Turn identity for the streaming buffer, used to scope retry discards. */
+  streamingTurnId: string | null
   /** Whether the agent is currently processing. */
   processing: boolean
   /** Streaming: the message ID being edited (Telegram only). */
   streamingMessageId: string | null
+  /** Whether the streaming bubble currently shows a transient retry status. */
+  streamingRetryPlaceholder: boolean
   /** Streaming: timer for next edit. */
   editTimer: ReturnType<typeof setTimeout> | null
   /** Streaming: length of text at last edit (to detect new content). */
@@ -130,6 +136,7 @@ const PROGRESS_BUBBLE_DELAY_MS = 1200
 const BACKOFF_RESET_MS = 30_000
 
 const THINKING_LABEL = '💭 thinking…'
+const DISCARDED_RESPONSE_LABEL = '⚠️ Incomplete response discarded.'
 
 /**
  * Max characters rendered inline with the buttons before we spill the full
@@ -195,8 +202,10 @@ export class Renderer {
     if (!state) {
       state = {
         textBuffer: '',
+        streamingTurnId: null,
         processing: false,
         streamingMessageId: null,
+        streamingRetryPlaceholder: false,
         editTimer: null,
         lastEditedLength: 0,
         currentEditIntervalMs: DEFAULT_EDIT_INTERVAL_MS,
@@ -250,7 +259,7 @@ export class Renderer {
   }
 
   // ---------------------------------------------------------------------------
-  // Mode: streaming (legacy behaviour — unchanged)
+  // Mode: streaming (legacy behaviour with retry-aware stream boundaries)
   // ---------------------------------------------------------------------------
 
   private async handleStreaming(
@@ -264,11 +273,98 @@ export class Renderer {
       case 'text_delta': {
         const delta = typeof event.delta === 'string' ? event.delta : ''
         if (!delta) break
+
+        const turnId = typeof event.turnId === 'string' ? event.turnId : null
+        if (turnId) state.streamingTurnId = turnId
+
         state.textBuffer += delta
         state.processing = true
+        state.streamingRetryPlaceholder = false
 
         if (adapter.capabilities.messageEditing) {
           await this.handleStreamingDelta(state, binding, adapter)
+        }
+        break
+      }
+
+      case 'text_discard': {
+        const turnId = typeof event.turnId === 'string' ? event.turnId : null
+        if (!turnId || turnId !== state.streamingTurnId) break
+
+        this.cancelEditTimer(state)
+        state.textBuffer = ''
+        state.streamingTurnId = null
+        state.lastEditedLength = 0
+        state.streamingRetryPlaceholder = false
+
+        // External messages cannot be deleted reliably. Keep the posted ID so
+        // retry status and recovered output can overwrite this same bubble.
+        if (state.streamingMessageId && adapter.capabilities.messageEditing) {
+          await this.tryEditMessage(
+            adapter,
+            binding,
+            state.streamingMessageId,
+            DISCARDED_RESPONSE_LABEL,
+            state,
+          )
+        }
+        break
+      }
+
+      case 'retry': {
+        const phase = event.phase
+        if (phase === 'backoff') {
+          state.processing = true
+          const message = typeof event.message === 'string' ? event.message : ''
+          if (message && state.streamingMessageId && adapter.capabilities.messageEditing) {
+            await this.tryEditMessage(
+              adapter,
+              binding,
+              state.streamingMessageId,
+              message,
+              state,
+            )
+            state.streamingRetryPlaceholder = true
+          }
+          break
+        }
+
+        if (phase === 'active') {
+          state.processing = true
+          if (state.streamingMessageId && adapter.capabilities.messageEditing) {
+            await this.tryEditMessage(
+              adapter,
+              binding,
+              state.streamingMessageId,
+              THINKING_LABEL,
+              state,
+            )
+            state.streamingRetryPlaceholder = true
+          }
+          break
+        }
+
+        if (phase === 'end') {
+          this.cancelEditTimer(state)
+          if (
+            state.streamingRetryPlaceholder &&
+            state.streamingMessageId &&
+            adapter.capabilities.messageEditing
+          ) {
+            await this.tryEditMessage(
+              adapter,
+              binding,
+              state.streamingMessageId,
+              DISCARDED_RESPONSE_LABEL,
+              state,
+            )
+          }
+          state.textBuffer = ''
+          state.streamingTurnId = null
+          state.streamingMessageId = null
+          state.streamingRetryPlaceholder = false
+          state.lastEditedLength = 0
+          state.processing = false
         }
         break
       }
@@ -297,6 +393,12 @@ export class Renderer {
           state.streamingMessageId = null
           state.lastEditedLength = 0
         }
+
+        state.textBuffer = ''
+        state.streamingTurnId = null
+        state.streamingMessageId = null
+        state.streamingRetryPlaceholder = false
+        state.lastEditedLength = 0
         break
       }
 
@@ -327,7 +429,9 @@ export class Renderer {
               state,
             )
             state.streamingMessageId = null
+            state.streamingRetryPlaceholder = false
             state.textBuffer = ''
+            state.streamingTurnId = null
             state.lastEditedLength = 0
           }
           await adapter.sendText(binding.channelId, `🔧 ${displayName}...`, bindingOpts(binding))
@@ -355,7 +459,12 @@ export class Renderer {
       }
       return
     }
-    // Subsequent chunks: edit timer handles batched updates
+
+    // This also restarts editing after a discarded partial retained its
+    // message ID but canceled the failed attempt's timer.
+    if (state.streamingMessageId && state.textBuffer.length > state.lastEditedLength) {
+      this.scheduleEdit(state, binding, adapter)
+    }
   }
 
   private scheduleEdit(
@@ -917,7 +1026,9 @@ Approve in the desktop app to continue.`,
     this.cancelEditTimer(state)
     this.cancelPendingProgressBubble(state)
     state.textBuffer = ''
+    state.streamingTurnId = null
     state.streamingMessageId = null
+    state.streamingRetryPlaceholder = false
     state.lastEditedLength = 0
     state.processing = false
     state.finalBuffer = ''

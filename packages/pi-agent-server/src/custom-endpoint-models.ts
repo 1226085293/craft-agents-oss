@@ -1,5 +1,8 @@
 export type CustomEndpointInput = 'text' | 'image'
 
+/** Custom endpoint protocol — determines which streaming adapter Pi SDK uses. */
+export type CustomEndpointApi = 'openai-completions' | 'anthropic-messages'
+
 export interface CustomEndpointModelDefaults {
   supportsImages?: boolean
   /**
@@ -89,11 +92,17 @@ export function normalizeCustomEndpointModelEntry(model: CustomEndpointModelConf
  * Uses reasonable defaults for context window and max tokens since we can't
  * query the endpoint for its actual capabilities. Image support must be
  * explicitly enabled either at the connection level or per-model.
+ *
+ * For `openai-completions` endpoints we set `compat.supportsStore = false` so the
+ * pi-ai driver omits the OpenAI-platform-specific `store` param entirely. Third-party
+ * OpenAI-compatible gateways gain nothing from `store`, and strict ones reject unknown
+ * params with a 400 — which made those connections unusable. See craft-agents-oss#1022.
  */
 export function buildCustomEndpointModelDef(
   id: string,
   defaults?: CustomEndpointModelDefaults,
   overrides?: CustomEndpointModelOverrides,
+  api?: CustomEndpointApi,
 ) {
   const supportsImages = overrides?.supportsImages ?? defaults?.supportsImages ?? false
   const input: CustomEndpointInput[] = supportsImages ? ['text', 'image'] : ['text']
@@ -140,6 +149,10 @@ export function buildCustomEndpointModelDef(
         overrides?.requiresReasoningContentOnAssistantMessages
         ?? defaults?.requiresReasoningContentOnAssistantMessages
         ?? true,
+      // craft-agents-oss#1022: strict OpenAI-compatible gateways reject the
+      // OpenAI-platform-specific `store` param with a 400. supportsStore:false
+      // makes the pi-ai driver omit it entirely for openai-completions.
+      ...(api === 'openai-completions' ? { supportsStore: false } : {}),
     },
     // thinkingLevelMap — always-thinking GLM/z.ai-style relays reject any
     // request without a valid reasoning_effort ("该模型始终思考，不支持关闭思考；

@@ -21,7 +21,7 @@ import type {
   ButtonPress,
   MessagingLogger,
 } from '../../types'
-import { formatForTelegram } from './format'
+import { formatForTelegram, TELEGRAM_MAX_CAPTION_LENGTH, TELEGRAM_MAX_MESSAGE_LENGTH, TELEGRAM_PARSE_MODE, type TelegramParseMode } from './format'
 
 /**
  * Discriminated chat metadata returned by `getChatInfo`. Phase A's supergroup
@@ -190,7 +190,10 @@ export class TelegramAdapter implements PlatformAdapter {
     messageEditing: true,
     inlineButtons: true,
     maxButtons: 10,
-    maxMessageLength: 4096,
+    // MarkdownV2 escaping inflates text (worst case ~2x), and the renderer
+    // splits on this limit *before* formatting. Leave headroom so a formatted
+    // chunk still fits Telegram's real 4096 cap instead of degrading to plain.
+    maxMessageLength: 3800,
     markdown: 'v2',
     // This adapter uses polling (grammY Bot#start). A webhook path is not
     // wired through the Electron main process, so advertising webhookSupport
@@ -879,11 +882,8 @@ export class TelegramAdapter implements PlatformAdapter {
 
   async sendText(channelId: string, text: string, opts?: SendOptions): Promise<SentMessage> {
     if (!this.bot) throw new Error('Telegram adapter not initialized')
-    const formatted = formatForTelegram(text)
-    const sent = await this.bot.api.sendMessage(
-      Number(channelId),
-      formatted,
-      sendParams(opts),
+    const sent = await sendWithMarkdownFallback(text, TELEGRAM_MAX_MESSAGE_LENGTH, this.log, (body, extra) =>
+      this.bot!.api.sendMessage(Number(channelId), body, { ...sendParams(opts), ...extra }),
     )
     return {
       platform: 'telegram',
@@ -894,11 +894,12 @@ export class TelegramAdapter implements PlatformAdapter {
 
   async editMessage(channelId: string, messageId: string, text: string, _opts?: SendOptions): Promise<void> {
     if (!this.bot) throw new Error('Telegram adapter not initialized')
-    const formatted = formatForTelegram(text)
     // editMessageText is keyed by (chat_id, message_id) — Telegram does not
     // accept message_thread_id here. We accept the option for caller
     // uniformity but ignore it.
-    await this.bot.api.editMessageText(Number(channelId), Number(messageId), formatted)
+    await sendWithMarkdownFallback(text, TELEGRAM_MAX_MESSAGE_LENGTH, this.log, (body, extra) =>
+      this.bot!.api.editMessageText(Number(channelId), Number(messageId), body, extra),
+    )
   }
 
   async sendButtons(channelId: string, text: string, buttons: InlineButton[], opts?: SendOptions): Promise<SentMessage> {
@@ -911,10 +912,13 @@ export class TelegramAdapter implements PlatformAdapter {
       }]),
     }
 
-    const sent = await this.bot.api.sendMessage(Number(channelId), text, {
-      reply_markup: keyboard,
-      ...sendParams(opts),
-    })
+    const sent = await sendWithMarkdownFallback(text, TELEGRAM_MAX_MESSAGE_LENGTH, this.log, (body, extra) =>
+      this.bot!.api.sendMessage(Number(channelId), body, {
+        reply_markup: keyboard,
+        ...sendParams(opts),
+        ...extra,
+      }),
+    )
 
     return {
       platform: 'telegram',
@@ -941,11 +945,22 @@ export class TelegramAdapter implements PlatformAdapter {
     if (!this.bot) throw new Error('Telegram adapter not initialized')
 
     const inputFile = new InputFile(file, filename)
-    const sent = await this.bot.api.sendDocument(
-      Number(channelId),
-      inputFile,
-      { caption, ...threadParams(opts) },
-    )
+    const formatted = captionParams(caption)
+
+    let sent: { message_id: number }
+    try {
+      sent = await this.bot.api.sendDocument(Number(channelId), inputFile, {
+        ...formatted,
+        ...threadParams(opts),
+      })
+    } catch (err) {
+      if (!isMarkupError(err) || !formatted.parse_mode) throw err
+      this.log.warn('Telegram rejected caption markup, resending as plain text')
+      sent = await this.bot.api.sendDocument(Number(channelId), inputFile, {
+        caption,
+        ...threadParams(opts),
+      })
+    }
 
     return {
       platform: 'telegram',
@@ -1004,6 +1019,61 @@ function sendParams(opts?: SendOptions): { message_thread_id?: number; disable_n
     ...threadParams(opts),
     ...(opts?.silent ? { disable_notification: true } : {}),
   }
+}
+
+/** Extra params the MarkdownV2 path injects into a send/edit call. */
+type MarkupExtra = { parse_mode?: TelegramParseMode }
+
+/**
+ * Send or edit a text body as MarkdownV2, degrading to plain text when that
+ * isn't possible.
+ *
+ * Two situations force the plain path:
+ *  1. Escaping inflated the body past Telegram's hard cap.
+ *  2. Telegram rejected the markup with `400: can't parse entities`.
+ *
+ * The retry has to live here, not in the renderer: `isRetryableSendError`
+ * classifies HTTP 400 as permanent, so an unhandled markup error would drop
+ * the message entirely. Streaming edits make case 2 very reachable — an
+ * intermediate flush can hand us text the converter couldn't balance.
+ */
+async function sendWithMarkdownFallback<T>(
+  text: string,
+  maxLength: number,
+  log: MessagingLogger,
+  send: (body: string, extra: MarkupExtra) => Promise<T>,
+): Promise<T> {
+  const formatted = formatForTelegram(text)
+  if (formatted.length <= maxLength) {
+    try {
+      return await send(formatted, { parse_mode: TELEGRAM_PARSE_MODE })
+    } catch (err) {
+      if (!isMarkupError(err)) throw err
+      log.warn('Telegram rejected MarkdownV2 markup, resending as plain text', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+  }
+  return send(text, {})
+}
+
+/**
+ * Build the caption params for `sendDocument`. Captions cap at 1024 chars —
+ * well below the message limit — so an escaped caption can overflow easily.
+ */
+function captionParams(caption?: string): { caption?: string; parse_mode?: TelegramParseMode } {
+  if (!caption) return {}
+  const formatted = formatForTelegram(caption)
+  if (formatted.length <= TELEGRAM_MAX_CAPTION_LENGTH) {
+    return { caption: formatted, parse_mode: TELEGRAM_PARSE_MODE }
+  }
+  return { caption: caption.slice(0, TELEGRAM_MAX_CAPTION_LENGTH) }
+}
+
+/** Detect Telegram's entity-parse rejection. */
+function isMarkupError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? '')
+  return /can(?:'|’)?t\s+parse\s+entities|can\s+not\s+parse\s+entities|unsupported\s+start\s+tag/i.test(message)
 }
 
 function encodeTelegramFilePath(filePath: string): string {

@@ -472,11 +472,15 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.hasEmittedFinalText = false;
     this.subTurnCounter = 0;
     this.messageSubTurnId = null;
-    // A new agent-loop turn re-arms terminal-error dedup. NOTE: the deferred
-    // retry error buffer deliberately survives turn boundaries — the SDK's
-    // retry turn is a fresh turn_start…agent_end pair, and the buffered error
-    // must still surface if that turn fails terminally.
-    this.hasEmittedTerminalError = false;
+    // A new Craft turn can only start once the previous queue completed (or
+    // was force-aborted), so any recovery state left over here is stale.
+    //
+    // The local subprocess retry buffer is deliberately preserved: that lane
+    // re-drives the turn from the subprocess on a long backoff, and the
+    // buffered error must still surface if the retried run fails terminally.
+    const deferredRetryError = this.deferredRetryError;
+    this.resetRecoveryState();
+    this.deferredRetryError = deferredRetryError;
     this.log.debug('Turn started', { turnIndex: this.turnIndex });
   }
 
@@ -1045,6 +1049,20 @@ export class PiEventAdapter extends BaseEventAdapter {
 
       case 'auto_retry_end': {
         const retryEndEvent = event as Extract<AgentSessionEvent, { type: 'auto_retry_end' }>;
+        // A retry run that produced an answer: close the retry indicator and,
+        // when it took more than one attempt, say so. Nothing is held here —
+        // the run's own agent_end still follows.
+        if (retryEndEvent.success) {
+          yield { type: 'retry', phase: 'end' };
+          const recoveredAfter = retryEndEvent.attempt;
+          if (recoveredAfter > 0) {
+            yield {
+              type: 'info',
+              message: `Recovered after ${recoveredAfter} ${recoveredAfter === 1 ? 'retry' : 'retries'}`,
+            };
+          }
+          break;
+        }
         if (!retryEndEvent.success && retryEndEvent.finalError) {
           // Abort during the backoff sleep: the held agent_end never gets a
           // terminal successor — auto_retry_end IS the failure terminal.

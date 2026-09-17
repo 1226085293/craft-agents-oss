@@ -997,26 +997,23 @@ async function createAuthenticatedRuntime(): Promise<{
 }
 
 /**
- * Apply LLM resilience overrides on a fresh Pi session (in-memory only —
- * does not persist to settings.json). Ensures:
- * 1. Auto-retry is on (Pi SDK retries connection/timeout errors — matches
- *    upstream gateway failures like ConnectionResetError / request_timeout).
- * 2. HTTP idle timeout is capped at 2 min (default is 5 min), so a stalled
- *    upstream response (no data at all) can't hold a turn hostage.
- * Combined with the LiteLLM gateway's 45s request_timeout, the worst case
- * for a dead upstream is ~2-3 min instead of 10+ min.
+ * Cap the HTTP idle timeout at 2 min (Pi SDK default is 5 min) so a stalled
+ * upstream response that never sends a byte can't hold a turn hostage.
+ * Combined with the LiteLLM gateway's 45s request_timeout, the worst case for
+ * a dead upstream is ~2-3 min instead of 10+ min.
+ *
+ * The retry policy is deliberately NOT overridden here: `createCraftSettingsManager`
+ * already injects the upstream-tuned policy from `session-settings.ts` (4 agent
+ * retries with exponential backoff + 2 provider retries honouring `retry-after`).
+ * Re-applying a `retry` block would replace that whole object and silently drop
+ * the provider layer — plus downgrade 4 retries to 3.
  */
 function applyPiResilienceSettings(session: AgentSession): void {
   try {
     session.settingsManager.applyOverrides({
-      retry: {
-        enabled: true,
-        maxRetries: 3,
-        baseDelayMs: 2000,
-      },
       httpIdleTimeoutMs: 120_000,
     });
-    debugLog('[resilience] Applied retry + 2min http idle timeout to Pi session');
+    debugLog('[resilience] Applied 2min http idle timeout to Pi session');
   } catch (error) {
     debugLog(`[resilience] Could not apply settings: ${error instanceof Error ? error.message : String(error)}`);
   }
@@ -2360,32 +2357,12 @@ function handleSessionEvent(event: AgentSessionEvent): void {
           );
         }
       }
-    } else if (
-      piSession &&
-      errorText &&
-      !autoRetryCancelled &&
-      !autoRetryRoundInFlight &&
-      !userAbortRequested &&
-      !stallAbortInProgress &&
-      typeof (piSession as unknown as { pendingMessageCount?: number }).pendingMessageCount === 'number' &&
-      (piSession as unknown as { pendingMessageCount: number }).pendingMessageCount === 0 &&
-      !isContextOverflow(last as unknown as Parameters<typeof isContextOverflow>[0], piSession.agent.state.model?.contextWindow ?? 0) &&
-      classifyAutoRetryError(errorText) !== 'permanent'
-    ) {
-      autoRetryState = {
-        startedAt: Date.now(),
-        round: 1,
-        lastErrorText: errorText,
-        budgetRounds: isBudgetExhaustedError(errorText) ? 1 : 0,
-      };
-      scheduleAutoRetryLoop(autoRetryState);
-      forwardedEvent = {
-        ...(forwardedEvent as Record<string, unknown>),
-        autoRetryPending: true,
-      } as unknown as OutboundAgentEvent;
-      autoRetryClaimed = true;
-      debugLog(`auto-retry: scheduled round 1 after error: ${errorText}`);
     }
+    // The local subprocess retry scheduler is retired. The Pi SDK now retries
+    // transient provider/transport errors itself (4 agent retries with
+    // exponential backoff + 2 provider retries — see session-settings.ts), and
+    // running both lanes double-retried every failure. The scheduler helpers
+    // below are retained only until the follow-up cleanup removes them.
   }
 
   // Post-stop defense evaluation: when the agent run ends, decide whether the

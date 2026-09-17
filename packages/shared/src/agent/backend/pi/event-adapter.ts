@@ -742,29 +742,7 @@ export class PiEventAdapter extends BaseEventAdapter {
             break;
           }
 
-          // --- Subprocess auto-retry lane (local, takes precedence) ---------
-          // The subprocess scheduler annotated this message_end with
-          // autoRetryPlanned: its own scheduler will retry on a BROADER
-          // transient classifier and a much longer backoff (2s → 5min) than
-          // the SDK's, so buffer the error and hold the queue — the terminal
-          // may be several minutes away.
-          //
-          // Checked FIRST: when the subprocess owns the retry, the SDK lane
-          // below must not also park the error (that would surface it twice).
-          if (
-            !this.hasEmittedTerminalError &&
-            ((event as { autoRetryPlanned?: boolean }).autoRetryPlanned === true ||
-              this.autoRetryHoldActive)
-          ) {
-            const parsed = parseError(new Error(msg.errorMessage));
-            this.deferredRetryError = {
-              message: msg.errorMessage,
-              parsed: parsed.code !== 'unknown_error' ? parsed : null,
-            };
-            break;
-          }
-
-          // --- SDK retry lane (upstream) -----------------------------------
+          // --- Retry lane (upstream Pi SDK) --------------------------------
           // The SDK's retry loop uses this same `isRetryableAssistantError`
           // classifier, so it will retry unless retries are disabled or
           // exhausted — and the following agent_end { willRetry } says which.

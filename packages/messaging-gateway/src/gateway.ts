@@ -15,6 +15,7 @@ import {
   evaluatePreBindingAccess,
   executeRejection,
 } from './access-control'
+import { normalizeThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import { BindingStore } from './binding-store'
 import { Router } from './router'
 import { Commands, type AccessControlDeps, type PairingCodeConsumer } from './commands'
@@ -888,6 +889,11 @@ export class MessagingGateway {
       await this.handlePlanButton(platform, adapter, press)
       return
     }
+
+    if (press.buttonId.startsWith('think:')) {
+      await this.handleThinkingButton(adapter, press)
+      return
+    }
   }
 
   /**
@@ -1054,10 +1060,67 @@ export class MessagingGateway {
   }
 
   /**
-   * Decide whether a button press may proceed. `bind:` is workspace-owner
-   * only (matches the `/bind` text command); `perm:` and `plan:` are gated
-   * by the binding's access policy (matches the routing-time check in
-   * Router.route). Bot senders are silent-dropped before any other logic.
+   * Handle an inline `think:<level>` press — the picker `/thinking` renders on
+   * Telegram/WhatsApp/Lark. Mirrors the `/thinking` text command: owner-gated
+   * via `gateButtonPress` (same `evaluatePreBindingAccess` check as `bind:`),
+   * routes through `setSessionThinkingLevel` so the level hot-applies to a
+   * running agent, persists to the session JSONL, and broadcasts to the
+   * desktop UI. Unknown levels are rejected without touching the session; on a
+   * successful change the menu keyboard is cleared so the chosen level's
+   * checkmark is the only residual.
+   */
+  private async handleThinkingButton(
+    adapter: PlatformAdapter,
+    press: ButtonPress,
+  ): Promise<void> {
+    const pressOpts = press.threadId !== undefined ? { threadId: press.threadId } : {}
+
+    const binding = this.bindingStore.findByChannel(press.platform, press.channelId, press.threadId)
+    if (!binding) {
+      await adapter.sendText(press.channelId, 'No session bound. Use /bind, /new, or /pair.', pressOpts)
+      return
+    }
+
+    const level = normalizeThinkingLevel(press.buttonId.slice('think:'.length).toLowerCase())
+    if (!level) {
+      await adapter.sendText(press.channelId, 'Unknown thinking level.', pressOpts)
+      return
+    }
+
+    try {
+      this.sessionManager.setSessionThinkingLevel(binding.sessionId, level)
+      this.log.info('session thinking level changed from chat button', {
+        event: 'session_thinking_level_changed_from_chat_button',
+        workspaceId: this.workspaceId,
+        platform: press.platform,
+        channelId: press.channelId,
+        sessionId: binding.sessionId,
+        level,
+      })
+      await adapter.sendText(press.channelId, `Thinking level set to ${level}.`, pressOpts)
+      if (adapter.clearButtons && press.messageId) {
+        await adapter.clearButtons(press.channelId, press.messageId).catch(() => {})
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      this.log.error('failed to set session thinking level from chat button', {
+        event: 'session_thinking_level_change_failed',
+        workspaceId: this.workspaceId,
+        platform: press.platform,
+        channelId: press.channelId,
+        sessionId: binding.sessionId,
+        error: message,
+      })
+      await adapter.sendText(press.channelId, `Failed to change thinking level: ${message}`, pressOpts)
+    }
+  }
+
+  /**
+   * Decide whether a button press may proceed. `bind:` and `think:` are
+   * workspace-owner only (they match the `/bind` and `/thinking` text
+   * commands); `perm:` and `plan:` are gated by the binding's access policy
+   * (matches the routing-time check in Router.route). Bot senders are
+   * silent-dropped before any other logic.
    *
    * Returns true to proceed, false on reject (caller must return early).
    * The reject path emits the friendly reply and records the sender in
@@ -1079,10 +1142,11 @@ export class MessagingGateway {
     let verdict: import('./access-control').AccessDecision
     let extra: { bindingId?: string; sessionId?: string } = {}
 
-    if (press.buttonId.startsWith('bind:')) {
-      // `bind:` runs the same gate as the `/bind` text command — the
-      // operator who emitted the keyboard is offering session-binding
-      // privileges, but only owners may take them.
+    if (press.buttonId.startsWith('bind:') || press.buttonId.startsWith('think:')) {
+      // `bind:`/`think:` run the same gate as the `/bind` and `/thinking`
+      // text commands — the operator who emitted the keyboard is offering
+      // session-binding / model-control privileges, but only owners may
+      // take them.
       verdict = evaluatePreBindingAccess({
         msg: this.synthesizeMsgForGate(press),
         workspaceConfig: this.accessDeps.getWorkspaceConfig(),

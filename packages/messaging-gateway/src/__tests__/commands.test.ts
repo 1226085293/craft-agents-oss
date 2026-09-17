@@ -6,7 +6,7 @@ import type { Session } from '@craft-agent/shared/protocol'
 import type { ISessionManager } from '@craft-agent/server-core/handlers'
 import { BindingStore } from '../binding-store'
 import { Commands } from '../commands'
-import type { IncomingMessage, PlatformAdapter, SentMessage } from '../types'
+import type { IncomingMessage, PlatformAdapter, SentMessage, InlineButton } from '../types'
 
 function makeSession(id: string, name: string, lastMessageAt: number): Session {
   return {
@@ -39,8 +39,9 @@ function makeSessionManager(
   } as unknown as ISessionManager
 }
 
-function makeAdapter(platform: 'telegram' | 'whatsapp', inlineButtons: boolean): PlatformAdapter & { sent: string[] } {
+function makeAdapter(platform: 'telegram' | 'whatsapp', inlineButtons: boolean): PlatformAdapter & { sent: string[]; sentButtons: InlineButton[] } {
   const sent: string[] = []
+  const sentButtons: InlineButton[] = []
   return {
     platform,
     capabilities: {
@@ -52,6 +53,7 @@ function makeAdapter(platform: 'telegram' | 'whatsapp', inlineButtons: boolean):
       webhookSupport: false,
     },
     sent,
+    sentButtons,
     async initialize() {},
     async destroy() {},
     isConnected() { return true },
@@ -62,8 +64,9 @@ function makeAdapter(platform: 'telegram' | 'whatsapp', inlineButtons: boolean):
       return { platform, channelId: 'chan-1', messageId: String(sent.length) }
     },
     async editMessage() {},
-    async sendButtons(_channelId: string, text: string): Promise<SentMessage> {
+    async sendButtons(_channelId: string, text: string, buttons?: InlineButton[]): Promise<SentMessage> {
       sent.push(text)
+      if (buttons) sentButtons.push(...buttons)
       return { platform, channelId: 'chan-1', messageId: String(sent.length) }
     },
     async sendTyping() {},
@@ -162,13 +165,35 @@ describe('Commands', () => {
       expect(setSessionThinkingLevel).toHaveBeenCalledWith('sess-1', 'max')
     })
 
-    it('reports the current level when no argument is given', async () => {
+    it('presents the thinking level picker as buttons when no argument is given (inline platform)', async () => {
       const { setSessionThinkingLevel, commands, adapter } = setup('xhigh')
 
       await commands.handleCommand(adapter, { ...makeMessage('/thinking'), platform: 'telegram' })
 
       expect(setSessionThinkingLevel).not.toHaveBeenCalled()
-      expect(adapter.sent.at(-1)).toContain('Thinking level: xhigh')
+      // Six levels, each button carries a `think:` id, current one marked.
+      expect(adapter.sentButtons).toHaveLength(6)
+      expect(adapter.sentButtons.every((b) => b.id.startsWith('think:'))).toBe(true)
+      expect(adapter.sentButtons.some((b) => b.label.includes('xhigh'))).toBe(true)
+      expect(adapter.sentButtons.filter((b) => b.label.startsWith('✓ '))).toHaveLength(1)
+    })
+
+    it('falls back to text usage on platforms without inline buttons', async () => {
+      const setSessionThinkingLevel = mock((_id: string, _level: string) => {})
+      const store = makeStore()
+      store.bind('ws1', 'sess-1', 'whatsapp', 'chan-1', 'Alice')
+      const commands = new Commands(
+        makeSessionManager([makeSession('sess-1', 'Alpha', 100)], { setSessionThinkingLevel } as Partial<ISessionManager>),
+        store,
+        'ws1',
+      )
+      const adapter = makeAdapter('whatsapp', false)
+
+      await commands.handleCommand(adapter, { ...makeMessage('/thinking'), platform: 'whatsapp' })
+
+      expect(setSessionThinkingLevel).not.toHaveBeenCalled()
+      expect(adapter.sentButtons).toHaveLength(0)
+      expect(adapter.sent.at(-1)).toContain('Thinking level:')
       expect(adapter.sent.at(-1)).toContain('Usage: /thinking')
     })
 

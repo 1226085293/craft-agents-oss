@@ -303,4 +303,23 @@ describe('MessagingGateway button-press access gate', () => {
     expect(pending[0]!.reason).toBe('not-on-binding-allowlist')
     expect(pending[0]!.bindingId).toBe(binding.id)
   })
+
+  it('rejects think: button press from non-owner on locked-down workspace', async () => {
+    const h = await makeHarness({
+      workspaceConfig: {
+        enabled: true,
+        platforms: {
+          telegram: {
+            enabled: true,
+            accessMode: 'owner-only',
+            owners: [{ userId: 'owner-1', addedAt: 0 }],
+          },
+        },
+      },
+    })
+    await h.adapter.fireButton(buildPress({ buttonId: 'think:high', senderId: 'stranger' }))
+    // Gate blocks it before any level change; only the friendly rejection.
+    expect(h.adapter.sent.some((s) => s.includes('Thinking level set to'))).toBe(false)
+    expect(h.adapter.sent.some((s) => s.includes('private'))).toBe(true)
+  })
 })

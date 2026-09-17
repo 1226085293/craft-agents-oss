@@ -798,8 +798,25 @@ export class Commands {
         return
       }
 
-      // No argument — report the current level alongside the usage.
+      // No argument — on platforms that render inline buttons (Telegram,
+      // WhatsApp, Lark) show a tap-to-pick menu mirroring `/bind`'s session
+      // picker, with the current level marked. Text-only platforms keep the
+      // scrollback usage line.
       if (!target) {
+        if (adapter.capabilities.inlineButtons) {
+          const buttons = THINKING_LEVEL_IDS.map((level) => ({
+            id: `think:${level}`,
+            label: session.thinkingLevel === level ? `✓ ${level}` : level,
+            data: level,
+          }))
+          await adapter.sendButtons(
+            msg.channelId,
+            `Thinking level — current: ${session.thinkingLevel ?? '(workspace default)'}`,
+            buttons,
+            replyOpts,
+          )
+          return
+        }
         await adapter.sendText(
           msg.channelId,
           `Thinking level: ${session.thinkingLevel ?? '(workspace default)'}\n\n${usage}`,
@@ -808,7 +825,8 @@ export class Commands {
         return
       }
 
-      // normalizeThinkingLevel also folds the legacy 'think' value to medium.
+      // An explicit level was supplied — set it (text path; also covers
+      // platforms without inline buttons).
       const level = normalizeThinkingLevel(target)
       if (!level) {
         await adapter.sendText(msg.channelId, usage, replyOpts)

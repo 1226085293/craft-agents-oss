@@ -129,6 +129,7 @@ function makeStubSessionManager(opts: StubSessionManagerOpts = {}): ISessionMana
     acceptPlan: mock(async () => {}),
     setPendingPlanExecution: mock(async () => {}),
     clearPendingPlanExecution: mock(async () => {}),
+    setSessionThinkingLevel: mock(async () => {}),
     setAutomationBinder: () => {},
   } as unknown as ISessionManager
 }
@@ -478,5 +479,46 @@ describe('MessagingGateway — perm: button (#726)', () => {
     const respondMock = h.sessionManager.respondToPermission as unknown as ReturnType<typeof mock>
     expect(respondMock.mock.calls[0]?.[1]).toBe('req-2')
     expect(respondMock.mock.calls[1]?.[1]).toBe('req-3')
+  })
+})
+
+describe('MessagingGateway — think: button', () => {
+  it('sets the bound session thinking level, clears the menu keyboard, posts ack', async () => {
+    const h = await makeHarness()
+
+    await h.adapter.fireButton(pressFor('think:high'))
+
+    expect(h.sessionManager.setSessionThinkingLevel).toHaveBeenCalledWith('sess-A', 'high')
+    expect(h.adapter.clearButtons).toHaveBeenCalledWith('chat-1', '1')
+    const acks = h.adapter.calls.filter((c) => c.kind === 'sendText')
+    expect(acks.some((c) => c.text?.includes('Thinking level set to high.'))).toBe(true)
+  })
+
+  it('is case-insensitive and folds legacy values', async () => {
+    const h = await makeHarness()
+
+    await h.adapter.fireButton(pressFor('think:MAX'))
+
+    expect(h.sessionManager.setSessionThinkingLevel).toHaveBeenCalledWith('sess-A', 'max')
+  })
+
+  it('rejects an unknown level without touching the session', async () => {
+    const h = await makeHarness()
+
+    await h.adapter.fireButton(pressFor('think:bogus'))
+
+    expect(h.sessionManager.setSessionThinkingLevel).not.toHaveBeenCalled()
+    const acks = h.adapter.calls.filter((c) => c.kind === 'sendText')
+    expect(acks.some((c) => c.text?.includes('Unknown thinking level.'))).toBe(true)
+  })
+
+  it('replies with a friendly message when there is no binding', async () => {
+    const h = await makeHarness()
+
+    await h.adapter.fireButton(pressFor('think:high', { channelId: 'unbound-chat' }))
+
+    expect(h.sessionManager.setSessionThinkingLevel).not.toHaveBeenCalled()
+    const acks = h.adapter.calls.filter((c) => c.kind === 'sendText')
+    expect(acks.some((c) => c.text?.includes('No session bound'))).toBe(true)
   })
 })

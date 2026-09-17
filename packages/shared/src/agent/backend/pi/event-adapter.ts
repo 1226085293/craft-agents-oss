@@ -1044,30 +1044,6 @@ export class PiEventAdapter extends BaseEventAdapter {
           }
           break;
         }
-        if (!retryEndEvent.success && retryEndEvent.finalError) {
-          // Abort during the backoff sleep: the held agent_end never gets a
-          // terminal successor — auto_retry_end IS the failure terminal.
-          // Surface the buffered deferred error here and terminate the queue.
-          if (this.retryHoldActive && this.deferredRetryError) {
-            const buffered = this.deferredRetryError;
-            this.deferredRetryError = null;
-            this.retryHoldActive = false;
-            this.hasEmittedTerminalError = true;
-            yield buffered.parsed
-              ? { type: 'typed_error', error: buffered.parsed }
-              : { type: 'error', message: buffered.message };
-            yield { type: 'complete' };
-            this.pendingQueueComplete = true;
-            break;
-          }
-          // Otherwise the failure was already reported (terminal agent_end
-          // surfaced the deferred error, or message_end reported directly).
-          // Never report a second error for the same turn-cycle.
-          if (!this.hasEmittedTerminalError && !this.deferredRetryError) {
-            yield { type: 'error', message: `Retry failed: ${retryEndEvent.finalError}` };
-            this.hasEmittedTerminalError = true;
-          }
-        }
         if (
           this.retryState === 'held' ||
           this.retryState === 'awaitingRetry' ||

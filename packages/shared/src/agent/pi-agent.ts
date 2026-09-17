@@ -2692,8 +2692,10 @@ n   * connection can be adopted mid-session.
   }
 
   forceAbort(reason: AbortReason): void {
-    // Subprocess teardown also tears down any pending auto-retry cycle.
-    this.autoRetryActive = false;
+    // Drop any held overflow/retry recovery state. On abort the SDK cancels an
+    // in-flight retry backoff and emits no further agent_end, so a stale hold
+    // would leak into the next turn and keep its queue open.
+    this.adapter.resetRecoveryState();
 
     // Fire Stop hook event (fire-and-forget)
     this.emitAutomationEvent('Stop', { hook_event_name: 'Stop' });

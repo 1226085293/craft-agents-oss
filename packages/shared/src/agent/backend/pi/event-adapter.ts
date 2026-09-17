@@ -537,33 +537,8 @@ export class PiEventAdapter extends BaseEventAdapter {
           // Recovered turn just finished — fall through to normal completion.
           this.overflowState = 'none';
         }
-        // --- SDK retry lane (upstream) -------------------------------------
-        // AgentSession stamps `willRetry` on agent_end
-        // (`_willRetryAfterAgentEnd`). When true, `_prepareRetry` follows with
-        // auto_retry_start, sleeps the backoff and re-runs the turn, so this
-        // agent_end is NOT the end of the Craft turn.
+        // Read once — both retry lanes below key off the same SDK annotation.
         const willRetry = (event as { willRetry?: boolean }).willRetry === true;
-        if (willRetry && this.retryState !== 'awaitingRetry' && this.retryState !== 'backoff') {
-          this.retryState = 'awaitingRetry';
-          this.armRetryFallbackTimer(
-            RETRY_START_FALLBACK_TIMEOUT_MS,
-            'no auto_retry_start followed agent_end { willRetry: true }',
-          );
-          break;
-        }
-        if (this.retryState === 'awaitingRetry' || this.retryState === 'backoff') {
-          // Defensive: no agent run is active in these states, so an agent_end
-          // is unexpected. Keep the queue open; the fallback timer drains it.
-          break;
-        }
-        if (this.retryState === 'held') {
-          // Retries disabled or exhausted: surface the parked error, then
-          // complete the turn normally below.
-          yield* this.releaseHeldRetryError();
-        } else if (this.retryState === 'recovering') {
-          // The retried run finished cleanly.
-          this.retryState = 'none';
-        }
 
         // --- Subprocess auto-retry lane (local) ----------------------------
         // willRetry:true with a buffered subprocess error — hold the queue open
@@ -627,6 +602,33 @@ export class PiEventAdapter extends BaseEventAdapter {
           break;
         }
         this.queuedFollowUpHeld = false;
+        // --- SDK retry lane (upstream) -------------------------------------
+        // Runs LAST so the local subprocess lane above wins when it owns the
+        // retry (a buffered deferred error). AgentSession stamps `willRetry` on
+        // agent_end (`_willRetryAfterAgentEnd`); when true `_prepareRetry`
+        // follows with auto_retry_start, sleeps the backoff and re-runs the
+        // turn, so this agent_end is NOT the end of the Craft turn.
+        if (willRetry && this.retryState !== 'awaitingRetry' && this.retryState !== 'backoff') {
+          this.retryState = 'awaitingRetry';
+          this.armRetryFallbackTimer(
+            RETRY_START_FALLBACK_TIMEOUT_MS,
+            'no auto_retry_start followed agent_end { willRetry: true }',
+          );
+          break;
+        }
+        if (this.retryState === 'awaitingRetry' || this.retryState === 'backoff') {
+          // Defensive: no agent run is active in these states, so an agent_end
+          // is unexpected. Keep the queue open; the fallback timer drains it.
+          break;
+        }
+        if (this.retryState === 'held') {
+          // Retries disabled or exhausted: surface the parked error, then
+          // complete the turn normally below.
+          yield* this.releaseHeldRetryError();
+        } else if (this.retryState === 'recovering') {
+          // The retried run finished cleanly.
+          this.retryState = 'none';
+        }
         if (this.lastUsage) {
           const inputTokens = this.lastUsage.input + (this.lastUsage.cacheRead || 0);
           yield {
@@ -733,6 +735,28 @@ export class PiEventAdapter extends BaseEventAdapter {
             break;
           }
 
+          // --- Subprocess auto-retry lane (local, takes precedence) ---------
+          // The subprocess scheduler annotated this message_end with
+          // autoRetryPlanned: its own scheduler will retry on a BROADER
+          // transient classifier and a much longer backoff (2s → 5min) than
+          // the SDK's, so buffer the error and hold the queue — the terminal
+          // may be several minutes away.
+          //
+          // Checked FIRST: when the subprocess owns the retry, the SDK lane
+          // below must not also park the error (that would surface it twice).
+          if (
+            !this.hasEmittedTerminalError &&
+            ((event as { autoRetryPlanned?: boolean }).autoRetryPlanned === true ||
+              this.autoRetryHoldActive)
+          ) {
+            const parsed = parseError(new Error(msg.errorMessage));
+            this.deferredRetryError = {
+              message: msg.errorMessage,
+              parsed: parsed.code !== 'unknown_error' ? parsed : null,
+            };
+            break;
+          }
+
           // --- SDK retry lane (upstream) -----------------------------------
           // The SDK's retry loop uses this same `isRetryableAssistantError`
           // classifier, so it will retry unless retries are disabled or
@@ -746,27 +770,6 @@ export class PiEventAdapter extends BaseEventAdapter {
           ) {
             this.retryState = 'held';
             this.heldRetryError = errorEvent;
-            break;
-          }
-
-          // --- Subprocess auto-retry lane (local) --------------------------
-          // Reached when the SDK lane above did not take the error (not
-          // retryable by the SDK classifier, or retries already exhausted) but
-          // the subprocess scheduler annotated this message_end with
-          // autoRetryPlanned: its own scheduler will retry on a BROADER
-          // transient classifier and a much longer backoff (2s → 5min), so
-          // buffer the error and hold the queue — the terminal may be several
-          // minutes away.
-          if (
-            !this.hasEmittedTerminalError &&
-            ((event as { autoRetryPlanned?: boolean }).autoRetryPlanned === true ||
-              this.autoRetryHoldActive)
-          ) {
-            const parsed = parseError(new Error(msg.errorMessage));
-            this.deferredRetryError = {
-              message: msg.errorMessage,
-              parsed: parsed.code !== 'unknown_error' ? parsed : null,
-            };
             break;
           }
 

@@ -587,12 +587,14 @@ describe('PiEventAdapter', () => {
       // upcoming agent_end, so surfacing here would report ❌ prematurely.
       expect(events).toHaveLength(0);
 
-      // Terminal agent_end (no retry follows) surfaces the deferred error
-      // exactly once, followed by complete.
+      // Terminal agent_end (no retry follows) closes the retry indicator, then
+      // surfaces the deferred error exactly once, followed by complete.
       const terminal = collect(adapter.adaptEvent({ type: 'agent_end', willRetry: false } as any));
-      expect(terminal[0].type).toBe('typed_error');
-      expect((terminal[0] as any).error.code).toBe('rate_limited');
-      expect(terminal[1]).toMatchObject({ type: 'complete' });
+      const surfaced = terminal.filter((e: any) => e.type === 'typed_error' || e.type === 'error');
+      expect(surfaced).toHaveLength(1);
+      expect(surfaced[0].type).toBe('typed_error');
+      expect((surfaced[0] as any).error.code).toBe('rate_limited');
+      expect(terminal[terminal.length - 1]).toMatchObject({ type: 'complete' });
     });
 
     it('should not emit error without errorMessage even if stopReason is error', () => {
@@ -1261,7 +1263,7 @@ describe('PiEventAdapter', () => {
         type: 'auto_retry_start', attempt: 1, maxAttempts: 1, delayMs: 2_000, errorMessage: 'fetch failed',
       } as any));
       expect(backoff).toEqual([{
-        type: 'retry', phase: 'backoff', message: 'Connection Error. Retrying in 2s (attempt 1/1)...',
+        type: 'retry', phase: 'backoff', message: 'AI Service Unreachable. Retrying in 2s (attempt 1/1)...',
       }]);
       expect(collect(adapter.adaptEvent({ type: 'agent_start' } as any))).toEqual([
         { type: 'retry', phase: 'active' },
@@ -1317,7 +1319,7 @@ describe('PiEventAdapter', () => {
       expect(collect(adapter.adaptEvent({
         type: 'auto_retry_start', attempt: 1, maxAttempts: 4, delayMs: 2_000, errorMessage: 'fetch failed',
       } as any))).toEqual([{
-        type: 'retry', phase: 'backoff', message: 'Connection Error. Retrying in 2s (attempt 1/4)...',
+        type: 'retry', phase: 'backoff', message: 'AI Service Unreachable. Retrying in 2s (attempt 1/4)...',
       }]);
 
       // session.abort() during the backoff → abortRetry() → "Retry cancelled"; no agent_end follows.
@@ -1380,7 +1382,7 @@ describe('PiEventAdapter', () => {
         expect(collect(adapter.adaptEvent({
           type: 'auto_retry_start', attempt: 1, maxAttempts: 4, delayMs: 8_000, errorMessage: 'fetch failed',
         } as any))).toEqual([{
-          type: 'retry', phase: 'backoff', message: 'Connection Error. Retrying in 8s (attempt 1/4)...',
+          type: 'retry', phase: 'backoff', message: 'AI Service Unreachable. Retrying in 8s (attempt 1/4)...',
         }]);
 
         // Announced backoff (8 s) + grace (15 s) not yet elapsed: still holding.
@@ -1569,10 +1571,11 @@ describe('PiEventAdapter', () => {
       // Retryable (non-overflow) errors are deferred, NOT held as overflow.
       expect(events).toHaveLength(0);
 
-      // Terminal agent_end surfaces the deferred error, then completes
-      // normally — overflow state stays untouched.
+      // Terminal agent_end closes the retry indicator, surfaces the deferred
+      // error, then completes normally — overflow state stays untouched.
       const agentEndEvents = collect(adapter.adaptEvent({ type: 'agent_end', willRetry: false } as any));
-      expect(agentEndEvents[0].type).toMatch(/^(error|typed_error)$/);
+      const surfacedErrors = agentEndEvents.filter((e: any) => e.type === 'error' || e.type === 'typed_error');
+      expect(surfacedErrors).toHaveLength(1);
       expect(agentEndEvents[agentEndEvents.length - 1]).toMatchObject({ type: 'complete' });
       expect(adapter.shouldCompleteQueue(true)).toBe(true);
     });

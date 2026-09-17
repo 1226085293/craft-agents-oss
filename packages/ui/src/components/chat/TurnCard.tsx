@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { useMemo, useEffect, useRef, useCallback, useState } from 'react'
+import { useMemo, useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react'
 import i18n from 'i18next'
 import { useTranslation } from 'react-i18next'
 import type { ToolDisplayMeta, AnnotationV1 } from '@craft-agent/core'
@@ -39,7 +39,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '../tooltip'
 import { parseDiffFromFile, type FileContents } from '@pierre/diffs'
 import { getDiffStats, getUnifiedDiffStats } from '../code-viewer'
 import { TurnCardActionsMenu } from './TurnCardActionsMenu'
-import { computeLastChildSet, groupActivitiesByParent, isActivityGroup, formatDuration, formatTokens, deriveTurnPhase, shouldShowThinkingIndicator, type ActivityGroup, type AssistantTurn } from './turn-utils'
+import { computeLastChildSet, groupActivitiesByParent, isActivityGroup, buildActivityRenderKeys, formatDuration, formatTokens, deriveTurnPhase, shouldShowThinkingIndicator, type ActivityGroup, type AssistantTurn } from './turn-utils'
 import { extractAnnotationSelectedText } from './follow-up-helpers'
 import {
   formatAnnotationFollowUpTooltipText,
@@ -256,6 +256,12 @@ export interface ActivityItem {
   // Parent-child nesting for Task subagents
   parentId?: string  // Parent activity's toolUseId
   depth?: number     // Nesting level (0 = root, 1 = child, etc.)
+  /**
+   * Stream correlation id of the backing message (message.turnId).
+   * Survives the pending -> authoritative id swap on text_complete, so
+   * intermediate rows can key off it and update in place.
+   */
+  turnId?: string
   // Status activities (e.g., compacting)
   statusType?: string  // e.g., 'compacting'
   // Background task fields
@@ -1261,6 +1267,13 @@ function ActivityGroupRow({ group, expandedGroups: externalExpandedGroups, onExp
   const isComplete = group.parent.status === 'completed' || group.parent.status === 'error'
   const hasError = group.parent.status === 'error'
 
+  // Same stable-key handling as the top-level list: nested intermediate rows
+  // must survive the pending -> authoritative message id swap without remounting.
+  const childRenderKeys = useMemo(
+    () => buildActivityRenderKeys(group.children),
+    [group.children]
+  )
+
   return (
     <motion.div
       initial={{ opacity: 0, x: -8 }}
@@ -1365,7 +1378,7 @@ function ActivityGroupRow({ group, expandedGroups: externalExpandedGroups, onExp
             <div className="pl-0 space-y-0.5 border-l-2 border-muted ml-[5px]">
               {group.children.map((child, idx) => (
                 <motion.div
-                  key={child.id}
+                  key={childRenderKeys.get(child) ?? child.id}
                   initial={{ opacity: 0, x: -4 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: idx * 0.02 }}
@@ -2954,26 +2967,62 @@ export const TurnCard = React.memo(function TurnCard({
     [sortedActivities, hasTaskSubagents]
   )
 
+  // Stable React keys for activity rows: intermediate rows key off their stream
+  // correlation id (turnId) instead of the message id, which is replaced with
+  // the authoritative main-process id on text_complete. Without this the row
+  // remounts mid-stream, splicing the old row next to the new one (flicker).
+  const activityRenderKeys = useMemo(
+    () => buildActivityRenderKeys(sortedActivities),
+    [sortedActivities]
+  )
+
+  // A running intermediate row already renders "Thinking..." for the block that
+  // is currently streaming. Suppress the standalone indicator in that case so
+  // the pending row can hand its text over in place (no duplicate flash).
+  const hasVisibleRunningIntermediate = useMemo(() => {
+    const isRunningIntermediate = (a: ActivityItem) =>
+      a.type === 'intermediate' && a.status === 'running'
+    if (!groupedActivities) return sortedActivities.some(isRunningIntermediate)
+    return groupedActivities.some(item => {
+      if (!isActivityGroup(item)) return isRunningIntermediate(item)
+      // Children only render when their group is expanded
+      return (
+        expandedActivityGroups.has(item.parent.id) &&
+        item.children.some(isRunningIntermediate)
+      )
+    })
+  }, [groupedActivities, sortedActivities, expandedActivityGroups])
+
   // Keep the expanded activities list pinned to the bottom while new process
   // content streams in (sticky-bottom). Observing the rows catches both new
   // activities and height changes in existing ones; handleActivitiesScroll
   // decides when sticky-bottom is active.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = activitiesContainerRef.current
     if (!el || !isExpanded) return
 
     // Fresh baseline: the container may have been remounted (new element with
     // scrollTop 0), and a stale position would read as an upward scroll.
-    lastActivitiesScrollTopRef.current = el.scrollTop
-
-    // On mounts not driven by a user click (e.g. restored expand state), inherit
-    // the current position: a list that fits or already sits at the bottom keeps
-    // showing the latest content as it grows. The click case is pinned by the
-    // expand effect above.
+    // On mounts not driven by a user click (e.g. restored expand state or a
+    // session switch), decide the starting position before paint:
+    // - in-progress turns open pinned to the latest step (and follow along
+    //   while new process content streams in);
+    // - finished turns keep their top position so reading starts at the first
+    //   step.
+    // The click case is pinned by the expand effect above.
     if (!hasUserToggled.current) {
-      isActivitiesStickToBottomRef.current =
-        el.scrollHeight - el.scrollTop - el.clientHeight < 20
+      if (!isComplete) {
+        isActivitiesStickToBottomRef.current = true
+        el.scrollTop = el.scrollHeight
+      } else {
+        isActivitiesStickToBottomRef.current =
+          el.scrollHeight - el.scrollTop - el.clientHeight < 20
+      }
     }
+
+    // Baseline = the position after any initial pin, so later upward movement
+    // (the only gesture that releases sticky) is measured against it.
+    lastActivitiesScrollTopRef.current = el.scrollTop
 
     const stickIfAtBottom = () => {
       if (isActivitiesStickToBottomRef.current) {
@@ -3000,7 +3049,7 @@ export const TurnCard = React.memo(function TurnCard({
       resizeObserver.disconnect()
       mutationObserver.disconnect()
     }
-  }, [isExpanded])
+  }, [isExpanded, isComplete])
 
   // Don't render if nothing to show and turn is complete
   if (activities.length === 0 && !response && isComplete) {
@@ -3123,13 +3172,16 @@ export const TurnCard = React.memo(function TurnCard({
                       : undefined
                   }}
                 >
-                  <AnimatePresence mode="sync">
+                  {/* No AnimatePresence here: no child of this list has an exit
+                      animation, and exit tracking would splice removed rows back
+                      in at their old index for a frame (visible flicker while
+                      streaming). Rows are keyed stably so updates morph in place. */}
                   {/* Grouped view for Task subagents */}
                   {groupedActivities ? (
                     groupedActivities.map((item, index) => (
                       isActivityGroup(item) ? (
                         <ActivityGroupRow
-                          key={item.parent.id}
+                          key={activityRenderKeys.get(item.parent) ?? item.parent.id}
                           group={item}
                           expandedGroups={expandedActivityGroups}
                           onExpandedGroupsChange={handleExpandedActivityGroupsChange}
@@ -3140,11 +3192,13 @@ export const TurnCard = React.memo(function TurnCard({
                         />
                       ) : (
                         <motion.div
-                          key={item.id}
+                          key={activityRenderKeys.get(item) ?? item.id}
                           initial={
-                            hasUserToggled.current || hasMounted.current
-                              ? { opacity: 0, x: -8 }
-                              : false
+                            item.type === 'intermediate' && item.status === 'running'
+                              ? false
+                              : hasUserToggled.current || hasMounted.current
+                                ? { opacity: 0, x: -8 }
+                                : false
                           }
                           animate={{ opacity: 1, x: 0 }}
                           transition={{ delay: hasUserToggled.current ? (index < SIZE_CONFIG.staggeredAnimationLimit ? index * 0.03 : SIZE_CONFIG.staggeredAnimationLimit * 0.03) : 0 }}
@@ -3162,11 +3216,13 @@ export const TurnCard = React.memo(function TurnCard({
                     /* Flat view for simple tool calls */
                     sortedActivities.map((activity, index) => (
                       <motion.div
-                        key={activity.id}
+                        key={activityRenderKeys.get(activity) ?? activity.id}
                         initial={
-                          hasUserToggled.current || hasMounted.current
-                            ? { opacity: 0, x: -8 }
-                            : false
+                          activity.type === 'intermediate' && activity.status === 'running'
+                            ? false
+                            : hasUserToggled.current || hasMounted.current
+                              ? { opacity: 0, x: -8 }
+                              : false
                         }
                         animate={{ opacity: 1, x: 0 }}
                         // Only animate on user toggle, not initial mount
@@ -3182,8 +3238,11 @@ export const TurnCard = React.memo(function TurnCard({
                       </motion.div>
                     ))
                   )}
-                  {/* Thinking/Buffering indicator - shown while waiting for response */}
-                  {isThinking && !animateResponse && (
+                  {/* Thinking/Buffering indicator - shown while waiting for response.
+                      Hidden while a running intermediate row is visible: that row
+                      already shows "Thinking..." and will morph into the streamed
+                      text in place (no duplicate flash). */}
+                  {isThinking && !animateResponse && !hasVisibleRunningIntermediate && (
                     <motion.div
                       key="thinking"
                       initial={{ opacity: 0, x: -8 }}
@@ -3199,7 +3258,6 @@ export const TurnCard = React.memo(function TurnCard({
                       <span>{isBuffering ? 'Preparing response...' : 'Thinking...'}</span>
                     </motion.div>
                   )}
-                  </AnimatePresence>
                 </div>
                 {/* TodoList - inside expanded section */}
                 {todos && todos.length > 0 && (

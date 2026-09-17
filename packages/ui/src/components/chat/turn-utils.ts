@@ -672,6 +672,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
           content: message.content,
           timestamp: message.timestamp,
           parentId: message.parentToolUseId,
+          turnId: message.turnId,
         }
         // Calculate depth for intermediate messages too
         if (intermediateActivity.parentId) {
@@ -1282,4 +1283,39 @@ export function countTotalActivities(items: (ActivityItem | ActivityGroup)[]): n
     }
   }
   return count
+}
+
+/**
+ * Builds React keys for a list of activity items, occurrence-aware.
+ *
+ * Intermediate rows must keep their React identity while streaming: when
+ * text_complete arrives, the renderer message swaps its temporary id for the
+ * authoritative main-process id, and an id-keyed row would remount (replaying
+ * enter animations and splicing the old row next to the new one). Their stable
+ * stream correlation id (turnId) is used instead — pending and completed
+ * versions of the same text block then update the same row in place.
+ *
+ * A turnId is only unique per text block in practice, but distinct blocks can
+ * reuse one correlation id (e.g. reasoning blocks between tool calls); repeats
+ * are disambiguated by occurrence order so keys stay unique (and stable).
+ * Everything else keeps its id.
+ */
+export function buildActivityRenderKeys(
+  activities: ActivityItem[]
+): Map<ActivityItem, string> {
+  const keys = new Map<ActivityItem, string>()
+  const occurrences = new Map<string, number>()
+  for (const activity of activities) {
+    if (activity.type === 'intermediate' && activity.turnId) {
+      const seen = occurrences.get(activity.turnId) ?? 0
+      occurrences.set(activity.turnId, seen + 1)
+      keys.set(
+        activity,
+        seen === 0 ? `intermediate:${activity.turnId}` : `intermediate:${activity.turnId}#${seen}`
+      )
+    } else {
+      keys.set(activity, activity.id)
+    }
+  }
+  return keys
 }

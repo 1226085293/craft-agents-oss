@@ -289,6 +289,9 @@ export class PiEventAdapter extends BaseEventAdapter {
         // was the willRetry:true one — keep the queue open for the retried turn.
         return false;
       }
+      // The upstream SDK retry lane holds the turn open while a retry is
+      // announced, backing off or still awaiting its start.
+      if (this.retryState !== 'none') return false;
       return this.overflowState === 'none';
     }
     return false;

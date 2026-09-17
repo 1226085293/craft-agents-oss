@@ -67,6 +67,8 @@ export const TELEGRAM_BOT_COMMANDS = [
   { command: 'pair', description: 'Redeem app pairing code' },
   { command: 'unbind', description: 'Disconnect this chat' },
   { command: 'status', description: 'Show current binding' },
+  { command: 'thinking', description: 'Set thinking level' },
+  { command: 'exec', description: 'Switch permission mode' },
   { command: 'stop', description: 'Stop current agent run' },
   { command: 'compact', description: 'Compact context into summary' },
   { command: 'clear', description: 'Clear current context' },

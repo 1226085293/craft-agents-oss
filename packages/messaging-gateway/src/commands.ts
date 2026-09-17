@@ -11,9 +11,14 @@
  * /compact       — compact the current session context into a summary
  * /clear         — clear the current session context
  * /exec          — switch the bound session's permission mode (explore | execute)
+ * /thinking      — set the bound session's thinking level (off|low|medium|high|xhigh|max)
  */
 
 import type { ISessionManager } from '@craft-agent/server-core/handlers'
+import {
+  THINKING_LEVEL_IDS,
+  normalizeThinkingLevel,
+} from '@craft-agent/shared/agent/thinking-levels'
 import {
   evaluatePreBindingAccess,
   executeRejection,
@@ -264,6 +269,9 @@ export class Commands {
         return true
       case '/status':
         await this.handleStatus(adapter, msg)
+        return true
+      case '/thinking':
+        await this.handleThinking(adapter, msg)
         return true
       case '/stop':
         await this.handleStop(adapter, msg)
@@ -760,6 +768,77 @@ export class Commands {
     }
   }
 
+  /**
+   * `/thinking` — set the bound session's thinking level from mobile chat.
+   *
+   * Routes through `setSessionThinkingLevel`, the same entry point the desktop
+   * picker uses, so the level is hot-applied to a running agent, persisted to
+   * the session JSONL, and broadcast to the desktop UI. Owner-gated (this is a
+   * mutating command, so it is deliberately not in ALWAYS_ALLOWED_COMMANDS).
+   */
+  private async handleThinking(adapter: PlatformAdapter, msg: IncomingMessage): Promise<void> {
+    const replyOpts = msg.threadId !== undefined ? { threadId: msg.threadId } : {}
+    const binding = this.bindingStore.findByChannel(adapter.platform, msg.channelId, msg.threadId)
+    if (!binding) {
+      await adapter.sendText(msg.channelId, 'No session bound. Use /bind, /new, or /pair.', replyOpts)
+      return
+    }
+
+    const { args } = parseCommand(msg.text)
+    const target = args.trim().toLowerCase()
+    const usage = `Usage: /thinking <${THINKING_LEVEL_IDS.join('|')}>\n\n` +
+      '  off — no extended thinking\n' +
+      '  low / medium — light / balanced reasoning\n' +
+      '  high / xhigh / max — deeper reasoning for complex work'
+
+    try {
+      const session = await this.sessionManager.getSession(binding.sessionId)
+      if (!session) {
+        await adapter.sendText(msg.channelId, 'Bound session not found.', replyOpts)
+        return
+      }
+
+      // No argument — report the current level alongside the usage.
+      if (!target) {
+        await adapter.sendText(
+          msg.channelId,
+          `Thinking level: ${session.thinkingLevel ?? '(workspace default)'}\n\n${usage}`,
+          replyOpts,
+        )
+        return
+      }
+
+      // normalizeThinkingLevel also folds the legacy 'think' value to medium.
+      const level = normalizeThinkingLevel(target)
+      if (!level) {
+        await adapter.sendText(msg.channelId, usage, replyOpts)
+        return
+      }
+
+      this.sessionManager.setSessionThinkingLevel(binding.sessionId, level)
+      this.log.info('session thinking level changed from chat', {
+        event: 'session_thinking_level_changed_from_chat',
+        workspaceId: this.workspaceId,
+        platform: adapter.platform,
+        channelId: msg.channelId,
+        sessionId: binding.sessionId,
+        level,
+      })
+      await adapter.sendText(msg.channelId, `Thinking level set to ${level}.`, replyOpts)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      this.log.error('failed to set session thinking level from chat', {
+        event: 'session_thinking_level_change_failed',
+        workspaceId: this.workspaceId,
+        platform: adapter.platform,
+        channelId: msg.channelId,
+        sessionId: binding.sessionId,
+        error: message,
+      })
+      await adapter.sendText(msg.channelId, `Failed to change thinking level: ${message}`, replyOpts)
+    }
+  }
+
   private async handleStop(adapter: PlatformAdapter, msg: IncomingMessage): Promise<void> {
     const replyOpts = msg.threadId !== undefined ? { threadId: msg.threadId } : {}
     const binding = this.bindingStore.findByChannel(adapter.platform, msg.channelId, msg.threadId)
@@ -863,6 +942,7 @@ export class Commands {
       '/pair <code> — redeem an app-generated pairing code\n' +
       '/unbind — disconnect this chat\n' +
       '/status — show current binding, model, thinking level\n' +
+      `/thinking <${THINKING_LEVEL_IDS.join('|')}> — set thinking level\n` +
       '/exec explore|execute — switch session permission mode\n' +
       '/stop — abort current agent run\n' +
       '/compact — compact current context into a summary\n' +

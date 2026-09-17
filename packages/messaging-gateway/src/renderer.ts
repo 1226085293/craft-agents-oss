@@ -172,6 +172,19 @@ export type PermissionMessageRecorder = (
   messageId: string,
 ) => void
 
+/**
+ * Fired once the final reply has actually been delivered to the platform.
+ *
+ * A session driven from a phone chat is by definition "read" the moment the
+ * answer lands in the chat, so the host uses this to clear the desktop unread
+ * badge. Only fires after a successful send — a failed delivery (blocked bot,
+ * network error) leaves the badge alone so the user still notices on desktop.
+ */
+export type ReplyDeliveredHook = (
+  adapter: PlatformAdapter,
+  binding: ChannelBinding,
+) => void
+
 export class Renderer {
   /** Per-binding render state. Keyed by binding.id */
   private states = new Map<string, RenderState>()
@@ -181,6 +194,7 @@ export class Renderer {
   private readonly progressStateFile: string | undefined
   private persistedProgressMessages: Record<string, PersistedProgressMessage> = {}
   private readonly recordPermissionMessage: PermissionMessageRecorder | undefined
+  private readonly onReplyDelivered: ReplyDeliveredHook | undefined
 
   constructor(deps?: {
     planTokens?: PlanTokenRegistry
@@ -188,12 +202,14 @@ export class Renderer {
     resolveFileBaseDirs?: FileBaseDirResolver
     progressStateFile?: string
     recordPermissionMessage?: PermissionMessageRecorder
+    onReplyDelivered?: ReplyDeliveredHook
   }) {
     this.planTokens = deps?.planTokens
     this.recordPlanMessage = deps?.recordPlanMessage
     this.resolveFileBaseDirs = deps?.resolveFileBaseDirs
     this.progressStateFile = deps?.progressStateFile
     this.recordPermissionMessage = deps?.recordPermissionMessage
+    this.onReplyDelivered = deps?.onReplyDelivered
     this.loadPersistedProgressMessages()
   }
 
@@ -1086,6 +1102,11 @@ Approve in the desktop app to continue.`,
     }
 
     if (!cleanedText && files.length === 0 && !editTarget) return undefined
+
+    // The reply reached the platform. For a chat-driven session the user just
+    // read it on their phone, so the desktop "unread" badge is stale — unless
+    // the platform can tell us about actual read receipts (see capabilities).
+    this.onReplyDelivered?.(adapter, binding)
     return last
   }
 

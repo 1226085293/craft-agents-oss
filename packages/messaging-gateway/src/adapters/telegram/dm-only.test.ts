@@ -94,5 +94,13 @@ describe('Telegram bot command registration', () => {
       command: 'clear',
       description: 'Clear current context',
     })
+    expect(registered).toContainEqual({
+      command: 'thinking',
+      description: 'Set thinking level',
+    })
+    expect(registered).toContainEqual({
+      command: 'exec',
+      description: 'Switch permission mode',
+    })
   })
 })

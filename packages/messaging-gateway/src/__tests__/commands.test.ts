@@ -129,6 +129,59 @@ describe('Commands', () => {
     expect(adapter.sent[0]).toContain('/bind <number>')
   })
 
+  describe('/thinking', () => {
+    function setup(level?: string) {
+      const sessions = [makeSession('sess-1', 'Alpha', 100)]
+      if (level) (sessions[0] as { thinkingLevel?: string }).thinkingLevel = level
+      const setSessionThinkingLevel = mock((_id: string, _level: string) => {})
+      const store = makeStore()
+      store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+      const commands = new Commands(
+        makeSessionManager(sessions, { setSessionThinkingLevel } as Partial<ISessionManager>),
+        store,
+        'ws1',
+      )
+      const adapter = makeAdapter('telegram', true)
+      return { setSessionThinkingLevel, commands, adapter }
+    }
+
+    it('sets the thinking level of the bound session', async () => {
+      const { setSessionThinkingLevel, commands, adapter } = setup('medium')
+
+      await commands.handleCommand(adapter, { ...makeMessage('/thinking high'), platform: 'telegram' })
+
+      expect(setSessionThinkingLevel).toHaveBeenCalledWith('sess-1', 'high')
+      expect(adapter.sent.at(-1)).toContain('Thinking level set to high.')
+    })
+
+    it('is case-insensitive and tolerates the @bot suffix', async () => {
+      const { setSessionThinkingLevel, commands, adapter } = setup('medium')
+
+      await commands.handleCommand(adapter, { ...makeMessage('/thinking@MyBot MAX'), platform: 'telegram' })
+
+      expect(setSessionThinkingLevel).toHaveBeenCalledWith('sess-1', 'max')
+    })
+
+    it('reports the current level when no argument is given', async () => {
+      const { setSessionThinkingLevel, commands, adapter } = setup('xhigh')
+
+      await commands.handleCommand(adapter, { ...makeMessage('/thinking'), platform: 'telegram' })
+
+      expect(setSessionThinkingLevel).not.toHaveBeenCalled()
+      expect(adapter.sent.at(-1)).toContain('Thinking level: xhigh')
+      expect(adapter.sent.at(-1)).toContain('Usage: /thinking')
+    })
+
+    it('rejects an unknown level without touching the session', async () => {
+      const { setSessionThinkingLevel, commands, adapter } = setup('medium')
+
+      await commands.handleCommand(adapter, { ...makeMessage('/thinking bogus'), platform: 'telegram' })
+
+      expect(setSessionThinkingLevel).not.toHaveBeenCalled()
+      expect(adapter.sent.at(-1)).toContain('Usage: /thinking')
+    })
+  })
+
   it('compacts the currently bound session from chat', async () => {
     const sessions = [makeSession('sess-1', 'Alpha', 100)]
     const sendMessage = mock(async () => {})

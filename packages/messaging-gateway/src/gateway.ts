@@ -325,6 +325,22 @@ export class MessagingGateway {
           ...(binding.threadId !== undefined ? { threadId: binding.threadId } : {}),
         })
       },
+      // The reply only counts as "read" once it is in the user's hands on the
+      // platform. Telegram/WhatsApp/QQ/WeChat expose no read receipt today, so
+      // delivery is the strongest signal we have and the badge is cleared here;
+      // a platform that later sets `readReceipts` will gate on that instead.
+      onReplyDelivered: (adapter, binding) => {
+        if (adapter.capabilities.readReceipts) return
+        void Promise.resolve(this.sessionManager.markSessionRead?.(binding.sessionId))
+          .catch((err) => {
+            this.log.warn('failed to mark session read after chat delivery', {
+              event: 'mark_read_failed',
+              sessionId: binding.sessionId,
+              platform: adapter.platform,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          })
+      },
     })
   }
 

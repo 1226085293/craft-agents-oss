@@ -72,6 +72,15 @@ export interface AdapterCapabilities {
   maxMessageLength: number
   markdown: 'v2' | 'whatsapp' | 'lark-post'
   webhookSupport: boolean
+  /**
+   * The platform can report whether the user actually viewed our message.
+   *
+   * When true the host waits for that signal before clearing the desktop
+   * unread badge; when false (the current default for every platform) the
+   * badge is cleared as soon as the reply is delivered, because a
+   * phone-driven session has no other read signal to wait for.
+   */
+  readReceipts?: boolean
 }
 
 // ---------------------------------------------------------------------------

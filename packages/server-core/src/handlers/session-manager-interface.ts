@@ -101,7 +101,7 @@ export interface ISessionManager {
   unarchiveSession(sessionId: string): Promise<void>
   renameSession(sessionId: string, name: string): Promise<void>
   setSessionStatus(sessionId: string, status: SessionStatus): Promise<void>
-  markSessionRead(sessionId: string): Promise<void>
+  markSessionRead(sessionId: string, opts?: { force?: boolean }): Promise<void>
   markSessionUnread(sessionId: string): Promise<void>
   markAllSessionsRead(workspaceId: string): Promise<void>
   setActiveViewingSession(sessionId: string | null, workspaceId: string): void

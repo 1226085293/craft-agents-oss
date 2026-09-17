@@ -332,7 +332,11 @@ export class MessagingGateway {
       // a platform that later sets `readReceipts` will gate on that instead.
       onReplyDelivered: (adapter, binding) => {
         if (adapter.capabilities.readReceipts) return
-        void Promise.resolve(this.sessionManager.markSessionRead?.(binding.sessionId))
+        // Force-clear so the desktop "unread" badge drops the moment the reply
+        // lands in the chat, even while the turn is still finishing server-side
+        // (the `isProcessing` guard in markSessionRead would otherwise no-op and
+        // onProcessingStopped would re-mark the session unread right after).
+        void Promise.resolve(this.sessionManager.markSessionRead?.(binding.sessionId, { force: true }))
           .catch((err) => {
             this.log.warn('failed to mark session read after chat delivery', {
               event: 'mark_read_failed',

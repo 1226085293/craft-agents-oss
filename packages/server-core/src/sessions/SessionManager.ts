@@ -5683,15 +5683,23 @@ ${request.prompt}`;
 
   /**
    * Mark a session as read by setting lastReadMessageId and clearing hasUnread.
-   * Called when user navigates to a session (and it's not processing).
+   * Called when user navigates to a session (and it's not processing), and by
+   * the messaging gateway when an agent reply is delivered to a chat platform
+   * (the user just read it on their phone, so the desktop "unread" badge is
+   * now stale).
+   *
+   * `force: true` skips the `isProcessing` guard so the gateway can clear the
+   * badge the moment a reply lands in the chat, even though the turn is still
+   * finishing server-side. That prevents `onProcessingStopped` from
+   * re-marking the session unread right after delivery.
    */
-  async markSessionRead(sessionId: string): Promise<void> {
+  async markSessionRead(sessionId: string, opts?: { force?: boolean }): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) return
 
-    // Only mark as read if not currently processing
-    // (user is viewing but we want to wait for processing to complete)
-    if (managed.isProcessing) return
+    // Only mark as read if not currently processing, unless forced (gateway
+    // delivery path). When forced we still want the read state to stick.
+    if (managed.isProcessing && !opts?.force) return
 
     let needsPersist = false
     const updates: { lastReadMessageId?: string; hasUnread?: boolean } = {}
@@ -5718,6 +5726,13 @@ ${request.prompt}`;
       const workspaceRootPath = managed.workspace.rootPath
       await updateSessionMetadata(workspaceRootPath, sessionId, updates)
       this.emitUnreadSummaryChanged()
+      // Push the read state to every connected client (incl. the desktop
+      // session list) so the badge clears immediately — the `complete` event
+      // may already have carried `hasUnread: true` for this turn.
+      this.sendEvent(
+        { type: 'session_metadata_changed', sessionId, changes: { hasUnread: false, ...(updates.lastReadMessageId ? { lastReadMessageId: updates.lastReadMessageId } : {}) } },
+        managed.workspace.id,
+      )
     }
   }
 
@@ -5734,6 +5749,11 @@ ${request.prompt}`;
       const workspaceRootPath = managed.workspace.rootPath
       await updateSessionMetadata(workspaceRootPath, sessionId, { hasUnread: true, lastReadMessageId: undefined })
       this.emitUnreadSummaryChanged()
+      // Reflect the unread state on every connected client.
+      this.sendEvent(
+        { type: 'session_metadata_changed', sessionId, changes: { hasUnread: true, lastReadMessageId: undefined } },
+        managed.workspace.id,
+      )
     }
   }
 

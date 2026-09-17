@@ -6699,16 +6699,6 @@ ${request.prompt}`;
       }, managed.workspace.id)
 
       if (delivery.shouldQueue) {
-        // Auto-retry interplay: queue mode never calls backend.redirect(), so
-        // an active subprocess auto-retry cycle would keep holding the old
-        // turn open while the user's message just sits in the queue. Cancel
-        // the cycle now — the replayed prompt then starts cleanly.
-        const piAgent = agent as unknown as {
-          isAutoRetryActive?: () => boolean
-          cancelAutoRetry?: () => void
-        } | null
-        if (piAgent?.isAutoRetryActive?.()) piAgent.cancelAutoRetry?.()
-
         // Push for FIFO replay on next onProcessingStopped tick. Same shape
         // for both queue-direct (current turn still running) and
         // queue-after-abort (backend already aborted) — the replay path in

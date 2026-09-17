@@ -75,10 +75,13 @@ export interface AdapterCapabilities {
   /**
    * The platform can report whether the user actually viewed our message.
    *
-   * When true the host waits for that signal before clearing the desktop
-   * unread badge; when false (the current default for every platform) the
-   * badge is cleared as soon as the reply is delivered, because a
-   * phone-driven session has no other read signal to wait for.
+   * When true the adapter emits `ReadReceipt`s via `onReadReceipt`, and the
+   * gateway clears the desktop unread badge on that signal. When false (the
+   * default for Telegram/WeChat/QQ, which expose no read receipt), the
+   * gateway instead clears the badge when a NEW inbound message arrives from
+   * the bound chat — a strong proxy that the user is looking at the
+   * conversation. Either way, the badge is also cleared when the user opens
+   * the session on the desktop client.
    */
   readReceipts?: boolean
 }
@@ -177,6 +180,23 @@ export interface ButtonPress {
 }
 
 /**
+ * A "the user actually read our message" signal from a platform that reports
+ * read receipts (e.g. WhatsApp via Baileys `messages.read`; Lark read events).
+ *
+ * Platforms without read receipts (Telegram Bot API, WeChat, QQ) cannot emit
+ * this — for those the gateway falls back to treating a NEW inbound message
+ * from the bound chat as the "user is looking at it" signal instead.
+ */
+export interface ReadReceipt {
+  platform: PlatformType
+  channelId: string
+  /** Forum topic id (Telegram). Undefined for DMs / non-Telegram. */
+  threadId?: number
+  /** Platform-native id of the message that was read, if available. */
+  messageId?: string
+}
+
+/**
  * Per-call options for outbound adapter operations. Currently only Telegram
  * uses `threadId` (forum topic posting); other adapters ignore extra fields.
  */
@@ -216,6 +236,13 @@ export interface PlatformAdapter {
 
   onMessage(handler: (msg: IncomingMessage) => Promise<void>): void
   onButtonPress(handler: (press: ButtonPress) => Promise<void>): void
+  /**
+   * Subscribe to "user read our message" signals. Optional because only
+   * platforms with read receipts (WhatsApp, Lark, ...) emit it; the gateway
+   * also clears the unread badge when a NEW inbound message arrives from the
+   * bound chat, which covers platforms without read receipts (Telegram, …).
+   */
+  onReadReceipt?(handler: (receipt: ReadReceipt) => void): void
 
   sendText(channelId: string, text: string, opts?: SendOptions): Promise<SentMessage>
   editMessage(channelId: string, messageId: string, text: string, opts?: SendOptions): Promise<void>

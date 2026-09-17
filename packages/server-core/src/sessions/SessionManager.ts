@@ -719,6 +719,15 @@ interface ManagedSession {
   agent: AgentInstance | null  // Lazy-loaded - null until first message
   messages: Message[]
   isProcessing: boolean
+  /**
+   * Set when the user is actively engaged on a mobile/chat channel bound to
+   * this session (they sent a message from it, or a real read receipt
+   * arrived). While true, `onProcessingStopped` treats the session as "being
+   * viewed" and clears the unread badge instead of marking it unread — because
+   * the user is clearly looking at the conversation on their phone. Reset when
+   * the user opens the session on the desktop client (markSessionRead).
+   */
+  mobileEngaged?: boolean
   /** Set when user requests stop - allows event loop to drain before clearing isProcessing */
   stopRequested?: boolean
   lastMessageAt: number
@@ -1028,6 +1037,7 @@ export function createManagedSession(
     agent: null,
     messages: [],
     isProcessing: false,
+    mobileEngaged: false,
     lastMessageAt: (s.lastMessageAt ?? s.lastUsedAt ?? Date.now()) as number,
     streamingText: '',
     processingGeneration: 0,
@@ -5683,23 +5693,25 @@ ${request.prompt}`;
 
   /**
    * Mark a session as read by setting lastReadMessageId and clearing hasUnread.
-   * Called when user navigates to a session (and it's not processing), and by
-   * the messaging gateway when an agent reply is delivered to a chat platform
-   * (the user just read it on their phone, so the desktop "unread" badge is
-   * now stale).
+   * Called when the user navigates to (opens) a session on the desktop client.
    *
-   * `force: true` skips the `isProcessing` guard so the gateway can clear the
-   * badge the moment a reply lands in the chat, even though the turn is still
-   * finishing server-side. That prevents `onProcessingStopped` from
-   * re-marking the session unread right after delivery.
+   * The messaging gateway does NOT call this on reply delivery: chat platforms
+   * (Telegram/WhatsApp/QQ/WeChat) expose no read receipt, so delivery is not
+   * "read" — clearing the badge on delivery would drop it before the user has
+   * actually looked at the reply. The desktop unread badge is therefore cleared
+   * only when the user opens the session.
    */
-  async markSessionRead(sessionId: string, opts?: { force?: boolean }): Promise<void> {
+  async markSessionRead(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) return
 
-    // Only mark as read if not currently processing, unless forced (gateway
-    // delivery path). When forced we still want the read state to stick.
-    if (managed.isProcessing && !opts?.force) return
+    // Only mark as read if not currently processing
+    // (user is viewing but we want to wait for processing to complete)
+    if (managed.isProcessing) return
+
+    // User opened the session on the desktop client — they're no longer
+    // "engaged on mobile", so drop that flag.
+    managed.mobileEngaged = false
 
     let needsPersist = false
     const updates: { lastReadMessageId?: string; hasUnread?: boolean } = {}
@@ -5731,6 +5743,31 @@ ${request.prompt}`;
       // may already have carried `hasUnread: true` for this turn.
       this.sendEvent(
         { type: 'session_metadata_changed', sessionId, changes: { hasUnread: false, ...(updates.lastReadMessageId ? { lastReadMessageId: updates.lastReadMessageId } : {}) } },
+        managed.workspace.id,
+      )
+    }
+  }
+
+  /**
+   * Record that the user is actively engaged on a mobile/chat channel bound to
+   * this session — either they sent a new message from it, or a real read
+   * receipt arrived. This clears the unread badge immediately (bypassing the
+   * `isProcessing` guard, because the user is looking at the conversation even
+   * mid-stream) and flags the session so `onProcessingStopped` won't re-mark it
+   * unread when the turn completes. Called by the messaging gateway.
+   */
+  async noteMobileActivity(sessionId: string): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return
+
+    managed.mobileEngaged = true
+
+    if (managed.hasUnread) {
+      managed.hasUnread = false
+      await updateSessionMetadata(managed.workspace.rootPath, sessionId, { hasUnread: false })
+      this.emitUnreadSummaryChanged()
+      this.sendEvent(
+        { type: 'session_metadata_changed', sessionId, changes: { hasUnread: false } },
         managed.workspace.id,
       )
     }
@@ -6571,6 +6608,14 @@ ${request.prompt}`;
     const managed = this.sessions.get(sessionId)
     if (!managed) {
       throw new Error(`Session ${sessionId} not found`)
+    }
+    // A message composed on the desktop client means the user is now driving
+    // from the desktop, not a bound mobile/chat channel — so this turn must not
+    // inherit a stale `mobileEngaged` flag from an earlier phone message (which
+    // would otherwise mark the reply "read" and suppress the unread badge that
+    // the desktop-origin path is supposed to show until the user views it).
+    if (options?.fromDesktop) {
+      managed.mobileEngaged = false
     }
     this.setLastMessageClientId(sessionId, rpcContext?.callerClientId)
 
@@ -7673,8 +7718,10 @@ ${request.prompt}`;
     const didReceiveNewFinalMessage = !!currentFinalMessageId && currentFinalMessageId !== turnStartFinalMessageId
 
     if (reason === 'complete' && didReceiveNewFinalMessage) {
-      if (isViewing) {
-        // User is watching - mark as read immediately
+      if (isViewing || managed.mobileEngaged) {
+        // User is watching on the desktop client, or is actively engaged on a
+        // bound mobile/chat channel (they sent a message or a read receipt
+        // arrived) — mark as read immediately.
         await this.markSessionRead(sessionId)
       } else {
         // User is not watching - mark as unread for NEW badge

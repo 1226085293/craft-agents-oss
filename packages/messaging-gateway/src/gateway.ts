@@ -27,6 +27,7 @@ import type {
   PlatformType,
   IncomingMessage,
   ButtonPress,
+  ReadReceipt,
   MessagingConfig,
   MessagingLogger,
   PlatformOwner,
@@ -327,24 +328,18 @@ export class MessagingGateway {
         })
       },
       // The reply only counts as "read" once it is in the user's hands on the
-      // platform. Telegram/WhatsApp/QQ/WeChat expose no read receipt today, so
-      // delivery is the strongest signal we have and the badge is cleared here;
-      // a platform that later sets `readReceipts` will gate on that instead.
-      onReplyDelivered: (adapter, binding) => {
-        if (adapter.capabilities.readReceipts) return
-        // Force-clear so the desktop "unread" badge drops the moment the reply
-        // lands in the chat, even while the turn is still finishing server-side
-        // (the `isProcessing` guard in markSessionRead would otherwise no-op and
-        // onProcessingStopped would re-mark the session unread right after).
-        void Promise.resolve(this.sessionManager.markSessionRead?.(binding.sessionId, { force: true }))
-          .catch((err) => {
-            this.log.warn('failed to mark session read after chat delivery', {
-              event: 'mark_read_failed',
-              sessionId: binding.sessionId,
-              platform: adapter.platform,
-              error: err instanceof Error ? err.message : String(err),
-            })
-          })
+      // platform. But delivery is NOT "read": the user may not have looked at
+      // it yet, and marking the session read here would wrongly suppress the
+      // desktop unread badge for a turn that originated from the desktop (or
+      // for any turn the user hasn't actually viewed). The unread badge state
+      // is therefore decided exclusively in SessionManager.onProcessingStopped,
+      // from (a) whether the user is viewing the session on the desktop
+      // (isViewing) and (b) whether the message came from a mobile channel
+      // (mobileEngaged → treated as read by default). Real read receipts (e.g.
+      // WhatsApp via Baileys) flow through `onReadReceipt` and clear the badge
+      // only when the user genuinely reads the reply on their phone.
+      onReplyDelivered: (_adapter, _binding) => {
+        // Intentionally a no-op: delivery must not clear the unread badge.
       },
     })
   }
@@ -455,11 +450,44 @@ export class MessagingGateway {
         const handled = await this.commands.handleCommand(adapter, msg)
         if (handled) return
       }
+      // The user is messaging from this bound chat, which is a strong signal
+      // they're looking at the conversation — clear the unread badge. Platforms
+      // with real read receipts also clear via `onReadReceipt` below, but this
+      // covers every platform (Telegram has no read receipt) and is the signal
+      // we actually trust most.
+      const binding = this.bindingStore.findByChannel(adapter.platform, msg.channelId, msg.threadId)
+      if (binding) {
+        void Promise.resolve(this.sessionManager.noteMobileActivity?.(binding.sessionId))
+          .catch((err) => {
+            this.log.warn('failed to note mobile activity for unread clear', {
+              event: 'note_mobile_activity_failed',
+              sessionId: binding.sessionId,
+              platform: adapter.platform,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          })
+      }
       await this.router.route(adapter, msg)
     })
 
     adapter.onButtonPress(async (press: ButtonPress) => {
       await this.handleButtonPress(adapter.platform, press)
+    })
+
+    // Real read receipts (WhatsApp, Lark, …). Maps the read signal to the
+    // bound session and clears its unread badge.
+    adapter.onReadReceipt?.((receipt: ReadReceipt) => {
+      const binding = this.bindingStore.findByChannel(receipt.platform, receipt.channelId, receipt.threadId)
+      if (!binding) return
+      void Promise.resolve(this.sessionManager.noteMobileActivity?.(binding.sessionId))
+        .catch((err) => {
+          this.log.warn('failed to clear unread on read receipt', {
+            event: 'read_receipt_unread_clear_failed',
+            sessionId: binding.sessionId,
+            platform: receipt.platform,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
     })
 
     this.log.info('adapter registered', {

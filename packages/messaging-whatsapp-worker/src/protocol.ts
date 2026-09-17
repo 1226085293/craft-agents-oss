@@ -87,6 +87,7 @@ export type WorkerEvent =
   | ConnectedEvent
   | DisconnectedEvent
   | IncomingEvent
+  | ReadEvent
   | SendResultEvent
   | ErrorEvent
   | UnavailableEvent
@@ -148,6 +149,17 @@ export interface IncomingEvent {
   text: string
   attachments?: WorkerIncomingAttachment[]
   timestamp: number
+}
+
+/**
+ * A message we sent was read by the other party (the user). Baileys emits
+ * `messages.read` with `fromMe: true` for our own messages. Surfaces as a
+ * "clear the unread badge" signal on the main side.
+ */
+export interface ReadEvent {
+  type: 'read'
+  /** JID (channelId) whose messages were read. */
+  channelId: string
 }
 
 

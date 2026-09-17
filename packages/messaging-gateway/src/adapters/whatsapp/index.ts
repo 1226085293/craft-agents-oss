@@ -34,6 +34,7 @@ import type {
   SentMessage,
   InlineButton,
   ButtonPress,
+  ReadReceipt,
   MessagingLogger,
 } from '../../types'
 
@@ -132,6 +133,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
     maxMessageLength: 4096,
     markdown: 'whatsapp',
     webhookSupport: false,
+    // Baileys reports read receipts for messages we send, so we can clear the
+    // desktop unread badge on a real "the user read it" signal.
+    readReceipts: true,
   }
 
   private proc: ChildProcess | null = null
@@ -141,6 +145,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private log: MessagingLogger = NOOP_LOGGER
   private messageHandler: ((msg: IncomingMessage) => Promise<void>) | null = null
   private buttonHandler: ((press: ButtonPress) => Promise<void>) | null = null
+  private readReceiptHandler: ((receipt: ReadReceipt) => void) | null = null
   private eventHandlers = new Set<EventHandler>()
   private pending = new Map<string, PendingEntry>()
   private nextCmdId = 1
@@ -273,6 +278,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
   onButtonPress(handler: (press: ButtonPress) => Promise<void>): void {
     this.buttonHandler = handler
+  }
+
+  onReadReceipt(handler: (receipt: ReadReceipt) => void): void {
+    this.readReceiptHandler = handler
   }
 
   /** Subscribe to adapter-level events (QR, pairing code, unavailable, errors). */
@@ -463,6 +472,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
           reason: ev.reason,
         })
         this.fireEvent({ type: 'disconnected', loggedOut: ev.loggedOut, reason: ev.reason })
+        return
+      case 'read':
+        if (this.readReceiptHandler) {
+          this.readReceiptHandler({ platform: 'whatsapp', channelId: ev.channelId })
+        }
         return
       case 'incoming':
         if (this.messageHandler) {

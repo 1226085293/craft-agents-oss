@@ -1103,9 +1103,12 @@ Approve in the desktop app to continue.`,
 
     if (!cleanedText && files.length === 0 && !editTarget) return undefined
 
-    // The reply reached the platform. For a chat-driven session the user just
-    // read it on their phone, so the desktop "unread" badge is stale — unless
-    // the platform can tell us about actual read receipts (see capabilities).
+    // The reply reached the platform. This is NOT a "read" signal — the user
+    // may not have looked at it yet, so the gateway's onReplyDelivered hook does
+    // NOT clear the unread badge. The badge is decided by SessionManager based
+    // on whether the user is viewing the session or whether the message came
+    // from a mobile channel; real read receipts (WhatsApp) flow through
+    // onReadReceipt instead.
     this.onReplyDelivered?.(adapter, binding)
     return last
   }

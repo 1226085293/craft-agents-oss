@@ -365,6 +365,15 @@ async function startSession(
       }, delay)
     })
 
+    // Read receipts: when the user reads a message WE sent, Baileys fires
+    // `messages.read` with `fromMe: true`. Surface it so the main side can
+    // clear the bound session's unread badge — this is the real "read" signal
+    // for the desktop unread indicator (delivery is not "read").
+    sock.ev.on('messages.read', ({ jid, fromMe }: { jid: string; fromMe?: boolean }) => {
+      if (!fromMe) return
+      emit({ type: 'read', channelId: jid })
+    })
+
     sock.ev.on('messages.upsert', (upsert) => {
       // Accept 'notify' (new inbound from other accounts) AND 'append'
       // (server sync — includes messages the user typed on another device

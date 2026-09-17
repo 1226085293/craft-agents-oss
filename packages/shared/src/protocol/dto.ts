@@ -465,6 +465,14 @@ export interface SendMessageOptions {
    * deliver_file for files instead of Markdown links on plain-text platforms).
    */
   platform?: string
+  /**
+   * True when the message was composed and sent from the desktop client (as
+   * opposed to arriving from a bound mobile/chat channel). The session manager
+   * uses this to reset the `mobileEngaged` flag so a desktop-originated turn
+   * shows the unread badge until the user views it, rather than inheriting a
+   * stale "read-on-phone" state from an earlier phone message.
+   */
+  fromDesktop?: boolean
 }
 
 // ---------------------------------------------------------------------------

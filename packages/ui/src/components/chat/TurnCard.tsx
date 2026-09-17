@@ -2832,6 +2832,27 @@ export const TurnCard = React.memo(function TurnCard({
   // Ref for scrollable activities container (to scroll to bottom on expand)
   const activitiesContainerRef = useRef<HTMLDivElement>(null)
 
+  // Sticky-bottom for the activities list: while true, new process content
+  // (steps, thinking indicator) keeps the list pinned to the bottom. Enabled
+  // when the user expands the list or scrolls back to the bottom; scrolling up
+  // releases it so older steps can be read without being yanked away.
+  const isActivitiesStickToBottomRef = useRef(false)
+  const lastActivitiesScrollTopRef = useRef(0)
+
+  const handleActivitiesScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    if (distanceFromBottom < 20) {
+      // 20px threshold matches the chat viewport's "at bottom" detection
+      isActivitiesStickToBottomRef.current = true
+    } else if (el.scrollTop < lastActivitiesScrollTopRef.current) {
+      // Only upward movement releases sticky: the expand animation and sticky
+      // snaps scroll downward and must not unpin the list mid-flight.
+      isActivitiesStickToBottomRef.current = false
+    }
+    lastActivitiesScrollTopRef.current = el.scrollTop
+  }, [])
+
   // Track if component has mounted (enable fade-in for new activities after mount)
   const hasMounted = useRef(false)
   useEffect(() => {
@@ -2860,8 +2881,13 @@ export const TurnCard = React.memo(function TurnCard({
   // This shows the most recent step instead of the oldest
   useEffect(() => {
     if (isExpanded && hasUserToggled.current && activitiesContainerRef.current) {
+      // Expanding pins the list to the most recent step: new steps keep
+      // following at the bottom until the user scrolls away.
+      isActivitiesStickToBottomRef.current = true
       // Wait for expansion animation to complete (250ms) before scrolling
       const timer = setTimeout(() => {
+        // Skip if the user scrolled away while the expansion was animating
+        if (!isActivitiesStickToBottomRef.current) return
         activitiesContainerRef.current?.scrollTo({
           top: activitiesContainerRef.current.scrollHeight,
           behavior: 'smooth'
@@ -2927,6 +2953,54 @@ export const TurnCard = React.memo(function TurnCard({
     () => !hasTaskSubagents ? computeLastChildSet(sortedActivities) : new Set<string>(),
     [sortedActivities, hasTaskSubagents]
   )
+
+  // Keep the expanded activities list pinned to the bottom while new process
+  // content streams in (sticky-bottom). Observing the rows catches both new
+  // activities and height changes in existing ones; handleActivitiesScroll
+  // decides when sticky-bottom is active.
+  useEffect(() => {
+    const el = activitiesContainerRef.current
+    if (!el || !isExpanded) return
+
+    // Fresh baseline: the container may have been remounted (new element with
+    // scrollTop 0), and a stale position would read as an upward scroll.
+    lastActivitiesScrollTopRef.current = el.scrollTop
+
+    // On mounts not driven by a user click (e.g. restored expand state), inherit
+    // the current position: a list that fits or already sits at the bottom keeps
+    // showing the latest content as it grows. The click case is pinned by the
+    // expand effect above.
+    if (!hasUserToggled.current) {
+      isActivitiesStickToBottomRef.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight < 20
+    }
+
+    const stickIfAtBottom = () => {
+      if (isActivitiesStickToBottomRef.current) {
+        el.scrollTop = el.scrollHeight
+      }
+    }
+
+    const resizeObserver = new ResizeObserver(stickIfAtBottom)
+    const observeRows = () => {
+      resizeObserver.disconnect()
+      for (const row of Array.from(el.children)) resizeObserver.observe(row)
+    }
+    observeRows()
+
+    // Rows are added/removed dynamically (new steps, thinking indicator):
+    // re-observe them and pin to the bottom when sticky.
+    const mutationObserver = new MutationObserver(() => {
+      observeRows()
+      stickIfAtBottom()
+    })
+    mutationObserver.observe(el, { childList: true })
+
+    return () => {
+      resizeObserver.disconnect()
+      mutationObserver.disconnect()
+    }
+  }, [isExpanded])
 
   // Don't render if nothing to show and turn is complete
   if (activities.length === 0 && !response && isComplete) {
@@ -3038,6 +3112,7 @@ export const TurnCard = React.memo(function TurnCard({
                 {/* ml-[15px] positions the border-l under the chevron */}
                 <div
                   ref={activitiesContainerRef}
+                  onScroll={handleActivitiesScroll}
                   className={cn(
                     "pl-4 pr-2 py-0 space-y-0.5 border-l-2 border-muted ml-[13px]",
                     sortedActivities.length > SIZE_CONFIG.maxVisibleActivities && "rounded-r-md overflow-y-auto scrollbar-hover py-1.5"

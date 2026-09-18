@@ -1028,6 +1028,7 @@ function AppShellContent({
   }, [activeWorkspaceId])
 
   // Load usage stats from backend (source & skill usage counts / last-used)
+  const usageStatsReloadRef = React.useRef<{ timer?: ReturnType<typeof setTimeout>; seq: number }>({ seq: 0 })
   React.useEffect(() => {
     if (!activeWorkspaceId) return
     window.electronAPI.getUsageStats(activeWorkspaceId).then((stats) => {
@@ -1035,6 +1036,32 @@ function AppShellContent({
     }).catch(err => {
       console.error('[Chat] Failed to load usage stats:', err)
     })
+  }, [activeWorkspaceId])
+
+  // Refresh usage stats when tool activity happens (source/skill calls change
+  // counts + last-used). Debounced so a burst of tool calls hits the RPC once.
+  React.useEffect(() => {
+    const reloadRef = usageStatsReloadRef.current
+    const cleanup = window.electronAPI.onSessionEvent((event) => {
+      if (event.type !== 'tool_start') return
+      const name = event.toolName
+      const isUsageRelevant = name === 'Skill' || name.startsWith('mcp__')
+      if (!isUsageRelevant) return
+
+      if (reloadRef.timer) clearTimeout(reloadRef.timer)
+      reloadRef.timer = setTimeout(() => {
+        reloadRef.timer = undefined
+        if (!activeWorkspaceId) return
+        const seq = ++reloadRef.seq
+        window.electronAPI.getUsageStats(activeWorkspaceId).then((stats) => {
+          if (seq === reloadRef.seq) setUsageStats(stats ?? { sources: {}, skills: {} })
+        }).catch(() => { /* best-effort refresh */ })
+      }, 1500)
+    })
+    return () => {
+      cleanup()
+      if (reloadRef.timer) clearTimeout(reloadRef.timer)
+    }
   }, [activeWorkspaceId])
 
   // Subscribe to live source updates (when sources are added/removed dynamically)

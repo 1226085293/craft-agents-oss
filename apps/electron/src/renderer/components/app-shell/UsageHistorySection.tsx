@@ -27,9 +27,11 @@ export interface UsageHistorySectionProps {
   slug: string
   workspaceId: string
   usageStats: UsageStats
+  /** Optional setter so expanding the section can refresh app-level stats */
+  setUsageStats?: (stats: UsageStats) => void
 }
 
-export function UsageHistorySection({ kind, slug, workspaceId, usageStats }: UsageHistorySectionProps) {
+export function UsageHistorySection({ kind, slug, workspaceId, usageStats, setUsageStats }: UsageHistorySectionProps) {
   const { t } = useTranslation()
   const { navigateToSession } = useNavigation()
 
@@ -59,10 +61,15 @@ export function UsageHistorySection({ kind, slug, workspaceId, usageStats }: Usa
   const handleToggle = React.useCallback(() => {
     const next = !expanded
     setExpanded(next)
-    if (next && records === null) {
+    // Always reload when expanding so the list reflects recent activity;
+    // refresh stats too since the backend is the source of truth.
+    if (next) {
       loadHistory()
+      window.electronAPI.getUsageStats(workspaceId).then((stats) => {
+        setUsageStats?.(stats ?? { sources: {}, skills: {} })
+      }).catch(() => { /* best-effort */ })
     }
-  }, [expanded, records, loadHistory])
+  }, [expanded, loadHistory, workspaceId, setUsageStats])
 
   // Resolve session titles when history is loaded. Track load completion so
   // "deleted" can be distinguished from "still loading".

@@ -413,6 +413,7 @@ export default function SourceInfoPage({ sourceSlug, workspaceId, onDelete }: So
             slug={sourceSlug}
             workspaceId={workspaceId}
             usageStats={usageStats}
+            setUsageStats={setUsageStats}
           />
 
           {/* Connection */}

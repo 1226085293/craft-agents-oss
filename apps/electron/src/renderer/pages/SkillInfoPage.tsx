@@ -192,6 +192,7 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
             slug={skillSlug}
             workspaceId={workspaceId}
             usageStats={usageStats}
+            setUsageStats={setUsageStats}
           />
 
           {/* Metadata */}

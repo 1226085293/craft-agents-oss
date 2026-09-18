@@ -866,6 +866,15 @@ export class Commands {
     }
 
     try {
+      // Report what actually happened. `cancelProcessing` returns silently when
+      // nothing is running, so replying "Stopped." unconditionally made a no-op
+      // look like a success — exactly what made /stop look broken here.
+      const session = await this.sessionManager.getSession(binding.sessionId)
+      if (!session?.isProcessing) {
+        await adapter.sendText(msg.channelId, 'Nothing to stop — the session is idle.', replyOpts)
+        return
+      }
+
       await this.sessionManager.cancelProcessing(binding.sessionId)
       await adapter.sendText(msg.channelId, 'Stopped.', replyOpts)
     } catch {
@@ -919,19 +928,46 @@ export class Commands {
 
     try {
       const session = await this.sessionManager.getSession(binding.sessionId)
+
+      // Refusing while the agent is mid-turn made /clear look dead from a
+      // phone: the reply says "use /stop first" but nothing stops and the
+      // session keeps thinking. Stop the run ourselves, then clear.
       if (session?.isProcessing) {
-        await adapter.sendText(
-          msg.channelId,
-          'Session is busy. Use /stop first, or wait for the current task to finish, then send /clear again.',
-          replyOpts,
-        )
-        return
+        await this.sessionManager.cancelProcessing(binding.sessionId)
+        if (!(await this.waitUntilIdle(binding.sessionId))) {
+          await adapter.sendText(
+            msg.channelId,
+            'Session is still winding down. Send /clear again in a moment.',
+            replyOpts,
+          )
+          return
+        }
       }
 
       await this.sessionManager.clearSessionMessages(binding.sessionId)
       await adapter.sendText(msg.channelId, 'Context cleared. Your next message will start fresh in this session.', replyOpts)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'unknown error'
+      // `clearSessionMessages` only sees sessions loaded in memory. A bound
+      // session that exists on disk but was never materialized (e.g. right
+      // after an app restart) reports "not found" here — say so plainly
+      // instead of a generic failure that reads like the command did nothing.
+      if (/not found/i.test(message)) {
+        this.log.warn('clear command targeted an unloaded session', {
+          event: 'command_clear_unloaded_session',
+          workspaceId: this.workspaceId,
+          sessionId: binding.sessionId,
+          platform: adapter.platform,
+          channelId: msg.channelId,
+          threadId: msg.threadId,
+        })
+        await adapter.sendText(
+          msg.channelId,
+          'That session is not loaded right now. Open it once in the app, then send /clear again.',
+          replyOpts,
+        )
+        return
+      }
       this.log.error('clear command failed', {
         event: 'command_clear_failed',
         workspaceId: this.workspaceId,
@@ -943,6 +979,26 @@ export class Commands {
       })
       await adapter.sendText(msg.channelId, `Couldn't clear context: ${message}`, replyOpts)
     }
+  }
+
+  /**
+   * Wait for a session to leave the processing state.
+   *
+   * `cancelProcessing` deliberately does NOT clear `isProcessing` itself — the
+   * event loop drains remaining events first (with a 5s safety net). Without
+   * waiting here, a /clear issued right after the stop would still hit the
+   * `isProcessing` guard in `clearSessionMessages` and throw 'Session is busy'.
+   *
+   * Returns false when the session is still busy after the timeout.
+   */
+  private async waitUntilIdle(sessionId: string, timeoutMs = 8_000): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const session = await this.sessionManager.getSession(sessionId)
+      if (!session?.isProcessing) return true
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+    return false
   }
 
   private async handleHelp(adapter: PlatformAdapter, msg: IncomingMessage): Promise<void> {

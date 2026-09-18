@@ -280,14 +280,19 @@ describe('Commands', () => {
     expect(adapter.sent.at(-1)).toContain('Context cleared')
   })
 
-  it('does not clear while the bound session is processing', async () => {
+  it('stops the run and then clears when the bound session is processing', async () => {
     const session = makeSession('sess-1', 'Alpha', 100)
     session.isProcessing = true
     const clearSessionMessages = mock(async () => {})
+    // Mirrors the real cancelProcessing: it requests the stop but leaves
+    // isProcessing set until the event loop drains.
+    const cancelProcessing = mock(async () => {
+      session.isProcessing = false
+    })
     const store = makeStore()
     store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
     const commands = new Commands(
-      makeSessionManager([session], { clearSessionMessages } as Partial<ISessionManager>),
+      makeSessionManager([session], { clearSessionMessages, cancelProcessing } as Partial<ISessionManager>),
       store,
       'ws1',
     )
@@ -295,9 +300,9 @@ describe('Commands', () => {
 
     await commands.handleCommand(adapter, { ...makeMessage('/clear'), platform: 'telegram' })
 
-    expect(clearSessionMessages).not.toHaveBeenCalled()
-    expect(adapter.sent.at(-1)).toContain('Session is busy')
-    expect(adapter.sent.at(-1)).toContain('/stop')
+    expect(cancelProcessing).toHaveBeenCalledWith('sess-1')
+    expect(clearSessionMessages).toHaveBeenCalledWith('sess-1')
+    expect(adapter.sent.at(-1)).toContain('Context cleared')
   })
 
   describe('/status model info', () => {

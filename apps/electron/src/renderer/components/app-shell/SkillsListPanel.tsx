@@ -69,13 +69,20 @@ export function SkillsListPanel({
       const aStat = stats[a.slug]
       const bStat = stats[b.slug]
       if (sortKey === 'count') {
-        return (bStat?.useCount ?? 0) - (aStat?.useCount ?? 0)
+        const aC = aStat?.useCount
+        const bC = bStat?.useCount
+        if (aC !== undefined && bC !== undefined) return bC - aC
+        if (aC !== undefined) return -1
+        if (bC !== undefined) return 1
+        return a.metadata.name.localeCompare(b.metadata.name)
       }
       if (sortKey === 'lastUsed') {
-        const aT = aStat?.lastUsedAt ?? 0
-        const bT = bStat?.lastUsedAt ?? 0
-        if (aT === bT) return a.metadata.name.localeCompare(b.metadata.name)
-        return bT - aT
+        const aT = aStat?.lastUsedAt
+        const bT = bStat?.lastUsedAt
+        if (aT !== undefined && bT !== undefined) return bT - aT
+        if (aT !== undefined) return -1
+        if (bT !== undefined) return 1
+        return a.metadata.name.localeCompare(b.metadata.name)
       }
       return a.metadata.name.localeCompare(b.metadata.name)
     })

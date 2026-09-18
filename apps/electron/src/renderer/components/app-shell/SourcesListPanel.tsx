@@ -90,13 +90,22 @@ export function SourcesListPanel({
       const aStat = stats[a.config.slug]
       const bStat = stats[b.config.slug]
       if (sortKey === 'count') {
-        return (bStat?.useCount ?? 0) - (aStat?.useCount ?? 0)
+        const aC = aStat?.useCount
+        const bC = bStat?.useCount
+        // Never-used items sink to the bottom; used items sort by count desc.
+        if (aC !== undefined && bC !== undefined) return bC - aC
+        if (aC !== undefined) return -1
+        if (bC !== undefined) return 1
+        return a.config.name.localeCompare(b.config.name)
       }
       if (sortKey === 'lastUsed') {
-        const aT = aStat?.lastUsedAt ?? 0
-        const bT = bStat?.lastUsedAt ?? 0
-        if (aT === bT) return a.config.name.localeCompare(b.config.name)
-        return bT - aT
+        const aT = aStat?.lastUsedAt
+        const bT = bStat?.lastUsedAt
+        // Never-used items sink to the bottom; used items sort by recency desc.
+        if (aT !== undefined && bT !== undefined) return bT - aT
+        if (aT !== undefined) return -1
+        if (bT !== undefined) return 1
+        return a.config.name.localeCompare(b.config.name)
       }
       return a.config.name.localeCompare(b.config.name)
     })

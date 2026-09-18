@@ -407,14 +407,17 @@ export default function SourceInfoPage({ sourceSlug, workspaceId, onDelete }: So
             </Info_Alert>
           )}
 
-          {/* Usage history (count + call records) */}
-          <UsageHistorySection
-            kind="source"
-            slug={sourceSlug}
-            workspaceId={workspaceId}
-            usageStats={usageStats}
-            setUsageStats={setUsageStats}
-          />
+          {/* Usage history (count + call records) — not shown for local sources,
+              which have no attributable tools and therefore no usage to track */}
+          {source.config.type !== 'local' && (
+            <UsageHistorySection
+              kind="source"
+              slug={sourceSlug}
+              workspaceId={workspaceId}
+              usageStats={usageStats}
+              setUsageStats={setUsageStats}
+            />
+          )}
 
           {/* Connection */}
           <Info_Section

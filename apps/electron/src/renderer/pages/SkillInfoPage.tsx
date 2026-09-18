@@ -23,7 +23,8 @@ import {
   Info_Table,
   Info_Markdown,
 } from '@/components/info'
-import type { LoadedSkill } from '../../shared/types'
+import type { LoadedSkill, UsageStats } from '../../shared/types'
+import { UsageHistorySection } from '@/components/app-shell/UsageHistorySection'
 
 interface SkillInfoPageProps {
   skillSlug: string
@@ -36,6 +37,7 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
   const [skill, setSkill] = useState<LoadedSkill | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [usageStats, setUsageStats] = useState<UsageStats>({ sources: {}, skills: {} })
   const activeWorkspace = useActiveWorkspace()
   const canRevealLocally = !activeWorkspace?.remoteServer
 
@@ -82,6 +84,16 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
       unsubscribe?.()
     }
   }, [workspaceId, skillSlug, workingDirectory])
+
+  // Load usage stats (source & skill usage counts / last-used)
+  useEffect(() => {
+    if (!workspaceId) return
+    window.electronAPI.getUsageStats(workspaceId).then((stats) => {
+      setUsageStats(stats ?? { sources: {}, skills: {} })
+    }).catch((err) => {
+      console.error('[SkillInfoPage] Failed to load usage stats:', err)
+    })
+  }, [workspaceId])
 
   // Handle open in finder
   const handleOpenInFinder = useCallback(async () => {
@@ -172,6 +184,14 @@ export default function SkillInfoPage({ skillSlug, workspaceId, workingDirectory
             avatar={<SkillAvatar skill={skill} fluid workspaceId={workspaceId} />}
             title={skill.metadata.name}
             tagline={skill.metadata.description}
+          />
+
+          {/* Usage history (count + call records) */}
+          <UsageHistorySection
+            kind="skill"
+            slug={skillSlug}
+            workspaceId={workspaceId}
+            usageStats={usageStats}
           />
 
           {/* Metadata */}

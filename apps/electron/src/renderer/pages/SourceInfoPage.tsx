@@ -16,6 +16,7 @@ import { cn } from '@/lib/utils'
 import { routes, navigate } from '@/lib/navigate'
 import { useNavigation } from '@/contexts/NavigationContext'
 import { toast } from 'sonner'
+import { UsageHistorySection } from '@/components/app-shell/UsageHistorySection'
 import {
   Info_Page,
   Info_Section,
@@ -27,7 +28,7 @@ import {
   type PermissionRow,
   type ToolRow,
 } from '@/components/info'
-import type { LoadedSource, McpToolWithPermission } from '../../shared/types'
+import type { LoadedSource, McpToolWithPermission, UsageStats } from '../../shared/types'
 import type { PermissionsConfigFile } from '@craft-agent/shared/agent/modes'
 
 interface SourceInfoPageProps {
@@ -179,6 +180,7 @@ export default function SourceInfoPage({ sourceSlug, workspaceId, onDelete }: So
   const [mcpToolsLoading, setMcpToolsLoading] = useState(false)
   const [mcpToolsError, setMcpToolsError] = useState<string | null>(null)
   const [localMcpEnabled, setLocalMcpEnabled] = useState(true)
+  const [usageStats, setUsageStats] = useState<UsageStats>({ sources: {}, skills: {} })
 
 
   // Load source data
@@ -265,6 +267,16 @@ export default function SourceInfoPage({ sourceSlug, workspaceId, onDelete }: So
       }
     }).catch((err) => {
       console.error('[SourceInfoPage] Failed to load workspace settings:', err)
+    })
+  }, [workspaceId])
+
+  // Load usage stats (source & skill usage counts / last-used)
+  useEffect(() => {
+    if (!workspaceId) return
+    window.electronAPI.getUsageStats(workspaceId).then((stats) => {
+      setUsageStats(stats ?? { sources: {}, skills: {} })
+    }).catch((err) => {
+      console.error('[SourceInfoPage] Failed to load usage stats:', err)
     })
   }, [workspaceId])
 
@@ -394,6 +406,14 @@ export default function SourceInfoPage({ sourceSlug, workspaceId, onDelete }: So
               </Info_Alert.Description>
             </Info_Alert>
           )}
+
+          {/* Usage history (count + call records) */}
+          <UsageHistorySection
+            kind="source"
+            slug={sourceSlug}
+            workspaceId={workspaceId}
+            usageStats={usageStats}
+          />
 
           {/* Connection */}
           <Info_Section

@@ -27,6 +27,7 @@ import type { LoadedSource } from '../sources/types.ts';
 import { buildCallLlmRequest, type LLMQueryRequest, type LLMQueryResult } from './llm-tool.ts';
 import { getLlmConnections, getDefaultLlmConnection } from '../config/storage.ts';
 import { loadAllSources } from '../sources/storage.ts';
+import { appendUsage } from '../usage/index.ts';
 import type { ApiServerConfig } from '../mcp/mcp-pool.ts';
 
 import type {
@@ -1101,6 +1102,17 @@ ${formattedMessages}
       yield { type: 'error', message: `Skill(s) not found: ${missingSkills.join(', ')}` };
       yield { type: 'complete' };
       return;
+    }
+
+    // Record skill usage. Skills here activate via [skill:slug] mentions (the
+    // SDK `Skill` tool is disallowed), so this is the authoritative activation
+    // signal — one record per mentioned skill per turn.
+    if (skillPaths.size > 0) {
+      const workspaceId = this.config.workspace?.id ?? '';
+      const sessionId = this.config.session?.id ?? '';
+      for (const slug of skillPaths.keys()) {
+        appendUsage({ kind: 'skill', slug, toolName: 'Skill', workspaceId, sessionId });
+      }
     }
 
     // Register skill prerequisites — blocks all tools until SKILL.md files are read.

@@ -76,6 +76,7 @@ import {
 } from '@craft-agent/shared/sessions'
 import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, TokenRefreshManager } from '@craft-agent/shared/sources'
 import { listTaskSlugs, parseTaskSpec, uniqueTaskSlug } from '@craft-agent/shared/tasks'
+import { resolveUsageTarget, appendUsage } from '@craft-agent/shared/usage'
 import { createTaskFromSpec, resolveCreateTaskProjectId } from '../tasks'
 import { buildPagesToolCallbacks } from '../pages/tool-callbacks'
 import { buildServersFromSources as buildServersFromSourcesShared } from '../sources/build-servers'
@@ -893,6 +894,8 @@ interface ManagedSession {
   messagesLoaded: boolean
   // Pending auth request tracking (for unified auth flow)
   pendingAuthRequestId?: string
+  /** toolUseIds already recorded into the usage store — prevents dual-event double-counting. */
+  recordedUsageToolUseIds?: Set<string>
   pendingAuthRequest?: AuthRequest
   // Auth retry tracking (for mid-session token expiry)
   // Store last sent message/attachments to enable retry after token refresh
@@ -8892,6 +8895,25 @@ ${request.prompt}`;
         if (formattedToolInput && Object.keys(formattedToolInput).length > 0) {
           const allSources = loadAllSources(workspaceRootPath)
           toolDisplayMeta = await resolveToolDisplayMeta(event.toolName, formattedToolInput, workspaceRootPath, allSources)
+        }
+
+        // Record source/skill usage on the complete-input event (second SDK event).
+        // Deduplicated by toolUseId so the dual-event pattern never double-counts.
+        if (formattedToolInput && Object.keys(formattedToolInput).length > 0) {
+          const target = resolveUsageTarget(event.toolName, formattedToolInput)
+          if (target) {
+            if (!managed.recordedUsageToolUseIds) managed.recordedUsageToolUseIds = new Set()
+            if (!managed.recordedUsageToolUseIds.has(event.toolUseId)) {
+              managed.recordedUsageToolUseIds.add(event.toolUseId)
+              appendUsage({
+                kind: target.kind,
+                slug: target.slug,
+                toolName: event.toolName,
+                workspaceId,
+                sessionId,
+              })
+            }
+          }
         }
 
         // Check if a message with this toolUseId already exists FIRST

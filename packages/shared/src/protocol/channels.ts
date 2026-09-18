@@ -506,6 +506,10 @@ export const RPC_CHANNELS = {
     MEMORY_DELETE: 'memory:delete',
     MEMORY_EXTRACT: 'memory:extract',
   },
+  usage: {
+    GET_STATS: 'usage:getStats',
+    GET_HISTORY: 'usage:getHistory',
+  },
 } as const
 
 // IPC_CHANNELS compat alias removed — all consumers now use RPC_CHANNELS

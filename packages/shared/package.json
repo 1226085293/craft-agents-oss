@@ -69,7 +69,8 @@
     "./protocol": "./src/protocol/index.ts",
     "./tasks": "./src/tasks/index.ts",
     "./i18n": "./src/i18n/index.ts",
-    "./resources": "./src/resources/index.ts"
+    "./resources": "./src/resources/index.ts",
+    "./usage": "./src/usage/index.ts"
   },
   "dependencies": {
     "@craft-agent/core": "workspace:*",

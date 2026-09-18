@@ -75,6 +75,70 @@ export const CRAFT_PI_EPHEMERAL_MAX_BACKOFF_MS =
   CRAFT_PI_EPHEMERAL_RETRY_SETTINGS.baseDelayMs *
     (2 ** CRAFT_PI_EPHEMERAL_RETRY_SETTINGS.maxRetries - 1);
 
+/**
+ * Upstream compaction defaults, mirrored so an explicit override never drops a
+ * field the SDK reads (see `DEFAULT_COMPACTION_SETTINGS` in
+ * `@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js`).
+ */
+export const PI_DEFAULT_COMPACTION_RESERVE_TOKENS = 16_384;
+export const PI_DEFAULT_KEEP_RECENT_TOKENS = 20_000;
+
+/**
+ * Ceiling for the compaction reserve. 0.8 × reserve is the summarization
+ * request's `maxTokens`, so 32k leaves ~26k output tokens — enough for a
+ * reasoning model to think and still write the summary.
+ */
+export const CRAFT_PI_COMPACTION_RESERVE_TOKENS = 32_768;
+
+/** Share of the context window reserved on large-context models. */
+const COMPACTION_RESERVE_WINDOW_SHARE = 0.16;
+
+/**
+ * Compaction settings for a session on a model with the given context window.
+ *
+ * `reserveTokens` drives two things in the Pi SDK:
+ *  - when auto-compaction fires: `contextTokens > contextWindow - reserveTokens`
+ *  - how much the summary itself may emit: `maxTokens = 0.8 * reserveTokens`
+ *
+ * The second is why the upstream default is too small for Craft.
+ * `createSummarizationOptions` forwards the session's thinking level to the
+ * summarization call (`options.reasoning = thinkingLevel`), so on a reasoning
+ * model thinking tokens are charged against that same small budget. At `xhigh`
+ * a single summary can burn >13k thinking tokens — more than the default
+ * 16384 reserve allows (0.8 × 16384 ≈ 13.1k) — so the response comes back
+ * `stopReason: "length"` ("generation hit the token cap and the summary is
+ * incomplete") and the whole compaction fails, killing the turn.
+ *
+ * Reserving more both raises the summary's own cap and triggers compaction
+ * earlier, which shrinks the prompt and frees further output budget.
+ *
+ * Falls back to the upstream default when the window is unknown, and never
+ * reserves more than the ceiling — a small-window model must not end up with
+ * the reserve larger than its context.
+ */
+export function craftCompactionSettings(contextWindow?: number): {
+  enabled: boolean;
+  reserveTokens: number;
+  keepRecentTokens: number;
+} {
+  const reserveTokens =
+    typeof contextWindow === 'number' && contextWindow > 0
+      ? Math.max(
+          PI_DEFAULT_COMPACTION_RESERVE_TOKENS,
+          Math.min(
+            CRAFT_PI_COMPACTION_RESERVE_TOKENS,
+            Math.floor(COMPACTION_RESERVE_WINDOW_SHARE * contextWindow),
+          ),
+        )
+      : PI_DEFAULT_COMPACTION_RESERVE_TOKENS;
+
+  return {
+    enabled: true,
+    reserveTokens,
+    keepRecentTokens: PI_DEFAULT_KEEP_RECENT_TOKENS,
+  };
+}
+
 /** Settings applied to one Pi session, isolated from project/global Pi files. */
 export function buildCraftPiSettings(purpose: CraftPiSessionPurpose = 'main'): PiSettings {
   const retry = purpose === 'ephemeral'

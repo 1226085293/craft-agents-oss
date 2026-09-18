@@ -4,10 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SettingsManager } from '@earendil-works/pi-coding-agent';
 import {
+  CRAFT_PI_COMPACTION_RESERVE_TOKENS,
   CRAFT_PI_EPHEMERAL_MAX_BACKOFF_MS,
   CRAFT_PI_EPHEMERAL_QUERY_DEADLINE_MS,
   CRAFT_PI_EPHEMERAL_RETRY_SETTINGS,
   CRAFT_PI_RETRY_SETTINGS,
+  PI_DEFAULT_COMPACTION_RESERVE_TOKENS,
+  PI_DEFAULT_KEEP_RECENT_TOKENS,
+  craftCompactionSettings,
   createCraftSettingsManager,
 } from './session-settings.ts';
 
@@ -90,5 +94,34 @@ describe('createCraftSettingsManager', () => {
     a.setRetryEnabled(false);
     expect(a.getRetryEnabled()).toBe(false);
     expect(b.getRetryEnabled()).toBe(true);
+  });
+});
+
+describe('craftCompactionSettings', () => {
+  it('raises the reserve above the upstream default on large-context models', () => {
+    // 0.8 x reserve is the summarization request's maxTokens. The upstream
+    // default (16k -> ~13k) is smaller than one `xhigh` summary's thinking
+    // spend, so the summary came back stopReason "length" and compaction died.
+    const settings = craftCompactionSettings(200_000);
+    expect(settings.reserveTokens).toBeGreaterThan(PI_DEFAULT_COMPACTION_RESERVE_TOKENS);
+    expect(settings.reserveTokens).toBeLessThanOrEqual(CRAFT_PI_COMPACTION_RESERVE_TOKENS);
+  });
+
+  it('never reserves more than the window can absorb on small-context models', () => {
+    // A 32k window must keep the upstream default, not a 32k reserve that
+    // would leave nothing to work with.
+    expect(craftCompactionSettings(32_000).reserveTokens).toBe(PI_DEFAULT_COMPACTION_RESERVE_TOKENS);
+    expect(craftCompactionSettings(8_192).reserveTokens).toBe(PI_DEFAULT_COMPACTION_RESERVE_TOKENS);
+  });
+
+  it('falls back to the upstream default when the window is unknown', () => {
+    expect(craftCompactionSettings().reserveTokens).toBe(PI_DEFAULT_COMPACTION_RESERVE_TOKENS);
+    expect(craftCompactionSettings(0).reserveTokens).toBe(PI_DEFAULT_COMPACTION_RESERVE_TOKENS);
+  });
+
+  it('keeps compaction enabled and preserves the other SDK fields', () => {
+    const settings = craftCompactionSettings(200_000);
+    expect(settings.enabled).toBe(true);
+    expect(settings.keepRecentTokens).toBe(PI_DEFAULT_KEEP_RECENT_TOKENS);
   });
 });

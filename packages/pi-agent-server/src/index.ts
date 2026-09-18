@@ -71,6 +71,7 @@ import { resolvePiModel, isDeniedMiniModelId, isModelNotFoundError } from './mod
 import { pickProviderAppropriateMiniModel } from './pick-mini-model.ts';
 import {
   CRAFT_PI_EPHEMERAL_QUERY_DEADLINE_MS,
+  craftCompactionSettings,
   createCraftSettingsManager,
 } from './session-settings.ts';
 import {
@@ -983,13 +984,24 @@ async function createAuthenticatedRuntime(): Promise<{
  * retries with exponential backoff + 2 provider retries honouring `retry-after`).
  * Re-applying a `retry` block would replace that whole object and silently drop
  * the provider layer — plus downgrade 4 retries to 3.
+ *
+ * The compaction reserve is applied here rather than in `session-settings.ts`
+ * because it is sized from the model's context window, which is only known
+ * once the session exists.
  */
 function applyPiResilienceSettings(session: AgentSession): void {
   try {
+    const contextWindow = (session as unknown as { agent?: { state?: { model?: { contextWindow?: number } } } })
+      ?.agent?.state?.model?.contextWindow;
+    const compaction = craftCompactionSettings(contextWindow);
     session.settingsManager.applyOverrides({
       httpIdleTimeoutMs: 120_000,
+      compaction,
     });
-    debugLog('[resilience] Applied 2min http idle timeout to Pi session');
+    debugLog(
+      `[resilience] Applied 2min http idle timeout and compaction reserve=${compaction.reserveTokens}` +
+        ` (contextWindow=${contextWindow ?? 'unknown'}) to Pi session`,
+    );
   } catch (error) {
     debugLog(`[resilience] Could not apply settings: ${error instanceof Error ? error.message : String(error)}`);
   }

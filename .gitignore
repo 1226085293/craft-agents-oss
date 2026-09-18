@@ -18,6 +18,8 @@ coverage
 logs
 _.log
 report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+# local build/install helper log
+update-build.log
 
 # dotenv environment variable files
 .env

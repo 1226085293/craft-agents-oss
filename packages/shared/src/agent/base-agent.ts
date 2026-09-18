@@ -1139,8 +1139,14 @@ ${formattedMessages}
 
     // Prepend read directive to the message so the model reads SKILL.md first.
     const directive = this.formatSkillDirective(skillPaths);
-    const messageParts = [memoryContext, branchSeedContext, transferredSessionContext, directive, cleanMessage].filter(Boolean);
-    const effectiveMessage = messageParts.join('\n\n');
+    // SDK slash commands (e.g. /compact) must reach the backend as the FIRST
+    // text of the message — both backends detect them with a ^\/command regex.
+    // Memory/branch/summary injection would bury the command and turn it into
+    // an ordinary prompt, so bypass all prefix injection for bare commands.
+    const isBareSlashCommand = /^\/[a-z]+(?:\s|$)/i.test(cleanMessage.trim());
+    const effectiveMessage = isBareSlashCommand
+      ? cleanMessage
+      : [memoryContext, branchSeedContext, transferredSessionContext, directive, cleanMessage].filter(Boolean).join('\n\n');
 
     // Capture the raw user message for source-activation auto-retry. `cleanMessage`
     // has skill paths stripped but otherwise matches what the user typed — exactly

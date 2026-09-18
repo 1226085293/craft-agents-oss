@@ -432,14 +432,25 @@ export class PiAgent extends BaseAgent {
   constructor(config: BackendConfig) {
     const resolvedModel = config.model || '';
     const modelDef = getModelById(resolvedModel);
-    super(config, resolvedModel, modelDef?.contextWindow);
+    // Custom connections (pi_compat / custom endpoints) can register models that
+    // are absent from the built-in MODEL_REGISTRY, so getModelById() returns
+    // undefined for them. The pi driver already mirrors connection.models into
+    // runtime.customModels — use that as the authoritative context-window source
+    // so the usage ring and compaction reserve reflect the real ceiling (e.g. a
+    // user-configured 1M window) instead of falling back to a hardcoded default.
+    const customDef = getBackendRuntime(config).customModels?.find(
+      (m) => typeof m !== 'string' && m.id === resolvedModel,
+    );
+    const contextWindow = modelDef?.contextWindow
+      ?? (typeof customDef === 'object' ? customDef.contextWindow : undefined);
+    super(config, resolvedModel, contextWindow);
 
     this._supportsBranching = true;
 
     this.piSessionId = config.session?.sdkSessionId || null;
     this.adapter = new PiEventAdapter();
-    if (modelDef?.contextWindow) {
-      this.adapter.setContextWindow(modelDef.contextWindow);
+    if (contextWindow) {
+      this.adapter.setContextWindow(contextWindow);
     }
     if (config.miniModel) {
       this.adapter.setMiniModel(config.miniModel);

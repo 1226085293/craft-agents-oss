@@ -1066,9 +1066,17 @@ async function ensureSession(): Promise<AgentSession> {
     // user config. Git Bash-native tools already emit UTF-8 and are unaffected
     // by the extra line (verified: git, grep, sed, ls). The startup-time chcp
     // (main()) alone cannot cover this because consoles are per-call.
+    //
+    // IMPORTANT: the chcp is wrapped in a subshell `( ... )`. Bare
+    // `chcp.com 65001 >/dev/null 2>&1` runs as the prior command, which
+    // makes bash expand the special `$_` variable (the last argument of the
+    // previous command = `65001`) inside the user's command. PowerShell
+    // pipelines like `... | ForEach-Object { $_.WS }` then see `65001.WS`
+    // instead of `$_` → "Unexpected token 65001". The subshell keeps the
+    // code-page switch while leaving the parent shell's `$_` untouched.
     createBashToolDefinition(cwd, {
       ...(process.platform === 'win32'
-        ? { commandPrefix: 'chcp.com 65001 >/dev/null 2>&1' }
+        ? { commandPrefix: '(chcp.com 65001 >/dev/null 2>&1)' }
         : {}),
       operations: (() => {
         const local = createLocalBashOperations({ shellPath: initConfig.shellPath });
@@ -1308,6 +1316,17 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
     if ((sdkToolName === 'Write' || sdkToolName === 'Edit' || sdkToolName === 'MultiEdit' || sdkToolName === 'NotebookEdit')
         && typeof inputObj.path === 'string' && !inputObj.file_path) {
       inputObj = { ...inputObj, file_path: inputObj.path };
+    }
+
+    // Windows PowerShell 5.1 reads BOM-less UTF-8 .ps1 scripts using the
+    // system ANSI code page (GBK/936 on zh-CN), corrupting any CJK string
+    // literals. A UTF-8 BOM makes PowerShell decode the script as UTF-8.
+    // Add one on Write when the target is a .ps1 and the content lacks a BOM.
+    if (sdkToolName === 'Write' && typeof inputObj.file_path === 'string'
+        && /\.ps1$/i.test(inputObj.file_path)
+        && typeof inputObj.content === 'string'
+        && !inputObj.content.startsWith('\uFEFF')) {
+      inputObj = { ...inputObj, content: '\uFEFF' + inputObj.content };
     }
 
     // Send to main process for permission checking + transforms

@@ -337,6 +337,47 @@ describe('sendMessage durability', () => {
     expect(managed.messageQueue[0]?.internalMessage).toContain('重启 Craft 然后告诉我好了')
   })
 
+  it('recovers a turn whose trailing intermediate/tool activity was cut off after its last final response', () => {
+    // Reproduces the 2026-09-19 self-restart regression: the model emitted a
+    // final "task 1 done" but was then killed while still working on task 2
+    // (dangling intermediate + tool messages, no final for them). The naive
+    // terminal-boundary scan saw the final and skipped recovery.
+    const sessionId = 'recover-dangling-tail'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'previous-final', role: 'assistant', content: 'done', timestamp: 1 },
+      { id: 'restart-user', role: 'user', content: '修复 A 然后检查 B', timestamp: 2 },
+      // Task 1 completed with a final response
+      { id: 'task1-final', role: 'assistant', content: 'A 修复完成', timestamp: 3, isIntermediate: false },
+      // Task 2 was mid-flight when the process died — dangling tail, no final.
+      { id: 'task2-thinking', role: 'assistant', content: '现在检查 B', timestamp: 4, isIntermediate: true },
+      { id: 'task2-tool', role: 'tool', content: 'Running Bash...', timestamp: 5, toolName: 'Bash', toolStatus: 'executing' },
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue).toHaveLength(1)
+    expect(managed.messageQueue[0]?.messageId).toBe('restart-user')
+    expect(managed.messageQueue[0]?.internalMessage).toContain('Continue the previous user request')
+    expect(managed.messageQueue[0]?.internalMessage).toContain('修复 A 然后检查 B')
+  })
+
+  it('does not recover a turn whose last final is the true end (no dangling tail)', () => {
+    const sessionId = 'recover-clean-final'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'previous-final', role: 'assistant', content: 'done', timestamp: 1 },
+      { id: 'restart-user', role: 'user', content: '修复 A', timestamp: 2 },
+      { id: 'task1-final', role: 'assistant', content: 'A 修复完成', timestamp: 3, isIntermediate: false },
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue).toHaveLength(0)
+  })
+
   it.each(['tool', 'assistant', 'legacy-tool'])('restart error recovery resumes continued work after transient errors (%s)', (activity) => {
     const managed = buildSession(`recover-transient-${activity}`)
     managed.isProcessing = true

@@ -2168,6 +2168,36 @@ export class SessionManager implements ISessionManager {
         continuedAfterError = true
       }
     }
+
+    // A single user turn can produce MULTIPLE final assistant messages (the
+    // model streams several final responses in one turn, e.g. "task 1 done"
+    // then "task 2 done"). If the process dies AFTER the last final but
+    // BEFORE the turn's subsequent intermediate/tool activity reached a
+    // terminal state, the naive `lastTerminalResponseIndex` above would
+    // mistakenly treat the turn as complete and skip recovery — the
+    // interrupted tail (thinking + in-flight tool calls + missing final text)
+    // is never replayed. Detect that dangling tail and roll the terminal
+    // boundary back to the user message that owns it.
+    const trailing = managed.messages.slice(lastTerminalResponseIndex + 1)
+    const hasDanglingTail = trailing.some(m =>
+      (m.role === 'assistant' && m.isIntermediate === true) ||
+      // Only an explicitly-unfinished tool row counts as dangling. Legacy
+      // rows without toolStatus (undefined) are not evidence of a torn turn —
+      // they appear after user Stops and in old transcripts.
+      (this.isToolLikeMessage(m) && (m.toolStatus === 'executing' || m.toolStatus === 'pending'))
+    )
+    if (hasDanglingTail) {
+      // Walk back from the last final to the owning user message (the one that
+      // started this unfinished turn), so its replay covers the interrupted tail.
+      for (let i = lastTerminalResponseIndex; i >= 0; i--) {
+        const m = managed.messages[i]!
+        if (m.role === 'user' && m.isGuidance !== true) {
+          lastTerminalResponseIndex = i - 1
+          break
+        }
+      }
+    }
+
     const candidateMessages = managed.messages.slice(lastTerminalResponseIndex + 1)
     const recoverable = candidateMessages.filter(m =>
       m.role === 'user' &&

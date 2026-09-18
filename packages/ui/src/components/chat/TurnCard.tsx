@@ -262,6 +262,12 @@ export interface ActivityItem {
    * intermediate rows can key off it and update in place.
    */
   turnId?: string
+  /**
+   * Set when this intermediate text was promoted to the turn's response (a turn
+   * that ended without a real final reply). Its text is already rendered as the
+   * response, so the steps list must not render it a second time.
+   */
+  promotedToResponse?: boolean
   // Status activities (e.g., compacting)
   statusType?: string  // e.g., 'compacting'
   // Background task fields
@@ -2942,8 +2948,10 @@ export const TurnCard = React.memo(function TurnCard({
     () => allSortedActivities.filter(a => a.type === 'plan'),
     [allSortedActivities]
   )
+  // Drop commentary that was promoted to the turn's response: its text is
+  // already rendered as the reply, and keeping the row shows it twice.
   const sortedActivities = useMemo(
-    () => allSortedActivities.filter(a => a.type !== 'plan'),
+    () => allSortedActivities.filter(a => a.type !== 'plan' && !a.promotedToResponse),
     [allSortedActivities]
   )
 

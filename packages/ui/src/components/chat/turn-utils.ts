@@ -443,6 +443,10 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
             isStreaming: false,
             messageId: lastTextActivity.id,
           }
+          // The commentary is now the turn's visible reply. Flag its step row so
+          // the steps list skips it — otherwise the same text renders twice
+          // (once as the response, once as a process row).
+          lastTextActivity.promotedToResponse = true
         }
       }
 

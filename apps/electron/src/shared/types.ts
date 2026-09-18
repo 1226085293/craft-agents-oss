@@ -63,6 +63,10 @@ export type { LoadedSource, FolderSourceConfig, SourceConnectionStatus };
 import type { LoadedSkill, SkillMetadata } from '@craft-agent/shared/skills/types';
 export type { LoadedSkill, SkillMetadata };
 
+// Usage types (source & skill usage tracking)
+import type { UsageStats, UsageRecord } from '@craft-agent/shared/usage';
+export type { UsageStats, UsageRecord };
+
 // Resource bundle types (cross-workspace export/import)
 import type { ExportResourcesOptions, ExportResult, ResourceImportMode, ResourceBundle, ResourceImportResult } from '@craft-agent/shared/resources';
 export type { ExportResourcesOptions, ExportResult, ResourceImportMode, ResourceBundle, ResourceImportResult };
@@ -673,6 +677,10 @@ export interface ElectronAPI {
   addMemory(workspaceRootPath: string, data: { content: string; type: MemoryType; tags?: string[]; confidence?: number }): Promise<{ id: string }>
   deleteMemory(workspaceRootPath: string, id: string): Promise<{ success: boolean }>
   extractSessionMemories(sessionId: string): Promise<{ extracted: number; discarded: number }>
+
+  // Usage (source & skill usage stats)
+  getUsageStats(workspaceId?: string): Promise<UsageStats>
+  getUsageHistory(workspaceId?: string, kind?: 'source' | 'skill', slug?: string): Promise<UsageRecord[]>
   getDefaultThinkingLevel(): Promise<ThinkingLevel>
   setDefaultThinkingLevel(level: ThinkingLevel): Promise<{ success: boolean; error?: string }>
   setWorkspaceDefaultLlmConnection(workspaceId: string, slug: string | null): Promise<{ success: boolean; error?: string }>

@@ -90,7 +90,7 @@ import { useFocusZone } from "@/hooks/keyboard"
 import { useFocusContext } from "@/context/FocusContext"
 import { getSessionTitle } from "@/utils/session"
 import { useSetAtom } from "jotai"
-import type { Session, Workspace, FileAttachment, PermissionRequest, LoadedSource, LoadedSkill, PermissionMode, SourceFilter, AutomationFilter } from "../../../shared/types"
+import type { Session, Workspace, FileAttachment, PermissionRequest, LoadedSource, LoadedSkill, PermissionMode, SourceFilter, AutomationFilter, UsageStats } from "../../../shared/types"
 import { sessionMetaMapAtom, sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
 import { sourcesAtom } from "@/atoms/sources"
 import { skillsAtom } from "@/atoms/skills"
@@ -922,6 +922,10 @@ function AppShellContent({
   React.useEffect(() => {
     setSkillsAtom(skills)
   }, [skills, setSkillsAtom])
+
+  // Usage stats (source & skill usage counts / last-used)
+  const [usageStats, setUsageStats] = React.useState<UsageStats>({ sources: {}, skills: {} })
+
   // Automations — state, handlers, loading, subscriptions
   const activeWorkspace = workspaces.find(w => w.id === activeWorkspaceId)
 
@@ -1020,6 +1024,16 @@ function AppShellContent({
       setSources(loaded || [])
     }).catch(err => {
       console.error('[Chat] Failed to load sources:', err)
+    })
+  }, [activeWorkspaceId])
+
+  // Load usage stats from backend (source & skill usage counts / last-used)
+  React.useEffect(() => {
+    if (!activeWorkspaceId) return
+    window.electronAPI.getUsageStats(activeWorkspaceId).then((stats) => {
+      setUsageStats(stats ?? { sources: {}, skills: {} })
+    }).catch(err => {
+      console.error('[Chat] Failed to load usage stats:', err)
     })
   }, [activeWorkspaceId])
 
@@ -3510,6 +3524,7 @@ function AppShellContent({
                 onSourceClick={handleSourceSelect}
                 selectedSourceSlug={isSourcesNavigation(navState) && navState.details ? navState.details.sourceSlug : null}
                 localMcpEnabled={localMcpEnabled}
+                usageStats={usageStats}
               />
             )}
             {isSkillsNavigation(navState) && activeWorkspaceId && (
@@ -3521,6 +3536,7 @@ function AppShellContent({
                 onSkillClick={handleSkillSelect}
                 onDeleteSkill={handleDeleteSkill}
                 selectedSkillSlug={isSkillsNavigation(navState) && navState.details?.type === 'skill' ? navState.details.skillSlug : null}
+                usageStats={usageStats}
               />
             )}
             {isProjectsNavigation(navState) && activeWorkspaceId && (

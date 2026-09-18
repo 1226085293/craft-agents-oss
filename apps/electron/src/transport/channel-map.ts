@@ -400,6 +400,10 @@ export const CHANNEL_MAP = {
   deleteMemory: invoke(RPC_CHANNELS.memory.MEMORY_DELETE),
   extractSessionMemories: invoke(RPC_CHANNELS.memory.MEMORY_EXTRACT),
 
+  // Usage (source & skill usage stats)
+  getUsageStats: invoke(RPC_CHANNELS.usage.GET_STATS),
+  getUsageHistory: invoke(RPC_CHANNELS.usage.GET_HISTORY),
+
   // Projects
   getProjects: invoke(RPC_CHANNELS.projects.GET),
   getProject: invoke(RPC_CHANNELS.projects.GET_ONE),

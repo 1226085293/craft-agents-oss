@@ -11,7 +11,8 @@ import { SourceMenu } from './SourceMenu'
 import { SendResourceToWorkspaceDialog } from './SendResourceToWorkspaceDialog'
 import { useAppShellContext } from '@/context/AppShellContext'
 import { EditPopover, getEditConfig, type EditContextKey } from '@/components/ui/EditPopover'
-import type { LoadedSource, SourceConnectionStatus, SourceFilter } from '../../../shared/types'
+import { UsageListToolbar, formatUsageRelativeTime, type UsageSortKey } from './UsageListToolbar'
+import type { LoadedSource, SourceConnectionStatus, SourceFilter, UsageStats } from '../../../shared/types'
 
 const SOURCE_TYPE_CONFIG: Record<string, { labelKey: string; colorClass: string }> = {
   mcp: { labelKey: 'sourcesList.typeMcp', colorClass: 'bg-accent/10 text-accent' },
@@ -41,6 +42,7 @@ export interface SourcesListPanelProps {
   onSourceClick: (source: LoadedSource) => void
   selectedSourceSlug?: string | null
   localMcpEnabled?: boolean
+  usageStats?: UsageStats
   className?: string
 }
 
@@ -52,11 +54,16 @@ export function SourcesListPanel({
   onSourceClick,
   selectedSourceSlug,
   localMcpEnabled = true,
+  usageStats,
   className,
 }: SourcesListPanelProps) {
   const { t } = useTranslation()
   const { workspaces, activeWorkspaceId } = useAppShellContext()
   const hasOtherWorkspaces = workspaces.length > 1
+
+  // Search + sort state
+  const [searchQuery, setSearchQuery] = React.useState('')
+  const [sortKey, setSortKey] = React.useState<UsageSortKey>('name')
 
   // Send to Workspace dialog state
   const [sendDialogOpen, setSendDialogOpen] = React.useState(false)
@@ -64,9 +71,37 @@ export function SourcesListPanel({
   const [sendResourceLabel, setSendResourceLabel] = React.useState('')
 
   const filteredSources = React.useMemo(() => {
-    if (!sourceFilter) return sources
-    return sources.filter(s => s.config.type === sourceFilter.sourceType)
-  }, [sources, sourceFilter])
+    let result = sourceFilter ? sources.filter(s => s.config.type === sourceFilter.sourceType) : sources
+
+    // Text search on name, provider, tagline
+    const q = searchQuery.trim().toLowerCase()
+    if (q) {
+      result = result.filter(s =>
+        s.config.name.toLowerCase().includes(q) ||
+        (s.config.provider ?? '').toLowerCase().includes(q) ||
+        (s.config.tagline ?? '').toLowerCase().includes(q)
+      )
+    }
+
+    // Sort
+    const stats = usageStats?.sources ?? {}
+    const sorted = [...result]
+    sorted.sort((a, b) => {
+      const aStat = stats[a.config.slug]
+      const bStat = stats[b.config.slug]
+      if (sortKey === 'count') {
+        return (bStat?.useCount ?? 0) - (aStat?.useCount ?? 0)
+      }
+      if (sortKey === 'lastUsed') {
+        const aT = aStat?.lastUsedAt ?? 0
+        const bT = bStat?.lastUsedAt ?? 0
+        if (aT === bT) return a.config.name.localeCompare(b.config.name)
+        return bT - aT
+      }
+      return a.config.name.localeCompare(b.config.name)
+    })
+    return sorted
+  }, [sources, sourceFilter, searchQuery, sortKey, usageStats])
 
   const emptyMessage = React.useMemo(() => {
     if (sourceFilter?.kind === 'type') {
@@ -87,6 +122,15 @@ export function SourcesListPanel({
       onItemClick={onSourceClick}
       className={className}
       containerProps={{ 'data-list-role': 'sources' }}
+      header={
+        <UsageListToolbar
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          sortKey={sortKey}
+          onSortChange={setSortKey}
+          searchPlaceholder={t('usage.searchPlaceholder')}
+        />
+      }
       emptyState={
         <EntityListEmptyScreen
           icon={<DatabaseZap />}
@@ -115,9 +159,15 @@ export function SourcesListPanel({
         const typeConfig = SOURCE_TYPE_CONFIG[source.config.type]
         const statusConfig = SOURCE_STATUS_CONFIG[connectionStatus]
         const subtitle = source.config.tagline || source.config.provider || ''
+        const stat = usageStats?.sources[source.config.slug]
         return {
           icon: <SourceAvatar source={source} size="sm" />,
           title: source.config.name,
+          trailing: stat ? (
+            <span className="shrink-0 text-[11px] text-foreground/40 whitespace-nowrap cursor-default" title={t('usage.timesUsed', { count: stat.useCount })}>
+              {stat.useCount}× · {formatUsageRelativeTime(stat.lastUsedAt)}
+            </span>
+          ) : undefined,
           badges: (
             <>
               {typeConfig && <EntityListBadge colorClass={typeConfig.colorClass}>{t(typeConfig.labelKey)}</EntityListBadge>}

@@ -1070,12 +1070,15 @@ export class MessagingGateway {
 
     try {
       await this.sessionManager.setPendingPlanExecution(entry.sessionId, entry.planPath)
-      await this.sessionManager.sendMessage(entry.sessionId, '/compact')
+      // Send the "started" notice BEFORE the blocking /compact so the user gets
+      // immediate feedback. Completion is reported separately by
+      // onSessionEvent → finishPendingCompactAccept once compaction finishes.
       await adapter.sendText(
         press.channelId,
         '♻️ Compacting conversation, then executing the plan…',
         pressOpts,
       )
+      await this.sessionManager.sendMessage(entry.sessionId, '/compact')
     } catch (err) {
       this.pendingCompactAccepts.delete(entry.sessionId)
       this.log.error('compact dispatch failed', {

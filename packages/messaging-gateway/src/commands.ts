@@ -35,6 +35,7 @@ import type {
   PlatformAdapter,
   PlatformOwner,
   PlatformType,
+  SendOptions,
 } from './types'
 
 const NOOP_LOGGER: MessagingLogger = {
@@ -901,20 +902,63 @@ export class Commands {
         return
       }
 
-      await this.sessionManager.sendMessage(binding.sessionId, '/compact')
-      await adapter.sendText(msg.channelId, 'Compacting conversation context...', replyOpts)
+      // Send the "started" notice FIRST so the user gets immediate feedback the
+      // moment /compact is issued. Compaction itself is blocking below — without
+      // this, the notice only appeared after compaction finished, which read as
+      // a long dead silence. Once compaction resolves, edit that same message in
+      // place (or append a completion line on platforms that can't edit).
+      const started = await adapter.sendText(msg.channelId, 'Compacting conversation context...', replyOpts)
+
+      try {
+        await this.sessionManager.sendMessage(binding.sessionId, '/compact')
+        await this.notifyCompactResult(
+          adapter,
+          msg.channelId,
+          started.messageId,
+          '✅ Compaction complete.',
+          replyOpts,
+        )
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'unknown error'
+        this.log.error('compact command failed', {
+          event: 'command_compact_failed',
+          workspaceId: this.workspaceId,
+          sessionId: binding.sessionId,
+          platform: adapter.platform,
+          channelId: msg.channelId,
+          threadId: msg.threadId,
+          error: err,
+        })
+        await this.notifyCompactResult(
+          adapter,
+          msg.channelId,
+          started.messageId,
+          `❌ Compaction failed: ${message}`,
+          replyOpts,
+        )
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'unknown error'
-      this.log.error('compact command failed', {
-        event: 'command_compact_failed',
-        workspaceId: this.workspaceId,
-        sessionId: binding.sessionId,
-        platform: adapter.platform,
-        channelId: msg.channelId,
-        threadId: msg.threadId,
-        error: err,
-      })
       await adapter.sendText(msg.channelId, `Couldn't compact context: ${message}`, replyOpts)
+    }
+  }
+
+  /**
+   * Report a compaction outcome. Platforms with message editing (Telegram, Lark)
+   * edit the earlier "Compacting…" notice in place; the rest (WhatsApp, WeChat,
+   * QQ) can't edit, so send a separate completion line instead.
+   */
+  private async notifyCompactResult(
+    adapter: PlatformAdapter,
+    channelId: string,
+    messageId: string,
+    text: string,
+    opts: SendOptions,
+  ): Promise<void> {
+    if (adapter.capabilities.messageEditing) {
+      await adapter.editMessage(channelId, messageId, text, opts)
+    } else {
+      await adapter.sendText(channelId, text, opts)
     }
   }
 

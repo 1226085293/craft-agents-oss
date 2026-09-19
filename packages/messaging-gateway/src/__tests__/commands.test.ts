@@ -39,9 +39,10 @@ function makeSessionManager(
   } as unknown as ISessionManager
 }
 
-function makeAdapter(platform: 'telegram' | 'whatsapp', inlineButtons: boolean): PlatformAdapter & { sent: string[]; sentButtons: InlineButton[] } {
+function makeAdapter(platform: 'telegram' | 'whatsapp', inlineButtons: boolean): PlatformAdapter & { sent: string[]; sentButtons: InlineButton[]; edits: Array<{ messageId: string; text: string }> } {
   const sent: string[] = []
   const sentButtons: InlineButton[] = []
+  const edits: Array<{ messageId: string; text: string }> = []
   return {
     platform,
     capabilities: {
@@ -54,6 +55,7 @@ function makeAdapter(platform: 'telegram' | 'whatsapp', inlineButtons: boolean):
     },
     sent,
     sentButtons,
+    edits,
     async initialize() {},
     async destroy() {},
     isConnected() { return true },
@@ -63,7 +65,9 @@ function makeAdapter(platform: 'telegram' | 'whatsapp', inlineButtons: boolean):
       sent.push(text)
       return { platform, channelId: 'chan-1', messageId: String(sent.length) }
     },
-    async editMessage() {},
+    async editMessage(_channelId: string, messageId: string, text: string): Promise<void> {
+      edits.push({ messageId, text })
+    },
     async sendButtons(_channelId: string, text: string, buttons?: InlineButton[]): Promise<SentMessage> {
       sent.push(text)
       if (buttons) sentButtons.push(...buttons)
@@ -223,6 +227,65 @@ describe('Commands', () => {
 
     expect(sendMessage).toHaveBeenCalledWith('sess-1', '/compact')
     expect(adapter.sent.at(-1)).toContain('Compacting conversation context')
+  })
+
+  it('edits the started notice in place once compaction completes (editing-capable platform)', async () => {
+    const sessions = [makeSession('sess-1', 'Alpha', 100)]
+    const sendMessage = mock(async () => {})
+    const store = makeStore()
+    store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+    const commands = new Commands(
+      makeSessionManager(sessions, { sendMessage } as Partial<ISessionManager>),
+      store,
+      'ws1',
+    )
+    const adapter = makeAdapter('telegram', true)
+
+    await commands.handleCommand(adapter, { ...makeMessage('/compact'), platform: 'telegram' })
+
+    // Started notice is sent exactly once, then edited in place (no second message).
+    expect(adapter.sent.filter(s => s.includes('Compacting conversation context'))).toHaveLength(1)
+    expect(adapter.edits).toHaveLength(1)
+    expect(adapter.edits[0].messageId).toBe('1')
+    expect(adapter.edits[0].text).toContain('Compaction complete')
+  })
+
+  it('appends a completion line on platforms that cannot edit messages', async () => {
+    const sessions = [makeSession('sess-1', 'Alpha', 100)]
+    const sendMessage = mock(async () => {})
+    const store = makeStore()
+    store.bind('ws1', 'sess-1', 'whatsapp', 'chan-1', 'Alice')
+    const commands = new Commands(
+      makeSessionManager(sessions, { sendMessage } as Partial<ISessionManager>),
+      store,
+      'ws1',
+    )
+    const adapter = makeAdapter('whatsapp', false)
+
+    await commands.handleCommand(adapter, { ...makeMessage('/compact'), platform: 'whatsapp' })
+
+    expect(adapter.edits).toHaveLength(0)
+    expect(adapter.sent.filter(s => s.includes('Compacting conversation context'))).toHaveLength(1)
+    expect(adapter.sent.at(-1)).toContain('Compaction complete')
+  })
+
+  it('edits the started notice with a failure message when compaction throws', async () => {
+    const sessions = [makeSession('sess-1', 'Alpha', 100)]
+    const sendMessage = mock(async () => { throw new Error('boom') })
+    const store = makeStore()
+    store.bind('ws1', 'sess-1', 'telegram', 'chan-1', 'Alice')
+    const commands = new Commands(
+      makeSessionManager(sessions, { sendMessage } as Partial<ISessionManager>),
+      store,
+      'ws1',
+    )
+    const adapter = makeAdapter('telegram', true)
+
+    await commands.handleCommand(adapter, { ...makeMessage('/compact'), platform: 'telegram' })
+
+    expect(adapter.edits).toHaveLength(1)
+    expect(adapter.edits[0].text).toContain('failed')
+    expect(adapter.edits[0].text).toContain('boom')
   })
 
   it('rejects /compact when the chat is not bound', async () => {

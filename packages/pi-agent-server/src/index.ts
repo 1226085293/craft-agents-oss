@@ -35,6 +35,7 @@ import {
   createGrepToolDefinition,
   createFindToolDefinition,
   createLsToolDefinition,
+  resizeImage,
 } from '@earendil-works/pi-coding-agent';
 import type {
   AgentSession,
@@ -46,7 +47,7 @@ import type {
 
 // Pi AI types
 import { InMemoryCredentialStore, InMemoryModelsStore } from '@earendil-works/pi-ai';
-import type { TextContent as PiTextContent } from '@earendil-works/pi-ai';
+import type { TextContent as PiTextContent, ImageContent } from '@earendil-works/pi-ai';
 import { isContextOverflow } from '@earendil-works/pi-ai';
 
 // Pre-register the Bedrock provider module so the Pi SDK doesn't attempt a
@@ -1295,6 +1296,55 @@ function makeErrorResult(message: string): AgentToolResult<any> {
   };
 }
 
+// Pi SDK's built-in read tool already resizes each image to ~2000px / ~4.5MB
+// (base64). That is fine for a single image, but a long image-heavy session
+// re-sends every historical image each turn — with dozens of images the request
+// body blows past the upstream gateway's per-request ceiling (e.g. 32MB) and the
+// turn 413s permanently. Push each image through the SDK's own Photon resize
+// with a tighter budget so many images fit in the same request. Images already
+// within budget are left untouched.
+const IMAGE_MAX_EDGE = 1024;
+const IMAGE_MAX_BYTES = 512 * 1024; // base64 bytes
+
+async function downsampleImageContent(
+  content: (PiTextContent | ImageContent)[],
+  onLog?: (msg: string) => void,
+): Promise<{ content: (PiTextContent | ImageContent)[]; changed: boolean }> {
+  let changed = false;
+  const out: (PiTextContent | ImageContent)[] = [];
+  for (const block of content) {
+    if (block.type !== 'image') {
+      out.push(block);
+      continue;
+    }
+    try {
+      const raw = Buffer.from(block.data, 'base64');
+      // Skip if already within the tighter budget (raw ≈ 3/4 of base64 size).
+      if (raw.length < IMAGE_MAX_BYTES * 3 / 4) {
+        out.push(block);
+        continue;
+      }
+      const resized = await resizeImage(raw, block.mimeType, {
+        maxWidth: IMAGE_MAX_EDGE,
+        maxHeight: IMAGE_MAX_EDGE,
+        maxBytes: IMAGE_MAX_BYTES,
+      });
+      if (!resized) {
+        // Could not be made small enough — keep original rather than drop it.
+        out.push(block);
+        continue;
+      }
+      onLog?.(`Image downsampled: ${resized.originalWidth}x${resized.originalHeight} -> ${resized.width}x${resized.height} (${(Buffer.from(resized.data, 'base64').length / 1024).toFixed(0)}KB)`);
+      out.push({ type: 'image', data: resized.data, mimeType: resized.mimeType });
+      changed = true;
+    } catch (err) {
+      onLog?.(`Image downsample failed: ${err instanceof Error ? err.message : String(err)}`);
+      out.push(block);
+    }
+  }
+  return { content: out, changed };
+}
+
 function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any> {
   const originalExecute = tool.execute;
   const parameters = allowCraftMetadataProperties(tool.parameters);
@@ -1364,6 +1414,14 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
       parentSignal?.removeEventListener('abort', abortFromParent);
       activeToolExecutions.delete(toolCallId);
       debugLog(`Active tool cleared: ${sdkToolName}/${toolCallId} aborted=${toolAbortController.signal.aborted}`);
+    }
+
+    // --- Post-execute: downsample images read by the Read tool ---
+    if (sdkToolName === 'Read' && Array.isArray(result.content)) {
+      const downsampled = await downsampleImageContent(result.content, debugLog);
+      if (downsampled.changed) {
+        result = { ...result, content: downsampled.content };
+      }
     }
 
     // --- Post-execute: large response summarization ---

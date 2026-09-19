@@ -163,4 +163,49 @@ describe('resolveSearchProvider', () => {
 
     expect(provider).toBeInstanceOf(DDGSearchProvider);
   });
+
+  // --- Custom endpoint (`pi_compat`) ---
+
+  it('falls back to DDG for custom endpoints even when piAuthProvider reports openai + api_key', () => {
+    // A pi_compat connection routes chat through a local gateway but its
+    // piAuthProvider is derived from customEndpoint.api === 'openai-completions'
+    // → 'openai'. Routing search to api.openai.com with the gateway's key 401s.
+    const provider = resolveSearchProvider(
+      {
+        provider: 'openai',
+        credential: { type: 'api_key', key: 'sk-omni-local-2026' },
+      },
+      undefined,
+      true,
+    );
+
+    expect(provider).toBeInstanceOf(DDGSearchProvider);
+    expect(provider.name).toBe('DuckDuckGo');
+  });
+
+  it('falls back to DDG for custom endpoints regardless of provider/key', () => {
+    const provider = resolveSearchProvider(
+      {
+        provider: 'google',
+        credential: { type: 'api_key', key: 'some-local-key' },
+      },
+      undefined,
+      true,
+    );
+
+    expect(provider).toBeInstanceOf(DDGSearchProvider);
+  });
+
+  it('still routes to provider-native search when NOT a custom endpoint', () => {
+    const provider = resolveSearchProvider(
+      {
+        provider: 'openai',
+        credential: { type: 'api_key', key: 'sk-real' },
+      },
+      undefined,
+      false,
+    );
+
+    expect(provider).toBeInstanceOf(ResponsesApiSearchProvider);
+  });
 });

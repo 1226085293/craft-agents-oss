@@ -1031,10 +1031,10 @@ async function ensureSession(): Promise<AgentSession> {
   const activeSearchModel = () => (initConfig?.model ? stripPiPrefix(initConfig.model) : undefined);
   const searchProvider = {
     get name() {
-      return resolveSearchProvider(initConfig?.piAuth, activeSearchModel()).name;
+      return resolveSearchProvider(initConfig?.piAuth, activeSearchModel(), shouldPreferCustomEndpoint()).name;
     },
     async search(query: string, count: number) {
-      return resolveSearchProvider(initConfig?.piAuth, activeSearchModel()).search(query, count);
+      return resolveSearchProvider(initConfig?.piAuth, activeSearchModel(), shouldPreferCustomEndpoint()).search(query, count);
     },
   };
   const searchTool = createSearchTool(searchProvider);

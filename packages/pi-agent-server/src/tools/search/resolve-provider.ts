@@ -53,8 +53,25 @@ function getOpenAiCodexAccessToken(piAuth?: SearchProviderAuthConfig): string | 
  * @param activeModel Bare (no `pi/` prefix) model ID of the active session/connection. Used
  *   by the ChatGPT backend provider to search with a model the account actually supports,
  *   instead of a hardcoded one that may have been retired (craft-agents-oss#1023).
+ * @param isCustomEndpoint True when the session runs against a user-hosted custom endpoint
+ *   (`pi_compat` with a `customEndpoint` + `baseUrl`). Such connections route chat through a
+ *   local gateway/proxy, but their `piAuthProvider` may still be reported as `openai` (derived
+ *   from `customEndpoint.api === 'openai-completions'`). Routing search through the provider's
+ *   real endpoint (e.g. hardcoded `api.openai.com`) with the gateway's own key would 401, so
+ *   custom endpoints always fall back to DuckDuckGo (they have no provider-native search).
  */
-export function resolveSearchProvider(piAuth?: SearchProviderAuthConfig, activeModel?: string): WebSearchProvider {
+export function resolveSearchProvider(
+  piAuth?: SearchProviderAuthConfig,
+  activeModel?: string,
+  isCustomEndpoint = false,
+): WebSearchProvider {
+  // Custom endpoints point at a local gateway/proxy, not the provider's real API. The gateway
+  // key is meaningless against api.openai.com (or any other provider's native search endpoint),
+  // so do not attempt provider-native search at all — fall straight through to DDG.
+  if (isCustomEndpoint) {
+    return new DDGSearchProvider();
+  }
+
   const provider = piAuth?.provider;
   const apiKey = getApiKey(piAuth);
   const openAiCodexAccess = getOpenAiCodexAccessToken(piAuth);

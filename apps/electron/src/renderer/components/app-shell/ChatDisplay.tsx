@@ -1904,6 +1904,36 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     && turns.length === 0
     && ((session?.messages?.length ?? 0) > 0 || (session?.messageCount ?? 0) > 0)
 
+  // Auto-fill the initial window so the list is actually scrollable.
+  // Reverse pagination renders only the last N turns; if that slice is shorter
+  // than the viewport there is NO scrollbar, so no `scroll` event can ever fire
+  // and handleScroll can never load the turns above — the view stays stuck on
+  // the tail behind a non-interactive "scroll up for earlier" hint. Grow one
+  // page at a time (bounded by allTurns.length) until the content overflows,
+  // keeping the viewport pinned to the bottom so the tail doesn't jump while
+  // older turns stream in above.
+  React.useEffect(() => {
+    if (compactMode || messagesLoading) return
+    const viewport = scrollViewportRef.current
+    if (!viewport) return
+    // Not laid out yet (hidden view / pre-paint) — measuring would report 0x0
+    // and we'd grow through the whole transcript. Wait for a real height.
+    if (viewport.clientHeight === 0) return
+    if (Math.max(0, allTurns.length - visibleTurnCount) <= 0) return
+    if (viewport.scrollHeight > viewport.clientHeight + 8) return
+    // Reaching the top without a scroll event: grow one page.
+    pendingLoadMoreAnchorRef.current = null
+    setVisibleTurnCount(prev => prev + TURNS_PER_PAGE)
+    requestAnimationFrame(() => {
+      const vp = scrollViewportRef.current
+      if (!vp) return
+      // Still shorter than the viewport → the next pass grows another page.
+      if (vp.scrollHeight <= vp.clientHeight + 8) return
+      isStickToBottomRef.current = true
+      vp.scrollTop = vp.scrollHeight
+    })
+  }, [compactMode, messagesLoading, session?.id, allTurns.length, visibleTurnCount])
+
   return (
     <div ref={zoneRef} className="flex h-full flex-col min-w-0" data-focus-zone="chat">
       {session ? (
@@ -2025,8 +2055,17 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                   )}
                   {/* Load more indicator - shown when there are older messages */}
                   {hasMoreAbove && (
-                    <div className="text-center text-muted-foreground/60 text-xs py-3 select-none">
-                      ↑ {t('chat.scrollUpForEarlier', { count: startIndex })}
+                    <div className="text-center py-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const vp = scrollViewportRef.current
+                          if (vp) triggerLoadMore(vp, vp.scrollTop)
+                        }}
+                        className="text-muted-foreground/60 hover:text-muted-foreground text-xs select-none cursor-pointer transition-colors"
+                      >
+                        ↑ {t('chat.scrollUpForEarlier', { count: startIndex })}
+                      </button>
                     </div>
                   )}
                   {turns.map((turn, index) => {

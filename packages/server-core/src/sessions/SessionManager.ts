@@ -9603,8 +9603,14 @@ ${request.prompt}`;
             }
           }
           // inputTokens = current context size (full conversation sent this turn), NOT accumulated
-          // Each API call sends the full conversation history, so we use the latest value
-          managed.tokenUsage.inputTokens = event.usage.inputTokens
+          // Each API call sends the full conversation history, so we use the latest value.
+          // A degenerate 0 reading (turn whose final message failed/aborted) is
+          // ignored: a non-empty conversation always has a non-zero context, and
+          // accepting the 0 wipes the context badge — and the persisted
+          // tokenUsage — to 0% until a later turn succeeds.
+          if (event.usage.inputTokens > 0) {
+            managed.tokenUsage.inputTokens = event.usage.inputTokens
+          }
           // outputTokens and costUsd are accumulated across all turns (total session usage)
           managed.tokenUsage.outputTokens += event.usage.outputTokens
           managed.tokenUsage.totalTokens = managed.tokenUsage.inputTokens + managed.tokenUsage.outputTokens
@@ -9632,8 +9638,12 @@ ${request.prompt}`;
               costUsd: 0,
             }
           }
-          // Update only inputTokens (current context size) - other fields accumulate on complete
-          managed.tokenUsage.inputTokens = event.usage.inputTokens
+          // Update only inputTokens (current context size) - other fields accumulate on complete.
+          // Ignore a degenerate 0 reading (failed/aborted turn) so the badge keeps
+          // the last real context size instead of dropping to 0%.
+          if (event.usage.inputTokens > 0) {
+            managed.tokenUsage.inputTokens = event.usage.inputTokens
+          }
           if (event.usage.contextWindow) {
             managed.tokenUsage.contextWindow = event.usage.contextWindow
           }
@@ -9643,7 +9653,7 @@ ${request.prompt}`;
             type: 'usage_update',
             sessionId: managed.id,
             tokenUsage: {
-              inputTokens: event.usage.inputTokens,
+              inputTokens: managed.tokenUsage.inputTokens,
               contextWindow: event.usage.contextWindow,
             },
           }, workspaceId)

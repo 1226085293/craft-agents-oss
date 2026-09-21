@@ -616,6 +616,102 @@ describe('PiEventAdapter', () => {
   });
 
   // ============================================================
+  // Usage reporting
+  // ============================================================
+  //
+  // The API clients initialize an assistant message's `usage` to all zeros
+  // (see pi-ai's `stream()`: `usage: { input: 0, output: 0, ... }`) and only fill
+  // it once a response has been parsed. A turn whose final message failed
+  // (stopReason 'error') or was interrupted (stopReason 'aborted') therefore
+  // still carries a zeroed `usage` — treating it as authoritative wiped the
+  // context badge (and the persisted tokenUsage) to `0%` until a later turn
+  // succeeded, most visibly right after an app restart.
+
+  describe('usage reporting', () => {
+    const usage = (input: number, output: number, cacheRead = 0) => ({
+      input,
+      output,
+      cacheRead,
+      cacheWrite: 0,
+      totalTokens: input + output + cacheRead,
+      cost: { total: 0 },
+    });
+
+    it('should emit usage_update for a real usage reading', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'stop', content: 'hi', usage: usage(120_000, 40, 3_000) },
+      } as any));
+
+      expect(events.find(e => e.type === 'usage_update')).toMatchObject({
+        type: 'usage_update',
+        usage: { inputTokens: 123_000 },
+      });
+    });
+
+    it('should not emit usage_update for an aborted message with zeroed usage', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'stop', content: 'ok', usage: usage(120_000, 40) },
+      } as any));
+
+      const aborted = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'aborted', content: '', usage: usage(0, 0) },
+      } as any));
+
+      expect(aborted.find(e => e.type === 'usage_update')).toBeUndefined();
+    });
+
+    it('should report the last real context size on complete after a zeroed reading', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'stop', content: 'ok', usage: usage(280_000, 90) },
+      } as any));
+      // The turn then dies with an error whose usage was never populated.
+      collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          content: '',
+          errorMessage: 'Bad Request',
+          usage: usage(0, 0),
+        },
+      } as any));
+
+      const terminal = collect(adapter.adaptEvent({ type: 'agent_end', willRetry: false } as any));
+      const complete = terminal.find(e => e.type === 'complete');
+
+      // Must NOT be 0 — that is what the UI rendered as a 0% context bar.
+      expect(complete).toMatchObject({ type: 'complete', usage: { inputTokens: 280_000 } });
+    });
+
+    it('should omit usage entirely when no real reading was ever recorded', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          content: '',
+          errorMessage: 'Bad Request',
+          usage: usage(0, 0),
+        },
+      } as any));
+
+      const terminal = collect(adapter.adaptEvent({ type: 'agent_end', willRetry: false } as any));
+      const complete = terminal.find(e => e.type === 'complete');
+
+      expect(complete).toMatchObject({ type: 'complete' });
+      expect((complete as { usage?: unknown }).usage).toBeUndefined();
+    });
+  });
+
+  // ============================================================
   // Tool events
   // ============================================================
 

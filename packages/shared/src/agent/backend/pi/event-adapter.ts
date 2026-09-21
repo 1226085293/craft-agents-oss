@@ -106,6 +106,15 @@ export class PiEventAdapter extends BaseEventAdapter {
   // Track last usage for emitting with complete event
   private lastUsage: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: { total: number } } | undefined;
 
+  // Last usage reading that actually carried a context size (> 0). Failed
+  // (stopReason 'error') and interrupted (stopReason 'aborted') assistant
+  // messages still carry a `usage` object — the API clients initialize it to
+  // all zeros and only fill it once a response has been parsed — so they must
+  // not overwrite the last real reading. See the `message_end` / `complete`
+  // handling: emitting a 0 here wipes the context badge (and the persisted
+  // tokenUsage) to 0% after an error or an app restart.
+  private lastContextTokens = 0;
+
   // ============================================================
   // Overflow-recovery state machine
   // ============================================================
@@ -595,8 +604,11 @@ export class PiEventAdapter extends BaseEventAdapter {
           // The retried run finished cleanly.
           this.retryState = 'none';
         }
-        if (this.lastUsage) {
-          const inputTokens = this.lastUsage.input + (this.lastUsage.cacheRead || 0);
+        if (this.lastUsage && this.lastContextTokens > 0) {
+          // Report the last REAL context size. Using `lastUsage.input` here would
+          // report 0 for a turn whose final message failed/aborted, persisting a
+          // 0 that the UI renders as 0% until a later turn succeeds.
+          const inputTokens = this.lastContextTokens;
           yield {
             type: 'complete',
             usage: {
@@ -750,17 +762,24 @@ export class PiEventAdapter extends BaseEventAdapter {
           this.hasStreamedDeltas = false;
         }
 
-        // Emit usage_update if the assistant message includes token usage
+        // Emit usage_update if the assistant message includes REAL token usage.
+        // A degenerate reading (all-zero usage on an error/aborted message) is
+        // kept out of the UI and of `lastContextTokens`; the previous real
+        // reading stands. Mirrors the SDK's own guard in pi-coding-agent
+        // (`assistantMessage.stopReason === "error" || directContextTokens === 0`).
         if (msg.usage && typeof msg.usage.input === 'number') {
           this.lastUsage = msg.usage;
           const inputTokens = msg.usage.input + (msg.usage.cacheRead || 0);
-          yield {
-            type: 'usage_update',
-            usage: {
-              inputTokens,
-              contextWindow: this.contextWindow,
-            },
-          };
+          if (inputTokens > 0) {
+            this.lastContextTokens = inputTokens;
+            yield {
+              type: 'usage_update',
+              usage: {
+                inputTokens,
+                contextWindow: this.contextWindow,
+              },
+            };
+          }
         }
         break;
       }

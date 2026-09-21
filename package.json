@@ -105,7 +105,7 @@
     "check-version": "bun run scripts/check-version.ts",
     "oss:sync": "bun run scripts/oss-sync.ts",
     "prepare": "husky",
-    "postinstall": "bun scripts/patch-pi-ai-maxtokens.ts && bun scripts/patch-pi-coding-agent-hierarchical-compaction.ts"
+    "postinstall": "bun scripts/patch-pi-ai-maxtokens.ts && bun scripts/patch-pi-coding-agent-hierarchical-compaction.ts && bun scripts/patch-pi-ai-image-tokens.ts"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "^3.947.0",

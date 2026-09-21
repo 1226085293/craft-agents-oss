@@ -1306,12 +1306,18 @@ function makeErrorResult(message: string): AgentToolResult<any> {
 const IMAGE_MAX_EDGE = 1024;
 const IMAGE_MAX_BYTES = 512 * 1024; // base64 bytes
 
+// ImageContent carrying its (downsampled) pixel dimensions so the client-side
+// token estimator can bill images like the upstream vision model (w×h/750).
+type ImageContentWithDims = ImageContent & { width?: number; height?: number };
+
+type DownsampleContent = (PiTextContent | ImageContentWithDims)[];
+
 async function downsampleImageContent(
-  content: (PiTextContent | ImageContent)[],
+  content: DownsampleContent,
   onLog?: (msg: string) => void,
-): Promise<{ content: (PiTextContent | ImageContent)[]; changed: boolean }> {
+): Promise<{ content: DownsampleContent; changed: boolean }> {
   let changed = false;
-  const out: (PiTextContent | ImageContent)[] = [];
+  const out: DownsampleContent = [];
   for (const block of content) {
     if (block.type !== 'image') {
       out.push(block);
@@ -1335,7 +1341,9 @@ async function downsampleImageContent(
         continue;
       }
       onLog?.(`Image downsampled: ${resized.originalWidth}x${resized.originalHeight} -> ${resized.width}x${resized.height} (${(Buffer.from(resized.data, 'base64').length / 1024).toFixed(0)}KB)`);
-      out.push({ type: 'image', data: resized.data, mimeType: resized.mimeType });
+      // Attach downsampled dimensions so the client-side token estimator can
+      // match the upstream vision model's tile-based billing (w×h/750 tokens).
+      out.push({ type: 'image', data: resized.data, mimeType: resized.mimeType, width: resized.width, height: resized.height });
       changed = true;
     } catch (err) {
       onLog?.(`Image downsample failed: ${err instanceof Error ? err.message : String(err)}`);

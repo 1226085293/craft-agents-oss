@@ -651,26 +651,48 @@ async function loadSessionMessages(
       && existingSession.messages.length > 0
       && (!loadedSession.messages || loadedSession.messages.length === 0)
 
+    // The fetched transcript is authoritative: the in-memory atom must never mask
+    // history the backend still has. Previously, when the session was `isProcessing`
+    // AND the atom already held ANY message, the fetched transcript was thrown away
+    // entirely (mergePersistedToolTerminalStates returns the existing array), so a
+    // session that had streamed a couple of messages before reconnecting kept a
+    // permanently truncated history even though the backend had the full transcript.
+    // Keep the renderer's own copy for ids the fetch also contains (they carry the
+    // normalized role / terminal tool state — see mergePersistedToolTerminalStates),
+    // and re-attach only ids the fetch doesn't know about yet: that can only be the
+    // documented streaming race window, which requires the session to be processing.
+    const fetchedMessages = loadedSession.messages ?? []
+    const existingMessages = existingSession?.messages ?? []
+    const fetchedMessageIds = new Set(fetchedMessages.map(m => m.id))
+    const existingById = new Map(existingMessages.map(m => [m.id, m]))
+    const orderedFetchedMessages = mergePersistedToolTerminalStates(
+      fetchedMessages.map(message => existingById.get(message.id) ?? message),
+      fetchedMessages,
+    )
+    const inFlightMessages = existingSession?.isProcessing
+      ? existingMessages.filter(message => !fetchedMessageIds.has(message.id))
+      : []
+    const mergedFetchedMessages = inFlightMessages.length > 0
+      ? [...orderedFetchedMessages, ...inFlightMessages]
+      : orderedFetchedMessages
+
     const mergedSession = existingSession
       ? {
           ...existingSession,
-          // CRITICAL: Don't clobber messages if session is actively streaming
-          // AND already has messages in the atom. Streaming events update the atom
-          // directly and may contain messages the IPC response doesn't know about
-          // (race window between IPC request and response).
-          // The `messages.length > 0` guard ensures Cmd+R reload works: after reload,
-          // the atom starts with messages=[] from getSessions(), so IPC response
-          // (which has full history from main process memory) must be used.
-          // Also guard against sleep/wake edge case: the server may return
-          // empty messages if the session subprocess hasn't finished lazy-loading.
-          // However, terminal tool states from persisted/main-process messages are
-          // authoritative after a restart: without this narrow merge, stale renderer
-          // process cards can remain stuck at "executing" forever even though the
-          // backend JSONL already has completed/error.
+          // Messages: the fetched transcript wins, but never lose messages that
+          // only exist in the renderer (streaming events update the atom directly
+          // and may be ahead of the IPC response — see mergedFetchedMessages).
+          // - preservedStaleMessages: the server returned nothing (lazy-load
+          //   recovery / sleep-wake), so keep the atom and only refresh terminal
+          //   tool states from the persisted copy — stale renderer process cards
+          //   would otherwise stay stuck on "executing" forever.
+          // - otherwise use the fetch (+ any in-flight extras). After a reload the
+          //   atom starts empty and relies on the fetch to supply full history, and
+          //   a partial in-memory list must never mask the backend transcript.
           messages: preservedStaleMessages
             ? mergePersistedToolTerminalStates(existingSession.messages, loadedSession.messages)
-            : existingSession.isProcessing && existingSession.messages.length > 0
-              ? mergePersistedToolTerminalStates(existingSession.messages, loadedSession.messages)
+            : existingSession.messages.length > 0
+              ? mergedFetchedMessages
               : loadedSession.messages,
           tokenUsage: loadedSession.tokenUsage ?? existingSession.tokenUsage,
           sessionFolderPath: loadedSession.sessionFolderPath ?? existingSession.sessionFolderPath,

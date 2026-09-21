@@ -602,6 +602,8 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   // scroll anchoring is immediately overwritten. load-more is deferred until the
   // drag ends (pointerup) so the anchoring can hold.
   const scrollbarDragActiveRef = React.useRef(false)
+  // Rate limit for wheel-originated load-mores (one flick fires dozens of events)
+  const lastWheelLoadAtRef = React.useRef(0)
   // When the user is near the top during a scrollbar drag, this is set to true.
   // On pointerup, if this is true, the deferred load-more is triggered.
   const deferLoadMoreRef = React.useRef(false)
@@ -637,12 +639,22 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   const triggerLoadMore = React.useCallback((viewport: HTMLElement, scrollTop: number) => {
     const currentStartIndex = Math.max(0, totalTurnCountRef.current - visibleTurnCountRef.current)
     if (currentStartIndex <= 0) return
-    const anchor = viewport.querySelector<HTMLElement>('[data-turn]')
-    if (anchor) {
-      pendingLoadMoreAnchorRef.current = {
-        element: anchor,
-        viewportOffsetBefore: anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top,
+    if (scrollTop > 2) {
+      // Mid-list (or near the top): keep the content the user is looking at at the
+      // same offset so prepending older turns above doesn't jump the view.
+      const anchor = viewport.querySelector<HTMLElement>('[data-turn]')
+      if (anchor) {
+        pendingLoadMoreAnchorRef.current = {
+          element: anchor,
+          viewportOffsetBefore: anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top,
+        }
       }
+    } else {
+      // Already at the very top: the user asked for older content, so let the
+      // prepended turns be the visible ones (native "load more above" behaviour).
+      // Re-anchoring here would scroll past everything we just loaded, making the
+      // load look like a no-op.
+      pendingLoadMoreAnchorRef.current = null
     }
     setVisibleTurnCount(prev => prev + TURNS_PER_PAGE)
   }, [])
@@ -1237,14 +1249,16 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     if (!viewport) return
     const { scrollTop, scrollHeight, clientHeight } = viewport
     const distanceFromBottom = scrollHeight - scrollTop - clientHeight
-    // While the initial bottom-anchor is pending (session switch in progress),
-    // ignore scroll events entirely: the viewport can be at the top during the
-    // mount burst, which would spuriously flip sticky-bottom off and inflate
-    // visibleTurnCount before we've scrolled to the bottom.
-    if (initialBottomScrollPendingRef.current) return
-
-    // 20px threshold for "at bottom" detection
-    isStickToBottomRef.current = distanceFromBottom < 20
+    // While the initial bottom-anchor is pending (session switch in progress)
+    // the sticky-bottom state is unreliable — the viewport can still be at the
+    // top during the mount burst, which would spuriously flip sticky-bottom off.
+    // Load-more below must NOT be gated on this flag though: if the mount burst
+    // never reaches the bottom, refusing to load older turns strands the user at
+    // the top of a short window with no way back into the history.
+    if (!initialBottomScrollPendingRef.current) {
+      // 20px threshold for "at bottom" detection
+      isStickToBottomRef.current = distanceFromBottom < 20
+    }
 
     // Load more turns when scrolling near top (within 100px)
     if (scrollTop < 100) {
@@ -1281,6 +1295,20 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     const viewport = scrollViewportRef.current
     if (!viewport) return
     viewport.addEventListener('scroll', handleScroll)
+
+    // Wheel-up near the top loads older turns. This is the primitive that keeps
+    // working when a `scroll` event can never fire: the viewport is already at
+    // scrollTop 0, or the rendered tail doesn't overflow the viewport at all
+    // (no scrollbar => no scroll event => the window used to stay stuck on the
+    // last few turns with the history above unreachable).
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY >= 0) return
+      if (viewport.scrollTop > 100) return
+      if (Date.now() - lastWheelLoadAtRef.current < 200) return
+      lastWheelLoadAtRef.current = Date.now()
+      triggerLoadMore(viewport, viewport.scrollTop)
+    }
+    viewport.addEventListener('wheel', onWheel, { passive: true })
 
     // Detect scrollbar thumb drags so load-more can be deferred until release
     // (see handleScroll). Capture-phase listeners ensure we see the pointer
@@ -1350,6 +1378,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     window.addEventListener('pointerup', onPointerUp, true)
     return () => {
       viewport.removeEventListener('scroll', handleScroll)
+      viewport.removeEventListener('wheel', onWheel)
       document.removeEventListener('pointerdown', onPointerDown, true)
       window.removeEventListener('pointermove', onPointerMove)
       window.removeEventListener('pointerup', onPointerUp, true)
@@ -1908,10 +1937,10 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   // Reverse pagination renders only the last N turns; if that slice is shorter
   // than the viewport there is NO scrollbar, so no `scroll` event can ever fire
   // and handleScroll can never load the turns above — the view stays stuck on
-  // the tail behind a non-interactive "scroll up for earlier" hint. Grow one
-  // page at a time (bounded by allTurns.length) until the content overflows,
-  // keeping the viewport pinned to the bottom so the tail doesn't jump while
-  // older turns stream in above.
+  // the tail behind a non-interactive "scroll up for earlier" hint. Always show
+  // at least one full page of turns, then grow one page at a time (bounded by
+  // allTurns.length) until the content overflows, keeping the viewport pinned to
+  // the bottom so the tail doesn't jump while older turns stream in above.
   React.useEffect(() => {
     if (compactMode || messagesLoading) return
     const viewport = scrollViewportRef.current
@@ -1920,10 +1949,39 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     // and we'd grow through the whole transcript. Wait for a real height.
     if (viewport.clientHeight === 0) return
     if (Math.max(0, allTurns.length - visibleTurnCount) <= 0) return
+    // (1) Always render at least one full page. The tail window must never sit on
+    // a handful of turns: if those turns are shorter than the viewport there is no
+    // scrollbar, so no `scroll` event exists to trigger load-more (the wheel
+    // handler below covers the rest).
+    if (visibleTurnCount < TURNS_PER_PAGE) {
+      // Anchor before paint: growing the window prepends turns ABOVE, so without
+      // anchoring the grown content paints at the old scrollTop and the view
+      // visibly jumps away from where the user was looking.
+      const vpEl = scrollViewportRef.current
+      const sticky = isStickToBottomRef.current
+      const anchorEl = sticky ? messagesEndRef.current : vpEl?.querySelector<HTMLElement>('[data-turn]') ?? null
+      if (vpEl && anchorEl) {
+        pendingLoadMoreAnchorRef.current = {
+          element: anchorEl,
+          viewportOffsetBefore: anchorEl.getBoundingClientRect().top - vpEl.getBoundingClientRect().top,
+        }
+      } else {
+        pendingLoadMoreAnchorRef.current = null
+      }
+      setVisibleTurnCount(Math.min(allTurns.length, TURNS_PER_PAGE))
+      if (sticky) {
+        requestAnimationFrame(() => {
+          const vp = scrollViewportRef.current
+          if (vp) vp.scrollTop = vp.scrollHeight
+        })
+      }
+      return
+    }
+    // (2) Still shorter than the viewport → grow until it overflows.
     if (viewport.scrollHeight > viewport.clientHeight + 8) return
     // Reaching the top without a scroll event: grow one page.
     pendingLoadMoreAnchorRef.current = null
-    setVisibleTurnCount(prev => prev + TURNS_PER_PAGE)
+    setVisibleTurnCount(prev => Math.min(allTurns.length, prev + TURNS_PER_PAGE))
     requestAnimationFrame(() => {
       const vp = scrollViewportRef.current
       if (!vp) return

@@ -208,6 +208,31 @@ describe('session message loading atoms', () => {
     expect(secondResult?.messages.map((message) => message.id)).toEqual(['m1', 'm2'])
     expect(store.get(loadedSessionsAtom).has(sessionId)).toBe(true)
   })
+
+  // Regression: a streaming session whose renderer atom already holds a couple of
+  // streamed messages used to throw the fetched transcript away entirely, leaving
+  // the session permanently truncated (long histories appeared to vanish).
+  it('keeps the full fetched transcript when a processing session has partial messages', async () => {
+    const store = createStore()
+    const sessionId = 'session-1'
+
+    globalThis.window = {
+      electronAPI: {
+        getSessionMessages: async (id: string) =>
+          makeSession({ id, messages: [msg('old-1'), msg('old-2'), msg('m1')] }),
+      },
+    } as unknown as typeof window
+
+    store.set(sessionAtomFamily(sessionId), makeSession({
+      id: sessionId,
+      isProcessing: true,
+      messages: [msg('m1'), msg('m2', 'assistant')],
+    }))
+
+    const result = await store.set(ensureSessionMessagesLoadedAtom, sessionId)
+    // Fetched history first, in-flight-only messages re-attached after it.
+    expect(result?.messages.map((message) => message.id)).toEqual(['old-1', 'old-2', 'm1', 'm2'])
+  })
 })
 
 describe('refreshSessionsMetadataAtom', () => {

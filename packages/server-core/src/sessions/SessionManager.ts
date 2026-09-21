@@ -2713,6 +2713,14 @@ export class SessionManager implements ISessionManager {
     // Lazy-load messages from disk if not yet loaded
     await this.ensureMessagesLoaded(m)
 
+    // Diagnostics for truncated-transcript reports: this is the exact payload the
+    // renderer receives for a lazily loaded session. If the renderer shows fewer
+    // turns than this count, the loss is on the renderer side, not in the store.
+    sessionLog.info(
+      `getSession ${sessionId}: returning ${m.messages.length} messages ` +
+      `(messageCount=${m.messageCount ?? 0}, hidden=${m.messages.filter(msg => msg.hidden).length})`
+    )
+
     return managedToSession(m, { messages: m.messages })
   }
 

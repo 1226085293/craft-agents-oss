@@ -2186,7 +2186,13 @@ export class SessionManager implements ISessionManager {
       // they appear after user Stops and in old transcripts.
       (this.isToolLikeMessage(m) && (m.toolStatus === 'executing' || m.toolStatus === 'pending'))
     )
-    if (hasDanglingTail) {
+    // If the trailing slice itself contains a non-guidance user message, that
+    // message owns the unfinished activity (e.g. the user re-prompted while the
+    // interrupted turn was still running). Rolling the boundary back past it
+    // would replay an older, already-answered request first and leave this one
+    // stuck in the queued state (2026-09-22 regression).
+    const trailingOwnsDanglingTail = trailing.some(m => m.role === 'user' && m.isGuidance !== true)
+    if (hasDanglingTail && !trailingOwnsDanglingTail) {
       // Walk back from the last final to the owning user message (the one that
       // started this unfinished turn), so its replay covers the interrupted tail.
       for (let i = lastTerminalResponseIndex; i >= 0; i--) {

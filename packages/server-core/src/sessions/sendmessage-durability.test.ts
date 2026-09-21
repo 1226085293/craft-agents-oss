@@ -363,6 +363,32 @@ describe('sendMessage durability', () => {
     expect(managed.messageQueue[0]?.internalMessage).toContain('修复 A 然后检查 B')
   })
 
+  it('does not rewind the boundary past a newer user message that owns the dangling tail', () => {
+    // 2026-09-22 regression: an older request had already been fully answered when
+    // the user sent a NEWER request whose turn was killed mid-flight. The dangling
+    // roll-back walked from the last final back to the OLDER user message and
+    // replayed it first — after restart the recovered session answered the
+    // previous, already-answered question while the newer message sat queued.
+    const sessionId = 'recover-newer-user-owns-tail'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'older-user', role: 'user', content: '为什么 cline 能用了这个会话还是报错', timestamp: 1 },
+      { id: 'older-final', role: 'assistant', content: '原因找到了:连接未运行', timestamp: 2, isIntermediate: false },
+      { id: 'newer-user', role: 'user', content: '我希望 uniapi 菜单只保留 Start、Stop', timestamp: 3 },
+      { id: 'newer-thinking', role: 'assistant', content: '先确认 pystray 的支持情况', timestamp: 4, isIntermediate: true },
+      { id: 'newer-tool', role: 'tool', content: 'Running Bash...', timestamp: 5, toolName: 'Bash', toolStatus: 'executing' },
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue.map(q => q.messageId)).toEqual(['newer-user'])
+    expect(managed.messageQueue[0]?.internalMessage).toContain('Continue the previous user request')
+    expect(managed.messageQueue[0]?.internalMessage).toContain('我希望 uniapi 菜单只保留 Start、Stop')
+    expect(managed.messageQueue[0]?.internalMessage).not.toContain('为什么 cline 能用了这个会话还是报错')
+    expect(managed.messages.find(m => m.id === 'older-user')?.isQueued).toBeUndefined()
+  })
+
   it('does not recover a turn whose last final is the true end (no dangling tail)', () => {
     const sessionId = 'recover-clean-final'
     const managed = buildSession(sessionId)

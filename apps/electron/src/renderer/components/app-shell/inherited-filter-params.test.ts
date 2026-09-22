@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'bun:test'
-import { resolveInheritedFilterParams, type FilterMode } from './inherited-filter-params'
+import {
+  resolveInheritedFilterParams,
+  resolveInheritedNavigatorFilter,
+  type FilterMode,
+} from './inherited-filter-params'
 
 const m = (...entries: [string, FilterMode][]) => new Map(entries)
 
@@ -33,5 +37,31 @@ describe('resolveInheritedFilterParams (#970)', () => {
 
   it('returns null for cross-dimension ambiguity (one status + one label include)', () => {
     expect(resolveInheritedFilterParams(m(['todo', 'include']), m(['bug', 'include']), m())).toBeNull()
+  })
+})
+
+describe('resolveInheritedNavigatorFilter', () => {
+  it('inherits the current state view (e.g. Backlog) so new sessions stay in that list', () => {
+    expect(resolveInheritedNavigatorFilter({ kind: 'state', stateId: 'backlog' })).toEqual({ status: 'backlog' })
+  })
+
+  it('inherits the current label view when it is a concrete label', () => {
+    expect(resolveInheritedNavigatorFilter({ kind: 'label', labelId: 'bug' })).toEqual({ label: 'bug' })
+  })
+
+  it('does NOT inherit the "all labeled sessions" view (`__all__`)', () => {
+    expect(resolveInheritedNavigatorFilter({ kind: 'label', labelId: '__all__' })).toBeNull()
+  })
+
+  it('returns null for non-state/label views (allSessions, flagged, archived, view)', () => {
+    expect(resolveInheritedNavigatorFilter({ kind: 'allSessions' })).toBeNull()
+    expect(resolveInheritedNavigatorFilter({ kind: 'flagged' })).toBeNull()
+    expect(resolveInheritedNavigatorFilter({ kind: 'archived' })).toBeNull()
+    expect(resolveInheritedNavigatorFilter({ kind: 'view', viewId: 'v1' })).toBeNull()
+  })
+
+  it('returns null for null/undefined filter', () => {
+    expect(resolveInheritedNavigatorFilter(null)).toBeNull()
+    expect(resolveInheritedNavigatorFilter(undefined)).toBeNull()
   })
 })

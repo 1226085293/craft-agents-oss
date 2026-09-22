@@ -740,21 +740,23 @@ export function NavigationProvider({
             parsed.params.label ? { kind: 'label', labelId: parsed.params.label } :
             { kind: 'allSessions' }
 
+          // Navigate the panel(s) to the new session, preserving the inherited filter
+          // (state/label) so creating from e.g. the Backlog list stays in the Backlog list.
+          const newState: NavigationState = {
+            navigator: 'sessions',
+            filter,
+            details: { type: 'session', sessionId: session.id },
+          }
+          const route = buildRouteFromNavigationState(newState) as ViewRoute
           if (options?.newPanel) {
-            // Open the new session in a new panel using lane-aware routing (pushPanel auto-focuses it)
+            // Open the new session in a new panel via lane-aware routing (pushPanel auto-focuses it)
             pushPanel({
-              route: routes.view.allSessions(session.id) as ViewRoute,
+              route,
               targetLaneId: options.targetLaneId,
               intent: 'explicit',
             })
           } else {
             // Navigate the focused panel to the new session
-            const newState: NavigationState = {
-              navigator: 'sessions',
-              filter,
-              details: { type: 'session', sessionId: session.id },
-            }
-            const route = buildRouteFromNavigationState(newState) as ViewRoute
             store.set(updateFocusedPanelRouteAtom, route)
             // Session selection sync handled by effect
           }

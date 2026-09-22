@@ -44,7 +44,7 @@ import { cn } from "@/lib/utils"
 import { isMac } from "@/lib/platform"
 import { Button } from "@/components/ui/button"
 import { HeaderIconButton } from "@/components/ui/HeaderIconButton"
-import { resolveInheritedFilterParams, type FilterMode } from "./inherited-filter-params"
+import { resolveInheritedFilterParams, resolveInheritedNavigatorFilter, type FilterMode } from "./inherited-filter-params"
 import { Separator } from "@/components/ui/separator"
 import { Tooltip, TooltipTrigger, TooltipContent, DocumentFormattedMarkdownOverlay } from "@craft-agent/ui"
 import {
@@ -2068,21 +2068,29 @@ function AppShellContent({
    * Resolve the "inherit sole active filter" rule for new sessions. Only
    * include-mode filters are candidates — an excluded status/label/project must
    * never be inherited (#970). See resolveInheritedFilterParams.
+   *
+   * When the navigator itself is a specific state/label view (e.g. "Backlog"),
+   * the new session inherits that state/label directly — creating a session
+   * from a status list must land in that same status list without jumping back
+   * to All Sessions. See resolveInheritedNavigatorFilter.
    */
   const resolveInheritedNewSessionParams = useCallback(
-    () => resolveInheritedFilterParams(listFilter, labelFilter, projectFilter),
-    [listFilter, labelFilter, projectFilter]
+    () =>
+      resolveInheritedNavigatorFilter(sessionFilter) ??
+      resolveInheritedFilterParams(listFilter, labelFilter, projectFilter),
+    [sessionFilter, listFilter, labelFilter, projectFilter]
   )
 
   // Create a new chat and select it
   const handleNewChat = useCallback((newPanel: boolean = false) => {
     if (!activeWorkspace) return
 
-    // Exit search mode and switch to All Sessions
+    // Exit search mode and clear the query so the list isn't filtered during/after creation.
     setSearchActive(false)
     setSearchQuery('')
 
-    // Inherit sole-active filter into the new session when unambiguous.
+    // Inherit the current view's status/label (e.g. creating from the Backlog list
+    // creates a Backlog session in-place) or, when unambiguous, a sole include filter.
     const inherited = resolveInheritedNewSessionParams()
 
     // Delegate to NavigationContext which handles session creation

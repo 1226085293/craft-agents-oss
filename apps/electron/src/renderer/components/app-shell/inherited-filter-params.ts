@@ -7,8 +7,37 @@ export interface InheritedNewSessionParams {
   project?: string
 }
 
+/** Minimal shape of the navigator filter the renderer uses to scope the session list. */
+export interface NavigatorFilter {
+  kind: string
+  stateId?: string
+  labelId?: string
+  viewId?: string
+}
+
 const includeKeys = <K extends string>(m: Map<K, FilterMode>): K[] =>
   [...m.entries()].filter(([, mode]) => mode === 'include').map(([id]) => id)
+
+/**
+ * Resolve inheritance from the navigator's own filter (the list currently
+ * shown in the sidebar). When the user creates a new session from a specific
+ * status list (e.g. Backlog) or an individual label list, the new session
+ * inherits that same status/label — so it lands in the current list instead of
+ * jumping back to All Sessions.
+ *
+ * `labelId === '__all__'` (the "all labeled sessions" view) carries no single
+ * label to inherit, so it returns null like every non-state non-label view.
+ */
+export function resolveInheritedNavigatorFilter(filter: NavigatorFilter | null | undefined): InheritedNewSessionParams | null {
+  if (!filter) return null
+  if (filter.kind === 'state' && filter.stateId) {
+    return { status: filter.stateId }
+  }
+  if (filter.kind === 'label' && filter.labelId && filter.labelId !== '__all__') {
+    return { label: filter.labelId }
+  }
+  return null
+}
 
 /**
  * Resolve the "inherit sole active filter" rule for new sessions.

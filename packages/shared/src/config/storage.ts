@@ -68,7 +68,6 @@ export interface StoredConfig {
   // Auto-update
   dismissedUpdateVersion?: string;  // Version that user dismissed (skip notifications for this version)
   // Input settings
-  autoCapitalisation?: boolean;  // Auto-capitalize first letter when typing (default: true)
   sendMessageKey?: 'enter' | 'cmd-enter';  // Key to send messages (default: 'enter')
   spellCheck?: boolean;  // Enable spell check in input (default: false)
   // Power settings
@@ -124,7 +123,6 @@ const FALLBACK_CONFIG_DEFAULTS: ConfigDefaults = {
   defaults: {
     notificationsEnabled: true,
     colorTheme: 'default',
-    autoCapitalisation: true,
     sendMessageKey: 'enter',
     spellCheck: false,
     keepAwakeWhileRunning: false,
@@ -363,29 +361,6 @@ export function setNotificationsEnabled(enabled: boolean): void {
   const config = loadStoredConfig();
   if (!config) return;
   config.notificationsEnabled = enabled;
-  saveConfig(config);
-}
-
-/**
- * Get whether auto-capitalisation is enabled.
- * Defaults to true if not set.
- */
-export function getAutoCapitalisation(): boolean {
-  const config = loadStoredConfig();
-  if (config?.autoCapitalisation !== undefined) {
-    return config.autoCapitalisation;
-  }
-  const defaults = loadConfigDefaults();
-  return defaults.defaults.autoCapitalisation;
-}
-
-/**
- * Set whether auto-capitalisation is enabled.
- */
-export function setAutoCapitalisation(enabled: boolean): void {
-  const config = loadStoredConfig();
-  if (!config) return;
-  config.autoCapitalisation = enabled;
   saveConfig(config);
 }
 

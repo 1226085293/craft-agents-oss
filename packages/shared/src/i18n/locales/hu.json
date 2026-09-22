@@ -1060,8 +1060,6 @@
   "settings.appearance.workspaceAvatarReset": "Visszaállítás automatikus színre",
   "settings.appearance.workspaceThemes": "Munkaterület-témák",
   "settings.appearance.workspaceThemesDesc": "Témabeállítások felülírása munkaterületenként",
-  "settings.input.autoCapitalisation": "Automatikus nagybetűsítés",
-  "settings.input.autoCapitalisationDesc": "Az első betű automatikus nagybetűsítése üzenet írásakor.",
   "settings.input.cmdEnterKey": "⌘ Enter",
   "settings.input.cmdEnterKeyDesc": "Enter használata új sorokhoz",
   "settings.input.ctrlEnterKey": "Ctrl+Enter",

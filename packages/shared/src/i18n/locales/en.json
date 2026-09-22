@@ -1060,8 +1060,6 @@
   "settings.appearance.workspaceAvatarReset": "Reset to auto color",
   "settings.appearance.workspaceThemes": "Workspace Themes",
   "settings.appearance.workspaceThemesDesc": "Override theme settings per workspace",
-  "settings.input.autoCapitalisation": "Auto capitalisation",
-  "settings.input.autoCapitalisationDesc": "Automatically capitalise the first letter when typing a message.",
   "settings.input.cmdEnterKey": "⌘ Enter",
   "settings.input.cmdEnterKeyDesc": "Use Enter for new lines",
   "settings.input.ctrlEnterKey": "Ctrl+Enter",

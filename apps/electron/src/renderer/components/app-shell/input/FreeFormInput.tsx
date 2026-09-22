@@ -52,7 +52,6 @@ import {
 import { cn } from '@/lib/utils'
 import { coerceInputText } from '@/lib/input-text'
 import { isMac } from '@/lib/platform'
-import { applySmartTypography } from '@/lib/smart-typography'
 import { AttachmentPreview } from '../AttachmentPreview'
 import { ImageSupportWarningBanner } from './ImageSupportWarningBanner'
 import { ANTHROPIC_MODELS, getModelShortName, getModelDisplayName, getModelContextWindow, type ModelDefinition } from '@config/models'
@@ -575,7 +574,6 @@ export function FreeFormInput({
   const [modelDropdownOpen, setModelDropdownOpen] = React.useState(false)
 
   // Input settings (loaded from config)
-  const [autoCapitalisation, setAutoCapitalisation] = React.useState(true)
   const [sendMessageKey, setSendMessageKey] = React.useState<'enter' | 'cmd-enter'>('enter')
   const [spellCheck, setSpellCheck] = React.useState(false)
 
@@ -584,12 +582,10 @@ export function FreeFormInput({
     const loadInputSettings = async () => {
       if (!window.electronAPI) return
       try {
-        const [autoCapEnabled, sendKey, spellCheckEnabled] = await Promise.all([
-          window.electronAPI.getAutoCapitalisation(),
+        const [sendKey, spellCheckEnabled] = await Promise.all([
           window.electronAPI.getSendMessageKey(),
           window.electronAPI.getSpellCheck(),
         ])
-        setAutoCapitalisation(autoCapEnabled)
         setSendMessageKey(sendKey ?? 'enter')
         setSpellCheck(spellCheckEnabled)
       } catch (error) {
@@ -1475,32 +1471,7 @@ export function FreeFormInput({
 
     // Update inline label state (for #labels)
     inlineLabel.handleInputChange(nextValue, cursorPosition)
-
-    // Auto-capitalize first letter (but not for slash commands, @mentions, or #labels)
-    // Only if autoCapitalisation setting is enabled
-    let newValue = nextValue
-    if (autoCapitalisation && nextValue.length > 0 && nextValue.charAt(0) !== '/' && nextValue.charAt(0) !== '@' && nextValue.charAt(0) !== '#') {
-      const capitalizedFirst = nextValue.charAt(0).toUpperCase()
-      if (capitalizedFirst !== nextValue.charAt(0)) {
-        newValue = capitalizedFirst + nextValue.slice(1)
-        // Set cursor position BEFORE state update so it's used when useEffect syncs the value
-        richInputRef.current?.setSelectionRange(cursorPosition, cursorPosition)
-        setInput(newValue)
-        syncToParent(newValue)
-        return
-      }
-    }
-
-    // Apply smart typography (-> to →, etc.)
-    const typography = applySmartTypography(nextValue, cursorPosition)
-    if (typography.replaced) {
-      newValue = typography.text
-      // Set cursor position BEFORE state update so it's used when useEffect syncs the value
-      richInputRef.current?.setSelectionRange(typography.cursor, typography.cursor)
-      setInput(newValue)
-      syncToParent(newValue)
-    }
-  }, [inlineSlash, inlineMention, inlineLabel, syncToParent, autoCapitalisation])
+  }, [inlineSlash, inlineMention, inlineLabel])
 
   // Handle inline slash command selection (removes the /command text)
   const handleInlineSlashCommandSelect = React.useCallback((commandId: SlashCommandId) => {

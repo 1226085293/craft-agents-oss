@@ -1060,8 +1060,6 @@
   "settings.appearance.workspaceAvatarReset": "Restablecer al color automático",
   "settings.appearance.workspaceThemes": "Temas de Workspace",
   "settings.appearance.workspaceThemesDesc": "Personaliza los ajustes del tema para cada Workspace",
-  "settings.input.autoCapitalisation": "Mayúsculas automáticas",
-  "settings.input.autoCapitalisationDesc": "Poner en mayúscula automáticamente la primera letra al escribir un mensaje.",
   "settings.input.cmdEnterKey": "⌘ Enter",
   "settings.input.cmdEnterKeyDesc": "Usar Enter para nueva línea",
   "settings.input.ctrlEnterKey": "Ctrl+Enter",

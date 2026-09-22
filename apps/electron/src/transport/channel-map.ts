@@ -294,8 +294,6 @@ export const CHANNEL_MAP = {
   setNotificationsEnabled: invoke(RPC_CHANNELS.notification.SET_ENABLED),
 
   // Input settings
-  getAutoCapitalisation: invoke(RPC_CHANNELS.input.GET_AUTO_CAPITALISATION),
-  setAutoCapitalisation: invoke(RPC_CHANNELS.input.SET_AUTO_CAPITALISATION),
   getSendMessageKey: invoke(RPC_CHANNELS.input.GET_SEND_MESSAGE_KEY),
   setSendMessageKey: invoke(RPC_CHANNELS.input.SET_SEND_MESSAGE_KEY),
   getSpellCheck: invoke(RPC_CHANNELS.input.GET_SPELL_CHECK),

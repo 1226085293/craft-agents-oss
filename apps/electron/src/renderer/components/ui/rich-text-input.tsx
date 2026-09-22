@@ -42,6 +42,40 @@ export function isEscapeDuringComposition(
   return Boolean(isComposingRefActive || event.isComposing || event.nativeEvent?.isComposing)
 }
 
+/**
+ * Loose event shape accepted by `isCompositionInputEvent`. Deliberately avoids
+ * relying on React's `FormEvent.nativeEvent` typing (plain `Event`, which has
+ * no `isComposing` member on all platforms/runtimes).
+ */
+export interface CompositionInputEventLike {
+  isComposing?: unknown
+  nativeEvent?: unknown
+}
+
+/**
+ * Returns true when an input event is part of an active IME composition.
+ *
+ * Uses both the local composition ref and the event's own flags. The native
+ * flag matters because Windows TSF (CJK IMEs) can dispatch the composition's
+ * first `input` event with `nativeEvent.isComposing === true` *before* our
+ * `compositionstart` handler runs, so the local ref may still be false.
+ * Publishing pre-edit text in that window triggers a DOM rewrite that kills
+ * the composition (fixes the "Nn俄好" / "Zz" input corruption).
+ */
+export function isCompositionInputEvent(
+  event: CompositionInputEventLike | undefined,
+  isComposingRefActive: boolean
+): boolean {
+  if (isComposingRefActive) return true
+  if (!event) return false
+  if (event.isComposing === true) return true
+  const native = event.nativeEvent
+  if (native && typeof native === 'object' && 'isComposing' in native) {
+    return (native as { isComposing?: boolean }).isComposing === true
+  }
+  return false
+}
+
 export interface RichTextInputProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'onChange' | 'onInput' | 'onPaste'> {
   /** Current text value */
   value: string
@@ -601,8 +635,13 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
     }), [])
 
     // Handle input events
-    const handleInput = React.useCallback(() => {
-      if (isComposing.current) return
+    const handleInput = React.useCallback((e?: React.FormEvent<HTMLDivElement>) => {
+      // Never publish while a composition is active — neither when the local
+      // ref is set (compositionstart ran) nor when only the event says so
+      // (Windows TSF can flip nativeEvent.isComposing before compositionstart).
+      // Publishing pre-edit text lets parents rewrite value + DOM, which aborts
+      // the IME composition and strands pinyin letters as plain text.
+      if (isCompositionInputEvent(e, isComposing.current)) return
       if (!divRef.current) return
 
       const newText = getTextFromElement(divRef.current)

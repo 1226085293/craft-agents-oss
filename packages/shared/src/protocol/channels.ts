@@ -311,8 +311,6 @@ export const RPC_CHANNELS = {
     SET_ENABLED: 'notification:setEnabled',
   },
   input: {
-    GET_AUTO_CAPITALISATION: 'input:getAutoCapitalisation',
-    SET_AUTO_CAPITALISATION: 'input:setAutoCapitalisation',
     GET_SEND_MESSAGE_KEY: 'input:getSendMessageKey',
     SET_SEND_MESSAGE_KEY: 'input:setSendMessageKey',
     GET_SPELL_CHECK: 'input:getSpellCheck',

@@ -1060,8 +1060,6 @@
   "settings.appearance.workspaceAvatarReset": "重置为自动颜色",
   "settings.appearance.workspaceThemes": "Workspace 主题",
   "settings.appearance.workspaceThemesDesc": "按 Workspace 覆盖主题设置",
-  "settings.input.autoCapitalisation": "自动大写",
-  "settings.input.autoCapitalisationDesc": "输入消息时自动大写首字母。",
   "settings.input.cmdEnterKey": "⌘ Enter",
   "settings.input.cmdEnterKeyDesc": "用 Enter 换行",
   "settings.input.ctrlEnterKey": "Ctrl+Enter",

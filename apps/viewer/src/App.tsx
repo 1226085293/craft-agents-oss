@@ -21,6 +21,8 @@ import {
   TerminalPreviewOverlay,
   JSONPreviewOverlay,
   DocumentFormattedMarkdownOverlay,
+  ImagePreviewOverlay,
+  PDFPreviewOverlay,
   TooltipProvider,
   extractOverlayData,
   detectLanguage,
@@ -239,6 +241,31 @@ export function App() {
       )}
 
       {/* Code preview overlay for Read/Write tools */}
+      {overlayData?.type === 'image-file' && (
+        <ImagePreviewOverlay
+          isOpen={!!overlayActivity}
+          onClose={handleCloseOverlay}
+          filePath={overlayData.filePath}
+          loadDataUrl={async () => {
+            throw new Error('Image preview is not available in the web viewer')
+          }}
+          theme={theme}
+        />
+      )}
+
+      {/* PDF preview overlay — not available in the web viewer (no filesystem access) */}
+      {overlayData?.type === 'pdf-file' && (
+        <PDFPreviewOverlay
+          isOpen={!!overlayActivity}
+          onClose={handleCloseOverlay}
+          filePath={overlayData.filePath}
+          loadPdfData={async () => {
+            throw new Error('PDF preview is not available in the web viewer')
+          }}
+          theme={theme}
+        />
+      )}
+
       {overlayData?.type === 'code' && (
         <CodePreviewOverlay
           isOpen={!!overlayActivity}

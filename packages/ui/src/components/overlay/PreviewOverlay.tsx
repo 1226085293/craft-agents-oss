@@ -47,6 +47,8 @@ export interface PreviewOverlayProps {
 
   /** File path — shows dual-trigger menu badge with "Open" + "Reveal in {file manager}" */
   filePath?: string
+  /** Optional session ID — scopes the header badge's Open/Reveal to that session's working directory */
+  sessionId?: string
   /** Title — displayed as badge. Fallback when no file path. */
   title?: string
   /** Callback when title badge is clicked (only used when no filePath) */
@@ -79,6 +81,7 @@ export function PreviewOverlay({
   theme = 'light',
   typeBadge,
   filePath,
+  sessionId,
   title,
   onTitleClick,
   subtitle,
@@ -115,6 +118,7 @@ export function PreviewOverlay({
       onClose={onClose}
       typeBadge={typeBadge}
       filePath={filePath}
+      sessionId={sessionId}
       title={title}
       onTitleClick={onTitleClick}
       subtitle={subtitle}
@@ -173,6 +177,7 @@ export function PreviewOverlay({
         onClose={onClose}
         typeBadge={typeBadge}
         filePath={filePath}
+        sessionId={sessionId}
         title={title}
         onTitleClick={onTitleClick}
         subtitle={subtitle}

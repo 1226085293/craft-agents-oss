@@ -21,6 +21,8 @@ export interface CodePreviewOverlayProps {
   content: string
   /** File path for language detection and display */
   filePath: string
+  /** Optional session ID — scopes the badge's Open/Reveal to that session's working directory */
+  sessionId?: string
   /** Language for syntax highlighting (auto-detected if not provided) */
   language?: string
   /** Mode: 'read' or 'write' */
@@ -46,6 +48,7 @@ export function CodePreviewOverlay({
   onClose,
   content,
   filePath,
+  sessionId,
   language,
   mode = 'read',
   startLine = 1,
@@ -75,6 +78,7 @@ export function CodePreviewOverlay({
         variant: mode === 'write' ? 'amber' : 'blue',
       }}
       filePath={filePath}
+      sessionId={sessionId}
       subtitle={subtitle}
       error={error ? { label: mode === 'write' ? 'Write Failed' : 'Read Failed', message: error } : undefined}
       embedded={embedded}

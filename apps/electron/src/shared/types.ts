@@ -328,11 +328,11 @@ export interface ElectronAPI {
   onUnreadSummaryChanged(callback: (summary: UnreadSummary) => void): () => void
 
   // File operations
-  readFile(path: string): Promise<string>
+  readFile(path: string, sessionId?: string): Promise<string>
   /** Read a file as binary data (Uint8Array) */
-  readFileBinary(path: string): Promise<Uint8Array>
+  readFileBinary(path: string, sessionId?: string): Promise<Uint8Array>
   /** Read a file as a data URL (data:{mime};base64,...) for binary preview (images, PDFs) */
-  readFileDataUrl(path: string): Promise<string>
+  readFileDataUrl(path: string, sessionId?: string): Promise<string>
   /** Read an image file as a size-bounded preview data URL for lightweight thumbnail rendering. */
   readFilePreviewDataUrl(path: string, maxSize?: number): Promise<string>
   openFileDialog(): Promise<string[]>
@@ -393,8 +393,12 @@ export interface ElectronAPI {
 
   // Shell operations
   openUrl(url: string): Promise<void>
-  openFile(path: string): Promise<void>
-  showInFolder(path: string): Promise<void>
+  /** Open a file with the OS default app. Optional sessionId expands the allowed
+   *  dirs with that session's working directory (for session-scoped file previews). */
+  openFile(path: string, sessionId?: string): Promise<void>
+  /** Reveal a file in the OS file manager. Optional sessionId expands the allowed
+   *  dirs with that session's working directory (for session-scoped file previews). */
+  showInFolder(path: string, sessionId?: string): Promise<void>
 
   // Menu event listeners
   onMenuNewChat(callback: () => void): () => void
@@ -560,8 +564,6 @@ export interface ElectronAPI {
   setNotificationsEnabled(enabled: boolean): Promise<void>
 
   // Input settings
-  getAutoCapitalisation(): Promise<boolean>
-  setAutoCapitalisation(enabled: boolean): Promise<void>
   getSendMessageKey(): Promise<'enter' | 'cmd-enter'>
   setSendMessageKey(key: 'enter' | 'cmd-enter'): Promise<void>
   getSpellCheck(): Promise<boolean>

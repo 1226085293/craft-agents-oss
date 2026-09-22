@@ -35,6 +35,8 @@ import {
   GenericOverlay,
   JSONPreviewOverlay,
   DocumentFormattedMarkdownOverlay,
+  ImagePreviewOverlay,
+  PDFPreviewOverlay,
   detectLanguage,
   type ActivityItem,
   type FileChange,
@@ -2535,7 +2537,25 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
       {/* Legacy output-only activity overlay for non-bash/non-mcp tools */}
       {overlayState?.type === 'activity' && !useStackedActivityOverlay && activityOutputOverlayData && (
-        activityOutputOverlayData.type === 'code' ? (
+        activityOutputOverlayData.type === 'image-file' ? (
+          <ImagePreviewOverlay
+            isOpen={true}
+            onClose={handleCloseOverlay}
+            filePath={activityOutputOverlayData.filePath}
+            sessionId={session?.id}
+            loadDataUrl={(path) => window.electronAPI.readFileDataUrl(path, session?.id)}
+            theme={isDark ? 'dark' : 'light'}
+          />
+        ) : activityOutputOverlayData.type === 'pdf-file' ? (
+          <PDFPreviewOverlay
+            isOpen={true}
+            onClose={handleCloseOverlay}
+            filePath={activityOutputOverlayData.filePath}
+            sessionId={session?.id}
+            loadPdfData={(path) => window.electronAPI.readFileBinary(path, session?.id)}
+            theme={isDark ? 'dark' : 'light'}
+          />
+        ) : activityOutputOverlayData.type === 'code' ? (
           <CodePreviewOverlay
             isOpen={true}
             onClose={handleCloseOverlay}

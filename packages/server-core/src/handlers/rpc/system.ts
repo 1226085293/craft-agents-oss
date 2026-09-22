@@ -383,13 +383,26 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
     }
   })
 
-  server.handle(RPC_CHANNELS.shell.OPEN_FILE, async (ctx, path: string) => {
+  // Allowed dirs for shell open/reveal: workspace dirs PLUS the calling session's
+  // working directory. Session-scoped overlays (activity detail viewers) surface files
+  // the agent produced under its own cwd (e.g. E:\ui-splitter\output\x.jpg), which may
+  // live outside the workspace root — the agent already had full access there, so
+  // opening/revealing those files is within the same trust boundary.
+  const sessionScopedAllowedDirs = (ctx: { workspaceId: string | null }, sessionId?: string): string[] => {
+    const base = getWorkspaceAllowedDirs(ctx.workspaceId)
+    if (!sessionId) return base
+    const sessionDir = deps.sessionManager.getSessionWorkingDirectory(sessionId)
+    if (!sessionDir) return base
+    return [...base, sessionDir]
+  }
+
+  server.handle(RPC_CHANNELS.shell.OPEN_FILE, async (ctx, path: string, sessionId?: string) => {
     assertLocalWorkspace(ctx, 'Open file')
     try {
       // Expand ~ before resolve() — resolve() treats ~ as a literal path component
       const expanded = path.startsWith('~') ? path.replace(/^~/, homedir()) : path
       const absolutePath = resolve(expanded)
-      const safePath = await validateFilePath(absolutePath, getWorkspaceAllowedDirs(ctx.workspaceId))
+      const safePath = await validateFilePath(absolutePath, sessionScopedAllowedDirs(ctx, sessionId))
       const result = await requestClientOpenPath(server, ctx.clientId, safePath)
       if (result.error) throw new Error(result.error)
     } catch (error) {
@@ -399,12 +412,12 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
     }
   })
 
-  server.handle(RPC_CHANNELS.shell.SHOW_IN_FOLDER, async (ctx, path: string) => {
+  server.handle(RPC_CHANNELS.shell.SHOW_IN_FOLDER, async (ctx, path: string, sessionId?: string) => {
     assertLocalWorkspace(ctx, 'Show in folder')
     try {
       const expanded = path.startsWith('~') ? path.replace(/^~/, homedir()) : path
       const absolutePath = resolve(expanded)
-      const safePath = await validateFilePath(absolutePath, getWorkspaceAllowedDirs(ctx.workspaceId))
+      const safePath = await validateFilePath(absolutePath, sessionScopedAllowedDirs(ctx, sessionId))
       await requestClientShowInFolder(server, ctx.clientId, safePath)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'

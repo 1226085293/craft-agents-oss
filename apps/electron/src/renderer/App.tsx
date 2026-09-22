@@ -1711,9 +1711,9 @@ export default function App() {
   // show an in-app preview overlay or open externally. Replaces the old
   // handleOpenFile/handleOpenUrl that always opened in external apps.
   const linkInterceptor = useLinkInterceptor({
-    openFileExternal: async (path) => {
+    openFileExternal: async (path, sessionId) => {
       try {
-        await window.electronAPI.openFile(path)
+        await window.electronAPI.openFile(path, sessionId)
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error'
         console.error('Failed to open file:', error)
@@ -1739,9 +1739,9 @@ export default function App() {
         })
       }
     },
-    showInFolder: async (path) => {
+    showInFolder: async (path, sessionId) => {
       try {
-        await window.electronAPI.showInFolder(path)
+        await window.electronAPI.showInFolder(path, sessionId)
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error'
         console.error('Failed to show in folder:', error)
@@ -1984,6 +1984,8 @@ export default function App() {
     onOpenUrl: handleOpenUrl,
     // Bypass link interceptor — opens file directly in system editor.
     // Used by overlay header badges (when already viewing a file, "Open" should launch editor).
+    // Optional sessionId widens the server-side allowed dirs to that session's working
+    // directory, so files the agent produced there can be opened.
     onOpenFileExternal: linkInterceptor.openFileExternal,
     // Read file contents as UTF-8 string (used by datatable/spreadsheet/html-preview src fields)
     onReadFile: (path: string) => window.electronAPI.readFile(path),
@@ -1992,8 +1994,16 @@ export default function App() {
     // Read file as binary Uint8Array (used by PDF preview blocks)
     onReadFileBinary: (path: string) => window.electronAPI.readFileBinary(path),
     // Reveal a file in the system file manager (Finder on macOS, Explorer on Windows, etc.)
-    onRevealInFinder: (path: string) => {
-      window.electronAPI.showInFolder(path).catch(() => {})
+    // Optional sessionId widens the server-side allowed dirs to that session's working
+    // directory. Errors are surfaced as a toast instead of failing silently.
+    onRevealInFinder: (path: string, sessionId?: string) => {
+      window.electronAPI.showInFolder(path, sessionId).catch((error) => {
+        const message = error instanceof Error ? error.message : 'Unknown error'
+        console.error('Failed to reveal in file manager:', error)
+        toast.error(t("toast.failedToReveal", { fileManager: getFileManagerName() }), {
+          description: message,
+        })
+      })
     },
     // Platform-specific file manager name for UI labels
     fileManagerName: getFileManagerName(),

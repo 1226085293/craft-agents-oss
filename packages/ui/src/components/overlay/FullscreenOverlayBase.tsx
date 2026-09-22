@@ -70,6 +70,8 @@ export interface FullscreenOverlayBaseProps {
   typeBadge?: OverlayTypeBadge
   /** File path — shows dual-trigger menu badge with "Open" + "Reveal in {file manager}" */
   filePath?: string
+  /** Optional session ID — scopes the header badge's Open/Reveal to that session's working directory */
+  sessionId?: string
   /** Title — displayed as a badge when no filePath */
   title?: string
   /** Click handler for the title badge */
@@ -99,6 +101,7 @@ export function FullscreenOverlayBase({
   accessibleTitle = 'Overlay',
   typeBadge,
   filePath,
+  sessionId,
   title,
   onTitleClick,
   subtitle,
@@ -195,6 +198,7 @@ export function FullscreenOverlayBase({
                 onClose={onClose}
                 typeBadge={typeBadge}
                 filePath={filePath}
+                sessionId={sessionId}
                 title={title}
                 onTitleClick={onTitleClick}
                 subtitle={subtitle}

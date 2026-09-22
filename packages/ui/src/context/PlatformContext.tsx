@@ -27,8 +27,11 @@ export interface PlatformActions {
    * Open a file directly in the system editor, bypassing the link interceptor.
    * Used by overlay header badges — when already viewing a file, "Open" should
    * launch an external editor, not re-trigger the in-app preview.
+   * Optional sessionId scopes the open to that session's working directory
+   * (server-side allowed-dirs check), for files the agent produced outside the
+   * workspace root.
    */
-  onOpenFileExternal?: (path: string) => void
+  onOpenFileExternal?: (path: string, sessionId?: string) => void
 
   /**
    * Open a URL in the default browser (Electron: shell.openExternal)
@@ -97,8 +100,11 @@ export interface PlatformActions {
   /**
    * Reveal a file in the system file manager (Electron: shell.showItemInFolder)
    * Web: Not available (menu items hidden when undefined)
+   * Optional sessionId scopes the reveal to that session's working directory
+   * (server-side allowed-dirs check), for files the agent produced outside the
+   * workspace root.
    */
-  onRevealInFinder?: (path: string) => void
+  onRevealInFinder?: (path: string, sessionId?: string) => void
 
   /**
    * Platform-specific file manager name for display labels.

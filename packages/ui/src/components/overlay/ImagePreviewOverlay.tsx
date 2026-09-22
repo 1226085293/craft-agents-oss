@@ -22,6 +22,8 @@ export interface ImagePreviewOverlayProps {
   isOpen: boolean
   onClose: () => void
   filePath: string
+  /** Optional session ID — scopes the badge's Open/Reveal to that session's working directory */
+  sessionId?: string
   items?: PreviewItem[]
   initialIndex?: number
   title?: string
@@ -33,6 +35,7 @@ export function ImagePreviewOverlay({
   isOpen,
   onClose,
   filePath,
+  sessionId,
   items,
   initialIndex = 0,
   title,
@@ -159,6 +162,7 @@ export function ImagePreviewOverlay({
         variant: 'purple',
       }}
       filePath={activeItem?.src || filePath}
+      sessionId={sessionId}
       title={title}
       error={error ? { label: 'Load Failed', message: error } : undefined}
       headerActions={headerActions}

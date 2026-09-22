@@ -32,6 +32,8 @@ export interface PDFPreviewOverlayProps {
   onClose: () => void
   /** Absolute file path for the PDF (single item / backward compat) */
   filePath: string
+  /** Optional session ID — scopes the badge's Open/Reveal to that session's working directory */
+  sessionId?: string
   /** Multiple items for arrow navigation */
   items?: PreviewItem[]
   /** Initial active item index (defaults to 0) */
@@ -45,6 +47,7 @@ export function PDFPreviewOverlay({
   isOpen,
   onClose,
   filePath,
+  sessionId,
   items,
   initialIndex = 0,
   loadPdfData,
@@ -133,6 +136,7 @@ export function PDFPreviewOverlay({
         variant: 'orange',
       }}
       filePath={activeItem?.src || filePath}
+      sessionId={sessionId}
       error={error ? { label: 'Load Failed', message: error } : undefined}
       headerActions={headerActions}
     >

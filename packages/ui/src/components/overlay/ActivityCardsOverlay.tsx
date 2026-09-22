@@ -166,6 +166,21 @@ export function ActivityCardsOverlay({
       return renderMarkdownCard(card, data.content)
     }
 
+    // image-file / pdf-file cards load their bytes from filePath in a dedicated
+    // viewer — there is no inline text content to render here. (Note: stacked
+    // cards are only enabled for Bash/MCP tools today, so these branches are
+    // defensive; extractOverlayData routes Read-of-image/pdf to the standalone
+    // overlays before this component is ever used.)
+    if (data.type === 'image-file' || data.type === 'pdf-file') {
+      return (
+        <ContentFrame title={card.label}>
+          <div className="p-4 text-sm text-muted-foreground">
+            {data.filePath}
+          </div>
+        </ContentFrame>
+      )
+    }
+
     const lang = detectLanguage(data.content)
     if (lang === 'markdown') {
       return renderMarkdownCard(card, data.content)

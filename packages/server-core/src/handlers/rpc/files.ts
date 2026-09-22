@@ -30,6 +30,21 @@ export const HANDLED_CHANNELS = [
 ] as const
 
 export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): void {
+  // Allowed dirs for file reads: workspace dirs PLUS the caller session's working
+  // directory. Session-scoped previews (Read-of-image/PDF activity overlays) load
+  // files the agent already produced/read under its own cwd, which may live outside
+  // the workspace root — the agent had full access there, so re-reading is within
+  // the same trust boundary. Without this, those previews failed with
+  // "Access denied: file path is outside allowed directories".
+  const sessionScopedAllowedDirs = (ctx: { workspaceId: string | null; webContentsId: number | null }, sessionId?: string): string[] => {
+    const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
+    const base = getWorkspaceAllowedDirs(workspaceId)
+    if (!sessionId) return base
+    const sessionDir = deps.sessionManager.getSessionWorkingDirectory(sessionId)
+    if (!sessionDir) return base
+    return [...base, sessionDir]
+  }
+
   // Read a file (with path validation to prevent traversal attacks)
   server.handle(RPC_CHANNELS.file.READ, async (ctx, path: string) => {
     try {
@@ -51,10 +66,9 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
 
   // Read an image file as a data URL for in-app image preview overlays.
   // Returns data:{mime};base64,{content} — used by ImagePreviewOverlay and markdown image blocks.
-  server.handle(RPC_CHANNELS.file.READ_DATA_URL, async (ctx, path: string) => {
+  server.handle(RPC_CHANNELS.file.READ_DATA_URL, async (ctx, path: string, sessionId?: string) => {
     try {
-      const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
-      const safePath = await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId))
+      const safePath = await validateFilePath(path, sessionScopedAllowedDirs(ctx, sessionId))
       const buffer = await readFile(safePath)
       const ext = safePath.split('.').pop()?.toLowerCase() ?? ''
 
@@ -103,10 +117,9 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
 
   // Read a file as raw binary (Uint8Array) for react-pdf.
   // The WS transport codec preserves Uint8Array payloads over JSON envelopes.
-  server.handle(RPC_CHANNELS.file.READ_BINARY, async (ctx, path: string) => {
+  server.handle(RPC_CHANNELS.file.READ_BINARY, async (ctx, path: string, sessionId?: string) => {
     try {
-      const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
-      const safePath = await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId))
+      const safePath = await validateFilePath(path, sessionScopedAllowedDirs(ctx, sessionId))
       const buffer = await readFile(safePath)
       // Return as Uint8Array (serializes to ArrayBuffer over IPC)
       return new Uint8Array(buffer)

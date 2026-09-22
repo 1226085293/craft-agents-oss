@@ -7,6 +7,7 @@
 
 import type { ActivityItem } from '../components/chat/TurnCard'
 import type { ToolType } from '../components/terminal/TerminalOutput'
+import { classifyFile, type FilePreviewType } from './file-classification'
 
 // ============================================================================
 // Individual Tool Parsers
@@ -37,6 +38,26 @@ export function parseReadResult(rawContent: string): ReadResult {
     // Not JSON, use as plain text
   }
   return { content: rawContent }
+}
+
+/**
+ * Map a Read tool target path to a link-interceptor preview type, so Read
+ * activity details route to the same viewers as clicked file links.
+ * Falls back to 'code' for unknown extensions (text-ish read results).
+ */
+function fileTypeForRead(filePath: string): FilePreviewType | 'code' {
+  const { type, canPreview } = classifyFile(filePath)
+  if (canPreview && type) return type
+  return 'code'
+}
+
+/** Parse a string as JSON, returning null instead of throwing. */
+function safeParseJson(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
 }
 
 export interface BashResult {
@@ -221,7 +242,25 @@ export interface DocumentOverlayData {
   error?: string
 }
 
-export type OverlayData = CodeOverlayData | TerminalOverlayData | GenericOverlayData | JSONOverlayData | DocumentOverlayData
+/**
+ * Binary asset rendered by a dedicated viewer — used when Read targets a file
+ * whose content the transport hands back as a placeholder (image) or binary
+ * (pdf). The overlay loads the bytes itself from filePath, so the activity's
+ * result text is intentionally dropped.
+ */
+export interface ImageFileOverlayData {
+  type: 'image-file'
+  filePath: string
+  error?: string
+}
+
+export interface PdfFileOverlayData {
+  type: 'pdf-file'
+  filePath: string
+  error?: string
+}
+
+export type OverlayData = CodeOverlayData | TerminalOverlayData | GenericOverlayData | JSONOverlayData | DocumentOverlayData | ImageFileOverlayData | PdfFileOverlayData
 
 /** Generic overlay card model (tab item) for activity details. */
 export interface OverlayCard {
@@ -253,8 +292,54 @@ export function extractOverlayData(activity: ActivityItem): OverlayData | null {
   // Get file path from various input formats
   const filePath = (input?.file_path as string) || (input?.path as string) || 'file'
 
-  // Read tool → Code overlay (read mode)
+  // Read tool → routed by file type, mirroring the link interceptor's previews.
+  //
+  // Image/PDF reads never carry usable text: the transport returns a placeholder
+  // string for images ("Read image file [image/jpeg]") and nothing meaningful for
+  // PDFs, because the bytes go to the model as a separate content block. Handing
+  // those to CodePreviewOverlay showed a code panel containing that placeholder,
+  // so they instead route to Image/PDF viewers that re-read the file from disk.
   if (toolName === 'read') {
+    const fileType = fileTypeForRead(filePath)
+
+    if (fileType === 'image') {
+      return {
+        type: 'image-file',
+        filePath,
+        error: activity.error,
+      }
+    }
+
+    if (fileType === 'pdf') {
+      return {
+        type: 'pdf-file',
+        filePath,
+        error: activity.error,
+      }
+    }
+
+    if (fileType === 'json') {
+      return {
+        type: 'json',
+        data: safeParseJson(parseReadResult(rawContent).content),
+        rawContent: parseReadResult(rawContent).content,
+        title: activity.displayName || activity.toolName || 'JSON Result',
+        error: activity.error,
+      }
+    }
+
+    if (fileType === 'markdown') {
+      const parsed = parseReadResult(rawContent)
+      return {
+        type: 'document',
+        filePath,
+        content: parsed.content,
+        toolName: 'Read',
+        error: activity.error,
+      }
+    }
+
+    // code | text | unknown extension → Code overlay (read mode)
     const parsed = parseReadResult(rawContent)
     return {
       type: 'code',

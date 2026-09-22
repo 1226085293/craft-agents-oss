@@ -38,6 +38,8 @@ export interface FullscreenOverlayBaseHeaderProps {
   typeBadge?: OverlayTypeBadge
   /** File path — shows dual-trigger menu badge with "Open" + "Reveal in {file manager}" */
   filePath?: string
+  /** Optional session ID — scopes the badge's Open/Reveal to that session's working directory */
+  sessionId?: string
   /** Title — displayed as a badge. Fallback when no file path. */
   title?: string
   /** Click handler for the title badge */
@@ -88,6 +90,9 @@ const contextMenuItemClasses = cn(
 
 interface FilePathBadgeProps {
   filePath: string
+  /** Optional session ID — scopes Open/Reveal to that session's working
+   *  directory on the server-side allowed-dirs check. */
+  sessionId?: string
 }
 
 /**
@@ -99,17 +104,17 @@ interface FilePathBadgeProps {
  * viewing a file in an overlay, "Open" should launch the system editor directly,
  * not re-trigger the in-app preview interceptor.
  */
-function FilePathBadge({ filePath }: FilePathBadgeProps) {
+function FilePathBadge({ filePath, sessionId }: FilePathBadgeProps) {
   const { onOpenFileExternal, onRevealInFinder, fileManagerName } = usePlatform()
   const revealLabel = `Reveal in ${fileManagerName || 'Finder'}`
 
   const handleOpen = useCallback(() => {
-    onOpenFileExternal?.(filePath)
-  }, [onOpenFileExternal, filePath])
+    onOpenFileExternal?.(filePath, sessionId)
+  }, [onOpenFileExternal, filePath, sessionId])
 
   const handleReveal = useCallback(() => {
-    onRevealInFinder?.(filePath)
-  }, [onRevealInFinder, filePath])
+    onRevealInFinder?.(filePath, sessionId)
+  }, [onRevealInFinder, filePath, sessionId])
 
   // Shared menu items — same content rendered by both dropdown and context menu
   const hasMenuItems = !!onOpenFileExternal || !!onRevealInFinder
@@ -196,6 +201,7 @@ export function FullscreenOverlayBaseHeader({
   onClose,
   typeBadge,
   filePath,
+  sessionId,
   title,
   onTitleClick,
   subtitle,
@@ -246,7 +252,7 @@ export function FullscreenOverlayBaseHeader({
         />
       )}
       {filePath ? (
-        <FilePathBadge filePath={filePath} />
+        <FilePathBadge filePath={filePath} sessionId={sessionId} />
       ) : title ? (
         <PreviewHeaderBadge label={title} onClick={onTitleClick} shrinkable />
       ) : null}

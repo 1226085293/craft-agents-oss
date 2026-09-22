@@ -75,11 +75,11 @@ export type FilePreviewState =
 
 interface LinkInterceptorOptions {
   /** Open file in default external application (e.g., VS Code) */
-  openFileExternal: (path: string) => Promise<void>
+  openFileExternal: (path: string, sessionId?: string) => Promise<void>
   /** Open URL in default browser */
   openUrl: (url: string) => Promise<void>
   /** Reveal file in system file manager */
-  showInFolder: (path: string) => Promise<void>
+  showInFolder: (path: string, sessionId?: string) => Promise<void>
   /** Read file as UTF-8 text (for code, markdown, json, text previews) */
   readFile: (path: string) => Promise<string>
   /** Read file as data URL (for image previews) */
@@ -95,8 +95,9 @@ interface LinkInterceptorResult {
   handleOpenFile: (path: string) => void
   /** Replacement for App.tsx handleOpenUrl — always opens externally */
   handleOpenUrl: (url: string) => void
-  /** Open file directly in external app, bypassing classification/preview */
-  openFileExternal: (path: string) => void
+  /** Open file directly in external app, bypassing classification/preview.
+   *  Optional sessionId widens the server-side allowed dirs to that session's working directory. */
+  openFileExternal: (path: string, sessionId?: string) => void
   /** Current preview state, drives which overlay renders in App.tsx */
   previewState: FilePreviewState | null
   /** Close the preview overlay */
@@ -168,9 +169,10 @@ export function useLinkInterceptor(options: LinkInterceptorOptions): LinkInterce
   }, []) // Stable: uses optionsRef
 
   /** Open file directly in external app, bypassing classification/preview.
-   * Used by overlay header badges — when already viewing a file, "Open" should launch the editor. */
-  const openFileExternal = useCallback((path: string) => {
-    optionsRef.current.openFileExternal(path)
+   * Used by overlay header badges — when already viewing a file, "Open" should launch the editor.
+   * Optional sessionId widens the server-side allowed dirs to that session's working directory. */
+  const openFileExternal = useCallback((path: string, sessionId?: string) => {
+    optionsRef.current.openFileExternal(path, sessionId)
   }, []) // Stable: uses optionsRef
 
   /** URLs always open externally — no in-app browser for security */

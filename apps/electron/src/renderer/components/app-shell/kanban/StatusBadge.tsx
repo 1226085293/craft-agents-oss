@@ -1,5 +1,6 @@
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
-import type { SessionStatus } from '@/config/session-status-config'
+import { isDefaultStatusId, type SessionStatus } from '@/config/session-status-config'
 
 interface StatusBadgeProps {
   status: SessionStatus
@@ -16,7 +17,9 @@ interface StatusBadgeProps {
  * When `live`, the dot gains a ping ring to signal an in-flight turn.
  */
 export function StatusBadge({ status, live = false, className }: StatusBadgeProps) {
+  const { t } = useTranslation()
   const color = status.resolvedColor
+  const label = isDefaultStatusId(status.id) ? t(`status.${status.id}`, status.label) : status.label
   return (
     <span
       className={cn(
@@ -42,7 +45,7 @@ export function StatusBadge({ status, live = false, className }: StatusBadgeProp
           aria-hidden
         />
       </span>
-      {status.label}
+      {label}
     </span>
   )
 }

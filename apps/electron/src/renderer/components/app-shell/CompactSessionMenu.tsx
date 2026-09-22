@@ -69,6 +69,7 @@ import {
   getStateColor,
   getStateIcon,
   getStatusIconStyle,
+  isDefaultStatusId,
   type SessionStatus,
   type SessionStatusId,
 } from '@/config/session-status-config'
@@ -531,17 +532,19 @@ function StatusPane({
   activeStateId?: SessionStatusId | null
   onSelect: (id: SessionStatusId) => void
 }) {
+  const { t } = useTranslation()
   return (
     <div className="flex flex-col">
       {sessionStatuses.map((state) => {
         const bareStateIcon = React.isValidElement(state.icon)
           ? React.cloneElement(state.icon as React.ReactElement<{ bare?: boolean }>, { bare: true })
           : state.icon
+        const label = isDefaultStatusId(state.id) ? t(`status.${state.id}`, state.label) : state.label
         return (
           <Row
             key={state.id}
             icon={<span style={getStatusIconStyle(state)}>{bareStateIcon}</span>}
-            label={state.label}
+            label={label}
             radioSelected={activeStateId === state.id}
             onTap={() => onSelect(state.id)}
           />

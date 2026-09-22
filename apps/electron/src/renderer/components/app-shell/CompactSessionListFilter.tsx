@@ -52,7 +52,7 @@ import {
 } from '@/components/ui/label-menu-utils'
 import { findLabelById } from '@craft-agent/shared/labels'
 import type { LabelConfig } from '@craft-agent/shared/labels'
-import { type SessionStatus, type SessionStatusId } from '@/config/session-status-config'
+import { type SessionStatus, type SessionStatusId, isDefaultStatusId } from '@/config/session-status-config'
 import type { ChatGroupingMode } from './SessionList'
 
 type FilterMode = 'include' | 'exclude'
@@ -255,7 +255,7 @@ export function CompactSessionListFilter({
                     icon={state.icon}
                     iconColor={colorize ? state.resolvedColor : undefined}
                     bareIcon
-                    label={state.label}
+                    label={isDefaultStatusId(state.id) ? t(`status.${state.id}`, state.label) : state.label}
                     mode={mode}
                     pinned={isPinned}
                     onTap={() => toggleStatus(state.id)}
@@ -474,7 +474,7 @@ function PinnedSummary({
                   : pinnedStatus.icon}
               </span>
             }
-            label={pinnedStatus.label}
+            label={isDefaultStatusId(pinnedStatus.id) ? t(`status.${pinnedStatus.id}`, pinnedStatus.label) : pinnedStatus.label}
           />
         )}
         {pinnedLabel && (

@@ -1545,6 +1545,7 @@
   "status.done": "完了",
   "status.filterStatuses": "ステータスを絞り込む...",
   "status.needs-review": "レビュー待ち",
+  "status.noStatusFound": "ステータスが見つかりません",
   "status.todo": "Todo",
   "table.access": "アクセス",
   "table.comment": "コメント",

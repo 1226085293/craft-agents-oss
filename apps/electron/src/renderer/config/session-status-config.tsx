@@ -154,6 +154,31 @@ export function getStateLabel(
   return state?.label ?? stateId
 }
 
+// ============================================================================
+// Default status i18n
+// ============================================================================
+
+/**
+ * Status IDs that ship with every workspace. These have dedicated i18n keys
+ * under `status.*` (e.g. `status.todo`), so their labels must go through
+ * `t()` instead of being rendered from the config directly. Custom statuses
+ * are NOT in this set — they use the user-provided label as-is.
+ */
+export const DEFAULT_STATUS_IDS = new Set([
+  'backlog',
+  'todo',
+  'needs-review',
+  'done',
+  'cancelled',
+])
+
+/**
+ * Whether a status ID has a dedicated i18n key (i.e. is a built-in default).
+ */
+export function isDefaultStatusId(id: string): boolean {
+  return DEFAULT_STATUS_IDS.has(id)
+}
+
 /**
  * Get a complete state object by ID
  */

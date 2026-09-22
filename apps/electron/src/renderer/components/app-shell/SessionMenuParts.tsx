@@ -2,7 +2,12 @@ import * as React from 'react'
 import { useTranslation } from "react-i18next"
 import { Check, Globe, Copy, RefreshCw, Link2Off } from 'lucide-react'
 import type { MenuComponents } from '@/components/ui/menu-context'
-import { getStatusIconStyle, type SessionStatusId, type SessionStatus } from '@/config/session-status-config'
+import {
+  getStatusIconStyle,
+  isDefaultStatusId,
+  type SessionStatusId,
+  type SessionStatus,
+} from '@/config/session-status-config'
 import { sortLabelsForDisplay, type LabelConfig } from '@craft-agent/shared/labels'
 import { LabelIcon } from '@/components/ui/label-icon'
 
@@ -70,6 +75,7 @@ export function StatusMenuItems({
   onSelect,
   menu,
 }: StatusMenuItemsProps) {
+  const { t } = useTranslation()
   const { MenuItem } = menu
 
   return (
@@ -78,6 +84,7 @@ export function StatusMenuItems({
         const bareIcon = React.isValidElement(state.icon)
           ? React.cloneElement(state.icon as React.ReactElement<{ bare?: boolean }>, { bare: true })
           : state.icon
+        const label = isDefaultStatusId(state.id) ? t(`status.${state.id}`, state.label) : state.label
         return (
           <MenuItem
             key={state.id}
@@ -87,7 +94,7 @@ export function StatusMenuItems({
             <span style={getStatusIconStyle(state)}>
               {bareIcon}
             </span>
-            <span className="flex-1">{state.label}</span>
+            <span className="flex-1">{label}</span>
           </MenuItem>
         )
       })}

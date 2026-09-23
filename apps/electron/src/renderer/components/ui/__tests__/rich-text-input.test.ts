@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'bun:test'
-import { isEscapeDuringComposition, isCompositionInputEvent } from '../rich-text-input'
+import {
+  isEscapeDuringComposition,
+  isCompositionInputEvent,
+  syncCompositionFromKeydown,
+} from '../rich-text-input'
 
 describe('isEscapeDuringComposition', () => {
   it('returns true for Escape when local composition ref is active', () => {
@@ -46,5 +50,24 @@ describe('isCompositionInputEvent', () => {
   it('returns false when no composition signal is present', () => {
     expect(isCompositionInputEvent({ nativeEvent: {} }, false)).toBe(false)
     expect(isCompositionInputEvent(undefined, false)).toBe(false)
+  })
+})
+
+describe('syncCompositionFromKeydown', () => {
+  it('turns the ref on when the native keydown is composing (TSF first keystroke)', () => {
+    // First composing keystroke: compositionstart may not have run yet.
+    expect(syncCompositionFromKeydown({ nativeEvent: { isComposing: true } })).toBe(true)
+  })
+
+  it('turns the ref off when the native flag is cleared (compositionend may have dropped)', () => {
+    expect(syncCompositionFromKeydown({ nativeEvent: { isComposing: false } })).toBe(false)
+  })
+
+  it('stays off for plain text keystrokes', () => {
+    expect(syncCompositionFromKeydown({ nativeEvent: { isComposing: false } })).toBe(false)
+  })
+
+  it('is safe for events without a nativeEvent', () => {
+    expect(syncCompositionFromKeydown({})).toBe(false)
   })
 })

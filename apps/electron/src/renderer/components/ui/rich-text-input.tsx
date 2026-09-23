@@ -76,6 +76,32 @@ export function isCompositionInputEvent(
   return false
 }
 
+/**
+ * Loose event shape accepted by `syncCompositionFromKeydown`. Only the native
+ * `isComposing` flag is consulted.
+ */
+export interface CompositionKeydownEventLike {
+  nativeEvent?: {
+    isComposing?: boolean
+  }
+}
+
+/**
+ * Steer local composition state from the *native* keydown signal so it stays in
+ * sync even when React's compositionstart/compositionend events lag or drop:
+ * Windows TSF can flag the first composing keystroke before compositionstart
+ * runs, and can clear the flag before compositionend.
+ *
+ * Returns the new value for the local composition ref. Clearing is safe
+ * because the publication gates (`isCompositionInputEvent`) still consult the
+ * native flag themselves, so pre-edit text can never slip through a cleared
+ * ref. Never reads the DOM and never publishes — the trailing `input` event
+ * still drives syncing.
+ */
+export function syncCompositionFromKeydown(event: CompositionKeydownEventLike): boolean {
+  return event.nativeEvent?.isComposing === true
+}
+
 export interface RichTextInputProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'onChange' | 'onInput' | 'onPaste'> {
   /** Current text value */
   value: string
@@ -699,7 +725,23 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
       }, 0)
     }, [handleInput])
 
+    /**
+     * Keep `isComposing` in sync with the *native* composition signal on every
+     * keydown. Windows TSF can dispatch the first composing keystroke before
+     * React's `compositionstart` handler runs (or with that event lost), so the
+     * local ref can lag behind the native flag; the reverse also happens when
+     * `compositionend` drops while the IME already cleared the flag.
+     *
+     * Never re-reads the DOM and never publishes here — the trailing `input`
+     * event still drives syncing — so this is purely state steering.
+     */
     const handleKeyDownInternal = React.useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+      const nextComposing = syncCompositionFromKeydown(e)
+      if (nextComposing !== isComposing.current) {
+        isComposing.current = nextComposing
+        setIsComposingRender(nextComposing)
+      }
+
       if (isEscapeDuringComposition(e, isComposing.current)) {
         e.stopPropagation()
         return
@@ -740,9 +782,6 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
     // Handle focus
     const handleFocus = React.useCallback((e: React.FocusEvent<HTMLDivElement>) => {
       setIsFocused(true)
-      // Tell browser to use <br> instead of <div> for line breaks.
-      // This prevents div-wrapping when typing before non-editable spans (badges).
-      document.execCommand('defaultParagraphSeparator', false, 'br')
       onFocus?.(e)
     }, [onFocus])
 
@@ -783,6 +822,13 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
 
     // Initialize content on mount
     React.useEffect(() => {
+      // Tell the document to use <br> instead of <div> for line breaks in
+      // contenteditable (set once; it is a document-wide preference). Doing this
+      // on every focus used to be a TSF hazard: the execCommand rewires the
+      // selection synchronously inside the focus sequence, which on Windows can
+      // leave the very first IME composition without an edit context (first
+      // keystroke falls through as plain text / duplicated letters).
+      document.execCommand('defaultParagraphSeparator', false, 'br')
       if (!divRef.current) return
       lastMentionSignatureRef.current = getMentionSignature(safeValue, skillSlugs, sourceSlugs)
       const html = textToHTML(safeValue, skills, sources, workspaceId)

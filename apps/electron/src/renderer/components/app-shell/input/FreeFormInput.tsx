@@ -856,9 +856,14 @@ export function FreeFormInput({
   React.useEffect(() => {
     if (!consumePendingFocusForSession(sessionId)) return
 
+    // Delay past the session-switch re-render burst so the input's DOM is
+    // stable (value sync, placeholder, layout) before we grab focus — focusing
+    // mid-update can race the Windows TSF edit-context registration and make
+    // the first keystroke miss the IME (plain/duplicated letters on first
+    // input).
     setTimeout(() => {
       richInputRef.current?.focus()
-    }, 0)
+    }, 120)
   }, [sessionId, richInputRef])
 
   // Get the next available number for a pasted file prefix (e.g., pasted-image-1, pasted-image-2)

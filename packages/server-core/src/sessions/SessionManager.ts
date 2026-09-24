@@ -7519,6 +7519,22 @@ ${request.prompt}`;
     // telling the LLM the previous response was cut short
     managed.wasInterrupted = true
 
+    // Mark the in-flight assistant message as aborted. Turn grouping must never
+    // promote the last intermediate ("thinking") text to a final reply — an
+    // interrupted turn has no result. Both the Stop button and the silent
+    // mid-stream redirect pass through here, so this is the single place that
+    // can record the abort; doing it server-side also means the decision
+    // survives an app reload (persistSession snapshots the full message list).
+    for (let i = managed.messages.length - 1; i >= 0; i--) {
+      const msg = managed.messages[i]!
+      if (msg.role !== 'assistant') continue
+      // A final response that already landed is a real result — leave it alone.
+      if (msg.isIntermediate === false && !msg.isPending) break
+      msg.aborted = true
+      break
+    }
+    this.persistSession(managed)
+
     // Force-abort via Query.close() - sends soft interrupt to the backend
     if (managed.agent) {
       managed.agent.forceAbort(AbortReason.UserStop)

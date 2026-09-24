@@ -385,6 +385,15 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
   let currentTurn: AssistantTurn | null = null
   let lastUserTurn: UserTurn | null = null
   let deferredQueuedUserTurns: UserTurn[] = []
+  /**
+   * True once an assistant message carrying `aborted` lands in the current turn.
+   * The user cut the run short (Stop, or a mid-stream redirect), so the turn has
+   * no result and its trailing intermediate text must stay a process step.
+   * The flag is set by the message itself and survives a session reload, which
+   * is what makes this work for the silent redirect — no info message is written
+   * there, so there is no flush-time signal to key off of.
+   */
+  let turnAborted = false
 
   const flushDeferredQueuedUserTurns = () => {
     if (deferredQueuedUserTurns.length === 0) return
@@ -395,7 +404,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
     deferredQueuedUserTurns = []
   }
 
-  const flushCurrentTurn = (interrupted = false) => {
+  const flushCurrentTurn = (interrupted = false, suppressPromotion = false) => {
     if (currentTurn) {
       // Sort activities by timestamp to ensure correct chronological order
       // This is necessary because buffering can delay when messages are added
@@ -428,10 +437,11 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
 
       // If no response but we have intermediate text, promote the last one to response
       // Don't do this for interrupted turns - respect user interruptions
+      // Don't do this for turns that failed or were aborted - those have no result
       // Don't do this for turns with plans - the plan is the final output
       // Only promote when turn is complete (processing indicator hidden)
       const hasPlan = currentTurn.activities.some(a => a.type === 'plan')
-      if (!interrupted && !hasPlan && !currentTurn.response && currentTurn.isComplete && currentTurn.activities.length > 0) {
+      if (!interrupted && !suppressPromotion && !turnAborted && !hasPlan && !currentTurn.response && currentTurn.isComplete && currentTurn.activities.length > 0) {
         // Find the last intermediate text activity (reverse to get most recent)
         const lastTextActivity = [...currentTurn.activities]
           .reverse()
@@ -452,6 +462,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
 
       turns.push(currentTurn)
       currentTurn = null
+      turnAborted = false
       flushDeferredQueuedUserTurns()
     }
   }
@@ -581,7 +592,11 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
       const isInterruption = message.role === 'info'
       // For error/warning (not info), the previous turn is complete
       if (currentTurn && !isInterruption) currentTurn.isComplete = true
-      flushCurrentTurn(isInterruption)
+      // An error or warning is the turn's outcome — the trailing intermediate
+      // text is unfinished commentary, not a reply. Suppress promotion so the
+      // run reports the failure instead of the last thing it happened to say.
+      const suppressPromotion = message.role !== 'info'
+      flushCurrentTurn(isInterruption, suppressPromotion)
       turns.push({
         type: 'system',
         message,
@@ -649,6 +664,10 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
 
     // Assistant messages are the response part of a turn
     if (message.role === 'assistant') {
+      // An aborted message means the user cut this run short. Record it on the
+      // turn so the trailing intermediate text is never promoted to a response.
+      if (message.aborted) turnAborted = true
+
       // Intermediate messages OR pending messages (don't know yet) are activities, not responses
       // Pending: streaming text where we don't yet know if it's intermediate - treat as intermediate
       // until text_complete arrives with the definitive isIntermediate flag

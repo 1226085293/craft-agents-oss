@@ -122,3 +122,82 @@ describe('handleInterrupted (#616)', () => {
     expect(ids).toContain('msg-1')
   })
 })
+
+/**
+ * The aborted flag is the only signal the turn grouper has for a silent
+ * redirect — that path writes no "Response interrupted" info message, so there
+ * is no terminator in the message list to key off of. The backend sets the same
+ * flag server-side (so it survives a reload); this covers the live view.
+ */
+describe('handleInterrupted — aborted marker', () => {
+  it('flags the in-flight assistant message on a silent redirect', () => {
+    const state = makeState([
+      { id: 'u1', role: 'user', content: 'first request' },
+      { id: 'a1', role: 'assistant', content: 'let me look', isIntermediate: true },
+    ])
+    // No `message` → silent redirect, which the backend uses when the user
+    // steers an active turn instead of pressing Stop.
+    const event: InterruptedEvent = { type: 'interrupted', sessionId: 'session-1' }
+
+    const next = handleInterrupted(state, event)
+    const assistant = next.state.session.messages.find(m => m.id === 'a1')
+    expect(assistant?.aborted).toBe(true)
+  })
+
+  it('leaves a delivered final response unmarked', () => {
+    const state = makeState([
+      { id: 'u1', role: 'user', content: 'first request' },
+      { id: 'a1', role: 'assistant', content: 'done', isIntermediate: false },
+      { id: 'u2', role: 'user', content: 'second request' },
+    ])
+    const event: InterruptedEvent = { type: 'interrupted', sessionId: 'session-1' }
+
+    const next = handleInterrupted(state, event)
+    const finalMessage = next.state.session.messages.find(m => m.id === 'a1')
+    // A final response is a real result — mislabeling it would cost the user
+    // their answer if the flag ever became a grouping input.
+    expect(finalMessage?.aborted).toBeUndefined()
+  })
+
+  it('does not flag anything when the last assistant message is a final response', () => {
+    const state = makeState([
+      { id: 'u1', role: 'user', content: 'only request' },
+      { id: 'a1', role: 'assistant', content: 'the answer', isIntermediate: false },
+    ])
+    const event: InterruptedEvent = { type: 'interrupted', sessionId: 'session-1' }
+
+    const next = handleInterrupted(state, event)
+    const flagged = next.state.session.messages.filter(m => m.aborted)
+    expect(flagged).toEqual([])
+  })
+
+  it('flags a pending streaming assistant message', () => {
+    const state = makeState([
+      { id: 'u1', role: 'user', content: 'first request' },
+      { id: 'a1', role: 'assistant', content: 'partial', isPending: true, isStreaming: true },
+    ])
+    const event: InterruptedEvent = { type: 'interrupted', sessionId: 'session-1' }
+
+    const next = handleInterrupted(state, event)
+    const assistant = next.state.session.messages.find(m => m.id === 'a1')
+    expect(assistant?.aborted).toBe(true)
+    expect(assistant?.isPending).toBe(false)
+    expect(assistant?.isStreaming).toBe(false)
+  })
+
+  it('indexes the abort flag after status messages are filtered out', () => {
+    // Status messages are dropped before the map runs; computing the index
+    // against the pre-filter array would flag the wrong message.
+    const state = makeState([
+      { id: 'u1', role: 'user', content: 'first request' },
+      { id: 's1', role: 'status', content: 'Compacting…' },
+      { id: 'a1', role: 'assistant', content: 'let me look', isIntermediate: true },
+    ])
+    const event: InterruptedEvent = { type: 'interrupted', sessionId: 'session-1' }
+
+    const next = handleInterrupted(state, event)
+    expect(next.state.session.messages.map(m => m.id)).toEqual(['u1', 'a1'])
+    expect(next.state.session.messages.find(m => m.id === 'a1')?.aborted).toBe(true)
+    expect(next.state.session.messages.find(m => m.id === 'u1')?.aborted).toBeUndefined()
+  })
+})

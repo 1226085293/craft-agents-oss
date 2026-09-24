@@ -289,6 +289,12 @@ export interface Message {
   isGuidance?: boolean;
   // Intermediate text (commentary between tool calls, not final response)
   isIntermediate?: boolean;
+  // Aborted: this assistant message belonged to a turn the user cut short
+  // (Stop, or a mid-stream redirect). The text stays visible as a process
+  // step, but turn grouping must never promote it to the turn's final reply —
+  // an interrupted turn has no result. Persisted so the grouping decision
+  // survives an app reload.
+  aborted?: boolean;
   // Hidden: a system-generated message that must reach the model (it drives a
   // turn) but must NOT render as a bubble in the transcript — e.g. the WS2
   // background-task-completion nudge that wakes an idle session to present a
@@ -420,6 +426,8 @@ export interface StoredMessage {
   isQueued?: boolean;
   // Guidance: user message steered into an active turn (persisted for UI grouping)
   isGuidance?: boolean;
+  // Aborted: turn was cut short by the user (persisted — see Message.aborted)
+  aborted?: boolean;
 }
 
 /**

@@ -129,6 +129,17 @@ interface RenderState {
   pendingProgressStatus: string | null
   /** Progress: in-flight send for the delayed first transient bubble. */
   progressSendPromise: Promise<void> | null
+
+  /**
+   * True once the user cut this run short (Stop, or a mid-stream redirect).
+   *
+   * The `complete` that follows an interruption still fires, and its fallback
+   * (`finalBuffer || lastAssistantText`) would otherwise deliver the run's last
+   * "thinking" text as if it were the answer. An interrupted run has no result,
+   * so the flag suppresses that delivery. It survives until the trailing
+   * `complete` or the next run's `user_message` resets it.
+   */
+  aborted: boolean
 }
 
 const DEFAULT_EDIT_INTERVAL_MS = 3500
@@ -232,6 +243,7 @@ export class Renderer {
         progressTimer: null,
         pendingProgressStatus: null,
         progressSendPromise: null,
+        aborted: false,
       }
       this.states.set(bindingId, state)
     }
@@ -260,6 +272,21 @@ export class Renderer {
     }
     if (event.type === 'error' || event.type === 'typed_error') {
       await this.handleError(event, binding, adapter, this.getState(binding.id))
+      return
+    }
+    // An interrupted run has no result, and the cleanup it needs is identical
+    // across all three response modes — handle it here so the modes can't
+    // disagree about it.
+    if (event.type === 'interrupted') {
+      await this.handleInterruption(event, binding, adapter)
+      return
+    }
+    // A new turn is starting: clear the previous run's abort marker so this
+    // run's `complete` can still deliver an answer. Event order guarantees
+    // `interrupted` is followed by either `complete` or `user_message` (never
+    // both), so there is no race with the trailing completion of the old run.
+    if (event.type === 'user_message') {
+      this.getState(binding.id).aborted = false
       return
     }
 
@@ -421,7 +448,7 @@ export class Renderer {
       case 'complete': {
         this.cancelEditTimer(state)
         try {
-          if (state.textBuffer.trim() && !state.streamingMessageId) {
+          if (!state.aborted && state.textBuffer.trim() && !state.streamingMessageId) {
             await this.sendResponse(adapter, binding, state.textBuffer.trim())
           }
         } finally {
@@ -566,7 +593,11 @@ export class Renderer {
         // Prefer the clean non-intermediate final; fall back to the last
         // assistant text so a tool-terminated run still delivers a message
         // instead of freezing the bubble on "thinking…".
-        const finalText = (state.finalBuffer.trim() || state.lastAssistantText.trim())
+        // An aborted run has no result, so it sends nothing at all — the
+        // fallback text is unfinished commentary, not an answer.
+        const finalText = state.aborted
+          ? ''
+          : (state.finalBuffer.trim() || state.lastAssistantText.trim())
 
         // Everything below must reset per-run state even when delivery fails.
         // A failed `sendResponse` (network HttpError) previously escaped before
@@ -792,7 +823,11 @@ export class Renderer {
         // Prefer the clean non-intermediate final; fall back to the last
         // assistant text so final_only still delivers something rather than
         // staying silent when the run ends on a tool call.
-        const finalText = (state.finalBuffer.trim() || state.lastAssistantText.trim())
+        // An aborted run has no result, so it sends nothing at all — the
+        // fallback text is unfinished commentary, not an answer.
+        const finalText = state.aborted
+          ? ''
+          : (state.finalBuffer.trim() || state.lastAssistantText.trim())
         // Wrap so a failed send still clears the buffer — otherwise the
         // stale final text is prepended to the next turn's reply (same
         // merged-reply class as the progress mode fix above).
@@ -1052,6 +1087,42 @@ Approve in the desktop app to continue.`,
     state.progressMessageId = null
     state.progressStatus = null
     state.progressSendPromise = null
+    state.aborted = false
+  }
+
+  /**
+   * The user stopped this run (Stop button, or a mid-stream redirect).
+   *
+   * Marks the run aborted so the trailing `complete` — whose
+   * `finalBuffer || lastAssistantText` fallback would otherwise send the run's
+   * last "thinking" text as the answer — delivers nothing. An interrupted run
+   * has no result.
+   *
+   * Deliberately does *not* call `resetRun`: that would clear the `aborted` flag
+   * we just set. Per-run state is cleaned up by the trailing `complete`, or by
+   * the next run's `user_message` when a queued message took the aborted run's
+   * place and no `complete` was emitted.
+   */
+  private async handleInterruption(
+    event: SessionEvent,
+    binding: ChannelBinding,
+    adapter: PlatformAdapter,
+  ): Promise<void> {
+    const state = this.getState(binding.id)
+    // A crash/restart between bubble post and the interrupt can leave the
+    // bubble only in the persisted state file — hydrate it so the deletion
+    // below reaches it instead of stranding a "thinking…" in the chat.
+    this.hydrateProgressBubbleFromDisk(state, binding, event)
+    state.aborted = true
+    state.processing = false
+    this.cancelEditTimer(state)
+    this.cancelPendingProgressBubble(state)
+    await this.waitForProgressBubbleSend(state)
+    const progressMessageId = state.progressMessageId
+    if (progressMessageId) {
+      await this.tryDeleteMessage(adapter, binding, progressMessageId)
+      this.clearPersistedProgressMessage(binding)
+    }
   }
 
   /** Send a final assistant response, extracting preview blocks into chat files. */

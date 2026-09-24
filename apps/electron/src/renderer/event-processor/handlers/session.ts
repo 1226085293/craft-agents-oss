@@ -343,19 +343,41 @@ export function handleInterrupted(
   // Clear transient streaming state (isPending, isStreaming) and mark running tools as interrupted
   // These fields are not persisted, so this matches the state after a reload
   // Also filter out status messages - they are transient UI state that shouldn't persist after interruption
-  const updatedMessages = session.messages
+  const keptMessages = session.messages
     .filter(m => m.role !== 'status')  // Remove transient status messages
     // Only drop queued bubbles when the user explicitly stopped — silent
     // redirects auto-replay them so they must remain visible (#616).
     .filter(m => !(isUserInitiated && m.isQueued))
-    .map(m => {
+
+  // Index of the assistant message to flag as aborted. Walks back to the last
+  // assistant message unless that one already delivered a final response — a
+  // landed final is a real result, and there is no in-flight commentary left
+  // to suppress in that case.
+  let lastAbortedIdx = -1
+  for (let i = keptMessages.length - 1; i >= 0; i--) {
+    const m = keptMessages[i]!
+    if (m.role !== 'assistant') continue
+    if (m.isIntermediate === false && !m.isPending) break
+    lastAbortedIdx = i
+    break
+  }
+
+  const updatedMessages = keptMessages
+    .map((m, i) => {
       // Mark running tools as interrupted
       if (m.role === 'tool' && m.toolResult === undefined && m.toolStatus !== 'completed' && m.toolStatus !== 'error') {
         return { ...m, toolStatus: 'error' as const, toolResult: 'Interrupted', isError: true }
       }
       // Clear pending state on assistant messages (transient streaming state)
       if (m.role === 'assistant' && m.isPending) {
-        return { ...m, isPending: false, isStreaming: false }
+        return { ...m, isPending: false, isStreaming: false, ...(i === lastAbortedIdx ? { aborted: true } : {}) }
+      }
+      // Flag the in-flight assistant message as aborted: turn grouping refuses
+      // to promote an aborted turn's last intermediate text to a final reply.
+      // The backend marks the same message server-side so the decision also
+      // survives a reload; this keeps the live view consistent before then.
+      if (i === lastAbortedIdx) {
+        return { ...m, aborted: true }
       }
       return m
     })

@@ -10,6 +10,7 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Bug Fixes
 
+- **Interrupted and failed runs no longer show a made-up answer** — stopping a run (Stop button or a mid-stream redirect) or hitting an error used to present the last "thinking" text as if it were the reply. Those turns now end with no result on both desktop and mobile, while the commentary stays visible as a process step. A delivered final response is unaffected, and a run that merely ended on a tool call still delivers its message as before.
 - **New sessions inherit the current list** — clicking "New session" while viewing a status list (e.g. Backlog) or a concrete label list now creates the session in that same state/label and keeps you in that list, instead of jumping back to All Sessions.
 - **Clear resets hidden context** — `/clear` now removes persisted Pi backend session state and transient tool artifacts (tool metadata, large tool responses, and turn anchors) as well as Craft's visible message history, preventing Telegram/mobile sessions from recovering stale context after a clear.
 - **Telegram progress cleanup** — progress-mode Telegram replies now delay the first transient `💭 thinking…`/tool-status bubble for fast runs and delete any posted progress bubble before sending the final answer, reducing leftover status messages in topics.

@@ -564,3 +564,138 @@ it('renders queued user messages after the active assistant process block', () =
   expect(turns[2].message.id).toBe('q1')
   expect(turns[2].message.isQueued).toBe(true)
 })
+
+// ============================================================================
+// Interrupted / failed runs must not produce a result
+// ============================================================================
+
+/**
+ * A run that never produced a real final reply is normally rescued by the
+ * "promote the last intermediate text to a response" branch, so the chat is
+ * not left on "Thinking…" forever (see the session-complete fallback block
+ * above). That rescue is wrong when the run had no result at all:
+ *
+ *  - the user hit Stop, or redirected mid-stream → the turn was abandoned
+ *  - the run errored or warned → the failure is the outcome
+ *
+ * Both must keep the trailing commentary as a process step only.
+ */
+describe('interrupted and failed runs produce no response', () => {
+  /** Builds "user → intermediate commentary → <terminator>" for one turn. */
+  function runTerminatedBy(terminator: Message): Message[] {
+    resetCounters()
+    turnIdCounter++
+    return [
+      createUserMessage('do the thing'),
+      createAssistantMessage(false, /* isIntermediate */ true),
+      terminator,
+    ]
+  }
+
+  function terminatedTurn(messages: Message[]): AssistantTurn {
+    const turns = groupMessagesByTurn(messages, { isSessionProcessing: false })
+    return getLastAssistantTurn(turns)!
+  }
+
+  it('error after commentary → no response promoted, error is the result', () => {
+    const error: Message = {
+      id: 'err-1',
+      role: 'error',
+      content: 'Error occurred: boom',
+      timestamp: Date.now() + 9999,
+    }
+    const turn = terminatedTurn(runTerminatedBy(error))
+    expect(turn.response).toBeUndefined()
+    // The commentary is still visible, just not as the answer.
+    expect(turn.activities.some(a => a.type === 'intermediate')).toBe(true)
+  })
+
+  it('warning after commentary → no response promoted', () => {
+    const warning: Message = {
+      id: 'warn-1',
+      role: 'warning',
+      content: 'Attachment upload failed',
+      timestamp: Date.now() + 9999,
+    }
+    const turn = terminatedTurn(runTerminatedBy(warning))
+    expect(turn.response).toBeUndefined()
+  })
+
+  it('info "Response interrupted" → no response promoted (existing Stop path)', () => {
+    const info: Message = {
+      id: 'info-1',
+      role: 'info',
+      content: 'Response interrupted',
+      timestamp: Date.now() + 9999,
+    }
+    const turn = terminatedTurn(runTerminatedBy(info))
+    expect(turn.response).toBeUndefined()
+  })
+
+  it('aborted message (silent redirect) → no response promoted', () => {
+    // The silent-redirect path writes no info message, so the `aborted` flag on
+    // the assistant message is the only signal. The turn is closed by the next
+    // user message arriving.
+    resetCounters()
+    turnIdCounter++
+    const messages: Message[] = [
+      createUserMessage('first request'),
+      { ...createAssistantMessage(false, true), aborted: true },
+      createUserMessage('actually, do this instead'),
+    ]
+    const turns = groupMessagesByTurn(messages, { isSessionProcessing: false })
+    const turn = getLastAssistantTurn(turns)!
+    expect(turn.response).toBeUndefined()
+    expect(turn.activities.some(a => a.type === 'intermediate')).toBe(true)
+  })
+
+  it('aborted message closed by session-complete fallback → no response promoted', () => {
+    // Same abort, but no trailing user message: the turn is closed by the
+    // isSessionProcessing=false fallback rather than by a new message.
+    resetCounters()
+    turnIdCounter++
+    const messages: Message[] = [
+      createUserMessage('do the thing'),
+      { ...createAssistantMessage(false, true), aborted: true },
+    ]
+    const turn = terminatedTurn(messages)
+    expect(turn.response).toBeUndefined()
+  })
+
+  it('aborted flag does not leak into the next turn', () => {
+    // turnAborted is per-turn state: a normal tool-terminated run after an
+    // aborted one must still promote, otherwise one Stop would permanently
+    // disable the fallback.
+    resetCounters()
+    turnIdCounter++
+    const abortedTurn: Message[] = [
+      createUserMessage('first request'),
+      { ...createAssistantMessage(false, true), aborted: true },
+    ]
+    const normalTurn: Message[] = [
+      createUserMessage('do the thing'),
+      createAssistantMessage(false, true),
+      createToolMessage('completed', 'Bash'),
+    ]
+    const turns = groupMessagesByTurn(
+      [...abortedTurn, ...normalTurn],
+      { isSessionProcessing: false }
+    )
+    const assistantTurns = turns.filter(t => t.type === 'assistant') as AssistantTurn[]
+    expect(assistantTurns[0]?.response).toBeUndefined()
+    expect(assistantTurns[1]?.response?.text).toBe('Response text')
+  })
+
+  it('an aborted run with a real final response still shows the final response', () => {
+    // A delivered final is a genuine result. Guarding against a false abort
+    // costs the user their answer, so the response must survive regardless.
+    resetCounters()
+    turnIdCounter++
+    const messages: Message[] = [
+      createUserMessage('do the thing'),
+      createAssistantMessage(false, /* isIntermediate */ false),
+    ]
+    const turn = terminatedTurn(messages)
+    expect(turn.response?.text).toBe('Response text')
+  })
+})

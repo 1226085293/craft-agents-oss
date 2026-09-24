@@ -3,6 +3,7 @@ import {
   isEscapeDuringComposition,
   isCompositionInputEvent,
   syncCompositionFromKeydown,
+  isImeCompositionPaste,
 } from '../rich-text-input'
 
 describe('isEscapeDuringComposition', () => {
@@ -69,5 +70,28 @@ describe('syncCompositionFromKeydown', () => {
 
   it('is safe for events without a nativeEvent', () => {
     expect(syncCompositionFromKeydown({})).toBe(false)
+  })
+})
+
+describe('isImeCompositionPaste', () => {
+  it('returns true while the local composition ref is active', () => {
+    // The clipboard path is how some Windows IMEs commit candidate text;
+    // intercepting it would duplicate the committed characters.
+    expect(isImeCompositionPaste(undefined, true)).toBe(true)
+  })
+
+  it('returns true when nativeEvent.isComposing is true', () => {
+    expect(
+      isImeCompositionPaste({ nativeEvent: { isComposing: true } }, false)
+    ).toBe(true)
+  })
+
+  it('returns true when the synthetic event carries isComposing', () => {
+    expect(isImeCompositionPaste({ isComposing: true }, false)).toBe(true)
+  })
+
+  it('returns false for a normal clipboard paste', () => {
+    expect(isImeCompositionPaste({ nativeEvent: { isComposing: false } }, false)).toBe(false)
+    expect(isImeCompositionPaste(undefined, false)).toBe(false)
   })
 })

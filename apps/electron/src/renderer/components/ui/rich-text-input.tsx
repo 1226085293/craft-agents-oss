@@ -102,6 +102,37 @@ export function syncCompositionFromKeydown(event: CompositionKeydownEventLike): 
   return event.nativeEvent?.isComposing === true
 }
 
+/**
+ * Loose event shape accepted by `isImeCompositionPaste`. Clipboard events do
+ * not always carry the composition flag, so the local ref is the primary
+ * signal and the event flags are a secondary check.
+ */
+export interface CompositionPasteEventLike {
+  isComposing?: unknown
+  nativeEvent?: unknown
+}
+
+/**
+ * True when a paste event belongs to a live IME composition.
+ *
+ * Windows IMEs (Microsoft Pinyin's compatibility mode in particular) can
+ * commit candidate text through the clipboard path. Intercepting that with
+ * `preventDefault()` + `execCommand('insertText')` stacks a second insertion on
+ * top of what the IME already committed, which is exactly the "first input
+ * duplicated / IME never took over" corruption. When this returns true the
+ * caller must leave the event completely alone and let the browser apply the
+ * IME's own insertion.
+ */
+export function isImeCompositionPaste(
+  event: CompositionPasteEventLike | undefined,
+  isComposingRefActive: boolean
+): boolean {
+  if (isComposingRefActive) return true
+  const nativeEvent = event?.nativeEvent as { isComposing?: unknown } | undefined
+  if (nativeEvent?.isComposing === true) return true
+  return event?.isComposing === true
+}
+
 export interface RichTextInputProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'onChange' | 'onInput' | 'onPaste'> {
   /** Current text value */
   value: string
@@ -752,6 +783,12 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
 
     // Handle paste - delegate files to parent, manually insert plain text
     const handlePasteInternal = React.useCallback((e: React.ClipboardEvent) => {
+      // Never interfere while an IME composition is live. The clipboard path is
+      // how some Windows IMEs commit candidate text; swallowing it here would
+      // either block the commit or duplicate the committed characters. Leave
+      // the event untouched so the browser applies the IME's own insertion.
+      if (isImeCompositionPaste(e, isComposing.current)) return
+
       // Check if we have files - let parent handle that
       const hasFiles = e.clipboardData?.files && e.clipboardData.files.length > 0
       if (hasFiles && onPaste) {
@@ -802,11 +839,32 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
       if (lastValueRef.current === safeValue) return
 
       // External value change - update content
+      const nextMentionSignature = getMentionSignature(safeValue, skillSlugs, sourceSlugs)
+      const mentionSignatureChanged = nextMentionSignature !== lastMentionSignatureRef.current
       lastValueRef.current = safeValue
-      lastMentionSignatureRef.current = getMentionSignature(safeValue, skillSlugs, sourceSlugs)
+      lastMentionSignatureRef.current = nextMentionSignature
+
+      // Re-serializing a tree that already matches the requested value is pure
+      // collateral damage: it destroys the browser's edit context, which on
+      // Windows leaves the *next* keystroke outside the IME (it lands as plain
+      // text / duplicated letters). Skip the rewrite when both the text and the
+      // mention signature are already in sync.
+      if (!mentionSignatureChanged && getTextFromElement(divRef.current) === safeValue) {
+        pendingCursorRef.current = null
+        return
+      }
 
       const html = textToHTML(safeValue, skills, sources, workspaceId)
+      // Writing innerHTML drops the node's edit context. When the user holds
+      // focus we tear it down and bring it straight back so the IME re-registers
+      // against the rewritten DOM — without this, the first keystroke after an
+      // external value change (e.g. a draft restored on session switch) never
+      // reaches the IME. Both calls run inside this one synchronous task, so
+      // React batches the focus callbacks and the styling does not flicker.
+      const hadFocus = document.activeElement === divRef.current
+      if (hadFocus) divRef.current.blur()
       divRef.current.innerHTML = html || '<br>'
+      if (hadFocus) divRef.current.focus()
 
       // Restore cursor position after innerHTML update.
       // Only restore if:

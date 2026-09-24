@@ -88,6 +88,7 @@ Formats like HEIC/HEIF/TIFF may not render in-app. For those files, use external
 
 ### Fullscreen Overlay
 - Larger fit-to-container image view
+- Mouse wheel zooms in/out around the pointer; drag pans while zoomed
 - Item navigation (arrows/dropdown) for multi-item sets
 - Copy path action in header
 - File path badge supports external open/reveal actions

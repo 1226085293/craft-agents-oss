@@ -132,6 +132,8 @@ export function useRichBlockInteractions({
   }, [])
 
   useEffect(() => {
+    if (!isOpen) return
+
     const container = containerRef.current
     if (!container) return
 
@@ -159,7 +161,7 @@ export function useRichBlockInteractions({
 
     container.addEventListener('wheel', handleWheel, { passive: false })
     return () => container.removeEventListener('wheel', handleWheel)
-  }, [containerRef, minScale, maxScale, wheelSensitivity])
+  }, [isOpen, containerRef, minScale, maxScale, wheelSensitivity])
 
   useEffect(() => {
     if (!isOpen || !keyboardShortcuts) return

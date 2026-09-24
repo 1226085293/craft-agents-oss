@@ -10,6 +10,7 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Bug Fixes
 
+- **Image preview wheel zoom** — opening a local image in the fullscreen preview now responds to mouse-wheel zoom again, with zooming anchored around the pointer and drag-to-pan preserved.
 - **Interrupted and failed runs no longer show a made-up answer** — stopping a run (Stop button or a mid-stream redirect) or hitting an error used to present the last "thinking" text as if it were the reply. Those turns now end with no result on both desktop and mobile, while the commentary stays visible as a process step. A delivered final response is unaffected, and a run that merely ended on a tool call still delivers its message as before.
 - **New sessions inherit the current list** — clicking "New session" while viewing a status list (e.g. Backlog) or a concrete label list now creates the session in that same state/label and keeps you in that list, instead of jumping back to All Sessions.
 - **Clear resets hidden context** — `/clear` now removes persisted Pi backend session state and transient tool artifacts (tool metadata, large tool responses, and turn anchors) as well as Craft's visible message history, preventing Telegram/mobile sessions from recovering stale context after a clear.

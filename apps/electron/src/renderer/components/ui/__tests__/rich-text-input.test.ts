@@ -4,6 +4,7 @@ import {
   isCompositionInputEvent,
   syncCompositionFromKeydown,
   isImeCompositionPaste,
+  needsTsfRepair,
 } from '../rich-text-input'
 
 describe('isEscapeDuringComposition', () => {
@@ -93,5 +94,19 @@ describe('isImeCompositionPaste', () => {
   it('returns false for a normal clipboard paste', () => {
     expect(isImeCompositionPaste({ nativeEvent: { isComposing: false } }, false)).toBe(false)
     expect(isImeCompositionPaste(undefined, false)).toBe(false)
+  })
+})
+
+describe('needsTsfRepair', () => {
+  it('repairs when the element holds text and no composition is live', () => {
+    expect(needsTsfRepair({ hasExistingText: true, isComposing: false })).toBe(true)
+  })
+
+  it('skips empty elements - they are not affected by the TSF first-focus bug', () => {
+    expect(needsTsfRepair({ hasExistingText: false, isComposing: false })).toBe(false)
+  })
+
+  it('never runs mid-composition', () => {
+    expect(needsTsfRepair({ hasExistingText: true, isComposing: true })).toBe(false)
   })
 })

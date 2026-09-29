@@ -133,6 +133,64 @@ export function isImeCompositionPaste(
   return event?.isComposing === true
 }
 
+/**
+ * Windows TSF / IME recovery.
+ *
+ * On Windows, the first focus of a text element that already holds content can
+ * leave the system's TSF/IME context broken: CJK input stops producing a
+ * candidate window and keystrokes land as raw ASCII letters until focus moves
+ * to a *different* text element and back. This matches the user-visible "first
+ * input after a session switch never triggers the IME" corruption.
+ *
+ * The recovery is a focus detour through a dedicated empty <textarea> (which
+ * re-primes TSF against an element whose text/selection is trivially
+ * synchronizable), then a refocus on the target. All calls run in one task, so
+ * React batches the focus/blur callbacks and the caret never visibly moves.
+ */
+let tsfPrimingElement: HTMLTextAreaElement | null = null
+
+function getTsfPrimingElement(): HTMLTextAreaElement {
+  if (tsfPrimingElement && document.body.contains(tsfPrimingElement)) return tsfPrimingElement
+  const ta = document.createElement('textarea')
+  ta.setAttribute('aria-hidden', 'true')
+  ta.tabIndex = -1
+  Object.assign(ta.style, {
+    position: 'fixed',
+    left: '-9999px',
+    top: '0',
+    width: '0',
+    height: '0',
+    opacity: '0',
+    padding: '0',
+    border: 'none',
+    resize: 'none',
+    pointerEvents: 'none',
+  })
+  document.body.appendChild(ta)
+  tsfPrimingElement = ta
+  return ta
+}
+
+/**
+ * Pure decision: should the focus-rewrite path run the TSF recovery cycle?
+ *
+ * Only elements that hold existing text are at risk (empty elements are
+ * unaffected — their focus has nothing to synchronize against, which is
+ * exactly why "empty inputs work" in the documented repro). A live
+ * composition must never be touched — the cycle would abort the IME.
+ */
+export function needsTsfRepair(input: { hasExistingText: boolean; isComposing: boolean }): boolean {
+  return input.hasExistingText && !input.isComposing
+}
+
+export function runTsfRecoveryCycle(el: HTMLElement): void {
+  const priming = getTsfPrimingElement()
+  el.blur()
+  priming.focus()
+  priming.blur()
+  el.focus()
+}
+
 export interface RichTextInputProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'onChange' | 'onInput' | 'onPaste'> {
   /** Current text value */
   value: string
@@ -631,6 +689,8 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
     const isInternalUpdate = React.useRef(false)
     // Pending cursor position to restore after external value update (e.g., after @mention selection)
     const pendingCursorRef = React.useRef<number | null>(null)
+    /** Timestamp of the last TSF recovery cycle (dedupes the re-entrant focus event). */
+    const tsfRepairAtRef = React.useRef(0)
 
     const skillSlugs = React.useMemo(() => skills.map(s => s.slug), [skills])
     const sourceSlugs = React.useMemo(() => sources.map(s => s.config.slug), [sources])
@@ -820,6 +880,23 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
     const handleFocus = React.useCallback((e: React.FocusEvent<HTMLDivElement>) => {
       setIsFocused(true)
       onFocus?.(e)
+      const el = e.currentTarget
+      // A first focus that lands on an element holding text can leave the
+      // Windows TSF/IME context broken (no candidate window; keystrokes land
+      // as raw letters). Re-prime it through the off-screen empty textarea and
+      // back. The cycle's own refocus re-fires this handler, so a 250 ms
+      // window dedupes the re-entry instead of chaining cycles.
+      const now = performance.now()
+      if (needsTsfRepair({ hasExistingText: getTextFromElement(el).length > 0, isComposing: isComposing.current })
+        && now - tsfRepairAtRef.current > 250) {
+        tsfRepairAtRef.current = now
+        Promise.resolve().then(() => {
+          // Only re-run if focus is still on our element — the user may have
+          // already moved on, in which case a different element's focus will
+          // repair TSF for it.
+          if (document.activeElement === el) runTsfRecoveryCycle(el)
+        })
+      }
     }, [onFocus])
 
     // Handle blur
@@ -855,16 +932,17 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
       }
 
       const html = textToHTML(safeValue, skills, sources, workspaceId)
-      // Writing innerHTML drops the node's edit context. When the user holds
-      // focus we tear it down and bring it straight back so the IME re-registers
-      // against the rewritten DOM — without this, the first keystroke after an
-      // external value change (e.g. a draft restored on session switch) never
-      // reaches the IME. Both calls run inside this one synchronous task, so
-      // React batches the focus callbacks and the styling does not flicker.
-      const hadFocus = document.activeElement === divRef.current
-      if (hadFocus) divRef.current.blur()
       divRef.current.innerHTML = html || '<br>'
-      if (hadFocus) divRef.current.focus()
+      // Writing innerHTML drops the node's edit context. When the user holds
+      // focus, re-prime TSF against the rewritten DOM by detouring focus
+      // through the empty priming textarea and back — without this, the first
+      // keystroke after an external value change (e.g. a draft restored on
+      // session switch) never reaches the IME. The whole cycle runs in one
+      // synchronous task, so React batches the focus callbacks (no flicker).
+      if (document.activeElement === divRef.current && needsTsfRepair({ hasExistingText: safeValue.length > 0, isComposing: false })) {
+        tsfRepairAtRef.current = performance.now()
+        runTsfRecoveryCycle(divRef.current)
+      }
 
       // Restore cursor position after innerHTML update.
       // Only restore if:

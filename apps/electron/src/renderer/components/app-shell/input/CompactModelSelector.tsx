@@ -18,7 +18,7 @@ import {
 } from '@/components/ui/drawer'
 import { cn } from '@/lib/utils'
 import * as storage from '@/lib/local-storage'
-import { navigate, routes } from '@/lib/navigate'
+import { openSettingsWindow } from '@/lib/settings-window'
 import { useOptionalAppShellContext } from '@/context/AppShellContext'
 import {
   ANTHROPIC_MODELS,
@@ -229,7 +229,7 @@ export function CompactModelSelector({
                 type="button"
                 onClick={() => {
                   setOpen(false)
-                  navigate(routes.view.settings('ai'))
+                  void openSettingsWindow('settings/ai', appShellCtx?.activeWorkspaceId ?? undefined)
                 }}
                 className="text-xs underline text-foreground/70 hover:text-foreground"
               >

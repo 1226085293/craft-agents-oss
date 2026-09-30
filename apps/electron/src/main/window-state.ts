@@ -11,11 +11,15 @@ export interface WindowBounds {
   height: number
 }
 
+export type WindowMode = 'main' | 'settings'
+
 export interface SavedWindow {
-  type: 'main'
+  type: WindowMode
   workspaceId: string
   bounds: WindowBounds
   focused?: boolean
+  /** Independent settings shell mode; old state files omit this field. */
+  windowMode?: 'settings'
   // Full URL captured from webContents.getURL() at quit time.
   // May be localhost (dev) or file:// (prod) — both are safe to store because
   // createWindow() never loads this URL directly. It extracts query params

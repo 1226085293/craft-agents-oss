@@ -641,6 +641,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     }
 
     const managedWindows = this.windowManager.getAllWindows()
+      .filter(managed => managed.mode !== 'settings')
     return managedWindows[0]?.workspaceId ?? null
   }
 

@@ -23,6 +23,8 @@ import type { DetailsPageMeta } from '@/lib/navigation-registry'
 import type { SettingsSubpage } from '../../../shared/types'
 import { SETTINGS_ITEMS } from '../../../shared/menu-schema'
 import { SETTINGS_ICONS } from '@/components/icons/SettingsIcons'
+import { openSettingsWindow } from '@/lib/settings-window'
+import { useOptionalAppShellContext } from '@/context/AppShellContext'
 
 export const meta: DetailsPageMeta = {
   navigator: 'settings',
@@ -38,6 +40,8 @@ interface SettingsNavigatorProps {
   selectedSubpage: SettingsSubpage | null
   /** Called when a subpage is selected */
   onSelectSubpage: (subpage: SettingsSubpage) => void
+  /** Show the legacy open-in-new-window action in the main chat shell. */
+  showOpenInNewWindow?: boolean
 }
 
 interface SettingsItem {
@@ -52,20 +56,28 @@ interface SettingsItemRowProps {
   isSelected: boolean
   isFirst: boolean
   onSelect: () => void
+  showOpenInNewWindow: boolean
 }
 
 /**
  * SettingsItemRow - Individual settings item with dropdown menu
  * Tracks menu open state to keep "..." button visible when menu is open
  */
-function SettingsItemRow({ item, isSelected, isFirst, onSelect }: SettingsItemRowProps) {
+function SettingsItemRow({
+  item,
+  isSelected,
+  isFirst,
+  onSelect,
+  showOpenInNewWindow,
+}: SettingsItemRowProps) {
   const { t } = useTranslation()
+  const appShellCtx = useOptionalAppShellContext()
   const [menuOpen, setMenuOpen] = useState(false)
   const Icon = item.icon
 
   // Open settings page in a new window via deep link
   const handleOpenInNewWindow = () => {
-    window.electronAPI.openUrl(`craftagents://settings/${item.id}?window=focused`)
+    void openSettingsWindow(`settings/${item.id}`, appShellCtx?.activeWorkspaceId ?? undefined)
   }
 
   return (
@@ -118,31 +130,33 @@ function SettingsItemRow({ item, isSelected, isFirst, onSelect }: SettingsItemRo
           </div>
         </button>
         {/* Action buttons - visible on hover or when menu is open */}
-        <div
-          data-touch-reveal="true"
-          className={cn(
-            'absolute right-2 top-2 transition-opacity z-10',
-            menuOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
-          )}
-        >
-          <div className="flex items-center rounded-[8px] overflow-hidden border border-transparent hover:border-border/50">
-            <DropdownMenu modal={true} onOpenChange={setMenuOpen}>
-              <DropdownMenuTrigger asChild>
-                <div className="p-1.5 hover:bg-foreground/10 data-[state=open]:bg-foreground/10 cursor-pointer">
-                  <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
-                </div>
-              </DropdownMenuTrigger>
-              <StyledDropdownMenuContent align="end">
-                <DropdownMenuProvider>
-                  <StyledDropdownMenuItem onClick={handleOpenInNewWindow}>
-                    <AppWindow className="h-3.5 w-3.5" />
-                    <span className="flex-1">{t("sessionMenu.openInNewWindow")}</span>
-                  </StyledDropdownMenuItem>
-                </DropdownMenuProvider>
-              </StyledDropdownMenuContent>
-            </DropdownMenu>
+        {showOpenInNewWindow && (
+          <div
+            data-touch-reveal="true"
+            className={cn(
+              'absolute right-2 top-2 transition-opacity z-10',
+              menuOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+            )}
+          >
+            <div className="flex items-center rounded-[8px] overflow-hidden border border-transparent hover:border-border/50">
+              <DropdownMenu modal={true} onOpenChange={setMenuOpen}>
+                <DropdownMenuTrigger asChild>
+                  <div className="p-1.5 hover:bg-foreground/10 data-[state=open]:bg-foreground/10 cursor-pointer">
+                    <MoreHorizontal className="h-4 w-4 text-muted-foreground" />
+                  </div>
+                </DropdownMenuTrigger>
+                <StyledDropdownMenuContent align="end">
+                  <DropdownMenuProvider>
+                    <StyledDropdownMenuItem onClick={handleOpenInNewWindow}>
+                      <AppWindow className="h-3.5 w-3.5" />
+                      <span className="flex-1">{t("sessionMenu.openInNewWindow")}</span>
+                    </StyledDropdownMenuItem>
+                  </DropdownMenuProvider>
+                </StyledDropdownMenuContent>
+              </DropdownMenu>
+            </div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   )
@@ -151,6 +165,7 @@ function SettingsItemRow({ item, isSelected, isFirst, onSelect }: SettingsItemRo
 export default function SettingsNavigator({
   selectedSubpage,
   onSelectSubpage,
+  showOpenInNewWindow = true,
 }: SettingsNavigatorProps) {
   const { t } = useTranslation()
 
@@ -175,6 +190,7 @@ export default function SettingsNavigator({
               isSelected={selectedSubpage === item.id}
               isFirst={index === 0}
               onSelect={() => onSelectSubpage(item.id)}
+              showOpenInNewWindow={showOpenInNewWindow}
             />
           ))}
         </div>

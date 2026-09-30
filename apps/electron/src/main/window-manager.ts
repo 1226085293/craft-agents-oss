@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url'
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config'
 import { classifyExternalUrl, formatBlockedUrlError } from '@craft-agent/shared/utils/url-safety'
 import { RPC_CHANNELS, type WindowCloseRequestSource } from '../shared/types'
-import type { SavedWindow } from './window-state'
+import type { SavedWindow, WindowMode } from './window-state'
 
 // Vite dev server URL for hot reload
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
@@ -41,13 +41,18 @@ function getWindowsBackgroundMaterial(): 'mica' | 'acrylic' | undefined {
 interface ManagedWindow {
   window: BrowserWindow
   workspaceId: string
+  mode: WindowMode
 }
 
 export interface CreateWindowOptions {
   /** The workspace to open (empty string for onboarding) */
   workspaceId: string
+  /** Window shell mode. Settings uses its own navigator shell, not focused mode. */
+  windowMode?: WindowMode
   /** Whether to open in focused mode (smaller window, no sidebars) */
   focused?: boolean
+  /** Initial renderer route (e.g. settings/ai) for a newly created shell. */
+  initialRoute?: string
   /** Deep link URL to navigate to after window loads (without ?window= param) */
   initialDeepLink?: string
   /** Full URL to restore from saved state (preserves route/query params) */
@@ -200,7 +205,15 @@ export class WindowManager {
    * @param options - Window creation options
    */
   createWindow(options: CreateWindowOptions): BrowserWindow {
-    const { workspaceId, focused = false, initialDeepLink, restoreUrl } = options
+    const {
+      workspaceId,
+      windowMode = 'main',
+      focused: requestedFocused = false,
+      initialRoute,
+      initialDeepLink,
+      restoreUrl,
+    } = options
+    const focused = windowMode === 'main' && requestedFocused
 
     // Load platform-specific app icon
     // In packaged app, resources are at dist/resources/ (same level as __dirname)
@@ -222,9 +235,10 @@ export class WindowManager {
       windowLog.warn('App icon not found at:', iconPath)
     }
 
-    // Use smaller window size for focused mode (single session view)
-    const windowWidth = focused ? 900 : 1400
-    const windowHeight = focused ? 700 : 900
+    // Use smaller window size for focused mode (single session view) and a
+    // roomier, independent shell for settings.
+    const windowWidth = windowMode === 'settings' ? 1100 : focused ? 900 : 1400
+    const windowHeight = windowMode === 'settings' ? 760 : focused ? 700 : 900
 
     // Platform-specific window options
     const isMac = process.platform === 'darwin'
@@ -234,8 +248,8 @@ export class WindowManager {
     const window = new BrowserWindow({
       width: windowWidth,
       height: windowHeight,
-      minWidth: 800,
-      minHeight: 600,
+      minWidth: windowMode === 'settings' ? 860 : 800,
+      minHeight: windowMode === 'settings' ? 620 : 600,
       show: false, // Don't show until ready-to-show event (faster perceived startup)
       title: '',
       icon: iconExists ? iconPath : undefined,
@@ -320,16 +334,45 @@ export class WindowManager {
     // Store the window mapping BEFORE loadURL — bootstrap preload uses
     // __get-workspace-id (via sendSync) which reads this map during eval.
     const webContentsId = window.webContents.id
-    this.windows.set(webContentsId, { window, workspaceId })
+    this.windows.set(webContentsId, { window, workspaceId, mode: windowMode })
 
     // Apply window-title policy now that the map size reflects this window —
     // covers both the new window and any existing windows that should switch
     // from app name → workspace name as the count crosses 1 → 2.
     this.refreshWindowTitles()
 
-    // Track focused mode state for persistence
+    // Track focused mode state for persistence. Settings is an independent
+    // shell and must never inherit the focused/single-session behavior.
     if (focused) {
       this.focusedModeWindows.add(webContentsId)
+    }
+
+    // Build the canonical query for a new window. Restore URLs are normalized
+    // below so a settings window never accidentally starts in main mode.
+    const buildDefaultQuery = (): Record<string, string> => {
+      const query: Record<string, string> = { workspaceId }
+      if (windowMode === 'settings') {
+        query.windowMode = 'settings'
+        if (initialRoute) query.route = initialRoute
+      } else if (focused) {
+        query.focused = 'true'
+      }
+      return query
+    }
+
+    const normalizeRestoreQuery = (searchParams: URLSearchParams): Record<string, string> => {
+      const query: Record<string, string> = {}
+      searchParams.forEach((value, key) => { query[key] = value })
+      query.workspaceId = workspaceId
+      delete query.windowMode
+      delete query.focused
+      if (windowMode === 'settings') {
+        query.windowMode = 'settings'
+        if (initialRoute) query.route = initialRoute
+      } else if (focused) {
+        query.focused = 'true'
+      }
+      return query
     }
 
     // Load the renderer - use restoreUrl if provided, otherwise build from options
@@ -340,15 +383,14 @@ export class WindowManager {
         try {
           const savedUrl = new URL(restoreUrl)
           const devUrl = new URL(VITE_DEV_SERVER_URL)
-          // Preserve pathname and search from saved URL, use dev server host
+          const query = normalizeRestoreQuery(savedUrl.searchParams)
           devUrl.pathname = savedUrl.pathname
-          devUrl.search = savedUrl.search
+          devUrl.search = new URLSearchParams(query).toString()
           window.loadURL(devUrl.toString())
         } catch {
           // Fallback if URL parsing fails
           windowLog.warn('Failed to parse restoreUrl, using default:', restoreUrl)
-          const params = new URLSearchParams({ workspaceId, ...(focused && { focused: 'true' }) }).toString()
-          window.loadURL(`${VITE_DEV_SERVER_URL}?${params}`)
+          window.loadURL(`${VITE_DEV_SERVER_URL}?${new URLSearchParams(buildDefaultQuery()).toString()}`)
         }
       } else {
         // In prod, always extract query params and load from current __dirname.
@@ -356,20 +398,15 @@ export class WindowManager {
         // mounts to a different /tmp dir on each launch). See #13.
         try {
           const savedUrl = new URL(restoreUrl)
-          const query: Record<string, string> = {}
-          savedUrl.searchParams.forEach((value, key) => { query[key] = value })
+          const query = normalizeRestoreQuery(savedUrl.searchParams)
           window.loadFile(join(__dirname, 'renderer/index.html'), { query })
         } catch {
-          window.loadFile(join(__dirname, 'renderer/index.html'), { query: { workspaceId } })
+          window.loadFile(join(__dirname, 'renderer/index.html'), { query: buildDefaultQuery() })
         }
       }
     } else {
       // Build URL from options
-      const query: Record<string, string> = { workspaceId }
-      if (focused) {
-        query.focused = 'true' // Open in focused mode (no sidebars)
-      }
-
+      const query = buildDefaultQuery()
       if (VITE_DEV_SERVER_URL) {
         const params = new URLSearchParams(query).toString()
         window.loadURL(`${VITE_DEV_SERVER_URL}?${params}`)
@@ -389,16 +426,16 @@ export class WindowManager {
         failLoadRetries++
         windowLog.info(`Retrying Vite dev server (attempt ${failLoadRetries}/5)...`)
         setTimeout(() => {
-          const params = new URLSearchParams({ workspaceId }).toString()
+          const params = new URLSearchParams(buildDefaultQuery()).toString()
           window.loadURL(`${VITE_DEV_SERVER_URL}?${params}`)
         }, 1000)
       } else {
-        window.loadFile(join(__dirname, 'renderer/index.html'), { query: { workspaceId } })
+        window.loadFile(join(__dirname, 'renderer/index.html'), { query: buildDefaultQuery() })
       }
     })
 
     // If an initial deep link was provided, navigate to it after the window is ready
-    if (initialDeepLink) {
+    if (initialDeepLink && windowMode !== 'settings') {
       window.once('ready-to-show', () => {
         // Import parseDeepLink dynamically to avoid circular dependency
         import('./deep-link').then(({ parseDeepLink }) => {
@@ -527,7 +564,7 @@ export class WindowManager {
       }
     })
 
-    windowLog.info(`Created window for workspace ${workspaceId} (focused: ${focused})`)
+    windowLog.info(`Created ${windowMode} window for workspace ${workspaceId} (focused: ${focused})`)
     return window
   }
 
@@ -540,11 +577,33 @@ export class WindowManager {
   }
 
   /**
-   * Get window by workspace ID (returns first match - for backwards compatibility)
+   * Get a regular chat window by workspace ID.
+   * Settings windows are intentionally excluded so notifications, session
+   * routing, and workspace switching never target the settings shell.
    */
   getWindowByWorkspace(workspaceId: string): BrowserWindow | null {
     for (const managed of this.windows.values()) {
-      if (managed.workspaceId === workspaceId && !managed.window.isDestroyed()) {
+      if (
+        managed.workspaceId === workspaceId &&
+        managed.mode === 'main' &&
+        !managed.window.isDestroyed()
+      ) {
+        return managed.window
+      }
+    }
+    return null
+  }
+
+  /**
+   * Get the single settings window for a workspace, if it exists.
+   */
+  getSettingsWindowByWorkspace(workspaceId: string): BrowserWindow | null {
+    for (const managed of this.windows.values()) {
+      if (
+        managed.workspaceId === workspaceId &&
+        managed.mode === 'settings' &&
+        !managed.window.isDestroyed()
+      ) {
         return managed.window
       }
     }
@@ -665,13 +724,25 @@ export class WindowManager {
    * Used for re-registration when window mapping is lost (e.g., after refresh)
    * @param window - The BrowserWindow to register
    * @param workspaceId - The workspace ID to associate with
+   * @param windowMode - Optional mode; omitted registrations infer it from the URL.
    */
-  registerWindow(window: BrowserWindow, workspaceId: string): void {
+  registerWindow(window: BrowserWindow, workspaceId: string, windowMode?: WindowMode): void {
     const webContentsId = window.webContents.id
-    this.windows.set(webContentsId, { window, workspaceId })
+    const previousMode = this.windows.get(webContentsId)?.mode
+    const currentUrl = typeof window.webContents.getURL === 'function'
+      ? window.webContents.getURL()
+      : ''
+    const inferredMode: WindowMode = windowMode
+      ?? previousMode
+      ?? (currentUrl.includes('windowMode=settings') ? 'settings' : 'main')
+    this.windows.set(webContentsId, { window, workspaceId, mode: inferredMode })
+    if (inferredMode === 'settings') {
+      // Settings never participates in the focused single-session lifecycle.
+      this.focusedModeWindows.delete(webContentsId)
+    }
     // Re-apply window-title policy after re-registration (e.g. post-refresh).
     this.refreshWindowTitles()
-    windowLog.info(`Registered window ${webContentsId} for workspace ${workspaceId}`)
+    windowLog.info(`Registered ${inferredMode} window ${webContentsId} for workspace ${workspaceId}`)
   }
 
   /**
@@ -682,7 +753,7 @@ export class WindowManager {
   }
 
   /**
-   * Focus existing window for workspace or create new one
+   * Focus existing window for workspace or create new regular chat window.
    */
   focusOrCreateWindow(workspaceId: string): BrowserWindow {
     const existing = this.getWindowByWorkspace(workspaceId)
@@ -691,7 +762,26 @@ export class WindowManager {
       existing.focus()
       return existing
     }
-    return this.createWindow({ workspaceId })
+    return this.createWindow({ workspaceId, windowMode: 'main' })
+  }
+
+  /**
+   * Focus or create the single settings shell for a workspace. The caller is
+   * responsible for pushing a route to an already-loaded window; new windows
+   * receive it directly in their initial renderer URL.
+   */
+  focusOrCreateSettingsWindow(workspaceId: string, route = 'settings'): BrowserWindow {
+    const existing = this.getSettingsWindowByWorkspace(workspaceId)
+    if (existing) {
+      this.revealWindow(existing)
+      existing.focus()
+      return existing
+    }
+    return this.createWindow({
+      workspaceId,
+      windowMode: 'settings',
+      initialRoute: route,
+    })
   }
 
   /**
@@ -704,9 +794,10 @@ export class WindowManager {
       const isFocused = this.focusedModeWindows.has(webContentsId)
       const url = managed.window.webContents.getURL()
       return {
-        type: 'main' as const,
+        type: managed.mode,
         workspaceId: managed.workspaceId,
         bounds: managed.window.getBounds(),
+        ...(managed.mode === 'settings' && { windowMode: 'settings' as const }),
         ...(isFocused && { focused: true }),
         ...(url && { url }),
       }
@@ -725,10 +816,13 @@ export class WindowManager {
    */
   getFocusedWindow(): BrowserWindow | null {
     const focused = BrowserWindow.getFocusedWindow()
-    if (focused && !focused.isDestroyed()) {
-      return focused
-    }
-    return null
+    if (!focused || focused.isDestroyed()) return null
+
+    const managed = this.windows.get(focused.webContents.id)
+    // A settings shell can be OS-focused, but it is never a valid target for
+    // ordinary session deep links or workspace actions.
+    if (managed?.mode === 'settings') return null
+    return focused
   }
 
   /**
@@ -742,8 +836,9 @@ export class WindowManager {
       return focused
     }
 
-    // Fall back to any available window
-    const allWindows = this.getAllWindows()
+    // Fall back to any available regular chat window. Settings shells are
+    // intentionally excluded from ordinary navigation fallback selection.
+    const allWindows = this.getAllWindows().filter(managed => managed.mode === 'main')
     if (allWindows.length > 0) {
       return allWindows[0].window
     }

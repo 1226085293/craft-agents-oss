@@ -16,7 +16,7 @@ export interface IWindowManager {
   getWindowByWebContentsId(webContentsId: number): unknown | null
 
   /** Register (or re-register) a window for a given workspace. */
-  registerWindow(window: unknown, workspaceId: string): void
+  registerWindow(window: unknown, workspaceId: string, windowMode?: 'main' | 'settings'): void
 
   /** Get all tracked windows for a workspace. */
   getAllWindowsForWorkspace(workspaceId: string): unknown[]

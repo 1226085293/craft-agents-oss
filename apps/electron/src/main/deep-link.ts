@@ -37,6 +37,7 @@
 import type { BrowserWindow } from 'electron'
 import { mainLog } from './logger'
 import type { WindowManager } from './window-manager'
+import type { WindowMode } from './window-state'
 import { RPC_CHANNELS } from '../shared/types'
 import type { EventSink } from '@craft-agent/server-core/transport'
 
@@ -49,7 +50,7 @@ export interface DeepLinkTarget {
   action?: string
   actionParams?: Record<string, string>
   /** Window mode - if set, opens in a new window instead of navigating in existing */
-  windowMode?: 'focused' | 'full'
+  windowMode?: WindowMode | 'focused' | 'full'
   /** Right sidebar param (e.g., 'files/path/to/file', 'history') */
   rightSidebar?: string
 }
@@ -74,9 +75,9 @@ export interface DeepLinkNavigation {
 /**
  * Parse window mode from URL search params
  */
-function parseWindowMode(parsed: URL): 'focused' | 'full' | undefined {
+function parseWindowMode(parsed: URL): WindowMode | 'focused' | 'full' | undefined {
   const windowParam = parsed.searchParams.get('window')
-  if (windowParam === 'focused' || windowParam === 'full') {
+  if (windowParam === 'focused' || windowParam === 'full' || windowParam === 'settings') {
     return windowParam
   }
   return undefined
@@ -229,6 +230,21 @@ function buildDeepLinkWithoutWindowParam(url: string): string {
   return parsed.toString()
 }
 
+function isSettingsView(view: string | undefined): boolean {
+  return view === 'settings' || view?.startsWith('settings/') === true
+}
+
+function resolveRegularWorkspaceId(windowManager: WindowManager): string | undefined {
+  const focused = windowManager.getFocusedWindow()
+  if (focused) {
+    const workspaceId = windowManager.getWorkspaceForWindow(focused.webContents.id)
+    if (workspaceId) return workspaceId
+  }
+
+  const regularWindow = windowManager.getAllWindows().find(managed => managed.mode !== 'settings')
+  return regularWindow?.workspaceId
+}
+
 /**
  * Handle a deep link by navigating to the target
  */
@@ -251,6 +267,47 @@ export async function handleDeepLink(
 
   mainLog.info('[DeepLink] Handling:', target)
 
+  // Settings always lives in its own shell, regardless of an old
+  // window=main/focused query or the absence of a window parameter. Resolve
+  // the workspace from the regular chat windows so focusing the settings shell
+  // never becomes a workspace-selection side effect for ordinary deep links.
+  if (isSettingsView(target.view)) {
+    const wsId = target.workspaceId ?? resolveRegularWorkspaceId(windowManager)
+    if (!wsId) {
+      mainLog.error('[DeepLink] No workspace available for settings window')
+      return { success: false, error: 'No workspace available for settings window' }
+    }
+
+    const route = target.view ?? 'settings'
+    const existing = windowManager.getSettingsWindowByWorkspace(wsId)
+    if (existing) {
+      if (existing.isMinimized()) existing.restore()
+      if (!existing.isVisible()) existing.show()
+      existing.focus()
+      await waitForWindowReady(existing)
+    }
+
+    if (existing) {
+      const navigation: DeepLinkNavigation = { view: route }
+      const resolvedClientId = resolveClientId?.(existing.webContents.id)
+      const clientId = resolvedClientId ?? (!resolveClientId ? preferredClientId : undefined)
+      if (sink && clientId) {
+        sink(RPC_CHANNELS.deeplink.NAVIGATE, { to: 'client', clientId }, navigation)
+      } else if (sink) {
+        sink(RPC_CHANNELS.deeplink.NAVIGATE, { to: 'workspace', workspaceId: wsId }, navigation)
+      }
+      return { success: true, windowId: existing.isDestroyed() ? -1 : existing.webContents.id }
+    }
+
+    const window = windowManager.createWindow({
+      workspaceId: wsId,
+      windowMode: 'settings',
+      initialRoute: route,
+    })
+    mainLog.info('[DeepLink] Settings window created:', window.webContents.id)
+    return { success: true, windowId: window.webContents.id }
+  }
+
   // If windowMode is set, create a new window instead of navigating in existing
   if (target.windowMode) {
     mainLog.info('[DeepLink] windowMode detected:', target.windowMode)
@@ -264,11 +321,11 @@ export async function handleDeepLink(
         mainLog.info('[DeepLink] wsId from focused window:', wsId)
       }
       if (!wsId) {
-        const allWindows = windowManager.getAllWindows()
-        mainLog.info('[DeepLink] allWindows count:', allWindows.length)
+        const allWindows = windowManager.getAllWindows().filter(managed => managed.mode !== 'settings')
+        mainLog.info('[DeepLink] regular windows count:', allWindows.length)
         if (allWindows.length > 0) {
           wsId = allWindows[0].workspaceId
-          mainLog.info('[DeepLink] wsId from first window:', wsId)
+          mainLog.info('[DeepLink] wsId from first regular window:', wsId)
         }
       }
     }
@@ -284,6 +341,7 @@ export async function handleDeepLink(
 
     const window = windowManager.createWindow({
       workspaceId: wsId,
+      windowMode: 'main',
       focused: target.windowMode === 'focused',
       initialDeepLink: navUrl,
     })

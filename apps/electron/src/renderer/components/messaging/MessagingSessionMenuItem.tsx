@@ -23,7 +23,8 @@ import { useSetAtom } from 'jotai'
 import { MessageSquare } from 'lucide-react'
 import { toast } from 'sonner'
 import type { TFunction } from 'i18next'
-import { navigate, routes } from '@/lib/navigate'
+import { openSettingsWindow } from '@/lib/settings-window'
+import { useOptionalAppShellContext } from '@/context/AppShellContext'
 import { useMenuComponents } from '@/components/ui/menu-context'
 import { messagingDialogAtom } from '@/atoms/messaging'
 
@@ -57,6 +58,7 @@ export function useMessagingConnect({
 }: UseMessagingConnectOptions) {
   const { t } = useTranslation()
   const setMessagingDialog = useSetAtom(messagingDialogAtom)
+  const appShellCtx = useOptionalAppShellContext()
 
   return React.useCallback(async (platform: MessagingPlatform) => {
     // First-run check — avoid hitting the server if the platform is not
@@ -74,7 +76,7 @@ export function useMessagingConnect({
         } else {
           // Telegram + Lark share the "open Settings" path — both use
           // a Settings dialog rather than an inline connect flow.
-          navigate(routes.view.settings('messaging'))
+          void openSettingsWindow('settings/messaging', appShellCtx?.activeWorkspaceId ?? undefined)
           toast.info(t('toast.telegramNotConfiguredOpenSettings'))
         }
         return
@@ -110,7 +112,7 @@ export function useMessagingConnect({
         error: classifyError(err, t),
       })
     }
-  }, [sessionId, onTelegramNotConfigured, classifyError, setMessagingDialog, t])
+  }, [sessionId, onTelegramNotConfigured, classifyError, setMessagingDialog, appShellCtx?.activeWorkspaceId, t])
 }
 
 export interface MessagingSessionMenuItemProps extends UseMessagingConnectOptions {}

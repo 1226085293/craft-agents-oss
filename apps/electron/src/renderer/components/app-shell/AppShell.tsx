@@ -109,6 +109,7 @@ import { resolveEntityColor } from "@craft-agent/shared/colors"
 import * as storage from "@/lib/local-storage"
 import { toast } from "sonner"
 import { navigate, routes } from "@/lib/navigate"
+import { openSettingsWindow } from "@/lib/settings-window"
 import {
   useNavigation,
   useNavigationState,
@@ -1898,11 +1899,11 @@ function AppShellContent({
     navigate(routes.view.automationsAgentic())
   }, [])
 
-  // Handler for settings view. With no arg → bare `settings` route (navigator-only
-  // in compact mode, App fallback on desktop). With an arg → `settings/<subpage>`.
+  // Open settings in its dedicated window. A missing subpage keeps the
+  // navigator-only `settings` entry and resolves to the app page in the window.
   const handleSettingsClick = useCallback((subpage?: SettingsSubpage) => {
-    navigate(routes.view.settings(subpage))
-  }, [])
+    void openSettingsWindow(subpage ? `settings/${subpage}` : 'settings', activeWorkspaceId ?? undefined)
+  }, [activeWorkspaceId])
 
   // Handler for What's New overlay
   const handleWhatsNewClick = useCallback(async () => {

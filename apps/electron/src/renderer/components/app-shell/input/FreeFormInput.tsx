@@ -15,7 +15,7 @@ import {
 import { Icon_Home, Spinner } from '@craft-agent/ui'
 
 import * as storage from '@/lib/local-storage'
-import { navigate, routes } from '@/lib/navigate'
+import { openSettingsWindow } from '@/lib/settings-window'
 import { Button } from '@/components/ui/button'
 import {
   InlineSlashCommand,
@@ -2102,7 +2102,7 @@ export function FreeFormInput({
                     type="button"
                     onClick={() => {
                       setModelDropdownOpen(false)
-                      navigate(routes.view.settings('ai'))
+                      void openSettingsWindow('settings/ai', workspaceId)
                     }}
                     className="mt-3 text-xs underline text-foreground/70 hover:text-foreground"
                   >

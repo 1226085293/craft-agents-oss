@@ -52,6 +52,7 @@ import {
 import { routes, type Route, type ViewRoute } from '../../shared/routes'
 import { parsePermissionMode } from '@craft-agent/shared/agent/mode-types'
 import { NAVIGATE_EVENT, type NavigateOptions } from '../lib/navigate'
+import { openSettingsWindow } from '@/lib/settings-window'
 import { normalizePanelRouteForReconcile } from './navigation-reconcile'
 import { buildSemanticHistoryKey, canRunInitialRestore } from './navigation-history'
 import * as storage from '@/lib/local-storage'
@@ -862,6 +863,14 @@ export function NavigationProvider({
 
   const navigate = useCallback(
     async (route: Route, options?: NavigateOptions) => {
+      // Settings is an auxiliary window now. Keep legacy in-app callers safe by
+      // opening/focusing that window and returning the chat shell to sessions.
+      if (route.startsWith('settings')) {
+        void openSettingsWindow(route, workspaceId)
+        store.set(updateFocusedPanelRouteAtom, routes.view.allSessions() as ViewRoute)
+        return
+      }
+
       // Reset auto-select suppression on any normal navigation
       if (!options?.skipAutoSelect) {
         suppressAutoSelectRef.current = false
@@ -1063,6 +1072,24 @@ export function NavigationProvider({
     suppressPushRef.current = true
 
     const params = new URLSearchParams(window.location.search)
+
+    // A settings URL may still be present in a main-window history entry from
+    // before the auxiliary shell existed. Open it in the correct workspace and
+    // replace the entry with a harmless chat route before restoring panels.
+    const panelRoutes = params.get('panels')?.split(',').map((entry) => entry.split(':')[0]) ?? []
+    const legacySettingsRoute = [params.get('route'), ...panelRoutes]
+      .find((candidate) => candidate?.startsWith('settings'))
+    if (legacySettingsRoute) {
+      void openSettingsWindow(legacySettingsRoute, workspaceId)
+      params.delete('route')
+      params.delete('panels')
+      params.delete('fi')
+      params.delete('sidebar')
+      params.set('route', routes.view.allSessions())
+      const replacementUrl = new URL(window.location.href)
+      replacementUrl.search = params.toString()
+      window.history.replaceState({ ...window.history.state, seq: 0 }, '', replacementUrl.toString())
+    }
 
     // Reconcile panels + sidebar from current URL
     reconcileFromUrlParamsRef.current(params)

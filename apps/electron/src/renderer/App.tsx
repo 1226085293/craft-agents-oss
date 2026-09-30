@@ -11,6 +11,7 @@ import { generateMessageId } from '../shared/types'
 import { useEventProcessor } from './event-processor'
 import type { AgentEvent, Effect } from './event-processor'
 import { AppShell } from '@/components/app-shell/AppShell'
+import { SettingsWindowShell } from '@/components/app-shell/SettingsWindowShell'
 import type { AppShellContextType } from '@/context/AppShellContext'
 import { OnboardingWizard, ReauthScreen } from '@/components/onboarding'
 import { WorkspacePicker } from '@/components/workspace'
@@ -27,6 +28,7 @@ import { useSession } from '@/hooks/useSession'
 import { useUpdateChecker } from '@/hooks/useUpdateChecker'
 import { NavigationProvider } from '@/contexts/NavigationContext'
 import { navigate, routes } from './lib/navigate'
+import { isSettingsWindowMode as detectSettingsWindowMode, openSettingsWindow } from './lib/settings-window'
 import { attachmentFromContentRef, toDraftRef } from './lib/drafts'
 import { stripMarkdown } from './utils/text'
 import { coerceInputText } from './lib/input-text'
@@ -328,13 +330,14 @@ export default function App() {
   }, [windowWorkspaceId, workspaces])
 
   // Get initial sessionId and focused mode from URL params (for "Open in New Window" feature)
+  const settingsWindowMode = useMemo(() => detectSettingsWindowMode(), [])
   const { initialSessionId, isFocusedMode } = useMemo(() => {
     const params = new URLSearchParams(window.location.search)
     return {
-      initialSessionId: params.get('sessionId'),
-      isFocusedMode: params.get('focused') === 'true',
+      initialSessionId: settingsWindowMode ? null : params.get('sessionId'),
+      isFocusedMode: !settingsWindowMode && params.get('focused') === 'true',
     }
-  }, [])
+  }, [settingsWindowMode])
 
   // Derive remote workspace ID for session matching in NavigationContext
   const windowRemoteWorkspaceId = useMemo(() => {
@@ -782,7 +785,13 @@ export default function App() {
         })
       }
     }).catch(() => { /* non-fatal startup check */ })
-    void loadSessionsFromServer()
+    if (settingsWindowMode) {
+      // The settings shell does not own chat sessions. Mark readiness without
+      // loading the potentially large session/draft collections.
+      setSessionsLoaded(true)
+    } else {
+      void loadSessionsFromServer()
+    }
     // Load LLM connections with authentication status
     window.electronAPI.listLlmConnectionsWithStatus().then((connections) => {
       setLlmConnections(connections)
@@ -791,14 +800,16 @@ export default function App() {
     // Load persisted input drafts into ref (no re-render needed).
     // Attachment files are not read here — hydration happens lazily when the session
     // is opened so app startup isn't delayed by reading potentially large files.
-    window.electronAPI.getAllDrafts().then((drafts) => {
-      if (Object.keys(drafts).length > 0) {
-        sessionDraftsRef.current = new Map(Object.entries(drafts))
-      }
-    })
+    if (!settingsWindowMode) {
+      window.electronAPI.getAllDrafts().then((drafts) => {
+        if (Object.keys(drafts).length > 0) {
+          sessionDraftsRef.current = new Map(Object.entries(drafts))
+        }
+      })
+    }
     // Load app-level theme
     window.electronAPI.getAppTheme().then(setAppTheme)
-  }, [appState, loadSessionsFromServer, resolveDefaultConnectionSlug])
+  }, [appState, loadSessionsFromServer, resolveDefaultConnectionSlug, settingsWindowMode])
 
   // Subscribe to theme change events (live updates when theme.json changes)
   useEffect(() => {
@@ -1188,17 +1199,17 @@ export default function App() {
       setMenuNewChatTrigger(n => n + 1)
     })
     const unsubSettings = window.electronAPI.onMenuOpenSettings(() => {
-      handleOpenSettings()
+      void openSettingsWindow(undefined, windowWorkspaceId)
     })
     const unsubShortcuts = window.electronAPI.onMenuKeyboardShortcuts(() => {
-      navigate(routes.view.settings('shortcuts'))
+      void openSettingsWindow('shortcuts', windowWorkspaceId)
     })
     return () => {
       unsubNewChat()
       unsubSettings()
       unsubShortcuts()
     }
-  }, [])
+  }, [windowWorkspaceId])
 
   const handleCreateSession = useCallback(async (workspaceId: string, options?: import('../shared/types').CreateSessionOptions): Promise<Session> => {
     const session = await window.electronAPI.createSession(workspaceId, options)
@@ -1769,16 +1780,16 @@ export default function App() {
   const handleOpenUrl = linkInterceptor.handleOpenUrl
 
   const handleOpenSettings = useCallback(() => {
-    navigate(routes.view.settings())
-  }, [])
+    void openSettingsWindow(undefined, windowWorkspaceId)
+  }, [windowWorkspaceId])
 
   const handleOpenKeyboardShortcuts = useCallback(() => {
-    navigate(routes.view.settings('shortcuts'))
-  }, [])
+    void openSettingsWindow('shortcuts', windowWorkspaceId)
+  }, [windowWorkspaceId])
 
   const handleOpenStoredUserPreferences = useCallback(() => {
-    navigate(routes.view.settings('preferences'))
-  }, [])
+    void openSettingsWindow('preferences', windowWorkspaceId)
+  }, [windowWorkspaceId])
 
   // Show reset confirmation dialog
   const handleReset = useCallback(() => {
@@ -2102,73 +2113,87 @@ export default function App() {
         <DismissibleLayerProvider>
         <ModalProvider>
         <TooltipProvider delayDuration={0}>
-        <NavigationProvider
-          workspaceId={windowWorkspaceId}
-          workspaceSlug={windowWorkspaceSlug}
-          onSwitchWorkspaceBySlug={handleSwitchWorkspaceBySlug}
-          onCreateSession={handleCreateSession}
-          onInputChange={handleInputChange}
-          getDraft={getDraft}
-          onAutoDeleteEmptySession={handleAutoDeleteEmptySession}
-          isReady={appState === 'ready'}
-          isSessionsReady={sessionsLoaded}
-          remoteWorkspaceId={windowRemoteWorkspaceId}
-        >
-          {/* Handle window close requests (X button, Cmd+W) - close modal first if open */}
-          <WindowCloseHandler />
-
-          {/* Splash screen overlay - fades out when fully ready */}
-          {showSplash && (
-            <SplashScreen
-              isExiting={splashExiting}
-              onExitComplete={handleSplashExitComplete}
-            />
-          )}
-
-          {/* Main UI - always rendered, splash fades away to reveal it */}
-          <div
-            className="h-full flex flex-col text-foreground"
-            style={{ paddingTop: 'var(--topbar-height)' }}
-          >
-            {showTransportConnectionBanner && connectionState && (
-              <TransportConnectionBanner
-                state={connectionState}
-                onRetry={handleReconnectTransport}
+          {settingsWindowMode ? (
+            <div className="h-full min-h-0">
+              <SettingsWindowShell
+                contextValue={appShellContextValue}
+                workspaceId={windowWorkspaceId}
               />
-            )}
-            <div className="flex-1 min-h-0">
-              {sessionLoadError ? (
-                <SessionLoadErrorScreen
-                  message={sessionLoadError}
-                  onRetry={() => { void loadSessionsFromServer() }}
-                />
-              ) : (
-                <AppShell
-                  contextValue={appShellContextValue}
-                  defaultLayout={[20, 32, 48]}
-                  menuNewChatTrigger={menuNewChatTrigger}
-                  isFocusedMode={isFocusedMode}
+              <ResetConfirmationDialog
+                open={showResetDialog}
+                onConfirm={executeReset}
+                onCancel={() => setShowResetDialog(false)}
+              />
+            </div>
+          ) : (
+            <NavigationProvider
+              workspaceId={windowWorkspaceId}
+              workspaceSlug={windowWorkspaceSlug}
+              onSwitchWorkspaceBySlug={handleSwitchWorkspaceBySlug}
+              onCreateSession={handleCreateSession}
+              onInputChange={handleInputChange}
+              getDraft={getDraft}
+              onAutoDeleteEmptySession={handleAutoDeleteEmptySession}
+              isReady={appState === 'ready'}
+              isSessionsReady={sessionsLoaded}
+              remoteWorkspaceId={windowRemoteWorkspaceId}
+            >
+              {/* Handle window close requests (X button, Cmd+W) - close modal first if open */}
+              <WindowCloseHandler />
+
+              {/* Splash screen overlay - fades out when fully ready */}
+              {showSplash && (
+                <SplashScreen
+                  isExiting={splashExiting}
+                  onExitComplete={handleSplashExitComplete}
                 />
               )}
-            </div>
-            <ResetConfirmationDialog
-              open={showResetDialog}
-              onConfirm={executeReset}
-              onCancel={() => setShowResetDialog(false)}
-            />
-          </div>
 
-          {/* File preview overlay — rendered by the link interceptor when a previewable file is clicked */}
-          {linkInterceptor.previewState && (
-            <FilePreviewRenderer
-              state={linkInterceptor.previewState}
-              onClose={linkInterceptor.closePreview}
-              loadDataUrl={linkInterceptor.readFileDataUrl}
-              loadPdfData={linkInterceptor.readFileBinary}
-              isDark={isDark}
-            />
+              {/* Main UI - always rendered, splash fades away to reveal it */}
+              <div
+                className="h-full flex flex-col text-foreground"
+                style={{ paddingTop: 'var(--topbar-height)' }}
+              >
+                {showTransportConnectionBanner && connectionState && (
+                  <TransportConnectionBanner
+                    state={connectionState}
+                    onRetry={handleReconnectTransport}
+                  />
+                )}
+                <div className="flex-1 min-h-0">
+                  {sessionLoadError ? (
+                    <SessionLoadErrorScreen
+                      message={sessionLoadError}
+                      onRetry={() => { void loadSessionsFromServer() }}
+                    />
+                  ) : (
+                    <AppShell
+                      contextValue={appShellContextValue}
+                      defaultLayout={[20, 32, 48]}
+                      menuNewChatTrigger={menuNewChatTrigger}
+                      isFocusedMode={isFocusedMode}
+                    />
+                  )}
+                </div>
+                <ResetConfirmationDialog
+                  open={showResetDialog}
+                  onConfirm={executeReset}
+                  onCancel={() => setShowResetDialog(false)}
+                />
+              </div>
+
+              {/* File preview overlay — rendered by the link interceptor when a previewable file is clicked */}
+              {linkInterceptor.previewState && (
+                <FilePreviewRenderer
+                  state={linkInterceptor.previewState}
+                  onClose={linkInterceptor.closePreview}
+                  loadDataUrl={linkInterceptor.readFileDataUrl}
+                  loadPdfData={linkInterceptor.readFileBinary}
+                  isDark={isDark}
+                />
+              )}
+            </NavigationProvider>
           )}
-        </NavigationProvider>
         </TooltipProvider>
         </ModalProvider>
         </DismissibleLayerProvider>

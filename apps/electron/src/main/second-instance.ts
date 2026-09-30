@@ -8,6 +8,8 @@ interface ActivatableWindow {
 
 interface ManagedWindowLike {
   window: ActivatableWindow
+  /** Settings shells are auxiliary and should not receive app activation. */
+  mode?: 'main' | 'settings'
 }
 
 interface WindowManagerLike {
@@ -26,7 +28,7 @@ export function focusOrCreateWindowForSecondInstance({
   windowManager: WindowManagerLike
   getWorkspaces: () => WorkspaceLike[]
 }): void {
-  const windows = windowManager.getAllWindows()
+  const windows = windowManager.getAllWindows().filter(managed => managed.mode !== 'settings')
   if (windows.length > 0) {
     const win = windows[0].window
     if (win.isMinimized()) win.restore()

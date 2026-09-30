@@ -337,27 +337,39 @@ async function createInitialWindows(): Promise<void> {
   const validWorkspaceIds = workspaces.map(ws => ws.id)
 
   if (savedState?.windows.length) {
-    // Restore windows from saved state
+    // Restore windows from saved state. A settings shell is auxiliary: it is
+    // restored alongside the chat window(s), never in place of the main shell.
     let restoredCount = 0
+    let restoredMainCount = 0
 
     for (const saved of savedState.windows) {
       // Skip invalid workspaces
       if (!validWorkspaceIds.includes(saved.workspaceId)) continue
 
-      // Restore main window with focused mode if it was saved
-      mainLog.info(`Restoring window: workspaceId=${saved.workspaceId}, focused=${saved.focused ?? false}, url=${saved.url ?? 'none'}`)
+      // Restore regular/focused windows and the independent settings shell.
+      // `windowMode` is retained for state files written during the transition;
+      // either marker means settings if the two legacy fields disagree.
+      const isSettingsWindow = saved.type === 'settings' || saved.windowMode === 'settings'
+      const windowMode = isSettingsWindow ? 'settings' : 'main'
+      const focused = isSettingsWindow ? false : (saved.focused ?? false)
+      mainLog.info(`Restoring ${windowMode} window: workspaceId=${saved.workspaceId}, focused=${focused}, url=${saved.url ?? 'none'}`)
       const win = windowManager.createWindow({
         workspaceId: saved.workspaceId,
-        focused: saved.focused,
+        windowMode,
+        focused,
         restoreUrl: saved.url,
       })
       win.setBounds(saved.bounds)
 
       restoredCount++
+      if (windowMode === 'main') restoredMainCount++
     }
 
     if (restoredCount > 0) {
-      mainLog.info(`Restored ${restoredCount} window(s) from saved state`)
+      mainLog.info(`Restored ${restoredCount} window(s) from saved state (${restoredMainCount} main)`)
+    }
+
+    if (restoredMainCount > 0) {
       return
     }
   }

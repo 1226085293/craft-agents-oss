@@ -1,4 +1,4 @@
-import { navigate, routes } from '@/lib/navigate'
+import { openSettingsWindow } from '@/lib/settings-window'
 import { dispatchFocusInputEvent } from '@/components/app-shell/input/focus-input-events'
 import type { Message } from '../../../shared/types'
 
@@ -24,7 +24,9 @@ export function handleErrorMessageAction(
   {
     sessionId,
     onOpenUrl,
-    onOpenSettings = () => navigate(routes.view.settings()),
+    onOpenSettings = () => {
+      void openSettingsWindow()
+    },
     onRetryFocus = dispatchFocusInputEvent,
     onRetry,
   }: HandleErrorMessageActionOptions = {},

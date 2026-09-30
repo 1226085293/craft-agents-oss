@@ -20,6 +20,8 @@ import {
   StyledDropdownMenuSeparator,
 } from './styled-dropdown'
 import { type DocFeature, getDocUrl } from '@craft-agent/shared/docs/doc-links'
+import { openSettingsWindow } from '@/lib/settings-window'
+import { useOptionalAppShellContext } from '@/context/AppShellContext'
 
 interface HeaderMenuProps {
   /** Route string for Open in New Window action */
@@ -32,10 +34,16 @@ interface HeaderMenuProps {
 
 export function HeaderMenu({ route, children, helpFeature }: HeaderMenuProps) {
   const { t } = useTranslation()
+  const appShellCtx = useOptionalAppShellContext()
+  const isSettingsRoute = route === 'settings' || route.startsWith('settings/')
   const handleOpenInNewWindow = async () => {
-    const separator = route.includes('?') ? '&' : '?'
-    const url = `craftagents://${route}${separator}window=focused`
     try {
+      if (isSettingsRoute) {
+        await openSettingsWindow(route, appShellCtx?.activeWorkspaceId ?? undefined)
+        return
+      }
+      const separator = route.includes('?') ? '&' : '?'
+      const url = `craftagents://${route}${separator}window=focused`
       await window.electronAPI?.openUrl(url)
     } catch (error) {
       console.error('[HeaderMenu] openUrl failed:', error)

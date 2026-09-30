@@ -1,4 +1,5 @@
 import { Component, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ErrorInfo, type ReactNode } from 'react'
+import { EscapeInterruptProvider } from '@/context/EscapeInterruptContext'
 import { useTranslation } from 'react-i18next'
 import { Settings2 } from 'lucide-react'
 
@@ -37,41 +38,92 @@ class SettingsPageErrorBoundary extends Component<
     subpage: SettingsSubpage
     onRetry: () => void
   },
-  { hasError: boolean }
+  { hasError: boolean; message: string; stack: string; componentStack: string }
 > {
-  state = { hasError: false }
+  state = { hasError: false, message: '', stack: '', componentStack: '' }
 
   static getDerivedStateFromError() {
-    return { hasError: true }
+    return { hasError: true, message: '', stack: '', componentStack: '' }
   }
 
   componentDidCatch(error: unknown, errorInfo: ErrorInfo) {
-    console.error(
-      '[SettingsCrash] uncaught error in settings page',
-      this.props.subpage,
-      error instanceof Error ? error.stack ?? String(error) : String(error),
-      errorInfo.componentStack,
-    )
+    const message = error instanceof Error ? error.message : String(error)
+    const stack = error instanceof Error ? error.stack ?? String(error) : String(error)
+    const componentStack = errorInfo.componentStack ?? ''
+    console.error('[SettingsCrash] uncaught error in settings page', this.props.subpage, stack, componentStack)
+    // Surface the real stack in the fallback card so it can be read/screenshotted.
+    this.setState({ message, stack, componentStack })
   }
 
   render() {
     if (this.state.hasError) {
-      return <SettingsPageErrorFallback subpage={this.props.subpage} onRetry={this.props.onRetry} />
+      return (
+        <SettingsPageErrorFallback
+          subpage={this.props.subpage}
+          onRetry={this.props.onRetry}
+          detail={{
+            message: this.state.message,
+            stack: this.state.stack,
+            componentStack: this.state.componentStack,
+          }}
+        />
+      )
     }
     return this.props.children
   }
 }
 
-function SettingsPageErrorFallback({ subpage, onRetry }: { subpage: SettingsSubpage; onRetry: () => void }) {
+interface SettingsPageCrashDetail {
+  message?: string
+  stack?: string
+  componentStack?: string
+}
+
+function SettingsPageErrorFallback({
+  subpage,
+  onRetry,
+  detail,
+}: {
+  subpage: SettingsSubpage
+  onRetry: () => void
+  detail?: SettingsPageCrashDetail
+}) {
   const { t } = useTranslation()
+  const hasDetail = Boolean(detail && (detail.message || detail.stack || detail.componentStack))
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+    <div className="flex h-full flex-col items-center justify-center gap-3 overflow-auto p-8 text-center">
       <div className="text-sm font-medium text-foreground">
         {t('crash.somethingWentWrong')}
       </div>
       <div className="max-w-xs text-xs text-muted-foreground">
         {t('settings.pageError', { defaultValue: 'The "{{subpage}}" page failed to load.', subpage })}
       </div>
+      {hasDetail && (
+        <div className="w-full max-w-[520px] space-y-2 text-left">
+          {detail?.message ? (
+            <div className="rounded-md border border-border/60 bg-muted/40 p-2 text-[11px] text-foreground/90">
+              <div className="mb-1 font-medium text-muted-foreground">message</div>
+              <div className="whitespace-pre-wrap break-words">{detail.message}</div>
+            </div>
+          ) : null}
+          {detail?.stack ? (
+            <div className="rounded-md border border-border/60 bg-background p-2 text-[11px] leading-snug text-foreground/80">
+              <div className="mb-1 font-medium text-muted-foreground">stack</div>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono">
+                {detail.stack}
+              </pre>
+            </div>
+          ) : null}
+          {detail?.componentStack ? (
+            <div className="rounded-md border border-border/60 bg-background p-2 text-[11px] leading-snug text-foreground/80">
+              <div className="mb-1 font-medium text-muted-foreground">component stack</div>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono">
+                {detail.componentStack}
+              </pre>
+            </div>
+          ) : null}
+        </div>
+      )}
       <button
         type="button"
         onClick={onRetry}
@@ -260,6 +312,7 @@ export function SettingsWindowShell({ contextValue, workspaceId }: SettingsWindo
       onSubpageChange={setSubpage}
     >
       <AppShellProvider value={contextValue}>
+        <EscapeInterruptProvider>
         <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
           <header
             className={cn(
@@ -306,6 +359,7 @@ export function SettingsWindowShell({ contextValue, workspaceId }: SettingsWindo
             </main>
           </div>
         </div>
+        </EscapeInterruptProvider>
       </AppShellProvider>
     </SettingsWindowNavigationProvider>
   )

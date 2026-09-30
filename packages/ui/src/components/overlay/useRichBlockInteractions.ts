@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type RefObject } from 'react'
 import { RICH_BLOCK_DEFAULTS, type RichBlockInteractionOptions } from './rich-block-interaction-spec'
 
 export function clampScale(value: number, min: number, max: number): number {
@@ -32,9 +32,70 @@ export function computeFitScale(
   return clampScale(Math.min(scaleX, scaleY), min, max)
 }
 
+/**
+ * Zoom level that fills the whole viewport (content may be cropped), with the
+ * same 90% padding as `computeFitScale`. Used to open previews edge-to-edge
+ * so wide or small images don't render as a centered strip on the backdrop.
+ */
+export function computeCoverScale(
+  container: { width: number; height: number },
+  content: { width: number; height: number },
+  min: number,
+  max: number,
+): number {
+  const scaleX = (container.width * 0.9) / content.width
+  const scaleY = (container.height * 0.9) / content.height
+  return clampScale(Math.max(scaleX, scaleY), min, max)
+}
+
+/**
+ * Duck-type check for DOM nodes: every Node exposes a numeric `nodeType`.
+ * Deliberately global-free (no `instanceof Node`) so it stays correct in
+ * non-DOM environments and trivially unit-testable with plain object fakes.
+ */
+export function isNodeTarget(value: unknown): boolean {
+  return (
+    value != null &&
+    typeof value === 'object' &&
+    typeof (value as { nodeType?: unknown }).nodeType === 'number'
+  )
+}
+
+/**
+ * Predicate deciding whether a wheel event should be handled as rich-block zoom.
+ * The wheel listener is attached to `document` (see the wheel effect below), so
+ * every event is gated here: only events whose target lies inside the preview
+ * container zoom; everything else keeps native scroll behavior.
+ *
+ * Exported for unit testing — it is deliberately DOM-shape-agnostic so it can be
+ * exercised with plain object fakes.
+ */
+export function shouldHandleWheel(
+  container: HTMLElement | null,
+  target: unknown,
+): boolean {
+  if (!container || !isNodeTarget(target)) return false
+  return container.contains(target as Node)
+}
+
 interface UseRichBlockInteractionsOptions extends RichBlockInteractionOptions {
   containerRef: RefObject<HTMLDivElement | null>
 }
+
+/**
+ * Single source of truth for the zoomed view: scale + center-anchored
+ * translate. Kept in ONE state object so every gesture (wheel, drag, step)
+ * applies a single pure update — the previous split-state version nested a
+ * `setTranslate` inside a `setScale` updater, which is impure and drifted
+ * under React updater re-invocation.
+ */
+interface InteractionView {
+  scale: number
+  x: number
+  y: number
+}
+
+const DEFAULT_VIEW: InteractionView = { scale: 1, x: 0, y: 0 }
 
 export function useRichBlockInteractions({
   isOpen,
@@ -45,8 +106,7 @@ export function useRichBlockInteractions({
   wheelSensitivity = RICH_BLOCK_DEFAULTS.wheelSensitivity,
   keyboardShortcuts = true,
 }: UseRichBlockInteractionsOptions) {
-  const [scale, setScale] = useState(1)
-  const [translate, setTranslate] = useState({ x: 0, y: 0 })
+  const [view, setView] = useState<InteractionView>(DEFAULT_VIEW)
   const [isDragging, setIsDragging] = useState(false)
   const [isAnimating, setIsAnimating] = useState(false)
 
@@ -54,26 +114,26 @@ export function useRichBlockInteractions({
   const dragStartRef = useRef({ x: 0, y: 0 })
   const translateAtDragStartRef = useRef({ x: 0, y: 0 })
 
+  const scale = view.scale
+  const translate = useMemo(() => ({ x: view.x, y: view.y }), [view])
+
   const reset = useCallback(() => {
     setIsAnimating(true)
-    setScale(1)
-    setTranslate({ x: 0, y: 0 })
+    setView(DEFAULT_VIEW)
   }, [])
 
   const zoomByStep = useCallback((direction: 'in' | 'out') => {
     setIsAnimating(true)
-    setScale(prev => {
-      const next = zoomStepScale(prev, direction, zoomStepFactor, minScale, maxScale)
-      const ratio = next / prev
-      setTranslate(t => ({ x: t.x * ratio, y: t.y * ratio }))
-      return next
+    setView(v => {
+      const next = zoomStepScale(v.scale, direction, zoomStepFactor, minScale, maxScale)
+      const ratio = next / v.scale
+      return { scale: next, x: v.x * ratio, y: v.y * ratio }
     })
   }, [zoomStepFactor, minScale, maxScale])
 
   const zoomToPreset = useCallback((percent: number) => {
     setIsAnimating(true)
-    setScale(clampScale(percent / 100, minScale, maxScale))
-    setTranslate({ x: 0, y: 0 })
+    setView({ scale: clampScale(percent / 100, minScale, maxScale), x: 0, y: 0 })
   }, [minScale, maxScale])
 
   const zoomToFit = useCallback((content: { width: number; height: number } | null) => {
@@ -86,8 +146,20 @@ export function useRichBlockInteractions({
     const rect = container.getBoundingClientRect()
     const fit = computeFitScale({ width: rect.width, height: rect.height }, content, minScale, maxScale)
     setIsAnimating(true)
-    setScale(fit)
-    setTranslate({ x: 0, y: 0 })
+    setView({ scale: fit, x: 0, y: 0 })
+  }, [containerRef, minScale, maxScale, reset])
+
+  const zoomToCover = useCallback((content: { width: number; height: number } | null) => {
+    const container = containerRef.current
+    if (!container || !content) {
+      reset()
+      return
+    }
+
+    const rect = container.getBoundingClientRect()
+    const cover = computeCoverScale({ width: rect.width, height: rect.height }, content, minScale, maxScale)
+    setIsAnimating(true)
+    setView({ scale: cover, x: 0, y: 0 })
   }, [containerRef, minScale, maxScale, reset])
 
   const onMouseDown = useCallback((e: ReactMouseEvent) => {
@@ -97,9 +169,9 @@ export function useRichBlockInteractions({
     setIsDragging(true)
     setIsAnimating(false)
     dragStartRef.current = { x: e.clientX, y: e.clientY }
-    setTranslate(t => {
-      translateAtDragStartRef.current = { x: t.x, y: t.y }
-      return t
+    setView(v => {
+      translateAtDragStartRef.current = { x: v.x, y: v.y }
+      return v
     })
   }, [])
 
@@ -111,10 +183,11 @@ export function useRichBlockInteractions({
     const handleMouseMove = (e: MouseEvent) => {
       if (!isDraggingRef.current) return
       setIsAnimating(false)
-      setTranslate({
+      setView(v => ({
+        ...v,
         x: translateAtDragStartRef.current.x + (e.clientX - dragStartRef.current.x),
         y: translateAtDragStartRef.current.y + (e.clientY - dragStartRef.current.y),
-      })
+      }))
     }
 
     const handleMouseUp = () => {
@@ -134,13 +207,18 @@ export function useRichBlockInteractions({
   useEffect(() => {
     if (!isOpen) return
 
-    const container = containerRef.current
-    if (!container) return
-
+    // The preview mounts through a Radix Portal + Presence: portal content attaches
+    // ONE COMMIT AFTER `isOpen` flips, so when this effect first runs the ref is
+    // still null and a container-attached listener is silently never registered.
+    // Attaching to `document` (always available) and gating each event with
+    // `shouldHandleWheel` fixes that: zoom works regardless of portal timing,
+    // and wheels outside the preview keep native scroll behavior.
     const handleWheel = (e: WheelEvent) => {
+      const container = containerRef.current
+      if (!container || !shouldHandleWheel(container, e.target)) return
+
       e.preventDefault()
       e.stopPropagation()
-      setIsAnimating(false)
 
       const rect = container.getBoundingClientRect()
       const cursor = {
@@ -151,16 +229,19 @@ export function useRichBlockInteractions({
       const sensitivity = e.ctrlKey ? wheelSensitivity.trackpadPinch : wheelSensitivity.mouse
       const factor = Math.pow(2, -e.deltaY * sensitivity)
 
-      setScale(prev => {
-        const next = clampScale(prev * factor, minScale, maxScale)
-        const ratio = next / prev
-        setTranslate(t => cursorAnchoredTranslate(t, cursor, ratio))
-        return next
+      // Glide instead of snap: consumers apply a short CSS transition while
+      // `isAnimating` is true, so rapid wheel/trackpad streams retarget an
+      // interruptible transition and feel continuous.
+      setIsAnimating(true)
+      setView(v => {
+        const next = clampScale(v.scale * factor, minScale, maxScale)
+        const anchored = cursorAnchoredTranslate({ x: v.x, y: v.y }, cursor, next / v.scale)
+        return { scale: next, ...anchored }
       })
     }
 
-    container.addEventListener('wheel', handleWheel, { passive: false })
-    return () => container.removeEventListener('wheel', handleWheel)
+    document.addEventListener('wheel', handleWheel, { passive: false })
+    return () => document.removeEventListener('wheel', handleWheel)
   }, [isOpen, containerRef, minScale, maxScale, wheelSensitivity])
 
   useEffect(() => {
@@ -188,8 +269,7 @@ export function useRichBlockInteractions({
 
   useEffect(() => {
     if (!isOpen) return
-    setScale(1)
-    setTranslate({ x: 0, y: 0 })
+    setView(DEFAULT_VIEW)
     setIsDragging(false)
     isDraggingRef.current = false
   }, [isOpen])
@@ -203,6 +283,7 @@ export function useRichBlockInteractions({
     zoomByStep,
     zoomToPreset,
     zoomToFit,
+    zoomToCover,
     reset,
     onMouseDown,
     onDoubleClick,

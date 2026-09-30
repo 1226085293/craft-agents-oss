@@ -3,7 +3,7 @@
  */
 
 import * as React from 'react'
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Image } from 'lucide-react'
 import { PreviewOverlay } from './PreviewOverlay'
@@ -16,12 +16,16 @@ import { useRichBlockInteractions } from './useRichBlockInteractions'
 interface PreviewItem {
   src: string
   label?: string
+  /** Inline data/blob URL, when the image is not loaded from a filesystem path. */
+  dataUrl?: string
+  /** Real filesystem path, when the item can be opened or revealed. */
+  filePath?: string
 }
 
 export interface ImagePreviewOverlayProps {
   isOpen: boolean
   onClose: () => void
-  filePath: string
+  filePath?: string
   /** Optional session ID — scopes the badge's Open/Reveal to that session's working directory */
   sessionId?: string
   items?: PreviewItem[]
@@ -45,7 +49,7 @@ export function ImagePreviewOverlay({
   const { t } = useTranslation()
   const resolvedItems = useMemo<PreviewItem[]>(() => {
     if (items && items.length > 0) return items
-    return [{ src: filePath }]
+    return filePath ? [{ src: filePath }] : []
   }, [items, filePath])
 
   const [activeIdx, setActiveIdx] = useState(initialIndex)
@@ -65,6 +69,7 @@ export function ImagePreviewOverlay({
     zoomByStep,
     zoomToPreset,
     zoomToFit,
+    zoomToCover,
     reset,
     onMouseDown,
     onDoubleClick,
@@ -74,7 +79,21 @@ export function ImagePreviewOverlay({
   })
 
   const activeItem = resolvedItems[activeIdx]
-  const activeDataUrl = activeItem ? contentCache[activeItem.src] : null
+  const activeInlineDataUrl = activeItem?.dataUrl
+    ?? (activeItem?.src && (activeItem.src.startsWith('data:') || activeItem.src.startsWith('blob:'))
+      ? activeItem.src
+      : undefined)
+  const activeDataUrl = activeItem
+    ? contentCache[activeItem.src] ?? activeInlineDataUrl ?? null
+    : null
+  const activeFilePath = activeItem
+    ? activeItem.filePath
+      ?? (activeItem.src && !activeItem.src.startsWith('data:') && !activeItem.src.startsWith('blob:')
+        ? activeItem.src
+        : undefined)
+    : filePath && !filePath.startsWith('data:') && !filePath.startsWith('blob:')
+      ? filePath
+      : undefined
   const activeDimensions = activeItem ? dimensionsCache[activeItem.src] : null
 
   useEffect(() => {
@@ -101,7 +120,11 @@ export function ImagePreviewOverlay({
     setIsLoading(true)
     setError(null)
 
-    loadDataUrl(activeItem.src)
+    const dataUrlPromise = activeInlineDataUrl
+      ? Promise.resolve(activeInlineDataUrl)
+      : loadDataUrl(activeItem.src)
+
+    dataUrlPromise
       .then((url) => {
         if (!cancelled) {
           setContentCache((prev) => ({ ...prev, [activeItem.src]: url }))
@@ -126,9 +149,27 @@ export function ImagePreviewOverlay({
       })
 
     return () => { cancelled = true }
-  }, [isOpen, activeItem?.src, loadDataUrl, contentCache])
+  }, [isOpen, activeItem?.src, activeInlineDataUrl, loadDataUrl, contentCache])
 
   const isDefaultView = scale === 1 && translate.x === 0 && translate.y === 0
+
+  // Once the image's natural dimensions are known, fill the viewport (cover fit)
+  // instead of leaving small or wide images as a centered strip on the
+  // backdrop. Skipped when the user already zoomed/panned; re-armed on close
+  // so reopening applies it again.
+  const autoCoveredRef = useRef<Set<string>>(new Set())
+
+  useEffect(() => {
+    if (!isOpen) autoCoveredRef.current.clear()
+  }, [isOpen])
+
+  useEffect(() => {
+    if (!isOpen || !activeItem?.src || !activeDimensions) return
+    if (autoCoveredRef.current.has(activeItem.src)) return
+    autoCoveredRef.current.add(activeItem.src)
+    if (scale !== 1 || translate.x !== 0 || translate.y !== 0) return
+    zoomToCover(activeDimensions)
+  }, [isOpen, activeItem?.src, activeDimensions, scale, translate, zoomToCover])
 
   const headerActions = (
     <div className="flex items-center gap-2">
@@ -147,7 +188,9 @@ export function ImagePreviewOverlay({
         resetDisabled={isDefaultView}
       />
 
-      <CopyButton content={activeItem?.src || filePath} title={t('common.copyPath')} className="bg-background shadow-minimal" />
+      {activeFilePath && (
+        <CopyButton content={activeFilePath} title={t('common.copyPath')} className="bg-background shadow-minimal" />
+      )}
     </div>
   )
 
@@ -161,9 +204,9 @@ export function ImagePreviewOverlay({
         label: 'Image',
         variant: 'purple',
       }}
-      filePath={activeItem?.src || filePath}
+      filePath={activeFilePath}
       sessionId={sessionId}
-      title={title}
+      title={title ?? (!activeFilePath ? activeItem?.label : undefined)}
       error={error ? { label: 'Load Failed', message: error } : undefined}
       headerActions={headerActions}
     >
@@ -183,7 +226,11 @@ export function ImagePreviewOverlay({
         {activeDataUrl && (
           <img
             src={activeDataUrl}
-            alt={activeItem?.label || activeItem?.src.split('/').pop() || 'Image preview'}
+            alt={activeItem?.label
+              || (activeItem?.src && !activeItem.src.startsWith('data:') && !activeItem.src.startsWith('blob:')
+                ? activeItem.src.split(/[\\/]/).pop()
+                : undefined)
+              || 'Image preview'}
             className="max-w-full max-h-full object-contain rounded-sm"
             draggable={false}
             onTransitionEnd={() => setIsAnimating(false)}

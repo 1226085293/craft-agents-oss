@@ -87,8 +87,8 @@ Formats like HEIC/HEIF/TIFF may not render in-app. For those files, use external
 - Multi-item blocks show item navigator in the header
 
 ### Fullscreen Overlay
-- Larger fit-to-container image view
-- Mouse wheel zooms in/out around the pointer; drag pans while zoomed
+- Opens edge-to-edge: on first load the image is auto-fit to **fill the viewport** (cover fit, clamped to the 25%–400% zoom range) so wide or small images don't appear as a centered strip on the backdrop. Use the zoom controls / scroll out to see the whole image; “Fit to screen” shows the full image (contain).
+- Mouse wheel zooms in/out smoothly around the pointer (short glide, cursor-anchored); Ctrl+pinch works on trackpads; drag pans
 - Item navigation (arrows/dropdown) for multi-item sets
 - Copy path action in header
 - File path badge supports external open/reveal actions

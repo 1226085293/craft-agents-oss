@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   clampScale,
+  computeCoverScale,
   computeFitScale,
   cursorAnchoredTranslate,
   shouldHandleWheel,
@@ -33,6 +34,27 @@ describe('useRichBlockInteractions helpers', () => {
     )
     // min((1000*0.9)/2000 = 0.45, (800*0.9)/1000 = 0.72) = 0.45
     expect(fit).toBeCloseTo(0.45)
+  })
+
+  it('computes zoom-to-cover scale with 90% padding (fills the viewport)', () => {
+    const cover = computeCoverScale(
+      { width: 1000, height: 800 },
+      { width: 2000, height: 1000 },
+      0.25,
+      4,
+    )
+    // max((1000*0.9)/2000 = 0.45, (800*0.9)/1000 = 0.72) = 0.72
+    expect(cover).toBeCloseTo(0.72)
+    // a small wide image upscales to fill (632x328 in 1312x804 → 2.206)
+    expect(
+      computeCoverScale({ width: 1312, height: 804 }, { width: 632, height: 328 }, 0.25, 4),
+    ).toBeCloseTo(2.206, 2)
+    // extremely wide content clamps at the max bound
+    expect(computeCoverScale({ width: 1000, height: 800 }, { width: 200, height: 20000 }, 0.25, 4)).toBe(4)
+    // extremely large content clamps at the min bound
+    expect(
+      computeCoverScale({ width: 100, height: 100 }, { width: 100000, height: 100000 }, 0.25, 4),
+    ).toBe(0.25)
   })
 
   describe('shouldHandleWheel (document-level wheel gating)', () => {

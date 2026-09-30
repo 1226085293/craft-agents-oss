@@ -74,6 +74,19 @@ export async function openSettingsWindow(
   subpage?: string | null,
   workspaceId?: string | null,
 ): Promise<void> {
+  const route = normalizeSettingsRoute(subpage)
+
+  // Preferred: dedicated IPC that directly calls windowManager.focusOrCreateSettingsWindow.
+  if (window.electronAPI?.openSettingsWindow) {
+    try {
+      await window.electronAPI.openSettingsWindow(workspaceId ?? undefined, route)
+      return
+    } catch (err) {
+      console.warn('[settings-window] dedicated IPC failed, falling back to openUrl:', err)
+    }
+  }
+
+  // Fallback: deep-link chain (openUrl → classifyExternalUrl → handleDeepLink).
   const url = buildSettingsWindowDeepLink(subpage, workspaceId)
   await window.electronAPI?.openUrl(url)
 }

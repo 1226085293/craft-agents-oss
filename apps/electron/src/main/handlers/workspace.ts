@@ -6,6 +6,7 @@ export const GUI_HANDLED_CHANNELS = [
   RPC_CHANNELS.remote.TEST_CONNECTION,
   RPC_CHANNELS.window.OPEN_WORKSPACE,
   RPC_CHANNELS.window.OPEN_SESSION_IN_NEW_WINDOW,
+  RPC_CHANNELS.window.OPEN_SETTINGS_WINDOW,
   RPC_CHANNELS.window.CLOSE,
   RPC_CHANNELS.window.CONFIRM_CLOSE,
   RPC_CHANNELS.window.CANCEL_CLOSE,
@@ -111,6 +112,19 @@ export function registerWorkspaceGuiHandlers(server: RpcServer, deps: HandlerDep
       focused: true,
       initialDeepLink: deepLink,
     })
+  })
+
+  // Open or focus the dedicated settings window for a workspace
+  server.handle(RPC_CHANNELS.window.OPEN_SETTINGS_WINDOW, async (_ctx, workspaceId: string, route?: string) => {
+    if (!windowManager) return
+    if (!workspaceId) {
+      // Resolve from the focused window when the caller didn't supply one
+      const focused = windowManager.getFocusedWindow()
+      const resolved = focused ? windowManager.getWorkspaceForWindow(focused.webContents.id) : undefined
+      if (!resolved) return
+      workspaceId = resolved
+    }
+    windowManager.focusOrCreateSettingsWindow(workspaceId, route ?? 'settings')
   })
 
   // Close the calling window (triggers close event which may be intercepted)

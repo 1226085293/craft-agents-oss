@@ -74,6 +74,7 @@ export const CHANNEL_MAP = {
   getWindowMode: invoke(RPC_CHANNELS.window.GET_MODE),
   openWorkspace: invoke(RPC_CHANNELS.window.OPEN_WORKSPACE),
   openSessionInNewWindow: invoke(RPC_CHANNELS.window.OPEN_SESSION_IN_NEW_WINDOW),
+  openSettingsWindow: invoke(RPC_CHANNELS.window.OPEN_SETTINGS_WINDOW),
   switchWorkspace: invoke(RPC_CHANNELS.window.SWITCH_WORKSPACE),
   closeWindow: invoke(RPC_CHANNELS.window.CLOSE),
   confirmCloseWindow: invoke(RPC_CHANNELS.window.CONFIRM_CLOSE),

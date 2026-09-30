@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { Component, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ErrorInfo, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Settings2 } from 'lucide-react'
 
@@ -24,6 +24,64 @@ import type { NavigationState, RightSidebarPanel, SettingsSubpage } from '../../
 import { cn } from '@/lib/utils'
 
 const SETTINGS_TITLEBAR_HEIGHT = 48
+
+/**
+ * Local error boundary for settings subpages. A crash in one settings page
+ * (e.g. a data table) must not take the whole settings window down into the
+ * app-level CrashFallback. We log the real stack (tagged for DevTools capture)
+ * and offer an in-place retry instead of a full-window "restart the app" screen.
+ */
+class SettingsPageErrorBoundary extends Component<
+  {
+    children: ReactNode
+    subpage: SettingsSubpage
+    onRetry: () => void
+  },
+  { hasError: boolean }
+> {
+  state = { hasError: false }
+
+  static getDerivedStateFromError() {
+    return { hasError: true }
+  }
+
+  componentDidCatch(error: unknown, errorInfo: ErrorInfo) {
+    console.error(
+      '[SettingsCrash] uncaught error in settings page',
+      this.props.subpage,
+      error instanceof Error ? error.stack ?? String(error) : String(error),
+      errorInfo.componentStack,
+    )
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return <SettingsPageErrorFallback subpage={this.props.subpage} onRetry={this.props.onRetry} />
+    }
+    return this.props.children
+  }
+}
+
+function SettingsPageErrorFallback({ subpage, onRetry }: { subpage: SettingsSubpage; onRetry: () => void }) {
+  const { t } = useTranslation()
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
+      <div className="text-sm font-medium text-foreground">
+        {t('crash.somethingWentWrong')}
+      </div>
+      <div className="max-w-xs text-xs text-muted-foreground">
+        {t('settings.pageError', { defaultValue: 'The "{{subpage}}" page failed to load.', subpage })}
+      </div>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="rounded-md bg-background px-4 py-1.5 text-[13px] text-foreground/80 shadow-minimal"
+      >
+        {t('crash.reload')}
+      </button>
+    </div>
+  )
+}
 
 interface SettingsWindowNavigationProviderProps {
   children: ReactNode
@@ -174,6 +232,8 @@ export function SettingsWindowShell({ contextValue, workspaceId }: SettingsWindo
   const [subpage, setSubpage] = useState<SettingsSubpage>(() =>
     settingsSubpageFromRoute(settingsRouteFromLocation()),
   )
+  // Bumped on in-place retry to remount (and reset) the page error boundary.
+  const [pageResetKey, setPageResetKey] = useState(0)
   const SettingsPageComponent = getSettingsPageComponent(subpage)
   const CurrentIcon = SETTINGS_ICONS[subpage as keyof typeof SETTINGS_ICONS] ?? Settings2
   const hasMacStoplights = isMac && !isWebUI
@@ -236,7 +296,13 @@ export function SettingsWindowShell({ contextValue, workspaceId }: SettingsWindo
               />
             </aside>
             <main className="min-w-0 flex-1 overflow-hidden">
-              <SettingsPageComponent />
+              <SettingsPageErrorBoundary
+                key={`settings-page-${subpage}-${pageResetKey}`}
+                subpage={subpage}
+                onRetry={() => setPageResetKey((k) => k + 1)}
+              >
+                <SettingsPageComponent />
+              </SettingsPageErrorBoundary>
             </main>
           </div>
         </div>

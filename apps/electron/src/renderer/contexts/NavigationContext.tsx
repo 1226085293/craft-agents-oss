@@ -866,6 +866,7 @@ export function NavigationProvider({
       // Settings is an auxiliary window now. Keep legacy in-app callers safe by
       // opening/focusing that window and returning the chat shell to sessions.
       if (route === 'settings' || route.startsWith('settings/')) {
+        console.warn('[Navigation] settings route intercepted in main window:', route)
         void openSettingsWindow(route, workspaceId)
         store.set(updateFocusedPanelRouteAtom, routes.view.allSessions() as ViewRoute)
         return

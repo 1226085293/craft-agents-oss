@@ -501,6 +501,17 @@ export class WindowManager {
         return
       }
 
+      // Settings windows have no modal/panel to layer-dismiss and do not mount a
+      // renderer WindowCloseHandler, so acknowledging the close request would only
+      // fall through to the 3s pending-close fallback (perceived as a hang). Close
+      // them immediately instead. Look up the live mode at close time — the entry
+      // is only removed on the 'closed' event that fires after this handler.
+      if (this.windows.get(window.webContents.id)?.mode === 'settings') {
+        const pending = this.pendingCloseTimeouts.get(window.webContents.id)
+        if (pending) clearTimeout(pending)
+        return
+      }
+
       // Check if renderer is ready (mainFrame exists) - if not, allow close directly
       if (!window.webContents.isDestroyed() && window.webContents.mainFrame) {
         event.preventDefault()

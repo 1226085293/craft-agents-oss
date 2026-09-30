@@ -313,6 +313,8 @@ export interface ElectronAPI {
   getWindowMode(): Promise<string | null>
   openWorkspace(workspaceId: string): Promise<void>
   openSessionInNewWindow(workspaceId: string, sessionId: string): Promise<void>
+  /** Open or focus the dedicated settings window for a workspace. */
+  openSettingsWindow(workspaceId?: string, route?: string): Promise<void>
   switchWorkspace(workspaceId: string): Promise<void>
   closeWindow(): Promise<void>
   confirmCloseWindow(): Promise<void>

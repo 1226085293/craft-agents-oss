@@ -865,7 +865,7 @@ export function NavigationProvider({
     async (route: Route, options?: NavigateOptions) => {
       // Settings is an auxiliary window now. Keep legacy in-app callers safe by
       // opening/focusing that window and returning the chat shell to sessions.
-      if (route.startsWith('settings')) {
+      if (route === 'settings' || route.startsWith('settings/')) {
         void openSettingsWindow(route, workspaceId)
         store.set(updateFocusedPanelRouteAtom, routes.view.allSessions() as ViewRoute)
         return
@@ -1078,7 +1078,7 @@ export function NavigationProvider({
     // replace the entry with a harmless chat route before restoring panels.
     const panelRoutes = params.get('panels')?.split(',').map((entry) => entry.split(':')[0]) ?? []
     const legacySettingsRoute = [params.get('route'), ...panelRoutes]
-      .find((candidate) => candidate?.startsWith('settings'))
+      .find((candidate) => candidate === 'settings' || candidate?.startsWith('settings/'))
     if (legacySettingsRoute) {
       void openSettingsWindow(legacySettingsRoute, workspaceId)
       params.delete('route')
@@ -1161,6 +1161,9 @@ export function NavigationProvider({
       }
 
       if (route) {
+        // Settings routes are owned by the auxiliary settings window. The main
+        // chat shell must not re-navigate to them (or loop via the open guard).
+        if (route === 'settings' || route.startsWith('settings/')) return
         const navState = parseRouteToNavigationState(route)
         if (!navState && !route.startsWith('action/')) {
           toast.error(t('toast.invalidLink'), {

@@ -25,6 +25,15 @@ const FILE_PATH_TARGET_REGEX = new RegExp(
   'i'
 )
 
+// Windows drive-letter paths (`C:\\Users\\...` or `C:/Users/...`). Accepted
+// regardless of extension so directory links (e.g. a results folder) route to
+// onFileClick -> shell.openPath instead of being misrouted as URLs to
+// shell.openExternal, which fails at the OS level on raw backslash paths.
+const WINDOWS_DRIVE_PATH_TARGET_REGEX = /^[A-Za-z]:[\\/].+$/
+
+// Windows UNC paths (`\\\\server\\share\\...` or `\\\\server/share/...`).
+const UNC_PATH_TARGET_REGEX = /^\\\\.+$/
+
 interface DetectedLink {
   type: 'url' | 'email' | 'file'
   text: string
@@ -280,5 +289,8 @@ export function hasLinks(text: string): boolean {
  * Used by click handlers to route local paths to onFileClick instead of onUrlClick.
  */
 export function isFilePathTarget(target: string): boolean {
-  return FILE_PATH_TARGET_REGEX.test(target.trim())
+  const trimmed = target.trim()
+  if (WINDOWS_DRIVE_PATH_TARGET_REGEX.test(trimmed)) return true
+  if (UNC_PATH_TARGET_REGEX.test(trimmed)) return true
+  return FILE_PATH_TARGET_REGEX.test(trimmed)
 }

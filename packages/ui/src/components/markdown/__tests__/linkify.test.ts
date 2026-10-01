@@ -273,4 +273,22 @@ describe('isFilePathTarget', () => {
   it('rejects non-file strings', () => {
     expect(isFilePathTarget('not a link at all')).toBe(false)
   })
+
+  it('accepts Windows backslash drive paths without extensions (directories)', () => {
+    expect(isFilePathTarget('C:\\Users\\12260\\Desktop\\效果图\\提字-09.29-01.11')).toBe(true)
+  })
+
+  it('accepts Windows forward-slash drive paths', () => {
+    expect(isFilePathTarget('C:/Users/me/project/app.tsx')).toBe(true)
+    expect(isFilePathTarget('D:/data/file.pdf')).toBe(true)
+  })
+
+  it('accepts UNC paths', () => {
+    expect(isFilePathTarget('\\\\fileserver\\shared\\report.docx')).toBe(true)
+  })
+
+  it('rejects drive-letter strings without a path separator', () => {
+    expect(isFilePathTarget('C:foo')).toBe(false)
+    expect(isFilePathTarget('c:')).toBe(false)
+  })
 })

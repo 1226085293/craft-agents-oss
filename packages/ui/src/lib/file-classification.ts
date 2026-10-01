@@ -85,7 +85,7 @@ const EXTERNAL_EXTENSIONS = new Set([
  * Handles compound extensions like .env.local by returning the last segment.
  */
 function getExtension(filePath: string): string {
-  const basename = filePath.split('/').pop() ?? filePath
+  const basename = filePath.split(/[/\\]/).pop() ?? filePath
   const dotIndex = basename.lastIndexOf('.')
   if (dotIndex === -1 || dotIndex === 0) return ''
   return basename.slice(dotIndex + 1).toLowerCase()

@@ -22,6 +22,12 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_TIMEOUT_MS = 15_000;
 const MAX_OUTPUT_CHARS = 20_000;
 
+// Guidance appended when isolation backends are unavailable (e.g. Windows has no
+// sandbox-exec/bwrap equivalent). Without this hint the model retries script_sandbox
+// in a loop — tell it to fall back to Bash instead.
+const ISOLATION_UNAVAILABLE_HINT =
+  ' Fall back to the Bash tool to run the same diagnostics — sandboxed inline execution is unavailable on this platform.';
+
 function truncateOutput(text: string): { text: string; truncated: boolean } {
   if (text.length <= MAX_OUTPUT_CHARS) {
     return { text, truncated: false };
@@ -94,7 +100,8 @@ export async function handleScriptSandbox(
       networkIsolation = applyNetworkIsolation(runtime.command, runtimeArgs);
       if (networkIsolation.status !== 'enforced') {
         return errorResponse(
-          'script_sandbox requires network isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.'
+          'script_sandbox requires network isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.' +
+            ISOLATION_UNAVAILABLE_HINT
         );
       }
 
@@ -107,13 +114,15 @@ export async function handleScriptSandbox(
 
     if (networkIsolation.status !== 'enforced') {
       return errorResponse(
-        'script_sandbox requires network isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.'
+        'script_sandbox requires network isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.' +
+          ISOLATION_UNAVAILABLE_HINT
       );
     }
 
     if (filesystemIsolation.status !== 'enforced') {
       return errorResponse(
-        'script_sandbox requires filesystem isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.'
+        'script_sandbox requires filesystem isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.' +
+          ISOLATION_UNAVAILABLE_HINT
       );
     }
 

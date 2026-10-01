@@ -111,7 +111,10 @@ export async function validateFilePath(
   })
 
   if (!isAllowed) {
-    throw new Error('Access denied: file path is outside allowed directories')
+    throw new Error(
+      `Access denied: file path is outside allowed directories (${allowedDirs.join(', ')}). ` +
+      'Copy the file into one of these directories (e.g. the session data directory) and retry.',
+    )
   }
 
   // Block sensitive files even within allowed directories.

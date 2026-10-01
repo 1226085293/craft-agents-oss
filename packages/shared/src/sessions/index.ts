@@ -91,6 +91,7 @@ export {
   readSessionJsonl,
   writeSessionJsonl,
   createSessionHeader,
+  expandSessionPath,
 } from './jsonl.ts';
 
 // Field utilities

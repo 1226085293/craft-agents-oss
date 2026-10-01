@@ -4,7 +4,7 @@ import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput
 import { RemoteBrowserPaneManager } from './RemoteBrowserPaneManager'
 import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@craft-agent/server-core/handlers'
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
-import { basename, dirname, join } from 'path'
+import { basename, dirname, isAbsolute, join } from 'path'
 import { existsSync } from 'fs'
 import { copyFile, readFile, writeFile, mkdir, stat, rm, readdir } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
@@ -57,6 +57,7 @@ import {
   getPendingPlanExecution as getStoredPendingPlanExecution,
   getSessionAttachmentsPath,
   getSessionPath as getSessionStoragePath,
+  expandSessionPath,
   ensureSessionDir,
   getSessionFilePath,
   generateSessionId,
@@ -5046,8 +5047,31 @@ ${request.prompt}`;
         deliverFileToMessagingFn: async (args) => {
           const registry = this.messagingRegistry
           if (!registry) throw new Error('Messaging is not configured for this workspace')
-          const extraDirs = getWorkspaceAllowedDirs(managed.workspace.id)
-          const safePath = await validateFilePath(args.path, extraDirs)
+
+          // Resolve the path the model supplied:
+          // 1. `{{SESSION_PATH}}` is the portable storage token for session dir
+          //    paths (packages/shared/src/sessions/jsonl.ts). When the model inspects
+          //    raw session .jsonl files it sometimes copies that token verbatim into
+          //    tool args — expand it here against this session's directory.
+          // 2. Relative paths usually point to files the agent just produced inside
+          //    its session directory (data/, attachments/), so resolve against it
+          //    instead of failing with "Only absolute file paths are allowed".
+          const sessionDir = getSessionStoragePath(managed.workspace.rootPath, managed.id)
+          let rawPath = expandSessionPath(args.path, sessionDir)
+          if (!isAbsolute(rawPath)) rawPath = join(sessionDir, rawPath)
+
+          // Widen the allow-list with the session's own working directory: the agent
+          // already has full read access there, and deliver_file only routes files to
+          // channels the user explicitly bound to this session — the same trust
+          // boundary as session-scoped previews in rpc/files.ts. Without this,
+          // delivering files the agent generated under its cwd failed with
+          // "Access denied: file path is outside allowed directories".
+          const extraDirs = [
+            ...getWorkspaceAllowedDirs(managed.workspace.id),
+            this.getSessionWorkingDirectory(managed.id),
+          ].filter((d): d is string => d !== undefined)
+
+          const safePath = await validateFilePath(rawPath, extraDirs)
           return registry.deliverFileToSessionBindings({
             workspaceId: managed.workspace.id,
             sessionId: managed.id,

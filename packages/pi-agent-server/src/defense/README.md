@@ -74,6 +74,20 @@ The "does correspond" branch re-delivers the previous final reply verbatim, so
 the user effectively receives ONE reply — not a second, different one. Extra
 work happens only on the "does not correspond" branch (reason + continue).
 
+**UI rendering of the resumed reply** (2026-10-01, `event-adapter.ts`):
+while a held defense-resume window is open, the resumed turn's final `stop`
+reply is the verification-delivery step, not a new top-level reply. The
+adapter folds it into the **process block** instead of a second reply card by
+marking it `isIntermediate`, with ONE discriminator:
+- **No tool executed** in the window → pure "corresponds → re-deliver"
+  duplicate of the original reply → `isIntermediate=true` (process-block step).
+- **A tool DID execute** → "doesn't correspond → continue"; the reply is the
+  continuation's NEW answer → `isIntermediate=false` (stays a visible card).
+
+This is persisted in `session.jsonl`, so a reload renders the same view as the
+live stream. The main turn's reply (emitted before the hold) always stays a
+normal reply card.
+
 Guardrails:
 - `maxResumes` (default 3): exceeding → `FAILED`.
 - `maxIterations` (default 50) / `maxDurationMs` (default 300_000): exceeding → `ABORTED`.

@@ -172,6 +172,14 @@ export class PiEventAdapter extends BaseEventAdapter {
    *  the FINAL `agent_end` (no flag) arrives — the defense analog of
    *  overflowState. See the subprocess defense layer in pi-agent-server. */
   private defenseResumeHeld: boolean = false;
+  /**
+   * True when at least one tool EXECUTED while a defense-resume hold was open
+   * (2026-10-01 two-reply incident). Discriminator for the resumed turn's
+   * final 'stop' reply: no tool work = pure "corresponds → re-deliver" (fold
+   * into the process block); tool work = "doesn't correspond → continue" (the
+   * continuation's answer must stay a visible reply card).
+   */
+  private sawToolDuringDefenseHold: boolean = false;
   /** Set when the subprocess annotated an `agent_end` with
    *  `queuedFollowUpPending: true` — the SDK's _handlePostAgentRun will
    *  `agent.continue()` with queued steering/followUp messages after this
@@ -270,6 +278,7 @@ export class PiEventAdapter extends BaseEventAdapter {
         // A defense resume is in flight — hold the queue open for the
         // resumed turn's events (they arrive after this agent_end).
         this.defenseResumeHeld = true;
+        this.sawToolDuringDefenseHold = false;
         return false;
       }
       this.defenseResumeHeld = false;
@@ -319,6 +328,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.heldRetryError = null;
     this.pendingQueueComplete = false;
     this.defenseResumeHeld = false;
+    this.sawToolDuringDefenseHold = false;
     this.queuedFollowUpHeld = false;
     this.deferredRetryError = null;
     this.retryHoldActive = false;
@@ -564,6 +574,7 @@ export class PiEventAdapter extends BaseEventAdapter {
         // falls through to normal completion below.
         if ((event as { defenseResumePending?: boolean }).defenseResumePending) {
           this.defenseResumeHeld = true;
+          this.sawToolDuringDefenseHold = false;
           break;
         }
         this.defenseResumeHeld = false;
@@ -745,7 +756,20 @@ export class PiEventAdapter extends BaseEventAdapter {
         const textContent = this.extractTextFromMessage(event.message);
         // Pi SDK stopReason: 'toolUse' means the model will call tools next (intermediate commentary),
         // 'stop'/'end_turn' means final response. Same logic as Claude's stop_reason === 'tool_use'.
-        const isIntermediate = msg.stopReason === 'toolUse';
+        // Defense-resume override (2026-10-01 two-reply incident, session
+        // 261001-ready-sunset): while a held defense-resume window is open,
+        // the resumed turn's 'stop' reply is the VERIFICATION-DELIVERY step.
+        // - No tool work in the window → pure "corresponds → re-deliver": a
+        //   redundant duplicate of the user's original reply. Mark it
+        //   intermediate so the UI renders it as a process-block step, never
+        //   a second reply card.
+        // - Tool work happened → "doesn't correspond → continue": the reply
+        //   is the continuation's NEW answer and stays a normal reply card.
+        // Persisted isIntermediate keeps reload consistent with the live view.
+        // (toolUse replies are intermediate unconditionally.)
+        const isIntermediate =
+          msg.stopReason === 'toolUse' ||
+          (this.defenseResumeHeld && !this.sawToolDuringDefenseHold);
         if (textContent && (isIntermediate || !this.hasEmittedFinalText)) {
           if (!isIntermediate) this.hasEmittedFinalText = true;
 
@@ -792,6 +816,11 @@ export class PiEventAdapter extends BaseEventAdapter {
         const toolCallId = event.toolCallId;
         const toolName = this.resolveToolName(event.toolName);
         this.toolNames.set(toolCallId, toolName);
+
+        // Defense-resume discriminator: any tool executing inside a held
+        // defense-resume window means the resumed turn did NEW work — its
+        // final reply is a continuation answer and must stay visible.
+        if (this.defenseResumeHeld) this.sawToolDuringDefenseHold = true;
 
         // Normalize Pi field names to Claude Code format for UI compatibility
         // (diff stats, diff overlay, document routing all expect Claude Code format)

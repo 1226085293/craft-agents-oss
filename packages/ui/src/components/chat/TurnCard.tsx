@@ -287,6 +287,8 @@ export interface ResponseContent {
   messageId?: string
   /** Persisted annotations attached to the response message */
   annotations?: AnnotationV1[]
+  /** When this final response landed (ms epoch). Rendered below the bubble; falls back to the turn timestamp when absent. */
+  timestamp?: number
 }
 
 // ============================================================================
@@ -3366,7 +3368,7 @@ export const TurnCard = React.memo(function TurnCard({
                 hasActiveFollowUpAnnotations={hasActiveFollowUpAnnotations}
                 openAnnotationRequest={openAnnotationRequest}
                 annotationInteractionMode={annotationInteractionMode}
-                timestamp={timestamp}
+                timestamp={response.timestamp ?? timestamp}
               />
             </motion.div>
           )}
@@ -3399,7 +3401,7 @@ export const TurnCard = React.memo(function TurnCard({
             hasActiveFollowUpAnnotations={hasActiveFollowUpAnnotations}
             openAnnotationRequest={openAnnotationRequest}
             annotationInteractionMode={annotationInteractionMode}
-            timestamp={timestamp}
+            timestamp={response.timestamp ?? timestamp}
           />
         </div>
       )}

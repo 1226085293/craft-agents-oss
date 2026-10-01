@@ -455,6 +455,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
             text: lastTextActivity.content,
             isStreaming: false,
             messageId: lastTextActivity.id,
+            timestamp: lastTextActivity.timestamp,
           }
           // The commentary is now the turn's visible reply. Flag its step row so
           // the steps list skips it — otherwise the same text renders twice
@@ -764,6 +765,11 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
         streamStartTime: message.isStreaming ? message.timestamp : undefined,
         messageId: message.id,
         annotations: message.annotations,
+        // The final response's OWN landed time. The bubble below renders this
+        // instead of the turn-level timestamp (first message of the turn),
+        // so a response that lands minutes after the turn opened shows its
+        // real time, not the turn-open time.
+        timestamp: message.timestamp,
       }
       currentTurn.isStreaming = !!message.isStreaming
       currentTurn.isComplete = !message.isStreaming

@@ -814,3 +814,48 @@ describe('interrupted and failed runs produce no response', () => {
     expect(turn.response?.text).toBe('Response text')
   })
 })
+
+/**
+ * The response bubble was stamped with the TURN's open time (its first
+ * response message), so a final that lands minutes later rendered with the
+ * wrong clock time. groupMessagesByTurn now records the final response's own
+ * `timestamp` on `turn.response`, and TurnCard renders that (falling back to
+ * the turn timestamp only when absent).
+ *
+ * (2026-10-01: session 261001-active-eclipse — a final that landed at
+ * 21:20:44 was displayed under a 21:12:31 stamp because it inherited the
+ * turn-open time instead of its own.)
+ */
+describe('final response carries its own timestamp (not the turn-open time)', () => {
+  const base = Date.now()
+
+  it('response.timestamp is the final time, later than the turn opened', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'do the thing', timestamp: base + 1 },
+      // opens the assistant turn early
+      { id: 'a-mid', role: 'assistant', content: 'let me check the file first', isStreaming: false, isIntermediate: true, timestamp: base + 2 },
+      // the genuine final lands much later
+      { id: 'a-final', role: 'assistant', content: 'Done — all tasks completed.', isStreaming: false, isIntermediate: false, timestamp: base + 300_000 },
+    ]
+    const turn = getLastAssistantTurn(groupMessagesByTurn(messages, { isSessionProcessing: false }))!
+    expect(turn.response?.text).toBe('Done — all tasks completed.')
+    // the response keeps the final's OWN timestamp ...
+    expect(turn.response?.timestamp).toBe(base + 300_000)
+    // ... which is strictly later than when the turn opened (turn.timestamp)
+    expect(turn.timestamp).toBeLessThan(base + 300_000)
+  })
+
+  it('turn.timestamp is the first response message; response.timestamp is distinct', () => {
+    const messages: Message[] = [
+      { id: 'u1', role: 'user', content: 'do the thing', timestamp: base + 1 },
+      { id: 'a-mid', role: 'assistant', content: 'first step', isStreaming: false, isIntermediate: true, timestamp: base + 2 },
+      { id: 'a-final', role: 'assistant', content: 'Second step — final.', isStreaming: false, isIntermediate: false, timestamp: base + 450_000 },
+    ]
+    const turn = getLastAssistantTurn(groupMessagesByTurn(messages, { isSessionProcessing: false }))!
+    // the assistant turn opens at its first response message
+    expect(turn.timestamp).toBe(base + 2)
+    // the bubble must NOT inherit that; it shows the final's own time
+    expect(turn.response?.timestamp).toBe(base + 450_000)
+    expect(turn.response?.timestamp).not.toBe(turn.timestamp)
+  })
+})

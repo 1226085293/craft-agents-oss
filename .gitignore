@@ -77,3 +77,6 @@ credentials.enc
 
 # Pi agent local settings
 .pi/
+
+# CodeGraph local index (regenerate with: codegraph init)
+.codegraph/

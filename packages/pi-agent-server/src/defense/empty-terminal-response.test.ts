@@ -10,9 +10,16 @@ import { DefenseEvaluator } from './evaluator.ts';
  * saw earlier progress text (`anyText=true`) and classified the stop as
  * normal — no resume, user left hanging.
  *
- * Fix: anchor strictly on the LAST assistant message and treat the strict
- * triple (stopReason=stop + no content blocks + 0 output tokens) as an
- * infrastructure fault that must trigger an automatic resume.
+ * Fix: anchor strictly on the LAST assistant message and treat any clean
+ * stop (stopReason=stop|length) whose final message carries NO visible text
+ * block as a fault that must trigger an automatic resume — empty content,
+ * or thinking-only content (thinking blocks are invisible to the user).
+ *
+ * 2026-10-01 incidents (261001-ready-sunset / 261001-calm-pond): both
+ * sessions ended with a CLEAN stop whose final assistant message carried
+ * ONLY a thinking block (output=363 / 1442, zero visible text). The old
+ * rule "thinking-only + stop is a deliberate finish" let them pass as
+ * state=done — the user saw a progress note and then nothing.
  */
 
 /** Build an evaluator primed with a read-only tool chain (like the incident). */
@@ -50,12 +57,9 @@ function scan(evaluator: DefenseEvaluator, endMessages: unknown[]) {
           && String((c as { text?: unknown }).text ?? '').trim().length > 0,
       );
     const cleanStop = lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length';
-    if (lastAssistant.stopReason === 'length') {
-      endsWithEmptyResponse = !hasVisibleTextBlock;
-    } else {
-      const noContentBlocks = !Array.isArray(lastAssistant.content) || lastAssistant.content.length === 0;
-      endsWithEmptyResponse = cleanStop && noContentBlocks;
-    }
+    // ANY clean stop without a visible text block in the final message is
+    // an empty delivery (empty content OR thinking-only content).
+    endsWithEmptyResponse = cleanStop && !hasVisibleTextBlock;
   }
   return evaluator.evaluate({ hasVisibleText: anyText, aborted, endsWithEmptyResponse });
 }
@@ -119,13 +123,19 @@ describe('empty terminal response defense (2026-08-22 incidents)', () => {
     expect(result.shouldResume).toBe(false);
   });
 
-  it('does NOT resume when the final message has thinking-only content', () => {
+  it('resumes when the final message is thinking-only on a clean stop (2026-10-01 incidents)', () => {
+    // 261001-ready-sunset (out=363) / 261001-calm-pond (out=1442): a
+    // stopReason="stop" whose final message carries ONLY a thinking block.
+    // The thinking block is invisible to the user, so the delivery is
+    // empty and must trigger a resume — the old "deliberate reasoning-only
+    // finish" rule hung real sessions.
     const e = incidentEvaluator();
     const result = scan(e, [
       { role: 'assistant', content: [{ type: 'text', text: 'progress note' }], stopReason: 'toolUse' },
-      { role: 'assistant', content: [{ type: 'thinking', thinking: '...' }], stopReason: 'stop', usage: { output: 10 } },
+      { role: 'assistant', content: [{ type: 'thinking', thinking: '...' }], stopReason: 'stop', usage: { output: 1442 } },
     ]);
-    expect(result.shouldResume).toBe(false);
+    expect(result.shouldResume).toBe(true);
+    expect(result.resumeMessage).toContain('EMPTY response');
   });
 
   it('does NOT resume after a user abort even if the final reply was empty', () => {

@@ -160,12 +160,10 @@ function scan(evaluator: DefenseEvaluator, endMessages: unknown[]) {
           && String((c as { text?: unknown }).text ?? '').trim().length > 0,
       );
     const cleanStop = lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length';
-    if (lastAssistant.stopReason === 'length') {
-      endsWithEmptyResponse = !hasVisibleTextBlock;
-    } else {
-      const noContentBlocks = !Array.isArray(lastAssistant.content) || lastAssistant.content.length === 0;
-      endsWithEmptyResponse = cleanStop && noContentBlocks;
-    }
+    // Keep in sync with the extraction in pi-agent-server/src/index.ts:
+    // any clean stop without a visible text block in the final message is
+    // an empty delivery (empty content OR thinking-only content).
+    endsWithEmptyResponse = cleanStop && !hasVisibleTextBlock;
   }
   const lastText = lastAssistant ? extractAssistantText(lastAssistant.content) : '';
   const hasRepetitionLoop = lastText.length > 0 && detectRepetitionLoop(lastText);

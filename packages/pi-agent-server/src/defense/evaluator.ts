@@ -136,13 +136,16 @@ export class DefenseEvaluator {
    * early-stop signal there is, regardless of tool history.
    *
    * `endsWithEmptyResponse` flags the pathological case where the FINAL
-   * assistant message is an empty LLM response — no content blocks at all.
-   * Two observed variants: finish_reason=stop with 0 output tokens (gateway
-   * fault) and finish_reason=length with output burned on invisible
-   * reasoning (max_tokens truncation). Both are infrastructure faults, not
-   * real completions. Unlike silent-stop (which scans the whole run), this
-   * signal anchors strictly on the last message: earlier progress updates
-   * in a long tool chain must not mask it (2026-08-22 incidents).
+   * assistant message carries NO visible content at all. Observed variants:
+   * finish_reason=stop with 0 output tokens (gateway fault); finish_reason=
+   * length with output burned on invisible reasoning (max_tokens
+   * truncation); and finish_reason=stop with thinking-only content (the
+   * 2026-10-01 incidents, 261001-ready-sunset / 261001-calm-pond: a clean
+   * stop that emitted only a reasoning block the user can never see).
+   * All are silent deliveries, not real completions. Unlike silent-stop
+   * (which scans the whole run), this signal anchors strictly on the last
+   * message: earlier progress updates in a long tool chain must not mask
+   * it (2026-08-22 incidents).
    *
    * `hasRepetitionLoop` flags the degeneration case where the FINAL
    * assistant message carries text, but that text devolved into a

@@ -553,12 +553,19 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
     //   - stopReason="length" + thinking-only content (2026-08-28 incident:
     //     ~109K ctx, reasoning ate the budget, output=0) → the reasoning
     //     block is NOT visible to the user, so the reply is still empty.
-    // Both are infrastructure faults, not intentional finishes. Anchoring
-    // strictly on the LAST assistant message is essential: run-wide text
-    // scanning is already covered by hasVisibleText above and must not mask
-    // this signal. Healthy replies always carry at least one visible text
-    // block (a bare toolCall-only assistant message ends with toolUse, not
-    // a clean stop, so it never reaches this branch).
+    //   - stopReason="stop" + thinking-only content (2026-10-01 incidents,
+    //     261001-ready-sunset out=363 / 261001-calm-pond out=1442): a clean
+    //     stop whose final message carries ONLY a thinking block. The user
+    //     saw a progress note and then NOTHING — a silent delivery. The
+    //     pre-2026-10-01 "deliberate reasoning-only finish is normal" rule
+    //     let real hung sessions pass as done; the thinking block is not
+    //     visible to the user, so the reply is still empty.
+    // All are infrastructure/quality faults, not intentional finishes.
+    // Anchoring strictly on the LAST assistant message is essential: run-
+    // wide text scanning is already covered by hasVisibleText above and
+    // must not mask this signal. Healthy replies always carry at least one
+    // visible text block (a bare toolCall-only assistant message ends with
+    // toolUse, not a clean stop, so it never reaches this branch).
     let endsWithEmptyResponse = false;
     if (lastAssistant) {
       const hasVisibleTextBlock = Array.isArray(lastAssistant.content)
@@ -567,17 +574,12 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
             && String((c as { text?: unknown }).text ?? '').trim().length > 0,
         );
       const cleanStop = lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length';
-      if (lastAssistant.stopReason === 'length') {
-        // Truncation: ANY final reply without visible text is a fault —
-        // empty content, or reasoning-only content that burned the whole
-        // budget (thinking blocks are invisible to the user).
-        endsWithEmptyResponse = !hasVisibleTextBlock;
-      } else {
-        // stop: keep the strict no-blocks rule — a model that deliberately
-        // ends with reasoning alone is a normal finish, not a fault.
-        const noContentBlocks = !Array.isArray(lastAssistant.content) || lastAssistant.content.length === 0;
-        endsWithEmptyResponse = cleanStop && noContentBlocks;
-      }
+      // ANY clean stop whose final message lacks a visible text block is a
+      // silent delivery: empty content (gateway fault), thinking-only
+      // content that burned the budget on 'length' (truncation), or a
+      // thinking-only 'stop' (2026-10-01 incidents) — thinking blocks are
+      // invisible to the user, so the reply is still empty.
+      endsWithEmptyResponse = cleanStop && !hasVisibleTextBlock;
     }
     // Repetition-loop (degeneration) detection (2026-08-28 incident): the
     // final assistant message contains text, but the text devolved into a

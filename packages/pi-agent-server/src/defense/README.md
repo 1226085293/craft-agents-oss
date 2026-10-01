@@ -12,6 +12,13 @@ problem where the agent stops before completing all goal checklist items.
 | **L2** | `repetition-detector.ts` | Degeneration-loop detection. Flags a final assistant reply whose sampled content is >60% exact duplicates (line-level and sliding-window chunk strategies) — the 2026-08-28 incident (213K chars = 874 copies of one sentence) carried visible text and sailed past empty-response/silent-stop detection. Conservatively gated to avoid false positives on code dumps and recurring idioms. |
 | **L2** | `session-lifecycle.ts` | Finite state machine (`IDLE → RUNNING → EVALUATING → RESUME_READY → RESUMING → DONE/FAILED/ABORTED`) with resume guardrails: max resume count, max iterations, max duration, and a context-fingerprint no-progress check. |
 
+**Empty terminal response** (extracted in `index.ts`, passed to the
+evaluator): any clean stop (`stop` or `length`) whose FINAL assistant
+message carries no visible text block — empty content, or thinking-only
+content whose reasoning is invisible to the user (2026-08-22 gateway
+fault, 2026-08-28 truncation, 2026-10-01 incidents `261001-ready-sunset`
+/ `261001-calm-pond` where a clean stop ended on a thinking block only).
+
 > **Removed — Layer 3 `idle-words.ts`.** The idle-word regex produced false
 > positives on normal transition sentences (e.g. "现在修改现有的集成点：") because
 > regex matches word surfaces, not semantics. Per issue #1 it is deleted and its

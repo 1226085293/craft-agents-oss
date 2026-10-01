@@ -2160,7 +2160,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                             isAnyMatch && !isCurrentMatch && "ring-1 ring-info/30"
                           )}
                         >
-                          <div className="flex flex-col gap-1">
+                          <div className="flex flex-col gap-2.5">
                             <MemoizedMessageBubble
                               message={turn.message}
                               onOpenFile={openFileInSession}

@@ -565,7 +565,7 @@ export function UserMessageBubble({
         }
       </div>
       {timestamp != null && (
-        <div className="mt-[2px] text-right text-[10px] leading-none text-muted-foreground/60 tabular-nums select-none">
+        <div className="mt-[4px] text-right text-[10px] leading-none text-muted-foreground/60 tabular-nums select-none">
           {formatDateTimeFull(timestamp)}
         </div>
       )}

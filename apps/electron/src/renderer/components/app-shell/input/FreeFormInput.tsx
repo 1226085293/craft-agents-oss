@@ -12,7 +12,7 @@ import {
   AlertCircle,
   Image as ImageIcon,
 } from 'lucide-react'
-import { Icon_Home, Spinner } from '@craft-agent/ui'
+import { ImagePreviewOverlay, Icon_Home, Spinner } from '@craft-agent/ui'
 
 import * as storage from '@/lib/local-storage'
 import { openSettingsWindow } from '@/lib/settings-window'
@@ -51,6 +51,7 @@ import {
 } from '@/components/ui/styled-dropdown'
 import { cn } from '@/lib/utils'
 import { coerceInputText } from '@/lib/input-text'
+import { isAbsolutePath } from '@/lib/drafts'
 import { isMac } from '@/lib/platform'
 import { AttachmentPreview } from '../AttachmentPreview'
 import { ImageSupportWarningBanner } from './ImageSupportWarningBanner'
@@ -61,6 +62,7 @@ import {
   modelSupportsImages,
 } from '@config/llm-connections'
 import { useOptionalAppShellContext } from '@/context/AppShellContext'
+import { useTheme } from '@/hooks/useTheme'
 import { EditPopover, getEditConfig } from '@/components/ui/EditPopover'
 import { SourceAvatar } from '@/components/ui/source-avatar'
 import { SourceSelectorPopover } from '@/components/ui/SourceSelectorPopover'
@@ -101,6 +103,22 @@ function formatFollowUpChipText(text: string, fallback: string, maxLength = 50):
   return normalized.length > maxLength
     ? `${normalized.slice(0, maxLength - 1).trimEnd()}…`
     : normalized
+}
+
+function buildAttachmentDataUrl(mimeType: string, base64: string): string {
+  if (base64.startsWith('data:')) return base64
+  return `data:${mimeType || 'image/png'};base64,${base64}`
+}
+
+function getAttachmentDataUrl(attachment: FileAttachment): string | undefined {
+  if (attachment.base64) return buildAttachmentDataUrl(attachment.mimeType, attachment.base64)
+  if (attachment.thumbnailBase64) return buildAttachmentDataUrl('image/png', attachment.thumbnailBase64)
+  return undefined
+}
+
+function getAttachmentRealPath(attachment: FileAttachment): string | undefined {
+  const path = isAbsolutePath(attachment.path) ? attachment.path : attachment.storedPath
+  return path && isAbsolutePath(path) ? path : undefined
 }
 
 
@@ -309,6 +327,7 @@ export function FreeFormInput({
   onRequestExpand,
 }: FreeFormInputProps) {
   const { t } = useTranslation()
+  const { isDark } = useTheme()
 
   // Default rotating placeholders for onboarding/empty state (i18n-aware)
   const defaultPlaceholders = React.useMemo(() => [
@@ -472,6 +491,70 @@ export function FreeFormInput({
   // Sync TO parent on blur/submit (debounced persistence)
   const [input, setInput] = React.useState(() => coerceInputText(inputValue))
   const [attachments, setAttachments] = React.useState<FileAttachment[]>(attachmentsValue ?? [])
+  const [previewImageIndex, setPreviewImageIndex] = React.useState<number | null>(null)
+
+  const imageAttachments = React.useMemo(
+    () => attachments
+      .map((attachment, index) => ({ attachment, index }))
+      .filter(({ attachment }) => attachment.type === 'image'),
+    [attachments],
+  )
+
+  const imagePreviewItems = React.useMemo(
+    () => imageAttachments.map(({ attachment }) => {
+      const dataUrl = getAttachmentDataUrl(attachment)
+      const filePath = getAttachmentRealPath(attachment)
+      return {
+        // Use the inline URL as the item source when available so the overlay
+        // never treats a synthetic clipboard filename as a filesystem path.
+        src: dataUrl ?? filePath ?? attachment.path,
+        label: attachment.name,
+        dataUrl,
+        filePath,
+      }
+    }),
+    [imageAttachments],
+  )
+
+  const handleAttachmentDoubleClick = React.useCallback((attachmentIndex: number) => {
+    const attachment = attachments[attachmentIndex]
+    if (!attachment) return
+    if (attachment.type === 'image') {
+      const imageIndex = imageAttachments.findIndex(({ index }) => index === attachmentIndex)
+      if (imageIndex >= 0) setPreviewImageIndex(imageIndex)
+      return
+    }
+    // Non-image attachments: route through the app-level link interceptor,
+    // which classifies the file and opens the matching in-app preview
+    // (pdf / code / markdown / json / text) or the system opener.
+    const path = getAttachmentRealPath(attachment)
+    if (path) appShellCtx?.onOpenFile(path, sessionId)
+  }, [attachments, imageAttachments, appShellCtx, sessionId])
+
+  const closeImagePreview = React.useCallback(() => {
+    setPreviewImageIndex(null)
+  }, [])
+
+  const loadAttachmentDataUrl = React.useCallback(async (src: string) => {
+    const previewItem = imagePreviewItems.find((item) => item.src === src)
+    if (previewItem?.dataUrl) return previewItem.dataUrl
+    if (!previewItem?.filePath) throw new Error('Attachment image is unavailable')
+
+    if (typeof window === 'undefined' || !window.electronAPI?.readFileDataUrl) {
+      throw new Error('Image preview is unavailable')
+    }
+    return window.electronAPI.readFileDataUrl(previewItem.filePath, sessionId)
+  }, [imagePreviewItems, sessionId])
+
+  React.useEffect(() => {
+    if (previewImageIndex !== null && previewImageIndex >= imagePreviewItems.length) {
+      setPreviewImageIndex(null)
+    }
+  }, [imagePreviewItems.length, previewImageIndex])
+
+  React.useEffect(() => {
+    setPreviewImageIndex(null)
+  }, [sessionId])
 
   // Ref to track current attachments for use in event handlers (avoids stale closure issues)
   const attachmentsRef = React.useRef<FileAttachment[]>([])
@@ -1566,7 +1649,8 @@ export function FreeFormInput({
     && !modelSupportsImages(effectiveConnectionDetails, currentModel)
 
   return (
-    <form onSubmit={handleSubmit}>
+    <>
+      <form onSubmit={handleSubmit}>
       <div
         ref={containerRef}
         className={cn(
@@ -1658,6 +1742,7 @@ export function FreeFormInput({
         <AttachmentPreview
           attachments={attachments}
           onRemove={handleRemoveAttachment}
+          onDoubleClick={handleAttachmentDoubleClick}
           disabled={disabled}
           loadingCount={loadingCount}
         />
@@ -2478,7 +2563,22 @@ export function FreeFormInput({
           </div>
         </div>
       </div>
-    </form>
+      </form>
+
+      {previewImageIndex !== null && imagePreviewItems.length > 0 && (
+        <ImagePreviewOverlay
+          isOpen
+          onClose={closeImagePreview}
+          filePath={imagePreviewItems[previewImageIndex]?.filePath}
+          sessionId={sessionId}
+          items={imagePreviewItems}
+          initialIndex={previewImageIndex}
+          title={imagePreviewItems[previewImageIndex]?.label}
+          loadDataUrl={loadAttachmentDataUrl}
+          theme={isDark ? 'dark' : 'light'}
+        />
+      )}
+    </>
   )
 }
 

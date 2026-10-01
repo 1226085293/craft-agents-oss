@@ -9066,6 +9066,13 @@ ${request.prompt}`;
           managed.messages.push(toolStartMessage)
         }
 
+        // Persist the executing tool row before control returns to the agent.
+        // A tool may terminate Craft before its tool_result arrives (for example,
+        // the Windows build/install/restart helper), while persistSession itself
+        // is debounced.
+        this.persistSession(managed)
+        await this.flushSession(managed.id)
+
         // Activate browser agent control overlay on actionable browser tool starts.
         // Skip browser_tool help/release commands to avoid pointless overlay flashes.
         const shouldActivateOverlay = shouldActivateBrowserOverlay(

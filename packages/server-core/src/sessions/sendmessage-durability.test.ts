@@ -563,6 +563,34 @@ describe('sendMessage durability', () => {
     expect(managed.messageQueue[0]?.resumeTurnId).toBe('old-turn')
   })
 
+  it('persists a tool_start row before a destructive tool can terminate Craft', async () => {
+    const sessionId = 'durability-tool-start'
+    const managed = buildSession(sessionId)
+
+    // Simulate a tool that terminates the app before it can emit tool_result.
+    // Do not call flushAllSessions before reading the file: the tool_start handler
+    // itself must make the row durable before control returns to the agent loop.
+    await (sm as unknown as { processEvent: (managed: any, event: any) => Promise<void> }).processEvent(managed, {
+      type: 'tool_start',
+      toolName: 'mcp__session__bash',
+      toolUseId: 'tool-start-1',
+      input: { command: 'build-install-restart-win.ps1' },
+      intent: 'Build, install, and restart Craft',
+      turnId: 'turn-1',
+    })
+
+    expect(managed.messages).toHaveLength(1)
+    expect(readPersistedMessages(sessionId)).toEqual([
+      expect.objectContaining({
+        type: 'tool',
+        toolName: 'mcp__session__bash',
+        toolUseId: 'tool-start-1',
+        toolStatus: 'executing',
+        content: 'Running mcp__session__bash...',
+      }),
+    ])
+  })
+
   it('reuses the unfinished tool row for the first matching recovered tool_start', async () => {
     const sessionId = 'reuse-recovered-tool-row'
     const managed = buildSession(sessionId)

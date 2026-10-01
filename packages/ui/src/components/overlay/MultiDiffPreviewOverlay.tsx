@@ -77,6 +77,8 @@ export interface MultiDiffPreviewOverlayProps {
   diffViewerSettings?: Partial<DiffViewerSettings>
   /** Callback when diff viewer settings change (to persist to preferences) */
   onDiffViewerSettingsChange?: (settings: DiffViewerSettings) => void
+  /** Session ID for scoping external file opens to the session's working directory */
+  sessionId?: string
 }
 
 // ============================================
@@ -150,8 +152,18 @@ export function MultiDiffPreviewOverlay({
   embedded,
   diffViewerSettings,
   onDiffViewerSettingsChange,
+  sessionId,
 }: MultiDiffPreviewOverlayProps) {
   const { onOpenFileExternal } = usePlatform()
+
+  // Thread the session ID so shell.OPEN_FILE on the server can allow the
+  // session's working directory (which may live outside the base allowlist).
+  const openFileInSession = useCallback(
+    (filePath: string) => {
+      onOpenFileExternal?.(filePath, sessionId)
+    },
+    [onOpenFileExternal, sessionId]
+  )
 
   // Ref map for scroll-to-focused-change support
   const changeRefs = useRef<Map<string, HTMLDivElement>>(new Map())
@@ -365,7 +377,7 @@ export function MultiDiffPreviewOverlay({
                         diffStyle={diffStyle}
                         disableBackground={disableBackground}
                         disableFileHeader={false}
-                        onFileHeaderClick={onOpenFileExternal}
+                        onFileHeaderClick={openFileInSession}
                         theme={theme}
                         onReady={handleDiffReady}
                       />
@@ -378,7 +390,7 @@ export function MultiDiffPreviewOverlay({
                         diffStyle={diffStyle}
                         disableBackground={disableBackground}
                         disableFileHeader={false}
-                        onFileHeaderClick={onOpenFileExternal}
+                        onFileHeaderClick={openFileInSession}
                         theme={theme}
                         onReady={handleDiffReady}
                       />

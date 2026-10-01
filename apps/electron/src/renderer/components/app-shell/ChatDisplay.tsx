@@ -2654,6 +2654,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           theme={isDark ? 'dark' : 'light'}
           diffViewerSettings={diffViewerSettings}
           onDiffViewerSettingsChange={handleDiffViewerSettingsChange}
+          sessionId={session?.id}
         />
       )}
 

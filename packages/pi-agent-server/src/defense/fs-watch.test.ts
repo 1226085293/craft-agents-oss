@@ -90,4 +90,19 @@ describe('FsWatch — framework runtime noise in session cwd (2026-09-08 inciden
     const ev = fw.detectWrites(dir);
     expect(ev?.modifiedFiles ?? []).toEqual([]);
   });
+
+  it('codegraph indexer daemon writes (.codegraph db/wal) never count as evidence (2026-10-01)', () => {
+    // Session 261001-ready-sunset: the codegraph source's background daemon
+    // (writer.pid) rewrites .codegraph/codegraph.db + -wal mid-turn, which
+    // previously fired a false-positive fsWrite resume on a healthy reply.
+    const { dir } = makeSessionDir();
+    mkdirSync(join(dir, '.codegraph'), { recursive: true });
+    writeFileSync(join(dir, '.codegraph', 'codegraph.db'), 'sqlite');
+    writeFileSync(join(dir, '.codegraph', 'codegraph.db-wal'), 'wal');
+    writeFileSync(join(dir, '.codegraph', 'writer.pid'), '4242');
+    const fw = new FsWatch();
+    fw.markTurnStart(new Date(Date.now() - 50));
+    const ev = fw.detectWrites(dir);
+    expect(ev?.modifiedFiles ?? []).toEqual([]);
+  });
 });

@@ -19,6 +19,13 @@ import { join, relative } from 'node:path';
 const SKIP_DIRS = new Set([
   '.git', 'node_modules', 'dist', 'build', 'out', '.next', '.cache',
   '.venv', 'venv', '__pycache__', '.turbo', 'coverage', '.pi-agent',
+  // .codegraph: the codegraph MCP source runs its OWN background indexer
+  // daemon (writer.pid) in <repo>/.codegraph — its SQLite db/-wal/-shm
+  // mtimes change on its schedule, independent of agent actions. Counting
+  // them as agent write evidence force-resumed healthy turns (2026-10-01,
+  // session 261001-ready-sunset: fsWrite(.codegraph\codegraph.db) fired a
+  // false-positive verification-delivery resume mid healthy reply).
+  '.codegraph',
 ]);
 
 /**

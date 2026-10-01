@@ -171,7 +171,7 @@ function getThumbnailUrl(filePath: string): string {
  * Shows the Lucide icon immediately, then cross-fades to the thumbnail on load.
  * If loading fails, the icon stays visible — no layout shift, no error state.
  */
-const FileThumbnail = memo(function FileThumbnail({ file }: { file: SessionFile }) {
+const FileThumbnail = memo(function FileThumbnail({ file, sessionId }: { file: SessionFile; sessionId?: string }) {
   const [loaded, setLoaded] = useState(false)
   const [failed, setFailed] = useState(false)
   const [dataUrl, setDataUrl] = useState<string | null>(null)
@@ -191,13 +191,13 @@ const FileThumbnail = memo(function FileThumbnail({ file }: { file: SessionFile 
   useEffect(() => {
     if (!isWebMode || !canPreview || failed) return
     let cancelled = false
-    window.electronAPI.readFilePreviewDataUrl(file.path, 64).then((url) => {
+    window.electronAPI.readFilePreviewDataUrl(file.path, 64, sessionId).then((url) => {
       if (!cancelled) setDataUrl(url)
     }).catch(() => {
       if (!cancelled) setFailed(true)
     })
     return () => { cancelled = true }
-  }, [file.path, canPreview, failed])
+  }, [file.path, canPreview, failed, sessionId])
 
   // Fall back to regular icon if not previewable or thumbnail failed
   if (!canPreview || failed) {
@@ -245,6 +245,8 @@ interface FileTreeItemProps {
   onRevealInFileManager: (path: string) => void
   /** Whether this item is inside an expanded folder (for stagger animation) */
   isNested?: boolean
+  /** Session that owns these files — scopes web-mode thumbnail reads to its working dir */
+  sessionId?: string
 }
 
 /**
@@ -263,6 +265,7 @@ function FileTreeItem({
   onFileDoubleClick,
   onRevealInFileManager,
   isNested,
+  sessionId,
 }: FileTreeItemProps) {
   const { t } = useTranslation()
   const isDirectory = file.type === 'directory'
@@ -329,7 +332,7 @@ function FileTreeItem({
         ) : (
           /* Non-directory files: show thumbnail preview for previewable types,
              with cross-fade from icon. Falls back to icon for unsupported types. */
-          <FileThumbnail file={file} />
+          <FileThumbnail file={file} sessionId={sessionId} />
         )}
       </span>
 
@@ -400,6 +403,7 @@ function FileTreeItem({
                         onFileDoubleClick={onFileDoubleClick}
                         onRevealInFileManager={onRevealInFileManager}
                         isNested={true}
+                        sessionId={sessionId}
                       />
                     </motion.div>
                   ))}
@@ -530,28 +534,28 @@ export function SessionFilesSection({ sessionId, className, sessionFolderPath, h
 
   // Reveal a file/folder in the system file manager
   const handleRevealInFileManager = useCallback((path: string) => {
-    window.electronAPI.showInFolder(path)
-  }, [])
+    window.electronAPI.showInFolder(path, sessionId)
+  }, [sessionId])
 
   // Handle file click — preview in-app if possible, open directory in file manager
   const handleFileClick = useCallback((file: SessionFile) => {
     if (file.type === 'directory') {
       // eslint-disable-next-line craft-links/no-direct-file-open -- directories can't be previewed in-app
-      window.electronAPI.openFile(file.path)
+      window.electronAPI.openFile(file.path, sessionId)
     } else {
-      onOpenFile(file.path)
+      onOpenFile(file.path, sessionId)
     }
-  }, [onOpenFile])
+  }, [onOpenFile, sessionId])
 
   // Handle double-click — same as single click (interceptor decides preview vs external)
   const handleFileDoubleClick = useCallback((file: SessionFile) => {
     if (file.type === 'directory') {
       // eslint-disable-next-line craft-links/no-direct-file-open -- directories can't be previewed in-app
-      window.electronAPI.openFile(file.path)
+      window.electronAPI.openFile(file.path, sessionId)
     } else {
-      onOpenFile(file.path)
+      onOpenFile(file.path, sessionId)
     }
-  }, [onOpenFile])
+  }, [onOpenFile, sessionId])
 
   // Toggle folder expanded state
   const handleToggleExpand = useCallback((path: string) => {
@@ -611,6 +615,7 @@ export function SessionFilesSection({ sessionId, className, sessionFolderPath, h
                 onFileClick={handleFileClick}
                 onFileDoubleClick={handleFileDoubleClick}
                 onRevealInFileManager={handleRevealInFileManager}
+                sessionId={sessionId}
               />
             ))}
           </nav>

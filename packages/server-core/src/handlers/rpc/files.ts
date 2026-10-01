@@ -45,11 +45,12 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
     return [...base, sessionDir]
   }
 
-  // Read a file (with path validation to prevent traversal attacks)
-  server.handle(RPC_CHANNELS.file.READ, async (ctx, path: string) => {
+  // Read a file (with path validation to prevent traversal attacks).
+  // Optional sessionId widens the allowed dirs to that session's working directory,
+  // matching the agent's trust boundary (see sessionScopedAllowedDirs above).
+  server.handle(RPC_CHANNELS.file.READ, async (ctx, path: string, sessionId?: string) => {
     try {
-      const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
-      const safePath = await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId))
+      const safePath = await validateFilePath(path, sessionScopedAllowedDirs(ctx, sessionId))
       const content = await readFile(safePath, 'utf-8')
       return content
     } catch (error) {
@@ -97,10 +98,10 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
 
   // Read an image file as a small preview data URL for lightweight thumbnail rendering.
   // Returns a PNG data URL resized to fit within maxSize×maxSize.
-  server.handle(RPC_CHANNELS.file.READ_PREVIEW_DATA_URL, async (ctx, path: string, maxSize = 64) => {
+  // Optional sessionId widens the allowed dirs to that session's working directory.
+  server.handle(RPC_CHANNELS.file.READ_PREVIEW_DATA_URL, async (ctx, path: string, maxSize = 64, sessionId?: string) => {
     try {
-      const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
-      const safePath = await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId))
+      const safePath = await validateFilePath(path, sessionScopedAllowedDirs(ctx, sessionId))
       const size = Number.isFinite(maxSize) ? Math.max(16, Math.min(256, Math.floor(maxSize))) : 64
       const preview = await deps.platform.imageProcessor.process(safePath, {
         resize: { width: size, height: size },

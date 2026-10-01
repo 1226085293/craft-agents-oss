@@ -26,11 +26,15 @@ import { getLanguageFromPath } from '@/lib/file-utils'
 interface ImagePreview {
   type: 'image'
   filePath: string
+  /** Session that produced this file — scopes the server-side read to its working dir. */
+  sessionId?: string
 }
 
 interface PDFPreview {
   type: 'pdf'
   filePath: string
+  /** Session that produced this file — scopes the server-side read to its working dir. */
+  sessionId?: string
 }
 
 interface CodePreview {
@@ -39,6 +43,8 @@ interface CodePreview {
   content: string | null
   language: string
   error?: string
+  /** Session that produced this file — scopes the server-side read to its working dir. */
+  sessionId?: string
 }
 
 interface MarkdownPreview {
@@ -46,6 +52,8 @@ interface MarkdownPreview {
   filePath: string
   content: string | null
   error?: string
+  /** Session that produced this file — scopes the server-side read to its working dir. */
+  sessionId?: string
 }
 
 interface JSONPreview {
@@ -53,6 +61,8 @@ interface JSONPreview {
   filePath: string
   content: string | null
   error?: string
+  /** Session that produced this file — scopes the server-side read to its working dir. */
+  sessionId?: string
 }
 
 interface TextPreview {
@@ -60,6 +70,8 @@ interface TextPreview {
   filePath: string
   content: string | null
   error?: string
+  /** Session that produced this file — scopes the server-side read to its working dir. */
+  sessionId?: string
 }
 
 export type FilePreviewState =
@@ -80,19 +92,23 @@ interface LinkInterceptorOptions {
   openUrl: (url: string) => Promise<void>
   /** Reveal file in system file manager */
   showInFolder: (path: string, sessionId?: string) => Promise<void>
-  /** Read file as UTF-8 text (for code, markdown, json, text previews) */
-  readFile: (path: string) => Promise<string>
-  /** Read file as data URL (for image previews) */
-  readFileDataUrl: (path: string) => Promise<string>
-  /** Read file as binary (Uint8Array) for PDF previews via react-pdf */
-  readFileBinary: (path: string) => Promise<Uint8Array>
+  /** Read file as UTF-8 text (for code, markdown, json, text previews).
+   *  Optional sessionId scopes the server-side read to that session's working directory. */
+  readFile: (path: string, sessionId?: string) => Promise<string>
+  /** Read file as data URL (for image previews).
+   *  Optional sessionId scopes the server-side read to that session's working directory. */
+  readFileDataUrl: (path: string, sessionId?: string) => Promise<string>
+  /** Read file as binary (Uint8Array) for PDF previews via react-pdf.
+   *  Optional sessionId scopes the server-side read to that session's working directory. */
+  readFileBinary: (path: string, sessionId?: string) => Promise<Uint8Array>
 }
 
 // ── Hook return type ───────────────────────────────────────────────────────────
 
 interface LinkInterceptorResult {
-  /** Replacement for App.tsx handleOpenFile — classifies and routes */
-  handleOpenFile: (path: string) => void
+  /** Replacement for App.tsx handleOpenFile — classifies and routes.
+   *  Optional sessionId scopes the server-side read to that session's working directory. */
+  handleOpenFile: (path: string, sessionId?: string) => void
   /** Replacement for App.tsx handleOpenUrl — always opens externally */
   handleOpenUrl: (url: string) => void
   /** Open file directly in external app, bypassing classification/preview.
@@ -107,9 +123,9 @@ interface LinkInterceptorResult {
   /** Reveal the currently previewed file in system file manager */
   revealCurrentInFinder: () => void
   /** Read file as data URL — passed to image overlays as their loader */
-  readFileDataUrl: (path: string) => Promise<string>
+  readFileDataUrl: (path: string, sessionId?: string) => Promise<string>
   /** Read file as binary — passed to PDF overlays for react-pdf */
-  readFileBinary: (path: string) => Promise<Uint8Array>
+  readFileBinary: (path: string, sessionId?: string) => Promise<Uint8Array>
 }
 
 // ── Hook implementation ────────────────────────────────────────────────────────
@@ -138,12 +154,12 @@ export function useLinkInterceptor(options: LinkInterceptorOptions): LinkInterce
    * state is needed. This avoids null-content issues in overlay components
    * (e.g., @uiw/react-json-view crashes on null value).
    */
-  const handleOpenFile = useCallback(async (path: string) => {
+  const handleOpenFile = useCallback(async (path: string, sessionId?: string) => {
     const classification = classifyFile(path)
 
     if (!classification.canPreview || !classification.type) {
       // No preview available — open in default external app
-      optionsRef.current.openFileExternal(path)
+      optionsRef.current.openFileExternal(path, sessionId)
       return
     }
 
@@ -151,19 +167,19 @@ export function useLinkInterceptor(options: LinkInterceptorOptions): LinkInterce
 
     // For image/pdf: set state immediately — the overlay handles its own async loading
     if (type === 'image' || type === 'pdf') {
-      setPreviewState({ type, filePath: path })
+      setPreviewState({ type, filePath: path, sessionId })
       return
     }
 
     // For text-based files: read content first, then show overlay with content ready.
     // Local filesystem reads are near-instant — no loading state needed.
     try {
-      const content = await optionsRef.current.readFile(path)
-      const state = buildInitialTextState(type, path)
+      const content = await optionsRef.current.readFile(path, sessionId)
+      const state = buildInitialTextState(type, path, sessionId)
       setPreviewState({ ...state, content } as FilePreviewState)
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : 'Failed to read file'
-      const state = buildInitialTextState(type, path)
+      const state = buildInitialTextState(type, path, sessionId)
       setPreviewState({ ...state, content: '', error: errorMsg } as FilePreviewState)
     }
   }, []) // Stable: uses optionsRef
@@ -188,7 +204,7 @@ export function useLinkInterceptor(options: LinkInterceptorOptions): LinkInterce
   const openCurrentExternal = useCallback(() => {
     const state = previewStateRef.current
     if (state) {
-      optionsRef.current.openFileExternal(state.filePath)
+      optionsRef.current.openFileExternal(state.filePath, state.sessionId)
     }
   }, []) // Stable: uses refs
 
@@ -196,18 +212,18 @@ export function useLinkInterceptor(options: LinkInterceptorOptions): LinkInterce
   const revealCurrentInFinder = useCallback(() => {
     const state = previewStateRef.current
     if (state) {
-      optionsRef.current.showInFolder(state.filePath)
+      optionsRef.current.showInFolder(state.filePath, state.sessionId)
     }
   }, []) // Stable: uses refs
 
   /** Stable reference to readFileDataUrl for overlay components */
-  const readFileDataUrl = useCallback((path: string) => {
-    return optionsRef.current.readFileDataUrl(path)
+  const readFileDataUrl = useCallback((path: string, sessionId?: string) => {
+    return optionsRef.current.readFileDataUrl(path, sessionId)
   }, []) // Stable: uses optionsRef
 
   /** Stable reference to readFileBinary for PDF overlay */
-  const readFileBinary = useCallback((path: string) => {
-    return optionsRef.current.readFileBinary(path)
+  const readFileBinary = useCallback((path: string, sessionId?: string) => {
+    return optionsRef.current.readFileBinary(path, sessionId)
   }, []) // Stable: uses optionsRef
 
   return {
@@ -229,18 +245,18 @@ export function useLinkInterceptor(options: LinkInterceptorOptions): LinkInterce
  * Build the initial preview state for text-based file types.
  * Content is null initially (loading), and gets populated after async read.
  */
-function buildInitialTextState(type: FilePreviewType, path: string): FilePreviewState {
+function buildInitialTextState(type: FilePreviewType, path: string, sessionId?: string): FilePreviewState {
   switch (type) {
     case 'code':
-      return { type: 'code', filePath: path, content: null, language: getLanguageFromPath(path) }
+      return { type: 'code', filePath: path, content: null, language: getLanguageFromPath(path), sessionId }
     case 'markdown':
-      return { type: 'markdown', filePath: path, content: null }
+      return { type: 'markdown', filePath: path, content: null, sessionId }
     case 'json':
-      return { type: 'json', filePath: path, content: null }
+      return { type: 'json', filePath: path, content: null, sessionId }
     case 'text':
-      return { type: 'text', filePath: path, content: null }
+      return { type: 'text', filePath: path, content: null, sessionId }
     default:
       // Should never happen — image/pdf are handled before this function is called
-      return { type: 'text', filePath: path, content: null }
+      return { type: 'text', filePath: path, content: null, sessionId }
   }
 }

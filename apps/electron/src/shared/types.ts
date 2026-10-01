@@ -336,7 +336,7 @@ export interface ElectronAPI {
   /** Read a file as a data URL (data:{mime};base64,...) for binary preview (images, PDFs) */
   readFileDataUrl(path: string, sessionId?: string): Promise<string>
   /** Read an image file as a size-bounded preview data URL for lightweight thumbnail rendering. */
-  readFilePreviewDataUrl(path: string, maxSize?: number): Promise<string>
+  readFilePreviewDataUrl(path: string, maxSize?: number, sessionId?: string): Promise<string>
   openFileDialog(): Promise<string[]>
   readFileAttachment(path: string): Promise<FileAttachment | null>
   /** Re-read a user-attached file by absolute path (bypasses workspace-dir validation).

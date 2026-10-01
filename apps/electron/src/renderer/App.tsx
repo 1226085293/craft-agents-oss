@@ -1761,9 +1761,9 @@ export default function App() {
         })
       }
     },
-    readFile: (path) => window.electronAPI.readFile(path),
-    readFileDataUrl: (path) => window.electronAPI.readFileDataUrl(path),
-    readFileBinary: (path) => window.electronAPI.readFileBinary(path),
+    readFile: (path, sessionId) => window.electronAPI.readFile(path, sessionId),
+    readFileDataUrl: (path, sessionId) => window.electronAPI.readFileDataUrl(path, sessionId),
+    readFileBinary: (path, sessionId) => window.electronAPI.readFileBinary(path, sessionId),
   })
 
   const connectionState = useTransportConnectionState()
@@ -1998,12 +1998,13 @@ export default function App() {
     // Optional sessionId widens the server-side allowed dirs to that session's working
     // directory, so files the agent produced there can be opened.
     onOpenFileExternal: linkInterceptor.openFileExternal,
-    // Read file contents as UTF-8 string (used by datatable/spreadsheet/html-preview src fields)
-    onReadFile: (path: string) => window.electronAPI.readFile(path),
+    // Read file contents as UTF-8 string (used by datatable/spreadsheet/html-preview src fields).
+    // Optional sessionId scopes the server-side read to that session's working directory.
+    onReadFile: (path: string, sessionId?: string) => window.electronAPI.readFile(path, sessionId),
     // Read file as data URL (used by image-preview blocks)
-    onReadFileDataUrl: (path: string) => window.electronAPI.readFileDataUrl(path),
+    onReadFileDataUrl: (path: string, sessionId?: string) => window.electronAPI.readFileDataUrl(path, sessionId),
     // Read file as binary Uint8Array (used by PDF preview blocks)
-    onReadFileBinary: (path: string) => window.electronAPI.readFileBinary(path),
+    onReadFileBinary: (path: string, sessionId?: string) => window.electronAPI.readFileBinary(path, sessionId),
     // Reveal a file in the system file manager (Finder on macOS, Explorer on Windows, etc.)
     // Optional sessionId widens the server-side allowed dirs to that session's working
     // directory. Errors are surfaced as a toast instead of failing silently.
@@ -2187,8 +2188,10 @@ export default function App() {
                 <FilePreviewRenderer
                   state={linkInterceptor.previewState}
                   onClose={linkInterceptor.closePreview}
-                  loadDataUrl={linkInterceptor.readFileDataUrl}
-                  loadPdfData={linkInterceptor.readFileBinary}
+                  // Pass the previewed file's session id so the server-side read is
+                  // scoped to that session's working directory (agent-produced files).
+                  loadDataUrl={(path) => linkInterceptor.readFileDataUrl(path, linkInterceptor.previewState?.sessionId)}
+                  loadPdfData={(path) => linkInterceptor.readFileBinary(path, linkInterceptor.previewState?.sessionId)}
                   isDark={isDark}
                 />
               )}

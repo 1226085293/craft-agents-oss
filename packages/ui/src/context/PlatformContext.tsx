@@ -21,7 +21,8 @@ export interface PlatformActions {
    * Open a file in the default application (Electron: shell.openPath)
    * Web: Could show file contents inline or provide download
    */
-  onOpenFile?: (path: string) => void
+  /** Optional sessionId scopes the open to that session's working directory */
+  onOpenFile?: (path: string, sessionId?: string) => void
 
   /**
    * Open a file directly in the system editor, bypassing the link interceptor.

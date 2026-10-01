@@ -112,7 +112,8 @@ export interface AppShellContextType {
   ) => void
 
   // File/URL handlers - these can open in tabs or external apps
-  onOpenFile: (path: string) => void
+  // Optional sessionId scopes the server-side read to that session's working directory
+  onOpenFile: (path: string, sessionId?: string) => void
   onOpenUrl: (url: string) => void
 
   // Workspace

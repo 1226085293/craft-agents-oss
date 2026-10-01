@@ -134,7 +134,9 @@ function getTurnKey(turn: Turn): string {
 interface ChatDisplayProps {
   session: Session | null
   onSendMessage: (message: string, attachments?: FileAttachment[], skillSlugs?: string[], options?: { midStreamBehavior?: 'steer' | 'queue' }) => void
-  onOpenFile: (path: string) => void
+  /** Open/preview a file. Optional sessionId scopes the server-side read to that
+   *  session's working directory, so agent-produced files outside the workspace root work. */
+  onOpenFile: (path: string, sessionId?: string) => void
   onOpenUrl: (url: string) => void
   // Model selection
   currentModel: string
@@ -564,6 +566,15 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   // Panel focus state (for multi-panel auto-scroll behavior)
   const appShellContext = useAppShellContext()
   const isFocusedPanel = appShellContext?.isFocusedPanel ?? true
+
+  // Session-scoped file open: pass the session id so the server widens its allowed
+  // directories to this session's working directory — agent-produced files that
+  // live outside the workspace root can then be previewed/opened from cards and
+  // markdown links without an "Access denied" error.
+  const openFileInSession = useCallback(
+    (path: string) => onOpenFile(path, session?.id),
+    [onOpenFile, session?.id]
+  )
 
   // Input is only disabled when explicitly disabled (e.g., agent needs activation)
   // User can type during streaming - submitting will stop the stream and send
@@ -2152,7 +2163,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                           <div className="flex flex-col gap-1">
                             <MemoizedMessageBubble
                               message={turn.message}
-                              onOpenFile={onOpenFile}
+                              onOpenFile={openFileInSession}
                               onOpenUrl={onOpenUrl}
                               sessionId={session?.id}
                               compactMode={compactMode}
@@ -2163,7 +2174,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                               <div key={guidanceMessage.id} className="pl-6 opacity-90">
                                 <MemoizedMessageBubble
                                   message={guidanceMessage}
-                                  onOpenFile={onOpenFile}
+                                  onOpenFile={openFileInSession}
                                   onOpenUrl={onOpenUrl}
                                   sessionId={session?.id}
                                   compactMode={compactMode}
@@ -2190,7 +2201,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                         >
                           <MemoizedMessageBubble
                             message={turn.message}
-                            onOpenFile={onOpenFile}
+                            onOpenFile={openFileInSession}
                             onOpenUrl={onOpenUrl}
                             sessionId={session?.id}
                             onRetry={turn.message.role === 'error' ? () => {
@@ -2265,7 +2276,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                         expandedActivityGroups={expandedActivityGroups}
                         onExpandedActivityGroupsChange={setExpandedActivityGroups}
                         todos={turn.todos}
-                        onOpenFile={onOpenFile}
+                        onOpenFile={openFileInSession}
                         onOpenUrl={onOpenUrl}
                         isLastResponse={isLastResponse}
                         compactMode={compactMode}
@@ -2531,7 +2542,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           title={overlayState.activity.displayName || overlayState.activity.toolName || 'Activity'}
           theme={isDark ? 'dark' : 'light'}
           onOpenUrl={onOpenUrl}
-          onOpenFile={onOpenFile}
+          onOpenFile={openFileInSession}
         />
       )}
 
@@ -2596,7 +2607,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
             onClose={handleCloseOverlay}
             content={activityOutputOverlayData.content}
             onOpenUrl={onOpenUrl}
-            onOpenFile={onOpenFile}
+            onOpenFile={openFileInSession}
             filePath={activityOutputOverlayData.filePath}
             typeBadge={{
               icon: Info,
@@ -2611,7 +2622,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
             onClose={handleCloseOverlay}
             content={activityOutputOverlayData.content}
             onOpenUrl={onOpenUrl}
-            onOpenFile={onOpenFile}
+            onOpenFile={openFileInSession}
             typeBadge={{
               icon: Info,
               label: overlayState.activity.displayName || overlayState.activity.toolName || 'Activity',
@@ -2665,7 +2676,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
             onClose={handleCloseOverlay}
             content={overlayState.content}
             onOpenUrl={onOpenUrl}
-            onOpenFile={onOpenFile}
+            onOpenFile={openFileInSession}
           />
         )
       )}

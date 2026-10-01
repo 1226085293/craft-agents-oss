@@ -494,7 +494,10 @@ export function UserMessageBubble({
           separate pill below — keeps the chat to one bubble per message
           while the chip and pulsing icon make the waiting state obvious
           (#616 follow-up). */}
-      <div className="w-full">
+      {/* Flex column + items-end keeps the bubble shrink-to-fit (a block
+          w-full wrapper would stretch it to 100% before max-w caps it) and
+          right-aligns the timestamp below the bubble. */}
+      <div className="w-full flex flex-col items-end">
       <div
         className={cn(
           "max-w-[80%] bg-user-message-bubble rounded-[16px] break-words min-w-0 select-text [&_p]:m-0",

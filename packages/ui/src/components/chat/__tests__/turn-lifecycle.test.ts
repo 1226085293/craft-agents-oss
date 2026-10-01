@@ -379,6 +379,121 @@ describe('turn lifecycle scenarios', () => {
       expect(deriveTurnPhase(turn)).toBe('awaiting')
     })
   })
+
+  // Empty intermediate assistant messages (a completed text event with no
+  // visible body) used to render as blank step rows in the process card.
+  // groupMessagesByTurn now drops them, while keeping pending (live "Thinking…")
+  // and non-empty intermediates.
+  describe('empty intermediate filtering', () => {
+    // Explicit base-relative timestamps keep every message in one turn, in the
+    // intended order, independent of the module-level helper counters.
+    const base = Date.now()
+
+    it('drops a completed empty intermediate between tool calls', () => {
+      const messages: Message[] = [
+        { id: 'u1', role: 'user', content: 'do the thing', timestamp: base + 1 },
+        { id: 't1', role: 'tool', content: 'Tool result', toolName: 'Read', toolUseId: 'tu-1', toolStatus: 'completed', toolResult: 'Tool result', timestamp: base + 2 },
+        // the blank-row culprit: completed intermediate with an empty body
+        { id: 'a-empty', role: 'assistant', content: '', isStreaming: false, isPending: false, isIntermediate: true, timestamp: base + 3 },
+        { id: 't2', role: 'tool', content: 'Tool result', toolName: 'Grep', toolUseId: 'tu-2', toolStatus: 'completed', toolResult: 'Tool result', timestamp: base + 4 },
+      ]
+      const turns = groupMessagesByTurn(messages, { isSessionProcessing: false })
+      const turn = getLastAssistantTurn(turns)!
+      expect(turn.activities.filter(a => a.type === 'intermediate')).toHaveLength(0)
+      // both tool rows survive
+      expect(turn.activities.filter(a => a.type === 'tool')).toHaveLength(2)
+    })
+
+    it('drops a whitespace-only completed intermediate too', () => {
+      const messages: Message[] = [
+        { id: 'u1', role: 'user', content: 'do the thing', timestamp: base + 1 },
+        { id: 't1', role: 'tool', content: 'Tool result', toolName: 'Read', toolUseId: 'tu-1', toolStatus: 'completed', toolResult: 'Tool result', timestamp: base + 2 },
+        { id: 'a-blank', role: 'assistant', content: '   \n  ', isStreaming: false, isPending: false, isIntermediate: true, timestamp: base + 3 },
+      ]
+      const turns = groupMessagesByTurn(messages, { isSessionProcessing: false })
+      const turn = getLastAssistantTurn(turns)!
+      expect(turn.activities.filter(a => a.type === 'intermediate')).toHaveLength(0)
+    })
+
+    it('keeps a non-empty completed intermediate', () => {
+      const messages: Message[] = [
+        { id: 'u1', role: 'user', content: 'do the thing', timestamp: base + 1 },
+        { id: 'a-nonempty', role: 'assistant', content: 'Let me read the file first', isStreaming: false, isPending: false, isIntermediate: true, timestamp: base + 2 },
+        { id: 't1', role: 'tool', content: 'Tool result', toolName: 'Read', toolUseId: 'tu-1', toolStatus: 'completed', toolResult: 'Tool result', timestamp: base + 3 },
+      ]
+      // still processing → no response promotion, so the row stays a plain activity
+      const turns = groupMessagesByTurn(messages, { isSessionProcessing: true })
+      const turn = getLastAssistantTurn(turns)!
+      const intermediates = turn.activities.filter(a => a.type === 'intermediate')
+      expect(intermediates).toHaveLength(1)
+      expect(intermediates[0]?.content).toBe('Let me read the file first')
+    })
+
+    it('keeps a pending (running) intermediate even when empty, for the Thinking placeholder', () => {
+      const messages: Message[] = [
+        { id: 'u1', role: 'user', content: 'do the thing', timestamp: base + 1 },
+        { id: 'a-pending', role: 'assistant', content: '', isStreaming: true, isPending: true, isIntermediate: true, timestamp: base + 2 },
+      ]
+      const turns = groupMessagesByTurn(messages)
+      const turn = getLastAssistantTurn(turns)!
+      const intermediates = turn.activities.filter(a => a.type === 'intermediate')
+      expect(intermediates).toHaveLength(1)
+      expect(intermediates[0]?.status).toBe('running')
+    })
+  })
+
+  // A *completed* non-intermediate response with no visible text — a blank 'stop'
+  // final (thinking-only stop, or a defense re-delivery that came back empty) —
+  // used to surface as an empty "result bubble" (copy/markdown buttons, no body).
+  // groupMessagesByTurn now keeps such turns as an activity-only process card.
+  // (2026-10-01 empty-bubble incident, session 261001-active-eclipse.)
+  describe('empty response filtering (blank result bubble)', () => {
+    const base = Date.now()
+
+    it('a blank completed final response is not surfaced as a response card', () => {
+      const messages: Message[] = [
+        { id: 'u1', role: 'user', content: 'do the thing', timestamp: base + 1 },
+        { id: 't1', role: 'tool', content: 'Tool result', toolName: 'Read', toolUseId: 'tu-1', toolStatus: 'completed', toolResult: 'Tool result', timestamp: base + 2 },
+        // the empty-bubble culprit: a non-intermediate 'stop' with a blank body
+        { id: 'a-blank-final', role: 'assistant', content: '\n\n', isStreaming: false, isIntermediate: false, timestamp: base + 3 },
+      ]
+      const turns = groupMessagesByTurn(messages, { isSessionProcessing: false })
+      const turn = getLastAssistantTurn(turns)!
+      expect(turn.response?.text?.trim()).toBeFalsy()
+      // the tool work is still present as an activity (process card)
+      expect(turn.activities.filter(a => a.type === 'tool')).toHaveLength(1)
+    })
+
+    it('a blank final flushes as a process card; later work forms the next turn', () => {
+      const messages: Message[] = [
+        { id: 'u1', role: 'user', content: 'do the thing', timestamp: base + 1 },
+        { id: 't1', role: 'tool', content: 'Tool result', toolName: 'Read', toolUseId: 'tu-1', toolStatus: 'completed', toolResult: 'Tool result', timestamp: base + 2 },
+        { id: 'a-blank-final', role: 'assistant', content: '\n\n', isStreaming: false, isIntermediate: false, timestamp: base + 3 },
+        { id: 't2', role: 'tool', content: 'Tool result', toolName: 'Grep', toolUseId: 'tu-2', toolStatus: 'completed', toolResult: 'Tool result', timestamp: base + 4 },
+        { id: 'a-final', role: 'assistant', content: 'Done — all tasks completed.', isStreaming: false, isIntermediate: false, timestamp: base + 5 },
+      ]
+      const turns = groupMessagesByTurn(messages, { isSessionProcessing: false })
+      const assistantTurns = turns.filter((t): t is AssistantTurn => t.type === 'assistant')
+      expect(assistantTurns).toHaveLength(2)
+      // first turn (tool1 + blank final) → process card, no response bubble
+      expect(assistantTurns[0].response).toBeUndefined()
+      expect(assistantTurns[0].activities.filter(a => a.type === 'tool')).toHaveLength(1)
+      // second turn (tool2 + real final) → the real response surfaces
+      expect(assistantTurns[1].response?.text).toBe('Done — all tasks completed.')
+      expect(assistantTurns[1].activities.filter(a => a.type === 'tool')).toHaveLength(1)
+    })
+
+    it('a real final response still surfaces normally', () => {
+      const messages: Message[] = [
+        { id: 'u1', role: 'user', content: 'do the thing', timestamp: base + 1 },
+        { id: 't1', role: 'tool', content: 'Tool result', toolName: 'Read', toolUseId: 'tu-1', toolStatus: 'completed', toolResult: 'Tool result', timestamp: base + 2 },
+        { id: 'a-final', role: 'assistant', content: 'Done — all tasks completed.', isStreaming: false, isIntermediate: false, timestamp: base + 3 },
+      ]
+      const turns = groupMessagesByTurn(messages, { isSessionProcessing: false })
+      const turn = getLastAssistantTurn(turns)!
+      expect(turn.response?.text).toBe('Done — all tasks completed.')
+    })
+  })
 })
 
 describe('edge cases', () => {

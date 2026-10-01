@@ -442,12 +442,15 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
       // Only promote when turn is complete (processing indicator hidden)
       const hasPlan = currentTurn.activities.some(a => a.type === 'plan')
       if (!interrupted && !suppressPromotion && !turnAborted && !hasPlan && !currentTurn.response && currentTurn.isComplete && currentTurn.activities.length > 0) {
-        // Find the last intermediate text activity (reverse to get most recent)
+        // Find the last intermediate text activity (reverse to get most recent).
+        // Only non-blank content is promotable — a whitespace-only intermediate
+        // would surface as an empty response bubble (same root cause as the
+        // blank 'stop' final above).
         const lastTextActivity = [...currentTurn.activities]
           .reverse()
-          .find(a => a.type === 'intermediate' && a.content)
+          .find(a => a.type === 'intermediate' && a.content?.trim())
 
-        if (lastTextActivity?.content) {
+        if (lastTextActivity?.content?.trim()) {
           currentTurn.response = {
             text: lastTextActivity.content,
             isStreaming: false,
@@ -672,6 +675,15 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
       // Pending: streaming text where we don't yet know if it's intermediate - treat as intermediate
       // until text_complete arrives with the definitive isIntermediate flag
       if (message.isIntermediate || message.isPending) {
+        // A *completed* intermediate with no visible text renders as a blank step row
+        // (ActivityRow shows just the dashed-circle icon, no label). Models emit these
+        // frequently when they go straight to the next tool call without narration. Drop
+        // them so the steps list stays readable. Keep: pending messages (live "Thinking…"
+        // placeholder) and intermediates with actual content.
+        const isBlankCompletedIntermediate = !message.isPending && !message.content?.trim()
+        if (isBlankCompletedIntermediate) {
+          continue
+        }
         if (!currentTurn) {
           // Start a new turn for this intermediate message
           currentTurn = {
@@ -727,6 +739,22 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
           isComplete: !message.isStreaming,
           timestamp: message.timestamp,
         }
+      }
+
+      // A *completed* non-intermediate response with no visible text is a blank
+      // "result bubble" — the classic symptom of a thinking-only 'stop' or a
+      // defense re-delivery that came back empty (2026-10-01 empty-bubble
+      // incident, session 261001-active-eclipse: a whitespace-only 'stop'
+      // rendered as a copy/markdown card with no body). Don't surface it as the
+      // turn's response: keep the turn as an activity-only process card.
+      // (Streaming/pending finals are never checked — the body may still arrive.)
+      const isBlankCompletedResponse =
+        !message.isStreaming && !message.isPending && !message.content?.trim()
+      if (isBlankCompletedResponse) {
+        currentTurn.isStreaming = false
+        currentTurn.isComplete = true
+        flushCurrentTurn()
+        continue
       }
 
       // Set as response on current turn (ignoring turnId differences)

@@ -2229,9 +2229,17 @@ export class SessionManager implements ISessionManager {
 
     for (const msg of recoverable) {
       const resumeTool = this.findRecoverableToolAnchor(managed.messages, msg)
-      // Keep queued styling/recovery semantics until processNextQueuedMessage
-      // promotes this exact message to `processing` and clears the flag.
-      msg.isQueued = true
+      // Do NOT mark these messages `isQueued`: the UI treats that flag as a
+      // LIVE mid-stream queue item — it defers the bubble below the running
+      // process block and shows the queued/guide/cancel chip (turn-utils
+      // deferral + UserMessageBubble). A recovered message is already part of
+      // the transcript history: the no-re-stamp replay below keeps its
+      // original timestamp, so it must stay in chronological place without
+      // the queued styling (2026-10-01: after a restart, previously-sent
+      // messages rendered below the process cards with a "queued" badge).
+      // Clear any stale persisted flag instead — replay is driven by the
+      // queue entry, not by the message flag.
+      msg.isQueued = false
       managed.messageQueue.push({
         message: msg.content,
         internalMessage: this.buildRecoveredTurnPrompt(managed.messages, msg),

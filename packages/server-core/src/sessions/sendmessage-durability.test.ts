@@ -314,8 +314,12 @@ describe('sendMessage durability', () => {
 
     expect(managed.messageQueue.map(q => q.messageId)).toEqual(['user-one', 'user-two'])
     expect(managed.messageQueue.map(q => q.message)).toEqual(['好了吗？', '回答我！'])
-    expect(managed.messages.find(m => m.id === 'user-one')?.isQueued).toBe(true)
-    expect(managed.messages.find(m => m.id === 'user-two')?.isQueued).toBe(true)
+    // Recovered messages must NOT carry the live-queue flag: it would defer
+    // them below the replayed process card and show the queued chip in the UI
+    // (2026-10-01 regression). They stay in chronological place; replay is
+    // driven by the queue entries above, not by the message flag.
+    expect(managed.messages.find(m => m.id === 'user-one')?.isQueued).toBe(false)
+    expect(managed.messages.find(m => m.id === 'user-two')?.isQueued).toBe(false)
   })
 
   it('resumes instead of replaying a user turn that already started tool work', () => {

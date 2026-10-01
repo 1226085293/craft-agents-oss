@@ -347,7 +347,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   }, [session])
 
   const handleOpenFile = React.useCallback(
-    async (path: string) => {
+    async (path: string, sessionId?: string) => {
       // Resolve bare relative paths against session working directory,
       // or workspace root as a fallback when workingDirectory is not set.
       const resolved = (() => {
@@ -379,12 +379,12 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
             const files = matches.filter((m) => m.type === 'file' && m.name === fileName)
             const exact = files.find((m) => m.path === resolved)
             if (exact) {
-              onOpenFile(exact.path)
+              onOpenFile(exact.path, sessionId)
               return
             }
 
             if (files.length === 1) {
-              onOpenFile(files[0].path)
+              onOpenFile(files[0].path, sessionId)
               toast.info(t('chat.openedClosestMatch', { path: files[0].relativePath }))
               return
             }
@@ -394,7 +394,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
         }
       }
 
-      onOpenFile(resolved)
+      onOpenFile(resolved, sessionId)
     },
     [onOpenFile, workingDirectory, activeWorkspace?.rootPath]
   )

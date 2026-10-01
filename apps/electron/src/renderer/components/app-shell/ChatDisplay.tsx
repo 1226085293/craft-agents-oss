@@ -2269,6 +2269,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                         activities={turn.activities}
                         response={turn.response}
                         intent={turn.intent}
+                        timestamp={turn.timestamp}
                         isStreaming={turn.isStreaming}
                         isComplete={turn.isComplete}
                         isExpanded={expandedTurns.has(assistantUiKey)}
@@ -2823,6 +2824,7 @@ function MessageBubble({
         onUrlClick={onOpenUrl}
         onFileClick={onOpenFile}
         compactMode={compactMode}
+        timestamp={message.timestamp}
       />
     )
   }

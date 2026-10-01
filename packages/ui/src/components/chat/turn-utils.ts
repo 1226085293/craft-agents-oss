@@ -1088,6 +1088,17 @@ export function formatDuration(ms: number): string {
 }
 
 /**
+ * Format a timestamp as full year-month-day hour:minute:second (local time).
+ * @example formatDateTimeFull(1759312880000) => "2026-01-01 16:41:20"
+ */
+export function formatDateTimeFull(timestamp: number): string {
+  const d = new Date(timestamp)
+  if (Number.isNaN(d.getTime())) return ''
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+/**
  * Format token count to human-readable string.
  * @example formatTokens(500) => "500"
  * @example formatTokens(1500) => "1.5k"

@@ -18,6 +18,7 @@ import { normalizePath } from '@craft-agent/core/utils'
 import { cn } from '../../lib/utils'
 import { Markdown } from '../markdown'
 import { FileTypeIcon, getFileTypeLabel } from './attachment-helpers'
+import { formatDateTimeFull } from './turn-utils'
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from '../tooltip'
 import { useTranslation } from 'react-i18next'
 
@@ -325,6 +326,8 @@ export interface UserMessageBubbleProps {
   onCancelQueued?: () => void
   /** Compact mode - reduces padding for popover embedding */
   compactMode?: boolean
+  /** Message timestamp (ms epoch) - shown at the bottom-right corner of the bubble */
+  timestamp?: number
 }
 
 /** Minimum visible duration of the "Queued" chip. Both backends ack
@@ -344,6 +347,7 @@ export function UserMessageBubble({
   onGuideQueued,
   onCancelQueued,
   compactMode,
+  timestamp,
 }: UserMessageBubbleProps) {
   const { t } = useTranslation()
   const hasAttachments = attachments && attachments.length > 0
@@ -555,6 +559,11 @@ export function UserMessageBubble({
             </Markdown>
           )
         }
+        {timestamp != null && (
+          <div className="mt-1.5 text-right text-[10px] leading-none text-muted-foreground/70 tabular-nums">
+            {formatDateTimeFull(timestamp)}
+          </div>
+        )}
       </div>
     </div>
   )

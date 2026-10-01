@@ -170,6 +170,7 @@ export function SessionViewer({
                       badges={turn.message.badges}
                       onUrlClick={platformActions.onOpenUrl}
                       onFileClick={platformActions.onOpenFile}
+                      timestamp={turn.message.timestamp}
                     />
                   </div>
                 )
@@ -197,6 +198,7 @@ export function SessionViewer({
                     activities={turn.activities}
                     response={turn.response}
                     intent={turn.intent}
+                    timestamp={turn.timestamp}
                     isStreaming={turn.isStreaming}
                     isComplete={turn.isComplete}
                     isExpanded={expandedTurns.has(assistantUiKey)}

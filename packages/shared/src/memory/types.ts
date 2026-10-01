@@ -105,6 +105,14 @@ export interface MemoryInjectionConfig {
   priorityTags: string[];
   /** Exclude memories with these tags */
   excludedTags: string[];
+  /**
+   * Minimum TOPICAL relevance score for a memory to be eligible for injection.
+   * This gates on the keyword/tag signal only (NOT on confidence/recency), so an
+   * entry with zero topical match to the current conversation is never injected,
+   * even if it is fresh or high-confidence. Set to 0 to disable the gate and
+   * always inject up to `maxMemories` (previous behavior).
+   */
+  minRelevanceScore: number;
 }
 
 /** Default injection configuration */
@@ -113,6 +121,11 @@ export const DEFAULT_MEMORY_INJECTION_CONFIG: MemoryInjectionConfig = {
   maxTokens: 1500,
   priorityTags: [],
   excludedTags: ['experimental', 'discarded'],
+  // A topical score of >= 2 means at least one keyword hit in content OR one
+  // keyword↔tag overlap (each +2); a priority tag alone contributes +5. This
+  // suppresses off-topic memories that would otherwise ride on the confidence/
+  // recency base floor into the top-N.
+  minRelevanceScore: 2,
 };
 
 // ============================================================================

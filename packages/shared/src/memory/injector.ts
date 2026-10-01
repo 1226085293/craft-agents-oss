@@ -21,43 +21,50 @@ import { getMemoryStats } from './store.ts';
 /**
  * Score a memory's relevance to the current conversation context.
  * Higher score = more relevant.
+ *
+ * Returns both:
+ * - `topical` — the keyword/tag signal ONLY (how well the memory's content/tags
+ *   match the conversation). This is what actually measures relevance and is what
+ *   the `minRelevanceScore` gate applies to.
+ * - `total`   — the ranking score used to order eligible memories. It adds a
+ *   confidence + recency "freshness" floor on top of `topical`; that floor is
+ *   deliberately NOT used for the gate, otherwise off-topic but fresh entries
+ *   would always crowd in.
  */
 function scoreMemoryRelevance(
   entry: MemoryEntry,
   contextKeywords: string[],
   priorityTags: string[],
-): number {
-  let score = 0;
+): { total: number; topical: number } {
+  let topical = 0;
   const contentLower = entry.content.toLowerCase();
   const allTags = [...entry.tags];
 
-  // Keyword matches in content
+  // Topical signal: keyword matches in content
   for (const keyword of contextKeywords) {
     if (contentLower.includes(keyword.toLowerCase())) {
-      score += 2;
+      topical += 2;
     }
   }
 
-  // Tag matches with priority boost
+  // Topical signal: tag matches with priority boost
   for (const tag of allTags) {
     if (priorityTags.includes(tag)) {
-      score += 5;
+      topical += 5;
     } else if (contextKeywords.some(kw => tag.includes(kw.toLowerCase()) || kw.toLowerCase().includes(tag))) {
-      score += 2;
+      topical += 2;
     }
   }
 
-  // Confidence bonus
-  score += entry.confidence * 2;
-
-  // Recency bonus (newer memories are slightly more relevant)
+  // Ranking total = topical signal + confidence + recency floor - freshness penalty
   const daysSinceCreated = (Date.now() - new Date(entry.createdAt).getTime()) / (1000 * 60 * 60 * 24);
-  score += Math.max(0, 2 - daysSinceCreated / 30); // Decays over 30 days
+  const total =
+    topical
+    + entry.confidence * 2
+    + Math.max(0, 2 - daysSinceCreated / 30) // Recency bonus, decays over 30 days
+    - Math.min(entry.injectedCount * 0.3, 2); // Freshness penalty for heavily-injected memories
 
-  // Freshness penalty for heavily injected memories (avoid redundancy)
-  score -= Math.min(entry.injectedCount * 0.3, 2);
-
-  return score;
+  return { total, topical };
 }
 
 // ============================================================================
@@ -112,7 +119,7 @@ export function selectRelevantMemories(
   recentMessages: Array<{ role: string; content?: string }>,
   config: MemoryInjectionConfig = DEFAULT_MEMORY_INJECTION_CONFIG,
 ): MemoryEntry[] {
-  const { maxMemories, maxTokens, priorityTags, excludedTags } = config;
+  const { maxMemories, maxTokens, priorityTags, excludedTags, minRelevanceScore } = config;
 
   const contextKeywords = extractContextKeywords(recentMessages);
 
@@ -125,11 +132,14 @@ export function selectRelevantMemories(
       if (entry.expiresAt && new Date(entry.expiresAt) < new Date()) return false;
       return true;
     })
-    .map(entry => ({
-      entry,
-      score: scoreMemoryRelevance(entry, contextKeywords, priorityTags),
-    }))
-    .sort((a, b) => b.score - a.score);
+    .map(entry => {
+      const { total, topical } = scoreMemoryRelevance(entry, contextKeywords, priorityTags);
+      return { entry, total, topical };
+    })
+    // Gate on TOPICAL relevance: an entry with no keyword/tag signal to the
+    // current conversation is not injected, even if fresh or high-confidence.
+    .filter(item => item.topical >= minRelevanceScore)
+    .sort((a, b) => b.total - a.total);
 
   // Select top entries within token budget
   const selected: MemoryEntry[] = [];

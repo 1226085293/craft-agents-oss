@@ -238,7 +238,7 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
         <div className="text-xs text-destructive">{error}</div>
       )}
 
-      <div className="space-y-1.5 max-h-48 overflow-y-auto">
+      <div className="space-y-1.5 flex-1 min-h-0 overflow-y-auto">
         {filteredMemories.length === 0 ? (
           <div className="text-center py-4 text-xs text-muted-foreground">
             {searchQuery ? t('memory.noResults') : t('memory.empty')}
@@ -268,9 +268,10 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
         )}
       </div>
 
-      {stats?.lastExtractionAt && (
-        <div className="text-[10px] text-muted-foreground text-center">
-          {t('memory.extractions')}: {stats.totalExtractions} · {stats.lastExtractionAt}
+      {stats && (
+        <div className="shrink-0 text-[10px] text-muted-foreground text-center border-t border-border/40 pt-1.5">
+          {t('memory.extractions')}: {stats.totalExtractions}
+          {stats.lastExtractionAt ? ` · ${stats.lastExtractionAt}` : ''}
         </div>
       )}
     </div>

@@ -326,7 +326,7 @@ export interface UserMessageBubbleProps {
   onCancelQueued?: () => void
   /** Compact mode - reduces padding for popover embedding */
   compactMode?: boolean
-  /** Message timestamp (ms epoch) - shown at the bottom-right corner of the bubble */
+  /** Message timestamp (ms epoch) - shown right-aligned below the bubble */
   timestamp?: number
 }
 
@@ -494,6 +494,7 @@ export function UserMessageBubble({
           separate pill below — keeps the chat to one bubble per message
           while the chip and pulsing icon make the waiting state obvious
           (#616 follow-up). */}
+      <div className="w-full">
       <div
         className={cn(
           "max-w-[80%] bg-user-message-bubble rounded-[16px] break-words min-w-0 select-text [&_p]:m-0",
@@ -559,11 +560,12 @@ export function UserMessageBubble({
             </Markdown>
           )
         }
-        {timestamp != null && (
-          <div className="mt-1.5 text-right text-[10px] leading-none text-muted-foreground/70 tabular-nums">
-            {formatDateTimeFull(timestamp)}
-          </div>
-        )}
+      </div>
+      {timestamp != null && (
+        <div className="mt-[2px] text-right text-[10px] leading-none text-muted-foreground/60 tabular-nums select-none">
+          {formatDateTimeFull(timestamp)}
+        </div>
+      )}
       </div>
     </div>
   )

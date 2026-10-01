@@ -379,7 +379,7 @@ export interface TurnCardProps {
   openAnnotationRequest?: OpenAnnotationRequest | null
   /** Annotation interaction mode (viewer uses tooltip-only to suppress the island) */
   annotationInteractionMode?: AnnotationInteractionMode
-  /** Turn timestamp (ms epoch) - shown at the bottom-left corner of the card */
+  /** Turn timestamp (ms epoch) - shown below the final response bubble */
   timestamp?: number
 }
 
@@ -1463,6 +1463,8 @@ export interface ResponseCardProps {
   openAnnotationRequest?: OpenAnnotationRequest | null
   /** Annotation interaction mode (viewer uses tooltip-only to suppress the island) */
   annotationInteractionMode?: AnnotationInteractionMode
+  /** Turn timestamp (ms epoch) - shown below the response bubble */
+  timestamp?: number
 }
 
 interface BranchDropdownProps {
@@ -1703,6 +1705,7 @@ export function ResponseCard({
   hasActiveFollowUpAnnotations = false,
   openAnnotationRequest,
   annotationInteractionMode = 'interactive',
+  timestamp,
 }: ResponseCardProps) {
   const { t } = useTranslation()
   // Throttled content for display - updates every CONTENT_THROTTLE_MS during streaming
@@ -2696,6 +2699,11 @@ export function ResponseCard({
           </div>
         )}
       </div>
+      {timestamp != null && (
+        <div className="ml-[4px] mt-[2px] text-[10px] leading-none text-muted-foreground/60 tabular-nums select-none">
+          {formatDateTimeFull(timestamp)}
+        </div>
+      )}
       {selectionMenu}
     </>
   )
@@ -3353,6 +3361,7 @@ export const TurnCard = React.memo(function TurnCard({
                 hasActiveFollowUpAnnotations={hasActiveFollowUpAnnotations}
                 openAnnotationRequest={openAnnotationRequest}
                 annotationInteractionMode={annotationInteractionMode}
+                timestamp={timestamp}
               />
             </motion.div>
           )}
@@ -3385,14 +3394,8 @@ export const TurnCard = React.memo(function TurnCard({
             hasActiveFollowUpAnnotations={hasActiveFollowUpAnnotations}
             openAnnotationRequest={openAnnotationRequest}
             annotationInteractionMode={annotationInteractionMode}
+            timestamp={timestamp}
           />
-        </div>
-      )}
-
-      {/* Turn timestamp - bottom-left corner of the card */}
-      {timestamp != null && (
-        <div className="text-[10px] leading-none text-muted-foreground/60 tabular-nums">
-          {formatDateTimeFull(timestamp)}
         </div>
       )}
     </div>

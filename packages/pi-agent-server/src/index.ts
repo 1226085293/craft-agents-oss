@@ -507,6 +507,7 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
     aborted: boolean;
     endsWithEmptyResponse: boolean;
     hasRepetitionLoop: boolean;
+    truncatedFinal: boolean;
     stallAborted?: boolean;
   } | undefined;
   let stallKillThisRun = false;
@@ -588,7 +589,23 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
     // run-wide text presence must not mask a garbage terminal reply.
     const lastText = lastAssistant ? extractAssistantText(lastAssistant.content) : '';
     const hasRepetitionLoop = lastText.length > 0 && detectRepetitionLoop(lastText);
-    runOutput = { hasVisibleText: anyText, aborted, endsWithEmptyResponse, hasRepetitionLoop, stallAborted: stallKillThisRun };
+    // Truncated-but-non-empty final (2026-10-01 incident): stopReason='length'
+    // means the output hit the max_tokens cap. When the cut happens AFTER some
+    // visible text was already emitted, endsWithEmptyResponse misses it (it
+    // requires NO visible block) and the truncated reply is delivered as-is —
+    // e.g. a final reply cut off mid-sentence. 'length' is a hard truncation
+    // marker, so it is a strong "incomplete" signal independent of text length.
+    // (The empty-'length' variant stays covered by endsWithEmptyResponse; this
+    // flag additionally raises the resume for the partial-text case.)
+    const truncatedFinal = lastAssistant?.stopReason === 'length';
+    runOutput = {
+      hasVisibleText: anyText,
+      aborted,
+      endsWithEmptyResponse,
+      hasRepetitionLoop,
+      truncatedFinal,
+      stallAborted: stallKillThisRun,
+    };
 
     // Double-guard for the P0 abort rule (evaluator also short-circuits):
     // a user-initiated stop is terminal. If ANY assistant message carries

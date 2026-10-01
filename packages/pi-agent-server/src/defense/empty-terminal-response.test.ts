@@ -50,6 +50,7 @@ function scan(evaluator: DefenseEvaluator, endMessages: unknown[]) {
     }
   }
   let endsWithEmptyResponse = false;
+  let truncatedFinal = false;
   if (lastAssistant) {
     const hasVisibleTextBlock = Array.isArray(lastAssistant.content)
       && lastAssistant.content.some(
@@ -60,8 +61,12 @@ function scan(evaluator: DefenseEvaluator, endMessages: unknown[]) {
     // ANY clean stop without a visible text block in the final message is
     // an empty delivery (empty content OR thinking-only content).
     endsWithEmptyResponse = cleanStop && !hasVisibleTextBlock;
+    // Mirrors pi-agent-server/src/index.ts: a max_tokens truncation
+    // (stopReason='length') cuts the final off — including the partial-text
+    // case that endsWithEmptyResponse cannot see (it needs NO visible block).
+    truncatedFinal = lastAssistant.stopReason === 'length';
   }
-  return evaluator.evaluate({ hasVisibleText: anyText, aborted, endsWithEmptyResponse });
+  return evaluator.evaluate({ hasVisibleText: anyText, aborted, endsWithEmptyResponse, truncatedFinal });
 }
 
 describe('empty terminal response defense (2026-08-22 incidents)', () => {
@@ -181,5 +186,51 @@ describe('empty terminal response defense (2026-08-22 incidents)', () => {
     const result = scan(e, [{ role: 'assistant', content: [{ type: 'text', text: 'done writing' }], stopReason: 'stop', usage: { output: 5 } }]);
     expect(result.shouldResume).toBe(true);
     expect(result.resumeMessage).not.toContain('EMPTY response'); // different reason branch
+  });
+});
+
+/**
+ * Regression contract for the 2026-10-01 truncated-but-non-empty incident
+ * (261001-active-eclipse): a final assistant reply hit the max_tokens cap
+ * (stopReason='length') AFTER emitting partial visible text, so it was cut
+ * off mid-sentence (`...用户要的是"连`) and delivered as-is. The old 5
+ * signals all read false for it — endsWithEmptyResponse needs NO visible
+ * block, the write signals need a write — so the truncation went unseen.
+ * Fix: stopReason='length' is now a standalone early-stop signal.
+ */
+describe('truncated-but-non-empty final (2026-10-01 incident)', () => {
+  it('resumes when a final reply hit max_tokens (length) with partial visible text', () => {
+    const e = incidentEvaluator();
+    const result = scan(e, [
+      { role: 'assistant', content: [{ type: 'text', text: '让我检查关键前提' }], stopReason: 'toolUse' },
+      { role: 'toolResult', content: [{ type: 'text', text: 'line 42: ...' }] },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: '真相大白。日志 12:56:34…用户要的是"连' }],
+        stopReason: 'length',
+        usage: { input: 4000, output: 8192 },
+      },
+    ]);
+    expect(result.shouldResume).toBe(true);
+    expect(result.resumeMessage).toContain('CUT OFF by the output token limit');
+    expect(result.reason).toContain('truncatedFinal');
+  });
+
+  it('does NOT flag a healthy stop final (no truncation) with visible text', () => {
+    const e = incidentEvaluator();
+    const result = scan(e, [
+      { role: 'assistant', content: [{ type: 'text', text: '分析完成，结论如下：' }], stopReason: 'stop', usage: { output: 120 } },
+    ]);
+    expect(result.shouldResume).toBe(false);
+    expect(result.state).toBe('done');
+  });
+
+  it('does NOT resume after a user abort even when the final was truncated', () => {
+    const e = incidentEvaluator();
+    const result = scan(e, [
+      { role: 'assistant', content: [{ type: 'text', text: '好的，我来看看这个问题。' }], stopReason: 'stop', usage: { output: 50 } },
+      { role: 'assistant', content: [{ type: 'text', text: '继续…用户要的是"' }], stopReason: 'aborted', usage: { output: 30 } },
+    ]);
+    expect(result.shouldResume).toBe(false);
   });
 });

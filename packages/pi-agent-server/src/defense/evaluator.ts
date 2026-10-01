@@ -111,11 +111,13 @@ export class DefenseEvaluator {
     silentStop: boolean,
     emptyResponse: boolean,
     repetitionLoop: boolean,
+    truncatedFinal: boolean,
   ): string {
     const parts: string[] = [];
     if (silentStop) parts.push('silentStop');
     if (emptyResponse) parts.push('emptyResponse');
     if (repetitionLoop) parts.push('repetitionLoop');
+    if (truncatedFinal) parts.push('truncatedFinal');
     if (hasWrite) {
       const fsFiles = fsEvidence?.modifiedFiles ?? [];
       parts.push(
@@ -152,12 +154,21 @@ export class DefenseEvaluator {
    * repetition loop (a large share of exact-duplicate lines/sentences).
    * Such a reply is a model failure, not an answer — it must resume like
    * an empty response (2026-08-28 incident: 213K chars of 874 repeats).
+   *
+   * `truncatedFinal` flags the case where the FINAL assistant message hit
+   * the max_tokens cap (stopReason='length') AFTER emitting some visible
+   * text — the reply was cut off mid-sentence and is likely incomplete.
+   * endsWithEmptyResponse misses this (it needs NO visible block), so
+   * truncation is its own early-stop signal (2026-10-01 incident: a final
+   * reply truncated to `...用户要的是"连` was delivered as-is).
    */
   evaluate(lastAssistantMessage?: {
     hasVisibleText: boolean;
     aborted: boolean;
     endsWithEmptyResponse?: boolean;
     hasRepetitionLoop?: boolean;
+    /** True when the final hit the max_tokens cap (stopReason='length'). */
+    truncatedFinal?: boolean;
     /** True when the abort was issued by the stall watchdog, not the user. */
     stallAborted?: boolean;
   }): DefenseEvaluationResult {
@@ -222,11 +233,18 @@ export class DefenseEvaluator {
     // model failure and must trigger a resume just like an empty response.
     const repetitionLoop = lastAssistantMessage?.hasRepetitionLoop === true;
 
+    // Truncated-but-non-empty final (2026-10-01 incident): the reply hit the
+    // max_tokens cap (stopReason='length') AFTER emitting some visible text,
+    // so it was cut off mid-sentence. endsWithEmptyResponse misses this (it
+    // needs NO visible block); the truncation is a genuine early-stop and the
+    // reply must be completed, not delivered as-is.
+    const truncatedFinal = lastAssistantMessage?.truncatedFinal === true;
+
     // A stall-watchdog abort is itself an early-stop signal: the turn was
     // killed mid-flight, so evaluation must run even when no other signal
     // fired (e.g. visible text was already produced earlier in the run).
     const needsEvaluation =
-      stallAborted || silentStop || emptyResponse || repetitionLoop || shouldResume || complexity.needsEvaluation;
+      stallAborted || silentStop || emptyResponse || repetitionLoop || truncatedFinal || shouldResume || complexity.needsEvaluation;
     const stop = this.lifecycle.onStop(needsEvaluation);
 
     if (stop === 'abort') {
@@ -244,7 +262,7 @@ export class DefenseEvaluator {
     // was produced earlier in the run: the watchdog killed a mid-flight turn
     // (2026-09-08 fit-pulsar — progress text existed, the final verification
     // run never came back), so "already said something" must not read as done.
-    if (stop === 'run' || (!stallAborted && !shouldResume && !silentStop && !emptyResponse && !repetitionLoop)) {
+    if (stop === 'run' || (!stallAborted && !shouldResume && !silentStop && !emptyResponse && !repetitionLoop && !truncatedFinal)) {
       this.lifecycle.markDone();
       return {
         evaluated: true,
@@ -254,7 +272,7 @@ export class DefenseEvaluator {
     }
 
     // needsEvaluation: build resume context and decide.
-    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop, emptyResponse, repetitionLoop, stallAborted);
+    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop, emptyResponse, repetitionLoop, truncatedFinal, stallAborted);
     const decision = this.lifecycle.decideResume(resumeMessage);
     if (decision === State.FAILED) {
       return {
@@ -262,7 +280,7 @@ export class DefenseEvaluator {
         shouldResume: false,
         state: State.FAILED,
         failureReason: 'Resume cap reached or no progress across consecutive resumes',
-        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop),
+        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal),
       };
     }
 
@@ -272,7 +290,7 @@ export class DefenseEvaluator {
       shouldResume: true,
       resumeMessage,
       state: this.lifecycle.getState(),
-      reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop),
+      reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal),
     };
   }
 }
@@ -297,6 +315,7 @@ function buildResumeMessage(
   silentStop: boolean,
   emptyResponse: boolean,
   repetitionLoop: boolean,
+  truncatedFinal: boolean,
   stallAborted = false,
 ): string {
   const writeCalls = toolCalls.filter((c) => ['write', 'edit', 'bash:write'].includes(c.type));
@@ -335,6 +354,15 @@ function buildResumeMessage(
       `was exact-duplicate text) — a model degeneration, not an answer. It does NOT ` +
       `correspond to the user's message: state that reason, then give the user a ` +
       `concise, non-repetitive reply covering the outstanding points.`,
+    );
+  }
+  if (truncatedFinal) {
+    lines.push(
+      `- Your previous reply was CUT OFF by the output token limit (max_tokens) — it ` +
+      `likely ends mid-sentence or mid-thought and is incomplete. If it already fully ` +
+      `answers the user's message, simply re-deliver it verbatim. Otherwise continue it ` +
+      `from exactly where it was cut off (no redoing completed work, no new analysis ` +
+      `beyond finishing the thought).`,
     );
   }
   if (silentStop) {

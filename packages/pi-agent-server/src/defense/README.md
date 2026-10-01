@@ -19,6 +19,16 @@ content whose reasoning is invisible to the user (2026-08-22 gateway
 fault, 2026-08-28 truncation, 2026-10-01 incidents `261001-ready-sunset`
 / `261001-calm-pond` where a clean stop ended on a thinking block only).
 
+**Truncated terminal response** (extracted in `index.ts`, `truncatedFinal`):
+a final assistant message that hit the max_tokens cap (`stopReason='length'`)
+AFTER emitting some visible text — cut off mid-sentence, likely incomplete.
+This is the partial-text case `endsWithEmptyResponse` cannot see (that signal
+needs NO visible block). Truncation is now a standalone early-stop signal: the
+resume message instructs the model to either re-deliver the final verbatim (if it
+already fully answers) or continue from exactly where it was cut off. 2026-10-01
+incident `261001-active-eclipse`: a final reply truncated to `…用户要的是"连`
+was delivered as-is and left the user with a cut-off answer.
+
 > **Removed — Layer 3 `idle-words.ts`.** The idle-word regex produced false
 > positives on normal transition sentences (e.g. "现在修改现有的集成点：") because
 > regex matches word surfaces, not semantics. Per issue #1 it is deleted and its
@@ -66,7 +76,7 @@ corresponds to the user's message (the request the user sent in this turn):
 - If it does NOT correspond (missing, off-target, or unverified): state the reason
   in one short line, then continue the task from where it left off.
 Signals that triggered this verification step:
-- <per-signal lines: writes without read-back / empty response / repetition loop / …>
+- <per-signal lines: writes without read-back / empty response / repetition loop / truncated final / …>
 - Do NOT repeat already completed steps.
 ```
 

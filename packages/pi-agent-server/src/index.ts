@@ -644,8 +644,10 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
 /**
  * Queue the defense resume message on the SAME session (fire-and-forget —
  * never block the SDK's event pipeline). Resume ≠ rerun: followUp() queues
- * the message and the SDK's _runAgentPrompt loop picks it up right after
- * `agent_end`, continuing the SAME turn.
+ * the verification-delivery step ("judge whether the final reply corresponds
+ * to the user's message; re-deliver it verbatim or state the reason and
+ * continue") and the SDK's _runAgentPrompt loop picks it up right after
+ * `agent_end`, continuing the SAME turn (same process block).
  *
  * Reports the outcome back to the main process via `defense_resume_status`:
  * - resumed=true  → the main process keeps its event queue held open for the

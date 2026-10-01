@@ -205,6 +205,23 @@ describe('DefenseEvaluator', () => {
     expect(result.resumeMessage).toContain('Do NOT repeat');
   });
 
+  it('resume message frames a verification-delivery judgment, not a task re-run (2026-10-01 spec)', () => {
+    const evalr = new DefenseEvaluator();
+    evalr.recordToolCall({ type: 'write' });
+    const result = evalr.evaluate();
+    const msg = result.resumeMessage!;
+    // The step asks the model to judge correspondence with the user's message…
+    expect(msg).toContain('Verification delivery');
+    expect(msg).toContain('corresponds to the user');
+    // …and on the "corresponds" branch it re-delivers the final reply verbatim
+    // (one effective reply, no second different answer).
+    expect(msg).toContain('verbatim');
+    expect(msg).toContain('do NOT re-run the task');
+    // The "does not correspond" branch: reason + continue.
+    expect(msg).toContain('state the reason');
+    expect(msg).toContain('continue the task');
+  });
+
   it('does not resume on clean completion', () => {
     const evalr = new DefenseEvaluator();
     evalr.recordToolCall({ type: 'read' });

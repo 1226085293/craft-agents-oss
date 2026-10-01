@@ -42,15 +42,30 @@ L1 and L2 are both gated by this single switch — there are no sub-policies.
 
 ## Resume semantics
 
-Resume ≠ rerun. The evaluator appends a differential message to the **same**
-session transcript:
+Resume ≠ rerun. The evaluator appends a **verification delivery** step to the
+**same** session transcript. The model judges whether its final reply (its
+last assistant message) actually corresponds to the user's message — the
+resumed turn stays inside the same turn's process block (the main process
+holds its event queue open via `defenseResumePending`, see
+`event-adapter.ts`):
 
 ```
-[Defense] Detected a possible early stop. Please continue the task from where it left off.
-- Write/edit operations were performed but not verified by a read-back. Re-read the affected files...
-- Affected targets: ...
+[Defense] Verification delivery step — check delivery, do NOT re-run the task.
+Judge whether your final reply (your last assistant message in this conversation)
+corresponds to the user's message (the request the user sent in this turn):
+- If it DOES correspond: your reply now must simply be that final reply content,
+  verbatim — the same reply from before this verification step. Add no new analysis,
+  redo no completed work, append no new steps.
+- If it does NOT correspond (missing, off-target, or unverified): state the reason
+  in one short line, then continue the task from where it left off.
+Signals that triggered this verification step:
+- <per-signal lines: writes without read-back / empty response / repetition loop / …>
 - Do NOT repeat already completed steps.
 ```
+
+The "does correspond" branch re-delivers the previous final reply verbatim, so
+the user effectively receives ONE reply — not a second, different one. Extra
+work happens only on the "does not correspond" branch (reason + continue).
 
 Guardrails:
 - `maxResumes` (default 3): exceeding → `FAILED`.

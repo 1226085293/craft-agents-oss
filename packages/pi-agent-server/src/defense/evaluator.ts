@@ -274,7 +274,19 @@ export class DefenseEvaluator {
   }
 }
 
-/** Build the differential resume message (resume ≠ rerun). */
+/**
+ * Build the verification-delivery resume message.
+ *
+ * Resume ≠ rerun: the message appends a **verification delivery** step to the
+ * SAME session transcript. The model judges whether its final reply (its last
+ * assistant message) actually corresponds to the user's message:
+ * - corresponds → re-deliver that final reply verbatim, so the user
+ *   effectively receives ONE reply — the resumed turn (still inside the same
+ *   turn's process block) must not produce a second, different answer;
+ * - does not correspond → state the reason, then continue the conversation.
+ * The per-signal lines below are judgment aids ("why this check fired"), not
+ * new work orders: extra work happens only on the "does not correspond" branch.
+ */
 function buildResumeMessage(
   hasWrite: boolean,
   fsEvidence: FsWriteEvidence | null,
@@ -286,43 +298,57 @@ function buildResumeMessage(
 ): string {
   const writeCalls = toolCalls.filter((c) => ['write', 'edit', 'bash:write'].includes(c.type));
   const lines: string[] = [
-    '[Defense] Detected a possible early stop. Please continue the task from where it left off.',
+    '[Defense] Verification delivery step — check delivery, do NOT re-run the task.',
+    `Judge whether your final reply (your last assistant message in this conversation) ` +
+      `corresponds to the user's message (the request the user sent in this turn):`,
+    `- If it DOES correspond: your reply now must simply be that final reply content, ` +
+      `verbatim — the same reply from before this verification step. Add no new analysis, ` +
+      `redo no completed work, append no new steps.`,
+    `- If it does NOT correspond (missing, off-target, or unverified): state the reason ` +
+      `in one short line, then continue the task from where it left off.`,
+    `Signals that triggered this verification step:`,
   ];
   if (stallAborted) {
     lines.push(
       `- Your turn was ABORTED BY THE SYSTEM (stall watchdog: no activity for a long time, ` +
-      `a long-running tool was killed mid-execution) — NOT by the user. ` +
-      `Check whether the interrupted work actually completed (files written, partial output, ` +
-      `processes still running) before redoing anything, then continue from exactly where ` +
-      `it left off. Prefer re-running the interrupted step in smaller, resumable pieces.`,
+      `a long-running tool was killed mid-execution) — NOT by the user. Your final reply ` +
+      `is therefore incomplete and does NOT correspond. Check whether the interrupted work ` +
+      `actually completed (files written, partial output, processes still running) before ` +
+      `redoing anything, then continue the task from exactly where it left off. Prefer ` +
+      `re-running the interrupted step in smaller, resumable pieces.`,
     );
   }
   if (emptyResponse) {
     lines.push(
       `- Your previous model call returned an EMPTY response (no visible content; ` +
       `likely an upstream fault or max_tokens truncation burning invisible reasoning) — ` +
-      `NOT an intentional completion. Pick up exactly where you left off.`,
+      `NOT an intentional completion. No final reply exists to verify, so it does NOT ` +
+      `correspond: state that reason, then pick up exactly where you left off.`,
     );
   }
   if (repetitionLoop) {
     lines.push(
       `- Your previous reply devolved into a REPETITION LOOP (a large share of the output ` +
-      `was exact-duplicate text) — a model degeneration, not an answer. Give the user a ` +
+      `was exact-duplicate text) — a model degeneration, not an answer. It does NOT ` +
+      `correspond to the user's message: state that reason, then give the user a ` +
       `concise, non-repetitive reply covering the outstanding points.`,
     );
   }
   if (silentStop) {
     lines.push(
-      `- Your previous turn ended WITHOUT any visible reply to the user. ` +
-      `Report your current progress/status to the user now, then continue any remaining work.`,
+      `- Your previous turn ended WITHOUT any visible reply to the user. No final reply ` +
+      `exists to verify, so it does NOT correspond: state that reason, report your current ` +
+      `progress/status to the user now, then continue any remaining work.`,
     );
   }
   if (hasWrite) {
     lines.push(
       `- Write/edit operations were performed but never followed by any read-back ` +
-      `(no file read, no verification command output). Verify the outcome actually ` +
-      `matches the user's request — re-read the affected files or run a status/test ` +
-      `check — then confirm or correct your final answer. Do NOT redo completed work.`,
+      `(no file read, no verification command output). If your final reply claims these ` +
+      `writes are done without such evidence, it does NOT correspond: state that reason, ` +
+      `verify the outcome actually matches the user's request (re-read the affected files ` +
+      `or run a status/test check), then confirm or correct your final answer. ` +
+      `Do NOT redo completed work.`,
     );
   }
   if (fsEvidence && fsEvidence.modifiedFiles.length > 0) {

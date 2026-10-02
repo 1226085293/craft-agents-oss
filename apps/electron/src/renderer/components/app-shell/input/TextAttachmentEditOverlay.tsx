@@ -1,5 +1,5 @@
 /**
- * TextAttachmentEditOverlay - Editable preview for text attachments in the message input.
+ * TextAttachmentEditOverlay - Preview + edit for text attachments in the message input.
  *
  * Why this exists: pasted text blocks (`type: 'text'`, e.g. `pasted-text-N.txt`) have no
  * real OS path — they are synthetic clipboard attachments with content inline in
@@ -8,19 +8,22 @@
  * (.md/.txt/.py/...) *do* resolve to a path and would open the read-only code preview,
  * but were not editable.
  *
- * This overlay covers both cases:
- *   - always shows the inline text content (fixes the dead double-click),
- *   - lets the user edit it; saving writes the new content back to `attachment.text`,
- *     which `storeAttachment` persists to the session attachments folder on send.
+ * This overlay covers both cases with a read/edit split:
+ *   - view state is the familiar code-preview presentation (PreviewOverlay +
+ *     ContentFrame + ShikiCodeViewer, same layout as CodePreviewOverlay),
+ *   - hitting "Edit" swaps the live editor in; saving writes the new content back to
+ *     `attachment.text` (plus size/base64), which `storeAttachment` persists to the
+ *     session attachments folder when the message is sent.
  *
- * Files that exist on disk are never modified — the path badge still offers
- * "Open" / "Reveal in {file manager}" through PreviewOverlay.
+ * Files on disk are never modified — the path badge still offers "Open" /
+ * "Reveal in {file manager}" through PreviewOverlay, and the edit hint reminds the
+ * user that only the sent copy changes.
  */
 
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
-import { FileText, Info } from 'lucide-react'
-import { PreviewOverlay } from '@craft-agent/ui'
+import { BookOpen, Info, PenLine } from 'lucide-react'
+import { ContentFrame, PreviewOverlay, ShikiCodeViewer } from '@craft-agent/ui'
 import { isAbsolutePath } from '@/lib/drafts'
 import { ShikiCodeEditor } from '@/components/shiki/ShikiCodeEditor'
 import { Button } from '@/components/ui/button'
@@ -109,10 +112,12 @@ export function TextAttachmentEditOverlay({
   const { t } = useTranslation()
   const initialText = attachment?.text ?? ''
   const [text, setText] = React.useState(initialText)
+  const [editing, setEditing] = React.useState(false)
 
-  // Re-seed the editor whenever a different attachment is opened
+  // Re-seed whenever a different attachment is opened, and start in view mode
   React.useEffect(() => {
     setText(initialText)
+    setEditing(false)
   }, [initialText])
 
   const dirty = text !== initialText
@@ -122,6 +127,11 @@ export function TextAttachmentEditOverlay({
     onSave(text)
     onClose()
   }, [attachment, onSave, onClose, text])
+
+  const handleCancelEdit = React.useCallback(() => {
+    setText(initialText)
+    setEditing(false)
+  }, [initialText])
 
   const ext = attachment?.name ? attachment.name.split('.').pop()?.toUpperCase() : ''
   const typeLabel = ext && ext !== attachment?.name.toUpperCase() ? ext : 'TEXT'
@@ -134,46 +144,63 @@ export function TextAttachmentEditOverlay({
       ? attachment.path
       : undefined
 
+  const language = languageForAttachment(attachment?.name ?? '')
+
   return (
     <PreviewOverlay
       isOpen={isOpen}
       onClose={onClose}
       theme={theme}
-      typeBadge={{
-        icon: FileText,
-        label: typeLabel,
-        variant: 'blue',
-      }}
+      typeBadge={
+        editing
+          ? { icon: PenLine, label: typeLabel, variant: 'amber' }
+          : { icon: BookOpen, label: typeLabel, variant: 'blue' }
+      }
       filePath={realPath}
       sessionId={sessionId}
       title={attachment?.name}
+      className="bg-foreground-3"
       headerActions={
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={onClose}>
-            {t('common.cancel')}
+        editing ? (
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={handleCancelEdit}>
+              {t('common.cancel')}
+            </Button>
+            <Button size="sm" onClick={handleSave} disabled={!dirty}>
+              {t('common.save')}
+            </Button>
+          </div>
+        ) : (
+          <Button size="sm" onClick={() => setEditing(true)}>
+            <PenLine className="mr-1.5 h-3.5 w-3.5" />
+            {t('common.edit')}
           </Button>
-          <Button size="sm" onClick={handleSave} disabled={!dirty}>
-            {t('common.save')}
-          </Button>
-        </div>
+        )
       }
     >
-      <div className="px-6 pb-5">
-        <div className="mx-auto w-full max-w-[850px]">
-          <div className="overflow-hidden rounded-[10px] border border-foreground/5 bg-background shadow-minimal">
+      <ContentFrame title={t('overlay.code')} fitContent minWidth={850}>
+        {editing ? (
+          <div>
             <ShikiCodeEditor
               value={text}
               onChange={setText}
-              language={languageForAttachment(attachment?.name ?? '')}
+              language={language}
               className="h-[55vh]"
             />
+            <div className="mt-2 flex items-start gap-1.5 px-4 pb-1 text-xs text-muted-foreground/70">
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>{t('attachment.editedHint')}</span>
+            </div>
           </div>
-          <div className="mt-3 flex items-start gap-1.5 text-xs text-muted-foreground/70">
-            <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span>{t('attachment.editedHint')}</span>
-          </div>
-        </div>
-      </div>
+        ) : (
+          <ShikiCodeViewer
+            code={text}
+            language={language}
+            filePath={attachment?.name}
+            theme={theme}
+          />
+        )}
+      </ContentFrame>
     </PreviewOverlay>
   )
 }

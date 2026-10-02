@@ -1554,6 +1554,10 @@ export class PiAgent extends BaseAgent {
       // Reset prerequisite state on compaction (LLM loses guide content)
       if (agentEvent.type === 'info' && typeof agentEvent.message === 'string' && agentEvent.message.startsWith('Compacted')) {
         this.resetPrerequisiteState();
+        // Extract memories after compaction (context was lost, preserve key facts)
+        this.extractSessionMemories().catch(err =>
+          this.onDebug?.(`[Memory] Post-compaction extraction failed: ${err}`)
+        );
       }
 
       // Fire PostToolUse / PostToolUseFailure hook events (fire-and-forget)
@@ -2592,6 +2596,10 @@ export class PiAgent extends BaseAgent {
         } else {
           yield { type: 'info', message: 'Compacted context to fit within limits' };
         }
+        // Extract memories after compaction (context was lost, preserve key facts)
+        this.extractSessionMemories().catch(err =>
+          this.onDebug?.(`[Memory] Post-compaction extraction failed: ${err}`)
+        );
         yield { type: 'complete' };
         return;
       }
@@ -2751,6 +2759,15 @@ export class PiAgent extends BaseAgent {
       this.clearTurnIdleWatchdog();
       this.activeTurnToolIds.clear();
       this._isProcessing = false;
+
+      // Extract memories at turn end (session-end semantics), matching
+      // ClaudeAgent behavior. The per-session already-extracted guard in
+      // extractMemories() makes this effectively one-shot per session.
+      if (this.memoryConfig.extractionStrategy !== 'compaction') {
+        this.extractSessionMemories({ strategy: 'session_end' }).catch(err =>
+          this.onDebug?.(`[Memory] Session-end extraction failed: ${err}`)
+        );
+      }
     }
   }
 

@@ -33,6 +33,20 @@ interface MemoryStats {
 
 const MEMORY_TYPES: MemoryType[] = ['fact', 'preference', 'workflow', 'reminder', 'context']
 
+/** Format an ISO timestamp as a readable local time (raw fallback if unparseable). */
+function formatLastExtractionTime(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleString(undefined, {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
 const TYPE_COLORS: Record<string, string> = {
   fact: 'bg-blue-500/10 text-blue-500 border-blue-500/20',
   preference: 'bg-green-500/10 text-green-500 border-green-500/20',
@@ -271,7 +285,7 @@ export function MemoryPanel({ workspaceRootPath, sessionId, className }: MemoryP
       {stats && (
         <div className="shrink-0 text-[10px] text-muted-foreground text-center border-t border-border/40 pt-1.5">
           {t('memory.extractions')}: {stats.totalExtractions}
-          {stats.lastExtractionAt ? ` · ${stats.lastExtractionAt}` : ''}
+          {stats.lastExtractionAt ? ` · ${formatLastExtractionTime(stats.lastExtractionAt)}` : ''}
         </div>
       )}
     </div>

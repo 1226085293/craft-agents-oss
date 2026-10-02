@@ -1,13 +1,16 @@
 #!/usr/bin/env sh
 # Guard against accidentally committing temp/junk/residual paths.
 # Keep patterns in sync with the ".gitignore Temp/residual guards" section.
+# Note: no bare *.log pattern here on purpose — legitimate log fixtures or
+# release logs exist in some projects; directory-level patterns below cover
+# the accident class observed in this repo.
 set -e
 
 staged="$(git diff --cached --name-only --diff-filter=ACM)"
 [ -z "$staged" ] && exit 0
 
 # Single-line ERE (NO line-continuation backslashes — grep errors on them).
-bad="$(printf '%s\n' "$staged" | grep -E '(^|/)~(^|/)|(^|/)AppData(^|/)|(^|/)[Tt]emp(^|/)|(^|/)tmp(^|/)|pending-plan-test-|sm-durability-|\.tmp$|\.temp$|\.bak$|\.orig$|\.rej$|\.swp$|\.log$' || true)"
+bad="$(printf '%s\n' "$staged" | grep -E '(^|/)~(^|/)|(^|/)AppData(^|/)|(^|/)[Tt]emp(^|/)|(^|/)tmp(^|/)|pending-plan-test-|sm-durability-|\.tmp$|\.temp$|\.bak$|\.orig$|\.rej$|\.swp$' || true)"
 
 if [ -n "$bad" ]; then
   echo ""

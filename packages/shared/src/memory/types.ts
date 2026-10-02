@@ -67,6 +67,12 @@ export interface MemoryExtractionRecord {
   factsDiscarded: number;
   /** IDs of newly created entries */
   newEntryIds: string[];
+  /**
+   * Which strategy triggered this pass ('compaction' | 'session_end').
+   * Optional — legacy records have no strategy field and keep matching
+   * "any strategy" in the one-shot guard.
+   */
+  strategy?: 'compaction' | 'session_end';
 }
 
 // ============================================================================

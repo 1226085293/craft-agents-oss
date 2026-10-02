@@ -76,3 +76,38 @@ describe('PiEventAdapter — program-side verification hold (2026-10-02)', () =>
     expect(adapter.shouldCompleteQueue(false, false, false, false)).toBe(true);
   });
 });
+describe('PiEventAdapter — late verification_result after hold release', () => {
+  let adapter: PiEventAdapter;
+
+  beforeEach(() => {
+    adapter = new PiEventAdapter();
+    adapter.startTurn();
+  });
+
+  it('finalizeVerificationHeld after the hold was released (interrupt) is a no-op', () => {
+    adapter.shouldCompleteQueue(true, false, false, true); // hold on
+    expect(adapter.isVerificationHeld()).toBe(true);
+
+    // Simulate the user interrupting mid-judge: resetRecoveryState() clears
+    // the hold (pi-agent.ts interrupt path).
+    adapter.resetRecoveryState();
+    expect(adapter.isVerificationHeld()).toBe(false);
+
+    // The late stale PASS result must not set pendingQueueComplete or
+    // otherwise touch the next turn's queue state.
+    adapter.finalizeVerificationHeld(true);
+    adapter.startTurn(); // next turn begins
+    expect(adapter.shouldCompleteQueue(false, false, false, false)).toBe(false);
+    // The next turn's plain agent_end settles the queue normally — no
+    // premature completion from the stale result.
+    expect(adapter.shouldCompleteQueue(true, false, false, false)).toBe(true);
+  });
+
+  it('isVerificationHeld reflects the hold lifecycle end to end', () => {
+    expect(adapter.isVerificationHeld()).toBe(false);
+    adapter.shouldCompleteQueue(true, false, false, true);
+    expect(adapter.isVerificationHeld()).toBe(true);
+    adapter.finalizeVerificationHeld(false);
+    expect(adapter.isVerificationHeld()).toBe(false);
+  });
+});

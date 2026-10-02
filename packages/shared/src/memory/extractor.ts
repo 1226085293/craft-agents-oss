@@ -239,6 +239,13 @@ export interface MemoryExtractorOptions {
   forceExtraction?: boolean;
   /** Whether to drop near-duplicates against the whole store */
   semanticDedup?: boolean;
+  /**
+   * Which strategy triggered this pass. Keys the one-shot guard per
+   * (sessionId, strategy) so an early compaction pass doesn't consume the
+   * session-end slot (or vice versa). Omitted for legacy callers, which
+   * keep the old "any extraction from this session" behavior.
+   */
+  strategy?: 'compaction' | 'session_end';
 }
 
 /**
@@ -257,9 +264,13 @@ export async function extractMemories(
     ...new Set(existingEntries.flatMap(e => e.tags)),
   ];
 
-  // Check if we already extracted from this session
+  // Check if we already extracted from this session via the SAME strategy.
+  // When no strategy is passed (legacy callers), fall back to the original
+  // "any extraction from this session" guard so old behavior is preserved.
+  const strategy = options.strategy;
   const alreadyExtracted = store.extractionHistory.some(
-    h => h.sessionId === input.sessionId,
+    h => h.sessionId === input.sessionId
+      && (strategy === undefined ? true : h.strategy === strategy),
   );
   if (alreadyExtracted && !forceExtraction) {
     return {
@@ -290,8 +301,11 @@ export async function extractMemories(
     if (existing) continue;
 
     // Drop near-duplicates against the whole store (cross-session), not just
-    // exact same-session matches.
-    if (semanticDedup && isSemanticDuplicate(entry, existingEntries)) continue;
+    // exact same-session matches. Compare against the LIVE store, not the
+    // pre-call snapshot: entries added earlier in this same batch must be
+    // deduplicated against too, or two near-identical candidates from one
+    // extraction both slip in.
+    if (semanticDedup && isSemanticDuplicate(entry, store.entries)) continue;
 
     const newEntry = addMemoryEntry(store, entry.content, entry.type, entry.sourceSessionId, entry.tags, entry.confidence);
     newEntryIds.push(newEntry.id);
@@ -303,6 +317,7 @@ export async function extractMemories(
     factsExtracted: entries.length,
     factsDiscarded: discarded,
     newEntryIds,
+    ...(strategy !== undefined ? { strategy } : {}),
   });
 
   return {

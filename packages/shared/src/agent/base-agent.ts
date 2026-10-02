@@ -1251,6 +1251,9 @@ ${formattedMessages}
         runMiniCompletion: this.runMiniCompletion.bind(this),
         existingEntries: this.memoryStore.entries,
         semanticDedup: this._memoryConfig.semanticDedup,
+        // Key the one-shot guard by (sessionId, strategy) so a compaction-
+        // triggered pass can't consume the session-end slot (or vice versa).
+        strategy: requestedStrategy,
       });
 
       this.persistMemoryStore();

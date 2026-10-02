@@ -793,7 +793,11 @@ Answer with EXACTLY one word: PASS or FAIL.`);
     debugLog(`[defense] verification LLM threw: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  const ok = verdict != null && /^FAIL/i.test(verdict.trim()) === false;
+  // FAIL-safe parse: the prompt demands exactly one word (PASS/FAIL), but
+  // models sometimes emit prose. Only an explicit leading "PASS" word passes;
+  // anything else (prose, "The reply misses...", whitespace garbage) falls
+  // back to the conservative resume path instead of delivering unverified.
+  const ok = verdict != null && /^PASS\b/i.test(verdict.trim());
   if (ok) {
     debugLog(`[defense] verification PASSED (${verifyReason ?? 'none'}): replaying ${finalText.length} chars`);
     send({ type: 'verification_result', passed: true, finalText });

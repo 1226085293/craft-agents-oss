@@ -345,8 +345,25 @@ export class PiEventAdapter extends BaseEventAdapter {
    * `agent_end` (no flags) completes the queue normally.
    */
   finalizeVerificationHeld(passed: boolean): void {
+    // No-op when no verification hold is active: a late/duplicate
+    // verification_result (e.g. the judge finished after the user
+    // interrupted the turn and resetRecoveryState() released the hold)
+    // must NOT touch pendingQueueComplete or the live next turn's queue.
+    if (!this.verificationHeld) return;
     this.verificationHeld = false;
     if (passed) this.pendingQueueComplete = true;
+  }
+
+  /**
+   * Read-only: whether a program-side verification hold is currently active
+   * (an agent_end annotated defenseVerificationPending arrived and the
+   * subprocess judge result has not been processed yet). Callers of
+   * `finalizeVerificationHeld` guard on this so that a result that lands
+   * after the hold was released (interrupt/teardown) is dropped instead of
+   * injecting a stale "Verification passed" replay into the next turn.
+   */
+  isVerificationHeld(): boolean {
+    return this.verificationHeld;
   }
 
   /**

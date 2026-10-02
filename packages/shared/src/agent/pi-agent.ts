@@ -1351,6 +1351,14 @@ export class PiAgent extends BaseAgent {
         // - failed → release the hold; the subprocess queued a followUp that
         //   continues the SAME turn, so the resumed turn's FINAL agent_end
         //   completes the queue normally.
+        // Turn guard: if the verification hold is no longer active (the
+        // user interrupted the turn mid-judge — resetRecoveryState() already
+        // released it — or the session was torn down), this result is
+        // stale: dropping it keeps the next turn's event queue clean.
+        if (!this.adapter.isVerificationHeld()) {
+          this.debug('verification_result dropped — no verification hold active (stale/late result)');
+          break;
+        }
         if (msg.passed === true && typeof msg.finalText === 'string') {
           this.debug(`Verification PASSED — replaying final reply (${msg.finalText.length} chars)`);
           this.adapter.finalizeVerificationHeld(true);
@@ -2937,6 +2945,20 @@ n   * connection can be adopted mid-session.
       // now so the context-usage ring reflects the target model immediately.
       this.config.connectionSlug = args.connectionSlug;
       const targetModel = args.model || connection.defaultModel || '';
+      // Persist model + target connection runtime into this.config so the
+      // next spawnSubprocess() / getBackendRuntime(this.config) adopt them
+      // (spawn reads _model only, which is set below; without this the ring
+      // would desync again on spawn — the connection's models would be lost).
+      this.config = {
+        ...this.config,
+        providerType: connection.providerType,
+        authType: connection.authType,
+        ...(targetModel ? { model: targetModel } : {}),
+        runtime: {
+          ...getBackendRuntime(this.config),
+          ...runtime,
+        },
+      };
       // Keep local model state in sync so the next subprocess spawn adopts the
       // target model; re-sync the adapter's context window to the target
       // connection's models so the context-usage ring is correct immediately.
@@ -2978,6 +3000,19 @@ n   * connection can be adopted mid-session.
     // re-sync the adapter's context window to the target connection's models.
     const resolvedModel = result.resolved ?? args.model;
     this.config.connectionSlug = args.connectionSlug;
+    // Mirror the subprocess-confirmed switch into local config (model +
+    // target runtime), same as updateRuntimeConfig, so restarts/config reads
+    // don't fall back to the pre-switch connection.
+    this.config = {
+      ...this.config,
+      providerType: connection.providerType,
+      authType: connection.authType,
+      ...(resolvedModel ? { model: resolvedModel } : {}),
+      runtime: {
+        ...getBackendRuntime(this.config),
+        ...runtime,
+      },
+    };
     super.setModel(resolvedModel);
     this.syncAdapterContextWindow(resolvedModel, runtime.customModels);
     this.debug(`switchConnection: subprocess confirmed ${previousSlug} → ${args.connectionSlug} (${result.resolved})`);

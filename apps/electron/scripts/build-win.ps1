@@ -528,7 +528,15 @@ while (-not $builderSuccess -and $builderRetry -lt $maxBuilderRetries) {
     }
     New-Item -ItemType Directory -Force -Path "$ElectronDir\release" | Out-Null
 
-    npx electron-builder --win --x64 2>&1 | Tee-Object -Variable builderOutput
+    # Prefer the bun-generated .bin shim (bun install creates no .cmd shims, so
+    # plain `npx` fails with "not recognized"); fall back to npx like the
+    # esbuild/vite call sites above.
+    $ElectronBuilderExe = Join-Path $RootDir "node_modules\.bin\electron-builder.exe"
+    if (Test-Path $ElectronBuilderExe) {
+        & $ElectronBuilderExe --win --x64 2>&1 | Tee-Object -Variable builderOutput
+    } else {
+        npx electron-builder --win --x64 2>&1 | Tee-Object -Variable builderOutput
+    }
 
     if ($LASTEXITCODE -eq 0) {
         $builderSuccess = $true

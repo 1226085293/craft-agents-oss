@@ -224,8 +224,10 @@ export class PiEventAdapter extends BaseEventAdapter {
 
   /**
    * Set the model's context window size for usage reporting.
+   * Pass undefined to clear (e.g. after switching to a custom model whose
+   * window is unknown) so events stop reporting a stale window.
    */
-  setContextWindow(cw: number): void {
+  setContextWindow(cw?: number): void {
     this.contextWindow = cw;
   }
 
@@ -793,7 +795,13 @@ export class PiEventAdapter extends BaseEventAdapter {
         // (`assistantMessage.stopReason === "error" || directContextTokens === 0`).
         if (msg.usage && typeof msg.usage.input === 'number') {
           this.lastUsage = msg.usage;
-          const inputTokens = msg.usage.input + (msg.usage.cacheRead || 0);
+          // pi-ai defines `input` as the NON-cached portion of the prompt
+          // (Anthropic: input_tokens; OpenAI: prompt - cacheRead - cacheWrite),
+          // so the true context size is input + cacheRead + cacheWrite.
+          // Omitting cacheWrite understates the context whenever a large share
+          // of the prompt is being written to the cache (first call, model
+          // switch, post-compaction), shrinking the context-usage ring.
+          const inputTokens = msg.usage.input + (msg.usage.cacheRead || 0) + (msg.usage.cacheWrite || 0);
           if (inputTokens > 0) {
             this.lastContextTokens = inputTokens;
             yield {
@@ -977,6 +985,20 @@ export class PiEventAdapter extends BaseEventAdapter {
           }
           // Use "Compacted" keyword so session handler detects statusType: 'compaction_complete'
           yield { type: 'info', message: 'Compacted context to fit within limits' };
+          // Refresh the context-usage ring immediately: the pre-compaction
+          // reading is now stale, and the SDK reports the post-compaction
+          // size (estimate) in the CompactionResult.
+          const postTokens = compactionEvent.result.estimatedTokensAfter;
+          if (typeof postTokens === 'number' && postTokens > 0) {
+            this.lastContextTokens = postTokens;
+            yield {
+              type: 'usage_update',
+              usage: {
+                inputTokens: postTokens,
+                contextWindow: this.contextWindow,
+              },
+            };
+          }
         } else if (compactionEvent.errorMessage) {
           // Defensive handler for the Pi SDK auto-compaction race (cause A
           // in plans/fix-pi-gpt-compaction.md). The raw stack

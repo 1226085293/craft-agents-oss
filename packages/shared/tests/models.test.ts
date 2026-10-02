@@ -11,7 +11,40 @@ import {
   ANTHROPIC_MODELS,
   getModelIdByShortName,
   normalizeDeprecatedModelId,
+  resolveModelContextWindow,
 } from '../src/config/models.ts';
+
+describe('resolveModelContextWindow', () => {
+  it('resolves built-in registry models', () => {
+    expect(resolveModelContextWindow('claude-sonnet-5')).toBe(1_000_000);
+  });
+
+  it('resolves pi/-prefixed registry models via the bare id', () => {
+    expect(resolveModelContextWindow('pi/claude-sonnet-5')).toBe(1_000_000);
+  });
+
+  it('falls back to connection custom model entries', () => {
+    const connectionModels = [
+      'gpt-5.1',
+      { id: 'my-custom-model', contextWindow: 500_000 },
+    ];
+    expect(resolveModelContextWindow('my-custom-model', connectionModels)).toBe(500_000);
+    // String entries have no window info → undefined
+    expect(resolveModelContextWindow('gpt-5.1', connectionModels)).toBeUndefined();
+  });
+
+  it('prefers the registry over connection entries', () => {
+    const connectionModels = [{ id: 'claude-sonnet-5', contextWindow: 123 }];
+    expect(resolveModelContextWindow('claude-sonnet-5', connectionModels)).toBe(1_000_000);
+  });
+
+  it('returns undefined for unknown models and empty input', () => {
+    expect(resolveModelContextWindow('unknown-model')).toBeUndefined();
+    expect(resolveModelContextWindow('')).toBeUndefined();
+    expect(resolveModelContextWindow(undefined)).toBeUndefined();
+    expect(resolveModelContextWindow(null, [{ id: 'x', contextWindow: 1 }])).toBeUndefined();
+  });
+});
 
 describe('isClaudeModel', () => {
   // Direct Anthropic model IDs

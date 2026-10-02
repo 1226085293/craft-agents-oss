@@ -97,7 +97,7 @@ import { getMemoryStorePath, loadMemoryStore, saveMemoryStore, recordExtraction 
 import { addMemoryEntry, deleteMemoryEntry, queryMemories, getMemoryStats as getMemStats } from '@craft-agent/shared/memory/store';
 import { invalidateContextFileCache } from '@craft-agent/shared/prompts/system'
 import { getToolIconsDir, getMiniModel } from '@craft-agent/shared/config'
-import { getDefaultSummarizationModel } from '@craft-agent/shared/config/models'
+import { getDefaultSummarizationModel, resolveModelContextWindow } from '@craft-agent/shared/config/models'
 import type { SummarizeCallback } from '@craft-agent/shared/sources'
 import { type ThinkingLevel, DEFAULT_THINKING_LEVEL, normalizeThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import { parseError } from '@craft-agent/shared/agent/errors'
@@ -6116,6 +6116,16 @@ ${request.prompt}`;
         const effectiveModel = model ?? wsConfig?.defaults?.model ?? sessionConn?.defaultModel!
         sessionLog.info(`[updateSessionModel] Calling agent.setModel(${effectiveModel}) [agent exists=${!!managed.agent}, connectionLocked=${managed.connectionLocked}]`)
         managed.agent.setModel(effectiveModel)
+        // Keep the reported context window in sync with the effective model so
+        // the context-usage ring falls back to the new model's window instead
+        // of the stale one. Unknown windows (e.g. custom models without a
+        // declared size) clear the stored value; the next usage event
+        // re-populates it from the agent.
+        if (managed.tokenUsage) {
+          const nextWindow = resolveModelContextWindow(effectiveModel, sessionConn?.models)
+          if (nextWindow !== undefined) managed.tokenUsage.contextWindow = nextWindow
+          else delete managed.tokenUsage.contextWindow
+        }
       } else {
         sessionLog.info(`[updateSessionModel] No agent yet, model will apply on next agent creation`)
       }
@@ -6165,6 +6175,15 @@ ${request.prompt}`;
         model: resolvedModel,
       })
       sessionLog.info(`[switchSessionConnection] Session ${sessionId} config adopted (no live agent): ${connectionSlug}`)
+    }
+
+    // Keep the reported context window in sync with the new model/connection so
+    // the context-usage ring refreshes immediately. Unknown windows clear the
+    // stored value; the next usage event re-populates it from the agent.
+    if (managed.tokenUsage) {
+      const nextWindow = resolveModelContextWindow(resolvedModel, connection.models)
+      if (nextWindow !== undefined) managed.tokenUsage.contextWindow = nextWindow
+      else delete managed.tokenUsage.contextWindow
     }
 
     // Commit session state + unlock the connection so future flows agree
@@ -9290,19 +9309,11 @@ ${request.prompt}`;
           // recovery will see awaitingCompaction=false and trigger execution.
           void markStoredCompactionComplete(managed.workspace.rootPath, sessionId)
           sessionLog.info(`Session ${sessionId}: compaction complete, marked pending plan ready`)
-
-          // Emit usage_update so the context count badge refreshes immediately
-          // after compaction, without waiting for the next message
-          if (managed.tokenUsage) {
-            this.sendEvent({
-              type: 'usage_update',
-              sessionId,
-              tokenUsage: {
-                inputTokens: managed.tokenUsage.inputTokens,
-                contextWindow: managed.tokenUsage.contextWindow,
-              },
-            }, workspaceId)
-          }
+          // NOTE: do NOT re-emit `usage_update` here with the pre-compaction
+          // tokenUsage — that would pin the context-usage ring to the stale
+          // (pre-compaction) size. The Pi adapter emits a fresh `usage_update`
+          // (post-compaction estimatedTokensAfter) right after this event; the
+          // Claude backend's ring refreshes on the next real usage event.
         }
 
         this.sendEvent({

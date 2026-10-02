@@ -628,12 +628,12 @@ describe('PiEventAdapter', () => {
   // succeeded, most visibly right after an app restart.
 
   describe('usage reporting', () => {
-    const usage = (input: number, output: number, cacheRead = 0) => ({
+    const usage = (input: number, output: number, cacheRead = 0, cacheWrite = 0) => ({
       input,
       output,
       cacheRead,
-      cacheWrite: 0,
-      totalTokens: input + output + cacheRead,
+      cacheWrite,
+      totalTokens: input + output + cacheRead + cacheWrite,
       cost: { total: 0 },
     });
 
@@ -647,6 +647,28 @@ describe('PiEventAdapter', () => {
       expect(events.find(e => e.type === 'usage_update')).toMatchObject({
         type: 'usage_update',
         usage: { inputTokens: 123_000 },
+      });
+    });
+
+    it('should include cacheWrite in the context size (input + cacheRead + cacheWrite)', () => {
+      // pi-ai reports `input` as the non-cached portion of the prompt; the true
+      // context size also includes tokens just written to the prompt cache.
+      // After a cache invalidation (model switch, /clear, compaction) most of
+      // the prompt arrives as cacheWrite, so omitting it understates the ring.
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'stop',
+          content: 'hi',
+          usage: usage(20_000, 40, 3_000, 150_000),
+        },
+      } as any));
+
+      expect(events.find(e => e.type === 'usage_update')).toMatchObject({
+        type: 'usage_update',
+        usage: { inputTokens: 173_000 },
       });
     });
 
@@ -1118,6 +1140,36 @@ describe('PiEventAdapter', () => {
         type: 'info',
         message: 'Compacted context to fit within limits',
       });
+    });
+
+    it('should emit a fresh usage_update with the post-compaction size', () => {
+      // After compaction the pre-compaction reading is stale. The SDK reports
+      // the estimated post-compaction size; surface it so the context-usage
+      // ring refreshes immediately instead of waiting for the next API call.
+      const events = collect(adapter.adaptEvent({
+        type: 'compaction_end',
+        result: { estimatedTokensAfter: 5_000 },
+        aborted: false,
+      } as any));
+
+      expect(events).toHaveLength(2);
+      expect(events[0]).toMatchObject({ type: 'info', message: 'Compacted context to fit within limits' });
+      expect(events[1]).toMatchObject({
+        type: 'usage_update',
+        usage: { inputTokens: 5_000 },
+      });
+    });
+
+    it('should not emit usage_update when post-compaction size is unknown', () => {
+      const events = collect(adapter.adaptEvent({
+        type: 'compaction_end',
+        result: {},
+        aborted: false,
+      } as any));
+
+      // Only the info message — no usage_update without an estimate.
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ type: 'info' });
     });
 
     it('should emit error for failed compaction_end', () => {

@@ -527,9 +527,17 @@ export function handleSessionModelChanged(
 ): ProcessResult {
   const { session, streaming } = state
 
+  // The agent-reported context window belongs to the model that produced it.
+  // Drop it so the context-usage ring falls back to the NEW model's window
+  // (registry lookup / 200k fallback) immediately; the next usage event from
+  // the agent re-populates it with the corrected value.
+  const tokenUsage = session.tokenUsage && session.tokenUsage.contextWindow !== undefined
+    ? { ...session.tokenUsage, contextWindow: undefined }
+    : session.tokenUsage
+
   return {
     state: {
-      session: { ...session, model: event.model ?? undefined },
+      session: { ...session, model: event.model ?? undefined, tokenUsage },
       streaming,
     },
     effects: [],
@@ -545,11 +553,20 @@ export function handleConnectionChanged(
 ): ProcessResult {
   const { session, streaming } = state
 
+  // A connection change implies a model (or at least a model pool) change —
+  // the previously reported context window may no longer apply. Clear it so
+  // the ring re-resolves from the (possibly new) model; the next usage event
+  // re-populates it.
+  const tokenUsage = session.tokenUsage && session.tokenUsage.contextWindow !== undefined
+    ? { ...session.tokenUsage, contextWindow: undefined }
+    : session.tokenUsage
+
   return {
     state: {
       session: {
         ...session,
         llmConnection: event.connectionSlug,
+        tokenUsage,
         ...(event.supportsBranching !== undefined && { supportsBranching: event.supportsBranching }),
       },
       streaming,

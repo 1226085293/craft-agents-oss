@@ -227,14 +227,21 @@ export function TextAttachmentEditOverlay({
   )
 
   /**
+   * Full-height edit panel shared by the markdown split view and the
+   * plain-text/code editor. Content area math: FullscreenOverlayBase pads
+   * 72px (header 48 + fade 24) on top and 24px on bottom — a child of
+   * calc(100vh-96px) fills the available space exactly, so the panel never
+   * floats with big gaps (it is vertically centered when smaller).
+   */
+  const editPanelHeight = 'h-[calc(100vh-96px)] min-h-[380px]'
+
+  /**
    * Markdown edit: split view — source editor (line numbers, no-wrap, horizontal
    * scroll) on the left, live rendered preview on the right.
-   * The panel fills the overlay's available height (header 48 + fade 24 +
-   * bottom fade 24 ≈ 96px of content insets) so it doesn't float with big gaps.
    */
   const markdownSplitEditor = (
     <div className="px-6">
-      <div className="flex h-[calc(100vh-100px)] min-h-[380px] w-full flex-col">
+      <div className={`flex w-full flex-col ${editPanelHeight}`}>
         <div className="flex min-h-0 flex-1 overflow-hidden rounded-[12px] border border-border/40 bg-background shadow-minimal">
           <div className="min-w-0 flex-1 overflow-hidden border-r border-border/40">
             <ShikiCodeEditor
@@ -257,11 +264,15 @@ export function TextAttachmentEditOverlay({
     </div>
   )
 
-  /** Plain-text / code edit: full-height, full-width editor (no-wrap) + status bar */
+  /**
+   * Plain-text / code edit: same full-height, no-wrap editor panel as the
+   * markdown split (frameless — the editor panel and status bar are the only
+   * chrome, matching the split view so both edit modes look identical).
+   */
   const codeEditor = (
-    <ContentFrame title={t('overlay.code')} fitContent minWidth={850}>
-      <div className="flex h-[calc(100vh-220px)] min-h-[300px] flex-col">
-        <div className="min-h-0 flex-1 overflow-hidden">
+    <div className="px-6">
+      <div className={`flex w-full flex-col ${editPanelHeight}`}>
+        <div className="min-h-0 flex-1 overflow-hidden rounded-[12px] border border-border/40 bg-background shadow-minimal">
           <ShikiCodeEditor
             value={text}
             onChange={setText}
@@ -273,7 +284,7 @@ export function TextAttachmentEditOverlay({
         </div>
         <div className="pt-2.5">{statusBar}</div>
       </div>
-    </ContentFrame>
+    </div>
   )
 
   const content = editing

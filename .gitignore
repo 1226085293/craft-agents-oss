@@ -80,3 +80,18 @@ credentials.enc
 
 # CodeGraph local index (regenerate with: codegraph init)
 .codegraph/
+
+# ---------------------------------------------------------------------------
+# Temp/residual guards (keep in sync with .husky/pre-commit patterns)
+# ---------------------------------------------------------------------------
+**/AppData/
+**/[Tt]emp/
+**/tmp/
+**/pending-plan-test-*/
+**/sm-durability-*/
+*.tmp
+*.temp
+*.bak
+*.orig
+*.rej
+*.swp

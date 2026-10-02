@@ -5,8 +5,8 @@
  *   est = sum(len(serialize_for_request(t)) / ESTIMATOR_DIVISOR for t in foldable)
  *   est >= enterThresholdTokens ? layered : flat
  *
- * The divisor is calibrated once against a real API request
- * (scripts/calibrate-estimator.ts → 3.636) and then fixed.
+ * The divisor was calibrated once against a real API request: measured
+ * 3.636 vs. the original /4, and is now fixed.
  *
  * serialize_for_request mirrors the wire format: OpenAI chat/completions tool
  * objects ({type:'function', function:{name, description, parameters}}), which

@@ -12,8 +12,8 @@
  *   est = sum(len(serialize_for_request(t)) / ESTIMATOR_DIVISOR for t in foldable)
  *   mode = forced (flat|layered) if present, else est >= enterThresholdTokens ? layered : flat
  *
- * The divisor is calibrated once against a real API request and then fixed
- * (scripts/calibrate-estimator.ts): measured 3.636 vs. the original /4.
+ * The divisor was calibrated once against a real API request and is now fixed:
+ * measured 3.636 vs. the original /4.
  */
 
 /** Layering mode. 'auto' decides via the token estimator at session start. */

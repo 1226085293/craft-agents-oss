@@ -1010,7 +1010,7 @@ export class QQAdapter implements PlatformAdapter {
       for (let attempt = 1; attempt <= 3; attempt++) {
         putRes = await fetch(part.presigned_url, {
           method: 'PUT',
-          body: chunk,
+          body: new Uint8Array(chunk),
           signal: AbortSignal.timeout(30_000),
         })
         if (putRes.ok) break

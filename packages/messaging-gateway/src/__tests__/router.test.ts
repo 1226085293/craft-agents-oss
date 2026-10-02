@@ -310,6 +310,7 @@ describe('Router', () => {
     expect(sessionManager.sendMessage.mock.calls[0]?.[4]).toEqual({
       midStreamBehavior: 'steer',
       permissionModeOverride: 'safe',
+      platform: 'telegram',
     })
   })
 

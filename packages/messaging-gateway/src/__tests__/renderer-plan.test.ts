@@ -131,11 +131,11 @@ describe('Renderer — plan_submitted', () => {
     expect(sendButtons).toBeTruthy()
     expect(sendButtons?.text).toContain('Plan ready for review')
     expect(sendButtons?.text).toContain('Step 1')
-    expect(sendButtons?.buttons).toHaveLength(2)
+    expect(sendButtons?.buttons).toHaveLength(4)
     expect(sendButtons?.buttons?.[0]?.id).toMatch(/^plan:accept:/)
     expect(sendButtons?.buttons?.[1]?.id).toMatch(/^plan:compact:/)
-
-    // No file attachment for short plans
+    expect(sendButtons?.buttons?.[2]?.id).toMatch(/^plan:view:/)
+    expect(sendButtons?.buttons?.[3]?.id).toMatch(/^plan:reject:/)
     expect(adapter.calls.some((c) => c.kind === 'sendFile')).toBe(false)
   })
 
@@ -195,9 +195,11 @@ describe('Renderer — plan_submitted', () => {
     expect(sendButtons).toBeTruthy()
     expect(sendButtons?.text).toContain('Plan ready for review')
     expect(sendButtons?.text).toContain('Step 1')
-    expect(sendButtons?.buttons).toHaveLength(2)
+    expect(sendButtons?.buttons).toHaveLength(4)
     expect(sendButtons?.buttons?.[0]?.id).toMatch(/^plan:accept:/)
     expect(sendButtons?.buttons?.[1]?.id).toMatch(/^plan:compact:/)
+    expect(sendButtons?.buttons?.[2]?.id).toMatch(/^plan:view:/)
+    expect(sendButtons?.buttons?.[3]?.id).toMatch(/^plan:reject:/)
     expect(adapter.calls.some((c) => c.kind === 'sendFile')).toBe(false)
   })
 

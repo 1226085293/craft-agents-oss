@@ -2564,22 +2564,24 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     // bindings remain public — exactly the false-sense-of-security UX
     // the feature is supposed to prevent.
     if (mode === 'owner-only') {
-      this.migrateOpenBindingsToInherit(workspaceId)
+      this.migrateOpenBindingsToInherit(workspaceId, platform)
     }
 
     this.emitBindingChanged(workspaceId)
   }
 
   /**
-   * Walk all bindings and flip any with `accessMode === 'open'` to
-   * `inherit` (the safe default). Used when locking down the workspace.
-   * Telegram-only — other platforms don't yet have per-binding access.
+   * Walk all bindings for the given platform and flip any with
+   * `accessMode === 'open'` to `inherit` (the safe default). Used when
+   * locking down the workspace. Only affects bindings on the target
+   * platform — other platforms' bindings are left untouched.
    */
-  private migrateOpenBindingsToInherit(workspaceId: string): void {
+  private migrateOpenBindingsToInherit(workspaceId: string, platform: PlatformType): void {
     const state = this.workspaces.get(workspaceId)
     if (!state) return
     const store = state.gateway.getBindingStore()
     for (const b of store.getAll()) {
+      if (b.platform !== platform) continue
       if (b.config.accessMode !== 'open') continue
       store.updateBindingConfig(b.id, { accessMode: 'inherit', allowedSenderIds: [] })
     }

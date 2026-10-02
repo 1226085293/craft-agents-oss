@@ -99,9 +99,26 @@ import { parseError, type AgentError } from './errors.ts';
 
 // Centralized PreToolUse pipeline
 import { runPreToolUseChecks, type PreToolUseCheckResult } from './core/pre-tool-use.ts';
+import { shouldAllowToolInMode } from './mode-manager.ts';
 import { getRtkPath } from './core/rtk-detector.ts';
 import { getRtkEnabled, getBrowserToolEnabled, getDefenseEnabled, getDefenseGuardrails } from '../config/storage.ts';
 import type { RtkContext } from './core/rtk-rewrite.ts';
+
+// Tool layering (foldable tools behind category meta tools + call_tool)
+import {
+  loadToolLayering,
+  assembleTools,
+  buildExpandPayload,
+  nearestToolNames,
+  SESSION_PREFIX,
+  CALL_TOOL_NAME,
+  type AssembledTools,
+  type RegistryEntry,
+  type ResolvedToolLayering,
+  type ToolDefLike,
+} from '../tool-layering/index.ts';
+import { MISC_CATEGORY_NAME } from '../tool-layering/types.ts';
+import { recordToolLayeringTelemetry } from '../tool-layering/telemetry.ts';
 
 // Workspace slug extraction for skill qualification
 import { extractWorkspaceSlug } from '../utils/workspace.ts';
@@ -158,6 +175,27 @@ interface PendingEphemeralRequest<T> {
   resolve(value: T): void;
   reject(error: Error): void;
   timeout: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * Resolve a model's context window: built-in MODEL_REGISTRY first, then
+ * connection-level custom models (the pi driver mirrors connection.models into
+ * runtime.customModels for pi_compat / custom-endpoint connections). Custom
+ * connections can register models absent from the built-in registry, so that
+ * list is the authoritative source for their windows (e.g. a user-configured
+ * 1M window) instead of a hardcoded fallback. Returns undefined when neither
+ * knows the model — callers clear/keep the window accordingly.
+ */
+function resolveContextWindow(
+  model: string,
+  customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>,
+): number | undefined {
+  const modelDef = model ? getModelById(model) : undefined;
+  const customDef = model
+    ? customModels?.find((m) => typeof m !== 'string' && m.id === model)
+    : undefined;
+  return modelDef?.contextWindow
+    ?? (typeof customDef === 'object' ? customDef.contextWindow : undefined);
 }
 
 /**
@@ -405,6 +443,31 @@ export class PiAgent extends BaseAgent {
   // Cached session tool context (lazy-created on first session tool call)
   private _sessionToolContext: SessionToolContext | null = null;
 
+  // Tool layering state (spec v2 §5-§7): assembly + registry + expanded set.
+  // Frozen once at session start; mid-session tool additions fold into misc.
+  private toolLayering: {
+    mode: 'flat' | 'layered';
+    resolved: ResolvedToolLayering;
+    assembled: AssembledTools;
+    /** Categories the model has expanded via tools_<cat> (layered mode). */
+    expandedCategories: Set<string>;
+    /** Registered meta tool names (mcp__session__tools_<cat>), incl. lazy misc. */
+    registeredMetaTools: Set<string>;
+  } | null = null;
+
+  /**
+   * Stable protocol hint injected in layered mode (never varies per turn)
+   * so the prompt cache prefix stays intact (issue #862).
+   */
+  private readonly TOOL_LAYERING_HINT = [
+    '【工具分层模式】本会话工具采用两层结构：',
+    '1. tools_<分类> 元工具：调用后返回该分类下所有可用工具及参数 schema。',
+    '2. call_tool：签名 {name: 工具名, args: 参数对象}，用于调用已展开分类中的工具。',
+    '固定层工具（如 call_llm、browser_tool 等核心工具）始终直接可用，无需展开。',
+    '调用流程：先 tools_<分类> 展开，再 call_tool 调用。若分类未展开就调用会返回错误，按提示先展开。',
+    '未知工具时 call_tool 会返回候选列表或完整 schema，按提示修正。',
+  ].join('\n');
+
   // RPC request counter for unique IDs
   private rpcIdCounter: number = 0;
 
@@ -431,27 +494,17 @@ export class PiAgent extends BaseAgent {
 
   constructor(config: BackendConfig) {
     const resolvedModel = config.model || '';
-    const modelDef = getModelById(resolvedModel);
-    // Custom connections (pi_compat / custom endpoints) can register models that
-    // are absent from the built-in MODEL_REGISTRY, so getModelById() returns
-    // undefined for them. The pi driver already mirrors connection.models into
-    // runtime.customModels — use that as the authoritative context-window source
-    // so the usage ring and compaction reserve reflect the real ceiling (e.g. a
-    // user-configured 1M window) instead of falling back to a hardcoded default.
-    const customDef = getBackendRuntime(config).customModels?.find(
-      (m) => typeof m !== 'string' && m.id === resolvedModel,
+    const contextWindow = resolveContextWindow(
+      resolvedModel,
+      getBackendRuntime(config).customModels,
     );
-    const contextWindow = modelDef?.contextWindow
-      ?? (typeof customDef === 'object' ? customDef.contextWindow : undefined);
     super(config, resolvedModel, contextWindow);
 
     this._supportsBranching = true;
 
     this.piSessionId = config.session?.sdkSessionId || null;
     this.adapter = new PiEventAdapter();
-    if (contextWindow) {
-      this.adapter.setContextWindow(contextWindow);
-    }
+    this.adapter.setContextWindow(contextWindow);
     if (config.miniModel) {
       this.adapter.setMiniModel(config.miniModel);
     }
@@ -727,28 +780,163 @@ export class PiAgent extends BaseAgent {
       }
     }
 
-    this.send({
-      type: 'register_tools',
-      tools: sessionToolDefs,
-    });
-    this.debug(`Registered ${sessionToolDefs.length} session tools with subprocess`);
+    // Register session tools via the tool layering path (spec §5): mode is
+    // frozen once; in layered mode foldable tools are never registered so the
+    // merge-by-name register_tools semantics can't leak them top-level.
+    this.initToolLayering(sessionToolDefs);
 
     // If pool has source tools, register them with the subprocess.
     this.registerPoolToolsWithSubprocess();
   }
 
   /**
+   * Initialize tool layering state once at session start (spec §3/§5).
+   * Loads config/tool_layering.json + tool_categories.json, boot-validates
+   * (duplicates/orphans abort), decides mode (forced wins; auto = estimate),
+   * then registers the top-level tool defs with the subprocess.
+   */
+  private initToolLayering(sessionToolDefs: ToolDefLike[]): void {
+    try {
+      const proxyDefs = (this.mcpPool?.getProxyToolDefs() ?? []) as ToolDefLike[];
+      // knownTools for boot validation: session tools by plain name
+      const knownTools = sessionToolDefs.map((d) => d.name.replace(SESSION_PREFIX, ''));
+      const resolved = loadToolLayering(this.config.workspace.rootPath, knownTools, true);
+      const assembled = assembleTools(resolved, sessionToolDefs, proxyDefs);
+      this.toolLayering = {
+        mode: assembled.mode,
+        resolved,
+        assembled,
+        expandedCategories: new Set(),
+        registeredMetaTools: new Set(),
+      };
+
+      if (assembled.mode === 'layered') {
+        // Foldable tools are hidden; register only fixed layer + meta + call_tool.
+        // Note: register_tools merges by name, so a previous register of a
+        // foldable tool cannot be retracted — layered must win from the start
+        // (it does: toolkit was empty until registerSessionTools ran).
+        this.send({
+          type: 'register_tools',
+          tools: assembled.topLevel,
+        });
+        this.toolLayering.registeredMetaTools = new Set(
+          assembled.metaTools.map((t) => t.name),
+        );
+        this.debug(
+          `Tool layering ON (${assembled.mode}): ${assembled.topLevel.length} top-level tools ` +
+          `(fixed + ${assembled.metaTools.length} meta + call_tool), ` +
+          `${assembled.registry.size} foldable tools in registry`,
+        );
+        recordToolLayeringTelemetry(this.config.workspace.rootPath, this._sessionId, {
+          type: 'init',
+          mode: 'layered',
+          reason: assembled.decideReason,
+          estimatedTokenOverhead: assembled.estimatedTokenOverhead,
+          thresholdTokens: assembled.thresholdTokens,
+          topLevelCount: assembled.topLevel.length,
+          metaToolCount: assembled.metaTools.length,
+          registryCount: assembled.registry.size,
+          foldableCount: assembled.foldableCount,
+          fixedLayer: assembled.fixedLayer,
+          categories: [...assembled.categoriesByName.keys()],
+        });
+      } else {
+        this.debug(`Tool layering off (${assembled.mode}): all tools flat`);
+        this.send({
+          type: 'register_tools',
+          tools: sessionToolDefs,
+        });
+        recordToolLayeringTelemetry(this.config.workspace.rootPath, this._sessionId, {
+          type: 'init',
+          mode: 'flat',
+          reason: assembled.decideReason,
+          estimatedTokenOverhead: assembled.estimatedTokenOverhead,
+          thresholdTokens: assembled.thresholdTokens,
+          topLevelCount: assembled.topLevel.length,
+          metaToolCount: 0,
+          registryCount: 0,
+          foldableCount: 0,
+          fixedLayer: [],
+          categories: [],
+        });
+      }
+    } catch (error) {
+      // Config corruption must not half-initialize the session: fall back to the
+      // established flat behavior (all session tools registered as before), and
+      // surface the validation failure loudly.
+      this.debug(`[tool-layering] init failed, falling back to flat: ${error instanceof Error ? error.message : String(error)}`);
+      this.toolLayering = null;
+      this.send({
+        type: 'register_tools',
+        tools: sessionToolDefs,
+      });
+    }
+  }
+
+  /**
    * Send pool's proxy tool defs to subprocess for model visibility.
+   *
+   * Layered mode (spec §7): newly connected MCP tools are NOT advertised
+   * top-level — they fold into the misc bucket (registry) and become reachable
+   * via call_tool. The tools_misc meta tool is lazily registered the first
+   * time anything lands there.
    */
   private registerPoolToolsWithSubprocess(): void {
     if (!this.mcpPool) return;
     const proxyDefs = this.mcpPool.getProxyToolDefs();
-    if (proxyDefs.length > 0) {
+    if (proxyDefs.length === 0) return;
+
+    const tl = this.toolLayering;
+    if (!tl || tl.mode === 'flat') {
       this.send({
         type: 'register_tools',
         tools: proxyDefs,
       });
       this.debug(`Registered ${proxyDefs.length} MCP source tools from pool with subprocess`);
+      return;
+    }
+
+    // Layered: fold MCP tools into the registry; they are NOT top-level.
+    // Also prune registry entries whose MCP source disconnected mid-session
+    // (spec §7: mid-session removals take effect immediately). SDK-level
+    // tools can't be retracted, but MCP tools were never registered top-level
+    // in layered mode, so removing them from the registry fully hides them.
+    const connected = new Set(proxyDefs.map((d) => d.name));
+    for (const [name, entry] of [...tl.assembled.registry]) {
+      if (entry.category !== MISC_CATEGORY_NAME) continue;
+      if (name.startsWith('mcp__') && !connected.has(name)) {
+        tl.assembled.registry.delete(name);
+      }
+    }
+
+    let miscAdded = false;
+    for (const def of proxyDefs) {
+      if (tl.assembled.registry.has(def.name)) continue; // already tracked
+      const entry: RegistryEntry = {
+        fullName: def.name,
+        callName: def.name,
+        def,
+        category: MISC_CATEGORY_NAME,
+        fixed: false,
+      };
+      tl.assembled.registry.set(def.name, entry);
+      miscAdded = true;
+    }
+    if (miscAdded) {
+      // Lazily publish the misc meta tool so the model can discover the new
+      // tools (spec §7: unclassified tools auto-fold into misc).
+      const miscCat = tl.resolved.categories.find((c) => c.name === MISC_CATEGORY_NAME)
+        ?? { name: MISC_CATEGORY_NAME, metaToolName: undefined, description: '其他工具（会话中途新增，未指定分类）', tools: [] };
+      if (!tl.registeredMetaTools.has(SESSION_PREFIX + 'tools_misc')) {
+        const metaDef = {
+          name: SESSION_PREFIX + 'tools_' + MISC_CATEGORY_NAME,
+          description: miscCat.description,
+          inputSchema: {},
+        };
+        this.send({ type: 'register_tools', tools: [metaDef] });
+        tl.registeredMetaTools.add(metaDef.name);
+      }
+      this.debug(`[tool-layering] folded ${proxyDefs.length} MCP tools into misc (call_tool dispatch)`);
     }
   }
 
@@ -1637,6 +1825,13 @@ export class PiAgent extends BaseAgent {
     toolName: string,
     args: Record<string, unknown>
   ): Promise<{ content: string; isError: boolean }> {
+    // Tool layering dispatch first (spec §6): meta tools (tools_<cat>) expand,
+    // call_tool routes to any foldable tool in the registry.
+    if (this.toolLayering?.mode === 'layered') {
+      const layered = await this.routeLayeredToolCall(toolName, args);
+      if (layered) return layered;
+    }
+
     // Session-scoped tools — strip mcp__session__ prefix added by the Pi SDK
     // registration (tools are registered as mcp__session__SubmitPlan, etc.)
     const strippedName = toolName.startsWith('mcp__session__')
@@ -1657,6 +1852,128 @@ export class PiAgent extends BaseAgent {
       content: `Unknown proxy tool: ${toolName}`,
       isError: true,
     };
+  }
+
+  /**
+   * Layered-mode dispatch (spec §6): tools_<cat> expands a category;
+   * call_tool invokes a folded tool by name. Returns null when the tool is not
+   * a layering construct (fall through to normal routing).
+   */
+  private async routeLayeredToolCall(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<{ content: string; isError: boolean } | null> {
+    const tl = this.toolLayering!;
+    const stripped = toolName.startsWith(SESSION_PREFIX)
+      ? toolName.slice(SESSION_PREFIX.length)
+      : toolName;
+
+    // tools_<category> meta tool: expand the category listing.
+    if (stripped.startsWith('tools_')) {
+      const catName = stripped.slice('tools_'.length);
+      const cat = tl.assembled.categoriesByName.get(catName);
+      if (!cat) {
+        return {
+          content: `未知分类 tools_${catName}。可用分类: ${[...tl.assembled.categoriesByName.keys()].join(', ')}`,
+          isError: true,
+        };
+      }
+      tl.expandedCategories.add(catName);
+      const expandedNames = [...tl.assembled.registry.values()]
+        .filter((e) => e.category === catName && !e.fixed)
+        .map((e) => e.callName);
+      recordToolLayeringTelemetry(this.config.workspace.rootPath, this._sessionId, {
+        type: 'expand',
+        category: catName,
+        toolCount: expandedNames.length,
+        toolNames: expandedNames,
+      });
+      return {
+        content: JSON.stringify(buildExpandPayload(cat, tl.assembled.registry), null, 2),
+        isError: false,
+      };
+    }
+
+    // call_tool: dispatch to a foldable tool by name.
+    if (stripped === CALL_TOOL_NAME) {
+      const name = typeof args.name === 'string' ? args.name : '';
+      const callArgs = (typeof args.args === 'object' && args.args !== null)
+        ? args.args as Record<string, unknown>
+        : {};
+
+      if (!name) {
+        recordToolLayeringTelemetry(this.config.workspace.rootPath, this._sessionId, {
+          type: 'call', targetTool: '<missing-name>', ok: false,
+        });
+        return {
+          content: 'call_tool 需要 name 参数（工具名）。args 为可选的符合该工具 schema 的 JSON 对象。',
+          isError: true,
+        };
+      }
+
+      // Registry lookup: by callName first, then full name (MCP tools keep their prefix).
+      const entry = [...tl.assembled.registry.values()]
+        .find((e) => e.callName === name || e.fullName === name);
+      if (!entry) {
+        const candidates = nearestToolNames(tl.assembled.registry, name);
+        recordToolLayeringTelemetry(this.config.workspace.rootPath, this._sessionId, {
+          type: 'call', targetTool: name, ok: false,
+        });
+        return {
+          content: `未知工具: ${name}。` +
+            (candidates.length ? `相近候选: ${candidates.join(', ')}。` : '') +
+            `可先调用 tools_* 元工具展开分类获取可用工具列表。`,
+          isError: true,
+        };
+      }
+
+      // Fixed-layer tools are top-level and callable directly; folded tools
+      // require the category to have been expanded first (spec §6).
+      if (!entry.fixed && !tl.expandedCategories.has(entry.category)) {
+        return {
+          content: `工具 ${entry.callName} 属于分类 ${entry.category}（未展开）。请先调用 tools_${entry.category} 获取该分类工具清单，再通过 call_tool 调用。`,
+          isError: true,
+        };
+      }
+
+      // Permission re-check against the REAL target tool (spec §6): the
+      // subprocess only saw call_tool in pre_tool_use, so evaluate the target's
+      // own policy here to keep Explore/ask semantics identical to flat mode.
+      const targetCheck = shouldAllowToolInMode(
+        entry.fullName,
+        callArgs,
+        this.permissionManager.getPermissionMode(),
+        {
+          plansFolderPath: getSessionPlansPath(this.config.workspace.rootPath, this._sessionId),
+          dataFolderPath: getSessionDataPath(this.config.workspace.rootPath, this._sessionId),
+        },
+      );
+      if (!targetCheck.allowed) {
+        return {
+          content: `权限检查未通过（工具 ${entry.callName}）：${targetCheck.reason}`,
+          isError: true,
+        };
+      }
+
+      // Dispatch: session tool vs MCP proxy tool.
+      recordToolLayeringTelemetry(this.config.workspace.rootPath, this._sessionId, {
+        type: 'call', targetTool: entry.callName, ok: true,
+      });
+      if (entry.callName !== entry.fullName) {
+        // session tool (mcp__session__ stripped in callName)
+        return this.executeSessionTool(entry.callName, callArgs);
+      }
+      if (this.mcpPool?.isProxyTool(entry.fullName)) {
+        return this.mcpPool.callTool(entry.fullName, callArgs);
+      }
+      return {
+        content: `工具 ${entry.callName} 无可用处理器`,
+        isError: true,
+      };
+    }
+
+    // Not a layering tool — fall through to normal routing.
+    return null;
   }
 
   /**
@@ -2300,6 +2617,10 @@ export class PiAgent extends BaseAgent {
       const fullSystemPrompt = [
         systemPrompt,
         ...stableParts,
+        // Layered tool mode adds a stable protocol block (spec v2 §5): folded
+        // tools are reached via tools_<category> meta tools + call_tool. This
+        // block is constant per session — it never re-stamps the cache prefix.
+        this.toolLayering?.mode === 'layered' ? this.TOOL_LAYERING_HINT : '',
       ].filter(Boolean).join('\n\n');
 
       // User message: volatile context + attachments + the actual message
@@ -2442,6 +2763,10 @@ export class PiAgent extends BaseAgent {
   override setModel(model: string): void {
     const previousModel = this.getModel();
     super.setModel(model);
+    // Re-sync the adapter's context window to the new model so subsequent
+    // usage events report the correct ceiling (the connection's custom models
+    // still apply; the connection itself is unchanged on a plain model switch).
+    this.syncAdapterContextWindow(model, getBackendRuntime(this.config).customModels);
     // Forward to subprocess so it uses the new model on next turn
     if (this.subprocess) {
       this.debug(`Forwarding model change to subprocess: ${previousModel} → ${model}`);
@@ -2449,6 +2774,18 @@ export class PiAgent extends BaseAgent {
     } else {
       this.debug(`Model updated but no subprocess to forward to: ${previousModel} → ${model}`);
     }
+  }
+
+  /**
+   * Point the event adapter at the model's context window (registry → the
+   * connection's custom models). Passing a model whose window is unknown clears
+   * the adapter's window so stale values stop flowing into usage events.
+   */
+  private syncAdapterContextWindow(
+    model: string,
+    customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>,
+  ): void {
+    this.adapter.setContextWindow(resolveContextWindow(model, customModels));
   }
 
   /**
@@ -2533,8 +2870,16 @@ n   * connection can be adopted mid-session.
     }
 
     if (!this.subprocess) {
-      // No live subprocess yet: just adopt the connection locally.
+      // No live subprocess yet: just adopt the connection locally. The model
+      // is applied when the subprocess is spawned, but re-sync the local state
+      // now so the context-usage ring reflects the target model immediately.
       this.config.connectionSlug = args.connectionSlug;
+      const targetModel = args.model || connection.defaultModel || '';
+      // Keep local model state in sync so the next subprocess spawn adopts the
+      // target model; re-sync the adapter's context window to the target
+      // connection's models so the context-usage ring is correct immediately.
+      super.setModel(targetModel);
+      this.syncAdapterContextWindow(targetModel, runtime.customModels);
       this.debug(`switchConnection: no subprocess; local adopt ${previousSlug} → ${args.connectionSlug}`);
       return;
     }
@@ -2564,8 +2909,14 @@ n   * connection can be adopted mid-session.
       throw new Error(result.errorMessage || 'switch_connection failed');
     }
 
-    // Commit the local config only after the subprocess confirms.
+    // Commit the local config only after the subprocess confirms. The
+    // subprocess already applied the resolved model via switch_connection,
+    // so update local model state without re-sending a set_model RPC, and
+    // re-sync the adapter's context window to the target connection's models.
+    const resolvedModel = result.resolved ?? args.model;
     this.config.connectionSlug = args.connectionSlug;
+    super.setModel(resolvedModel);
+    this.syncAdapterContextWindow(resolvedModel, runtime.customModels);
     this.debug(`switchConnection: subprocess confirmed ${previousSlug} → ${args.connectionSlug} (${result.resolved})`);
   }
 

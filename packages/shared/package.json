@@ -53,6 +53,7 @@
     "./labels/auto": "./src/labels/auto/index.ts",
     "./labels/storage": "./src/labels/storage.ts",
     "./labels/crud": "./src/labels/crud.ts",
+    "./tool-layering": "./src/tool-layering/index.ts",
     "./views": "./src/views/index.ts",
     "./views/storage": "./src/views/storage.ts",
     "./validation": "./src/validation/index.ts",

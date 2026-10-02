@@ -2066,6 +2066,17 @@ export function shouldAllowToolInMode(
   if (toolName.startsWith('mcp__')) {
     // Handle session-scoped tools - derive safe-mode behavior from canonical session-tools-core metadata
     if (toolName.startsWith('mcp__session__')) {
+      // Layering proxy tools (spec §6): tools_* expand a category, call_tool
+      // dispatches to a folded real tool. Proxies themselves do nothing — no data
+      // — so they are always allowed; the TARGET tool's real policy is evaluated
+      // inside dispatch (routeLayeredToolCall re-checks shouldAllowToolInMode).
+      const layeringProxy =
+        toolName.startsWith('mcp__session__tools_') ||
+        toolName === 'mcp__session__call_tool';
+      if (layeringProxy) {
+        return { allowed: true };
+      }
+
       const safeAllowedSessionTools = getSessionSafeAllowedToolNames({
         prefix: 'mcp__session__',
         includeDeveloperFeedback: FEATURE_FLAGS.developerFeedback,

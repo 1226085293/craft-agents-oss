@@ -13,6 +13,7 @@ import {
   Image as ImageIcon,
 } from 'lucide-react'
 import { ImagePreviewOverlay, Icon_Home, Spinner } from '@craft-agent/ui'
+import { TextAttachmentEditOverlay } from './TextAttachmentEditOverlay'
 
 import * as storage from '@/lib/local-storage'
 import { openSettingsWindow } from '@/lib/settings-window'
@@ -55,7 +56,7 @@ import { isAbsolutePath } from '@/lib/drafts'
 import { isMac } from '@/lib/platform'
 import { AttachmentPreview } from '../AttachmentPreview'
 import { ImageSupportWarningBanner } from './ImageSupportWarningBanner'
-import { ANTHROPIC_MODELS, getModelShortName, getModelDisplayName, getModelContextWindow, type ModelDefinition } from '@config/models'
+import { ANTHROPIC_MODELS, getModelShortName, getModelDisplayName, resolveModelContextWindow, type ModelDefinition } from '@config/models'
 import {
   resolveEffectiveConnectionSlug,
   isCompatProvider,
@@ -119,6 +120,20 @@ function getAttachmentDataUrl(attachment: FileAttachment): string | undefined {
 function getAttachmentRealPath(attachment: FileAttachment): string | undefined {
   const path = isAbsolutePath(attachment.path) ? attachment.path : attachment.storedPath
   return path && isAbsolutePath(path) ? path : undefined
+}
+
+/**
+ * UTF-8 → base64 (btoa alone mangles non-Latin-1 text). Chunked to avoid
+ * O(n²) string concatenation on large inputs, mirroring readFileAsAttachment.
+ */
+function encodeTextToBase64(text: string): string {
+  const bytes = new TextEncoder().encode(text)
+  let binary = ''
+  const chunkSize = 8192
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + chunkSize, bytes.length)))
+  }
+  return btoa(binary)
 }
 
 
@@ -492,6 +507,7 @@ export function FreeFormInput({
   const [input, setInput] = React.useState(() => coerceInputText(inputValue))
   const [attachments, setAttachments] = React.useState<FileAttachment[]>(attachmentsValue ?? [])
   const [previewImageIndex, setPreviewImageIndex] = React.useState<number | null>(null)
+  const [editingTextAttachmentIndex, setEditingTextAttachmentIndex] = React.useState<number | null>(null)
 
   const imageAttachments = React.useMemo(
     () => attachments
@@ -524,12 +540,58 @@ export function FreeFormInput({
       if (imageIndex >= 0) setPreviewImageIndex(imageIndex)
       return
     }
-    // Non-image attachments: route through the app-level link interceptor,
-    // which classifies the file and opens the matching in-app preview
-    // (pdf / code / markdown / json / text) or the system opener.
+    // Text attachments (pasted text, .md/.txt/.json/.py/.ts/...): open the inline
+    // editable overlay. Pasted blocks have no real disk path so the app-level file
+    // preview can't open them — the overlay reads attachment.text directly, and
+    // saving writes back to it (storeAttachment persists it on send).
+    if (attachment.type === 'text' && attachment.text !== undefined) {
+      setEditingTextAttachmentIndex(attachmentIndex)
+      return
+    }
+    // Other non-image attachments (pdf / office / audio / unknown): route through
+    // the app-level link interceptor, which classifies the file and opens the
+    // matching in-app preview or the system opener.
     const path = getAttachmentRealPath(attachment)
     if (path) appShellCtx?.onOpenFile(path, sessionId)
   }, [attachments, imageAttachments, appShellCtx, sessionId])
+
+  const closeTextEditOverlay = React.useCallback(() => {
+    setEditingTextAttachmentIndex(null)
+  }, [])
+
+  // Save edited text back into the attachment. setAttachments triggers the
+  // persistence effect, which notifies the parent (drafts) — pasted blocks store
+  // content inline (Track C), so the edit survives draft restore and is written
+  // to the session attachments folder when the message is sent.
+  const handleTextAttachmentSave = React.useCallback((newText: string) => {
+    const index = editingTextAttachmentIndex
+    if (index === null) return
+    setAttachments(prev => {
+      if (index < 0 || index >= prev.length || prev[index].type !== 'text') return prev
+      const next = [...prev]
+      const edited = {
+        ...next[index],
+        text: newText,
+        // Keep size in sync so draft persistence caps and UI totals stay accurate
+        size: new Blob([newText]).size,
+      }
+      // Disk-backed text files carry a base64 copy alongside `text`, and
+      // storeAttachment prefers base64 when both are present — rewrite it so
+      // the edited content (not the stale file bytes) ends up on disk.
+      if (edited.base64) edited.base64 = encodeTextToBase64(newText)
+      next[index] = edited
+      return next
+    })
+    setEditingTextAttachmentIndex(null)
+  }, [editingTextAttachmentIndex])
+
+  // If the attachment being edited is removed (e.g. X on the chip while the
+  // overlay is open), close the overlay instead of editing a ghost.
+  React.useEffect(() => {
+    if (editingTextAttachmentIndex === null) return
+    const editing = attachments[editingTextAttachmentIndex]
+    if (!editing || editing.type !== 'text') setEditingTextAttachmentIndex(null)
+  }, [attachments, editingTextAttachmentIndex])
 
   const closeImagePreview = React.useCallback(() => {
     setPreviewImageIndex(null)
@@ -2134,7 +2196,7 @@ export function FreeFormInput({
           <ContextUsageRing
             inputTokens={contextStatus?.inputTokens}
             contextWindow={contextStatus?.contextWindow}
-            fallbackContextWindow={getModelContextWindow(currentModel)}
+            fallbackContextWindow={resolveModelContextWindow(currentModel)}
             isCompacting={contextStatus?.isCompacting}
             disabled={isProcessing}
             onCompact={() => onSubmit('/compact', [])}
@@ -2578,6 +2640,19 @@ export function FreeFormInput({
           theme={isDark ? 'dark' : 'light'}
         />
       )}
+
+      <TextAttachmentEditOverlay
+        isOpen={editingTextAttachmentIndex !== null}
+        onClose={closeTextEditOverlay}
+        attachment={
+          editingTextAttachmentIndex !== null
+            ? attachments[editingTextAttachmentIndex]
+            : undefined
+        }
+        sessionId={sessionId}
+        theme={isDark ? 'dark' : 'light'}
+        onSave={handleTextAttachmentSave}
+      />
     </>
   )
 }

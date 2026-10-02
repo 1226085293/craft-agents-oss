@@ -176,13 +176,17 @@ function injectMetadataFields(
     _intent?: unknown;
     [key: string]: unknown;
   };
+  // Place metadata LAST so the real tool parameters (command, path, etc.) stay
+  // visually first in the schema. Putting `_displayName`/`_intent` (underscore-
+  // prefixed) first primed models (esp. DeepSeek) to also underscore the real
+  // parameter names (command -> _command), causing "Validation failed for tool".
   const newProperties = {
+    ...rest,
     _displayName: _displayName || displayNameSchema,
     _intent: _intent || intentSchema,
-    ...rest,
   };
   const otherRequired = (required || []).filter(r => r !== '_displayName' && r !== '_intent');
-  return { properties: newProperties, required: ['_displayName', '_intent', ...otherRequired] };
+  return { properties: newProperties, required: [...otherRequired, '_displayName', '_intent'] };
 }
 
 /**

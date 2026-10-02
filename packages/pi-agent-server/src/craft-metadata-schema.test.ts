@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { createEditToolDefinition } from '@earendil-works/pi-coding-agent';
-import { allowCraftMetadataProperties, stripCraftMetadata } from './craft-metadata-schema.ts';
+import { allowCraftMetadataProperties, normalizeUnderscorePrefixedArgs, stripCraftMetadata } from './craft-metadata-schema.ts';
 
 describe('Craft metadata schema compatibility for Pi tools', () => {
   it('widens a strict Edit-like schema with optional Craft metadata properties', () => {
@@ -105,8 +105,53 @@ describe('Craft metadata schema compatibility for Pi tools', () => {
     expect(input).toHaveProperty('_intent', 'Add punctuation');
   });
 
+  it('normalizes underscore-prefixed real params (command -> _command) before validation', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        command: { type: 'string' },
+        timeout: { type: 'number' },
+      },
+      required: ['command'],
+    };
+
+    const args = { _command: 'ls -la', _displayName: 'List', _intent: 'List files', timeout: 5 };
+    const normalized = normalizeUnderscorePrefixedArgs(
+      args as unknown as Record<string, unknown>,
+      schema as { properties: Record<string, unknown> },
+    );
+
+    expect(normalized).toEqual({
+      command: 'ls -la',
+      _displayName: 'List',
+      _intent: 'List files',
+      timeout: 5,
+    });
+  });
+
+  it('leaves args untouched when there is no underscore-prefixed param', () => {
+    const schema = { properties: { command: { type: 'string' } } };
+    const args = { command: 'ls -la', _displayName: 'List', _intent: 'List' };
+    const normalized = normalizeUnderscorePrefixedArgs(args as unknown as Record<string, unknown>, schema as { properties: Record<string, unknown> });
+    expect(normalized).toBe(args);
+  });
+
+  it('does not map underscores for keys not in the schema (unknown noise)', () => {
+    const schema = { properties: { path: { type: 'string' } } };
+    const args = { _command: 'ls', path: 'x' };
+    const normalized = normalizeUnderscorePrefixedArgs(args as unknown as Record<string, unknown>, schema as { properties: Record<string, unknown> });
+    expect(normalized).toEqual({ _command: 'ls', path: 'x' });
+  });
+
   it('returns the same input object when no metadata is present', () => {
     const input = { path: 'random' };
     expect(stripCraftMetadata(input)).toBe(input);
+  });
+
+  it('does not clobber an existing bare key if both `_x` and `x` are present', () => {
+    const schema = { properties: { command: { type: 'string' } } };
+    const args = { _command: 'bad', command: 'good' };
+    const normalized = normalizeUnderscorePrefixedArgs(args as unknown as Record<string, unknown>, schema as { properties: Record<string, unknown> });
+    expect(normalized).toEqual({ _command: 'bad', command: 'good' });
   });
 });

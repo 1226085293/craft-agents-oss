@@ -25,7 +25,7 @@ describe('unified-network-interceptor schema metadata injection', () => {
     expect(result.required).toContain('_intent');
   });
 
-  it('preserves existing properties and required keys while prepending metadata keys', () => {
+  it('preserves existing properties and required keys while appending metadata keys', () => {
     const schema = {
       type: 'object',
       properties: {
@@ -37,7 +37,7 @@ describe('unified-network-interceptor schema metadata injection', () => {
     const result = injectMetadataIntoToolSchema(schema);
 
     expect(result.properties.url).toEqual({ type: 'string' });
-    expect(result.required).toEqual(['_displayName', '_intent', 'url']);
+    expect(result.required).toEqual(['url', '_displayName', '_intent']);
   });
 
   it('does not duplicate metadata keys when already present in required', () => {
@@ -45,13 +45,14 @@ describe('unified-network-interceptor schema metadata injection', () => {
       properties: {
         _displayName: { type: 'string', description: 'custom display name schema' },
         _intent: { type: 'string', description: 'custom intent schema' },
+        url: { type: 'string' },
       },
-      required: ['_intent', '_displayName'],
+      required: ['_intent', '_displayName', 'url'],
     };
 
     const result = injectMetadataIntoToolSchema(schema);
 
-    expect(result.required).toEqual(['_displayName', '_intent']);
+    expect(result.required).toEqual(['url', '_displayName', '_intent']);
     expect(result.properties._displayName).toEqual({ type: 'string', description: 'custom display name schema' });
     expect(result.properties._intent).toEqual({ type: 'string', description: 'custom intent schema' });
   });

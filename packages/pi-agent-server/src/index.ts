@@ -103,7 +103,7 @@ import { getDefaultSummarizationModel } from '../../shared/src/config/models.ts'
 import { createWebFetchTool } from './tools/web-fetch.ts';
 import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
 import { createSearchTool } from './tools/search/create-search-tool.ts';
-import { allowCraftMetadataProperties, stripCraftMetadata } from './craft-metadata-schema.ts';
+import { allowCraftMetadataProperties, normalizeUnderscorePrefixedArgs, stripCraftMetadata } from './craft-metadata-schema.ts';
 import { applySystemPromptOverride, applySystemPromptOverrideWithDefense } from './system-prompt-override.ts';
 import { adaptCredentialForPiSdk, type PiCredential } from './adapt-credential.ts';
 import { DefenseEvaluator, resolveDefenseEnabled } from './defense/index.ts';
@@ -1505,6 +1505,17 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
   const originalExecute = tool.execute;
   const parameters = allowCraftMetadataProperties(tool.parameters);
 
+  /**
+   * Defensive normalization: some models (esp. DeepSeek) learn the
+   * `_displayName`/`_intent` underscore pattern from the schema and also
+   * underscore real parameter names (command -> _command, path -> _path).
+   * The Pi SDK runs prepareArguments BEFORE validateToolArguments, so
+   * mapping stray `_<param>` back to `<param>` prevents the whole class of
+   * "command: must have required properties command" validation failures.
+   */
+  const prepareArguments = (rawArgs: unknown): Record<string, unknown> =>
+    normalizeUnderscorePrefixedArgs(rawArgs as Record<string, unknown>, tool.parameters);
+
   const wrappedExecute: ToolDefinition<any, any>['execute'] = async (
     toolCallId,
     params,
@@ -1630,6 +1641,7 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
   return {
     ...tool,
     parameters,
+    prepareArguments,
     execute: wrappedExecute,
   };
 }

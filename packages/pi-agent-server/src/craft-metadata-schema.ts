@@ -66,3 +66,38 @@ export function stripCraftMetadata<T>(input: T): T {
 
   return cleanInput as T;
 }
+
+/**
+ * Normalize args where the model mistakenly prefixed a real payload key with an
+ * underscore (`_command` → `command`, `_path` → `path`).
+ *
+ * Root cause: `_displayName` / `_intent` are the only legitimately
+ * underscore-prefixed fields, and their presence primes some models (notably
+ * DeepSeek) to also underscore real parameter names, which the Pi SDK then
+ * rejects with "Validation failed for tool ...: command: must have required
+ * properties command". This runs via `prepareArguments` BEFORE schema
+ * validation, so the whole class of failures is eliminated.
+ *
+ * Safe by construction: only keys that (a) start with `_`, (b) are NOT the
+ * metadata fields, and (c) whose bare name exists in the tool's schema
+ * properties are moved. Unknown underscore keys (typeless noise) are left
+ * untouched and still get stripped later.
+ */
+export function normalizeUnderscorePrefixedArgs<T = unknown>(args: T, schema: {
+  properties?: Record<string, unknown>;
+} | undefined): T {
+  if (!isRecord(args)) return args;
+  const props = isRecord(schema?.properties) ? schema.properties : {};
+  const result = { ...args } as Record<string, unknown>;
+  let changed = false;
+  for (const key of Object.keys(result)) {
+    if (!key.startsWith('_')) continue;
+    if (key === CRAFT_DISPLAY_NAME_KEY || key === CRAFT_INTENT_KEY) continue;
+    const bare = key.slice(1);
+    if (!bare || !(bare in props) || bare in result) continue;
+    result[bare] = result[key];
+    delete result[key];
+    changed = true;
+  }
+  return changed ? (result as T) : args;
+}

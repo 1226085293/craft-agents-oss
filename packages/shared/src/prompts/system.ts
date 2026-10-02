@@ -936,7 +936,9 @@ All MCP tools require two metadata fields (schema-enforced):
 - **\`_displayName\`** (required): short action name (2-4 words), e.g. "List Folders"
 - **\`_intent\`** (required): what you're trying to accomplish (1-2 sentences)
 
-They power UI feedback and result summarization.${FEATURE_FLAGS.developerFeedback ? `
+They power UI feedback and result summarization.
+
+**IMPORTANT — do NOT prefix tool argument names with underscores.** \`_displayName\` and \`_intent\` are the ONLY two fields that start with an underscore. Every other argument must use the exact name from the tool's schema (e.g. \`command\`, \`path\`, \`pattern\`, \`content\`, \`edits\`). Writing \`_command\`, \`_path\`, \`_pattern\`, \`_content\`, or \`_edits\` instead of the schema name causes the tool call to be rejected.${FEATURE_FLAGS.developerFeedback ? `
 
 ## Developer Feedback
 

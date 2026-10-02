@@ -278,8 +278,15 @@ export class MessagingGateway {
       },
       onChannelBound: (args) => {
         // The session may be mid-run — surface its process bubble right away
-        // instead of waiting for the next session event.
-        this.surfaceSessionToChannel(args.sessionId, args.platform, args.channelId, args.threadId)
+        // instead of waiting for the next session event. Idle sessions get no
+        // bubble: the next run shows its own progress.
+        this.surfaceSessionToChannel(
+          args.sessionId,
+          args.isProcessing,
+          args.platform,
+          args.channelId,
+          args.threadId,
+        )
       },
     }
 
@@ -886,14 +893,17 @@ export class MessagingGateway {
   /**
    * After a session is bound to a channel, immediately surface the session's
    * in-flight process ("💭 thinking…" bubble) when the agent is already
-   * running. Progress-mode only; other modes render their own output.
+   * running (`isProcessing`). Idle sessions get nothing — the next run shows
+   * its own process. Progress-mode only; other modes render their own output.
    */
   private surfaceSessionToChannel(
     sessionId: string,
+    isProcessing: boolean,
     platform: PlatformType,
     channelId: string,
     threadId?: number,
   ): void {
+    if (!isProcessing) return
     const binding = this.bindingStore.findByChannel(platform, channelId, threadId)
     const adapter = this.adapters.get(platform)
     if (!binding || binding.sessionId !== sessionId) return
@@ -977,8 +987,15 @@ export class MessagingGateway {
       )
 
       // The bound session may be mid-run: post its process bubble immediately
-      // (desktop parity) instead of waiting for the next session event.
-      this.surfaceSessionToChannel(session.id, platform, press.channelId, press.threadId)
+      // (desktop parity) instead of waiting for the next session event. An
+      // idle session gets no bubble — nothing is running yet.
+      this.surfaceSessionToChannel(
+        session.id,
+        session.isProcessing === true,
+        platform,
+        press.channelId,
+        press.threadId,
+      )
       return
     }
 

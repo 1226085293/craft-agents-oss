@@ -352,10 +352,12 @@ describe('MessagingGateway button-press access gate', () => {
       buildPress({ buttonId: 'bind:sess-A', senderId: 'owner-1', messageId: 'picker-1' }),
     )
 
-    // The "Recent sessions:" message the user picked from is transient — it
-    // must not stay around after a choice was made.
+    // The "Recent sessions:" note the user picked from is transient — it
+    // must not stay up after a choice was made.
     expect(h.adapter.deleted).toContain('picker-1')
     expect(h.adapter.sent.some((s) => s.includes('Bound to'))).toBe(true)
+    // The session is idle (no isProcessing) — no premature thinking bubble.
+    expect(h.adapter.sent.some((s) => s.includes('💭'))).toBe(false)
   })
 
   it('bind: to an in-progress session posts its process bubble immediately', async () => {

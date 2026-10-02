@@ -1226,6 +1226,16 @@ ${formattedMessages}
       const jsonlPath = join(this.config.workspace.rootPath, 'sessions', sessionId, 'session.jsonl');
       const messages = readSessionJsonl(jsonlPath)?.messages ?? [];
 
+      // Session-end extraction waits until the transcript has enough material;
+      // compaction and manual extraction bypass this gate.
+      if (options?.strategy === 'session_end') {
+        const minMessages = this._memoryConfig.minMessagesForExtraction ?? 0;
+        if (messages.length < minMessages) {
+          this.onDebug?.(`[Memory] Skipping session-end extraction: ${messages.length} messages < threshold ${minMessages}`);
+          return { extracted: 0, discarded: 0 };
+        }
+      }
+
       const input: MemoryExtractionInput = {
         sessionId,
         messages: messages.map((m: any) => ({
@@ -1240,6 +1250,7 @@ ${formattedMessages}
       const result = await extractMemories(input, this.memoryStore, {
         runMiniCompletion: this.runMiniCompletion.bind(this),
         existingEntries: this.memoryStore.entries,
+        semanticDedup: this._memoryConfig.semanticDedup,
       });
 
       this.persistMemoryStore();

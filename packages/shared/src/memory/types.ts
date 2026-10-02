@@ -208,6 +208,17 @@ export interface MemoryConfig {
   maxMemoriesPerSession?: number
   /** Minimum confidence threshold for auto-extracted memories */
   minAutoConfidence?: number
+  /**
+   * Minimum number of messages a session must accumulate before the
+   * session-end (turn-end) extraction fires. Compaction and manual extraction
+   * are unaffected. Guards against extracting from a nearly-empty transcript.
+   */
+  minMessagesForExtraction?: number
+  /**
+   * When true, near-duplicate candidates are dropped against the whole store
+   * (tag overlap + content similarity), not just same-session exact matches.
+   */
+  semanticDedup?: boolean
 }
 
 /** Default configuration */
@@ -215,4 +226,6 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
   extractionStrategy: 'both',
   maxMemoriesPerSession: 20,
   minAutoConfidence: 0.5,
+  minMessagesForExtraction: 20,
+  semanticDedup: true,
 }

@@ -16,6 +16,72 @@ import type {
 import { addMemoryEntry, recordExtraction } from './store.ts';
 
 // ============================================================================
+// Semantic Deduplication
+// ============================================================================
+
+/**
+ * Tokenize content into lowercase alphanumeric word tokens (length >= 2 to
+ * drop stopwords) plus CJK character bigrams (contiguous runs split into
+ * overlapping two-character shingles, which keeps Chinese similarity
+ * meaningful without a word segmenter).
+ */
+export function tokenizeMemoryContent(content: string): string[] {
+  const tokens: string[] = [];
+
+  const ascii = content.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+  for (const w of ascii) if (w.length >= 2) tokens.push(w);
+
+  const runs = content.match(/[\u4e00-\u9fff\u3400-\u4dbf]+/g) ?? [];
+  for (const run of runs) {
+    if (run.length === 1) {
+      tokens.push(run);
+      continue;
+    }
+    for (let i = 0; i < run.length - 1; i++) {
+      tokens.push(run.slice(i, i + 2));
+    }
+  }
+
+  return tokens;
+}
+
+/** Jaccard similarity between two token multisets (0..1). */
+export function tokenOverlap(a: string[], b: string[]): number {
+  if (a.length === 0 && b.length === 0) return 0;
+  const setA = new Set(a);
+  const setB = new Set(b);
+  const union = new Set([...setA, ...setB]);
+  if (union.size === 0) return 0;
+  let inter = 0;
+  for (const t of setA) if (setB.has(t)) inter++;
+  return inter / union.size;
+}
+
+/**
+ * Decide whether `candidate` is a near-duplicate of any existing entry.
+ * Strong signal: high content overlap AND tag overlap. Weak signal (content
+ * alone) only counts if the tags also intersect, so unrelated entries with
+ * similar boilerplate don't get dropped.
+ */
+export function isSemanticDuplicate(
+  candidate: { content: string; tags: string[] },
+  existingEntries: Array<{ content: string; tags: string[] }>,
+): boolean {
+  const cTokens = tokenizeMemoryContent(candidate.content);
+  const cTags = new Set(candidate.tags);
+
+  for (const e of existingEntries) {
+    const eTags = e.tags ?? [];
+    const tagOverlap = eTags.some(t => cTags.has(t));
+    const similarity = tokenOverlap(cTokens, tokenizeMemoryContent(e.content));
+
+    if (similarity >= 0.75 && tagOverlap) return true;          // near-identical + same topic
+    if (similarity >= 0.85 && cTokens.length >= 4) return true; // essentially identical content
+  }
+  return false;
+}
+
+// ============================================================================
 // Extraction Prompt Builder
 // ============================================================================
 
@@ -171,6 +237,8 @@ export interface MemoryExtractorOptions {
   existingEntries: MemoryEntry[];
   /** Whether to force extraction even if confidence is low */
   forceExtraction?: boolean;
+  /** Whether to drop near-duplicates against the whole store */
+  semanticDedup?: boolean;
 }
 
 /**
@@ -182,7 +250,7 @@ export async function extractMemories(
   store: MemoryStore,
   options: MemoryExtractorOptions,
 ): Promise<MemoryExtractionRecord> {
-  const { runMiniCompletion, existingEntries, forceExtraction = false } = options;
+  const { runMiniCompletion, existingEntries, forceExtraction = false, semanticDedup = false } = options;
 
   // Build list of existing tags for deduplication
   const existingTags = [
@@ -219,10 +287,14 @@ export async function extractMemories(
     const existing = store.entries.find(e =>
       e.content === entry.content && e.sourceSessionId === entry.sourceSessionId,
     );
-    if (!existing) {
-      const newEntry = addMemoryEntry(store, entry.content, entry.type, entry.sourceSessionId, entry.tags, entry.confidence);
-      newEntryIds.push(newEntry.id);
-    }
+    if (existing) continue;
+
+    // Drop near-duplicates against the whole store (cross-session), not just
+    // exact same-session matches.
+    if (semanticDedup && isSemanticDuplicate(entry, existingEntries)) continue;
+
+    const newEntry = addMemoryEntry(store, entry.content, entry.type, entry.sourceSessionId, entry.tags, entry.confidence);
+    newEntryIds.push(newEntry.id);
   }
 
   // Record extraction

@@ -35,6 +35,11 @@ export interface ShikiCodeEditorProps {
   placeholder?: string
   /** Render a line-number gutter like ShikiCodeViewer (default: false) */
   showLineNumbers?: boolean
+  /**
+   * Keep lines on a single line (code-editor style): long lines scroll
+   * horizontally instead of soft-wrapping. Off by default.
+   */
+  noWrap?: boolean
 }
 
 // Map aliases to Shiki language names
@@ -74,6 +79,7 @@ export function ShikiCodeEditor({
   className,
   placeholder,
   showLineNumbers = false,
+  noWrap = false,
 }: ShikiCodeEditorProps) {
   const { isDark, shikiTheme } = useTheme()
   const hasCalledReady = useRef(false)
@@ -179,6 +185,12 @@ export function ShikiCodeEditor({
       disabled={readOnly}
       padding={16}
       placeholder={placeholder}
+      preClassName={noWrap ? 'scce-nowrap scce-nowrap-pre' : undefined}
+      textareaClassName={cn(
+        'focus:outline-none',
+        readOnly && 'cursor-default',
+        noWrap && 'scce-nowrap'
+      )}
       style={{
         fontFamily: '"JetBrains Mono", monospace',
         fontSize: 13,
@@ -187,10 +199,6 @@ export function ShikiCodeEditor({
         backgroundColor,
         color: 'var(--foreground)',
       }}
-      textareaClassName={cn(
-        'focus:outline-none',
-        readOnly && 'cursor-default'
-      )}
       className="min-h-full"
     />
   )
@@ -229,6 +237,18 @@ export function ShikiCodeEditor({
       <style>{`
         .npm__react-simple-code-editor__textarea::placeholder {
           color: ${placeholderColor};
+        }
+        /* no-wrap mode: override the library's hardcoded pre-wrap so long lines
+           scroll horizontally (standard code-editor behavior) */
+        .scce-nowrap {
+          white-space: pre !important;
+          overflow-wrap: normal !important;
+          word-break: normal !important;
+        }
+        .scce-nowrap-pre {
+          width: fit-content;
+          min-width: 100%;
+          max-width: none;
         }
       `}</style>
     </div>

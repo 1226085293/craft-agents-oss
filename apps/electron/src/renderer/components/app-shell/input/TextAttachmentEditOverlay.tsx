@@ -190,7 +190,7 @@ export function TextAttachmentEditOverlay({
 
   /** Shared status bar under the editors: language badge + "sent copy only" hint */
   const statusBar = (
-    <div className="mt-2.5 flex items-center justify-between gap-4 rounded-[8px] border border-foreground/5 bg-foreground/3 px-3 py-1.5 text-[11px] text-muted-foreground/80">
+    <div className="flex items-center justify-between gap-4 rounded-[8px] border border-foreground/5 bg-foreground/3 px-3 py-1.5 text-[11px] text-muted-foreground/80">
       <span className="shrink-0 font-semibold tracking-wide text-foreground/70">{typeLabel}</span>
       <span className="min-w-0 text-right leading-snug">{t('attachment.editedHint')}</span>
     </div>
@@ -226,43 +226,52 @@ export function TextAttachmentEditOverlay({
     </ContentFrame>
   )
 
-  /** Markdown edit: split view — source editor (line numbers) + live rendered preview */
+  /**
+   * Markdown edit: split view — source editor (line numbers, no-wrap, horizontal
+   * scroll) on the left, live rendered preview on the right.
+   * The panel fills the overlay's available height (header 48 + fade 24 +
+   * bottom fade 24 ≈ 96px of content insets) so it doesn't float with big gaps.
+   */
   const markdownSplitEditor = (
-    <div className="px-6 pb-5">
-      <div className="mx-auto w-full max-w-[1100px]">
-        <div className="flex h-[55vh] min-h-[320px] overflow-hidden rounded-[12px] border border-border/40 bg-background shadow-minimal">
-          <div className="min-w-0 flex-1 border-r border-border/40">
+    <div className="px-6">
+      <div className="flex h-[calc(100vh-100px)] min-h-[380px] w-full flex-col">
+        <div className="flex min-h-0 flex-1 overflow-hidden rounded-[12px] border border-border/40 bg-background shadow-minimal">
+          <div className="min-w-0 flex-1 overflow-hidden border-r border-border/40">
             <ShikiCodeEditor
               value={text}
               onChange={setText}
               language="markdown"
               showLineNumbers
+              noWrap
               className="h-full"
             />
           </div>
           <div className="min-w-0 flex-1 overflow-y-auto">
-            <div className="h-full min-h-full bg-muted/20 px-8 py-6 text-sm">
+            <div className="min-h-full bg-muted/20 px-8 py-6 text-sm">
               <Markdown mode="minimal">{previewText}</Markdown>
             </div>
           </div>
         </div>
-        {statusBar}
+        <div className="pt-2.5">{statusBar}</div>
       </div>
     </div>
   )
 
-  /** Plain-text / code edit: full-width editor + status bar */
+  /** Plain-text / code edit: full-height, full-width editor (no-wrap) + status bar */
   const codeEditor = (
     <ContentFrame title={t('overlay.code')} fitContent minWidth={850}>
-      <div>
-        <ShikiCodeEditor
-          value={text}
-          onChange={setText}
-          language={language}
-          showLineNumbers
-          className="h-[55vh]"
-        />
-        {statusBar}
+      <div className="flex h-[calc(100vh-220px)] min-h-[300px] flex-col">
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <ShikiCodeEditor
+            value={text}
+            onChange={setText}
+            language={language}
+            showLineNumbers
+            noWrap
+            className="h-full"
+          />
+        </div>
+        <div className="pt-2.5">{statusBar}</div>
       </div>
     </ContentFrame>
   )

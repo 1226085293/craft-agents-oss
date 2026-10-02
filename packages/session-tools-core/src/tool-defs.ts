@@ -320,318 +320,41 @@ export const UnbindMessagingChannelSchema = z.object({
 // ============================================================
 
 export const TOOL_DESCRIPTIONS = {
-  SubmitPlan: `Submit a plan for user review.
-
-Call this after you have written your plan to a markdown file using the Write tool.
-The plan will be displayed to the user in a special formatted view.
-
-**IMPORTANT:** After calling this tool:
-- Execution will be **automatically paused** to present the plan to the user
-- No further tool calls or text output will be processed after this tool returns
-- The conversation will resume when the user responds (accept, modify, or reject the plan)
-- Do NOT include any text or tool calls after SubmitPlan - they will not be executed`,
-
-  config_validate: `Validate Craft Agent configuration files.
-
-Use this after editing configuration files to check for errors before they take effect.
-Returns structured validation results with errors, warnings, and suggestions.
-
-**Targets:**
-- \`config\`: Validates config.json (workspaces, model, settings)
-- \`sources\`: Validates all source config.json files
-- \`statuses\`: Validates statuses config.json
-- \`preferences\`: Validates preferences.json
-- \`permissions\`: Validates permissions.json files
-- \`automations\`: Validates automations.json configuration
-- \`tool-icons\`: Validates tool-icons.json
-- \`all\`: Validates all configuration files`,
-
-  skill_validate: `Validate a skill's SKILL.md file.
-
-Checks:
-- Slug format (lowercase alphanumeric with hyphens)
-- SKILL.md exists and is readable
-- YAML frontmatter is valid with required fields (name, description)
-- Content is non-empty after frontmatter
-- Icon format if present (svg/png/jpg)`,
-
-  mermaid_validate: `Validate Mermaid diagram syntax before outputting.
-
-Use this when:
-- Creating complex diagrams with many nodes/relationships
-- Unsure about syntax for a specific diagram type
-- Debugging a diagram that failed to render
-
-Returns validation result with specific error messages if invalid.`,
-
-  source_test: `Validate, test, and (by default) activate a source configuration.
-
-**This tool performs:**
-1. **Schema validation**: Validates config.json structure
-2. **Icon handling**: Checks/downloads icon if configured
-3. **Completeness check**: Warns about missing guide.md/icon/tagline
-4. **Connection test**: Tests if the source is reachable
-5. **Auth status**: Checks if source is authenticated
-6. **Auto-enable** (default): If validation passes, flip \`enabled: true\` in config (if needed) and activate the source in the running session so its tools become available without a restart.
-
-Pass \`autoEnable: false\` to keep pure validation behavior (no config or session mutations).`,
-
-  source_oauth_trigger: `Start OAuth authentication for an MCP source.
-
-This tool initiates the OAuth 2.0 + PKCE flow for sources that require authentication.
-
-**Prerequisites:**
-- Source must exist in the current workspace
-- Source must be type 'mcp' with authType 'oauth'
-- Source must have a valid MCP URL
-
-**IMPORTANT:** After calling this tool, execution will be paused while OAuth completes.`,
-
-  source_google_oauth_trigger: `Trigger Google OAuth authentication for a Google API source.
-
-Opens a browser window for the user to sign in with their Google account.
-
-**Supported services:** Gmail, Calendar, Drive, Docs, Sheets, YouTube, Search Console
-
-**IMPORTANT:** After calling this tool, execution will be paused while OAuth completes.`,
-
-  source_slack_oauth_trigger: `Trigger Slack OAuth authentication for a Slack API source.
-
-Opens a browser window for the user to sign in with their Slack account.
-
-**IMPORTANT:** After calling this tool, execution will be paused while OAuth completes.`,
-
-  source_microsoft_oauth_trigger: `Trigger Microsoft OAuth authentication for a Microsoft API source.
-
-Opens a browser window for the user to sign in with their Microsoft account.
-
-**Supported services:** Outlook, Calendar, OneDrive, Teams, SharePoint
-
-**IMPORTANT:** After calling this tool, execution will be paused while OAuth completes.`,
-
-  source_credential_prompt: `Prompt the user to enter credentials for a source.
-
-Use this when a source requires authentication that isn't OAuth.
-The user will see a secure input UI with appropriate fields based on the auth mode.
-
-**Auth Modes:**
-- \`bearer\`: Single token field (Bearer Token, API Key)
-- \`basic\`: Username and Password fields
-- \`header\`: API Key with custom header name shown
-- \`query\`: API Key for query parameter auth
-- \`multi-header\`: Multiple API keys with custom header names
-
-**IMPORTANT:** After calling this tool, execution will be paused for user input.`,
-
-  update_user_preferences: `Update stored user preferences. Use this when you learn information about the user that would be helpful to remember for future conversations. This includes their name, timezone, and location. Only update fields you have confirmed information about - don't guess.`,
-
-  transform_data: `Transform data files using a script and write structured output for datatable/spreadsheet blocks, or extract HTML content for html-preview blocks.
-
-Use this tool when you need to transform large datasets (20+ rows) into structured JSON for display, or extract/decode content for rich previews. Write a transform script that reads the input file and produces an output file, then reference it via \`"src"\` in your datatable/spreadsheet/html-preview/pdf-preview/image-preview block.
-
-**Workflow:**
-1. Call \`transform_data\` with a script that reads input files and writes output
-2. Output a datatable/spreadsheet block with \`"src": "data/output.json"\`, an html-preview block with \`"src": "data/output.html"\`, a pdf-preview block with \`"src": "data/output.pdf"\`, or an image-preview block with \`"src": "data/output.png"\`
-
-**Script conventions:**
-- Input file paths are passed as command-line arguments (last arg = output file path)
-- Python: \`sys.argv[1:-1]\` = input files, \`sys.argv[-1]\` = output path
-- Node/Bun: \`process.argv.slice(2, -1)\` = input files, \`process.argv.at(-1)\` = output path
-- For datatable/spreadsheet: output must be valid JSON: \`{"title": "...", "columns": [...], "rows": [...]}\`
-- For html-preview: output is an HTML file (any valid HTML)
-
-**Security:** Runs in an isolated subprocess with no access to API keys or credentials. 30-second timeout.`,
-
-  script_sandbox: `Run quick inline diagnostics in a sandboxed subprocess with network isolation.
-
-Use this for short Python/Node/Bun snippets when strict Explore-mode Bash parsing blocks inline diagnostics.
-
-**Behavior:**
-- Executes script source from \`script\` in a temporary file
-- Returns stdout/stderr, exit code, duration, and timeout status
-- Accepts optional input files and stdin
-- Requires enforced network and filesystem isolation; if unsupported or unusable, execution is blocked
-
-**Safety:**
-- Sensitive credential env vars are stripped
-- Input files are restricted to the current session directory
-- Filesystem writes are restricted to the current session directory
-- Timeout is capped (default 5000ms, max 15000ms)
-- Network/filesystem isolation is required in all permission modes; if unavailable, execution is blocked`,
-
-  render_template: `Render a source's HTML template with data.
-
-Use this when a source provides HTML templates for rich rendering of its data (e.g., issue detail views, email threads, ticket summaries).
-
-**Workflow:**
-1. Fetch data from the source (via MCP tools or API calls)
-2. Call \`render_template\` with the source slug, template ID, and data
-3. Output an \`html-preview\` block with the returned file path as \`"src"\`
-
-**Available templates** are documented in each source's \`guide.md\` under the "Templates" section.
-
-Templates use Mustache syntax — the tool handles rendering and writes the output HTML to the session data folder.`,
-
-  browser_tool: `Run browser actions using a CLI-like command (string or array input).
-
-All browser interactions use this single tool with strict validation and actionable feedback.
-String mode supports batching with semicolons: \`fill @e1 value; fill @e2 value; click @e3\`
-Batch stops after navigation commands (click, navigate, back, forward) since page state may change.
-
-Array mode bypasses string parsing and preserves raw arguments exactly (recommended for semicolons, tabs, and newlines):
-- \`["evaluate", "var x = 1; var y = 2; x + y"]\`
-- \`["paste", "Name\\tAge\\nAlice\\t30"]\`
-
-Examples:
-- \`--help\`
-- \`open\`
-- \`navigate https://example.com\`
-- \`snapshot\`
-- \`find login button\` — search elements by keyword
-- \`click @e12\`
-- \`click-at 350 200\` — click at pixel coordinates (for canvas elements)
-- \`fill @e5 user@example.com\`
-- \`type Hello World\` — type into currently focused element (no ref needed)
-- \`select @e3 optionValue\`
-- \`select @e75 CNAME --assert-text Target --timeout 3000\`
-- \`set-clipboard Name\\tAge\\nAlice\\t30\` — write text to clipboard
-- \`get-clipboard\` — read clipboard text content
-- \`paste Name\\tAge\\nAlice\\t30\` — set clipboard and trigger Ctrl/Cmd+V
-- \`scroll down 800\`
-- \`evaluate document.title\`
-- \`console 50 error\`
-- \`screenshot\` — raw screenshot
-- \`screenshot --annotated\` — screenshot with @eN labels overlaid on interactive elements
-- \`screenshot-region 100 200 640 480\`
-- \`screenshot-region --ref @e12 --padding 8\`
-- \`screenshot-region --selector div[data-testid="chart"]\`
-- \`window-resize 1440 900\`
-- \`network 50 failed\`
-- \`wait network-idle 8000\`
-- \`key Enter\`
-- \`key k meta\`
-- \`downloads wait 15000\`
-- \`focus [windowId]\` — focus existing browser window (no new window)
-- \`windows\` — list current browser windows and ownership state
-- \`release\` — dismiss the agent control overlay when done
-- \`close\` — close and destroy the browser window
-- \`hide\` — hide the window while preserving state`,
-
-  call_llm: `Invoke a secondary LLM for focused subtasks. Use for:
-- Cost optimization: use a smaller model for simple tasks (summarization, classification)
-- Structured output: JSON schema compliance via prompt instructions
-- Parallel processing: call multiple times in one message - all run simultaneously
-- Context isolation: process content without polluting main context
-
-Put text/content directly in the 'prompt' parameter. Do NOT pass inline text via attachments.
-Only use 'attachments' for existing file paths on disk - the tool loads file content automatically.
-For large files (>2000 lines), use {path, startLine, endLine} to select a portion.`,
-
-  spawn_session: `Create a new session that runs independently with its own prompt, connection, model, and sources.
-
-Use this to delegate tasks to parallel sessions — research, analysis, drafts, or any work that benefits from separate context.
-
-Call with help=true first to discover available connections, models, and sources.
-When spawning, the 'prompt' parameter is required.
-
-Optional overrides: \`model\`, \`llmConnection\`, \`permissionMode\`, \`thinkingLevel\`, \`enabledSourceSlugs\`, \`labels\`, \`workingDirectory\`. Omitted fields inherit from the spawning session or the workspace default.
-
-\`thinkingLevel\` is silently ignored on non-reasoning models (e.g. gpt-4o, gemini-2.5-flash) — the SDK drops the reasoning param rather than erroring. Use it when you want to force deeper reasoning on a supported model, or set it to \`off\` when spawning a session that doesn't need to think.
-
-The spawned session appears in the session list and runs fire-and-forget.
-Only use 'attachments' for existing file paths on disk — the tool reads them automatically.`,
-
-  send_developer_feedback: `Send freeform feedback to the Craft Agent development team.
-
-Use this to share anything that would help improve the product — issues you hit, ideas for better tools, suggestions for improved workflows, or patterns you notice. Write in markdown with as much detail as possible. This is your direct line to the developers.`,
-
-  set_session_labels: `Set labels on the current session or a specific session by ID. Replaces all existing labels.
-
-Use this to tag sessions for filtering or to trigger label-based automations (LabelAdd/LabelRemove events).
-Pass an empty array to clear all labels. Omit sessionId to target the current session.`,
-
-  set_session_status: `Set the status of the current session or a specific session by ID (e.g., "todo", "in_progress").
-
-Use this to reflect progress or trigger status-based automations (SessionStatusChange events).
-Omit sessionId to target the current session.
-
-IMPORTANT: never move a task into a closed status (such as "done" or "cancelled") yourself — closing a task is the user's decision, made on the board. You may prepare and hand off work by setting an open status like "needs-review"; the user reviews and closes it. Closed-status calls are rejected.`,
-
-  archive_session: `Archive or unarchive another session in this workspace by ID.
-
-Archiving removes a session from the active list and unread counts — it does NOT delete it (pass archived=false to restore). Use it to tidy up finished or superseded sessions.
-Requires an explicit sessionId and cannot target your own session. Use list_sessions / get_session_info to find the target session's ID.`,
-
-  create_task: `Create a Craft Agents Task on the kanban board — writes tasks/<slug>/task.yaml and creates its orchestrator session. CREATION ONLY: the task lands in "todo" and is NOT run; starting it is the user's (or an automation's) decision.
-
-Provide title + description (the description becomes the task goal and the initial node prompt). Optional: acceptanceCriteria (verification rubric), sources / skills (workspace slugs), llmConnection + model, workingDirectory, projectId. When projectId is omitted, the task inherits the invoking session's project.
-
-Returns { slug, orchestratorSessionId, taskLabelId, warnings } — unknown source/skill slugs are reported as warnings, not errors. Use it when the user asks to capture or queue work as a task; to execute work right now, use the current session or spawn_session instead.`,
-
-  list_pages: `List the workspace's Pages — persistent, agent-authored HTML mini dashboards/documents rendered in the app's Pages section (sidebar) and optionally shared via password-protected public links.
-
-Returns compact summaries: slug, name, kind (static/interactive/live), project, refresh schedule, last refresh outcome, share state, and folder path. Optionally filter by projectId. Use get_page for full details on one page.`,
-
-  get_page: `Get full details for one Page by slug: config, content digest/length/path, a data summary (KV keys + per-series point counts and latest values), source-action grants, and share state.
-
-The response includes absolute paths (contentPath, data.snapshotPath) — Read those files for the full HTML or the complete data snapshot. Pass includeContent: true only when you need the HTML inline.`,
-
-  create_page: `Create a new Page: a persistent, self-contained HTML document stored at pages/{slug}/ in the workspace, shown as a tile in the app's Pages section, and rendered in a sandboxed iframe.
-
-IMPORTANT — read ~/.craft-agent/docs/pages.md BEFORE authoring page HTML. Key rules: provide a FULL standalone HTML document with ALL CSS/JS inline (no external requests — shared copies get network egress blocked); to display data from the page's data store, listen for the 'craft-pages/v1' bridge messages (init/data) documented there; kind 'live' pages receive replacement data snapshots automatically while open.
-
-Use Pages (instead of chat previews) when the user wants something persistent: a dashboard that an automation refreshes, a report they'll revisit or share, a tracker fed by write_page_data. Returns the created page details including the slug.`,
-
-  update_page: `Update an existing Page: metadata (name, description, kind, projectId), the scheduled refresh spec, and/or replace its HTML content.
-
-Only provided fields change; pass null to clear description/projectId/refresh. Replacing content re-computes the content digest, so existing source-action grants go stale by design (the user must re-approve them). The slug never changes.`,
-
-  write_page_data: `Write to a Page's data store: KV upserts/deletes plus numeric timeseries appends/prunes, applied in one transaction. The data snapshot (data/snapshot.json) is regenerated and pushed to open renders — 'live' pages update on screen without a reload.
-
-Data model: kv is key → any JSON value; series are named lists of { t: epoch ms, v: number } points with idempotent (series, t) upserts — re-running the same write is safe. Use timeseries for anything you may want charted over time (metrics, counts, prices). Composes with scheduled refresh scripts writing the same store.`,
-
-  delete_page: `Delete a Page permanently — removes its folder including content, data store, and grants. DESTRUCTIVE: confirm with the user first unless they explicitly asked for the deletion.
-
-A published page is unpublished first (best effort); the result reports publicCopyMayRemain when the remote copy could not be confirmed removed.`,
-
-  get_session_info: `Get metadata about the current session or a specific session by ID.
-
-Returns labels, status, name, permission mode, projectId (if the session is bound to a project), workingDirectory, and other details.
-Call with no arguments to introspect your own session state.`,
-
-  list_sessions: `List sessions in the workspace. Returns total count + paginated results.
-
-Use filters (status, label, search) to narrow results instead of fetching everything. Default limit is 20 sessions.
-Use get_session_info for full details on a specific session (list-then-detail pattern).`,
-
-  list_background_tasks: `List background agents/tasks tracked for a session (running, finished, or orphaned).
-
-This is the authoritative way to answer a "what background work is running / what's the status?" question.
-It reads the main-process registry, which tracks tasks ACROSS turns — unlike the SDK's in-subprocess task tools,
-which only see tasks launched in the current subprocess and lose visibility of tasks from prior turns.
-
-Status meanings:
-- running: backgrounded and not yet reported finished.
-- completed / failed / stopped: a terminal notification was received.
-- orphaned: the turn that launched the task ended before it finished, so it was terminated with that turn's subprocess.
-
-Never guess or claim "the app restarted" — report exactly what this tool returns. Omit sessionId for the current session.`,
-
-  send_agent_message: `Send a message to another session. The message is delivered with your session ID so the target can reply back.
-
-Use this to coordinate with spawned sessions, send follow-up instructions, or relay information between sessions.
-Use list_sessions to find session IDs, or use the sessionId returned by spawn_session.
-
-The target session receives your message with a sender envelope containing your session ID, so it can use send_agent_message to reply.`,
-
-  deliver_file: `Deliver a local file as an attachment to messaging channels bound to the current session.
-Use this when the user asks to send, forward, or deliver a generated/downloaded file (PNG, PDF, CSV, etc.) to their phone or external chat app. Prefer this over merely printing a local path or Markdown link when a real attachment is requested.`,
-
-  list_messaging_channels: `List messaging channels (Telegram, WhatsApp, Lark/Feishu, QQ, WeChat) bound to a session.
-Shows which external chat apps are connected and can send/receive messages/files.`,
-
-  unbind_messaging_channel: `Disconnect a messaging channel from the current session.
-Messages will no longer be forwarded between the chat app and this session.`,
+  SubmitPlan: `Submit a plan for user review. Write the plan to a markdown file first, then call this to present it. IMPORTANT: after this returns, execution pauses until the user accepts/modifies/rejects the plan. Do not call any tools or output text after SubmitPlan.`,
+  config_validate: `Validate Craft Agent config files after editing, before they take effect. Targets: config (config.json), sources, statuses, preferences, permissions, automations, tool-icons, all. Returns structured errors/warnings/suggestions.`,
+  skill_validate: `Validate a skill SKILL.md: slug format (lowercase alnum + hyphens), file exists/readable, YAML frontmatter valid (name+description required), non-empty body, icon format if present.`,
+  mermaid_validate: `Validate Mermaid diagram syntax before outputting (complex diagrams, many nodes, failed renders). Returns specific error messages if invalid. Include the raw diagram code.`,
+  source_test: `Validate, test, and (by default) activate a source config: schema check, icon handling, completeness warning, connectivity test, auth status; on success flips enabled=true and activates in the running session. Pass autoEnable=false for pure validation.`,
+  source_oauth_trigger: `Start OAuth 2.0 + PKCE for an MCP source. Prerequisites: source exists, type mcp, authType oauth, valid MCP URL. Execution pauses while OAuth completes.`,
+  source_google_oauth_trigger: `Trigger Google OAuth for a Google API source; opens a browser window for user sign-in. Services: Gmail, Calendar, Drive, Docs, Sheets, YouTube, Search Console. Pauses until OAuth completes.`,
+  source_slack_oauth_trigger: `Trigger Slack OAuth for a Slack API source; opens browser for user sign-in. Pauses until OAuth completes.`,
+  source_microsoft_oauth_trigger: `Trigger Microsoft OAuth for a Microsoft API source; opens browser for sign-in. Services: Outlook, Calendar, OneDrive, Teams, SharePoint. Pauses until OAuth completes.`,
+  source_credential_prompt: `Ask the user for non-OAuth credentials via secure input UI. Modes: bearer (single token), basic (user+password), header (API key with header name), query (API key query param), multi-header (multiple keys). Pauses for user input.`,
+  update_user_preferences: `Update stored user preferences (name, timezone, city, region, country, git co-author). Use only when you have CONFIRMED information; never guess.`,
+  transform_data: `Run a transform script to turn data files into tables, or decode HTML for rich previews. Input files as CLI args, last arg = output path (Python: sys.argv[1:-1], Node/Bun: process.argv.slice(2, -1)). Output JSON {title, columns, rows} for datatable/spreadsheet, or any HTML. Isolated subprocess: no API keys, 30s timeout.`,
+  script_sandbox: `Run a short Python/Node/Bun diagnostic in an isolated subprocess (no network, no credentials). Returns stdout/exit code/timeout. Great when strict Explore-mode parsing blocks inline Bash. Input files limited to session dir; timeout default 5s, max 15s.`,
+  render_template: `Render a source HTML template with a data payload (source guide.md lists templates under Templates). Returns a file path; use the path as 'src' in an html-preview block. Mustache syntax.`,
+  browser_tool: `Drive a built-in browser via a CLI-like command (string or array; array keeps literal semicolons/tabs/newlines). Batching with ';' works but the batch stops after navigation commands (click/navigate/forward/back). Commands: open, navigate, snapshot, find, click, fill, type, wait, screenshot, evaluate, console, network, sign-in flows; window management. Run --help first when unsure.`,
+  call_llm: `Get a secondary LLM for focused subtasks: parallel batch processing, efficiency gains, structured extraction (outputSchema), context isolation. Put text in the prompt param; use attachments only for file paths on disk (max 20 items; for files >2000 lines pass a startLine/endLine range).`,
+  spawn_session: `Create an independent session running with its own prompt, connection, model, and sources. Useful for delegating research/analysis/drafts to parallel sessions. Use help=true first to list connections/models/sources. The prompt param is required; optional overrides: model, llmConnection, permissionMode, thinkingLevel, enabledSourceSlugs, labels, workingDirectory. Runs fire-and-forget, appears in session list.`,
+  send_developer_feedback: `Send freeform feedback to the Craft Agent development team: issues, improvement ideas, patterns found. Write in markdown with as much detail as possible.`,
+  set_session_labels: `Set/replace labels on a session (pass ids; valued labels use 'id::value' when a valueType is declared; empty array clears all). Omit sessionId for the current session.`,
+  set_session_status: `Set the status of a session (e.g. 'in_progress'). NEVER move to closed statuses ('done'/'cancelled') — those are the user's decision and calls are rejected. Omit sessionId for the current session.`,
+  archive_session: `Archive or purely unarchive ANOTHER session by ID: removes it from active list/unread counts (does not delete). Requires explicit sessionId; you cannot archive your own. Find ids via list_sessions.`,
+  create_task: `Create a new task (board card) — writes tasks/<slug>/task.yaml + creates its orchestrator session. Title + description required (description becomes goal + initial prompt). Optional: acceptanceCriteria, sources, skills, llmConnection, model, workingDirectory, projectId. Task is created as todo and NOT run — starting is the user's or an automation's decision.`,
+  list_pages: `List the workspace's Pages (persistent HTML mini-apps shown in sidebar). Returns slug, name, kind (static/interactive/live), project, refresh schedule, last outcome, share state, folder. Use get_page for full details.`,
+  get_page: `Get full details for one Page by slug: config, content path/digest, data summary (KV keys + per-series point counts/latest), grants, share state. Returns absolute paths (contentPath, data/ snapshot) to Read for full HTML/snapshot.`,
+  create_page: `Create a new Page: self-contained HTML app living at pages/<slug>/ in the workspace, shown in the Pages sidebar. Read the pages doc (dev docs) BEFORE authoring: full standalone HTML, all CSS/JS inline, no external requests; receive data via the page data bridge; kind: static (no JS), interactive (JS + user-driven), live (interactive + data snapshot stream).`,
+  update_page: `Update an existing Page: metadata (name/description/kind/project), refresh schedule, and/or full new HTML content. Only provided fields change; pass null to clear description/null-driven reset. Replacing content invalidates existing source grants (user must re-approve). Slug stays.`,
+  write_page_data: `Write to a Page data store: set (kv upsert), delete (kv remove), appendSeries (numeric timeseries intances with timestamps), pruneSeries. The snapshot regenerates and pushes to open renders live. Idempotent writes: same series+timestamp overwrites.`,
+  delete_page: `Permanently delete a Page — removes folder including content, data store, grants. DESTRUCTIVE: confirm deletion with the user first unless the user explicitly asked. Published copies are unpublished best-effort (publicCopyMayRemain possible).`,
+  get_session_info: `Get metadata about the current session (or by sessionId): labels, status, name, permission mode, projectId, workingDirectory. No args = introspect your own.`,
+  list_sessions: `List sessions (workspace-wide; total + paginated results, limit 20 default, sort/filters via status/label/search). Use get_session_info for details on a specific.`,
+  list_background_tasks: `List background agents/tasks tracked for a session: running, finished, or orphaned (terminated when the turn launched them ended). Authoritative answer for 'what is running / what's the status?'. Omit sessionId for the current session.`,
+  send_agent_message: `Send a message to another session; the target receives it with your session ID so it can reply. Use to coordinate spawned sessions, follow-up instructions, or relay information. Find ids via list_sessions or use the sessionId from spawn_session.`,
+  deliver_file: `Deliver a local file as an attachment to the messaging channel(s) bound to this session (Telegram/WhatsApp/Lark/QQ). Use when the user asks to send/forward a generated/downloaded file to their phone or app. Prefer this over printing a link when a real attachment is wanted.`,
+  list_messaging_channels: `List messaging channels (Telegram/WhatsApp/Lark/QQ) bound to this session — shows which external chat apps are connected to send/receive files.`,
+  unbind_messaging_channel: `Disconnect a messaging channel from this session so messages stop forwarding. Optionally specify platform (e.g. telegram); default removes all.`,
 } as const;
 
 // ============================================================

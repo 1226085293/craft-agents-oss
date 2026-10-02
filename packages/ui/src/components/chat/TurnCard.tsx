@@ -2653,7 +2653,7 @@ export function ResponseCard({
           isStreaming={isStreaming}
         />
         {timestamp != null && (
-          <div className="ml-[4px] mt-[4px] text-[10px] leading-none text-muted-foreground/60 tabular-nums select-none">
+          <div className="ml-[4px] mt-[4px] text-[10px] leading-none text-muted-foreground/60 tabular-nums select-text cursor-text">
             {formatDateTimeFull(timestamp)}
           </div>
         )}
@@ -2707,7 +2707,7 @@ export function ResponseCard({
         )}
       </div>
       {timestamp != null && (
-        <div className="ml-[4px] mt-[4px] text-[10px] leading-none text-muted-foreground/60 tabular-nums select-none">
+        <div className="ml-[4px] mt-[4px] text-[10px] leading-none text-muted-foreground/60 tabular-nums select-text cursor-text">
           {formatDateTimeFull(timestamp)}
         </div>
       )}

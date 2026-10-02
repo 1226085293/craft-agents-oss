@@ -6,6 +6,7 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Improvements
 
+- **Chat timestamps are selectable** — the date/time shown under assistant replies and user messages is now selectable text, so you can copy the exact timestamp instead of retyping or screenshotting it.
 - **Messaging busy replies** — Telegram and WhatsApp bindings can now ask a lightweight agent decision whether an inbound message received during an active run needs an immediate side-channel reply, should be ignored, or should be queued, keeping Telegram's single progress bubble behavior while making long-running chats more responsive.
 
 ## Bug Fixes

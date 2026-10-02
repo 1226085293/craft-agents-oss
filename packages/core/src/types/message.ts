@@ -562,6 +562,14 @@ export interface AgentEventUsage {
 export type AgentEvent =
   // Failed assistant output is discarded before a retry can produce more text.
   | { type: 'text_discard'; turnId: string }
+  /**
+   * Demote an already-emitted final reply to a process-block step. Used by
+   * the program-side verification flow (2026-10-02): when verification is
+   * triggered, the draft reply shown at the main turn's end folds into the
+   * process card so the verified replay (or the follow-up continuation) is
+   * the single visible final reply — never two identical bubbles.
+   */
+  | { type: 'text_demote'; turnId: string }
   | { type: 'retry'; phase: 'backoff'; message: string }
   | { type: 'retry'; phase: 'active' | 'end' }
   | { type: 'status'; message: string; statusType?: string }

@@ -380,6 +380,7 @@ export interface PermissionModeState {
 // turnId: Correlation ID from the API's message.id, groups all events in an assistant turn
 export type SessionEvent =
   | { type: 'text_discard'; sessionId: string; turnId: string }
+  | { type: 'text_demote'; sessionId: string; turnId: string }
   | { type: 'retry'; sessionId: string; phase: 'backoff'; message: string }
   | { type: 'retry'; sessionId: string; phase: 'active' | 'end' }
   | { type: 'text_delta'; sessionId: string; delta: string; turnId?: string }

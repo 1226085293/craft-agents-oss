@@ -9,6 +9,7 @@ import type { Session, SessionEvent, Message, PermissionRequest, CredentialReque
 
 /** Explicit SDK retry boundaries; keep their transport shape authoritative. */
 export type TextDiscardEvent = Extract<SessionEvent, { type: 'text_discard' }>
+export type TextDemoteEvent = Extract<SessionEvent, { type: 'text_demote' }>
 export type RetryEvent = Extract<SessionEvent, { type: 'retry' }>
 
 /**
@@ -552,6 +553,7 @@ export interface UsageUpdateEvent {
  */
 export type AgentEvent =
   | TextDiscardEvent
+  | TextDemoteEvent
   | RetryEvent
   | TextDeltaEvent
   | TextCompleteEvent

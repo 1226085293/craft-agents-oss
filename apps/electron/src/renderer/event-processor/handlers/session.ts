@@ -309,12 +309,17 @@ export function handleInfo(
         ? { ...m, role: 'info' as const, content: event.message, statusType: 'verification_passed' as const, infoLevel: (event.level ?? 'success') as Message['infoLevel'] }
         : m
     )
+    // Inherit the demoted draft's turnId so the replay lands in the SAME
+    // process card (draft as a step, replay as the single response).
+    const draftTurnId = [...updatedMessages].reverse()
+      .find((m): m is Message => m.role === 'assistant' && m.content === event.finalText)?.turnId
     const messagesWithReply = typeof event.finalText === 'string' && event.finalText.length > 0
       ? [...updatedMessages, {
           id: generateMessageId(),
           role: 'assistant' as const,
           content: event.finalText,
           timestamp: event.timestamp ?? Date.now(),
+          ...(typeof draftTurnId === 'string' ? { turnId: draftTurnId } : {}),
         }]
       : updatedMessages
     return {

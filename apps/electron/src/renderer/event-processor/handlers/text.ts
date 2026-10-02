@@ -5,7 +5,7 @@
  * Pure functions that return new state - no side effects.
  */
 
-import type { SessionState, StreamingState, TextDeltaEvent, TextCompleteEvent, TextDiscardEvent } from '../types'
+import type { SessionState, StreamingState, TextDeltaEvent, TextCompleteEvent, TextDemoteEvent, TextDiscardEvent } from '../types'
 import type { Message } from '../../../shared/types'
 import {
   findStreamingMessage,
@@ -24,6 +24,31 @@ export function handleTextDiscard(state: SessionState, event: TextDiscardEvent):
         m.role === 'assistant' && m.turnId === event.turnId && (m.isStreaming || m.isPending)
       )),
     },
+    streaming: state.streaming?.turnId === event.turnId ? null : state.streaming,
+  }
+}
+
+/**
+ * Handle text_demote - fold an already-emitted final reply into the
+ * process block (2026-10-02 verification flow). The verified replay (or
+ * the follow-up continuation) becomes the turn's single final bubble, so
+ * the draft must not survive as a second, identical reply card.
+ */
+export function handleTextDemote(state: SessionState, event: TextDemoteEvent): SessionState {
+  let index = -1
+  for (let i = state.session.messages.length - 1; i >= 0; i--) {
+    const m = state.session.messages[i]
+    if (m.role === 'assistant' && m.turnId === event.turnId && m.isIntermediate !== true) {
+      index = i
+      break
+    }
+  }
+  if (index === -1) return state
+  const messages = state.session.messages.map((m, i) =>
+    i === index ? { ...m, isIntermediate: true } : m
+  )
+  return {
+    session: { ...state.session, messages },
     streaming: state.streaming?.turnId === event.turnId ? null : state.streaming,
   }
 }

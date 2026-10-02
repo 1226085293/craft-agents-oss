@@ -43,6 +43,28 @@ describe('turn lifecycle — verification class (2026-10-02)', () => {
     expect(assistantTurn.response?.text).toBe('部署完成 ✅')
   })
 
+  it('demoted draft (text_demote) folds into the process card; the replay is the single response', () => {
+    // The draft already emitted at the main turn's end was demoted to an
+    // intermediate step; the replayed final text (same content, inherited
+    // turnId) is the turn's ONLY response bubble.
+    const draftTurnId = 'turn-x'
+    const turns = groupMessagesByTurn([
+      msg({ role: 'user', content: '部署完成后总结' }),
+      msg({ role: 'assistant', content: '部署完成 ✅', isIntermediate: true, turnId: draftTurnId }),
+      msg({ role: 'status', content: 'Verifying final reply…', statusType: 'verification', turnId: draftTurnId }),
+      msg({ role: 'info', content: 'Verification passed — delivering final reply', statusType: 'verification_passed', turnId: draftTurnId }),
+      msg({ role: 'assistant', content: '部署完成 ✅', isIntermediate: false, turnId: draftTurnId }),
+    ])
+    const assistantTurn = turns[turns.length - 1] as AssistantTurn
+    // Draft is a process step…
+    const step = assistantTurn.activities.find(a => a.type === 'intermediate' && a.content?.includes('部署完成'))
+    expect(step).toBeDefined()
+    // …and the replay is the single response (one bubble, not two).
+    expect(assistantTurn.response?.text).toBe('部署完成 ✅')
+    const bubbles = (assistantTurn.response?.text ?? '').split('部署完成 ✅').length - 1
+    expect(bubbles).toBe(1)
+  })
+
   it('verification card errors on fail; no forced response', () => {
     const turns = groupMessagesByTurn([
       msg({ role: 'user', content: '部署完成后总结' }),

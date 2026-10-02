@@ -8895,6 +8895,22 @@ ${request.prompt}`;
         this.sendEvent({ ...event, sessionId }, workspaceId)
         break
 
+      case 'text_demote': {
+        // Verification flow (2026-10-02): fold the already-emitted draft reply
+        // into the process block so the verified replay / follow-up continuation
+        // is the single final bubble. Persists isIntermediate for reload.
+        for (let i = managed.messages.length - 1; i >= 0; i--) {
+          const m = managed.messages[i]
+          if (m.role === 'assistant' && m.turnId === event.turnId && m.isIntermediate !== true) {
+            managed.messages[i] = { ...m, isIntermediate: true }
+            break
+          }
+        }
+        this.persistSession(managed)
+        this.sendEvent({ ...event, sessionId }, workspaceId)
+        break
+      }
+
       case 'retry':
         // Retry progress is transient; do not persist it as transcript history.
         this.sendEvent({ ...event, sessionId }, workspaceId)
@@ -9325,11 +9341,17 @@ ${request.prompt}`;
           // Verification passed (2026-10-02 redesign): persist the replayed
           // final reply as a real assistant message so it survives reload,
           // then forward the info event (renderer folds it into the card).
+          // Inherit the draft's turnId (if this draft was demoted by
+          // text_demote in the same turn) so reload groups it into the SAME
+          // process card instead of a separate reply card.
+          const replayTurnId = [...managed.messages].reverse()
+            .find((m): m is Message => m.role === 'assistant' && m.content === finalText)?.turnId
           const replayed: Message = {
             id: generateMessageId(),
             role: 'assistant',
             content: finalText,
             timestamp: infoTimestamp,
+            ...(replayTurnId ? { turnId: replayTurnId } : {}),
           }
           managed.messages.push(replayed)
         }

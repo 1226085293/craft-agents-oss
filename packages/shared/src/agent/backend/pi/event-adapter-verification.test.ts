@@ -46,6 +46,28 @@ describe('PiEventAdapter — program-side verification hold (2026-10-02)', () =>
     expect(adapter.shouldCompleteQueue(true, false, false, false)).toBe(true);
   });
 
+  it('agent_end with defenseVerificationPending demotes the draft reply to a process step', () => {
+    // Main turn: a normal final reply was emitted.
+    adapter.startTurn();
+    const finals = [...adapter.adaptEvent({
+      type: 'message_end',
+      message: { role: 'assistant', id: 'f1', stopReason: 'stop', content: [{ type: 'text', text: '草稿终稿' }] },
+    } as any)].filter(e => e.type === 'text_complete') as any[];
+    expect(finals).toHaveLength(1);
+    expect(finals[0]!.isIntermediate).toBe(false);
+
+    // Verification pending on agent_end → the draft is demoted so the
+    // verified replay (or follow-up) is the single final bubble.
+    const events = [...adapter.adaptEvent({ type: 'agent_end', defenseVerificationPending: true } as any)] as any[];
+    const demote = events.find(e => e.type === 'text_demote');
+    expect(demote).toBeDefined();
+    expect(demote!.turnId).toBe(finals[0]!.turnId);
+
+    // A second hold must NOT re-demote (turnId was cleared).
+    const events2 = [...adapter.adaptEvent({ type: 'agent_end', defenseVerificationPending: true } as any)] as any[];
+    expect(events2.find(e => e.type === 'text_demote')).toBeUndefined();
+  });
+
   it('verification hold is independent from defense-resume hold (mutually exclusive flags)', () => {
     // agent_end carrying BOTH flags: resume wins first (checked before verify).
     adapter.shouldCompleteQueue(true, true, false, true);

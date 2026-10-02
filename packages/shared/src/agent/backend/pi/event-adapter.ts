@@ -90,6 +90,10 @@ export class PiEventAdapter extends BaseEventAdapter {
   // Track whether a final (non-intermediate) text_complete has been emitted this turn
   private hasEmittedFinalText: boolean = false;
 
+  // Turn id of the LAST final (non-intermediate) reply emitted this turn —
+  // targeted by `text_demote` when verification is triggered (2026-10-02).
+  private lastFinalTextTurnId: string | null = null;
+
   // Sub-turnId isolation for tool calls within a single Pi turn
   private subTurnCounter: number = 0;
   private messageSubTurnId: string | null = null;
@@ -361,6 +365,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.sawToolDuringDefenseHold = false;
     this.queuedFollowUpHeld = false;
     this.verificationHeld = false;
+    this.lastFinalTextTurnId = null;
     this.deferredRetryError = null;
     this.retryHoldActive = false;
     this.hasEmittedTerminalError = false;
@@ -501,6 +506,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.toolNames.clear();
     this.hasStreamedDeltas = false;
     this.hasEmittedFinalText = false;
+    this.lastFinalTextTurnId = null;
     this.subTurnCounter = 0;
     this.messageSubTurnId = null;
     // A new Craft turn can only start once the previous queue completed (or
@@ -618,6 +624,13 @@ export class PiEventAdapter extends BaseEventAdapter {
         // hold (passed → replay + complete, failed → followUp continues).
         if ((event as { defenseVerificationPending?: boolean }).defenseVerificationPending) {
           this.verificationHeld = true;
+          // The draft reply already shown at the main turn's end must not coexist
+          // with the verified replay (or the follow-up continuation) — demote it
+          // into the process block so the turn ends with a SINGLE final bubble.
+          if (this.lastFinalTextTurnId) {
+            yield { type: 'text_demote', turnId: this.lastFinalTextTurnId };
+            this.lastFinalTextTurnId = null;
+          }
           break;
         }
         this.verificationHeld = false;
@@ -814,10 +827,12 @@ export class PiEventAdapter extends BaseEventAdapter {
           msg.stopReason === 'toolUse' ||
           (this.defenseResumeHeld && !this.sawToolDuringDefenseHold);
         if (textContent && (isIntermediate || !this.hasEmittedFinalText)) {
-          if (!isIntermediate) this.hasEmittedFinalText = true;
-
           const mTurnId = this.messageSubTurnId || this.nextSubTurnId('m');
           this.messageSubTurnId = null;
+          if (!isIntermediate) {
+            this.hasEmittedFinalText = true;
+            this.lastFinalTextTurnId = mTurnId;
+          }
 
           yield {
             type: 'text_complete',

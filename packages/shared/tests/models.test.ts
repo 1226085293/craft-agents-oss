@@ -12,7 +12,19 @@ import {
   getModelIdByShortName,
   normalizeDeprecatedModelId,
   resolveModelContextWindow,
+  DEFAULT_CONTEXT_WINDOW,
 } from '../src/config/models.ts';
+
+describe('DEFAULT_CONTEXT_WINDOW', () => {
+  it('is 128k — the fallback used when a model has no configured window', () => {
+    expect(DEFAULT_CONTEXT_WINDOW).toBe(131_072);
+  });
+
+  it('does not affect models whose window is known', () => {
+    expect(resolveModelContextWindow('claude-sonnet-5')).toBe(1_000_000);
+    expect(getModelContextWindow('claude-sonnet-4-6')).toBe(200_000);
+  });
+});
 
 describe('resolveModelContextWindow', () => {
   it('resolves built-in registry models', () => {

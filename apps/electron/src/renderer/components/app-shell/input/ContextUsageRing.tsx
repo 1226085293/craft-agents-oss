@@ -2,6 +2,7 @@ import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@craft-agent/ui'
+import { DEFAULT_CONTEXT_WINDOW } from '@config/models'
 import { formatTokenCount } from './model-picker-helpers'
 
 /** Usage (0–1 of the context window) at which the ring turns amber / red. */
@@ -11,9 +12,10 @@ const DANGER_AT = 0.75
 /**
  * Last-resort context window. The agent normally reports one, and known models
  * are resolvable via the registry, but custom / `pi/`-prefixed ids are not —
- * without a fallback the ring would silently render nothing.
+ * without a fallback the ring would silently render nothing. Shared constant so
+ * the host UI, the backends and the pi subprocess all agree on the default.
  */
-const FALLBACK_CONTEXT_WINDOW = 200_000
+const FALLBACK_CONTEXT_WINDOW = DEFAULT_CONTEXT_WINDOW
 
 export interface ContextUsageRingProps {
   /** Tokens currently in the context, as reported by the agent. */

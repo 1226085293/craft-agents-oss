@@ -1,3 +1,5 @@
+import { DEFAULT_CONTEXT_WINDOW } from '../../shared/src/config/models.ts'
+
 export type CustomEndpointInput = 'text' | 'image'
 
 /** Custom endpoint protocol — determines which streaming adapter Pi SDK uses. */
@@ -173,7 +175,7 @@ export function buildCustomEndpointModelDef(
     },
     input,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: overrides?.contextWindow ?? 131_072,
+    contextWindow: overrides?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: overrides?.maxTokens ?? DEFAULT_MAX_TOKENS,
   }
 }

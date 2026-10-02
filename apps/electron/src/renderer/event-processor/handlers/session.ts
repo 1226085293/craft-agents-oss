@@ -584,8 +584,9 @@ export function handleSessionModelChanged(
 
   // The agent-reported context window belongs to the model that produced it.
   // Drop it so the context-usage ring falls back to the NEW model's window
-  // (registry lookup / 200k fallback) immediately; the next usage event from
-  // the agent re-populates it with the corrected value.
+  // (registry / connection-model lookup, then the shared 128k default)
+  // immediately; the next usage event from the agent re-populates it with the
+  // corrected value.
   const tokenUsage = session.tokenUsage && session.tokenUsage.contextWindow !== undefined
     ? { ...session.tokenUsage, contextWindow: undefined }
     : session.tokenUsage

@@ -123,6 +123,18 @@ export interface ModelDefinition {
 }
 
 // ============================================
+// DEFAULTS
+// ============================================
+
+/**
+ * Context window (in tokens) assumed for models whose window is not configured
+ * anywhere (neither in MODEL_REGISTRY nor in the connection's custom model
+ * entries). 128k mirrors the pi-agent-server custom-endpoint default so the
+ * host-side display and the subprocess agree.
+ */
+export const DEFAULT_CONTEXT_WINDOW = 131_072;
+
+// ============================================
 // MODEL REGISTRY (Single Source of Truth)
 // ============================================
 

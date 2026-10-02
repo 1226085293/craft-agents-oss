@@ -51,6 +51,7 @@ import {
 } from '../../shared/route-parser'
 import { routes, type Route, type ViewRoute } from '../../shared/routes'
 import { parsePermissionMode } from '@craft-agent/shared/agent/mode-types'
+import type { DraftAttachmentRef } from '@craft-agent/shared/config'
 import { NAVIGATE_EVENT, type NavigateOptions } from '../lib/navigate'
 import { openSettingsWindow } from '@/lib/settings-window'
 import { normalizePanelRouteForReconcile } from './navigation-reconcile'
@@ -142,6 +143,8 @@ interface NavigationProviderProps {
   onInputChange?: (sessionId: string, value: string) => void
   /** Get draft input text for a session (reads from ref, no re-render) */
   getDraft?: (sessionId: string) => string
+  /** Get persisted attachment refs for a session's draft (reads from ref, no re-render) */
+  getDraftAttachmentRefs?: (sessionId: string) => DraftAttachmentRef[]
   /** Auto-delete an empty session (no confirmation needed) */
   onAutoDeleteEmptySession?: (sessionId: string) => void
   /** Whether the app is ready to navigate */
@@ -160,6 +163,7 @@ export function NavigationProvider({
   onCreateSession,
   onInputChange,
   getDraft,
+  getDraftAttachmentRefs,
   onAutoDeleteEmptySession,
   isReady = true,
   isSessionsReady = true,
@@ -499,16 +503,21 @@ export function NavigationProvider({
         if (!currentIds.has(prevId)) {
           const meta = store.get(sessionMetaMapAtom).get(prevId)
           const isEmpty = meta && !meta.lastFinalMessageId && !meta.name && !meta.isProcessing
-          const hasDraft = getDraft?.(prevId)?.trim()
-          if (isEmpty && !hasDraft) {
-            onAutoDeleteEmptySession(prevId)
+          if (isEmpty) {
+            // A session is a draft (not empty) if it has text OR attachment refs
+            const draftText = getDraft?.(prevId)?.trim()
+            const draftAttachments = getDraftAttachmentRefs?.(prevId)
+            const hasDraft = !!draftText || (draftAttachments && draftAttachments.length > 0)
+            if (!hasDraft) {
+              onAutoDeleteEmptySession(prevId)
+            }
           }
         }
       }
     }
 
     prevVisibleSessionIdsRef.current = currentIds
-  }, [panelStack, onAutoDeleteEmptySession, store, getDraft])
+  }, [panelStack, onAutoDeleteEmptySession, store, getDraft, getDraftAttachmentRefs])
 
   // =========================================================================
   // SESSION SELECTION SYNC

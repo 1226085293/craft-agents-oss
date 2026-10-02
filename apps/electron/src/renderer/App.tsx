@@ -2134,6 +2134,7 @@ export default function App() {
               onCreateSession={handleCreateSession}
               onInputChange={handleInputChange}
               getDraft={getDraft}
+              getDraftAttachmentRefs={getDraftAttachmentRefs}
               onAutoDeleteEmptySession={handleAutoDeleteEmptySession}
               isReady={appState === 'ready'}
               isSessionsReady={sessionsLoaded}

@@ -148,6 +148,14 @@ interface InitMessage {
   piAuth?: { provider: string; credential: PiCredential };
 
   /**
+   * Fallback context window (in tokens) for models whose size is unknown.
+   * Comes from config.json (`defaultContextWindow`) via the host so the
+   * subprocess's compaction reserve and usage reporting follow the user's
+   * configured value instead of the compiled-in DEFAULT_CONTEXT_WINDOW.
+   */
+  defaultContextWindow?: number;
+
+  /**
    * Defense master switch (init message). User-controlled boolean:
    * `true` (default when omitted) enables L1 discipline + L2 evaluator,
    * `false` disables both. No sub-policies (see issue #1).
@@ -171,6 +179,8 @@ interface RuntimeConfigUpdateMessage {
   baseUrl?: string;
   customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean; requiresReasoningContentOnAssistantMessages?: boolean; contextTokenBudget?: number };
   customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean; requiresReasoningContentOnAssistantMessages?: boolean; contextTokenBudget?: number }>;
+  /** See InitMessage.defaultContextWindow. */
+  defaultContextWindow?: number;
 }
 
 /**
@@ -188,6 +198,8 @@ interface SwitchConnectionMessage {
   baseUrl?: string;
   customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean; requiresReasoningContentOnAssistantMessages?: boolean; contextTokenBudget?: number };
   customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean; requiresReasoningContentOnAssistantMessages?: boolean; contextTokenBudget?: number }>;
+  /** See InitMessage.defaultContextWindow. */
+  defaultContextWindow?: number;
 }
 
 /** Messages from main process (stdin) */
@@ -949,6 +961,18 @@ function resolveActiveContextTokenBudget(modelId?: string): number {
   );
 }
 
+/**
+ * Fallback context window for custom-endpoint models without an explicit size.
+ * The host forwards config.json's `defaultContextWindow` on init and on every
+ * runtime-config / connection-switch update; validation is repeated here
+ * because the value crosses a process boundary as JSON.
+ */
+function resolveConfiguredDefaultContextWindow(): number | undefined {
+  const raw = initConfig?.defaultContextWindow;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined;
+  return Math.floor(raw);
+}
+
 function registerCustomEndpointModels(
   registry: PiModelRegistry,
   api: CustomEndpointApi,
@@ -992,6 +1016,7 @@ function registerCustomEndpointModels(
       connectionDefaults,
       customModelOverrides.get(id),
       api,
+      resolveConfiguredDefaultContextWindow(),
     )),
   });
   debugLog(`Registered custom endpoint: ${baseUrl} with ${allIds.length} model(s) [${allIds.join(', ')}], api: ${api}`);
@@ -2762,6 +2787,7 @@ async function handleUpdateRuntimeConfig(msg: RuntimeConfigUpdateMessage): Promi
       baseUrl: msg.baseUrl,
       customEndpoint: msg.customEndpoint,
       customModels: msg.customModels,
+      defaultContextWindow: msg.defaultContextWindow ?? initConfig.defaultContextWindow,
     };
 
     if (piModelRegistry && initConfig.baseUrl?.trim() && initConfig.customEndpoint) {
@@ -2841,6 +2867,7 @@ async function handleSwitchConnection(msg: SwitchConnectionMessage): Promise<voi
       baseUrl: msg.baseUrl,
       customEndpoint: msg.customEndpoint,
       customModels: msg.customModels,
+      defaultContextWindow: msg.defaultContextWindow ?? initConfig.defaultContextWindow,
     };
     if (piModelRegistry && msg.baseUrl?.trim() && msg.customEndpoint) {
       const modelEntries: CustomEndpointModelEntry[] = (msg.customModels?.length

@@ -15,7 +15,7 @@ import type { BackendConfig, PostInitResult, PermissionRequestType, SdkMcpServer
 import { parseError, type AgentError } from './errors.ts';
 import { mapClaudeSdkAssistantError, type ClaudeSdkApiError } from './claude-sdk-error-mapper.ts';
 import { runErrorDiagnostics } from './diagnostics.ts';
-import { loadStoredConfig, loadConfigDefaults, type Workspace, type AuthType, getDefaultLlmConnection, getLlmConnection } from '../config/storage.ts';
+import { loadStoredConfig, loadConfigDefaults, getDefaultContextWindow, type Workspace, type AuthType, getDefaultLlmConnection, getLlmConnection } from '../config/storage.ts';
 import { getValidClaudeOAuthToken } from '../auth/state.ts';
 import {
   resolveAuthEnvVars,
@@ -24,7 +24,7 @@ import type { McpClientPool } from '../mcp/mcp-pool.ts';
 import { proxyToolName } from '../mcp/proxy-tool-name.ts';
 import { loadPlanFromPath, type SessionConfig as Session } from '../sessions/storage.ts';
 import { loadProjectById, getProjectAssetsPath, listProjectAssets, getProjectMemoryPath, loadProjectMemory } from '../projects/storage.ts';
-import { DEFAULT_MODEL, isClaudeModel, isAdaptiveThinkingAlwaysOnModel, getDefaultSummarizationModel, getModelContextWindow, DEFAULT_CONTEXT_WINDOW } from '../config/models.ts';
+import { DEFAULT_MODEL, isClaudeModel, isAdaptiveThinkingAlwaysOnModel, getDefaultSummarizationModel, getModelContextWindow } from '../config/models.ts';
 import { getCredentialManager } from '../credentials/index.ts';
 import { loadPreferences, formatPreferencesForPrompt, getCoAuthorPreference } from '../config/preferences.ts';
 import type { FileAttachment } from '../utils/files.ts';
@@ -771,8 +771,9 @@ export class ClaudeAgent extends BaseAgent {
 
     // Build BackendConfig for BaseAgent
     // Context window from registry (1M for Opus/Sonnet 4.6, 200K for others);
-    // unknown models fall back to the shared default window.
-    const CLAUDE_CONTEXT_WINDOW = getModelContextWindow(model) ?? DEFAULT_CONTEXT_WINDOW;
+    // unknown models fall back to the user-configurable default window
+    // (config.json `defaultContextWindow`, 128k unless changed).
+    const CLAUDE_CONTEXT_WINDOW = getModelContextWindow(model) ?? getDefaultContextWindow();
     const backendConfig: BackendConfig = {
       provider: 'anthropic',
       workspace: config.workspace,

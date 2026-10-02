@@ -101,7 +101,7 @@ import { parseError, type AgentError } from './errors.ts';
 import { runPreToolUseChecks, type PreToolUseCheckResult } from './core/pre-tool-use.ts';
 import { shouldAllowToolInMode } from './mode-manager.ts';
 import { getRtkPath } from './core/rtk-detector.ts';
-import { getRtkEnabled, getBrowserToolEnabled, getDefenseEnabled, getDefenseGuardrails } from '../config/storage.ts';
+import { getRtkEnabled, getBrowserToolEnabled, getDefenseEnabled, getDefenseGuardrails, getDefaultContextWindow } from '../config/storage.ts';
 import type { RtkContext } from './core/rtk-rewrite.ts';
 
 // Tool layering (foldable tools behind category meta tools + call_tool)
@@ -734,6 +734,10 @@ export class PiAgent extends BaseAgent {
       baseUrl: runtime.baseUrl,
       customEndpoint: runtime.customEndpoint,
       customModels: runtime.customModels,
+      // Fallback context window for models whose size is unknown — read from
+      // config.json so the subprocess's compaction reserve and usage reporting
+      // track the user's configured value, not a code constant.
+      defaultContextWindow: getDefaultContextWindow(),
       // Anti early-stop defense — read from local config so the user's
       // Settings → Tools toggle binds to the subprocess init message.
       defenseEnabled: getDefenseEnabled(),
@@ -2481,6 +2485,7 @@ export class PiAgent extends BaseAgent {
         baseUrl: runtime.baseUrl,
         customEndpoint: runtime.customEndpoint,
         customModels: runtime.customModels,
+        defaultContextWindow: getDefaultContextWindow(),
       });
     });
   }
@@ -2942,6 +2947,7 @@ n   * connection can be adopted mid-session.
         baseUrl: runtime.baseUrl,
         customEndpoint: runtime.customEndpoint,
         customModels: runtime.customModels,
+        defaultContextWindow: getDefaultContextWindow(),
       });
     });
 

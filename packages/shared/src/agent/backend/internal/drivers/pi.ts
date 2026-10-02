@@ -1,6 +1,6 @@
 import type { ProviderDriver, DriverTestConnectionArgs } from '../driver-types.ts';
 import type { ModelDefinition } from '../../../../config/models.ts';
-import { DEFAULT_CONTEXT_WINDOW } from '../../../../config/models.ts';
+import { getDefaultContextWindow } from '../../../../config/storage.ts';
 import { getAllPiModels, getPiModelsForAuthProvider } from '../../../../config/models-pi.ts';
 import { getPiProviderBaseUrl } from '../../../../config/models-pi.ts';
 
@@ -111,7 +111,7 @@ function toModelDefinitions(models: RawCopilotModel[]): ModelDefinition[] {
     shortName: m.name,
     description: '',
     provider: 'pi' as const,
-    contextWindow: m.contextWindow || DEFAULT_CONTEXT_WINDOW,
+    contextWindow: m.contextWindow || getDefaultContextWindow(),
     supportsThinking: !!(m.supportedReasoningEfforts && m.supportedReasoningEfforts.length > 0),
   }));
 }

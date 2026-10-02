@@ -11,9 +11,11 @@ const DANGER_AT = 0.75
 
 /**
  * Last-resort context window. The agent normally reports one, and known models
- * are resolvable via the registry, but custom / `pi/`-prefixed ids are not —
- * without a fallback the ring would silently render nothing. Shared constant so
- * the host UI, the backends and the pi subprocess all agree on the default.
+ * are resolvable via the registry / connection entries, but custom / `pi/`
+ * -prefixed ids may not be — without a fallback the ring would silently render
+ * nothing. The user-facing default comes from config.json
+ * (`defaultContextWindow`, passed in as `defaultContextWindow`); this constant
+ * covers the brief window before that value loads.
  */
 const FALLBACK_CONTEXT_WINDOW = DEFAULT_CONTEXT_WINDOW
 
@@ -24,6 +26,11 @@ export interface ContextUsageRingProps {
   contextWindow?: number | null
   /** Fallback window derived from the selected model. */
   fallbackContextWindow?: number | null
+  /**
+   * User-configured default window (config.json `defaultContextWindow`),
+   * used when neither the agent nor the selected model reports one.
+   */
+  defaultContextWindow?: number | null
   isCompacting?: boolean
   /** Blocks the click-to-compact affordance (e.g. while a turn is running). */
   disabled?: boolean
@@ -42,6 +49,7 @@ export function ContextUsageRing({
   inputTokens,
   contextWindow,
   fallbackContextWindow,
+  defaultContextWindow,
   isCompacting = false,
   disabled = false,
   onCompact,
@@ -49,7 +57,8 @@ export function ContextUsageRing({
 }: ContextUsageRingProps) {
   const { t } = useTranslation()
 
-  const effectiveWindow = contextWindow || fallbackContextWindow || FALLBACK_CONTEXT_WINDOW
+  const effectiveWindow =
+    contextWindow || fallbackContextWindow || defaultContextWindow || FALLBACK_CONTEXT_WINDOW
   // Missing usage data renders an empty ring rather than nothing, so the control
   // is discoverable and its tooltip can explain the current state.
   const ratio = React.useMemo(() => {

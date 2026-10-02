@@ -1,4 +1,8 @@
 import { DEFAULT_CONTEXT_WINDOW } from '../../shared/src/config/models.ts'
+// NOTE: the user-facing default window lives in config.json
+// (`defaultContextWindow`, forwarded by the host and passed as the 5th arg to
+// buildCustomEndpointModelDef); DEFAULT_CONTEXT_WINDOW above is only the
+// last-resort fallback when no configured value is provided.
 
 export type CustomEndpointInput = 'text' | 'image'
 
@@ -105,9 +109,20 @@ export function buildCustomEndpointModelDef(
   defaults?: CustomEndpointModelDefaults,
   overrides?: CustomEndpointModelOverrides,
   api?: CustomEndpointApi,
+  /**
+   * Fallback context window for models without an explicit `contextWindow`.
+   * Sourced from config.json (`defaultContextWindow`) via the host so the user
+   * can adjust it without a rebuild; the compiled-in DEFAULT_CONTEXT_WINDOW
+   * applies only when this is omitted or invalid (CI / standalone runs).
+   */
+  defaultContextWindow?: number,
 ) {
   const supportsImages = overrides?.supportsImages ?? defaults?.supportsImages ?? false
   const input: CustomEndpointInput[] = supportsImages ? ['text', 'image'] : ['text']
+  const fallbackContextWindow =
+    typeof defaultContextWindow === 'number' && Number.isFinite(defaultContextWindow) && defaultContextWindow > 0
+      ? Math.floor(defaultContextWindow)
+      : DEFAULT_CONTEXT_WINDOW
 
   // reasoning: true — declare the model as reasoning-capable so the user's
   // session thinkingLevel actually reaches the request (getSupportedThinkingLevels
@@ -175,7 +190,7 @@ export function buildCustomEndpointModelDef(
     },
     input,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: overrides?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    contextWindow: overrides?.contextWindow ?? fallbackContextWindow,
     maxTokens: overrides?.maxTokens ?? DEFAULT_MAX_TOKENS,
   }
 }

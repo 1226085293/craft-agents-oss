@@ -40,6 +40,7 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.defense.SET_GUARDRAILS,
   RPC_CHANNELS.settings.GET_DEFAULT_THINKING_LEVEL,
   RPC_CHANNELS.settings.SET_DEFAULT_THINKING_LEVEL,
+  RPC_CHANNELS.settings.GET_DEFAULT_CONTEXT_WINDOW,
   RPC_CHANNELS.tools.GET_BROWSER_TOOL_ENABLED,
   RPC_CHANNELS.tools.SET_BROWSER_TOOL_ENABLED,
   RPC_CHANNELS.settings.GET_NETWORK_PROXY,
@@ -68,6 +69,14 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
       throw new Error('Failed to persist default thinking level')
     }
     return { success: true }
+  })
+
+  // Fallback context window (tokens) for models without a configured size.
+  // Lives in config.json (`defaultContextWindow`) so users can change it
+  // without a rebuild; the renderer uses it for the context-usage ring.
+  server.handle(RPC_CHANNELS.settings.GET_DEFAULT_CONTEXT_WINDOW, async () => {
+    const { getDefaultContextWindow } = await import('@craft-agent/shared/config/storage')
+    return getDefaultContextWindow()
   })
 
   // ============================================================

@@ -48,6 +48,7 @@ import {
   getModelById,
   getModelDisplayName,
   normalizeDeprecatedModelId,
+  DEFAULT_CONTEXT_WINDOW,
   type ModelDefinition,
 } from './models.ts';
 
@@ -80,6 +81,12 @@ export interface StoredConfig {
   // Prompt caching & context
   extendedPromptCache?: boolean;  // Use 1h prompt cache TTL instead of 5m (default: false)
   enable1MContext?: boolean;  // Enable 1M context window for supported models (default: false — opt-in; requires Anthropic Tier 4+)
+  // Default context window (in tokens) assumed when a model's window is not
+  // configured anywhere (neither the built-in registry nor the connection's
+  // model entries). Drives the context-usage ring and the subprocess
+  // compaction reserve. Seeded to 131072 (128k) on startup so it is visible
+  // and editable here; change it to match your provider's real window.
+  defaultContextWindow?: number;
   // Token optimization
   rtkEnabled?: boolean;  // Route Bash commands through rtk to compress tool output (default: false). https://github.com/rtk-ai/rtk
   // Anti early-stop defense (Pi backend). When enabled, the Pi agent server
@@ -559,6 +566,59 @@ export function setEnable1MContext(enabled: boolean): void {
 export function getRtkEnabled(): boolean {
   const config = loadStoredConfig();
   return config?.rtkEnabled === true;
+}
+
+/**
+ * Normalize a configured default context window. Accepts only positive
+ * finite numbers (config.json is user-editable, so anything can show up).
+ * Returns undefined for invalid values so callers can fall back.
+ */
+function normalizeDefaultContextWindow(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined;
+  return Math.floor(value);
+}
+
+/**
+ * Get the default context window (in tokens) assumed for models whose window
+ * is not configured anywhere — neither in the built-in model registry nor in
+ * the connection's `models` entries (e.g. custom `pi_compat` endpoints without
+ * a `contextWindow` override).
+ *
+ * The value lives in config.json (`defaultContextWindow`) so users can adjust
+ * it without a rebuild; DEFAULT_CONTEXT_WINDOW is only the safety net for CI /
+ * standalone runs where config.json is missing or still unseeded.
+ */
+export function getDefaultContextWindow(): number {
+  const config = loadStoredConfig();
+  return normalizeDefaultContextWindow(config?.defaultContextWindow) ?? DEFAULT_CONTEXT_WINDOW;
+}
+
+/**
+ * Set the default context window (in tokens).
+ * @returns true if persisted, false if the value is invalid or config could not be loaded
+ */
+export function setDefaultContextWindow(tokens: number): boolean {
+  const normalized = normalizeDefaultContextWindow(tokens);
+  if (normalized === undefined) return false;
+  const config = loadStoredConfig();
+  if (!config) return false;
+  config.defaultContextWindow = normalized;
+  saveConfig(config);
+  return true;
+}
+
+/**
+ * Seed the top-level `defaultContextWindow` field into config.json so the
+ * effective value is visible and editable (rather than implicit in code).
+ * Runs on app startup; writes only when the field is missing or invalid, so
+ * a value the user edits or deliberately picks always sticks.
+ */
+export function migrateDefaultContextWindowConfig(): void {
+  const config = loadStoredConfig();
+  if (!config) return;
+  if (normalizeDefaultContextWindow(config.defaultContextWindow) !== undefined) return;
+  config.defaultContextWindow = DEFAULT_CONTEXT_WINDOW;
+  saveConfig(config);
 }
 
 /**

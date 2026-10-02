@@ -31,6 +31,7 @@ import {
   getWorkspaceByNameOrId,
   loadConfigDefaults,
   loadPreferences,
+  migrateDefaultContextWindowConfig,
   migrateLegacyCredentials,
   migrateLegacyLlmConnectionsConfig,
   migrateOrphanedDefaultConnections,
@@ -1925,6 +1926,11 @@ export class SessionManager implements ISessionManager {
     try {
       // Backfill missing `models` arrays on existing LLM connections
       migrateLegacyLlmConnectionsConfig()
+
+      // Seed the top-level `defaultContextWindow` (fallback window for models
+      // without a configured size) into config.json so it is visible and
+      // editable. Writes only when missing/invalid — user edits stick.
+      migrateDefaultContextWindowConfig()
 
       // Fix defaultLlmConnection if it points to a non-existent connection
       migrateOrphanedDefaultConnections()

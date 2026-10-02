@@ -721,6 +721,9 @@ export function FreeFormInput({
   // Input settings (loaded from config)
   const [sendMessageKey, setSendMessageKey] = React.useState<'enter' | 'cmd-enter'>('enter')
   const [spellCheck, setSpellCheck] = React.useState(false)
+  // Fallback context window from config.json (`defaultContextWindow`), used by
+  // the usage ring when neither the agent nor the selected model reports one.
+  const [defaultContextWindow, setDefaultContextWindow] = React.useState<number | null>(null)
 
   // Load input settings on mount
   React.useEffect(() => {
@@ -735,6 +738,11 @@ export function FreeFormInput({
         setSpellCheck(spellCheckEnabled)
       } catch (error) {
         console.error('Failed to load input settings:', error)
+      }
+      try {
+        setDefaultContextWindow(await window.electronAPI.getDefaultContextWindow())
+      } catch (error) {
+        console.error('Failed to load default context window:', error)
       }
     }
     loadInputSettings()
@@ -2196,7 +2204,8 @@ export function FreeFormInput({
           <ContextUsageRing
             inputTokens={contextStatus?.inputTokens}
             contextWindow={contextStatus?.contextWindow}
-            fallbackContextWindow={resolveModelContextWindow(currentModel)}
+            fallbackContextWindow={resolveModelContextWindow(currentModel, effectiveConnectionDetails?.models)}
+            defaultContextWindow={defaultContextWindow}
             isCompacting={contextStatus?.isCompacting}
             disabled={isProcessing}
             onCompact={() => onSubmit('/compact', [])}

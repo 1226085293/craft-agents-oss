@@ -127,10 +127,16 @@ export interface ModelDefinition {
 // ============================================
 
 /**
- * Context window (in tokens) assumed for models whose window is not configured
- * anywhere (neither in MODEL_REGISTRY nor in the connection's custom model
- * entries). 128k mirrors the pi-agent-server custom-endpoint default so the
- * host-side display and the subprocess agree.
+ * Last-resort context window (in tokens) for models whose window is not
+ * configured anywhere (neither in MODEL_REGISTRY nor in the connection's
+ * model entries).
+ *
+ * The USER-FACING default lives in `~/.craft-agent/config.json` as
+ * `defaultContextWindow` (read via `getDefaultContextWindow()` in
+ * config/storage.ts, seeded to this value on startup) so it can be changed
+ * without a rebuild. This constant only covers contexts where config.json is
+ * unavailable — CI, standalone scripts — and keeps the pi-agent-server
+ * subprocess and the host display in agreement when no config is passed.
  */
 export const DEFAULT_CONTEXT_WINDOW = 131_072;
 

@@ -134,4 +134,30 @@ describe('buildCustomEndpointModelDef', () => {
     const model = buildCustomEndpointModelDef('some-model')
     expect((model as { compat?: { supportsStore?: boolean } }).compat?.supportsStore).toBeUndefined()
   })
+
+  // The user-facing fallback window lives in config.json
+  // (`defaultContextWindow`, forwarded by the host); the compiled-in 128k
+  // default must only apply when no configured value was passed.
+  it('uses the configured default context window when no per-model override exists', () => {
+    const model = buildCustomEndpointModelDef('deepseek-v4.1-flash', undefined, undefined, undefined, 262_144)
+    expect(model.contextWindow).toBe(262_144)
+  })
+
+  it('falls back to 128k when no configured default is passed', () => {
+    const model = buildCustomEndpointModelDef('my-model')
+    expect(model.contextWindow).toBe(131_072)
+  })
+
+  it('lets a per-model contextWindow override win over the configured default', () => {
+    const model = buildCustomEndpointModelDef('my-model', undefined, { contextWindow: 524_288 }, undefined, 262_144)
+    expect(model.contextWindow).toBe(524_288)
+  })
+
+  it('ignores an invalid configured default and keeps 128k', () => {
+    // Values cross a process boundary as JSON — guard against garbage.
+    for (const invalid of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, '262144' as unknown as number]) {
+      const model = buildCustomEndpointModelDef('my-model', undefined, undefined, undefined, invalid)
+      expect(model.contextWindow).toBe(131_072)
+    }
+  })
 })

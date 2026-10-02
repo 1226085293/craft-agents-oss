@@ -16,7 +16,10 @@ import {
 } from '../src/config/models.ts';
 
 describe('DEFAULT_CONTEXT_WINDOW', () => {
-  it('is 128k — the fallback used when a model has no configured window', () => {
+  it('is 128k — the last-resort fallback when no window is configured', () => {
+    // The user-facing default lives in config.json (`defaultContextWindow`,
+    // read via getDefaultContextWindow()); this constant only covers CI /
+    // standalone contexts without a config file.
     expect(DEFAULT_CONTEXT_WINDOW).toBe(131_072);
   });
 

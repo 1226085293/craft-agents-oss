@@ -687,6 +687,8 @@ export interface ElectronAPI {
   getUsageHistory(workspaceId?: string, kind?: 'source' | 'skill', slug?: string): Promise<UsageRecord[]>
   getDefaultThinkingLevel(): Promise<ThinkingLevel>
   setDefaultThinkingLevel(level: ThinkingLevel): Promise<{ success: boolean; error?: string }>
+  /** Fallback context window (tokens) from config.json `defaultContextWindow`. */
+  getDefaultContextWindow(): Promise<number>
   setWorkspaceDefaultLlmConnection(workspaceId: string, slug: string | null): Promise<{ success: boolean; error?: string }>
 
   // Projects (workspace-scoped)

@@ -1,7 +1,8 @@
 import type { ProviderDriver } from '../driver-types.ts';
 import { applyAnthropicRuntimeBootstrap } from '../runtime-resolver.ts';
 import { validateAnthropicConnection } from '../../../../config/llm-validation.ts';
-import { DEFAULT_MODEL, getModelById, getModelContextWindow, normalizeDeprecatedModelId, DEFAULT_CONTEXT_WINDOW } from '../../../../config/models.ts';
+import { DEFAULT_MODEL, getModelById, getModelContextWindow, normalizeDeprecatedModelId } from '../../../../config/models.ts';
+import { getDefaultContextWindow } from '../../../../config/storage.ts';
 
 export const anthropicDriver: ProviderDriver = {
   provider: 'anthropic',
@@ -101,7 +102,7 @@ export const anthropicDriver: ProviderDriver = {
           description: registryModel?.description ?? '',
           descriptionKey: registryModel?.descriptionKey,
           provider: 'anthropic' as const,
-          contextWindow: getModelContextWindow(m.id) ?? DEFAULT_CONTEXT_WINDOW,
+          contextWindow: getModelContextWindow(m.id) ?? getDefaultContextWindow(),
           supportsThinking: registryModel?.supportsThinking,
           supportsImages: registryModel?.supportsImages,
         };

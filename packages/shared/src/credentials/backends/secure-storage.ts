@@ -32,7 +32,7 @@ import {
   createHash,
 } from 'crypto';
 import { execSync } from 'child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync, renameSync, copyFileSync } from 'fs';
 import { hostname, userInfo, homedir } from 'os';
 import { join, dirname } from 'path';
 
@@ -311,8 +311,13 @@ export class SecureStorageBackend implements CredentialBackend {
     // Combine all parts
     const fileData = Buffer.concat([header, iv, authTag, ciphertext]);
 
-    // Write with restrictive permissions (owner read/write only)
-    writeFileSync(CREDENTIALS_FILE, fileData, { mode: 0o600 });
+    // Write atomically: write to a temp file first, then rename over the
+    // target. A crash/force-kill mid-write leaves the original file intact
+    // instead of a half-written corrupted file (which previously caused the
+    // credential store to be silently deleted on next load).
+    const tmpFile = `${CREDENTIALS_FILE}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync(tmpFile, fileData, { mode: 0o600 });
+    renameSync(tmpFile, CREDENTIALS_FILE);
     this.cachedStore = store;
   }
 
@@ -348,9 +353,18 @@ export class SecureStorageBackend implements CredentialBackend {
   }
 
   private handleCorruptedFile(): void {
-    // Delete corrupted file - user will need to re-enter credentials
+    // Never silently destroy the user's credentials. Before deleting a
+    // corrupted file, back it up so it can be recovered (e.g. by re-deriving
+    // the key on a machine migration, or partial-write recovery). This prevents
+    // a transient corruption from permanently wiping all stored API keys.
     try {
       if (existsSync(CREDENTIALS_FILE)) {
+        const backupPath = `${CREDENTIALS_FILE}.bak-corrupted-${Date.now()}`;
+        try {
+          copyFileSync(CREDENTIALS_FILE, backupPath);
+        } catch {
+          // Best-effort backup; proceed with deletion so the app can recover.
+        }
         unlinkSync(CREDENTIALS_FILE);
       }
     } catch {

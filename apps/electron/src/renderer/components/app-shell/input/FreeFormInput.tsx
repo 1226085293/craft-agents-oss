@@ -2661,6 +2661,8 @@ export function FreeFormInput({
         sessionId={sessionId}
         theme={isDark ? 'dark' : 'light'}
         onSave={handleTextAttachmentSave}
+        onUrlClick={appShellCtx?.onOpenUrl}
+        onFileClick={appShellCtx ? (p) => appShellCtx.onOpenFile(p, sessionId) : undefined}
       />
     </>
   )

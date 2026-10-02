@@ -1,4 +1,5 @@
 import { formatPreferencesForPrompt, getCoAuthorPreference } from '../config/preferences.ts';
+import { formatSkillsBlock } from '../skills/skills-prompt.ts';
 import { getBrowserToolEnabled } from '../config/storage.ts';
 import { debug } from '../utils/debug.ts';
 import { existsSync, readFileSync, readdirSync } from 'fs';
@@ -379,7 +380,11 @@ export function getSystemPrompt(
   // to enable prompt caching. The system prompt stays static and cacheable.
   // Safe Mode context is also in user messages for the same reason.
   const basePrompt = getCraftAssistantPrompt(workspaceRootPath, backendName, resolvedIncludeCoAuthoredBy);
-  const fullPrompt = `${basePrompt}${preferences}${projectBlock}${debugContext}${projectContextFiles}`;
+  // Skills inventory (L1 metadata: slug + description) injected so the model
+  // can match a task against skill descriptions and auto-trigger the relevant
+  // SKILL.md without waiting for an explicit [skill:slug] mention.
+  const skillsBlock = formatSkillsBlock(workspaceRootPath, workingDirectory);
+  const fullPrompt = `${basePrompt}${skillsBlock}${preferences}${projectBlock}${debugContext}${projectContextFiles}`;
 
   debug('[getSystemPrompt] full prompt length:', fullPrompt.length);
 
@@ -613,9 +618,11 @@ Sources are external data connections. Each source has \`config.json\` (connecti
 
 Skills are reusable instruction sets (\`SKILL.md\` — instructions + behavior; read before execution).
 
+**When a task matches a skill's description, use that skill proactively**: read the \`SKILL.md\` at its resolved path (Read tool or cat via Bash) — for example, design/UI work should trigger a design skill automatically rather than only when the user explicitly names one.
+
 **When user mentions \`[skill:slug]\`:** read the \`SKILL.md\` at its resolved path (Read tool or cat via Bash) — tool calls are blocked until read; then follow it.
 
-Three levels, checked in order: Global \`~/.agents/skills/{slug}/SKILL.md\` · Workspace \`${workspacePath}/skills/{slug}/SKILL.md\` · Project \`{projectRoot}/.agents/skills/{slug}/SKILL.md\`
+Skills are discovered from three levels, checked in order: Global \`~/.agents/skills/{slug}/SKILL.md\` · Workspace \`${workspacePath}/skills/{slug}/SKILL.md\` · Project \`{projectRoot}/.agents/skills/{slug}/SKILL.md\`
 
 ## Project Context
 

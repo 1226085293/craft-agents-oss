@@ -17,3 +17,5 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 - **Telegram progress cleanup** — progress-mode Telegram replies now delay the first transient `💭 thinking…`/tool-status bubble for fast runs and delete any posted progress bubble before sending the final answer, reducing leftover status messages in topics.
 
 ## Breaking Changes
+
+- **User preferences `notes` field removed** — the free-form "Notes" section in Settings → User Preferences (including its AI-assist edit context) and the `notes` argument of the `update_user_preferences` tool have been removed. The system prompt no longer injects "Notes about this user". Legacy `preferences.json` files containing a `notes` key are scrubbed on load; name, timezone, location, and language preferences are unchanged.

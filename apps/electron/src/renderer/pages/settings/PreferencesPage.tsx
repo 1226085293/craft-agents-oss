@@ -3,8 +3,7 @@
  *
  * Form-based editor for stored user preferences (~/.craft-agent/preferences.json).
  * Features:
- * - Fixed input fields for known preferences (name, timezone, location, language)
- * - Free-form textarea for notes
+ * - Fixed input fields for known preferences (name, timezone, location)
  * - Auto-saves on change with debouncing
  */
 
@@ -20,9 +19,7 @@ import {
   SettingsSection,
   SettingsCard,
   SettingsInput,
-  SettingsTextarea,
 } from '@/components/settings'
-import { EditPopover, EditButton, getEditConfig } from '@/components/ui/EditPopover'
 import type { DetailsPageMeta } from '@/lib/navigation-registry'
 
 export const meta: DetailsPageMeta = {
@@ -35,7 +32,6 @@ interface PreferencesFormState {
   timezone: string
   city: string
   country: string
-  notes: string
 }
 
 const emptyFormState: PreferencesFormState = {
@@ -43,7 +39,6 @@ const emptyFormState: PreferencesFormState = {
   timezone: '',
   city: '',
   country: '',
-  notes: '',
 }
 
 // Parse JSON to form state
@@ -55,7 +50,6 @@ function parsePreferences(json: string): PreferencesFormState {
       timezone: prefs.timezone || '',
       city: prefs.location?.city || '',
       country: prefs.location?.country || '',
-      notes: prefs.notes || '',
     }
   } catch {
     return emptyFormState
@@ -76,7 +70,6 @@ function serializePreferences(state: PreferencesFormState): string {
     prefs.location = location
   }
 
-  if (state.notes) prefs.notes = state.notes
   prefs.updatedAt = Date.now()
 
   return JSON.stringify(prefs, null, 2)
@@ -86,7 +79,6 @@ export default function PreferencesPage() {
   const { t } = useTranslation()
   const [formState, setFormState] = useState<PreferencesFormState>(emptyFormState)
   const [isLoading, setIsLoading] = useState(true)
-  const [preferencesPath, setPreferencesPath] = useState<string | null>(null)
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isInitialLoadRef = useRef(true)
   const formStateRef = useRef(formState)
@@ -104,7 +96,6 @@ export default function PreferencesPage() {
         const result = await window.electronAPI.readPreferences()
         const parsed = parsePreferences(result.content)
         setFormState(parsed)
-        setPreferencesPath(result.path)
         lastSavedRef.current = serializePreferences(parsed)
       } catch (err) {
         console.error('Failed to load stored user preferences:', err)
@@ -237,35 +228,6 @@ export default function PreferencesPage() {
                 value={formState.country}
                 onChange={(v) => updateField('country', v)}
                 placeholder={t("settings.preferences.countryPlaceholder")}
-                inCard
-              />
-            </SettingsCard>
-          </SettingsSection>
-
-          {/* Notes */}
-          <SettingsSection
-            title={t("settings.preferences.notes")}
-            description={t("settings.preferences.notesDesc")}
-            action={
-              // EditPopover for AI-assisted notes editing with "Edit File" as secondary action
-              preferencesPath ? (
-                <EditPopover
-                  trigger={<EditButton />}
-                  {...getEditConfig('preferences-notes', preferencesPath)}
-                  secondaryAction={{
-                    label: t("common.editFile"),
-                    filePath: preferencesPath!,
-                  }}
-                />
-              ) : null
-            }
-          >
-            <SettingsCard divided={false}>
-              <SettingsTextarea
-                value={formState.notes}
-                onChange={(v) => updateField('notes', v)}
-                placeholder={t("settings.preferences.notesPlaceholder")}
-                rows={5}
                 inCard
               />
             </SettingsCard>

@@ -27,8 +27,6 @@ export interface UserPreferences {
   name?: string;
   timezone?: string;
   location?: UserLocation;
-  // Free-form notes the agent learns about the user
-  notes?: string;
   // Diff viewer display preferences
   diffViewer?: DiffViewerPreferences;
   // Whether to include Co-Authored-By trailer on git commits (default: true)
@@ -50,12 +48,17 @@ export function loadPreferences(): UserPreferences {
     if (!existsSync(PREFERENCES_FILE)) {
       return {};
     }
-    const raw = readJsonFileSync<UserPreferences & { language?: unknown }>(PREFERENCES_FILE);
+    const raw = readJsonFileSync<UserPreferences & { language?: unknown; notes?: unknown }>(PREFERENCES_FILE);
     // Scrub legacy free-text `language` field on read so it never leaks
     // back into a write. Old values were free-text ("Hungarian", "English") —
     // not language codes — so we drop them rather than migrate.
     if (raw && typeof raw === 'object' && 'language' in raw) {
       delete (raw as { language?: unknown }).language;
+    }
+    // Scrub legacy `notes` field on read — the notes feature was removed,
+    // so drop it instead of carrying it back into a write.
+    if (raw && typeof raw === 'object' && 'notes' in raw) {
+      delete (raw as { notes?: unknown }).notes;
     }
     return raw;
   } catch {
@@ -142,7 +145,7 @@ export function formatPreferencesForPrompt(): string {
   const langName = langEntry?.nativeName ?? 'English';
 
   if (Object.keys(prefs).length === 0 ||
-      (!prefs.name && !prefs.timezone && !prefs.location && !prefs.notes && langCode === 'en')) {
+      (!prefs.name && !prefs.timezone && !prefs.location && langCode === 'en')) {
     return '';
   }
 
@@ -167,10 +170,6 @@ export function formatPreferencesForPrompt(): string {
   // Always include language so the AI knows which language to respond in.
   lines.push(`- Preferred language: ${langName}`);
 
-  if (prefs.notes) {
-    lines.push('', '### Notes about this user', prefs.notes);
-  }
-
   lines.push('');
   return lines.join('\n');
 }
@@ -187,8 +186,7 @@ export function formatPreferencesDisplay(): string {
   const hasName = !!prefs.name;
   const hasTimezone = !!prefs.timezone;
   const hasLocation = prefs.location && (prefs.location.city || prefs.location.region || prefs.location.country);
-  const hasNotes = !!prefs.notes;
-  const hasAnyPrefs = hasName || hasTimezone || hasLocation || hasNotes;
+  const hasAnyPrefs = hasName || hasTimezone || hasLocation;
 
   lines.push('Your preferences help personalise your experience. The assistant uses these to provide more relevant responses (e.g., timezone for scheduling, language for communication).');
   lines.push('');
@@ -211,10 +209,6 @@ export function formatPreferencesDisplay(): string {
     const displayLangCode = (i18n.resolvedLanguage ?? 'en') as LanguageCode;
     const displayLangEntry = LOCALE_REGISTRY[displayLangCode];
     lines.push(`- Language: ${displayLangEntry?.nativeName ?? 'English'} (via Appearance settings)`);
-
-    if (hasNotes) {
-      lines.push('', '**Notes**', prefs.notes!);
-    }
 
     if (prefs.updatedAt) {
       lines.push('', `_Last updated: ${new Date(prefs.updatedAt).toLocaleString()}_`);

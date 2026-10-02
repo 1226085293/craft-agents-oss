@@ -1,7 +1,7 @@
 /**
  * Update User Preferences Handler
  *
- * Updates stored user preferences (name, timezone, location, notes).
+ * Updates stored user preferences (name, timezone, location).
  * Uses an injected updatePreferences callback to avoid depending on @craft-agent/shared.
  *
  * Note: UI language is NOT user-editable here — it mirrors Appearance → Language
@@ -18,7 +18,6 @@ export interface UpdatePreferencesArgs {
   city?: string;
   region?: string;
   country?: string;
-  notes?: string;
   includeCoAuthoredBy?: boolean;
 }
 
@@ -59,11 +58,6 @@ export async function handleUpdatePreferences(
         location.country = args.country;
       }
       updates.location = location;
-    }
-
-    // Handle notes (replace)
-    if (args.notes && typeof args.notes === 'string') {
-      updates.notes = args.notes;
     }
 
     // Handle co-author preference (explicit boolean)

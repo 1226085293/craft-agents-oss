@@ -74,7 +74,6 @@ export type EditContextKey =
   | 'source-config'
   | 'source-permissions'
   | 'source-tool-permissions'
-  | 'preferences-notes'
   | 'add-source'
   | 'add-source-api'   // Filter-specific: user is viewing APIs
   | 'add-source-mcp'   // Filter-specific: user is viewing MCPs
@@ -275,26 +274,6 @@ const EDIT_CONFIGS: Record<EditContextKey, (location: string) => EditConfig> = {
     displayLabelKey: 'editPopover.label.toolPermissions',
     exampleKey: 'editPopover.example.sourceToolPermissions',
     model: 'default',
-    systemPromptPreset: 'mini',
-    inlineExecution: true,
-  }),
-
-  // Preferences editing context
-  'preferences-notes': (location) => ({
-    context: {
-      label: 'Preferences Notes',
-      filePath: location, // location is the full path for preferences
-      context:
-        'The user is editing the notes field in their preferences (~/.craft-agent/preferences.json). ' +
-        'This is a JSON file. Only modify the "notes" field unless explicitly asked otherwise. ' +
-        'The notes field is free-form text that provides context about the user to the AI. ' +
-        'After editing, call config_validate with target "preferences" to verify the changes. ' +
-        'Confirm clearly when done.',
-    },
-    example: 'Add coding style preferences',
-    displayLabelKey: 'editPopover.label.preferencesNotes',
-    exampleKey: 'editPopover.example.preferencesNotes',
-    model: 'fast',
     systemPromptPreset: 'mini',
     inlineExecution: true,
   }),

@@ -350,6 +350,24 @@ export class PiEventAdapter extends BaseEventAdapter {
   }
 
   /**
+   * Fold the already-emitted draft final reply into the process block (via a
+   * `text_demote` event) BEFORE the event queue is held open, so the UI never
+   * shows a "final" reply bubble while the turn is still running (a later
+   * continuation / recovered run / retried run produces the real final bubble).
+   * No-op when no non-intermediate reply was emitted this turn.
+   *
+   * Hold-open points: overflow-compaction recovery, defense-resume follow-up,
+   * queued steering/follow-up continuation, and the SDK auto-retry lane.
+   */
+  private *demoteDraftReplyForHold(): Generator<CraftAgentEvent, void, void> {
+    if (this.lastFinalTextTurnId) {
+      const t = this.lastFinalTextTurnId;
+      this.lastFinalTextTurnId = null;
+      yield { type: 'text_demote', turnId: t };
+    }
+  }
+
+  /**
    * Reset overflow-recovery + defense-resume state. Call from session
    * disposal so a stale fallback timer doesn't fire on a torn-down adapter.
    */
@@ -566,6 +584,10 @@ export class PiEventAdapter extends BaseEventAdapter {
         if (this.overflowState === 'held') {
           this.overflowState = 'awaiting';
           this.armOverflowFallbackTimer();
+          // The draft final reply (if any) must not linger as a "done" bubble
+          // while the SDK's overflow-compaction + continuation turn is still
+          // running — fold it into the process block.
+          yield* this.demoteDraftReplyForHold();
           break;
         }
         if (this.overflowState === 'awaiting' || this.overflowState === 'compacting') {
@@ -612,6 +634,9 @@ export class PiEventAdapter extends BaseEventAdapter {
         if ((event as { defenseResumePending?: boolean }).defenseResumePending) {
           this.defenseResumeHeld = true;
           this.sawToolDuringDefenseHold = false;
+          // The resume continues this SAME turn — fold the draft into the
+          // process block; the resumed continuation's reply is the only final.
+          yield* this.demoteDraftReplyForHold();
           break;
         }
         this.defenseResumeHeld = false;
@@ -641,6 +666,9 @@ export class PiEventAdapter extends BaseEventAdapter {
         // continuation turn; its FINAL agent_end (no flag) completes below.
         if ((event as { queuedFollowUpPending?: boolean }).queuedFollowUpPending) {
           this.queuedFollowUpHeld = true;
+          // A continuation turn is about to run for the same Craft turn —
+          // the current draft is not the final answer yet; demote it.
+          yield* this.demoteDraftReplyForHold();
           break;
         }
         this.queuedFollowUpHeld = false;
@@ -656,6 +684,8 @@ export class PiEventAdapter extends BaseEventAdapter {
             RETRY_START_FALLBACK_TIMEOUT_MS,
             'no auto_retry_start followed agent_end { willRetry: true }',
           );
+          // The SDK re-runs the turn — the draft is not final; demote it.
+          yield* this.demoteDraftReplyForHold();
           break;
         }
         if (this.retryState === 'awaitingRetry' || this.retryState === 'backoff') {

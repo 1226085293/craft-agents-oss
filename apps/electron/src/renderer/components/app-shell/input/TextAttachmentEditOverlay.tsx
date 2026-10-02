@@ -22,7 +22,7 @@
 
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
-import { BookOpen, Info, PenLine } from 'lucide-react'
+import { BookOpen, PenLine } from 'lucide-react'
 import { ContentFrame, PreviewOverlay, ShikiCodeViewer } from '@craft-agent/ui'
 import { isAbsolutePath } from '@/lib/drafts'
 import { ShikiCodeEditor } from '@/components/shiki/ShikiCodeEditor'
@@ -133,6 +133,19 @@ export function TextAttachmentEditOverlay({
     setEditing(false)
   }, [initialText])
 
+  // Ctrl/Cmd+S saves while editing
+  React.useEffect(() => {
+    if (!editing || !isOpen) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault()
+        handleSave()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [editing, isOpen, handleSave])
+
   const ext = attachment?.name ? attachment.name.split('.').pop()?.toUpperCase() : ''
   const typeLabel = ext && ext !== attachment?.name.toUpperCase() ? ext : 'TEXT'
 
@@ -185,11 +198,14 @@ export function TextAttachmentEditOverlay({
               value={text}
               onChange={setText}
               language={language}
+              showLineNumbers
               className="h-[55vh]"
             />
-            <div className="mt-2 flex items-start gap-1.5 px-4 pb-1 text-xs text-muted-foreground/70">
-              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-              <span>{t('attachment.editedHint')}</span>
+            <div className="mt-2.5 flex items-center justify-between gap-4 rounded-[8px] border border-foreground/5 bg-foreground/3 px-3 py-1.5 text-[11px] text-muted-foreground/80">
+              <span className="shrink-0 font-semibold tracking-wide text-foreground/70">
+                {typeLabel}
+              </span>
+              <span className="min-w-0 text-right leading-snug">{t('attachment.editedHint')}</span>
             </div>
           </div>
         ) : (

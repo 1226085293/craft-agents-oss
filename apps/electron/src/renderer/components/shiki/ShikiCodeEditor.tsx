@@ -33,6 +33,8 @@ export interface ShikiCodeEditorProps {
   className?: string
   /** Placeholder text when empty */
   placeholder?: string
+  /** Render a line-number gutter like ShikiCodeViewer (default: false) */
+  showLineNumbers?: boolean
 }
 
 // Map aliases to Shiki language names
@@ -71,6 +73,7 @@ export function ShikiCodeEditor({
   onReady,
   className,
   placeholder,
+  showLineNumbers = false,
 }: ShikiCodeEditorProps) {
   const { isDark, shikiTheme } = useTheme()
   const hasCalledReady = useRef(false)
@@ -161,37 +164,68 @@ export function ShikiCodeEditor({
     return highlightedCode || code
   }, [resolvedLang, theme, highlight, highlightedCode])
 
-  // Background color (must match CSS --background values)
-  const backgroundColor = isDark ? '#302f33' : '#faf9fb'
-  const textColor = isDark ? '#d4d4d4' : '#1f1f1f'
+  // Background color (matches CSS --background, same as ShikiViewer)
+  const backgroundColor = 'var(--background)'
+  const lineNumberColor = isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.3)'
+  const borderColor = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.06)'
   const placeholderColor = isDark ? 'rgba(255,255,255,0.3)' : 'rgba(0,0,0,0.3)'
+  const lineNumbers = showLineNumbers ? value.split('\n') : []
+
+  const editorNode = (
+    <Editor
+      value={value}
+      onValueChange={handleValueChange}
+      highlight={syncHighlight}
+      disabled={readOnly}
+      padding={16}
+      placeholder={placeholder}
+      style={{
+        fontFamily: '"JetBrains Mono", monospace',
+        fontSize: 13,
+        lineHeight: 1.6,
+        minHeight: '100%',
+        backgroundColor,
+        color: 'var(--foreground)',
+      }}
+      textareaClassName={cn(
+        'focus:outline-none',
+        readOnly && 'cursor-default'
+      )}
+      className="min-h-full"
+    />
+  )
 
   return (
     <div
       className={cn('h-full w-full overflow-auto', className)}
       style={{ backgroundColor }}
     >
-      <Editor
-        value={value}
-        onValueChange={handleValueChange}
-        highlight={syncHighlight}
-        disabled={readOnly}
-        padding={24}
-        placeholder={placeholder}
-        style={{
-          fontFamily: '"JetBrains Mono", monospace',
-          fontSize: 14,
-          lineHeight: 1.6,
-          minHeight: '100%',
-          backgroundColor,
-          color: textColor,
-        }}
-        textareaClassName={cn(
-          'focus:outline-none',
-          readOnly && 'cursor-default'
-        )}
-        className="min-h-full"
-      />
+      {showLineNumbers ? (
+        <div className="flex min-h-full">
+          {/* Line numbers gutter — same visual as ShikiCodeViewer */}
+          <div
+            className="sticky left-0 shrink-0 select-none pb-4 pr-4 pt-4 text-right"
+            style={{
+              backgroundColor,
+              borderRight: `1px solid ${borderColor}`,
+              minWidth: '60px',
+            }}
+          >
+            {lineNumbers.map((_, index) => (
+              <div
+                key={index}
+                className="px-2 font-mono text-[13px] leading-[1.6]"
+                style={{ color: lineNumberColor }}
+              >
+                {index + 1}
+              </div>
+            ))}
+          </div>
+          <div className="min-w-0 flex-1">{editorNode}</div>
+        </div>
+      ) : (
+        editorNode
+      )}
       <style>{`
         .npm__react-simple-code-editor__textarea::placeholder {
           color: ${placeholderColor};

@@ -1655,18 +1655,18 @@ async function queryLlm(
     };
     lifecycle.setResource(resource);
 
-    // Same resilience overrides as the main session (retry + capped idle timeout).
+    // Same resilience overrides as the main session (retry + capped idle timeout),
+    // applied AFTER setModel below so the reserve is derived from the mini model's
+    // context window. If setModel throws we fall back to session defaults.
+    try {
+      await ephemeralSession.setModel(piModel);
+    } catch {
+      debugLog(`[queryLlm] Failed to set model on ephemeral session, proceeding with default`);
+    }
     applyPiResilienceSettings(ephemeralSession);
 
     let unsub: (() => void) | undefined;
     try {
-      // Pi SDK ignores options.model for ephemeral sessions (same issue as options.tools).
-      // Explicitly set the model after creation to ensure the mini model is used.
-      try {
-        await ephemeralSession.setModel(piModel);
-      } catch {
-        debugLog(`[queryLlm] Failed to set model on ephemeral session, proceeding with default`);
-      }
       lifecycle.throwIfCancelled();
 
     // Force a low thinking level for mini completions (titles, summaries, etc.).
@@ -2666,6 +2666,11 @@ async function handleUpdateRuntimeConfig(msg: RuntimeConfigUpdateMessage): Promi
 
       await piSession.setModel(piModel);
       setInterceptorApiHints(piModel as { api?: string; provider?: string; baseUrl?: string });
+      // Compaction reserve must track the NEW model's context window. The SDK
+      // freezes settings-level reserveTokens at session creation; without this
+      // re-derivation a 200k-window reserve (32k) kept after switching to a
+      // 128k model compacts at ~99k instead of ~110k.
+      applyPiResilienceSettings(piSession);
       debugLog(`[runtime_config] Updated runtime config and active model: ${piModel.provider}/${piModel.id}`);
     } else {
       debugLog('[runtime_config] Stored update; no active session/model registry yet');
@@ -2740,6 +2745,9 @@ async function handleSwitchConnection(msg: SwitchConnectionMessage): Promise<voi
     }
     await piSession.setModel(piModel);
     setInterceptorApiHints(piModel as { api?: string; provider?: string; baseUrl?: string });
+    // Re-derive the compaction reserve from the switched model's context window
+    // (see runtime_config path for why this is required after setModel).
+    applyPiResilienceSettings(piSession);
 
     send({ type: 'switch_connection_result', id: msg.id, success: true, resolved: `${piModel.provider}/${piModel.id}` });
     debugLog(`[switch_connection] Switched to: ${msg.model} (resolved: ${piModel.provider}/${piModel.id})`);
@@ -2779,6 +2787,9 @@ async function handleSetModel(msg: Extract<InboundMessage, { type: 'set_model' }
     // Keep initConfig.model current so downstream consumers that read it (e.g. the web-search
     // provider's model derivation, #1023) reflect the switch — setModel alone didn't update it.
     if (initConfig) initConfig.model = msg.model;
+    // Re-derive the compaction reserve from the switched model's context window
+    // so the auto-compaction threshold tracks the model actually in use.
+    applyPiResilienceSettings(piSession);
     debugLog(`[set_model] Model changed to: ${msg.model} (resolved: ${piModel.provider}/${piModel.id})`);
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);

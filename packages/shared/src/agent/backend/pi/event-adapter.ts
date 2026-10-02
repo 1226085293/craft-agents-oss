@@ -186,6 +186,14 @@ export class PiEventAdapter extends BaseEventAdapter {
    *  agent_end. The queue stays open for that continuation turn (same shape
    *  as defenseResumeHeld). The FINAL `agent_end` (no flag) clears it. */
   private queuedFollowUpHeld: boolean = false;
+  /** Set when the subprocess annotated an `agent_end` with
+   *  `defenseVerificationPending: true` — a program-side verification turn is
+   *  in flight (subprocess LLM judge; 2026-10-02 redesign). Unlike a defense
+   *  resume there is NO resumed agent_end ahead: the queue stays open until
+   *  the subprocess reports `verification_result` (passed → replay the final
+   *  text, complete; failed → a followUp continues the turn, its FINAL
+   *  agent_end completes). */
+  private verificationHeld: boolean = false;
 
   // ============================================================
   // Retryable-error deferral (auto-retry terminal-state reporting)
@@ -270,6 +278,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     isAgentEnd: boolean,
     defenseResumePending?: boolean,
     queuedFollowUpPending?: boolean,
+    verificationPending?: boolean,
   ): boolean {
     if (this.pendingQueueComplete) {
       this.pendingQueueComplete = false;
@@ -284,6 +293,13 @@ export class PiEventAdapter extends BaseEventAdapter {
         return false;
       }
       this.defenseResumeHeld = false;
+      if (verificationPending) {
+        // Program-side verification in flight (subprocess LLM judge). No
+        // resumed turn is scheduled — hold the queue until verification_result.
+        this.verificationHeld = true;
+        return false;
+      }
+      this.verificationHeld = false;
       if (queuedFollowUpPending) {
         // The SDK will continue the turn with queued steering/followUp
         // messages after this agent_end — hold the queue open.
@@ -316,6 +332,18 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.pendingQueueComplete = true;
   }
 
+  /**
+   * Finalize a held verification turn when the subprocess reports the
+   * `verification_result`. passed=true → the final reply was verified and is
+   * replayed verbatim — terminate the queue now (pendingQueueComplete).
+   * passed=false → a followUp will continue the turn (LLM repairs the
+   * reply); just release the verification hold — the resumed turn's FINAL
+   * `agent_end` (no flags) completes the queue normally.
+   */
+  finalizeVerificationHeld(passed: boolean): void {
+    this.verificationHeld = false;
+    if (passed) this.pendingQueueComplete = true;
+  }
 
   /**
    * Reset overflow-recovery + defense-resume state. Call from session
@@ -332,6 +360,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.defenseResumeHeld = false;
     this.sawToolDuringDefenseHold = false;
     this.queuedFollowUpHeld = false;
+    this.verificationHeld = false;
     this.deferredRetryError = null;
     this.retryHoldActive = false;
     this.hasEmittedTerminalError = false;
@@ -580,6 +609,18 @@ export class PiEventAdapter extends BaseEventAdapter {
           break;
         }
         this.defenseResumeHeld = false;
+        // Program-side verification (pi-agent-server, 2026-10-02 redesign):
+        // the subprocess annotated this agent_end with
+        // defenseVerificationPending=true when it captured the final reply and
+        // dispatched an async LLM verification (doVerificationCheck). There is
+        // NO resumed turn ahead — the queue stays open until the subprocess
+        // reports verification_result; the main process then finalizes the
+        // hold (passed → replay + complete, failed → followUp continues).
+        if ((event as { defenseVerificationPending?: boolean }).defenseVerificationPending) {
+          this.verificationHeld = true;
+          break;
+        }
+        this.verificationHeld = false;
         // Queued steering/followUp continuation (pi-agent-server): the
         // subprocess annotated this agent_end with queuedFollowUpPending=true
         // because pendingMessageCount > 0 — the SDK's _handlePostAgentRun

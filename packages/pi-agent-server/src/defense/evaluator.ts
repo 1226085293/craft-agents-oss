@@ -17,10 +17,20 @@ import { SessionLifecycle, State, type SessionLifecycleOptions } from './session
 export interface DefenseEvaluationResult {
   /** Whether the post-stop evaluation ran. */
   evaluated: boolean;
-  /** Whether a resume is required (early-stop suspected). */
+  /** Whether a resume is required (early-stop suspected — fault-class signal). */
   shouldResume: boolean;
   /** Human-readable resume message to append to the session. */
   resumeMessage?: string;
+  /**
+   * Verification-class signal: the turn finished with content that must be
+   * semantically verified before delivery (wrote-without-readback, or a
+   * force-verified long turn). The caller runs a program-side verification
+   * check: PASS → replay the captured final text as the single reply;
+   * FAIL → only then queue the follow-up (shouldResume semantics apply).
+   */
+  verifyRequired?: boolean;
+  /** Why verification is required (diagnostics / UI). */
+  verifyReason?: string;
   /** Final FSM state after evaluation. */
   state: State;
   /** Failure reason when state === FAILED. */
@@ -34,13 +44,28 @@ export interface DefenseOptions extends SessionLifecycleOptions {
   enabled?: boolean;
   /** Working directory for filesystem write detection. */
   cwd?: string;
+  /**
+   * Verification-class thresholds (user-configurable; defaults below).
+   * A turn that meets EITHER threshold is treated as a long turn and gets
+   * the same forced final-reply verification as write-without-readback.
+   * - minSteps: tool/activity count in the turn (the number of process-card
+   *   rows the UI shows) — default 50.
+   * - minDurationMs: elapsed wall-clock in the turn — default 5 minutes.
+   */
+  verifyMinSteps?: number;
+  verifyMinDurationMs?: number;
 }
+
+const DEFAULT_VERIFY_MIN_STEPS = 50;
+const DEFAULT_VERIFY_MIN_DURATION_MS = 5 * 60 * 1000;
 
 export class DefenseEvaluator {
   private readonly enabled: boolean;
   private readonly lifecycle: SessionLifecycle;
   private readonly fsWatch: FsWatch;
   private readonly cwd?: string;
+  private readonly verifyMinSteps: number;
+  private readonly verifyMinDurationMs: number;
   private toolCalls: ToolCallLike[] = [];
   private readOutputs: string[] = [];
 
@@ -49,6 +74,8 @@ export class DefenseEvaluator {
     this.cwd = options.cwd;
     this.fsWatch = new FsWatch();
     this.lifecycle = new SessionLifecycle(options);
+    this.verifyMinSteps = options.verifyMinSteps ?? DEFAULT_VERIFY_MIN_STEPS;
+    this.verifyMinDurationMs = options.verifyMinDurationMs ?? DEFAULT_VERIFY_MIN_DURATION_MS;
   }
 
   get isEnabled(): boolean {
@@ -112,12 +139,14 @@ export class DefenseEvaluator {
     emptyResponse: boolean,
     repetitionLoop: boolean,
     truncatedFinal: boolean,
+    verifyRequired = false,
   ): string {
     const parts: string[] = [];
     if (silentStop) parts.push('silentStop');
     if (emptyResponse) parts.push('emptyResponse');
     if (repetitionLoop) parts.push('repetitionLoop');
     if (truncatedFinal) parts.push('truncatedFinal');
+    if (verifyRequired) parts.push('verify');
     if (hasWrite) {
       const fsFiles = fsEvidence?.modifiedFiles ?? [];
       parts.push(
@@ -210,7 +239,7 @@ export class DefenseEvaluator {
     const fsEvidence = this.detectFsWrites();
     const fsWrite = !!fsEvidence && fsEvidence.modifiedFiles.length > 0;
     const hasWrite = fsWrite || complexity.hasWrite;
-    const shouldResume = hasWrite && !effectiveVerify;
+    const writeUnverified = hasWrite && !effectiveVerify;
 
     // Silent-stop detection: the turn ended without any assistant-visible
     // text. The user sees nothing — indistinguishable from a hang. Not
@@ -240,11 +269,35 @@ export class DefenseEvaluator {
     // reply must be completed, not delivered as-is.
     const truncatedFinal = lastAssistantMessage?.truncatedFinal === true;
 
+    // Fault-class signals: genuine early-stop infrastructure faults (stall
+    // kill, no visible text, empty terminal model call, degeneration loop,
+    // mid-sentence truncation). These keep the ORIGINAL LLM-completion
+    // flow: a followUp resume message asks the model to finish/repair the
+    // reply. Verification NEVER applies to fault class — there is no
+    // finished content to verify.
+    const faultClass =
+      stallAborted || silentStop || emptyResponse || repetitionLoop || truncatedFinal;
+
+    // Verification-class signals (user-approved redesign, 2026-10-02):
+    // a) writes performed with no read-back evidence;
+    // b) FORCED long turn — the turn met EITHER threshold (step count ≥
+    //    verifyMinSteps OR elapsed ≥ verifyMinDurationMs; OR semantics,
+    //    configurable). These are NOT faults: the content may be fine.
+    // Instead of blindly resuming, the turn gets a program-side
+    // verification: an LLM check on whether the final reply is a valid
+    // answer to the user's message. PASS → the captured final text is
+    // replayed AS the single final reply (no second LLM bubble); FAIL →
+    // only then follow up (LLM continues).
+    const longTurn =
+      this.lifecycle.getIterations() >= this.verifyMinSteps
+      || this.lifecycle.elapsedMs() >= this.verifyMinDurationMs;
+    const verifyRequired = !faultClass && (writeUnverified || longTurn);
+
     // A stall-watchdog abort is itself an early-stop signal: the turn was
     // killed mid-flight, so evaluation must run even when no other signal
     // fired (e.g. visible text was already produced earlier in the run).
     const needsEvaluation =
-      stallAborted || silentStop || emptyResponse || repetitionLoop || truncatedFinal || shouldResume || complexity.needsEvaluation;
+      faultClass || verifyRequired || complexity.needsEvaluation;
     const stop = this.lifecycle.onStop(needsEvaluation);
 
     if (stop === 'abort') {
@@ -259,10 +312,10 @@ export class DefenseEvaluator {
     // automatic resume — silent stop (no output at all), wrote-without-
     // read-back, or a stall-watchdog kill. High complexity alone is
     // informational. stallAborted bypasses this gate even when visible text
-    // was produced earlier in the run: the watchdog killed a mid-flight turn
-    // (2026-09-08 fit-pulsar — progress text existed, the final verification
-    // run never came back), so "already said something" must not read as done.
-    if (stop === 'run' || (!stallAborted && !shouldResume && !silentStop && !emptyResponse && !repetitionLoop && !truncatedFinal)) {
+    // was produced earlier in the run (faultClass covers it): the watchdog
+    // killed a mid-flight turn, so "already said something" must not read
+    // as done.
+    if (stop === 'run' || (!faultClass && !verifyRequired)) {
       this.lifecycle.markDone();
       return {
         evaluated: true,
@@ -271,7 +324,10 @@ export class DefenseEvaluator {
       };
     }
 
-    // needsEvaluation: build resume context and decide.
+    // needsEvaluation: build resume context and decide. Verification also
+    // consumes one FSM slot via decideResume — a FAIL ed verification
+    // follows up (a real resume), and repeat fail→re-verify cycles must
+    // respect maxResumes like any other loop.
     const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop, emptyResponse, repetitionLoop, truncatedFinal, stallAborted);
     const decision = this.lifecycle.decideResume(resumeMessage);
     if (decision === State.FAILED) {
@@ -280,17 +336,31 @@ export class DefenseEvaluator {
         shouldResume: false,
         state: State.FAILED,
         failureReason: 'Resume cap reached or no progress across consecutive resumes',
-        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal),
+        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired),
       };
     }
 
     this.lifecycle.markResumed();
+    if (verifyRequired) {
+      return {
+        evaluated: true,
+        shouldResume: false,
+        verifyRequired: true,
+        verifyReason: writeUnverified
+          ? 'write-without-readback'
+          : 'force-long-turn',
+        resumeMessage,
+        state: this.lifecycle.getState(),
+        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired),
+      };
+    }
+
     return {
       evaluated: true,
       shouldResume: true,
       resumeMessage,
       state: this.lifecycle.getState(),
-      reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal),
+      reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired),
     };
   }
 }

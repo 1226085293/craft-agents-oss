@@ -304,7 +304,7 @@ export interface Message {
   // Turn ID: Correlation ID from the API's message.id, groups all messages in an assistant turn
   turnId?: string;
   // Status type for special status messages (retrying is transient renderer state)
-  statusType?: 'compacting' | 'compaction_complete' | 'retrying';
+  statusType?: 'compacting' | 'compaction_complete' | 'retrying' | 'verification' | 'verification_passed' | 'verification_failed';
   // Info level for info messages (determines icon/color)
   infoLevel?: 'info' | 'warning' | 'error' | 'success';
   // Error-specific fields (for typed errors with diagnostics)
@@ -383,7 +383,7 @@ export interface StoredMessage {
   isIntermediate?: boolean;
   turnId?: string;
   // Status type (retry progress is not persisted by the session manager)
-  statusType?: 'compacting' | 'compaction_complete' | 'retrying';
+  statusType?: 'compacting' | 'compaction_complete' | 'retrying' | 'verification' | 'verification_passed' | 'verification_failed';
   // Info level for info messages (persisted for reload)
   infoLevel?: 'info' | 'warning' | 'error' | 'success';
   // Error display fields
@@ -564,8 +564,8 @@ export type AgentEvent =
   | { type: 'text_discard'; turnId: string }
   | { type: 'retry'; phase: 'backoff'; message: string }
   | { type: 'retry'; phase: 'active' | 'end' }
-  | { type: 'status'; message: string }
-  | { type: 'info'; message: string }
+  | { type: 'status'; message: string; statusType?: string }
+  | { type: 'info'; message: string; statusType?: string; finalText?: string }
   | { type: 'text_delta'; text: string; turnId?: string; parentToolUseId?: string }
   | { type: 'text_complete'; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; sdkMessageId?: string }
   | { type: 'pi_turn_anchor'; sdkMessageId: string; sdkTurnAnchor: string }

@@ -30,7 +30,7 @@ export interface ConfigDefaults {
      * LOOPS only — first-turn monitoring is unbounded (stall detection
      * bounds runaway turns).
      */
-    defenseGuardrails: { maxResumes?: number; maxIterations?: number; maxDurationMs?: number };
+    defenseGuardrails: { maxResumes?: number; maxIterations?: number; maxDurationMs?: number; verifyMinSteps?: number; verifyMinDurationMs?: number };
     /**
      * Allow remote agents to call `browser_tool evaluate <expression>`.
      * When false, the local dispatcher rejects with `BROWSER_REMOTE_EVALUATE_BLOCKED`.

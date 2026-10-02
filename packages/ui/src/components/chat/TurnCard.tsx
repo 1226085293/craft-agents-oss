@@ -975,6 +975,7 @@ function ActivityRow({ activity, onOpenDetails, isLastChild, sessionFolderPath, 
   // Status activities (e.g., compacting, guidance) - system-level with distinct styling
   if (activity.type === 'status') {
     const isRunning = activity.status === 'running'
+    const isFailed = activity.status === 'error'
     const isGuidance = activity.statusType === 'guidance'
     return (
       <div className="flex items-stretch">
@@ -982,13 +983,17 @@ function ActivityRow({ activity, onOpenDetails, isLastChild, sessionFolderPath, 
         <div
           className={cn(
             "flex items-center gap-2 py-0.5 text-muted-foreground flex-1 min-w-0",
+            isRunning && "text-foreground/70",
             isGuidance && "text-foreground/80",
+            isFailed && "text-destructive",
             SIZE_CONFIG.fontSize
           )}
         >
           <div className={cn(SIZE_CONFIG.iconSize, "flex items-center justify-center shrink-0")}>
             {isRunning ? (
               <Spinner className={SIZE_CONFIG.spinnerSizeSmall} />
+            ) : isFailed ? (
+              <XCircle className={cn(SIZE_CONFIG.iconSize, "text-destructive")} />
             ) : isGuidance ? (
               <CornerDownRight className={cn(SIZE_CONFIG.iconSize, "text-info")} />
             ) : (

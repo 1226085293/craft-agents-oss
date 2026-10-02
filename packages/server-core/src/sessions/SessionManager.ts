@@ -9283,7 +9283,9 @@ ${request.prompt}`;
           type: 'status',
           sessionId,
           message: event.message,
-          statusType: event.message.includes('Compacting') ? 'compacting' : undefined
+          statusType: event.message.includes('Compacting')
+            ? 'compacting'
+            : (((event as { statusType?: string }).statusType ?? '') as '' | 'verification' | 'verification_passed' | 'verification_failed') || undefined
         }, workspaceId)
         break
 
@@ -9316,12 +9318,31 @@ ${request.prompt}`;
           // Claude backend's ring refreshes on the next real usage event.
         }
 
+        const isVerificationPassed = (event as { statusType?: string }).statusType === 'verification_passed'
+        const isVerificationFailed = (event as { statusType?: string }).statusType === 'verification_failed'
+        const finalText = (event as { finalText?: string }).finalText
+        if (isVerificationPassed && typeof finalText === 'string') {
+          // Verification passed (2026-10-02 redesign): persist the replayed
+          // final reply as a real assistant message so it survives reload,
+          // then forward the info event (renderer folds it into the card).
+          const replayed: Message = {
+            id: generateMessageId(),
+            role: 'assistant',
+            content: finalText,
+            timestamp: infoTimestamp,
+          }
+          managed.messages.push(replayed)
+        }
         this.sendEvent({
           type: 'info',
           sessionId,
           message: event.message,
-          statusType: isCompactionComplete ? 'compaction_complete' : undefined,
+          statusType: isCompactionComplete ? 'compaction_complete'
+            : isVerificationPassed ? 'verification_passed'
+            : isVerificationFailed ? 'verification_failed'
+            : undefined,
           timestamp: infoTimestamp,
+          ...(typeof finalText === 'string' ? { finalText } : {}),
         }, workspaceId)
         break
       }

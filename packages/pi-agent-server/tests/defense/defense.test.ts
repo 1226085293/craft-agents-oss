@@ -196,13 +196,18 @@ describe('DefenseEvaluator', () => {
     expect(result.shouldResume).toBe(false);
   });
 
-  it('resumes when write without read-back detected', () => {
+  it('triggers verification (verifyRequired) when write without read-back detected (2026-10-02 redesign)', () => {
     const evalr = new DefenseEvaluator();
     evalr.recordToolCall({ type: 'write' });
     const result = evalr.evaluate();
+    // Write-without-read-back is now verification-class, not a blind resume:
+    // the program checks the captured final reply with an LLM first, and only
+    // reverts to a follow-up (resume) when that check FAILS.
     expect(result.evaluated).toBe(true);
-    expect(result.shouldResume).toBe(true);
-    expect(result.resumeMessage).toContain('Do NOT repeat');
+    expect(result.shouldResume).toBe(false);
+    expect(result.verifyRequired).toBe(true);
+    expect(result.verifyReason).toBe('write-without-readback');
+    expect(result.resumeMessage).toBeDefined();
   });
 
   it('resume message frames a verification-delivery judgment, not a task re-run (2026-10-01 spec)', () => {
@@ -239,14 +244,17 @@ describe('DefenseEvaluator', () => {
     expect(result.shouldResume).toBe(false);
   });
 
-  it('fails after resume cap', () => {
+  it('fails after resume cap (verification slots consume the budget too)', () => {
     const evalr = new DefenseEvaluator({ maxResumes: 1 });
     evalr.recordToolCall({ type: 'write' });
     let r = evalr.evaluate();
-    expect(r.shouldResume).toBe(true);
-    // Second resume attempt on the same run (no reset between) hits the cap.
+    // First slot: verification (program-side check), capital consumed.
+    expect(r.verifyRequired).toBe(true);
+    expect(r.shouldResume).toBe(false);
+    // Second verification attempt on the same run (no reset between) hits the cap.
     evalr.recordToolCall({ type: 'write' });
     r = evalr.evaluate();
+    expect(r.verifyRequired).toBeUndefined();
     expect(r.shouldResume).toBe(false);
     expect(r.state).toBe(State.FAILED);
   });
@@ -254,11 +262,11 @@ describe('DefenseEvaluator', () => {
   it('resetTurn clears the lifecycle for a fresh prompt turn', () => {
     const evalr = new DefenseEvaluator({ maxResumes: 1 });
     evalr.recordToolCall({ type: 'write' });
-    expect(evalr.evaluate().shouldResume).toBe(true);
+    expect(evalr.evaluate().verifyRequired).toBe(true);
     evalr.resetTurn();
     evalr.recordToolCall({ type: 'write' });
-    // Fresh turn → can resume again (cap was reset).
-    expect(evalr.evaluate().shouldResume).toBe(true);
+    // Fresh turn → verification budget is reset again.
+    expect(evalr.evaluate().verifyRequired).toBe(true);
   });
 });
 

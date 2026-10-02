@@ -53,7 +53,7 @@ describe('PiEventAdapter — defense-resume held window (2026-10-01 two-reply in
     );
     const tc = textCompletes(events);
     expect(tc).toHaveLength(1);
-    expect(tc[0].isIntermediate).toBe(false);
+    expect(tc[0]!.isIntermediate).toBe(false);
   });
 
   it('resumed verification-delivery reply emits intermediate when NO tool work happened in the window', () => {
@@ -74,9 +74,9 @@ describe('PiEventAdapter — defense-resume held window (2026-10-01 two-reply in
     );
     const tc = textCompletes(events);
     expect(tc).toHaveLength(1);
-    expect(tc[0].text).toBe('状态复查完毕（验证交付）');
+    expect(tc[0]!.text).toBe('状态复查完毕（验证交付）');
     // A redundant re-delivery is a process-block step, NOT a second reply card.
-    expect(tc[0].isIntermediate).toBe(true);
+    expect(tc[0]!.isIntermediate).toBe(true);
   });
 
   it('resumed continuation reply stays a normal reply card when the model did NEW tool work', () => {
@@ -105,7 +105,7 @@ describe('PiEventAdapter — defense-resume held window (2026-10-01 two-reply in
     );
     const tc = textCompletes(events);
     expect(tc).toHaveLength(1);
-    expect(tc[0].isIntermediate).toBe(false);
+    expect(tc[0]!.isIntermediate).toBe(false);
   });
 
   it('final agent_end (no flag) clears the hold — later replies are normal finals', () => {
@@ -124,7 +124,7 @@ describe('PiEventAdapter — defense-resume held window (2026-10-01 two-reply in
     );
     const tc = textCompletes(events);
     expect(tc).toHaveLength(1);
-    expect(tc[0].isIntermediate).toBe(false);
+    expect(tc[0]!.isIntermediate).toBe(false);
   });
 
   it('toolUse replies stay intermediate with or without a hold', () => {
@@ -141,7 +141,7 @@ describe('PiEventAdapter — defense-resume held window (2026-10-01 two-reply in
     );
     const tc = textCompletes(events);
     expect(tc).toHaveLength(1);
-    expect(tc[0].isIntermediate).toBe(true);
+    expect(tc[0]!.isIntermediate).toBe(true);
   });
 
 });

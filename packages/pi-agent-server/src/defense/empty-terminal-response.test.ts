@@ -180,12 +180,13 @@ describe('empty terminal response defense (2026-08-22 incidents)', () => {
     expect(result.shouldResume).toBe(false);
   });
 
-  it('write-without-readback still resumes independently of the empty-response signal', () => {
+  it('write-without-readback routes to the verification class independently of the empty-response signal (2026-10-02)', () => {
     const e = new DefenseEvaluator({ enabled: true });
     e.recordToolCall({ type: 'bash', command: 'rm /tmp/f.txt' }); // bash:write per WRITE_CMDS
     const result = scan(e, [{ role: 'assistant', content: [{ type: 'text', text: 'done writing' }], stopReason: 'stop', usage: { output: 5 } }]);
-    expect(result.shouldResume).toBe(true);
-    expect(result.resumeMessage).not.toContain('EMPTY response'); // different reason branch
+    expect(result.shouldResume).toBe(false);
+    expect(result.verifyRequired).toBe(true);
+    expect(result.verifyReason).toBe('write-without-readback'); // different branch, not the EMPTY signal
   });
 });
 

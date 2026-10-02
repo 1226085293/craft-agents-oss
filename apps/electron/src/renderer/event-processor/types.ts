@@ -254,7 +254,7 @@ export interface StatusEvent {
   type: 'status'
   sessionId: string
   message: string
-  statusType?: 'compacting'
+  statusType?: 'compacting' | 'verification' | 'verification_passed' | 'verification_failed'
   /** Timestamp from main process for consistent ordering */
   timestamp?: number
 }
@@ -266,10 +266,12 @@ export interface InfoEvent {
   type: 'info'
   sessionId: string
   message: string
-  statusType?: 'compaction_complete'
+  statusType?: 'compaction_complete' | 'verification_passed' | 'verification_failed'
   level?: 'info' | 'warning' | 'error' | 'success'
   /** Timestamp from main process for consistent ordering */
   timestamp?: number
+  /** Verified final reply to replay as THE final bubble (verification_passed) */
+  finalText?: string
 }
 
 /**

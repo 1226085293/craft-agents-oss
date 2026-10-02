@@ -590,6 +590,26 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
       continue  // Don't create a separate system turn
     }
 
+    // Info messages with verification_passed/failed (2026-10-02 redesign)
+    // update the pending 'verification' status step; the replayed final
+    // reply arrives as its own assistant message and becomes the response.
+    if (message.role === 'info' && (message.statusType === 'verification_passed' || message.statusType === 'verification_failed')) {
+      if (currentTurn) {
+        const statusIdx = currentTurn.activities.findIndex(
+          a => a.type === 'status' && a.statusType === 'verification'
+        )
+        const existingActivity = currentTurn.activities[statusIdx]
+        if (statusIdx !== -1 && existingActivity) {
+          currentTurn.activities[statusIdx] = {
+            ...existingActivity,
+            status: message.statusType === 'verification_passed' ? 'completed' : 'error',
+            content: message.content,
+          }
+        }
+      }
+      continue  // Don't create a separate system turn
+    }
+
     // Error/info/warning messages are standalone
     if (message.role === 'error' || message.role === 'info' || message.role === 'warning') {
       // Flush current turn first (mark as interrupted if info message)

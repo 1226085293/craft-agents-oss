@@ -159,7 +159,7 @@ interface InitMessage {
    * first turn is unbounded (stall detection bounds runaway turns).
    * Omitted fields fall back to SessionLifecycle defaults.
    */
-  defenseGuardrails?: { maxResumes?: number; maxIterations?: number; maxDurationMs?: number };
+  defenseGuardrails?: { maxResumes?: number; maxIterations?: number; maxDurationMs?: number; verifyMinSteps?: number; verifyMinDurationMs?: number };
 }
 
 interface RuntimeConfigUpdateMessage {
@@ -291,6 +291,23 @@ interface OutboundError { type: 'error'; message: string; code?: string; id?: st
 /** Defense layer feedback: whether the queued followUp() resume materialized. */
 interface OutboundDefenseResumeStatus { type: 'defense_resume_status'; resumed: boolean }
 
+/**
+ * Defense layer feedback (2026-10-02 user-approved redesign): the result of
+ * the program-side verification check on a verification-class turn.
+ * - passed=true  → the captured final text was judged a valid answer;
+ *   the UI replays `finalText` as the SINGLE final reply (no second LLM bubble).
+ * - passed=false → verification failed (or the check itself errored); the
+ *   main process should NOT render the candidate; the turn instead follows
+ *   up so the LLM continues (existing resume flow).
+ * `failReason` explains why (judge output / infra failure).
+ */
+interface OutboundVerificationResult {
+  type: 'verification_result';
+  passed: boolean;
+  finalText?: string;
+  failReason?: string;
+}
+
 type OutboundMessage =
   | OutboundReady
   | OutboundEvent
@@ -306,6 +323,7 @@ type OutboundMessage =
   | OutboundSwitchConnectionResult
   | OutboundSessionIdUpdate
   | OutboundDefenseResumeStatus
+  | OutboundVerificationResult
   | OutboundError;
 
 // ============================================================
@@ -451,7 +469,9 @@ function defenseReset(): void {
     defenseEvaluator = new DefenseEvaluator({
       enabled: true,
       cwd: resolvedCwd(),
-      ...(guardrails ? { maxResumes: guardrails.maxResumes, maxIterations: guardrails.maxIterations, maxDurationMs: guardrails.maxDurationMs } : {}),
+      ...(guardrails
+        ? { maxResumes: guardrails.maxResumes, maxIterations: guardrails.maxIterations, maxDurationMs: guardrails.maxDurationMs, verifyMinSteps: guardrails.verifyMinSteps, verifyMinDurationMs: guardrails.verifyMinDurationMs }
+        : {}),
     });
     debugLog(`[defense] Enabled — DefenseEvaluator initialized (guardrails=${JSON.stringify(guardrails ?? {})})`);
   } else {
@@ -495,7 +515,9 @@ const AUTH_HANDOFF_TOOLS = new Set([
   'source_microsoft_oauth_trigger',
 ]);
 
-function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boolean; resumeMessage?: string } | null {
+function evaluateDefensePostStop(endMessages?: unknown[]):
+  | { shouldResume: boolean; resumeMessage?: string; verifyRequired?: boolean; verifyReason?: string; finalText?: string }
+  | null {
   if (!defenseEvaluator) return null;
 
   // Silent-stop detection: scan ALL assistant messages of the run. A long
@@ -511,11 +533,11 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
     stallAborted?: boolean;
   } | undefined;
   let stallKillThisRun = false;
+  let lastAssistant: { content?: unknown; stopReason?: string; usage?: { output?: number } } | null = null;
   if (Array.isArray(endMessages)) {
     let anyText = false;
     let aborted = false;
     let authHandoff = false;
-    let lastAssistant: { content?: unknown; stopReason?: string; usage?: { output?: number } } | null = null;
     for (const raw of endMessages) {
       const m = raw as {
         role?: string;
@@ -648,10 +670,24 @@ function evaluateDefensePostStop(endMessages?: unknown[]): { shouldResume: boole
     const result = defenseEvaluator.evaluate(runOutput);
     debugLog(
       `[defense] Post-stop result: state=${result.state} evaluated=${result.evaluated} shouldResume=${result.shouldResume}` +
+        ` verifyRequired=${result.verifyRequired ?? false}${result.verifyReason ? ` verifyReason=${result.verifyReason}` : ''}` +
         (result.reason ? ` reason=${result.reason}` : ''),
     );
     if (result.shouldResume && result.resumeMessage) {
       return { shouldResume: true, resumeMessage: result.resumeMessage };
+    }
+    if (result.verifyRequired) {
+      // Verification-class (2026-10-02 user-approved redesign): capture the
+      // final assistant text — this is the candidate answer the verification
+      // LLM judges, and the exact text the program REPLAYS as the single final
+      // reply when verification passes (no second LLM bubble, no followUp).
+      return {
+        shouldResume: false,
+        verifyRequired: true,
+        verifyReason: result.verifyReason,
+        resumeMessage: result.resumeMessage,
+        finalText: lastAssistant ? extractAssistantText(lastAssistant.content) : undefined,
+      };
     }
     return { shouldResume: false };
   } catch (error) {
@@ -689,6 +725,72 @@ function queueDefenseResume(session: AgentSession, resumeMessage: string): void 
       debugLog(`[defense] Resume followUp failed: ${error instanceof Error ? error.message : String(error)}`);
       send({ type: 'defense_resume_status', resumed: false });
     });
+}
+
+/**
+ * Program-side verification for verification-class turns (2026-10-02
+ * user-approved redesign). Runs ONE lightweight LLM check on whether the
+ * captured final reply is a valid answer to the user's message:
+ *
+ * - PASS → send `verification_result { passed:true, finalText }`. The main
+ *   process replays finalText as THE final reply — no second LLM bubble, no
+ *   followUp; the turn ends here.
+ * - FAIL or any infra error → conservative fallback: send
+ *   `verification_result { passed:false }` and queue the followUp, so the LLM
+ *   continues/repairs (identical to the pre-redesign behavior).
+ *
+ * Fire-and-forget (never blocks the SDK's event pipeline); the agent_end
+ * that triggered it was already forwarded with `defenseVerificationPending`
+ * so the main process holds its event queue until this result arrives.
+ */
+async function doVerificationCheck(
+  session: AgentSession,
+  opts: { finalText: string; verifyReason?: string; resumeMessage?: string },
+): Promise<void> {
+  const { finalText, verifyReason } = opts;
+  // No captured final text -> nothing to verify -> follow up (LLM continues).
+  if (!finalText.trim()) {
+    debugLog('[defense] verification: no final text captured — falling back to resume');
+    send({ type: 'verification_result', passed: false, failReason: 'no-final-text' });
+    if (opts.resumeMessage) queueDefenseResume(session, opts.resumeMessage);
+    return;
+  }
+
+  // Slice the candidate: verification only needs enough context to judge
+  // correspondence, not the whole reply. 6K chars is generous for a
+  // delivery check while keeping the ephemeral query cheap.
+  const candidate = finalText.slice(0, 6000);
+  const userMsg = (currentUserMessage || '').slice(0, 2000);
+  let verdict: string | null = null;
+  try {
+    verdict = await runMiniCompletion(
+      `[Defense verification] Judge whether the assistant's FINAL REPLY is a valid, complete answer to the USER'S MESSAGE. This judgment gates program-side verification delivery — be fair: any reasonably complete answer (including a "done, here's what I did" summary with the key results) PASSES. Only fail when the reply is missing, off-topic, a clear refusal, factually empty, or stops mid-sentence.
+
+USER'S MESSAGE:
+<user>
+${userMsg}
+</user>
+
+FINAL REPLY (assistant, last message in the turn):
+<reply>
+${candidate}
+</reply>
+
+Answer with EXACTLY one word: PASS or FAIL.`);
+  } catch (error) {
+    debugLog(`[defense] verification LLM threw: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const ok = verdict != null && /^FAIL/i.test(verdict.trim()) === false;
+  if (ok) {
+    debugLog(`[defense] verification PASSED (${verifyReason ?? 'none'}): replaying ${finalText.length} chars`);
+    send({ type: 'verification_result', passed: true, finalText });
+    return;
+  }
+
+  debugLog(`[defense] verification FAILED${verdict ? ` (judge said: ${verdict.trim().slice(0, 120)})` : ' (judge unavailable)'} (${verifyReason ?? 'none'}) — falling back to follow-up`);
+  send({ type: 'verification_result', passed: false, failReason: verdict?.trim().slice(0, 200) || 'judge-unavailable' });
+  if (opts.resumeMessage) queueDefenseResume(session, opts.resumeMessage);
 }
 
 // ============================================================
@@ -2106,12 +2208,33 @@ function handleSessionEvent(event: AgentSessionEvent): void {
   ) {
     const defenseResult = evaluateDefensePostStop((event as { messages?: unknown[] }).messages);
     if (defenseResult) {
-      forwardedEvent = {
-        ...(event as Record<string, unknown>),
-        defenseResumePending: defenseResult.shouldResume,
-      } as unknown as OutboundAgentEvent;
-      if (defenseResult.shouldResume && defenseResult.resumeMessage) {
-        queueDefenseResume(piSession, defenseResult.resumeMessage);
+      if (defenseResult.verifyRequired) {
+        // Verification-class (2026-10-02 user-approved redesign): the turn
+        // did NOT stop on a fault — it either wrote without read-back or hit
+        // the forced long-turn threshold. The captured final reply is a
+        // CANDIDATE answer, not a confirmed delivery. Hold the event queue
+        // (the verification result arrives async) and run the program-side
+        // verification check. PASS → replay the captured final text via
+        // verification_result (no second LLM bubble); FAIL → follow up so
+        // the LLM continues；exception → fall back to the followUp path.
+        forwardedEvent = {
+          ...(event as Record<string, unknown>),
+          defenseVerificationPending: true,
+        } as unknown as OutboundAgentEvent;
+        void doVerificationCheck(piSession, {
+          finalText: defenseResult.finalText ?? '',
+          verifyReason: defenseResult.verifyReason,
+          resumeMessage: defenseResult.resumeMessage,
+        });
+        debugLog(`[defense] agent_end: verification-class triggered (${defenseResult.verifyReason ?? 'unknown'}, finalText=${(defenseResult.finalText ?? '').length} chars)`);
+      } else {
+        forwardedEvent = {
+          ...(event as Record<string, unknown>),
+          defenseResumePending: defenseResult.shouldResume,
+        } as unknown as OutboundAgentEvent;
+        if (defenseResult.shouldResume && defenseResult.resumeMessage) {
+          queueDefenseResume(piSession, defenseResult.resumeMessage);
+        }
       }
     }
   }
@@ -2136,6 +2259,7 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     piSession &&
     !(event as { willRetry?: boolean }).willRetry &&
     !(forwardedEvent as { defenseResumePending?: boolean }).defenseResumePending &&
+    !(forwardedEvent as { defenseVerificationPending?: boolean }).defenseVerificationPending &&
     typeof (piSession as unknown as { pendingMessageCount?: number }).pendingMessageCount === 'number' &&
     (piSession as unknown as { pendingMessageCount: number }).pendingMessageCount > 0
   ) {

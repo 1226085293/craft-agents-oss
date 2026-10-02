@@ -89,13 +89,18 @@ describe('complexityScore — bash verification counts as read-back', () => {
     expect(result.shouldResume).toBe(true);
   });
 
-  it('verify-grade bash command that FAILED does not count', () => {
+  it('verify-grade bash command that FAILED does not count (write stays unverified → verification class, 2026-10-02)', () => {
     const e = new DefenseEvaluator({ enabled: true });
     e.recordToolCall({ type: 'write' });
     e.recordToolCall({ type: 'bash', command: 'git status --short' });
     e.recordReadOutput(''); // empty output → ignored by recordReadOutput
     const result = e.evaluate(COMPLETE_ANSWER);
-    expect(result.shouldResume).toBe(true);
+    // Unverified write no longer triggers a blind resume — it routes to the
+    // program-side verification (LLM judges the final reply; only a FAIL
+    // reverts to the resume/follow-up path).
+    expect(result.shouldResume).toBe(false);
+    expect(result.verifyRequired).toBe(true);
+    expect(result.verifyReason).toBe('write-without-readback');
   });
 });
 

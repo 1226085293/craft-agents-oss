@@ -88,7 +88,7 @@ export interface StoredConfig {
   defenseEnabled?: boolean;
   // Resume-chain budget for the defense. Caps bound RESUME LOOPS only —
   // first-turn monitoring is unbounded (stall detection bounds it).
-  defenseGuardrails?: { maxResumes?: number; maxIterations?: number; maxDurationMs?: number };
+  defenseGuardrails?: { maxResumes?: number; maxIterations?: number; maxDurationMs?: number; verifyMinSteps?: number; verifyMinDurationMs?: number };
   // Network proxy
   networkProxy?: import('./types.ts').NetworkProxySettings;
   // Windows: path to Git Bash (bash.exe) for the SDK subprocess
@@ -600,27 +600,32 @@ export function setDefenseEnabled(enabled: boolean): void {
 /** Defaults for the resume-chain budget (see SessionLifecycle). */
 const DEFENSE_GUARDRAIL_DEFAULTS = { maxResumes: 3 };
 
+/** Default verification thresholds (user-approved 2026-10-02): steps >= 50 OR elapsed >= 5min. */
+const DEFENSE_VERIFY_DEFAULTS = { verifyMinSteps: 50, verifyMinDurationMs: 300_000 };
+
 /**
- * Get the anti early-stop defense resume-chain budget.
- * Only maxResumes is user-configurable today; iteration/duration caps stay
- * internal defaults (they bound pathological loops, not normal usage).
+ * Get the anti early-stop defense resume-chain budget and verification
+ * thresholds. maxResumes is user-configurable; verifyMinSteps/DurationMs
+ * gate the verification-class path (long turns / write-unverified turns).
  */
-export function getDefenseGuardrails(): { maxResumes: number; maxIterations?: number; maxDurationMs?: number } {
+export function getDefenseGuardrails(): { maxResumes: number; maxIterations?: number; maxDurationMs?: number; verifyMinSteps: number; verifyMinDurationMs: number } {
   const config = loadStoredConfig();
   const defaults = loadConfigDefaults();
   const stored = config?.defenseGuardrails
-    ?? (defaults.defaults as { defenseGuardrails?: { maxResumes?: number } }).defenseGuardrails
-    ?? DEFENSE_GUARDRAIL_DEFAULTS;
+    ?? (defaults.defaults as { defenseGuardrails?: { maxResumes?: number; verifyMinSteps?: number; verifyMinDurationMs?: number } }).defenseGuardrails
+    ?? { ...DEFENSE_GUARDRAIL_DEFAULTS, ...DEFENSE_VERIFY_DEFAULTS };
   return {
-    maxResumes: typeof stored.maxResumes === 'number' && stored.maxResumes >= 1 ? Math.floor(stored.maxResumes) : 3,
+    maxResumes: typeof stored.maxResumes === 'number' && stored.maxResumes >= 1 ? Math.floor(stored.maxResumes) : DEFENSE_GUARDRAIL_DEFAULTS.maxResumes,
+    verifyMinSteps: typeof stored.verifyMinSteps === 'number' && stored.verifyMinSteps >= 1 ? Math.floor(stored.verifyMinSteps) : DEFENSE_VERIFY_DEFAULTS.verifyMinSteps,
+    verifyMinDurationMs: typeof stored.verifyMinDurationMs === 'number' && stored.verifyMinDurationMs >= 1 ? Math.floor(stored.verifyMinDurationMs) : DEFENSE_VERIFY_DEFAULTS.verifyMinDurationMs,
   };
 }
 
 /**
- * Set the anti early-stop defense resume-chain budget.
- * Persists to config; read by the Pi agent subprocess at init-time.
+ * Set the anti early-stop defense resume-chain budget and verification
+ * thresholds. Persists to config; read by the Pi agent subprocess at init-time.
  */
-export function setDefenseGuardrails(guardrails: { maxResumes?: number }): void {
+export function setDefenseGuardrails(guardrails: { maxResumes?: number; verifyMinSteps?: number; verifyMinDurationMs?: number }): void {
   const config = loadStoredConfig();
   if (!config) return;
   config.defenseGuardrails = {
@@ -630,6 +635,7 @@ export function setDefenseGuardrails(guardrails: { maxResumes?: number }): void 
   };
   saveConfig(config);
 }
+
 
 /**
  * Get persisted Git Bash path (Windows only).

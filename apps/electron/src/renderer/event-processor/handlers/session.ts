@@ -300,6 +300,56 @@ export function handleInfo(
     }
   }
 
+  // Verification result (2026-10-02 redesign): fold into the pending
+  // 'verification' status card and, on pass, append the replayed final reply
+  // as a REAL assistant bubble (the program-side replay — no second LLM turn).
+  if (event.statusType === 'verification_passed') {
+    const updatedMessages = session.messages.map(m =>
+      m.role === 'status' && m.statusType === 'verification'
+        ? { ...m, role: 'info' as const, content: event.message, statusType: 'verification_passed' as const, infoLevel: (event.level ?? 'success') as Message['infoLevel'] }
+        : m
+    )
+    const messagesWithReply = typeof event.finalText === 'string' && event.finalText.length > 0
+      ? [...updatedMessages, {
+          id: generateMessageId(),
+          role: 'assistant' as const,
+          content: event.finalText,
+          timestamp: event.timestamp ?? Date.now(),
+        }]
+      : updatedMessages
+    return {
+      state: {
+        session: {
+          ...session,
+          messages: messagesWithReply,
+          currentStatus: undefined,
+        },
+        streaming,
+      },
+      effects: [],
+    }
+  }
+  if (event.statusType === 'verification_failed') {
+    // Failed: mark the card as a warning — the LLM continues (followUp), so
+    // no bubble is replayed here; the continuation's reply renders normally.
+    const updatedMessages = session.messages.map(m =>
+      m.role === 'status' && m.statusType === 'verification'
+        ? { ...m, role: 'info' as const, content: event.message, statusType: 'verification_failed' as const, infoLevel: 'warning' as Message['infoLevel'] }
+        : m
+    )
+    return {
+      state: {
+        session: {
+          ...session,
+          messages: updatedMessages,
+          currentStatus: undefined,
+        },
+        streaming,
+      },
+      effects: [],
+    }
+  }
+
   // Otherwise, add as new info message
   const infoMessage: Message = {
     id: generateMessageId(),

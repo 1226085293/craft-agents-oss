@@ -1338,6 +1338,32 @@ export class PiAgent extends BaseAgent {
         }
         break;
 
+      case 'verification_result':
+        // Program-side verification (2026-10-02 redesign): the subprocess ran a
+        // lightweight LLM judge on the captured final reply.
+        // - passed → the reply is valid: finalize the held queue, replay the
+        //   captured finalText as THE final reply (no second LLM bubble).
+        // - failed → release the hold; the subprocess queued a followUp that
+        //   continues the SAME turn, so the resumed turn's FINAL agent_end
+        //   completes the queue normally.
+        if (msg.passed === true && typeof msg.finalText === 'string') {
+          this.debug(`Verification PASSED — replaying final reply (${msg.finalText.length} chars)`);
+          this.adapter.finalizeVerificationHeld(true);
+          this.eventQueue.enqueue({
+            type: 'info',
+            message: 'Verification passed — delivering final reply',
+            statusType: 'verification_passed',
+            finalText: msg.finalText,
+          });
+          this.eventQueue.complete();
+        } else {
+          this.debug(`Verification FAILED${typeof msg.failReason === 'string' ? `: ${msg.failReason}` : ''} — continuing turn (followUp)`);
+          this.adapter.finalizeVerificationHeld(false);
+          // Stay open: the followUp resume continues the turn; its final
+          // agent_end (no verification flag) completes the queue.
+        }
+        break;
+
       case 'defense_resume_status':
         // Defense layer feedback from the subprocess: whether the queued
         // followUp() resume actually materialized. The adapter holds the
@@ -1541,6 +1567,18 @@ export class PiAgent extends BaseAgent {
       this.eventQueue.enqueue(agentEvent);
     }
 
+    // Verification card (2026-10-02 redesign): surface a status card after an
+    // agent_end annotated with defenseVerificationPending so the turn shows
+    // "Verifying final reply…" as an activity card, followed by the replayed
+    // final bubble (or the follow-up continuation) after it.
+    if (eventType === 'agent_end' && (event as { defenseVerificationPending?: boolean }).defenseVerificationPending) {
+      this.eventQueue.enqueue({
+        type: 'status',
+        message: 'Verifying final reply…',
+        statusType: 'verification',
+      });
+    }
+
     // Turn-completion is now adapter-driven so overflow recovery AND defense
     // resumes can hold the queue open across the SDK's recovery sequence
     // (see PiEventAdapter overflow + defense-resume state). The adapter
@@ -1551,6 +1589,7 @@ export class PiAgent extends BaseAgent {
       eventType === 'agent_end',
       eventType === 'agent_end' ? (event.defenseResumePending as boolean | undefined) : undefined,
       eventType === 'agent_end' ? (event.queuedFollowUpPending as boolean | undefined) : undefined,
+      eventType === 'agent_end' ? (event.defenseVerificationPending as boolean | undefined) : undefined,
     )) {
       this.eventQueue.complete();
     }

@@ -202,7 +202,7 @@ describe('renderer — interrupted runs produce no response', () => {
     expect(sent.some(s => s.text.includes('tool-terminated note'))).toBe(true)
   })
 
-  it('error still reports the failure, and the trailing complete stays silent', async () => {
+  it('erroring: still reports the failure, and the trailing complete stays silent', async () => {
     const { adapter, sent } = createAdapter()
     const renderer = new Renderer()
     const binding = createBinding('progress')
@@ -213,5 +213,78 @@ describe('renderer — interrupted runs produce no response', () => {
 
     expect(sent.some(s => s.text.includes('❌') && s.text.includes('boom'))).toBe(true)
     expect(sent.some(s => s.text.includes(THINKING_TEXT))).toBe(false)
+  })
+
+  it('streaming: the posted partial thinking bubble is retracted on interrupt', async () => {
+    // With message editing, streaming mode posts the thinking text live — on
+    // interruption that partial is commentary, not a result, so it must be
+    // deleted instead of left in the chat looking like an answer.
+    const { adapter, sent, deleted } = createAdapter(/* messageEditing */ true)
+    const renderer = new Renderer()
+    const binding = createBinding('streaming')
+
+    await renderer.handle(event('text_delta', { delta: THINKING_TEXT }), binding, adapter)
+    // First delta posts the bubble; the edit timer needs a tick before sending
+    // a second delta, but for deletion we only need the ID recorded.
+    expect(sent.length).toBe(1)
+
+    await renderer.handle(event('interrupted'), binding, adapter)
+
+    // The partial that was streamed to the chat is retracted — an interrupted
+    // run's thinking text is not an answer to leave behind.
+    expect(deleted).toContain('sent-1')
+  })
+
+  it('streaming: an explicit Stop sends the desktop-parity interruption notice', async () => {
+    const { adapter, sent } = createAdapter()
+    const renderer = new Renderer()
+    const binding = createBinding('streaming')
+
+    await renderer.handle(event('text_delta', { delta: THINKING_TEXT }), binding, adapter)
+    await renderer.handle(
+      event('interrupted', { message: { content: 'Response interrupted' } }),
+      binding,
+      adapter
+    )
+
+    expect(sent.some(s => s.text.includes('Response interrupted'))).toBe(true)
+  })
+
+  it('progress: an explicit Stop sends the desktop-parity interruption notice after deleting the bubble', async () => {
+    const { adapter, sent, deleted } = createAdapter()
+    const renderer = new Renderer()
+    const binding = createBinding('progress')
+
+    await renderer.handle(event('tool_start', { toolName: 'Bash' }), binding, adapter)
+    await new Promise(resolve => setTimeout(resolve, 1500))
+    expect(sent.length).toBeGreaterThan(0)
+
+    await renderer.handle(
+      event('interrupted', { message: { content: 'Response interrupted' } }),
+      binding,
+      adapter
+    )
+
+    // The transient bubble is retracted…
+    expect(deleted.length).toBeGreaterThan(0)
+    // …and the user gets the interruption notice (desktop parity), not the
+    // run's thinking commentary.
+    expect(sent.some(s => s.text === '⏹ Response interrupted')).toBe(true)
+    expect(sent.filter(s => s.text.includes(THINKING_TEXT))).toEqual([])
+  })
+
+  it('progress: a silent redirect (no `message`) posts no interruption notice', async () => {
+    const { adapter, sent } = createAdapter()
+    const renderer = new Renderer()
+    const binding = createBinding('progress')
+
+    await renderer.handle(event('text_complete', { text: THINKING_TEXT, isIntermediate: true }), binding, adapter)
+    await renderer.handle(event('interrupted'), binding, adapter)
+    await renderer.handle(event('complete'), binding, adapter)
+
+    // Exactly nothing — the desktop shows nothing for a silent redirect either;
+    // the new turn's own bubble picks up from here.
+    expect(sent.filter(s => s.text.includes(THINKING_TEXT))).toEqual([])
+    expect(sent.some(s => s.text.includes('Response interrupted'))).toBe(false)
   })
 })

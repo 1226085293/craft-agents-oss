@@ -270,6 +270,17 @@ export class MessagingGateway {
       pendingStore: this.pendingStore,
       resolveConnection: opts.resolveConnection,
       resolveDefaultConnection: opts.resolveDefaultConnection,
+      onBeforeChannelBind: (args) => {
+        // Retire the binding being replaced on this channel before the new
+        // one is created, so a re-bind never leaves stale transient bubbles
+        // ("thinking…") in the chat.
+        this.retireChannelBindingForRebind(args.platform, args.channelId, args.threadId)
+      },
+      onChannelBound: (args) => {
+        // The session may be mid-run — surface its process bubble right away
+        // instead of waiting for the next session event.
+        this.surfaceSessionToChannel(args.sessionId, args.platform, args.channelId, args.threadId)
+      },
     }
 
     this.commands = new Commands(
@@ -855,6 +866,66 @@ export class MessagingGateway {
   // Button handling
   // -------------------------------------------------------------------------
 
+  /**
+   * Before a channel is (re)bound, retire the binding being evicted: delete
+   * any transient progress/streaming bubble it posted so a re-bind never
+   * leaves a stale "thinking…" message behind in the chat. Fire-and-forget.
+   */
+  private retireChannelBindingForRebind(
+    platform: PlatformType,
+    channelId: string,
+    threadId?: number,
+  ): void {
+    const previous = this.bindingStore.findByChannel(platform, channelId, threadId)
+    if (!previous) return
+    const adapter = this.adapters.get(previous.platform)
+    if (!adapter || !adapter.isConnected()) return
+    void this.renderer.removeBinding(previous, adapter)
+  }
+
+  /**
+   * After a session is bound to a channel, immediately surface the session's
+   * in-flight process ("💭 thinking…" bubble) when the agent is already
+   * running. Progress-mode only; other modes render their own output.
+   */
+  private surfaceSessionToChannel(
+    sessionId: string,
+    platform: PlatformType,
+    channelId: string,
+    threadId?: number,
+  ): void {
+    const binding = this.bindingStore.findByChannel(platform, channelId, threadId)
+    const adapter = this.adapters.get(platform)
+    if (!binding || binding.sessionId !== sessionId) return
+    if (!adapter || !adapter.isConnected()) return
+    void this.renderer.primeProgressForBinding(binding, adapter)
+  }
+
+  /**
+   * The bind picker is transient UI: once the user picks a session, remove
+   * the "Recent sessions:" message that held the keyboard (or at least
+   * clear the inline buttons when deletion is unavailable/denied).
+   */
+  private async dismissBindPicker(
+    adapter: PlatformAdapter,
+    press: ButtonPress,
+  ): Promise<void> {
+    if (!press.messageId) return
+    const opts = press.threadId !== undefined ? { threadId: press.threadId } : {}
+    if (adapter.deleteMessage) {
+      try {
+        await adapter.deleteMessage(press.channelId, press.messageId, opts)
+        return
+      } catch {
+        // Fall through: the message may already be gone; at least clear the
+        // inline keyboard so the stale buttons can't be tapped again.
+      }
+    }
+    if (adapter.clearButtons) {
+      await adapter.clearButtons(press.channelId, press.messageId, opts).catch(() => {})
+    }
+  }
+
   private async handleButtonPress(platform: PlatformType, press: ButtonPress): Promise<void> {
     const adapter = this.adapters.get(platform)
     if (!adapter) return
@@ -880,6 +951,10 @@ export class MessagingGateway {
         return
       }
 
+      // Rebinding the same channel evicts the old binding: retire it first so
+      // its transient bubbles ("thinking…") are deleted rather than stranded.
+      this.retireChannelBindingForRebind(platform, press.channelId, press.threadId)
+
       this.bindingStore.bind(
         this.workspaceId,
         session.id,
@@ -890,11 +965,20 @@ export class MessagingGateway {
         press.threadId,
       )
 
+      // The "Recent sessions:" picker this press came from is transient —
+      // delete it (or at least its inline keyboard) so the chat doesn't keep
+      // a stale chooser around after the user already picked a session.
+      await this.dismissBindPicker(adapter, press)
+
       await adapter.sendText(
         press.channelId,
         `Bound to "${session.name || session.id}"`,
         pressOpts,
       )
+
+      // The bound session may be mid-run: post its process bubble immediately
+      // (desktop parity) instead of waiting for the next session event.
+      this.surfaceSessionToChannel(session.id, platform, press.channelId, press.threadId)
       return
     }
 

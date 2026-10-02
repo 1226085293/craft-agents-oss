@@ -38,12 +38,16 @@ interface FakeAdapter extends PlatformAdapter {
   fireButton: (press: ButtonPress) => Promise<void>
   fireMessage: (msg: IncomingMessage) => Promise<void>
   sent: string[]
+  deleted: string[]
+  cleared: string[]
 }
 
 function makeFakeAdapter(): FakeAdapter {
   let buttonHandler: ((press: ButtonPress) => Promise<void>) | null = null
   let messageHandler: ((msg: IncomingMessage) => Promise<void>) | null = null
   const sent: string[] = []
+  const deleted: string[] = []
+  const cleared: string[] = []
   const adapter = {
     platform: 'telegram' as const,
     capabilities: {
@@ -71,8 +75,16 @@ function makeFakeAdapter(): FakeAdapter {
     sendButtons: async () => ({ platform: 'telegram' as const, channelId: '', messageId: '0' }),
     sendTyping: async () => {},
     sendFile: async () => ({ platform: 'telegram' as const, channelId: '', messageId: '0' }),
+    deleteMessage: async (_channelId: string, messageId: string) => {
+      deleted.push(messageId)
+    },
+    clearButtons: async (_channelId: string, messageId: string) => {
+      cleared.push(messageId)
+    },
   } as unknown as FakeAdapter
   ;(adapter as { sent: string[] }).sent = sent
+  ;(adapter as { deleted: string[] }).deleted = deleted
+  ;(adapter as { cleared: string[] }).cleared = cleared
   ;(adapter as { fireButton: (press: ButtonPress) => Promise<void> }).fireButton = (press) =>
     buttonHandler!(press)
   ;(adapter as { fireMessage: (msg: IncomingMessage) => Promise<void> }).fireMessage = (msg) =>
@@ -321,5 +333,58 @@ describe('MessagingGateway button-press access gate', () => {
     // Gate blocks it before any level change; only the friendly rejection.
     expect(h.adapter.sent.some((s) => s.includes('Thinking level set to'))).toBe(false)
     expect(h.adapter.sent.some((s) => s.includes('private'))).toBe(true)
+  })
+
+  it('bind: press deletes the picker message the buttons were on', async () => {
+    const h = await makeHarness({
+      workspaceConfig: {
+        enabled: true,
+        platforms: {
+          telegram: {
+            enabled: true,
+            accessMode: 'owner-only',
+            owners: [{ userId: 'owner-1', addedAt: 0 }],
+          },
+        },
+      },
+    })
+    await h.adapter.fireButton(
+      buildPress({ buttonId: 'bind:sess-A', senderId: 'owner-1', messageId: 'picker-1' }),
+    )
+
+    // The "Recent sessions:" message the user picked from is transient — it
+    // must not stay around after a choice was made.
+    expect(h.adapter.deleted).toContain('picker-1')
+    expect(h.adapter.sent.some((s) => s.includes('Bound to'))).toBe(true)
+  })
+
+  it('bind: to an in-progress session posts its process bubble immediately', async () => {
+    const h = await makeHarness({
+      workspaceConfig: {
+        enabled: true,
+        platforms: {
+          telegram: {
+            enabled: true,
+            accessMode: 'owner-only',
+            owners: [{ userId: 'owner-1', addedAt: 0 }],
+          },
+        },
+      },
+    })
+    // The session is mid-run.
+    ;(h.sessionManager as unknown as { getSession: unknown }).getSession = async () => ({
+      id: 'sess-A',
+      name: 'Running',
+      isProcessing: true,
+      messages: [],
+    })
+
+    await h.adapter.fireButton(
+      buildPress({ buttonId: 'bind:sess-A', senderId: 'owner-1', messageId: 'picker-2' }),
+    )
+
+    // No further session event was needed: the thinking bubble is already up.
+    expect(h.adapter.sent.some((s) => s.includes('💭'))).toBe(true)
+    expect(h.adapter.deleted).toContain('picker-2')
   })
 })

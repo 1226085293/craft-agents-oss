@@ -113,12 +113,37 @@ export interface AccessControlDeps {
    */
   resolveConnection?: (connectionSlug: string) => { name?: string } | undefined
   /**
-   * Returns the workspace default connection (slug + display name + default
-   * model) at call time, or undefined when none is configured. Used by
+   * Returns the workspace default connection (slug + name + default model)
+   * at call time, or undefined when none is configured. Used by
    * `/status` to show what actually answers when a session's persisted
    * connection was deleted.
    */
   resolveDefaultConnection?: () => { slug: string; name?: string; defaultModel?: string } | undefined
+  /**
+   * Fired right before a `bindingStore.bind(...)` replaces an existing
+   * binding on the same channel (one channel → one session). The host uses
+   * it to retire the evicted binding — most importantly to delete any
+   * transient progress bubble it posted — before the new binding takes over,
+   * so a rebind never leaves a stale "thinking…" bubble behind.
+   */
+  onBeforeChannelBind?: (args: {
+    platform: PlatformType
+    channelId: string
+    threadId?: number
+  }) => void
+  /**
+   * Fired after a session is bound to a chat (from `/bind`, `/new`, or a
+   * pairing redeem). `isProcessing` lets the host immediately surface the
+   * session's in-flight process (e.g. post its "thinking…" bubble) instead
+   * of waiting for the next session event, matching the desktop mid-run view.
+   */
+  onChannelBound?: (args: {
+    sessionId: string
+    isProcessing: boolean
+    platform: PlatformType
+    channelId: string
+    threadId?: number
+  }) => void
 }
 
 /**
@@ -320,6 +345,11 @@ export class Commands {
     try {
       const session = await this.sessionManager.createSession(this.workspaceId, { name })
 
+      this.access.onBeforeChannelBind?.({
+        platform: adapter.platform,
+        channelId: msg.channelId,
+        threadId: msg.threadId,
+      })
       this.bindingStore.bind(
         this.workspaceId,
         session.id,
@@ -329,6 +359,13 @@ export class Commands {
         undefined,
         msg.threadId,
       )
+      this.access.onChannelBound?.({
+        sessionId: session.id,
+        isProcessing: session.isProcessing === true,
+        platform: adapter.platform,
+        channelId: msg.channelId,
+        threadId: msg.threadId,
+      })
 
       const displayName = session.name || session.id
       await adapter.sendText(
@@ -369,6 +406,11 @@ export class Commands {
         return
       }
 
+      this.access.onBeforeChannelBind?.({
+        platform: adapter.platform,
+        channelId: msg.channelId,
+        threadId: msg.threadId,
+      })
       this.bindingStore.bind(
         this.workspaceId,
         session.id,
@@ -378,6 +420,13 @@ export class Commands {
         undefined,
         msg.threadId,
       )
+      this.access.onChannelBound?.({
+        sessionId: session.id,
+        isProcessing: session.isProcessing === true,
+        platform: adapter.platform,
+        channelId: msg.channelId,
+        threadId: msg.threadId,
+      })
 
       this.log.info('chat bound to existing session', {
         event: 'chat_bound',
@@ -538,6 +587,11 @@ export class Commands {
       return
     }
 
+    this.access.onBeforeChannelBind?.({
+      platform: adapter.platform,
+      channelId: msg.channelId,
+      threadId: msg.threadId,
+    })
     this.bindingStore.bind(
       entry.workspaceId,
       entry.sessionId,
@@ -547,6 +601,13 @@ export class Commands {
       undefined,
       msg.threadId,
     )
+    this.access.onChannelBound?.({
+      sessionId: entry.sessionId,
+      isProcessing: session.isProcessing === true,
+      platform: adapter.platform,
+      channelId: msg.channelId,
+      threadId: msg.threadId,
+    })
 
     this.log.info('pairing code redeemed', {
       event: 'pairing_redeemed',

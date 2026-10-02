@@ -1117,11 +1117,37 @@ Approve in the desktop app to continue.`,
     state.processing = false
     this.cancelEditTimer(state)
     this.cancelPendingProgressBubble(state)
+
+    // Streaming mode is the only place a partial of the run's commentary was
+    // actually posted to the chat. That thinking text is NOT a result — an
+    // interrupted run has no answer — so retract the partial bubble instead
+    // of leaving the run's last "thinking" message sitting in the chat as
+    // if it were one.
+    if (state.streamingMessageId && adapter.capabilities.messageEditing) {
+      await this.tryDeleteMessage(adapter, binding, state.streamingMessageId)
+      state.streamingMessageId = null
+      state.streamingRetryPlaceholder = false
+      state.lastEditedLength = 0
+    }
+    state.textBuffer = ''
+    state.streamingTurnId = null
+
     await this.waitForProgressBubbleSend(state)
     const progressMessageId = state.progressMessageId
     if (progressMessageId) {
       await this.tryDeleteMessage(adapter, binding, progressMessageId)
       this.clearPersistedProgressMessage(binding)
+    }
+
+    // Desktop parity for an explicit user Stop: the desktop renders a
+    // "Response interrupted" info message when the interruption carries one
+    // (cancelProcessing with silent=false — the Stop button or a chat-side
+    // interrupt). A silent interrupt (mid-stream redirect / queued takeover)
+    // carries no `message`: the desktop does not show one either, and the new
+    // turn's own bubble starts instead.
+    const notice = (event.message as { content?: unknown } | undefined)?.content
+    if (typeof notice === 'string' && notice.trim()) {
+      await adapter.sendText(binding.channelId, `⏹ ${notice.trim()}`, bindingOpts(binding))
     }
   }
 
@@ -1234,14 +1260,55 @@ Approve in the desktop app to continue.`,
     throw lastError
   }
 
-  /** Clean up state for a removed binding. */
-  removeBinding(bindingId: string): void {
-    const state = this.states.get(bindingId)
+  /**
+   * Retire a binding that is being removed/replaced (channel re-bound to a
+   * different session, unbind, …). Unlike the in-memory-only cleanup, this
+   * also deletes the binding's posted transient bubbles from the chat — a
+   * discarded binding would otherwise leave a stale "💭 thinking…" behind
+   * that nothing will ever edit again (the binding that owned it is gone).
+   * Failures are non-fatal: the bubble may already be deleted.
+   */
+  async removeBinding(binding: ChannelBinding, adapter: PlatformAdapter): Promise<void> {
+    const state = this.states.get(binding.id)
+    // A crash/restart between bubble post and the rebind leaves the bubble
+    // only in the persisted state file — hydrate it so cleanup reaches it.
+    const persisted = this.persistedProgressMessages[binding.id]
+    const progressMessageId = state?.progressMessageId ?? persisted?.messageId
+
     if (state) {
       this.cancelEditTimer(state)
       this.cancelPendingProgressBubble(state)
-      this.states.delete(bindingId)
+      if (state.streamingMessageId && adapter.capabilities.messageEditing) {
+        await this.tryDeleteMessage(adapter, binding, state.streamingMessageId)
+        state.streamingMessageId = null
+        state.streamingRetryPlaceholder = false
+        state.lastEditedLength = 0
+      }
+      state.textBuffer = ''
+      state.streamingTurnId = null
+      this.states.delete(binding.id)
     }
+    if (progressMessageId) {
+      await this.tryDeleteMessage(adapter, binding, progressMessageId)
+    }
+    this.clearPersistedProgressMessage(binding)
+  }
+
+  /**
+   * Show the run's process bubble the instant a session is bound to a chat
+   * while the agent is already working. Without this, a mid-run bind shows
+   * nothing until the next session event arrives (and the ~1.2s first-bubble
+   * delay on top) — the desktop instead starts the session's process card
+   * from its current live state. Progress mode only; streaming/final_only
+   * runs render their own output. No-op when the bubble already exists.
+   */
+  async primeProgressForBinding(binding: ChannelBinding, adapter: PlatformAdapter): Promise<void> {
+    if (!adapter.capabilities.messageEditing) return
+    const state = this.getState(binding.id)
+    const mode = resolveResponseMode(binding.config.responseMode, binding.config.streamResponses)
+    if (mode !== 'progress') return
+    if (state.progressMessageId || state.progressTimer || state.progressSendPromise) return
+    await this.postProgressBubble(state, binding, adapter, THINKING_LABEL)
   }
 }
 

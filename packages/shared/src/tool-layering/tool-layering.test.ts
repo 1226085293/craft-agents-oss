@@ -188,6 +188,13 @@ describe('assembler', () => {
     expect(a.topLevel.length).toBe(1 + metas + 1);
     expect(a.topLevel[0]!.name).toBe(SESSION_PREFIX + 'get_session_info');
     expect(a.topLevel.some((t) => t.name === SESSION_PREFIX + 'call_tool')).toBe(true);
+    // meta tools must carry well-formed schemas — empty `{}` is rejected by
+    // strict providers (code 11129 invalid_function_parameters)
+    for (const meta of a.metaTools) {
+      expect((meta.inputSchema as { type?: string }).type).toBe('object');
+    }
+    const callDef = a.topLevel.find((t) => t.name === SESSION_PREFIX + 'call_tool')!;
+    expect((callDef.inputSchema as { type?: string }).type).toBe('object');
     // registry unchanged — every tool reachable
     expect(a.registry.size).toBe(ALL_TOOLS.length + 1);
     const entry = a.registry.get(SESSION_PREFIX + 'get_page')!;

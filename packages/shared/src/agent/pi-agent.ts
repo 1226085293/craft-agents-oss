@@ -110,6 +110,7 @@ import {
   assembleTools,
   buildExpandPayload,
   nearestToolNames,
+  EMPTY_INPUT_SCHEMA,
   SESSION_PREFIX,
   CALL_TOOL_NAME,
   type AssembledTools,
@@ -931,7 +932,7 @@ export class PiAgent extends BaseAgent {
         const metaDef = {
           name: SESSION_PREFIX + 'tools_' + MISC_CATEGORY_NAME,
           description: miscCat.description,
-          inputSchema: {},
+          inputSchema: EMPTY_INPUT_SCHEMA,
         };
         this.send({ type: 'register_tools', tools: [metaDef] });
         tl.registeredMetaTools.add(metaDef.name);

@@ -25,6 +25,14 @@ export interface ToolDefLike {
   inputSchema: Record<string, unknown>;
 }
 
+/** Minimal legal JSON Schema for parameter-less tools (meta tools must carry
+ *  a well-formed schema — empty objects `{}` are rejected by strict model
+ *  providers with invalid_function_parameters (11129)). */
+export const EMPTY_INPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {},
+};
+
 /** One entry in the dispatch registry. */
 export interface RegistryEntry {
   /** Full registered name (with prefix), as the subprocess sees it. */
@@ -77,7 +85,7 @@ function defForMeta(cat: ToolCategory): ToolDefLike {
   return {
     name: metaToolFullName(cat.name),
     description: cat.description,
-    inputSchema: {},
+    inputSchema: EMPTY_INPUT_SCHEMA,
   };
 }
 

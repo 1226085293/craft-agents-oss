@@ -95,6 +95,18 @@ export interface MemoryExtractionInput {
 // Injection
 // ============================================================================
 
+/**
+ * Memory types that carry user intent (things to do / follow-up actions).
+ * These get a reserved quota in injection so instruction-like memories are
+ * not crowded out by high-scoring background knowledge noise.
+ */
+export const BEHAVIORAL_MEMORY_TYPES: readonly MemoryType[] = ['preference', 'workflow', 'reminder'];
+
+/** True when a memory type represents user-intent behavior (vs background knowledge). */
+export function isBehavioralMemoryType(type: MemoryType): boolean {
+  return (BEHAVIORAL_MEMORY_TYPES as readonly string[]).includes(type);
+}
+
 /** Configuration for memory injection into a session */
 export interface MemoryInjectionConfig {
   /** Maximum number of memories to inject */
@@ -111,21 +123,40 @@ export interface MemoryInjectionConfig {
    * entry with zero topical match to the current conversation is never injected,
    * even if it is fresh or high-confidence. Set to 0 to disable the gate and
    * always inject up to `maxMemories` (previous behavior).
+   *
+   * Background knowledge memories (fact/context) use this gate; behavioral
+   * memories use {@link minBehavioralRelevanceScore} (lower, easier).
    */
   minRelevanceScore: number;
+  /**
+   * Minimum TOPICAL score for behavior-type memories (preference/workflow/
+   * reminder). Kept lower than `minRelevanceScore` so instruction-like
+   * memories are easier to recall even with fuzzy wording.
+   */
+  minBehavioralRelevanceScore: number;
+  /**
+   * Reserved seats for behavior-type memories inside the injection list.
+   * Guarantees at least this many workflow/preference/reminder memories when
+   * enough qualify, so high-scoring knowledge noise cannot occupy every slot.
+   */
+  behavioralQuota: number;
 }
 
 /** Default injection configuration */
 export const DEFAULT_MEMORY_INJECTION_CONFIG: MemoryInjectionConfig = {
-  maxMemories: 5,
+  maxMemories: 8,
   maxTokens: 1500,
   priorityTags: [],
   excludedTags: ['experimental', 'discarded'],
-  // A topical score of >= 2 means at least one keyword hit in content OR one
-  // keyword↔tag overlap (each +2); a priority tag alone contributes +5. This
-  // suppresses off-topic memories that would otherwise ride on the confidence/
-  // recency base floor into the top-N.
+  // A topical score of >= 2 means at least one keyword hit in content (or one
+  // keyword↔tag overlap, each +2); a priority tag alone contributes +5. Keeps
+  // off-topic knowledge from riding the confidence/recency floor into the top-N.
   minRelevanceScore: 2,
+  // A single keyword/tag hit is enough for user-intent memories (they should be
+  // easier to recall, especially with Chinese wording).
+  minBehavioralRelevanceScore: 1,
+  // Reserve 2 heads-up slots for behavior memories out of 8.
+  behavioralQuota: 2,
 };
 
 // ============================================================================

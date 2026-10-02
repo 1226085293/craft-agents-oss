@@ -31,6 +31,8 @@ export type {
 
 export {
   DEFAULT_MEMORY_INJECTION_CONFIG,
+  BEHAVIORAL_MEMORY_TYPES,
+  isBehavioralMemoryType,
 } from './types.ts';
 
 // Store
@@ -62,6 +64,8 @@ export {
   selectRelevantMemories,
   buildMemoryContext,
   extractContextKeywords,
+  extractWeightedKeywords,
+  type WeightedKeyword,
   formatMemoriesForPrompt,
   hasMemories,
   previewMemoryInjection,

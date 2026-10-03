@@ -36,6 +36,7 @@ import {
   createFindToolDefinition,
   createLsToolDefinition,
   resizeImage,
+  DefaultResourceLoader,
 } from '@earendil-works/pi-coding-agent';
 import type {
   AgentSession,
@@ -47,7 +48,7 @@ import type {
 
 // Pi AI types
 import { InMemoryCredentialStore, InMemoryModelsStore } from '@earendil-works/pi-ai';
-import type { TextContent as PiTextContent, ImageContent } from '@earendil-works/pi-ai';
+import type { TextContent as PiTextContent, ImageContent, AssistantMessage as PiAssistantMessage } from '@earendil-works/pi-ai';
 import { isContextOverflow } from '@earendil-works/pi-ai';
 
 // Pre-register the Bedrock provider module so the Pi SDK doesn't attempt a
@@ -74,6 +75,7 @@ import {
   CRAFT_PI_EPHEMERAL_QUERY_DEADLINE_MS,
   craftCompactionSettings,
   createCraftSettingsManager,
+  getCraftPiHttpIdleTimeoutMs,
 } from './session-settings.ts';
 import {
   EphemeralQueryCancelledError,
@@ -96,21 +98,34 @@ import {
 // Direct source imports from shared (bundled by bun build)
 import { handleLargeResponse, estimateTokens, tokenLimitFor } from '../../shared/src/utils/large-response.ts';
 import { getSessionPlansPath, getSessionPath } from '../../shared/src/sessions/storage.ts';
+import { loadLatestUserRequest, loadProgressSnapshot } from '../../shared/src/agent/progress-journal.ts';
 import { buildCallLlmRequest } from '../../shared/src/agent/llm-tool.ts';
 import type { LLMQueryRequest, LLMQueryResult } from '../../shared/src/agent/llm-tool.ts';
 import { PI_TOOL_NAME_MAP, THINKING_TO_PI } from '../../shared/src/agent/backend/pi/constants.ts';
+import { createCompactionProgressHeartbeat } from './compaction-progress.ts';
+import {
+  findLastCompactionRecord,
+  getCompactWaitTimeoutMs,
+  translateAlreadyCompacted,
+  waitForCompaction,
+} from './compaction-policy.ts';
 import { getDefaultSummarizationModel } from '../../shared/src/config/models.ts';
 import { createWebFetchTool } from './tools/web-fetch.ts';
 import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
 import { createSearchTool } from './tools/search/create-search-tool.ts';
 import { allowCraftMetadataProperties, normalizeUnderscorePrefixedArgs, stripCraftMetadata } from './craft-metadata-schema.ts';
+import { wrapMidTurnGuidance } from './steer-guidance.ts';
+import { scheduleQueuedFollowUpDrain, type DrainableSession } from './queued-followup-drain.ts';
 import { applySystemPromptOverride, applySystemPromptOverrideWithDefense } from './system-prompt-override.ts';
 import { adaptCredentialForPiSdk, type PiCredential } from './adapt-credential.ts';
-import { DefenseEvaluator, resolveDefenseEnabled } from './defense/index.ts';
-import { VERIFY_OUTPUT_CMDS } from './defense/complexity-score.ts';
-import { detectRepetitionLoop, extractAssistantText } from './defense/repetition-detector.ts';
-import { ToolLoopDetector, fingerprintToolCall, digestResult, isEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
+import { DefenseEvaluator, resolveDefenseEnabled, buildDefenseStopNotice } from './defense/index.ts';
+import { detectRepetitionLoop, extractAssistantText, selectVerificationCandidateText } from './defense/repetition-detector.ts';
+import { createDsmlSanitizerExtension } from './defense/dsml-sanitizer.ts';
+import { installDsmlReceiver } from './dsml-receiver.ts';
+import { drainQueuedFollowUp } from './defense/resume-followup.ts';
+import { ToolLoopDetector, fingerprintToolCall, digestResult, shouldRejectEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
+import { normalizeShellTimeout } from './shell-timeout.ts';
 import {
   TOOL_PAYLOAD_WARN_TOKENS,
   buildPromptSnippet,
@@ -207,6 +222,10 @@ interface SwitchConnectionMessage {
 type InboundMessage =
   | InitMessage
   | { type: 'prompt'; id: string; message: string; systemPrompt: string; images?: Array<{ type: 'image'; data: string; mimeType: string }> }
+  /** Re-run the model for the current (last-failed) turn WITHOUT appending a
+      new user message (unlike `prompt`). Driven by the main-process retry
+      ladder. */
+  | { type: 'retry' }
   | { type: 'register_tools'; tools: ProxyToolDef[] }
   | { type: 'tool_execute_response'; requestId: string; result: { content: string; isError: boolean } }
   | { type: 'pre_tool_use_response'; requestId: string; action: 'allow' | 'block' | 'modify'; input?: Record<string, unknown>; reason?: string }
@@ -276,6 +295,12 @@ interface OutboundCompactResult {
   success: boolean;
   result?: { summary: string; firstKeptEntryId: string; tokensBefore: number };
   errorMessage?: string;
+  /** Epoch ms when the subprocess started handling the compact request.
+   *  Lets the main process measure how late a dropped reply arrived. */
+  requestedAt?: number;
+  /** Set when a reply was synthesized from a compaction the subprocess waited
+   *  on (e.g. 'completed by the preceding compaction'). */
+  note?: string;
 }
 interface OutboundSetAutoCompactionResult {
   type: 'set_auto_compaction_result';
@@ -303,22 +328,39 @@ interface OutboundSessionIdUpdate { type: 'session_id_update'; sessionId: string
 interface OutboundError { type: 'error'; message: string; code?: string; id?: string }
 /** Defense layer feedback: whether the queued followUp() resume materialized. */
 interface OutboundDefenseResumeStatus { type: 'defense_resume_status'; resumed: boolean }
+/**
+ * System-initiated stop notice: a guardrail (busy-limit call cap, no-progress
+ * repeat streak) killed the turn instead of the user. The host should surface
+ * the reason to the UI and to any bound messaging channels — a silent stop
+ * with no assistant reply otherwise reads as a hung / broken session.
+ * - reason: stable machine key (e.g. 'busy_limit', 'no_progress')
+ * - message: user-facing explanation of WHY the turn was cut short
+ */
+interface OutboundSystemStopNotice { type: 'system_stop_notice'; reason: string; message: string }
 
 /**
  * Defense layer feedback (2026-10-02 user-approved redesign): the result of
  * the program-side verification check on a verification-class turn.
- * - passed=true  → the captured final text was judged a valid answer;
- *   the UI replays `finalText` as the SINGLE final reply (no second LLM bubble).
- * - passed=false → verification failed (or the check itself errored); the
- *   main process should NOT render the candidate; the turn instead follows
- *   up so the LLM continues (existing resume flow).
- * `failReason` explains why (judge output / infra failure).
+ * - passed=true, skipped=false → the captured final text was judged a valid
+ *   answer; the UI replays `finalText` as the SINGLE final reply (no second
+ *   LLM bubble).
+ * - passed=true, skipped=true → the judge was UNAVAILABLE (upstream 401 /
+ *   quota / timeout — an infrastructure fault, not a delivery problem).
+ *   Fail-open: the captured final text still replays as the final reply
+ *   (2026-10-05 fix: a down judge must not block delivery nor burn resume
+ *   cycles on a perfectly good reply).
+ * - passed=false → the judge actively said FAIL; the main process should NOT
+ *   render the candidate; the turn instead follows up so the LLM continues
+ *   (existing resume flow).
+ * `failReason` explains a rejection; `skipReason` explains a fail-open.
  */
 interface OutboundVerificationResult {
   type: 'verification_result';
   passed: boolean;
   finalText?: string;
   failReason?: string;
+  skipped?: boolean;
+  skipReason?: string;
 }
 
 type OutboundMessage =
@@ -336,6 +378,7 @@ type OutboundMessage =
   | OutboundSwitchConnectionResult
   | OutboundSessionIdUpdate
   | OutboundDefenseResumeStatus
+  | OutboundSystemStopNotice
   | OutboundVerificationResult
   | OutboundError;
 
@@ -344,6 +387,7 @@ type OutboundMessage =
 // ============================================================
 
 let piSession: AgentSession | null = null;
+let restoreDsmlReceiver: (() => void) | null = null;
 let piModelRegistry: PiModelRegistry | null = null;
 let moduleCredentialStore: InMemoryCredentialStore | null = null;
 // Cached runtime build shared by the main session and ephemeral queryLlm
@@ -381,10 +425,6 @@ const pendingToolExecutions = new Map<string, { resolve: (result: { content: str
 
 // Pending session MCP tool calls for completion detection
 const pendingSessionToolCalls = new Map<string, { toolName: string; arguments: Record<string, unknown> }>();
-// tool_execution_end carries no args — cache bash commands from
-// tool_execution_start so verification-grade output can be recognized at
-// end time (defense hasVerify read-back evidence).
-const pendingBashCommands = new Map<string, string>();
 // Layer 2b (busy-loop detection): tool-call fingerprints cached at the
 // PreToolUse choke point so tool_execution_end (which carries no args) can
 // complete the streak bookkeeping. Denied calls leave a stale entry —
@@ -487,7 +527,11 @@ function defenseReset(): void {
     const guardrails = initConfig?.defenseGuardrails;
     defenseEvaluator = new DefenseEvaluator({
       enabled: true,
-      cwd: resolvedCwd(),
+      // 2026-10-06 spec: empty terminal responses are model-layer transient
+      // faults — owned by the main-process RETRY LADDER (error event +
+      // strip-and-continue re-issue), not the defense followUp lane. Other
+      // fault classes (repetition/truncation/leaked tool-call) keep followUp.
+      ladderOwnsEmptyResponse: true,
       ...(guardrails
         ? { maxResumes: guardrails.maxResumes, maxIterations: guardrails.maxIterations, maxDurationMs: guardrails.maxDurationMs, verifyMinSteps: guardrails.verifyMinSteps, verifyMinDurationMs: guardrails.verifyMinDurationMs }
         : {}),
@@ -534,8 +578,13 @@ const AUTH_HANDOFF_TOOLS = new Set([
   'source_microsoft_oauth_trigger',
 ]);
 
+// Minimum visible-text length (chars) for an assistant message to qualify as
+// the verification candidate. A trailing one-line note ("...was a mistake,
+// ignore it") must not displace the real answer emitted earlier in the turn.
+const VERIFICATION_CANDIDATE_MIN_CHARS = 120;
+
 function evaluateDefensePostStop(endMessages?: unknown[]):
-  | { shouldResume: boolean; resumeMessage?: string; verifyRequired?: boolean; verifyReason?: string; finalText?: string }
+  | { shouldResume: boolean; resumeMessage?: string; verifyRequired?: boolean; verifyReason?: string; finalText?: string; stopNotice?: { reason: string; message: string }; emptyResponseOwned?: boolean }
   | null {
   if (!defenseEvaluator) return null;
 
@@ -549,6 +598,8 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     endsWithEmptyResponse: boolean;
     hasRepetitionLoop: boolean;
     truncatedFinal: boolean;
+    hasFinalText: boolean;
+    stopReason?: string;
     stallAborted?: boolean;
   } | undefined;
   let stallKillThisRun = false;
@@ -630,6 +681,11 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     // run-wide text presence must not mask a garbage terminal reply.
     const lastText = lastAssistant ? extractAssistantText(lastAssistant.content) : '';
     const hasRepetitionLoop = lastText.length > 0 && detectRepetitionLoop(lastText);
+    // Leaked tool-call markup detector removed (2026-10-06, user decision):
+    // the fault-class kill + terminal 'Automatic recovery unavailable' card
+    // were redundant — the session auto-continues on the next user message
+    // anyway. The DSML bridge (dsml-receiver/dsml-sanitizer) still executes
+    // leaked calls natively for the live channel.
     // Truncated-but-non-empty final (2026-10-01 incident): stopReason='length'
     // means the output hit the max_tokens cap. When the cut happens AFTER some
     // visible text was already emitted, endsWithEmptyResponse misses it (it
@@ -641,6 +697,10 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     const truncatedFinal = lastAssistant?.stopReason === 'length';
     runOutput = {
       hasVisibleText: anyText,
+      hasFinalText: !!lastAssistant
+        && (lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length')
+        && extractAssistantText(lastAssistant.content).trim().length > 0,
+      stopReason: lastAssistant?.stopReason,
       aborted,
       endsWithEmptyResponse,
       hasRepetitionLoop,
@@ -693,6 +753,13 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
         (result.reason ? ` reason=${result.reason}` : ''),
     );
     if (result.shouldResume && result.resumeMessage) {
+      if (result.emptyResponseOwned) {
+        // Ladder lane: the MAIN-PROCESS RETRY LADDER owns this recovery —
+        // no defense followUp is queued. The caller emits the error event
+        // that arms the ladder; its re-issue strips the empty assistant
+        // message and re-runs the SAME model step.
+        return { shouldResume: true, resumeMessage: result.resumeMessage, emptyResponseOwned: true };
+      }
       return { shouldResume: true, resumeMessage: result.resumeMessage };
     }
     if (result.verifyRequired) {
@@ -705,10 +772,10 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
         verifyRequired: true,
         verifyReason: result.verifyReason,
         resumeMessage: result.resumeMessage,
-        finalText: lastAssistant ? extractAssistantText(lastAssistant.content) : undefined,
+        finalText: selectVerificationCandidateText(endMessages, VERIFICATION_CANDIDATE_MIN_CHARS) || undefined,
       };
     }
-    return { shouldResume: false };
+    return { shouldResume: false, stopNotice: buildDefenseStopNotice(result) ?? undefined };
   } catch (error) {
     debugLog(`[defense] Post-stop evaluation threw: ${error instanceof Error ? error.message : String(error)}`);
     return null;
@@ -736,9 +803,20 @@ function queueDefenseResume(session: AgentSession, resumeMessage: string): void 
   // decide whether the turn recovered and must not be failed.
   defenseResumeQueued = true;
   session.followUp(resumeMessage)
-    .then(() => {
+    .then(async () => {
       debugLog('[defense] Resume message queued via followUp');
-      send({ type: 'defense_resume_status', resumed: true });
+      // Delivery guarantee (2026-10-04 incident, 261004-tall-nickel):
+      // the verification-FAIL fallback queues the followUp AFTER the async
+      // judge call, by which point the SDK's post-run loop has exited and
+      // nothing consumes the queue. When the session is idle, start the
+      // continuation explicitly so the resumed turn's events actually flow.
+      const drain = await drainQueuedFollowUp(session);
+      if (drain === 'explicit-continue') {
+        debugLog('[defense] Session idle — explicit agent.continue() drained the queued followUp');
+      } else if (drain === 'busy-will-drain') {
+        debugLog('[defense] Run started in the meantime — it will drain the queued followUp');
+      }
+      send({ type: 'defense_resume_status', resumed: drain !== 'failed' });
     })
     .catch((error) => {
       debugLog(`[defense] Resume followUp failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -754,7 +832,13 @@ function queueDefenseResume(session: AgentSession, resumeMessage: string): void 
  * - PASS → send `verification_result { passed:true, finalText }`. The main
  *   process replays finalText as THE final reply — no second LLM bubble, no
  *   followUp; the turn ends here.
- * - FAIL or any infra error → conservative fallback: send
+ * - judge UNAVAILABLE (upstream error / quota / timeout) → fail OPEN: send
+ *   `verification_result { passed:true, finalText, skipped:true }`. The
+ *   captured text was produced by the agent; a down judge is an
+ *   infrastructure fault and must not block delivery nor consume resume
+ *   cycles (2026-10-05 fix: 401 judge → follow-up → exhausted recovery →
+ *   false "stopped without a final response" guardrail notice).
+ * - judge FAIL (explicit verdict) → conservative fallback: send
  *   `verification_result { passed:false }` and queue the followUp, so the LLM
  *   continues/repairs (identical to the pre-redesign behavior).
  *
@@ -800,19 +884,29 @@ Answer with EXACTLY one word: PASS or FAIL.`);
     debugLog(`[defense] verification LLM threw: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  // Judge UNAVAILABLE (verdict is null — upstream error, quota, timeout, or
+  // an empty judge response): fail OPEN. The verification's job is to judge
+  // the reply's CONTENT; it must not gate delivery on whether the judge's own
+  // upstream happened to work. Deliver the captured final text as-is.
+  if (verdict == null) {
+    debugLog(`[defense] verification SKIPPED (judge unavailable) (${verifyReason ?? 'none'}) — failing open, delivering final text`);
+    send({ type: 'verification_result', passed: true, finalText, skipped: true, skipReason: 'judge-unavailable' });
+    return;
+  }
+
   // FAIL-safe parse: the prompt demands exactly one word (PASS/FAIL), but
   // models sometimes emit prose. Only an explicit leading "PASS" word passes;
   // anything else (prose, "The reply misses...", whitespace garbage) falls
   // back to the conservative resume path instead of delivering unverified.
-  const ok = verdict != null && /^PASS\b/i.test(verdict.trim());
+  const ok = /^PASS\b/i.test(verdict.trim());
   if (ok) {
     debugLog(`[defense] verification PASSED (${verifyReason ?? 'none'}): replaying ${finalText.length} chars`);
     send({ type: 'verification_result', passed: true, finalText });
     return;
   }
 
-  debugLog(`[defense] verification FAILED${verdict ? ` (judge said: ${verdict.trim().slice(0, 120)})` : ' (judge unavailable)'} (${verifyReason ?? 'none'}) — falling back to follow-up`);
-  send({ type: 'verification_result', passed: false, failReason: verdict?.trim().slice(0, 200) || 'judge-unavailable' });
+  debugLog(`[defense] verification FAILED (judge said: ${verdict.trim().slice(0, 120)}) (${verifyReason ?? 'none'}) — falling back to follow-up`);
+  send({ type: 'verification_result', passed: false, failReason: verdict.trim().slice(0, 200) });
   if (opts.resumeMessage) queueDefenseResume(session, opts.resumeMessage);
 }
 
@@ -1134,16 +1228,22 @@ async function createAuthenticatedRuntime(): Promise<{
 }
 
 /**
- * Cap the HTTP idle timeout at 2 min (Pi SDK default is 5 min) so a stalled
- * upstream response that never sends a byte can't hold a turn hostage.
- * Combined with the LiteLLM gateway's 45s request_timeout, the worst case for
- * a dead upstream is ~2-3 min instead of 10+ min.
+ * HTTP idle/request timeout for Pi sessions. Default 5 min (SDK default);
+ * overridable via CRAFT_PI_HTTP_IDLE_TIMEOUT_MS (0 = disabled).
+ *
+ * History: capped at 2 min to keep a byte-silent upstream from holding a turn
+ * hostage, but that cap killed legitimately slow requests — 261005-fresh-tulip
+ * (d4f0731 via uni-api, 700-message contexts) completed in ~115 s with 15–63 s
+ * time-to-first-token; completions clustered at exactly ~120 s − 5 s showed the
+ * client was cutting the stream right before the upstream finished, then the
+ * SDK's silent retry cascade (provider 2 × agent 4) produced zero forwarded
+ * events and tripped the 300 s turn-idle watchdog. Raised back to the SDK
+ * default; the unified retry ladder (pi-agent.ts) owns recovery now.
  *
  * The retry policy is deliberately NOT overridden here: `createCraftSettingsManager`
- * already injects the upstream-tuned policy from `session-settings.ts` (4 agent
- * retries with exponential backoff + 2 provider retries honouring `retry-after`).
- * Re-applying a `retry` block would replace that whole object and silently drop
- * the provider layer — plus downgrade 4 retries to 3.
+ * already injects the upstream-tuned policy from `session-settings.ts`.
+ * (With the unified ladder active, CRAFT_PI_RETRY_ENABLED=0 disables the SDK's
+ * own retries so the ladder is the single retry owner.)
  *
  * The compaction reserve is applied here rather than in `session-settings.ts`
  * because it is sized from the model's context window, which is only known
@@ -1154,12 +1254,13 @@ function applyPiResilienceSettings(session: AgentSession): void {
     const contextWindow = (session as unknown as { agent?: { state?: { model?: { contextWindow?: number } } } })
       ?.agent?.state?.model?.contextWindow;
     const compaction = craftCompactionSettings(contextWindow);
+    const httpIdleTimeoutMs = getCraftPiHttpIdleTimeoutMs();
     session.settingsManager.applyOverrides({
-      httpIdleTimeoutMs: 120_000,
+      httpIdleTimeoutMs,
       compaction,
     });
     debugLog(
-      `[resilience] Applied 2min http idle timeout and compaction reserve=${compaction.reserveTokens}` +
+      `[resilience] Applied ${Math.floor(httpIdleTimeoutMs / 1000)}s http idle timeout and compaction reserve=${compaction.reserveTokens}` +
         ` (contextWindow=${contextWindow ?? 'unknown'}) to Pi session`,
     );
   } catch (error) {
@@ -1167,9 +1268,39 @@ function applyPiResilienceSettings(session: AgentSession): void {
   }
 }
 
+let inFlightSessionCreation: Promise<AgentSession> | null = null;
+
 async function ensureSession(): Promise<AgentSession> {
   if (piSession) return piSession;
+  // Concurrency guard (2026-10-07, 261007-lean-bamboo): a `prompt` and an
+  // `ensure_session_ready` (branch-preflight handshake) can BOTH arrive
+  // before any session exists. Without this guard each caller creates its
+  // own AgentSession (the log showed two "Created Pi session" lines 1ms
+  // apart), the global piSession ends up pointing at the LAST one (empty),
+  // while the turn runs on the FIRST. Every subsequent steer/retry/drain
+  // command then hits the wrong session: the steer queues on the empty
+  // session, the retry ladder refuses with "transcript is empty", and the
+  // turn hangs on "Thinking..." until the 300s watchdog.
+  if (!inFlightSessionCreation) {
+    inFlightSessionCreation = createPiSession().finally(() => {
+      inFlightSessionCreation = null; // success → piSession set; failure → allow retry
+    });
+  }
+  return inFlightSessionCreation;
+}
+
+async function createPiSession(): Promise<AgentSession> {
   if (!initConfig) throw new Error('Cannot create session: init not received');
+
+  if (!restoreDsmlReceiver) {
+    restoreDsmlReceiver = installDsmlReceiver({
+      isLlmRequest: (url) => {
+        const path = url.toLowerCase().split(/[?#]/, 1)[0] ?? '';
+        return /\/(?:chat\/)?completions\/?$/.test(path);
+      },
+      debugLog,
+    });
+  }
 
   const cwd = resolvedCwd();
 
@@ -1213,9 +1344,11 @@ async function ensureSession(): Promise<AgentSession> {
   //     then `.has(name)` returns false for every string lookup → zero tools active.
   const builtinDefs = [
     createReadToolDefinition(cwd),
-    // Global default timeout: exec() only applies one when the model passes
-    // args.timeout; wrap local ops so every command gets a 300s ceiling unless
-    // overridden per-call (unit: seconds — the SDK multiplies by 1000).
+    // Shell timeout policy: the Pi SDK's bash `timeout` unit is SECONDS, but
+    // models routinely pass millisecond values (120000 intending 120 s → a
+    // ~33-hour ceiling that never fires; 2026-10-04 incident). Wrap local
+    // ops so every command gets a normalized, clamped ceiling via
+    // normalizeShellTimeout (default 300 s, hard cap 300 s).
     //
     // Windows UTF-8 prefix: every bash invocation gets its own hidden console
     // at the system OEM code page (GBK 936 on zh-CN, Shift-JIS on ja-JP, …).
@@ -1242,7 +1375,7 @@ async function ensureSession(): Promise<AgentSession> {
         const local = createLocalBashOperations({ shellPath: initConfig.shellPath });
         return {
           exec: (command, dir, opts) =>
-            local.exec(command, dir, { ...opts, timeout: opts.timeout ?? 300 }),
+            local.exec(command, dir, { ...opts, timeout: normalizeShellTimeout(opts.timeout) }),
         };
       })(),
     }),
@@ -1332,6 +1465,18 @@ async function ensureSession(): Promise<AgentSession> {
       sessionOptions.sessionManager = PiSessionManager.continueRecent(cwd, sessionDir);
     }
 
+    // Sanitize residual DSML text after the network receiver converts leaked
+    // content into native toolCall blocks. This extension never executes tools.
+    const resourceLoader = new DefaultResourceLoader({
+      cwd,
+      agentDir: sessionOptions.agentDir!,
+      settingsManager: sessionOptions.settingsManager,
+      extensionFactories: [
+        createDsmlSanitizerExtension({ debugLog }),
+      ],
+    });
+    await resourceLoader.reload();
+    sessionOptions.resourceLoader = resourceLoader;
   }
 
   // Set model if specified
@@ -1384,8 +1529,13 @@ async function ensureSession(): Promise<AgentSession> {
   // visible reply — even when context is below the SDK's shouldCompact threshold
   // (2026-08-28 incident: model died at ~112K of a 131072 window). Force a
   // compaction in that case so auto-resume has a smaller context to work with.
+  const progressSessionDir = initConfig.sessionPath;
   applyForcedCompactionPatch(session, {
     log: (m) => debugLog(m),
+    sessionJsonlPath: progressSessionDir ? join(progressSessionDir, 'session.jsonl') : undefined,
+    progressJsonlPath: progressSessionDir ? join(progressSessionDir, 'progress.jsonl') : undefined,
+    resolveCurrentUserRequest: () => (progressSessionDir ? loadLatestUserRequest(progressSessionDir) : undefined) || currentUserMessage,
+    resolveProgressSnapshot: () => progressSessionDir ? loadProgressSnapshot(progressSessionDir) : '',
     // Resolved per compaction, not captured now: the active model (and hence a
     // per-model budget override) can change mid-session.
     resolveContextTokenBudget: () =>
@@ -1463,7 +1613,9 @@ function makeErrorResult(message: string): AgentToolResult<any> {
  *   The instructive error result reaches the model's context (same surface
  *   PreToolUse permission blocks use), which is what weak models need to
  *   stop repeating.
- * - ABORT: repeated denies or a busy hard cap (500 calls / 60 min). The
+ * - ABORT: repeated denies or the busy call-count cap (500 calls, no
+ *   wall-clock cap — long legitimate turns must not be killed for taking
+ *   time). The
  *   whole turn is stopped with stall-abort attribution, so the post-stop
  *   defense still evaluates the stop rather than treating it as a user
  *   stop. The returned error result ends the current tool step; the
@@ -1490,6 +1642,12 @@ function applyToolLoopGuard(
       piSession.abort().catch((error) => debugLog(`Busy-abort failed: ${error instanceof Error ? error.message : String(error)}`));
     }
     debugLog(`[busy-loop] ${intervention.message}`);
+    // Tell the host why the turn is dying so the stop is never silent:
+    // the renderer shows the reason and bound channels get a notification.
+    const reason = intervention.message.includes('tool calls')
+      ? 'busy_limit'
+      : 'no_progress';
+    send({ type: 'system_stop_notice', reason, message: intervention.message });
     return makeErrorResult(intervention.message);
   }
   debugLog(`[busy-loop] deny x${intervention.repeats}: ${fingerprintToolCall(call).slice(0, 200)}`);
@@ -1608,7 +1766,7 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
     // P2 guard: empty-parameter calls on built-in tools fail upstream
     // validation with a cryptic error; give the model an instructive one
     // instead (proxy tools are exempt — their schemas may be empty).
-    if (isEmptyArgs(inputObj)) {
+    if (shouldRejectEmptyArgs(sdkToolName, inputObj)) {
       debugLog(`[empty-args] ${sdkToolName}`);
       return makeErrorResult(emptyArgsMessage(sdkToolName));
     }
@@ -1825,13 +1983,39 @@ async function queryLlm(
     const resolvedProvider = (resolved as any)?.provider;
     const isCompatible = resolvedProvider === authProvider || resolvedProvider === 'custom-endpoint';
     if (!resolved || !isCompatible || isDeniedMiniModelId(model, piAuthProvider)) {
+      // 2026-10-05 fix (session 261005-steady-horse): for custom-endpoint
+      // sessions, prefer the SESSION'S OWN model before anything else. It is
+      // registered under the 'custom-endpoint' provider with the connection's
+      // own API key, so it always resolves and never hits a foreign
+      // provider's credentials. The old chain walked straight to a built-in
+      // provider default (e.g. gpt-6-astra → the provider's OFFICIAL
+      // endpoint) which 401s when the user routes everything through a
+      // gateway — taking the judge permanently down with it.
+      let sessionFallback: string | undefined;
+      if (shouldPreferCustomEndpoint() && initConfig.model) {
+        const bareSessionModel = initConfig.model.startsWith('pi/')
+          ? initConfig.model.slice(3)
+          : initConfig.model;
+        const sessionResolved = resolvePiModel(
+          modelRegistry,
+          bareSessionModel,
+          authProvider,
+          shouldPreferCustomEndpoint(),
+        );
+        if (
+          (sessionResolved as any)?.provider === 'custom-endpoint'
+          && !isDeniedMiniModelId(bareSessionModel, piAuthProvider)
+        ) {
+          sessionFallback = bareSessionModel;
+        }
+      }
       // Anthropic: keep Haiku (the cheap/fast mini). For every other provider
       // Haiku is unresolvable, so walk PI_PREFERRED_DEFAULTS for a model that
       // actually works under the user's auth.
       const providerDefault = authProvider === 'anthropic'
         ? undefined
         : pickProviderAppropriateMiniModel(authProvider, modelRegistry, shouldPreferCustomEndpoint());
-      const fallback = providerDefault ?? getDefaultSummarizationModel();
+      const fallback = sessionFallback ?? providerDefault ?? getDefaultSummarizationModel();
       debugLog(`[queryLlm] Model ${bareModel} incompatible with ${authProvider} (resolved: ${resolvedProvider}), falling back to ${fallback}`);
       model = fallback;
     }
@@ -2122,9 +2306,46 @@ let userAbortRequested = false;
 // as a terminal prompt error).
 let defenseResumeQueued = false;
 
+// Bounded compaction heartbeat: while the Pi SDK runs a threshold/overflow
+// compaction the main stream is silent, so without these ticks the
+// PiAgent's turn-idle watchdog (300 s plain ceiling as of 2026-10-05; 120 s
+// before that) false-positived "stream stalled" for any compaction longer
+// than the cap (2026-10-04 incident). Each
+// tick is a main-process turn-progress event (watchdog-only — the adapter no
+// longer surfaces ticks as UI status, so the process block keeps a single
+// static "Compacting context..." row from compaction_start and the bottom
+// indicator's live per-second timer is the only elapsed-time display) and
+// the heartbeat self-stops at the shared capped deadline so a dead
+// compaction still trips the capped watchdog. See compaction-progress.ts.
+let compactionProgress: ReturnType<typeof createCompactionProgressHeartbeat> | null = null;
+
+function startCompactionProgress(): void {
+  stopCompactionProgress();
+  compactionProgress = createCompactionProgressHeartbeat({
+    emit: (payload) => {
+      debugLog(`[compaction-progress] heartbeat ${Math.round(payload.elapsedMs / 1000)}s`);
+      send({ type: 'event', event: payload as unknown as OutboundAgentEvent });
+    },
+  });
+  compactionProgress.start();
+}
+
+function stopCompactionProgress(): void {
+  compactionProgress?.stop();
+  compactionProgress = null;
+}
+
 
 function handleSessionEvent(event: AgentSessionEvent): void {
   let forwardedEvent: OutboundAgentEvent = event;
+
+  // Compaction heartbeat lifecycle (emits its own outbound events; the SDK
+  // compaction events themselves still flow through the normal forward below).
+  if (event.type === 'compaction_start') {
+    startCompactionProgress();
+  } else if (event.type === 'compaction_end') {
+    stopCompactionProgress();
+  }
 
   // Activity tracking for stall detection (see prompt timeout below):
   // ANY SDK event during a turn — stream deltas, tool start/end, message_end —
@@ -2181,6 +2402,31 @@ function handleSessionEvent(event: AgentSessionEvent): void {
             } as unknown as OutboundAgentEvent,
           });
         });
+      }
+
+      // Mid-turn follow-up continuation (2026-10-05 smooth-gorge double
+      // bubble): when the SDK's steering/followUp queues still hold messages
+      // at message_end, its `_runAgentPrompt` → `_handlePostAgentRun` will
+      // `agent.continue()` after agent_end and inject them into the SAME
+      // turn. This stop text is NOT the final reply — stamp the flag HERE
+      // (message_end). The agent_end-side pendingMessageCount check below
+      // can never fire: by the time agent_end is forwarded the queues have
+      // been drained by the continuation, so `pendingMessageCount` is 0.
+      if (
+        msg.stopReason !== 'toolUse' &&
+        msg.stopReason !== 'error' &&
+        msg.stopReason !== 'aborted' &&
+        (piSession as unknown as { pendingMessageCount: number }).pendingMessageCount > 0
+      ) {
+        forwardedEvent = {
+          ...(forwardedEvent as Record<string, unknown>),
+          assistantFollowUpPending: true,
+        } as unknown as OutboundAgentEvent;
+        debugLog(
+          `[defense] message_end annotated assistantFollowUpPending=true (pending=${
+            (piSession as unknown as { pendingMessageCount: number }).pendingMessageCount
+          })`,
+        );
       }
 
 
@@ -2241,17 +2487,14 @@ function handleSessionEvent(event: AgentSessionEvent): void {
 
     // Record the tool call for post-stop defense evaluation (L2).
     // Bash calls carry the command string (side-effect classification);
-    // read/write/edit carry a `path` arg.
+    // read/write/edit carry a `path` arg (fs-write attribution).
     const args = (event.args ?? {}) as Record<string, unknown>;
     defenseEvaluator?.recordToolCall({
       type: toolName.toLowerCase(),
       command: typeof args.command === 'string' ? args.command : undefined,
+      path: typeof args.path === 'string' ? args.path : undefined,
       output: args.output,
     });
-
-    if (toolName.toLowerCase() === 'bash' && typeof args.command === 'string') {
-      pendingBashCommands.set(event.toolCallId, args.command);
-    }
 
     if (toolMetadata) {
       forwardedEvent = {
@@ -2277,26 +2520,6 @@ function handleSessionEvent(event: AgentSessionEvent): void {
       });
     }
 
-    // Capture read-back output for defense verification (hasVerify).
-    // A non-error read result with textual output counts as a read-back.
-    // Bash output counts too when the command is verification-grade (git
-    // push/show/status, test/build runs): a turn that verifies its writes
-    // exclusively through bash must not be judged as "wrote but never read
-    // back" (2026-09-07 incident). tool_execution_end carries no args, so
-    // the command comes from the start-time cache.
-    if (!event.isError) {
-      const lowerToolName = event.toolName.toLowerCase();
-      const isReadTool = lowerToolName === 'read';
-      const bashCommand = lowerToolName === 'bash' ? pendingBashCommands.get(event.toolCallId) : undefined;
-      if (lowerToolName === 'bash') pendingBashCommands.delete(event.toolCallId);
-      const isVerifyBash = bashCommand != null && VERIFY_OUTPUT_CMDS.test(bashCommand);
-      if (isReadTool || isVerifyBash) {
-        const resultText = extractResultText(event.result);
-        if (resultText && defenseEvaluator) {
-          defenseEvaluator.recordReadOutput(resultText);
-        }
-      }
-    }
 
     // Layer 2b — busy-loop bookkeeping: complete the streak counter with
     // this call's result digest (identical result keeps the streak alive;
@@ -2349,32 +2572,69 @@ function handleSessionEvent(event: AgentSessionEvent): void {
         });
         debugLog(`[defense] agent_end: verification-class triggered (${defenseResult.verifyReason ?? 'unknown'}, finalText=${(defenseResult.finalText ?? '').length} chars)`);
       } else {
+        // Ladder lane (2026-10-06 spec): an empty terminal response is a
+        // model-layer transient fault owned by the MAIN-PROCESS RETRY LADDER.
+        // Emit an error event so the ladder arms; the ladder's re-issue
+        // arrives as a `retry` command and handleRetry() strips the empty
+        // assistant message and re-runs the SAME model step. No defense
+        // followUp — so defenseResumePending stays false and the main
+        // process holds its queue via the ladder, not the defense lane.
+        const emptyOwned = defenseResult.emptyResponseOwned === true;
         forwardedEvent = {
           ...(event as Record<string, unknown>),
-          defenseResumePending: defenseResult.shouldResume,
+          defenseResumePending: defenseResult.shouldResume && !emptyOwned,
         } as unknown as OutboundAgentEvent;
         if (defenseResult.shouldResume && defenseResult.resumeMessage) {
-          queueDefenseResume(piSession, defenseResult.resumeMessage);
+          if (emptyOwned) {
+            debugLog('[defense] Empty terminal response — routed to retry ladder (error event, no followUp)');
+            // Top-level `error` (not an agent event): the main process's
+            // subprocess-error path feeds it into the retry ladder
+            // (classifyRetryError → transient: no 4xx code in the message).
+            // No `code` field on purpose — an unrecognized typed code would
+            // render an ugly "ERROR" title in the terminal card; a plain
+            // message renders cleanly. The matching agent_end above has
+            // defenseResumePending=false, so the main process holds its
+            // queue via the ladder, not the defense lane.
+            send({
+              type: 'error',
+              message: 'The AI service returned an empty response (no visible content). This is usually a temporary upstream issue — retrying in the background.',
+            });
+          } else {
+            queueDefenseResume(piSession, defenseResult.resumeMessage);
+          }
+        }
+        if (defenseResult.stopNotice) {
+          // Surface WHY the turn ended (2026-10-04 polished-canyon: the
+          // state=failed stop closed the process block with no reason, unlike
+          // a manual stop which at least shows "Response interrupted").
+          // Sent BEFORE the forwarded agent_end so the main process enqueues
+          // the info event while its event queue is still open.
+          send({ type: 'system_stop_notice', reason: defenseResult.stopNotice.reason, message: defenseResult.stopNotice.message });
+          debugLog(`[defense] Stop notice queued: ${defenseResult.stopNotice.reason}`);
         }
       }
     }
   }
 
-  // Queued steering/followUp continuation (2026-09-06 golden-swamp incident):
-  // when the turn ends while steering/followUp messages are still queued, the
-  // SDK's _runAgentPrompt → _handlePostAgentRun() checks hasQueuedMessages()
-  // AFTER this agent_end and calls agent.continue() — a continuation turn
-  // with no flag of its own. Annotate the agent_end so the main process holds
-  // its event queue open; otherwise the continuation's events land in a
-  // closed iterator and are silently lost (UI freezes on the last
-  // intermediate while the subprocess keeps running until the stall watchdog
-  // kills it).
-  // Normal path: the agent loop drains steering inside the inner loop, so
-  // pendingMessageCount is 0 at agent_end and nothing is annotated.
-  // Defense-resume interplay: queueDefenseResume() above queues a followUp,
-  // making pendingMessageCount > 0 — but defenseResumePending already holds
-  // the queue, so the extra flag is harmless. Checking pendingMessageCount
-  // AFTER the defense branch keeps both flags consistent on the same event.
+  // Queued steering/followUp continuation (2026-09-06 golden-swamp incident;
+  // 2026-10-07 lean-bamboo correction): when the turn ends while
+  // steering/followUp messages are still queued, annotate the agent_end so
+  // the main process holds its event queue open; otherwise the drained
+  // continuation's events land in a closed iterator and are silently lost
+  // (UI freezes on the last intermediate until the stall watchdog).
+  // THE SDK DOES NOT DRAIN AFTER agent_end (the original design note
+  // assumed it would): it re-checks the queue only at model-round starts,
+  // so a steer queued mid-stream of the final round survives to agent_end
+  // with pending>0 and nothing moves — 261007-lean-bamboo hung on
+  // "Thinking..." with pending=1 until the 300s watchdog. We therefore
+  // schedule the drain ourselves (agent.continue(), same mechanism as
+  // handleRetry's drain path). The SDK's own post-stop auto-retry path
+  // (willRetry) and the defense-resume/verification paths are excluded
+  // above — they own their continuations. Defense-resume interplay:
+  // queueDefenseResume() queues a followUp (pendingMessageCount > 0) but
+  // defenseResumePending already holds the queue, so the extra flag is
+  // harmless. Checking pendingMessageCount AFTER the defense branch keeps
+  // both flags consistent on the same event.
   if (
     event.type === 'agent_end' &&
     piSession &&
@@ -2389,6 +2649,20 @@ function handleSessionEvent(event: AgentSessionEvent): void {
       queuedFollowUpPending: true,
     } as unknown as OutboundAgentEvent;
     debugLog(`[defense] agent_end annotated queuedFollowUpPending=true (pending=${(piSession as unknown as { pendingMessageCount: number }).pendingMessageCount})`);
+    // Drain the queue ourselves — the SDK will not re-check it after the
+    // loop ended (261007-lean-bamboo). No-op if an in-loop drain consumed
+    // the messages before the timer fires.
+    scheduleQueuedFollowUpDrain(
+      piSession as unknown as DrainableSession,
+      {
+        onDrain: (pending) =>
+          debugLog(`[drain] agent_end left ${pending} queued message(s); draining via agent.continue()`),
+        onDrainError: (emsg) => {
+          debugLog(`[drain] continue() failed: ${emsg}`);
+          send({ type: 'error', message: emsg, code: 'prompt_error' });
+        },
+      },
+    );
   }
 
   // Forward all events to main process
@@ -2400,6 +2674,9 @@ function handleSessionEvent(event: AgentSessionEvent): void {
 // ============================================================
 
 async function handleInit(msg: Extract<InboundMessage, { type: 'init' }>): Promise<void> {
+  restoreDsmlReceiver?.();
+  restoreDsmlReceiver = null;
+
   // A re-init invalidates every utility query created under the old credentials.
   ephemeralQueries.cancelAll(new EphemeralQueryCancelledError('Pi server reinitialized'));
 
@@ -2411,6 +2688,7 @@ async function handleInit(msg: Extract<InboundMessage, { type: 'init' }>): Promi
     }
     piSession.dispose();
     piSession = null;
+    stopCompactionProgress(); // Re-init: no in-flight compaction can survive the session swap
     moduleCredentialStore = null; // Reset so createAuthenticatedRuntime() creates a fresh store
     debugLog('Cleaned up existing session for re-init');
   }
@@ -2454,22 +2732,6 @@ async function handleInit(msg: Extract<InboundMessage, { type: 'init' }>): Promi
  * in PiAgent.requestCompact (300 s), since GPT compactions can legitimately
  * take 60–120 s.
  */
-async function waitForCompaction(session: { isCompacting: boolean }, timeoutMs = 300_000): Promise<void> {
-  if (!session.isCompacting) return;
-  debugLog('Waiting for in-flight compaction to finish before prompt...');
-  const start = Date.now();
-  while (session.isCompacting) {
-    if (Date.now() - start > timeoutMs) {
-      debugLog(`Compaction wait timed out after ${Math.floor(timeoutMs / 1000)}s, proceeding anyway`);
-      break;
-    }
-    await new Promise(resolve => setTimeout(resolve, 200));
-  }
-  if (Date.now() - start < timeoutMs) {
-    debugLog('Compaction finished, proceeding with prompt');
-  }
-}
-
 /**
  * Await a turn's prompt promise with SILENCE-based stall detection.
  *
@@ -2512,6 +2774,28 @@ async function awaitTurnWithStallDetection(
   ]);
 }
 
+/**
+ * Dispose + detach the current Pi session when proxy tools changed since the
+ * session was created (the "will be recreated on next prompt" marker). The
+ * fresh session is then created by the caller's ensureSession() with all
+ * tools known upfront (toolsChanged is cleared inside createPiSession).
+ *
+ * Must run BEFORE any work that pins a session: a compact started on a
+ * stale-tool session can be silently aborted by the next prompt's rebuild
+ * (2026-10-08 fresh-dusk 3rd failure: 21:04:02 rebuild aborted an
+ * in-flight compaction → "Turn prefix summarization failed: aborted").
+ */
+function disposeSessionForToolChanges(where: string): void {
+  if (!toolsChanged || !piSession) return;
+  debugLog(`Recreating session due to tool changes (${where})`);
+  if (unsubscribeEvents) {
+    unsubscribeEvents();
+    unsubscribeEvents = null;
+  }
+  piSession.dispose();
+  piSession = null;
+}
+
 async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): Promise<void> {
 
   currentUserMessage = msg.message;
@@ -2520,15 +2804,7 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     // If proxy tools changed since last session creation, dispose and recreate.
     // This avoids calling _buildRuntime() for dynamic tool updates — instead
     // we create a fresh session via continueRecent() with all tools known upfront.
-    if (toolsChanged && piSession) {
-      debugLog('Recreating session due to tool changes');
-      if (unsubscribeEvents) {
-        unsubscribeEvents();
-        unsubscribeEvents = null;
-      }
-      piSession.dispose();
-      piSession = null;
-    }
+    disposeSessionForToolChanges('prompt');
 
     const session = await ensureSession();
 
@@ -2556,7 +2832,7 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     unsubscribeEvents = session.subscribe(handleSessionEvent);
 
     // Wait for any in-flight auto-compaction to avoid race (craft-agents-oss#464)
-    await waitForCompaction(session);
+    await waitForCompaction(session, 300_000, debugLog);
 
     // Fire prompt — use followUp when session is already streaming so the
     // message is queued instead of throwing "Agent is already processing".
@@ -2645,6 +2921,151 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     send({ type: 'error', message: errorMsg, code: 'prompt_error' });
     // Send synthetic agent_end so the main process event queue unblocks.
     // willRetry: false — this is the terminal error path, no retry follows.
+    send({ type: 'event', event: { type: 'agent_end', messages: [], willRetry: false } });
+  }
+}
+
+/**
+ * Re-run the model for the CURRENT (last-failed) turn WITHOUT appending a new
+ * user message. `agent.continue()` resumes from the existing transcript, so a
+ * retry neither duplicates the user bubble nor bloats context (the flaw of
+ * re-sending a `prompt`). It is the SAME logical turn: defense / turn-loop
+ * state is intentionally NOT reset, and the original prompt's event
+ * subscription (handleSessionEvent) stays live.
+ *
+ * Precondition: the transcript must end on a re-runnable model step — a user
+ * or tool-result message, OR a committed FAILED assistant message
+ * (stopReason='error'), OR an EMPTY clean-stop assistant message (no
+ * visible text). The last two are stripped (SDK-documented mutation,
+ * mirroring the pi SDK's own _prepareRetry) and the model step is re-run
+ * via continue() — 2026-10-06 spec: stream errors and empty terminal
+ * responses are transient model-layer faults owned by the main-process
+ * retry ladder. Anything else (a real reply, an aborted run, a tool-call
+ * step) is refused: we surface a clean error instead of letting a rejected
+ * `continue()` busy-loop the retry ladder.
+ */
+async function handleRetry(): Promise<void> {
+  let session: AgentSession;
+  try {
+    session = await ensureSession();
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    debugLog(`[retry] ensureSession failed: ${errorMsg}`);
+    send({ type: 'error', message: errorMsg, code: 'prompt_error' });
+    send({ type: 'event', event: { type: 'agent_end', messages: [], willRetry: false } });
+    return;
+  }
+
+  const lastMessage = session.messages[session.messages.length - 1];
+  if (!lastMessage) {
+    debugLog('[retry] cannot continue — transcript is empty');
+    send({
+      type: 'error',
+      message: 'Cannot retry: the session transcript is empty.',
+      code: 'prompt_error',
+    });
+    send({ type: 'event', event: { type: 'agent_end', messages: [], willRetry: false } });
+    return;
+  }
+
+  if (lastMessage.role === 'assistant') {
+    // A re-runnable model step exists even when the LAST transcript message
+    // is an assistant message, in exactly two cases:
+    //  1. stopReason='error' — the SDK committed the FAILED model step
+    //     (stream ended without finish_reason, network drop, …). Stripping
+    //     it and continuing re-runs the SAME step from the previous
+    //     user/tool-result message — the same mechanism the pi SDK's own
+    //     _prepareRetry uses (state.messages = messages.slice(0,-1)).
+    //     (2026-10-06 incident: this refusal made every post-stream-error
+    //     retry fail with prompt_error, and the main process misjudged the
+    //     refused retry as a successful run.)
+    //  2. A clean stop ('stop'/'length') with NO visible text — an empty
+    //     terminal response the main-process retry ladder routed here
+    //     (2026-10-06 spec: all model-layer failures enter the ladder).
+    // Any OTHER assistant message (a real reply, an aborted run, a
+    // tool-call step) is NOT re-runnable: refuse as before.
+    const am = lastMessage as unknown as PiAssistantMessage;
+    const hasVisibleText = Array.isArray(am.content)
+      && (am.content as Array<{ type?: string; text?: unknown }>).some(
+        (c) => c?.type === 'text' && String(c.text ?? '').trim().length > 0,
+      );
+    const isFailedStep = am.stopReason === 'error';
+    const isEmptyCleanStop = (am.stopReason === 'stop' || am.stopReason === 'length') && !hasVisibleText;
+    // Silent-stream recovery (2026-10-07, session 261007-focal-twilight / golden-swamp):
+    // a DELIVERED reply while queued guidance/follow-ups are still pending is the
+    // case where the SDK answered the original question but never drained the
+    // queued follow-up — the main process held its queue open on
+    // queuedFollowUpPending, the stall watchdog fired, and the retry ladder
+    // re-issued us here. agent.continue() DRAINS the follow-up queue and
+    // answers the pending guidance within the SAME turn, so this is re-runnable
+    // WITHOUT stripping (the delivered reply stays in context).
+    const pendingFollowUps =
+      (piSession as unknown as { pendingMessageCount?: number })?.pendingMessageCount ?? 0;
+    if (!isFailedStep && !isEmptyCleanStop && pendingFollowUps === 0) {
+      debugLog(`[retry] cannot continue — last assistant is not re-runnable (stopReason=${am.stopReason ?? 'unknown'})`);
+      send({
+        type: 'error',
+        message: 'Cannot retry: the current turn has no re-runnable model step.',
+        code: 'prompt_error',
+      });
+      send({ type: 'event', event: { type: 'agent_end', messages: [], willRetry: false } });
+      return;
+    }
+    if (isFailedStep || isEmptyCleanStop) {
+      // Strip the unusable assistant message — the SDK's documented mutation
+      // (assigning a new array copies the top-level array; session persistence
+      // keeps the original transcript intact) — so continue() re-runs the
+      // model step from the previous user/tool-result message.
+      const agentState = (session.agent as unknown as { state: { messages: unknown[] } }).state;
+      agentState.messages = agentState.messages.slice(0, -1);
+      debugLog(
+        `[retry] stripped ${isFailedStep
+          ? `failed assistant message (stopReason=error${am.errorMessage ? `: ${String(am.errorMessage).slice(0, 120)}` : ''})`
+          : 'empty assistant message (clean stop, no visible text)'}` +
+        ' — re-running model step via continue()',
+      );
+    } else {
+      debugLog(`[retry] delivered reply with ${pendingFollowUps} pending follow-up(s) — draining via continue() (no strip)`);
+    }
+  }
+
+  stallAbortInProgress = false;
+  lastTurnActivityAt = Date.now();
+  const activeToolDeadline = (): number | null => {
+    let latest: number | null = null;
+    for (const d of activeToolSilenceDeadlines.values()) {
+      if (d != null && (latest == null || d > latest)) latest = d;
+    }
+    return latest;
+  };
+
+  let contPromise: Promise<void>;
+  try {
+    contPromise = session.agent.continue();
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    debugLog(`[retry] continue() rejected: ${errorMsg}`);
+    send({ type: 'error', message: errorMsg, code: 'prompt_error' });
+    send({ type: 'event', event: { type: 'agent_end', messages: [], willRetry: false } });
+    return;
+  }
+
+  debugLog('[retry] re-issued model step via agent.continue() (same turn, no new user message)');
+  try {
+    await awaitTurnWithStallDetection(contPromise, activeToolDeadline);
+  } catch (stallErr) {
+    const errorMsg = stallErr instanceof Error ? stallErr.message : String(stallErr);
+    // Mirror handlePrompt: abort to reset SDK internal state, then surface the
+    // failure. The main-process ladder re-arms on the error event (or stays
+    // held) per its own schedule.
+    debugLog(`[retry] stalled or failed: ${errorMsg}; aborting session to reset state`);
+    stallAbortInProgress = true;
+    try {
+      await piSession?.abort().catch(() => { /* already aborted */ });
+    } finally {
+      stallAbortInProgress = false;
+    }
+    send({ type: 'error', message: errorMsg, code: 'prompt_error' });
     send({ type: 'event', event: { type: 'agent_end', messages: [], willRetry: false } });
   }
 }
@@ -2820,37 +3241,100 @@ async function handleEnsureSessionReady(msg: Extract<InboundMessage, { type: 'en
 }
 
 async function handleCompact(msg: Extract<InboundMessage, { type: 'compact' }>): Promise<void> {
+  const requestedAt = Date.now();
+  const sendResult = (payload: Omit<OutboundCompactResult, 'type' | 'id' | 'requestedAt'>): void => {
+    send({ type: 'compact_result', id: msg.id, requestedAt, ...payload });
+  };
+
   try {
+    // Consume the pending tool-rebuild marker BEFORE pinning a session:
+    // starting compaction on a stale-tool session lets the next prompt's
+    // rebuild abort the in-flight compaction (2026-10-08 fresh-dusk 3rd
+    // failure). Rebuild first, then compact on a fresh session. Also a
+    // permanent observation point: the SDK internals (isCompacting/isIdle)
+    // explain stalls like the 120s silent window on that same incident.
+    disposeSessionForToolChanges('compact');
     const session = await ensureSession();
+    if (!unsubscribeEvents) {
+      // A session whose FIRST action is /compact (fresh subprocess,
+      // tool-rebuild path, or a recovered session with no prompt yet) never
+      // went through handlePrompt, so the SDK event subscription is missing.
+      // Without it compaction_start/end and the 30s compaction_progress
+      // heartbeat never reach the main process — and startCompactionProgress
+      // is never armed — so ANY compaction longer than the staleness window
+      // false-positives "compact stalled" even when it succeeds
+      // (2026-10-08 vast-slate: compaction persisted 13:52:09 with
+      // stopReason=stop, stalled surfaced at 13:51:49).
+      unsubscribeEvents = session.subscribe(handleSessionEvent);
+    }
+    debugLog(`[compact] pre-wait: isCompacting=${session.isCompacting} isIdle=${session.isIdle} toolsChanged=${toolsChanged}`);
     // Serialize manual /compact behind any in-flight auto-compaction. Public
     // session.compact() calls agent.abort() and uses its own controller; if
     // it runs while _runAutoCompaction is suspended, agent state churns and
     // the SDK's race surface widens. Wait for the auto-compaction to drain
-    // before starting a manual one. waitForCompaction has its own timeout
-    // fallback so we don't deadlock on a stuck subprocess.
-    await waitForCompaction(session);
-    const result = await session.compact(msg.customInstructions);
-    send({
-      type: 'compact_result',
-      id: msg.id,
-      success: true,
-      result: {
-        summary: result.summary,
-        firstKeptEntryId: result.firstKeptEntryId,
-        tokensBefore: result.tokensBefore,
-      },
-    });
+    // before starting a manual one. The wait budget (W) is strictly below the
+    // main-process RPC budget (R) so an honest "still running" verdict can
+    // always reach the user before the RPC timer gives up on this request.
+    const wait = await waitForCompaction(session, getCompactWaitTimeoutMs());
+    if (wait.timedOut) {
+      // The in-flight compaction is still running past W. Blind-proceeding
+      // here would start a concurrent compact() and re-open the exact SDK
+      // race waitForCompaction exists to prevent — say so honestly instead.
+      const waitSeconds = Math.max(1, Math.round(getCompactWaitTimeoutMs() / 1000));
+      const errorMsg = `A context compaction was still in progress after waiting ${waitSeconds}s — retry once it completes.`;
+      debugLog(`[compact] ${errorMsg}`);
+      sendResult({ success: false, errorMessage: errorMsg });
+      return;
+    }
+    try {
+      debugLog(`[compact] invoking session.compact (isCompacting=${session.isCompacting} isIdle=${session.isIdle})`);
+      const result = await session.compact(msg.customInstructions);
+      sendResult({
+        success: true,
+        result: {
+          summary: result.summary,
+          firstKeptEntryId: result.firstKeptEntryId,
+          tokensBefore: result.tokensBefore,
+        },
+      });
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (wait.waited && errorMsg === 'Already compacted') {
+        // We waited on a live compaction that then finished and persisted its
+        // own record — this request was completed by the preceding compaction.
+        // Had we reported the bare error, the main process would surface a
+        // misleading failure (and its retry trap) even though the data layer
+        // is correct. Report success from the persisted record so the user
+        // sees the real summary/token counts.
+        const record = findLastCompactionRecord(session.sessionManager.getEntries());
+        const translation = translateAlreadyCompacted(wait, errorMsg, record);
+        if (translation) {
+          debugLog('[compact] Already compacted after waiting on a live compaction — reporting success from the completed record');
+          sendResult({
+            success: true,
+            note: translation.note,
+            result: translation.result,
+          });
+          return;
+        }
+        debugLog(`[compact] Already compacted but no compaction record found on session — falling back to error: ${errorMsg}`);
+      }
+      debugLog(`[compact] Failed: ${errorMsg}`);
+      sendResult({ success: false, errorMessage: errorMsg });
+    }
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     debugLog(`[compact] Failed: ${errorMsg}`);
-    send({
-      type: 'compact_result',
-      id: msg.id,
-      success: false,
-      errorMessage: errorMsg,
-    });
+    sendResult({ success: false, errorMessage: errorMsg });
   }
 }
+
+/**
+ * Read the most recent persisted compaction record from the session store.
+ * Used to synthesize a truthful success reply when a manual compact request
+ * was completed by the compaction it waited on ("Already compacted").
+ * See compaction-policy.ts for the pure implementation.
+ */
 
 async function handleSetAutoCompaction(msg: Extract<InboundMessage, { type: 'set_auto_compaction' }>): Promise<void> {
   try {
@@ -3075,6 +3559,8 @@ async function handleSetThinkingLevel(msg: Extract<InboundMessage, { type: 'set_
 
 function handleShutdown(): void {
   debugLog('Shutdown requested');
+  restoreDsmlReceiver?.();
+  restoreDsmlReceiver = null;
 
   // Abort utility sessions independently from the main chat session.
   ephemeralQueries.cancelAll(new EphemeralQueryCancelledError('Pi server shutting down'));
@@ -3084,6 +3570,7 @@ function handleShutdown(): void {
     unsubscribeEvents();
     unsubscribeEvents = null;
   }
+  stopCompactionProgress();
 
   // Dispose session
   if (piSession) {
@@ -3120,6 +3607,10 @@ async function processMessage(msg: InboundMessage): Promise<void> {
 
     case 'prompt':
       await handlePrompt(msg);
+      break;
+
+    case 'retry':
+      await handleRetry();
       break;
 
     case 'register_tools':
@@ -3182,7 +3673,11 @@ async function processMessage(msg: InboundMessage): Promise<void> {
     case 'steer':
       if (piSession) {
         debugLog(`Steering with: "${msg.message.slice(0, 100)}" activeTools=${activeToolExecutions.size}`);
-        await piSession.steer(msg.message);
+        // Wrap the guidance so the drain round cannot drop the original
+        // in-progress request (2026-10-07 misty-plain). Raw text first;
+        // the conditional completion note is harmless when the main
+        // request was already answered before the drain.
+        await piSession.steer(wrapMidTurnGuidance(msg.message));
         debugLog(`Steer queued; evaluating ${activeToolExecutions.size} active tool(s) for interruption`);
 
         // Pi SDK steer queues the guidance for the active reasoning loop, but

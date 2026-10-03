@@ -131,8 +131,59 @@ export function shouldCompactForBudget(
 
 type Logger = (message: string) => void;
 
+export interface CompactionHandoffInput {
+  sessionJsonlPath: string;
+  progressJsonlPath?: string;
+  currentUserRequest?: string;
+  progressSnapshot?: string;
+  existingInstructions?: string;
+}
+
+const MAX_HANDOFF_CONTEXT_CHARS = 8_000;
+
+/** Build the fixed summary contract appended to every default compaction prompt. */
+export function buildCompactionHandoffInstructions(input: CompactionHandoffInput): string {
+  const fixed = [
+    'COMPACTION HANDOFF CONTRACT — produce a concise, durable handoff summary. Do not continue the conversation or answer the user.',
+    'Required sections (preserve these headings and do not omit a section; write "None" when genuinely empty):',
+    '1. Current user request verbatim: preserve the active request exactly, including constraints and acceptance criteria.',
+    '2. Task checklist: Completed (each item with its result), In progress (exact current state), Blocked (blocker and needed input).',
+    '3. Confirmed facts and conclusions: include evidence, exact values, and decisions already established.',
+    '4. Rejected paths and reasons: record failed/ruled-out approaches and why; never present them as next steps.',
+    '5. Next actions: list the smallest concrete next steps in order.',
+    '6. Key file paths and IDs: preserve exact paths, identifiers, commands, and error text needed to resume.',
+    'When updating an earlier compaction summary, merge its still-valid state with new conversation evidence; do not drop completed items or rejected-path reasons merely because they are old.',
+    `Transcript recovery pointer: the full conversation is persisted at ${input.sessionJsonlPath}. If a required detail is missing, instruct the resumed agent to search/read that file before repeating work.`,
+    ...(input.progressJsonlPath ? [`Durable request/progress ledger: the full current request (credential values redacted), latest steer, and bounded tool/conclusion records are at ${input.progressJsonlPath}. If the active request above is clipped, read this ledger before continuing.`] : []),
+  ].join('\n\n');
+  const remaining = Math.max(0, MAX_HANDOFF_CONTEXT_CHARS - fixed.length - 8);
+  const currentLimit = Math.min(3_200, Math.floor(remaining * 0.5));
+  const progressLimit = Math.min(2_400, Math.floor(remaining * 0.35));
+  const reservedCurrent = input.currentUserRequest
+    ? `Active user request and latest guidance (preserve verbatim in section 1):\n${input.currentUserRequest.slice(0, currentLimit)}`
+    : '';
+  const currentUsed = reservedCurrent.length;
+  const focusLimit = Math.min(800, Math.max(0, remaining - currentUsed - (input.progressSnapshot ? 100 : 0)));
+  const focus = input.existingInstructions
+    ? `Additional caller focus (also preserve):\n${input.existingInstructions.slice(0, focusLimit)}`
+    : '';
+  const progressRemaining = Math.max(0, remaining - currentUsed - focus.length);
+  const boundedProgress = input.progressSnapshot
+    ? `Durable progress ledger (latest completed calls and conclusions):\n${input.progressSnapshot.slice(-Math.min(progressLimit, progressRemaining))}`
+    : '';
+  return [fixed, reservedCurrent, focus, boundedProgress].filter(Boolean).join('\n\n').slice(0, MAX_HANDOFF_CONTEXT_CHARS);
+}
+
 export interface ForcedCompactionOptions {
   log?: Logger;
+  /** Session transcript path included in the handoff and recovery pointer. */
+  sessionJsonlPath?: string;
+  /** Persistent request/progress ledger path used for full-input recovery. */
+  progressJsonlPath?: string;
+  /** Current user request, resolved at compaction time to include steer updates. */
+  resolveCurrentUserRequest?: () => string | undefined;
+  /** Persisted progress ledger, resolved at compaction time. */
+  resolveProgressSnapshot?: () => string;
   /**
    * Largest request (in tokens) this channel reliably accepts — i.e. the
    * ceiling enforced by the provider/gateway, which is often far below the
@@ -169,16 +220,46 @@ export function applyForcedCompactionPatch(
   // channel-budget lane.
   const options: ForcedCompactionOptions =
     typeof optionsOrLog === 'function' ? { log: optionsOrLog } : (optionsOrLog ?? {});
-  const { log, contextTokenBudget = 0, resolveContextTokenBudget } = options;
+  const {
+    log,
+    contextTokenBudget = 0,
+    resolveContextTokenBudget,
+    sessionJsonlPath,
+    resolveCurrentUserRequest,
+    resolveProgressSnapshot,
+    progressJsonlPath,
+  } = options;
 
   const sdk = session as unknown as {
     _checkCompaction?: (assistantMessage: unknown, skipAbortedCheck?: boolean) => Promise<boolean>;
     _runAutoCompaction?: (reason: string, willRetry: boolean) => Promise<boolean>;
+    _runDefaultCompaction?: (...args: unknown[]) => Promise<unknown>;
   };
   const original = sdk._checkCompaction?.bind(session);
+  const originalDefaultCompaction = sdk._runDefaultCompaction;
   if (!original || typeof sdk._runAutoCompaction !== 'function') {
-    // SDK surface changed — nothing to patch.
+    // SDK surface changed — report the lost safety integration, do not silently
+    // leave users believing forced compaction and the summary contract remain active.
+    log?.('[compaction-handoff] WARNING: Pi SDK auto-compaction hooks unavailable; forced compaction and universal handoff patch are not installed');
     return () => {};
+  }
+
+  if (originalDefaultCompaction && sessionJsonlPath) {
+    sdk._runDefaultCompaction = async function (...args: unknown[]): Promise<unknown> {
+      const existingInstructions = typeof args[4] === 'string' ? args[4] : undefined;
+      const handoff = buildCompactionHandoffInstructions({
+        sessionJsonlPath,
+        progressJsonlPath,
+        currentUserRequest: safeResolve(resolveCurrentUserRequest),
+        progressSnapshot: safeResolve(resolveProgressSnapshot),
+        existingInstructions,
+      });
+      args[4] = handoff;
+      log?.(`[compaction-handoff] attached contract to ${String(args[7] ?? 'unknown')} compaction (${handoff.length} chars)`);
+      return originalDefaultCompaction.apply(this, args);
+    };
+  } else if (sessionJsonlPath) {
+    log?.('[compaction-handoff] SDK default compaction method unavailable; summary contract not installed');
   }
 
   let lastForcedTotalTokens = 0;
@@ -252,5 +333,10 @@ export function applyForcedCompactionPatch(
   sdk._checkCompaction = patched;
   return () => {
     sdk._checkCompaction = original;
+    if (originalDefaultCompaction) sdk._runDefaultCompaction = originalDefaultCompaction;
   };
+}
+
+function safeResolve<T>(resolver: (() => T) | undefined): T | undefined {
+  try { return resolver?.(); } catch { return undefined; }
 }

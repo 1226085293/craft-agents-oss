@@ -66,6 +66,40 @@ This detector closes it:
 > responsibilities absorbed into L1 (planning-language discipline) and L2
 > (side-effect-weighted scoring), which do not touch semantics.
 
+## Compaction handoff (2026-10-03 follow-up)
+
+The forced-compaction integration also wraps Pi SDK 0.85.1's private
+`_runDefaultCompaction` method. Because SDK threshold/overflow compaction and
+Craft's forced Lane 1 all converge on that default summary generator, each path
+receives the same additive handoff contract (six required sections: original
+user request, completed/in-progress/blocked checklist, confirmed facts,
+rejected paths with reasons, next actions, and exact paths/IDs). Existing caller
+focus is preserved. Contract inputs are re-read from the session directory at
+summary time, not cached in the subprocess, because Pi tool events and raw user
+requests are persisted by the host process. This integration covers the SDK's
+default summarizer used by Craft; a third-party `session_before_compact` hook
+that supplies its own complete summary bypasses the default summary generator
+and is not rewritten by this patch.
+
+The session's `progress.jsonl` is an append-only, bounded recovery ledger for
+user requests, tool starts/results (matched by tool-call ID), and assistant
+final/conclusion text. Entries are size-limited and credential-redacted; the
+file is capped at 1 MiB / 1,024 records by default. The summary view collapses
+consecutive identical call/result pairs so repeating loops do not become new
+prompt noise. Post-compaction steering rebuilds its anchor from the durable
+ledger and includes the exact `session.jsonl` recovery path, instructing the
+model to inspect history before repeating work.
+
+**SDK upgrade guard:** the contract covers SDK threshold/overflow/manual
+compaction by wrapping the private `_runDefaultCompaction` method and its
+`customInstructions` argument position (0.85.1: index 4). The split-turn prefix
+summary is a separate SDK path; the existing postinstall patch script now
+threads the same dynamic instructions into it, including recursive emergency
+splits. The patcher is idempotent and warns if the SDK source anchor changes.
+The runtime also warns if `_checkCompaction`, `_runAutoCompaction`, or
+`_runDefaultCompaction` is unavailable. Keep both the patch-helper and focused
+forced-compaction tests green when upgrading the Pi SDK.
+
 ## Master switch
 
 `defenseEnabled: boolean` in the **init message**, controlled by the user.

@@ -809,17 +809,6 @@ export function EditPopover({
     }
   }, [isProcessing, handleEscapePress, handleStopGeneration])
 
-  // Handle click outside during generation:
-  // Show the ESC overlay via context, prevent closing
-  const handleInteractOutside = useCallback((e: Event) => {
-    if (isProcessing) {
-      // Prevent close during processing
-      e.preventDefault()
-      // Show the ESC overlay so user knows how to cancel
-      handleEscapePress()
-    }
-  }, [isProcessing, handleEscapePress])
-
   // Drag state for movable popover
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 })
   const [isDragging, setIsDragging] = useState(false)
@@ -831,6 +820,41 @@ export function EditPopover({
   const [containerSize, setContainerSize] = useState({ width: width || 400, height: 480 })
   const [isResizing, setIsResizing] = useState(false)
   const resizeStartRef = useRef({ x: 0, y: 0, width: 0, height: 0 })
+
+  // Handle click outside during generation:
+  // Show the ESC overlay via context, prevent closing
+  const handleInteractOutside = useCallback((e: Event) => {
+    // Radix's non-modal DismissableLayer reports ANY focusin that lands
+    // outside the layer as an "outside interaction" (routed through
+    // onInteractOutside). That includes:
+    //  - the auto-focus of the chat input that happens when the popover opens
+    //  - RichTextInput's Windows TSF/IME recovery detour, which briefly moves
+    //    focus to a body-level priming <textarea> (marked with
+    //    data-craft-tsf-priming) and back — see runTsfRecoveryCycle
+    //  - transient loss of focus to document/body without a real destination
+    // Without these guards the popover dismisses ~1 frame after opening
+    // (the "flash then disappear" bug on source/skill detail pages).
+    // Pointer-based dismissal is unaffected: outside pointerdowns still
+    // close the popover via the regular path below.
+    const target = e.target as Node | null
+    if (
+      target == null
+      || target === document
+      || target === document.body
+      || popoverRef.current?.contains(target)
+      || (target instanceof Element && target.hasAttribute('data-craft-tsf-priming'))
+    ) {
+      e.preventDefault()
+      return
+    }
+
+    if (isProcessing) {
+      // Prevent close during processing
+      e.preventDefault()
+      // Show the ESC overlay so user knows how to cancel
+      handleEscapePress()
+    }
+  }, [isProcessing, handleEscapePress])
 
   // Reset drag position and size when popover opens
   useEffect(() => {

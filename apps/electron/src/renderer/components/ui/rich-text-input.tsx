@@ -153,6 +153,10 @@ function getTsfPrimingElement(): HTMLTextAreaElement {
   if (tsfPrimingElement && document.body.contains(tsfPrimingElement)) return tsfPrimingElement
   const ta = document.createElement('textarea')
   ta.setAttribute('aria-hidden', 'true')
+  // Marker so UI layers (e.g. Radix popovers) can recognize this element's
+  // transient focus as an internal TSF repair detour rather than a real
+  // focus-outside interaction.
+  ta.setAttribute('data-craft-tsf-priming', '')
   ta.tabIndex = -1
   Object.assign(ta.style, {
     position: 'fixed',

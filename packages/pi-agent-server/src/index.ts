@@ -109,7 +109,7 @@ import { adaptCredentialForPiSdk, type PiCredential } from './adapt-credential.t
 import { DefenseEvaluator, resolveDefenseEnabled } from './defense/index.ts';
 import { VERIFY_OUTPUT_CMDS } from './defense/complexity-score.ts';
 import { detectRepetitionLoop, extractAssistantText } from './defense/repetition-detector.ts';
-import { ToolLoopDetector, fingerprintToolCall, digestResult, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
+import { ToolLoopDetector, fingerprintToolCall, digestResult, isEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
 import {
   TOOL_PAYLOAD_WARN_TOKENS,
@@ -1603,6 +1603,14 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
     const loopGuardResult = applyToolLoopGuard(sdkToolName, inputObj, toolCallId);
     if (loopGuardResult) {
       return loopGuardResult;
+    }
+
+    // P2 guard: empty-parameter calls on built-in tools fail upstream
+    // validation with a cryptic error; give the model an instructive one
+    // instead (proxy tools are exempt — their schemas may be empty).
+    if (isEmptyArgs(inputObj)) {
+      debugLog(`[empty-args] ${sdkToolName}`);
+      return makeErrorResult(emptyArgsMessage(sdkToolName));
     }
 
     // Send to main process for permission checking + transforms

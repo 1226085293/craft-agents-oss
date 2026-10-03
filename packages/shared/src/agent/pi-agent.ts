@@ -438,12 +438,16 @@ export class PiAgent extends BaseAgent {
   // Current user message (for context in summarization)
   private currentUserMessage: string = '';
   /**
-   * Progress-anchor ring: recent tool executions of the current turn, used
-   * to re-anchor the model after forced compaction (2026-10-03
-   * "compaction pump" incident: the model replans from scratch after every
-   * compaction and re-runs its first step, regrowing the context until it
-   * compacts again). Entries: tool name + short args, result attached at
-   * tool_result. Consecutive duplicates are collapsed; ring is capped.
+   * Progress-anchor ring: recent tool executions, used to re-anchor the
+   * model after forced compaction (2026-10-03 "compaction pump" incident:
+   * the model replans from scratch after every compaction and re-runs its
+   * first step, regrowing the context until it compacts again).
+   * NOTE: the ring deliberately persists across turns (and across defense
+   * resumes) so a resumed segment keeps the no-repeat rule meaningful;
+   * entries are only pruned by the cap (last 20, consecutive duplicates
+   * collapsed) — not cleared on new prompts.  Anchor rendering uses the
+   * last 10 entries.  Entries: tool name + short args, result attached at
+   * tool_result.
    */
   private recentToolCalls: Array<{ name: string; args: string; result?: string; isError?: boolean }> = [];
 
@@ -1586,6 +1590,12 @@ export class PiAgent extends BaseAgent {
         // Delivered via the steer channel: it reaches the model BEFORE the
         // next LLM call without ending the turn. Skipping when not
         // processing avoids redirect()'s forceAbort fallback.
+        //
+        // NOTE: the explicit "/compact" command path (handlePrompt) also
+        // yields "Compacted …" info events but is intentionally NOT anchored:
+        // it ends the turn — there is no in-turn replanning left to steer,
+        // and the next user prompt starts a fresh context. Only forced
+        // (mid-turn, auto) compactions need the anchor.
         const anchor = this.buildProgressAnchor();
         if (anchor && this._isProcessing && this.subprocess) {
           this.debug(`[ProgressAnchor] Re-injecting post-compaction anchor (${anchor.length} chars)`);

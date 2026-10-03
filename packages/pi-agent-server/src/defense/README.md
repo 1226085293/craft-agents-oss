@@ -52,6 +52,13 @@ This detector closes it:
   legitimate heavy turns while still bounding pathological loops.
 - Streaks reset on any different call or different result digest — a
   genuine state change produces a different result and is not a repeat.
+- **Empty-parameter calls** (P2): a built-in tool invoked with no real
+  arguments (or only craft-metadata keys like `_displayName`/`_intent`)
+  previously died upstream with a cryptic "Validation failed for tool bash".
+  The PreToolUse choke point now short-circuits it with an instructive result
+  (`isEmptyArgs`/`emptyArgsMessage` in `tool-loop-detector.ts`): send the
+  schema's arguments, or stop calling tools and finish. Proxy/MCP tools are
+  exempt — their schemas may legitimately be empty.
 
 > **Removed — Layer 3 `idle-words.ts`.** The idle-word regex produced false
 > positives on normal transition sentences (e.g. "现在修改现有的集成点：") because

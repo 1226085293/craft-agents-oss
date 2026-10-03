@@ -208,3 +208,27 @@ export class ToolLoopDetector {
     }
   }
 }
+
+/**
+ * P2 guard (optional plan item 5): a built-in tool invoked with an empty
+ * parameter object (e.g. `{ command: {} }`) fails upstream schema
+ * validation with a cryptic "Validation failed for tool bash". Feed the
+ * model an instructive result instead — usually the task is already done
+ * and the model should stop calling tools. Applies to BUILT-IN tools only
+ * (proxy/MCP tools may legitimately have an empty schema).
+ */
+export function isEmptyArgs(input: Record<string, unknown> | null | undefined): boolean {
+  // Underscore-prefixed keys are craft-metadata transport (e.g. _displayName
+  // / _intent) — not real tool arguments. A call carrying ONLY metadata
+  // counts as empty.
+  if (!input) return true;
+  return !Object.keys(input).some((k) => !k.startsWith('_'));
+}
+
+export function emptyArgsMessage(toolName: string): string {
+  return (
+    `Validation failed for tool '${toolName}': you sent an empty parameter object. ` +
+    `Either call it with the arguments from its schema, or — if the task is already complete — ` +
+    `stop calling tools, summarize the result, and finish the turn.`
+  );
+}

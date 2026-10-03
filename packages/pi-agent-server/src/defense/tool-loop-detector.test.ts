@@ -3,6 +3,8 @@ import {
   ToolLoopDetector,
   digestResult,
   fingerprintToolCall,
+  isEmptyArgs,
+  emptyArgsMessage,
 } from './tool-loop-detector.ts';
 
 /**
@@ -19,7 +21,9 @@ import {
  *   - first 3 identical (fingerprint+result) pairs: no intervention
  *   - 4th identical call → DENY (instructive result, call not executed)
  *   - denied calls extend the streak → 6th → ABORT
- *   - 200 tool calls / 30 min wall-clock per turn → ABORT
+ *   - 500 tool calls / 60 min wall-clock per turn → ABORT
+ *     (defaults are env-tunable: CRAFT_PI_MAX_TURN_TOOL_CALLS /
+ *      CRAFT_PI_MAX_TURN_DURATION_MS)
  */
 
 const CALL = { type: 'bash', command: 'git status' };
@@ -168,5 +172,28 @@ describe('ToolLoopDetector (busy caps)', () => {
     expect(d.recordStart(CALL)?.level).toBe('deny');
     d.resetTurn();
     expect(d.recordStart(CALL)).toBeNull();
+  });
+});
+
+describe('empty-args guard (P2)', () => {
+  it('detects null/undefined and truly empty input as empty', () => {
+    expect(isEmptyArgs(null)).toBe(true);
+    expect(isEmptyArgs(undefined)).toBe(true);
+    expect(isEmptyArgs({})).toBe(true);
+  });
+
+  it('counts craft-metadata-only calls as empty (built-in path still has _displayName/_intent attached)', () => {
+    expect(isEmptyArgs({ _displayName: 'X', _intent: 'Y' })).toBe(true);
+  });
+
+  it('real arguments are never empty', () => {
+    expect(isEmptyArgs({ command: 'echo hi', _displayName: 'X' })).toBe(false);
+  });
+
+  it('message names the tool and offers the stop-calling-tools escape hatch', () => {
+    const msg = emptyArgsMessage('bash');
+    expect(msg).toContain("'bash'");
+    expect(msg).toContain('empty parameter object');
+    expect(msg).toContain('finish');
   });
 });

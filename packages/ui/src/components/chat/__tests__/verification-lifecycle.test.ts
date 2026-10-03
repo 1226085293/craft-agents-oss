@@ -78,6 +78,21 @@ describe('turn lifecycle — verification class (2026-10-02)', () => {
     expect(assistantTurn.response).toBeUndefined()
   })
 
+  it('keeps the verification verdict visible when the live status row was folded into an info message by the renderer', () => {
+    // handleInfo converts the pending status row to an info message; turn
+    // grouping must not drop the verdict in that case.
+    const turns = groupMessagesByTurn([
+      msg({ role: 'user', content: '部署完成后总结' }),
+      msg({ role: 'info', content: 'Verification failed — continuing', statusType: 'verification_failed' }),
+      msg({ role: 'assistant', content: '补充说明：任务已完成', isIntermediate: false }),
+    ])
+    const assistantTurn = turns[turns.length - 1] as AssistantTurn
+    const card = verifyCard(assistantTurn)
+    expect(card).toBeDefined()
+    expect(card!.status).toBe('error')
+    expect(assistantTurn.response?.text).toBe('补充说明：任务已完成')
+  })
+
   it('follow-up reply after a failed verdict becomes the turn response', () => {
     const turns = groupMessagesByTurn([
       msg({ role: 'user', content: '部署完成后总结' }),

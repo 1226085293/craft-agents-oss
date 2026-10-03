@@ -1,6 +1,6 @@
 # Skill Read Usage Tracking Design
 
-**Date:** 2026-10-03  
+**Date:** 2026-10-03
 **Status:** Awaiting user review before implementation planning
 
 ## Goal

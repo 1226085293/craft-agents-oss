@@ -1120,8 +1120,11 @@ ${formattedMessages}
       this.prerequisiteManager.registerSkillPrerequisites([...skillPaths.values()]);
     }
 
-    // Inject cross-session memories (if any are relevant)
-    const memoryContext = this.buildMemoryContext();
+    // Inject cross-session memories (if any are relevant). The current user
+    // message is passed in so the keyword window always contains the user's
+    // latest intent — the jsonl-based window alone only holds history from
+    // *before* this turn.
+    const memoryContext = this.buildMemoryContext(cleanMessage);
 
     // Prepend branch seed context (for seeded branch sessions) and transferred-session summary.
     const branchSeedContext = this.buildBranchSeedContext(this.config.getBranchSeedMessages?.());
@@ -1168,7 +1171,7 @@ ${formattedMessages}
    * Build memory context string from relevant cross-session memories.
    * Returns empty string if no relevant memories found.
    */
-  protected buildMemoryContext(): string {
+  protected buildMemoryContext(currentUserMessage?: string): string {
     const sessionId = this.config.session?.id;
     if (!sessionId) return '';
 
@@ -1176,8 +1179,12 @@ ${formattedMessages}
       const store = this.memoryStore;
       if (!store.entries.length) return '';
 
-      // Get recent messages for relevance scoring
-      const recentMessages = this.getRecentMessagesForInjection(5);
+      // Get recent messages for relevance scoring: the 4 most recent history
+      // messages PLUS the current user message (the strongest intent signal,
+      // not yet in the jsonl when this runs).
+      const recentMessages = this.getRecentMessagesForInjection(4);
+      const trimmed = currentUserMessage?.trim();
+      if (trimmed) recentMessages.push({ role: 'user', content: trimmed });
       const memories = selectRelevantMemories(store, recentMessages);
 
       if (memories.length === 0) return '';
@@ -1200,7 +1207,10 @@ ${formattedMessages}
       const jsonlPath = join(this.config.workspace.rootPath, 'sessions', sessionId, 'session.jsonl');
       const messages = readSessionJsonl(jsonlPath)?.messages ?? [];
       return messages.slice(-maxMessages).map((m: any) => ({
-        role: m.role,
+        // Stored JSONL messages carry the role as `type`; `role` is only a
+        // transient in-memory field. Falling back keeps message-authority
+        // weighting in keyword extraction functional.
+        role: m.role ?? m.type,
         content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
       }));
     } catch {

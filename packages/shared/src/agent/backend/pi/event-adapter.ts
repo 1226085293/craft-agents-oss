@@ -873,7 +873,13 @@ export class PiEventAdapter extends BaseEventAdapter {
         const isIntermediate =
           msg.stopReason === 'toolUse' ||
           (this.defenseResumeHeld && !this.sawToolDuringDefenseHold);
-        if (textContent && (isIntermediate || !this.hasEmittedFinalText)) {
+        // Whitespace-only "final" text (\n\n after a thinking-only stop, 2026-10-03
+        // blank-message incident: 585 blank messages persisted into session.jsonl)
+        // is NOT a reply — skip it entirely. A truly empty stop is still caught by
+        // the post-stop defense (endsWithEmptyResponse) — it keys off the SDK
+        // message itself, not this event.
+        const hasVisibleText = (textContent ?? '').trim().length > 0;
+        if (hasVisibleText && (isIntermediate || !this.hasEmittedFinalText)) {
           const mTurnId = this.messageSubTurnId || this.nextSubTurnId('m');
           this.messageSubTurnId = null;
           if (!isIntermediate) {
@@ -883,7 +889,7 @@ export class PiEventAdapter extends BaseEventAdapter {
 
           yield {
             type: 'text_complete',
-            text: textContent,
+            text: String(textContent ?? ''),
             isIntermediate,
             turnId: mTurnId,
             sdkMessageId,

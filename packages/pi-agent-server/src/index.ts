@@ -109,6 +109,7 @@ import { adaptCredentialForPiSdk, type PiCredential } from './adapt-credential.t
 import { DefenseEvaluator, resolveDefenseEnabled } from './defense/index.ts';
 import { VERIFY_OUTPUT_CMDS } from './defense/complexity-score.ts';
 import { detectRepetitionLoop, extractAssistantText } from './defense/repetition-detector.ts';
+import { ToolLoopDetector, fingerprintToolCall, digestResult, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
 import {
   TOOL_PAYLOAD_WARN_TOKENS,
@@ -384,6 +385,12 @@ const pendingSessionToolCalls = new Map<string, { toolName: string; arguments: R
 // tool_execution_start so verification-grade output can be recognized at
 // end time (defense hasVerify read-back evidence).
 const pendingBashCommands = new Map<string, string>();
+// Layer 2b (busy-loop detection): tool-call fingerprints cached at the
+// PreToolUse choke point so tool_execution_end (which carries no args) can
+// complete the streak bookkeeping. Denied calls leave a stale entry —
+// harmless, pruned on the next prompt's resetTurn.
+const pendingLoopFingerprints = new Map<string, string>();
+const toolLoopDetector = new ToolLoopDetector();
 
 // Proxy tool definitions from main process
 let proxyToolDefs: ProxyToolDef[] = [];
@@ -1448,6 +1455,47 @@ function makeErrorResult(message: string): AgentToolResult<any> {
   };
 }
 
+/**
+ * Layer 2b — busy-loop guard, invoked at BOTH executor paths (built-in
+ * coding tools and proxy tools) before execution. Returns a tool result to
+ * hand back to the SDK instead of executing:
+ * - DENY: this call would be the Nth consecutive identical repetition.
+ *   The instructive error result reaches the model's context (same surface
+ *   PreToolUse permission blocks use), which is what weak models need to
+ *   stop repeating.
+ * - ABORT: repeated denies or a busy hard cap (500 calls / 60 min). The
+ *   whole turn is stopped with stall-abort attribution, so the post-stop
+ *   defense still evaluates the stop rather than treating it as a user
+ *   stop. The returned error result ends the current tool step; the
+ *   abort unwinds the turn itself.
+ * - null: the call may proceed; its fingerprint is cached so
+ *   tool_execution_end can complete the streak bookkeeping.
+ */
+function applyToolLoopGuard(
+  sdkToolName: string,
+  input: Record<string, unknown>,
+  toolCallId?: string,
+): AgentToolResult<any> | null {
+  const call = { type: sdkToolName, command: typeof input.command === 'string' ? input.command : undefined, args: input };
+  const intervention = toolLoopDetector.recordStart(call);
+  if (!intervention) {
+    if (toolCallId) {
+      pendingLoopFingerprints.set(toolCallId, fingerprintToolCall(call));
+    }
+    return null;
+  }
+  if (intervention.level === 'abort') {
+    stallAbortInProgress = true;
+    if (piSession) {
+      piSession.abort().catch((error) => debugLog(`Busy-abort failed: ${error instanceof Error ? error.message : String(error)}`));
+    }
+    debugLog(`[busy-loop] ${intervention.message}`);
+    return makeErrorResult(intervention.message);
+  }
+  debugLog(`[busy-loop] deny x${intervention.repeats}: ${fingerprintToolCall(call).slice(0, 200)}`);
+  return makeErrorResult(intervention.message);
+}
+
 // Pi SDK's built-in read tool already resizes each image to ~2000px / ~4.5MB
 // (base64). That is fine for a single image, but a long image-heavy session
 // re-sends every historical image each turn — with dozens of images the request
@@ -1548,6 +1596,13 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
         && typeof inputObj.content === 'string'
         && !inputObj.content.startsWith('\uFEFF')) {
       inputObj = { ...inputObj, content: '\uFEFF' + inputObj.content };
+    }
+
+    // Layer 2b busy-loop guard: a denied repetition or a hit busy cap
+    // returns the instructive result WITHOUT executing the tool.
+    const loopGuardResult = applyToolLoopGuard(sdkToolName, inputObj, toolCallId);
+    if (loopGuardResult) {
+      return loopGuardResult;
     }
 
     // Send to main process for permission checking + transforms
@@ -1692,6 +1747,14 @@ function buildProxyTools(): ToolDefinition<any, any>[] {
       }
 
       const inputObj = params as Record<string, unknown>;
+
+      // Layer 2b busy-loop guard: denied repetition → instructive error
+      // result; cap hit → turn abort with stall attribution. (The prefetch-
+      // hit path above is call_llm-only and is exempt.)
+      const loopGuardResult = applyToolLoopGuard(def.name, inputObj, toolCallId);
+      if (loopGuardResult) {
+        return loopGuardResult;
+      }
 
       // Permission checking via main process
       const approvedInput = await requestPreToolUseApproval(def.name, inputObj, toolCallId);
@@ -2226,6 +2289,15 @@ function handleSessionEvent(event: AgentSessionEvent): void {
         }
       }
     }
+
+    // Layer 2b — busy-loop bookkeeping: complete the streak counter with
+    // this call's result digest (identical result keeps the streak alive;
+    // any difference resets it — genuine progress looks different).
+    const loopFp = pendingLoopFingerprints.get(event.toolCallId);
+    pendingLoopFingerprints.delete(event.toolCallId);
+    if (loopFp) {
+      toolLoopDetector.recordCompletion(loopFp, digestResult(extractResultText(event.result), !!event.isError));
+    }
   }
 
   // Post-stop defense evaluation: when the agent run ends, decide whether the
@@ -2454,6 +2526,12 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
 
     // Reset per-turn defense buffers before the new prompt.
     defenseEvaluator?.resetTurn();
+    // Busy-loop detector: NEW user prompt = new turn (counts, wall clock,
+    // and streak all reset). Defense-resume follow-ups deliberately do NOT
+    // reset — a resumed segment inherits the same busy caps, which is what
+    // bounds the 2026-10-03 250-iteration loop even after a resume.
+    toolLoopDetector.resetTurn();
+    pendingLoopFingerprints.clear();
 
     // Force the Craft-built system prompt onto the Pi session. Direct assignment
     // to `state.systemPrompt` is wiped on every `session.prompt()` call by the Pi

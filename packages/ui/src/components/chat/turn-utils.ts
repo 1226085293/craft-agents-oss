@@ -381,6 +381,29 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
   // This ensures correct turn grouping even if messages are added out of order during streaming
   const sortedMessages = [...visibleMessages].sort((a, b) => a.timestamp - b.timestamp)
 
+  // Pre-scan (double-bubble fix, 2026-10-03 verification replay incident):
+  // when a turn flushes BETWEEN a demoted intermediate reply (isIntermediate
+  // — e.g. the defense-hold demotion) and its same-turnId replayed final,
+  // the intermediate's promotion-to-response would surface it as Turn A's
+  // reply while the replay becomes Turn B's reply → two response bubbles
+  // for one turn. Record every turnId that carries a REAL final (non-
+  // intermediate, landed, non-blank) assistant message so promotion can
+  // defer to that replay. If the replay never lands (verification failed
+  // without re-delivery), the turnId is absent from the set and the
+  // fallback promotion of the demoted intermediate still happens.
+  const turnIdHasFinalResponse = new Set<string>()
+  for (const m of sortedMessages) {
+    if (
+      m.role === 'assistant'
+      && !m.isIntermediate
+      && !m.isPending
+      && m.turnId
+      && m.content?.trim()
+    ) {
+      turnIdHasFinalResponse.add(m.turnId)
+    }
+  }
+
   const turns: Turn[] = []
   let currentTurn: AssistantTurn | null = null
   let lastUserTurn: UserTurn | null = null
@@ -448,7 +471,13 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
         // blank 'stop' final above).
         const lastTextActivity = [...currentTurn.activities]
           .reverse()
-          .find(a => a.type === 'intermediate' && a.content?.trim())
+          .find(a =>
+            a.type === 'intermediate'
+            && a.content?.trim()
+            // Same-turnId replay takes over as the visible reply — never
+            // promote the demoted intermediate into a second bubble.
+            && !turnIdHasFinalResponse.has(a.turnId ?? '')
+          )
 
         if (lastTextActivity?.content?.trim()) {
           currentTurn.response = {

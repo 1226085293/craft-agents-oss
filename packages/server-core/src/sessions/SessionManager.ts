@@ -8923,6 +8923,15 @@ ${request.prompt}`;
         break
 
       case 'text_complete': {
+        // Defense in depth: a whitespace-only text_complete is not a reply —
+        // it persists nothing and broadcasts nothing (2026-10-03 blank-message
+        // incident: 585 \n\n messages landed in session.jsonl). Both backends
+        // are covered here even when a backend's own filter regresses.
+        if (!event.text || event.text.trim().length === 0) {
+          this.flushDelta(sessionId, workspaceId)
+          break
+        }
+
         // Flush any pending deltas before sending complete (ensures renderer has all content)
         this.flushDelta(sessionId, workspaceId)
 

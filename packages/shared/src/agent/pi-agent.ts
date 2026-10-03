@@ -437,6 +437,15 @@ export class PiAgent extends BaseAgent {
 
   // Current user message (for context in summarization)
   private currentUserMessage: string = '';
+  /**
+   * Progress-anchor ring: recent tool executions of the current turn, used
+   * to re-anchor the model after forced compaction (2026-10-03
+   * "compaction pump" incident: the model replans from scratch after every
+   * compaction and re-runs its first step, regrowing the context until it
+   * compacts again). Entries: tool name + short args, result attached at
+   * tool_result. Consecutive duplicates are collapsed; ring is capped.
+   */
+  private recentToolCalls: Array<{ name: string; args: string; result?: string; isError?: boolean }> = [];
 
   // Pool reference for convenience (from this.config.mcpPool)
   private get mcpPool(): McpClientPool | undefined { return this.config.mcpPool; }
@@ -1559,6 +1568,10 @@ export class PiAgent extends BaseAgent {
       if (agentEvent.type === 'tool_start' && agentEvent.toolName === 'Read') {
         this.prerequisiteManager.trackReadTool(agentEvent.input as Record<string, unknown>);
       }
+      // Progress-anchor ring bookkeeping (compaction re-injection fuel)
+      if (agentEvent.type === 'tool_start') {
+        this.noteRecentToolEvent('tool_start', agentEvent.toolName, agentEvent.input);
+      }
       // Reset prerequisite state on compaction (LLM loses guide content)
       if (agentEvent.type === 'info' && typeof agentEvent.message === 'string' && agentEvent.message.startsWith('Compacted')) {
         this.resetPrerequisiteState();
@@ -1566,10 +1579,23 @@ export class PiAgent extends BaseAgent {
         this.extractSessionMemories().catch(err =>
           this.onDebug?.(`[Memory] Post-compaction extraction failed: ${err}`)
         );
+        // Re-inject a PROGRESS ANCHOR so post-compaction replanning starts
+        // from "what is already done" instead of from scratch — this breaks
+        // the compaction pump (2026-10-03: ~19 forced compactions in one
+        // hour, each erasing the "already done" memory of the loop).
+        // Delivered via the steer channel: it reaches the model BEFORE the
+        // next LLM call without ending the turn. Skipping when not
+        // processing avoids redirect()'s forceAbort fallback.
+        const anchor = this.buildProgressAnchor();
+        if (anchor && this._isProcessing && this.subprocess) {
+          this.debug(`[ProgressAnchor] Re-injecting post-compaction anchor (${anchor.length} chars)`);
+          this.redirect(anchor);
+        }
       }
 
       // Fire PostToolUse / PostToolUseFailure hook events (fire-and-forget)
       if (agentEvent.type === 'tool_result') {
+        this.noteRecentToolEvent('tool_result', agentEvent.toolName ?? (event.toolName as string) ?? 'unknown', undefined, agentEvent.result, agentEvent.isError);
         const hookEvent = agentEvent.isError ? 'PostToolUseFailure' : 'PostToolUse';
         this.emitAutomationEvent(hookEvent, {
           hook_event_name: hookEvent,
@@ -3128,6 +3154,108 @@ n   * connection can be adopted mid-session.
 
     // For other reasons, send abort to subprocess
     this.send({ type: 'abort' });
+  }
+
+  /**
+   * Compact a tool args object to a short identifying summary for the
+   * progress anchor: bash → command, files → path, search → pattern.
+   */
+  private compactToolArgSummary(input: unknown): string {
+    if (!input || typeof input !== 'object') {
+      return String(input ?? '').trim().slice(0, 120);
+    }
+    const rec = input as Record<string, unknown>;
+    const specific:
+      | string
+      | undefined =
+      typeof rec.command === 'string' ? rec.command.trim()
+        : typeof rec.file_path === 'string' ? rec.file_path
+          : typeof rec.path === 'string' ? rec.path
+            : typeof rec.query === 'string'
+              ? (typeof rec.pattern === 'string' ? `${rec.query} → ${rec.pattern}` : rec.query)
+              : typeof rec.pattern === 'string'
+                ? (typeof rec.glob === 'string' ? `${rec.pattern} (${rec.glob})` : rec.pattern)
+                : undefined;
+    if (specific) return specific.slice(0, 120);
+    let all: string;
+    try {
+      all = JSON.stringify(rec);
+    } catch {
+      all = String(rec);
+    }
+    return all.slice(0, 120);
+  }
+
+  /** Record a tool start/result into the progress-anchor ring. */
+  private noteRecentToolEvent(
+    type: 'tool_start' | 'tool_result',
+    toolName?: string,
+    input?: unknown,
+    result?: unknown,
+    isError?: boolean,
+  ): void {
+    const name = toolName ?? 'tool';
+    const ring = this.recentToolCalls;
+    if (type === 'tool_start') {
+      const args = this.compactToolArgSummary(input);
+      const last = ring[ring.length - 1];
+      // Collapse consecutive duplicates (same tool + args) — the incident
+      // loop was hundreds of identical pairs; a handful is enough context.
+      if (!last || last.name !== name || last.args !== args) {
+        ring.push({ name, args });
+        if (ring.length > 20) ring.shift();
+      }
+      return;
+    }
+    // Attach the result to the most recent entry of the same tool.
+    let entry: (typeof ring)[number] | undefined;
+    for (let i = ring.length - 1; i >= 0; i--) {
+      const candidate = ring[i];
+      if (candidate && candidate.name === name) {
+        entry = candidate;
+        break;
+      }
+    }
+    if (entry) {
+      const text = String(result ?? '').trim().replace(/\s+/g, ' ');
+      entry.result = text ? text.slice(0, 120) : '(no output)';
+      entry.isError = !!isError;
+    }
+  }
+
+  /**
+   * Build the post-compaction progress anchor (2026-10-03 incident, plan
+   * patch 2). Re-establishes "what is already done" for the model: the
+   * current user request, the recently-executed tool calls with their
+   * results, and hard no-repeat rules. Isomorphic to the defense
+   * resumeMessage template — extends its protection to compaction.
+   * Returns null when there is nothing worth anchoring.
+   */
+  private buildProgressAnchor(): string | null {
+    const executed = this.recentToolCalls;
+    if (!this.currentUserMessage && executed.length === 0) return null;
+    const lines: string[] = [
+      '[SYSTEM PROGRESS ANCHOR — context was just compacted. This is a system note, not a user message. Do NOT redo work that is already done.]',
+    ];
+    if (this.currentUserMessage) {
+      lines.push(`Current user request: ${this.currentUserMessage.slice(0, 400)}`);
+    }
+    const done = executed
+      .filter(c => c.result !== undefined)
+      .slice(-10)
+      .map(c => {
+        const head = c.name === 'bash' ? c.args : `${c.name} ${c.args}`.trim();
+        const err = c.isError ? ' [FAILED]' : '';
+        return `- already executed: ${head} → ${c.result}${err}`;
+      });
+    if (done.length > 0) {
+      lines.push('Completed tool work in this turn (do NOT re-run these):');
+      lines.push(...done);
+    }
+    lines.push(
+      'Your next step MUST differ from the steps above. If a listed call already returned the information you need, cite it instead of re-executing it. If nothing new can be done, report your current conclusion to the user now.',
+    );
+    return lines.join('\n');
   }
 
   /**

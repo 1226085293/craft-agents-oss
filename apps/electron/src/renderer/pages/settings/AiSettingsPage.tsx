@@ -83,9 +83,11 @@ function getModelOptionsForConnection(
       if (typeof m === 'string') {
         return { value: m, label: getModelShortName(m), description: '' }
       }
-      // ModelDefinition object
+      // ModelDefinition object — user-defined entries may omit name/shortName
+      // (e.g. { id: "auto" }), in which case the trigger would fall back to the
+      // "Select..." placeholder even when a model is selected. Fall back to id.
       const def = m as ModelDefinition
-      return { value: def.id, label: def.name, description: def.description, descriptionKey: def.descriptionKey }
+      return { value: def.id, label: def.name || def.shortName || def.id, description: def.description, descriptionKey: def.descriptionKey }
     })
   }
 

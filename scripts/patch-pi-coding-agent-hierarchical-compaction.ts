@@ -26,6 +26,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { patchSplitTurnHandoff } from './pi-compaction-handoff-patch.ts';
 
 const REL = "node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js";
 const file = path.join(import.meta.dir, "..", REL);
@@ -43,12 +44,9 @@ let changed = false;
 const MARKER = "generateSummaryWithUsageResilient";
 const LEGACY_MARKER = "export async function generateSummaryResilient";
 
-if (src.includes(MARKER)) {
-  console.log("[patch-compaction] patch (hierarchical): already applied");
-  process.exit(0);
-} else if (src.includes(LEGACY_MARKER)) {
-  console.log("[patch-compaction] patch (hierarchical): legacy variant already applied");
-  process.exit(0);
+const hierarchicalAlreadyApplied = src.includes(MARKER) || src.includes(LEGACY_MARKER);
+if (hierarchicalAlreadyApplied) {
+  console.log('[patch-compaction] patch (hierarchical): already applied');
 }
 
 const HELPERS = [
@@ -205,22 +203,33 @@ const TARGETS = [
   },
 ];
 
-let ok = true;
-for (const { name, from } of TARGETS) {
-  if (!src.includes(from)) {
-    console.warn(
-      `[patch-compaction] WARNING: pattern not found for "${name}" - patch skipped entirely. ` +
-        `pi-coding-agent may have changed upstream; re-check ${REL}.`,
-    );
-    ok = false;
-    break;
+if (!hierarchicalAlreadyApplied) {
+  let ok = true;
+  for (const { name, from } of TARGETS) {
+    if (!src.includes(from)) {
+      console.warn(
+        `[patch-compaction] WARNING: pattern not found for "${name}" - hierarchical patch skipped. ` +
+          `pi-coding-agent may have changed upstream; re-check ${REL}.`,
+      );
+      ok = false;
+      break;
+    }
+  }
+
+  if (ok) {
+    for (const { from, to } of TARGETS) src = src.replace(from, to);
+    changed = true;
+    console.log('[patch-compaction] patch (hierarchical) applied');
   }
 }
 
-if (ok) {
-  for (const { from, to } of TARGETS) src = src.replace(from, to);
+const handoffPatch = patchSplitTurnHandoff(src);
+if (handoffPatch.warning) {
+  console.warn(`[patch-compaction] WARNING: ${handoffPatch.warning}`);
+} else if (handoffPatch.changed) {
+  src = handoffPatch.source;
   changed = true;
-  console.log("[patch-compaction] patch (hierarchical) applied");
+  console.log('[patch-compaction] patch (handoff) applied to split-turn prefix summarizer');
 }
 
 if (changed) {

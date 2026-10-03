@@ -96,6 +96,7 @@ import {
 // Direct source imports from shared (bundled by bun build)
 import { handleLargeResponse, estimateTokens, tokenLimitFor } from '../../shared/src/utils/large-response.ts';
 import { getSessionPlansPath, getSessionPath } from '../../shared/src/sessions/storage.ts';
+import { loadLatestUserRequest, loadProgressSnapshot } from '../../shared/src/agent/progress-journal.ts';
 import { buildCallLlmRequest } from '../../shared/src/agent/llm-tool.ts';
 import type { LLMQueryRequest, LLMQueryResult } from '../../shared/src/agent/llm-tool.ts';
 import { PI_TOOL_NAME_MAP, THINKING_TO_PI } from '../../shared/src/agent/backend/pi/constants.ts';
@@ -1384,8 +1385,13 @@ async function ensureSession(): Promise<AgentSession> {
   // visible reply — even when context is below the SDK's shouldCompact threshold
   // (2026-08-28 incident: model died at ~112K of a 131072 window). Force a
   // compaction in that case so auto-resume has a smaller context to work with.
+  const progressSessionDir = initConfig.sessionPath;
   applyForcedCompactionPatch(session, {
     log: (m) => debugLog(m),
+    sessionJsonlPath: progressSessionDir ? join(progressSessionDir, 'session.jsonl') : undefined,
+    progressJsonlPath: progressSessionDir ? join(progressSessionDir, 'progress.jsonl') : undefined,
+    resolveCurrentUserRequest: () => (progressSessionDir ? loadLatestUserRequest(progressSessionDir) : undefined) || currentUserMessage,
+    resolveProgressSnapshot: () => progressSessionDir ? loadProgressSnapshot(progressSessionDir) : '',
     // Resolved per compaction, not captured now: the active model (and hence a
     // per-model budget override) can change mid-session.
     resolveContextTokenBudget: () =>

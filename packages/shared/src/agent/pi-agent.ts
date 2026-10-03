@@ -93,6 +93,7 @@ import { homedir } from 'os';
 
 // Session storage (plans folder path)
 import { getSessionDataPath, getSessionPath, getSessionPlansPath } from '../sessions/storage.ts';
+import { ProgressJournal, buildHistoryRecoveryPointer } from './progress-journal.ts';
 
 // Error typing
 import { parseError, type AgentError } from './errors.ts';
@@ -437,19 +438,8 @@ export class PiAgent extends BaseAgent {
 
   // Current user message (for context in summarization)
   private currentUserMessage: string = '';
-  /**
-   * Progress-anchor ring: recent tool executions, used to re-anchor the
-   * model after forced compaction (2026-10-03 "compaction pump" incident:
-   * the model replans from scratch after every compaction and re-runs its
-   * first step, regrowing the context until it compacts again).
-   * NOTE: the ring deliberately persists across turns (and across defense
-   * resumes) so a resumed segment keeps the no-repeat rule meaningful;
-   * entries are only pruned by the cap (last 20, consecutive duplicates
-   * collapsed) — not cleared on new prompts.  Anchor rendering uses the
-   * last 10 entries.  Entries: tool name + short args, result attached at
-   * tool_result.
-   */
-  private recentToolCalls: Array<{ name: string; args: string; result?: string; isError?: boolean }> = [];
+  /** Session-scoped, bounded JSONL progress ledger; survives subprocess/app restarts. */
+  private readonly progressJournal?: ProgressJournal;
 
   // Pool reference for convenience (from this.config.mcpPool)
   private get mcpPool(): McpClientPool | undefined { return this.config.mcpPool; }
@@ -517,6 +507,11 @@ export class PiAgent extends BaseAgent {
     this._supportsBranching = true;
 
     this.piSessionId = config.session?.sdkSessionId || null;
+    const sessionId = config.session?.id;
+    if (sessionId && config.workspace.rootPath) {
+      this.progressJournal = new ProgressJournal(getSessionPath(config.workspace.rootPath, sessionId));
+      this.currentUserMessage = this.progressJournal.latestUserRequest() ?? '';
+    }
     this.adapter = new PiEventAdapter();
     this.adapter.setContextWindow(contextWindow);
     if (config.miniModel) {
@@ -1572,9 +1567,10 @@ export class PiAgent extends BaseAgent {
       if (agentEvent.type === 'tool_start' && agentEvent.toolName === 'Read') {
         this.prerequisiteManager.trackReadTool(agentEvent.input as Record<string, unknown>);
       }
-      // Progress-anchor ring bookkeeping (compaction re-injection fuel)
+      // Durable progress ledger (compaction handoff fuel); call IDs keep
+      // parallel same-name tool results attached to the correct invocation.
       if (agentEvent.type === 'tool_start') {
-        this.noteRecentToolEvent('tool_start', agentEvent.toolName, agentEvent.input);
+        this.noteRecentToolEvent('tool_start', agentEvent.toolUseId, agentEvent.toolName, agentEvent.input);
       }
       // Reset prerequisite state on compaction (LLM loses guide content)
       if (agentEvent.type === 'info' && typeof agentEvent.message === 'string' && agentEvent.message.startsWith('Compacted')) {
@@ -1603,9 +1599,13 @@ export class PiAgent extends BaseAgent {
         }
       }
 
+      if (agentEvent.type === 'text_complete' && !agentEvent.isIntermediate && agentEvent.text.trim()) {
+        this.progressJournal?.recordConclusion(agentEvent.text);
+      }
+
       // Fire PostToolUse / PostToolUseFailure hook events (fire-and-forget)
       if (agentEvent.type === 'tool_result') {
-        this.noteRecentToolEvent('tool_result', agentEvent.toolName ?? (event.toolName as string) ?? 'unknown', undefined, agentEvent.result, agentEvent.isError);
+        this.noteRecentToolEvent('tool_result', agentEvent.toolUseId, agentEvent.toolName ?? (event.toolName as string) ?? 'unknown', agentEvent.input, agentEvent.result, agentEvent.isError);
         const hookEvent = agentEvent.isError ? 'PostToolUseFailure' : 'PostToolUse';
         this.emitAutomationEvent(hookEvent, {
           hook_event_name: hookEvent,
@@ -2580,7 +2580,9 @@ export class PiAgent extends BaseAgent {
     this.activeTurnToolIds.clear();
     this.clearTurnIdleWatchdog();
     this.lastTurnEventAt = Date.now();
-    this.currentUserMessage = message;
+    const rawUserRequest = this.getCurrentTurnUserMessage() ?? message;
+    this.currentUserMessage = rawUserRequest;
+    this.progressJournal?.recordUserRequest(rawUserRequest);
     this.adapter.startTurn();
 
     // Fire UserPromptSubmit hook event (fire-and-forget)
@@ -3196,41 +3198,31 @@ n   * connection can be adopted mid-session.
     return all.slice(0, 120);
   }
 
-  /** Record a tool start/result into the progress-anchor ring. */
+  /** Record a tool start/result into the durable progress ledger. */
   private noteRecentToolEvent(
     type: 'tool_start' | 'tool_result',
+    callId: string,
     toolName?: string,
     input?: unknown,
     result?: unknown,
     isError?: boolean,
   ): void {
     const name = toolName ?? 'tool';
-    const ring = this.recentToolCalls;
     if (type === 'tool_start') {
-      const args = this.compactToolArgSummary(input);
-      const last = ring[ring.length - 1];
-      // Collapse consecutive duplicates (same tool + args) — the incident
-      // loop was hundreds of identical pairs; a handful is enough context.
-      if (!last || last.name !== name || last.args !== args) {
-        ring.push({ name, args });
-        if (ring.length > 20) ring.shift();
-      }
+      this.progressJournal?.recordToolStart({
+        callId,
+        toolName: name,
+        argsSummary: this.compactToolArgSummary(input),
+      });
       return;
     }
-    // Attach the result to the most recent entry of the same tool.
-    let entry: (typeof ring)[number] | undefined;
-    for (let i = ring.length - 1; i >= 0; i--) {
-      const candidate = ring[i];
-      if (candidate && candidate.name === name) {
-        entry = candidate;
-        break;
-      }
-    }
-    if (entry) {
-      const text = String(result ?? '').trim().replace(/\s+/g, ' ');
-      entry.result = text ? text.slice(0, 120) : '(no output)';
-      entry.isError = !!isError;
-    }
+    const text = String(result ?? '').trim().replace(/\s+/g, ' ');
+    this.progressJournal?.recordToolResult({
+      callId,
+      toolName: name,
+      resultSummary: text || '(no output)',
+      isError,
+    });
   }
 
   /**
@@ -3242,28 +3234,24 @@ n   * connection can be adopted mid-session.
    * Returns null when there is nothing worth anchoring.
    */
   private buildProgressAnchor(): string | null {
-    const executed = this.recentToolCalls;
-    if (!this.currentUserMessage && executed.length === 0) return null;
+    const currentRequest = this.progressJournal?.latestUserRequest() || this.currentUserMessage;
+    const progress = this.progressJournal?.recentSnapshot() ?? '';
+    if (!currentRequest && !progress) return null;
+    const sessionId = this.config.session?.id;
+    const transcriptPath = sessionId
+      ? join(getSessionPath(this.config.workspace.rootPath, sessionId), 'session.jsonl')
+      : '';
     const lines: string[] = [
       '[SYSTEM PROGRESS ANCHOR — context was just compacted. This is a system note, not a user message. Do NOT redo work that is already done.]',
     ];
-    if (this.currentUserMessage) {
-      lines.push(`Current user request: ${this.currentUserMessage.slice(0, 400)}`);
+    if (currentRequest) lines.push(`Current user request: ${currentRequest.slice(0, 1_200)}`);
+    if (progress) {
+      lines.push('Persistent completed/in-progress work (do NOT repeat completed calls):');
+      lines.push(progress);
     }
-    const done = executed
-      .filter(c => c.result !== undefined)
-      .slice(-10)
-      .map(c => {
-        const head = c.name === 'bash' ? c.args : `${c.name} ${c.args}`.trim();
-        const err = c.isError ? ' [FAILED]' : '';
-        return `- already executed: ${head} → ${c.result}${err}`;
-      });
-    if (done.length > 0) {
-      lines.push('Completed tool work in this turn (do NOT re-run these):');
-      lines.push(...done);
-    }
+    if (transcriptPath) lines.push(buildHistoryRecoveryPointer(transcriptPath));
     lines.push(
-      'Your next step MUST differ from the steps above. If a listed call already returned the information you need, cite it instead of re-executing it. If nothing new can be done, report your current conclusion to the user now.',
+      'Your next step MUST differ from completed steps above. If an essential detail is missing, search/read the persisted transcript before repeating work. If nothing new can be done, report the current conclusion to the user now.',
     );
     return lines.join('\n');
   }
@@ -3281,6 +3269,7 @@ n   * connection can be adopted mid-session.
       return false;
     }
     this.debug(`Steering mid-stream: "${message.slice(0, 100)}"`);
+    this.progressJournal?.recordGuidance(message);
     this.send({ type: 'steer', message });
     this.refreshTurnIdleWatchdog();
     return true;

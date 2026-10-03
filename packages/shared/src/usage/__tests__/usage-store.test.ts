@@ -1,10 +1,10 @@
 import { describe, it, expect, afterAll } from 'bun:test'
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
-import { tmpdir } from 'os'
+import { homedir, tmpdir } from 'os'
 import { pathToFileURL } from 'url'
 
-import { resolveUsageTarget } from '../usage-store.ts'
+import { resolveUsageTarget, resolveSkillReadUsageTarget } from '../usage-store.ts'
 
 describe('resolveUsageTarget', () => {
   it('resolves MCP source tools to their slug', () => {
@@ -45,6 +45,90 @@ describe('resolveUsageTarget', () => {
   it('ignores malformed MCP tool names', () => {
     expect(resolveUsageTarget('mcp__linear', {})).toBeNull()
     expect(resolveUsageTarget('mcp__', {})).toBeNull()
+  })
+})
+
+describe('resolveSkillReadUsageTarget', () => {
+  const context = {
+    workspaceRootPath: '/workspace',
+    workingDirectory: '/project',
+    globalSkillsPath: '/home/user/.agents/skills',
+  }
+
+  it('resolves global, workspace, and project skill files', () => {
+    expect(resolveSkillReadUsageTarget('Read', {
+      file_path: '/home/user/.agents/skills/tts-voice-send/SKILL.md',
+    }, false, context)).toEqual({ kind: 'skill', slug: 'tts-voice-send' })
+    expect(resolveSkillReadUsageTarget('Read', {
+      file_path: '/workspace/skills/brainstorming/references/testing-anti-patterns.md',
+    }, false, context)).toEqual({ kind: 'skill', slug: 'brainstorming' })
+    expect(resolveSkillReadUsageTarget('Read', {
+      path: '/project/.agents/skills/ui-ux-pro-max/SKILL.md',
+    }, false, context)).toEqual({ kind: 'skill', slug: 'ui-ux-pro-max' })
+  })
+
+  it('expands a tilde path into the default global skills root', () => {
+    expect(resolveSkillReadUsageTarget('Read', {
+      file_path: '~/.agents/skills/video-speech-translate/references.md',
+    }, false, {
+      workspaceRootPath: '/workspace',
+    })).toEqual({ kind: 'skill', slug: 'video-speech-translate' })
+    expect(homedir()).toBeTruthy()
+  })
+
+  it('matches Windows drive paths with either separator style and case', () => {
+    expect(resolveSkillReadUsageTarget('Read', {
+      file_path: 'C:\\Users\\Alice\\.agents\\skills\\brainstorming\\testing-anti-patterns.md',
+    }, false, {
+      workspaceRootPath: 'C:/Users/Alice/.craft-agent/workspaces/main',
+      workingDirectory: 'C:/repo',
+      globalSkillsPath: 'c:/users/alice/.agents/skills',
+    })).toEqual({ kind: 'skill', slug: 'brainstorming' })
+
+    expect(resolveSkillReadUsageTarget('Read', {
+      file_path: 'C:/Users/Alice/.agents/skills/brainstorming/SKILL.md',
+    }, false, {
+      workspaceRootPath: 'C:\\Users\\Alice\\.craft-agent\\workspaces\\main',
+      workingDirectory: 'C:\\repo',
+      globalSkillsPath: 'C:\\Users\\Alice\\.agents\\skills',
+    })).toEqual({ kind: 'skill', slug: 'brainstorming' })
+  })
+
+  it('matches UNC paths case-insensitively after slash normalization', () => {
+    expect(resolveSkillReadUsageTarget('Read', {
+      file_path: '\\\\SERVER\\Share\\.agents\\skills\\demo\\SKILL.md',
+    }, false, {
+      workspaceRootPath: '\\\\server\\share\\workspace',
+      workingDirectory: '\\\\server\\share\\repo',
+      globalSkillsPath: '\\\\server\\share\\.agents\\skills',
+    })).toEqual({ kind: 'skill', slug: 'demo' })
+  })
+
+  it('resolves relative paths against the working directory or workspace root', () => {
+    expect(resolveSkillReadUsageTarget('Read', {
+      file_path: '.agents\\skills\\demo\\SKILL.md',
+    }, false, context)).toEqual({ kind: 'skill', slug: 'demo' })
+    expect(resolveSkillReadUsageTarget('Read', {
+      file_path: 'skills\\workspace-skill\\notes.md',
+    }, false, {
+      workspaceRootPath: '/workspace',
+      globalSkillsPath: '/home/user/.agents/skills',
+    })).toEqual({ kind: 'skill', slug: 'workspace-skill' })
+  })
+
+  it('rejects unsuccessful reads, non-Read tools, ordinary paths, and root-prefix siblings', () => {
+    expect(resolveSkillReadUsageTarget('Bash', {
+      file_path: '/workspace/skills/demo/SKILL.md',
+    }, false, context)).toBeNull()
+    expect(resolveSkillReadUsageTarget('Read', {
+      file_path: '/workspace/skills/demo/SKILL.md',
+    }, true, context)).toBeNull()
+    expect(resolveSkillReadUsageTarget('Read', { file_path: '/workspace/README.md' }, false, context)).toBeNull()
+    expect(resolveSkillReadUsageTarget('Read', { file_path: '/workspace/skills' }, false, context)).toBeNull()
+    expect(resolveSkillReadUsageTarget('Read', { file_path: '/workspace/skills/demo' }, false, context)).toBeNull()
+    expect(resolveSkillReadUsageTarget('Read', {
+      file_path: '/workspace/skills-extra/demo/SKILL.md',
+    }, false, context)).toBeNull()
   })
 })
 

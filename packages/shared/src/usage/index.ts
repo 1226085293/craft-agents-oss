@@ -9,11 +9,13 @@ export type {
   UsageRecord,
   UsageRecordInput,
   UsageTarget,
+  SkillReadUsageContext,
   UsageStats,
 } from './usage-store.ts';
 
 export {
   resolveUsageTarget,
+  resolveSkillReadUsageTarget,
   appendUsage,
   readUsageRecords,
   getUsageStats,

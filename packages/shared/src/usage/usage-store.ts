@@ -11,7 +11,8 @@
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { join, posix, win32 } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { CONFIG_DIR } from '../config/paths.ts';
 
@@ -46,6 +47,13 @@ export type UsageRecordInput = Omit<UsageRecord, 'id' | 'timestamp'>;
 export interface UsageTarget {
   kind: UsageKind;
   slug: string;
+}
+
+export interface SkillReadUsageContext {
+  workspaceRootPath: string;
+  workingDirectory?: string;
+  /** Optional override for deterministic tests; defaults to ~/.agents/skills. */
+  globalSkillsPath?: string;
 }
 
 /** Aggregated per-slug stats. */
@@ -106,6 +114,78 @@ export function resolveUsageTarget(
   }
 
   return null;
+}
+
+const PROJECT_AGENT_SKILLS_DIR = '.agents/skills';
+const WINDOWS_ABSOLUTE_PATH = /^(?:[a-zA-Z]:[\\/]|(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+)/;
+
+function normalizeUsagePath(path: string): string {
+  const expanded = path === '~' || path.startsWith('~/') || path.startsWith('~\\')
+    ? `${homedir()}${path.slice(1)}`
+    : path;
+  return expanded.replace(/\\/g, '/');
+}
+
+function getPathApi(...paths: string[]) {
+  return paths.some(path => WINDOWS_ABSOLUTE_PATH.test(path.replace(/\\/g, '/'))) ? win32 : posix;
+}
+
+function joinUsagePath(base: string, relative: string): string {
+  const normalizedBase = normalizeUsagePath(base);
+  const pathApi = getPathApi(normalizedBase);
+  return pathApi.join(normalizedBase, relative);
+}
+
+/**
+ * Resolve a successful native Read path to a skill slug when it is below one
+ * of the supported skill roots. Both Windows and POSIX separators are accepted
+ * regardless of the host OS; containment is checked on path segments, not a
+ * textual prefix.
+ */
+export function resolveSkillReadUsageTarget(
+  toolName: string,
+  toolInput: Record<string, unknown> | undefined,
+  isError: boolean,
+  context: SkillReadUsageContext,
+): UsageTarget | null {
+  if (toolName !== 'Read' || isError || !toolInput) return null;
+
+  const readPath = toolInput.file_path ?? toolInput.path;
+  if (typeof readPath !== 'string' || !readPath.trim()) return null;
+
+  const normalizedReadPath = normalizeUsagePath(readPath.trim());
+  const workingDirectory = context.workingDirectory ?? context.workspaceRootPath;
+  const normalizedWorkingDirectory = normalizeUsagePath(workingDirectory);
+  const roots = [
+    context.globalSkillsPath ?? join(homedir(), '.agents', 'skills'),
+    joinUsagePath(context.workspaceRootPath, 'skills'),
+    ...(context.workingDirectory ? [joinUsagePath(context.workingDirectory, PROJECT_AGENT_SKILLS_DIR)] : []),
+  ].map(normalizeUsagePath);
+
+  const matches: Array<{ slug: string; rootLength: number }> = [];
+  for (const root of roots) {
+    const pathApi = getPathApi(normalizedReadPath, normalizedWorkingDirectory, root);
+    const absoluteReadPath = pathApi.resolve(normalizedWorkingDirectory, normalizedReadPath);
+    const absoluteRoot = pathApi.resolve(root);
+    const relativePath = pathApi.relative(absoluteRoot, absoluteReadPath).replace(/\\/g, '/');
+    const segments = relativePath.split('/').filter(Boolean);
+    const normalizedRelativePath = process.platform === 'win32' || WINDOWS_ABSOLUTE_PATH.test(root)
+      ? relativePath.toLowerCase()
+      : relativePath;
+
+    if (pathApi.isAbsolute(relativePath) || normalizedRelativePath === '..' || normalizedRelativePath.startsWith('../')) {
+      continue;
+    }
+    // A skill file must be inside a skill directory, not the skills root or
+    // the slug directory itself.
+    if (segments.length < 2) continue;
+
+    matches.push({ slug: segments[0]!, rootLength: absoluteRoot.length });
+  }
+
+  matches.sort((a, b) => b.rootLength - a.rootLength);
+  const slug = matches[0]?.slug;
+  return slug ? { kind: 'skill', slug } : null;
 }
 
 // ============================================================================

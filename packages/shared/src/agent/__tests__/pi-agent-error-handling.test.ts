@@ -172,6 +172,89 @@ describe('PiAgent subprocess error handling', () => {
   })
 })
 
+describe('PiAgent verification delivery lifecycle', () => {
+  function startVerificationHold(agent: PiAgent, enqueued: any[]) {
+    ;(agent as any).eventQueue.enqueue = (event: any) => { enqueued.push(event) }
+    ;(agent as any).eventQueue.complete = () => { enqueued.push({ type: 'queue_complete' }) }
+    ;(agent as any).adapter.startTurn()
+    ;(agent as any).handleSubprocessEvent({ type: 'turn_start' })
+    ;(agent as any).handleSubprocessEvent({
+      type: 'message_end',
+      message: { role: 'assistant', stopReason: 'stop', content: 'Candidate reply' },
+    })
+    ;(agent as any).handleSubprocessEvent({ type: 'agent_end', defenseVerificationPending: true })
+  }
+
+  it('re-emits the verified reply as text_complete on the held draft turn', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    startVerificationHold(agent, enqueued)
+    const draftTurnId = enqueued[0].turnId
+
+    ;(agent as any).handleLine(JSON.stringify({
+      type: 'verification_result',
+      passed: true,
+      finalText: 'Candidate reply',
+    }))
+    ;(agent as any).handleSubprocessEvent({
+      type: 'message_end',
+      message: { role: 'assistant', stopReason: 'stop', content: 'Candidate reply' },
+    })
+
+    const finalText = enqueued.find(event => event.type === 'text_complete' && event.text === 'Candidate reply' && event !== enqueued[0])
+    expect(finalText?.turnId).toBe(draftTurnId)
+    expect(finalText?.isIntermediate).not.toBe(true)
+    agent.destroy()
+  })
+
+  it('ends the verification card before returning to the follow-up conversation on failure', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    startVerificationHold(agent, enqueued)
+
+    ;(agent as any).handleLine(JSON.stringify({
+      type: 'verification_result',
+      passed: false,
+      failReason: 'candidate did not answer the user',
+    }))
+
+    expect(enqueued.map(event => event.statusType ?? event.type)).toEqual([
+      'text_complete',
+      'text_demote',
+      'verification',
+      'verification_failed',
+    ])
+    expect(enqueued[3].message).toContain('Verification failed')
+    expect(enqueued).not.toContainEqual({ type: 'queue_complete' })
+    agent.destroy()
+  })
+
+  it('finishes verification before delivering the verified reply and completing the turn', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    startVerificationHold(agent, enqueued)
+
+    ;(agent as any).handleLine(JSON.stringify({
+      type: 'verification_result',
+      passed: true,
+      finalText: 'Verified answer',
+    }))
+
+    expect(enqueued.map(event => event.statusType ?? event.type)).toEqual([
+      'text_complete',
+      'text_demote',
+      'verification',
+      'verification_passed',
+      'text_complete',
+      'complete',
+      'queue_complete',
+    ])
+    expect(enqueued[4]).toMatchObject({ type: 'text_complete', text: 'Verified answer' })
+    expect(enqueued[4].turnId).toBe(enqueued[0].turnId)
+    agent.destroy()
+  })
+})
+
 describe('PiAgent recovery state on abort', () => {
   it('forceAbort clears a held auto-retry so the next turn starts clean', () => {
     const agent = new PiAgent(createConfig())

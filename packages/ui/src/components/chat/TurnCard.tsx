@@ -39,7 +39,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '../tooltip'
 import { parseDiffFromFile, type FileContents } from '@pierre/diffs'
 import { getDiffStats, getUnifiedDiffStats } from '../code-viewer'
 import { TurnCardActionsMenu } from './TurnCardActionsMenu'
-import { computeLastChildSet, groupActivitiesByParent, isActivityGroup, buildActivityRenderKeys, formatDuration, formatTokens, formatDateTimeFull, deriveTurnPhase, shouldShowThinkingIndicator, type ActivityGroup, type AssistantTurn } from './turn-utils'
+import { computeLastChildSet, groupActivitiesByParent, isActivityGroup, buildActivityRenderKeys, formatDuration, formatTokens, formatDateTimeFull, deriveTurnPhase, shouldShowThinkingIndicator, sortActivitiesForDisplay, type ActivityGroup, type AssistantTurn } from './turn-utils'
 import { extractAnnotationSelectedText } from './follow-up-helpers'
 import {
   formatAnnotationFollowUpTooltipText,
@@ -2958,10 +2958,10 @@ export const TurnCard = React.memo(function TurnCard({
     [activities, intent, isStreaming, response, isComplete]
   )
 
-  // Sort activities by timestamp for correct chronological order
-  // This handles the live streaming case (turn-utils sorts on flush for completed turns)
+  // Keep any live progress row at the tail even if its original timestamp
+  // predates later tools/status events (stream deltas keep the row's first timestamp).
   const allSortedActivities = useMemo(
-    () => [...activities].sort((a, b) => a.timestamp - b.timestamp),
+    () => sortActivitiesForDisplay(activities),
     [activities]
   )
 

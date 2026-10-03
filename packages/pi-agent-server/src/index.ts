@@ -549,6 +549,8 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     endsWithEmptyResponse: boolean;
     hasRepetitionLoop: boolean;
     truncatedFinal: boolean;
+    hasFinalText: boolean;
+    stopReason?: string;
     stallAborted?: boolean;
   } | undefined;
   let stallKillThisRun = false;
@@ -641,6 +643,10 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     const truncatedFinal = lastAssistant?.stopReason === 'length';
     runOutput = {
       hasVisibleText: anyText,
+      hasFinalText: !!lastAssistant
+        && (lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length')
+        && extractAssistantText(lastAssistant.content).trim().length > 0,
+      stopReason: lastAssistant?.stopReason,
       aborted,
       endsWithEmptyResponse,
       hasRepetitionLoop,

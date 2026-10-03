@@ -1379,12 +1379,18 @@ export class PiAgent extends BaseAgent {
             type: 'info',
             message: 'Verification passed — delivering final reply',
             statusType: 'verification_passed',
-            finalText: msg.finalText,
           });
+          this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(msg.finalText));
+          this.eventQueue.enqueue({ type: 'complete' });
           this.eventQueue.complete();
         } else {
           this.debug(`Verification FAILED${typeof msg.failReason === 'string' ? `: ${msg.failReason}` : ''} — continuing turn (followUp)`);
           this.adapter.finalizeVerificationHeld(false);
+          this.eventQueue.enqueue({
+            type: 'info',
+            message: 'Verification failed — continuing',
+            statusType: 'verification_failed',
+          });
           // Stay open: the followUp resume continues the turn; its final
           // agent_end (no verification flag) completes the queue.
         }

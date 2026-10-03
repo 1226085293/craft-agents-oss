@@ -391,7 +391,7 @@ export type SessionEvent =
   | { type: 'typed_error'; sessionId: string; error: TypedError; timestamp?: number }
   | { type: 'complete'; sessionId: string; tokenUsage?: Session['tokenUsage']; hasUnread?: boolean; backgroundTasksAlive?: boolean }
   | { type: 'interrupted'; sessionId: string; message?: Message; queuedMessages?: string[] }
-  | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'verification' | 'verification_passed' | 'verification_failed' }
+  | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'verification' | 'verification_passed' | 'verification_failed'; timestamp?: number }
   | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'verification_passed' | 'verification_failed'; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string }
   | { type: 'title_generated'; sessionId: string; title: string }
   | { type: 'title_regenerating'; sessionId: string; isRegenerating: boolean }

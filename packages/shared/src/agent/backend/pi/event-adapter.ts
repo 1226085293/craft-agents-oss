@@ -198,6 +198,8 @@ export class PiEventAdapter extends BaseEventAdapter {
    *  text, complete; failed → a followUp continues the turn, its FINAL
    *  agent_end completes). */
   private verificationHeld: boolean = false;
+  /** Correlation id of the final candidate awaiting a successful verification replay. */
+  private verificationReplayTurnId: string | null = null;
 
   // ============================================================
   // Retryable-error deferral (auto-retry terminal-state reporting)
@@ -351,7 +353,16 @@ export class PiEventAdapter extends BaseEventAdapter {
     // must NOT touch pendingQueueComplete or the live next turn's queue.
     if (!this.verificationHeld) return;
     this.verificationHeld = false;
-    if (passed) this.pendingQueueComplete = true;
+    if (!passed) this.verificationReplayTurnId = null;
+  }
+
+  /** Build the one visible final reply after the verifier has passed. */
+  createVerifiedReplyEvent(finalText: string): CraftAgentEvent {
+    const turnId = this.verificationReplayTurnId ?? this.nextSubTurnId('m');
+    this.verificationReplayTurnId = null;
+    this.hasEmittedFinalText = true;
+    this.lastFinalTextTurnId = turnId;
+    return { type: 'text_complete', text: finalText, isIntermediate: false, turnId };
   }
 
   /**
@@ -400,6 +411,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.sawToolDuringDefenseHold = false;
     this.queuedFollowUpHeld = false;
     this.verificationHeld = false;
+    this.verificationReplayTurnId = null;
     this.lastFinalTextTurnId = null;
     this.deferredRetryError = null;
     this.retryHoldActive = false;
@@ -542,6 +554,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.hasStreamedDeltas = false;
     this.hasEmittedFinalText = false;
     this.lastFinalTextTurnId = null;
+    this.verificationReplayTurnId = null;
     this.subTurnCounter = 0;
     this.messageSubTurnId = null;
     // A new Craft turn can only start once the previous queue completed (or
@@ -666,6 +679,7 @@ export class PiEventAdapter extends BaseEventAdapter {
         // hold (passed → replay + complete, failed → followUp continues).
         if ((event as { defenseVerificationPending?: boolean }).defenseVerificationPending) {
           this.verificationHeld = true;
+          this.verificationReplayTurnId = this.lastFinalTextTurnId;
           // The draft reply already shown at the main turn's end must not coexist
           // with the verified replay (or the follow-up continuation) — demote it
           // into the process block so the turn ends with a SINGLE final bubble.

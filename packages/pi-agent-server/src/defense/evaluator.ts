@@ -193,6 +193,10 @@ export class DefenseEvaluator {
    */
   evaluate(lastAssistantMessage?: {
     hasVisibleText: boolean;
+    /** Whether the terminal assistant message has visible text suitable for verification delivery. */
+    hasFinalText?: boolean;
+    /** Pi SDK stop reason; upstream errors must not enter post-stop recovery. */
+    stopReason?: string;
     aborted: boolean;
     endsWithEmptyResponse?: boolean;
     hasRepetitionLoop?: boolean;
@@ -206,6 +210,13 @@ export class DefenseEvaluator {
     }
 
     const stallAborted = lastAssistantMessage?.stallAborted === true;
+
+    // Transport/provider errors are not candidate replies. Let the SDK retry
+    // lane or its terminal error own this outcome; running Defense here could
+    // turn an EOF into a misleading verification/recovery turn.
+    if (lastAssistantMessage?.stopReason === 'error') {
+      return { evaluated: false, shouldResume: false, state: this.lifecycle.getState() };
+    }
 
     // P0 guardrail (2026-08-22): a user abort is an explicit intent to stop.
     // It must short-circuit EVERY resume signal — not just silentStop. Before
@@ -291,13 +302,21 @@ export class DefenseEvaluator {
     const longTurn =
       this.lifecycle.getIterations() >= this.verifyMinSteps
       || this.lifecycle.elapsedMs() >= this.verifyMinDurationMs;
-    const verifyRequired = !faultClass && (writeUnverified || longTurn);
+    // Legacy direct evaluator callers provide hasVisibleText only. The Pi
+    // server passes hasFinalText explicitly so earlier commentary/tool-call
+    // text can never be mistaken for a terminal candidate.
+    const hasFinalText = lastAssistantMessage?.hasFinalText ?? lastAssistantMessage?.hasVisibleText ?? false;
+    const verifyRequired = hasFinalText && !faultClass && (writeUnverified || longTurn);
+    // If a verification signal fires without a deliverable final candidate,
+    // preserve the ordinary follow-up recovery path instead of opening a
+    // program-side verification hold.
+    const resumeWithoutCandidate = !hasFinalText && (writeUnverified || longTurn);
 
     // A stall-watchdog abort is itself an early-stop signal: the turn was
     // killed mid-flight, so evaluation must run even when no other signal
     // fired (e.g. visible text was already produced earlier in the run).
     const needsEvaluation =
-      faultClass || verifyRequired || complexity.needsEvaluation;
+      faultClass || verifyRequired || resumeWithoutCandidate || complexity.needsEvaluation;
     const stop = this.lifecycle.onStop(needsEvaluation);
 
     if (stop === 'abort') {
@@ -315,7 +334,7 @@ export class DefenseEvaluator {
     // was produced earlier in the run (faultClass covers it): the watchdog
     // killed a mid-flight turn, so "already said something" must not read
     // as done.
-    if (stop === 'run' || (!faultClass && !verifyRequired)) {
+    if (stop === 'run' || (!faultClass && !verifyRequired && !resumeWithoutCandidate)) {
       this.lifecycle.markDone();
       return {
         evaluated: true,

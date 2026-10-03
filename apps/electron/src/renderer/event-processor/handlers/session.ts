@@ -124,6 +124,7 @@ export function handleError(
   state: SessionState,
   event: ErrorEvent
 ): ProcessResult {
+  const { streaming } = state
   const session = clearRetryStatus(state.session)
 
   // Fail-safe: Mark any running tools as failed
@@ -145,10 +146,8 @@ export function handleError(
       session: {
         ...session,
         messages: [...messagesWithFailedTools, errorMessage],
-        isProcessing: false,
-        currentStatus: undefined,  // Clear any lingering status
       },
-      streaming: null,
+      streaming,
     },
     effects: [],
   }
@@ -161,6 +160,7 @@ export function handleTypedError(
   state: SessionState,
   event: TypedErrorEvent
 ): ProcessResult {
+  const { streaming } = state
   const session = clearRetryStatus(state.session)
 
   // Fail-safe: Mark any running tools as failed
@@ -196,10 +196,8 @@ export function handleTypedError(
       session: {
         ...session,
         messages: [...messagesWithFailedTools, errorMessage],
-        isProcessing: false,
-        currentStatus: undefined,  // Clear any lingering status
       },
-      streaming: null,
+      streaming,
     },
     effects: [],
   }
@@ -300,33 +298,20 @@ export function handleInfo(
     }
   }
 
-  // Verification result (2026-10-02 redesign): fold into the pending
-  // 'verification' status card and, on pass, append the replayed final reply
-  // as a REAL assistant bubble (the program-side replay — no second LLM turn).
+  // Verification result (2026-10-02 redesign): close the pending status card.
+  // The verified reply is delivered separately as text_complete after this
+  // event so the card always disappears before its result bubble appears.
   if (event.statusType === 'verification_passed') {
     const updatedMessages = session.messages.map(m =>
       m.role === 'status' && m.statusType === 'verification'
         ? { ...m, role: 'info' as const, content: event.message, statusType: 'verification_passed' as const, infoLevel: (event.level ?? 'success') as Message['infoLevel'] }
         : m
     )
-    // Inherit the demoted draft's turnId so the replay lands in the SAME
-    // process card (draft as a step, replay as the single response).
-    const draftTurnId = [...updatedMessages].reverse()
-      .find((m): m is Message => m.role === 'assistant' && m.content === event.finalText)?.turnId
-    const messagesWithReply = typeof event.finalText === 'string' && event.finalText.length > 0
-      ? [...updatedMessages, {
-          id: generateMessageId(),
-          role: 'assistant' as const,
-          content: event.finalText,
-          timestamp: event.timestamp ?? Date.now(),
-          ...(typeof draftTurnId === 'string' ? { turnId: draftTurnId } : {}),
-        }]
-      : updatedMessages
     return {
       state: {
         session: {
           ...session,
-          messages: messagesWithReply,
+          messages: updatedMessages,
           currentStatus: undefined,
         },
         streaming,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { buildActivityRenderKeys, groupMessagesByTurn } from '../turn-utils'
+import { buildActivityRenderKeys, groupMessagesByTurn, sortActivitiesForDisplay } from '../turn-utils'
 import type { ActivityItem } from '../TurnCard'
 import type { Message } from '@craft-agent/core'
 
@@ -12,6 +12,35 @@ function activity(over: Partial<ActivityItem> & { id: string }): ActivityItem {
     ...over,
   } as ActivityItem
 }
+
+describe('sortActivitiesForDisplay', () => {
+  it('pins running Thinking and verification rows below later completed activities', () => {
+    const completedTool = {
+      id: 'tool-later',
+      type: 'tool',
+      status: 'completed',
+      timestamp: 500,
+    } as ActivityItem
+    const staleRunningThinking = activity({ id: 'thinking-early', timestamp: 100, status: 'running' })
+    const staleRunningVerification = {
+      id: 'verification-early',
+      type: 'status',
+      status: 'running',
+      statusType: 'verification',
+      timestamp: 50,
+    } as ActivityItem
+
+    expect(sortActivitiesForDisplay([
+      staleRunningVerification,
+      completedTool,
+      staleRunningThinking,
+    ]).map(item => item.id)).toEqual([
+      'tool-later',
+      'verification-early',
+      'thinking-early',
+    ])
+  })
+})
 
 describe('buildActivityRenderKeys', () => {
   it('keeps the render key stable across the pending -> authoritative id swap', () => {

@@ -32,6 +32,21 @@ describe('Pi retry streaming boundaries', () => {
   beforeEach(() => { jest.useFakeTimers() })
   afterEach(() => { jest.clearAllTimers(); jest.useRealTimers() })
 
+  it('stamps status rows with the main-process monotonic timestamp', async () => {
+    const { manager, events, fire } = harness()
+    manager.monotonic = () => 1234
+
+    await fire({ type: 'status', message: 'Verifying final reply…', statusType: 'verification' })
+
+    expect(events).toContainEqual({
+      type: 'status',
+      sessionId: 'retry-test',
+      message: 'Verifying final reply…',
+      statusType: 'verification',
+      timestamp: 1234,
+    })
+  })
+
   it('discards pending failed deltas before backoff and never sends them later', async () => {
     const { manager, managed, events, fire } = harness()
     await fire({ type: 'text_delta', text: 'Failed partial', turnId: 'attempt-0' })

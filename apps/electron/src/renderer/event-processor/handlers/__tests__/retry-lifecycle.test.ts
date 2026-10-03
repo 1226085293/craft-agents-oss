@@ -289,6 +289,55 @@ describe('Pi retry lifecycle event processing', () => {
     expect(state.streaming).toBeNull()
   })
 
+  it('keeps the session processing after an error until the actual complete event', () => {
+    let state = makeState([], { streaming: { content: 'partial response', turnId: RETRY_TURN_ID } })
+    state = applyEvent(state, {
+      type: 'error',
+      sessionId: SESSION_ID,
+      error: 'stream disconnected before completion',
+      timestamp: 5,
+    })
+
+    expect(state.session.isProcessing).toBe(true)
+    expect(state.session.messages.at(-1)?.role).toBe('error')
+
+    state = applyEvent(state, {
+      type: 'text_delta',
+      sessionId: SESSION_ID,
+      delta: 'recovery is still running',
+      turnId: 'recovery-turn',
+    })
+    expect(state.session.isProcessing).toBe(true)
+
+    state = applyEvent(state, { type: 'complete', sessionId: SESSION_ID })
+    expect(state.session.isProcessing).toBe(false)
+  })
+
+  it('closes verification state before a verified final text is appended', () => {
+    let state = makeState([
+      { id: 'verify', role: 'status', content: 'Verifying final reply…', statusType: 'verification', timestamp: 1 },
+    ])
+
+    state = applyEvent(state, {
+      type: 'info',
+      sessionId: SESSION_ID,
+      message: 'Verification passed — delivering final reply',
+      statusType: 'verification_passed',
+      timestamp: 2,
+    })
+    expect(state.session.messages.some(message => message.role === 'assistant' && message.content === 'Verified answer')).toBe(false)
+    expect(state.session.messages[0]).toMatchObject({ role: 'info', statusType: 'verification_passed' })
+
+    state = applyEvent(state, {
+      type: 'text_complete',
+      sessionId: SESSION_ID,
+      text: 'Verified answer',
+      timestamp: 3,
+      messageId: 'verified-final',
+    })
+    expect(state.session.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'Verified answer' })
+  })
+
   it('upserts a single transient retry row as backoff attempts advance', () => {
     const compacting = {
       id: 'compacting',

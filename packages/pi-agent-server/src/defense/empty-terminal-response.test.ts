@@ -36,9 +36,9 @@ function scan(evaluator: DefenseEvaluator, endMessages: unknown[]) {
   // Mirrors the extraction logic in pi-agent-server/src/index.ts.
   let anyText = false;
   let aborted = false;
-  let lastAssistant: { content?: unknown; stopReason?: string; usage?: { output?: number } } | null = null;
+  let lastAssistant: { content?: unknown; stopReason?: string; usage?: { output?: number }; errorMessage?: string } | null = null;
   for (const raw of endMessages) {
-    const m = raw as { role?: string; content?: unknown; stopReason?: string; usage?: { output?: number } };
+    const m = raw as { role?: string; content?: unknown; stopReason?: string; usage?: { output?: number }; errorMessage?: string };
     if (m?.role !== 'assistant') continue;
     lastAssistant = m;
     if (m.stopReason === 'aborted') aborted = true;
@@ -66,7 +66,21 @@ function scan(evaluator: DefenseEvaluator, endMessages: unknown[]) {
     // case that endsWithEmptyResponse cannot see (it needs NO visible block).
     truncatedFinal = lastAssistant.stopReason === 'length';
   }
-  return evaluator.evaluate({ hasVisibleText: anyText, aborted, endsWithEmptyResponse, truncatedFinal });
+  const hasFinalText = !!lastAssistant
+    && (lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length')
+    && Array.isArray(lastAssistant.content)
+    && lastAssistant.content.some(
+      (c) => (c as { type?: string })?.type === 'text'
+        && String((c as { text?: unknown }).text ?? '').trim().length > 0,
+    );
+  return evaluator.evaluate({
+    hasVisibleText: anyText,
+    hasFinalText,
+    stopReason: lastAssistant?.stopReason,
+    aborted,
+    endsWithEmptyResponse,
+    truncatedFinal,
+  });
 }
 
 describe('empty terminal response defense (2026-08-22 incidents)', () => {
@@ -187,6 +201,32 @@ describe('empty terminal response defense (2026-08-22 incidents)', () => {
     expect(result.shouldResume).toBe(false);
     expect(result.verifyRequired).toBe(true);
     expect(result.verifyReason).toBe('write-without-readback'); // different branch, not the EMPTY signal
+  });
+
+  it('a long turn without a final visible reply resumes without entering verification', () => {
+    const e = new DefenseEvaluator({ enabled: true, verifyMinSteps: 1 });
+    e.recordToolCall({ type: 'read' });
+    const result = scan(e, [{
+      role: 'assistant',
+      content: [{ type: 'text', text: 'Checking the final item.' }, { type: 'toolCall', name: 'read' }],
+      stopReason: 'toolUse',
+    }]);
+    expect(result.verifyRequired).not.toBe(true);
+    expect(result.shouldResume).toBe(true);
+  });
+
+  it('does not evaluate an upstream assistant error as a verification candidate', () => {
+    const e = new DefenseEvaluator({ enabled: true, verifyMinSteps: 1 });
+    e.recordToolCall({ type: 'bash', command: 'rm /tmp/f.txt' });
+    const result = scan(e, [{
+      role: 'assistant',
+      content: [],
+      stopReason: 'error',
+      errorMessage: 'stream disconnected before completion',
+    }]);
+    expect(result.verifyRequired).not.toBe(true);
+    expect(result.shouldResume).toBe(false);
+    expect(result.evaluated).toBe(false);
   });
 });
 

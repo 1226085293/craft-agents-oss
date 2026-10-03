@@ -19,6 +19,13 @@ export type { ActivityItem }
 // Helpers
 // ============================================================================
 
+/** Keep live activity rows (Thinking / verification / active tools) at the tail. */
+export function sortActivitiesForDisplay<T extends ActivityItem>(activities: T[]): T[] {
+  return [...activities].sort((a, b) =>
+    Number(a.status === 'running') - Number(b.status === 'running') || a.timestamp - b.timestamp
+  )
+}
+
 /**
  * Strip error wrapper tags and prefixes from tool error messages.
  * The Claude Agent SDK wraps errors in tags like <error><tool_use_error>...</tool_use_error></error>
@@ -623,18 +630,42 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
     // update the pending 'verification' status step; the replayed final
     // reply arrives as its own assistant message and becomes the response.
     if (message.role === 'info' && (message.statusType === 'verification_passed' || message.statusType === 'verification_failed')) {
-      if (currentTurn) {
-        const statusIdx = currentTurn.activities.findIndex(
-          a => a.type === 'status' && a.statusType === 'verification'
-        )
-        const existingActivity = currentTurn.activities[statusIdx]
-        if (statusIdx !== -1 && existingActivity) {
-          currentTurn.activities[statusIdx] = {
-            ...existingActivity,
-            status: message.statusType === 'verification_passed' ? 'completed' : 'error',
-            content: message.content,
+      const verdictStatus = message.statusType === 'verification_passed' ? 'completed' : 'error'
+      const statusIdx = currentTurn?.activities.findIndex(
+        a => a.type === 'status' && a.statusType === 'verification'
+      ) ?? -1
+      const existingActivity = statusIdx !== -1 ? currentTurn!.activities[statusIdx] : undefined
+      if (statusIdx !== -1 && existingActivity) {
+        currentTurn!.activities[statusIdx] = {
+          ...existingActivity,
+          status: verdictStatus,
+          content: message.content,
+        }
+      } else {
+        // The renderer folded the transient status row into this info message
+        // (and status rows are not persisted), so recreate the verdict card
+        // to keep the verification outcome visible on reload.
+        if (!currentTurn) {
+          currentTurn = {
+            type: 'assistant',
+            turnId: message.turnId || message.id,
+            activities: [],
+            response: undefined,
+            intent: undefined,
+            isStreaming: false,
+            isComplete: false,
+            timestamp: message.timestamp,
           }
         }
+        currentTurn.activities.push({
+          id: message.id,
+          type: 'status',
+          status: verdictStatus,
+          content: message.content,
+          timestamp: message.timestamp,
+          statusType: 'verification',
+          depth: 0,
+        })
       }
       continue  // Don't create a separate system turn
     }

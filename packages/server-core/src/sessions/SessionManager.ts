@@ -78,7 +78,7 @@ import {
 } from '@craft-agent/shared/sessions'
 import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, TokenRefreshManager } from '@craft-agent/shared/sources'
 import { listTaskSlugs, parseTaskSpec, uniqueTaskSlug } from '@craft-agent/shared/tasks'
-import { resolveUsageTarget, appendUsage } from '@craft-agent/shared/usage'
+import { resolveUsageTarget, resolveSkillReadUsageTarget, appendUsage } from '@craft-agent/shared/usage'
 import { createTaskFromSpec, resolveCreateTaskProjectId } from '../tasks'
 import { buildPagesToolCallbacks } from '../pages/tool-callbacks'
 import { buildServersFromSources as buildServersFromSourcesShared } from '../sources/build-servers'
@@ -898,6 +898,8 @@ interface ManagedSession {
   pendingAuthRequestId?: string
   /** toolUseIds already recorded into the usage store — prevents dual-event double-counting. */
   recordedUsageToolUseIds?: Set<string>
+  /** Original Read inputs awaiting their matching tool_result usage decision. */
+  pendingReadToolInputs?: Map<string, Record<string, unknown>>
   pendingAuthRequest?: AuthRequest
   // Auth retry tracking (for mid-session token expiry)
   // Store last sent message/attachments to enable retry after token refresh
@@ -9014,6 +9016,18 @@ ${request.prompt}`;
       }
 
       case 'tool_start': {
+        // Preserve original Read input until the matching result confirms success.
+        // The display-formatted path below is not suitable for usage resolution.
+        if (event.toolName === 'Read' && Object.keys(event.input).length > 0) {
+          managed.pendingReadToolInputs ??= new Map()
+          managed.pendingReadToolInputs.set(event.toolUseId, event.input)
+          while (managed.pendingReadToolInputs.size > 100) {
+            const oldestToolUseId = managed.pendingReadToolInputs.keys().next().value
+            if (oldestToolUseId === undefined) break
+            managed.pendingReadToolInputs.delete(oldestToolUseId)
+          }
+        }
+
         // Format tool input paths to relative for better readability
         const formattedToolInput = formatToolInputPaths(event.input)
 
@@ -9221,6 +9235,32 @@ ${request.prompt}`;
         const wasAlreadyComplete = existingToolMsg?.toolStatus === 'completed'
 
         sessionLog.info(`RESULT MATCH: toolUseId=${event.toolUseId}, found=${!!existingToolMsg}, toolName=${existingToolMsg?.toolName || toolName}, wasComplete=${wasAlreadyComplete}`)
+
+        const readInput = (event.input && Object.keys(event.input).length > 0
+          ? event.input
+          : managed.pendingReadToolInputs?.get(event.toolUseId)) ?? existingToolMsg?.toolInput
+        managed.pendingReadToolInputs?.delete(event.toolUseId)
+        const readTarget = !managed.recordedUsageToolUseIds?.has(event.toolUseId)
+          ? resolveSkillReadUsageTarget(
+            event.toolName || existingToolMsg?.toolName || toolName,
+            readInput,
+            inferredError,
+            {
+              workspaceRootPath: managed.workspace.rootPath,
+              workingDirectory: managed.workingDirectory,
+            },
+          )
+          : null
+        if (readTarget) {
+          if (!managed.recordedUsageToolUseIds) managed.recordedUsageToolUseIds = new Set()
+          managed.recordedUsageToolUseIds.add(event.toolUseId)
+          appendUsage({
+            ...readTarget,
+            toolName: 'Read',
+            workspaceId,
+            sessionId,
+          })
+        }
 
         // parentToolUseId comes from CraftAgent (SDK-authoritative) or existing message
         const parentToolUseId = existingToolMsg?.parentToolUseId || event.parentToolUseId

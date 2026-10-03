@@ -74,6 +74,7 @@ import {
 } from "@/components/ui/collapsible"
 import { SessionList, type ChatGroupingMode } from "./SessionList"
 import { MainContentPanel } from "./MainContentPanel"
+import { shouldRefreshUsageStats } from "./usage-refresh"
 import { BoardListToggle } from "./kanban/BoardListToggle"
 import { PanelStackContainer } from "./PanelStackContainer"
 import { CompactSessionListFilter } from "./CompactSessionListFilter"
@@ -1043,15 +1044,12 @@ function AppShellContent({
     })
   }, [activeWorkspaceId])
 
-  // Refresh usage stats when tool activity happens (source/skill calls change
-  // counts + last-used). Debounced so a burst of tool calls hits the RPC once.
+  // Refresh usage stats when source/skill calls complete. Debounced so a burst
+  // of tool calls hits the RPC once.
   React.useEffect(() => {
     const reloadRef = usageStatsReloadRef.current
     const cleanup = window.electronAPI.onSessionEvent((event) => {
-      if (event.type !== 'tool_start') return
-      const name = event.toolName
-      const isUsageRelevant = name === 'Skill' || name.startsWith('mcp__')
-      if (!isUsageRelevant) return
+      if (!shouldRefreshUsageStats(event)) return
 
       if (reloadRef.timer) clearTimeout(reloadRef.timer)
       reloadRef.timer = setTimeout(() => {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import type { LlmConnection } from '@craft-agent/shared/config'
 import type { FileAttachment } from '@craft-agent/shared/protocol'
-import { buildBackendRuntimeSignature, filterAttachmentsForModelInput } from './runtime-config'
+import { buildBackendRuntimeSignature, buildRestartRequiredSignature, filterAttachmentsForModelInput } from './runtime-config'
 
 const baseCompat: LlmConnection = {
   slug: 'local',
@@ -42,6 +42,30 @@ const textAttachment: FileAttachment = {
   size: 12,
   text: 'hello',
 }
+
+describe('buildRestartRequiredSignature', () => {
+  const restartInput = () => ({
+    connection: baseCompat,
+    provider: 'pi' as const,
+    authType: 'api_key' as const,
+    resolvedModel: 'gemma',
+  })
+
+  it('drifts when the api key fingerprint changes (credential rotation forces restart)', () => {
+    const sigA = buildRestartRequiredSignature({ ...restartInput(), apiKeyFingerprint: 'fp-A' })
+    const sigB = buildRestartRequiredSignature({ ...restartInput(), apiKeyFingerprint: 'fp-B' })
+
+    expect(sigB).not.toBe(sigA)
+  })
+
+  it('omits the fingerprint when no key is present (no-key connections stay stable)', () => {
+    const without = buildRestartRequiredSignature(restartInput())
+    const withFingerprint = buildRestartRequiredSignature({ ...restartInput(), apiKeyFingerprint: 'fp' })
+
+    expect(without).not.toContain('apiKeyFingerprint')
+    expect(without).not.toBe(withFingerprint)
+  })
+})
 
 describe('buildBackendRuntimeSignature', () => {
   it('changes when a custom endpoint model image override changes', () => {

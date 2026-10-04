@@ -7,7 +7,7 @@ import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger 
 import { basename, dirname, isAbsolute, join } from 'path'
 import { existsSync } from 'fs'
 import { copyFile, readFile, writeFile, mkdir, stat, rm, readdir } from 'fs/promises'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { type AgentEvent, setPermissionMode, setTransientPermissionMode, clearTransientPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
 import {
   resolveSessionConnection,
@@ -3654,6 +3654,24 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * SHA-256 fingerprint of a connection's current API key (or undefined when
+   * it has none). Credential rotation cannot be re-routed in-place, so the
+   * fingerprint is part of the restart signature (see runtime-config.ts).
+   * Best-effort: unavailable credential storage must not break refresh.
+   */
+  private async resolveApiKeyFingerprint(connectionSlug: string | undefined): Promise<string | undefined> {
+    if (!connectionSlug) return undefined
+    try {
+      const apiKey = await getCredentialManager().getLlmApiKey(connectionSlug)
+      if (apiKey) return createHash('sha256').update(apiKey).digest('hex')
+    } catch {
+      // Best-effort: missing/stale credential storage must not break refresh.
+    }
+    return undefined
+  }
+
+
+  /**
    * Refresh an existing agent's runtime config in place when the session's
    * resolved connection signature has drifted from what the agent was created
    * with. No-ops when the agent doesn't exist, when the signature still
@@ -3677,14 +3695,6 @@ export class SessionManager implements ISessionManager {
    *     can't apply the update.
    */
   private async tryRefreshAgentRuntime(managed: ManagedSession, reason: string): Promise<void> {
-    // Serialize against any in-flight refresh on this session. The waiter
-    // doesn't propagate the prior call's errors — those are logged at the
-    // origin call site.
-    const inflight = this.agentRefreshLocks.get(managed.id)
-    if (inflight) {
-      await inflight.catch(() => undefined)
-    }
-
     if (!managed.agent) return
 
     const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
@@ -3694,11 +3704,24 @@ export class SessionManager implements ISessionManager {
       managedModel: managed.model,
     })
     const connection = backendContext.connection
+    // Resolve the fingerprint before the lock gate below: it is async and
+    // must not sit between the lock check and lock registration, or two
+    // concurrent callers would both pass the gate and refresh twice.
+    const apiKeyFingerprint = await this.resolveApiKeyFingerprint(connection?.slug)
+
+    // Serialize against any in-flight refresh on this session. The waiter
+    // doesn't propagate the prior call's errors — those are logged at the
+    // origin call site.
+    const inflight = this.agentRefreshLocks.get(managed.id)
+    if (inflight) {
+      await inflight.catch(() => undefined)
+    }
     const sigInput = {
       connection,
       provider: backendContext.provider,
       authType: backendContext.authType,
       resolvedModel: backendContext.resolvedModel,
+      apiKeyFingerprint,
     }
     const runtimeSignature = buildBackendRuntimeSignature(sigInput)
     const restartSignature = buildRestartRequiredSignature(sigInput)
@@ -3841,11 +3864,13 @@ export class SessionManager implements ISessionManager {
       managedModel: managed.model,
     })
     const connection = backendContext.connection
+    const apiKeyFingerprint = await this.resolveApiKeyFingerprint(connection?.slug)
     const sigInput = {
       connection,
       provider: backendContext.provider,
       authType: backendContext.authType,
       resolvedModel: backendContext.resolvedModel,
+      apiKeyFingerprint,
     }
     const runtimeSignature = buildBackendRuntimeSignature(sigInput)
     const restartSignature = buildRestartRequiredSignature(sigInput)

@@ -5,6 +5,7 @@ import { join } from 'path'
 import { resolveBackendContext } from '@craft-agent/shared/agent/backend'
 import { loadWorkspaceConfig } from '@craft-agent/shared/workspaces'
 import { SessionManager, createManagedSession } from './SessionManager.ts'
+import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { buildRestartRequiredSignature } from './runtime-config.ts'
 
 // Regression coverage for the stale-Pi-subprocess bug where toggling
@@ -95,13 +96,20 @@ function injectSession(
 describe('refreshConnectionRuntime', () => {
   let tmpRoot: string
   let sm: SessionManager
+  let keySpy: ReturnType<typeof jest.spyOn>
 
   beforeEach(() => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'sm-refresh-'))
     sm = new SessionManager()
+    // Tests run on the developer's machine where the resolved connection (via
+    // the real default-connection fallback) may carry a live API key. Pin the
+    // fingerprint source to "no key" so injected pre-rotation signatures stay
+    // comparable; individual tests opt in with a key via `keySpy`.
+    keySpy = jest.spyOn(getCredentialManager(), 'getLlmApiKey').mockResolvedValue(null)
   })
 
   afterEach(() => {
+    keySpy.mockRestore()
     rmSync(tmpRoot, { recursive: true, force: true })
   })
 
@@ -154,6 +162,21 @@ describe('refreshConnectionRuntime', () => {
     await sm.refreshConnectionRuntime('slug-A')
 
     expect(failingAgent.updateRuntimeConfig).toHaveBeenCalledTimes(1)
+    expect(managed.agent).toBeNull()
+  })
+
+  it('disposes the runtime when the api key fingerprint appears (credential rotation)', async () => {
+    // Regression: a rotated API key must not be pushed via update_runtime_config
+    // (it carries no key material). The restart signature now fingerprints the
+    // current key, so a session spawned with a pre-rotation signature must be
+    // disposed and recreated to pick up the new credential.
+    keySpy.mockResolvedValue('rotated-key-secret')
+    const agent = createAgentStub()
+    const managed = injectSession(sm, 'key-rotated', tmpRoot, 'slug-A', agent)
+
+    await sm.refreshConnectionRuntime('slug-A')
+
+    expect(agent.updateRuntimeConfig).not.toHaveBeenCalled()
     expect(managed.agent).toBeNull()
   })
 

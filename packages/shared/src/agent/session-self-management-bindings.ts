@@ -105,14 +105,6 @@ export function attachSessionSelfManagementBindings(
     enumerable: true,
   });
 
-  Object.defineProperty(context, 'activateSourceInSession', {
-    get() {
-      return getSessionScopedToolCallbacks(sessionId)?.activateSourceInSessionFn;
-    },
-    configurable: true,
-    enumerable: true,
-  });
-
   // Messaging gateway bindings
   Object.defineProperty(context, 'getMessagingBindings', {
     get() {

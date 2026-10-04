@@ -598,7 +598,6 @@ export type PreToolUseCheckResult =
       commandHash?: string;
       approvalTtlSeconds?: number;
     }
-  | { type: 'source_activation_needed'; sourceSlug: string; sourceExists: boolean }
   | { type: 'call_llm_intercept'; input: Record<string, unknown> }
   | { type: 'spawn_session_intercept'; input: Record<string, unknown> };
 
@@ -629,8 +628,6 @@ export interface PreToolUseInput {
   activeSourceSlugs: string[];
   /** All available sources (for source-exists check) */
   allSourceSlugs: string[];
-  /** Whether the agent supports source activation (has onSourceActivationRequest callback) */
-  hasSourceActivation: boolean;
   /** PermissionManager for session-scoped whitelists */
   permissionManager: PermissionManagerLike;
   /** PrerequisiteManager for guide.md checking */
@@ -672,8 +669,7 @@ const FILE_WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
 /**
  * Centralized PreToolUse pipeline.
  *
- * Synchronous except for the final result — all async work (source activation,
- * user prompting) is handled by the calling agent based on the result type.
+ * Synchronous except for user prompting, which is handled by the calling agent based on the result type.
  *
  * Pipeline:
  * 1. Permission mode check (shouldAllowToolInMode)
@@ -711,7 +707,6 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
     workingDirectory,
     activeSourceSlugs,
     allSourceSlugs,
-    hasSourceActivation,
     permissionManager,
     prerequisiteManager,
     backendMetadata,
@@ -765,12 +760,11 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
       const isActive = activeSourceSlugs.includes(serverName);
       if (!isActive) {
         const sourceExists = allSourceSlugs.includes(serverName);
-        onDebug?.(`Source "${serverName}" not active (exists=${sourceExists}, hasActivation=${hasSourceActivation})`);
-        return {
-          type: 'source_activation_needed',
-          sourceSlug: serverName,
-          sourceExists,
-        };
+        const reason = sourceExists
+          ? `Data source "${serverName}" is not selected for this turn. Do not enable it or retry automatically. Ask the user to select/connect it in the source picker below the input, then resend the request.`
+          : `Data source "${serverName}" is not configured in this workspace. Do not try to enable or create it yourself; tell the user it must be configured before use.`;
+        onDebug?.(`Blocking tool ${toolName}: source "${serverName}" is not selected (exists=${sourceExists})`);
+        return { type: 'block', reason };
       }
     }
   }

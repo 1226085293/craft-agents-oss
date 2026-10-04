@@ -430,7 +430,6 @@ export type SessionEvent =
   | { type: 'session_unshared'; sessionId: string }
   | { type: 'auth_request'; sessionId: string; message: Message; request: SharedAuthRequest }
   | { type: 'auth_completed'; sessionId: string; requestId: string; success: boolean; cancelled?: boolean; error?: string }
-  | { type: 'source_activated'; sessionId: string; sourceSlug: string; originalMessage: string }
   | { type: 'usage_update'; sessionId: string; tokenUsage: { inputTokens: number; contextWindow?: number } }
   | { type: 'message_annotations_updated'; sessionId: string; messageId: string; annotations: AnnotationV1[] }
   | { type: 'working_directory_error'; sessionId: string; error: string }

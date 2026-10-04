@@ -540,17 +540,6 @@ export interface AuthCompletedEvent {
 }
 
 /**
- * Source activated event - a source was auto-activated mid-turn.
- * The server owns the auto-retry; renderers should treat this as UI feedback only.
- */
-export interface SourceActivatedEvent {
-  type: 'source_activated'
-  sessionId: string
-  sourceSlug: string
-  originalMessage: string
-}
-
-/**
  * Usage update event - real-time context usage during processing
  * Allows UI to show growing context as agent processes, not just on complete
  */
@@ -616,7 +605,6 @@ export type AgentEvent =
   | SessionUnsharedEvent
   | AuthRequestEvent
   | AuthCompletedEvent
-  | SourceActivatedEvent
   | UsageUpdateEvent
 
 /**

@@ -790,22 +790,16 @@ interface ManagedSession {
   enabledSourceSlugs?: string[]
   /** Source slugs currently applied to the live agent and connection pool. */
   appliedSourceSlugs?: string[]
-  /** Source set captured when the current turn starts. */
-  processingSourceSlugs?: string[]
-  /** The picker changed while the current turn was holding its source snapshot. */
-  pendingSourceSync?: boolean
-  sourceSelectionVersion?: number
-  /** Serializes live-pool updates so a newer picker choice cannot be overwritten by an older build. */
-  sourceSyncPromise?: Promise<void>
-  /** Increments on user changes; stale asynchronous builds may not mutate the active pool. */
-  sourceSelectionVersion?: number
-  /** Sources last applied to the live agent/tool pool. */
-  appliedSourceSlugs?: string[]
-  /** Snapshot used by the current turn, unaffected by picker changes during that turn. */
+  /** Source snapshot is being prepared before processing starts. */
+  sourceTurnStarting?: boolean
+  /** Snapshot of the source set in use by the current turn. */
   processingSourceSlugs?: string[]
   /** A picker change arrived while the current turn retained its source snapshot. */
   pendingSourceSync?: boolean
+  /** Monotonic selection version protects against stale asynchronous pool builds. */
   sourceSelectionVersion?: number
+  /** Serializes live-pool updates so a newer picker choice cannot be overwritten by an older build. */
+  sourceSyncPromise?: Promise<void>
   /**
    * Explicit MCP server configs for isolated execution.
    * When set, the session uses a dedicated MCP pool with only these servers,
@@ -5513,8 +5507,17 @@ ${request.prompt}`;
 
     if (managed.agent && managed.isProcessing) {
       managed.pendingSourceSync = true
+    } else if (managed.agent) {
+      await this.queueSessionSourceSync(managed)
     } else {
-      await this.syncSessionSources(managed, managed.enabledSourceSlugs, disabledSlugs)
+      if (disabledSlugs.length > 0) {
+        try {
+          await cleanupSourceRuntimeArtifacts(managed.workspace.rootPath, disabledSlugs)
+        } catch (err) {
+          sessionLog.warn(`Failed to clean up source runtime artifacts: ${err}`)
+        }
+      }
+      managed.appliedSourceSlugs = [...managed.enabledSourceSlugs]
     }
 
     this.persistSession(managed)
@@ -5527,26 +5530,49 @@ ${request.prompt}`;
     sessionLog.info(`Session ${sessionId} sources updated: ${sourceSlugs.length} sources`)
   }
 
-  /** Apply the user's selected sources to the live agent and pool. */
-  private async syncSessionSources(
-    managed: ManagedSession,
-    sourceSlugs: string[],
-    disabledSlugs: string[] = [],
-  ): Promise<void> {
-    const workspaceRootPath = managed.workspace.rootPath
-    const selectionVersion = managed.sourceSelectionVersion ?? 0
+  private queueSessionSourceSync(managed: ManagedSession): Promise<void> {
+    const next = (managed.sourceSyncPromise ?? Promise.resolve())
+      .catch((error) => sessionLog.warn(`Prior source sync failed for ${managed.id}: ${error}`))
+      .then(() => this.syncSessionSources(managed))
+    managed.sourceSyncPromise = next
+    const clear = () => {
+      if (managed.sourceSyncPromise === next) managed.sourceSyncPromise = undefined
+    }
+    void next.then(clear, clear)
+    return next
+  }
 
-    // Credential caches are cleared only once no running turn can still use the source.
-    if (disabledSlugs.length > 0) {
+  private async flushPendingSessionSources(managed: ManagedSession): Promise<void> {
+    while (managed.pendingSourceSync || managed.sourceSyncPromise) {
+      if (managed.isProcessing) return
+      if (managed.pendingSourceSync && !managed.sourceSyncPromise) {
+        managed.pendingSourceSync = false
+        void this.queueSessionSourceSync(managed)
+      }
+      const sync = managed.sourceSyncPromise
+      if (!sync) continue
       try {
-        await cleanupSourceRuntimeArtifacts(workspaceRootPath, disabledSlugs)
-      } catch (err) {
-        sessionLog.warn(`Failed to clean up source runtime artifacts: ${err}`)
+        await sync
+      } catch (error) {
+        managed.pendingSourceSync = true
+        throw error
       }
     }
+  }
+
+  /** Apply the user's selected sources to the live agent and pool. */
+  private async syncSessionSources(managed: ManagedSession): Promise<void> {
+    const workspaceRootPath = managed.workspace.rootPath
+    const selectionVersion = managed.sourceSelectionVersion ?? 0
+    const sourceSlugs = [...(managed.enabledSourceSlugs ?? [])]
+    const disabledSlugs = (managed.appliedSourceSlugs ?? []).filter(slug => !sourceSlugs.includes(slug))
 
     if (!managed.agent) {
       managed.appliedSourceSlugs = [...sourceSlugs]
+      return
+    }
+    if (managed.isProcessing || selectionVersion !== managed.sourceSelectionVersion) {
+      managed.pendingSourceSync = true
       return
     }
 
@@ -5581,6 +5607,14 @@ ${request.prompt}`;
 
     await managed.agent.setSourceServers(mcpServers, apiServers, intendedSlugs)
     managed.appliedSourceSlugs = [...sourceSlugs]
+    if (disabledSlugs.length > 0) {
+      try {
+        await cleanupSourceRuntimeArtifacts(workspaceRootPath, disabledSlugs)
+      } catch (err) {
+        sessionLog.warn(`Failed to clean up source runtime artifacts: ${err}`)
+      }
+    }
+    managed.pendingSourceSync = selectionVersion !== managed.sourceSelectionVersion
     sessionLog.info(`Applied ${Object.keys(mcpServers).length} MCP + ${Object.keys(apiServers).length} API sources to active agent (${allSources.length} total)`)
   }
 
@@ -6587,6 +6621,26 @@ ${request.prompt}`;
     if (!managed) {
       throw new Error(`Session ${sessionId} not found`)
     }
+
+    const ownsSourceStartup = !managed.isProcessing && !managed.sourceTurnStarting
+    if (ownsSourceStartup) managed.sourceTurnStarting = true
+    const duringSourceStartup = async <T>(work: Promise<T>): Promise<T> => {
+      try {
+        return await work
+      } catch (error) {
+        if (ownsSourceStartup && managed.sourceTurnStarting && !managed.isProcessing) {
+          managed.sourceTurnStarting = false
+          managed.processingSourceSlugs = undefined
+          if (managed.pendingSourceSync) {
+            void this.flushPendingSessionSources(managed).catch(syncError => {
+              sessionLog.error(`Failed to flush source selection after send preparation failed for ${sessionId}:`, syncError)
+            })
+          }
+        }
+        throw error
+      }
+    }
+
     // A message composed on the desktop client means the user is now driving
     // from the desktop, not a bound mobile/chat channel — so this turn must not
     // inherit a stale `mobileEngaged` flag from an earlier phone message (which
@@ -6600,13 +6654,13 @@ ${request.prompt}`;
     // Clear any pending plan execution state when a new user message is sent.
     // This acts as a safety valve - if the user moves on, we don't want to
     // auto-execute an old plan later.
-    await clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
+    await duringSourceStartup(clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId))
 
     // Ensure messages are loaded before we try to add new ones
-    await this.ensureMessagesLoaded(managed)
+    await duringSourceStartup(this.ensureMessagesLoaded(managed))
 
     if (attachments?.length && (!storedAttachments || storedAttachments.length === 0)) {
-      const persisted = await this.persistTransientAttachments(managed, sessionId, attachments)
+      const persisted = await duringSourceStartup(this.persistTransientAttachments(managed, sessionId, attachments))
       attachments = persisted.attachments.length > 0 ? persisted.attachments : undefined
       storedAttachments = persisted.storedAttachments.length > 0 ? persisted.storedAttachments : undefined
     }
@@ -6660,16 +6714,18 @@ ${request.prompt}`;
     // - 'queue': hold the message untouched; the current turn keeps running
     //   to natural completion; replay as a new turn afterwards. NO call to
     //   `agent.redirect()`, NO forceAbort, NO interruption.
-    if (managed.isProcessing) {
+    if (managed.isProcessing || managed.sourceTurnStarting && !ownsSourceStartup) {
       const connection = resolveSessionConnection(managed.llmConnection, undefined)
       // Per-send override wins over the connection default. Desktop submits
       // busy-session messages as queue by default, while messaging channels
       // submit them as steer/guidance by default.
       // Fallback to 'steer' when no connection is resolvable — preserves
       // today's exact behavior (call redirect, take whatever it returns).
-      const behavior = options?.midStreamBehavior === 'queue' || options?.midStreamBehavior === 'steer'
-        ? options.midStreamBehavior
-        : connection ? resolveMidStreamBehavior(connection) : 'steer'
+      const behavior = options?.midStreamBehavior === 'queue' || managed.sourceTurnStarting && !ownsSourceStartup
+        ? 'queue'
+        : options?.midStreamBehavior === 'steer'
+          ? 'steer'
+          : connection ? resolveMidStreamBehavior(connection) : 'steer'
 
       const agent = managed.agent
 
@@ -6863,6 +6919,8 @@ ${request.prompt}`;
 
     managed.lastMessageAt = Date.now()
     this.setProcessing(managed, true)
+    managed.sourceTurnStarting = false
+    managed.processingSourceSlugs = [...(managed.processingSourceSlugs ?? managed.appliedSourceSlugs ?? managed.enabledSourceSlugs ?? [])]
     managed.currentRunStartedAt = Date.now()
     managed.streamingText = ''
     managed.streamingTurnId = undefined
@@ -6916,7 +6974,11 @@ ${request.prompt}`;
     const sendSpan = perf.span('session.sendMessage', { sessionId })
 
     const workspaceRootPath = managed.workspace.rootPath
-    const enabledSlugs = managed.enabledSourceSlugs ?? []
+    if (ownsSourceStartup) {
+      await duringSourceStartup(this.flushPendingSessionSources(managed))
+      managed.processingSourceSlugs = [...(managed.appliedSourceSlugs ?? managed.enabledSourceSlugs ?? [])]
+    }
+    const enabledSlugs = [...(managed.processingSourceSlugs ?? managed.appliedSourceSlugs ?? managed.enabledSourceSlugs ?? [])]
     const hasSources = enabledSlugs.length > 0
 
     // Load enabled sources up-front so we can refresh tokens BEFORE getOrCreateAgent
@@ -6963,6 +7025,7 @@ ${request.prompt}`;
         const usableSources = sources.filter(isSourceUsable)
         const intendedSlugs = usableSources.map(s => s.config.slug)
         await agent.setSourceServers(mcpServers, apiServers, intendedSlugs)
+        managed.appliedSourceSlugs = [...enabledSlugs]
         await applyBridgeUpdates(agent, sessionPath, usableSources, mcpServers, sessionId, workspaceRootPath, 'send message', managed.poolServer?.url)
         sessionLog.info(`Applied ${mcpCount} MCP + ${apiCount} API sources to session ${sessionId} (${allSources.length} total)`)
       }
@@ -7593,8 +7656,18 @@ ${request.prompt}`;
 
     // 1. Cleanup state
     this.setProcessing(managed, false)
+    managed.sourceTurnStarting = false
     managed.currentRunStartedAt = undefined
+    managed.processingSourceSlugs = undefined
     managed.stopRequested = false  // Reset for next turn
+
+    // Apply the latest picker state only after the old turn is over, and before
+    // any queued user message is allowed to start.
+    try {
+      await this.flushPendingSessionSources(managed)
+    } catch (error) {
+      sessionLog.error(`Failed to apply deferred source selection for ${sessionId}:`, error)
+    }
 
     // Clear any per-send permission-mode override applied for the turn that
     // just finished. The persisted/diagnostics mode is untouched — this only

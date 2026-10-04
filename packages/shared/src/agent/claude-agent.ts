@@ -32,7 +32,6 @@ import type { LLMQueryRequest, LLMQueryResult } from './llm-tool.ts';
 import { consumeLlmQueryMessages } from './claude-llm-query.ts';
 import { debug } from '../utils/debug.ts';
 import { guardLargeResult } from '../utils/large-response.ts';
-import { SourceActivationDrainController } from './source-activation-drain.ts';
 import { resolveKeepBackgroundTasksAlive, createPushableInputStream, type PushableInputStream } from './backend/claude/persistent-input.ts';
 import { classifyClaudeTaskNotification } from './backend/claude/task-notification.ts';
 import {
@@ -86,7 +85,6 @@ import type {
   PlanCallback,
   AuthCallback,
   SourceChangeCallback,
-  SourceActivationCallback,
 } from './backend/types.ts';
 import { existsSync } from 'node:fs';
 import { stat } from 'node:fs/promises';
@@ -118,7 +116,7 @@ import type { AgentEvent } from '@craft-agent/core/types';
 export type { AgentEvent };
 
 // Stateless tool matching — pure functions for SDK message → AgentEvent conversion
-import { ToolIndex, parseWorkflowIdFromTranscriptPath } from './tool-matching.ts';
+import { parseWorkflowIdFromTranscriptPath } from './tool-matching.ts';
 
 // Claude event adapter — extracts SDK message → AgentEvent conversion into testable class
 import { ClaudeEventAdapter, buildWindowsSkillsDirError as buildWindowsSkillsDirErrorFn } from './backend/claude/event-adapter.ts';
@@ -759,7 +757,7 @@ export class ClaudeAgent extends BaseAgent {
   // Callback when a source config changes (hot-reload from file watcher)
   public onSourceChange: ((slug: string, source: LoadedSource | null) => void) | null = null;
 
-  // onSourcesListChange, onConfigValidationError, and onSourceActivationRequest are inherited from BaseAgent
+  // onSourcesListChange and onConfigValidationError are inherited from BaseAgent
 
   // Callback when token usage is updated (for context window display).
   // Note: Full UsageTracker integration is planned for Phase 4 refactoring.
@@ -1362,7 +1360,6 @@ export class ClaudeAgent extends BaseAgent {
                 workingDirectory: this.config.session?.workingDirectory,
                 activeSourceSlugs: Array.from(this.sourceManager.getActiveSlugs()),
                 allSourceSlugs: this.sourceManager.getAllSources().map(s => s.config.slug),
-                hasSourceActivation: !!this.onSourceActivationRequest,
                 permissionManager: this.permissionManager,
                 prerequisiteManager: this.prerequisiteManager,
                 rtkContext,
@@ -1412,48 +1409,6 @@ export class ClaudeAgent extends BaseAgent {
                     reason: checkResult.reason,
                   })}`);
                   return blockWithReason(checkResult.reason);
-                }
-
-                case 'source_activation_needed': {
-                  const { sourceSlug, sourceExists } = checkResult;
-                  if (sourceExists && this.onSourceActivationRequest) {
-                    this.onDebug?.(`Source "${sourceSlug}" not active, attempting auto-enable...`);
-                    try {
-                      const activated = await this.onSourceActivationRequest(sourceSlug);
-                      if (activated) {
-                        this.onDebug?.(`Source "${sourceSlug}" auto-enabled successfully, tools available next turn`);
-                        return {
-                          continue: false,
-                          decision: 'block' as const,
-                          reason: `STOP. Source "${sourceSlug}" has been activated successfully. The tools will be available on the next turn. Do NOT try other tool names or approaches. Respond to the user now: tell them the source is now active and ask them to send their request again.`,
-                        };
-                      } else {
-                        return {
-                          continue: false,
-                          decision: 'block' as const,
-                          reason: `Source "${sourceSlug}" could not be activated. It may require authentication. Please check the source status and authenticate if needed.`,
-                        };
-                      }
-                    } catch (error) {
-                      return {
-                        continue: false,
-                        decision: 'block' as const,
-                        reason: `Failed to activate source "${sourceSlug}": ${error instanceof Error ? error.message : 'Unknown error'}`,
-                      };
-                    }
-                  } else if (sourceExists) {
-                    return {
-                      continue: false,
-                      decision: 'block' as const,
-                      reason: `Source "${sourceSlug}" is available but not enabled for this session. Please enable it in the sources panel.`,
-                    };
-                  } else {
-                    return {
-                      continue: false,
-                      decision: 'block' as const,
-                      reason: `Source "${sourceSlug}" could not be connected. It may need re-authentication, or the server may be unreachable. Check the source in the sidebar for details.`,
-                    };
-                  }
                 }
 
                 case 'call_llm_intercept':
@@ -1708,12 +1663,6 @@ This is a branched conversation. All prior messages in this conversation are par
       let receivedAssistantContent = false;
       let suppressedSessionExpiredError = false;
       let suppressedBranchCutoffError = false;
-      // Source-activation auto-restart drain controller (#790). Captures the
-      // pending restart on the first triggering tool_result and drains sibling
-      // tool_results from the same parallel-tool batch before firing
-      // `source_activated` + `forceAbort` — otherwise the session journal
-      // ends up with orphan `tool_use` IDs that block subsequent sends.
-      const sourceActivationDrain = new SourceActivationDrainController('batch-boundary');
       try {
         // Flag-OFF: `turnMessageSource === this.currentQuery` (unchanged). Flag-ON:
         // it's the per-turn channel, so breaking/ending here never closes the query.
@@ -1749,65 +1698,6 @@ This is a branched conversation. All prior messages in this conversation are par
 
           const events = await this.eventAdapter.adapt(message);
           for (const event of events) {
-            // After source_test (or any session-scoped tool) successfully activates a
-            // new source, activateSourceInSessionFn stashes a restart descriptor on the
-            // agent. The drain controller captures the descriptor on the first
-            // triggering tool_result and short-circuits per-event handling for any
-            // sibling tool_results / synthetic background events in the same
-            // adapted batch. The fire (yield source_activated + forceAbort) happens
-            // at end-of-batch below, NOT here — see #790 for the symptoms when
-            // siblings were dropped.
-            if (sourceActivationDrain.observe(event, () => this.consumePendingSourceActivationRestart())) {
-              yield event;
-              continue;
-            }
-
-            // Check for tool-not-found errors on inactive sources and attempt auto-activation
-            const inactiveSourceError = this.detectInactiveSourceToolError(event, this.eventAdapter.getToolIndex());
-
-            if (inactiveSourceError && this.onSourceActivationRequest) {
-              const { sourceSlug, toolName } = inactiveSourceError;
-
-              this.onDebug?.(`Detected tool call to inactive source "${sourceSlug}", attempting activation...`);
-
-              try {
-                const activated = await this.onSourceActivationRequest(sourceSlug);
-
-                if (activated) {
-                  this.onDebug?.(`Source "${sourceSlug}" activated successfully, interrupting turn for auto-retry`);
-
-                  // Yield source_activated event immediately for auto-retry
-                  yield {
-                    type: 'source_activated' as const,
-                    sourceSlug,
-                    originalMessage: userMessage,
-                  };
-
-                  // Interrupt the turn - no point letting the model continue without the tools
-                  // The abort will cause the loop to exit and emit 'complete'
-                  this.forceAbort(AbortReason.SourceActivated);
-                  return; // Exit the generator
-                } else {
-                  this.onDebug?.(`Source "${sourceSlug}" activation failed (may need auth)`);
-                  // Let the original error through, but with more context
-                  const toolResultEvent = event as Extract<AgentEvent, { type: 'tool_result' }>;
-                  yield {
-                    type: 'tool_result' as const,
-                    toolUseId: toolResultEvent.toolUseId,
-                    toolName: toolResultEvent.toolName,
-                    result: `Source "${sourceSlug}" could not be activated. It may require authentication. Please check the source status in the sources panel.`,
-                    isError: true,
-                    input: toolResultEvent.input,
-                    turnId: toolResultEvent.turnId,
-                    parentToolUseId: toolResultEvent.parentToolUseId,
-                  };
-                  continue;
-                }
-              } catch (error) {
-                this.onDebug?.(`Source "${sourceSlug}" activation error: ${error}`);
-                // Let original error through
-              }
-            }
 
             // Context Pressure Preflight: stub old results BEFORE compaction
             if (event.type === 'info' && event.message === 'Compacted Conversation') {
@@ -1905,31 +1795,6 @@ This is a branched conversation. All prior messages in this conversation are par
             yield event;
           }
 
-          // End-of-batch fire (#790): if the drain controller captured a
-          // pending source-activation restart while iterating this adapted
-          // SDK message, all sibling tool_results / interleaved synthetic
-          // events have now been yielded. Emit `source_activated` and abort.
-          const sourceActivationFire = sourceActivationDrain.shouldFireAtBoundary();
-          if (sourceActivationFire) {
-            this.onDebug?.(`source_test activated "${sourceActivationFire.sourceSlug}", drained sibling tool_results, restarting turn`);
-            yield sourceActivationFire;
-            this.forceAbort(AbortReason.SourceActivated);
-            return;
-          }
-        }
-
-        // Stream-end fallback (#790): the SDK stream ended without any batch
-        // boundary firing — defensive against the SDK closing in the same
-        // adapted batch the capture happened in. `return` is critical here —
-        // without it we fall through to flushPending + the defensive
-        // `complete` emission below, which would corrupt the auto-restart
-        // contract (renderer expects `source_activated` to be the final event).
-        const sourceActivationFireAtEnd = sourceActivationDrain.shouldFireAtBoundary();
-        if (sourceActivationFireAtEnd) {
-          this.onDebug?.(`source_test activated "${sourceActivationFireAtEnd.sourceSlug}", stream ended mid-batch, restarting turn`);
-          yield sourceActivationFireAtEnd;
-          this.forceAbort(AbortReason.SourceActivated);
-          return;
         }
 
         // Missing-UUID fallback: branch cutoff failed because resumeSessionAt target
@@ -2707,72 +2572,6 @@ This is a branched conversation. All prior messages in this conversation are par
     };
   }
 
-  /**
-   * Check if a tool result error indicates a "tool not found" for an inactive source.
-   * This is used to detect when Claude tries to call a tool from a source that exists
-   * but isn't currently active, so we can auto-activate and retry.
-   *
-   * @returns The source slug, tool name, and input if this is an inactive source error, null otherwise
-   */
-  private detectInactiveSourceToolError(
-    event: AgentEvent,
-    toolIndex: ToolIndex
-  ): { sourceSlug: string; toolName: string; input: unknown } | null {
-    if (event.type !== 'tool_result' || !event.isError) return null;
-
-    const resultStr = typeof event.result === 'string' ? event.result : '';
-
-    // Try to extract tool name from error message patterns:
-    // - "No such tool available: mcp__slack__api_slack"
-    // - "Error: Tool 'mcp__slack__api_slack' not found"
-    let toolName: string | null = null;
-
-    // Pattern 1: "No such tool available: {toolName}" or "No tool available: {toolName}"
-    // Note: SDK wraps in XML tags like "</tool_use_error>", so we stop at '<' to avoid capturing the tag
-    const noSuchToolMatch = resultStr.match(/No (?:such )?tool available:\s*([^\s<]+)/i);
-    if (noSuchToolMatch?.[1]) {
-      toolName = noSuchToolMatch[1];
-    }
-
-    // Pattern 2: "Tool '{toolName}' not found" or "Tool `{toolName}` not found"
-    if (!toolName) {
-      const toolNotFoundMatch = resultStr.match(/Tool\s+['"`]([^'"`]+)['"`]\s+not found/i);
-      if (toolNotFoundMatch?.[1]) {
-        toolName = toolNotFoundMatch[1];
-      }
-    }
-
-    // Fallback: try toolIndex if we couldn't extract from error
-    if (!toolName) {
-      const name = toolIndex.getName(event.toolUseId);
-      if (name) {
-        toolName = name;
-      }
-    }
-
-    if (!toolName) return null;
-
-    // Check if it's an MCP tool (mcp__{slug}__{toolname})
-    if (!toolName.startsWith('mcp__')) return null;
-
-    const parts = toolName.split('__');
-    if (parts.length < 3) return null;
-
-    // parts[1] is guaranteed to exist since we checked parts.length >= 3
-    const sourceSlug = parts[1]!;
-
-    // Check if source exists but is inactive
-    const sourceExists = this.sourceManager.getAllSources().some((s) => s.config.slug === sourceSlug);
-    const isActive = this.sourceManager.isSourceActive(sourceSlug);
-
-    if (sourceExists && !isActive) {
-      // Get input from toolIndex
-      const input = toolIndex.getInput(event.toolUseId);
-      return { sourceSlug, toolName, input: input ?? {} };
-    }
-
-    return null;
-  }
 
   clearHistory(): void {
     // Clear session to start fresh conversation

@@ -100,12 +100,6 @@ export type AuthCallback = (request: AuthRequest) => void;
  */
 export type SourceChangeCallback = (slug: string, source: LoadedSource | null) => void;
 
-/**
- * Source activation request callback.
- * Returns true if source was successfully activated.
- */
-export type SourceActivationCallback = (sourceSlug: string) => Promise<boolean>;
-
 // ============================================================
 // Lifecycle Types
 // ============================================================
@@ -544,22 +538,6 @@ export interface AgentBackend {
    */
   getActiveSourceSlugs(): string[];
 
-  /**
-   * Get the raw user message for the current turn (cleared between turns).
-   * Used by SessionManager.activateSourceInSessionFn to capture the message
-   * that should be re-sent after a source_test-triggered auto-restart.
-   */
-  getCurrentTurnUserMessage(): string | null;
-
-  /**
-   * Schedule a source-activation auto-restart. Consumed by the backend's
-   * event loop after the next tool_result, which yields `source_activated`
-   * and `forceAbort`s the turn. SessionManager's `source_activated` handler
-   * then schedules the server-side resend with a "[{slug} activated]" suffix
-   * (craft-agents-oss#804). Set by SessionManager after a successful mid-turn
-   * activation (source_test auto-enable).
-   */
-  setPendingSourceActivationRestart(pending: { sourceSlug: string; userMessage: string }): void;
 
   /**
    * Get all sources (for context injection).
@@ -640,9 +618,6 @@ export interface AgentBackend {
 
   /** Called with debug messages */
   onDebug: ((message: string) => void) | null;
-
-  /** Called when a source tool is used but source isn't active */
-  onSourceActivationRequest: SourceActivationCallback | null;
 
   /**
    * Called when backend-specific authentication is required.

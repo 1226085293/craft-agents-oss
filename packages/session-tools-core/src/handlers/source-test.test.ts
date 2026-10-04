@@ -15,12 +15,7 @@ import { handleSourceTest } from './source-test.ts';
 import type { SessionToolContext } from '../context.ts';
 import type { SourceConfig } from '../types.ts';
 
-type ActivateResult = Awaited<
-  ReturnType<NonNullable<SessionToolContext['activateSourceInSession']>>
->;
-
 interface CtxOverrides {
-  activateSourceInSession?: (slug: string) => Promise<ActivateResult>;
   validateStdioMcpConnection?: SessionToolContext['validateStdioMcpConnection'];
   validateMcpConnection?: SessionToolContext['validateMcpConnection'];
   credentialManager?: SessionToolContext['credentialManager'];
@@ -68,7 +63,6 @@ function createCtx(workspacePath: string, overrides: CtxOverrides = {}): Session
     validateStdioMcpConnection: overrides.validateStdioMcpConnection,
     validateMcpConnection: overrides.validateMcpConnection,
     credentialManager: overrides.credentialManager,
-    activateSourceInSession: overrides.activateSourceInSession,
   } as unknown as SessionToolContext;
   // Expose saved for assertions (test-only — not on real ctx).
   (ctx as unknown as { _saved: typeof saved })._saved = saved;
@@ -119,165 +113,65 @@ function stubMcpFail(): NonNullable<SessionToolContext['validateStdioMcpConnecti
   return async () => ({ success: false, error: 'boom' });
 }
 
-describe('source_test auto-enable', () => {
+describe('source_test validation-only behavior', () => {
   let tempDir: string;
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'source-test-auto-enable-'));
+    tempDir = mkdtempSync(join(tmpdir(), 'source-test-validation-'));
   });
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('flips enabled: false → true and calls activation callback on clean run', async () => {
+  it('validates a usable source without changing its enabled selection', async () => {
     writeSource(tempDir, 'craft-kb', { enabled: false });
-
-    let activated: string | null = null as string | null;
-    const ctx = createCtx(tempDir, {
+    const result = await handleSourceTest(createCtx(tempDir, {
       validateStdioMcpConnection: stubMcpOk(),
-      activateSourceInSession: async (slug) => {
-        activated = slug;
-        return { ok: true, availability: 'next-turn' };
-      },
-    });
-
-    const result = await handleSourceTest(ctx, { sourceSlug: 'craft-kb' });
-
+    }), { sourceSlug: 'craft-kb' });
     const text = result.content[0]?.text ?? '';
-    expect(text).toContain('Source auto-enabled in config');
-    expect(text).toContain('turn will auto-restart');
-    expect(activated).toBe('craft-kb');
 
+    expect(text).toContain('Validation passed');
+    expect(text).toContain('select it in the session source picker');
+    expect(text).not.toContain('auto-enabled');
+    expect(text).not.toContain('auto-restart');
+
+    const persisted = JSON.parse(
+      readFileSync(join(tempDir, 'sources', 'craft-kb', 'config.json'), 'utf-8')
+    ) as SourceConfig;
+    expect(persisted.enabled).toBe(false);
+    expect(persisted.connectionStatus).toBe('connected');
+  });
+
+  it('leaves an already-enabled source enabled without changing session selection', async () => {
+    writeSource(tempDir, 'craft-kb', { enabled: true });
+    const result = await handleSourceTest(createCtx(tempDir, {
+      validateStdioMcpConnection: stubMcpOk(),
+    }), { sourceSlug: 'craft-kb' });
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toContain('Validation passed');
+    expect(text).not.toContain('auto-restart');
     const persisted = JSON.parse(
       readFileSync(join(tempDir, 'sources', 'craft-kb', 'config.json'), 'utf-8')
     ) as SourceConfig;
     expect(persisted.enabled).toBe(true);
   });
 
-  it('already-enabled source still calls activation callback (session may be stale)', async () => {
-    writeSource(tempDir, 'craft-kb', { enabled: true });
-
-    let activated: string | null = null as string | null;
-    const ctx = createCtx(tempDir, {
-      validateStdioMcpConnection: stubMcpOk(),
-      activateSourceInSession: async (slug) => {
-        activated = slug;
-        return { ok: true, availability: 'next-turn' };
-      },
-    });
-
-    const result = await handleSourceTest(ctx, { sourceSlug: 'craft-kb' });
-    const text = result.content[0]?.text ?? '';
-
-    // No "auto-enabled in config" line because enabled was already true.
-    expect(text).not.toContain('auto-enabled in config');
-    expect(activated).toBe('craft-kb');
-    expect(text).toContain('turn will auto-restart');
-  });
-
-  it('autoEnable: false skips both the flag flip and the activation callback', async () => {
-    writeSource(tempDir, 'craft-kb', { enabled: false });
-
-    let activated = false;
-    const ctx = createCtx(tempDir, {
-      validateStdioMcpConnection: stubMcpOk(),
-      activateSourceInSession: async () => {
-        activated = true;
-        return { ok: true };
-      },
-    });
-
-    await handleSourceTest(ctx, { sourceSlug: 'craft-kb', autoEnable: false });
-
-    expect(activated).toBe(false);
-    const persisted = JSON.parse(
-      readFileSync(join(tempDir, 'sources', 'craft-kb', 'config.json'), 'utf-8')
-    ) as SourceConfig;
-    // saveSourceConfig still runs (metadata update), but enabled flag must remain false.
-    expect(persisted.enabled).toBe(false);
-  });
-
-  it('validation errors skip auto-enable entirely (even when autoEnable is default)', async () => {
+  it('reports connection failure without enabling a source', async () => {
     writeSource(tempDir, 'broken', { enabled: false });
-
-    let activated = false;
-    const ctx = createCtx(tempDir, {
+    const result = await handleSourceTest(createCtx(tempDir, {
       validateStdioMcpConnection: stubMcpFail(),
-      activateSourceInSession: async () => {
-        activated = true;
-        return { ok: true };
-      },
-    });
-
-    const result = await handleSourceTest(ctx, { sourceSlug: 'broken' });
+    }), { sourceSlug: 'broken' });
     const text = result.content[0]?.text ?? '';
 
     expect(result.isError).toBe(true);
-    expect(activated).toBe(false);
-    expect(text).not.toContain('auto-enabled in config');
-
+    expect(text).not.toContain('auto-enabled');
     const persisted = JSON.parse(
       readFileSync(join(tempDir, 'sources', 'broken', 'config.json'), 'utf-8')
     ) as SourceConfig;
     expect(persisted.enabled).toBe(false);
-  });
-
-  it('without activateSourceInSession, flag flip still happens with restart hint', async () => {
-    writeSource(tempDir, 'craft-kb', { enabled: false });
-
-    const ctx = createCtx(tempDir, {
-      validateStdioMcpConnection: stubMcpOk(),
-      // activateSourceInSession intentionally undefined
-    });
-
-    const result = await handleSourceTest(ctx, { sourceSlug: 'craft-kb' });
-    const text = result.content[0]?.text ?? '';
-
-    expect(text).toContain('auto-enabled in config');
-    expect(text).toContain('Restart session to load tools');
-
-    const persisted = JSON.parse(
-      readFileSync(join(tempDir, 'sources', 'craft-kb', 'config.json'), 'utf-8')
-    ) as SourceConfig;
-    expect(persisted.enabled).toBe(true);
-  });
-
-  it('activation failure shows warning but still persists enabled flag', async () => {
-    writeSource(tempDir, 'craft-kb', { enabled: false });
-
-    const ctx = createCtx(tempDir, {
-      validateStdioMcpConnection: stubMcpOk(),
-      activateSourceInSession: async () => ({ ok: false, reason: 'build failed' }),
-    });
-
-    const result = await handleSourceTest(ctx, { sourceSlug: 'craft-kb' });
-    const text = result.content[0]?.text ?? '';
-
-    expect(text).toContain('session activation failed: build failed');
-
-    const persisted = JSON.parse(
-      readFileSync(join(tempDir, 'sources', 'craft-kb', 'config.json'), 'utf-8')
-    ) as SourceConfig;
-    expect(persisted.enabled).toBe(true);
-  });
-
-  it('successful activation reports a single auto-restart message (backend-agnostic)', async () => {
-    writeSource(tempDir, 'craft-kb', { enabled: true });
-
-    const ctx = createCtx(tempDir, {
-      validateStdioMcpConnection: stubMcpOk(),
-      activateSourceInSession: async () => ({ ok: true, availability: 'next-turn' }),
-    });
-
-    const result = await handleSourceTest(ctx, { sourceSlug: 'craft-kb' });
-    const text = result.content[0]?.text ?? '';
-
-    // Both backends route through the same source_activated + auto_retry machinery
-    // now, so the user-visible message is one line — no Claude vs Pi branching.
-    expect(text).toContain('turn will auto-restart');
-    expect(text).not.toContain('tools available now');
-    expect(text).not.toContain('available on your next message');
+    expect(persisted.connectionStatus).toBe('error');
   });
 });
 
@@ -360,110 +254,69 @@ describe('source_test API connection branches', () => {
     rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('200 → connected, source auto-enabled, activation called', async () => {
+  it('200 → connected, but does not enable or select the source', async () => {
     writeApiSource(tempDir, 'good-api');
     ({ restore: restoreFetch } = installFetchStub(() => new Response(null, { status: 200 })));
 
-    let activated: string | null = null as string | null;
-    const ctx = createCtx(tempDir, {
-      activateSourceInSession: async (slug) => {
-        activated = slug;
-        return { ok: true, availability: 'next-turn' };
-      },
-    });
-
-    const result = await handleSourceTest(ctx, { sourceSlug: 'good-api' });
+    const result = await handleSourceTest(createCtx(tempDir), { sourceSlug: 'good-api' });
     const text = result.content[0]?.text ?? '';
 
     expect(text).toContain('Validation passed');
-    expect(text).not.toContain('Skipping activation');
-    expect(activated).toBe('good-api');
-
+    expect(text).toContain('select it in the session source picker');
     const persisted = JSON.parse(
       readFileSync(join(tempDir, 'sources', 'good-api', 'config.json'), 'utf-8')
     ) as SourceConfig;
-    expect(persisted.enabled).toBe(true);
+    expect(persisted.enabled).toBe(false);
     expect(persisted.connectionStatus).toBe('connected');
   });
 
-  it('500 → disconnected, NOT auto-enabled, activation NOT called', async () => {
+  it('500 → disconnected and leaves the source disabled', async () => {
     writeApiSource(tempDir, 'flaky-api');
     ({ restore: restoreFetch } = installFetchStub(() => new Response(null, { status: 500 })));
 
-    let activated = false;
-    const ctx = createCtx(tempDir, {
-      activateSourceInSession: async () => {
-        activated = true;
-        return { ok: true };
-      },
-    });
-
-    const result = await handleSourceTest(ctx, { sourceSlug: 'flaky-api' });
+    const result = await handleSourceTest(createCtx(tempDir), { sourceSlug: 'flaky-api' });
     const text = result.content[0]?.text ?? '';
 
-    // The summary line must not be "✓ Validation passed" alone — it must be
-    // the warnings variant, because the probe got a non-2xx the probe couldn't
-    // classify as healthy.
+    // The summary line must be the warnings variant because the endpoint is not healthy.
     expect(text).toContain('Validation passed with warnings');
     expect(text).toContain('API returned 500');
-    expect(text).toContain('Skipping activation');
-
-    expect(activated).toBe(false);
+    expect(text).not.toContain('auto-enabled');
 
     const persisted = JSON.parse(
       readFileSync(join(tempDir, 'sources', 'flaky-api', 'config.json'), 'utf-8')
     ) as SourceConfig;
-    // The enabled flag must not be flipped on a failed probe.
     expect(persisted.enabled).toBe(false);
     expect(persisted.connectionStatus).toBe('disconnected');
   });
 
-  it('404 → disconnected, NOT auto-enabled, activation NOT called', async () => {
+  it('404 → disconnected and remains unselected', async () => {
     writeApiSource(tempDir, 'wrong-path-api');
     ({ restore: restoreFetch } = installFetchStub(() => new Response(null, { status: 404 })));
 
-    let activated = false;
-    const ctx = createCtx(tempDir, {
-      activateSourceInSession: async () => {
-        activated = true;
-        return { ok: true };
-      },
-    });
-
-    const result = await handleSourceTest(ctx, { sourceSlug: 'wrong-path-api' });
+    const result = await handleSourceTest(createCtx(tempDir), { sourceSlug: 'wrong-path-api' });
     const text = result.content[0]?.text ?? '';
 
     expect(text).toContain('Validation passed with warnings');
     expect(text).toContain('API returned 404');
-    expect(text).toContain('Skipping activation');
-    expect(activated).toBe(false);
+    expect(text).not.toContain('auto-enabled');
+    const persisted = JSON.parse(readFileSync(join(tempDir, 'sources', 'wrong-path-api', 'config.json'), 'utf-8')) as SourceConfig;
+    expect(persisted.enabled).toBe(false);
   });
 
-  it('401 → connected (auth-required), auto-enabled (refresh path runs)', async () => {
-    // 401 from an unauthenticated probe is mapped to "reachable, needs auth".
-    // The token-refresh case in checkAuthStatus relies on this — gating on
-    // connectionStatus must not break it.
+  it('401 → connected (auth-required) without enabling the source', async () => {
+    // 401 means the probe reached the endpoint, not that this source was selected.
     writeApiSource(tempDir, 'auth-needed-api');
     ({ restore: restoreFetch } = installFetchStub(() => new Response(null, { status: 401 })));
 
-    let activated: string | null = null as string | null;
-    const ctx = createCtx(tempDir, {
-      activateSourceInSession: async (slug) => {
-        activated = slug;
-        return { ok: true, availability: 'next-turn' };
-      },
-    });
-
-    const result = await handleSourceTest(ctx, { sourceSlug: 'auth-needed-api' });
+    const result = await handleSourceTest(createCtx(tempDir), { sourceSlug: 'auth-needed-api' });
     const text = result.content[0]?.text ?? '';
 
-    expect(text).not.toContain('Skipping activation');
-    expect(activated).toBe('auth-needed-api');
-
+    expect(text).toContain('select it in the session source picker');
+    expect(text).not.toContain('auto-enabled');
     const persisted = JSON.parse(
       readFileSync(join(tempDir, 'sources', 'auth-needed-api', 'config.json'), 'utf-8')
     ) as SourceConfig;
-    expect(persisted.enabled).toBe(true);
+    expect(persisted.enabled).toBe(false);
     expect(persisted.connectionStatus).toBe('connected');
   });
 
@@ -482,20 +335,13 @@ describe('source_test API connection branches', () => {
     stub = installFetchStub(() => new Response(null, { status: 200 }));
     restoreFetch = stub.restore;
 
-    await handleSourceTest(ctx_for(tempDir), { sourceSlug: 'post-only-api' });
+    await handleSourceTest(createCtx(tempDir), { sourceSlug: 'post-only-api' });
 
     expect(stub.calls.length).toBe(1);
     expect(stub.calls[0]?.init?.method).toBe('POST');
     expect(stub.calls[0]?.url).toBe('https://api.example.test/v1/things');
   });
 });
-
-// Tiny helper to build a no-callback ctx for tests that don't care about activation.
-function ctx_for(workspacePath: string) {
-  return createCtx(workspacePath, {
-    activateSourceInSession: async () => ({ ok: true }),
-  });
-}
 
 // ============================================================
 // HTTP MCP probe — credential resolution (regression for #720)
@@ -601,7 +447,7 @@ describe('source_test HTTP MCP probe credential forwarding (regression for #720)
       },
     });
 
-    const result = await handleSourceTest(ctx, { sourceSlug: 'oauth-cached', autoEnable: false });
+    const result = await handleSourceTest(ctx, { sourceSlug: 'oauth-cached' });
 
     expect(result.isError).toBeFalsy();
     expect(calls.length).toBe(1);
@@ -634,7 +480,7 @@ describe('source_test HTTP MCP probe credential forwarding (regression for #720)
       },
     });
 
-    await handleSourceTest(ctx, { sourceSlug: 'oauth-refresh', autoEnable: false });
+    await handleSourceTest(ctx, { sourceSlug: 'oauth-refresh' });
 
     expect(calls.length).toBe(1);
     expect(calls[0]?.accessToken).toBe('fresh-tok');
@@ -661,7 +507,7 @@ describe('source_test HTTP MCP probe credential forwarding (regression for #720)
       },
     });
 
-    await handleSourceTest(ctx, { sourceSlug: 'bearer-cached', autoEnable: false });
+    await handleSourceTest(ctx, { sourceSlug: 'bearer-cached' });
 
     expect(calls.length).toBe(1);
     expect(calls[0]?.accessToken).toBe('bearer-tok');
@@ -689,7 +535,7 @@ describe('source_test HTTP MCP probe credential forwarding (regression for #720)
       },
     });
 
-    await handleSourceTest(ctx, { sourceSlug: 'header-style', autoEnable: false });
+    await handleSourceTest(ctx, { sourceSlug: 'header-style' });
 
     expect(calls.length).toBe(1);
     expect(calls[0]?.headers).toEqual({ 'X-Api-Key': 'k1' });
@@ -755,7 +601,7 @@ describe('source_test basic-auth header (regression for #824)', () => {
     });
     const ctx = createCtx(tempDir, { credentialManager: cred.manager });
 
-    await handleSourceTest(ctx, { sourceSlug: 'json-basic', autoEnable: false });
+    await handleSourceTest(ctx, { sourceSlug: 'json-basic' });
 
     expect(authHeader()).toBe(`Basic ${Buffer.from('u:p').toString('base64')}`);
   });
@@ -766,7 +612,7 @@ describe('source_test basic-auth header (regression for #824)', () => {
     const cred = makeCredentialManager({ cachedToken: encoded });
     const ctx = createCtx(tempDir, { credentialManager: cred.manager });
 
-    await handleSourceTest(ctx, { sourceSlug: 'legacy-basic', autoEnable: false });
+    await handleSourceTest(ctx, { sourceSlug: 'legacy-basic' });
 
     expect(authHeader()).toBe(`Basic ${encoded}`);
   });
@@ -776,7 +622,7 @@ describe('source_test basic-auth header (regression for #824)', () => {
     const cred = makeCredentialManager({ cachedToken: 'not-json' });
     const ctx = createCtx(tempDir, { credentialManager: cred.manager });
 
-    await handleSourceTest(ctx, { sourceSlug: 'garbage-basic', autoEnable: false });
+    await handleSourceTest(ctx, { sourceSlug: 'garbage-basic' });
 
     expect(authHeader()).toBe('Basic not-json');
   });

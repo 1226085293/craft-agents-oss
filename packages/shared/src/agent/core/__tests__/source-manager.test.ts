@@ -116,57 +116,6 @@ describe('SourceManager', () => {
     });
   });
 
-  describe('Inactive Source Detection', () => {
-    beforeEach(() => {
-      // Set up sources where github is active but slack is inactive
-      sourceManager.setAllSources([
-        createMockSource('github'),
-        createMockSource('slack'),
-      ]);
-      sourceManager.updateActiveState(['github'], [], ['github']);
-    });
-
-    it('should detect inactive source tool errors', () => {
-      const result = sourceManager.detectInactiveSourceToolError(
-        'mcp__slack__api_slack',
-        'No such tool available: mcp__slack__api_slack'
-      );
-
-      expect(result).not.toBeNull();
-      expect(result?.sourceSlug).toBe('slack');
-      expect(result?.toolName).toBe('mcp__slack__api_slack');
-    });
-
-    it('should not detect errors for active sources', () => {
-      const result = sourceManager.detectInactiveSourceToolError(
-        'mcp__github__api_github',
-        'No such tool available: mcp__github__api_github'
-      );
-
-      // github is active, so this shouldn't be detected as inactive source error
-      expect(result).toBeNull();
-    });
-
-    it('should not detect errors for non-MCP tools', () => {
-      const result = sourceManager.detectInactiveSourceToolError(
-        'Bash',
-        'Command failed: ls'
-      );
-
-      expect(result).toBeNull();
-    });
-
-    it('should handle "Tool not found" error pattern', () => {
-      const result = sourceManager.detectInactiveSourceToolError(
-        'mcp__slack__post_message',
-        "Tool 'mcp__slack__post_message' not found"
-      );
-
-      expect(result).not.toBeNull();
-      expect(result?.sourceSlug).toBe('slack');
-    });
-  });
-
   describe('Source State Formatting', () => {
     beforeEach(() => {
       sourceManager.setAllSources([

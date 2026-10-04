@@ -78,13 +78,7 @@ export const MermaidValidateSchema = z.object({
 });
 
 export const SourceTestSchema = z.object({
-  sourceSlug: z.string().describe('The slug of the source to test'),
-  autoEnable: z
-    .boolean()
-    .optional()
-    .describe(
-      'Automatically enable and activate the source in the current session on successful validation. Defaults to true. Pass false to keep pure validation behavior.'
-    ),
+  sourceSlug: z.string().describe('The slug of the source to validate and test; this never enables or selects it'),
 });
 
 export const SourceOAuthTriggerSchema = z.object({
@@ -335,7 +329,7 @@ export const TOOL_DESCRIPTIONS = {
   config_validate: `Validate Craft Agent config files after editing, before they take effect. Targets: config (config.json), sources, statuses, preferences, permissions, automations, tool-icons, all. Returns structured errors/warnings/suggestions.`,
   skill_validate: `Validate a skill SKILL.md: slug format (lowercase alnum + hyphens), file exists/readable, YAML frontmatter valid (name+description required), non-empty body, icon format if present.`,
   mermaid_validate: `Validate Mermaid diagram syntax before outputting (complex diagrams, many nodes, failed renders). Returns specific error messages if invalid. Include the raw diagram code.`,
-  source_test: `Validate, test, and (by default) activate a source config: schema check, icon handling, completeness warning, connectivity test, auth status; on success flips enabled=true and activates in the running session. Pass autoEnable=false for pure validation.`,
+  source_test: `Validate and test a source config: schema, icon, completeness, connectivity, and auth. This tool does not enable or select a source. If the user wants to use its tools, ask them to enable it in workspace settings and select it in the session source picker before they resend the request.`,
   source_oauth_trigger: `Start OAuth 2.0 + PKCE for an MCP source. Prerequisites: source exists, type mcp, authType oauth, valid MCP URL. Execution pauses while OAuth completes.`,
   source_google_oauth_trigger: `Trigger Google OAuth for a Google API source; opens a browser window for user sign-in. Services: Gmail, Calendar, Drive, Docs, Sheets, YouTube, Search Console. Pauses until OAuth completes.`,
   source_slack_oauth_trigger: `Trigger Slack OAuth for a Slack API source; opens browser for user sign-in. Pauses until OAuth completes.`,

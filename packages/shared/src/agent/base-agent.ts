@@ -37,7 +37,6 @@ import type {
   PlanCallback,
   AuthCallback,
   SourceChangeCallback,
-  SourceActivationCallback,
   SdkMcpServerConfig,
   BackendConfig,
   PostInitResult,
@@ -237,44 +236,8 @@ export abstract class BaseAgent implements AgentBackend {
   // ============================================================
   protected temporaryClarifications: string | null = null;
 
-  // ============================================================
-  // Source activation auto-retry (routed through the existing source_activated
-  // + forceAbort + auto_retry pipeline used for tool-call errors).
-  //
-  // When a session-scoped tool (source_test) successfully activates a new source
-  // mid-turn, the Claude SDK's mcpServers is already frozen for the current query
-  // (and Pi's tool registry is only refreshed between turns). The only way to
-  // expose the new tools is to end the current turn and auto-resend the user's
-  // original message with a "[{slug} activated]" suffix — same as what happens
-  // when a model directly calls an unknown tool on an inactive source.
-  //
-  // activateSourceInSessionFn in SessionManager sets this; the per-backend event
-  // loop consumes it after yielding the source_test tool_result.
-  // ============================================================
-  protected _pendingSourceActivationRestart: { sourceSlug: string; userMessage: string } | null = null;
+  // Raw current-turn user input feeds Pi's progress journal and compaction anchors.
   protected _currentTurnUserMessage: string | null = null;
-
-  setPendingSourceActivationRestart(pending: { sourceSlug: string; userMessage: string }): void {
-    // First-writer-wins under parallel `mcp__session__source_test` calls. The
-    // overwrite race itself is harmless (each activation runs independently and
-    // succeeds), but the surviving slug is what the renderer displays in the
-    // "[{slug} activated]" suffix on the auto-resend. Keeping the first writer
-    // gives a stable user-facing label without forcing all source_tests to
-    // serialize. See #790.
-    if (this._pendingSourceActivationRestart) {
-      this.debug(
-        `source-activation restart already pending (${this._pendingSourceActivationRestart.sourceSlug}); ignoring overlapping activation of "${pending.sourceSlug}"`,
-      );
-      return;
-    }
-    this._pendingSourceActivationRestart = pending;
-  }
-
-  consumePendingSourceActivationRestart(): { sourceSlug: string; userMessage: string } | null {
-    const pending = this._pendingSourceActivationRestart;
-    this._pendingSourceActivationRestart = null;
-    return pending;
-  }
 
   getCurrentTurnUserMessage(): string | null {
     return this._currentTurnUserMessage;
@@ -283,7 +246,6 @@ export abstract class BaseAgent implements AgentBackend {
   protected setCurrentTurnUserMessage(message: string | null): void {
     this._currentTurnUserMessage = message;
   }
-
   // ============================================================
   // Callbacks (public for facade wiring)
   // ============================================================
@@ -295,7 +257,6 @@ export abstract class BaseAgent implements AgentBackend {
   onConfigValidationError: ((file: string, errors: string[]) => void) | null = null;
   onPermissionModeChange: ((mode: PermissionMode) => void) | null = null;
   onDebug: ((message: string) => void) | null = null;
-  onSourceActivationRequest: SourceActivationCallback | null = null;
   onUsageUpdate: ((update: UsageUpdate) => void) | null = null;
   onBackendAuthRequired: ((reason: string) => void) | null = null;
   onSpawnSession: ((request: SpawnSessionRequest) => Promise<SpawnSessionResult>) | null = null;
@@ -1153,9 +1114,7 @@ ${formattedMessages}
       ? cleanMessage
       : [memoryContext, branchSeedContext, transferredSessionContext, directive, cleanMessage].filter(Boolean).join('\n\n');
 
-    // Capture the raw user message for source-activation auto-retry. `cleanMessage`
-    // has skill paths stripped but otherwise matches what the user typed — exactly
-    // what we want to resend when an activation forces a turn restart.
+    // Capture the raw user input for the progress journal and compaction anchors.
     this.setCurrentTurnUserMessage(cleanMessage);
     try {
       yield* this.chatImpl(effectiveMessage, attachments, options);

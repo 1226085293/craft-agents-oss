@@ -37,7 +37,6 @@ export type {
   PlanCallback,
   AuthCallback,
   SourceChangeCallback,
-  SourceActivationCallback,
   ChatOptions,
   RecoveryMessage,
   SdkMcpServerConfig,

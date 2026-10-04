@@ -468,7 +468,8 @@ export class PiAgent extends BaseAgent {
     '2. call_tool：签名 {name: 工具名, args: 参数对象}，用于调用已展开分类中的工具。',
     '固定层工具（如 call_llm、browser_tool 等核心工具）始终直接可用，无需展开。',
     '调用流程：先 tools_<分类> 展开，再 call_tool 调用。若分类未展开就调用会返回错误，按提示先展开。',
-    '未知工具时 call_tool 会返回候选列表或完整 schema，按提示修正。',
+    '来源工具必须属于本轮用户手动选择的 Active 数据源。不要搜索、启用或重试 Inactive 来源；缺少所需来源时，询问用户在输入框下方手动选择并重发请求。',
+    '未知工具时可通过 call_tool 查看候选列表或 schema；不得借此绕过用户来源选择。',
   ].join('\n');
 
   // RPC request counter for unique IDs

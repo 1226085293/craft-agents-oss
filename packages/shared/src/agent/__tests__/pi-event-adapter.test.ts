@@ -147,6 +147,22 @@ describe('PiEventAdapter', () => {
       expect(events1[0].turnId).toBe(events2[0].turnId);
     });
 
+    it('does not surface aborted assistant content as a final response', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'text_delta', delta: 'unfinished commentary' },
+      } as any));
+
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'aborted', content: 'unfinished commentary' },
+      } as any));
+
+      expect(events.some(event => event.type === 'text_complete')).toBe(false);
+      expect(events).toContainEqual(expect.objectContaining({ type: 'text_discard' }));
+    });
+
     it('should emit text_complete for final assistant message_end', () => {
       collect(adapter.adaptEvent({ type: 'turn_start' } as any));
       const events = collect(adapter.adaptEvent({

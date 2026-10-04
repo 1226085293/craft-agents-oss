@@ -869,6 +869,18 @@ export class PiEventAdapter extends BaseEventAdapter {
           break;
         }
 
+        // An aborted assistant message is only the truncated tail of a cancelled
+        // run, not a delivered final reply. Discard any streamed partial and keep
+        // the turn result-free so terminal UI state cannot surface it as an answer.
+        if (msg.stopReason === 'aborted') {
+          if (this.messageSubTurnId) {
+            yield { type: 'text_discard', turnId: this.messageSubTurnId };
+            this.messageSubTurnId = null;
+            this.hasStreamedDeltas = false;
+          }
+          break;
+        }
+
         // Extract text content from the final assistant message
         const textContent = this.extractTextFromMessage(event.message);
         // Pi SDK stopReason: 'toolUse' means the model will call tools next (intermediate commentary),

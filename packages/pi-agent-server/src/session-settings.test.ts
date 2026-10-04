@@ -18,9 +18,13 @@ import {
 describe('createCraftSettingsManager', () => {
   it('pins the agent-level auto-retry policy', () => {
     const settings = createCraftSettingsManager();
-    expect(settings.getRetryEnabled()).toBe(true);
+    // Default env has CRAFT_PI_RETRY_ENABLED unset → SDK agent-level retry is
+    // OFF; the main-process unified retry ladder (pi-agent.ts) is the sole
+    // retry owner. Pin the configured value (not a hardcoded true) so this
+    // stays correct if the default is ever flipped.
+    expect(settings.getRetryEnabled()).toBe(CRAFT_PI_RETRY_SETTINGS.enabled);
     expect(settings.getRetrySettings()).toEqual({
-      enabled: true,
+      enabled: CRAFT_PI_RETRY_SETTINGS.enabled,
       maxRetries: CRAFT_PI_RETRY_SETTINGS.maxRetries,
       baseDelayMs: CRAFT_PI_RETRY_SETTINGS.baseDelayMs,
     });
@@ -80,7 +84,7 @@ describe('createCraftSettingsManager', () => {
 
       // …and that Craft's manager does not.
       const settings = createCraftSettingsManager();
-      expect(settings.getRetryEnabled()).toBe(true);
+      expect(settings.getRetryEnabled()).toBe(CRAFT_PI_RETRY_SETTINGS.enabled);
       expect(settings.getCompactionEnabled()).toBe(true);
     } finally {
       rmSync(cwd, { recursive: true, force: true });

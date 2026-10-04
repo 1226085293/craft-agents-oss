@@ -170,6 +170,15 @@ export function buildCustomEndpointModelDef(
       // OpenAI-platform-specific `store` param with a 400. supportsStore:false
       // makes the pi-ai driver omit it entirely for openai-completions.
       ...(api === 'openai-completions' ? { supportsStore: false } : {}),
+      // Session affinity: send the Pi session id as `x-session-id` on every
+      // provider request so a gateway (e.g. the local uni-api relay) can pin
+      // a conversation's consecutive requests to the same upstream account
+      // for cache-affinity / quota-fairness routing. 'openrouter' format sends
+      // only x-session-id (no underscore-containing header names), which is
+      // the most portable for OpenAI-compatible relays. pi-ai's default for
+      // openai-completions is sendSessionAffinityHeaders: false.
+      sendSessionAffinityHeaders: true,
+      sessionAffinityFormat: 'openrouter',
     },
     // thinkingLevelMap — always-thinking GLM/z.ai-style relays reject any
     // request without a valid reasoning_effort ("该模型始终思考，不支持关闭思考；

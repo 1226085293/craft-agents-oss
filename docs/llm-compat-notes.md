@@ -455,3 +455,82 @@ recovery, defense resume, auto-retry, queued steering/followUp) must have a
 corresponding queue hold in the event adapter. When adding a new
 continuation path, treat "agent_end fired but the SDK may still emit events"
 as the invariant to preserve.
+
+## Incident 8: `httpIdleTimeoutMs` 120s kills legitimately slow completion + silent retry cascade (2026-10-05)
+
+### Symptom
+
+Session `261005-fresh-tulip` repeated `Pi agent stream stalled for 120s/300s
+with no events after all tools completed (timeout ...). Please retry the
+message.`, and `261005-fluid-mesa` showed `Automatic recovery was interrupted —
+the turn ended without a response.` Ten stall errors on 2026-10-05 alone.
+
+### Root cause (three stacked gaps)
+
+1. **`httpIdleTimeoutMs` 120s was too tight for legitimate slow requests.**
+   The d4f0731 channel (via uni-api) served 700-message contexts with
+   15–63 s time-to-first-token and ~115 s total completion. uni-api trace
+   spans repeatedly showed `stream_end ≈ 114 9xx ms` — i.e. exactly
+   `120s − ~5s` — proof the Craft client cut the stream just before the
+   upstream finished.
+
+2. **The SDK retried in silence.** With the client aborting at ~120 s, the pi
+   SDK's agent/provider retries ran inside `streamFn` (`retryProviderRequest`
+   + `_prepareRetry`), emitting NO forwardable events. The main process's
+   300 s turn-idle watchdog therefore fired mid-retry and declared a stall
+   while the subprocess was actually still retrying — the retries themselves
+   produced the "no events" window.
+
+3. **`keepalive` was never the culprit.** `api.yaml` has no
+   `keepalive_interval`, so it resolved to `None` (default 99999 > 600 s
+   model_timeout) and no `: keepalive` SSE frames were ever injected. The
+   earlier hypothesis (keepalive bytes resetting the client idle timer) was
+   disproven by the trace spans.
+
+### Fix (2026-10-05, user-approved unified retry design)
+
+- `packages/pi-agent-server/src/session-settings.ts` —
+  `httpIdleTimeoutMs` default raised 120s → **300s** (env
+  `CRAFT_PI_HTTP_IDLE_TIMEOUT_MS`, 0 disables) so healthy requests with
+  TTFT 60s+/total ~115s are no longer cut off. SDK retries default
+  **OFF** (`CRAFT_PI_RETRY_ENABLED=0`) — the unified ladder is the single
+  retry owner.
+- `packages/shared/src/agent/retry-ladder.ts` (new) — Craft-owned ladder:
+  1s → 5s → 10s → 30s → 60s → 5min → 10min, then a 10 min loop capped at
+  24 h. Deterministic 4xx-family gets at most 3 retries (1s/5s/10s) then a
+  hard stop. Honors `Retry-After` hints.
+- `packages/shared/src/agent/pi-agent.ts` — ladder integration: subprocess
+  errors and adapter-released terminal errors are staged, the queue is held
+  open across retries (the 300 s watchdog is exempt while the ladder is
+  active), the error surfaces NON-terminally after the 10 s rung
+  (`retryPending` on error/typed_error events) with a stop-retrying control,
+  and a retried prompt is re-issued on the schedule. Tool-mid-execution
+  failures are never laddered (duplicate side-effect risk).
+- `packages/server-core/src/sessions/SessionManager.ts` + renderer
+  (`ChatDisplay.tsx`) — pass through `retryPending`/`retryAttempt` and render
+  the retrying card.
+- `apps/electron/src/renderer/components/app-shell/ChatDisplay.tsx` —
+  non-terminal retry card (amber, spinner, retry counter) with 停止重试.
+
+### Env vars (all optional)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `CRAFT_PI_HTTP_IDLE_TIMEOUT_MS` | `300000` | HTTP idle/request timeout (0 = disabled) |
+| `CRAFT_PI_RETRY_ENABLED` | `0` | Restore the pi SDK's own 4+2 retry policy |
+| `CRAFT_PI_RETRY_RUNGS_MS` | `1000,5000,10000,30000,60000,300000,600000` | Ladder rungs (ms) |
+| `CRAFT_PI_RETRY_LOOP_MS` | `600000` | Loop interval after rungs (ms) |
+| `CRAFT_PI_RETRY_LOOP_CAP_MS` | `86400000` | Hard cap from ladder start (24 h) |
+| `CRAFT_PI_RETRY_SHOW_ERROR_AFTER_ATTEMPT` | `3` | Surface non-terminal error after N failed retries |
+| `CRAFT_PI_RETRY_DETERMINISTIC_MAX` | `3` | Max retries for deterministic 4xx-family errors |
+
+### Prevention
+
+- Timeouts that cap requests at the client must stay above the measured
+  (TTFT + generation) distribution of the slowest healthy channel; when
+  adding/raising a cap, verify against uni-api `trace_span` duration
+  clusters (a cluster at cap − ~5 s is a client-side cut, not upstream
+  slowness).
+- Any retry owner must forward progress events (or hold+re-issue) so the
+  main-process watchdog can distinguish "retrying" from "dead". Silent
+  internal retries are indistinguishable from a hang.

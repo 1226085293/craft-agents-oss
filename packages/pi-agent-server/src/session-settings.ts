@@ -17,6 +17,31 @@
 import { SettingsManager } from '@earendil-works/pi-coding-agent';
 import { LLM_QUERY_TIMEOUT_MS } from '../../shared/src/agent/llm-tool.ts';
 
+/**
+ * Default HTTP idle/request timeout for main Pi sessions.
+ *
+ * History: 120_000 was killing legitimately slow upstream requests. Session
+ * 261005-fresh-tulip (d4f0731 via uni-api): 700-message contexts with 15–63 s
+ * time-to-first-token and ~115 s total completion — a cluster of completions
+ * at exactly ~120 s − 5 s proved the client cut the stream right before the
+ * upstream finished. Raised to 300_000 (SDK default). Override with
+ * CRAFT_PI_HTTP_IDLE_TIMEOUT_MS (0 = disabled).
+ */
+export const CRAFT_PI_HTTP_IDLE_TIMEOUT_MS_DEFAULT = 300_000;
+
+/** Read the Pi HTTP idle/request timeout from env (ms). 0 disables. */
+export function getCraftPiHttpIdleTimeoutMs(): number {
+  const raw = process.env.CRAFT_PI_HTTP_IDLE_TIMEOUT_MS;
+  if (raw == null || raw.trim() === '') {
+    return CRAFT_PI_HTTP_IDLE_TIMEOUT_MS_DEFAULT;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return CRAFT_PI_HTTP_IDLE_TIMEOUT_MS_DEFAULT;
+  }
+  return Math.floor(parsed);
+}
+
 type PiSettings = NonNullable<Parameters<typeof SettingsManager.inMemory>[0]>;
 
 export type CraftPiSessionPurpose = 'main' | 'ephemeral';
@@ -31,23 +56,38 @@ export const CRAFT_PI_EPHEMERAL_QUERY_DEADLINE_MS = LLM_QUERY_TIMEOUT_MS - 5_000
 /**
  * Main-chat retry policy for transient provider/transport errors.
  *
- * Agent-level (`AgentSession._prepareRetry`, classifier `isRetryableAssistantError`
- * in pi-ai): re-runs a failed assistant turn with exponential backoff
- * `baseDelayMs * 2^(attempt-1)`. Four retries wait 2 s + 4 s + 8 s + 16 s ≈ 30 s.
+ * Default: DISABLED (2026-10-05). The unified retry ladder in
+ * `packages/shared/src/agent/retry-ladder.ts` is the single retry owner with
+ * the user-approved schedule 1s/5s/10s/30s/60s/5m/10m (+10m loop, 24h cap).
+ * The SDK's own agent/provider retries ran silently inside streamFn and
+ * emitted no forwarded events, which made the main-process turn-idle watchdog
+ * fire mid-retry ("stream stalled") — see 261005-fresh-tulip. Restore the SDK
+ * policy with CRAFT_PI_RETRY_ENABLED=1.
  *
+ * When enabled: Agent-level (`AgentSession._prepareRetry`, classifier
+ * `isRetryableAssistantError` in pi-ai) re-runs a failed assistant turn with
+ * exponential backoff `baseDelayMs * 2^(attempt-1)` — 2s/4s/8s/16s ≈ 30s.
  * Provider-level (`retryProviderRequest` in pi-ai): pre-stream retries for
- * 408/409/429/5xx honoring `retry-after` up to `maxRetryDelayMs`, mirroring the
- * OpenAI/Anthropic SDK default of 2. (Pi SDK default: 0.)
+ * 408/409/429/5xx honoring `retry-after` up to `maxRetryDelayMs`, mirroring
+ * the OpenAI/Anthropic SDK default of 2. (Pi SDK default: 0.)
  */
+export const CRAFT_PI_SDK_RETRY_ENABLED = readEnvBool('CRAFT_PI_RETRY_ENABLED', false);
+
 export const CRAFT_PI_RETRY_SETTINGS = {
-  enabled: true,
-  maxRetries: 4,
+  enabled: CRAFT_PI_SDK_RETRY_ENABLED,
+  maxRetries: CRAFT_PI_SDK_RETRY_ENABLED ? 4 : 0,
   baseDelayMs: 2_000,
   provider: {
-    maxRetries: 2,
-    maxRetryDelayMs: 60_000,
+    maxRetries: CRAFT_PI_SDK_RETRY_ENABLED ? 2 : 0,
+    maxRetryDelayMs: CRAFT_PI_SDK_RETRY_ENABLED ? 60_000 : 0,
   },
 } as const;
+
+function readEnvBool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw == null || raw.trim() === '') return fallback;
+  return !['0', 'false', 'no', 'off'].includes(raw.trim().toLowerCase());
+}
 
 /**
  * Smaller retry budget for utility sessions (`call_llm`, titles, summaries).

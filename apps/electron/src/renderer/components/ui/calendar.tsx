@@ -152,8 +152,12 @@ function CalendarDayButton({
         // Fill the cell: flexible width, fixed min size from CSS var
         'h-[--cell-size] w-full min-w-[--cell-size] select-none',
         'hover:bg-foreground/5 transition-colors cursor-pointer',
-        // Selection state from modifiers
-        modifiers.selected && 'bg-background shadow-minimal font-medium',
+        // Range selection visual: middle days get a soft accent fill,
+        // the start/end days get a solid accent chip so the chosen span
+        // is clearly visible (previously the span blended into the panel).
+        modifiers.range_middle && 'rounded-none bg-accent/10 font-medium',
+        (modifiers.range_start || modifiers.range_end) && 'rounded-md bg-accent text-accent-foreground font-medium',
+        modifiers.selected && !modifiers.range_start && !modifiers.range_end && 'font-medium',
         'outline-none focus-visible:ring-1 focus-visible:ring-ring',
         className
       )}

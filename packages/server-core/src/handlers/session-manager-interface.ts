@@ -11,6 +11,7 @@ import type { StoredAttachment, AnnotationV1 } from '@craft-agent/core/types'
 import type { PermissionMode } from '@craft-agent/shared/agent/mode-types'
 import type { ThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import type { AuthResult } from '@craft-agent/shared/agent'
+import type { LLMQueryRequest, LLMQueryResult } from '@craft-agent/shared/agent/llm-tool'
 import type { IMessagingGatewayRegistry } from './messaging-registry-interface'
 import type {
   Session,
@@ -120,7 +121,7 @@ export interface ISessionManager {
   setSessionPermissionMode(sessionId: string, mode: PermissionMode): void
   setSessionThinkingLevel(sessionId: string, level: ThinkingLevel): void
   updateWorkingDirectory(sessionId: string, path: string): void
-  setSessionSources(sessionId: string, sourceSlugs: string[]): Promise<void>
+  setSessionSources(sessionId: string, sourceSlugs: string[], sourceScope?: 'auto' | 'only' | 'exclude'): Promise<void>
   setSessionLabels(sessionId: string, labels: string[]): void
   /** Apply the reserved Task labeling (mint / inherit the per-task item label under the Task
    *  root). Returns the resolved ITEM label id, or undefined if the session is unknown.
@@ -169,7 +170,11 @@ export interface ISessionManager {
    * Live agent instance backing a session, or null when it hasn't been
    * initialized yet. Used by handlers that invoke agent-owned operations.
    */
-  getSessionAgent?(sessionId: string): { extractSessionMemories?: (options?: { strategy?: 'compaction' | 'session_end' }) => Promise<{ extracted: number; discarded: number }> } | null
+  getSessionAgent?(sessionId: string): {
+    extractSessionMemories?: (options?: { strategy?: 'compaction' | 'session_end' }) => Promise<{ extracted: number; discarded: number }>
+    runMiniCompletion?: (prompt: string) => Promise<string | null>
+    queryLlm?: (request: LLMQueryRequest) => Promise<LLMQueryResult>
+  } | null
   /**
    * Lightweight side-channel decision used by messaging adapters when a user
    * sends a follow-up while the session is already running. Implementations

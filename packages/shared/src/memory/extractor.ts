@@ -11,6 +11,7 @@ import type {
   MemoryExtractionInput,
   MemoryType,
   MemoryStore,
+  SessionMemoryStore,
   MemoryExtractionRecord,
 } from './types.ts';
 import { addMemoryEntry, recordExtraction } from './store.ts';
@@ -88,8 +89,12 @@ export function isSemanticDuplicate(
 /**
  * Build the extraction prompt for the LLM.
  * Focuses on extracting structured, reusable knowledge from the conversation.
+ *
+ * @param options.language - Preferred output language (native name, e.g.
+ *   "简体中文"); extracted content and tags are written in this language so
+ *   memories follow the app's UI language setting.
  */
-export function buildExtractionPrompt(input: MemoryExtractionInput): string {
+export function buildExtractionPrompt(input: MemoryExtractionInput, options?: { language?: string }): string {
   const { messages, sessionTitle } = input;
 
   // Build a compact transcript (max ~8000 chars to fit in mini model context)
@@ -114,9 +119,13 @@ export function buildExtractionPrompt(input: MemoryExtractionInput): string {
     ? `Session title: "${sessionTitle}"\n`
     : '';
 
+  const languageInstruction = options?.language
+    ? `\nLanguage: Write ALL extracted knowledge in ${options.language} — content and tags must be in ${options.language}.`
+    : '';
+
   return `You are a knowledge extraction specialist. Your task is to analyze a conversation transcript and extract persistent, reusable knowledge that should be remembered across future sessions.
 
-${titleContext}
+${titleContext}${languageInstruction}
 Conversation transcript:
 ${transcript}
 
@@ -125,15 +134,20 @@ Extract knowledge in these categories:
 2. **preference** — User preferences about style, tools, workflows, communication
 3. **workflow** — Important multi-step processes, solutions, or procedures discovered
 4. **reminder** — Action items, follow-ups, or things the user wants to be reminded about
-5. **context** — Background information that will be useful for future conversations (project structure, tech stack, domain knowledge)
+5. **context** — Long-lived background that stays useful across many future sessions (the user's role, teams, long-term goals) — NOT per-session background like one project's current structure
 
 Rules:
 - Each memory should be self-contained and specific (no "user is working on a project")
+- **Write every memory from a third-person observer perspective and always name its subject and context** — the project, tool, error source, or domain it applies to (e.g. "While debugging the retry policy for the XYZ pipeline, the user confirmed ..."). Never write fragments that rely on this conversation to be understood (e.g. "用户已确认三个决策点" without saying what was confirmed and in which context/codebase).
 - Include concrete details: names, paths, versions, configs, API endpoints
 - For workflows, capture the key steps not just the topic
 - Confidence: 0.9-1.0 for direct quotes/stated facts, 0.6-0.8 for inferred knowledge
 - Skip anything that's already in the existing tags list below (avoid duplicates)
 - Skip trivial or obvious information
+- Extract at most 6 memories. Fewer is better; an empty array is acceptable.
+- Relevance test: "Would this change how I assist in a FUTURE session?" If no, skip.
+- Do not extract snapshots of code or files (paths, function behavior, regexes, module structure) — the codebase is its own durable record. Extract the decision, rationale, preference, or trap behind them, not the implementation.
+- Never extract session-specific transient state (what a named session did, pending calls, current error states).
 
 Existing tags to avoid duplicating: ${(input.existingTags || []).join(', ') || 'none'}
 
@@ -239,6 +253,12 @@ export interface MemoryExtractorOptions {
   forceExtraction?: boolean;
   /** Whether to drop near-duplicates against the whole store */
   semanticDedup?: boolean;
+  /** Global memory entries used for cross-store semantic dedup — a new session must not re-extract what the global store already knows. */
+  globalEntries?: MemoryEntry[];
+  /** Called once per candidate blocked by cross-store dedup (persistent counter for the duplicate-extraction rate). */
+  onDedupBlocked?: () => void;
+  /** Preferred output language (native name, e.g. "简体中文") for extracted knowledge. */
+  language?: string;
   /**
    * Which strategy triggered this pass. Keys the one-shot guard per
    * (sessionId, strategy) so an early compaction pass doesn't consume the
@@ -254,10 +274,10 @@ export interface MemoryExtractorOptions {
  */
 export async function extractMemories(
   input: MemoryExtractionInput,
-  store: MemoryStore,
+  store: MemoryStore | SessionMemoryStore,
   options: MemoryExtractorOptions,
 ): Promise<MemoryExtractionRecord> {
-  const { runMiniCompletion, existingEntries, forceExtraction = false, semanticDedup = false } = options;
+  const { runMiniCompletion, existingEntries, forceExtraction = false, semanticDedup = false, globalEntries } = options;
 
   // Build list of existing tags for deduplication
   const existingTags = [
@@ -268,7 +288,9 @@ export async function extractMemories(
   // When no strategy is passed (legacy callers), fall back to the original
   // "any extraction from this session" guard so old behavior is preserved.
   const strategy = options.strategy;
-  const alreadyExtracted = store.extractionHistory.some(
+  const extractionHistory = store.extractionHistory;
+  const isSessionStore = !('totalInjectionTokens' in store);
+  const alreadyExtracted = !isSessionStore && extractionHistory.some(
     h => h.sessionId === input.sessionId
       && (strategy === undefined ? true : h.strategy === strategy),
   );
@@ -283,8 +305,9 @@ export async function extractMemories(
   }
 
   // Build and send extraction prompt
-  const prompt = buildExtractionPrompt(input);
+  const prompt = buildExtractionPrompt(input, { language: options.language });
   const response = await runMiniCompletion(prompt);
+  if (response === null) throw new Error('Memory extraction returned an empty response');
 
   const { entries, discarded } = parseExtractionResponse(
     response,
@@ -305,20 +328,38 @@ export async function extractMemories(
     // pre-call snapshot: entries added earlier in this same batch must be
     // deduplicated against too, or two near-identical candidates from one
     // extraction both slip in.
-    if (semanticDedup && isSemanticDuplicate(entry, store.entries)) continue;
+    // P0-4: also compare against the GLOBAL store so a new session never
+    // re-extracts preferences/decisions the library already knows. The
+    // in-loop spread keeps store.entries live for batch-internal dedup.
+    const dedupPool = globalEntries?.length
+      ? [...store.entries, ...globalEntries]
+      : store.entries;
+    if (semanticDedup && isSemanticDuplicate(entry, dedupPool)) {
+      console.debug(`[Memory/Extractor] Cross-store duplicate blocked: ${entry.content.slice(0, 80)}`);
+      options.onDedupBlocked?.();
+      continue;
+    }
 
     const newEntry = addMemoryEntry(store, entry.content, entry.type, entry.sourceSessionId, entry.tags, entry.confidence);
     newEntryIds.push(newEntry.id);
   }
 
   // Record extraction
-  recordExtraction(store, {
+  const extractionRecord: MemoryExtractionRecord = {
     sessionId: input.sessionId,
+    timestamp: new Date().toISOString(),
     factsExtracted: entries.length,
     factsDiscarded: discarded,
     newEntryIds,
     ...(strategy !== undefined ? { strategy } : {}),
-  });
+  };
+  if ('totalInjectionTokens' in store) {
+    recordExtraction(store as MemoryStore, extractionRecord);
+  } else {
+    const sessionStore = store as SessionMemoryStore;
+    sessionStore.extractionHistory.push(extractionRecord);
+    sessionStore.extractionHistory = sessionStore.extractionHistory.slice(-100);
+  }
 
   return {
     sessionId: input.sessionId,

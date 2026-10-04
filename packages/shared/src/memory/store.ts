@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   MemoryEntry,
   MemoryStore,
+  SessionMemoryStore,
   MemoryExtractionRecord,
   MemoryQueryArgs,
   MemoryQueryResult,
@@ -32,6 +33,7 @@ export function loadMemoryStore(workspaceRootPath: string): MemoryStore {
     return {
       version: 1,
       entries: [],
+      trash: [],
       extractionHistory: [],
       totalInjectionTokens: 0,
     };
@@ -43,6 +45,7 @@ export function loadMemoryStore(workspaceRootPath: string): MemoryStore {
 
     // Ensure backward compatibility: add missing fields
     if (!store.extractionHistory) store.extractionHistory = [];
+    if (!store.trash) store.trash = [];
     if (store.totalInjectionTokens === undefined) store.totalInjectionTokens = 0;
 
     // Clean up expired entries
@@ -56,6 +59,7 @@ export function loadMemoryStore(workspaceRootPath: string): MemoryStore {
     return {
       version: 1,
       entries: [],
+      trash: [],
       extractionHistory: [],
       totalInjectionTokens: 0,
     };
@@ -89,7 +93,7 @@ export function saveMemoryStore(
  * Add a new memory entry.
  */
 export function addMemoryEntry(
-  store: MemoryStore,
+  store: MemoryStore | SessionMemoryStore,
   content: string,
   type: MemoryType,
   sourceSessionId: string,
@@ -117,12 +121,13 @@ export function addMemoryEntry(
 export function updateMemoryEntry(
   store: MemoryStore,
   id: string,
-  updates: Partial<Pick<MemoryEntry, 'content' | 'tags' | 'confidence'>>,
+  updates: Partial<Pick<MemoryEntry, 'content' | 'type' | 'tags' | 'confidence'>>,
 ): MemoryEntry | null {
   const entry = store.entries.find(e => e.id === id);
   if (!entry) return null;
 
   if (updates.content !== undefined) entry.content = updates.content;
+  if (updates.type !== undefined) entry.type = updates.type;
   if (updates.tags !== undefined) entry.tags = updates.tags;
   if (updates.confidence !== undefined) entry.confidence = updates.confidence;
   entry.updatedAt = new Date().toISOString();
@@ -139,6 +144,44 @@ export function deleteMemoryEntry(store: MemoryStore, id: string): boolean {
 
   store.entries.splice(idx, 1);
   return true;
+}
+
+/** Move an active entry into the recoverable global-memory trash. */
+export function softDeleteMemoryEntry(store: MemoryStore, id: string, reason?: string, replacedById?: string): boolean {
+  const index = store.entries.findIndex(entry => entry.id === id);
+  if (index < 0) return false;
+  const [entry] = store.entries.splice(index, 1);
+  if (!entry) return false;
+  store.trash ??= [];
+  store.trash.push({ entry, deletedAt: new Date().toISOString(), ...(reason ? { reason } : {}), ...(replacedById ? { replacedById } : {}) });
+  return true;
+}
+
+/** Restore a trashed global-memory entry without changing its original metadata. */
+export function restoreMemoryEntry(store: MemoryStore, id: string): boolean {
+  store.trash ??= [];
+  const index = store.trash.findIndex(record => record.entry.id === id);
+  if (index < 0 || store.entries.some(entry => entry.id === id)) return false;
+  const [record] = store.trash.splice(index, 1);
+  if (!record) return false;
+  store.entries.push(record.entry);
+  return true;
+}
+
+/** Permanently remove every entry currently in the global-memory trash. */
+export function clearMemoryTrash(store: MemoryStore): number {
+  const count = store.trash?.length ?? 0;
+  store.trash = [];
+  return count;
+}
+
+/** Permanently remove the given trashed entries (irreversible). Returns how many were removed. */
+export function permanentlyDeleteTrashEntries(store: MemoryStore, ids: string[]): number {
+  if (!store.trash || ids.length === 0) return 0;
+  const idSet = new Set(ids);
+  const before = store.trash.length;
+  store.trash = store.trash.filter(record => !idSet.has(record.entry.id));
+  return before - store.trash.length;
 }
 
 /**

@@ -149,6 +149,7 @@ export const NavigationRegistry = {
     displayName: 'Sources',
     detailsPages: {
       source: PlaceholderComponent, // Will be: SourceInfoPage
+      memory: PlaceholderComponent, // Global memory manager is rendered by MainContentPanel.
     },
     defaultDetails: null, // Empty state when no sources
     getFirstItem: (ctx: NavigationData) => ctx.sources[0]?.slug ?? null,

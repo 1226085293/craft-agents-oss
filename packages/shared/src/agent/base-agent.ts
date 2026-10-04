@@ -37,7 +37,6 @@ import type {
   PlanCallback,
   AuthCallback,
   SourceChangeCallback,
-  SourceActivationCallback,
   SdkMcpServerConfig,
   BackendConfig,
   PostInitResult,
@@ -68,13 +67,16 @@ import { buildTitlePrompt, buildRegenerateTitlePrompt, validateTitle } from '../
 import {
   loadMemoryStore,
   saveMemoryStore,
-  selectRelevantMemories,
+  selectRelevantMemoriesFromScopes,
   buildMemoryContext,
+  loadSessionMemoryStore,
+  saveSessionMemoryStore,
   extractMemories,
   type MemoryStore,
   type MemoryExtractionInput,
 } from '../memory/index.ts';
 import { getMemoryStorePath } from '../memory/store.ts';
+import { resolveTitleLanguageName } from '../config/preferences.ts';
 import type { MemoryConfig } from '../memory/types.ts';
 import { DEFAULT_MEMORY_CONFIG } from '../memory/types.ts';
 // Execution journal — tool dispatch/outcome tracking
@@ -235,44 +237,8 @@ export abstract class BaseAgent implements AgentBackend {
   // ============================================================
   protected temporaryClarifications: string | null = null;
 
-  // ============================================================
-  // Source activation auto-retry (routed through the existing source_activated
-  // + forceAbort + auto_retry pipeline used for tool-call errors).
-  //
-  // When a session-scoped tool (source_test) successfully activates a new source
-  // mid-turn, the Claude SDK's mcpServers is already frozen for the current query
-  // (and Pi's tool registry is only refreshed between turns). The only way to
-  // expose the new tools is to end the current turn and auto-resend the user's
-  // original message with a "[{slug} activated]" suffix — same as what happens
-  // when a model directly calls an unknown tool on an inactive source.
-  //
-  // activateSourceInSessionFn in SessionManager sets this; the per-backend event
-  // loop consumes it after yielding the source_test tool_result.
-  // ============================================================
-  protected _pendingSourceActivationRestart: { sourceSlug: string; userMessage: string } | null = null;
+  // Raw current-turn user input feeds Pi's progress journal and compaction anchors.
   protected _currentTurnUserMessage: string | null = null;
-
-  setPendingSourceActivationRestart(pending: { sourceSlug: string; userMessage: string }): void {
-    // First-writer-wins under parallel `mcp__session__source_test` calls. The
-    // overwrite race itself is harmless (each activation runs independently and
-    // succeeds), but the surviving slug is what the renderer displays in the
-    // "[{slug} activated]" suffix on the auto-resend. Keeping the first writer
-    // gives a stable user-facing label without forcing all source_tests to
-    // serialize. See #790.
-    if (this._pendingSourceActivationRestart) {
-      this.debug(
-        `source-activation restart already pending (${this._pendingSourceActivationRestart.sourceSlug}); ignoring overlapping activation of "${pending.sourceSlug}"`,
-      );
-      return;
-    }
-    this._pendingSourceActivationRestart = pending;
-  }
-
-  consumePendingSourceActivationRestart(): { sourceSlug: string; userMessage: string } | null {
-    const pending = this._pendingSourceActivationRestart;
-    this._pendingSourceActivationRestart = null;
-    return pending;
-  }
 
   getCurrentTurnUserMessage(): string | null {
     return this._currentTurnUserMessage;
@@ -281,7 +247,6 @@ export abstract class BaseAgent implements AgentBackend {
   protected setCurrentTurnUserMessage(message: string | null): void {
     this._currentTurnUserMessage = message;
   }
-
   // ============================================================
   // Callbacks (public for facade wiring)
   // ============================================================
@@ -293,7 +258,6 @@ export abstract class BaseAgent implements AgentBackend {
   onConfigValidationError: ((file: string, errors: string[]) => void) | null = null;
   onPermissionModeChange: ((mode: PermissionMode) => void) | null = null;
   onDebug: ((message: string) => void) | null = null;
-  onSourceActivationRequest: SourceActivationCallback | null = null;
   onUsageUpdate: ((update: UsageUpdate) => void) | null = null;
   onBackendAuthRequired: ((reason: string) => void) | null = null;
   onSpawnSession: ((request: SpawnSessionRequest) => Promise<SpawnSessionResult>) | null = null;
@@ -716,6 +680,22 @@ export abstract class BaseAgent implements AgentBackend {
 
   getActiveSourceSlugs(): string[] {
     return Array.from(this.sourceManager.getIntendedSlugs());
+  }
+
+  /** 本会话被禁止（deny-session）的来源工具名集合 */
+  protected sourceSessionDenyTools = new Set<string>();
+
+  /**
+   * 设置本会话禁止调用的来源工具（可由确认卡片“禁止”响应写入）。
+   * 传入空数组清空。
+   */
+  setSourceSessionDeny(tools: string[]): void {
+    this.sourceSessionDenyTools = new Set(tools);
+  }
+
+  /** 当前本会话禁止的来源工具名列表 */
+  getSourceSessionDeny(): string[] {
+    return Array.from(this.sourceSessionDenyTools);
   }
 
   getAllSources(): LoadedSource[] {
@@ -1151,9 +1131,7 @@ ${formattedMessages}
       ? cleanMessage
       : [memoryContext, branchSeedContext, transferredSessionContext, directive, cleanMessage].filter(Boolean).join('\n\n');
 
-    // Capture the raw user message for source-activation auto-retry. `cleanMessage`
-    // has skill paths stripped but otherwise matches what the user typed — exactly
-    // what we want to resend when an activation forces a turn restart.
+    // Capture the raw user input for the progress journal and compaction anchors.
     this.setCurrentTurnUserMessage(cleanMessage);
     try {
       yield* this.chatImpl(effectiveMessage, attachments, options);
@@ -1177,7 +1155,8 @@ ${formattedMessages}
 
     try {
       const store = this.memoryStore;
-      if (!store.entries.length) return '';
+      const sessionStore = loadSessionMemoryStore(this.config.workspace.rootPath, sessionId);
+      if (!store.entries.length && !sessionStore.entries.length) return '';
 
       // Get recent messages for relevance scoring: the 4 most recent history
       // messages PLUS the current user message (the strongest intent signal,
@@ -1185,7 +1164,7 @@ ${formattedMessages}
       const recentMessages = this.getRecentMessagesForInjection(4);
       const trimmed = currentUserMessage?.trim();
       if (trimmed) recentMessages.push({ role: 'user', content: trimmed });
-      const memories = selectRelevantMemories(store, recentMessages);
+      const memories = selectRelevantMemoriesFromScopes(store, sessionStore, recentMessages);
 
       if (memories.length === 0) return '';
 
@@ -1219,7 +1198,7 @@ ${formattedMessages}
   }
 
   /**
-   * Extract memories from the current session and save to workspace store.
+   * Extract memories from the current session and save to its session-local store.
    * Called on session end or compaction.
    */
   async extractSessionMemories(options?: { strategy?: 'compaction' | 'session_end' }): Promise<{ extracted: number; discarded: number }> {
@@ -1246,27 +1225,55 @@ ${formattedMessages}
         }
       }
 
+      const sessionStore = loadSessionMemoryStore(this.config.workspace.rootPath, sessionId);
+      const extractedThroughIndex = sessionStore.extractedThroughMessageId
+        ? messages.findIndex((message: any) => message.id === sessionStore.extractedThroughMessageId)
+        : -1;
+      const extractionMessages = extractedThroughIndex >= 0
+        ? messages.slice(extractedThroughIndex + 1)
+        : sessionStore.extractedThroughMessageId || !sessionStore.extractedMessageCount
+          ? messages
+          : messages.slice(sessionStore.extractedMessageCount);
+      if (extractionMessages.length === 0) return { extracted: 0, discarded: 0 };
+
       const input: MemoryExtractionInput = {
         sessionId,
-        messages: messages.map((m: any) => ({
+        messages: extractionMessages.map((m: any) => ({
           role: m.role,
           content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
           toolName: (m as Record<string, unknown>).tool_name as string | undefined,
         })),
         sessionTitle: this.config.session?.name,
-        existingTags: this.memoryStore.entries.flatMap(e => e.tags),
+        existingTags: sessionStore.entries.flatMap(e => e.tags),
       };
 
-      const result = await extractMemories(input, this.memoryStore, {
+      const result = await extractMemories(input, sessionStore, {
         runMiniCompletion: this.runMiniCompletion.bind(this),
-        existingEntries: this.memoryStore.entries,
+        existingEntries: sessionStore.entries,
         semanticDedup: this._memoryConfig.semanticDedup,
+        // P0-4: cross-store semantic dedup against the global store — each new
+        // session must not re-extract what the global library already knows
+        // (existingTags here only covers this session's own entries).
+        globalEntries: this.memoryStore.entries,
+        // Persist a durable counter for blocked duplicates — console debug
+        // output is not persisted in packaged builds, so the counter is the
+        // observable for the duplicate-extraction rate across the window.
+        onDedupBlocked: () => {
+          this.memoryStore.dedupBlockedCount = (this.memoryStore.dedupBlockedCount ?? 0) + 1;
+          this.persistMemoryStore();
+        },
+        // Extracted memories follow the app's UI language setting (e.g. 简体中文)
+        // instead of defaulting to whatever language the model picks.
+        language: resolveTitleLanguageName(),
         // Key the one-shot guard by (sessionId, strategy) so a compaction-
         // triggered pass can't consume the session-end slot (or vice versa).
         strategy: requestedStrategy,
       });
 
-      this.persistMemoryStore();
+      sessionStore.extractedMessageCount = messages.length;
+      const lastMessage = messages.at(-1) as { id?: string } | undefined;
+      if (lastMessage?.id) sessionStore.extractedThroughMessageId = lastMessage.id;
+      saveSessionMemoryStore(this.config.workspace.rootPath, sessionStore);
       return { extracted: result.factsExtracted, discarded: result.factsDiscarded };
     } catch (error) {
       this.onDebug?.(`[Memory] Extraction failed: ${error}`);

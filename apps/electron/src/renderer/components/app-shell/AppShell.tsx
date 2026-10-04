@@ -34,6 +34,7 @@ import {
   MailOpen,
   FolderKanban,
   PanelsTopLeft,
+  Brain,
 } from "lucide-react"
 // SessionStatusIcons no longer used - icons come from dynamic sessionStatuses
 import { SourceAvatar } from "@/components/ui/source-avatar"
@@ -644,6 +645,11 @@ function AppShellContent({
   // full-width in the content area — there is no pages navigator list.
   const isPagesView = isPagesNavigation(navState)
 
+  // Memory manager renders full-width in the content area — there is no
+  // sources list to keep beside it, so the navigator (and its resize handle)
+  // collapse to zero width while it's active (#memory-ui).
+  const isMemoryView = isSourcesNavigation(navState) && navState.details?.type === 'memory'
+
   // Derive source filter from navigation state (only when in sources navigator)
   const sourceFilter: SourceFilter | null = isSourcesNavigation(navState) ? navState.filter ?? null : null
 
@@ -1088,9 +1094,9 @@ function AppShellContent({
   }, [activeWorkspaceId])
 
   // Handle session source selection changes
-  const handleSessionSourcesChange = React.useCallback(async (sessionId: string, sourceSlugs: string[]) => {
+  const handleSessionSourcesChange = React.useCallback(async (sessionId: string, sourceSlugs: string[], sourceScope?: 'auto' | 'only' | 'exclude') => {
     try {
-      await window.electronAPI.sessionCommand(sessionId, { type: 'setSources', sourceSlugs })
+      await window.electronAPI.sessionCommand(sessionId, { type: 'setSources', sourceSlugs, sourceScope })
       // Session will emit a 'sources_changed' event that updates the session state
     } catch (err) {
       console.error('[Chat] Failed to set session sources:', err)
@@ -2645,6 +2651,13 @@ function AppShellContent({
                             sourceType: 'local',
                           },
                         },
+                        {
+                          id: "nav:sources:memories",
+                          title: t("memory.globalTitle"),
+                          icon: Brain,
+                          variant: navState.navigator === 'sources' && navState.details?.type === 'memory' ? "default" : "ghost",
+                          onClick: () => navigate(routes.view.memories()),
+                        },
                       ],
                     },
                     {
@@ -3552,7 +3565,8 @@ function AppShellContent({
               }
             />
             {/* Content: SessionList, SourcesListPanel, or SettingsNavigator based on navigation state */}
-            {isSourcesNavigation(navState) && (
+            {/* Memory manager view replaces the sources list in the navigator */}
+            {isSourcesNavigation(navState) && navState.details?.type !== 'memory' && (
               /* Sources List - filtered by type if sourceFilter is active */
               <SourcesListPanel
                 sources={sources}
@@ -3560,7 +3574,7 @@ function AppShellContent({
                 workspaceRootPath={activeWorkspace?.rootPath}
                 onDeleteSource={handleDeleteSource}
                 onSourceClick={handleSourceSelect}
-                selectedSourceSlug={isSourcesNavigation(navState) && navState.details ? navState.details.sourceSlug : null}
+                selectedSourceSlug={isSourcesNavigation(navState) && navState.details?.type === 'source' ? navState.details.sourceSlug : null}
                 localMcpEnabled={localMcpEnabled}
                 usageStats={usageStats}
               />
@@ -3676,7 +3690,7 @@ function AppShellContent({
             )}
             </div>
           }
-          navigatorWidth={isAutoCompact ? sessionListWidth : (effectiveSidebarAndNavigatorHidden || isBoardView || isPagesView ? 0 : sessionListWidth)}
+          navigatorWidth={isAutoCompact ? sessionListWidth : (effectiveSidebarAndNavigatorHidden || isBoardView || isPagesView || isMemoryView ? 0 : sessionListWidth)}
           isSidebarAndNavigatorHidden={effectiveSidebarAndNavigatorHidden}
           isRightSidebarVisible={false}
           isCompact={isAutoCompact}
@@ -3716,8 +3730,8 @@ function AppShellContent({
         </div>
         )}
 
-        {/* Session List Resize Handle (absolute, hidden in focused mode, board view, and pages) */}
-        {!effectiveSidebarAndNavigatorHidden && !isBoardView && !isPagesView && (
+        {/* Session List Resize Handle (absolute, hidden in focused mode, board view, pages, and memory) */}
+        {!effectiveSidebarAndNavigatorHidden && !isBoardView && !isPagesView && !isMemoryView && (
         <div
           ref={sessionListHandleRef}
           onMouseDown={(e) => { e.preventDefault(); setIsResizing('session-list') }}

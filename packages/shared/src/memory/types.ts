@@ -45,14 +45,49 @@ export interface MemoryEntry {
 export interface MemoryStore {
   /** Schema version — increment when format changes */
   version: 1;
-  /** All memory entries */
+  /** All active global memory entries */
   entries: MemoryEntry[];
+  /** Recoverable deleted or superseded entries */
+  trash?: MemoryTrashEntry[];
+  /** Optional user-enabled workspace consolidation schedule. */
+  consolidationSchedule?: { enabled: boolean; cron: string; timezone?: string };
   /** Timestamp of last automatic extraction pass */
   lastExtractedAt?: string;
   /** Per-extraction pass statistics */
   extractionHistory: MemoryExtractionRecord[];
   /** Total tokens used for memory injection across all sessions */
   totalInjectionTokens: number;
+  /**
+   * Candidates blocked by cross-store semantic dedup during extraction
+   * (anti-bloat P0 observable). Persistent so the duplicate-extraction rate
+   * survives restarts — console debug output is not persisted.
+   */
+  dedupBlockedCount?: number;
+}
+
+/** A recoverable global-memory deletion record. */
+export interface MemoryTrashEntry {
+  entry: MemoryEntry;
+  deletedAt: string;
+  reason?: string;
+  replacedById?: string;
+}
+
+/** Session-local memory store; it is scoped by its containing session directory. */
+export interface SessionMemoryStore {
+  version: 1;
+  sessionId: string;
+  entries: MemoryEntry[];
+  /** Last successfully consolidated entry creation timestamp. */
+  lastConsolidatedAt?: string;
+  /** Entry IDs already considered during consolidation (handles equal timestamps). */
+  consolidatedEntryIds?: string[];
+  /** Last transcript message ID successfully included in extraction. */
+  extractedThroughMessageId?: string;
+  /** Number of transcript messages successfully included in the last extraction pass (legacy cursor fallback). */
+  extractedMessageCount?: number;
+  /** Extraction records prevent repeated automatic extraction passes. */
+  extractionHistory: MemoryExtractionRecord[];
 }
 
 /** Record of a single extraction pass */

@@ -16,6 +16,8 @@
 export type {
   MemoryEntry,
   MemoryStore,
+  MemoryTrashEntry,
+  SessionMemoryStore,
   MemoryExtractionRecord,
   MemoryExtractionInput,
   MemoryInjectionConfig,
@@ -39,6 +41,10 @@ export {
 export {
   getMemoryStorePath,
   loadMemoryStore,
+  softDeleteMemoryEntry,
+  restoreMemoryEntry,
+  clearMemoryTrash,
+  permanentlyDeleteTrashEntries,
   saveMemoryStore,
   addMemoryEntry,
   updateMemoryEntry,
@@ -49,6 +55,15 @@ export {
   applyMemoryAction,
   getMemoryStats,
 } from './store.ts';
+
+export {
+  getSessionMemoryStorePath,
+  loadSessionMemoryStore,
+  saveSessionMemoryStore,
+  addSessionMemory,
+  updateSessionMemory,
+  deleteSessionMemory,
+} from './session-store.ts';
 
 // Extractor
 export {
@@ -62,6 +77,7 @@ export {
 // Injector
 export {
   selectRelevantMemories,
+  selectRelevantMemoriesFromScopes,
   buildMemoryContext,
   extractContextKeywords,
   extractWeightedKeywords,
@@ -70,6 +86,15 @@ export {
   hasMemories,
   previewMemoryInjection,
 } from './injector.ts';
+
+export {
+  consolidateSessionMemories,
+  splitConsolidationBatches,
+  CONSOLIDATION_BATCH_MAX_CHARS,
+  type ConsolidationOptions,
+  type MemoryConsolidationSessionResult,
+} from './consolidation.ts';
+export { MemoryConsolidationScheduler, type MemorySchedule } from './scheduler.ts';
 
 // Tools
 export {

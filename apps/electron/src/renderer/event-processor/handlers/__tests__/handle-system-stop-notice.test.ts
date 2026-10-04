@@ -16,7 +16,7 @@ function makeState(messages: any[], currentStatus?: string): SessionState {
 }
 
 describe('handleSystemStopNotice', () => {
-  it('appends a persistent warning notice with the machine reason and a continue hint', () => {
+  it('appends a persistent unified-error notice with the machine reason and a continue hint', () => {
     const state = makeState([{ id: 'msg-1', role: 'user', content: 'go' }], 'Thinking…')
 
     const event: SystemStopNoticeEvent = {
@@ -31,8 +31,11 @@ describe('handleSystemStopNotice', () => {
     const notice = messages[messages.length - 1]
 
     expect(messages).toHaveLength(2)
-    expect(notice.role).toBe('info')
-    expect(notice.infoLevel).toBe('warning')
+    // Unified error card (same rendering as "Pi agent stream stalled"),
+    // not a ⚠️ info/warning bubble.
+    expect(notice.role).toBe('error')
+    expect('infoLevel' in notice ? (notice as any).infoLevel : undefined).toBeUndefined()
+    expect(notice.content).not.toContain('⚠️')
     expect(notice.content).toContain('busy_limit')
     expect(notice.content).toContain('500 tool calls')
     expect(notice.content).toContain('continue')

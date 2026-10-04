@@ -361,10 +361,15 @@ export function handleInfo(
 
 /**
  * Handle system_stop_notice — a guardrail in the agent host stopped the turn
- * on its own (busy-limit call cap, no-progress repeat streak). The user never
- * pressed Stop, so show a persistent, clearly-labelled notice with the real
- * reason plus a "send continue" hint instead of leaving the session looking
- * silently hung.
+ * on its own (busy-limit call cap, no-progress repeat streak, defense
+ * recovery exhausted). The user never pressed Stop, so show a persistent,
+ * clearly-labelled notice with the real reason plus a "send continue" hint
+ * instead of leaving the session looking silently hung.
+ *
+ * Rendered as a unified `error` message (same card as e.g. the "Pi agent
+ * stream stalled" error) rather than a ⚠️ info/warning bubble: it IS an
+ * error state, and mixing two visual languages for terminal errors makes
+ * the process block look broken (2026-10-04 fleet-mist feedback).
  */
 export function handleSystemStopNotice(
   state: SessionState,
@@ -376,10 +381,9 @@ export function handleSystemStopNotice(
     : ''
   const notice: Message = {
     id: generateMessageId(),
-    role: 'info',
-    content: `⚠️ This turn was stopped by the system guardrail${reason}: ${event.message}\nSend "continue" to resume where it left off.`,
+    role: 'error',
+    content: `This turn was stopped by the system guardrail${reason}: ${event.message}\nSend "continue" to resume where it left off.`,
     timestamp: event.timestamp ?? Date.now(),
-    infoLevel: 'warning',
   }
   return {
     state: {

@@ -116,6 +116,7 @@ import { createDsmlBridgeExtension, bridgeHandledSig, finalTextSig } from './def
 import { drainQueuedFollowUp } from './defense/resume-followup.ts';
 import { ToolLoopDetector, fingerprintToolCall, digestResult, isEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
+import { normalizeShellTimeout } from './shell-timeout.ts';
 import {
   TOOL_PAYLOAD_WARN_TOKENS,
   buildPromptSnippet,
@@ -1255,9 +1256,11 @@ async function ensureSession(): Promise<AgentSession> {
   //     then `.has(name)` returns false for every string lookup → zero tools active.
   const builtinDefs = [
     createReadToolDefinition(cwd),
-    // Global default timeout: exec() only applies one when the model passes
-    // args.timeout; wrap local ops so every command gets a 300s ceiling unless
-    // overridden per-call (unit: seconds — the SDK multiplies by 1000).
+    // Shell timeout policy: the Pi SDK's bash `timeout` unit is SECONDS, but
+    // models routinely pass millisecond values (120000 intending 120 s → a
+    // ~33-hour ceiling that never fires; 2026-10-04 incident). Wrap local
+    // ops so every command gets a normalized, clamped ceiling via
+    // normalizeShellTimeout (default 300 s, hard cap 300 s).
     //
     // Windows UTF-8 prefix: every bash invocation gets its own hidden console
     // at the system OEM code page (GBK 936 on zh-CN, Shift-JIS on ja-JP, …).
@@ -1284,7 +1287,7 @@ async function ensureSession(): Promise<AgentSession> {
         const local = createLocalBashOperations({ shellPath: initConfig.shellPath });
         return {
           exec: (command, dir, opts) =>
-            local.exec(command, dir, { ...opts, timeout: opts.timeout ?? 300 }),
+            local.exec(command, dir, { ...opts, timeout: normalizeShellTimeout(opts.timeout) }),
         };
       })(),
     }),

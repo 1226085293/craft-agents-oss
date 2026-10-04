@@ -23,6 +23,7 @@ import { DefenseEvaluator } from './evaluator.ts';
 
 export {
   DefenseEvaluator,
+  buildDefenseStopNotice,
   type DefenseEvaluationResult,
   type DefenseOptions,
 } from './evaluator.ts';

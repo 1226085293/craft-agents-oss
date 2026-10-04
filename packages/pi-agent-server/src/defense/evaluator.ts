@@ -59,6 +59,29 @@ export interface DefenseOptions extends SessionLifecycleOptions {
 const DEFAULT_VERIFY_MIN_STEPS = 50;
 const DEFAULT_VERIFY_MIN_DURATION_MS = 5 * 60 * 1000;
 
+/**
+ * User-facing stop notice for defense FAILED stops (2026-10-04
+ * polished-canyon): when the post-stop evaluation ends a turn WITHOUT
+ * recovery (state=failed, resume cap exhausted), the main process must be
+ * told WHY — otherwise the UI process block ends silently, with no reason
+ * shown (unlike a manual stop, which at least says "Response
+ * interrupted"). Returns null for recoverable / non-terminal results so
+ * healthy stops stay silent.
+ */
+export function buildDefenseStopNotice(
+  result: Pick<DefenseEvaluationResult, 'state' | 'shouldResume' | 'verifyRequired' | 'reason' | 'failureReason'>,
+): { reason: string; message: string } | null {
+  if (result.state !== State.FAILED || result.shouldResume || result.verifyRequired) return null;
+  const detail =
+    result.reason === 'leakedToolCall'
+      ? 'the model kept emitting tool calls as literal text on this channel and automatic retries are exhausted'
+      : 'the automatic recovery attempts for this turn are exhausted';
+  return {
+    reason: result.reason || 'defense_failed',
+    message: `Automatic recovery unavailable — ${detail}. The turn has stopped without a final response; send a message to continue.`,
+  };
+}
+
 export class DefenseEvaluator {
   private readonly enabled: boolean;
   private readonly lifecycle: SessionLifecycle;

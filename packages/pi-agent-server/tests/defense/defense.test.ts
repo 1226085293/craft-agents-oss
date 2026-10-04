@@ -24,7 +24,7 @@ import {
   DEFAULT_DEFENSE_ENABLED,
 } from '../../src/defense/index.ts';
 import { FsWatch } from '../../src/defense/fs-watch.ts';
-import { attributeFsWrites } from '../../src/defense/evaluator.ts';
+import { attributeFsWrites, buildDefenseStopNotice } from '../../src/defense/evaluator.ts';
 import { detectLeakedToolCall } from '../../src/defense/leaked-toolcall.ts';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -560,5 +560,35 @@ describe('leaked tool-call markup (2026-10-04 incident)', () => {
     });
     expect(r.shouldResume).toBe(false);
     expect(r.verifyRequired).toBeUndefined();
+  });
+});
+
+describe('defense stop notice (2026-10-04 polished-canyon silent stop)', () => {
+  it('builds a leakedToolCall notice for a failed evaluation', () => {
+    const n = buildDefenseStopNotice({
+      state: 'failed' as never,
+      shouldResume: false,
+      reason: 'leakedToolCall',
+    });
+    expect(n).not.toBeNull();
+    expect(n!.reason).toBe('leakedToolCall');
+    expect(n!.message).toContain('literal text');
+    expect(n!.message).toContain('send a message to continue');
+  });
+
+  it('builds a generic notice for other failed reasons', () => {
+    const n = buildDefenseStopNotice({ state: 'failed' as never, shouldResume: false, reason: 'repetitionLoop' });
+    expect(n!.reason).toBe('repetitionLoop');
+    expect(n!.message).toContain('recovery attempts');
+  });
+
+  it('falls back to defense_failed when no reason is recorded', () => {
+    const n = buildDefenseStopNotice({ state: 'failed' as never, shouldResume: false });
+    expect(n!.reason).toBe('defense_failed');
+  });
+
+  it('returns null for recoverable or non-terminal results', () => {
+    expect(buildDefenseStopNotice({ state: 'resuming' as never, shouldResume: true })).toBeNull();
+    expect(buildDefenseStopNotice({ state: 'failed' as never, shouldResume: false, verifyRequired: true })).toBeNull();
   });
 });

@@ -108,7 +108,7 @@ import { createSearchTool } from './tools/search/create-search-tool.ts';
 import { allowCraftMetadataProperties, normalizeUnderscorePrefixedArgs, stripCraftMetadata } from './craft-metadata-schema.ts';
 import { applySystemPromptOverride, applySystemPromptOverrideWithDefense } from './system-prompt-override.ts';
 import { adaptCredentialForPiSdk, type PiCredential } from './adapt-credential.ts';
-import { DefenseEvaluator, resolveDefenseEnabled } from './defense/index.ts';
+import { DefenseEvaluator, resolveDefenseEnabled, buildDefenseStopNotice } from './defense/index.ts';
 import { VERIFY_OUTPUT_CMDS } from './defense/complexity-score.ts';
 import { detectRepetitionLoop, extractAssistantText } from './defense/repetition-detector.ts';
 import { detectLeakedToolCall } from './defense/leaked-toolcall.ts';
@@ -550,7 +550,7 @@ const AUTH_HANDOFF_TOOLS = new Set([
 ]);
 
 function evaluateDefensePostStop(endMessages?: unknown[]):
-  | { shouldResume: boolean; resumeMessage?: string; verifyRequired?: boolean; verifyReason?: string; finalText?: string }
+  | { shouldResume: boolean; resumeMessage?: string; verifyRequired?: boolean; verifyReason?: string; finalText?: string; stopNotice?: { reason: string; message: string } }
   | null {
   if (!defenseEvaluator) return null;
 
@@ -739,7 +739,7 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
         finalText: lastAssistant ? extractAssistantText(lastAssistant.content) : undefined,
       };
     }
-    return { shouldResume: false };
+    return { shouldResume: false, stopNotice: buildDefenseStopNotice(result) ?? undefined };
   } catch (error) {
     debugLog(`[defense] Post-stop evaluation threw: ${error instanceof Error ? error.message : String(error)}`);
     return null;
@@ -2441,6 +2441,15 @@ function handleSessionEvent(event: AgentSessionEvent): void {
               + 'Continue the task from those results. Do NOT re-emit ｜DSML｜ literal blocks.';
           }
           queueDefenseResume(piSession, resumeMessage);
+        }
+        if (defenseResult.stopNotice) {
+          // Surface WHY the turn ended (2026-10-04 polished-canyon: the
+          // state=failed stop closed the process block with no reason, unlike
+          // a manual stop which at least shows "Response interrupted").
+          // Sent BEFORE the forwarded agent_end so the main process enqueues
+          // the info event while its event queue is still open.
+          send({ type: 'system_stop_notice', reason: defenseResult.stopNotice.reason, message: defenseResult.stopNotice.message });
+          debugLog(`[defense] Stop notice queued: ${defenseResult.stopNotice.reason}`);
         }
       }
     }

@@ -4,6 +4,7 @@ import {
   digestResult,
   fingerprintToolCall,
   isEmptyArgs,
+  shouldRejectEmptyArgs,
   emptyArgsMessage,
 } from './tool-loop-detector.ts';
 
@@ -21,9 +22,11 @@ import {
  *   - first 3 identical (fingerprint+result) pairs: no intervention
  *   - 4th identical call → DENY (instructive result, call not executed)
  *   - denied calls extend the streak → 6th → ABORT
- *   - 500 tool calls / 60 min wall-clock per turn → ABORT
- *     (defaults are env-tunable: CRAFT_PI_MAX_TURN_TOOL_CALLS /
- *      CRAFT_PI_MAX_TURN_DURATION_MS)
+ *   - 500 tool calls per turn → ABORT
+ *     (default is env-tunable: CRAFT_PI_MAX_TURN_TOOL_CALLS)
+ *   - NO wall-clock cap: a legitimate multi-hour turn is never aborted just
+ *     for taking time. Only the call-count cap and the identical-repeat
+ *     streak can abort.
  */
 
 const CALL = { type: 'bash', command: 'git status' };
@@ -148,25 +151,24 @@ describe('ToolLoopDetector (busy caps)', () => {
     expect(intervention?.message).toContain('exceeded 5 tool calls');
   });
 
-  it('aborts when the wall-clock cap is exceeded', () => {
-    const d = new ToolLoopDetector({ maxTurnDurationMs: 1 });
-    const call = { type: 'read', args: { path: 'f.ts' } };
-    const first = d.recordStart(call);
-    expect(first).toBeNull(); // turn just started
-    d.recordCompletion(fingerprintToolCall(call), digestResult('x', false));
-    const deadline = d['turnStartedAt'] + d['opts'].maxTurnDurationMs;
-    const now = (() => Date.now())();
-    if (now < deadline) {
-      d['turnStartedAt'] = deadline - 5; // fast-forward past the cap
-    } else {
-      d['turnStartedAt'] = deadline - 5;
+  it('has NO wall-clock cap — long turns with progress are never aborted for taking time', () => {
+    // Regression: the 60-min busy cap (removed 2026-10-04) killed legitimate
+    // multi-hour turns. The detector only limits call COUNT and identical
+    // repeat streaks — a turn running for hours with distinct, progressing
+    // calls must be allowed through regardless of elapsed time.
+    const d = new ToolLoopDetector();
+    expect((d['opts'] as Record<string, unknown>)['maxTurnDurationMs']).toBeUndefined();
+    expect((d as { turnStartedAt?: number })['turnStartedAt']).toBeUndefined();
+    for (let i = 0; i < 100; i++) {
+      const call = { type: 'read', args: { path: `f${i}.ts` } };
+      expect(d.recordStart(call)).toBeNull();
+      d.recordCompletion(fingerprintToolCall(call), digestResult(`content ${i}`, false));
     }
-    const intervention = d.recordStart(call);
-    expect(intervention?.level).toBe('abort');
-    expect(intervention?.message).toContain('wall-clock');
+    // 100 distinct calls, arbitrarily "later" in wall-clock terms: still no intervention
+    expect(d.recordStart({ type: 'read', args: { path: 'f100.ts' } })).toBeNull();
   });
 
-  it('resetTurn clears counts, wall clock, and streak', () => {
+  it('resetTurn clears counts and streak', () => {
     const d = new ToolLoopDetector();
     fillStreak(d, 3);
     expect(d.recordStart(CALL)?.level).toBe('deny');
@@ -180,6 +182,12 @@ describe('empty-args guard (P2)', () => {
     expect(isEmptyArgs(null)).toBe(true);
     expect(isEmptyArgs(undefined)).toBe(true);
     expect(isEmptyArgs({})).toBe(true);
+  });
+
+  it('rejects empty built-in calls but permits parameterless MCP meta tools', () => {
+    expect(shouldRejectEmptyArgs('Bash', {})).toBe(true);
+    expect(shouldRejectEmptyArgs('mcp__session__tools_compute', {})).toBe(false);
+    expect(shouldRejectEmptyArgs('mcp__github__list_repositories', {})).toBe(false);
   });
 
   it('counts craft-metadata-only calls as empty (built-in path still has _displayName/_intent attached)', () => {

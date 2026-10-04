@@ -607,6 +607,7 @@ export class MessagingGateway {
       'info',
       'complete',
       'interrupted',
+      'system_stop_notice',
       'permission_request',
       'plan_submitted',
       'user_message',

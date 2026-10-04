@@ -24,19 +24,20 @@
  *                   the turn is hard-ABORTED (stall-abort attribution,
  *                   defense still evaluates the stop)
  *
- * Hard caps (one turn, first turn included — unlike the resume-chain
+ * Hard cap (one turn, first turn included — unlike the resume-chain
  * budget, which exempts the first turn):
  *   - `maxTurnToolCalls`   total tool calls in one turn (default 500)
- *   - `maxTurnDurationMs`  wall-clock per turn (default 60 min)
  *
- * Defaults are tuned to sit ABOVE legitimate heavy turns (big refactors,
- * full-repo test runs, parallel call_llm batches — tens to low hundreds
- * of calls) while still bounding pathological busy loops (the incident
- * loop ran 250+ identical iterations in ~1h; any variant keeps the cap
- * reachable without starving real work).
-
- * Both caps are env-tunable: CRAFT_PI_MAX_TURN_TOOL_CALLS /
- * CRAFT_PI_MAX_TURN_DURATION_MS.
+ * There is intentionally NO wall-clock cap: long legitimate turns
+ * (multi-hour refactors / test runs) must not be killed just for taking
+ * time. No-progress busy loops are caught by the repeat-fingerprint streak
+ * logic instead, which only fires on repeated IDENTICAL calls with
+ * identical results. The cap default is tuned to sit above legitimate
+ * heavy turns (tens to low hundreds of calls) while still bounding
+ * pathological busy loops (the incident loop ran 250+ identical
+ * iterations in ~1h).
+ *
+ * Env-tunable: CRAFT_PI_MAX_TURN_TOOL_CALLS.
  */
 import type { ToolCallLike } from './complexity-score.ts';
 
@@ -57,15 +58,12 @@ export interface ToolLoopDetectorOptions {
   abortAfterExtraRepeats?: number;
   /** Hard cap of tool calls in ONE turn (first turn included). Default 500. */
   maxTurnToolCalls?: number;
-  /** Hard wall-clock cap for one turn. Default 60 min. */
-  maxTurnDurationMs?: number;
 }
 
 const DEFAULTS: Required<ToolLoopDetectorOptions> = {
   repeatThreshold: 4,
   abortAfterExtraRepeats: 2,
   maxTurnToolCalls: Number(process.env.CRAFT_PI_MAX_TURN_TOOL_CALLS ?? 500),
-  maxTurnDurationMs: Number(process.env.CRAFT_PI_MAX_TURN_DURATION_MS ?? 60 * 60_000),
 };
 
 /** Collapse whitespace so trivial formatting differences don't split fingerprints. */
@@ -122,7 +120,6 @@ export function digestResult(result: string | undefined, isError: boolean): stri
 
 export class ToolLoopDetector {
   private readonly opts: Required<ToolLoopDetectorOptions>;
-  private turnStartedAt: number;
   private turnToolCallCount = 0;
   private lastFingerprint = '';
   private lastResultDigest = '';
@@ -130,12 +127,10 @@ export class ToolLoopDetector {
 
   constructor(options: ToolLoopDetectorOptions = {}) {
     this.opts = { ...DEFAULTS, ...options };
-    this.turnStartedAt = Date.now();
   }
 
   /** Called at the start of every turn (handlePrompt). */
   resetTurn(): void {
-    this.turnStartedAt = Date.now();
     this.turnToolCallCount = 0;
     this.lastFingerprint = '';
     this.lastResultDigest = '';
@@ -145,7 +140,7 @@ export class ToolLoopDetector {
   /**
    * Call before executing a tool (PreToolUse choke point).
    * Returns the intervention that should PREVENT this call:
-   * - abort: busy cap (call count / wall-clock) or repeated denies
+   * - abort: busy call-count cap or repeated denies
    * - deny: this call would be the Nth consecutive identical repetition
    */
   recordStart(call: ToolCallLike & { args?: Record<string, unknown> }): ToolLoopIntervention | null {
@@ -154,13 +149,6 @@ export class ToolLoopDetector {
       return {
         level: 'abort',
         message: `Turn aborted: exceeded ${this.opts.maxTurnToolCalls} tool calls in one turn (busy-limit guardrail).`,
-        repeats: this.turnToolCallCount,
-      };
-    }
-    if (this.turnStartedAt > 0 && Date.now() - this.turnStartedAt > this.opts.maxTurnDurationMs) {
-      return {
-        level: 'abort',
-        message: `Turn aborted: exceeded ${Math.round(this.opts.maxTurnDurationMs / 60_000)} min wall-clock (busy-limit guardrail).`,
         repeats: this.turnToolCallCount,
       };
     }

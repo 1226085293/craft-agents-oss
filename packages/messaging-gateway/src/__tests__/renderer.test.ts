@@ -160,6 +160,11 @@ const ev = {
     text,
     isIntermediate: true,
   }),
+  demote: (turnId: string): SessionEvent => ({
+    type: 'text_demote',
+    sessionId: 's',
+    turnId,
+  }),
   final: (text: string): SessionEvent => ({
     type: 'text_complete',
     sessionId: 's',
@@ -264,6 +269,37 @@ describe('Renderer — progress mode (default)', () => {
       .map((c) => c.text ?? '')
     expect(all.some((t) => t.includes('I am thinking'))).toBe(false)
     expect(all.some((t) => t.includes('Final: 42'))).toBe(true)
+  })
+
+  it('sends a verified replay once instead of appending it to the demoted draft', async () => {
+    const adapter = makeAdapter()
+    const binding = makeBinding()
+    const candidate = 'The verified answer.'
+    await play(renderer, binding, adapter, [
+      { type: 'text_complete', sessionId: 's', text: candidate, turnId: 'turn-1', isIntermediate: false },
+      ev.demote('turn-1'),
+      { type: 'info', sessionId: 's', statusType: 'verification_passed', finalText: candidate },
+      { type: 'text_complete', sessionId: 's', text: candidate, turnId: 'turn-1', isIntermediate: false },
+      ev.complete(),
+    ])
+
+    const sends = adapter.calls.filter((call) => call.kind === 'sendText')
+    expect(sends.map((call) => call.text)).toEqual([candidate])
+  })
+
+  it('drops a demoted draft when verification fails and delivers only the continuation', async () => {
+    const adapter = makeAdapter()
+    const binding = makeBinding()
+    await play(renderer, binding, adapter, [
+      { type: 'text_complete', sessionId: 's', text: 'Incomplete candidate.', turnId: 'turn-1', isIntermediate: false },
+      ev.demote('turn-1'),
+      { type: 'info', sessionId: 's', statusType: 'verification_failed' },
+      ev.final('Repaired answer.'),
+      ev.complete(),
+    ])
+
+    const sends = adapter.calls.filter((call) => call.kind === 'sendText')
+    expect(sends.map((call) => call.text)).toEqual(['Repaired answer.'])
   })
 
   it('degrades to single send on complete for adapters without edit support', async () => {

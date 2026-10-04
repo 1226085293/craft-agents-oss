@@ -276,6 +276,21 @@ export interface InfoEvent {
 }
 
 /**
+ * System stop notice — a guardrail in the agent host stopped the turn on its
+ * own (busy-limit tool-call cap, no-progress repeat streak) instead of the
+ * user pressing Stop. Carries the machine reason + a human-readable message so
+ * the UI can explain WHY the session went quiet.
+ */
+export interface SystemStopNoticeEvent {
+  type: 'system_stop_notice'
+  sessionId: string
+  /** Machine key, e.g. 'busy_limit' | 'no_progress' */
+  reason: string
+  message: string
+  timestamp?: number
+}
+
+/**
  * Interrupted event
  */
 export interface InterruptedEvent {
@@ -553,6 +568,7 @@ export interface UsageUpdateEvent {
  */
 export type AgentEvent =
   | TextDiscardEvent
+  | SystemStopNoticeEvent
   | TextDemoteEvent
   | RetryEvent
   | TextDeltaEvent

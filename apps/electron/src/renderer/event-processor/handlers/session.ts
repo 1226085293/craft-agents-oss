@@ -27,6 +27,7 @@ import type {
   StatusEvent,
   RetryEvent,
   InfoEvent,
+  SystemStopNoticeEvent,
   InterruptedEvent,
   TitleGeneratedEvent,
   TitleRegeneratingEvent,
@@ -359,6 +360,40 @@ export function handleInfo(
 }
 
 /**
+ * Handle system_stop_notice — a guardrail in the agent host stopped the turn
+ * on its own (busy-limit call cap, no-progress repeat streak). The user never
+ * pressed Stop, so show a persistent, clearly-labelled notice with the real
+ * reason plus a "send continue" hint instead of leaving the session looking
+ * silently hung.
+ */
+export function handleSystemStopNotice(
+  state: SessionState,
+  event: SystemStopNoticeEvent
+): ProcessResult {
+  const { session, streaming } = state
+  const reason = event.reason && event.reason !== 'system_stop'
+    ? ` (${event.reason})`
+    : ''
+  const notice: Message = {
+    id: generateMessageId(),
+    role: 'info',
+    content: `⚠️ This turn was stopped by the system guardrail${reason}: ${event.message}\nSend "continue" to resume where it left off.`,
+    timestamp: event.timestamp ?? Date.now(),
+    infoLevel: 'warning',
+  }
+  return {
+    state: {
+      session: {
+        ...appendMessage(session, notice),
+        currentStatus: undefined, // clear any lingering "Thinking…" status
+      },
+      streaming,
+    },
+    effects: [],
+  }
+}
+
+/**
  * Handle interrupted - agent was interrupted.
  *
  * Two distinct shapes:
@@ -412,10 +447,8 @@ export function handleInterrupted(
       if (m.role === 'assistant' && m.isPending) {
         return { ...m, isPending: false, isStreaming: false, ...(i === lastAbortedIdx ? { aborted: true } : {}) }
       }
-      // Flag the in-flight assistant message as aborted: turn grouping refuses
-      // to promote an aborted turn's last intermediate text to a final reply.
-      // The backend marks the same message server-side so the decision also
-      // survives a reload; this keeps the live view consistent before then.
+      // Flag the in-flight assistant message as aborted for restart recovery and
+      // defense evaluation. The backend persists the same marker server-side.
       if (i === lastAbortedIdx) {
         return { ...m, aborted: true }
       }

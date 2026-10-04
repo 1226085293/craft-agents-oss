@@ -46,10 +46,12 @@ This detector closes it:
   tools). Each denied retry re-triggers the deny; 2 more identical retries
   abort the whole turn with **stall-abort attribution**, so post-stop
   defense still evaluates it.
-- **Busy hard caps per turn** (first turn INCLUDED — unlike the resume-chain
-  budget, which exempts it): 500 tool calls (`CRAFT_PI_MAX_TURN_TOOL_CALLS`)
-  or 60 min wall-clock (`CRAFT_PI_MAX_TURN_DURATION_MS`). Tuned above
-  legitimate heavy turns while still bounding pathological loops.
+- **Busy hard cap per turn** (first turn INCLUDED — unlike the resume-chain
+  budget, which exempts it): 500 tool calls (`CRAFT_PI_MAX_TURN_TOOL_CALLS`),
+  tuned above legitimate heavy turns while still bounding pathological loops.
+  There is deliberately **no wall-clock cap**: long legitimate turns
+  (multi-hour refactors / test runs) must not be killed just for taking
+  time — no-progress loops are caught by the identical-repeat streak above.
 - Streaks reset on any different call or different result digest — a
   genuine state change produces a different result and is not a repeat.
 - **Empty-parameter calls** (P2): a built-in tool invoked with no real

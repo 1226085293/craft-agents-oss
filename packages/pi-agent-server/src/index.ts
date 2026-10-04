@@ -304,6 +304,15 @@ interface OutboundSessionIdUpdate { type: 'session_id_update'; sessionId: string
 interface OutboundError { type: 'error'; message: string; code?: string; id?: string }
 /** Defense layer feedback: whether the queued followUp() resume materialized. */
 interface OutboundDefenseResumeStatus { type: 'defense_resume_status'; resumed: boolean }
+/**
+ * System-initiated stop notice: a guardrail (busy-limit call cap, no-progress
+ * repeat streak) killed the turn instead of the user. The host should surface
+ * the reason to the UI and to any bound messaging channels — a silent stop
+ * with no assistant reply otherwise reads as a hung / broken session.
+ * - reason: stable machine key (e.g. 'busy_limit', 'no_progress')
+ * - message: user-facing explanation of WHY the turn was cut short
+ */
+interface OutboundSystemStopNotice { type: 'system_stop_notice'; reason: string; message: string }
 
 /**
  * Defense layer feedback (2026-10-02 user-approved redesign): the result of
@@ -337,6 +346,7 @@ type OutboundMessage =
   | OutboundSwitchConnectionResult
   | OutboundSessionIdUpdate
   | OutboundDefenseResumeStatus
+  | OutboundSystemStopNotice
   | OutboundVerificationResult
   | OutboundError;
 
@@ -1475,7 +1485,9 @@ function makeErrorResult(message: string): AgentToolResult<any> {
  *   The instructive error result reaches the model's context (same surface
  *   PreToolUse permission blocks use), which is what weak models need to
  *   stop repeating.
- * - ABORT: repeated denies or a busy hard cap (500 calls / 60 min). The
+ * - ABORT: repeated denies or the busy call-count cap (500 calls, no
+ *   wall-clock cap — long legitimate turns must not be killed for taking
+ *   time). The
  *   whole turn is stopped with stall-abort attribution, so the post-stop
  *   defense still evaluates the stop rather than treating it as a user
  *   stop. The returned error result ends the current tool step; the
@@ -1502,6 +1514,12 @@ function applyToolLoopGuard(
       piSession.abort().catch((error) => debugLog(`Busy-abort failed: ${error instanceof Error ? error.message : String(error)}`));
     }
     debugLog(`[busy-loop] ${intervention.message}`);
+    // Tell the host why the turn is dying so the stop is never silent:
+    // the renderer shows the reason and bound channels get a notification.
+    const reason = intervention.message.includes('tool calls')
+      ? 'busy_limit'
+      : 'no_progress';
+    send({ type: 'system_stop_notice', reason, message: intervention.message });
     return makeErrorResult(intervention.message);
   }
   debugLog(`[busy-loop] deny x${intervention.repeats}: ${fingerprintToolCall(call).slice(0, 200)}`);

@@ -52,6 +52,7 @@ import {
   handleAuthRequest,
   handleAuthCompleted,
   handleUsageUpdate,
+  handleSystemStopNotice,
 } from './handlers/session'
 
 /**
@@ -137,6 +138,9 @@ export function processEvent(
 
     case 'info':
       return handleInfo(state, event)
+
+    case 'system_stop_notice':
+      return handleSystemStopNotice(state, event)
 
     case 'interrupted':
       return handleInterrupted(state, event)

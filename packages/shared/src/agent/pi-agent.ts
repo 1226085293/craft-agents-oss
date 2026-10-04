@@ -32,7 +32,6 @@ import type {
 } from './backend/types.ts';
 import { AbortReason } from './backend/types.ts';
 import { getBackendRuntime } from './backend/internal/driver-types.ts';
-import { SourceActivationDrainController } from './source-activation-drain.ts';
 
 import type { PermissionMode } from './mode-manager.ts';
 import type { ThinkingLevel } from './thinking-levels.ts';
@@ -1391,6 +1390,23 @@ export class PiAgent extends BaseAgent {
         }
         break;
 
+      case 'system_stop_notice': {
+        // A guardrail (busy-limit cap / no-progress streak) killed the turn,
+        // not the user. Enqueue it as an info event so SessionManager can
+        // surface the reason (UI banner + messaging-channel notification)
+        // instead of a silent stop reading as a hung session.
+        const reason = typeof msg.reason === 'string' ? msg.reason : 'system_stop';
+        const message = typeof msg.message === 'string' ? msg.message : 'This turn was stopped by the system.';
+        this.debug(`System stop notice (${reason}): ${message}`);
+        this.eventQueue.enqueue({
+          type: 'info',
+          message,
+          statusType: 'system_stop',
+          stopReason: reason,
+        });
+        break;
+      }
+
       case 'defense_resume_status':
         // Defense layer feedback from the subprocess: whether the queued
         // followUp() resume actually materialized. The adapter holds the
@@ -1716,7 +1732,6 @@ export class PiAgent extends BaseAgent {
       workingDirectory: this.config.session?.workingDirectory,
       activeSourceSlugs: Array.from(this.sourceManager.getActiveSlugs()),
       allSourceSlugs: this.sourceManager.getAllSources().map(s => s.config.slug),
-      hasSourceActivation: !!this.onSourceActivationRequest,
       permissionManager: this.permissionManager,
       prerequisiteManager: this.prerequisiteManager,
       rtkContext,
@@ -1744,65 +1759,6 @@ export class PiAgent extends BaseAgent {
           reason: checkResult.reason,
         })}`);
         this.send({ type: 'pre_tool_use_response', requestId, action: 'block', reason: checkResult.reason });
-        return;
-      }
-
-      case 'source_activation_needed': {
-        const { sourceSlug, sourceExists } = checkResult;
-        this.debug(`PreToolUse(sessionId=${sessionId}): Source "${sourceSlug}" not active, attempting activation...`);
-
-        if (this.onSourceActivationRequest) {
-          try {
-            const activated = await this.onSourceActivationRequest(sourceSlug);
-            if (!activated) {
-              const reason = sourceExists
-                ? `Source "${sourceSlug}" is not active. Activate it by @mentioning it in your message or via the source icon at the bottom of the input field.`
-                : `Source "${sourceSlug}" is not available yet. It needs to be created and configured first.`;
-              this.send({ type: 'pre_tool_use_response', requestId, action: 'block', reason });
-              return;
-            }
-            this.debug(`PreToolUse(sessionId=${sessionId}): Source "${sourceSlug}" activated successfully`);
-            this.eventQueue.enqueue({
-              type: 'source_activated' as const,
-              sourceSlug,
-              originalMessage: this.getCurrentTurnUserMessage() ?? '',
-            });
-          } catch (err) {
-            const reason = sourceExists
-              ? `Source "${sourceSlug}" could not be activated: ${err}`
-              : `Source "${sourceSlug}" is not available yet. It needs to be created and configured first.`;
-            this.send({ type: 'pre_tool_use_response', requestId, action: 'block', reason });
-            return;
-          }
-        }
-
-        // Re-run pipeline after activation
-        const postResult = runPreToolUseChecks({
-          toolName,
-          input,
-          sessionId,
-          permissionMode: this.permissionManager.getPermissionMode(),
-          workspaceRootPath: rootPath,
-          workspaceId: workspaceSlug,
-          plansFolderPath,
-          dataFolderPath,
-          workingDirectory: this.config.session?.workingDirectory,
-          activeSourceSlugs: Array.from(this.sourceManager.getActiveSlugs()),
-          allSourceSlugs: this.sourceManager.getAllSources().map(s => s.config.slug),
-          hasSourceActivation: !!this.onSourceActivationRequest,
-          permissionManager: this.permissionManager,
-          prerequisiteManager: this.prerequisiteManager,
-          rtkContext,
-          onDebug: (msg) => this.debug(`PreToolUse(sessionId=${sessionId}): ${msg}`),
-        });
-
-        if (postResult.type === 'modify') {
-          this.send({ type: 'pre_tool_use_response', requestId, action: 'modify', input: postResult.input });
-        } else if (postResult.type === 'block') {
-          this.send({ type: 'pre_tool_use_response', requestId, action: 'block', reason: postResult.reason });
-        } else {
-          this.send({ type: 'pre_tool_use_response', requestId, action: 'allow' });
-        }
         return;
       }
 
@@ -2748,44 +2704,9 @@ export class PiAgent extends BaseAgent {
       });
       this.refreshTurnIdleWatchdog();
 
-      // Yield events as they arrive. The source-activation drain controller
-      // captures a pending restart on the first triggering tool_result and
-      // drains sibling tool_results from the same parallel-tool batch before
-      // firing `source_activated` + `forceAbort` — Pi's subprocess only picks
-      // up new proxy tools on the next handlePrompt, so the restart is needed
-      // here too. Without the drain, sibling tool_results from parallel
-      // source_test calls are lost (#790).
-      const sourceActivationDrain = new SourceActivationDrainController('fire-on-non-tool-result');
-      for await (const event of this.eventQueue.drain()) {
-        // Pre-yield check: when we're past capture and the incoming event is
-        // not a tool_result, fire BEFORE yielding it (the event belongs to
-        // the about-to-be-aborted next turn — letting it through would leak
-        // a fragment of the cancelled response into the session journal).
-        const preFire = sourceActivationDrain.shouldFireBeforeEvent(event);
-        if (preFire) {
-          this.debug(`source_test activated "${preFire.sourceSlug}", drained sibling tool_results, restarting turn`);
-          yield preFire;
-          this.forceAbort(AbortReason.SourceActivated);
-          return;
-        }
-
-        if (sourceActivationDrain.observe(event, () => this.consumePendingSourceActivationRestart())) {
-          yield event;
-          continue;
-        }
-
-        yield event;
-      }
-
-      // Stream-end fallback: queue drained naturally with a captured restart
-      // still pending. Fire and return (no further events expected).
-      const sourceActivationFireAtEnd = sourceActivationDrain.shouldFireAtBoundary();
-      if (sourceActivationFireAtEnd) {
-        this.debug(`source_test activated "${sourceActivationFireAtEnd.sourceSlug}", stream ended with pending restart, restarting turn`);
-        yield sourceActivationFireAtEnd;
-        this.forceAbort(AbortReason.SourceActivated);
-        return;
-      }
+      // Inactive-source calls are blocked before reaching this event stream;
+      // selected-source changes are deferred by SessionManager until the turn ends.
+      yield* this.eventQueue.drain();
     } catch (error) {
       if (error instanceof Error && error.message.includes('abort')) {
         if (this.abortReason === AbortReason.PlanSubmitted) {

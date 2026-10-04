@@ -2,11 +2,9 @@
  * `cancelProcessing` records the abort on the in-flight assistant message.
  *
  * A silent mid-stream redirect writes no "Response interrupted" info message,
- * so the `aborted` flag on the message is the only durable signal that the turn
- * was abandoned. Without it the turn grouper's "promote the last intermediate
- * text to a response" rescue fires and hands the user unfinished commentary as
- * the answer. The flag has to reach disk, because turn grouping is recomputed
- * from the message list on every render — including after a reload.
+ * so the `aborted` flag on the message is the durable signal that the turn was
+ * abandoned. It must reach disk for defense evaluation and messaging gateway
+ * delivery suppression after reload.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'

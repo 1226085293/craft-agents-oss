@@ -289,11 +289,9 @@ export interface Message {
   isGuidance?: boolean;
   // Intermediate text (commentary between tool calls, not final response)
   isIntermediate?: boolean;
-  // Aborted: this assistant message belonged to a turn the user cut short
-  // (Stop, or a mid-stream redirect). The text stays visible as a process
-  // step, but turn grouping must never promote it to the turn's final reply —
-  // an interrupted turn has no result. Persisted so the grouping decision
-  // survives an app reload.
+  // Aborted: this assistant message belonged to a turn cut short by Stop,
+  // redirect, or internal cancellation. Persisted for restart recovery,
+  // defense evaluation, and messaging delivery suppression.
   aborted?: boolean;
   // Hidden: a system-generated message that must reach the model (it drives a
   // turn) but must NOT render as a bubble in the transcript — e.g. the WS2
@@ -573,7 +571,7 @@ export type AgentEvent =
   | { type: 'retry'; phase: 'backoff'; message: string }
   | { type: 'retry'; phase: 'active' | 'end' }
   | { type: 'status'; message: string; statusType?: string }
-  | { type: 'info'; message: string; statusType?: string; finalText?: string }
+  | { type: 'info'; message: string; statusType?: string; finalText?: string; /** Present when statusType === 'system_stop': machine key (e.g. 'busy_limit', 'no_progress') explaining why a guardrail killed the turn. */ stopReason?: string }
   | { type: 'text_delta'; text: string; turnId?: string; parentToolUseId?: string }
   | { type: 'text_complete'; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; sdkMessageId?: string }
   | { type: 'pi_turn_anchor'; sdkMessageId: string; sdkTurnAnchor: string }
@@ -604,7 +602,6 @@ export type AgentEvent =
   | { type: 'task_completed'; taskId: string; status: 'completed' | 'failed' | 'stopped'; outputFile?: string; summary?: string; turnId?: string }
   | { type: 'workflow_agent_completed'; workflowId: string; agentId: string; turnId?: string }
   | { type: 'shell_killed'; shellId: string; turnId?: string }
-  | { type: 'source_activated'; sourceSlug: string; originalMessage: string }
   | { type: 'usage_update'; usage: Pick<AgentEventUsage, 'inputTokens' | 'contextWindow'> }
   | { type: 'steer_undelivered'; message: string };
 

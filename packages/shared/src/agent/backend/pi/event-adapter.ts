@@ -590,6 +590,25 @@ export class PiEventAdapter extends BaseEventAdapter {
       return;
     }
 
+    // Craft-injected compaction heartbeat from pi-agent-server (not part of
+    // the Pi SDK). While the SDK compacts, the main stream is silent, so the
+    // server emits periodic ticks; surface them as a live "Compacting
+    // context..." status with elapsed time (keep the "Compacting" keyword so
+    // the session handler keeps statusType: 'compacting'). The matching tick
+    // also keeps PiAgent's turn-idle watchdog from false-positiving a slow
+    // compaction as a stalled stream. No state transitions here.
+    if ((event as { type?: string }).type === 'compaction_progress') {
+      const elapsedMs = (event as unknown as { elapsedMs?: number }).elapsedMs;
+      const totalSeconds = typeof elapsedMs === 'number' ? Math.max(0, Math.round(elapsedMs / 1000)) : 0;
+      const minutes = Math.floor(totalSeconds / 60);
+      const seconds = totalSeconds % 60;
+      yield {
+        type: 'status',
+        message: `Compacting context... (${minutes}m ${seconds}s)`,
+      };
+      return;
+    }
+
     switch (event.type) {
       // ============================================================
       // Agent lifecycle events

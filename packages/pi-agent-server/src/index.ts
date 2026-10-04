@@ -101,6 +101,7 @@ import { loadLatestUserRequest, loadProgressSnapshot } from '../../shared/src/ag
 import { buildCallLlmRequest } from '../../shared/src/agent/llm-tool.ts';
 import type { LLMQueryRequest, LLMQueryResult } from '../../shared/src/agent/llm-tool.ts';
 import { PI_TOOL_NAME_MAP, THINKING_TO_PI } from '../../shared/src/agent/backend/pi/constants.ts';
+import { createCompactionProgressHeartbeat } from './compaction-progress.ts';
 import { getDefaultSummarizationModel } from '../../shared/src/config/models.ts';
 import { createWebFetchTool } from './tools/web-fetch.ts';
 import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
@@ -2199,9 +2200,42 @@ let userAbortRequested = false;
 // as a terminal prompt error).
 let defenseResumeQueued = false;
 
+// Bounded compaction heartbeat: while the Pi SDK runs a threshold/overflow
+// compaction the main stream is silent, so without these ticks the
+// PiAgent's 120s turn-idle watchdog false-positives "stream stalled" for
+// any compaction longer than the turn ceiling (2026-10-04 incident). Each
+// tick is a main-process turn-progress event (live "Compacting context..."
+// status) and the heartbeat self-stops at the shared capped deadline so a
+// dead compaction still trips the capped watchdog. See compaction-progress.ts.
+let compactionProgress: ReturnType<typeof createCompactionProgressHeartbeat> | null = null;
+
+function startCompactionProgress(): void {
+  stopCompactionProgress();
+  compactionProgress = createCompactionProgressHeartbeat({
+    emit: (payload) => {
+      debugLog(`[compaction-progress] heartbeat ${Math.round(payload.elapsedMs / 1000)}s`);
+      send({ type: 'event', event: payload as unknown as OutboundAgentEvent });
+    },
+  });
+  compactionProgress.start();
+}
+
+function stopCompactionProgress(): void {
+  compactionProgress?.stop();
+  compactionProgress = null;
+}
+
 
 function handleSessionEvent(event: AgentSessionEvent): void {
   let forwardedEvent: OutboundAgentEvent = event;
+
+  // Compaction heartbeat lifecycle (emits its own outbound events; the SDK
+  // compaction events themselves still flow through the normal forward below).
+  if (event.type === 'compaction_start') {
+    startCompactionProgress();
+  } else if (event.type === 'compaction_end') {
+    stopCompactionProgress();
+  }
 
   // Activity tracking for stall detection (see prompt timeout below):
   // ANY SDK event during a turn — stream deltas, tool start/end, message_end —
@@ -2509,6 +2543,7 @@ async function handleInit(msg: Extract<InboundMessage, { type: 'init' }>): Promi
     }
     piSession.dispose();
     piSession = null;
+    stopCompactionProgress(); // Re-init: no in-flight compaction can survive the session swap
     moduleCredentialStore = null; // Reset so createAuthenticatedRuntime() creates a fresh store
     debugLog('Cleaned up existing session for re-init');
   }
@@ -3182,6 +3217,7 @@ function handleShutdown(): void {
     unsubscribeEvents();
     unsubscribeEvents = null;
   }
+  stopCompactionProgress();
 
   // Dispose session
   if (piSession) {

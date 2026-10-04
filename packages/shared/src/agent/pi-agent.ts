@@ -254,10 +254,34 @@ export class PiAgent extends BaseAgent {
    * the CRAFT_PI_TURN_IDLE_TIMEOUT_MS environment variable.
    */
   private static readonly DEFAULT_TURN_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
+  /**
+   * Capped idle ceiling for in-flight context compaction. While the Pi SDK
+   * runs a threshold/overflow compaction inside the subprocess, the main
+   * stream emits no events at all — a compaction that legitimately takes
+   * longer than the 2-min turn ceiling (a 2026-10-04 deepseek session
+   * compacted for 3m40s and false-positived the 120s turn watchdog, surfacing
+   * a misleading "stream stalled … Please retry the message" during
+   * "Compacting context...") would otherwise trip it. The deadline is pinned
+   * to compaction_start + this cap and is NOT extended by heartbeat
+   * `compaction_progress` events, so a genuinely dead compaction still trips
+   * the capped deadline instead of hanging forever. Matches the 300 s
+   * `waitForCompaction` / `requestCompact` precedent. Override with
+   * CRAFT_PI_COMPACTION_IDLE_TIMEOUT_MS.
+   */
+  private static readonly DEFAULT_COMPACTION_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
   private activeTurnToolIds = new Set<string>();
   private turnIdleTimer: ReturnType<typeof setTimeout> | null = null;
   private lastTurnEventAt = 0;
+  /**
+   * Compaction watch state: `compaction_start` (any, incl. threshold/overflow)
+   * pins `compactionDeadlineAt`; while set, the turn-idle watchdog tracks that
+   * deadline with the compaction cap instead of the 120s turn ceiling. Dropped
+   * on `compaction_end` (and defensively on `agent_end`) — the normal 120s
+   * watchdog resumes on the next event.
+   */
+  private compactionInFlight = false;
+  private compactionDeadlineAt: number | null = null;
 
   /**
    * Look up the bound project (if any) and return a snapshot for system-prompt injection.
@@ -304,6 +328,15 @@ export class PiAgent extends BaseAgent {
     return Number.isFinite(parsed) ? Math.max(0, parsed) : PiAgent.DEFAULT_TURN_IDLE_TIMEOUT_MS;
   }
 
+  private getCompactionIdleTimeoutMs(): number {
+    const raw = process.env.CRAFT_PI_COMPACTION_IDLE_TIMEOUT_MS;
+    if (!raw) return PiAgent.DEFAULT_COMPACTION_IDLE_TIMEOUT_MS;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0
+      ? parsed
+      : PiAgent.DEFAULT_COMPACTION_IDLE_TIMEOUT_MS;
+  }
+
   private clearTurnIdleWatchdog(): void {
     if (this.turnIdleTimer) {
       clearTimeout(this.turnIdleTimer);
@@ -318,6 +351,24 @@ export class PiAgent extends BaseAgent {
       return;
     }
 
+    if (this.compactionInFlight && this.compactionDeadlineAt != null) {
+      // Compaction-aware branch: the deadline is pinned to compaction_start +
+      // the compaction cap, so each refresh (incl. compaction_progress
+      // heartbeats) re-arms against the SAME deadline and never extends it.
+      const delayMs = this.compactionDeadlineAt - Date.now();
+      if (delayMs <= 0) {
+        // Deadline already passed (stale flag after a missed compaction_end)
+        // — fire now instead of arming a zero-delay timer.
+        this.handleCompactionIdleTimeout();
+        return;
+      }
+      this.turnIdleTimer = setTimeout(() => {
+        this.handleCompactionIdleTimeout();
+      }, delayMs);
+      (this.turnIdleTimer as { unref?: () => void }).unref?.();
+      return;
+    }
+
     const timeoutMs = this.getTurnIdleTimeoutMs();
     if (timeoutMs <= 0) return;
 
@@ -325,6 +376,34 @@ export class PiAgent extends BaseAgent {
       this.handleTurnIdleTimeout(timeoutMs);
     }, timeoutMs);
     (this.turnIdleTimer as { unref?: () => void }).unref?.();
+  }
+
+  /**
+   * Fired when a compaction neither finished nor received its end event
+   * within the capped deadline. Unlike the plain turn stall, the wording
+   * names the compaction so the user is not sent to retry a message that
+   * was mid-compaction all along.
+   */
+  private handleCompactionIdleTimeout(): void {
+    this.turnIdleTimer = null;
+
+    if (!this._isProcessing || this.eventQueue.isComplete || !this.compactionInFlight) return;
+
+    const capMs = this.getCompactionIdleTimeoutMs();
+    const deadline = this.compactionDeadlineAt ?? Date.now();
+    const stalledSeconds = Math.max(1, Math.round((Date.now() - deadline) / 1000));
+    const capSeconds = Math.max(1, Math.round(capMs / 1000));
+    const message = `Context compaction did not finish: no completion for ${stalledSeconds}s (compaction timeout ${capSeconds}s). Please retry the message.`;
+
+    this.debug(message);
+    this.eventQueue.enqueue({ type: 'error', message });
+    this.eventQueue.enqueue({ type: 'complete' });
+    this.eventQueue.complete();
+  }
+
+  private clearCompactionWatch(): void {
+    this.compactionInFlight = false;
+    this.compactionDeadlineAt = null;
   }
 
   private handleTurnIdleTimeout(timeoutMs: number): void {
@@ -356,8 +435,18 @@ export class PiAgent extends BaseAgent {
       this.activeTurnToolIds.delete(toolCallId);
     } else if (eventType === 'agent_end') {
       this.activeTurnToolIds.clear();
+      // Defensive: drop stale compaction state (a missed compaction_end must
+      // not let the cap branch govern the next turn's plain 120s watchdog).
+      this.clearCompactionWatch();
       this.clearTurnIdleWatchdog();
       return;
+    } else if (eventType === 'compaction_start') {
+      // Pin the capped deadline NOW; later heartbeats refresh the timer but
+      // never the deadline (see refreshTurnIdleWatchdog).
+      this.compactionInFlight = true;
+      this.compactionDeadlineAt = Date.now() + this.getCompactionIdleTimeoutMs();
+    } else if (eventType === 'compaction_end') {
+      this.clearCompactionWatch();
     }
 
     this.refreshTurnIdleWatchdog();

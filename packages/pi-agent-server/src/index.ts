@@ -113,7 +113,8 @@ import { DefenseEvaluator, resolveDefenseEnabled, buildDefenseStopNotice } from 
 import { VERIFY_OUTPUT_CMDS } from './defense/complexity-score.ts';
 import { detectRepetitionLoop, extractAssistantText } from './defense/repetition-detector.ts';
 import { detectLeakedToolCall } from './defense/leaked-toolcall.ts';
-import { createDsmlBridgeExtension, bridgeHandledSig, finalTextSig } from './defense/dsml-bridge.ts';
+import { createDsmlSanitizerExtension } from './defense/dsml-sanitizer.ts';
+import { installDsmlReceiver } from './dsml-receiver.ts';
 import { drainQueuedFollowUp } from './defense/resume-followup.ts';
 import { ToolLoopDetector, fingerprintToolCall, digestResult, isEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
@@ -361,6 +362,7 @@ type OutboundMessage =
 // ============================================================
 
 let piSession: AgentSession | null = null;
+let restoreDsmlReceiver: (() => void) | null = null;
 let piModelRegistry: PiModelRegistry | null = null;
 let moduleCredentialStore: InMemoryCredentialStore | null = null;
 // Cached runtime build shared by the main session and ephemeral queryLlm
@@ -1215,6 +1217,16 @@ async function ensureSession(): Promise<AgentSession> {
   if (piSession) return piSession;
   if (!initConfig) throw new Error('Cannot create session: init not received');
 
+  if (!restoreDsmlReceiver) {
+    restoreDsmlReceiver = installDsmlReceiver({
+      isLlmRequest: (url) => {
+        const path = url.toLowerCase().split(/[?#]/, 1)[0] ?? '';
+        return /\/(?:chat\/)?completions\/?$/.test(path);
+      },
+      debugLog,
+    });
+  }
+
   const cwd = resolvedCwd();
 
   const { modelRuntime, modelRegistry } = await createAuthenticatedRuntime();
@@ -1378,21 +1390,14 @@ async function ensureSession(): Promise<AgentSession> {
       sessionOptions.sessionManager = PiSessionManager.continueRecent(cwd, sessionDir);
     }
 
-    // DSML bridge (2026-10-04): channels whose OpenAI-compatible layer leaks
-    // provider-native ｜DSML｜ tool-call markup as literal text (observed on
-    // deepseek-v4-flash via discovery-api.intern-ai.org.cn). The bridge
-    // executes the intended calls through the SAME wrapped tool definitions
-    // (full guard stack: loop guard, approval, metadata strip) and queues a
-    // result report as a followUp so the continuation turn gets evidence.
+    // Sanitize residual DSML text after the network receiver converts leaked
+    // content into native toolCall blocks. This extension never executes tools.
     const resourceLoader = new DefaultResourceLoader({
       cwd,
       agentDir: sessionOptions.agentDir!,
       settingsManager: sessionOptions.settingsManager,
       extensionFactories: [
-        createDsmlBridgeExtension({
-          getToolDefinitions: () => wrappedAll,
-          debugLog,
-        }),
+        createDsmlSanitizerExtension({ debugLog }),
       ],
     });
     await resourceLoader.reload();
@@ -2466,18 +2471,7 @@ function handleSessionEvent(event: AgentSessionEvent): void {
           defenseResumePending: defenseResult.shouldResume,
         } as unknown as OutboundAgentEvent;
         if (defenseResult.shouldResume && defenseResult.resumeMessage) {
-          let resumeMessage = defenseResult.resumeMessage;
-          // DSML bridge dedup: when the bridge already executed this stop's
-          // leaked calls, its result report is queued first — the resume note
-          // must point at those results instead of demanding another re-issue
-          // of calls that the broken channel would re-leak (resume-cap burn).
-          const finalText = defenseResult.finalText ?? '';
-          if (detectLeakedToolCall(finalText).leaked && bridgeHandledSig() === finalTextSig(finalText)) {
-            resumeMessage =
-              '[DSML Bridge] The tool calls you attempted above have ALREADY been executed by Craft — their results are in the preceding message. '
-              + 'Continue the task from those results. Do NOT re-emit ｜DSML｜ literal blocks.';
-          }
-          queueDefenseResume(piSession, resumeMessage);
+          queueDefenseResume(piSession, defenseResult.resumeMessage);
         }
         if (defenseResult.stopNotice) {
           // Surface WHY the turn ended (2026-10-04 polished-canyon: the
@@ -2532,6 +2526,9 @@ function handleSessionEvent(event: AgentSessionEvent): void {
 // ============================================================
 
 async function handleInit(msg: Extract<InboundMessage, { type: 'init' }>): Promise<void> {
+  restoreDsmlReceiver?.();
+  restoreDsmlReceiver = null;
+
   // A re-init invalidates every utility query created under the old credentials.
   ephemeralQueries.cancelAll(new EphemeralQueryCancelledError('Pi server reinitialized'));
 
@@ -3208,6 +3205,8 @@ async function handleSetThinkingLevel(msg: Extract<InboundMessage, { type: 'set_
 
 function handleShutdown(): void {
   debugLog('Shutdown requested');
+  restoreDsmlReceiver?.();
+  restoreDsmlReceiver = null;
 
   // Abort utility sessions independently from the main chat session.
   ephemeralQueries.cancelAll(new EphemeralQueryCancelledError('Pi server shutting down'));

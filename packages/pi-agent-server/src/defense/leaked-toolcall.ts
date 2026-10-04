@@ -65,9 +65,10 @@ export interface ParsedLeakedCall {
  * Full parser for leaked provider tool-call markup (the DSML format).
  *
  * `detectLeakedToolCall` is the cheap detector; this extracts each
- * `<｜DSML｜invoke name="X">` block and its `arguments` parameter so the DSML
- * bridge (dsml-bridge.ts) can EXECUTE the intended calls when the channel's
- * OpenAI-compat layer failed to emit structured `tool_calls`.
+ * `<｜DSML｜invoke name="X">` block and its `arguments` parameter so the
+ * network receiver can synthesize native `tool_calls` when the channel's
+ * OpenAI-compatible layer leaked the markup into assistant text; the
+ * sanitizer removes only residual markup beside those native calls.
  */
 export function parseLeakedToolCalls(
   text: string | null | undefined,

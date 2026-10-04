@@ -354,25 +354,6 @@ describe('PiEventAdapter', () => {
       });
     });
 
-    it('should set isIntermediate: true when the message carries craftAskedForLeakedToolCall', () => {
-      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
-      const events = collect(adapter.adaptEvent({
-        type: 'message_end',
-        message: {
-          role: 'assistant',
-          stopReason: 'stop',
-          craftAskedForLeakedToolCall: true,
-          content: '已读取 skill。现在查看核心源码 diff。 (工具调用 bash：Craft 已代执行，结果见后续消息)',
-        },
-      } as any));
-
-      expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({
-        type: 'text_complete',
-        isIntermediate: true,
-      });
-    });
-
     it('should allow multiple intermediate messages in a turn', () => {
       collect(adapter.adaptEvent({ type: 'turn_start' } as any));
 

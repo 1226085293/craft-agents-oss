@@ -176,14 +176,6 @@ export class PiEventAdapter extends BaseEventAdapter {
    *  the FINAL `agent_end` (no flag) arrives — the defense analog of
    *  overflowState. See the subprocess defense layer in pi-agent-server. */
   private defenseResumeHeld: boolean = false;
-  /**
-   * True when at least one tool EXECUTED while a defense-resume hold was open
-   * (2026-10-01 two-reply incident). Discriminator for the resumed turn's
-   * final 'stop' reply: no tool work = pure "corresponds → re-deliver" (fold
-   * into the process block); tool work = "doesn't correspond → continue" (the
-   * continuation's answer must stay a visible reply card).
-   */
-  private sawToolDuringDefenseHold: boolean = false;
   /** Set when the subprocess annotated an `agent_end` with
    *  `queuedFollowUpPending: true` — the SDK's _handlePostAgentRun will
    *  `agent.continue()` with queued steering/followUp messages after this
@@ -295,7 +287,6 @@ export class PiEventAdapter extends BaseEventAdapter {
         // A defense resume is in flight — hold the queue open for the
         // resumed turn's events (they arrive after this agent_end).
         this.defenseResumeHeld = true;
-        this.sawToolDuringDefenseHold = false;
         return false;
       }
       this.defenseResumeHeld = false;
@@ -408,7 +399,6 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.heldRetryError = null;
     this.pendingQueueComplete = false;
     this.defenseResumeHeld = false;
-    this.sawToolDuringDefenseHold = false;
     this.queuedFollowUpHeld = false;
     this.verificationHeld = false;
     this.verificationReplayTurnId = null;
@@ -682,7 +672,6 @@ export class PiEventAdapter extends BaseEventAdapter {
         // falls through to normal completion below.
         if ((event as { defenseResumePending?: boolean }).defenseResumePending) {
           this.defenseResumeHeld = true;
-          this.sawToolDuringDefenseHold = false;
           // The resume continues this SAME turn — fold the draft into the
           // process block; the resumed continuation's reply is the only final.
           yield* this.demoteDraftReplyForHold();
@@ -821,7 +810,7 @@ export class PiEventAdapter extends BaseEventAdapter {
       case 'message_end': {
         // Pi SDK emits message_end for ALL messages (user, assistant, toolResult).
         // Only process assistant messages — skip user prompts and tool results.
-        const msg = event.message as { role?: string; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: { total: number } }; id?: string; craftAskedForLeakedToolCall?: boolean } | undefined;
+        const msg = event.message as { role?: string; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: { total: number } }; id?: string } | undefined;
         // SDK message id, set by pi-agent-server when forwarding the event.
         // SessionManager uses this to correlate the follow-up `pi_turn_anchor`
         // event to the Craft assistant message created here (#782).
@@ -919,25 +908,22 @@ export class PiEventAdapter extends BaseEventAdapter {
         }
         // Pi SDK stopReason: 'toolUse' means the model will call tools next (intermediate commentary),
         // 'stop'/'end_turn' means final response. Same logic as Claude's stop_reason === 'tool_use'.
-        // Defense-resume override (2026-10-01 two-reply incident, session
-        // 261001-ready-sunset): while a held defense-resume window is open,
-        // the resumed turn's 'stop' reply is the VERIFICATION-DELIVERY step.
-        // - No tool work in the window → pure "corresponds → re-deliver": a
-        //   redundant duplicate of the user's original reply. Mark it
-        //   intermediate so the UI renders it as a process-block step, never
-        //   a second reply card.
-        // - Tool work happened → "doesn't correspond → continue": the reply
-        //   is the continuation's NEW answer and stays a normal reply card.
+        // Hold-open override (2026-10-04 fleet-mist user rule: a reply bubble
+        // represents the turn's RESULT — the LAST message. While any hold is
+        // open (defense resume / queued follow-up / verification in flight) the
+        // turn keeps running, so this cycle's 'stop' text is a process step,
+        // NEVER a result bubble — even when the resumed cycle did new tool
+        // work (the 2026-10-01 two-reply discriminator was the inverse: it
+        // kept tool-work continuations as visible cards, which the user
+        // experienced as result bubbles appearing mid-process).
+        // The FINAL agent_end (no hold) emits the single result bubble.
         // Persisted isIntermediate keeps reload consistent with the live view.
         // (toolUse replies are intermediate unconditionally.)
         const isIntermediate =
           msg.stopReason === 'toolUse' ||
-          // DSML leak marker (261004-polished-canyon): the DSML bridge executed
-          // the leaked tool calls and replaced the raw ｜DSML｜ markup; the turn
-          // continues, so this message is a process step, never a premature
-          // result bubble while the turn keeps running.
-          msg.craftAskedForLeakedToolCall === true ||
-          (this.defenseResumeHeld && !this.sawToolDuringDefenseHold);
+          this.defenseResumeHeld ||
+          this.queuedFollowUpHeld ||
+          this.verificationHeld;
         // Whitespace-only "final" text (\n\n after a thinking-only stop, 2026-10-03
         // blank-message incident: 585 blank messages persisted into session.jsonl)
         // is NOT a reply — skip it entirely. A truly empty stop is still caught by
@@ -998,11 +984,6 @@ export class PiEventAdapter extends BaseEventAdapter {
         const toolCallId = event.toolCallId;
         const toolName = this.resolveToolName(event.toolName);
         this.toolNames.set(toolCallId, toolName);
-
-        // Defense-resume discriminator: any tool executing inside a held
-        // defense-resume window means the resumed turn did NEW work — its
-        // final reply is a continuation answer and must stay visible.
-        if (this.defenseResumeHeld) this.sawToolDuringDefenseHold = true;
 
         // Normalize Pi field names to Claude Code format for UI compatibility
         // (diff stats, diff overlay, document routing all expect Claude Code format)

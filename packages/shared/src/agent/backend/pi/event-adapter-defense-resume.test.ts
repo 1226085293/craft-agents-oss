@@ -1,21 +1,17 @@
 /**
  * Regression tests for the 2026-10-01 two-reply incident (session
- * 261001-ready-sunset): when the defense layer queues a verification-delivery
- * followUp, the resumed turn's final 'stop' reply used to emit as a non-
- * intermediate (top-level) response — the UI then rendered a SECOND reply
- * card identical to the user's original reply.
+ * 261001-ready-sunset) and its 2026-10-04 refinement (session
+ * 261004-fleet-mist: three mid-process result bubbles during a defense
+ * auto-recovery cycle).
  *
- * Contract: while a held defense-resume window is open (agent_end carried
- * defenseResumePending=true), the resumed turn's final 'stop' reply is the
- * VERIFICATION-DELIVERY step, with ONE discriminator:
- *   - NO tool executed in the window  -> pure "corresponds -> re-deliver"
- *     duplicate of the original reply; emit isIntermediate=true so the UI
- *     renders it as a process-block step, NOT a second reply card.
- *   - a tool DID execute in the window -> "doesn't correspond -> continue":
- *     the reply is the continuation's NEW answer; emit isIntermediate=false
- *     so it stays a visible reply card.
- * The main turn's reply (emitted before the hold) and replies after the
- * final agent_end (no flag) always stay non-intermediate.
+ * Contract: a reply bubble represents the turn's RESULT — the LAST message.
+ * While any hold is open (agent_end carried defenseResumePending / queued
+ * follow-up pending / verification pending), the turn keeps running, so that
+ * cycle's final 'stop' text is a process-block step (isIntermediate=true)
+ * UNCONDITIONALLY — the original two-reply tool-work discriminator was
+ * inverted on 2026-10-04: keeping tool-work continuations as visible cards
+ * surfaced as premature result bubbles. The FINAL agent_end (no hold) emits
+ * the single result bubble; replies after it are normal finals.
  */
 import { describe, it, expect, beforeEach } from 'bun:test';
 import { PiEventAdapter } from './event-adapter.ts';
@@ -79,7 +75,7 @@ describe('PiEventAdapter — defense-resume held window (2026-10-01 two-reply in
     expect(tc[0]!.isIntermediate).toBe(true);
   });
 
-  it('resumed continuation reply stays a normal reply card when the model did NEW tool work', () => {
+  it('resumed continuation reply stays a process step even when the model did NEW tool work (2026-10-04 fleet-mist rule)', () => {
     // Main turn ends; defense resume queued.
     collect(adapter.adaptEvent({ type: 'agent_end', defenseResumePending: true } as any));
     // The resumed turn does new work: a tool executes inside the held window.
@@ -91,7 +87,9 @@ describe('PiEventAdapter — defense-resume held window (2026-10-01 two-reply in
         args: { command: 'echo 1' },
       } as any),
     );
-    // Final reply of the continuation — must remain a VISIBLE reply card.
+    // The continuation's final text must NOT surface as a result bubble while
+    // the turn is still running — it folds into the process block; only the
+    // FINAL agent_end's reply becomes the single result bubble.
     const events = collect(
       adapter.adaptEvent({
         type: 'message_end',
@@ -105,7 +103,39 @@ describe('PiEventAdapter — defense-resume held window (2026-10-01 two-reply in
     );
     const tc = textCompletes(events);
     expect(tc).toHaveLength(1);
-    expect(tc[0]!.isIntermediate).toBe(false);
+    expect(tc[0]!.isIntermediate).toBe(true);
+  });
+
+  it('queued-followUp hold demotes the continuation cycle’s final text too', () => {
+    collect(adapter.adaptEvent({ type: 'agent_end', queuedFollowUpPending: true } as any));
+    const events = collect(
+      adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          id: 'a2c',
+          stopReason: 'stop',
+          content: [{ type: 'text', text: '队列续作周期的收尾文本' }],
+        },
+      } as any),
+    );
+    const tc = textCompletes(events);
+    expect(tc).toHaveLength(1);
+    expect(tc[0]!.isIntermediate).toBe(true);
+    // Terminal agent_end resumes normal finals.
+    collect(adapter.adaptEvent({ type: 'agent_end' } as any));
+    const terminal = collect(
+      adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          id: 'a2d',
+          stopReason: 'stop',
+          content: [{ type: 'text', text: '真正最终的回答' }],
+        },
+      } as any),
+    );
+    expect(textCompletes(terminal)[0]!.isIntermediate).toBe(false);
   });
 
   it('final agent_end (no flag) clears the hold — later replies are normal finals', () => {

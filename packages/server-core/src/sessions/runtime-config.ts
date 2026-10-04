@@ -7,6 +7,12 @@ export interface BackendRuntimeSignatureInput {
   provider: AgentProvider
   authType?: LlmAuthType
   resolvedModel: string
+  /**
+   * SHA-256 fingerprint of the connection's API key. Credential rotation
+   * cannot be re-routed in-place (update_runtime_config carries no key
+   * material), so a changed key must drift the restart signature.
+   */
+  apiKeyFingerprint?: string
 }
 
 export interface ModelAttachmentFilterResult {
@@ -55,16 +61,19 @@ function normalizeCustomModels(connection: LlmConnection): Array<Record<string, 
  * carries `model, providerType, authType, baseUrl, customEndpoint, customModels` —
  * but NOT `piAuthProvider`, and switching `slug`/`providerType`/`authType` mid-life
  * pulls in credential routing and provider-registry state the subprocess doesn't
- * fully reset on a runtime update.
+ * fully reset on a runtime update. Likewise an API key rotation: the running
+ * subprocess holds the key it was spawned with, so a changed key must also
+ * route through dispose + recreate.
  */
 export function buildRestartRequiredSignature(input: BackendRuntimeSignatureInput): string {
-  const { connection, provider, authType } = input
+  const { connection, provider, authType, apiKeyFingerprint } = input
   return JSON.stringify(definedObject({
     provider,
     authType,
     slug: connection?.slug,
     providerType: connection?.providerType,
     piAuthProvider: connection?.piAuthProvider,
+    apiKeyFingerprint,
   }))
 }
 

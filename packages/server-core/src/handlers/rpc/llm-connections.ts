@@ -310,6 +310,17 @@ export function registerLlmConnectionsHandlers(server: RpcServer, deps: HandlerD
         deps.platform.logger?.info('Saved IAM credentials to LLM connection')
       }
 
+      // Push credential changes to live sessions on this connection: a running
+      // Pi subprocess holds the key it was spawned with, so a rotated key must
+      // dispose + recreate it (drifted restart signature, see
+      // SessionManager.tryRefreshAgentRuntime). Detached like SAVE; the lazy
+      // `getOrCreateAgent` refresh remains the correctness backstop.
+      sessionManager.refreshConnectionRuntime(setup.slug).catch(error => {
+        deps.platform.logger?.warn(
+          `Detached credential runtime push failed for ${setup.slug}: ${error instanceof Error ? error.message : error}`,
+        )
+      })
+
       // Set as default only if no default exists yet (first connection)
       if (!getDefaultLlmConnection()) {
         setDefaultLlmConnection(setup.slug)

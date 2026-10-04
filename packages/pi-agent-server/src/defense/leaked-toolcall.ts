@@ -46,3 +46,58 @@ export function detectLeakedToolCall(text: string): { leaked: boolean; callNames
   }
   return { leaked: true, callNames };
 }
+
+/** One intended tool call recovered from a leaked ｜DSML｜ block. */
+export interface ParsedLeakedCall {
+  /** Intended tool name as emitted by the model (e.g. "read", "bash"). */
+  name: string;
+  /**
+   * Parsed JSON-object arguments. `null` when the arguments parameter is
+   * missing or is not a valid JSON object (the call is then reported but
+   * NOT executed — executing with fabricated args would be worse).
+   */
+  args: Record<string, unknown> | null;
+  /** Raw arguments text (diagnostics / error reporting). */
+  rawArgs: string;
+}
+
+/**
+ * Full parser for leaked provider tool-call markup (the DSML format).
+ *
+ * `detectLeakedToolCall` is the cheap detector; this extracts each
+ * `<｜DSML｜invoke name="X">` block and its `arguments` parameter so the DSML
+ * bridge (dsml-bridge.ts) can EXECUTE the intended calls when the channel's
+ * OpenAI-compat layer failed to emit structured `tool_calls`.
+ */
+export function parseLeakedToolCalls(
+  text: string | null | undefined,
+): { leaked: boolean; calls: ParsedLeakedCall[] } {
+  const t = text ?? '';
+  if (t.length === 0 || !/<｜DSML｜(tool_calls|invoke)/.test(t)) {
+    return { leaked: false, calls: [] };
+  }
+  const calls: ParsedLeakedCall[] = [];
+  const blockRe = /<｜DSML｜invoke\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/｜DSML｜invoke\s*>/g;
+  let m: RegExpExecArray | null;
+  while ((m = blockRe.exec(t)) !== null) {
+    const name = m[1] ?? '';
+    if (!name) continue;
+    const body = m[2] ?? '';
+    const argRe = /<｜DSML｜parameter\s+name="arguments"[^>]*>([\s\S]*?)<\/｜DSML｜parameter\s*>/;
+    const am = argRe.exec(body);
+    const rawArgs = (am?.[1] ?? '').trim();
+    let args: Record<string, unknown> | null = null;
+    if (rawArgs) {
+      try {
+        const parsed: unknown = JSON.parse(rawArgs);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          args = parsed as Record<string, unknown>;
+        }
+      } catch {
+        args = null;
+      }
+    }
+    calls.push({ name, args, rawArgs });
+  }
+  return { leaked: calls.length > 0, calls };
+}

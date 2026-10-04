@@ -36,6 +36,7 @@ import {
   createFindToolDefinition,
   createLsToolDefinition,
   resizeImage,
+  DefaultResourceLoader,
 } from '@earendil-works/pi-coding-agent';
 import type {
   AgentSession,
@@ -111,6 +112,7 @@ import { DefenseEvaluator, resolveDefenseEnabled } from './defense/index.ts';
 import { VERIFY_OUTPUT_CMDS } from './defense/complexity-score.ts';
 import { detectRepetitionLoop, extractAssistantText } from './defense/repetition-detector.ts';
 import { detectLeakedToolCall } from './defense/leaked-toolcall.ts';
+import { createDsmlBridgeExtension, bridgeHandledSig, finalTextSig } from './defense/dsml-bridge.ts';
 import { drainQueuedFollowUp } from './defense/resume-followup.ts';
 import { ToolLoopDetector, fingerprintToolCall, digestResult, isEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
@@ -1372,6 +1374,25 @@ async function ensureSession(): Promise<AgentSession> {
       sessionOptions.sessionManager = PiSessionManager.continueRecent(cwd, sessionDir);
     }
 
+    // DSML bridge (2026-10-04): channels whose OpenAI-compatible layer leaks
+    // provider-native ｜DSML｜ tool-call markup as literal text (observed on
+    // deepseek-v4-flash via discovery-api.intern-ai.org.cn). The bridge
+    // executes the intended calls through the SAME wrapped tool definitions
+    // (full guard stack: loop guard, approval, metadata strip) and queues a
+    // result report as a followUp so the continuation turn gets evidence.
+    const resourceLoader = new DefaultResourceLoader({
+      cwd,
+      agentDir: sessionOptions.agentDir!,
+      settingsManager: sessionOptions.settingsManager,
+      extensionFactories: [
+        createDsmlBridgeExtension({
+          getToolDefinitions: () => wrappedAll,
+          debugLog,
+        }),
+      ],
+    });
+    await resourceLoader.reload();
+    sessionOptions.resourceLoader = resourceLoader;
   }
 
   // Set model if specified
@@ -2408,7 +2429,18 @@ function handleSessionEvent(event: AgentSessionEvent): void {
           defenseResumePending: defenseResult.shouldResume,
         } as unknown as OutboundAgentEvent;
         if (defenseResult.shouldResume && defenseResult.resumeMessage) {
-          queueDefenseResume(piSession, defenseResult.resumeMessage);
+          let resumeMessage = defenseResult.resumeMessage;
+          // DSML bridge dedup: when the bridge already executed this stop's
+          // leaked calls, its result report is queued first — the resume note
+          // must point at those results instead of demanding another re-issue
+          // of calls that the broken channel would re-leak (resume-cap burn).
+          const finalText = defenseResult.finalText ?? '';
+          if (detectLeakedToolCall(finalText).leaked && bridgeHandledSig() === finalTextSig(finalText)) {
+            resumeMessage =
+              '[DSML Bridge] The tool calls you attempted above have ALREADY been executed by Craft — their results are in the preceding message. '
+              + 'Continue the task from those results. Do NOT re-emit ｜DSML｜ literal blocks.';
+          }
+          queueDefenseResume(piSession, resumeMessage);
         }
       }
     }

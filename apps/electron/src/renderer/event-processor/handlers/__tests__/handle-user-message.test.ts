@@ -157,4 +157,86 @@ describe('handleUserMessage queued replay', () => {
 
     expect(next.state.session.isProcessing).toBe(false)
   })
+
+  it('preserves the guide-click startedAt when merging an accepted steer into a queued bubble', () => {
+    // 2026-10-07 plain-jade: the main process stamps startedAt at the guide
+    // click. The renderer merge must pass it through to the queued bubble so
+    // the in-card row positions by startedAt ?? timestamp; the display
+    // timestamp stays the send time.
+    const state = makeState([
+      {
+        id: 'optimistic-guide',
+        role: 'user',
+        content: '还有你的名字',
+        timestamp: 100,
+        isPending: false,
+        isQueued: true,
+      },
+    ])
+
+    const acceptedEvent: UserMessageEvent = {
+      type: 'user_message',
+      sessionId: 'session-1',
+      message: {
+        id: 'backend-guide',
+        role: 'user',
+        content: '还有你的名字',
+        timestamp: 100,
+        startedAt: 150,
+        isGuidance: true,
+      },
+      status: 'accepted',
+      optimisticMessageId: 'optimistic-guide',
+    }
+
+    const next = handleUserMessage(state, acceptedEvent)
+    const message = next.state.session.messages.find(m => m.id === 'optimistic-guide')
+
+    expect(message?.startedAt).toBe(150)
+    expect(message?.timestamp).toBe(100)
+    expect(message?.isGuidance).toBe(true)
+  })
+
+  it('a drain re-emit (accepted with a newer startedAt) updates the merged bubble', () => {
+    // 2026-10-07 plain-jade round 2: the main process re-emits the accepted
+    // user_message at the drain moment with a re-stamped startedAt (the
+    // agent actually read the guidance now). The renderer merge updates the
+    // existing bubble in place (no duplicate).
+    const state = makeState([
+      {
+        id: 'optimistic-guide',
+        role: 'user',
+        content: '还有你的名字',
+        timestamp: 100,
+        isPending: false,
+        isQueued: false,
+        startedAt: 150, // guide-click stamp
+        isGuidance: true,
+      },
+    ])
+
+    const drainEvent: UserMessageEvent = {
+      type: 'user_message',
+      sessionId: 'session-1',
+      message: {
+        id: 'backend-guide',
+        role: 'user',
+        content: '还有你的名字',
+        timestamp: 100,
+        startedAt: 200, // drain stamp (later than the guide click)
+        isGuidance: true,
+      },
+      status: 'accepted',
+      optimisticMessageId: 'optimistic-guide',
+    }
+
+    const next = handleUserMessage(state, drainEvent)
+
+    expect(next.state.session.messages).toHaveLength(1)
+    const message = next.state.session.messages[0]
+    expect(message?.id).toBe('optimistic-guide')
+    expect(message?.startedAt).toBe(200)
+    expect(message?.timestamp).toBe(100)
+    expect(message?.isQueued).toBe(false)
+  })
 })

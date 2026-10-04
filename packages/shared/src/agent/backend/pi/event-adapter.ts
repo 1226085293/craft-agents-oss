@@ -93,10 +93,33 @@ export class PiEventAdapter extends BaseEventAdapter {
   // Turn id of the LAST final (non-intermediate) reply emitted this turn —
   // targeted by `text_demote` when verification is triggered (2026-10-02).
   private lastFinalTextTurnId: string | null = null;
+  /**
+   * Queued-follow-up re-promotion capture (2026-10-07, 261007-wise-horizon).
+   * When a mid-turn user steer is drained, the MAIN reply that was demoted
+   * for the queuedFollowUpHeld hold is recorded here; on the drained
+   * reply's terminal stop (hold released, nothing pending) the adapter
+   * emits `text_promote` so the demoted reply returns to a result bubble
+   * instead of staying buried in the process card. Captured ONLY for the
+   * pure queued-follow-up hold — defense/verification holds keep the
+   * fleet-mist process-step behavior (no re-promotion).
+   */
+  private queuedHoldDemotedReply: { turnId: string; text: string } | null = null;
+  /** Most recent FINAL reply text — re-promotion source when an agent_end
+   *  hold demotes a reply that was already final (active-wren window). */
+  private lastEmittedFinalText: { turnId: string; text: string } | null = null;
 
   // Sub-turnId isolation for tool calls within a single Pi turn
   private subTurnCounter: number = 0;
   private messageSubTurnId: string | null = null;
+
+  // When the current assistant message started (its message_start event).
+  // Thinking-only blocks never stream text deltas — their thinking text is
+  // synthesized as an intermediate text_complete at message_end, so the
+  // SessionManager's delta-based startedAt hook can't see them. Stamping
+  // this time onto that synthetic event keeps process-card ordering
+  // honest: the block's row sorts from the moment the model started it,
+  // not from when the block became visible at completion.
+  private messageStartAt: number | null = null;
 
   // Model context window for usage_update events
   private contextWindow: number | undefined;
@@ -176,20 +199,19 @@ export class PiEventAdapter extends BaseEventAdapter {
    *  the FINAL `agent_end` (no flag) arrives — the defense analog of
    *  overflowState. See the subprocess defense layer in pi-agent-server. */
   private defenseResumeHeld: boolean = false;
-  /**
-   * True when at least one tool EXECUTED while a defense-resume hold was open
-   * (2026-10-01 two-reply incident). Discriminator for the resumed turn's
-   * final 'stop' reply: no tool work = pure "corresponds → re-deliver" (fold
-   * into the process block); tool work = "doesn't correspond → continue" (the
-   * continuation's answer must stay a visible reply card).
-   */
-  private sawToolDuringDefenseHold: boolean = false;
   /** Set when the subprocess annotated an `agent_end` with
    *  `queuedFollowUpPending: true` — the SDK's _handlePostAgentRun will
    *  `agent.continue()` with queued steering/followUp messages after this
    *  agent_end. The queue stays open for that continuation turn (same shape
    *  as defenseResumeHeld). The FINAL `agent_end` (no flag) clears it. */
   private queuedFollowUpHeld: boolean = false;
+  /** True while the SDK's most recent `queue_update` reported non-empty
+   *  steering (or followUp) queues. Backup signal for the subprocess's
+   *  `assistantFollowUpPending` stamp: while set, an assistant stop text is a
+   *  process step, never a result bubble (2026-10-05 smooth-gorge).
+   *  Cleared on an empty `queue_update`, by {@link onTurnStart} and
+   *  {@link resetRecoveryState}. */
+  private queuePendingNonEmpty: boolean = false;
   /** Set when the subprocess annotated an `agent_end` with
    *  `defenseVerificationPending: true` — a program-side verification turn is
    *  in flight (subprocess LLM judge; 2026-10-02 redesign). Unlike a defense
@@ -198,6 +220,8 @@ export class PiEventAdapter extends BaseEventAdapter {
    *  text, complete; failed → a followUp continues the turn, its FINAL
    *  agent_end completes). */
   private verificationHeld: boolean = false;
+  /** Correlation id of the final candidate awaiting a successful verification replay. */
+  private verificationReplayTurnId: string | null = null;
 
   // ============================================================
   // Retryable-error deferral (auto-retry terminal-state reporting)
@@ -293,7 +317,6 @@ export class PiEventAdapter extends BaseEventAdapter {
         // A defense resume is in flight — hold the queue open for the
         // resumed turn's events (they arrive after this agent_end).
         this.defenseResumeHeld = true;
-        this.sawToolDuringDefenseHold = false;
         return false;
       }
       this.defenseResumeHeld = false;
@@ -351,7 +374,22 @@ export class PiEventAdapter extends BaseEventAdapter {
     // must NOT touch pendingQueueComplete or the live next turn's queue.
     if (!this.verificationHeld) return;
     this.verificationHeld = false;
-    if (passed) this.pendingQueueComplete = true;
+    if (passed) {
+      // Replay path: the verified final reply is replayed verbatim — the
+      // next shouldCompleteQueue check terminates the queue so the main
+      // process can deliver it (mirrors finalizeDefenseResumeHeld).
+      this.pendingQueueComplete = true;
+    }
+    if (!passed) this.verificationReplayTurnId = null;
+  }
+
+  /** Build the one visible final reply after the verifier has passed. */
+  createVerifiedReplyEvent(finalText: string): CraftAgentEvent {
+    const turnId = this.verificationReplayTurnId ?? this.nextSubTurnId('m');
+    this.verificationReplayTurnId = null;
+    this.hasEmittedFinalText = true;
+    this.lastFinalTextTurnId = turnId;
+    return { type: 'text_complete', text: finalText, isIntermediate: false, turnId };
   }
 
   /**
@@ -382,6 +420,13 @@ export class PiEventAdapter extends BaseEventAdapter {
       this.lastFinalTextTurnId = null;
       yield { type: 'text_demote', turnId: t };
     }
+    // The draft has been folded into the process block — it is no longer
+    // "the" final reply of this turn. Without this reset the one-final gate
+    // (`!hasEmittedFinalText`) would block the drained continuation's reply
+    // from becoming the new result bubble (2026-10-07 active-wren variant:
+    // steer queued in the message_end→agent_end window, main reply demoted
+    // here, drained reply then suppressed → zero bubbles).
+    this.hasEmittedFinalText = false;
   }
 
   /**
@@ -397,9 +442,12 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.heldRetryError = null;
     this.pendingQueueComplete = false;
     this.defenseResumeHeld = false;
-    this.sawToolDuringDefenseHold = false;
     this.queuedFollowUpHeld = false;
+    this.queuePendingNonEmpty = false;
     this.verificationHeld = false;
+    this.verificationReplayTurnId = null;
+    this.queuedHoldDemotedReply = null;
+    this.lastEmittedFinalText = null;
     this.lastFinalTextTurnId = null;
     this.deferredRetryError = null;
     this.retryHoldActive = false;
@@ -542,8 +590,10 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.hasStreamedDeltas = false;
     this.hasEmittedFinalText = false;
     this.lastFinalTextTurnId = null;
+    this.verificationReplayTurnId = null;
     this.subTurnCounter = 0;
     this.messageSubTurnId = null;
+    this.messageStartAt = null;
     // A new Craft turn can only start once the previous queue completed (or
     // was force-aborted), so any recovery state left over here is stale.
     //
@@ -574,6 +624,22 @@ export class PiEventAdapter extends BaseEventAdapter {
           sdkTurnAnchor: e.sdkTurnAnchor,
         };
       }
+      return;
+    }
+
+    // Craft-injected compaction heartbeat from pi-agent-server (not part of
+    // the Pi SDK). While the SDK compacts, the main stream is silent, so the
+    // server emits periodic ticks. The ticks are consumed upstream by
+    // PiAgent.recordSubprocessTurnProgress → refreshTurnIdleWatchdog (they
+    // keep the capped compaction watchdog armed without ever extending the
+    // deadline). They are NOT surfaced to the UI as status events: each tick
+    // used to append its own "Compacting context... (Nm Ms)" line to the
+    // process block, producing a growing list of near-identical rows with a
+    // stale per-tick elapsed time. The UI instead keeps the single
+    // "Compacting context..." row emitted on compaction_start (the renderer
+    // dedupes repeated compacting status messages in place) and the bottom
+    // ProcessingIndicator already shows a live per-second elapsed timer.
+    if ((event as { type?: string }).type === 'compaction_progress') {
       return;
     }
 
@@ -650,7 +716,6 @@ export class PiEventAdapter extends BaseEventAdapter {
         // falls through to normal completion below.
         if ((event as { defenseResumePending?: boolean }).defenseResumePending) {
           this.defenseResumeHeld = true;
-          this.sawToolDuringDefenseHold = false;
           // The resume continues this SAME turn — fold the draft into the
           // process block; the resumed continuation's reply is the only final.
           yield* this.demoteDraftReplyForHold();
@@ -666,6 +731,7 @@ export class PiEventAdapter extends BaseEventAdapter {
         // hold (passed → replay + complete, failed → followUp continues).
         if ((event as { defenseVerificationPending?: boolean }).defenseVerificationPending) {
           this.verificationHeld = true;
+          this.verificationReplayTurnId = this.lastFinalTextTurnId;
           // The draft reply already shown at the main turn's end must not coexist
           // with the verified replay (or the follow-up continuation) — demote it
           // into the process block so the turn ends with a SINGLE final bubble.
@@ -683,9 +749,24 @@ export class PiEventAdapter extends BaseEventAdapter {
         // continuation turn; its FINAL agent_end (no flag) completes below.
         if ((event as { queuedFollowUpPending?: boolean }).queuedFollowUpPending) {
           this.queuedFollowUpHeld = true;
-          // A continuation turn is about to run for the same Craft turn —
-          // the current draft is not the final answer yet; demote it.
-          yield* this.demoteDraftReplyForHold();
+          if (this.defenseResumeHeld || this.verificationHeld) {
+            // fleet-mist: a defense/verification stop text is a process step
+            // — demote it and remember it for re-promotion once the hold
+            // releases.
+            yield* this.demoteDraftReplyForHold();
+            if (this.lastEmittedFinalText && !this.defenseResumeHeld && !this.verificationHeld) {
+              this.queuedHoldDemotedReply = this.lastEmittedFinalText;
+            }
+          } else {
+            // 2026-10-07 plain-jade: pure queued steer — the main reply
+            // STAYS a result bubble (it was emitted as final before the steer
+            // was queued, or with the hold opening). No demotion, no
+            // re-promotion; just release the one-final gate so the drain
+            // round's reply can claim it.
+            this.hasEmittedFinalText = false;
+            this.lastFinalTextTurnId = null;
+            this.lastEmittedFinalText = null;
+          }
           break;
         }
         this.queuedFollowUpHeld = false;
@@ -764,9 +845,20 @@ export class PiEventAdapter extends BaseEventAdapter {
       // Message events (text streaming)
       // ============================================================
 
-      case 'message_start':
-        // Pi SDK emits message_start for user messages too — skip non-assistant
-        break;
+      case 'message_start': {
+        // Pi SDK emits message_start for user messages too.
+        const startMsg = event.message as { role?: string; id?: string } | undefined
+        if (startMsg?.role === 'assistant') {
+          this.messageStartAt = Date.now()
+        } else if (startMsg?.role === 'user') {
+          // 2026-10-07 plain-jade: this is the moment a spliced
+          // steer/follow-up message actually enters the agent's context
+          // (drain time). The main process re-stamps the pending guidance
+          // row to this moment.
+          yield { type: 'steer_injected', messageId: startMsg.id }
+        }
+        break
+      };
 
       case 'message_update': {
         // Pi SDK emits message_update only for assistant messages (streaming deltas)
@@ -855,24 +947,122 @@ export class PiEventAdapter extends BaseEventAdapter {
           break;
         }
 
+        // An aborted assistant message is only the truncated tail of a cancelled
+        // run, not a delivered final reply. Discard any streamed partial and keep
+        // the turn result-free so terminal UI state cannot surface it as an answer.
+        if (msg.stopReason === 'aborted') {
+          if (this.messageSubTurnId) {
+            yield { type: 'text_discard', turnId: this.messageSubTurnId };
+            this.messageSubTurnId = null;
+            this.hasStreamedDeltas = false;
+          }
+          break;
+        }
+
         // Extract text content from the final assistant message
         const textContent = this.extractTextFromMessage(event.message);
+
+        // Surface the model's reasoning/thinking as a process step. Reasoning
+        // channels (deepseek-v4-flash via discovery-api.intern-ai.org.cn) put
+        // nearly all their narrative into the 'thinking' content block and emit
+        // little visible text between tool calls, so the UI would otherwise show
+        // nothing while the model works (2026-10-04 d4f "invisible process").
+        const thinking = this.extractThinkingFromMessage(event.message);
+        if (thinking) {
+          yield {
+            type: 'text_complete',
+            text: thinking,
+            isIntermediate: true,
+            turnId: this.nextSubTurnId('m'),
+            // Thinking blocks don't stream deltas — start from message_start so
+            // the UI's startedAt ordering matches what the user saw live.
+            ...(this.messageStartAt ? { startedAt: this.messageStartAt } : {}),
+          };
+        }
         // Pi SDK stopReason: 'toolUse' means the model will call tools next (intermediate commentary),
         // 'stop'/'end_turn' means final response. Same logic as Claude's stop_reason === 'tool_use'.
-        // Defense-resume override (2026-10-01 two-reply incident, session
-        // 261001-ready-sunset): while a held defense-resume window is open,
-        // the resumed turn's 'stop' reply is the VERIFICATION-DELIVERY step.
-        // - No tool work in the window → pure "corresponds → re-deliver": a
-        //   redundant duplicate of the user's original reply. Mark it
-        //   intermediate so the UI renders it as a process-block step, never
-        //   a second reply card.
-        // - Tool work happened → "doesn't correspond → continue": the reply
-        //   is the continuation's NEW answer and stays a normal reply card.
+        // Hold-open override (2026-10-04 fleet-mist user rule: a reply bubble
+        // represents the turn's RESULT — the LAST message. While any hold is
+        // open (defense resume / queued follow-up / verification in flight) the
+        // turn keeps running, so this cycle's 'stop' text is a process step,
+        // NEVER a result bubble — even when the resumed cycle did new tool
+        // work (the 2026-10-01 two-reply discriminator was the inverse: it
+        // kept tool-work continuations as visible cards, which the user
+        // experienced as result bubbles appearing mid-process).
+        // The drained continuation's OWN terminal stop (no pending left,
+        // released below) is the single result bubble; the FINAL agent_end
+        // (no flag) completes the queue.
         // Persisted isIntermediate keeps reload consistent with the live view.
         // (toolUse replies are intermediate unconditionally.)
+        // Mid-turn follow-up continuation (2026-10-05 smooth-gorge): the
+        // subprocess stamps `assistantFollowUpPending` when the SDK's
+        // steering/followUp queues still hold messages at message_end — the
+        // SDK injects them via agent.continue() AFTER this message (same
+        // turn, no new turn_start) and the agent_end-side pendingMessageCount
+        // check can never fire (queues drained by then). `queue_update`
+        // non-empty is the backup signal. While either is true the stop text
+        // is a PROCESS STEP, never a result bubble (same fleet-mist rule as
+        // the holds below); the queue stays open until the FINAL `agent_end`
+        // (no flag) completes the turn.
+        //
+        // Hold RELEASE (2026-10-07 active-wren incident: guidance “你叫什么
+        // 名字” queued as a user steer mid-turn; the SDK drained it and its
+        // answer — the turn's ACTUAL result — was still demoted to a process
+        // line, so no reply bubble was ever shown (“没有回复，然后中断了”)).
+        // The holds are SET only; a sticky queuedFollowUpHeld from an
+        // annotated stop (or a non-empty queue_update) survived through the
+        // drained continuation's own final reply, demoting it. The design's
+        // “FINAL agent_end emits the result bubble” was never implementable
+        // (the bubble is emitted at message_end; the final agent_end only
+        // completes the queue). So RELEASE queuedFollowUpHeld the moment a
+        // terminal stop with NO pending signal arrives: the SDK stamps
+        // assistantFollowUpPending while drains remain and its queue_update
+        // goes empty when the last queued message is consumed, so “terminal
+        // stop + nothing pending” is the turn's LAST reply → the result
+        // bubble.
+        // ONLY queuedFollowUpHeld is released: a defense follow-up sets
+        // defenseResumePending/verificationPending too, so defenseResumeHeld /
+        // verificationHeld stay set and keep the fleet-mist demotion (a
+        // program-side re-delivery is a process step, never a duplicate
+        // bubble). A pure user-steer drain sets queuedFollowUpHeld alone, so
+        // releasing it promotes the steer's answer to the result bubble.
+        const pendingFollowUpNow =
+          (event as { assistantFollowUpPending?: boolean }).assistantFollowUpPending === true ||
+          this.queuePendingNonEmpty;
+        if (pendingFollowUpNow) {
+          this.queuedFollowUpHeld = true;
+        } else if (msg.stopReason !== 'toolUse') {
+          // Terminal stop, nothing pending: the queued steer/follow-up drain is
+          // complete — this message is the turn's result. Release the queued-
+          // follow-up hold so it is NOT demoted below. (Defense/verification
+          // holds are untouched — see the rule above.)
+          this.queuedFollowUpHeld = false;
+          // Re-promotion (2026-10-07 wise-horizon): if a MAIN reply was
+          // demoted to the process card for this hold, bring it back as a
+          // result bubble now that the drain is complete — otherwise only the
+          // steer's answer would be visible and the user's original answer
+          // would be buried. Defense/verification holds keep fleet-mist
+          // behavior: no re-promotion.
+          if (
+            this.queuedHoldDemotedReply &&
+            !this.defenseResumeHeld &&
+            !this.verificationHeld
+          ) {
+            const promoted = this.queuedHoldDemotedReply;
+            this.queuedHoldDemotedReply = null;
+            yield { type: 'text_promote', turnId: promoted.turnId, text: promoted.text };
+          }
+        }
+        // A hold that opens JUST NOW (pendingFollowUpNow) must not demote the
+        // reply that finished — it stays a result bubble, shown the moment it
+        // appears; the drain round's own reply becomes the second bubble
+        // (2026-10-07 plain-jade request). An already-open hold (drain in
+        // flight) or a defense/verification hold still demotes as before.
         const isIntermediate =
           msg.stopReason === 'toolUse' ||
-          (this.defenseResumeHeld && !this.sawToolDuringDefenseHold);
+          this.defenseResumeHeld ||
+          (this.queuedFollowUpHeld && !pendingFollowUpNow) ||
+          this.verificationHeld;
         // Whitespace-only "final" text (\n\n after a thinking-only stop, 2026-10-03
         // blank-message incident: 585 blank messages persisted into session.jsonl)
         // is NOT a reply — skip it entirely. A truly empty stop is still caught by
@@ -883,8 +1073,31 @@ export class PiEventAdapter extends BaseEventAdapter {
           const mTurnId = this.messageSubTurnId || this.nextSubTurnId('m');
           this.messageSubTurnId = null;
           if (!isIntermediate) {
-            this.hasEmittedFinalText = true;
-            this.lastFinalTextTurnId = mTurnId;
+            if (pendingFollowUpNow) {
+              // This reply stays a result bubble, but the drain round's reply
+              // must ALSO be allowed to claim the final slot — release the
+              // one-final gate instead of claiming it (the active-wren
+              // zero-bubble lesson). No demote/promote bookkeeping needed:
+              // nothing was demoted, so nothing gets re-promoted.
+              this.hasEmittedFinalText = false;
+              this.lastFinalTextTurnId = null;
+              this.lastEmittedFinalText = null;
+            } else {
+              this.hasEmittedFinalText = true;
+              this.lastFinalTextTurnId = mTurnId;
+              this.lastEmittedFinalText = { turnId: mTurnId, text: String(textContent ?? '') };
+            }
+          } else if (
+            this.queuedFollowUpHeld &&
+            !this.defenseResumeHeld &&
+            !this.verificationHeld &&
+            msg.stopReason !== 'toolUse'
+          ) {
+            // Demoted main reply under a pure queued-follow-up hold (the steer
+            // was queued mid-stream and this stop is a process step, not the
+            // turn's result). Remember it — the drain's terminal stop will
+            // re-promote it via `text_promote`.
+            this.queuedHoldDemotedReply = { turnId: mTurnId, text: String(textContent ?? '') };
           }
 
           yield {
@@ -933,11 +1146,6 @@ export class PiEventAdapter extends BaseEventAdapter {
         const toolCallId = event.toolCallId;
         const toolName = this.resolveToolName(event.toolName);
         this.toolNames.set(toolCallId, toolName);
-
-        // Defense-resume discriminator: any tool executing inside a held
-        // defense-resume window means the resumed turn did NEW work — its
-        // final reply is a continuation answer and must stay visible.
-        if (this.defenseResumeHeld) this.sawToolDuringDefenseHold = true;
 
         // Normalize Pi field names to Claude Code format for UI compatibility
         // (diff stats, diff overlay, document routing all expect Claude Code format)
@@ -1161,6 +1369,8 @@ export class PiEventAdapter extends BaseEventAdapter {
           type: 'retry',
           phase: 'backoff',
           message: `${this.retryReasonLabel(retryEvent.errorMessage)}. Retrying${wait} (${attempt})...`,
+          attempt: retryEvent.attempt ?? 0,
+          nextRetryInMs: delayMs,
         };
         break;
       }
@@ -1171,7 +1381,7 @@ export class PiEventAdapter extends BaseEventAdapter {
         // when it took more than one attempt, say so. Nothing is held here —
         // the run's own agent_end still follows.
         if (retryEndEvent.success) {
-          yield { type: 'retry', phase: 'end' };
+          yield { type: 'retry', phase: 'end', recovered: true, attempt: retryEndEvent.attempt ?? 0 };
           const recoveredAfter = retryEndEvent.attempt;
           if (recoveredAfter > 0) {
             yield {
@@ -1194,7 +1404,7 @@ export class PiEventAdapter extends BaseEventAdapter {
             yield* this.releaseHeldRetryError();
           } else {
             this.retryState = 'none';
-            yield { type: 'retry', phase: 'end' };
+            yield { type: 'retry', phase: 'end', recovered: false, attempt: retryEndEvent.attempt ?? 0 };
             if (retryEndEvent.finalError) {
               yield { type: 'error', message: `Retry failed: ${retryEndEvent.finalError}` };
             }
@@ -1210,11 +1420,22 @@ export class PiEventAdapter extends BaseEventAdapter {
         break;
       }
 
-      case 'queue_update':
-        // Queue contents are currently reflected by existing session/message state.
-        // Ignore the event explicitly so newer Pi SDK sessions don't log noisy
-        // "Unknown Pi event" warnings until we add a dedicated UI consumer.
+      case 'queue_update': {
+        // Queue contents signal (2026-10-05): while the SDK's steering or
+        // followUp queues are non-empty, any stop text still in flight is a
+        // process step (a queued message will be injected via
+        // agent.continue() after agent_end). Previously ignored — the queues
+        // were "reflected by session/message state", but that gave the
+        // adapter no advance warning before it rendered a fake final bubble.
+        const qe = event as unknown as { steering?: unknown[]; followUp?: unknown[] };
+        const steering = Array.isArray(qe.steering) ? qe.steering : [];
+        const followUp = Array.isArray(qe.followUp) ? qe.followUp : [];
+        this.queuePendingNonEmpty = steering.length > 0 || followUp.length > 0;
+        if (this.queuePendingNonEmpty) {
+          this.queuedFollowUpHeld = true;
+        }
         break;
+      }
 
       case 'agent_settled':
       case 'entry_appended':
@@ -1374,6 +1595,34 @@ export class PiEventAdapter extends BaseEventAdapter {
     }
 
     return null;
+  }
+
+  /**
+   * Extract the model's reasoning/thinking content from a Pi AgentMessage.
+   * Reasoning channels carry their analysis in a `thinking` content block
+   * (pi-ai Message format); it is surfaced as a process step so reasoning
+   * models don't appear frozen while they work. Truncated to keep session
+   * persistence bounded (thinking blocks can be tens of thousands of chars).
+   */
+  private extractThinkingFromMessage(message: unknown): string | null {
+    if (!message || typeof message !== 'object') return null;
+
+    const msg = message as {
+      content?: string | Array<{ type: string; thinking?: string }>;
+    };
+
+    if (typeof msg.content === 'string' || !Array.isArray(msg.content)) return null;
+
+    const parts = msg.content
+      .filter((c) => c.type === 'thinking' && c.thinking)
+      .map((c) => c.thinking!);
+    if (parts.length === 0) return null;
+
+    const joined = parts.join('');
+    const MAX_THINKING_CHARS = 2000;
+    return joined.length <= MAX_THINKING_CHARS
+      ? joined
+      : `${joined.slice(0, MAX_THINKING_CHARS)}…`;
   }
 
   /**

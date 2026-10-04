@@ -1,21 +1,22 @@
 /**
  * Regression tests for the 2026-10-01 two-reply incident (session
- * 261001-ready-sunset): when the defense layer queues a verification-delivery
- * followUp, the resumed turn's final 'stop' reply used to emit as a non-
- * intermediate (top-level) response — the UI then rendered a SECOND reply
- * card identical to the user's original reply.
+ * 261001-ready-sunset) and its 2026-10-04 refinement (session
+ * 261004-fleet-mist: three mid-process result bubbles during a defense
+ * auto-recovery cycle).
  *
- * Contract: while a held defense-resume window is open (agent_end carried
- * defenseResumePending=true), the resumed turn's final 'stop' reply is the
- * VERIFICATION-DELIVERY step, with ONE discriminator:
- *   - NO tool executed in the window  -> pure "corresponds -> re-deliver"
- *     duplicate of the original reply; emit isIntermediate=true so the UI
- *     renders it as a process-block step, NOT a second reply card.
- *   - a tool DID execute in the window -> "doesn't correspond -> continue":
- *     the reply is the continuation's NEW answer; emit isIntermediate=false
- *     so it stays a visible reply card.
- * The main turn's reply (emitted before the hold) and replies after the
- * final agent_end (no flag) always stay non-intermediate.
+ * Contract: a reply bubble represents the turn's RESULT — the LAST message.
+ * While a DEFENSE hold is open (agent_end carried defenseResumePending /
+ * verification pending), that cycle's final 'stop' text is a process-block
+ * step (isIntermediate=true) UNCONDITIONALLY — the original two-reply
+ * tool-work discriminator was inverted on 2026-10-04: keeping tool-work
+ * continuations as visible cards surfaced as premature result bubbles.
+ *
+ * REFINEMENT (2026-10-07 active-wren): a pure queued steering/follow-up
+ * drain (queuedFollowUpPending set, but NO defense/verification hold) is
+ * different: the SDK's drain answers a USER message, so its terminal stop
+ * (nothing pending left) is released from the queued-follow-up hold and
+ * becomes the turn's result bubble. Defense lanes keep their demotion.
+ * The FINAL agent_end (no flag) completes the queue in all cases.
  */
 import { describe, it, expect, beforeEach } from 'bun:test';
 import { PiEventAdapter } from './event-adapter.ts';
@@ -79,7 +80,7 @@ describe('PiEventAdapter — defense-resume held window (2026-10-01 two-reply in
     expect(tc[0]!.isIntermediate).toBe(true);
   });
 
-  it('resumed continuation reply stays a normal reply card when the model did NEW tool work', () => {
+  it('resumed continuation reply stays a process step even when the model did NEW tool work (2026-10-04 fleet-mist rule)', () => {
     // Main turn ends; defense resume queued.
     collect(adapter.adaptEvent({ type: 'agent_end', defenseResumePending: true } as any));
     // The resumed turn does new work: a tool executes inside the held window.
@@ -91,7 +92,9 @@ describe('PiEventAdapter — defense-resume held window (2026-10-01 two-reply in
         args: { command: 'echo 1' },
       } as any),
     );
-    // Final reply of the continuation — must remain a VISIBLE reply card.
+    // The continuation's final text must NOT surface as a result bubble while
+    // the turn is still running — it folds into the process block; only the
+    // FINAL agent_end's reply becomes the single result bubble.
     const events = collect(
       adapter.adaptEvent({
         type: 'message_end',
@@ -105,7 +108,48 @@ describe('PiEventAdapter — defense-resume held window (2026-10-01 two-reply in
     );
     const tc = textCompletes(events);
     expect(tc).toHaveLength(1);
+    expect(tc[0]!.isIntermediate).toBe(true);
+  });
+
+  it('queued-followUp drain: the drained steer\'s answer becomes the result bubble (2026-10-07 active-wren)', () => {
+    collect(adapter.adaptEvent({ type: 'agent_end', queuedFollowUpPending: true } as any));
+    // No defense/verification flag on that agent_end → only the queued-
+    // follow-up hold is open. The SDK drains the queued user steer; its
+    // answer is the turn's result — the clean terminal stop releases the
+    // queued-follow-up hold.
+    const events = collect(
+      adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          id: 'a2c',
+          stopReason: 'stop',
+          content: [{ type: 'text', text: '我是 Craft Agent。' }],
+        },
+      } as any),
+    );
+    const tc = textCompletes(events);
+    expect(tc).toHaveLength(1);
     expect(tc[0]!.isIntermediate).toBe(false);
+    // No demoted final existed before this agent_end → nothing to re-promote
+    // (fleet-mist: only pure user-steer drains re-promote).
+    expect(events.find((e: any) => e.type === 'text_promote')).toBeUndefined();
+    // Terminal agent_end completes the queue.
+    collect(adapter.adaptEvent({ type: 'agent_end' } as any));
+    // The NEXT user turn (fresh turn state) gets normal finals again.
+    adapter.startTurn();
+    const terminal = collect(
+      adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          id: 'a2d',
+          stopReason: 'stop',
+          content: [{ type: 'text', text: '真正最终的回答' }],
+        },
+      } as any),
+    );
+    expect(textCompletes(terminal)[0]!.isIntermediate).toBe(false);
   });
 
   it('final agent_end (no flag) clears the hold — later replies are normal finals', () => {

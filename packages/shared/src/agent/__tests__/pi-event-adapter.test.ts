@@ -99,6 +99,41 @@ describe('PiEventAdapter', () => {
       expect(events).toHaveLength(0);
     });
 
+    it('stamps startedAt (message_start time) onto synthetic thinking text_complete', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({ type: 'message_start', message: { role: 'assistant' } } as any));
+      const atStart = Date.now()
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'thinking', thinking: 'deep reasoning' }, { type: 'text', text: '\n\n' }],
+        },
+      } as any));
+      const thinking = events.find(e => e.type === 'text_complete');
+      expect(thinking).toBeDefined();
+      expect(thinking!.isIntermediate).toBe(true);
+      expect(thinking!.startedAt).toBeGreaterThanOrEqual(atStart - 5);
+      expect(thinking!.startedAt).toBeLessThanOrEqual(Date.now());
+    });
+
+    it('does not stamp startedAt when message_start was not assistant', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({ type: 'message_start', message: { role: 'user' } } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'thinking', thinking: 'deep reasoning' }],
+        },
+      } as any));
+      const thinking = events.find(e => e.type === 'text_complete');
+      expect(thinking).toBeDefined();
+      expect((thinking as { startedAt?: number }).startedAt).toBeUndefined();
+    });
+
     it('should emit text_delta for message_update with text_delta', () => {
       collect(adapter.adaptEvent({ type: 'turn_start' } as any));
       const events = collect(adapter.adaptEvent({
@@ -145,6 +180,22 @@ describe('PiEventAdapter', () => {
       } as any));
 
       expect(events1[0].turnId).toBe(events2[0].turnId);
+    });
+
+    it('does not surface aborted assistant content as a final response', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'text_delta', delta: 'unfinished commentary' },
+      } as any));
+
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'aborted', content: 'unfinished commentary' },
+      } as any));
+
+      expect(events.some(event => event.type === 'text_complete')).toBe(false);
+      expect(events).toContainEqual(expect.objectContaining({ type: 'text_discard' }));
     });
 
     it('should emit text_complete for final assistant message_end', () => {
@@ -255,6 +306,43 @@ describe('PiEventAdapter', () => {
         },
       } as any));
       expect(events).toHaveLength(0);
+    });
+
+    it('should surface thinking content as an intermediate process step', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'stop',
+          content: [
+            { type: 'thinking', thinking: 'Let me reason through this carefully.' },
+            { type: 'text', text: 'Here is the final answer.' },
+          ],
+        },
+      } as any));
+
+      expect(events).toHaveLength(2);
+      expect(events[0]).toMatchObject({
+        type: 'text_complete',
+        text: 'Let me reason through this carefully.',
+        isIntermediate: true,
+      });
+      expect(events[1]).toMatchObject({
+        type: 'text_complete',
+        text: 'Here is the final answer.',
+        isIntermediate: false,
+      });
+    });
+
+    it('should skip thinking when the message has none', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'stop', content: 'Plain answer.' },
+      } as any));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ type: 'text_complete', text: 'Plain answer.', isIntermediate: false });
     });
   });
 
@@ -1210,6 +1298,8 @@ describe('PiEventAdapter', () => {
         type: 'retry',
         phase: 'backoff',
         message: 'fetch failed. Retrying in 4s (attempt 2/3)...',
+        attempt: 2,
+        nextRetryInMs: 4_000,
       }]);
     });
 
@@ -1232,7 +1322,7 @@ describe('PiEventAdapter', () => {
         success: true,
       } as any));
 
-      expect(events).toEqual([{ type: 'retry', phase: 'end' }]);
+      expect(events).toEqual([{ type: 'retry', phase: 'end', recovered: true, attempt: 0 }]);
     });
 
     it('should emit retry/end then transient recovery info after retries', () => {
@@ -1243,7 +1333,7 @@ describe('PiEventAdapter', () => {
       } as any));
 
       expect(events).toEqual([
-        { type: 'retry', phase: 'end' },
+        { type: 'retry', phase: 'end', recovered: true, attempt: 2 },
         { type: 'info', message: 'Recovered after 2 retries' },
       ]);
     });
@@ -1374,6 +1464,8 @@ describe('PiEventAdapter', () => {
         type: 'retry',
         phase: 'backoff',
         message: 'Service Error. Retrying in 2s (attempt 1/4)...',
+        attempt: 1,
+        nextRetryInMs: 2_000,
       }]);
       expect(adapter.shouldCompleteQueue(false)).toBe(false);
 
@@ -1387,7 +1479,7 @@ describe('PiEventAdapter', () => {
       expect(text).toMatchObject([{ type: 'text_complete', text: 'Recovered answer' }]);
       const recovered = collect(adapter.adaptEvent({ type: 'auto_retry_end', success: true, attempt: 1 } as any));
       expect(recovered).toEqual([
-        { type: 'retry', phase: 'end' },
+        { type: 'retry', phase: 'end', recovered: true, attempt: 1 },
         { type: 'info', message: 'Recovered after 1 retry' },
       ]);
 
@@ -1412,6 +1504,8 @@ describe('PiEventAdapter', () => {
       } as any));
       expect(backoff).toEqual([{
         type: 'retry', phase: 'backoff', message: 'AI Service Unreachable. Retrying in 2s (attempt 1/1)...',
+        attempt: 1,
+        nextRetryInMs: 2_000,
       }]);
       expect(collect(adapter.adaptEvent({ type: 'agent_start' } as any))).toEqual([
         { type: 'retry', phase: 'active' },
@@ -1468,6 +1562,8 @@ describe('PiEventAdapter', () => {
         type: 'auto_retry_start', attempt: 1, maxAttempts: 4, delayMs: 2_000, errorMessage: 'fetch failed',
       } as any))).toEqual([{
         type: 'retry', phase: 'backoff', message: 'AI Service Unreachable. Retrying in 2s (attempt 1/4)...',
+        attempt: 1,
+        nextRetryInMs: 2_000,
       }]);
 
       // session.abort() during the backoff → abortRetry() → "Retry cancelled"; no agent_end follows.
@@ -1531,6 +1627,8 @@ describe('PiEventAdapter', () => {
           type: 'auto_retry_start', attempt: 1, maxAttempts: 4, delayMs: 8_000, errorMessage: 'fetch failed',
         } as any))).toEqual([{
           type: 'retry', phase: 'backoff', message: 'AI Service Unreachable. Retrying in 8s (attempt 1/4)...',
+          attempt: 1,
+          nextRetryInMs: 8_000,
         }]);
 
         // Announced backoff (8 s) + grace (15 s) not yet elapsed: still holding.
@@ -1912,6 +2010,17 @@ describe('PiEventAdapter', () => {
   // so the UI (Telegram ❌) reported final failure while the SDK was still
   // retrying and the retried answer then arrived anyway.
   //
+  it('emits steer_injected when a spliced user message starts (drain moment)', () => {
+    const events = collect(adapter.adaptEvent({
+      type: 'message_start',
+      message: { role: 'user', id: 'u-steer', content: [{ type: 'text', text: '还有你' }] },
+    } as any));
+    expect(events.find((e: any) => e.type === 'steer_injected')).toMatchObject({ messageId: 'u-steer' });
+    // assistant message_start is unaffected (no steer_injected)
+    const a = collect(adapter.adaptEvent({ type: 'message_start', message: { role: 'assistant', id: 'a1' } } as any));
+    expect(a.find((e: any) => e.type === 'steer_injected')).toBeUndefined();
+  });
+
   // Fix: defer retryable errors until the terminal agent_end (willRetry: false
   // or absent) and report exactly once. User aborts (stopReason 'aborted') are
   // never deferred or recovered. See plans/termination-progress-fix.md step 1.

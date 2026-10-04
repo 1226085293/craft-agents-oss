@@ -5,7 +5,7 @@
  * Pure functions that return new state - no side effects.
  */
 
-import type { SessionState, StreamingState, TextDeltaEvent, TextCompleteEvent, TextDemoteEvent, TextDiscardEvent } from '../types'
+import type { SessionState, StreamingState, TextDeltaEvent, TextCompleteEvent, TextDemoteEvent, TextPromoteEvent, TextDiscardEvent } from '../types'
 import type { Message } from '../../../shared/types'
 import {
   findStreamingMessage,
@@ -50,6 +50,42 @@ export function handleTextDemote(state: SessionState, event: TextDemoteEvent): S
   return {
     session: { ...state.session, messages },
     streaming: state.streaming?.turnId === event.turnId ? null : state.streaming,
+  }
+}
+
+/**
+ * Handle text_promote - re-promote a demoted main reply back to a result
+ * bubble (2026-10-07 wise-horizon / slim-badger, in-app live counterpart of
+ * the SessionManager persistence flip).
+ *
+ * When a mid-turn user steer was queued, the MAIN reply completed as a
+ * process-card line (text_complete with isIntermediate under the
+ * queued-follow-up hold). The drain's terminal stop releases the hold and
+ * the main process emits text_promote (turnId + text of the demoted reply)
+ * AND flips the persisted record. Without this handler the live display
+ * keeps the demoted line in the process card, so the user sees only the
+ * drain's answer as a result bubble until a reload. Flipping it back here
+ * makes the live view agree with the persisted one: two result bubbles
+ * (the original answer + the steer's answer).
+ */
+export function handleTextPromote(state: SessionState, event: TextPromoteEvent): SessionState {
+  let index = -1
+  for (let i = state.session.messages.length - 1; i >= 0; i--) {
+    const m = state.session.messages[i]
+    if (m.role === 'assistant' && m.turnId === event.turnId && m.isIntermediate === true) {
+      index = i
+      break
+    }
+  }
+  // No matching demoted record (duplicate/late event, or the reply was
+  // never demoted live) - no-op, keep state reference unchanged.
+  if (index === -1) return state
+  const messages = state.session.messages.map((m, i) =>
+    i === index ? { ...m, isIntermediate: false } : m
+  )
+  return {
+    session: { ...state.session, messages },
+    streaming: state.streaming,
   }
 }
 
@@ -159,6 +195,9 @@ export function handleTextComplete(
       // Overwrite text_delta's Date.now() with main process monotonic timestamp
       // This ensures reload order matches live order
       ...(event.timestamp ? { timestamp: event.timestamp } : {}),
+      // Streaming start time (first text_delta) — the process card orders rows
+      // by when each block first became visible
+      ...(event.startedAt ? { startedAt: event.startedAt } : {}),
     }, shouldUpdateTimestamp)
     return { session: updatedSession, streaming: null }
   }
@@ -171,6 +210,7 @@ export function handleTextComplete(
     role: 'assistant',
     content: event.text || streaming?.content || '',
     timestamp: event.timestamp ?? Date.now(),
+    startedAt: event.startedAt,
     isStreaming: false,
     isPending: false,
     isIntermediate: event.isIntermediate,

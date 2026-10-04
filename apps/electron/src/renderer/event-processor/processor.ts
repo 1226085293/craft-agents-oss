@@ -13,7 +13,7 @@
  */
 
 import type { SessionState, AgentEvent, ProcessResult } from './types'
-import { handleTextDelta, handleTextComplete, handleTextDemote, handleTextDiscard } from './handlers/text'
+import { handleTextDelta, handleTextComplete, handleTextDemote, handleTextPromote, handleTextDiscard } from './handlers/text'
 import { handleToolStart, handleToolResult, handleTaskBackgrounded, handleShellBackgrounded, handleTaskProgress, handleTaskCompleted } from './handlers/tool'
 import {
   handleComplete,
@@ -52,6 +52,7 @@ import {
   handleAuthRequest,
   handleAuthCompleted,
   handleUsageUpdate,
+  handleSystemStopNotice,
 } from './handlers/session'
 
 /**
@@ -74,6 +75,9 @@ export function processEvent(
 
     case 'text_demote':
       return { state: handleTextDemote(state, event), effects: [] }
+
+    case 'text_promote':
+      return { state: handleTextPromote(state, event), effects: [] }
 
     case 'retry':
       return handleRetry(state, event)
@@ -137,6 +141,9 @@ export function processEvent(
 
     case 'info':
       return handleInfo(state, event)
+
+    case 'system_stop_notice':
+      return handleSystemStopNotice(state, event)
 
     case 'interrupted':
       return handleInterrupted(state, event)
@@ -238,11 +245,6 @@ export function processEvent(
 
     case 'auth_completed':
       return handleAuthCompleted(state, event)
-
-    case 'source_activated':
-      // Server-side handles the auto-retry now (craft-agents-oss#804); the renderer
-      // just receives the event for UI feedback. See SessionManager.processEvent.
-      return { state, effects: [] }
 
     case 'usage_update':
       return handleUsageUpdate(state, event)

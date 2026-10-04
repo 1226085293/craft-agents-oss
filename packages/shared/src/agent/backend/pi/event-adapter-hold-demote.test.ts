@@ -84,15 +84,17 @@ describe('PiEventAdapter — draft demotion at hold-open points (2026-10-02)', (
     expect(endEvents.find((e) => e.type === 'complete')).toBeUndefined();
   });
 
-  it('queued-followUp hold demotes the draft reply', () => {
-    const draftTurn = emitDraft(adapter);
+  it('queued-followUp hold keeps the main reply a bubble and releases the one-final gate (plain-jade)', () => {
+    emitDraft(adapter);
     const endEvents = collect(adapter.adaptEvent({
       type: 'agent_end',
       queuedFollowUpPending: true,
     } as any));
-    const demote = endEvents.find((e) => e.type === 'text_demote');
-    expect(demote).toBeDefined();
-    expect(demote.turnId).toBe(draftTurn);
+    // 2026-10-07 plain-jade: a PURE queued steer no longer demotes the main
+    // reply — it stays a result bubble shown the moment it completed; the
+    // drain round's own reply claims the released one-final gate. (Defense/
+    // verification holds above still demote — fleet-mist behavior.)
+    expect(endEvents.find((e) => e.type === 'text_demote')).toBeUndefined();
     expect(endEvents.find((e) => e.type === 'complete')).toBeUndefined();
   });
 

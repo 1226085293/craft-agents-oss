@@ -80,4 +80,54 @@ describe('handleTextComplete messageId synchronization', () => {
     expect(id.startsWith('msg-')).toBe(true)
     expect(id).not.toBe('')
   })
+
+  it('passes startedAt (streaming start time) through to the message', () => {
+    const state = makeState([
+      {
+        id: 'msg-local-temp-2',
+        role: 'assistant',
+        content: 'partial',
+        isStreaming: true,
+        isPending: true,
+        turnId: 'turn-2',
+        timestamp: 100,
+      },
+    ])
+
+    const event: TextCompleteEvent = {
+      type: 'text_complete',
+      sessionId: 'session-1',
+      text: 'thinking block',
+      turnId: 'turn-2',
+      messageId: 'msg-main-2',
+      timestamp: 300, // completion time
+      startedAt: 150, // first text_delta — when the block became visible
+      isIntermediate: true,
+    }
+
+    const next = handleTextComplete(state, event)
+    const msg = next.session.messages[0] as any
+
+    expect(msg.startedAt).toBe(150)
+    expect(msg.timestamp).toBe(300) // completion time unchanged
+  })
+
+  it('omits startedAt from created messages when the event carries none', () => {
+    const state = makeState([])
+
+    const event: TextCompleteEvent = {
+      type: 'text_complete',
+      sessionId: 'session-1',
+      text: 'instant reply',
+      turnId: 'turn-3',
+      messageId: 'msg-main-3',
+      timestamp: 500,
+    }
+
+    const next = handleTextComplete(state, event)
+    const msg = next.session.messages[0] as any
+
+    expect(msg.startedAt ?? undefined).toBeUndefined()
+    expect(msg.timestamp).toBe(500)
+  })
 })

@@ -119,6 +119,8 @@ interface RenderState {
    * the agent's message instead of stranding the user on "thinking…".
    */
   lastAssistantText: string
+  /** The verifier approved a candidate and its replay text_complete is pending. */
+  verifiedReplayPending: boolean
   /** Progress: id of the single evolving message for this run (null before first activity). */
   progressMessageId: string | null
   /** Progress: last status label written to the bubble, to avoid redundant edits. */
@@ -238,6 +240,7 @@ export class Renderer {
         currentEditIntervalMs: DEFAULT_EDIT_INTERVAL_MS,
         finalBuffer: '',
         lastAssistantText: '',
+        verifiedReplayPending: false,
         progressMessageId: null,
         progressStatus: null,
         progressTimer: null,
@@ -279,6 +282,14 @@ export class Renderer {
     // disagree about it.
     if (event.type === 'interrupted') {
       await this.handleInterruption(event, binding, adapter)
+      return
+    }
+    // A system guardrail (busy-limit cap / no-progress streak) killed the turn.
+    // Unlike a user interruption, the user needs to KNOW why the session went
+    // quiet — post a standalone notice on every bound channel (mode-agnostic,
+    // same as errors).
+    if (event.type === 'system_stop_notice') {
+      await this.handleSystemStopNotice(event, binding, adapter)
       return
     }
     // A new turn is starting: clear the previous run's abort marker so this
@@ -557,8 +568,14 @@ export class Renderer {
         const text = typeof event.text === 'string' ? event.text : ''
         if (text.trim()) {
           if (!isIntermediate) {
-            // Last assistant text of the run — keep it for the final edit.
-            state.finalBuffer = appendFinal(state.finalBuffer, text)
+            // The verifier-approved replay is already in finalBuffer from its
+            // verification_passed event; consume this event without appending it.
+            if (state.verifiedReplayPending) {
+              state.verifiedReplayPending = false
+            } else {
+              // Last assistant text of the run — keep it for the final edit.
+              state.finalBuffer = appendFinal(state.finalBuffer, text)
+            }
           }
           // Always remember the latest assistant text so `complete` can fall
           // back to it if the run never produces a non-intermediate final.
@@ -567,6 +584,39 @@ export class Renderer {
         // Intermediate text is dropped from the bubble. Make sure it exists and shows
         // thinking status so the user knows the run is alive.
         await this.ensureProgressBubble(state, binding, adapter, THINKING_LABEL)
+        return
+      }
+
+      case 'text_demote': {
+        // The draft is no longer deliverable. Clear it so a failed verdict
+        // cannot leak it as the fallback while the continuation is running.
+        state.finalBuffer = ''
+        state.lastAssistantText = ''
+        return
+      }
+
+      case 'text_promote': {
+        // Queued-follow-up re-promotion (2026-10-07 wise-horizon): the
+        // demoted main reply is re-attached ahead of whatever result buffer
+        // has accumulated (the drained steer's answer, if any). Guard
+        // against double-attachment on a duplicate event.
+        const promoted = (typeof event.text === 'string' ? event.text : '').trim()
+        if (promoted.length > 0 && !state.finalBuffer.includes(promoted)) {
+          state.finalBuffer = state.finalBuffer.trim().length > 0
+            ? `${promoted}\n\n${state.finalBuffer.trim()}`
+            : promoted
+        }
+        return
+      }
+
+      case 'info': {
+        if (event.statusType === 'verification_passed' && typeof event.finalText === 'string') {
+          // The server-side verifier returns the exact candidate it approved.
+          // Replace, rather than append to, any text accumulated before demotion.
+          state.finalBuffer = event.finalText.trim()
+          state.lastAssistantText = event.finalText.trim()
+          state.verifiedReplayPending = true
+        }
         return
       }
 
@@ -590,11 +640,9 @@ export class Renderer {
       }
 
       case 'complete': {
-        // Prefer the clean non-intermediate final; fall back to the last
-        // assistant text so a tool-terminated run still delivers a message
-        // instead of freezing the bubble on "thinking…".
-        // An aborted run has no result, so it sends nothing at all — the
-        // fallback text is unfinished commentary, not an answer.
+        // Only a clean non-intermediate final is a result. An aborted or
+        // tool-terminated run without one has no result; never deliver its
+        // unfinished intermediate commentary as an answer.
         const finalText = state.aborted
           ? ''
           : (state.finalBuffer.trim() || state.lastAssistantText.trim())
@@ -1084,10 +1132,55 @@ Approve in the desktop app to continue.`,
     state.processing = false
     state.finalBuffer = ''
     state.lastAssistantText = ''
+    state.verifiedReplayPending = false
     state.progressMessageId = null
     state.progressStatus = null
     state.progressSendPromise = null
     state.aborted = false
+  }
+
+  /**
+   * A guardrail in the agent host stopped the turn on its own (e.g. the
+   * busy-limit tool-call cap or a no-progress repeat streak). The user never
+   * pressed stop, so silence on the channel would read as a dead session:
+   * retract the transient bubble, mark the run aborted so the trailing
+   * `complete` delivers no stale text, and post the reason with a
+   * "reply continue" hint.
+   */
+  private async handleSystemStopNotice(
+    event: SessionEvent,
+    binding: ChannelBinding,
+    adapter: PlatformAdapter,
+  ): Promise<void> {
+    const state = this.getState(binding.id)
+    this.hydrateProgressBubbleFromDisk(state, binding, event)
+    const reason = typeof event.reason === 'string' ? event.reason : 'system'
+    const message = typeof event.message === 'string' ? event.message : 'Turn stopped by the system.'
+
+    state.aborted = true
+    state.processing = false
+    this.cancelEditTimer(state)
+    this.cancelPendingProgressBubble(state)
+    if (state.streamingMessageId && adapter.capabilities.messageEditing) {
+      await this.tryDeleteMessage(adapter, binding, state.streamingMessageId)
+      state.streamingMessageId = null
+    }
+    state.textBuffer = ''
+
+    await this.waitForProgressBubbleSend(state)
+    const progressMessageId = state.progressMessageId
+    if (progressMessageId) {
+      await this.tryDeleteMessage(adapter, binding, progressMessageId)
+      this.clearPersistedProgressMessage(binding)
+    }
+
+    const text = `⚠️ Agent stopped this turn by itself (${reason}): ${message}\nReply "continue" to pick up where it left off.`
+    try {
+      await adapter.sendText(binding.channelId, text, bindingOpts(binding))
+    } catch {
+      // Delivery failure must not corrupt per-run state; the desktop UI
+      // still shows the stop notice independently.
+    }
   }
 
   /**

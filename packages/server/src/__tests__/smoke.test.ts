@@ -10,6 +10,8 @@
 
 import { describe, it, expect, afterEach } from 'bun:test'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { rmSync } from 'node:fs'
 import type { Subprocess } from 'bun'
 import WebSocket from 'ws'
 
@@ -28,11 +30,17 @@ interface SpawnedServer {
 async function spawnTestServer(extraEnv?: Record<string, string>): Promise<SpawnedServer> {
   const token = crypto.randomUUID() + crypto.randomUUID() // 72 chars, well above 16 minimum
   const { CLAUDECODE: _, ...parentEnv } = process.env
-
+  // Isolate the config dir: the server refuses to start while another
+  // instance holds the global lock (~/.craft-agent/.server.lock) — with the
+  // user's app running (the dev case), a shared config dir would make every
+  // spawned server exit before printing CRAFT_SERVER_URL. A fresh per-run
+  // dir gets its own lock and skips the session/config load of the live app.
+  const configDir = join(tmpdir(), `craft-server-smoke-${crypto.randomUUID()}`)
   const proc = Bun.spawn(['bun', 'run', SERVER_ENTRY], {
     env: {
       ...parentEnv,
       ...extraEnv,
+      CRAFT_CONFIG_DIR: configDir,
       CRAFT_SERVER_TOKEN: token,
       CRAFT_RPC_PORT: '0',
       CRAFT_RPC_HOST: '127.0.0.1',
@@ -41,6 +49,9 @@ async function spawnTestServer(extraEnv?: Record<string, string>): Promise<Spawn
     stdout: 'pipe',
     stderr: 'pipe',
   })
+  const cleanup = () => {
+    try { rmSync(configDir, { recursive: true, force: true }) } catch { /* ignore */ }
+  }
 
   return new Promise<SpawnedServer>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -68,6 +79,7 @@ async function spawnTestServer(extraEnv?: Record<string, string>): Promise<Spawn
             stop: async () => {
               proc.kill('SIGTERM')
               await proc.exited
+              cleanup()
             },
           })
           return
@@ -89,6 +101,7 @@ async function spawnTestServer(extraEnv?: Record<string, string>): Promise<Spawn
         // Stream closed
       }
       clearTimeout(timer)
+      cleanup()
       if (!url) {
         reject(new Error('Server exited before printing CRAFT_SERVER_URL'))
       }
@@ -167,6 +180,15 @@ describe('headless server smoke test', () => {
   }, TEST_TIMEOUT)
 
   it('shuts down cleanly on SIGTERM', async () => {
+    // POSIX-only semantics: proc.kill('SIGTERM') and a 0 exit code only hold
+    // on Unix. On Windows, child processes cannot be terminated with a POSIX
+    // signal (kill() falls back to TerminateProcess → non-zero exit), so the
+    // clean-shutdown path is not observable there — skip rather than flake.
+    if (process.platform === 'win32') {
+      // No POSIX signal semantics on Windows — early-return so the test is a
+      // no-op there (it still "passes" without asserting signal behavior).
+      return
+    }
     server = await spawnTestServer()
     const ws = await connectWs(server.url, server.token)
 

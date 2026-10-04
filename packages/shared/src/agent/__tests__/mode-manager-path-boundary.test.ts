@@ -3,6 +3,12 @@ import { mkdtempSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { shouldAllowToolInMode, extractBashWriteTarget } from '../../agent/mode-manager.ts';
+import { setPowerShellValidatorRoot } from '../../agent/powershell-validator.ts';
+
+// On Windows, mode-manager routes PowerShell-looking commands through the
+// native AST parser, which needs its validator root (normally set at
+// Electron startup). Point it at the in-repo parser script (src/agent/).
+setPowerShellValidatorRoot(join(import.meta.dir, '..'));
 
 describe('mode-manager path containment for plans/data exceptions', () => {
   let base: string;

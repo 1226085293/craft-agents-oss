@@ -161,7 +161,11 @@ describe('chunked transfer handlers', () => {
   })
 
   it('refreshes TTL as chunks arrive so slow healthy uploads survive', async () => {
-    process.env.CRAFT_TRANSFER_TTL_MS = '40'
+    // The TTL must comfortably exceed the two 25ms waits below; under CI/dev
+    // load the waits stretch, and a 40ms TTL expiring mid-test would evict
+    // the transfer and fail the commit for a scheduling reason, not the bug
+    // this test targets (TTL not refreshed on chunk arrival).
+    process.env.CRAFT_TRANSFER_TTL_MS = '400'
 
     const { start, chunk, commit } = createHarness()
     const payload = encodeParts({ hello: 'world', slow: true }, 8)

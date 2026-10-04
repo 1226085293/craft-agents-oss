@@ -7,7 +7,14 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { preprocessLinks, detectLinks, isPlaceholderUrl, isFilePathTarget } from '../linkify'
+import { fromMarkdown } from 'mdast-util-from-markdown'
+import {
+  preprocessLinks,
+  detectLinks,
+  isPlaceholderUrl,
+  isFilePathTarget,
+  protectWindowsBackslashLinks,
+} from '../linkify'
 
 // ============================================================================
 // preprocessLinks — existing markdown links should NOT be corrupted
@@ -246,6 +253,58 @@ describe('detectLinks', () => {
     expect(links[0]).toBeDefined()
     expect(links[0]!.type).toBe('file')
     expect(links[0]!.url).toBe('../README.md')
+  })
+})
+
+// ============================================================================
+// protectWindowsBackslashLinks — keep Windows drive paths intact through
+// CommonMark parsing (\\. would otherwise be eaten as an escape sequence)
+// ============================================================================
+
+describe('protectWindowsBackslashLinks', () => {
+  it('doubles backslashes in single-backslash drive-path link targets', () => {
+    const input = '[t](C:\\Users\\12260\\.craft-agent\\a.md)'
+    expect(protectWindowsBackslashLinks(input)).toBe(
+      '[t](C:\\\\Users\\\\12260\\\\.craft-agent\\\\a.md)'
+    )
+  })
+
+  it('leaves already-doubled backslash targets alone', () => {
+    const input = '[t](C:\\\\Users\\\\a\\\\b.md)'
+    expect(protectWindowsBackslashLinks(input)).toBe(input)
+  })
+
+  it('leaves forward-slash, non-drive and relative targets alone', () => {
+    expect(protectWindowsBackslashLinks('[t](C:/Users/a/b.md)')).toBe('[t](C:/Users/a/b.md)')
+    expect(protectWindowsBackslashLinks('[t](https://example.com/a)')).toBe('[t](https://example.com/a)')
+    expect(protectWindowsBackslashLinks('[t](./rel.md)')).toBe('[t](./rel.md)')
+    expect(protectWindowsBackslashLinks('[t](/abs/path.md)')).toBe('[t](/abs/path.md)')
+  })
+
+  it('skips links inside code blocks', () => {
+    const input = '```\n[t](C:\\Users\\a\\.b.md)\n```'
+    expect(protectWindowsBackslashLinks(input)).toBe(input)
+    const inline = 'text `[t](C:\\Users\\a\\.b.md)` more'
+    expect(protectWindowsBackslashLinks(inline)).toBe(inline)
+  })
+
+  it('keeps the exact original path when CommonMark parses the protected link', () => {
+    const input = '[t](C:\\Users\\12260\\.craft-agent\\workspaces\\a.md)'
+    const protectedText = protectWindowsBackslashLinks(input)
+    const url = fromMarkdown(protectedText).children[0].children[0].url
+    expect(url).toBe('C:\\Users\\12260\\.craft-agent\\workspaces\\a.md')
+  })
+
+  it('integration: preprocessLinks output survives parsing with intact drive path', () => {
+    const input =
+      '文件位置： [memory-system-anti-bloat-plan.md](C:\\Users\\12260\\.craft-agent\\workspaces\\my-workspace\\sessions\\261008-vital-halo\\plans\\memory-system-anti-bloat-plan.md)'
+    const processed = preprocessLinks(input)
+    const paragraph = fromMarkdown(processed).children[0] as any
+    const link = paragraph.children.find((c: any) => c.type === 'link')
+    const url = link?.url
+    expect(url).toBe(
+      'C:\\Users\\12260\\.craft-agent\\workspaces\\my-workspace\\sessions\\261008-vital-halo\\plans\\memory-system-anti-bloat-plan.md'
+    )
   })
 })
 

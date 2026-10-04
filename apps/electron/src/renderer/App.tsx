@@ -1320,6 +1320,13 @@ export default function App() {
       // for the queued badge (#616 follow-up — covers Pi steer path which
       // returns status 'accepted', not 'queued').
       const sendingMidStream = store.get(sessionAtomFamily(sessionId))?.isProcessing === true
+      // Desktop busy-send default: QUEUE. The message waits for the current
+      // turn to finish and replays as the next turn; the "Guide" button on
+      // the queued bubble (guideQueuedMessage → steer) is the explicit
+      // real-time path, and messaging-channel sends keep the connection
+      // default (steer). (2026-10-06: an earlier steer-default was rolled
+      // back — desktop users expect the queue badge on mid-stream sends; the
+      // real-time steer concern is covered by redirect() immediate retry.)
       const midStreamBehavior = sendingMidStream
         ? (sendOptions?.midStreamBehavior ?? 'queue')
         : sendOptions?.midStreamBehavior

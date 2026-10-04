@@ -231,11 +231,48 @@ function stripPlaceholderLinks(text: string): string {
 }
 
 /**
+ * Backslash sequences CommonMark eats inside link destinations.
+ * `\.` is treated as an escape (`.` is ASCII punctuation), while `\U`,
+ * `\1`, `\w`… (non-punctuation) survive. Corrupted path after parsing:
+ * `C:\Users\me\.config\a.md` → `C:\Users\me.config\a.md`.
+ */
+const WINDOWS_BACKSLASH_LINK_TARGET_REGEX = /(\[[^\]\n]*\]\(\s*)([A-Za-z]:\\(?![\\])[^()\s)]*)(\s*\))/g
+
+/**
+ * Protect single-backslash Windows drive paths inside explicit markdown link
+ * destinations (e.g. `[file](C:\Users\me\.config\a.md)`) from CommonMark
+ * escape processing.
+ *
+ * Doubling the backslashes before parsing (`C:\\Users\\me\\.config\\a.md`)
+ * makes the parser restore the exact original path (`\\` → `\`), so the link
+ * target still resolves to a real on-disk path instead of a corrupted one.
+ *
+ * Only single-backslash drive paths are touched: destinations already written
+ * with doubled backslashes are left alone, and code blocks are skipped.
+ */
+export function protectWindowsBackslashLinks(text: string): string {
+  const codeRanges = findCodeRanges(text)
+  return text.replace(
+    WINDOWS_BACKSLASH_LINK_TARGET_REGEX,
+    (fullMatch: string, pre: string, target: string, post: string, offset: number) => {
+      if (isInsideCode(offset, codeRanges)) return fullMatch
+      return pre + target.replace(/\\/g, '\\\\') + post
+    }
+  )
+}
+
+/**
  * Preprocess text to convert raw URLs and file paths into markdown links
  * Skips code blocks and already-linked content
  */
 export function preprocessLinks(text: string): string {
-  // First pass: strip markdown links with placeholder/fabricated URLs
+  // First pass: protect Windows backslash paths in explicit links — CommonMark
+  // escapes `\.` inside link destinations, corrupting single-backslash drive
+  // paths (e.g. `\.craft-agent` → `.craft-agent`) before the click handler
+  // ever sees them.
+  text = protectWindowsBackslashLinks(text)
+
+  // Second pass: strip markdown links with placeholder/fabricated URLs
   // (e.g., AI-generated `[commit](https://github.com/...)` → `\`commit\``)
   text = stripPlaceholderLinks(text)
 

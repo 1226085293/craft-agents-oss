@@ -32,9 +32,12 @@ describe('system prompt guidance', () => {
 
   it('does not mention Grep in call_llm tool-dependency guidance', () => {
     const prompt = getSystemPrompt(undefined, undefined, '/tmp/workspace', '/tmp/workspace')
-
-    expect(prompt).toContain('The subtask needs file/shell tools (for example, Read or Bash)')
-    expect(prompt).not.toContain('The subtask needs tools (Read, Bash, Grep)')
+    // Case-insensitive: the wording lives mid-sentence ("...; the subtask
+    // needs file/shell tools..."), and the regression this guards is a
+    // mention of Grep in the dependency list, not casing.
+    const lower = prompt.toLowerCase()
+    expect(lower).toContain('the subtask needs file/shell tools (for example, read or bash)')
+    expect(lower).not.toContain('the subtask needs tools (read, bash, grep)')
   })
 })
 

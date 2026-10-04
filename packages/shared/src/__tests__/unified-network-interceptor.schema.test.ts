@@ -149,7 +149,9 @@ describe('upgradePromptCacheTtl', () => {
   function enableExtendedCache() {
     const dir = join(homedir(), '.craft-agent');
     mkdirSync(dir, { recursive: true });
-    const existing = originalConfig ? JSON.parse(originalConfig) : {};
+    // The user config may carry a UTF-8 BOM (Windows-written file) — JSON.parse
+    // rejects it, so strip it before re-serializing.
+    const existing = originalConfig ? JSON.parse(originalConfig.replace(/^\uFEFF/, '')) : {};
     writeFileSync(configFile, JSON.stringify({ ...existing, extendedPromptCache: true }));
     _resetConfigCacheForTesting();
   }
@@ -157,7 +159,7 @@ describe('upgradePromptCacheTtl', () => {
   function disableExtendedCache() {
     const dir = join(homedir(), '.craft-agent');
     mkdirSync(dir, { recursive: true });
-    const existing = originalConfig ? JSON.parse(originalConfig) : {};
+    const existing = originalConfig ? JSON.parse(originalConfig.replace(/^\uFEFF/, '')) : {};
     writeFileSync(configFile, JSON.stringify({ ...existing, extendedPromptCache: false }));
     _resetConfigCacheForTesting();
   }

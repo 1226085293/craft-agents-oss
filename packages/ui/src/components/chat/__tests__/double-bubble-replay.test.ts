@@ -7,13 +7,10 @@
  * the promotion logic promoted 314 into Turn A's visible reply while 315
  * became Turn B's reply → two response bubbles for one turn.
  *
- * Fix contract (turn-utils groupMessagesByTurn pre-scan):
- *  - If a same-turnId NON-intermediate, landed, non-blank final exists,
- *    the demoted intermediate is NEVER promoted — the replay takes over
- *    as the only response.
- *  - If the replay never lands (verification failed without re-delivery),
- *    the demoted intermediate is still promoted as the fallback reply —
- *    original behavior preserved.
+ * Fix contract:
+ *  - Only a landed non-intermediate assistant message is a response bubble.
+ *  - Demoted/intermediate commentary is never promoted when a replay is absent;
+ *    a failed/aborted run must not invent a result.
  */
 import { describe, it, expect } from 'bun:test'
 import { groupMessagesByTurn, type AssistantTurn } from '../turn-utils'
@@ -46,11 +43,8 @@ describe('double-bubble: demoted intermediate + same-turnId replay', () => {
 
     expect(bubbles).toHaveLength(1)
     expect(bubbles[0]?.response?.text).toBe(REPLAY_TEXT)
-    // The demoted intermediate must NOT have been promoted
-    const promoted = turns.some(
-      (t) => t.type === 'assistant' && (t as AssistantTurn).activities.some(a => a.promotedToResponse),
-    )
-    expect(promoted).toBe(false)
+    // The first turn only contains demoted commentary; the replay is the sole response.
+    expect((turns.find(t => t.type === 'assistant') as AssistantTurn).response).toBeUndefined()
   })
 
   it('flushing via a compaction status message also yields ONE bubble', () => {
@@ -69,7 +63,7 @@ describe('double-bubble: demoted intermediate + same-turnId replay', () => {
     expect(bubbles[0]?.response?.text).toBe(REPLAY_TEXT)
   })
 
-  it('falls back to promoting the demoted intermediate when the replay never lands', () => {
+  it('does not promote demoted intermediate when the replay never lands', () => {
     const messages: Message[] = [
       { id: 'u1', role: 'user', content: 'do the task', timestamp: base },
       { id: 'a-314', role: 'assistant', content: DEMOTED_TEXT, timestamp: base + 100, isIntermediate: true, turnId: TURN },
@@ -80,11 +74,11 @@ describe('double-bubble: demoted intermediate + same-turnId replay', () => {
     const turns = groupMessagesByTurn(messages, { isSessionProcessing: false })
     const bubbles = responseBubbles(turns)
 
-    expect(bubbles).toHaveLength(1)
-    expect(bubbles[0]?.response?.text).toBe(DEMOTED_TEXT)
+    expect(bubbles).toHaveLength(0)
+    expect(turns.some(t => t.type === 'assistant' && (t as AssistantTurn).activities.some(a => a.type === 'intermediate'))).toBe(true)
   })
 
-  it('a BLANK replay does not suppress the fallback promotion', () => {
+  it('a BLANK replay still produces no response bubble', () => {
     const messages: Message[] = [
       { id: 'u1', role: 'user', content: 'do the task', timestamp: base },
       { id: 'a-314', role: 'assistant', content: DEMOTED_TEXT, timestamp: base + 100, isIntermediate: true, turnId: TURN },
@@ -96,8 +90,7 @@ describe('double-bubble: demoted intermediate + same-turnId replay', () => {
     const turns = groupMessagesByTurn(messages, { isSessionProcessing: false })
     const bubbles = responseBubbles(turns)
 
-    // Blank final surfaces as no bubble; the demoted intermediate promotes
-    expect(bubbles).toHaveLength(1)
-    expect(bubbles[0]?.response?.text).toBe(DEMOTED_TEXT)
+    // Blank final and prior commentary are not final results.
+    expect(bubbles).toHaveLength(0)
   })
 })

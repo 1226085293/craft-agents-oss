@@ -7,6 +7,7 @@
  */
 
 import { describe, test, expect } from 'bun:test'
+import { join } from 'node:path'
 import { createPagesScriptExecutor } from '../script-executor-bridge'
 import type { ScriptAction, ScriptActionResult } from '@craft-agent/shared/automations'
 import type { Logger } from '@craft-agent/server-core/runtime'
@@ -57,10 +58,14 @@ describe('createPagesScriptExecutor', () => {
     const { executor, seen } = makeExecutor({ exitCode: 0 })
     await executor({ pageSlug: 'dash', script: 'pages/dash/run.sh' }, { signal })
     const env = seen[0].ctx.env
+    const pageDir = join('/tmp/ws', 'pages', 'dash')
     expect(env.CRAFT_WORKSPACE_PATH).toBe('/tmp/ws')
     expect(env.CRAFT_PAGE_SLUG).toBe('dash')
-    expect(env.CRAFT_PAGE_DIR).toBe('/tmp/ws/pages/dash')
-    expect(env.CRAFT_PAGE_DATA_DIR).toBe('/tmp/ws/pages/dash/data')
+    // Platform-agnostic: the implementation builds paths with the native
+    // path.join, so the expectation must use the same join (forward slashes
+    // on Unix, backslashes on Windows).
+    expect(env.CRAFT_PAGE_DIR).toBe(pageDir)
+    expect(env.CRAFT_PAGE_DATA_DIR).toBe(join(pageDir, 'data'))
     // never leaks non-CRAFT secrets
     expect(env.ANTHROPIC_API_KEY).toBeUndefined()
   })

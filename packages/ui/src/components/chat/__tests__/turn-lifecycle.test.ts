@@ -315,13 +315,11 @@ describe('turn lifecycle scenarios', () => {
     })
   })
 
-  // Mirrors the messaging-gateway/renderer.ts lastAssistantText fallback (PR #779).
-  // When the Pi agent emits intermediate text + a tool call and then completes
-  // without a non-intermediate text_complete, the chat must not sit on "Thinking…"
-  // forever. The session.isProcessing=false signal triggers the existing
-  // "promote last intermediate text to response" branch in groupMessagesByTurn.
+  // A terminal session event must close the process card, but it cannot turn
+  // intermediate commentary into a final result. Only a landed non-intermediate
+  // assistant message is eligible to render as a response bubble.
   describe('tool-terminated run — session-complete fallback', () => {
-    it('intermediate text + completed tool + session done → phase complete, intermediate promoted to response', () => {
+    it('intermediate text + completed tool + session done → complete process card, no response without a final', () => {
       resetCounters()
       turnIdCounter++
 
@@ -333,7 +331,8 @@ describe('turn lifecycle scenarios', () => {
       const turns = groupMessagesByTurn(messages, { isSessionProcessing: false })
       const turn = getLastAssistantTurn(turns)!
       expect(deriveTurnPhase(turn)).toBe('complete')
-      expect(turn.response?.text).toBe('Response text') // promoted from the intermediate
+      expect(turn.response).toBeUndefined()
+      expect(turn.activities.some(activity => activity.type === 'intermediate')).toBe(true)
     })
 
     it('intermediate text + completed tool + session still processing → phase awaiting', () => {
@@ -685,15 +684,9 @@ it('renders queued user messages after the active assistant process block', () =
 // ============================================================================
 
 /**
- * A run that never produced a real final reply is normally rescued by the
- * "promote the last intermediate text to a response" branch, so the chat is
- * not left on "Thinking…" forever (see the session-complete fallback block
- * above). That rescue is wrong when the run had no result at all:
- *
- *  - the user hit Stop, or redirected mid-stream → the turn was abandoned
- *  - the run errored or warned → the failure is the outcome
- *
- * Both must keep the trailing commentary as a process step only.
+ * Intermediate commentary is not a result. If a turn is stopped, aborted,
+ * or errors before a non-intermediate final message lands, it must remain a
+ * process step and never render as a response bubble.
  */
 describe('interrupted and failed runs produce no response', () => {
   /** Builds "user → intermediate commentary → <terminator>" for one turn. */
@@ -777,10 +770,23 @@ describe('interrupted and failed runs produce no response', () => {
     expect(turn.response).toBeUndefined()
   })
 
-  it('aborted flag does not leak into the next turn', () => {
-    // turnAborted is per-turn state: a normal tool-terminated run after an
-    // aborted one must still promote, otherwise one Stop would permanently
-    // disable the fallback.
+  it('aborted message is still non-promotable when an error bubble terminates the turn', () => {
+    resetCounters()
+    turnIdCounter++
+    const messages = runTerminatedBy({
+      id: 'guardrail-error',
+      role: 'error',
+      content: 'Turn aborted by busy-limit guardrail',
+      timestamp: Date.now() + 9999,
+    })
+    messages.splice(1, 1, { ...messages[1]!, aborted: true })
+
+    const turn = terminatedTurn(messages)
+    expect(turn.response).toBeUndefined()
+    expect(turn.activities.some(activity => activity.type === 'intermediate')).toBe(true)
+  })
+
+  it('an aborted turn does not hide a later real final response', () => {
     resetCounters()
     turnIdCounter++
     const abortedTurn: Message[] = [
@@ -791,6 +797,7 @@ describe('interrupted and failed runs produce no response', () => {
       createUserMessage('do the thing'),
       createAssistantMessage(false, true),
       createToolMessage('completed', 'Bash'),
+      createAssistantMessage(false, false),
     ]
     const turns = groupMessagesByTurn(
       [...abortedTurn, ...normalTurn],
@@ -798,6 +805,7 @@ describe('interrupted and failed runs produce no response', () => {
     )
     const assistantTurns = turns.filter(t => t.type === 'assistant') as AssistantTurn[]
     expect(assistantTurns[0]?.response).toBeUndefined()
+    // A real final message, unlike intermediate commentary, remains visible.
     expect(assistantTurns[1]?.response?.text).toBe('Response text')
   })
 

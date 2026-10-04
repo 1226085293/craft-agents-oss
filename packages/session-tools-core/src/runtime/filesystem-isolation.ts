@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { resolve, posix } from 'node:path';
 
 export interface FilesystemIsolationPlan {
   status: 'enforced' | 'unavailable';
@@ -40,7 +40,14 @@ export function buildDarwinSandboxProfile(
   sessionDir: string,
   options?: FilesystemIsolationOptions,
 ): string {
-  const escapedRoot = escapeSandboxPath(resolve(sessionDir));
+  // The profile only ever runs under macOS sandbox-exec, so resolve the
+  // session dir with POSIX semantics: on a darwin host that is the native
+  // resolve(), while on a Windows dev host it keeps the Unix-style input
+  // absolute (resolve('/tmp/x') on win32 would produce C:\tmp\x, which is
+  // not a valid sandbox subpath and breaks the darwin tests on Windows).
+  const escapedRoot = escapeSandboxPath(
+    process.platform === 'win32' ? posix.resolve('/', sessionDir) : resolve(sessionDir),
+  );
   const profileParts = [
     '(version 1)',
     '(deny default)',

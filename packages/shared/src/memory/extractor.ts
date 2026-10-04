@@ -11,6 +11,7 @@ import type {
   MemoryExtractionInput,
   MemoryType,
   MemoryStore,
+  SessionMemoryStore,
   MemoryExtractionRecord,
 } from './types.ts';
 import { addMemoryEntry, recordExtraction } from './store.ts';
@@ -254,7 +255,7 @@ export interface MemoryExtractorOptions {
  */
 export async function extractMemories(
   input: MemoryExtractionInput,
-  store: MemoryStore,
+  store: MemoryStore | SessionMemoryStore,
   options: MemoryExtractorOptions,
 ): Promise<MemoryExtractionRecord> {
   const { runMiniCompletion, existingEntries, forceExtraction = false, semanticDedup = false } = options;
@@ -268,7 +269,9 @@ export async function extractMemories(
   // When no strategy is passed (legacy callers), fall back to the original
   // "any extraction from this session" guard so old behavior is preserved.
   const strategy = options.strategy;
-  const alreadyExtracted = store.extractionHistory.some(
+  const extractionHistory = store.extractionHistory;
+  const isSessionStore = !('totalInjectionTokens' in store);
+  const alreadyExtracted = !isSessionStore && extractionHistory.some(
     h => h.sessionId === input.sessionId
       && (strategy === undefined ? true : h.strategy === strategy),
   );
@@ -285,6 +288,7 @@ export async function extractMemories(
   // Build and send extraction prompt
   const prompt = buildExtractionPrompt(input);
   const response = await runMiniCompletion(prompt);
+  if (response === null) throw new Error('Memory extraction returned an empty response');
 
   const { entries, discarded } = parseExtractionResponse(
     response,
@@ -312,13 +316,21 @@ export async function extractMemories(
   }
 
   // Record extraction
-  recordExtraction(store, {
+  const extractionRecord: MemoryExtractionRecord = {
     sessionId: input.sessionId,
+    timestamp: new Date().toISOString(),
     factsExtracted: entries.length,
     factsDiscarded: discarded,
     newEntryIds,
     ...(strategy !== undefined ? { strategy } : {}),
-  });
+  };
+  if ('totalInjectionTokens' in store) {
+    recordExtraction(store as MemoryStore, extractionRecord);
+  } else {
+    const sessionStore = store as SessionMemoryStore;
+    sessionStore.extractionHistory.push(extractionRecord);
+    sessionStore.extractionHistory = sessionStore.extractionHistory.slice(-100);
+  }
 
   return {
     sessionId: input.sessionId,

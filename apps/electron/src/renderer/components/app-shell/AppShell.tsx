@@ -34,6 +34,7 @@ import {
   MailOpen,
   FolderKanban,
   PanelsTopLeft,
+  Brain,
 } from "lucide-react"
 // SessionStatusIcons no longer used - icons come from dynamic sessionStatuses
 import { SourceAvatar } from "@/components/ui/source-avatar"
@@ -2645,6 +2646,13 @@ function AppShellContent({
                             sourceType: 'local',
                           },
                         },
+                        {
+                          id: "nav:sources:memories",
+                          title: t("memory.globalTitle"),
+                          icon: Brain,
+                          variant: navState.navigator === 'sources' && navState.details?.type === 'memory' ? "default" : "ghost",
+                          onClick: () => navigate(routes.view.memories()),
+                        },
                       ],
                     },
                     {
@@ -3560,7 +3568,7 @@ function AppShellContent({
                 workspaceRootPath={activeWorkspace?.rootPath}
                 onDeleteSource={handleDeleteSource}
                 onSourceClick={handleSourceSelect}
-                selectedSourceSlug={isSourcesNavigation(navState) && navState.details ? navState.details.sourceSlug : null}
+                selectedSourceSlug={isSourcesNavigation(navState) && navState.details?.type === 'source' ? navState.details.sourceSlug : null}
                 localMcpEnabled={localMcpEnabled}
                 usageStats={usageStats}
               />

@@ -68,8 +68,10 @@ import { buildTitlePrompt, buildRegenerateTitlePrompt, validateTitle } from '../
 import {
   loadMemoryStore,
   saveMemoryStore,
-  selectRelevantMemories,
+  selectRelevantMemoriesFromScopes,
   buildMemoryContext,
+  loadSessionMemoryStore,
+  saveSessionMemoryStore,
   extractMemories,
   type MemoryStore,
   type MemoryExtractionInput,
@@ -1177,7 +1179,8 @@ ${formattedMessages}
 
     try {
       const store = this.memoryStore;
-      if (!store.entries.length) return '';
+      const sessionStore = loadSessionMemoryStore(this.config.workspace.rootPath, sessionId);
+      if (!store.entries.length && !sessionStore.entries.length) return '';
 
       // Get recent messages for relevance scoring: the 4 most recent history
       // messages PLUS the current user message (the strongest intent signal,
@@ -1185,7 +1188,7 @@ ${formattedMessages}
       const recentMessages = this.getRecentMessagesForInjection(4);
       const trimmed = currentUserMessage?.trim();
       if (trimmed) recentMessages.push({ role: 'user', content: trimmed });
-      const memories = selectRelevantMemories(store, recentMessages);
+      const memories = selectRelevantMemoriesFromScopes(store, sessionStore, recentMessages);
 
       if (memories.length === 0) return '';
 
@@ -1219,7 +1222,7 @@ ${formattedMessages}
   }
 
   /**
-   * Extract memories from the current session and save to workspace store.
+   * Extract memories from the current session and save to its session-local store.
    * Called on session end or compaction.
    */
   async extractSessionMemories(options?: { strategy?: 'compaction' | 'session_end' }): Promise<{ extracted: number; discarded: number }> {
@@ -1246,27 +1249,41 @@ ${formattedMessages}
         }
       }
 
+      const sessionStore = loadSessionMemoryStore(this.config.workspace.rootPath, sessionId);
+      const extractedThroughIndex = sessionStore.extractedThroughMessageId
+        ? messages.findIndex((message: any) => message.id === sessionStore.extractedThroughMessageId)
+        : -1;
+      const extractionMessages = extractedThroughIndex >= 0
+        ? messages.slice(extractedThroughIndex + 1)
+        : sessionStore.extractedThroughMessageId || !sessionStore.extractedMessageCount
+          ? messages
+          : messages.slice(sessionStore.extractedMessageCount);
+      if (extractionMessages.length === 0) return { extracted: 0, discarded: 0 };
+
       const input: MemoryExtractionInput = {
         sessionId,
-        messages: messages.map((m: any) => ({
+        messages: extractionMessages.map((m: any) => ({
           role: m.role,
           content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content),
           toolName: (m as Record<string, unknown>).tool_name as string | undefined,
         })),
         sessionTitle: this.config.session?.name,
-        existingTags: this.memoryStore.entries.flatMap(e => e.tags),
+        existingTags: sessionStore.entries.flatMap(e => e.tags),
       };
 
-      const result = await extractMemories(input, this.memoryStore, {
+      const result = await extractMemories(input, sessionStore, {
         runMiniCompletion: this.runMiniCompletion.bind(this),
-        existingEntries: this.memoryStore.entries,
+        existingEntries: sessionStore.entries,
         semanticDedup: this._memoryConfig.semanticDedup,
         // Key the one-shot guard by (sessionId, strategy) so a compaction-
         // triggered pass can't consume the session-end slot (or vice versa).
         strategy: requestedStrategy,
       });
 
-      this.persistMemoryStore();
+      sessionStore.extractedMessageCount = messages.length;
+      const lastMessage = messages.at(-1) as { id?: string } | undefined;
+      if (lastMessage?.id) sessionStore.extractedThroughMessageId = lastMessage.id;
+      saveSessionMemoryStore(this.config.workspace.rootPath, sessionStore);
       return { extracted: result.factsExtracted, discarded: result.factsDiscarded };
     } catch (error) {
       this.onDebug?.(`[Memory] Extraction failed: ${error}`);

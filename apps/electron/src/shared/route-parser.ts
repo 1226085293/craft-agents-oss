@@ -127,6 +127,7 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
 
   // Sources navigator - supports type filters (api, mcp, local)
   if (first === 'sources') {
+    if (segments[1] === 'memories') return { navigator: 'sources', details: { type: 'memory', id: 'global' } }
     if (segments.length === 1) {
       return { navigator: 'sources', details: null }
     }
@@ -316,7 +317,7 @@ export function buildCompoundRoute(parsed: ParsedCompoundRoute): string {
       base = `sources/${parsed.sourceFilter.sourceType}`
     }
     if (!parsed.details) return base
-    return `${base}/source/${parsed.details.id}`
+    return parsed.details.type === 'memory' ? 'sources/memories' : `${base}/source/${parsed.details.id}`
   }
 
   if (parsed.navigator === 'skills') {
@@ -451,6 +452,7 @@ function convertCompoundToViewRoute(compound: ParsedCompoundRoute): ParsedRoute 
     if (!compound.details) {
       return { type: 'view', name: 'sources', params: {} }
     }
+    if (compound.details.type === 'memory') return { type: 'view', name: 'memories', params: {} }
     return { type: 'view', name: 'source-info', id: compound.details.id, params: {} }
   }
 
@@ -590,7 +592,9 @@ function convertCompoundToNavigationState(compound: ParsedCompoundRoute): Naviga
     return {
       navigator: 'sources',
       filter: compound.sourceFilter,
-      details: { type: 'source', sourceSlug: compound.details.id },
+      details: compound.details.type === 'memory'
+        ? { type: 'memory', id: 'global' }
+        : { type: 'source', sourceSlug: compound.details.id },
     }
   }
 
@@ -684,6 +688,8 @@ function convertParsedRouteToNavigationState(parsed: ParsedRoute): NavigationSta
       return { navigator: 'settings', subpage: 'preferences' }
     case 'sources':
       return { navigator: 'sources', details: null }
+    case 'memories':
+      return { navigator: 'sources', details: { type: 'memory', id: 'global' } }
     case 'source-info':
       if (parsed.id) {
         return {
@@ -830,7 +836,11 @@ function navigationStateToCompoundRoute(state: NavigationState): ParsedCompoundR
     return {
       navigator: 'sources',
       sourceFilter: state.filter ?? undefined,
-      details: state.details ? { type: 'source', id: state.details.sourceSlug } : null,
+      details: state.details
+        ? state.details.type === 'memory'
+          ? { type: 'memory', id: 'global' }
+          : { type: 'source', id: state.details.sourceSlug }
+        : null,
     }
   }
 

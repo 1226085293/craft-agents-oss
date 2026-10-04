@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import {
   buildMemoryContext,
   extractContextKeywords,
+  selectRelevantMemoriesFromScopes,
   extractWeightedKeywords,
   selectRelevantMemories,
   type WeightedKeyword,
@@ -83,6 +84,24 @@ describe('extractWeightedKeywords', () => {
 // ============================================================
 // selectRelevantMemories — behavioral quota + relevance gating
 // ============================================================
+
+describe('selectRelevantMemoriesFromScopes', () => {
+  it('retrieves relevant entries from the global and only the current session store', () => {
+    const globalEntry = makeEntry({ content: 'Craft deployment uses Bun runtime', sourceSessionId: 'global' })
+    const current = makeEntry({ content: 'Craft deployment target is Windows', sourceSessionId: 'session-a' })
+    const otherSession = makeEntry({ content: 'Craft deployment target is Linux', sourceSessionId: 'session-b' })
+    const globalStore = makeStore([globalEntry])
+    const sessionStore = { version: 1 as const, sessionId: 'session-a', entries: [current, otherSession], extractionHistory: [] }
+
+    const selected = selectRelevantMemoriesFromScopes(globalStore, sessionStore, [
+      { role: 'user', content: 'Craft deployment target Windows' },
+    ])
+
+    expect(selected.map(entry => entry.content)).toContain(globalEntry.content)
+    expect(selected.map(entry => entry.content)).toContain(current.content)
+    expect(selected.map(entry => entry.content)).not.toContain(otherSession.content)
+  })
+})
 
 describe('selectRelevantMemories', () => {
   it('injects a topically-matching workflow even when many knowledge memories share a generic tag', () => {

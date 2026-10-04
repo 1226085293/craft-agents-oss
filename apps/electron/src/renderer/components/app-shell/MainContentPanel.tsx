@@ -21,7 +21,7 @@ import { useAtomValue } from 'jotai'
 import { useTranslation } from 'react-i18next'
 import { Panel } from './Panel'
 import { MultiSelectPanel } from './MultiSelectPanel'
-import { useAppShellContext } from '@/context/AppShellContext'
+import { useAppShellContext, useActiveWorkspace } from '@/context/AppShellContext'
 import { sessionMetaMapAtom, type SessionMeta } from '@/atoms/sessions'
 import { StoplightProvider } from '@/context/StoplightContext'
 import {
@@ -45,6 +45,7 @@ import { AutomationInfoPage } from '../automations/AutomationInfoPage'
 import ProjectInfoPage from '@/pages/ProjectInfoPage'
 import { KanbanBoardContainer } from './kanban/KanbanBoardContainer'
 import { PagesHome } from '../pages/PagesHome'
+import { MemoryPanel } from './MemoryPanel'
 import { PageView } from '../pages/PageView'
 import type { ExecutionEntry } from '../automations/types'
 import { automationsAtom } from '@/atoms/automations'
@@ -69,6 +70,7 @@ export function MainContentPanel({
   navStateOverride,
 }: MainContentPanelProps) {
   const { t } = useTranslation()
+  const activeWorkspace = useActiveWorkspace()
   const globalNavState = useNavigationState()
   const navState = navStateOverride ?? globalNavState
   const {
@@ -252,6 +254,13 @@ export function MainContentPanel({
 
   // Sources navigator - show source info, multi-select panel, or empty state
   if (isSourcesNavigation(navState)) {
+    if (navState.details?.type === 'memory') {
+      return wrapWithStoplight(
+        <Panel variant="grow" className={className}>
+          <MemoryPanel workspaceRootPath={activeWorkspace?.rootPath} scope="global" className="h-full max-w-4xl mx-auto" />
+        </Panel>
+      )
+    }
     if (isSourceMultiSelectActive) {
       return wrapWithStoplight(
         <Panel variant="grow" className={className}>

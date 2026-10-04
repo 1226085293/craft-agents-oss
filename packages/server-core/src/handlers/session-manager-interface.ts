@@ -169,7 +169,10 @@ export interface ISessionManager {
    * Live agent instance backing a session, or null when it hasn't been
    * initialized yet. Used by handlers that invoke agent-owned operations.
    */
-  getSessionAgent?(sessionId: string): { extractSessionMemories?: (options?: { strategy?: 'compaction' | 'session_end' }) => Promise<{ extracted: number; discarded: number }> } | null
+  getSessionAgent?(sessionId: string): {
+    extractSessionMemories?: (options?: { strategy?: 'compaction' | 'session_end' }) => Promise<{ extracted: number; discarded: number }>
+    runMiniCompletion?: (prompt: string) => Promise<string | null>
+  } | null
   /**
    * Lightweight side-channel decision used by messaging adapters when a user
    * sends a follow-up while the session is already running. Implementations

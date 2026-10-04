@@ -21,6 +21,7 @@
 import type {
   MemoryEntry,
   MemoryStore,
+  SessionMemoryStore,
   MemoryInjectionConfig,
 } from './types.ts';
 import { DEFAULT_MEMORY_INJECTION_CONFIG, isBehavioralMemoryType } from './types.ts';
@@ -316,6 +317,17 @@ function computeKeywordIdf(keywords: WeightedKeyword[], entries: MemoryEntry[]):
  *    pass the stricter gate (`minRelevanceScore`), ordered by score.
  * If one tier has no qualifying memories, its seats roll over to the other.
  */
+export function selectRelevantMemoriesFromScopes(
+  globalStore: MemoryStore,
+  sessionStore: SessionMemoryStore,
+  recentMessages: Array<{ role: string; content?: string }>,
+  config: MemoryInjectionConfig = DEFAULT_MEMORY_INJECTION_CONFIG,
+): MemoryEntry[] {
+  const sessionEntries = sessionStore.entries.filter(entry => entry.sourceSessionId === sessionStore.sessionId);
+  const combined: MemoryStore = { ...globalStore, entries: [...globalStore.entries, ...sessionEntries] };
+  return selectRelevantMemories(combined, recentMessages, config);
+}
+
 export function selectRelevantMemories(
   store: MemoryStore,
   recentMessages: Array<{ role: string; content?: string }>,

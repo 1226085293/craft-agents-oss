@@ -49,6 +49,15 @@ const input = {
 };
 
 describe('extractMemories — strategy-keyed one-shot guard', () => {
+  it('does not record a successful pass when the model returns no response', async () => {
+    const store = { version: 1 as const, sessionId: 'session-empty', entries: [], extractionHistory: [] }
+    await expect(extractMemories({ sessionId: 'session-empty', messages: [], existingTags: [] }, store, {
+      runMiniCompletion: async () => null,
+      existingEntries: [],
+    })).rejects.toThrow('empty response')
+    expect(store.extractionHistory).toHaveLength(0)
+  })
+
   it('an earlier compaction pass does NOT block the session_end slot', async () => {
     const store = makeStore();
     store.extractionHistory.push(historyRecord('s1', 'compaction'));

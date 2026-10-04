@@ -680,6 +680,18 @@ export interface ElectronAPI {
   getMemoryStats(workspaceRootPath: string): Promise<{ entries: MemoryEntry[]; stats: MemoryStats }>
   addMemory(workspaceRootPath: string, data: { content: string; type: MemoryType; tags?: string[]; confidence?: number }): Promise<{ id: string }>
   deleteMemory(workspaceRootPath: string, id: string): Promise<{ success: boolean }>
+  deleteMemories(workspaceRootPath: string, ids: string[]): Promise<{ deleted: number }>
+  updateMemory(workspaceRootPath: string, id: string, updates: { content?: string; type?: MemoryType; tags?: string[] }): Promise<{ success: boolean }>
+  getMemoryTrash(workspaceRootPath: string): Promise<Array<{ entry: MemoryEntry; deletedAt: string; reason?: string; replacedById?: string }>>
+  restoreMemory(workspaceRootPath: string, id: string): Promise<{ success: boolean }>
+  clearMemoryTrash(workspaceRootPath: string): Promise<{ count: number }>
+  getSessionMemories(workspaceRootPath: string, sessionId: string): Promise<{ entries: MemoryEntry[]; lastConsolidatedAt?: string }>
+  addSessionMemory(workspaceRootPath: string, sessionId: string, data: { content: string; type: MemoryType; tags?: string[]; confidence?: number }): Promise<{ id: string }>
+  updateSessionMemory(workspaceRootPath: string, sessionId: string, id: string, updates: { content?: string; type?: MemoryType; tags?: string[]; confidence?: number }): Promise<{ success: boolean }>
+  deleteSessionMemory(workspaceRootPath: string, sessionId: string, id: string): Promise<{ success: boolean }>
+  consolidateMemories(workspaceRootPath: string): Promise<{ promoted: number; trashed: number; sessionsProcessed: number }>
+  getMemorySchedule(workspaceRootPath: string): Promise<{ enabled: boolean; cron: string; timezone?: string }>
+  setMemorySchedule(workspaceRootPath: string, schedule: { enabled: boolean; cron: string; timezone?: string }): Promise<{ success: boolean }>
   extractSessionMemories(sessionId: string): Promise<{ extracted: number; discarded: number }>
 
   // Usage (source & skill usage stats)
@@ -951,7 +963,7 @@ export interface AutomationFilter {
 export interface SourcesNavigationState {
   navigator: 'sources'
   filter?: SourceFilter
-  details: { type: 'source'; sourceSlug: string } | null
+  details: { type: 'source'; sourceSlug: string } | { type: 'memory'; id: 'global' } | null
   rightSidebar?: RightSidebarPanel
 }
 
@@ -1057,7 +1069,8 @@ export const DEFAULT_NAVIGATION_STATE: NavigationState = {
 
 export const getNavigationStateKey = (state: NavigationState): string => {
   if (state.navigator === 'sources') {
-    if (state.details) {
+    if (state.details?.type === 'memory') return 'sources/memories'
+    if (state.details?.type === 'source') {
       return `sources/source/${state.details.sourceSlug}`
     }
     return 'sources'
@@ -1105,6 +1118,7 @@ export const getNavigationStateKey = (state: NavigationState): string => {
 
 export const parseNavigationStateKey = (key: string): NavigationState | null => {
   // Handle sources
+  if (key === 'sources/memories') return { navigator: 'sources', details: { type: 'memory', id: 'global' } }
   if (key === 'sources') return { navigator: 'sources', details: null }
   if (key.startsWith('sources/source/')) {
     const sourceSlug = key.slice(15)

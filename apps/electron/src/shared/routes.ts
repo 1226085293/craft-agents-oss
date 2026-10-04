@@ -134,6 +134,9 @@ export const routes = {
       return base as 'sources' | `sources/${'api' | 'mcp' | 'local'}`
     },
 
+    /** Global memory manager under the Sources navigator. */
+    memories: () => 'sources/memories' as const,
+
     /** API sources view (sources navigator, api filter) */
     sourcesApi: (sourceSlug?: string) =>
       sourceSlug

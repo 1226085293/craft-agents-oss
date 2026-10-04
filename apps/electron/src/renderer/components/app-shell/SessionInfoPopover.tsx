@@ -180,6 +180,7 @@ function SessionInfoPopoverContent({ sessionId, sessionFolderPath }: { sessionId
           <MemoryPanel
             workspaceRootPath={activeWorkspace?.rootPath}
             sessionId={sessionId}
+            scope="session"
             className="h-full"
           />
         </div>

@@ -896,10 +896,38 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
    * can apply the empty-stream guard uniformly to every terminal shape.
    */
   let pendingFinishLine: string | null = null;
+  /**
+   * Truncated tool-call guard (2026-10-04 incident): when an upstream relay
+   * cuts the SSE stream mid tool-call arguments, the buffered args JSON is
+   * incomplete. Emitting the partial call with a synthesized
+   * `finish_reason: "tool_calls"` masked the truncation and surfaced
+   * downstream as a malformed call (`Received arguments: {}` / missing
+   * required params). Instead we suppress the incomplete call(s) and close
+   * the stream with a retryable `network_error` finish so the agent retries
+   * the turn.
+   */
+  let incompleteToolCallDetected = false;
+  /** Whether the retryable network_error terminal was already emitted. */
+  let retryableErrorSignalled = false;
 
   function emitSseLine(dataStr: string, controller: TransformStreamDefaultController<Uint8Array>): void {
     if (DEBUG_SSE_RAW) debugLog(`[SSE RAW OUT openai] ${dataStr.slice(0, 4000)}`);
     controller.enqueue(encoder.encode(`data: ${dataStr}\n\n`));
+  }
+
+  /**
+   * Close the stream with a retryable network_error terminal. pi-ai maps it
+   * to stopReason=error with a retryable errorMessage, so AgentSession
+   * retries the turn instead of dispatching a truncated tool call.
+   */
+  function emitRetryableNetworkError(controller: TransformStreamDefaultController<Uint8Array>): void {
+    if (retryableErrorSignalled) return;
+    retryableErrorSignalled = true;
+    debugLog('[openai] Truncated tool-call stream detected — signalling retryable network_error');
+    const retryable = JSON.stringify({
+      choices: [{ index: 0, delta: {}, finish_reason: 'network_error' }],
+    });
+    emitSseLine(retryable, controller);
   }
 
   function flushTrackedCalls(controller: TransformStreamDefaultController<Uint8Array>): void {
@@ -909,6 +937,9 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
       return a.toolIndex - b.toolIndex;
     });
 
+    const prepared: Array<{ tc: TrackedToolCall; outArgs: string }> = [];
+    let anyIncomplete = false;
+
     for (const tc of sorted) {
       // Merge in this priority: phase-1 args (partial-JSON concatenation)
       // first, then any phase-2 "shifted index" args (each a complete JSON
@@ -916,17 +947,18 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
       // carries the model's actual content (DeepSeek emits real args there;
       // phase-1 carries only `_intent` / `_displayName` for those calls).
       let merged: Record<string, unknown> = {};
-      let parseFailed = false;
+      let phase1Ok = false;
+      let phase2Ok = false;
 
       if (tc.arguments) {
         try {
           const parsed = JSON.parse(tc.arguments);
           if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            phase1Ok = true;
             merged = { ...merged, ...(parsed as Record<string, unknown>) };
           }
         } catch {
-          parseFailed = true;
-          debugLog(`[OpenAI SSE] Failed to parse phase-1 arguments for ${tc.name} (${tc.id}), passing through raw`);
+          debugLog(`[OpenAI SSE] Failed to parse phase-1 arguments for ${tc.name} (${tc.id})`);
         }
       }
 
@@ -934,43 +966,60 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
         try {
           const parsed = JSON.parse(piece);
           if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            phase2Ok = true;
             merged = { ...merged, ...(parsed as Record<string, unknown>) };
           }
         } catch {
-          parseFailed = true;
-          debugLog(`[OpenAI SSE] Failed to parse phase-2 arguments for ${tc.name} (${tc.id}), passing through raw`);
+          debugLog(`[OpenAI SSE] Failed to parse phase-2 arguments for ${tc.name} (${tc.id})`);
         }
       }
 
-      let outArgs: string;
-      if (parseFailed && !tc.shiftedArgs.length) {
-        // Pure phase-1 parse failure with no phase-2 to recover from —
-        // pass through the raw concatenation so downstream sees something.
-        outArgs = tc.arguments;
-      } else {
-        captureMetadataFromInput(tc.id, tc.name, merged);
-        delete merged._intent;
-        delete merged._displayName;
-        outArgs = JSON.stringify(merged);
+      // A call is only emitted when its argument payload was received and
+      // parsed completely. An empty payload is accepted only when a real
+      // finish_reason arrived — without one the stream was cut before any
+      // argument delta made it through (the `Received arguments: {}` shape
+      // seen in the 2026-10-04 incidents), and a truncated call must not be
+      // dispatched as a finished tool call.
+      const emptyArgs = !tc.arguments && tc.shiftedArgs.length === 0;
+      if (!phase1Ok && !phase2Ok && !(emptyArgs && hadFinishReason)) {
+        anyIncomplete = true;
+        debugLog(`[OpenAI SSE] Incomplete arguments for ${tc.name} (${tc.id}) — suppressing truncated tool call`);
+        continue;
       }
 
-      // Consolidated tool_call event: id + type + name + cleanArgs together.
-      // Downstream SDKs see one event per logical tool call — no merging
-      // by index, no orphan args-only deltas.
-      const consolidatedEvent = {
-        choices: [{
-          index: tc.choiceIndex,
-          delta: {
-            tool_calls: [{
-              index: tc.toolIndex,
-              id: tc.id,
-              type: tc.type,
-              function: { name: tc.name, arguments: outArgs },
-            }],
-          },
-        }],
-      };
-      emitSseLine(JSON.stringify(consolidatedEvent), controller);
+      captureMetadataFromInput(tc.id, tc.name, merged);
+      delete merged._intent;
+      delete merged._displayName;
+      prepared.push({ tc, outArgs: JSON.stringify(merged) });
+    }
+
+    if (anyIncomplete) {
+      // Suppress the whole batch: a truncated call means the model never
+      // finished the turn. Partial calls must not be dispatched; the
+      // terminal emitters replace the finish with a retryable network_error
+      // so the agent retries instead of hard-failing on missing required
+      // properties downstream.
+      incompleteToolCallDetected = true;
+    } else {
+      for (const { tc, outArgs } of prepared) {
+        // Consolidated tool_call event: id + type + name + cleanArgs together.
+        // Downstream SDKs see one event per logical tool call — no merging
+        // by index, no orphan args-only deltas.
+        const consolidatedEvent = {
+          choices: [{
+            index: tc.choiceIndex,
+            delta: {
+              tool_calls: [{
+                index: tc.toolIndex,
+                id: tc.id,
+                type: tc.type,
+                function: { name: tc.name, arguments: outArgs },
+              }],
+            },
+          }],
+        };
+        emitSseLine(JSON.stringify(consolidatedEvent), controller);
+      }
     }
     trackedCalls.clear();
     bufferingToolCalls = false;
@@ -980,6 +1029,12 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
     if (DEBUG_SSE_RAW) debugLog(`[SSE RAW IN  openai] ${dataStr.slice(0, 4000)}`);
     if (dataStr === '[DONE]') {
       flushTrackedCalls(controller);
+      // A suppressed truncated tool call must surface as a retryable error
+      // instead of the buffered (or absent) finish chunk.
+      if (incompleteToolCallDetected) {
+        emitRetryableNetworkError(controller);
+        pendingFinishLine = null;
+      }
       // Flush any buffered terminal finish_reason chunk (empty-stream guard)
       // before emitting [DONE]. The upstream relay sends finish_reason then
       // [DONE]; without this, pendingFinishLine is never emitted and the
@@ -1126,6 +1181,7 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
               .filter(t => t.choiceIndex === choiceIndex)
               .sort((a, b) => a.toolIndex - b.toolIndex);
             const lastOpened = lastOpenedToolIndexByChoice.get(choiceIndex);
+            let attached = false;
             if (
               typeof lastOpened === 'number' &&
               tc.index !== undefined &&
@@ -1136,7 +1192,15 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
               const ord = tc.index - (lastOpened + 1);
               if (ord >= 0 && ord < phase1.length) {
                 phase1[ord]!.shiftedArgs.push(tc.function.arguments);
+                attached = true;
               }
+            }
+            if (!attached && tc.function?.arguments) {
+              // An argument payload with no bucket to land in — dropping it
+              // silently would emit a tool call with missing params. Mark
+              // the stream incomplete so the terminal emitter retries.
+              incompleteToolCallDetected = true;
+              debugLog(`[OpenAI SSE] Unroutable argument delta for choice ${choiceIndex} — signalling retry`);
             }
           }
         }
@@ -1176,7 +1240,13 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
       if (bufferingToolCalls) {
         flushTrackedCalls(controller);
       }
-      pendingFinishLine = forwardStr;
+      if (incompleteToolCallDetected) {
+        // The relay cut the stream mid tool-call arguments — do not present
+        // the truncated call as a finished tool_calls turn.
+        emitRetryableNetworkError(controller);
+      } else {
+        pendingFinishLine = forwardStr;
+      }
       return;
     }
 
@@ -1215,7 +1285,9 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
       // not throw "Stream ended without finish_reason". See #995 regression.
       if (trackedCalls.size > 0) {
         flushTrackedCalls(controller);
-        if (!hadFinishReason) {
+        if (incompleteToolCallDetected) {
+          emitRetryableNetworkError(controller);
+        } else if (!hadFinishReason) {
           const synthetic = JSON.stringify({
             choices: [{ index: 0, finish_reason: 'tool_calls' }],
           });
@@ -1228,7 +1300,9 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
       // pi-ai maps it to stopReason=error with a retryable errorMessage and
       // AgentSession retries the turn instead of ending it silently.
       if (pendingFinishLine !== null) {
-        if (!sawVisibleDelta && !sawToolCallDelta) {
+        if (incompleteToolCallDetected) {
+          emitRetryableNetworkError(controller);
+        } else if (!sawVisibleDelta && !sawToolCallDelta) {
           debugLog('[openai] Empty successful stream detected — swapping finish_reason for network_error (retryable)');
           const retryable = JSON.stringify({
             choices: [{ index: 0, delta: {}, finish_reason: 'network_error' }],

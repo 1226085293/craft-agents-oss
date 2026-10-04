@@ -56,8 +56,8 @@ describe('queued message bug reproduction', () => {
     console.log('=== Scenario 2: T1 streaming, queued message, isProcessing=false ===')
     console.log(describeTurns(turns))
 
-    // This is the BUG scenario: isProcessing=false triggers the session-complete fallback
-    // which marks T1 as complete even though it's still streaming
+    // isProcessing=false closes the current process card even though the stored
+    // assistant message still indicates that its response is streaming.
     expect(turns).toHaveLength(3)
     expect(turns[0]?.type).toBe('user')
     expect(turns[1]?.type).toBe('assistant')
@@ -78,9 +78,8 @@ describe('queued message bug reproduction', () => {
     console.log('=== Scenario 3: T1 tool-active, queued message, isProcessing=false ===')
     console.log(describeTurns(turns))
 
-    // BUG: isProcessing=false triggers session-complete fallback
-    // T1 gets marked complete and flushed, then queued user2 is flushed
-    // But T1 is still running!
+    // isProcessing=false closes the process card even though the tool remains running;
+    // the queued user is then rendered after the active process block.
     expect(turns).toHaveLength(3)
     expect(turns[0]?.type).toBe('user')
     expect(turns[1]?.type).toBe('assistant')
@@ -118,9 +117,8 @@ describe('queued message bug reproduction', () => {
     console.log('=== Scenario 5: T1 intermediate text, queued message, isProcessing=false ===')
     console.log(describeTurns(turns))
 
-    // BUG: isProcessing=false triggers session-complete fallback
-    // T1 gets marked complete, intermediate text promoted to response
-    // This creates a "final" card for T1 that shouldn't be there yet
+    // isProcessing=false closes the process card, but intermediate text must
+    // remain an activity rather than becoming a fabricated final response.
     expect(turns).toHaveLength(3)
     expect(turns[0]?.type).toBe('user')
     expect(turns[1]?.type).toBe('assistant')

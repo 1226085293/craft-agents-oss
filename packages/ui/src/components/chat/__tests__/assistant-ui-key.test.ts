@@ -28,31 +28,28 @@ describe('getAssistantTurnUiKey', () => {
     expect(getAssistantTurnUiKey(turn, 0)).toBe('assistant:msg:msg-final-1')
   })
 
-  it('uses turn-based key when response was promoted from intermediate activity', () => {
+  it('uses the actual final response message id even when the turn has intermediate activity', () => {
     const turn = makeAssistantTurn({
-      turnId: 'restart-turn',
-      timestamp: 456,
       activities: [
         {
-          id: 'promoted-msg',
+          id: 'intermediate-msg',
           type: 'intermediate',
           status: 'completed',
-          content: '中间步骤已完成',
+          content: '我先检查一下',
           timestamp: 789,
         } as any,
       ],
       response: {
-        text: '中间步骤已完成',
+        text: '任务完成',
         isStreaming: false,
-        messageId: 'promoted-msg',
+        messageId: 'final-msg',
       },
     })
 
-    // Key should be turn-based, not msg-based, so expansion state survives restart
-    expect(getAssistantTurnUiKey(turn, 1)).toBe('assistant:turn:restart-turn:456:1')
+    expect(getAssistantTurnUiKey(turn, 1)).toBe('assistant:msg:final-msg')
   })
 
-  it('uses msg-based key when response messageId is NOT from an intermediate activity', () => {
+  it('uses msg-based key when the turn also contains intermediate activity', () => {
     const turn = makeAssistantTurn({
       activities: [
         {

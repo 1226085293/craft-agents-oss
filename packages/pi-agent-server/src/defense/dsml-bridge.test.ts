@@ -160,6 +160,18 @@ describe('DSML bridge extension (2026-10-04 polished-canyon incident)', () => {
     expect((res!.message as unknown as { role: string }).role).toBe('assistant');
   });
 
+  it('marks the replaced message so the main process can classify it as intermediate', async () => {
+    const { def } = fakeDef('bash', { content: [{ type: 'text', text: 'ok-bash' }] });
+    const h = harness([def]);
+    const res = await h.fire({
+      role: 'assistant',
+      content: [{ type: 'text', text: INCIDENT_TEXT }],
+      stopReason: 'stop',
+    });
+    expect(res?.message).toBeDefined();
+    expect((res!.message as unknown as Record<string, unknown>).craftAskedForLeakedToolCall).toBe(true);
+  });
+
   it('never interferes with a healthy structured tool-call stream', async () => {
     const { def, calls } = fakeDef('bash');
     const h = harness([def]);

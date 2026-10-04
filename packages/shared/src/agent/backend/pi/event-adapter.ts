@@ -802,7 +802,7 @@ export class PiEventAdapter extends BaseEventAdapter {
       case 'message_end': {
         // Pi SDK emits message_end for ALL messages (user, assistant, toolResult).
         // Only process assistant messages — skip user prompts and tool results.
-        const msg = event.message as { role?: string; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: { total: number } }; id?: string } | undefined;
+        const msg = event.message as { role?: string; stopReason?: string; errorMessage?: string; usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: { total: number } }; id?: string; craftAskedForLeakedToolCall?: boolean } | undefined;
         // SDK message id, set by pi-agent-server when forwarding the event.
         // SessionManager uses this to correlate the follow-up `pi_turn_anchor`
         // event to the Craft assistant message created here (#782).
@@ -898,6 +898,11 @@ export class PiEventAdapter extends BaseEventAdapter {
         // (toolUse replies are intermediate unconditionally.)
         const isIntermediate =
           msg.stopReason === 'toolUse' ||
+          // DSML leak marker (261004-polished-canyon): the DSML bridge executed
+          // the leaked tool calls and replaced the raw ｜DSML｜ markup; the turn
+          // continues, so this message is a process step, never a premature
+          // result bubble while the turn keeps running.
+          msg.craftAskedForLeakedToolCall === true ||
           (this.defenseResumeHeld && !this.sawToolDuringDefenseHold);
         // Whitespace-only "final" text (\n\n after a thinking-only stop, 2026-10-03
         // blank-message incident: 585 blank messages persisted into session.jsonl)

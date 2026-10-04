@@ -236,6 +236,12 @@ async function handleMessageEnd(
     message: {
       ...(event.message as unknown as Record<string, unknown>),
       content: cleanContent,
+      // Main-process marker: this message's leaked 0x1F60D block was recognized
+      // and its calls executed here. The event-adapter (packages/shared) reads
+      // it to force isIntermediate=true, so the message is a process step and
+      // never a premature result bubble while the turn continues
+      // (261004-polished-canyon).
+      craftAskedForLeakedToolCall: true,
     },
   };
 }

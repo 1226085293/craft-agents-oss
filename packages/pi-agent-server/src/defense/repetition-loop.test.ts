@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 import { DefenseEvaluator } from './evaluator.ts';
-import { detectRepetitionLoop, extractAssistantText } from './repetition-detector.ts';
+import { detectRepetitionLoop, extractAssistantText, selectVerificationCandidateText } from './repetition-detector.ts';
 
 /**
  * Regression contract for the 2026-08-28 incident.
@@ -224,5 +224,40 @@ describe('repetition-loop defense (2026-08-28 incident)', () => {
     const result = scan(e, [{ role: 'assistant', content: [{ type: 'text', text: buildLoopText() }], stopReason: 'stop', usage: { output: 5000 } }]);
     expect(result.resumeMessage).toContain('REPETITION LOOP');
     expect(result.resumeMessage).not.toContain('EMPTY response');
+  });
+});
+
+describe('selectVerificationCandidateText (2026-10-07 261007-pearl-amber)', () => {
+  const min = 120;
+
+  it('prefers the last substantial reply over a trailing thin note', () => {
+    const messages = [
+      { role: 'assistant', content: [{ type: 'text', text: 'real answer '.repeat(20) }] }, // 240 chars
+      { role: 'assistant', content: [{ type: 'text', text: 'that read call was a mistake, ignore it' }] }, // 39 chars
+    ];
+    expect(selectVerificationCandidateText(messages, min)).toBe('real answer '.repeat(20));
+  });
+
+  it('falls back to the last assistant text when nothing is substantial', () => {
+    const messages = [
+      { role: 'assistant', content: [{ type: 'text', text: 'short note' }] },
+    ];
+    expect(selectVerificationCandidateText(messages, min)).toBe('short note');
+  });
+
+  it('returns empty string when there is no assistant text at all', () => {
+    const messages = [
+      { role: 'assistant', content: [{ type: 'toolCall' }] },
+      { role: 'user', content: [{ type: 'text', text: 'hello' }] },
+    ];
+    expect(selectVerificationCandidateText(messages, min)).toBe('');
+  });
+
+  it('keeps the later substantive reply when multiple clear the floor', () => {
+    const messages = [
+      { role: 'assistant', content: [{ type: 'text', text: 'first answer '.repeat(20) }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'second answer '.repeat(20) }] },
+    ];
+    expect(selectVerificationCandidateText(messages, min)).toBe('second answer '.repeat(20));
   });
 });

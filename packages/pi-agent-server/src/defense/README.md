@@ -8,7 +8,7 @@ problem where the agent stops before completing all goal checklist items.
 | Layer | Module | Responsibility |
 |---|---|---|
 | **L1** | `system-discipline.ts` | Execution-discipline block appended to the effective system prompt: goal-checklist self-check before `finish`, actions-before-words, failure fallback, artifact read-back verification, balanced wrap-up. |
-| **L2** | `complexity-score.ts` | Side-effect-weighted scoring of tool calls (`read 0.5 / bash:read 0.8 / edit 1.5 / write 2.0 / bash:write 3.0`). `hasWrite && !hasVerify` (wrote but never read back) is the strongest early-stop signal. |
+| **L2** | `complexity-score.ts` | Shared `ToolCallLike` shape used by the evaluator and busy-loop detector (S1 removed 2026-10-05 — the side-effect scoring / write-without-readback signal no longer exists). |
 | **L2** | `repetition-detector.ts` | Degeneration-loop detection. Flags a final assistant reply whose sampled content is >60% exact duplicates (line-level and sliding-window chunk strategies) — the 2026-08-28 incident (213K chars = 874 copies of one sentence) carried visible text and sailed past empty-response/silent-stop detection. Conservatively gated to avoid false positives on code dumps and recurring idioms. |
 | **L2** | `session-lifecycle.ts` | Finite state machine (`IDLE → RUNNING → EVALUATING → RESUME_READY → RESUMING → DONE/FAILED/ABORTED`) with resume guardrails: max resume count, max iterations, max duration, and a context-fingerprint no-progress check. |
 | **L2b** | `tool-loop-detector.ts` | Busy-loop / no-progress detection: denies the 4th consecutive identical (fingerprint + result) tool call before execution and hard-aborts the turn at repeated denies or busy caps (500 calls / 60 min per turn). Closes the "activity ≠ progress" blind spot of the silence-based stall watchdog. |
@@ -46,10 +46,12 @@ This detector closes it:
   tools). Each denied retry re-triggers the deny; 2 more identical retries
   abort the whole turn with **stall-abort attribution**, so post-stop
   defense still evaluates it.
-- **Busy hard caps per turn** (first turn INCLUDED — unlike the resume-chain
-  budget, which exempts it): 500 tool calls (`CRAFT_PI_MAX_TURN_TOOL_CALLS`)
-  or 60 min wall-clock (`CRAFT_PI_MAX_TURN_DURATION_MS`). Tuned above
-  legitimate heavy turns while still bounding pathological loops.
+- **Busy hard cap per turn** (first turn INCLUDED — unlike the resume-chain
+  budget, which exempts it): 500 tool calls (`CRAFT_PI_MAX_TURN_TOOL_CALLS`),
+  tuned above legitimate heavy turns while still bounding pathological loops.
+  There is deliberately **no wall-clock cap**: long legitimate turns
+  (multi-hour refactors / test runs) must not be killed just for taking
+  time — no-progress loops are caught by the identical-repeat streak above.
 - Streaks reset on any different call or different result digest — a
   genuine state change produces a different result and is not a repeat.
 - **Empty-parameter calls** (P2): a built-in tool invoked with no real
@@ -65,6 +67,40 @@ This detector closes it:
 > regex matches word surfaces, not semantics. Per issue #1 it is deleted and its
 > responsibilities absorbed into L1 (planning-language discipline) and L2
 > (side-effect-weighted scoring), which do not touch semantics.
+
+## Compaction handoff (2026-10-03 follow-up)
+
+The forced-compaction integration also wraps Pi SDK 0.85.1's private
+`_runDefaultCompaction` method. Because SDK threshold/overflow compaction and
+Craft's forced Lane 1 all converge on that default summary generator, each path
+receives the same additive handoff contract (six required sections: original
+user request, completed/in-progress/blocked checklist, confirmed facts,
+rejected paths with reasons, next actions, and exact paths/IDs). Existing caller
+focus is preserved. Contract inputs are re-read from the session directory at
+summary time, not cached in the subprocess, because Pi tool events and raw user
+requests are persisted by the host process. This integration covers the SDK's
+default summarizer used by Craft; a third-party `session_before_compact` hook
+that supplies its own complete summary bypasses the default summary generator
+and is not rewritten by this patch.
+
+The session's `progress.jsonl` is an append-only, bounded recovery ledger for
+user requests, tool starts/results (matched by tool-call ID), and assistant
+final/conclusion text. Entries are size-limited and credential-redacted; the
+file is capped at 1 MiB / 1,024 records by default. The summary view collapses
+consecutive identical call/result pairs so repeating loops do not become new
+prompt noise. Post-compaction steering rebuilds its anchor from the durable
+ledger and includes the exact `session.jsonl` recovery path, instructing the
+model to inspect history before repeating work.
+
+**SDK upgrade guard:** the contract covers SDK threshold/overflow/manual
+compaction by wrapping the private `_runDefaultCompaction` method and its
+`customInstructions` argument position (0.85.1: index 4). The split-turn prefix
+summary is a separate SDK path; the existing postinstall patch script now
+threads the same dynamic instructions into it, including recursive emergency
+splits. The patcher is idempotent and warns if the SDK source anchor changes.
+The runtime also warns if `_checkCompaction`, `_runAutoCompaction`, or
+`_runDefaultCompaction` is unavailable. Keep both the patch-helper and focused
+forced-compaction tests green when upgrading the Pi SDK.
 
 ## Master switch
 
@@ -107,7 +143,7 @@ corresponds to the user's message (the request the user sent in this turn):
 - If it does NOT correspond (missing, off-target, or unverified): state the reason
   in one short line, then continue the task from where it left off.
 Signals that triggered this verification step:
-- <per-signal lines: writes without read-back / empty response / repetition loop / truncated final / …>
+- <per-signal lines: empty response / repetition loop / truncated final / forced long turn / …>
 - Do NOT repeat already completed steps.
 ```
 

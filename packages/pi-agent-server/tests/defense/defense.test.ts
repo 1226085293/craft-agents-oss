@@ -1,10 +1,5 @@
 import { afterAll, describe, expect, it } from 'bun:test';
 import {
-  complexityScore,
-  classify,
-  WEIGHTS,
-} from '../../src/defense/complexity-score.ts';
-import {
   State,
   SessionLifecycle,
   fnv1a,
@@ -23,64 +18,7 @@ import {
   resolveDefenseEnabled,
   DEFAULT_DEFENSE_ENABLED,
 } from '../../src/defense/index.ts';
-import { FsWatch } from '../../src/defense/fs-watch.ts';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
-describe('complexity-score', () => {
-  it('read-only short tasks score low and never resume', () => {
-    const r = complexityScore([
-      { type: 'read' },
-      { type: 'read' },
-    ]);
-    expect(r.hasWrite).toBe(false);
-    expect(r.needsEvaluation).toBe(false);
-    expect(r.shouldResume).toBe(false);
-    expect(r.weighted).toBe(1.0);
-  });
-
-  it('write without read-back is the strongest early-stop signal', () => {
-    const r = complexityScore([
-      { type: 'write' },
-    ]);
-    expect(r.hasWrite).toBe(true);
-    expect(r.hasVerify).toBe(false);
-    expect(r.shouldResume).toBe(true);
-    expect(r.needsEvaluation).toBe(true);
-  });
-
-  it('edit without read-back also triggers resume', () => {
-    const r = complexityScore([{ type: 'edit' }]);
-    expect(r.shouldResume).toBe(true);
-  });
-
-  it('write followed by a read-back with output is verified', () => {
-    const r = complexityScore([
-      { type: 'write' },
-      { type: 'read', output: 'file content...' },
-    ]);
-    expect(r.hasWrite).toBe(true);
-    expect(r.hasVerify).toBe(true);
-    expect(r.shouldResume).toBe(false);
-    expect(r.needsEvaluation).toBe(true); // still evaluated due to weight
-  });
-
-  it('classifies bash write commands', () => {
-    expect(classify({ type: 'bash', command: 'rm -rf build' })).toBe('bash:write');
-    expect(classify({ type: 'bash', command: 'git push origin main' })).toBe('bash:write');
-    expect(classify({ type: 'bash', command: 'npm install' })).toBe('bash:write');
-    expect(classify({ type: 'bash', command: 'ls -la' })).toBe('bash:read');
-    expect(classify({ type: 'bash', command: 'grep foo bar.txt' })).toBe('bash:read');
-  });
-
-  it('bash write triggers resume when no read-back follows', () => {
-    const r = complexityScore([
-      { type: 'bash', command: 'npm install' },
-    ]);
-    expect(r.shouldResume).toBe(true);
-  });
-});
+import { buildDefenseStopNotice } from '../../src/defense/evaluator.ts';
 
 describe('session-lifecycle', () => {
   it('tracks state transitions', () => {
@@ -196,23 +134,23 @@ describe('DefenseEvaluator', () => {
     expect(result.shouldResume).toBe(false);
   });
 
-  it('triggers verification (verifyRequired) when write without read-back detected (2026-10-02 redesign)', () => {
-    const evalr = new DefenseEvaluator();
-    evalr.recordToolCall({ type: 'write' });
-    const result = evalr.evaluate();
-    // Write-without-read-back is now verification-class, not a blind resume:
-    // the program checks the captured final reply with an LLM first, and only
-    // reverts to a follow-up (resume) when that check FAILS.
+  it('triggers verification (verifyRequired) on a forced long turn (S1 removed, 2026-10-05)', () => {
+    const evalr = new DefenseEvaluator({ verifyMinSteps: 1 });
+    evalr.recordToolCall({ type: 'read', output: 'ok' });
+    const result = evalr.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false });
+    // Long-turn is the only verification-class trigger now (write-without-
+    // read-back was removed): the program checks the captured final reply
+    // with an LLM first, and only reverts to a follow-up (resume) on FAIL.
     expect(result.evaluated).toBe(true);
     expect(result.shouldResume).toBe(false);
     expect(result.verifyRequired).toBe(true);
-    expect(result.verifyReason).toBe('write-without-readback');
+    expect(result.verifyReason).toBe('force-long-turn');
     expect(result.resumeMessage).toBeDefined();
   });
 
   it('resume message frames a verification-delivery judgment, not a task re-run (2026-10-01 spec)', () => {
-    const evalr = new DefenseEvaluator();
-    evalr.recordToolCall({ type: 'write' });
+    const evalr = new DefenseEvaluator({ verifyMinSteps: 1 });
+    evalr.recordToolCall({ type: 'read', output: 'ok' });
     const result = evalr.evaluate();
     const msg = result.resumeMessage!;
     // The step asks the model to judge correspondence with the user's message…
@@ -244,29 +182,28 @@ describe('DefenseEvaluator', () => {
     expect(result.shouldResume).toBe(false);
   });
 
-  it('fails after resume cap (verification slots consume the budget too)', () => {
+  it('fails after the resume cap (fault-class resumes consume the budget)', () => {
+    // Verification is now once-per-turn (latched), so it does NOT loop against
+    // the cap. Fault-class resumes (an empty final) still do — each one burns
+    // a resume slot until the cap (or a no-progress hash) ends the turn.
     const evalr = new DefenseEvaluator({ maxResumes: 1 });
-    evalr.recordToolCall({ type: 'write' });
-    let r = evalr.evaluate();
-    // First slot: verification (program-side check), capital consumed.
-    expect(r.verifyRequired).toBe(true);
-    expect(r.shouldResume).toBe(false);
-    // Second verification attempt on the same run (no reset between) hits the cap.
-    evalr.recordToolCall({ type: 'write' });
-    r = evalr.evaluate();
-    expect(r.verifyRequired).toBeUndefined();
+    const emptyFinal = { hasVisibleText: false, hasFinalText: false, aborted: false, endsWithEmptyResponse: true };
+    let r = evalr.evaluate(emptyFinal);
+    expect(r.shouldResume).toBe(true);
+    // Second identical resume hits the cap → terminal FAILED.
+    r = evalr.evaluate(emptyFinal);
     expect(r.shouldResume).toBe(false);
     expect(r.state).toBe(State.FAILED);
   });
 
   it('resetTurn clears the lifecycle for a fresh prompt turn', () => {
-    const evalr = new DefenseEvaluator({ maxResumes: 1 });
-    evalr.recordToolCall({ type: 'write' });
-    expect(evalr.evaluate().verifyRequired).toBe(true);
+    const evalr = new DefenseEvaluator({ maxResumes: 1, verifyMinSteps: 1 });
+    evalr.recordToolCall({ type: 'read', output: 'ok' });
+    expect(evalr.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false }).verifyRequired).toBe(true);
     evalr.resetTurn();
-    evalr.recordToolCall({ type: 'write' });
+    evalr.recordToolCall({ type: 'read', output: 'ok' });
     // Fresh turn → verification budget is reset again.
-    expect(evalr.evaluate().verifyRequired).toBe(true);
+    expect(evalr.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false }).verifyRequired).toBe(true);
   });
 });
 
@@ -306,128 +243,44 @@ describe('defense switch', () => {
 });
 
 
-describe('fs-watch (filesystem-fact write detection)', () => {
-  const tdir = mkdtempSync(join(tmpdir(), 'fs-watch-test-'));
-
-  it('detects files written after turn-start marker', async () => {
-    const fw = new FsWatch();
-    fw.markTurnStart();
-    await new Promise((r) => setTimeout(r, 20));
-    writeFileSync(join(tdir, 'a.txt'), 'x');
-    const ev = fw.detectWrites(tdir)!;
-    expect(ev.modifiedFiles).toContain('a.txt');
-    expect(ev.truncated).toBe(false);
-  });
-
-  it('ignores skipped dirs like node_modules', async () => {
-    const fw = new FsWatch();
-    fw.markTurnStart();
-    await new Promise((r) => setTimeout(r, 20));
-    writeFileSync(join(tdir, 'node_modules-x'), 'x'); // plain file fine
-    const ev = fw.detectWrites(tdir)!;
-    expect(ev.modifiedFiles.length).toBeGreaterThan(0);
-  });
-
-  it('ignores framework top-level dirs (sessions/, data/, .pi-sessions/) but watches deeper same-name dirs', async () => {
-    const fw = new FsWatch();
-    fw.markTurnStart();
-    await new Promise((r) => setTimeout(r, 20));
-    mkdirSync(join(tdir, 'sessions'), { recursive: true });
-    writeFileSync(join(tdir, 'sessions', 'session.jsonl'), 'noise');
-    writeFileSync(join(tdir, 'deep-sessions'), 'x'); // plain file fine
-    const ev = fw.detectWrites(tdir)!;
-    expect(ev.modifiedFiles.some((f) => f.startsWith('sessions/'))).toBe(false);
-  });
-
-  it('ignores framework noise files like events.jsonl at top level', async () => {
-    const fw = new FsWatch();
-    fw.markTurnStart();
-    await new Promise((r) => setTimeout(r, 20));
-    writeFileSync(join(tdir, 'events.jsonl'), '{"tick":1}');
-    writeFileSync(join(tdir, 'user-file.txt'), 'mine');
-    const ev = fw.detectWrites(tdir)!;
-    expect(ev.modifiedFiles).not.toContain('events.jsonl');
-    expect(ev.modifiedFiles).toContain('user-file.txt');
-  });
-
-  it('returns null without a turn-start anchor', () => {
-    const fw = new FsWatch();
-    expect(fw.detectWrites(tdir)).toBeNull();
-  });
-
-  it('catches regex-blind writes (python3 heredoc) via fs evidence', async () => {
-    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
-    evaluator.resetTurn();
-    await new Promise((r) => setTimeout(r, 20));
-    // python3 heredoc — WRITE_CMDS regex classifies this as bash:read
-    evaluator.recordToolCall({
-      type: 'bash',
-      command: "python3 << EOF\nopen('" + join(tdir, 'new.py') + "','w').write('x')\nEOF",
+describe('DSML-leak final reply (2026-10-04 incident; fault-class detection removed 2026-10-06)', () => {
+  it('a leak-marker final reply no longer forces fault-class resume', () => {
+    // The leakedToolCall fault-class signal was removed: the session
+    // auto-continues on the next user message, so the post-stop kill +
+    // terminal card was redundant. A turn with visible final text now
+    // follows the ordinary path (no resume, no verification).
+    const evaluator = new DefenseEvaluator();
+    evaluator.recordToolCall({ type: 'read' });
+    const r = evaluator.evaluate({
+      hasVisibleText: true,
+      hasFinalText: true,
+      aborted: false,
     });
-    writeFileSync(join(tdir, 'new.py'), 'data');
-    const r = evaluator.evaluate({ hasVisibleText: false, aborted: false });
-    expect(r.shouldResume).toBe(true);
-    expect(r.resumeMessage).toContain('new.py');
-  });
-
-  it('resumes on silent stop even with no writes', () => {
-    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
-    evaluator.resetTurn();
-    evaluator.recordToolCall({ type: 'bash', command: 'ls /tmp' }); // read-only
-    const r = evaluator.evaluate({ hasVisibleText: false, aborted: false });
-    expect(r.shouldResume).toBe(true);
-    expect(r.resumeMessage).toContain('WITHOUT any visible reply');
-  });
-
-  it('does not resume on user abort', () => {
-    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
-    evaluator.resetTurn();
-    const r = evaluator.evaluate({ hasVisibleText: false, aborted: true });
     expect(r.shouldResume).toBe(false);
+    expect(r.verifyRequired).toBeUndefined();
+  });
+});
+
+describe('defense stop notice (2026-10-04 polished-canyon silent stop)', () => {
+  it('builds a generic notice for a failed evaluation', () => {
+    const n = buildDefenseStopNotice({
+      state: 'failed' as never,
+      shouldResume: false,
+      reason: 'repetitionLoop',
+    });
+    expect(n).not.toBeNull();
+    expect(n!.reason).toBe('repetitionLoop');
+    expect(n!.message).toContain('recovery attempts');
+    expect(n!.message).toContain('send a message to continue');
   });
 
-  // P0 (2026-08-22): a user abort is an explicit stop. Every resume signal
-  // must yield to it — write-without-readback, empty terminal response, and
-  // silent stop alike. Before the short-circuit, aborted + write-no-verify
-  // returned shouldResume=true and the interrupted task was revived.
-  it('P0: abort short-circuits write-without-readback resume', () => {
-    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
-    evaluator.resetTurn();
-    evaluator.recordToolCall({ type: 'bash', command: 'rm /tmp/f.txt' }); // bash:write
-    const r = evaluator.evaluate({ hasVisibleText: true, aborted: true });
-    expect(r.shouldResume).toBe(false);
-    expect(r.state).toBe('aborted');
+  it('falls back to defense_failed when no reason is recorded', () => {
+    const n = buildDefenseStopNotice({ state: 'failed' as never, shouldResume: false });
+    expect(n!.reason).toBe('defense_failed');
   });
 
-  it('P0: abort short-circuits empty-terminal-response resume', () => {
-    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
-    evaluator.resetTurn();
-    evaluator.recordToolCall({ type: 'bash', command: 'rm /tmp/f.txt' });
-    const r = evaluator.evaluate({ hasVisibleText: false, aborted: true, endsWithEmptyResponse: true });
-    expect(r.shouldResume).toBe(false);
-    expect(r.state).toBe('aborted');
-  });
-
-  it('P0: abort marks the lifecycle terminal (no re-evaluation later in the turn)', () => {
-    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
-    evaluator.resetTurn();
-    evaluator.recordToolCall({ type: 'bash', command: 'rm /tmp/f.txt' });
-    evaluator.evaluate({ hasVisibleText: true, aborted: true });
-    expect(evaluator.canEvaluate()).toBe(false);
-  });
-
-  it('normal completion (write + read-back + text) does not resume', async () => {
-    const evaluator = new DefenseEvaluator({ enabled: true, cwd: tdir });
-    evaluator.resetTurn();
-    await new Promise((r) => setTimeout(r, 20));
-    writeFileSync(join(tdir, 'w.txt'), 'w');
-    evaluator.recordToolCall({ type: 'bash', command: 'cp x y' });
-    evaluator.recordReadOutput('file content here');
-    const r = evaluator.evaluate({ hasVisibleText: true, aborted: false });
-    expect(r.shouldResume).toBe(false);
-  });
-
-  afterAll(() => {
-    rmSync(tdir, { recursive: true, force: true });
+  it('returns null for recoverable or non-terminal results', () => {
+    expect(buildDefenseStopNotice({ state: 'resuming' as never, shouldResume: true })).toBeNull();
+    expect(buildDefenseStopNotice({ state: 'failed' as never, shouldResume: false, verifyRequired: true })).toBeNull();
   });
 });

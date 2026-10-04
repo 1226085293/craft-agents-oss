@@ -2,7 +2,8 @@
  * DefenseEvaluator
  *
  * Orchestrates Layer 2 post-stop evaluation:
- * - complexity-score → whether evaluation is needed
+ * - signal detection → whether a post-stop check is needed (fault-class
+ *   early stops + forced long-turn verification)
  * - session-lifecycle → FSM + resume guardrails
  *
  * Layer 1 (system-discipline) is applied at prompt-build time via
@@ -10,8 +11,7 @@
  * issue #1 — regex cannot judge semantics and produced false positives.
  */
 
-import { complexityScore, type ToolCallLike } from './complexity-score.ts';
-import { FsWatch, type FsWriteEvidence } from './fs-watch.ts';
+import { type ToolCallLike } from './complexity-score.ts';
 import { SessionLifecycle, State, type SessionLifecycleOptions } from './session-lifecycle.ts';
 
 export interface DefenseEvaluationResult {
@@ -37,17 +37,37 @@ export interface DefenseEvaluationResult {
   failureReason?: string;
   /** Which signal(s) triggered the resume decision (diagnostics). */
   reason?: string;
+  /**
+   * True when the resume decision is owned by the MAIN-PROCESS RETRY LADDER
+   * (empty terminal response, 2026-10-06 spec): the caller must NOT queue a
+   * defense followUp — instead it emits an error event so the ladder arms,
+   * and the ladder's re-issue strips the empty assistant message and
+   * re-runs the model step. This decision did not consume a resume slot.
+   */
+  emptyResponseOwned?: boolean;
 }
 
 export interface DefenseOptions extends SessionLifecycleOptions {
   /** Master switch. When false, DefenseEvaluator is a no-op. */
   enabled?: boolean;
-  /** Working directory for filesystem write detection. */
-  cwd?: string;
+  /**
+   * Route EMPTY terminal responses (clean stop with no visible text) to the
+   * MAIN-PROCESS RETRY LADDER instead of the defense followUp lane
+   * (2026-10-06 spec: all model-layer failures enter the retry mechanism).
+   * An empty terminal response is a transient upstream fault — the ladder
+   * re-issues the SAME model step (strip + continue) on its
+   * 1s/5s/10s/30s/60s/5m/10m schedule with the 24h loop cap, while
+   * content-quality faults (repetition loop, truncation)
+   * stay on the defense followUp lane.
+   * Ladder-routed empty responses do NOT consume a defense resume slot, so
+   * the 24h retry loop is not cut short by maxResumes.
+   */
+  ladderOwnsEmptyResponse?: boolean;
   /**
    * Verification-class thresholds (user-configurable; defaults below).
-   * A turn that meets EITHER threshold is treated as a long turn and gets
-   * the same forced final-reply verification as write-without-readback.
+   * A turn that meets EITHER threshold is treated as a long turn and gets a
+   * forced program-side final-reply verification (the only verify-class
+   * trigger now; the write-without-readback signal was removed).
    * - minSteps: tool/activity count in the turn (the number of process-card
    *   rows the UI shows) — default 50.
    * - minDurationMs: elapsed wall-clock in the turn — default 5 minutes.
@@ -59,23 +79,52 @@ export interface DefenseOptions extends SessionLifecycleOptions {
 const DEFAULT_VERIFY_MIN_STEPS = 50;
 const DEFAULT_VERIFY_MIN_DURATION_MS = 5 * 60 * 1000;
 
+/**
+ * User-facing stop notice for defense FAILED stops (2026-10-04
+ * polished-canyon): when the post-stop evaluation ends a turn WITHOUT
+ * recovery (state=failed, resume cap exhausted), the main process must be
+ * told WHY — otherwise the UI process block ends silently, with no reason
+ * shown (unlike a manual stop, which at least says "Response
+ * interrupted"). Returns null for recoverable / non-terminal results so
+ * healthy stops stay silent.
+ */
+export function buildDefenseStopNotice(
+  result: Pick<DefenseEvaluationResult, 'state' | 'shouldResume' | 'verifyRequired' | 'reason' | 'failureReason'>,
+): { reason: string; message: string } | null {
+  if (result.state !== State.FAILED || result.shouldResume || result.verifyRequired) return null;
+  return {
+    reason: result.reason || 'defense_failed',
+    message: `Automatic recovery unavailable — the automatic recovery attempts for this turn are exhausted. The turn has stopped without a final response; send a message to continue.`,
+  };
+}
+
 export class DefenseEvaluator {
   private readonly enabled: boolean;
   private readonly lifecycle: SessionLifecycle;
-  private readonly fsWatch: FsWatch;
-  private readonly cwd?: string;
   private readonly verifyMinSteps: number;
   private readonly verifyMinDurationMs: number;
+  /** Ladder lane (2026-10-06): empty terminal responses are owned by the main retry ladder. */
+  private readonly ladderOwnsEmptyResponse: boolean;
   private toolCalls: ToolCallLike[] = [];
-  private readOutputs: string[] = [];
+  /**
+   * Whether the program-side verification has already been attempted on this
+   * turn. The long-turn verification signal is a TURN-LEVEL accumulator
+   * (iterations/elapsed only grow), so after a FAILED verification the
+   * follow-up repair round's own agent_end would re-trigger verifyRequired
+   * — the event adapter demotes the freshly streamed result bubble and runs
+   * a second Verifying/Verification-failed cycle after it (2026-10-05
+   * report: "结果气泡出现后还会出现验证失败的错误"). One verification
+   * attempt per turn: FAIL → followUp → the repaired reply is delivered as
+   * the final bubble; genuine fault-class signals still resume as before.
+   */
+  private verificationAttempted = false;
 
   constructor(options: DefenseOptions = {}) {
     this.enabled = options.enabled ?? true;
-    this.cwd = options.cwd;
-    this.fsWatch = new FsWatch();
     this.lifecycle = new SessionLifecycle(options);
     this.verifyMinSteps = options.verifyMinSteps ?? DEFAULT_VERIFY_MIN_STEPS;
     this.verifyMinDurationMs = options.verifyMinDurationMs ?? DEFAULT_VERIFY_MIN_DURATION_MS;
+    this.ladderOwnsEmptyResponse = options.ladderOwnsEmptyResponse ?? false;
   }
 
   get isEnabled(): boolean {
@@ -103,38 +152,15 @@ export class DefenseEvaluator {
     this.recordToolCall({ type: 'bash', command });
   }
 
-  /** Record a read-back output so writes followed by reads count as verified. */
-  recordReadOutput(text: string): void {
-    if (!this.enabled) return;
-    if (text.trim().length > 0) {
-      this.readOutputs.push(text);
-    }
-  }
-
   /** Reset tool-call buffer for a new turn. */
   resetTurn(): void {
     this.toolCalls = [];
-    this.readOutputs = [];
+    this.verificationAttempted = false;
     this.lifecycle.reset();
-    // Anchor the fs mtime marker: anything modified after this point counts
-    // as a turn-caused write, regardless of which tool/script did it.
-    if (this.cwd) this.fsWatch.markTurnStart();
-  }
-
-  /**
-   * Filesystem-fact write evidence for this turn (null when cwd unknown).
-   * This is the ground truth for "did a write happen" — command-text regex
-   * classification is only a fallback for when the scan is unavailable.
-   */
-  detectFsWrites(): FsWriteEvidence | null {
-    if (!this.enabled || !this.cwd) return null;
-    return this.fsWatch.detectWrites(this.cwd);
   }
 
   /** Human-readable summary of which resume signal(s) fired (diagnostics). */
   private describeSignals(
-    hasWrite: boolean,
-    fsEvidence: FsWriteEvidence | null,
     silentStop: boolean,
     emptyResponse: boolean,
     repetitionLoop: boolean,
@@ -147,14 +173,6 @@ export class DefenseEvaluator {
     if (repetitionLoop) parts.push('repetitionLoop');
     if (truncatedFinal) parts.push('truncatedFinal');
     if (verifyRequired) parts.push('verify');
-    if (hasWrite) {
-      const fsFiles = fsEvidence?.modifiedFiles ?? [];
-      parts.push(
-        fsFiles.length > 0
-          ? `fsWrite(${fsFiles.slice(0, 5).join(', ')}${fsFiles.length > 5 ? ', …' : ''})`
-          : 'cmdWrite',
-      );
-    }
     return parts.join('+') || 'none';
   }
 
@@ -193,6 +211,10 @@ export class DefenseEvaluator {
    */
   evaluate(lastAssistantMessage?: {
     hasVisibleText: boolean;
+    /** Whether the terminal assistant message has visible text suitable for verification delivery. */
+    hasFinalText?: boolean;
+    /** Pi SDK stop reason; upstream errors must not enter post-stop recovery. */
+    stopReason?: string;
     aborted: boolean;
     endsWithEmptyResponse?: boolean;
     hasRepetitionLoop?: boolean;
@@ -207,10 +229,17 @@ export class DefenseEvaluator {
 
     const stallAborted = lastAssistantMessage?.stallAborted === true;
 
+    // Transport/provider errors are not candidate replies. Let the SDK retry
+    // lane or its terminal error own this outcome; running Defense here could
+    // turn an EOF into a misleading verification/recovery turn.
+    if (lastAssistantMessage?.stopReason === 'error') {
+      return { evaluated: false, shouldResume: false, state: this.lifecycle.getState() };
+    }
+
     // P0 guardrail (2026-08-22): a user abort is an explicit intent to stop.
     // It must short-circuit EVERY resume signal — not just silentStop. Before
-    // this guard, a turn aborted mid-task with write-without-readback (or an
-    // empty final reply) was automatically resumed via followUp(), reviving a
+    // this guard, a turn aborted mid-task with an empty final reply (or any
+    // other early-stop signal) was automatically resumed via followUp(), reviving a
     // task the user had deliberately stopped and letting it keep mutating
     // files. Abort wins over all heuristics.
     //
@@ -227,19 +256,6 @@ export class DefenseEvaluator {
         state: this.lifecycle.getState(),
       };
     }
-
-    const complexity = complexityScore(this.toolCalls);
-    // Merge separately-recorded read-back outputs into the verification check:
-    // a read tool that returned content counts as a read-back even though the
-    // tool-execution event payload may not carry it.
-    const effectiveVerify = complexity.hasVerify || this.readOutputs.length > 0;
-
-    // Ground-truth write detection: filesystem mtime evidence first,
-    // command-text regex as fallback (e.g. writes outside cwd).
-    const fsEvidence = this.detectFsWrites();
-    const fsWrite = !!fsEvidence && fsEvidence.modifiedFiles.length > 0;
-    const hasWrite = fsWrite || complexity.hasWrite;
-    const writeUnverified = hasWrite && !effectiveVerify;
 
     // Silent-stop detection: the turn ended without any assistant-visible
     // text. The user sees nothing — indistinguishable from a hang. Not
@@ -271,33 +287,46 @@ export class DefenseEvaluator {
 
     // Fault-class signals: genuine early-stop infrastructure faults (stall
     // kill, no visible text, empty terminal model call, degeneration loop,
-    // mid-sentence truncation). These keep the ORIGINAL LLM-completion
-    // flow: a followUp resume message asks the model to finish/repair the
-    // reply. Verification NEVER applies to fault class — there is no
-    // finished content to verify.
+    // mid-sentence truncation). These keep the
+    // ORIGINAL LLM-completion flow: a followUp resume message asks the model
+    // to finish/repair the reply. Verification NEVER applies to fault class
+    // — there is no finished content to verify.
     const faultClass =
       stallAborted || silentStop || emptyResponse || repetitionLoop || truncatedFinal;
 
-    // Verification-class signals (user-approved redesign, 2026-10-02):
-    // a) writes performed with no read-back evidence;
-    // b) FORCED long turn — the turn met EITHER threshold (step count ≥
-    //    verifyMinSteps OR elapsed ≥ verifyMinDurationMs; OR semantics,
-    //    configurable). These are NOT faults: the content may be fine.
-    // Instead of blindly resuming, the turn gets a program-side
-    // verification: an LLM check on whether the final reply is a valid
-    // answer to the user's message. PASS → the captured final text is
-    // replayed AS the single final reply (no second LLM bubble); FAIL →
-    // only then follow up (LLM continues).
+    // Verification-class signal (user decision, 2026-10-05): a FORCED long
+    // turn — the turn met EITHER threshold (step count ≥ verifyMinSteps OR
+    // elapsed ≥ verifyMinDurationMs; OR semantics, configurable). This is
+    // the ONLY verification-class trigger now; a plain write-without-
+    // read-back no longer forces verification (S1 removed). These are NOT
+    // faults: the content may be fine. Instead of blindly resuming, the turn
+    // gets a program-side verification: an LLM check on whether the final
+    // reply is a valid answer to the user's message. PASS → the captured
+    // final text is replayed AS the single final reply (no second LLM
+    // bubble); FAIL → only then follow up (LLM continues).
     const longTurn =
       this.lifecycle.getIterations() >= this.verifyMinSteps
       || this.lifecycle.elapsedMs() >= this.verifyMinDurationMs;
-    const verifyRequired = !faultClass && (writeUnverified || longTurn);
+    // Legacy direct evaluator callers provide hasVisibleText only. The Pi
+    // server passes hasFinalText explicitly so earlier commentary/tool-call
+    // text can never be mistaken for a terminal candidate.
+    const hasFinalText = lastAssistantMessage?.hasFinalText ?? lastAssistantMessage?.hasVisibleText ?? false;
+    // One verification attempt per turn (2026-10-05): after a FAILED
+    // verification the follow-up repair round's agent_end must deliver the
+    // repaired reply, not re-verify it — the long-turn signal persists
+    // across the resume and would otherwise re-enter the verification hold
+    // and demote the fresh bubble ("结果气泡后又出现验证失败").
+    const verifyRequired = !this.verificationAttempted && hasFinalText && !faultClass && longTurn;
+    // If a verification signal fires without a deliverable final candidate,
+    // preserve the ordinary follow-up recovery path instead of opening a
+    // program-side verification hold.
+    const resumeWithoutCandidate = !hasFinalText && longTurn;
 
     // A stall-watchdog abort is itself an early-stop signal: the turn was
     // killed mid-flight, so evaluation must run even when no other signal
     // fired (e.g. visible text was already produced earlier in the run).
     const needsEvaluation =
-      faultClass || verifyRequired || complexity.needsEvaluation;
+      faultClass || verifyRequired || resumeWithoutCandidate;
     const stop = this.lifecycle.onStop(needsEvaluation);
 
     if (stop === 'abort') {
@@ -309,13 +338,14 @@ export class DefenseEvaluator {
     }
 
     // Rule-based evaluation: only concrete early-stop signals warrant an
-    // automatic resume — silent stop (no output at all), wrote-without-
-    // read-back, or a stall-watchdog kill. High complexity alone is
-    // informational. stallAborted bypasses this gate even when visible text
+    // automatic resume — a fault-class early stop (silent stop with no
+    // output, empty terminal reply, repetition loop, truncation, or a
+    // stall-watchdog kill) or a forced long-turn
+    // verification. stallAborted bypasses this gate even when visible text
     // was produced earlier in the run (faultClass covers it): the watchdog
     // killed a mid-flight turn, so "already said something" must not read
     // as done.
-    if (stop === 'run' || (!faultClass && !verifyRequired)) {
+    if (stop === 'run' || (!faultClass && !verifyRequired && !resumeWithoutCandidate)) {
       this.lifecycle.markDone();
       return {
         evaluated: true,
@@ -328,7 +358,37 @@ export class DefenseEvaluator {
     // consumes one FSM slot via decideResume — a FAIL ed verification
     // follows up (a real resume), and repeat fail→re-verify cycles must
     // respect maxResumes like any other loop.
-    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop, emptyResponse, repetitionLoop, truncatedFinal, stallAborted);
+    const resumeMessage = buildResumeMessage(silentStop, emptyResponse, repetitionLoop, truncatedFinal, stallAborted);
+
+    // Ladder lane (2026-10-06 spec: all model-layer failures enter the
+    // retry mechanism): an EMPTY terminal response is a transient upstream
+    // fault — route it to the MAIN-PROCESS RETRY LADDER instead of the
+    // defense followUp lane. The caller emits an error event (ladder arms)
+    // and the ladder's re-issue strips the empty assistant message and
+    // re-runs the SAME model step on its 1s/5s/10s/30s/60s/5m/10m
+    // schedule (24h loop cap). Content-quality faults (repetition loop,
+    // truncation) keep the followUp lane.
+    // The ladder handoff consumes no defense resume slot, so the retry
+    // loop is not cut short by maxResumes.
+    const ladderLane =
+      this.ladderOwnsEmptyResponse &&
+      emptyResponse &&
+      !repetitionLoop &&
+      !truncatedFinal &&
+      !stallAborted;
+    if (ladderLane) {
+      this.lifecycle.markLadderLane();
+      const ladderState = this.lifecycle.markLadderHandoff();
+      return {
+        evaluated: true,
+        shouldResume: true,
+        resumeMessage,
+        emptyResponseOwned: true,
+        state: ladderState,
+        reason: this.describeSignals(silentStop, emptyResponse, repetitionLoop, truncatedFinal, false),
+      };
+    }
+
     const decision = this.lifecycle.decideResume(resumeMessage);
     if (decision === State.FAILED) {
       return {
@@ -336,22 +396,21 @@ export class DefenseEvaluator {
         shouldResume: false,
         state: State.FAILED,
         failureReason: 'Resume cap reached or no progress across consecutive resumes',
-        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired),
+        reason: this.describeSignals(silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired),
       };
     }
 
     this.lifecycle.markResumed();
     if (verifyRequired) {
+      this.verificationAttempted = true;
       return {
         evaluated: true,
         shouldResume: false,
         verifyRequired: true,
-        verifyReason: writeUnverified
-          ? 'write-without-readback'
-          : 'force-long-turn',
+        verifyReason: 'force-long-turn',
         resumeMessage,
         state: this.lifecycle.getState(),
-        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired),
+        reason: this.describeSignals(silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired),
       };
     }
 
@@ -360,7 +419,7 @@ export class DefenseEvaluator {
       shouldResume: true,
       resumeMessage,
       state: this.lifecycle.getState(),
-      reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired),
+      reason: this.describeSignals(silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired),
     };
   }
 }
@@ -379,16 +438,12 @@ export class DefenseEvaluator {
  * new work orders: extra work happens only on the "does not correspond" branch.
  */
 function buildResumeMessage(
-  hasWrite: boolean,
-  fsEvidence: FsWriteEvidence | null,
-  toolCalls: ToolCallLike[],
   silentStop: boolean,
   emptyResponse: boolean,
   repetitionLoop: boolean,
   truncatedFinal: boolean,
   stallAborted = false,
 ): string {
-  const writeCalls = toolCalls.filter((c) => ['write', 'edit', 'bash:write'].includes(c.type));
   const lines: string[] = [
     '[Defense] Verification delivery step — check delivery, do NOT re-run the task.',
     `Judge whether your final reply (your last assistant message in this conversation) ` +
@@ -441,24 +496,6 @@ function buildResumeMessage(
       `exists to verify, so it does NOT correspond: state that reason, report your current ` +
       `progress/status to the user now, then continue any remaining work.`,
     );
-  }
-  if (hasWrite) {
-    lines.push(
-      `- Write/edit operations were performed but never followed by any read-back ` +
-      `(no file read, no verification command output). If your final reply claims these ` +
-      `writes are done without such evidence, it does NOT correspond: state that reason, ` +
-      `verify the outcome actually matches the user's request (re-read the affected files ` +
-      `or run a status/test check), then confirm or correct your final answer. ` +
-      `Do NOT redo completed work.`,
-    );
-  }
-  if (fsEvidence && fsEvidence.modifiedFiles.length > 0) {
-    const files = fsEvidence.modifiedFiles.slice(0, 5).join(', ');
-    const more = fsEvidence.modifiedFiles.length > 5 ? ` (+${fsEvidence.modifiedFiles.length - 5} more)` : '';
-    lines.push(`- Files modified during the turn (fs mtime evidence): ${files}${more}`);
-  }
-  if (writeCalls.length > 0) {
-    lines.push(`- Affected targets: ${writeCalls.map((c) => (c.type === 'bash' ? (c.command ?? '').slice(0, 80) : c.type)).join(', ')}`);
   }
   lines.push(`- Do NOT repeat already completed steps.`);
   return lines.join('\n');

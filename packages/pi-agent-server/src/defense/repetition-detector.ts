@@ -123,3 +123,30 @@ export function extractAssistantText(content: unknown): string {
     .map((c) => String((c as { text?: unknown })?.text ?? ''))
     .join('\n');
 }
+
+/**
+ * Select the assistant message whose visible text is the verification
+ * candidate. Anchoring on the LAST assistant message is wrong when a short
+ * stray note (e.g. "that read call was a mistake") is emitted AFTER the real
+ * answer — the 2026-10-07 261007-pearl-amber incident where a 113-char
+ * "误触说明" displaced the 2602-char real answer and the judge correctly
+ * failed it. Walk the messages in order and keep the LAST assistant message
+ * whose extracted text meets `minChars` (a generous floor that any genuine
+ * answer clears but a one-line note does not); fall back to the last
+ * assistant message when none clears the floor.
+ */
+export function selectVerificationCandidateText(
+  messages: unknown[],
+  minChars: number,
+): string {
+  let lastAssistantText = '';
+  let candidateText = '';
+  for (const raw of messages) {
+    const m = raw as { role?: string; content?: unknown } | null | undefined;
+    if (m?.role !== 'assistant') continue;
+    const text = extractAssistantText(m.content);
+    if (text.trim().length > 0) lastAssistantText = text;
+    if (text.trim().length >= minChars) candidateText = text;
+  }
+  return candidateText || lastAssistantText;
+}

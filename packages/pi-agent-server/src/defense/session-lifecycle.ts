@@ -58,6 +58,15 @@ export class SessionLifecycle {
 
   private lastResumeHash: string | null = null;
   private startedAt: number;
+  /**
+   * Ladder lane (2026-10-06): while the MAIN-PROCESS RETRY LADDER owns the
+   * recovery of empty terminal responses, the 24h retry loop must not be
+   * cut short by the defense chain caps (maxIterations/maxDurationMs
+   * anchor at the first resume) — those caps bound FOLLOWUP resume chains,
+   * not ladder retries. The flag is set per-turn by the evaluator; it does
+   * not suppress terminal states (DONE/FAILED/ABORTED still win).
+   */
+  private ladderLaneActive = false;
   /** Wall-clock time of the FIRST resume in the current chain (null until
    *  then). The loop-bounding guardrails measure against THIS, not the turn
    *  start: a long healthy first segment (20+ min research with browser
@@ -82,6 +91,29 @@ export class SessionLifecycle {
 
   getState(): State {
     return this.state;
+  }
+
+  /**
+   * Enable the ladder lane for this turn: chain caps no longer bound
+   * post-resume stops (the main retry ladder owns the schedule/cap for
+   * empty-response recovery). Idempotent; cleared on reset.
+   */
+  markLadderLane(): void {
+    this.ladderLaneActive = true;
+  }
+
+  /**
+   * Ladder handoff (2026-10-06): advance the FSM to RESUME_READY WITHOUT
+   * consuming a resume slot — the retry is driven by the main-process
+   * ladder (its own 1s/5s/10s/30s/60s/5m/10m schedule + 24h cap), not the
+   * defense chain budget. The next post-stop evaluation re-enters via
+   * RESUMING → EVALUATING exactly like a followUp resume.
+   */
+  markLadderHandoff(): State {
+    if (this.isTerminal()) return this.state;
+    if (this.state === State.IDLE) this.transition(State.RUNNING);
+    if (this.state === State.RUNNING) this.transition(State.EVALUATING);
+    return this.transition(State.RESUME_READY);
   }
 
   getResumeCount(): number {
@@ -118,6 +150,7 @@ export class SessionLifecycle {
    * already bounds runaway turns.
    */
   private inResumeChain(): boolean {
+    if (this.ladderLaneActive && !this.isTerminal()) return false;
     return this.chainStartedAt !== null || this.resumeCount > 0;
   }
 

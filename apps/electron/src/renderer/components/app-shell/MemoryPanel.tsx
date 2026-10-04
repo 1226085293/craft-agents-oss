@@ -68,7 +68,6 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
   const [stats, setStats] = React.useState<MemoryStats | null>(null)
   const [searchQuery, setSearchQuery] = React.useState('')
   const [isLoading, setIsLoading] = React.useState(false)
-  const [isExtracting, setIsExtracting] = React.useState(false)
   const [isSaving, setIsSaving] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
   const [successMessage, setSuccessMessage] = React.useState<string | null>(null)
@@ -135,20 +134,12 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
     setIsSaving(true)
     setError(null)
     try {
-      const add = scope === 'session' && sessionId
-        ? window.electronAPI.addSessionMemory(workspaceRootPath, sessionId, {
-          content: newMemory.trim(),
-          type: newMemoryType,
-          tags: [],
-          confidence: 1.0,
-        })
-        : window.electronAPI.addMemory(workspaceRootPath, {
+      await window.electronAPI.addMemory(workspaceRootPath, {
         content: newMemory.trim(),
         type: newMemoryType,
         tags: [],
         confidence: 1.0,
       })
-      await add
       setNewMemory('')
       setShowAddForm(false)
       await loadMemories()
@@ -229,20 +220,6 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
     }
   }
 
-  const handleExtractMemories = async () => {
-    if (!sessionId) return
-    setIsExtracting(true)
-    setError(null)
-    try {
-      await window.electronAPI.extractSessionMemories(sessionId)
-      await loadMemories()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setIsExtracting(false)
-    }
-  }
-
   if (!workspaceRootPath) {
     return (
       <div className={cn('p-3 text-sm text-muted-foreground', className)}>
@@ -266,9 +243,6 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
         <div className="flex items-center gap-1">
           {scope === 'global' && (
             <>
-              <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={handleConsolidate} disabled={isConsolidating}>
-                <Sparkles className={cn('h-3 w-3 mr-1', isConsolidating && 'animate-spin')} />{t('memory.consolidate')}
-              </Button>
               <Button variant={showTrash ? 'secondary' : 'ghost'} size="sm" className="h-7 text-xs" onClick={() => setShowTrash(value => !value)}>
                 <Trash2 className="h-3 w-3 mr-1" />{showTrash ? t('memory.activeMemories') : t('memory.trash', { count: trash.length })}
               </Button>
@@ -289,16 +263,9 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
           >
             <RefreshCw className={cn('h-3 w-3', isLoading && 'animate-spin')} />
           </Button>
-          {sessionId && scope === 'session' && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="h-7 w-7 p-0"
-              onClick={handleExtractMemories}
-              disabled={isExtracting}
-              title={t('memory.extract')}
-            >
-              <Plus className={cn('h-3 w-3', isExtracting && 'animate-spin')} />
+          {scope === 'global' && (
+            <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={handleConsolidate} disabled={isConsolidating}>
+              <Sparkles className={cn('h-3 w-3 mr-1', isConsolidating && 'animate-spin')} />{t('memory.consolidate')}
             </Button>
           )}
         </div>
@@ -314,7 +281,7 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
         />
       </div>}
 
-      {showAddForm && (
+      {scope === 'global' && showAddForm && (
         <div className="space-y-2">
           <select
             value={newMemoryType}
@@ -363,17 +330,6 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
         </div>
       )}
 
-      {!showAddForm && !showTrash && (
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 text-xs"
-          onClick={() => setShowAddForm(true)}
-        >
-          <Plus className="h-3 w-3 mr-1" />
-          {t('memory.add')}
-        </Button>
-      )}
 
       {scope === 'global' && !showTrash && selectedIds.length > 0 && (
         <div className="flex items-center justify-between text-xs">
@@ -449,6 +405,18 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
           ))
         )}
       </div>
+
+      {scope === 'global' && !showTrash && !showAddForm && (
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 text-xs shrink-0"
+          onClick={() => setShowAddForm(true)}
+        >
+          <Plus className="h-3 w-3 mr-1" />
+          {t('memory.add')}
+        </Button>
+      )}
 
       {stats && (
         <div className="shrink-0 text-[10px] text-muted-foreground text-center border-t border-border/40 pt-1.5">

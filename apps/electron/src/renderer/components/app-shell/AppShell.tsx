@@ -3560,7 +3560,8 @@ function AppShellContent({
               }
             />
             {/* Content: SessionList, SourcesListPanel, or SettingsNavigator based on navigation state */}
-            {isSourcesNavigation(navState) && (
+            {/* Memory manager view replaces the sources list in the navigator */}
+            {isSourcesNavigation(navState) && navState.details?.type !== 'memory' && (
               /* Sources List - filtered by type if sourceFilter is active */
               <SourcesListPanel
                 sources={sources}

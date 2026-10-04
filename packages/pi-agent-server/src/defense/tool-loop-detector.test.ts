@@ -4,6 +4,7 @@ import {
   digestResult,
   fingerprintToolCall,
   isEmptyArgs,
+  shouldRejectEmptyArgs,
   emptyArgsMessage,
 } from './tool-loop-detector.ts';
 
@@ -181,6 +182,12 @@ describe('empty-args guard (P2)', () => {
     expect(isEmptyArgs(null)).toBe(true);
     expect(isEmptyArgs(undefined)).toBe(true);
     expect(isEmptyArgs({})).toBe(true);
+  });
+
+  it('rejects empty built-in calls but permits parameterless MCP meta tools', () => {
+    expect(shouldRejectEmptyArgs('Bash', {})).toBe(true);
+    expect(shouldRejectEmptyArgs('mcp__session__tools_compute', {})).toBe(false);
+    expect(shouldRejectEmptyArgs('mcp__github__list_repositories', {})).toBe(false);
   });
 
   it('counts craft-metadata-only calls as empty (built-in path still has _displayName/_intent attached)', () => {

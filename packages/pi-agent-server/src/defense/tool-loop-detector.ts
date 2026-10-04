@@ -213,6 +213,11 @@ export function isEmptyArgs(input: Record<string, unknown> | null | undefined): 
   return !Object.keys(input).some((k) => !k.startsWith('_'));
 }
 
+export function shouldRejectEmptyArgs(toolName: string, input: Record<string, unknown> | null | undefined): boolean {
+  if (toolName.startsWith('mcp__')) return false;
+  return isEmptyArgs(input);
+}
+
 export function emptyArgsMessage(toolName: string): string {
   return (
     `Validation failed for tool '${toolName}': you sent an empty parameter object. ` +

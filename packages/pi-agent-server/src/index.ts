@@ -116,7 +116,7 @@ import { detectLeakedToolCall } from './defense/leaked-toolcall.ts';
 import { createDsmlSanitizerExtension } from './defense/dsml-sanitizer.ts';
 import { installDsmlReceiver } from './dsml-receiver.ts';
 import { drainQueuedFollowUp } from './defense/resume-followup.ts';
-import { ToolLoopDetector, fingerprintToolCall, digestResult, isEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
+import { ToolLoopDetector, fingerprintToolCall, digestResult, shouldRejectEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
 import { normalizeShellTimeout } from './shell-timeout.ts';
 import {
@@ -1691,7 +1691,7 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
     // P2 guard: empty-parameter calls on built-in tools fail upstream
     // validation with a cryptic error; give the model an instructive one
     // instead (proxy tools are exempt — their schemas may be empty).
-    if (isEmptyArgs(inputObj)) {
+    if (shouldRejectEmptyArgs(sdkToolName, inputObj)) {
       debugLog(`[empty-args] ${sdkToolName}`);
       return makeErrorResult(emptyArgsMessage(sdkToolName));
     }

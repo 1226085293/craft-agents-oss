@@ -11,7 +11,7 @@ import {
   bridgeHandledSig,
   resetBridgeStateForTest,
 } from './dsml-bridge.ts';
-import { parseLeakedToolCalls } from './leaked-toolcall.ts';
+import { parseLeakedToolCalls, cleanLeakedBlocks } from './leaked-toolcall.ts';
 
 // The exact shape observed in the 2026-10-04 incidents (tall-nickel /
 // polished-canyon): deepseek-v4-flash leaked the DSML tool-call block as
@@ -104,14 +104,40 @@ describe('parseLeakedToolCalls', () => {
   });
 });
 
+describe('cleanLeakedBlocks', () => {
+  it('replaces invoke blocks with markers and strips the wrappers', () => {
+    const text =
+      '继续分析。\n' +
+      '<｜DSML｜tool_calls>\n' +
+      '<｜DSML｜invoke name="bash"><｜DSML｜parameter name="arguments" string="false">{"command":"git status"}</｜DSML｜parameter></｜DSML｜invoke>\n' +
+      '</｜DSML｜tool_calls>\n后续说明。';
+    const out = cleanLeakedBlocks(text, ['(工具调用 bash：Craft 已代执行，结果见后续消息)']);
+    expect(out).not.toContain('｜DSML｜');
+    expect(out).toContain('工具调用 bash：Craft 已代执行');
+    expect(out).toContain('继续分析。');
+    expect(out).toContain('后续说明。');
+  });
+
+  it('returns healthy text unchanged', () => {
+    expect(cleanLeakedBlocks('plain answer', ['x'])).toBe('plain answer');
+  });
+
+  it('strips blocks without markers (never invents)', () => {
+    const text =
+      '<｜DSML｜tool_calls><｜DSML｜invoke name="a">{}</｜DSML｜invoke><｜DSML｜invoke name="b">{}</｜DSML｜invoke></｜DSML｜tool_calls>';
+    expect(cleanLeakedBlocks(text, ['only-a'])).not.toContain('｜DSML｜');
+    expect(cleanLeakedBlocks(text, ['only-a'])).toContain('only-a');
+  });
+});
+
 describe('DSML bridge extension (2026-10-04 polished-canyon incident)', () => {
   beforeAll(() => {});
   beforeEach(() => resetBridgeStateForTest());
 
-  it('executes a leaked call through the wrapped tool and queues the result report', async () => {
+  it('executes a leaked call through the wrapped tool, queues the result report, and sanitizes the final message', async () => {
     const { def, calls } = fakeDef('bash');
     const h = harness([def]);
-    await h.fire({
+    const res = await h.fire({
       role: 'assistant',
       content: [{ type: 'text', text: INCIDENT_TEXT }],
       stopReason: 'stop',
@@ -125,6 +151,13 @@ describe('DSML bridge extension (2026-10-04 polished-canyon incident)', () => {
     expect(JSON.stringify(calls[0].args)).toContain('git status');
     expect(h.sent[0].options).toEqual({ deliverAs: 'followUp' });
     expect(bridgeHandledSig()).toBe(finalTextSig(INCIDENT_TEXT));
+    // The finalized message is replaced in place: prose kept, raw markup gone.
+    expect(res?.message).toBeDefined();
+    const clean = (res!.message as unknown as { content: Array<{ type?: string; text?: string }> }).content;
+    expect(clean[0].text).not.toContain('｜DSML｜');
+    expect(clean[0].text).toContain('工具调用 bash：Craft 已代执行');
+    expect(clean[0].text).toContain('继续分析。');
+    expect((res!.message as unknown as { role: string }).role).toBe('assistant');
   });
 
   it('never interferes with a healthy structured tool-call stream', async () => {
@@ -143,10 +176,10 @@ describe('DSML bridge extension (2026-10-04 polished-canyon incident)', () => {
     expect(bridgeHandledSig()).toBeNull();
   });
 
-  it('skips unknown tools and only reports (no followUp when nothing executed)', async () => {
+  it('skips unknown tools, only reports, and does NOT sanitize (defense fallback keeps the raw text)', async () => {
     const { def } = fakeDef('bash');
     const h = harness([def]);
-    await h.fire({
+    const res = await h.fire({
       role: 'assistant',
       content: [
         {
@@ -161,18 +194,23 @@ describe('DSML bridge extension (2026-10-04 polished-canyon incident)', () => {
     });
     expect(h.sent).toHaveLength(0);
     expect(h.logs.join(' ')).toContain('none executable');
+    expect(res).toBeUndefined(); // raw text preserved so the leak fault class still fires
   });
 
-  it('reports execution errors but still queues the report', async () => {
+  it('reports execution errors, still queues the report, and sanitizes with a failure note', async () => {
     const { def } = fakeDef('bash', undefined, 'permission denied');
     const h = harness([def]);
-    await h.fire({
+    const res = await h.fire({
       role: 'assistant',
       content: [{ type: 'text', text: INCIDENT_TEXT }],
       stopReason: 'stop',
     });
     expect(h.sent).toHaveLength(1);
     expect(h.sent[0].content).toContain('ERROR: permission denied');
+    expect(res?.message).toBeDefined();
+    const clean = (res!.message as unknown as { content: Array<{ type?: string; text?: string }> }).content;
+    expect(clean[0].text).not.toContain('｜DSML｜');
+    expect(clean[0].text).toContain('Craft 代执行失败');
   });
 
   it('caps executions per message and notes the remainder', async () => {

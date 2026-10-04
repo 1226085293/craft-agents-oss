@@ -101,3 +101,26 @@ export function parseLeakedToolCalls(
   }
   return { leaked: calls.length > 0, calls };
 }
+
+/**
+ * Replace every leaked ｜DSML｜ invoke block in `text` with the given marker
+ * strings (aligned in block order; blocks beyond `markers.length` are
+ * stripped bare) and drop the wrapping ｜DSML｜tool_calls markers, leaving
+ * the surrounding prose intact. Used by the DSML bridge to keep user-facing
+ * assistant bubbles free of raw provider markup after executing the calls.
+ */
+export function cleanLeakedBlocks(text: string, markers: string[]): string {
+  if (text.length === 0 || !/<｜DSML｜/.test(text)) return text;
+  let out = text;
+  let mi = 0;
+  out = out.replace(
+    /<｜DSML｜invoke\s+name="([^"]+)"[^>]*>[\s\S]*?<\/｜DSML｜invoke\s*>/g,
+    () => {
+      const m = markers[mi] ?? '';
+      mi++;
+      return m;
+    },
+  );
+  out = out.replace(/<\/?｜DSML｜tool_calls\s*>/g, '');
+  return out.replace(/[\n\r]+$/, '');
+}

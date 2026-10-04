@@ -39,7 +39,11 @@ import type {
   MessageEndEvent,
   ToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import { parseLeakedToolCalls } from './leaked-toolcall.ts';
+import { parseLeakedToolCalls, cleanLeakedBlocks } from './leaked-toolcall.ts';
+
+/** Structural stand-in for the SDK's MessageEndEventResult (not re-exported
+ * from the package root). `message` carries the replacement AgentMessage. */
+type MessageEndResult = { message: unknown };
 
 export const MAX_CALLS_PER_MESSAGE = 4;
 const MAX_RESULT_CHARS = 1500;
@@ -81,16 +85,22 @@ export function createDsmlBridgeExtension(deps: DsmlBridgeDeps): InlineExtension
     name: 'craft-dsml-bridge',
     hidden: true,
     factory: (api: ExtensionAPI) => {
-      api.on('message_end', async (event: MessageEndEvent, ctx: ExtensionContext) => {
+      const handler = async (event: MessageEndEvent, ctx: ExtensionContext) => {
         try {
-          await handleMessageEnd(event, ctx, api, deps);
+          const r = await handleMessageEnd(event, ctx, api, deps);
+          return r as MessageEndResult | undefined;
         } catch (e) {
           // Fault isolation: the plain defense-resume path remains the fallback.
           deps.debugLog(
             `[dsml-bridge] handler error: ${e instanceof Error ? e.stack ?? e.message : String(e)}`,
           );
+          return undefined;
         }
-      });
+      };
+      // The SDK's MessageEndEventResult (replacement message) type is not
+      // re-exported from the package root; `never` is assignable to the
+      // expected handler type, so the cast is checked at the factory boundary.
+      api.on('message_end', handler as unknown as never);
     },
   };
 }
@@ -105,7 +115,7 @@ async function handleMessageEnd(
   ctx: ExtensionContext,
   api: ExtensionAPI,
   deps: DsmlBridgeDeps,
-): Promise<void> {
+): Promise<MessageEndResult | undefined> {
   const msg = event.message as unknown as {
     role?: string;
     content?: Array<Record<string, unknown>>;
@@ -134,12 +144,14 @@ async function handleMessageEnd(
   }
 
   const results: string[] = [];
+  const markers: string[] = [];
   let executed = 0;
   const capped = calls.slice(0, MAX_CALLS_PER_MESSAGE);
   for (const call of capped) {
     const def = byName.get(call.name.toLowerCase());
     if (!def) {
       results.push(`• ${call.name} — skipped (unknown tool in this session)`);
+      markers.push(`(工具调用 ${call.name}：未知工具，已跳过)`);
       continue;
     }
     const callId = `dsml-bridge-${++seq}`;
@@ -161,11 +173,17 @@ async function handleMessageEnd(
       results.push(
         `• ${call.name} — ${r?.isError ? 'ERROR: ' : ''}${(txt || '(no output)').slice(0, MAX_RESULT_CHARS)}`,
       );
+      markers.push(
+        r?.isError
+          ? `(工具调用 ${call.name}：Craft 已代执行，返回错误，结果见后续消息)`
+          : `(工具调用 ${call.name}：Craft 已代执行，结果见后续消息)`,
+      );
     } catch (e) {
       executed++;
       results.push(
         `• ${call.name} — ERROR: ${String((e as Error)?.message ?? e).slice(0, 500)}`,
       );
+      markers.push(`(工具调用 ${call.name}：Craft 代执行失败，结果见后续消息)`);
     }
   }
   if (calls.length > capped.length) {
@@ -191,6 +209,33 @@ async function handleMessageEnd(
   ].join('\n');
   await api.sendUserMessage(report, { deliverAs: 'followUp' });
   deps.debugLog(
-    `[dsml-bridge] executed ${executed}/${capped.length} leaked call(s) (${calls.length} found); result report queued as followUp`,
+    `[dsml-bridge] executed ${executed}/${capped.length} leaked call(s) (${calls.length} found); result report queued as followUp; final message sanitized`,
   );
+
+  // Replace the finalized message IN PLACE (the SDK normalizes this into
+  // agent state + session history + all downstream subscribers), so the UI
+  // shows the surrounding prose with a short execution note instead of the
+  // raw provider markup. Only when something was actually executed — the
+  // nothing-executable case keeps the raw text so the defense layer's leak
+  // fault class still fires as the fallback.
+  let cursor = 0; // position of this block's calls within the global `calls` order
+  const cleanContent = msg.content.map((b) => {
+    if (!b || b.type !== 'text') return b;
+    const t = String((b as { text?: unknown }).text ?? '');
+    if (!/<｜DSML｜/.test(t)) return b;
+    const local = parseLeakedToolCalls(t);
+    const localMarkers = local.calls.map((c, i) => {
+      const gi = cursor + i;
+      if (gi < markers.length) return markers[gi] ?? `(工具调用 ${c.name}：结果见后续消息)`;
+      return `(工具调用 ${c.name}：超出代执行上限，未自动执行)`;
+    });
+    cursor += local.calls.length;
+    return { ...b, text: cleanLeakedBlocks(t, localMarkers) };
+  });
+  return {
+    message: {
+      ...(event.message as unknown as Record<string, unknown>),
+      content: cleanContent,
+    },
+  };
 }

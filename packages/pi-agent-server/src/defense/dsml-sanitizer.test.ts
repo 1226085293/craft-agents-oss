@@ -22,7 +22,7 @@ function harness() {
 describe('DSML sanitizer extension', () => {
   it('strips residual DSML text beside native toolCall blocks only', async () => {
     const h = harness();
-    const nativeCall = { type: 'toolCall', id: 'call_dsml_1', name: 'read', arguments: { path: 'a.txt' } };
+    const nativeCall = { type: 'toolCall', id: 'call_dsml_00000000000000000000000000000000_1', name: 'read', arguments: { path: 'a.txt' } };
     const original = { role: 'assistant', content: [{ type: 'text', text: `Before\n${leaked}\nAfter` }, nativeCall], stopReason: 'toolUse' };
     const result = await h.fire(original);
     const message = (result as { message: typeof original } | undefined)?.message;
@@ -40,7 +40,7 @@ describe('DSML sanitizer extension', () => {
       role: 'assistant',
       content: [
         { type: 'text', text: leaked + invalid },
-        { type: 'toolCall', id: 'call_dsml_1', name: 'read', arguments: { path: 'a.txt' } },
+        { type: 'toolCall', id: 'call_dsml_00000000000000000000000000000000_1', name: 'read', arguments: { path: 'a.txt' } },
       ],
     };
     expect(await h.fire(message)).toBeUndefined();

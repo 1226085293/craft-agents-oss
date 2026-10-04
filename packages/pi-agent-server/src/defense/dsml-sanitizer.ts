@@ -48,7 +48,15 @@ function sanitizeNativeMessage(
   const nativeCalls = message.content
     .filter((block) => block?.type === 'toolCall')
     .map((block) => block as { id?: unknown; name?: unknown; arguments?: unknown })
-    .filter((block) => typeof block.id === 'string' && block.id.startsWith('call_dsml_') && String(Number(block.id.slice(10))) === block.id.slice(10));
+    .filter((block) => {
+      if (typeof block.id !== 'string' || !block.id.startsWith('call_dsml_')) return false;
+      const suffix = block.id.slice('call_dsml_'.length);
+      const separator = suffix.lastIndexOf('_');
+      const namespace = suffix.slice(0, separator);
+      const sequence = suffix.slice(separator + 1);
+      return separator > 0 && namespace.length === 32 && /^[a-f0-9]+$/.test(namespace) &&
+        sequence.length > 0 && [...sequence].every((digit) => digit >= '0' && digit <= '9');
+    });
   if (nativeCalls.length === 0) return undefined;
 
   let changed = false;

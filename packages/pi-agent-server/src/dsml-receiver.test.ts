@@ -35,6 +35,21 @@ describe("DeepSeek DSML receiver", () => {
     expect(output.indexOf('"tool_calls"')).toBeLessThan(output.indexOf("[DONE]"));
   });
 
+  it("uses distinct tool_call IDs across separate DSML responses", async () => {
+    const nl = String.fromCharCode(10);
+    const input = `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: leaked }, finish_reason: null }] })}${nl}${nl}` +
+      `data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}${nl}${nl}` +
+      `data: [DONE]${nl}${nl}`;
+    const ids: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const output = await readStream(transformDsmlSse(streamOf(input), () => {}));
+      const events = output.split(nl).filter((line) => line.startsWith("data: ")).map((line) => line.slice(6)).filter((line) => line !== "[DONE]").map((line) => JSON.parse(line));
+      const call = events.flatMap((event) => event.choices?.[0]?.delta?.tool_calls ?? [])[0];
+      ids.push(call.id);
+    }
+    expect(ids[0]).not.toBe(ids[1]);
+  });
+
   it("passes healthy SSE through unchanged", async () => {
     const input =
       `data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: "hello" }, finish_reason: null }] })}\n\n` +

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { parseLeakedToolCalls } from "./defense/leaked-toolcall.ts";
 
 type FetchFunction = typeof globalThis.fetch;
@@ -10,6 +11,8 @@ export interface DsmlReceiverDeps {
 
 const DSML_MARKER = String.fromCharCode(0xff5c);
 const MAX_CAPTURED_CONTENT_CHARS = 32 * 1024;
+const syntheticCallNamespace = randomUUID().replaceAll("-", "");
+let nextSyntheticCallId = 0;
 
 interface SseState {
   prefix: string;
@@ -142,7 +145,7 @@ export function transformDsmlSse(body: ReadableStream<Uint8Array>, log: (message
             index: 0,
             delta: { tool_calls: [{
               index: i,
-              id: `call_dsml_${i + 1}`,
+              id: `call_dsml_${syntheticCallNamespace}_${++nextSyntheticCallId}`,
               type: "function",
               function: { name: call.name, arguments: JSON.stringify(call.args) },
             }] },

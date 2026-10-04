@@ -883,6 +883,21 @@ export class PiEventAdapter extends BaseEventAdapter {
 
         // Extract text content from the final assistant message
         const textContent = this.extractTextFromMessage(event.message);
+
+        // Surface the model's reasoning/thinking as a process step. Reasoning
+        // channels (deepseek-v4-flash via discovery-api.intern-ai.org.cn) put
+        // nearly all their narrative into the 'thinking' content block and emit
+        // little visible text between tool calls, so the UI would otherwise show
+        // nothing while the model works (2026-10-04 d4f "invisible process").
+        const thinking = this.extractThinkingFromMessage(event.message);
+        if (thinking) {
+          yield {
+            type: 'text_complete',
+            text: thinking,
+            isIntermediate: true,
+            turnId: this.nextSubTurnId('m'),
+          };
+        }
         // Pi SDK stopReason: 'toolUse' means the model will call tools next (intermediate commentary),
         // 'stop'/'end_turn' means final response. Same logic as Claude's stop_reason === 'tool_use'.
         // Defense-resume override (2026-10-01 two-reply incident, session
@@ -1405,6 +1420,34 @@ export class PiEventAdapter extends BaseEventAdapter {
     }
 
     return null;
+  }
+
+  /**
+   * Extract the model's reasoning/thinking content from a Pi AgentMessage.
+   * Reasoning channels carry their analysis in a `thinking` content block
+   * (pi-ai Message format); it is surfaced as a process step so reasoning
+   * models don't appear frozen while they work. Truncated to keep session
+   * persistence bounded (thinking blocks can be tens of thousands of chars).
+   */
+  private extractThinkingFromMessage(message: unknown): string | null {
+    if (!message || typeof message !== 'object') return null;
+
+    const msg = message as {
+      content?: string | Array<{ type: string; thinking?: string }>;
+    };
+
+    if (typeof msg.content === 'string' || !Array.isArray(msg.content)) return null;
+
+    const parts = msg.content
+      .filter((c) => c.type === 'thinking' && c.thinking)
+      .map((c) => c.thinking!);
+    if (parts.length === 0) return null;
+
+    const joined = parts.join('');
+    const MAX_THINKING_CHARS = 2000;
+    return joined.length <= MAX_THINKING_CHARS
+      ? joined
+      : `${joined.slice(0, MAX_THINKING_CHARS)}…`;
   }
 
   /**

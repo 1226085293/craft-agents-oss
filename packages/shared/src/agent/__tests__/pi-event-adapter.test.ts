@@ -272,6 +272,43 @@ describe('PiEventAdapter', () => {
       } as any));
       expect(events).toHaveLength(0);
     });
+
+    it('should surface thinking content as an intermediate process step', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'stop',
+          content: [
+            { type: 'thinking', thinking: 'Let me reason through this carefully.' },
+            { type: 'text', text: 'Here is the final answer.' },
+          ],
+        },
+      } as any));
+
+      expect(events).toHaveLength(2);
+      expect(events[0]).toMatchObject({
+        type: 'text_complete',
+        text: 'Let me reason through this carefully.',
+        isIntermediate: true,
+      });
+      expect(events[1]).toMatchObject({
+        type: 'text_complete',
+        text: 'Here is the final answer.',
+        isIntermediate: false,
+      });
+    });
+
+    it('should skip thinking when the message has none', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'stop', content: 'Plain answer.' },
+      } as any));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ type: 'text_complete', text: 'Plain answer.', isIntermediate: false });
+    });
   });
 
   // ============================================================

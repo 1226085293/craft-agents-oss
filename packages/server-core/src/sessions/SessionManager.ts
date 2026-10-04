@@ -2191,6 +2191,48 @@ export class SessionManager implements ISessionManager {
     )
 
     if (recoverable.length === 0) {
+      // 2026-10-04 amber-plain freeze: a turn can die mid-tool-loop leaving an
+      // executing/pending tool result (or intermediate reasoning) with NO user
+      // message left to replay — e.g. an auto-queued follow-up / verification
+      // turn interrupted by a restart. Every user-replay path above finds
+      // nothing, so the restored session would sit idle until the turn-idle
+      // watchdog finally fired. When the trailing activity is genuinely
+      // dangling (`hasDanglingTail` = an intermediate assistant message or a
+      // tool row still executing/pending) and no user owns it, enqueue ONE
+      // synthetic recovery message that resumes the turn from the last tool
+      // result. A user-STOPPED turn has no dangling tail (its trailing tool
+      // rows are finished, status undefined/completed), so this never
+      // resurrects a Stop.
+      const lastToolAnchor = this.findDanglingTailToolAnchor(trailing)
+      const alreadyRecovering = lastToolAnchor
+        ? managed.messageQueue.some(
+            q => q.resumeToolMessageId === lastToolAnchor.id && !q.messageId,
+          )
+        : false
+      if (hasDanglingTail && !trailingOwnsDanglingTail && lastToolAnchor && !alreadyRecovering) {
+        managed.messageQueue.push({
+          message: 'The previous turn was interrupted by a restart while a tool was still running. Continue from the last tool result without re-running completed work.',
+          resumeToolMessageId: lastToolAnchor.id,
+          resumeToolName: lastToolAnchor.toolName,
+          resumeTurnId: lastToolAnchor.turnId,
+          messageId: undefined,
+          attachments: undefined,
+          storedAttachments: undefined,
+          options: undefined,
+        })
+        sessionLog.info('Recovering dangling tool-loop turn with no replayable user message', {
+          sessionId: managed.id,
+          anchor: lastToolAnchor.id,
+          turnId: lastToolAnchor.turnId,
+        })
+        if (!managed.isProcessing) {
+          setImmediate(() => {
+            this.processNextQueuedMessage(managed.id)
+          })
+        }
+        return
+      }
+
       sessionLog.debug('No pending user turns for restart recovery', {
         sessionId: managed.id,
         terminalMessageId: managed.messages[lastTerminalResponseIndex]?.id,
@@ -2268,6 +2310,24 @@ export class SessionManager implements ISessionManager {
       m.toolStatus !== 'completed' &&
       m.toolStatus !== 'error'
     )
+  }
+
+  /**
+   * Find the dangling, still-in-flight tool row at the end of a restarted
+   * turn that has no user message to replay. Only an explicitly-unfinished
+   * tool (status `executing`/`pending`) counts — a finished tool row
+   * (status undefined/`completed`, as left behind by a user Stop) is NOT
+   * evidence of a torn turn, so a stopped turn is never resurrected.
+   * Mirrors the `hasDanglingTail` tool test in `recoverPendingUserTurns`.
+   */
+  private findDanglingTailToolAnchor(trailing: Message[]): Message | undefined {
+    for (let i = trailing.length - 1; i >= 0; i--) {
+      const m = trailing[i]!
+      if (this.isToolLikeMessage(m) && (m.toolStatus === 'executing' || m.toolStatus === 'pending')) {
+        return m
+      }
+    }
+    return undefined
   }
 
   private buildRecoveredTurnPrompt(messages: Message[], userMessage: Message): string {

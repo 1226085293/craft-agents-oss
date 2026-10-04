@@ -241,7 +241,19 @@ export class PiAgent extends BaseAgent {
   private lastSubprocessError: string | null = null;
   private subprocessErrorRepeatCount = 0;
   private static readonly MAX_IDENTICAL_SUBPROCESS_ERRORS = 3;
-  private static readonly DEFAULT_TURN_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+  /**
+   * Turn-idle watchdog ceiling (no events since the last one while the agent
+   * is idle with all tools completed).
+   *
+   * Shortened from 10 min to 2 min on 2026-10-04 (session 261004-amber-plain
+   * freeze): an application restart orphaned an in-flight turn, leaving a
+   * restored session silent for ~10 minutes until this ceiling finally fired.
+   * The watchdog still resets on every event and is fully exempt while a tool
+   * is actively running, so a long-but-healthy model call is unaffected; 120s
+   * bounds a genuine idle stall to two minutes instead of ten. Override with
+   * the CRAFT_PI_TURN_IDLE_TIMEOUT_MS environment variable.
+   */
+  private static readonly DEFAULT_TURN_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 
   private activeTurnToolIds = new Set<string>();
   private turnIdleTimer: ReturnType<typeof setTimeout> | null = null;

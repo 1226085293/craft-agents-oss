@@ -123,6 +123,18 @@ describe('PiAgent subprocess error handling', () => {
     agent.destroy()
   })
 
+  it('defaults the turn-idle watchdog to 120s when no env override is set', () => {
+    const agent = new PiAgent(createConfig())
+    const prev = process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS
+    delete process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS
+    try {
+      expect((agent as any).getTurnIdleTimeoutMs()).toBe(120_000)
+    } finally {
+      if (prev !== undefined) process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS = prev
+      agent.destroy()
+    }
+  })
+
   it('unblocks the chat queue when the Pi stream goes idle after a tool finishes', async () => {
     const previousTimeout = process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS
     process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS = '10'

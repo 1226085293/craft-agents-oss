@@ -408,6 +408,61 @@ describe('sendMessage durability', () => {
     expect(managed.messageQueue).toHaveLength(0)
   })
 
+  it('resumes a dangling tool-loop turn that has no user message to replay', () => {
+    // 2026-10-04 amber-plain class: an auto-queued follow-up / verification
+    // turn dies mid-tool with NO user message in its trail. The user-replay
+    // path finds nothing; the synthetic recovery must enqueue exactly one
+    // "continue from the last tool result" prompt instead of stalling.
+    const sessionId = 'recover-dangling-tool-no-user'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'previous-final', role: 'assistant', content: 'done', timestamp: 1, isIntermediate: false },
+      { id: 'auto-thinking', role: 'assistant', content: 'now checking state', timestamp: 2, isIntermediate: true },
+      { id: 'auto-tool', role: 'tool', content: 'Running Bash...', timestamp: 3, toolName: 'Bash', toolStatus: 'executing', turnId: 'auto-turn' } as any,
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue).toHaveLength(1)
+    expect(managed.messageQueue[0]?.message).toContain('interrupted by a restart')
+    expect(managed.messageQueue[0]?.resumeToolMessageId).toBe('auto-tool')
+    expect(managed.messageQueue[0]?.messageId).toBeUndefined()
+  })
+
+  it('does NOT resurrect a user-stopped turn whose trailing tool is finished', () => {
+    // A Stop leaves a finished/drain tool row (status undefined) after an
+    // interrupt info. That is not a dangling executing/pending tail, so no
+    // synthetic recovery fires and the queue stays empty.
+    const sessionId = 'recover-stopped-no-resurrect'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'final', role: 'assistant', content: 'done', timestamp: 1, isIntermediate: false },
+      { id: 'stop', role: 'info', content: 'Response interrupted', timestamp: 2 },
+      { id: 'late-tool', role: 'tool', content: 'finished draining', timestamp: 3, toolName: 'Bash' } as any,
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue).toHaveLength(0)
+  })
+
+  it('does not duplicate the synthetic recovery when rescan runs twice', () => {
+    const managed = buildSession('recover-dangling-no-dup')
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'final', role: 'assistant', content: 'done', timestamp: 1, isIntermediate: false },
+      { id: 'tool-exec', role: 'tool', content: 'Running Bash...', timestamp: 2, toolName: 'Bash', toolStatus: 'executing', turnId: 't1' } as any,
+    )
+    const recover = () => (sm as any).recoverPendingUserTurns(managed)
+    recover()
+    recover()
+
+    expect(managed.messageQueue).toHaveLength(1)
+    expect(managed.messageQueue[0]?.resumeToolMessageId).toBe('tool-exec')
+  })
+
   it.each(['tool', 'assistant', 'legacy-tool'])('restart error recovery resumes continued work after transient errors (%s)', (activity) => {
     const managed = buildSession(`recover-transient-${activity}`)
     managed.isProcessing = true

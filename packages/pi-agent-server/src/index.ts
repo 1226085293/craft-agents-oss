@@ -110,6 +110,8 @@ import { adaptCredentialForPiSdk, type PiCredential } from './adapt-credential.t
 import { DefenseEvaluator, resolveDefenseEnabled } from './defense/index.ts';
 import { VERIFY_OUTPUT_CMDS } from './defense/complexity-score.ts';
 import { detectRepetitionLoop, extractAssistantText } from './defense/repetition-detector.ts';
+import { detectLeakedToolCall } from './defense/leaked-toolcall.ts';
+import { drainQueuedFollowUp } from './defense/resume-followup.ts';
 import { ToolLoopDetector, fingerprintToolCall, digestResult, isEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
 import {
@@ -560,6 +562,8 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     endsWithEmptyResponse: boolean;
     hasRepetitionLoop: boolean;
     truncatedFinal: boolean;
+    hasLeakedToolCall: boolean;
+    leakedCallNames: string[];
     hasFinalText: boolean;
     stopReason?: string;
     stallAborted?: boolean;
@@ -643,6 +647,12 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     // run-wide text presence must not mask a garbage terminal reply.
     const lastText = lastAssistant ? extractAssistantText(lastAssistant.content) : '';
     const hasRepetitionLoop = lastText.length > 0 && detectRepetitionLoop(lastText);
+    // Leaked tool-call markup (2026-10-04 incident, 261004-tall-nickel):
+    // the upstream model emitted provider tool-call tokens (DeepSeek DSML
+    // blocks) as literal text — the intended tool call never executed and
+    // the "final reply" is garbage markup. Fault-class: no valid candidate
+    // exists to verify, so the turn resumes via the ordinary LLM lane.
+    const leakedToolCallInfo = lastText.length > 0 ? detectLeakedToolCall(lastText) : { leaked: false, callNames: [] };
     // Truncated-but-non-empty final (2026-10-01 incident): stopReason='length'
     // means the output hit the max_tokens cap. When the cut happens AFTER some
     // visible text was already emitted, endsWithEmptyResponse misses it (it
@@ -662,6 +672,8 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
       endsWithEmptyResponse,
       hasRepetitionLoop,
       truncatedFinal,
+      hasLeakedToolCall: leakedToolCallInfo.leaked,
+      leakedCallNames: leakedToolCallInfo.callNames,
       stallAborted: stallKillThisRun,
     };
 
@@ -753,9 +765,20 @@ function queueDefenseResume(session: AgentSession, resumeMessage: string): void 
   // decide whether the turn recovered and must not be failed.
   defenseResumeQueued = true;
   session.followUp(resumeMessage)
-    .then(() => {
+    .then(async () => {
       debugLog('[defense] Resume message queued via followUp');
-      send({ type: 'defense_resume_status', resumed: true });
+      // Delivery guarantee (2026-10-04 incident, 261004-tall-nickel):
+      // the verification-FAIL fallback queues the followUp AFTER the async
+      // judge call, by which point the SDK's post-run loop has exited and
+      // nothing consumes the queue. When the session is idle, start the
+      // continuation explicitly so the resumed turn's events actually flow.
+      const drain = await drainQueuedFollowUp(session);
+      if (drain === 'explicit-continue') {
+        debugLog('[defense] Session idle — explicit agent.continue() drained the queued followUp');
+      } else if (drain === 'busy-will-drain') {
+        debugLog('[defense] Run started in the meantime — it will drain the queued followUp');
+      }
+      send({ type: 'defense_resume_status', resumed: drain !== 'failed' });
     })
     .catch((error) => {
       debugLog(`[defense] Resume followUp failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -2271,11 +2294,12 @@ function handleSessionEvent(event: AgentSessionEvent): void {
 
     // Record the tool call for post-stop defense evaluation (L2).
     // Bash calls carry the command string (side-effect classification);
-    // read/write/edit carry a `path` arg.
+    // read/write/edit carry a `path` arg (fs-write attribution).
     const args = (event.args ?? {}) as Record<string, unknown>;
     defenseEvaluator?.recordToolCall({
       type: toolName.toLowerCase(),
       command: typeof args.command === 'string' ? args.command : undefined,
+      path: typeof args.path === 'string' ? args.path : undefined,
       output: args.output,
     });
 

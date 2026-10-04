@@ -140,12 +140,14 @@ export class DefenseEvaluator {
     repetitionLoop: boolean,
     truncatedFinal: boolean,
     verifyRequired = false,
+    leakedToolCall = false,
   ): string {
     const parts: string[] = [];
     if (silentStop) parts.push('silentStop');
     if (emptyResponse) parts.push('emptyResponse');
     if (repetitionLoop) parts.push('repetitionLoop');
     if (truncatedFinal) parts.push('truncatedFinal');
+    if (leakedToolCall) parts.push('leakedToolCall');
     if (verifyRequired) parts.push('verify');
     if (hasWrite) {
       const fsFiles = fsEvidence?.modifiedFiles ?? [];
@@ -204,6 +206,15 @@ export class DefenseEvaluator {
     truncatedFinal?: boolean;
     /** True when the abort was issued by the stall watchdog, not the user. */
     stallAborted?: boolean;
+    /**
+     * True when the FINAL assistant text contains leaked provider tool-call
+     * markup (e.g. DeepSeek `｜DSML｜` blocks emitted as literal text). The
+     * intended tool calls never executed and no valid final reply exists —
+     * fault-class, like emptyResponse (2026-10-04 incident, 261004-tall-nickel).
+     */
+    hasLeakedToolCall?: boolean;
+    /** Intended tool names extracted from the leaked markup (diagnostics). */
+    leakedCallNames?: string[];
   }): DefenseEvaluationResult {
     if (!this.enabled) {
       return { evaluated: false, shouldResume: false, state: State.IDLE };
@@ -247,10 +258,28 @@ export class DefenseEvaluator {
 
     // Ground-truth write detection: filesystem mtime evidence first,
     // command-text regex as fallback (e.g. writes outside cwd).
-    const fsEvidence = this.detectFsWrites();
+    //
+    // ATTRIBUTION (2026-10-04 incident, 261004-tall-nickel): mtime evidence
+    // cannot tell WHICH process modified a file. A worktree shared with other
+    // sessions/indexers/watch processes poisons the signal — an unrelated
+    // session's write to a test file forced a verification on a pure
+    // read-only session. Only count files attributable to THIS session's own
+    // tool activity (path correlation); when the turn has write-class
+    // actions, keep all evidence conservatively.
+    let fsEvidence = this.detectFsWrites();
+    if (fsEvidence && fsEvidence.modifiedFiles.length > 0) {
+      const attributed = attributeFsWrites(fsEvidence.modifiedFiles, this.toolCalls, complexity.hasWrite);
+      fsEvidence = { ...fsEvidence, modifiedFiles: attributed };
+    }
     const fsWrite = !!fsEvidence && fsEvidence.modifiedFiles.length > 0;
     const hasWrite = fsWrite || complexity.hasWrite;
     const writeUnverified = hasWrite && !effectiveVerify;
+
+    // Leaked tool-call markup (fault-class): the model emitted provider
+    // tool-call tokens as literal text; the calls never executed. No valid
+    // final reply exists to verify — resume like an empty response.
+    const leakedToolCall = lastAssistantMessage?.hasLeakedToolCall === true;
+    const leakedCallNames = lastAssistantMessage?.leakedCallNames ?? [];
 
     // Silent-stop detection: the turn ended without any assistant-visible
     // text. The user sees nothing — indistinguishable from a hang. Not
@@ -282,12 +311,12 @@ export class DefenseEvaluator {
 
     // Fault-class signals: genuine early-stop infrastructure faults (stall
     // kill, no visible text, empty terminal model call, degeneration loop,
-    // mid-sentence truncation). These keep the ORIGINAL LLM-completion
-    // flow: a followUp resume message asks the model to finish/repair the
-    // reply. Verification NEVER applies to fault class — there is no
-    // finished content to verify.
+    // mid-sentence truncation, leaked tool-call markup). These keep the
+    // ORIGINAL LLM-completion flow: a followUp resume message asks the model
+    // to finish/repair the reply. Verification NEVER applies to fault class
+    // — there is no finished content to verify.
     const faultClass =
-      stallAborted || silentStop || emptyResponse || repetitionLoop || truncatedFinal;
+      stallAborted || silentStop || emptyResponse || repetitionLoop || truncatedFinal || leakedToolCall;
 
     // Verification-class signals (user-approved redesign, 2026-10-02):
     // a) writes performed with no read-back evidence;
@@ -347,7 +376,7 @@ export class DefenseEvaluator {
     // consumes one FSM slot via decideResume — a FAIL ed verification
     // follows up (a real resume), and repeat fail→re-verify cycles must
     // respect maxResumes like any other loop.
-    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop, emptyResponse, repetitionLoop, truncatedFinal, stallAborted);
+    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop, emptyResponse, repetitionLoop, truncatedFinal, stallAborted, leakedToolCall, leakedCallNames);
     const decision = this.lifecycle.decideResume(resumeMessage);
     if (decision === State.FAILED) {
       return {
@@ -355,7 +384,7 @@ export class DefenseEvaluator {
         shouldResume: false,
         state: State.FAILED,
         failureReason: 'Resume cap reached or no progress across consecutive resumes',
-        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired),
+        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired, leakedToolCall),
       };
     }
 
@@ -370,7 +399,7 @@ export class DefenseEvaluator {
           : 'force-long-turn',
         resumeMessage,
         state: this.lifecycle.getState(),
-        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired),
+        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired, leakedToolCall),
       };
     }
 
@@ -379,9 +408,65 @@ export class DefenseEvaluator {
       shouldResume: true,
       resumeMessage,
       state: this.lifecycle.getState(),
-      reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired),
+      reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired, leakedToolCall),
     };
   }
+}
+
+/**
+ * Attribute filesystem mtime evidence to THIS session's own tool activity.
+ *
+ * FsWatch observes mtime changes under cwd but cannot tell WHICH process
+ * made them. A worktree shared with other sessions, indexers, or
+ * build/watch processes poisons the "did a write happen" signal: an
+ * unrelated session's write to `packages\messaging-gateway\...\renderer-
+ * system-stop-notice.test.ts` forced a verification-delivery hold on a pure
+ * read-only session that never touched that file (2026-10-04 incident,
+ * session 261004-tall-nickel).
+ *
+ * Rules:
+ * 1. Path correlation — a modified file is attributable when its path or
+ *    basename is referenced by this session's own tool calls (write/edit
+ *    `path` args, bash command text).
+ * 2. Write-class fallback — when the turn performed write-class actions
+ *    (write/edit tool calls or write-like bash commands), keep ALL evidence:
+ *    the writes may have happened through a script whose output paths are
+ *    not visible in the command text. Excluding them would miss real
+ *    unverified writes.
+ * 3. No write-class actions at all — the session's tools could not have
+ *    produced the observed mtime changes; they are external and are
+ *    dropped (unless path-correlated in rule 1).
+ */
+export function attributeFsWrites(
+  modifiedFiles: string[],
+  toolCalls: ToolCallLike[],
+  turnHasWriteAction: boolean,
+): string[] {
+  const references: string[] = [];
+  for (const call of toolCalls ?? []) {
+    if (typeof call.path === 'string' && call.path.length > 0) references.push(call.path);
+    if (typeof call.command === 'string' && call.command.length > 0) references.push(call.command);
+  }
+  if (references.length === 0) {
+    return turnHasWriteAction ? modifiedFiles : [];
+  }
+  if (turnHasWriteAction) {
+    // Conservative: the turn did write-class work; we cannot rule out that
+    // any of the observed changes are its (script) output.
+    return modifiedFiles;
+  }
+  const norm = (s: string): string => s.toLowerCase().replace(/\\/g, '/');
+  const hay = references.map(norm);
+  const attributed: string[] = [];
+  for (const file of modifiedFiles) {
+    const nf = norm(file);
+    const base = nf.split('/').pop() ?? nf;
+    const hit = hay.some((h) =>
+      h.includes(nf) || (base.length >= 6 && h.includes(base)),
+    );
+    if (hit) attributed.push(file);
+  }
+  return attributed;
 }
 
 /**
@@ -406,6 +491,8 @@ function buildResumeMessage(
   repetitionLoop: boolean,
   truncatedFinal: boolean,
   stallAborted = false,
+  leakedToolCall = false,
+  leakedCallNames: string[] = [],
 ): string {
   const writeCalls = toolCalls.filter((c) => ['write', 'edit', 'bash:write'].includes(c.type));
   const lines: string[] = [
@@ -427,6 +514,16 @@ function buildResumeMessage(
       `actually completed (files written, partial output, processes still running) before ` +
       `redoing anything, then continue the task from exactly where it left off. Prefer ` +
       `re-running the interrupted step in smaller, resumable pieces.`,
+    );
+  }
+  if (leakedToolCall) {
+    lines.push(
+      `- Your previous reply emitted tool-call markup as LITERAL TEXT` +
+      (leakedCallNames.length > 0 ? ` (intended calls: ${leakedCallNames.join(', ')})` : '') +
+      ` — the tool calls NEVER executed and the reply is not a valid answer. ` +
+      `Do NOT correspond: state that reason in one short line, re-issue the intended tool ` +
+      `calls properly (as real tool calls, not as text), then continue the task from where ` +
+      `it left off.`,
     );
   }
   if (emptyResponse) {

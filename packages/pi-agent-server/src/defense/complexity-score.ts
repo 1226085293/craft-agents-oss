@@ -15,6 +15,8 @@ export interface ToolCallLike {
   type: string;
   /** Raw command string for bash calls; used to classify read vs write. */
   command?: string;
+  /** File path argument (write/edit/read); used to attribute fs-mtime evidence to this session's own tools. */
+  path?: string;
   /** Optional read-back output (hasVerify relies on output length). */
   output?: unknown;
 }

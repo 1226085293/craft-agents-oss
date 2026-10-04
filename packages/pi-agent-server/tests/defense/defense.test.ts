@@ -24,6 +24,8 @@ import {
   DEFAULT_DEFENSE_ENABLED,
 } from '../../src/defense/index.ts';
 import { FsWatch } from '../../src/defense/fs-watch.ts';
+import { attributeFsWrites } from '../../src/defense/evaluator.ts';
+import { detectLeakedToolCall } from '../../src/defense/leaked-toolcall.ts';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -199,7 +201,7 @@ describe('DefenseEvaluator', () => {
   it('triggers verification (verifyRequired) when write without read-back detected (2026-10-02 redesign)', () => {
     const evalr = new DefenseEvaluator();
     evalr.recordToolCall({ type: 'write' });
-    const result = evalr.evaluate();
+    const result = evalr.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false });
     // Write-without-read-back is now verification-class, not a blind resume:
     // the program checks the captured final reply with an LLM first, and only
     // reverts to a follow-up (resume) when that check FAILS.
@@ -247,13 +249,13 @@ describe('DefenseEvaluator', () => {
   it('fails after resume cap (verification slots consume the budget too)', () => {
     const evalr = new DefenseEvaluator({ maxResumes: 1 });
     evalr.recordToolCall({ type: 'write' });
-    let r = evalr.evaluate();
+    let r = evalr.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false });
     // First slot: verification (program-side check), capital consumed.
     expect(r.verifyRequired).toBe(true);
     expect(r.shouldResume).toBe(false);
     // Second verification attempt on the same run (no reset between) hits the cap.
     evalr.recordToolCall({ type: 'write' });
-    r = evalr.evaluate();
+    r = evalr.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false });
     expect(r.verifyRequired).toBeUndefined();
     expect(r.shouldResume).toBe(false);
     expect(r.state).toBe(State.FAILED);
@@ -262,11 +264,11 @@ describe('DefenseEvaluator', () => {
   it('resetTurn clears the lifecycle for a fresh prompt turn', () => {
     const evalr = new DefenseEvaluator({ maxResumes: 1 });
     evalr.recordToolCall({ type: 'write' });
-    expect(evalr.evaluate().verifyRequired).toBe(true);
+    expect(evalr.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false }).verifyRequired).toBe(true);
     evalr.resetTurn();
     evalr.recordToolCall({ type: 'write' });
     // Fresh turn → verification budget is reset again.
-    expect(evalr.evaluate().verifyRequired).toBe(true);
+    expect(evalr.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false }).verifyRequired).toBe(true);
   });
 });
 
@@ -429,5 +431,134 @@ describe('fs-watch (filesystem-fact write detection)', () => {
 
   afterAll(() => {
     rmSync(tdir, { recursive: true, force: true });
+  });
+});
+
+describe('fs-write attribution (2026-10-04 incident: external mtime writes)', () => {
+  const atdir = mkdtempSync(join(tmpdir(), 'fs-attrib-test-'));
+
+  it('attributeFsWrites drops uncorrelated files when the turn has no write-class actions', () => {
+    // Read-only turn (a bash script writing into ANOTHER session's dir — the
+    // actual incident shape): the repo test file's mtime change is external.
+    const files = ['packages\\messaging-gateway\\src\\__tests__\\renderer-system-stop-notice.test.ts'];
+    const calls = [
+      { type: 'read', path: 'C:\\Users\\x\\sessions\\other\\timeline.txt' },
+      { type: 'bash', command: 'cd "C:\\Users\\x\\sessions\\other" && python -c "io.open(\\"pattern.txt\\", \\"w\\")"' },
+    ];
+    expect(attributeFsWrites(files, calls, false)).toEqual([]);
+  });
+
+  it('attributeFsWrites correlates a modified file referenced in the turn command log', () => {
+    const files = ['out.txt'];
+    const calls = [{ type: 'bash', command: 'echo hi > out.txt' }];
+    expect(attributeFsWrites(files, calls, false)).toEqual(['out.txt']);
+  });
+
+  it('attributeFsWrites normalizes backslash/forward-slash and case for path args', () => {
+    const files = ['Packages/A/B.test.ts'];
+    const calls = [{ type: 'read', path: 'C:\\repo\\packages\\a\\b.test.ts' }];
+    expect(attributeFsWrites(files, calls, false)).toEqual(files);
+  });
+
+  it('attributeFsWrites keeps ALL files when the turn has write-class actions (conservative)', () => {
+    const files = ['unrelated/a.ts', 'unrelated/b.ts'];
+    expect(attributeFsWrites(files, [{ type: 'bash', command: 'git commit -m x' }], true)).toEqual(files);
+    // No tool activity recorded at all: write-class flag decides.
+    expect(attributeFsWrites(files, [], true)).toEqual(files);
+    expect(attributeFsWrites(files, [], false)).toEqual([]);
+  });
+
+  it('external mtime writes do NOT force a verification on a read-only session (incident regression)', async () => {
+    const evaluator = new DefenseEvaluator({ enabled: true, cwd: atdir });
+    evaluator.resetTurn();
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(join(atdir, 'external-test-file.ts'), 'x');
+    // This session's own tools: reads + a bash writing into a different dir.
+    evaluator.recordToolCall({ type: 'read', path: join(atdir, 'notes.txt') });
+    evaluator.recordToolCall({ type: 'bash', command: 'cd C:/Users/x/sessions/other && python -c "open(\\"p.txt\\",\\"w\\")"' });
+    const r = evaluator.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false });
+    expect(r.verifyRequired).toBeUndefined();
+    expect(r.shouldResume).toBe(false);
+  });
+
+  it('an unredirected write referenced in the session bash command still forces verification', async () => {
+    const evaluator = new DefenseEvaluator({ enabled: true, cwd: atdir });
+    evaluator.resetTurn();
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(join(atdir, 'redirected.txt'), 'x');
+    evaluator.recordToolCall({ type: 'bash', command: 'cd ' + atdir + ' && echo hi > redirected.txt' });
+    const r = evaluator.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false });
+    expect(r.verifyRequired).toBe(true);
+    expect(r.verifyReason).toBe('write-without-readback');
+  });
+
+  it('write-class actions keep all fs evidence (scripts with unknown output paths)', async () => {
+    const evaluator = new DefenseEvaluator({ enabled: true, cwd: atdir });
+    evaluator.resetTurn();
+    await new Promise((r) => setTimeout(r, 20));
+    writeFileSync(join(atdir, 'script-output.bin'), 'x');
+    evaluator.recordToolCall({ type: 'bash', command: 'git commit -m wip' });
+    const r = evaluator.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false });
+    expect(r.verifyRequired).toBe(true);
+  });
+
+  afterAll(() => {
+    rmSync(atdir, { recursive: true, force: true });
+  });
+});
+
+describe('leaked tool-call markup (2026-10-04 incident)', () => {
+  const LEAK =
+    '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="read">'
+    + '<｜DSML｜parameter name="arguments" string="false">{"path": "pattern.txt"}</｜DSML｜parameter>'
+    + '</｜DSML｜invoke>\n</｜DSML｜tool_calls>';
+
+  it('detects the leaked block and extracts the intended tool name', () => {
+    expect(detectLeakedToolCall(LEAK)).toEqual({ leaked: true, callNames: ['read'] });
+    expect(detectLeakedToolCall('normal final answer').leaked).toBe(false);
+  });
+
+  it('treats a DSML-leak final reply as fault-class resume, not a verification hold', () => {
+    const evaluator = new DefenseEvaluator();
+    evaluator.recordToolCall({ type: 'read' });
+    const r = evaluator.evaluate({
+      hasVisibleText: true,
+      hasFinalText: true,
+      aborted: false,
+      hasLeakedToolCall: true,
+      leakedCallNames: ['read'],
+    });
+    expect(r.shouldResume).toBe(true);
+    expect(r.verifyRequired).toBeUndefined();
+    expect(r.reason ?? '').toContain('leakedToolCall');
+  });
+
+  it('resume message names the intended call and instructs a proper re-issue', () => {
+    const evaluator = new DefenseEvaluator();
+    evaluator.recordToolCall({ type: 'read' });
+    const r = evaluator.evaluate({
+      hasVisibleText: true,
+      hasFinalText: true,
+      aborted: false,
+      hasLeakedToolCall: true,
+      leakedCallNames: ['read'],
+    });
+    const msg = r.resumeMessage!;
+    expect(msg).toContain('LITERAL TEXT');
+    expect(msg).toContain('intended calls: read');
+    expect(msg).toContain('as real tool calls, not as text');
+  });
+
+  it('ordinary text without leak markers keeps the normal path', () => {
+    const evaluator = new DefenseEvaluator();
+    evaluator.recordToolCall({ type: 'read' });
+    const r = evaluator.evaluate({
+      hasVisibleText: true,
+      hasFinalText: true,
+      aborted: false,
+      hasLeakedToolCall: false,
+    });
+    expect(r.shouldResume).toBe(false);
+    expect(r.verifyRequired).toBeUndefined();
   });
 });

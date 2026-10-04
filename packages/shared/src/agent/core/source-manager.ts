@@ -8,7 +8,6 @@
  * Key responsibilities:
  * - Track active, inactive, and intended source states
  * - Format source state for system prompt injection
- * - Detect inactive source tool errors for auto-activation
  * - Determine authentication requirements for sources
  */
 
@@ -235,6 +234,16 @@ export class SourceManager {
       parts.push(`Inactive: ${inactiveList.join(', ')}`);
     }
 
+    // Authorization model: the workspace authorization (enable + authenticate) is
+    // authoritative; the session picker only narrows the per-turn scope. The agent
+    // may autonomously use any source listed under Active (authorized + in-scope).
+    // Never use sources listed under Inactive (unauthorized or excluded this turn),
+    // never change the user's manual picker state, and never replay the original
+    // user message automatically. If a needed source is unauthorized, ask the user
+    // to authorize it in Settings; if it is merely out of scope this turn, ask the
+    // user to adjust the source picker.
+    parts.push('Use tools from sources listed under Active. You may autonomously choose among authorized sources. Do NOT use sources under Inactive (unauthorized or excluded this turn), do NOT enable them yourself, and do NOT replay the original user message. If a source is unauthorized, ask the user to authorize it in Settings; if excluded this turn, ask the user to adjust the source picker.');
+
     // Persistent reminder: if any active source has a guide, remind the LLM every message
     const activeSourcesWithGuides = activeSources.filter(
       (s) => s.guide?.raw && !GUIDE_EXEMPT_SLUGS.has(s.config.slug)
@@ -296,63 +305,6 @@ export class SourceManager {
     }
 
     return output;
-  }
-
-  // ============================================================
-  // Inactive Source Detection
-  // ============================================================
-
-  /**
-   * Detect if a tool error indicates an inactive source that could be auto-activated.
-   *
-   * This is used when the agent tries to call a tool from a source that exists
-   * but isn't currently active. If detected, the session manager can auto-activate
-   * the source and retry the tool call.
-   *
-   * @param toolName - The tool name that was called
-   * @param errorMessage - The error message from the tool call
-   * @returns Source info if this is an inactive source error, null otherwise
-   */
-  detectInactiveSourceToolError(
-    toolName: string,
-    errorMessage: string
-  ): { sourceSlug: string; toolName: string } | null {
-    // Extract tool name from error message patterns
-    let extractedToolName: string | null = toolName;
-
-    // Pattern 1: "No such tool available: {toolName}"
-    const noSuchToolMatch = errorMessage.match(/No (?:such )?tool available:\s*([^\s<]+)/i);
-    if (noSuchToolMatch?.[1]) {
-      extractedToolName = noSuchToolMatch[1];
-    }
-
-    // Pattern 2: "Tool '{toolName}' not found"
-    if (!extractedToolName) {
-      const toolNotFoundMatch = errorMessage.match(/Tool\s+['"`]([^'"`]+)['"`]\s+not found/i);
-      if (toolNotFoundMatch?.[1]) {
-        extractedToolName = toolNotFoundMatch[1];
-      }
-    }
-
-    if (!extractedToolName) return null;
-
-    // Check if it's an MCP tool (mcp__{slug}__{toolname})
-    if (!extractedToolName.startsWith('mcp__')) return null;
-
-    const parts = extractedToolName.split('__');
-    if (parts.length < 3) return null;
-
-    const sourceSlug = parts[1]!;
-
-    // Check if source exists but is inactive
-    const sourceExists = this.allSources.some((s) => s.config.slug === sourceSlug);
-    const isActive = this.activeSlugs.has(sourceSlug);
-
-    if (sourceExists && !isActive) {
-      return { sourceSlug, toolName: extractedToolName };
-    }
-
-    return null;
   }
 
   // ============================================================

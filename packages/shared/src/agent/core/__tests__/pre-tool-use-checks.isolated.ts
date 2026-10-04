@@ -140,7 +140,6 @@ function createInput(overrides?: Partial<PreToolUseInput>): PreToolUseInput {
     workspaceId: 'test-ws',
     activeSourceSlugs: [],
     allSourceSlugs: [],
-    hasSourceActivation: true,
     permissionManager: createMockPermissionManager(),
     ...overrides,
   };
@@ -251,7 +250,7 @@ describe('runPreToolUseChecks', () => {
   // ============================================================
 
   describe('step 2: source blocking', () => {
-    it('returns source_activation_needed for inactive MCP source (exists)', () => {
+    it('blocks an authorized-but-out-of-scope MCP source (user scope constraint wins)', () => {
       const result = runPreToolUseChecks(createInput({
         toolName: 'mcp__linear__createIssue',
         input: {},
@@ -259,14 +258,13 @@ describe('runPreToolUseChecks', () => {
         allSourceSlugs: ['linear'],
       }));
 
-      expect(result.type).toBe('source_activation_needed');
-      if (result.type === 'source_activation_needed') {
-        expect(result.sourceSlug).toBe('linear');
-        expect(result.sourceExists).toBe(true);
+      expect(result.type).toBe('block');
+      if (result.type === 'block') {
+        expect(result.reason).toContain('linear');
       }
     });
 
-    it('returns source_activation_needed for inactive MCP source (not exists)', () => {
+    it('blocks an MCP source that is not configured without attempting activation', () => {
       const result = runPreToolUseChecks(createInput({
         toolName: 'mcp__notion__search',
         input: {},
@@ -274,10 +272,9 @@ describe('runPreToolUseChecks', () => {
         allSourceSlugs: [],
       }));
 
-      expect(result.type).toBe('source_activation_needed');
-      if (result.type === 'source_activation_needed') {
-        expect(result.sourceSlug).toBe('notion');
-        expect(result.sourceExists).toBe(false);
+      expect(result.type).toBe('block');
+      if (result.type === 'block') {
+        expect(result.reason).toContain('notion');
       }
     });
 
@@ -801,7 +798,7 @@ describe('runPreToolUseChecks', () => {
     });
 
     it('source blocking runs before prerequisite check', () => {
-      // Inactive source → source_activation_needed (not prerequisite block)
+      // Unselected source → manual-selection block (not prerequisite block)
       const prereqManager = createMockPrerequisiteManager({
         checkPrerequisites: () => ({
           allowed: false,
@@ -817,7 +814,7 @@ describe('runPreToolUseChecks', () => {
         prerequisiteManager: prereqManager,
       }));
 
-      expect(result.type).toBe('source_activation_needed');
+      expect(result.type).toBe('block');
     });
 
     it('prerequisite check runs before call_llm interception', () => {
@@ -882,7 +879,7 @@ describe('runPreToolUseChecks', () => {
       expect(debugMessages[0]).toContain('Bash');
     });
 
-    it('calls onDebug for source activation', () => {
+    it('calls onDebug when an unselected source is blocked', () => {
       const debugMessages: string[] = [];
 
       runPreToolUseChecks(createInput({
@@ -1099,7 +1096,7 @@ describe('shouldPromptInAskMode', () => {
 
       expect(result).not.toBeNull();
       expect(result!.promptType).toBe('mcp_mutation');
-      expect(result!.description).toContain('linear');
+      expect(result!.sourceSlug).toBe('linear');
     });
 
     it('auto-allows MCP read-only tools (not blocked in safe mode)', () => {
@@ -1143,7 +1140,7 @@ describe('shouldPromptInAskMode', () => {
 
       expect(result).not.toBeNull();
       expect(result!.promptType).toBe('api_mutation');
-      expect(result!.description).toContain('POST');
+      expect(result!.sourceSlug).toBe('github');
     });
 
     it('auto-allows GET API calls', () => {

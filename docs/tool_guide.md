@@ -77,15 +77,14 @@
 
 ## source_test
 
-验证→（默认）启用属性源配置。步骤：
+验证数据源配置和连通性，并更新测试/连接状态 metadata，不修改 `enabled` 设置或会话中的手动数据源选择。步骤：
 1. Schema 校验 config.json 结构
 2. 图标处理（如配了则下载）
 3. 完整性检查（缺少 guide.md/icon/tagline 会告警）
 4. 连通性测试（源可达性）
 5. 鉴权状态检查
-6. 默认快乐启用：通过后把 `enabled: true` 写入 config 并激活到当前会话（工具即刻可用，无需重启）
 
-传 `autoEnable: false` 保持纯验证（不写 config、不改会话）。
+需要使用来源工具时，请提示用户先在 workspace settings 启用数据源，再在输入框下方的数据源选择器中选择该来源。
 
 ## source_oauth_trigger
 

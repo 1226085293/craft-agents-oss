@@ -144,7 +144,6 @@ export {
   type PlanCallback,
   type AuthCallback,
   type SourceChangeCallback,
-  type SourceActivationCallback,
   type ChatOptions,
   type RecoveryMessage,
   type SdkMcpServerConfig as BackendMcpServerConfig,

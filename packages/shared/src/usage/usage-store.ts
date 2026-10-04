@@ -92,6 +92,22 @@ export function resolveUsageTarget(
     return null;
   }
 
+  // Layered dispatch (tool-layering): the model calls mcp__session__call_tool
+  // with { name: <real proxy tool>, args }. Count the REAL target so source
+  // usage still tracks folded MCP/API tool calls.
+  if (toolName === 'mcp__session__call_tool' && toolInput) {
+    const args = (toolInput.args ?? {}) as Record<string, unknown>;
+    const raw = typeof toolInput.name === 'string'
+      ? toolInput.name
+      : typeof args.name === 'string'
+        ? args.name
+        : undefined;
+    if (raw && (raw.startsWith('mcp__') || raw.startsWith('api_'))) {
+      return resolveUsageTarget(raw, args);
+    }
+    return null;
+  }
+
   // MCP tools: mcp__<serverSlug>__<toolSlug...>
   if (toolName.startsWith('mcp__')) {
     const parts = toolName.split('__');
@@ -117,6 +133,19 @@ export function resolveUsageTarget(
 }
 
 const PROJECT_AGENT_SKILLS_DIR = '.agents/skills';
+
+/** Native shell tool names that carry a `command` input. */
+const SHELL_TOOL_NAMES = new Set(['Bash', 'Terminal', 'Shell']);
+
+/**
+ * Read verbs whose file arguments count as skill usage when the argument
+ * resolves under one of the supported skill roots. Deliberately small:
+ * search/copy/delete verbs (ls, grep, find, rm, cp, …) never count.
+ */
+const SKILL_READ_VERBS = new Set([
+  'cat', 'type', 'more', 'less', 'head', 'tail', 'diff',
+  'get-content', 'open-file',
+]);
 const WINDOWS_ABSOLUTE_PATH = /^(?:[a-zA-Z]:[\\/]|(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+)/;
 
 function normalizeUsagePath(path: string): string {
@@ -142,25 +171,28 @@ function joinUsagePath(base: string, relative: string): string {
  * regardless of the host OS; containment is checked on path segments, not a
  * textual prefix.
  */
-export function resolveSkillReadUsageTarget(
-  toolName: string,
-  toolInput: Record<string, unknown> | undefined,
-  isError: boolean,
-  context: SkillReadUsageContext,
-): UsageTarget | null {
-  if (toolName !== 'Read' || isError || !toolInput) return null;
-
-  const readPath = toolInput.file_path ?? toolInput.path;
-  if (typeof readPath !== 'string' || !readPath.trim()) return null;
-
-  const normalizedReadPath = normalizeUsagePath(readPath.trim());
-  const workingDirectory = context.workingDirectory ?? context.workspaceRootPath;
-  const normalizedWorkingDirectory = normalizeUsagePath(workingDirectory);
+function buildSkillRoots(context: SkillReadUsageContext): string[] {
   const roots = [
     context.globalSkillsPath ?? join(homedir(), '.agents', 'skills'),
     joinUsagePath(context.workspaceRootPath, 'skills'),
     ...(context.workingDirectory ? [joinUsagePath(context.workingDirectory, PROJECT_AGENT_SKILLS_DIR)] : []),
-  ].map(normalizeUsagePath);
+  ];
+  return roots.map(normalizeUsagePath);
+}
+
+/**
+ * Check whether `fileLike` resolves under one of the skill roots and return
+ * the best (most specific root) match, or `null`. Both Windows and POSIX
+ * separators are accepted regardless of the host OS; containment is checked
+ * on path segments, not a textual prefix.
+ */
+function matchSkillSlugForPath(
+  fileLike: string,
+  workingDirectory: string,
+  roots: string[],
+): { slug: string; rootLength: number } | null {
+  const normalizedReadPath = normalizeUsagePath(fileLike);
+  const normalizedWorkingDirectory = normalizeUsagePath(workingDirectory);
 
   const matches: Array<{ slug: string; rootLength: number }> = [];
   for (const root of roots) {
@@ -183,9 +215,99 @@ export function resolveSkillReadUsageTarget(
     matches.push({ slug: segments[0]!, rootLength: absoluteRoot.length });
   }
 
+  if (matches.length === 0) return null;
   matches.sort((a, b) => b.rootLength - a.rootLength);
-  const slug = matches[0]?.slug;
-  return slug ? { kind: 'skill', slug } : null;
+  return matches[0]!;
+}
+
+export function resolveSkillReadUsageTarget(
+  toolName: string,
+  toolInput: Record<string, unknown> | undefined,
+  isError: boolean,
+  context: SkillReadUsageContext,
+): UsageTarget | null {
+  if (toolName !== 'Read' || isError || !toolInput) return null;
+
+  const readPath = toolInput.file_path ?? toolInput.path;
+  if (typeof readPath !== 'string' || !readPath.trim()) return null;
+
+  const workingDirectory = context.workingDirectory ?? context.workspaceRootPath;
+  const hit = matchSkillSlugForPath(readPath.trim(), workingDirectory, buildSkillRoots(context));
+  return hit ? { kind: 'skill', slug: hit.slug } : null;
+}
+
+function commandHasReadVerb(segment: string): boolean {
+  // Strip quoted literals so a verb inside a string literal never counts;
+  // the verb must be an actual command word of this segment.
+  const stripped = segment.replace(/"([^"]*)"|'([^']*)'/g, ' ');
+  return stripped.split(/\s+/).some(token => SKILL_READ_VERBS.has(token.toLowerCase()));
+}
+
+function looksLikeFilePath(token: string): boolean {
+  const cleaned = token.replace(/^["']+|["']+$/g, '');
+  if (!cleaned || cleaned.length < 2 || cleaned.startsWith('-')) return false;
+  return cleaned.includes('/') || cleaned.includes('\\')
+    || cleaned.startsWith('~') || /^[a-zA-Z]:/.test(cleaned);
+}
+
+/**
+ * Extract file-path candidates from one shell command segment: quoted
+ * literals and bare tokens that look like paths. Quoted literals are
+ * returned without their quotes so they can be resolved directly.
+ */
+function extractPathTokens(segment: string): string[] {
+  const tokens: string[] = [];
+  const quoted = /"([^"]*)"|'([^']*)'/g;
+  let match: RegExpExecArray | null;
+  while ((match = quoted.exec(segment)) !== null) {
+    const literal = (match[1] ?? match[2] ?? '').trim();
+    if (looksLikeFilePath(literal)) tokens.push(literal);
+  }
+  for (const raw of segment.split(/\s+/)) {
+    const token = raw.trim();
+    if (token && looksLikeFilePath(token)) {
+      tokens.push(token.replace(/^["']+|["']+$/g, ''));
+    }
+  }
+  return tokens;
+}
+
+/**
+ * Resolve a successful shell invocation to a skill slug when the command
+ * READS a skill file via a read verb (cat, type, Get-Content, ...).
+ *
+ * The verb and the path must sit in the same command segment (the command
+ * is split on `&&`/`||`/`;`/`|`/newlines), so `grep`-ing or `ls`-ing a
+ * skill file never counts, and a verb in one segment never attributes a
+ * path that belongs to another segment. Failed invocations are rejected
+ * up front (`isError`), mirroring the Read resolver: a `cat` of a missing
+ * skill file is a shell error, not a usage.
+ */
+export function resolveSkillCommandUsageTarget(
+  toolName: string,
+  toolInput: Record<string, unknown> | undefined,
+  isError: boolean,
+  context: SkillReadUsageContext,
+): UsageTarget | null {
+  if (!SHELL_TOOL_NAMES.has(toolName) || isError || !toolInput) return null;
+  const command = (toolInput.command ?? toolInput.cmd) as string | undefined;
+  if (typeof command !== 'string' || !command.trim()) return null;
+
+  const workingDirectory = context.workingDirectory ?? context.workspaceRootPath;
+  const roots = buildSkillRoots(context);
+
+  const matches: Array<{ slug: string; rootLength: number }> = [];
+  for (const segment of command.split(/&&|\|\||[;|\n]/)) {
+    if (!commandHasReadVerb(segment)) continue;
+    for (const token of extractPathTokens(segment)) {
+      const hit = matchSkillSlugForPath(token, workingDirectory, roots);
+      if (hit) matches.push(hit);
+    }
+  }
+
+  if (matches.length === 0) return null;
+  matches.sort((a, b) => b.rootLength - a.rootLength);
+  return { kind: 'skill', slug: matches[0]!.slug };
 }
 
 // ============================================================================

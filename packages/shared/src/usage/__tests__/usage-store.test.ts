@@ -4,7 +4,7 @@ import { join } from 'path'
 import { homedir, tmpdir } from 'os'
 import { pathToFileURL } from 'url'
 
-import { resolveUsageTarget, resolveSkillReadUsageTarget } from '../usage-store.ts'
+import { resolveUsageTarget, resolveSkillReadUsageTarget, resolveSkillCommandUsageTarget } from '../usage-store.ts'
 
 describe('resolveUsageTarget', () => {
   it('resolves MCP source tools to their slug', () => {
@@ -20,6 +20,21 @@ describe('resolveUsageTarget', () => {
   it('resolves in-process API source tools to their slug', () => {
     // In-process API server (mcp-pool.ts connectInProcess): mcp__{slug}__api_{slug}
     expect(resolveUsageTarget('mcp__stripe__api_stripe', {})).toEqual({ kind: 'source', slug: 'stripe' })
+  })
+
+  it('counts the real target of layered call_tool dispatch', () => {
+    // Tool-layering: the model calls mcp__session__call_tool; the real folded
+    // source tool is inside input.name (or args.name).
+    expect(resolveUsageTarget('mcp__session__call_tool', { name: 'mcp__codegraph__codegraph_explore' }))
+      .toEqual({ kind: 'source', slug: 'codegraph' })
+    expect(resolveUsageTarget('mcp__session__call_tool', { name: 'mcp__codegraph__codegraph_explore', args: { query: 'x' } }))
+      .toEqual({ kind: 'source', slug: 'codegraph' })
+    // API tools targeted via call_tool (in-process API proxy name)
+    expect(resolveUsageTarget('mcp__session__call_tool', { name: 'mcp__stripe__api_stripe', args: { method: 'GET' } }))
+      .toEqual({ kind: 'source', slug: 'stripe' })
+    // Internal targets remain untracked
+    expect(resolveUsageTarget('mcp__session__call_tool', { name: 'mcp__session__call_llm' })).toBeNull()
+    expect(resolveUsageTarget('mcp__session__call_tool', {})).toBeNull()
   })
 
   it('ignores internal session MCP tools', () => {
@@ -129,6 +144,97 @@ describe('resolveSkillReadUsageTarget', () => {
     expect(resolveSkillReadUsageTarget('Read', {
       file_path: '/workspace/skills-extra/demo/SKILL.md',
     }, false, context)).toBeNull()
+  })
+})
+
+describe('resolveSkillCommandUsageTarget', () => {
+  const context = {
+    workspaceRootPath: '/workspace',
+    workingDirectory: '/project',
+    globalSkillsPath: '/home/user/.agents/skills',
+  }
+
+  it('counts a read verb targeting a skill file in any of the skill roots', () => {
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'cat /home/user/.agents/skills/tts-voice-send/SKILL.md',
+    }, false, context)).toEqual({ kind: 'skill', slug: 'tts-voice-send' })
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'head -120 "/workspace/skills/brainstorming/references/testing-anti-patterns.md"',
+    }, false, context)).toEqual({ kind: 'skill', slug: 'brainstorming' })
+    // relative to the working directory (project skill root)
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'cat .agents/skills/ui-ux-pro-max/SKILL.md',
+    }, false, context)).toEqual({ kind: 'skill', slug: 'ui-ux-pro-max' })
+  })
+
+  it('counts the fallback-chain + pipe pattern actually seen in sessions', () => {
+    const command = 'cat "C:\\Users\\u\\.agents\\skills\\writing-plans\\SKILL.md" 2>/dev/null | head -120 || cat "C:\\Users\\u\\.craft-agent\\workspaces\\my-workspace\\skills\\writing-plans\\SKILL.md" 2>/dev/null | head -120'
+    expect(resolveSkillCommandUsageTarget('Bash', { command }, false, {
+      workspaceRootPath: 'C:/Users/u/.craft-agent/workspaces/my-workspace',
+      workingDirectory: 'C:/repo',
+      globalSkillsPath: 'C:/Users/u/.agents/skills',
+    })).toEqual({ kind: 'skill', slug: 'writing-plans' })
+  })
+
+  it('matches Windows `type` and PowerShell `Get-Content` verbs', () => {
+    const winContext = {
+      workspaceRootPath: 'C:/Users/Alice/.craft-agent/workspaces/main',
+      workingDirectory: 'C:/repo',
+      globalSkillsPath: 'C:/Users/Alice/.agents/skills',
+    }
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'type C:\\Users\\Alice\\.agents\\skills\\brainstorming\\testing-anti-patterns.md',
+    }, false, winContext)).toEqual({ kind: 'skill', slug: 'brainstorming' })
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'Get-Content "C:\\repo\\.agents\\skills\\demo\\SKILL.md"',
+    }, false, winContext)).toEqual({ kind: 'skill', slug: 'demo' })
+  })
+
+  it('never counts non-read verbs (ls, grep, rm, echo, find)', () => {
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'ls /home/user/.agents/skills/tts-voice-send/SKILL.md',
+    }, false, context)).toBeNull()
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'grep -n foo /workspace/skills/demo/SKILL.md',
+    }, false, context)).toBeNull()
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'rm /workspace/skills/demo/SKILL.md',
+    }, false, context)).toBeNull()
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'echo /workspace/skills/demo/SKILL.md',
+    }, false, context)).toBeNull()
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'find /workspace/skills -name SKILL.md',
+    }, false, context)).toBeNull()
+    // listing a skill root or a bare slug directory also never matches
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'ls /home/user/.agents/skills',
+    }, false, context)).toBeNull()
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'ls /home/user/.agents/skills/writing-plans',
+    }, false, context)).toBeNull()
+  })
+
+  it('requires the verb and the path to share one command segment', () => {
+    // `cat` in the first segment, skill path behind `grep` in the second
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'cat /workspace/README.md && grep foo /workspace/skills/demo/SKILL.md',
+    }, false, context)).toBeNull()
+    // `cat` present but targeting only an ordinary file
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'cat /workspace/README.md | head -5',
+    }, false, context)).toBeNull()
+  })
+
+  it('ignores non-shell tools, failed commands, and missing input', () => {
+    expect(resolveSkillCommandUsageTarget('Read', {
+      command: 'cat /workspace/skills/demo/SKILL.md',
+    }, false, context)).toBeNull()
+    expect(resolveSkillCommandUsageTarget('Bash', {
+      command: 'cat /workspace/skills/demo/SKILL.md',
+    }, true, context)).toBeNull()
+    expect(resolveSkillCommandUsageTarget('Bash', {}, false, context)).toBeNull()
+    expect(resolveSkillCommandUsageTarget('Bash', { command: '' }, false, context)).toBeNull()
   })
 })
 

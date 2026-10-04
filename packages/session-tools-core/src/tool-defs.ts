@@ -52,6 +52,7 @@ import { handleArchiveSession } from './handlers/archive-session.ts';
 import { handleSendAgentMessage } from './handlers/send-agent-message.ts';
 import { handleDeliverFile } from './handlers/deliver-file.ts';
 import { handleListMessagingChannels, handleUnbindMessagingChannel } from './handlers/messaging.ts';
+import { handleAddMemory, handleQueryMemories } from './handlers/memory.ts';
 
 // ============================================================
 // Canonical Zod Schemas
@@ -77,13 +78,7 @@ export const MermaidValidateSchema = z.object({
 });
 
 export const SourceTestSchema = z.object({
-  sourceSlug: z.string().describe('The slug of the source to test'),
-  autoEnable: z
-    .boolean()
-    .optional()
-    .describe(
-      'Automatically enable and activate the source in the current session on successful validation. Defaults to true. Pass false to keep pure validation behavior.'
-    ),
+  sourceSlug: z.string().describe('The slug of the source to validate and test; this never enables or selects it'),
 });
 
 export const SourceOAuthTriggerSchema = z.object({
@@ -299,6 +294,16 @@ export const SendAgentMessageSchema = z.object({
   })).optional().describe('Files to include with the message'),
 });
 
+export const AddMemorySchema = z.object({
+  action: z.enum(['add', 'update', 'delete']),
+  scope: z.enum(['session', 'global']).describe('session for temporary facts related only to this conversation; global only for durable user preferences, rules, and reusable knowledge'),
+  id: z.string().optional(),
+  content: z.string().min(1).max(4000).optional(),
+  type: z.enum(['fact', 'preference', 'workflow', 'reminder', 'context']).optional(),
+  tags: z.array(z.string()).optional(),
+});
+export const QueryMemoriesSchema = z.object({ query: z.string().min(1) });
+
 export const DeliverFileSchema = z.object({
   path: z.string().describe('Absolute or session/workspace-relative path to the file to deliver.'),
   filename: z.string().optional().describe('Attachment filename shown to the recipient. Defaults to the file basename.'),
@@ -324,7 +329,7 @@ export const TOOL_DESCRIPTIONS = {
   config_validate: `Validate Craft Agent config files after editing, before they take effect. Targets: config (config.json), sources, statuses, preferences, permissions, automations, tool-icons, all. Returns structured errors/warnings/suggestions.`,
   skill_validate: `Validate a skill SKILL.md: slug format (lowercase alnum + hyphens), file exists/readable, YAML frontmatter valid (name+description required), non-empty body, icon format if present.`,
   mermaid_validate: `Validate Mermaid diagram syntax before outputting (complex diagrams, many nodes, failed renders). Returns specific error messages if invalid. Include the raw diagram code.`,
-  source_test: `Validate, test, and (by default) activate a source config: schema check, icon handling, completeness warning, connectivity test, auth status; on success flips enabled=true and activates in the running session. Pass autoEnable=false for pure validation.`,
+  source_test: `Validate and test a source config: schema, icon, completeness, connectivity, and auth. This tool does not enable or select a source. If the user wants to use its tools, ask them to enable it in workspace settings and select it in the session source picker before they resend the request.`,
   source_oauth_trigger: `Start OAuth 2.0 + PKCE for an MCP source. Prerequisites: source exists, type mcp, authType oauth, valid MCP URL. Execution pauses while OAuth completes.`,
   source_google_oauth_trigger: `Trigger Google OAuth for a Google API source; opens a browser window for user sign-in. Services: Gmail, Calendar, Drive, Docs, Sheets, YouTube, Search Console. Pauses until OAuth completes.`,
   source_slack_oauth_trigger: `Trigger Slack OAuth for a Slack API source; opens browser for user sign-in. Pauses until OAuth completes.`,
@@ -352,6 +357,8 @@ export const TOOL_DESCRIPTIONS = {
   list_sessions: `List sessions (workspace-wide; total + paginated results, limit 20 default, sort/filters via status/label/search). Use get_session_info for details on a specific.`,
   list_background_tasks: `List background agents/tasks tracked for a session: running, finished, or orphaned (terminated when the turn launched them ended). Authoritative answer for 'what is running / what's the status?'. Omit sessionId for the current session.`,
   send_agent_message: `Send a message to another session; the target receives it with your session ID so it can reply. Use to coordinate spawned sessions, follow-up instructions, or relay information. Find ids via list_sessions or use the sessionId from spawn_session.`,
+  add_memory: `Add a memory. Use session scope for temporary/task-specific context; use global only for durable user preferences, rules, and reusable knowledge that should persist across sessions.`,
+  query_memories: `Search the current session's memories and workspace-global memories for relevant context.`,
   deliver_file: `Deliver a local file as an attachment to the messaging channel(s) bound to this session (Telegram/WhatsApp/Lark/QQ). Use when the user asks to send/forward a generated/downloaded file to their phone or app. Prefer this over printing a link when a real attachment is wanted.`,
   list_messaging_channels: `List messaging channels (Telegram/WhatsApp/Lark/QQ) bound to this session — shows which external chat apps are connected to send/receive files.`,
   unbind_messaging_channel: `Disconnect a messaging channel from this session so messages stop forwarding. Optionally specify platform (e.g. telegram); default removes all.`,
@@ -437,6 +444,8 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'list_background_tasks', description: TOOL_DESCRIPTIONS.list_background_tasks, inputSchema: ListBackgroundTasksSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListBackgroundTasks },
   // Inter-session messaging
   { name: 'send_agent_message', description: TOOL_DESCRIPTIONS.send_agent_message, inputSchema: SendAgentMessageSchema, executionMode: 'registry', safeMode: 'block', handler: handleSendAgentMessage },
+  { name: 'add_memory', description: TOOL_DESCRIPTIONS.add_memory, inputSchema: AddMemorySchema, executionMode: 'registry', safeMode: 'block', handler: handleAddMemory },
+  { name: 'query_memories', description: TOOL_DESCRIPTIONS.query_memories, inputSchema: QueryMemoriesSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleQueryMemories },
   // Messaging gateway tools
   { name: 'deliver_file', description: TOOL_DESCRIPTIONS.deliver_file, inputSchema: DeliverFileSchema, executionMode: 'registry', safeMode: 'block', handler: handleDeliverFile },
   { name: 'list_messaging_channels', description: TOOL_DESCRIPTIONS.list_messaging_channels, inputSchema: ListMessagingChannelsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListMessagingChannels },

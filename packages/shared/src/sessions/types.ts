@@ -33,7 +33,7 @@ export const SESSION_PERSISTENT_FIELDS = [
   // Read tracking
   'lastReadMessageId', 'hasUnread',
   // Config
-  'enabledSourceSlugs', 'permissionMode', 'previousPermissionMode', 'workingDirectory',
+  'enabledSourceSlugs', 'sourceScope', 'permissionMode', 'previousPermissionMode', 'workingDirectory',
   // Model/Connection
   'model', 'llmConnection', 'connectionLocked', 'thinkingLevel',
   // Sharing
@@ -140,6 +140,8 @@ export interface SessionConfig {
   hasUnread?: boolean;
   /** Per-session source selection (source slugs) */
   enabledSourceSlugs?: string[];
+  /** 数据源选择器模式：auto（默认）/ only（仅这些）/ exclude（排除这些） */
+  sourceScope?: 'auto' | 'only' | 'exclude';
   /** Working directory for this session (used by agent for bash commands and context) */
   workingDirectory?: string;
   /** SDK cwd for session storage - set once at creation, never changes. Ensures SDK can find session transcripts regardless of workingDirectory changes. */
@@ -272,6 +274,8 @@ export interface SessionHeader {
   hasUnread?: boolean;
   /** Per-session source selection (source slugs) */
   enabledSourceSlugs?: string[];
+  /** 数据源选择器模式：auto（默认）/ only（仅这些）/ exclude（排除这些） */
+  sourceScope?: 'auto' | 'only' | 'exclude';
   /** Working directory for this session (used by agent for bash commands and context) */
   workingDirectory?: string;
   /** SDK cwd for session storage - set once at creation, never changes */
@@ -367,6 +371,8 @@ export interface SessionMetadata {
   labels?: string[];
   /** Explicit per-session source selection (absent = follow workspace defaults) */
   enabledSourceSlugs?: string[];
+  /** 数据源选择器模式：auto（默认）/ only（仅这些）/ exclude（排除这些） */
+  sourceScope?: 'auto' | 'only' | 'exclude';
   /** Permission mode for this session */
   permissionMode?: PermissionMode;
   /** Previous permission mode (used to preserve modeTransition context across restarts) */

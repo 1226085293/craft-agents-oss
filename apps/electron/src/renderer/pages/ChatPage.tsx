@@ -751,6 +751,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
         isFlagged: sessionMeta.isFlagged,
         workingDirectory: sessionMeta.workingDirectory,
         enabledSourceSlugs: sessionMeta.enabledSourceSlugs,
+        sourceScope: sessionMeta.sourceScope,
       }
 
       return (
@@ -785,7 +786,8 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
                 sessionStatuses={sessionStatuses}
                 onSessionStatusChange={handleSessionStatusChange}
                 workspaceId={activeWorkspaceId || undefined}
-                onSourcesChange={(slugs) => onSessionSourcesChange?.(sessionId, slugs)}
+                onSourcesChange={(slugs, scope) => onSessionSourcesChange?.(sessionId, slugs, scope)}
+                sourceScope={sessionMeta.sourceScope}
                 workingDirectory={sessionMeta.workingDirectory}
                 onWorkingDirectoryChange={handleWorkingDirectoryChange}
                 messagesLoading={messageLoadState.messagesLoading || (messagesRetrying && !messageLoadState.messagesReady)}
@@ -864,7 +866,8 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
             sessionStatuses={sessionStatuses}
             onSessionStatusChange={handleSessionStatusChange}
             workspaceId={activeWorkspaceId || undefined}
-            onSourcesChange={(slugs) => onSessionSourcesChange?.(sessionId, slugs)}
+            onSourcesChange={(slugs, scope) => onSessionSourcesChange?.(sessionId, slugs, scope)}
+            sourceScope={session?.sourceScope ?? sessionMeta?.sourceScope}
             workingDirectory={workingDirectory}
             onWorkingDirectoryChange={handleWorkingDirectoryChange}
             sessionFolderPath={session?.sessionFolderPath}

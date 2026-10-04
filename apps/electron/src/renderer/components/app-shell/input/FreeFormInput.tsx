@@ -205,12 +205,14 @@ export interface FreeFormInputProps {
   /** Callback when focus state changes */
   onFocusChange?: (focused: boolean) => void
   // Source selection
-  /** Available sources (enabled only) */
+  /** Available sources (enabled only)；选择器内未授权项会置灰 */
   sources?: LoadedSource[]
   /** Currently enabled source slugs for this session */
   enabledSourceSlugs?: string[]
+  /** 数据源选择器模式：auto（默认）/ only / exclude */
+  sourceScope?: 'auto' | 'only' | 'exclude'
   /** Callback when source selection changes */
-  onSourcesChange?: (slugs: string[]) => void
+  onSourcesChange?: (slugs: string[], sourceScope?: 'auto' | 'only' | 'exclude') => void
   // Skill selection (for @mentions)
   /** Available skills for @mention autocomplete */
   skills?: LoadedSkill[]
@@ -316,6 +318,7 @@ export function FreeFormInput({
   onFocusChange,
   sources = [],
   enabledSourceSlugs = [],
+  sourceScope = 'auto',
   onSourcesChange,
   skills = [],
   labels = [],
@@ -657,6 +660,11 @@ export function FreeFormInput({
 
   // Optimistic state for source selection - updates UI immediately before IPC round-trip completes
   const [optimisticSourceSlugs, setOptimisticSourceSlugs] = React.useState(enabledSourceSlugs)
+  const [optimisticSourceScope, setOptimisticSourceScope] = React.useState<'auto' | 'only' | 'exclude'>(sourceScope)
+
+  React.useEffect(() => {
+    setOptimisticSourceScope(sourceScope)
+  }, [sourceScope])
 
   // Sync from prop when server state changes (reconciles after IPC or on external updates)
   // Use content comparison (not reference) to avoid infinite loops with empty arrays
@@ -1133,16 +1141,19 @@ export function FreeFormInput({
     // For sources: enable the source immediately
     if (item.type === 'source' && item.source && onSourcesChange) {
       const slug = item.source.config.slug
+      if (!item.source.config.enabled) return // 未授权源不可通过 @ 启用
       if (!optimisticSourceSlugs.includes(slug)) {
         const newSlugs = [...optimisticSourceSlugs, slug]
+        const scope: 'auto' | 'only' | 'exclude' = optimisticSourceScope === 'auto' ? 'only' : optimisticSourceScope
         setOptimisticSourceSlugs(newSlugs)
-        onSourcesChange(newSlugs)
+        setOptimisticSourceScope(scope)
+        onSourcesChange(newSlugs, scope)
       }
     }
 
     // Files via @ mention in text are sufficient context for the agent.
     // Skills also don't need special handling beyond text insertion.
-  }, [optimisticSourceSlugs, onSourcesChange])
+  }, [optimisticSourceSlugs, optimisticSourceScope, onSourcesChange])
 
   // Inline mention hook (for skills, sources, and files)
   const inlineMention = useInlineMention({
@@ -1433,8 +1444,10 @@ export function FreeFormInput({
     if (mentions.sources.length > 0 && onSourcesChange) {
       const newSlugs = [...new Set([...optimisticSourceSlugs, ...mentions.sources])]
       if (newSlugs.length > optimisticSourceSlugs.length) {
+        const scope: 'auto' | 'only' | 'exclude' = optimisticSourceScope === 'auto' ? 'only' : optimisticSourceScope
         setOptimisticSourceSlugs(newSlugs)
-        onSourcesChange(newSlugs)
+        setOptimisticSourceScope(scope)
+        onSourcesChange(newSlugs, scope)
       }
     }
 
@@ -2048,13 +2061,23 @@ export function FreeFormInput({
                 onOpenChange={setSourceDropdownOpen}
                 sources={sources}
                 selectedSlugs={optimisticSourceSlugs}
+                sourceScope={optimisticSourceScope}
+                onScopeChange={(scope) => {
+                  setOptimisticSourceScope(scope)
+                  onSourcesChange?.(optimisticSourceSlugs, scope)
+                }}
                 onToggleSlug={(slug) => {
+                  const source = sources.find(s => s.config.slug === slug)
+                  if (source && !source.config.enabled) return
                   const isEnabled = optimisticSourceSlugs.includes(slug)
                   const newSlugs = isEnabled
                     ? optimisticSourceSlugs.filter(currentSlug => currentSlug !== slug)
                     : [...optimisticSourceSlugs, slug]
+                  // auto 模式下首次选择来源 → 收窄为“仅这些”
+                  const scope: 'auto' | 'only' | 'exclude' = optimisticSourceScope === 'auto' ? 'only' : optimisticSourceScope
                   setOptimisticSourceSlugs(newSlugs)
-                  onSourcesChange?.(newSlugs)
+                  setOptimisticSourceScope(scope)
+                  onSourcesChange?.(newSlugs, scope)
                 }}
               />
             </div>
@@ -2154,13 +2177,23 @@ export function FreeFormInput({
                 anchorRef={sourceButtonRef}
                 sources={sources}
                 selectedSlugs={optimisticSourceSlugs}
+                sourceScope={optimisticSourceScope}
+                onScopeChange={(scope) => {
+                  setOptimisticSourceScope(scope)
+                  onSourcesChange?.(optimisticSourceSlugs, scope)
+                }}
                 onToggleSlug={(slug) => {
+                  const source = sources.find(s => s.config.slug === slug)
+                  if (source && !source.config.enabled) return
                   const isEnabled = optimisticSourceSlugs.includes(slug)
                   const newSlugs = isEnabled
                     ? optimisticSourceSlugs.filter(currentSlug => currentSlug !== slug)
                     : [...optimisticSourceSlugs, slug]
+                  // auto 模式下首次选择来源 → 收窄为“仅这些”
+                  const scope: 'auto' | 'only' | 'exclude' = optimisticSourceScope === 'auto' ? 'only' : optimisticSourceScope
                   setOptimisticSourceSlugs(newSlugs)
-                  onSourcesChange?.(newSlugs)
+                  setOptimisticSourceScope(scope)
+                  onSourcesChange?.(newSlugs, scope)
                 }}
               />
             </div>

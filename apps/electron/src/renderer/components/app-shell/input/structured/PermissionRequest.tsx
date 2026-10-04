@@ -1,3 +1,4 @@
+import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { ShieldAlert, Check, X, RefreshCw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -22,20 +23,41 @@ interface PermissionRequestProps {
  * - Command preview (scrollable)
  * - Action buttons: Allow, Always Allow, Deny
  */
+const RISK_STYLES: Record<string, string> = {
+  low: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
+  medium: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
+  high: 'bg-orange-500/15 text-orange-600 dark:text-orange-400',
+  critical: 'bg-red-500/15 text-red-600 dark:text-red-400',
+}
+
 export function PermissionRequest({ request, onResponse, unstyled = false }: PermissionRequestProps) {
   const { t } = useTranslation()
+  const [permanentDeny, setPermanentDeny] = React.useState(false)
 
   const handleAllow = () => {
-    onResponse({ type: 'permission', allowed: true, alwaysAllow: false })
+    onResponse({ type: 'permission', allowed: true, alwaysAllow: false, sourcePermission: 'once' })
+  }
+
+  const handleSessionAllow = () => {
+    onResponse({ type: 'permission', allowed: true, alwaysAllow: true, sourcePermission: 'session' })
   }
 
   const handleAlwaysAllow = () => {
-    onResponse({ type: 'permission', allowed: true, alwaysAllow: true })
+    onResponse({ type: 'permission', allowed: true, alwaysAllow: true, sourcePermission: 'always' })
   }
 
   const handleDeny = () => {
-    onResponse({ type: 'permission', allowed: false, alwaysAllow: false })
+    onResponse({
+      type: 'permission',
+      allowed: false,
+      alwaysAllow: false,
+      sourcePermission: permanentDeny ? 'deny-permanent' : 'deny',
+    })
   }
+
+  // 来源调用确认：显示源、工具、权限、数据范围、风险；文案区分“授权请求”与“单次确认”
+  const isSourceCall = !!request.sourceSlug
+  const isAuthorizationRequest = request.isAuthorizationRequest === true
 
   return (
     <div
@@ -59,6 +81,36 @@ export function PermissionRequest({ request, onResponse, unstyled = false }: Per
             <br />
             {request.description}
           </div>
+
+          {isSourceCall && (
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              {request.sourceName && (
+                <span className="rounded bg-foreground/8 px-1.5 py-0.5 font-medium text-foreground/80">
+                  {request.sourceName}
+                </span>
+              )}
+              {request.requiredPermission && (
+                <span className="rounded bg-foreground/8 px-1.5 py-0.5 text-foreground/60">
+                  {request.requiredPermission}
+                </span>
+              )}
+              {request.dataScope && (
+                <span className="rounded bg-foreground/8 px-1.5 py-0.5 text-foreground/60">
+                  {request.dataScope}
+                </span>
+              )}
+              {request.sourceRisk && (
+                <span className={cn('rounded px-1.5 py-0.5 font-medium', RISK_STYLES[request.sourceRisk] ?? 'bg-foreground/8')}>
+                  {request.sourceRisk}
+                </span>
+              )}
+              {isAuthorizationRequest && (
+                <span className="rounded bg-info/10 px-1.5 py-0.5 font-medium text-info">
+                  Authorization request
+                </span>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Command preview */}
@@ -79,17 +131,39 @@ export function PermissionRequest({ request, onResponse, unstyled = false }: Per
           data-tutorial="permission-allow-button"
         >
           <Check className="h-3.5 w-3.5" />
-          Allow
+          {isSourceCall ? (isAuthorizationRequest ? 'Authorize once' : 'Allow once') : 'Allow'}
         </Button>
         <Button
           size="sm"
           variant="ghost"
           className="h-7 gap-1.5 border border-foreground/10 hover:bg-foreground/5 active:bg-foreground/10"
-          onClick={handleAlwaysAllow}
+          onClick={handleSessionAllow}
         >
           <RefreshCw className="h-3.5 w-3.5" />
-          Always Allow
+          {isSourceCall ? 'Allow this session' : 'Allow session'}
         </Button>
+        {isSourceCall && (
+          <>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 gap-1.5 border border-foreground/10 hover:bg-foreground/5 active:bg-foreground/10"
+              onClick={handleAlwaysAllow}
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Always Allow
+            </Button>
+            <label className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={permanentDeny}
+                onChange={(e) => setPermanentDeny(e.target.checked)}
+                className="h-3 w-3"
+              />
+              Permanent
+            </label>
+          </>
+        )}
         <Button
           size="sm"
           variant="ghost"
@@ -102,7 +176,9 @@ export function PermissionRequest({ request, onResponse, unstyled = false }: Per
 
         {/* Tip text */}
         <span className="min-w-0 flex-1 basis-full text-[10px] text-muted-foreground sm:basis-auto sm:text-right">
-          "Always Allow" remembers this command for the session
+          {isSourceCall
+            ? '“Always Allow” persists this tool permission; Permanent + Deny blocks it permanently'
+            : '"Always Allow" remembers this command for the session'}
         </span>
       </div>
     </div>

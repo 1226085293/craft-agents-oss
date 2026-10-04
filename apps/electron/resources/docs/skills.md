@@ -62,7 +62,7 @@ name: "Skill Display Name"
 description: "Brief description shown in skill list"
 globs: ["*.ts", "*.tsx"]     # Optional: file patterns that trigger skill
 alwaysAllow: ["Bash"]        # Optional: tools to always allow
-requiredSources:             # Optional: sources to auto-enable on invocation
+requiredSources:             # Optional: source tools this skill requires
   - linear
 ---
 
@@ -112,18 +112,15 @@ alwaysAllow:
 ```
 
 ### requiredSources (optional)
-Array of source slugs to auto-enable when this skill is invoked.
-When a user mentions the skill, the listed sources are enabled for the session
-before the agent starts — so tools from those sources are available from the first turn.
-
-Sources must exist in the workspace and be authenticated. Unauthenticated or
-missing sources are silently skipped (the existing runtime auto-enable handles them
-as a fallback).
+Array of source slugs that a skill depends on. This is descriptive metadata only:
+it never enables a workspace source or changes the session's manual selection. If
+a required source is not selected, the agent must ask the user to select it in the
+session source picker and resend the request.
 
 ```yaml
 requiredSources:
-  - linear               # Auto-enable Linear source
-  - github               # Auto-enable GitHub source
+  - linear               # The user must select Linear before this skill can use it
+  - github               # The user must select GitHub before this skill can use it
 ```
 
 ## Creating a Skill

@@ -186,13 +186,6 @@ export class ClaudeEventAdapter extends BaseEventAdapter {
   }
 
   /**
-   * Get the tool index (for agent-level operations like inactive source detection).
-   */
-  getToolIndex(): ToolIndex {
-    return this.toolIndex;
-  }
-
-  /**
    * Get the set of active parent tools (exposed for source activation detection).
    */
   getActiveParentTools(): Set<string> {

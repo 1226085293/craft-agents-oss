@@ -105,4 +105,33 @@ describe('FsWatch — framework runtime noise in session cwd (2026-09-08 inciden
     const ev = fw.detectWrites(dir);
     expect(ev?.modifiedFiles ?? []).toEqual([]);
   });
+
+  it('tray/gateway runtime files (.err/.lock) never count as evidence (2026-10-05)', () => {
+    // Session 261005-steady-horse: the turn restarted a Python tray gateway
+    // via Bash; its stderr log (server.err) and lockfile (tray.lock) gained
+    // fresh mtimes mid-turn, leaked into the verify+fsWrite evidence list,
+    // and — combined with a down judge — exhausted recovery into a false
+    // "stopped without a final response" guardrail notice on a healthy reply.
+    const { dir } = makeSessionDir();
+    const now = new Date();
+    writeFileSync(join(dir, 'server.err'), 'traceback\n');
+    writeFileSync(join(dir, 'tray.lock'), '1234\n');
+    utimesSync(join(dir, 'server.err'), now, now);
+    utimesSync(join(dir, 'tray.lock'), now, now);
+    const fw = new FsWatch();
+    fw.markTurnStart(new Date(Date.now() - 50));
+    const ev = fw.detectWrites(dir);
+    expect(ev?.modifiedFiles ?? []).toEqual([]);
+  });
+
+  it('genuine edits still count even when .err/.lock churn happens', () => {
+    const { dir } = makeSessionDir();
+    writeFileSync(join(dir, 'tray.lock'), '999\n');
+    writeFileSync(join(dir, 'config.py'), 'X = 1\n');
+    const fw = new FsWatch();
+    fw.markTurnStart(new Date(Date.now() - 50));
+    const ev = fw.detectWrites(dir);
+    expect(ev?.modifiedFiles ?? []).toContain('config.py');
+    expect(ev?.modifiedFiles ?? []).not.toContain('tray.lock');
+  });
 });

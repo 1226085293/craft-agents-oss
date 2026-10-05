@@ -265,6 +265,35 @@ describe('PiAgent verification delivery lifecycle', () => {
     expect(enqueued[4].turnId).toBe(enqueued[0].turnId)
     agent.destroy()
   })
+
+  it('skipped (judge unavailable) fails open: delivers the captured reply and completes the turn', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    startVerificationHold(agent, enqueued)
+
+    ;(agent as any).handleLine(JSON.stringify({
+      type: 'verification_result',
+      passed: true,
+      finalText: 'Captured reply',
+      skipped: true,
+      skipReason: 'judge-unavailable',
+    }))
+
+    // Same lifecycle as a pass (replay + complete) — only the info wording differs.
+    expect(enqueued.map(event => event.statusType ?? event.type)).toEqual([
+      'text_complete',
+      'text_demote',
+      'verification',
+      'verification_passed',
+      'text_complete',
+      'complete',
+      'queue_complete',
+    ])
+    expect(enqueued[3].message).toContain('Verification skipped')
+    expect(enqueued[4]).toMatchObject({ type: 'text_complete', text: 'Captured reply' })
+    expect(enqueued[4].turnId).toBe(enqueued[0].turnId)
+    agent.destroy()
+  })
 })
 
 describe('PiAgent recovery state on abort', () => {

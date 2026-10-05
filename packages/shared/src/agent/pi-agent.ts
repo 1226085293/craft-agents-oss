@@ -1469,16 +1469,31 @@ export class PiAgent extends BaseAgent {
           break;
         }
         if (msg.passed === true && typeof msg.finalText === 'string') {
-          this.debug(`Verification PASSED — replaying final reply (${msg.finalText.length} chars)`);
-          this.adapter.finalizeVerificationHeld(true);
-          this.eventQueue.enqueue({
-            type: 'info',
-            message: 'Verification passed — delivering final reply',
-            statusType: 'verification_passed',
-          });
-          this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(msg.finalText));
-          this.eventQueue.enqueue({ type: 'complete' });
-          this.eventQueue.complete();
+          if (msg.skipped === true) {
+            // Judge was unavailable (upstream 401/quota/timeout) — the
+            // subprocess failed open: deliver the captured final text as-is.
+            this.debug(`Verification SKIPPED (judge unavailable) — delivering final reply (${msg.finalText.length} chars)`);
+            this.adapter.finalizeVerificationHeld(true);
+            this.eventQueue.enqueue({
+              type: 'info',
+              message: 'Verification skipped (judge unavailable) — delivering final reply',
+              statusType: 'verification_passed',
+            });
+            this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(msg.finalText));
+            this.eventQueue.enqueue({ type: 'complete' });
+            this.eventQueue.complete();
+          } else {
+            this.debug(`Verification PASSED — replaying final reply (${msg.finalText.length} chars)`);
+            this.adapter.finalizeVerificationHeld(true);
+            this.eventQueue.enqueue({
+              type: 'info',
+              message: 'Verification passed — delivering final reply',
+              statusType: 'verification_passed',
+            });
+            this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(msg.finalText));
+            this.eventQueue.enqueue({ type: 'complete' });
+            this.eventQueue.complete();
+          }
         } else {
           this.debug(`Verification FAILED${typeof msg.failReason === 'string' ? `: ${msg.failReason}` : ''} — continuing turn (followUp)`);
           this.adapter.finalizeVerificationHeld(false);

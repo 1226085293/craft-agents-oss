@@ -119,7 +119,18 @@ export class FsWatch {
           walk(full);
           continue;
         }
-        if (NOISE_FILES.has(entry.name) || entry.name.endsWith('.log') || entry.name.endsWith('.pid')) continue;
+        // 2026-10-05 fix (session 261005-steady-horse): runtime-state files
+        // written by the session's OWN spawned processes (a tray/gateway's
+        // stderr log + lockfile) change mtime on their own
+        // schedule, not because of agent write-class work. Excluding them
+        // stops them polluting the verify+fsWrite evidence list.
+        if (
+          NOISE_FILES.has(entry.name)
+          || entry.name.endsWith('.log')
+          || entry.name.endsWith('.pid')
+          || entry.name.endsWith('.err')
+          || entry.name.endsWith('.lock')
+        ) continue;
         try {
           const st = statSync(full);
           if (st.mtimeMs > this.turnStartMs) {

@@ -324,18 +324,26 @@ interface OutboundSystemStopNotice { type: 'system_stop_notice'; reason: string;
 /**
  * Defense layer feedback (2026-10-02 user-approved redesign): the result of
  * the program-side verification check on a verification-class turn.
- * - passed=true  → the captured final text was judged a valid answer;
- *   the UI replays `finalText` as the SINGLE final reply (no second LLM bubble).
- * - passed=false → verification failed (or the check itself errored); the
- *   main process should NOT render the candidate; the turn instead follows
- *   up so the LLM continues (existing resume flow).
- * `failReason` explains why (judge output / infra failure).
+ * - passed=true, skipped=false → the captured final text was judged a valid
+ *   answer; the UI replays `finalText` as the SINGLE final reply (no second
+ *   LLM bubble).
+ * - passed=true, skipped=true → the judge was UNAVAILABLE (upstream 401 /
+ *   quota / timeout — an infrastructure fault, not a delivery problem).
+ *   Fail-open: the captured final text still replays as the final reply
+ *   (2026-10-05 fix: a down judge must not block delivery nor burn resume
+ *   cycles on a perfectly good reply).
+ * - passed=false → the judge actively said FAIL; the main process should NOT
+ *   render the candidate; the turn instead follows up so the LLM continues
+ *   (existing resume flow).
+ * `failReason` explains a rejection; `skipReason` explains a fail-open.
  */
 interface OutboundVerificationResult {
   type: 'verification_result';
   passed: boolean;
   finalText?: string;
   failReason?: string;
+  skipped?: boolean;
+  skipReason?: string;
 }
 
 type OutboundMessage =
@@ -800,7 +808,13 @@ function queueDefenseResume(session: AgentSession, resumeMessage: string): void 
  * - PASS → send `verification_result { passed:true, finalText }`. The main
  *   process replays finalText as THE final reply — no second LLM bubble, no
  *   followUp; the turn ends here.
- * - FAIL or any infra error → conservative fallback: send
+ * - judge UNAVAILABLE (upstream error / quota / timeout) → fail OPEN: send
+ *   `verification_result { passed:true, finalText, skipped:true }`. The
+ *   captured text was produced by the agent; a down judge is an
+ *   infrastructure fault and must not block delivery nor consume resume
+ *   cycles (2026-10-05 fix: 401 judge → follow-up → exhausted recovery →
+ *   false "stopped without a final response" guardrail notice).
+ * - judge FAIL (explicit verdict) → conservative fallback: send
  *   `verification_result { passed:false }` and queue the followUp, so the LLM
  *   continues/repairs (identical to the pre-redesign behavior).
  *
@@ -846,19 +860,29 @@ Answer with EXACTLY one word: PASS or FAIL.`);
     debugLog(`[defense] verification LLM threw: ${error instanceof Error ? error.message : String(error)}`);
   }
 
+  // Judge UNAVAILABLE (verdict is null — upstream error, quota, timeout, or
+  // an empty judge response): fail OPEN. The verification's job is to judge
+  // the reply's CONTENT; it must not gate delivery on whether the judge's own
+  // upstream happened to work. Deliver the captured final text as-is.
+  if (verdict == null) {
+    debugLog(`[defense] verification SKIPPED (judge unavailable) (${verifyReason ?? 'none'}) — failing open, delivering final text`);
+    send({ type: 'verification_result', passed: true, finalText, skipped: true, skipReason: 'judge-unavailable' });
+    return;
+  }
+
   // FAIL-safe parse: the prompt demands exactly one word (PASS/FAIL), but
   // models sometimes emit prose. Only an explicit leading "PASS" word passes;
   // anything else (prose, "The reply misses...", whitespace garbage) falls
   // back to the conservative resume path instead of delivering unverified.
-  const ok = verdict != null && /^PASS\b/i.test(verdict.trim());
+  const ok = /^PASS\b/i.test(verdict.trim());
   if (ok) {
     debugLog(`[defense] verification PASSED (${verifyReason ?? 'none'}): replaying ${finalText.length} chars`);
     send({ type: 'verification_result', passed: true, finalText });
     return;
   }
 
-  debugLog(`[defense] verification FAILED${verdict ? ` (judge said: ${verdict.trim().slice(0, 120)})` : ' (judge unavailable)'} (${verifyReason ?? 'none'}) — falling back to follow-up`);
-  send({ type: 'verification_result', passed: false, failReason: verdict?.trim().slice(0, 200) || 'judge-unavailable' });
+  debugLog(`[defense] verification FAILED (judge said: ${verdict.trim().slice(0, 120)}) (${verifyReason ?? 'none'}) — falling back to follow-up`);
+  send({ type: 'verification_result', passed: false, failReason: verdict.trim().slice(0, 200) });
   if (opts.resumeMessage) queueDefenseResume(session, opts.resumeMessage);
 }
 
@@ -1908,13 +1932,39 @@ async function queryLlm(
     const resolvedProvider = (resolved as any)?.provider;
     const isCompatible = resolvedProvider === authProvider || resolvedProvider === 'custom-endpoint';
     if (!resolved || !isCompatible || isDeniedMiniModelId(model, piAuthProvider)) {
+      // 2026-10-05 fix (session 261005-steady-horse): for custom-endpoint
+      // sessions, prefer the SESSION'S OWN model before anything else. It is
+      // registered under the 'custom-endpoint' provider with the connection's
+      // own API key, so it always resolves and never hits a foreign
+      // provider's credentials. The old chain walked straight to a built-in
+      // provider default (e.g. gpt-6-astra → the provider's OFFICIAL
+      // endpoint) which 401s when the user routes everything through a
+      // gateway — taking the judge permanently down with it.
+      let sessionFallback: string | undefined;
+      if (shouldPreferCustomEndpoint() && initConfig.model) {
+        const bareSessionModel = initConfig.model.startsWith('pi/')
+          ? initConfig.model.slice(3)
+          : initConfig.model;
+        const sessionResolved = resolvePiModel(
+          modelRegistry,
+          bareSessionModel,
+          authProvider,
+          shouldPreferCustomEndpoint(),
+        );
+        if (
+          (sessionResolved as any)?.provider === 'custom-endpoint'
+          && !isDeniedMiniModelId(bareSessionModel, piAuthProvider)
+        ) {
+          sessionFallback = bareSessionModel;
+        }
+      }
       // Anthropic: keep Haiku (the cheap/fast mini). For every other provider
       // Haiku is unresolvable, so walk PI_PREFERRED_DEFAULTS for a model that
       // actually works under the user's auth.
       const providerDefault = authProvider === 'anthropic'
         ? undefined
         : pickProviderAppropriateMiniModel(authProvider, modelRegistry, shouldPreferCustomEndpoint());
-      const fallback = providerDefault ?? getDefaultSummarizationModel();
+      const fallback = sessionFallback ?? providerDefault ?? getDefaultSummarizationModel();
       debugLog(`[queryLlm] Model ${bareModel} incompatible with ${authProvider} (resolved: ${resolvedProvider}), falling back to ${fallback}`);
       model = fallback;
     }

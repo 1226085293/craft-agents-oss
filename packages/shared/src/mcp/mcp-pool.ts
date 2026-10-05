@@ -311,8 +311,16 @@ export class McpClientPool {
         try {
           await this.connect(slug, config);
         } catch (err) {
-          this.debug(`Failed to connect MCP source ${slug}: ${err instanceof Error ? err.message : String(err)}`);
-          failures.push(slug);
+          // 单 writer 型 MCP（如 codegraph）可能正被其他会话短暂占用：延迟重试一次再放弃
+          const first = err instanceof Error ? err.message : String(err);
+          this.debug(`Failed to connect MCP source ${slug}: ${first}; retrying once after 1.5s`);
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          try {
+            await this.connect(slug, config);
+          } catch (err2) {
+            this.debug(`Failed to connect MCP source ${slug} after retry: ${err2 instanceof Error ? err2.message : String(err2)}`);
+            failures.push(slug);
+          }
         }
       } else {
         const oldConfig = this.activeConfigs.get(slug);

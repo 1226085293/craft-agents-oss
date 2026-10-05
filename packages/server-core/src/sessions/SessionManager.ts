@@ -802,6 +802,8 @@ interface ManagedSession {
   sourceSelectionVersion?: number
   /** Serializes live-pool updates so a newer picker choice cannot be overwritten by an older build. */
   sourceSyncPromise?: Promise<void>
+  /** 空闲自动断开 MCP 连接的计时器（单 writer 型 MCP 需要释放连接给其他会话） */
+  mcpIdleDisconnectTimer?: ReturnType<typeof setTimeout>
   /**
    * Explicit MCP server configs for isolated execution.
    * When set, the session uses a dedicated MCP pool with only these servers,
@@ -5642,6 +5644,27 @@ ${request.prompt}`;
   }
 
   /**
+   * 会话停止处理 5 分钟后断开本会话 MCP 连接（保留 agent/pool 对象）。
+   * 下一轮 sendMessage 的 hasSources 分支会重新 sync 连接；
+   * 活动开始（sendMessage）会取消本计时器。
+   */
+  private scheduleMcpIdleDisconnect(managed: ManagedSession): void {
+    if (managed.mcpIdleDisconnectTimer) clearTimeout(managed.mcpIdleDisconnectTimer)
+    managed.mcpIdleDisconnectTimer = setTimeout(async () => {
+      managed.mcpIdleDisconnectTimer = undefined
+      const m = this.sessions.get(managed.id)
+      if (!m || m.isProcessing || !m.mcpPool) return
+      try {
+        await m.mcpPool.disconnectAll()
+        sessionLog.info(`Idle MCP connections released for session ${m.id}`)
+      } catch (err) {
+        sessionLog.warn(`Idle MCP disconnect failed for ${m.id}: ${err}`)
+      }
+    }, 5 * 60 * 1000)
+    managed.mcpIdleDisconnectTimer.unref?.()
+  }
+
+  /**
    * 解析本次会话范围内应启用的来源 slug：
    * - auto：全部已授权（enabled + 已鉴权）源，Agent 自主选择
    * - only：已授权 ∩ 用户选择
@@ -6752,7 +6775,14 @@ ${request.prompt}`;
     }
 
     const ownsSourceStartup = !managed.isProcessing && !managed.sourceTurnStarting
-    if (ownsSourceStartup) managed.sourceTurnStarting = true
+    if (ownsSourceStartup) {
+      managed.sourceTurnStarting = true
+      // 用户消息 = 会话活动：取消空闲断开计时器
+      if (managed.mcpIdleDisconnectTimer) {
+        clearTimeout(managed.mcpIdleDisconnectTimer)
+        managed.mcpIdleDisconnectTimer = undefined
+      }
+    }
     const duringSourceStartup = async <T>(work: Promise<T>): Promise<T> => {
       try {
         return await work
@@ -7803,6 +7833,11 @@ ${request.prompt}`;
     } catch (error) {
       sessionLog.error(`Failed to apply deferred source selection for ${sessionId}:`, error)
     }
+
+    // 空闲释放：单 writer 型 MCP（如 codegraph）按会话常驻时，其他会话无法并发连接。
+    // 会话停止处理 5 分钟后断开本会话 MCP 连接（guide 预期“空闲时 0 常驻”）；
+    // 下一轮消息发送时 hasSources 分支会重新 sync 连接。
+    this.scheduleMcpIdleDisconnect(managed)
 
     // Clear any per-send permission-mode override applied for the turn that
     // just finished. The persisted/diagnostics mode is untouched — this only

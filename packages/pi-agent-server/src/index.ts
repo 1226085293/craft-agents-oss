@@ -2353,6 +2353,31 @@ function handleSessionEvent(event: AgentSessionEvent): void {
         });
       }
 
+      // Mid-turn follow-up continuation (2026-10-05 smooth-gorge double
+      // bubble): when the SDK's steering/followUp queues still hold messages
+      // at message_end, its `_runAgentPrompt` → `_handlePostAgentRun` will
+      // `agent.continue()` after agent_end and inject them into the SAME
+      // turn. This stop text is NOT the final reply — stamp the flag HERE
+      // (message_end). The agent_end-side pendingMessageCount check below
+      // can never fire: by the time agent_end is forwarded the queues have
+      // been drained by the continuation, so `pendingMessageCount` is 0.
+      if (
+        msg.stopReason !== 'toolUse' &&
+        msg.stopReason !== 'error' &&
+        msg.stopReason !== 'aborted' &&
+        (piSession as unknown as { pendingMessageCount: number }).pendingMessageCount > 0
+      ) {
+        forwardedEvent = {
+          ...(forwardedEvent as Record<string, unknown>),
+          assistantFollowUpPending: true,
+        } as unknown as OutboundAgentEvent;
+        debugLog(
+          `[defense] message_end annotated assistantFollowUpPending=true (pending=${
+            (piSession as unknown as { pendingMessageCount: number }).pendingMessageCount
+          })`,
+        );
+      }
+
 
       // Speculative prefetch: if the assistant message contains 2+ prefetchable tool calls,
       // fire all requests to the main process in parallel NOW, before executeToolCalls

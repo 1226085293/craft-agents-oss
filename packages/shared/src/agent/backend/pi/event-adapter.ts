@@ -1284,7 +1284,7 @@ export class PiEventAdapter extends BaseEventAdapter {
         // agent.continue() after agent_end). Previously ignored — the queues
         // were "reflected by session/message state", but that gave the
         // adapter no advance warning before it rendered a fake final bubble.
-        const qe = event as { steering?: unknown[]; followUp?: unknown[] };
+        const qe = event as unknown as { steering?: unknown[]; followUp?: unknown[] };
         const steering = Array.isArray(qe.steering) ? qe.steering : [];
         const followUp = Array.isArray(qe.followUp) ? qe.followUp : [];
         this.queuePendingNonEmpty = steering.length > 0 || followUp.length > 0;

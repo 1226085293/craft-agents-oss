@@ -22,6 +22,21 @@ describe('resolveUsageTarget', () => {
     expect(resolveUsageTarget('mcp__stripe__api_stripe', {})).toEqual({ kind: 'source', slug: 'stripe' })
   })
 
+  it('counts the real target of layered call_tool dispatch', () => {
+    // Tool-layering: the model calls mcp__session__call_tool; the real folded
+    // source tool is inside input.name (or args.name).
+    expect(resolveUsageTarget('mcp__session__call_tool', { name: 'mcp__codegraph__codegraph_explore' }))
+      .toEqual({ kind: 'source', slug: 'codegraph' })
+    expect(resolveUsageTarget('mcp__session__call_tool', { name: 'mcp__codegraph__codegraph_explore', args: { query: 'x' } }))
+      .toEqual({ kind: 'source', slug: 'codegraph' })
+    // API tools targeted via call_tool (in-process API proxy name)
+    expect(resolveUsageTarget('mcp__session__call_tool', { name: 'mcp__stripe__api_stripe', args: { method: 'GET' } }))
+      .toEqual({ kind: 'source', slug: 'stripe' })
+    // Internal targets remain untracked
+    expect(resolveUsageTarget('mcp__session__call_tool', { name: 'mcp__session__call_llm' })).toBeNull()
+    expect(resolveUsageTarget('mcp__session__call_tool', {})).toBeNull()
+  })
+
   it('ignores internal session MCP tools', () => {
     expect(resolveUsageTarget('mcp__session__call_llm', { model: 'x' })).toBeNull()
     expect(resolveUsageTarget('mcp__session__SubmitPlan', {})).toBeNull()

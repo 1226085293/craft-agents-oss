@@ -92,6 +92,22 @@ export function resolveUsageTarget(
     return null;
   }
 
+  // Layered dispatch (tool-layering): the model calls mcp__session__call_tool
+  // with { name: <real proxy tool>, args }. Count the REAL target so source
+  // usage still tracks folded MCP/API tool calls.
+  if (toolName === 'mcp__session__call_tool' && toolInput) {
+    const args = (toolInput.args ?? {}) as Record<string, unknown>;
+    const raw = typeof toolInput.name === 'string'
+      ? toolInput.name
+      : typeof args.name === 'string'
+        ? args.name
+        : undefined;
+    if (raw && (raw.startsWith('mcp__') || raw.startsWith('api_'))) {
+      return resolveUsageTarget(raw, args);
+    }
+    return null;
+  }
+
   // MCP tools: mcp__<serverSlug>__<toolSlug...>
   if (toolName.startsWith('mcp__')) {
     const parts = toolName.split('__');

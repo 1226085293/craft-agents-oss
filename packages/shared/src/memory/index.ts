@@ -86,7 +86,13 @@ export {
   previewMemoryInjection,
 } from './injector.ts';
 
-export { consolidateSessionMemories } from './consolidation.ts';
+export {
+  consolidateSessionMemories,
+  splitConsolidationBatches,
+  CONSOLIDATION_BATCH_MAX_CHARS,
+  type ConsolidationOptions,
+  type MemoryConsolidationSessionResult,
+} from './consolidation.ts';
 export { MemoryConsolidationScheduler, type MemorySchedule } from './scheduler.ts';
 
 // Tools

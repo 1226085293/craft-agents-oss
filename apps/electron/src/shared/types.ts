@@ -690,6 +690,7 @@ export interface ElectronAPI {
   updateSessionMemory(workspaceRootPath: string, sessionId: string, id: string, updates: { content?: string; type?: MemoryType; tags?: string[]; confidence?: number }): Promise<{ success: boolean }>
   deleteSessionMemory(workspaceRootPath: string, sessionId: string, id: string): Promise<{ success: boolean }>
   consolidateMemories(workspaceRootPath: string): Promise<{ promoted: number; trashed: number; sessionsProcessed: number }>
+  onMemoryConsolidationProgress(callback: (progress: MemoryConsolidationProgress) => void): () => void
   getMemorySchedule(workspaceRootPath: string): Promise<{ enabled: boolean; cron: string; timezone?: string }>
   setMemorySchedule(workspaceRootPath: string, schedule: { enabled: boolean; cron: string; timezone?: string }): Promise<{ success: boolean }>
   extractSessionMemories(sessionId: string): Promise<{ extracted: number; discarded: number }>
@@ -834,6 +835,19 @@ export interface MemoryStats {
   entriesByType: Record<string, number>;
   totalExtractions: number;
   lastExtractionAt?: string;
+}
+/** Progress of a memory consolidation run, pushed per completed session. */
+export interface MemoryConsolidationProgress {
+  /** Sessions processed successfully so far (marked + persisted). */
+  done: number;
+  /** Total sessions selected for this run. */
+  total: number;
+  /** Session ID of the session that just completed. */
+  sessionId: string;
+  /** New global memories promoted from that session. */
+  promoted: number;
+  /** Existing global memories moved to trash by that session. */
+  trashed: number;
 }
 
 export interface MessagingPlatformRuntimeInfo {

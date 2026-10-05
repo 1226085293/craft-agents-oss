@@ -515,6 +515,7 @@ export const RPC_CHANNELS = {
     MEMORY_SESSION_UPDATE: 'memory:session:update',
     MEMORY_SESSION_DELETE: 'memory:session:delete',
     MEMORY_CONSOLIDATE: 'memory:consolidate',
+    MEMORY_CONSOLIDATE_PROGRESS: 'memory:consolidate:progress',
     MEMORY_SCHEDULE_GET: 'memory:schedule:get',
     MEMORY_SCHEDULE_SET: 'memory:schedule:set',
   },

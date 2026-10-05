@@ -645,6 +645,11 @@ function AppShellContent({
   // full-width in the content area — there is no pages navigator list.
   const isPagesView = isPagesNavigation(navState)
 
+  // Memory manager renders full-width in the content area — there is no
+  // sources list to keep beside it, so the navigator (and its resize handle)
+  // collapse to zero width while it's active (#memory-ui).
+  const isMemoryView = isSourcesNavigation(navState) && navState.details?.type === 'memory'
+
   // Derive source filter from navigation state (only when in sources navigator)
   const sourceFilter: SourceFilter | null = isSourcesNavigation(navState) ? navState.filter ?? null : null
 
@@ -3685,7 +3690,7 @@ function AppShellContent({
             )}
             </div>
           }
-          navigatorWidth={isAutoCompact ? sessionListWidth : (effectiveSidebarAndNavigatorHidden || isBoardView || isPagesView ? 0 : sessionListWidth)}
+          navigatorWidth={isAutoCompact ? sessionListWidth : (effectiveSidebarAndNavigatorHidden || isBoardView || isPagesView || isMemoryView ? 0 : sessionListWidth)}
           isSidebarAndNavigatorHidden={effectiveSidebarAndNavigatorHidden}
           isRightSidebarVisible={false}
           isCompact={isAutoCompact}
@@ -3725,8 +3730,8 @@ function AppShellContent({
         </div>
         )}
 
-        {/* Session List Resize Handle (absolute, hidden in focused mode, board view, and pages) */}
-        {!effectiveSidebarAndNavigatorHidden && !isBoardView && !isPagesView && (
+        {/* Session List Resize Handle (absolute, hidden in focused mode, board view, pages, and memory) */}
+        {!effectiveSidebarAndNavigatorHidden && !isBoardView && !isPagesView && !isMemoryView && (
         <div
           ref={sessionListHandleRef}
           onMouseDown={(e) => { e.preventDefault(); setIsResizing('session-list') }}

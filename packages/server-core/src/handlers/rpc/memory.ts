@@ -10,6 +10,7 @@ import {
   getMemoryStats,
 } from '@craft-agent/shared/memory/store'
 import { consolidateSessionMemories, MemoryConsolidationScheduler } from '@craft-agent/shared/memory'
+import { resolveTitleLanguageName } from '@craft-agent/shared/config'
 import { listSessions as listStoredSessions } from '@craft-agent/shared/sessions'
 import { addSessionMemory, deleteSessionMemory, updateSessionMemory, loadSessionMemoryStore, saveSessionMemoryStore } from '@craft-agent/shared/memory'
 import type { HandlerDeps } from '../handler-deps'
@@ -49,7 +50,10 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
   const { sessionManager } = deps
   const scheduled = new Map<string, { signature: string; scheduler: MemoryConsolidationScheduler }>()
 
-  const runWorkspaceConsolidation = async (workspaceRootPath: string): Promise<{ promoted: number; trashed: number; sessionsProcessed: number }> => {
+  const runWorkspaceConsolidation = async (
+    workspaceRootPath: string,
+    onSessionConsolidated?: (progress: { done: number; total: number; sessionId: string; promoted: number; trashed: number }) => void,
+  ): Promise<{ promoted: number; trashed: number; sessionsProcessed: number }> => {
     const workspace = sessionManager.getWorkspaces().find(item => item.rootPath === workspaceRootPath)
     if (!workspace) return { promoted: 0, trashed: 0, sessionsProcessed: 0 }
     const sessions = listStoredSessions(workspaceRootPath)
@@ -59,13 +63,26 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
     const agent = sessions.map(session => sessionManager.getSessionAgent?.(session.id)).find(candidate => candidate?.runMiniCompletion)
     if (!agent?.runMiniCompletion) throw new Error('No active session agent is available for memory consolidation')
     const globalStore = loadMemoryStore(workspaceRootPath)
+    // Promoted memories follow the app's UI language setting.
+    const language = resolveTitleLanguageName()
+    let done = 0
     const result = await consolidateSessionMemories(globalStore, stores, async prompt => {
       const response = await agent.runMiniCompletion!(prompt)
       if (!response) throw new Error('Memory consolidation returned an empty response')
       return response
+    }, {
+      language,
+      onSessionConsolidated: (session, sessionResult) => {
+        // Persist ONLY after this session fully succeeded (across all of its
+        // batches). Session stores are saved one-by-one, so a restart or
+        // model failure mid-run never marks a session as organized without
+        // its work having completed — completed sessions keep their markers.
+        saveMemoryStore(workspaceRootPath, globalStore)
+        saveSessionMemoryStore(workspaceRootPath, session)
+        done += 1
+        onSessionConsolidated?.({ done, total: stores.length, sessionId: session.sessionId, ...sessionResult })
+      },
     })
-    saveMemoryStore(workspaceRootPath, globalStore)
-    for (const store of stores) saveSessionMemoryStore(workspaceRootPath, store)
     return { ...result, sessionsProcessed: stores.length }
   }
 
@@ -210,7 +227,7 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
     return { success: true }
   })
 
-  server.handle(RPC_CHANNELS.memory.MEMORY_CONSOLIDATE, async (_ctx: unknown, workspaceRootPath: string) => {
+  server.handle(RPC_CHANNELS.memory.MEMORY_CONSOLIDATE, async (ctx, workspaceRootPath: string) => {
     if (!workspaceRootPath) throw new Error('workspaceRootPath is required')
     const workspace = sessionManager.getWorkspaces().find(item => item.rootPath === workspaceRootPath)
     if (!workspace) throw new Error('Workspace not found')
@@ -218,7 +235,9 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
     const stores = sessions.map(session => loadSessionMemoryStore(workspaceRootPath, session.id))
       .filter(store => store.entries.some(entry => !(store.consolidatedEntryIds ?? []).includes(entry.id)))
     if (!stores.length) return { promoted: 0, trashed: 0, sessionsProcessed: 0 }
-    return runWorkspaceConsolidation(workspaceRootPath)
+    return runWorkspaceConsolidation(workspaceRootPath, progress => {
+      server.push(RPC_CHANNELS.memory.MEMORY_CONSOLIDATE_PROGRESS, { to: 'client', clientId: ctx.clientId }, progress)
+    })
   })
 
   server.handle(RPC_CHANNELS.memory.MEMORY_EXTRACT, async (_ctx: unknown, sessionId: string) => {

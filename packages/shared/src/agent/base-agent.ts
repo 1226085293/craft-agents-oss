@@ -62,6 +62,7 @@ import type { AgentEvent as AutomationAgentEvent, SdkAutomationInput } from '../
 import { getSessionPlansPath, getSessionDataPath, getSessionPath } from '../sessions/storage.ts';
 import { readSessionJsonl } from '../sessions/jsonl.ts';
 import { getMiniAgentSystemPrompt } from '../prompts/system.ts';
+import { resolveTitleLanguageName } from '../config/preferences.ts';
 import { buildTitlePrompt, buildRegenerateTitlePrompt, validateTitle } from '../utils/title-generator.ts';
 // Memory module — cross-session persistent knowledge
 import {
@@ -1250,6 +1251,9 @@ ${formattedMessages}
         runMiniCompletion: this.runMiniCompletion.bind(this),
         existingEntries: sessionStore.entries,
         semanticDedup: this._memoryConfig.semanticDedup,
+        // Extracted memories follow the app's UI language setting (e.g. 简体中文)
+        // instead of defaulting to whatever language the model picks.
+        language: resolveTitleLanguageName(),
         // Key the one-shot guard by (sessionId, strategy) so a compaction-
         // triggered pass can't consume the session-end slot (or vice versa).
         strategy: requestedStrategy,

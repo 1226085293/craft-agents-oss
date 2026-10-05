@@ -89,8 +89,12 @@ export function isSemanticDuplicate(
 /**
  * Build the extraction prompt for the LLM.
  * Focuses on extracting structured, reusable knowledge from the conversation.
+ *
+ * @param options.language - Preferred output language (native name, e.g.
+ *   "简体中文"); extracted content and tags are written in this language so
+ *   memories follow the app's UI language setting.
  */
-export function buildExtractionPrompt(input: MemoryExtractionInput): string {
+export function buildExtractionPrompt(input: MemoryExtractionInput, options?: { language?: string }): string {
   const { messages, sessionTitle } = input;
 
   // Build a compact transcript (max ~8000 chars to fit in mini model context)
@@ -115,9 +119,13 @@ export function buildExtractionPrompt(input: MemoryExtractionInput): string {
     ? `Session title: "${sessionTitle}"\n`
     : '';
 
+  const languageInstruction = options?.language
+    ? `\nLanguage: Write ALL extracted knowledge in ${options.language} — content and tags must be in ${options.language}.`
+    : '';
+
   return `You are a knowledge extraction specialist. Your task is to analyze a conversation transcript and extract persistent, reusable knowledge that should be remembered across future sessions.
 
-${titleContext}
+${titleContext}${languageInstruction}
 Conversation transcript:
 ${transcript}
 
@@ -240,6 +248,8 @@ export interface MemoryExtractorOptions {
   forceExtraction?: boolean;
   /** Whether to drop near-duplicates against the whole store */
   semanticDedup?: boolean;
+  /** Preferred output language (native name, e.g. "简体中文") for extracted knowledge. */
+  language?: string;
   /**
    * Which strategy triggered this pass. Keys the one-shot guard per
    * (sessionId, strategy) so an early compaction pass doesn't consume the
@@ -286,7 +296,7 @@ export async function extractMemories(
   }
 
   // Build and send extraction prompt
-  const prompt = buildExtractionPrompt(input);
+  const prompt = buildExtractionPrompt(input, { language: options.language });
   const response = await runMiniCompletion(prompt);
   if (response === null) throw new Error('Memory extraction returned an empty response');
 

@@ -27,12 +27,14 @@ function collect(gen: Generator<any, any, any>): any[] {
   return out;
 }
 
-/** Emit one assistant stop message via the adapter; returns collected events. */
+/** Emit one assistant stop message via the adapter; returns collected events.
+ *  Note: the caller is responsible for `startTurn()` — it resets the
+ *  follow-up pending signals under test, so it must run BEFORE any
+ *  `queue_update` / signal stamps. */
 function emitStop(
   adapter: PiEventAdapter,
   extra: Record<string, unknown> = {},
 ): any[] {
-  adapter.startTurn();
   return collect(
     adapter.adaptEvent({
       type: 'message_end',
@@ -55,6 +57,7 @@ describe('PiEventAdapter — mid-turn follow-up continuation (2026-10-05)', () =
   });
 
   it('assistantFollowUpPending marks the stop text intermediate and holds the queue open until the final agent_end', () => {
+    adapter.startTurn();
     const events = emitStop(adapter, { assistantFollowUpPending: true });
     const tc = events.find((e) => e.type === 'text_complete');
     expect(tc).toBeDefined();
@@ -90,7 +93,7 @@ describe('PiEventAdapter — mid-turn follow-up continuation (2026-10-05)', () =
       steering: ['。'],
       followUp: [],
     } as any));
-    const events = emitStop(adapter); // no assistantFollowUpPending stamp
+    const events = emitStop(adapter); // no assistantFollowUpPending stamp (signal comes from queue_update state)
     const tc = events.find((e) => e.type === 'text_complete');
     expect(tc).toBeDefined();
     expect(tc.isIntermediate).toBe(true);
@@ -113,6 +116,7 @@ describe('PiEventAdapter — mid-turn follow-up continuation (2026-10-05)', () =
   });
 
   it('no signal at all — stop text remains a final bubble (regression)', () => {
+    adapter.startTurn();
     const events = emitStop(adapter);
     const tc = events.find((e) => e.type === 'text_complete');
     expect(tc).toBeDefined();

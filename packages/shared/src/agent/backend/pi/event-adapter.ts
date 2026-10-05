@@ -182,6 +182,13 @@ export class PiEventAdapter extends BaseEventAdapter {
    *  agent_end. The queue stays open for that continuation turn (same shape
    *  as defenseResumeHeld). The FINAL `agent_end` (no flag) clears it. */
   private queuedFollowUpHeld: boolean = false;
+  /** True while the SDK's most recent `queue_update` reported non-empty
+   *  steering (or followUp) queues. Backup signal for the subprocess's
+   *  `assistantFollowUpPending` stamp: while set, an assistant stop text is a
+   *  process step, never a result bubble (2026-10-05 smooth-gorge).
+   *  Cleared on an empty `queue_update`, by {@link onTurnStart} and
+   *  {@link resetRecoveryState}. */
+  private queuePendingNonEmpty: boolean = false;
   /** Set when the subprocess annotated an `agent_end` with
    *  `defenseVerificationPending: true` — a program-side verification turn is
    *  in flight (subprocess LLM judge; 2026-10-02 redesign). Unlike a defense
@@ -400,6 +407,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.pendingQueueComplete = false;
     this.defenseResumeHeld = false;
     this.queuedFollowUpHeld = false;
+    this.queuePendingNonEmpty = false;
     this.verificationHeld = false;
     this.verificationReplayTurnId = null;
     this.lastFinalTextTurnId = null;
@@ -916,6 +924,22 @@ export class PiEventAdapter extends BaseEventAdapter {
         // The FINAL agent_end (no hold) emits the single result bubble.
         // Persisted isIntermediate keeps reload consistent with the live view.
         // (toolUse replies are intermediate unconditionally.)
+        // Mid-turn follow-up continuation (2026-10-05 smooth-gorge): the
+        // subprocess stamps `assistantFollowUpPending` when the SDK's
+        // steering/followUp queues still hold messages at message_end — the
+        // SDK injects them via agent.continue() AFTER this message (same
+        // turn, no new turn_start) and the agent_end-side pendingMessageCount
+        // check can never fire (queues drained by then). `queue_update`
+        // non-empty is the backup signal. While either is true the stop text
+        // is a PROCESS STEP, never a result bubble (same fleet-mist rule as
+        // the holds below); the queue stays open until the FINAL `agent_end`
+        // (no flag) completes the turn.
+        if (
+          (event as { assistantFollowUpPending?: boolean }).assistantFollowUpPending === true ||
+          this.queuePendingNonEmpty
+        ) {
+          this.queuedFollowUpHeld = true;
+        }
         const isIntermediate =
           msg.stopReason === 'toolUse' ||
           this.defenseResumeHeld ||
@@ -1253,11 +1277,22 @@ export class PiEventAdapter extends BaseEventAdapter {
         break;
       }
 
-      case 'queue_update':
-        // Queue contents are currently reflected by existing session/message state.
-        // Ignore the event explicitly so newer Pi SDK sessions don't log noisy
-        // "Unknown Pi event" warnings until we add a dedicated UI consumer.
+      case 'queue_update': {
+        // Queue contents signal (2026-10-05): while the SDK's steering or
+        // followUp queues are non-empty, any stop text still in flight is a
+        // process step (a queued message will be injected via
+        // agent.continue() after agent_end). Previously ignored — the queues
+        // were "reflected by session/message state", but that gave the
+        // adapter no advance warning before it rendered a fake final bubble.
+        const qe = event as { steering?: unknown[]; followUp?: unknown[] };
+        const steering = Array.isArray(qe.steering) ? qe.steering : [];
+        const followUp = Array.isArray(qe.followUp) ? qe.followUp : [];
+        this.queuePendingNonEmpty = steering.length > 0 || followUp.length > 0;
+        if (this.queuePendingNonEmpty) {
+          this.queuedFollowUpHeld = true;
+        }
         break;
+      }
 
       case 'agent_settled':
       case 'entry_appended':

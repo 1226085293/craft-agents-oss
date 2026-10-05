@@ -78,7 +78,7 @@ import {
 } from '@craft-agent/shared/sessions'
 import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, TokenRefreshManager, loadSourceConfig, saveSourceConfig } from '@craft-agent/shared/sources'
 import { listTaskSlugs, parseTaskSpec, uniqueTaskSlug } from '@craft-agent/shared/tasks'
-import { resolveUsageTarget, resolveSkillReadUsageTarget, appendUsage } from '@craft-agent/shared/usage'
+import { resolveUsageTarget, resolveSkillReadUsageTarget, resolveSkillCommandUsageTarget, appendUsage } from '@craft-agent/shared/usage'
 import { createTaskFromSpec, resolveCreateTaskProjectId } from '../tasks'
 import { buildPagesToolCallbacks } from '../pages/tool-callbacks'
 import { buildServersFromSources as buildServersFromSourcesShared } from '../sources/build-servers'
@@ -9316,23 +9316,23 @@ ${request.prompt}`;
           ? event.input
           : managed.pendingReadToolInputs?.get(event.toolUseId)) ?? existingToolMsg?.toolInput
         managed.pendingReadToolInputs?.delete(event.toolUseId)
+        const usageToolName = event.toolName || existingToolMsg?.toolName || toolName
+        const skillUsageContext = {
+          workspaceRootPath: managed.workspace.rootPath,
+          workingDirectory: managed.workingDirectory,
+        }
+        // The Read resolver first (native Read of a SKILL.md), then the
+        // command resolver (shell `cat`/`type`/`Get-Content` of a skill file).
         const readTarget = !managed.recordedUsageToolUseIds?.has(event.toolUseId)
-          ? resolveSkillReadUsageTarget(
-            event.toolName || existingToolMsg?.toolName || toolName,
-            readInput,
-            inferredError,
-            {
-              workspaceRootPath: managed.workspace.rootPath,
-              workingDirectory: managed.workingDirectory,
-            },
-          )
+          ? resolveSkillReadUsageTarget(usageToolName, readInput, inferredError, skillUsageContext)
+            ?? resolveSkillCommandUsageTarget(usageToolName, readInput, inferredError, skillUsageContext)
           : null
         if (readTarget) {
           if (!managed.recordedUsageToolUseIds) managed.recordedUsageToolUseIds = new Set()
           managed.recordedUsageToolUseIds.add(event.toolUseId)
           appendUsage({
             ...readTarget,
-            toolName: 'Read',
+            toolName: usageToolName,
             workspaceId,
             sessionId,
           })

@@ -16,6 +16,7 @@ export type {
 export {
   resolveUsageTarget,
   resolveSkillReadUsageTarget,
+  resolveSkillCommandUsageTarget,
   appendUsage,
   readUsageRecords,
   getUsageStats,

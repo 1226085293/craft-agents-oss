@@ -330,6 +330,7 @@ ${workspaceContext}
 ## Available Tools
 Use Read, Edit, Write tools for file operations.
 Use config_validate to verify changes match the expected schema.
+Prefer built-in tools over ad-hoc CLI commands when they cover the same task.
 `;
 }
 

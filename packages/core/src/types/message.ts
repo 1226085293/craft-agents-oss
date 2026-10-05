@@ -537,6 +537,18 @@ export interface PermissionRequest {
   commandHash?: string;
   /** Approval validity window */
   approvalTtlSeconds?: number;
+  /** 数据源 slug（来源工具确认时存在） */
+  sourceSlug?: string;
+  /** 数据源名称 */
+  sourceName?: string;
+  /** 服务端裁定的风险级别 */
+  sourceRisk?: 'low' | 'medium' | 'high' | 'critical';
+  /** 推断的所需权限类别（read/write/external/delete/payment/sensitive） */
+  requiredPermission?: string;
+  /** 数据范围（源 tagline/说明） */
+  dataScope?: string;
+  /** true = 未授权/越界 → 授权请求；false/缺省 = 已授权高风险 → 单次确认 */
+  isAuthorizationRequest?: boolean;
 }
 
 /**

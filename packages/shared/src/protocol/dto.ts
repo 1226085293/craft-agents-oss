@@ -68,6 +68,7 @@ export interface Session {
    */
   hasUnread?: boolean
   enabledSourceSlugs?: string[]
+  sourceScope?: 'auto' | 'only' | 'exclude'
   workingDirectory?: string
   sessionFolderPath?: string
   sharedUrl?: string
@@ -403,7 +404,7 @@ export type SessionEvent =
   | { type: 'credential_request'; sessionId: string; request: CredentialRequest }
   | { type: 'permission_mode_changed'; sessionId: string; permissionMode: PermissionMode; previousPermissionMode?: PermissionMode; transitionDisplay?: string; modeVersion?: number; changedAt?: string; changedBy?: PermissionModeState['changedBy'] }
   | { type: 'plan_submitted'; sessionId: string; message: Message }
-  | { type: 'sources_changed'; sessionId: string; enabledSourceSlugs: string[] }
+  | { type: 'sources_changed'; sessionId: string; enabledSourceSlugs: string[]; sourceScope?: 'auto' | 'only' | 'exclude' }
   | { type: 'labels_changed'; sessionId: string; labels: string[] }
   | { type: 'project_id_changed'; sessionId: string; projectId: string | null }
   | { type: 'connection_changed'; sessionId: string; connectionSlug: string; supportsBranching?: boolean }
@@ -493,7 +494,7 @@ export type SessionCommand =
   | { type: 'setPermissionMode'; mode: PermissionMode }
   | { type: 'setThinkingLevel'; level: ThinkingLevel }
   | { type: 'updateWorkingDirectory'; dir: string }
-  | { type: 'setSources'; sourceSlugs: string[] }
+  | { type: 'setSources'; sourceSlugs: string[]; sourceScope?: 'auto' | 'only' | 'exclude' }
   | { type: 'setLabels'; labels: string[] }
   | { type: 'setProjectId'; projectId: string | null }
   | { type: 'setKanbanColumn'; column: string | null }
@@ -535,6 +536,8 @@ export interface PermissionRequest extends BasePermissionRequest {
 
 export interface PermissionResponseOptions {
   rememberForMinutes?: number
+  /** 数据源调用确认策略：once=仅本次 / session=本会话 / always=工具级始终允许（持久）/ deny=本会话禁止 / deny-permanent=工具级永久禁止（持久） */
+  sourcePermission?: 'once' | 'session' | 'always' | 'deny' | 'deny-permanent'
 }
 
 // Re-export for handler convenience

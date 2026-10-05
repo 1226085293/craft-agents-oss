@@ -681,6 +681,22 @@ export abstract class BaseAgent implements AgentBackend {
     return Array.from(this.sourceManager.getIntendedSlugs());
   }
 
+  /** 本会话被禁止（deny-session）的来源工具名集合 */
+  protected sourceSessionDenyTools = new Set<string>();
+
+  /**
+   * 设置本会话禁止调用的来源工具（可由确认卡片“禁止”响应写入）。
+   * 传入空数组清空。
+   */
+  setSourceSessionDeny(tools: string[]): void {
+    this.sourceSessionDenyTools = new Set(tools);
+  }
+
+  /** 当前本会话禁止的来源工具名列表 */
+  getSourceSessionDeny(): string[] {
+    return Array.from(this.sourceSessionDenyTools);
+  }
+
   getAllSources(): LoadedSource[] {
     return this.sourceManager.getAllSources();
   }

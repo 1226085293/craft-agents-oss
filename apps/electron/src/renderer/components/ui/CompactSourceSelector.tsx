@@ -17,6 +17,8 @@ export interface CompactSourceSelectorProps {
   onOpenChange: (open: boolean) => void
   sources: LoadedSource[]
   selectedSlugs: string[]
+  sourceScope?: 'auto' | 'only' | 'exclude'
+  onScopeChange?: (scope: 'auto' | 'only' | 'exclude') => void
   onToggleSlug: (slug: string) => void
 }
 
@@ -33,6 +35,8 @@ export function CompactSourceSelector({
   onOpenChange,
   sources,
   selectedSlugs,
+  sourceScope = 'auto',
+  onScopeChange,
   onToggleSlug,
 }: CompactSourceSelectorProps) {
   const { t } = useTranslation()
@@ -55,6 +59,33 @@ export function CompactSourceSelector({
         <DrawerHeader>
           <DrawerTitle>{t('chat.sourcesTooltip')}</DrawerTitle>
         </DrawerHeader>
+
+        {sources.length > 0 && (
+          <div className="px-4 pb-2">
+            <div className="flex items-center gap-1">
+              {(['auto', 'only', 'exclude'] as const).map(mode => (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={() => onScopeChange?.(mode)}
+                  className={cn(
+                    'rounded-[8px] px-2.5 py-1.5 text-xs font-medium transition-colors',
+                    sourceScope === mode
+                      ? 'bg-foreground/10 text-foreground'
+                      : 'text-muted-foreground hover:bg-foreground/5',
+                  )}
+                >
+                  {mode === 'auto' ? t('chat.sourceScopeAuto') : mode === 'only' ? t('chat.sourceScopeOnly') : t('chat.sourceScopeExclude')}
+                </button>
+              ))}
+            </div>
+            {sourceScope === 'auto' && (
+              <div className="mt-1 text-[11px] leading-tight text-muted-foreground">
+                {t('chat.sourceScopeAutoHint')}
+              </div>
+            )}
+          </div>
+        )}
 
         {sources.length > 0 && (
           <div className="px-4 pb-2">
@@ -83,14 +114,17 @@ export function CompactSourceSelector({
           ) : (
             filteredSources.map((source) => {
               const isSelected = selectedSlugs.includes(source.config.slug)
+              const unauthorized = !source.config.enabled
               return (
                 <button
                   key={source.config.slug}
                   type="button"
+                  disabled={unauthorized}
                   onClick={() => onToggleSlug(source.config.slug)}
                   className={cn(
                     'flex items-center gap-3 px-3 py-3 rounded-[10px] text-left transition-colors',
                     isSelected ? 'bg-foreground/5' : 'hover:bg-foreground/5',
+                    unauthorized && 'opacity-50 cursor-not-allowed hover:bg-transparent',
                   )}
                 >
                   <div className="shrink-0 flex items-center">
@@ -100,6 +134,11 @@ export function CompactSourceSelector({
                   </div>
                   <div className="flex-1 min-w-0 text-sm font-medium truncate">
                     {source.config.name}
+                    {unauthorized && (
+                      <div className="text-[11px] font-normal text-foreground/50">
+                        {t('chat.sourceUnauthorizedHint')}
+                      </div>
+                    )}
                   </div>
                   <div
                     className={cn(

@@ -6,6 +6,7 @@ import { cn } from '../../lib/utils'
 export interface FilterableSelectRenderState {
   selected: boolean
   highlighted: boolean
+  disabled: boolean
 }
 
 export interface FilterableSelectPopoverProps<T> {
@@ -24,6 +25,10 @@ export interface FilterableSelectPopoverProps<T> {
   closeOnSelect?: boolean
   minWidth?: number
   maxWidth?: number
+  /** 列表头部插槽（搜索框上方，如三态模式切换） */
+  header?: React.ReactNode
+  /** 该项是否禁用（禁用项不可选，置灰） */
+  isDisabled?: (item: T) => boolean
 }
 
 /**
@@ -49,6 +54,8 @@ export function FilterableSelectPopover<T>({
   closeOnSelect = false,
   minWidth = 200,
   maxWidth = 320,
+  header,
+  isDisabled,
 }: FilterableSelectPopoverProps<T>) {
   const { t } = useTranslation()
   const resolvedPlaceholder = filterPlaceholder ?? t('common.search')
@@ -117,9 +124,10 @@ export function FilterableSelectPopover<T>({
   }, [open, highlightedIndex, filteredItems.length])
 
   const handleToggle = React.useCallback((item: T) => {
+    if (isDisabled?.(item)) return
     onToggle(item)
     if (closeOnSelect) onOpenChange(false)
-  }, [onToggle, closeOnSelect, onOpenChange])
+  }, [onToggle, closeOnSelect, onOpenChange, isDisabled])
 
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'ArrowDown') {
@@ -174,6 +182,7 @@ export function FilterableSelectPopover<T>({
           </div>
         ) : (
           <>
+            {header}
             <div className="border-b border-border/50 px-3 py-2">
               <input
                 ref={inputRef}
@@ -194,6 +203,7 @@ export function FilterableSelectPopover<T>({
                 filteredItems.map((item, index) => {
                   const selected = isSelected(item)
                   const highlighted = index === highlightedIndex
+                  const disabled = isDisabled?.(item) ?? false
                   return (
                     <button
                       key={getKey(item)}
@@ -201,15 +211,17 @@ export function FilterableSelectPopover<T>({
                       data-highlighted={highlighted}
                       onMouseEnter={() => setHighlightedIndex(index)}
                       onClick={() => handleToggle(item)}
+                      disabled={disabled}
                       className={cn(
                         'w-full text-left outline-none',
                         !renderItem && 'flex cursor-pointer select-none items-center gap-3 rounded-[6px] px-3 py-2 text-[13px]',
                         highlighted && 'bg-foreground/5',
                         selected && 'bg-foreground/3',
+                        disabled && 'opacity-50 cursor-not-allowed',
                       )}
                     >
                       {renderItem
-                        ? renderItem(item, { selected, highlighted }, index)
+                        ? renderItem(item, { selected, highlighted, disabled }, index)
                         : <span className="truncate">{getLabel(item)}</span>}
                     </button>
                   )

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionManager, createManagedSession } from './SessionManager.ts'
@@ -74,6 +74,64 @@ describe('SessionManager session source selection', () => {
     }) as never)
     return managed
   }
+
+  it('resolves auto scope to all authorized (enabled) sources and excludes unpublished ones', async () => {
+    writeLocalSource('alpha')
+    writeLocalSource('beta')
+    writeLocalSource('gamma')
+    // gamma 未授权（disabled）——auto 模式不应包含它
+    const gammaConfigPath = join(tmpRoot, 'sources', 'gamma', 'config.json')
+    const gammaConfig = JSON.parse(readFileSync(gammaConfigPath, 'utf-8'))
+    gammaConfig.enabled = false
+    writeFileSync(gammaConfigPath, JSON.stringify(gammaConfig))
+
+    const sessionId = 'scope-auto'
+    const managed = buildSession(sessionId)
+
+    await sm.setSessionSources(sessionId, [], 'auto')
+
+    expect(sourceSyncCalls.at(-1)).toEqual(['alpha', 'beta'])
+    expect(managed.appliedSourceSlugs).toEqual(['alpha', 'beta'])
+    expect((events.find(e => e.type === 'sources_changed') as { sourceScope?: string }).sourceScope).toBe('auto')
+  })
+
+  it('resolves only scope to the intersection of selection and authorized sources', async () => {
+    writeLocalSource('alpha')
+    writeLocalSource('beta')
+    const sessionId = 'scope-only'
+    const managed = buildSession(sessionId)
+
+    // 手动指定 only + [alpha]
+    await sm.setSessionSources(sessionId, ['alpha', 'nonexistent'], 'only')
+
+    expect(sourceSyncCalls.at(-1)).toEqual(['alpha'])
+  })
+
+  it('resolves exclude scope to authorized minus excluded', async () => {
+    writeLocalSource('alpha')
+    writeLocalSource('beta')
+    writeLocalSource('gamma')
+    const sessionId = 'scope-exclude'
+    const managed = buildSession(sessionId)
+
+    await sm.setSessionSources(sessionId, ['beta'], 'exclude')
+
+    expect(sourceSyncCalls.at(-1)).toEqual(['alpha', 'gamma'])
+  })
+
+  it('keeps legacy sessions (no sourceScope) in only mode', async () => {
+    writeLocalSource('alpha')
+    writeLocalSource('beta')
+    const sessionId = 'scope-legacy'
+    const managed = buildSession(sessionId)
+    // 旧会话：无 sourceScope，enabledSourceSlugs=['alpha'] → only（不因空 scope 变成 auto）
+    managed.sourceScope = undefined
+
+    await sm.setSessionSources(sessionId, ['alpha'])
+
+    expect(managed.sourceScope).toBe('only')
+    expect(sourceSyncCalls.at(-1)).toEqual(['alpha'])
+  })
 
   it('keeps in-flight source tools connected and flushes the latest picker choice after stop', async () => {
     writeLocalSource('alpha')

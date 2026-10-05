@@ -85,6 +85,9 @@ import { getPermissionModeDiagnostics } from './mode-manager.ts';
 
 // McpClientPool for source tool proxying (centralized pool from main process)
 import type { McpClientPool } from '../mcp/mcp-pool.ts';
+import { isSourceUsable } from '../sources/storage.ts';
+import { recordSourceCall } from './source-call-log.ts';
+import { classifySourceToolRisk, parseSourceSlugFromTool } from './source-policy.ts';
 
 // Path utilities
 import { join } from 'path';
@@ -1849,6 +1852,20 @@ export class PiAgent extends BaseAgent {
       workingDirectory: this.config.session?.workingDirectory,
       activeSourceSlugs: Array.from(this.sourceManager.getActiveSlugs()),
       allSourceSlugs: this.sourceManager.getAllSources().map(s => s.config.slug),
+      authorizedSourceSlugs: this.sourceManager.getAllSources().filter(isSourceUsable).map(s => s.config.slug),
+      sourceConfigs: Object.fromEntries(
+        this.sourceManager.getAllSources()
+          .filter(s => s.config.enabled)
+          .map(s => [s.config.slug, {
+            grantedPermissions: s.config.grantedPermissions,
+            riskLevel: s.config.riskLevel,
+            sourcePolicy: s.config.sourcePolicy,
+            sourceToolPolicies: s.config.sourceToolPolicies,
+            name: s.config.name,
+            tagline: s.config.tagline,
+          }]),
+      ),
+      sourceSessionDeny: this.getSourceSessionDeny(),
       permissionManager: this.permissionManager,
       prerequisiteManager: this.prerequisiteManager,
       rtkContext,
@@ -1920,6 +1937,12 @@ export class PiAgent extends BaseAgent {
           rememberForMinutes: checkResult.rememberForMinutes,
           commandHash: checkResult.commandHash,
           approvalTtlSeconds: checkResult.approvalTtlSeconds,
+          sourceSlug: checkResult.sourceSlug,
+          sourceName: checkResult.sourceName,
+          sourceRisk: checkResult.sourceRisk,
+          requiredPermission: checkResult.requiredPermission,
+          dataScope: checkResult.dataScope,
+          isAuthorizationRequest: checkResult.isAuthorizationRequest,
         });
 
         const allowed = await permissionPromise;
@@ -3267,6 +3290,26 @@ n   * connection can be adopted mid-session.
       resultSummary: text || '(no output)',
       isError,
     });
+
+    // 最小审计：来源工具调用日志（仅元数据，不入参/返回体）
+    const sessionId = this.config.session?.id;
+    if (sessionId) {
+      const parsed = parseSourceSlugFromTool(name);
+      if (parsed) {
+        const source = this.sourceManager.getAllSources().find(s => s.config.slug === parsed.slug);
+        if (source) {
+          const riskInfo = classifySourceToolRisk(name, (input ?? {}) as Record<string, unknown>, source.config);
+          const toolPolicy = source.config.sourceToolPolicies?.[name];
+          recordSourceCall(this.config.workspace.rootPath, sessionId, {
+            tool: name,
+            risk: riskInfo.risk,
+            operation: riskInfo.operation,
+            result: isError ? 'error' : 'ok',
+            confirmed: toolPolicy === 'auto' ? 'always' : this.permissionManager.isCommandWhitelisted(name) ? 'session' : 'none',
+          });
+        }
+      }
+    }
   }
 
   /**

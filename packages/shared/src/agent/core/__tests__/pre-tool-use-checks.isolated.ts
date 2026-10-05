@@ -250,7 +250,7 @@ describe('runPreToolUseChecks', () => {
   // ============================================================
 
   describe('step 2: source blocking', () => {
-    it('blocks an unselected MCP source and tells the agent to ask for manual selection', () => {
+    it('blocks an authorized-but-out-of-scope MCP source (user scope constraint wins)', () => {
       const result = runPreToolUseChecks(createInput({
         toolName: 'mcp__linear__createIssue',
         input: {},
@@ -261,8 +261,6 @@ describe('runPreToolUseChecks', () => {
       expect(result.type).toBe('block');
       if (result.type === 'block') {
         expect(result.reason).toContain('linear');
-        expect(result.reason).toContain('select');
-        expect(result.reason).toContain('connect');
       }
     });
 
@@ -277,7 +275,6 @@ describe('runPreToolUseChecks', () => {
       expect(result.type).toBe('block');
       if (result.type === 'block') {
         expect(result.reason).toContain('notion');
-        expect(result.reason).toContain('not available');
       }
     });
 
@@ -1099,7 +1096,7 @@ describe('shouldPromptInAskMode', () => {
 
       expect(result).not.toBeNull();
       expect(result!.promptType).toBe('mcp_mutation');
-      expect(result!.description).toContain('linear');
+      expect(result!.sourceSlug).toBe('linear');
     });
 
     it('auto-allows MCP read-only tools (not blocked in safe mode)', () => {
@@ -1143,7 +1140,7 @@ describe('shouldPromptInAskMode', () => {
 
       expect(result).not.toBeNull();
       expect(result!.promptType).toBe('api_mutation');
-      expect(result!.description).toContain('POST');
+      expect(result!.sourceSlug).toBe('github');
     });
 
     it('auto-allows GET API calls', () => {

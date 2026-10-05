@@ -181,6 +181,7 @@ export async function createSession(
     workingDirectory?: string;
     permissionMode?: SessionConfig['permissionMode'];
     enabledSourceSlugs?: string[];
+    sourceScope?: 'auto' | 'only' | 'exclude';
     model?: string;
     llmConnection?: string;
     hidden?: boolean;

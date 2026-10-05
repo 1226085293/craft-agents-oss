@@ -185,8 +185,10 @@ interface ChatDisplayProps {
   // Source selection
   /** Available sources (enabled only) */
   sources?: LoadedSource[]
+  /** 数据源选择器模式：auto（默认）/ only / exclude */
+  sourceScope?: 'auto' | 'only' | 'exclude'
   /** Callback when source selection changes */
-  onSourcesChange?: (slugs: string[]) => void
+  onSourcesChange?: (slugs: string[], sourceScope?: 'auto' | 'only' | 'exclude') => void
   // Skill selection (for @mentions)
   /** Available skills for @mention autocomplete */
   skills?: LoadedSkill[]
@@ -528,6 +530,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   onAttachmentsChange,
   // Sources
   sources,
+  sourceScope,
   onSourcesChange,
   // Skills (for @mentions)
   skills,
@@ -1795,7 +1798,8 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           pendingPermission.sessionId,
           pendingPermission.requestId,
           permResponse.allowed,
-          permResponse.alwaysAllow
+          permResponse.alwaysAllow,
+          permResponse.sourcePermission ? { sourcePermission: permResponse.sourcePermission } : undefined
         )
         return
       }
@@ -2506,6 +2510,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
               onAttachmentsChange,
               sources,
               enabledSourceSlugs: session.enabledSourceSlugs,
+              sourceScope,
               onSourcesChange,
               skills,
               workspaceId,

@@ -80,6 +80,12 @@ export type PermissionCallback = (request: {
   rememberForMinutes?: number;
   commandHash?: string;
   approvalTtlSeconds?: number;
+  sourceSlug?: string;
+  sourceName?: string;
+  sourceRisk?: 'low' | 'medium' | 'high' | 'critical';
+  requiredPermission?: string;
+  dataScope?: string;
+  isAuthorizationRequest?: boolean;
 }) => void;
 
 /**
@@ -537,6 +543,12 @@ export interface AgentBackend {
    * Get currently active source slugs.
    */
   getActiveSourceSlugs(): string[];
+
+  /** 本会话被禁止（deny-session）的来源工具名列表 */
+  getSourceSessionDeny(): string[];
+
+  /** 设置本会话禁止调用的来源工具（清空传 []） */
+  setSourceSessionDeny(tools: string[]): void;
 
 
   /**

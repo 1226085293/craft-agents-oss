@@ -76,7 +76,7 @@ import {
   type SessionHeader,
   pickSessionFields,
 } from '@craft-agent/shared/sessions'
-import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, TokenRefreshManager } from '@craft-agent/shared/sources'
+import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, TokenRefreshManager, loadSourceConfig, saveSourceConfig } from '@craft-agent/shared/sources'
 import { listTaskSlugs, parseTaskSpec, uniqueTaskSlug } from '@craft-agent/shared/tasks'
 import { resolveUsageTarget, resolveSkillReadUsageTarget, appendUsage } from '@craft-agent/shared/usage'
 import { createTaskFromSpec, resolveCreateTaskProjectId } from '../tasks'
@@ -788,6 +788,8 @@ interface ManagedSession {
   hasUnread?: boolean
   // User-owned source picker state persisted to session metadata.
   enabledSourceSlugs?: string[]
+  /** 选择器模式：auto（默认）= 已授权源中 Agent 自主；only = 仅这些；exclude = 排除这些 */
+  sourceScope?: 'auto' | 'only' | 'exclude'
   /** Source slugs currently applied to the live agent and connection pool. */
   appliedSourceSlugs?: string[]
   /** Source snapshot is being prepared before processing starts. */
@@ -1151,6 +1153,8 @@ export class SessionManager implements ISessionManager {
     sessionId: string
     type?: 'bash' | 'file_write' | 'mcp_mutation' | 'api_mutation' | 'admin_approval'
     commandHash?: string
+    toolName?: string
+    sourceSlug?: string
   }> = new Map()
   // Privileged approval binding + audit logger
   private privilegedExecutionBroker = new PrivilegedExecutionBroker(sessionLog)
@@ -1817,7 +1821,7 @@ export class SessionManager implements ISessionManager {
     managed.agent.setAllSources(allSources)
 
     // Rebuild MCP and API servers for session's enabled sources
-    const enabledSlugs = managed.enabledSourceSlugs || []
+    const enabledSlugs = this.resolveSessionSourceSlugs(managed)
     const enabledSources = allSources.filter(s =>
       enabledSlugs.includes(s.config.slug) && isSourceUsable(s)
     )
@@ -2014,6 +2018,7 @@ export class SessionManager implements ISessionManager {
             // session list shows the right chips — sessions without one hydrate any legacy
             // body value on message load (see hydrateMessagesForColdPersist).
             enabledSourceSlugs: meta.enabledSourceSlugs,
+            sourceScope: meta.sourceScope,
             workingDirectory: meta.workingDirectory ?? wsDefaultWorkingDir,
           })
 
@@ -2098,6 +2103,7 @@ export class SessionManager implements ISessionManager {
       // loadSessionsFromDisk). Populate from disk only if not already set in
       // memory — a caller may have mutated them via setSessionSources etc.
       if (managed.enabledSourceSlugs === undefined) managed.enabledSourceSlugs = stored.enabledSourceSlugs
+      if (managed.sourceScope === undefined) managed.sourceScope = stored.sourceScope
       if (managed.lastReadMessageId === undefined) managed.lastReadMessageId = stored.lastReadMessageId
       if (managed.hasUnread === undefined) managed.hasUnread = stored.hasUnread
       if (managed.sharedUrl === undefined) managed.sharedUrl = stored.sharedUrl
@@ -3065,6 +3071,7 @@ export class SessionManager implements ISessionManager {
       managed.lastReadMessageId = storedSession.lastReadMessageId
       managed.hasUnread = storedSession.hasUnread  // Explicit unread flag for NEW badge state machine
       managed.enabledSourceSlugs = storedSession.enabledSourceSlugs
+      managed.sourceScope = storedSession.sourceScope
       managed.sharedUrl = storedSession.sharedUrl
       managed.sharedId = storedSession.sharedId
       // Sync name from disk - ensures title persistence across lazy loading
@@ -3922,7 +3929,7 @@ export class SessionManager implements ISessionManager {
       // If mcpServerConfigs is explicitly set (spawned session with isolation), use those directly
       let mcpServers: Record<string, import('@craft-agent/shared/agent/backend').SdkMcpServerConfig>
       let apiServers: Record<string, import('@craft-agent/shared/mcp').ApiServerConfig>
-      let enabledSlugs = managed.enabledSourceSlugs || []
+      let enabledSlugs = this.resolveSessionSourceSlugs(managed)
       let enabledSources: import('@craft-agent/shared/sources').LoadedSource[] = []
 
       if (managed.mcpServerConfigs && Object.keys(managed.mcpServerConfigs).length > 0) {
@@ -4534,6 +4541,12 @@ export class SessionManager implements ISessionManager {
         rememberForMinutes?: number;
         commandHash?: string;
         approvalTtlSeconds?: number;
+        sourceSlug?: string;
+        sourceName?: string;
+        sourceRisk?: 'low' | 'medium' | 'high' | 'critical';
+        requiredPermission?: string;
+        dataScope?: string;
+        isAuthorizationRequest?: boolean;
       }) => {
         sessionLog.info(`Permission request for session ${managed.id}:`, request.command)
         let brokerMetadata: {
@@ -4563,6 +4576,8 @@ export class SessionManager implements ISessionManager {
           sessionId: managed.id,
           type: request.type,
           commandHash: effectiveCommandHash,
+          toolName: request.toolName,
+          sourceSlug: request.sourceSlug,
         })
 
         if (request.type === 'admin_approval' && effectiveCommandHash && this.hasActiveAdminRememberApproval(managed.id, effectiveCommandHash)) {
@@ -5570,16 +5585,19 @@ ${request.prompt}`;
   // ============================================
 
   /**
-   * Update the user's source-picker selection.
+   * Update the user's source-picker selection (本次范围约束，不影响长期授权).
    * If a turn is running, apply the change after it ends so its tools/connections stay stable.
+   *
+   * @param sourceScope 'auto' = 已授权源中由 Agent 自主；'only' = 仅这些；'exclude' = 排除这些。
+   * 旧会话兼容：scope 缺省时，已存在 enabledSourceSlugs 视为 'only'，否则 'auto'。
    */
-  async setSessionSources(sessionId: string, sourceSlugs: string[]): Promise<void> {
+  async setSessionSources(sessionId: string, sourceSlugs: string[], sourceScope?: 'auto' | 'only' | 'exclude'): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
       throw new Error(`Session not found: ${sessionId}`)
     }
 
-    sessionLog.info(`Setting sources for session ${sessionId}:`, sourceSlugs)
+    sessionLog.info(`Setting sources for session ${sessionId} (scope=${sourceScope ?? managed.sourceScope ?? 'auto'}):`, sourceSlugs)
 
     const previousSlugs = new Set(managed.enabledSourceSlugs || [])
     const newSlugs = new Set(sourceSlugs)
@@ -5588,6 +5606,12 @@ ${request.prompt}`;
     // This is the user's picker state, not a report of every runtime source.
     // Persist and send it immediately; only tool-pool reconciliation is deferred.
     managed.enabledSourceSlugs = [...sourceSlugs]
+    if (sourceScope) {
+      managed.sourceScope = sourceScope
+    } else if (managed.sourceScope === undefined) {
+      // 新/旧会话兼容：有选择 → only；无（空/缺省）→ auto
+      managed.sourceScope = sourceSlugs.length > 0 ? 'only' : 'auto'
+    }
     managed.sourceSelectionVersion = (managed.sourceSelectionVersion ?? 0) + 1
 
     if (managed.agent && managed.isProcessing) {
@@ -5595,6 +5619,7 @@ ${request.prompt}`;
     } else if (managed.agent) {
       await this.queueSessionSourceSync(managed)
     } else {
+      const applied = this.resolveSessionSourceSlugs(managed)
       if (disabledSlugs.length > 0) {
         try {
           await cleanupSourceRuntimeArtifacts(managed.workspace.rootPath, disabledSlugs)
@@ -5602,7 +5627,7 @@ ${request.prompt}`;
           sessionLog.warn(`Failed to clean up source runtime artifacts: ${err}`)
         }
       }
-      managed.appliedSourceSlugs = [...managed.enabledSourceSlugs]
+      managed.appliedSourceSlugs = [...applied]
     }
 
     this.persistSession(managed)
@@ -5610,9 +5635,28 @@ ${request.prompt}`;
       type: 'sources_changed',
       sessionId,
       enabledSourceSlugs: managed.enabledSourceSlugs,
+      sourceScope: managed.sourceScope,
     }, managed.workspace.id)
 
-    sessionLog.info(`Session ${sessionId} sources updated: ${sourceSlugs.length} sources`)
+    sessionLog.info(`Session ${sessionId} sources updated: ${sourceSlugs.length} sources (scope=${managed.sourceScope})`)
+  }
+
+  /**
+   * 解析本次会话范围内应启用的来源 slug：
+   * - auto：全部已授权（enabled + 已鉴权）源，Agent 自主选择
+   * - only：已授权 ∩ 用户选择
+   * - exclude：已授权 − 用户排除
+   * 旧会话兼容：无 sourceScope 且有选择 → only；否则 auto。
+   */
+  private resolveSessionSourceSlugs(managed: ManagedSession): string[] {
+    const scope = managed.sourceScope ?? (managed.enabledSourceSlugs && managed.enabledSourceSlugs.length > 0 ? 'only' : 'auto')
+    const authorized = loadWorkspaceSources(managed.workspace.rootPath)
+      .filter(isSourceUsable)
+      .map(s => s.config.slug)
+    const selected = managed.enabledSourceSlugs ?? []
+    if (scope === 'only') return selected.filter(slug => authorized.includes(slug))
+    if (scope === 'exclude') return authorized.filter(slug => !selected.includes(slug))
+    return authorized
   }
 
   private queueSessionSourceSync(managed: ManagedSession): Promise<void> {
@@ -5649,7 +5693,7 @@ ${request.prompt}`;
   private async syncSessionSources(managed: ManagedSession): Promise<void> {
     const workspaceRootPath = managed.workspace.rootPath
     const selectionVersion = managed.sourceSelectionVersion ?? 0
-    const sourceSlugs = [...(managed.enabledSourceSlugs ?? [])]
+    const sourceSlugs = this.resolveSessionSourceSlugs(managed)
     const disabledSlugs = (managed.appliedSourceSlugs ?? []).filter(slug => !sourceSlugs.includes(slug))
 
     if (!managed.agent) {
@@ -7063,7 +7107,7 @@ ${request.prompt}`;
       await duringSourceStartup(this.flushPendingSessionSources(managed))
       managed.processingSourceSlugs = [...(managed.appliedSourceSlugs ?? managed.enabledSourceSlugs ?? [])]
     }
-    const enabledSlugs = [...(managed.processingSourceSlugs ?? managed.appliedSourceSlugs ?? managed.enabledSourceSlugs ?? [])]
+    const enabledSlugs = [...(managed.processingSourceSlugs ?? managed.appliedSourceSlugs ?? this.resolveSessionSourceSlugs(managed))]
     const hasSources = enabledSlugs.length > 0
 
     // Load enabled sources up-front so we can refresh tokens BEFORE getOrCreateAgent
@@ -8243,7 +8287,35 @@ ${request.prompt}`;
         }
       }
 
-      sessionLog.info(`Permission response for ${requestId}: allowed=${allowed}, alwaysAllow=${alwaysAllow}`)
+      // 来源工具级策略（评审 #1/#5）：按工具粒度落库，绝不放大到整源
+      const sourcePermission = options?.sourcePermission
+      const toolName = requestMeta?.toolName
+      const sourceSlug = requestMeta?.sourceSlug
+      if (sourcePermission && toolName && sourceSlug && (sourcePermission === 'always' || sourcePermission === 'deny-permanent')) {
+        try {
+          const config = loadSourceConfig(managed.workspace.rootPath, sourceSlug)
+          if (config) {
+            config.sourceToolPolicies = {
+              ...(config.sourceToolPolicies ?? {}),
+              [toolName]: sourcePermission === 'always' ? 'auto' : 'deny',
+            }
+            saveSourceConfig(managed.workspace.rootPath, config)
+            // 让运行层立即感知（pre-tool gate / ask 管线读取最新策略）
+            managed.agent.setAllSources(loadAllSources(managed.workspace.rootPath))
+            sessionLog.info(`Persisted tool-level source policy: ${toolName} -> ${sourcePermission === 'always' ? 'auto' : 'deny'} (${sourceSlug})`)
+          }
+        } catch (err) {
+          sessionLog.warn(`Failed to persist source tool policy for ${toolName}: ${err}`)
+        }
+      } else if (sourcePermission === 'deny' && toolName) {
+        // 本会话禁止：加入 session deny 集合，后续调用直接 block（不再询问）
+        const denied = new Set(managed.agent.getSourceSessionDeny())
+        denied.add(toolName)
+        managed.agent.setSourceSessionDeny([...denied])
+        sessionLog.info(`Added tool to session deny: ${toolName}`)
+      }
+
+      sessionLog.info(`Permission response for ${requestId}: allowed=${allowed}, alwaysAllow=${alwaysAllow}, sourcePermission=${sourcePermission ?? 'none'}`)
       managed.agent.respondToPermission(requestId, allowed, alwaysAllow)
 
       // Broadcast so other clients (e.g. the desktop app) drop the matching

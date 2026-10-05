@@ -45,7 +45,19 @@ import {
   PERMISSION_MODE_CONFIG,
   type PermissionMode,
 } from '../mode-manager.ts';
-import { evaluateApiEndpointPolicy, evaluateMcpToolPolicy } from '../source-policy.ts';
+import {
+  evaluateApiEndpointPolicy,
+  evaluateMcpToolPolicy,
+  evaluateSourceToolAccess,
+  parseSourceSlugFromTool,
+} from '../source-policy.ts';
+import type { FolderSourceConfig } from '../../sources/types.ts';
+
+/** 源授权策略摘要（运行时裁决所需字段的子集） */
+export type SourcePolicyConfigSummary = Pick<
+  FolderSourceConfig,
+  'grantedPermissions' | 'riskLevel' | 'sourcePolicy' | 'sourceToolPolicies' | 'name' | 'tagline'
+>;
 import { permissionsConfigCache, type PermissionsContext } from '../permissions-config.ts';
 import type { PrerequisiteCheckResult } from './prerequisite-manager.ts';
 import { rewriteBashWithRtk } from './rtk-rewrite.ts';
@@ -597,6 +609,14 @@ export type PreToolUseCheckResult =
       rememberForMinutes?: number;
       commandHash?: string;
       approvalTtlSeconds?: number;
+      /** 数据源授权/确认元信息（确认卡片展示） */
+      sourceSlug?: string;
+      sourceName?: string;
+      sourceRisk?: 'low' | 'medium' | 'high' | 'critical';
+      requiredPermission?: string;
+      dataScope?: string;
+      /** true = 未授权/越界 → 授权请求；false/缺省 = 已授权高风险 → 单次确认 */
+      isAuthorizationRequest?: boolean;
     }
   | { type: 'call_llm_intercept'; input: Record<string, unknown> }
   | { type: 'spawn_session_intercept'; input: Record<string, unknown> };
@@ -624,10 +644,16 @@ export interface PreToolUseInput {
   dataFolderPath?: string;
   /** Working directory override (for skill resolution) */
   workingDirectory?: string;
-  /** Currently active source slugs */
+  /** Currently active source slugs (本 turn 范围，已含授权过滤) */
   activeSourceSlugs: string[];
   /** All available sources (for source-exists check) */
   allSourceSlugs: string[];
+  /** 已授权数据源（enabled=true 且已鉴权）slug 列表；缺失时回退 allSourceSlugs */
+  authorizedSourceSlugs?: string[];
+  /** 源配置摘要（授权字段），用于 grantedPermissions/riskLevel/sourcePolicy/sourceToolPolicies 裁定 */
+  sourceConfigs?: Record<string, SourcePolicyConfigSummary>;
+  /** 本会话被禁止（deny-session）的工具名列表 */
+  sourceSessionDeny?: string[];
   /** PermissionManager for session-scoped whitelists */
   permissionManager: PermissionManagerLike;
   /** PrerequisiteManager for guide.md checking */
@@ -707,6 +733,9 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
     workingDirectory,
     activeSourceSlugs,
     allSourceSlugs,
+    authorizedSourceSlugs,
+    sourceConfigs,
+    sourceSessionDeny,
     permissionManager,
     prerequisiteManager,
     backendMetadata,
@@ -751,22 +780,43 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
   }
 
   // ============================================================
-  // 2. SOURCE BLOCKING (inactive MCP sources)
+  // 2. SOURCE BOUNDARY (authorization + per-turn scope)
   // ============================================================
-  if (toolName.startsWith('mcp__')) {
-    const parts = toolName.split('__');
-    const serverName = parts[1];
-    if (parts.length >= 3 && serverName && !BUILT_IN_MCP_SERVERS.has(serverName)) {
-      const isActive = activeSourceSlugs.includes(serverName);
-      if (!isActive) {
+  const parsedSource = (toolName.startsWith('mcp__') || toolName.startsWith('api_'))
+    ? parseSourceSlugFromTool(toolName)
+    : null;
+  if (parsedSource) {
+    const serverName = parsedSource.slug;
+    const isBuiltIn = toolName.startsWith('mcp__') && BUILT_IN_MCP_SERVERS.has(serverName);
+    if (!isBuiltIn) {
+      // 授权边界：未授权（enabled=false 或未鉴权）→ 引导授权，不做重试
+      const authorized = authorizedSourceSlugs ?? allSourceSlugs;
+      if (!authorized.includes(serverName)) {
         const sourceExists = allSourceSlugs.includes(serverName);
         const reason = sourceExists
-          ? `Data source "${serverName}" is not selected for this turn. Do not enable it or retry automatically. Ask the user to select/connect it in the source picker below the input, then resend the request.`
-          : `Data source "${serverName}" is not configured in this workspace. Do not try to enable or create it yourself; tell the user it must be configured before use.`;
-        onDebug?.(`Blocking tool ${toolName}: source "${serverName}" is not selected (exists=${sourceExists})`);
+          ? `数据源 "${serverName}" 未授权。请勿自动启用或重试：请在 设置→数据源 中完成授权（启用 + 鉴权）后，再让用户选择该来源并重发请求。`
+          : `数据源 "${serverName}" 未配置。请勿自行创建；告知用户需先配置该数据源。`;
+        onDebug?.(`Blocking tool ${toolName}: source "${serverName}" is not authorized (exists=${sourceExists})`);
+        return { type: 'block', reason };
+      }
+      // 本次范围：用户选择了“仅这些/排除这些”时，未在范围内的源不可用（用户约束优先）
+      if (!activeSourceSlugs.includes(serverName)) {
+        const reason = `数据源 "${serverName}" 不在本次范围内（当前选择器为 仅这些/排除这些 模式）。如需使用，请调整输入框下方的数据源选择器后重发请求。`;
+        onDebug?.(`Blocking tool ${toolName}: source "${serverName}" is outside the per-turn scope`);
         return { type: 'block', reason };
       }
     }
+  }
+
+  // 2b. RUNTIME ACCESS DECISION (authorized + in-scope): granted-policy / deny / autonomy
+  const sourceRuntimeDecision = evaluateSourceToolAccessIfApplies(toolName, input, {
+    sourceConfigs,
+    sourceSessionDeny,
+    plansFolderPath,
+  });
+  if (sourceRuntimeDecision?.decision === 'block') {
+    onDebug?.(`Blocking ${toolName}: ${sourceRuntimeDecision.reason}`);
+    return { type: 'block', reason: sourceRuntimeDecision.reason };
   }
 
   // ============================================================
@@ -881,6 +931,7 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
       permissionsContext,
       plansFolderPath,
       onDebug,
+      { sourceConfigs, sourceSessionDeny },
     );
     if (promptInfo) {
       const adminWrappedInput =
@@ -899,6 +950,12 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
         modifiedInput: adminWrappedInput ?? (wasModified ? currentInput : undefined),
         appName: promptInfo.appName,
         reason: promptInfo.reason,
+        sourceSlug: promptInfo.sourceSlug,
+        sourceName: promptInfo.sourceName,
+        sourceRisk: promptInfo.sourceRisk,
+        requiredPermission: promptInfo.requiredPermission,
+        dataScope: promptInfo.dataScope,
+        isAuthorizationRequest: promptInfo.isAuthorizationRequest,
         impact: promptInfo.impact,
         requiresSystemPrompt: promptInfo.requiresSystemPrompt,
         rememberForMinutes: promptInfo.rememberForMinutes,
@@ -932,6 +989,12 @@ interface PromptInfo {
   rememberForMinutes?: number;
   commandHash?: string;
   approvalTtlSeconds?: number;
+  sourceSlug?: string;
+  sourceName?: string;
+  sourceRisk?: 'low' | 'medium' | 'high' | 'critical';
+  requiredPermission?: string;
+  dataScope?: string;
+  isAuthorizationRequest?: boolean;
 }
 
 function hashCommand(command: string): string {
@@ -1009,6 +1072,30 @@ function wrapCommandForMacAdminPrompt(command: string): string {
 }
 
 /**
+ * 来源工具运行层访问决策（gate 用）：仅当工具属于来源且非内置时评估。
+ * block 由 gate 拦截；allow/confirm 继续走 ask 管线。
+ */
+function evaluateSourceToolAccessIfApplies(
+  toolName: string,
+  input: Record<string, unknown>,
+  ctx: {
+    sourceConfigs?: Record<string, SourcePolicyConfigSummary>;
+    sourceSessionDeny?: string[];
+    plansFolderPath?: string;
+  },
+): ReturnType<typeof evaluateSourceToolAccess> | null {
+  const parsed = parseSourceSlugFromTool(toolName);
+  if (!parsed) return null;
+  if (toolName.startsWith('mcp__') && BUILT_IN_MCP_SERVERS.has(parsed.slug)) return null;
+  const config = ctx.sourceConfigs?.[parsed.slug];
+  return evaluateSourceToolAccess(toolName, input, {
+    config: config ?? null,
+    sessionDeny: ctx.sourceSessionDeny?.includes(toolName),
+    opts: { plansFolderPath: ctx.plansFolderPath },
+  });
+}
+
+/**
  * Determine if user approval is needed in 'ask' mode.
  *
  * Returns prompt info if user should be asked, null if auto-allowed.
@@ -1024,7 +1111,23 @@ export function shouldPromptInAskMode(
   permissionsContext: PermissionsContext,
   plansFolderPath?: string,
   onDebug?: (message: string) => void,
+  sourceAccessCtx?: {
+    sourceConfigs?: Record<string, SourcePolicyConfigSummary>;
+    sourceSessionDeny?: string[];
+  },
 ): PromptInfo | null {
+  const evaluateSourceAccess = (): ReturnType<typeof evaluateSourceToolAccess> | null => {
+    const parsed = parseSourceSlugFromTool(toolName);
+    if (!parsed) return null;
+    if (toolName.startsWith('mcp__') && BUILT_IN_MCP_SERVERS.has(parsed.slug)) return null;
+    const config = sourceAccessCtx?.sourceConfigs?.[parsed.slug];
+    return evaluateSourceToolAccess(toolName, input, {
+      config: config ?? null,
+      sessionDeny: sourceAccessCtx?.sourceSessionDeny?.includes(toolName),
+      opts: { plansFolderPath },
+    });
+  };
+
 
   // --- File writes ---
   if (FILE_WRITE_TOOLS.has(toolName)) {
@@ -1081,7 +1184,7 @@ export function shouldPromptInAskMode(
     };
   }
 
-  // --- MCP mutations ---
+  // --- MCP mutations (with authorization/autonomy decision) ---
   if (toolName.startsWith('mcp__')) {
     // Freestanding policy: blocked-in-safe-mode = mutation (shared with the Pages action bridge)
     const policy = evaluateMcpToolPolicy(toolName, input, { plansFolderPath });
@@ -1089,7 +1192,32 @@ export function shouldPromptInAskMode(
       // Read-only MCP tool — no prompt needed
       return null;
     }
-    // It's a mutation — check session whitelist
+    const sourceAccess = evaluateSourceAccess();
+    if (sourceAccess) {
+      if (sourceAccess.decision === 'allow') {
+        onDebug?.(`Auto-allowing "${toolName}" (${sourceAccess.reason})`);
+        return null;
+      }
+      if (permissionManager.isCommandWhitelisted(toolName)) {
+        onDebug?.(`Auto-allowing "${toolName}" (previously approved)`);
+        return null;
+      }
+      const risk = sourceAccess.risk;
+      const cfg = risk.sourceSlug ? sourceAccessCtx?.sourceConfigs?.[risk.sourceSlug] : undefined;
+      return {
+        promptType: 'mcp_mutation',
+        description: sourceAccess.reason,
+        command: toolName,
+        sourceSlug: risk.sourceSlug ?? undefined,
+        sourceName: cfg?.name,
+        sourceRisk: risk.risk,
+        requiredPermission: risk.operation,
+        dataScope: cfg?.tagline,
+        isAuthorizationRequest: false,
+      };
+    }
+
+    // It's a mutation (non-source tool fallback) — check session whitelist
     if (permissionManager.isCommandWhitelisted(toolName)) {
       onDebug?.(`Auto-allowing "${toolName}" (previously approved)`);
       return null;
@@ -1101,7 +1229,7 @@ export function shouldPromptInAskMode(
     };
   }
 
-  // --- API mutations ---
+  // --- API mutations (with authorization/autonomy decision) ---
   if (toolName.startsWith('api_')) {
     const method = ((input?.method as string) || 'GET').toUpperCase();
     const path = input?.path as string | undefined;
@@ -1117,7 +1245,32 @@ export function shouldPromptInAskMode(
 
     const apiDescription = policy.description;
 
-    // Check session whitelist
+    const sourceAccess = evaluateSourceAccess();
+    if (sourceAccess) {
+      if (sourceAccess.decision === 'allow') {
+        onDebug?.(`Auto-allowing "${toolName}" (${sourceAccess.reason})`);
+        return null;
+      }
+      if (permissionManager.isCommandWhitelisted(toolName) || permissionManager.isCommandWhitelisted(apiDescription)) {
+        onDebug?.(`Auto-allowing "${toolName}" (previously approved)`);
+        return null;
+      }
+      const risk = sourceAccess.risk;
+      const cfg = risk.sourceSlug ? sourceAccessCtx?.sourceConfigs?.[risk.sourceSlug] : undefined;
+      return {
+        promptType: 'api_mutation',
+        description: sourceAccess.reason,
+        command: toolName,
+        sourceSlug: risk.sourceSlug ?? undefined,
+        sourceName: cfg?.name,
+        sourceRisk: risk.risk,
+        requiredPermission: risk.operation,
+        dataScope: cfg?.tagline,
+        isAuthorizationRequest: false,
+      };
+    }
+
+    // Non-source API fallback — check session whitelist
     if (permissionManager.isCommandWhitelisted(apiDescription)) {
       onDebug?.(`Auto-allowing API "${apiDescription}" (previously approved)`);
       return null;

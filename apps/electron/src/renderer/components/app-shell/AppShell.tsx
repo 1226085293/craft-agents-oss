@@ -1089,9 +1089,9 @@ function AppShellContent({
   }, [activeWorkspaceId])
 
   // Handle session source selection changes
-  const handleSessionSourcesChange = React.useCallback(async (sessionId: string, sourceSlugs: string[]) => {
+  const handleSessionSourcesChange = React.useCallback(async (sessionId: string, sourceSlugs: string[], sourceScope?: 'auto' | 'only' | 'exclude') => {
     try {
-      await window.electronAPI.sessionCommand(sessionId, { type: 'setSources', sourceSlugs })
+      await window.electronAPI.sessionCommand(sessionId, { type: 'setSources', sourceSlugs, sourceScope })
       // Session will emit a 'sources_changed' event that updates the session state
     } catch (err) {
       console.error('[Chat] Failed to set session sources:', err)

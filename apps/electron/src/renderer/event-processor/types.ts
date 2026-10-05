@@ -154,6 +154,7 @@ export interface SourcesChangedEvent {
   type: 'sources_changed'
   sessionId: string
   enabledSourceSlugs: string[]
+  sourceScope?: 'auto' | 'only' | 'exclude'
 }
 
 /**

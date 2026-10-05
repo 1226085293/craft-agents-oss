@@ -29,11 +29,14 @@ export interface StructuredInputState {
 
 /**
  * Response from permission request
+ * sourcePermission: once=仅本次 / session=本会话 / always=工具级始终允许（持久）/
+ * deny=本会话禁止 / deny-permanent=工具级永久禁止（持久）
  */
 export interface PermissionResponse {
   type: 'permission'
   allowed: boolean
   alwaysAllow: boolean
+  sourcePermission?: 'once' | 'session' | 'always' | 'deny' | 'deny-permanent'
 }
 
 /**

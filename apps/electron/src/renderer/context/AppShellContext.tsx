@@ -136,7 +136,7 @@ export interface AppShellContextType {
   onAttachmentsChange: (sessionId: string, attachments: FileAttachment[]) => void
 
   // Source selection callback (per-session) - provided by AppShell component
-  onSessionSourcesChange?: (sessionId: string, sourceSlugs: string[]) => void
+  onSessionSourcesChange?: (sessionId: string, sourceSlugs: string[], sourceScope?: 'auto' | 'only' | 'exclude') => void
 
   // Open a new chat with optional agent, name, and pre-filled input
   openNewChat?: (params?: NewChatActionParams) => Promise<void>

@@ -281,8 +281,8 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Respond to a permission request (bash command approval)
   // Returns true if the response was delivered, false if agent/session is gone
-  server.handle(RPC_CHANNELS.sessions.RESPOND_TO_PERMISSION, async (_ctx, sessionId: string, requestId: string, allowed: boolean, alwaysAllow: boolean) => {
-    return sessionManager.respondToPermission(sessionId, requestId, allowed, alwaysAllow)
+  server.handle(RPC_CHANNELS.sessions.RESPOND_TO_PERMISSION, async (_ctx, sessionId: string, requestId: string, allowed: boolean, alwaysAllow: boolean, options?: import('@craft-agent/shared/protocol').PermissionResponseOptions) => {
+    return sessionManager.respondToPermission(sessionId, requestId, allowed, alwaysAllow, options)
   })
 
   // Respond to a credential request (secure auth input)
@@ -332,7 +332,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
       case 'updateWorkingDirectory':
         return sessionManager.updateWorkingDirectory(sessionId, command.dir)
       case 'setSources':
-        return sessionManager.setSessionSources(sessionId, command.sourceSlugs)
+        return sessionManager.setSessionSources(sessionId, command.sourceSlugs, command.sourceScope)
       case 'setLabels':
         return sessionManager.setSessionLabels(sessionId, command.labels)
       case 'setProjectId':

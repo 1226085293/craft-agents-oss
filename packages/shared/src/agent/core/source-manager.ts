@@ -234,9 +234,15 @@ export class SourceManager {
       parts.push(`Inactive: ${inactiveList.join(', ')}`);
     }
 
-    // The source picker is authoritative for tool access. Never enable an inactive
-    // source or retry the user's original request; ask the user to select/connect it.
-    parts.push('Use only tools from sources listed under Active. Never auto-enable an Inactive source. If a source is needed, ask the user to select it in the session source picker and resend the request.');
+    // Authorization model: the workspace authorization (enable + authenticate) is
+    // authoritative; the session picker only narrows the per-turn scope. The agent
+    // may autonomously use any source listed under Active (authorized + in-scope).
+    // Never use sources listed under Inactive (unauthorized or excluded this turn),
+    // never change the user's manual picker state, and never replay the original
+    // user message automatically. If a needed source is unauthorized, ask the user
+    // to authorize it in Settings; if it is merely out of scope this turn, ask the
+    // user to adjust the source picker.
+    parts.push('Use tools from sources listed under Active. You may autonomously choose among authorized sources. Do NOT use sources under Inactive (unauthorized or excluded this turn), do NOT enable them yourself, and do NOT replay the original user message. If a source is unauthorized, ask the user to authorize it in Settings; if excluded this turn, ask the user to adjust the source picker.');
 
     // Persistent reminder: if any active source has a guide, remind the LLM every message
     const activeSourcesWithGuides = activeSources.filter(

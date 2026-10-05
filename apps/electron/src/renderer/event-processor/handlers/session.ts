@@ -867,6 +867,7 @@ export function handleSourcesChanged(
       session: {
         ...session,
         enabledSourceSlugs: event.enabledSourceSlugs,
+        sourceScope: event.sourceScope,
       },
       streaming,
     },

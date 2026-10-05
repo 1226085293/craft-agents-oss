@@ -21,6 +21,9 @@ import {
   resolveAuthEnvVars,
 } from '../config/llm-connections.ts';
 import type { McpClientPool } from '../mcp/mcp-pool.ts';
+import { isSourceUsable } from '../sources/storage.ts';
+import { recordSourceCall } from './source-call-log.ts';
+import { classifySourceToolRisk, parseSourceSlugFromTool } from './source-policy.ts';
 import { proxyToolName } from '../mcp/proxy-tool-name.ts';
 import { loadPlanFromPath, type SessionConfig as Session } from '../sessions/storage.ts';
 import { loadProjectById, getProjectAssetsPath, listProjectAssets, getProjectMemoryPath, loadProjectMemory } from '../projects/storage.ts';
@@ -734,6 +737,12 @@ export class ClaudeAgent extends BaseAgent {
     rememberForMinutes?: number;
     commandHash?: string;
     approvalTtlSeconds?: number;
+    sourceSlug?: string;
+    sourceName?: string;
+    sourceRisk?: 'low' | 'medium' | 'high' | 'critical';
+    requiredPermission?: string;
+    dataScope?: string;
+    isAuthorizationRequest?: boolean;
   }) => void) | null = null;
 
   // Debug callback for status messages
@@ -762,6 +771,25 @@ export class ClaudeAgent extends BaseAgent {
   // Callback when token usage is updated (for context window display).
   // Note: Full UsageTracker integration is planned for Phase 4 refactoring.
   public onUsageUpdate: ((update: { inputTokens: number; contextWindow?: number; cacheHitRate?: number }) => void) | null = null;
+
+  /** 记录来源工具调用到最小审计日志（非来源工具 no-op；失败不阻断） */
+  private recordSourceCallEntry(toolName: string, input: Record<string, unknown>, outcome: 'ok' | 'error'): void {
+    const sessionId = this.config.session?.id;
+    if (!sessionId) return;
+    const parsed = parseSourceSlugFromTool(toolName);
+    if (!parsed) return;
+    const source = this.sourceManager.getAllSources().find(s => s.config.slug === parsed.slug);
+    if (!source) return;
+    const riskInfo = classifySourceToolRisk(toolName, input, source.config);
+    const toolPolicy = source.config.sourceToolPolicies?.[toolName];
+    recordSourceCall(this.workspaceRootPath, sessionId, {
+      tool: toolName,
+      risk: riskInfo.risk,
+      operation: riskInfo.operation,
+      result: outcome,
+      confirmed: toolPolicy === 'auto' ? 'always' : this.permissionManager.isCommandWhitelisted(toolName) ? 'session' : 'none',
+    });
+  }
 
   constructor(config: ClaudeAgentConfig) {
     // Resolve model: prioritize session model > config model > current Anthropic default.
@@ -1360,6 +1388,20 @@ export class ClaudeAgent extends BaseAgent {
                 workingDirectory: this.config.session?.workingDirectory,
                 activeSourceSlugs: Array.from(this.sourceManager.getActiveSlugs()),
                 allSourceSlugs: this.sourceManager.getAllSources().map(s => s.config.slug),
+                authorizedSourceSlugs: this.sourceManager.getAllSources().filter(isSourceUsable).map(s => s.config.slug),
+                sourceConfigs: Object.fromEntries(
+                  this.sourceManager.getAllSources()
+                    .filter(s => s.config.enabled)
+                    .map(s => [s.config.slug, {
+                      grantedPermissions: s.config.grantedPermissions,
+                      riskLevel: s.config.riskLevel,
+                      sourcePolicy: s.config.sourcePolicy,
+                      sourceToolPolicies: s.config.sourceToolPolicies,
+                      name: s.config.name,
+                      tagline: s.config.tagline,
+                    }]),
+                ),
+                sourceSessionDeny: this.getSourceSessionDeny(),
                 permissionManager: this.permissionManager,
                 prerequisiteManager: this.prerequisiteManager,
                 rtkContext,
@@ -1446,6 +1488,12 @@ export class ClaudeAgent extends BaseAgent {
                       rememberForMinutes: checkResult.rememberForMinutes,
                       commandHash: checkResult.commandHash,
                       approvalTtlSeconds: checkResult.approvalTtlSeconds,
+                      sourceSlug: checkResult.sourceSlug,
+                      sourceName: checkResult.sourceName,
+                      sourceRisk: checkResult.sourceRisk,
+                      requiredPermission: checkResult.requiredPermission,
+                      dataScope: checkResult.dataScope,
+                      isAuthorizationRequest: checkResult.isAuthorizationRequest,
                     });
                   } else {
                     this.pendingPermissions.delete(requestId);
@@ -1723,6 +1771,7 @@ This is a branched conversation. All prior messages in this conversation are par
                 event.toolUseId || 'unknown',
                 event.result,
               );
+              this.recordSourceCallEntry(event.toolName || 'unknown', event.input ?? {}, 'ok');
 
               const guarded = await guardLargeResult(event.result, {
                 sessionPath: metadataSessionDir,
@@ -1738,6 +1787,9 @@ This is a branched conversation. All prior messages in this conversation are par
             }
 
             // Suggest CLI tools when Read fails on convertible file types
+            if (event.type === 'tool_result' && event.isError) {
+              this.recordSourceCallEntry(event.toolName || 'unknown', event.input ?? {}, 'error');
+            }
             if (event.type === 'tool_result' && event.toolName === 'Read' && event.isError && event.result) {
               const filePath = typeof event.input?.file_path === 'string' ? event.input.file_path : undefined;
               if (filePath) {

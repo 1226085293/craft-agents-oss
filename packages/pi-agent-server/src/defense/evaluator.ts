@@ -2,7 +2,8 @@
  * DefenseEvaluator
  *
  * Orchestrates Layer 2 post-stop evaluation:
- * - complexity-score → whether evaluation is needed
+ * - signal detection → whether a post-stop check is needed (fault-class
+ *   early stops + forced long-turn verification)
  * - session-lifecycle → FSM + resume guardrails
  *
  * Layer 1 (system-discipline) is applied at prompt-build time via
@@ -10,8 +11,7 @@
  * issue #1 — regex cannot judge semantics and produced false positives.
  */
 
-import { complexityScore, type ToolCallLike } from './complexity-score.ts';
-import { FsWatch, type FsWriteEvidence } from './fs-watch.ts';
+import { type ToolCallLike } from './complexity-score.ts';
 import { SessionLifecycle, State, type SessionLifecycleOptions } from './session-lifecycle.ts';
 
 export interface DefenseEvaluationResult {
@@ -42,12 +42,11 @@ export interface DefenseEvaluationResult {
 export interface DefenseOptions extends SessionLifecycleOptions {
   /** Master switch. When false, DefenseEvaluator is a no-op. */
   enabled?: boolean;
-  /** Working directory for filesystem write detection. */
-  cwd?: string;
   /**
    * Verification-class thresholds (user-configurable; defaults below).
-   * A turn that meets EITHER threshold is treated as a long turn and gets
-   * the same forced final-reply verification as write-without-readback.
+   * A turn that meets EITHER threshold is treated as a long turn and gets a
+   * forced program-side final-reply verification (the only verify-class
+   * trigger now; the write-without-readback signal was removed).
    * - minSteps: tool/activity count in the turn (the number of process-card
    *   rows the UI shows) — default 50.
    * - minDurationMs: elapsed wall-clock in the turn — default 5 minutes.
@@ -85,17 +84,24 @@ export function buildDefenseStopNotice(
 export class DefenseEvaluator {
   private readonly enabled: boolean;
   private readonly lifecycle: SessionLifecycle;
-  private readonly fsWatch: FsWatch;
-  private readonly cwd?: string;
   private readonly verifyMinSteps: number;
   private readonly verifyMinDurationMs: number;
   private toolCalls: ToolCallLike[] = [];
-  private readOutputs: string[] = [];
+  /**
+   * Whether the program-side verification has already been attempted on this
+   * turn. The long-turn verification signal is a TURN-LEVEL accumulator
+   * (iterations/elapsed only grow), so after a FAILED verification the
+   * follow-up repair round's own agent_end would re-trigger verifyRequired
+   * — the event adapter demotes the freshly streamed result bubble and runs
+   * a second Verifying/Verification-failed cycle after it (2026-10-05
+   * report: "结果气泡出现后还会出现验证失败的错误"). One verification
+   * attempt per turn: FAIL → followUp → the repaired reply is delivered as
+   * the final bubble; genuine fault-class signals still resume as before.
+   */
+  private verificationAttempted = false;
 
   constructor(options: DefenseOptions = {}) {
     this.enabled = options.enabled ?? true;
-    this.cwd = options.cwd;
-    this.fsWatch = new FsWatch();
     this.lifecycle = new SessionLifecycle(options);
     this.verifyMinSteps = options.verifyMinSteps ?? DEFAULT_VERIFY_MIN_STEPS;
     this.verifyMinDurationMs = options.verifyMinDurationMs ?? DEFAULT_VERIFY_MIN_DURATION_MS;
@@ -126,38 +132,15 @@ export class DefenseEvaluator {
     this.recordToolCall({ type: 'bash', command });
   }
 
-  /** Record a read-back output so writes followed by reads count as verified. */
-  recordReadOutput(text: string): void {
-    if (!this.enabled) return;
-    if (text.trim().length > 0) {
-      this.readOutputs.push(text);
-    }
-  }
-
   /** Reset tool-call buffer for a new turn. */
   resetTurn(): void {
     this.toolCalls = [];
-    this.readOutputs = [];
+    this.verificationAttempted = false;
     this.lifecycle.reset();
-    // Anchor the fs mtime marker: anything modified after this point counts
-    // as a turn-caused write, regardless of which tool/script did it.
-    if (this.cwd) this.fsWatch.markTurnStart();
-  }
-
-  /**
-   * Filesystem-fact write evidence for this turn (null when cwd unknown).
-   * This is the ground truth for "did a write happen" — command-text regex
-   * classification is only a fallback for when the scan is unavailable.
-   */
-  detectFsWrites(): FsWriteEvidence | null {
-    if (!this.enabled || !this.cwd) return null;
-    return this.fsWatch.detectWrites(this.cwd);
   }
 
   /** Human-readable summary of which resume signal(s) fired (diagnostics). */
   private describeSignals(
-    hasWrite: boolean,
-    fsEvidence: FsWriteEvidence | null,
     silentStop: boolean,
     emptyResponse: boolean,
     repetitionLoop: boolean,
@@ -172,14 +155,6 @@ export class DefenseEvaluator {
     if (truncatedFinal) parts.push('truncatedFinal');
     if (leakedToolCall) parts.push('leakedToolCall');
     if (verifyRequired) parts.push('verify');
-    if (hasWrite) {
-      const fsFiles = fsEvidence?.modifiedFiles ?? [];
-      parts.push(
-        fsFiles.length > 0
-          ? `fsWrite(${fsFiles.slice(0, 5).join(', ')}${fsFiles.length > 5 ? ', …' : ''})`
-          : 'cmdWrite',
-      );
-    }
     return parts.join('+') || 'none';
   }
 
@@ -254,8 +229,8 @@ export class DefenseEvaluator {
 
     // P0 guardrail (2026-08-22): a user abort is an explicit intent to stop.
     // It must short-circuit EVERY resume signal — not just silentStop. Before
-    // this guard, a turn aborted mid-task with write-without-readback (or an
-    // empty final reply) was automatically resumed via followUp(), reviving a
+    // this guard, a turn aborted mid-task with an empty final reply (or any
+    // other early-stop signal) was automatically resumed via followUp(), reviving a
     // task the user had deliberately stopped and letting it keep mutating
     // files. Abort wins over all heuristics.
     //
@@ -272,31 +247,6 @@ export class DefenseEvaluator {
         state: this.lifecycle.getState(),
       };
     }
-
-    const complexity = complexityScore(this.toolCalls);
-    // Merge separately-recorded read-back outputs into the verification check:
-    // a read tool that returned content counts as a read-back even though the
-    // tool-execution event payload may not carry it.
-    const effectiveVerify = complexity.hasVerify || this.readOutputs.length > 0;
-
-    // Ground-truth write detection: filesystem mtime evidence first,
-    // command-text regex as fallback (e.g. writes outside cwd).
-    //
-    // ATTRIBUTION (2026-10-04 incident, 261004-tall-nickel): mtime evidence
-    // cannot tell WHICH process modified a file. A worktree shared with other
-    // sessions/indexers/watch processes poisons the signal — an unrelated
-    // session's write to a test file forced a verification on a pure
-    // read-only session. Only count files attributable to THIS session's own
-    // tool activity (path correlation); when the turn has write-class
-    // actions, keep all evidence conservatively.
-    let fsEvidence = this.detectFsWrites();
-    if (fsEvidence && fsEvidence.modifiedFiles.length > 0) {
-      const attributed = attributeFsWrites(fsEvidence.modifiedFiles, this.toolCalls, complexity.hasWrite);
-      fsEvidence = { ...fsEvidence, modifiedFiles: attributed };
-    }
-    const fsWrite = !!fsEvidence && fsEvidence.modifiedFiles.length > 0;
-    const hasWrite = fsWrite || complexity.hasWrite;
-    const writeUnverified = hasWrite && !effectiveVerify;
 
     // Leaked tool-call markup (fault-class): the model emitted provider
     // tool-call tokens as literal text; the calls never executed. No valid
@@ -341,16 +291,16 @@ export class DefenseEvaluator {
     const faultClass =
       stallAborted || silentStop || emptyResponse || repetitionLoop || truncatedFinal || leakedToolCall;
 
-    // Verification-class signals (user-approved redesign, 2026-10-02):
-    // a) writes performed with no read-back evidence;
-    // b) FORCED long turn — the turn met EITHER threshold (step count ≥
-    //    verifyMinSteps OR elapsed ≥ verifyMinDurationMs; OR semantics,
-    //    configurable). These are NOT faults: the content may be fine.
-    // Instead of blindly resuming, the turn gets a program-side
-    // verification: an LLM check on whether the final reply is a valid
-    // answer to the user's message. PASS → the captured final text is
-    // replayed AS the single final reply (no second LLM bubble); FAIL →
-    // only then follow up (LLM continues).
+    // Verification-class signal (user decision, 2026-10-05): a FORCED long
+    // turn — the turn met EITHER threshold (step count ≥ verifyMinSteps OR
+    // elapsed ≥ verifyMinDurationMs; OR semantics, configurable). This is
+    // the ONLY verification-class trigger now; a plain write-without-
+    // read-back no longer forces verification (S1 removed). These are NOT
+    // faults: the content may be fine. Instead of blindly resuming, the turn
+    // gets a program-side verification: an LLM check on whether the final
+    // reply is a valid answer to the user's message. PASS → the captured
+    // final text is replayed AS the single final reply (no second LLM
+    // bubble); FAIL → only then follow up (LLM continues).
     const longTurn =
       this.lifecycle.getIterations() >= this.verifyMinSteps
       || this.lifecycle.elapsedMs() >= this.verifyMinDurationMs;
@@ -358,17 +308,22 @@ export class DefenseEvaluator {
     // server passes hasFinalText explicitly so earlier commentary/tool-call
     // text can never be mistaken for a terminal candidate.
     const hasFinalText = lastAssistantMessage?.hasFinalText ?? lastAssistantMessage?.hasVisibleText ?? false;
-    const verifyRequired = hasFinalText && !faultClass && (writeUnverified || longTurn);
+    // One verification attempt per turn (2026-10-05): after a FAILED
+    // verification the follow-up repair round's agent_end must deliver the
+    // repaired reply, not re-verify it — the long-turn signal persists
+    // across the resume and would otherwise re-enter the verification hold
+    // and demote the fresh bubble ("结果气泡后又出现验证失败").
+    const verifyRequired = !this.verificationAttempted && hasFinalText && !faultClass && longTurn;
     // If a verification signal fires without a deliverable final candidate,
     // preserve the ordinary follow-up recovery path instead of opening a
     // program-side verification hold.
-    const resumeWithoutCandidate = !hasFinalText && (writeUnverified || longTurn);
+    const resumeWithoutCandidate = !hasFinalText && longTurn;
 
     // A stall-watchdog abort is itself an early-stop signal: the turn was
     // killed mid-flight, so evaluation must run even when no other signal
     // fired (e.g. visible text was already produced earlier in the run).
     const needsEvaluation =
-      faultClass || verifyRequired || resumeWithoutCandidate || complexity.needsEvaluation;
+      faultClass || verifyRequired || resumeWithoutCandidate;
     const stop = this.lifecycle.onStop(needsEvaluation);
 
     if (stop === 'abort') {
@@ -380,9 +335,10 @@ export class DefenseEvaluator {
     }
 
     // Rule-based evaluation: only concrete early-stop signals warrant an
-    // automatic resume — silent stop (no output at all), wrote-without-
-    // read-back, or a stall-watchdog kill. High complexity alone is
-    // informational. stallAborted bypasses this gate even when visible text
+    // automatic resume — a fault-class early stop (silent stop with no
+    // output, empty terminal reply, repetition loop, truncation, leaked
+    // tool-call markup, or a stall-watchdog kill) or a forced long-turn
+    // verification. stallAborted bypasses this gate even when visible text
     // was produced earlier in the run (faultClass covers it): the watchdog
     // killed a mid-flight turn, so "already said something" must not read
     // as done.
@@ -399,7 +355,7 @@ export class DefenseEvaluator {
     // consumes one FSM slot via decideResume — a FAIL ed verification
     // follows up (a real resume), and repeat fail→re-verify cycles must
     // respect maxResumes like any other loop.
-    const resumeMessage = buildResumeMessage(hasWrite, fsEvidence, this.toolCalls, silentStop, emptyResponse, repetitionLoop, truncatedFinal, stallAborted, leakedToolCall, leakedCallNames);
+    const resumeMessage = buildResumeMessage(silentStop, emptyResponse, repetitionLoop, truncatedFinal, stallAborted, leakedToolCall, leakedCallNames);
     const decision = this.lifecycle.decideResume(resumeMessage);
     if (decision === State.FAILED) {
       return {
@@ -407,22 +363,21 @@ export class DefenseEvaluator {
         shouldResume: false,
         state: State.FAILED,
         failureReason: 'Resume cap reached or no progress across consecutive resumes',
-        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired, leakedToolCall),
+        reason: this.describeSignals(silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired, leakedToolCall),
       };
     }
 
     this.lifecycle.markResumed();
     if (verifyRequired) {
+      this.verificationAttempted = true;
       return {
         evaluated: true,
         shouldResume: false,
         verifyRequired: true,
-        verifyReason: writeUnverified
-          ? 'write-without-readback'
-          : 'force-long-turn',
+        verifyReason: 'force-long-turn',
         resumeMessage,
         state: this.lifecycle.getState(),
-        reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired, leakedToolCall),
+        reason: this.describeSignals(silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired, leakedToolCall),
       };
     }
 
@@ -431,65 +386,9 @@ export class DefenseEvaluator {
       shouldResume: true,
       resumeMessage,
       state: this.lifecycle.getState(),
-      reason: this.describeSignals(hasWrite, fsEvidence, silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired, leakedToolCall),
+      reason: this.describeSignals(silentStop, emptyResponse, repetitionLoop, truncatedFinal, verifyRequired, leakedToolCall),
     };
   }
-}
-
-/**
- * Attribute filesystem mtime evidence to THIS session's own tool activity.
- *
- * FsWatch observes mtime changes under cwd but cannot tell WHICH process
- * made them. A worktree shared with other sessions, indexers, or
- * build/watch processes poisons the "did a write happen" signal: an
- * unrelated session's write to `packages\messaging-gateway\...\renderer-
- * system-stop-notice.test.ts` forced a verification-delivery hold on a pure
- * read-only session that never touched that file (2026-10-04 incident,
- * session 261004-tall-nickel).
- *
- * Rules:
- * 1. Path correlation — a modified file is attributable when its path or
- *    basename is referenced by this session's own tool calls (write/edit
- *    `path` args, bash command text).
- * 2. Write-class fallback — when the turn performed write-class actions
- *    (write/edit tool calls or write-like bash commands), keep ALL evidence:
- *    the writes may have happened through a script whose output paths are
- *    not visible in the command text. Excluding them would miss real
- *    unverified writes.
- * 3. No write-class actions at all — the session's tools could not have
- *    produced the observed mtime changes; they are external and are
- *    dropped (unless path-correlated in rule 1).
- */
-export function attributeFsWrites(
-  modifiedFiles: string[],
-  toolCalls: ToolCallLike[],
-  turnHasWriteAction: boolean,
-): string[] {
-  const references: string[] = [];
-  for (const call of toolCalls ?? []) {
-    if (typeof call.path === 'string' && call.path.length > 0) references.push(call.path);
-    if (typeof call.command === 'string' && call.command.length > 0) references.push(call.command);
-  }
-  if (references.length === 0) {
-    return turnHasWriteAction ? modifiedFiles : [];
-  }
-  if (turnHasWriteAction) {
-    // Conservative: the turn did write-class work; we cannot rule out that
-    // any of the observed changes are its (script) output.
-    return modifiedFiles;
-  }
-  const norm = (s: string): string => s.toLowerCase().replace(/\\/g, '/');
-  const hay = references.map(norm);
-  const attributed: string[] = [];
-  for (const file of modifiedFiles) {
-    const nf = norm(file);
-    const base = nf.split('/').pop() ?? nf;
-    const hit = hay.some((h) =>
-      h.includes(nf) || (base.length >= 6 && h.includes(base)),
-    );
-    if (hit) attributed.push(file);
-  }
-  return attributed;
 }
 
 /**
@@ -506,9 +405,6 @@ export function attributeFsWrites(
  * new work orders: extra work happens only on the "does not correspond" branch.
  */
 function buildResumeMessage(
-  hasWrite: boolean,
-  fsEvidence: FsWriteEvidence | null,
-  toolCalls: ToolCallLike[],
   silentStop: boolean,
   emptyResponse: boolean,
   repetitionLoop: boolean,
@@ -517,7 +413,6 @@ function buildResumeMessage(
   leakedToolCall = false,
   leakedCallNames: string[] = [],
 ): string {
-  const writeCalls = toolCalls.filter((c) => ['write', 'edit', 'bash:write'].includes(c.type));
   const lines: string[] = [
     '[Defense] Verification delivery step — check delivery, do NOT re-run the task.',
     `Judge whether your final reply (your last assistant message in this conversation) ` +
@@ -580,24 +475,6 @@ function buildResumeMessage(
       `exists to verify, so it does NOT correspond: state that reason, report your current ` +
       `progress/status to the user now, then continue any remaining work.`,
     );
-  }
-  if (hasWrite) {
-    lines.push(
-      `- Write/edit operations were performed but never followed by any read-back ` +
-      `(no file read, no verification command output). If your final reply claims these ` +
-      `writes are done without such evidence, it does NOT correspond: state that reason, ` +
-      `verify the outcome actually matches the user's request (re-read the affected files ` +
-      `or run a status/test check), then confirm or correct your final answer. ` +
-      `Do NOT redo completed work.`,
-    );
-  }
-  if (fsEvidence && fsEvidence.modifiedFiles.length > 0) {
-    const files = fsEvidence.modifiedFiles.slice(0, 5).join(', ');
-    const more = fsEvidence.modifiedFiles.length > 5 ? ` (+${fsEvidence.modifiedFiles.length - 5} more)` : '';
-    lines.push(`- Files modified during the turn (fs mtime evidence): ${files}${more}`);
-  }
-  if (writeCalls.length > 0) {
-    lines.push(`- Affected targets: ${writeCalls.map((c) => (c.type === 'bash' ? (c.command ?? '').slice(0, 80) : c.type)).join(', ')}`);
   }
   lines.push(`- Do NOT repeat already completed steps.`);
   return lines.join('\n');

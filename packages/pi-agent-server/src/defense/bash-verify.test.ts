@@ -89,30 +89,28 @@ describe('complexityScore — bash verification counts as read-back', () => {
     expect(result.shouldResume).toBe(true);
   });
 
-  it('verify-grade bash command that FAILED does not count (write stays unverified → verification class, 2026-10-02)', () => {
+  it('a lone write on a short turn no longer routes to verification (S1 removed)', () => {
     const e = new DefenseEvaluator({ enabled: true });
     e.recordToolCall({ type: 'write' });
     e.recordToolCall({ type: 'bash', command: 'git status --short' });
-    e.recordReadOutput(''); // empty output → ignored by recordReadOutput
     const result = e.evaluate(COMPLETE_ANSWER);
-    // Unverified write no longer triggers a blind resume — it routes to the
-    // program-side verification (LLM judges the final reply; only a FAIL
-    // reverts to the resume/follow-up path).
+    // The write-without-readback signal is gone: a short turn that only wrote
+    // is NOT verification-class — a clean final answer is delivered as-is.
     expect(result.shouldResume).toBe(false);
-    expect(result.verifyRequired).toBe(true);
-    expect(result.verifyReason).toBe('write-without-readback');
+    expect(result.verifyRequired).not.toBe(true);
+    expect(result.state).toBe('done');
   });
 });
 
-describe('DefenseEvaluator end-to-end — bash-only verification flow', () => {
-  it('commit+push+verify-in-bash+final answer → no resume', () => {
-    const e = new DefenseEvaluator({ enabled: true, cwd: process.cwd() });
+describe('DefenseEvaluator end-to-end — write class no longer forces verification (S1 removed)', () => {
+  it('commit+push on a short turn with a final answer → no resume, no verification', () => {
+    const e = new DefenseEvaluator({ enabled: true });
     e.recordToolCall({ type: 'edit' });
     e.recordToolCall({ type: 'bash', command: 'git commit -m "fix: something"' });
     e.recordToolCall({ type: 'bash', command: 'git push origin main', output: 'main -> main' });
-    e.recordReadOutput('d623ed22..a64e1a29  main -> main'); // recorded at tool_execution_end
     const result = e.evaluate(COMPLETE_ANSWER);
     expect(result.shouldResume).toBe(false);
-    expect(result.state).not.toBe('failed');
+    expect(result.verifyRequired).not.toBe(true);
+    expect(result.state).toBe('done');
   });
 });

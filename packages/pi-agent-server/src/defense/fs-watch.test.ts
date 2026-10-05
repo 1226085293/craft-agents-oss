@@ -60,7 +60,9 @@ describe('FsWatch — framework runtime noise in session cwd (2026-09-08 inciden
   it('read-only Q&A turn with zero user writes → evaluator must NOT resume', () => {
     const { DefenseEvaluator } = require('./evaluator.ts') as typeof import('./evaluator.ts');
     const { dir } = makeSessionDir();
-    const e = new DefenseEvaluator({ enabled: true, cwd: dir });
+    // (The evaluator no longer consumes FsWatch/cwd — S1 write-evidence
+    // removed 2026-10-05 — so this is now a plain short read-only turn.)
+    const e = new DefenseEvaluator({ enabled: true });
     e.resetTurn();
     // Host writes runtime files mid-turn:
     touchAll(dir, Date.now());

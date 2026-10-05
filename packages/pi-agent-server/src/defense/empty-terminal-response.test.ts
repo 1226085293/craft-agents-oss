@@ -194,13 +194,15 @@ describe('empty terminal response defense (2026-08-22 incidents)', () => {
     expect(result.shouldResume).toBe(false);
   });
 
-  it('write-without-readback routes to the verification class independently of the empty-response signal (2026-10-02)', () => {
+  it('a lone write (rm) on a short turn no longer routes to verification (S1 removed)', () => {
     const e = new DefenseEvaluator({ enabled: true });
     e.recordToolCall({ type: 'bash', command: 'rm /tmp/f.txt' }); // bash:write per WRITE_CMDS
     const result = scan(e, [{ role: 'assistant', content: [{ type: 'text', text: 'done writing' }], stopReason: 'stop', usage: { output: 5 } }]);
+    // The write-without-readback signal is gone: only a forced long turn
+    // reaches the verification class now. A short write-only turn with a
+    // clean final reply is delivered as-is — no verification, no resume.
     expect(result.shouldResume).toBe(false);
-    expect(result.verifyRequired).toBe(true);
-    expect(result.verifyReason).toBe('write-without-readback'); // different branch, not the EMPTY signal
+    expect(result.verifyRequired).not.toBe(true);
   });
 
   it('a long turn without a final visible reply resumes without entering verification', () => {

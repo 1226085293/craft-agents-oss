@@ -125,7 +125,7 @@ describe('SessionManager session source selection', () => {
     const sessionId = 'scope-legacy'
     const managed = buildSession(sessionId)
     // 旧会话：无 sourceScope，enabledSourceSlugs=['alpha'] → only（不因空 scope 变成 auto）
-    managed.sourceScope = undefined
+    delete (managed as { sourceScope?: 'auto' | 'only' | 'exclude' }).sourceScope
 
     await sm.setSessionSources(sessionId, ['alpha'])
 

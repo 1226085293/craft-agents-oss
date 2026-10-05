@@ -7049,7 +7049,9 @@ ${request.prompt}`;
     managed.lastMessageAt = Date.now()
     this.setProcessing(managed, true)
     managed.sourceTurnStarting = false
-    managed.processingSourceSlugs = [...(managed.processingSourceSlugs ?? managed.appliedSourceSlugs ?? managed.enabledSourceSlugs ?? [])]
+    // 快照初始化：已应用集优先；从未应用过（全新 auto 会话）→ 按授权范围 resolve，
+    // 避免空数组([])吃掉“全部授权源”的默认语义（用户手动 only+空选择仍尊重 applied=[]）。
+    managed.processingSourceSlugs = [...(managed.processingSourceSlugs ?? managed.appliedSourceSlugs ?? this.resolveSessionSourceSlugs(managed))]
     managed.currentRunStartedAt = Date.now()
     managed.streamingText = ''
     managed.streamingTurnId = undefined
@@ -7105,7 +7107,11 @@ ${request.prompt}`;
     const workspaceRootPath = managed.workspace.rootPath
     if (ownsSourceStartup) {
       await duringSourceStartup(this.flushPendingSessionSources(managed))
-      managed.processingSourceSlugs = [...(managed.appliedSourceSlugs ?? managed.enabledSourceSlugs ?? [])]
+      // 与 setProcessing 处同源：applied 未初始化（auto 首轮）→ resolve 授权源；
+      // flush 之后 applied 可能已更新，优先采用最新 applied。
+      managed.processingSourceSlugs = [...(managed.processingSourceSlugs && managed.processingSourceSlugs.length > 0
+        ? managed.processingSourceSlugs
+        : managed.appliedSourceSlugs ?? this.resolveSessionSourceSlugs(managed))]
     }
     const enabledSlugs = [...(managed.processingSourceSlugs ?? managed.appliedSourceSlugs ?? this.resolveSessionSourceSlugs(managed))]
     const hasSources = enabledSlugs.length > 0

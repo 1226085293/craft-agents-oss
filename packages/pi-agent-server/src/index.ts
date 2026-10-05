@@ -2257,8 +2257,9 @@ let defenseResumeQueued = false;
 
 // Bounded compaction heartbeat: while the Pi SDK runs a threshold/overflow
 // compaction the main stream is silent, so without these ticks the
-// PiAgent's 120s turn-idle watchdog false-positives "stream stalled" for
-// any compaction longer than the turn ceiling (2026-10-04 incident). Each
+// PiAgent's turn-idle watchdog (300 s plain ceiling as of 2026-10-05; 120 s
+// before that) false-positived "stream stalled" for any compaction longer
+// than the cap (2026-10-04 incident). Each
 // tick is a main-process turn-progress event (watchdog-only — the adapter no
 // longer surfaces ticks as UI status, so the process block keeps a single
 // static "Compacting context..." row from compaction_start and the bottom

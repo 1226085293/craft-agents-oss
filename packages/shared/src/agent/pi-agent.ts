@@ -248,27 +248,41 @@ export class PiAgent extends BaseAgent {
    * Turn-idle watchdog ceiling (no events since the last one while the agent
    * is idle with all tools completed).
    *
-   * Shortened from 10 min to 2 min on 2026-10-04 (session 261004-amber-plain
-   * freeze): an application restart orphaned an in-flight turn, leaving a
-   * restored session silent for ~10 minutes until this ceiling finally fired.
-   * The watchdog still resets on every event and is fully exempt while a tool
-   * is actively running, so a long-but-healthy model call is unaffected; 120s
-   * bounds a genuine idle stall to two minutes instead of ten. Override with
+   * History: shortened from 10 min to 2 min on 2026-10-04 (session
+   * 261004-amber-plain freeze: an application restart orphaned an in-flight
+   * turn, leaving a restored session silent until the ceiling fired).
+   *
+   * Raised to 5 min on 2026-10-05 (session 261005-fresh-tulip repeated
+   * stalls): the ceiling must stay CLEAR of the Pi subprocess's 120 s HTTP
+   * idle timeout (`httpIdleTimeoutMs`, see applyPiResilienceSettings in
+   * pi-agent-server) plus at least one agent-retry backoff cycle. At 120 s
+   * the two timers armed within milliseconds of each other and the watchdog
+   * always won the race, so a silently hanging upstream (no bytes, no error
+   * status) surfaced as "stream stalled … Please retry" before the SDK's
+   * auto-retry policy (4 agent retries + provider retries, CRAFT_PI_RETRY_
+   * SETTINGS) got a chance to run. At 300 s each http-idle timeout lands its
+   * auto_retry_* event inside the watchdog window, re-arms the timer, and
+   * lets the retry ladder progress — or terminate the turn with the REAL api
+   * error once retries are exhausted. A genuinely orphaned/dead stream (no
+   * events at all) is now bounded to 5 minutes instead of 10. The watchdog
+   * still resets on every event and is fully exempt while a tool is actively
+   * running, so a long-but-healthy model call is unaffected. Override with
    * the CRAFT_PI_TURN_IDLE_TIMEOUT_MS environment variable.
    */
-  private static readonly DEFAULT_TURN_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
+  private static readonly DEFAULT_TURN_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
   /**
    * Capped idle ceiling for in-flight context compaction. While the Pi SDK
    * runs a threshold/overflow compaction inside the subprocess, the main
-   * stream emits no events at all — a compaction that legitimately takes
-   * longer than the 2-min turn ceiling (a 2026-10-04 deepseek session
-   * compacted for 3m40s and false-positived the 120s turn watchdog, surfacing
-   * a misleading "stream stalled … Please retry the message" during
-   * "Compacting context...") would otherwise trip it. The deadline is pinned
-   * to compaction_start + this cap and is NOT extended by heartbeat
+   * stream emits no events at all. The deadline is pinned to
+   * compaction_start + this cap and is NOT extended by heartbeat
    * `compaction_progress` events, so a genuinely dead compaction still trips
-   * the capped deadline instead of hanging forever. Matches the 300 s
-   * `waitForCompaction` / `requestCompact` precedent. Override with
+   * the capped deadline instead of hanging forever, and surfaces a
+   * compaction-specific error instead of the plain turn-stall message. (The
+   * cap existed because a 2026-10-04 deepseek session compacted for 3m40s
+   * and false-positived the then-120s turn watchdog mid-"Compacting
+   * context..."; as of 2026-10-05 the plain turn ceiling is also 300 s, so
+   * the cap governs the same window with the specific message.) Matches the
+   * 300 s `waitForCompaction` / `requestCompact` precedent. Override with
    * CRAFT_PI_COMPACTION_IDLE_TIMEOUT_MS.
    */
   private static readonly DEFAULT_COMPACTION_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -279,9 +293,9 @@ export class PiAgent extends BaseAgent {
   /**
    * Compaction watch state: `compaction_start` (any, incl. threshold/overflow)
    * pins `compactionDeadlineAt`; while set, the turn-idle watchdog tracks that
-   * deadline with the compaction cap instead of the 120s turn ceiling. Dropped
-   * on `compaction_end` (and defensively on `agent_end`) — the normal 120s
-   * watchdog resumes on the next event.
+   * deadline with the compaction cap instead of the plain 300s turn ceiling.
+   * Dropped on `compaction_end` (and defensively on `agent_end`) — the normal
+   * turn watchdog resumes on the next event.
    */
   private compactionInFlight = false;
   private compactionDeadlineAt: number | null = null;

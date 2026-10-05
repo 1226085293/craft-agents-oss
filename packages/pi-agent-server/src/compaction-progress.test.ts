@@ -10,7 +10,7 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 /**
  * Regression contract for the 2026-10-04 incident: a 3m40s threshold
- * compaction false-positived the PiAgent's 120s turn-idle watchdog because
+ * compaction false-positived the PiAgent's then-120s turn-idle watchdog because
  * the main stream is silent for the whole SDK summary call. The server-side
  * heartbeat keeps the watchdog fed; it must be BOUNDED so a dead
  * compaction still trips the capped deadline instead of being silenced

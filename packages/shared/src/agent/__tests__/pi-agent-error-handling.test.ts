@@ -123,12 +123,15 @@ describe('PiAgent subprocess error handling', () => {
     agent.destroy()
   })
 
-  it('defaults the turn-idle watchdog to 120s when no env override is set', () => {
+  it('defaults the turn-idle watchdog to 300s when no env override is set', () => {
     const agent = new PiAgent(createConfig())
     const prev = process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS
     delete process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS
     try {
-      expect((agent as any).getTurnIdleTimeoutMs()).toBe(120_000)
+      // 2026-10-05: raised from 120s to 300s so a silent hang (no bytes, no
+      // error) can ride the Pi subprocess's 120s http-idle timeout plus at
+      // least one agent-retry backoff cycle before the watchdog fires.
+      expect((agent as any).getTurnIdleTimeoutMs()).toBe(300_000)
     } finally {
       if (prev !== undefined) process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS = prev
       agent.destroy()

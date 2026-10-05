@@ -3,11 +3,11 @@
  *
  * While the Pi SDK runs a threshold/overflow compaction inside the
  * subprocess, the main stream is silent — no SDK events flow for the whole
- * summary call. The PiAgent's 120 s turn-idle watchdog
- * (pi-agent.ts `refreshTurnIdleWatchdog`) therefore false-positives "stream
- * stalled" for any compaction that takes longer than the turn ceiling
- * (2026-10-04 incident: a 3m40s compaction fired the error mid-"Compacting
- * context...").
+ * summary call. The PiAgent's turn-idle watchdog (pi-agent.ts
+ * `refreshTurnIdleWatchdog`; 300 s plain ceiling as of 2026-10-05, 120 s
+ * before that) therefore false-positives "stream stalled" for any compaction
+ * that takes longer than the cap (2026-10-04 incident: a 3m40s compaction
+ * fired the error mid-"Compacting context...").
  *
  * The server emits a `compaction_progress` outbound event every ~30 s while
  * a compaction is in flight. Two consumers:

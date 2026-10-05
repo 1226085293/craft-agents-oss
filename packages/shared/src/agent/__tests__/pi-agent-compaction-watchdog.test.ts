@@ -61,8 +61,8 @@ function startTurn(agent: PiAgent): {
 }
 
 /** 2026-10-04 incident regression: while the Pi SDK compacts, the main stream
- *  is silent — the plain 120s turn watchdog must NOT fire; the compaction cap
- *  (here 100ms) governs instead. */
+ *  is silent — the plain turn watchdog (20ms here via CRAFT_PI_TURN_IDLE_
+ *  TIMEOUT_MS) must NOT fire; the compaction cap (here 100ms) governs instead. */
 describe('PiAgent compaction-aware turn-idle watchdog', () => {
   it('does not false-positive the plain stall while compaction is in flight', async () => {
     const agent = new PiAgent(createConfig())

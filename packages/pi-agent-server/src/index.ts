@@ -2259,9 +2259,12 @@ let defenseResumeQueued = false;
 // compaction the main stream is silent, so without these ticks the
 // PiAgent's 120s turn-idle watchdog false-positives "stream stalled" for
 // any compaction longer than the turn ceiling (2026-10-04 incident). Each
-// tick is a main-process turn-progress event (live "Compacting context..."
-// status) and the heartbeat self-stops at the shared capped deadline so a
-// dead compaction still trips the capped watchdog. See compaction-progress.ts.
+// tick is a main-process turn-progress event (watchdog-only — the adapter no
+// longer surfaces ticks as UI status, so the process block keeps a single
+// static "Compacting context..." row from compaction_start and the bottom
+// indicator's live per-second timer is the only elapsed-time display) and
+// the heartbeat self-stops at the shared capped deadline so a dead
+// compaction still trips the capped watchdog. See compaction-progress.ts.
 let compactionProgress: ReturnType<typeof createCompactionProgressHeartbeat> | null = null;
 
 function startCompactionProgress(): void {

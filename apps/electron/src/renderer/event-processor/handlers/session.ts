@@ -47,7 +47,7 @@ import type {
   Effect,
 } from '../types'
 import type { Message } from '../../../shared/types'
-import { generateMessageId, appendMessage, clearRetryStatus } from '../helpers'
+import { generateMessageId, appendMessage, updateMessageAt, clearRetryStatus, dropCompactingStatus } from '../helpers'
 
 /**
  * Handle complete - agent loop finished
@@ -126,7 +126,9 @@ export function handleError(
   event: ErrorEvent
 ): ProcessResult {
   const { streaming } = state
-  const session = clearRetryStatus(state.session)
+  // A failed turn ends any in-flight compaction: drop the pending
+  // "Compacting context..." row (the error card carries the failure).
+  const session = dropCompactingStatus(clearRetryStatus(state.session))
 
   // Fail-safe: Mark any running tools as failed
   const messagesWithFailedTools = session.messages.map(m =>
@@ -162,7 +164,9 @@ export function handleTypedError(
   event: TypedErrorEvent
 ): ProcessResult {
   const { streaming } = state
-  const session = clearRetryStatus(state.session)
+  // See handleError: the failed turn ends any in-flight compaction, so the
+  // pending compacting row is dropped alongside the retry status.
+  const session = dropCompactingStatus(clearRetryStatus(state.session))
 
   // Fail-safe: Mark any running tools as failed
   const messagesWithFailedTools = session.messages.map(m =>
@@ -236,13 +240,25 @@ export function handleRetry(state: SessionState, event: RetryEvent): ProcessResu
 
 /**
  * Handle status - status message (e.g., compacting)
- * Stores on session for ProcessingIndicator AND appends as message for TurnCard activity
+ * Stores on session for ProcessingIndicator AND appends as message for TurnCard activity.
+ *
+ * Compacting status is idempotent: repeated "Compacting context..." messages
+ * (e.g. a second compaction_start for the same in-flight compaction, or the
+ * Claude backend re-emitting its compacting status) update the existing row
+ * in place instead of stacking duplicate lines in the process block.
  */
 export function handleStatus(
   state: SessionState,
   event: StatusEvent
 ): ProcessResult {
   const { session, streaming } = state
+
+  // Idempotent compacting: a repeated compacting status updates the existing
+  // row in place instead of stacking another "Compacting context..." line.
+  const compactingIdx =
+    event.statusType === 'compacting'
+      ? session.messages.findIndex(m => m.role === 'status' && m.statusType === 'compacting')
+      : -1
 
   const statusMessage: Message = {
     id: generateMessageId(),
@@ -252,7 +268,10 @@ export function handleStatus(
     statusType: event.statusType,
   }
 
-  const updatedSession = appendMessage(session, statusMessage)
+  const updatedSession =
+    compactingIdx !== -1
+      ? updateMessageAt(session, compactingIdx, { content: event.message })
+      : appendMessage(session, statusMessage)
 
   return {
     state: {

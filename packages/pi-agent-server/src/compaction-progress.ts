@@ -13,8 +13,11 @@
  * a compaction is in flight. Two consumers:
  *
  * 1. PiAgent (main process): every heartbeat is a turn-progress event that
- *    keeps the plain watchdog from expiring; the adapter surfaces it as a
- *    live "Compacting context... (Nm Ms)" status.
+ *    keeps the plain watchdog from expiring. The adapter intentionally does
+ *    NOT surface ticks as UI status (a 2026-10-05 UI fix): the process block
+ *    keeps a single "Compacting context..." row from compaction_start, and
+ *    repeated per-tick rows would stack near-identical lines with stale
+ *    embedded elapsed times.
  * 2. The heartbeat is BOUNDED — it stops at `getCompactionProgressCapMs()`
  *    (defaults to the same CRAFT_PI_COMPACTION_IDLE_TIMEOUT_MS the PiAgent
  *    compaction cap uses, 5 min). Once the heartbeats stop, a dead

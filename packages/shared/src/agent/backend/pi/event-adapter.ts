@@ -582,20 +582,17 @@ export class PiEventAdapter extends BaseEventAdapter {
 
     // Craft-injected compaction heartbeat from pi-agent-server (not part of
     // the Pi SDK). While the SDK compacts, the main stream is silent, so the
-    // server emits periodic ticks; surface them as a live "Compacting
-    // context..." status with elapsed time (keep the "Compacting" keyword so
-    // the session handler keeps statusType: 'compacting'). The matching tick
-    // also keeps PiAgent's turn-idle watchdog from false-positiving a slow
-    // compaction as a stalled stream. No state transitions here.
+    // server emits periodic ticks. The ticks are consumed upstream by
+    // PiAgent.recordSubprocessTurnProgress → refreshTurnIdleWatchdog (they
+    // keep the capped compaction watchdog armed without ever extending the
+    // deadline). They are NOT surfaced to the UI as status events: each tick
+    // used to append its own "Compacting context... (Nm Ms)" line to the
+    // process block, producing a growing list of near-identical rows with a
+    // stale per-tick elapsed time. The UI instead keeps the single
+    // "Compacting context..." row emitted on compaction_start (the renderer
+    // dedupes repeated compacting status messages in place) and the bottom
+    // ProcessingIndicator already shows a live per-second elapsed timer.
     if ((event as { type?: string }).type === 'compaction_progress') {
-      const elapsedMs = (event as unknown as { elapsedMs?: number }).elapsedMs;
-      const totalSeconds = typeof elapsedMs === 'number' ? Math.max(0, Math.round(elapsedMs / 1000)) : 0;
-      const minutes = Math.floor(totalSeconds / 60);
-      const seconds = totalSeconds % 60;
-      yield {
-        type: 'status',
-        message: `Compacting context... (${minutes}m ${seconds}s)`,
-      };
       return;
     }
 

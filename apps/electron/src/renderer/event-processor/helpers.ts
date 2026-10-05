@@ -168,6 +168,25 @@ export function clearRetryStatus(session: Session): Session {
   }
 }
 
+/**
+ * Drop a pending "Compacting context..." status row when the turn fails.
+ * The error card itself carries the failure, so a still-spinning compacting
+ * row would wrongly suggest compaction is in flight. Status rows are
+ * transient (not persisted), so removing them is safe.
+ */
+export function dropCompactingStatus(session: Session): Session {
+  const hasCompacting = session.messages.some(m => m.role === 'status' && m.statusType === 'compacting')
+  const isCompacting = session.currentStatus?.statusType === 'compacting'
+  if (!hasCompacting && !isCompacting) return session
+  return {
+    ...session,
+    messages: hasCompacting
+      ? session.messages.filter(m => !(m.role === 'status' && m.statusType === 'compacting'))
+      : session.messages,
+    ...(isCompacting ? { currentStatus: undefined } : {}),
+  }
+}
+
 /** Create an empty session for a given ID. */
 export function createEmptySession(sessionId: string, workspaceId: string, workspaceName: string = ''): Session {
   return {

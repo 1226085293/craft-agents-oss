@@ -401,14 +401,17 @@ describe('Pi retry lifecycle event processing', () => {
     expect(retryRows(state)).toHaveLength(1)
   })
 
-  const terminalEvents: Array<{ label: string; event: AgentEvent }> = [
+  const terminalEvents: Array<{ label: string; event: AgentEvent; dropCompacting?: boolean }> = [
     {
       label: 'complete',
       event: { type: 'complete', sessionId: SESSION_ID },
     },
     {
       label: 'plain error',
+      // A failed turn ends any in-flight compaction: the compacting row is
+      // dropped (the error card carries the failure) — 2026-10-05 UI fix.
       event: { type: 'error', sessionId: SESSION_ID, error: 'request failed', timestamp: 10 },
+      dropCompacting: true,
     },
     {
       label: 'typed error',
@@ -424,10 +427,11 @@ describe('Pi retry lifecycle event processing', () => {
         },
         timestamp: 10,
       },
+      dropCompacting: true,
     },
   ]
 
-  for (const { label, event } of terminalEvents) {
+  for (const { label, event, dropCompacting } of terminalEvents) {
     it(`removes retry UI as a fail-safe on ${label}`, () => {
       const compacting = {
         id: 'compacting',
@@ -440,7 +444,11 @@ describe('Pi retry lifecycle event processing', () => {
       const next = applyEvent(state, event)
 
       expect(retryRows(next)).toHaveLength(0)
-      expect(messageIds(next)).toContain('compacting')
+      if (dropCompacting) {
+        expect(messageIds(next)).not.toContain('compacting')
+      } else {
+        expect(messageIds(next)).toContain('compacting')
+      }
       expect(next.session.currentStatus).toBeUndefined()
     })
   }

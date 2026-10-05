@@ -20,6 +20,7 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 - **New sessions inherit the current list** — clicking "New session" while viewing a status list (e.g. Backlog) or a concrete label list now creates the session in that same state/label and keeps you in that list, instead of jumping back to All Sessions.
 - **Clear resets hidden context** — `/clear` now removes persisted Pi backend session state and transient tool artifacts (tool metadata, large tool responses, and turn anchors) as well as Craft's visible message history, preventing Telegram/mobile sessions from recovering stale context after a clear.
 - **Telegram progress cleanup** — progress-mode Telegram replies now delay the first transient `💭 thinking…`/tool-status bubble for fast runs and delete any posted progress bubble before sending the final answer, reducing leftover status messages in topics.
+- **Process blocks can be expanded/collapsed reliably** — the turn card's expansion key used the render index and swapped to the reply message id once streaming landed, so loading older turns (reverse pagination) or a reply landing could silently collapse an expanded process block, and clicks sometimes appeared to do nothing until the session was reopened. The key is now a stable per-turn identity (turn id + open timestamp), so expanded state survives pagination, queued-message inserts, and streaming → landed transitions.
 
 ## Breaking Changes
 

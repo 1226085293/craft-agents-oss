@@ -16,7 +16,7 @@ function makeAssistantTurn(overrides: Partial<AssistantTurn> = {}): AssistantTur
 }
 
 describe('getAssistantTurnUiKey', () => {
-  it('uses response message id when available', () => {
+  it('is based on turn identity (turnId + open timestamp), not on the response', () => {
     const turn = makeAssistantTurn({
       response: {
         text: 'Done',
@@ -25,10 +25,60 @@ describe('getAssistantTurnUiKey', () => {
       },
     })
 
-    expect(getAssistantTurnUiKey(turn, 0)).toBe('assistant:msg:msg-final-1')
+    expect(getAssistantTurnUiKey(turn, 0)).toBe('assistant:turn:pi-turn-1:123')
   })
 
-  it('uses the actual final response message id even when the turn has intermediate activity', () => {
+  it('keeps the same key when the response messageId arrives (streaming → landed)', () => {
+    // While streaming there is no landed response yet
+    const streaming = makeAssistantTurn({
+      isStreaming: true,
+      isComplete: false,
+      activities: [
+        {
+          id: 'tool-1',
+          type: 'tool',
+          status: 'completed',
+          toolName: 'Bash',
+          timestamp: 200,
+        } as any,
+      ],
+    })
+    const landed = makeAssistantTurn({
+      activities: streaming.activities,
+      response: {
+        text: '任务完成',
+        isStreaming: false,
+        messageId: 'final-msg',
+      },
+    })
+
+    const keyWhileStreaming = getAssistantTurnUiKey(streaming, 0)
+    const keyAfterLanded = getAssistantTurnUiKey(landed, 0)
+
+    expect(keyWhileStreaming).toBe(keyAfterLanded)
+    expect(keyAfterLanded).toBe('assistant:turn:pi-turn-1:123')
+  })
+
+  it('keeps the same key across reverse-pagination index shifts', () => {
+    // ChatDisplay renders `turns.slice(startIndex)` and passes the sliced
+    // local index; loading more turns grows startIndex and shifts indexes.
+    const turn = makeAssistantTurn({
+      activities: [
+        {
+          id: 'tool-1',
+          type: 'tool',
+          status: 'completed',
+          toolName: 'Bash',
+          timestamp: 200,
+        } as any,
+      ],
+    })
+
+    expect(getAssistantTurnUiKey(turn, 0)).toBe(getAssistantTurnUiKey(turn, 7))
+    expect(getAssistantTurnUiKey(turn, 0)).toBe('assistant:turn:pi-turn-1:123')
+  })
+
+  it('keeps the same key when an intermediate message is promoted to the response', () => {
     const turn = makeAssistantTurn({
       activities: [
         {
@@ -40,46 +90,31 @@ describe('getAssistantTurnUiKey', () => {
         } as any,
       ],
       response: {
-        text: '任务完成',
+        text: '我先检查一下',
         isStreaming: false,
-        messageId: 'final-msg',
+        messageId: 'intermediate-msg',
       },
     })
 
-    expect(getAssistantTurnUiKey(turn, 1)).toBe('assistant:msg:final-msg')
+    expect(getAssistantTurnUiKey(turn, 1)).toBe('assistant:turn:pi-turn-1:123')
   })
 
-  it('uses msg-based key when the turn also contains intermediate activity', () => {
-    const turn = makeAssistantTurn({
-      activities: [
-        {
-          id: 'tool-1',
-          type: 'tool',
-          status: 'completed',
-          toolName: 'Bash',
-          timestamp: 200,
-        } as any,
-      ],
-      response: {
-        text: '任务完成',
-        isStreaming: false,
-        messageId: 'final-msg-1',
-      },
-    })
-
-    // Normal response: key should use the stable msg-based format
-    expect(getAssistantTurnUiKey(turn, 0)).toBe('assistant:msg:final-msg-1')
-  })
-
-  it('disambiguates split cards with same turnId/timestamp via index fallback', () => {
+  it('distinguishes split cards that open at different timestamps', () => {
     const turnA = makeAssistantTurn({ turnId: 'pi-turn-1', timestamp: 555 })
-    const turnB = makeAssistantTurn({ turnId: 'pi-turn-1', timestamp: 555 })
+    const turnB = makeAssistantTurn({ turnId: 'pi-turn-1', timestamp: 556 })
 
-    const keyA = getAssistantTurnUiKey(turnA, 2)
-    const keyB = getAssistantTurnUiKey(turnB, 3)
+    const keyA = getAssistantTurnUiKey(turnA, 0)
+    const keyB = getAssistantTurnUiKey(turnB, 1)
 
     expect(keyA).not.toBe(keyB)
-    expect(keyA).toBe('assistant:turn:pi-turn-1:555:2')
-    expect(keyB).toBe('assistant:turn:pi-turn-1:555:3')
+    expect(keyA).toBe('assistant:turn:pi-turn-1:555')
+    expect(keyB).toBe('assistant:turn:pi-turn-1:556')
+  })
+
+  it('is stable for a turn that never got activities (bare process card)', () => {
+    const turn = makeAssistantTurn({ timestamp: 999 })
+
+    expect(getAssistantTurnUiKey(turn, 0)).toBe(getAssistantTurnUiKey(turn, 3))
+    expect(getAssistantTurnUiKey(turn, 0)).toBe('assistant:turn:pi-turn-1:999')
   })
 })

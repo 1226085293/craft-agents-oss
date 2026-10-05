@@ -3441,6 +3441,13 @@ export const TurnCard = React.memo(function TurnCard({
   // Re-render when active follow-up annotation state changes (plan CTA label)
   if (prev.hasActiveFollowUpAnnotations !== next.hasActiveFollowUpAnnotations) return false
 
+  // The UI identity key (getAssistantTurnUiKey) is derived from turnId + turn
+  // open-timestamp; if either changes the card identity changed, and the
+  // expansion toggle closure must be refreshed — otherwise clicks keep
+  // operating on a stale key against the new identity (memoized skip breaks
+  // the controlled expanded state).
+  if (prev.timestamp !== next.timestamp) return false
+
   // For complete, non-streaming turns: skip re-render only when both
   // session and turn identities match. Prevents stale local UI state from
   // leaking across session switches that may reuse turn IDs/components.

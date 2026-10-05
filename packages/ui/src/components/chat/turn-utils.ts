@@ -88,16 +88,29 @@ export type Turn = AssistantTurn | UserTurn | SystemTurn | AuthRequestTurn
 /**
  * Build a stable UI identity key for an assistant turn card.
  *
- * Why this exists:
- * - Backend turnId can be reused across visually split assistant cards
- *   (e.g., steer/interruption boundaries).
- * - Expansion state must be keyed by UI-card identity, not raw backend turnId.
+ * The key must be a pure function of data that is FIXED for the turn's whole
+ * lifetime, because expansion state (in-memory sets, persisted localStorage)
+ * and the user's expanded/collapsed intent are keyed by it:
+ *
+ * - `response.messageId` only exists after the final reply lands, so keying on
+ *   it would switch the key mid-turn (streaming → landed). That silently
+ *   collapses the process block the user opened while the turn was streaming,
+ *   and it was the reason the old "promoted from intermediate" special case
+ *   existed for restart-recovery turns — every normally-completed turn hits
+ *   the same switch.
+ * - `index` is the render position, which shifts whenever earlier turns are
+ *   loaded (ChatDisplay reverse pagination grows startIndex) or inserted
+ *   (deferred queued messages flush). The renderer passes TurnCards as memoized
+ *   components whose toggle callback closes over the key; when the key drifts
+ *   while `isExpanded` stays the same (false→false), the memo compare skips
+ *   re-render, so clicks operate on a stale key and appear to do nothing until
+ *   the session is re-opened (which resets the pagination and the key).
+ * - Backend turnId can be reused across visually split assistant cards (e.g.,
+ *   steer/interruption boundaries); adding the turn-open timestamp keeps split
+ *   cards distinct since each card opens at its own first-message timestamp.
  */
-export function getAssistantTurnUiKey(turn: AssistantTurn, index: number): string {
-  if (turn.response?.messageId) {
-    return `assistant:msg:${turn.response.messageId}`
-  }
-  return `assistant:turn:${turn.turnId}:${turn.timestamp}:${index}`
+export function getAssistantTurnUiKey(turn: AssistantTurn, _index: number): string {
+  return `assistant:turn:${turn.turnId}:${turn.timestamp}`
 }
 
 // ============================================================================

@@ -243,6 +243,7 @@ export class SourceManager {
     // to authorize it in Settings; if it is merely out of scope this turn, ask the
     // user to adjust the source picker.
     parts.push('Use tools from sources listed under Active. You may autonomously choose among authorized sources. Do NOT use sources under Inactive (unauthorized or excluded this turn), do NOT enable them yourself, and do NOT replay the original user message. If a source is unauthorized, ask the user to authorize it in Settings; if excluded this turn, ask the user to adjust the source picker.');
+    parts.push('When using a source, prefer its own tools (expand the category via tools_* then call_tool) over reimplementing it with Bash/CLI — source calls are audit-logged and counted in usage. If a source tool fails to connect (e.g. a single-writer source like codegraph is busy), retry once; still failing, tell the user it may be in use by another session and to try again shortly.');
 
     // Persistent reminder: if any active source has a guide, remind the LLM every message
     const activeSourcesWithGuides = activeSources.filter(

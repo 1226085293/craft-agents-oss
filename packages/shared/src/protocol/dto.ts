@@ -85,6 +85,17 @@ export interface Session {
     message: string
     statusType?: string
   }
+  /**
+   * Transient retry-ladder UI state — drives the single process-block retry
+   * line (retrying / recovered / failed + live countdown). Not persisted.
+   */
+  retryState?: {
+    status: 'retrying' | 'recovered' | 'failed'
+    /** Number of retries already completed. */
+    attempt: number
+    /** Epoch ms when the next retry fires (drives the live countdown). */
+    nextRetryAt?: number
+  }
   createdAt?: number
   messageCount?: number
   tokenUsage?: {
@@ -382,14 +393,14 @@ export interface PermissionModeState {
 export type SessionEvent =
   | { type: 'text_discard'; sessionId: string; turnId: string }
   | { type: 'text_demote'; sessionId: string; turnId: string }
-  | { type: 'retry'; sessionId: string; phase: 'backoff'; message: string }
-  | { type: 'retry'; sessionId: string; phase: 'active' | 'end' }
+  | { type: 'retry'; sessionId: string; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number }
+  | { type: 'retry'; sessionId: string; phase: 'active' | 'end'; recovered?: boolean; attempt?: number }
   | { type: 'text_delta'; sessionId: string; delta: string; turnId?: string }
   | { type: 'text_complete'; sessionId: string; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; timestamp?: number; messageId?: string }
   | { type: 'tool_start'; sessionId: string; toolName: string; toolUseId: string; toolInput: Record<string, unknown>; toolIntent?: string; toolDisplayName?: string; toolDisplayMeta?: ToolDisplayMeta; turnId?: string; parentToolUseId?: string; timestamp?: number; messageId?: string }
   | { type: 'tool_result'; sessionId: string; toolUseId: string; toolName: string; result: string; turnId?: string; parentToolUseId?: string; isError?: boolean; timestamp?: number }
-  | { type: 'error'; sessionId: string; error: string; timestamp?: number }
-  | { type: 'typed_error'; sessionId: string; error: TypedError; timestamp?: number }
+  | { type: 'error'; sessionId: string; error: string; timestamp?: number; retryPending?: boolean; retryAttempt?: number }
+  | { type: 'typed_error'; sessionId: string; error: TypedError; timestamp?: number; retryPending?: boolean; retryAttempt?: number }
   | { type: 'complete'; sessionId: string; tokenUsage?: Session['tokenUsage']; hasUnread?: boolean; backgroundTasksAlive?: boolean }
   | { type: 'interrupted'; sessionId: string; message?: Message; queuedMessages?: string[] }
   | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'verification' | 'verification_passed' | 'verification_failed'; timestamp?: number }

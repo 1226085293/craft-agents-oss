@@ -580,8 +580,8 @@ export type AgentEvent =
    * the single visible final reply — never two identical bubbles.
    */
   | { type: 'text_demote'; turnId: string }
-  | { type: 'retry'; phase: 'backoff'; message: string }
-  | { type: 'retry'; phase: 'active' | 'end' }
+  | { type: 'retry'; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number }
+  | { type: 'retry'; phase: 'active' | 'end'; recovered?: boolean; attempt?: number }
   | { type: 'status'; message: string; statusType?: string }
   | { type: 'info'; message: string; statusType?: string; finalText?: string; /** Present when statusType === 'system_stop': machine key (e.g. 'busy_limit', 'no_progress') explaining why a guardrail killed the turn. */ stopReason?: string }
   | { type: 'text_delta'; text: string; turnId?: string; parentToolUseId?: string }

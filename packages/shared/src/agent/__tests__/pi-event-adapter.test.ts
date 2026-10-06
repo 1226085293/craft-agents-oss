@@ -1263,6 +1263,8 @@ describe('PiEventAdapter', () => {
         type: 'retry',
         phase: 'backoff',
         message: 'fetch failed. Retrying in 4s (attempt 2/3)...',
+        attempt: 2,
+        nextRetryInMs: 4_000,
       }]);
     });
 
@@ -1285,7 +1287,7 @@ describe('PiEventAdapter', () => {
         success: true,
       } as any));
 
-      expect(events).toEqual([{ type: 'retry', phase: 'end' }]);
+      expect(events).toEqual([{ type: 'retry', phase: 'end', recovered: true, attempt: 0 }]);
     });
 
     it('should emit retry/end then transient recovery info after retries', () => {
@@ -1296,7 +1298,7 @@ describe('PiEventAdapter', () => {
       } as any));
 
       expect(events).toEqual([
-        { type: 'retry', phase: 'end' },
+        { type: 'retry', phase: 'end', recovered: true, attempt: 2 },
         { type: 'info', message: 'Recovered after 2 retries' },
       ]);
     });
@@ -1427,6 +1429,8 @@ describe('PiEventAdapter', () => {
         type: 'retry',
         phase: 'backoff',
         message: 'Service Error. Retrying in 2s (attempt 1/4)...',
+        attempt: 1,
+        nextRetryInMs: 2_000,
       }]);
       expect(adapter.shouldCompleteQueue(false)).toBe(false);
 
@@ -1440,7 +1444,7 @@ describe('PiEventAdapter', () => {
       expect(text).toMatchObject([{ type: 'text_complete', text: 'Recovered answer' }]);
       const recovered = collect(adapter.adaptEvent({ type: 'auto_retry_end', success: true, attempt: 1 } as any));
       expect(recovered).toEqual([
-        { type: 'retry', phase: 'end' },
+        { type: 'retry', phase: 'end', recovered: true, attempt: 1 },
         { type: 'info', message: 'Recovered after 1 retry' },
       ]);
 
@@ -1465,6 +1469,8 @@ describe('PiEventAdapter', () => {
       } as any));
       expect(backoff).toEqual([{
         type: 'retry', phase: 'backoff', message: 'AI Service Unreachable. Retrying in 2s (attempt 1/1)...',
+        attempt: 1,
+        nextRetryInMs: 2_000,
       }]);
       expect(collect(adapter.adaptEvent({ type: 'agent_start' } as any))).toEqual([
         { type: 'retry', phase: 'active' },
@@ -1521,6 +1527,8 @@ describe('PiEventAdapter', () => {
         type: 'auto_retry_start', attempt: 1, maxAttempts: 4, delayMs: 2_000, errorMessage: 'fetch failed',
       } as any))).toEqual([{
         type: 'retry', phase: 'backoff', message: 'AI Service Unreachable. Retrying in 2s (attempt 1/4)...',
+        attempt: 1,
+        nextRetryInMs: 2_000,
       }]);
 
       // session.abort() during the backoff → abortRetry() → "Retry cancelled"; no agent_end follows.
@@ -1584,6 +1592,8 @@ describe('PiEventAdapter', () => {
           type: 'auto_retry_start', attempt: 1, maxAttempts: 4, delayMs: 8_000, errorMessage: 'fetch failed',
         } as any))).toEqual([{
           type: 'retry', phase: 'backoff', message: 'AI Service Unreachable. Retrying in 8s (attempt 1/4)...',
+          attempt: 1,
+          nextRetryInMs: 8_000,
         }]);
 
         // Announced backoff (8 s) + grace (15 s) not yet elapsed: still holding.

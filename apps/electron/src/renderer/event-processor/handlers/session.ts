@@ -106,6 +106,10 @@ export function handleComplete(
         messages: updatedMessages,
         isProcessing: false,
         currentStatus: undefined,  // Clear any lingering status
+        // Fail-safe: a stuck 'retrying' state (no terminal `retry end` arrived)
+        // is cleared on complete; a real 'recovered'/'failed' outcome lingers
+        // until the next user message.
+        retryState: session.retryState?.status === 'retrying' ? undefined : session.retryState,
         // Update tokenUsage from complete event (for real-time context counter updates)
         tokenUsage: event.tokenUsage ?? session.tokenUsage,
         // Update hasUnread flag from main process (state machine for NEW badge)
@@ -149,6 +153,12 @@ export function handleError(
       session: {
         ...session,
         messages: [...messagesWithFailedTools, errorMessage],
+        // Fail-safe: a terminal error arriving while still 'retrying' (no
+        // `retry end` seen) means the retries stopped without recovering.
+        retryState:
+          session.retryState?.status === 'retrying'
+            ? { ...session.retryState, status: 'failed' as const }
+            : session.retryState,
       },
       streaming,
     },
@@ -201,6 +211,12 @@ export function handleTypedError(
       session: {
         ...session,
         messages: [...messagesWithFailedTools, errorMessage],
+        // Fail-safe: same as handleError — a stuck 'retrying' state becomes
+        // 'failed' when a terminal typed_error lands without a `retry end`.
+        retryState:
+          session.retryState?.status === 'retrying'
+            ? { ...session.retryState, status: 'failed' as const }
+            : session.retryState,
       },
       streaming,
     },
@@ -213,25 +229,37 @@ export function handleTypedError(
  * events may end backoff — a delayed token/tool event is not proof of recovery.
  */
 export function handleRetry(state: SessionState, event: RetryEvent): ProcessResult {
-  const session = clearRetryStatus(state.session)
-  if (event.phase !== 'backoff') {
-    return { state: { session, streaming: state.streaming }, effects: [] }
+  // Transient retry UI lives on a single session.retryState (drives the one
+  // process-block retry line) instead of stacking status rows + a below-block
+  // card. Scrub any legacy 'retrying' rows first.
+  const scrubbed = clearRetryStatus(state.session)
+
+  if (event.phase === 'backoff') {
+    // "已重试 {attempt} 次，下次重试倒计时 {mm:ss}" — attempt = retries already
+    // completed; nextRetryAt drives the live countdown in the process block.
+    const attempt = typeof event.attempt === 'number' ? event.attempt : 0
+    const nextRetryAt =
+      typeof event.nextRetryInMs === 'number' ? Date.now() + event.nextRetryInMs : undefined
+    return {
+      state: {
+        session: { ...scrubbed, retryState: { status: 'retrying', attempt, nextRetryAt } },
+        streaming: state.streaming,
+      },
+      effects: [],
+    }
   }
 
-  // Replace prior progress rather than accumulating a running row per attempt.
-  const retryMessage: Message = {
-    id: generateMessageId(),
-    role: 'status',
-    statusType: 'retrying',
-    content: event.message,
-    timestamp: Date.now(),
+  if (event.phase === 'active') {
+    // Still inside the retry window — keep the existing retryState (countdown stands).
+    return { state: { session: scrubbed, streaming: state.streaming }, effects: [] }
   }
+
+  // phase === 'end' → terminal outcome: "重试 {n} 次恢复会话" / "重试 {n} 次后失败".
+  const prev = scrubbed.retryState
+  const attempt = typeof event.attempt === 'number' ? event.attempt : prev?.attempt ?? 0
   return {
     state: {
-      session: {
-        ...appendMessage(session, retryMessage),
-        currentStatus: { message: event.message, statusType: 'retrying' },
-      },
+      session: { ...scrubbed, retryState: { status: event.recovered ? 'recovered' : 'failed', attempt } },
       streaming: state.streaming,
     },
     effects: [],
@@ -500,6 +528,7 @@ export function handleInterrupted(
         isProcessing: false,
         messages,
         currentStatus: undefined,  // Clear any lingering status
+        retryState: undefined,  // Interruption (user stop / abort) drops the retry line
       },
       streaming: null,
     },
@@ -766,6 +795,9 @@ export function handleUserMessage(
         isProcessing: status === 'accepted' || status === 'processing'
           ? true
           : session.isProcessing,
+        // A brand-new turn (accepted/processing) clears the previous turn's
+        // retry outcome line. 'queued' keeps the in-flight turn's retry state.
+        retryState: status === 'accepted' || status === 'processing' ? undefined : session.retryState,
       },
       streaming,
     },

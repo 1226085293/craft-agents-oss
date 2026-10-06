@@ -1228,6 +1228,8 @@ export class PiEventAdapter extends BaseEventAdapter {
           type: 'retry',
           phase: 'backoff',
           message: `${this.retryReasonLabel(retryEvent.errorMessage)}. Retrying${wait} (${attempt})...`,
+          attempt: retryEvent.attempt ?? 0,
+          nextRetryInMs: delayMs,
         };
         break;
       }
@@ -1238,7 +1240,7 @@ export class PiEventAdapter extends BaseEventAdapter {
         // when it took more than one attempt, say so. Nothing is held here —
         // the run's own agent_end still follows.
         if (retryEndEvent.success) {
-          yield { type: 'retry', phase: 'end' };
+          yield { type: 'retry', phase: 'end', recovered: true, attempt: retryEndEvent.attempt ?? 0 };
           const recoveredAfter = retryEndEvent.attempt;
           if (recoveredAfter > 0) {
             yield {
@@ -1261,7 +1263,7 @@ export class PiEventAdapter extends BaseEventAdapter {
             yield* this.releaseHeldRetryError();
           } else {
             this.retryState = 'none';
-            yield { type: 'retry', phase: 'end' };
+            yield { type: 'retry', phase: 'end', recovered: false, attempt: retryEndEvent.attempt ?? 0 };
             if (retryEndEvent.finalError) {
               yield { type: 'error', message: `Retry failed: ${retryEndEvent.finalError}` };
             }

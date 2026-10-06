@@ -29,18 +29,28 @@ function applyEvent(state: SessionState, event: AgentEvent): SessionState {
   return processEvent(state, event).state
 }
 
-function retryRows(state: SessionState): any[] {
+/**
+ * Legacy 'retrying' status rows must no longer be created — the single process-block
+ * retry line is driven by `session.retryState` instead. Asserting these stay empty
+ * guards against the old UI resurfacing.
+ */
+function retryingRows(state: SessionState): any[] {
   return state.session.messages.filter(
     message => message.role === 'status' && message.statusType === 'retrying',
   )
 }
 
-function beginBackoff(state: SessionState, message = 'Connection Error. Retrying in 2s (attempt 1/4)...'): SessionState {
+function beginBackoff(
+  state: SessionState,
+  opts: { message?: string; attempt?: number; nextRetryInMs?: number } = {},
+): SessionState {
   return applyEvent(state, {
     type: 'retry',
     sessionId: SESSION_ID,
     phase: 'backoff',
-    message,
+    message: opts.message ?? 'Connection Error. Retrying in 2s (attempt 1)...',
+    ...(opts.attempt != null ? { attempt: opts.attempt } : {}),
+    ...(opts.nextRetryInMs != null ? { nextRetryInMs: opts.nextRetryInMs } : {}),
   })
 }
 
@@ -50,58 +60,61 @@ function messageIds(state: SessionState): string[] {
 
 describe('Pi retry lifecycle event processing', () => {
   it('routes text_discard through the processor and removes only unfinished assistant text for its turn', () => {
-    const state = makeState([
-      { id: 'user', role: 'user', content: 'hello', timestamp: 1 },
+    const state = makeState(
+      [
+        { id: 'user', role: 'user', content: 'hello', timestamp: 1 },
+        {
+          id: 'completed-same-turn',
+          role: 'assistant',
+          content: 'keep completed',
+          timestamp: 2,
+          turnId: RETRY_TURN_ID,
+          isStreaming: false,
+          isPending: false,
+        },
+        {
+          id: 'intermediate-same-turn',
+          role: 'assistant',
+          content: 'keep intermediate',
+          timestamp: 3,
+          turnId: RETRY_TURN_ID,
+          isIntermediate: true,
+          isStreaming: false,
+          isPending: false,
+        },
+        {
+          id: 'failed-partial',
+          role: 'assistant',
+          content: 'discard this partial',
+          timestamp: 4,
+          turnId: RETRY_TURN_ID,
+          isStreaming: true,
+          isPending: true,
+        },
+        {
+          id: 'other-turn-partial',
+          role: 'assistant',
+          content: 'keep other turn',
+          timestamp: 5,
+          turnId: 'turn-other',
+          isStreaming: true,
+          isPending: true,
+        },
+        {
+          id: 'same-turn-tool',
+          role: 'tool',
+          timestamp: 6,
+          turnId: RETRY_TURN_ID,
+          toolUseId: 'tool-1',
+          toolName: 'Read',
+          toolStatus: 'completed',
+          toolResult: 'ok',
+        },
+      ],
       {
-        id: 'completed-same-turn',
-        role: 'assistant',
-        content: 'keep completed',
-        timestamp: 2,
-        turnId: RETRY_TURN_ID,
-        isStreaming: false,
-        isPending: false,
+        streaming: { content: 'discard this partial', turnId: RETRY_TURN_ID },
       },
-      {
-        id: 'intermediate-same-turn',
-        role: 'assistant',
-        content: 'keep intermediate',
-        timestamp: 3,
-        turnId: RETRY_TURN_ID,
-        isIntermediate: true,
-        isStreaming: false,
-        isPending: false,
-      },
-      {
-        id: 'failed-partial',
-        role: 'assistant',
-        content: 'discard this partial',
-        timestamp: 4,
-        turnId: RETRY_TURN_ID,
-        isStreaming: true,
-        isPending: true,
-      },
-      {
-        id: 'other-turn-partial',
-        role: 'assistant',
-        content: 'keep other turn',
-        timestamp: 5,
-        turnId: 'turn-other',
-        isStreaming: true,
-        isPending: true,
-      },
-      {
-        id: 'same-turn-tool',
-        role: 'tool',
-        timestamp: 6,
-        turnId: RETRY_TURN_ID,
-        toolUseId: 'tool-1',
-        toolName: 'Read',
-        toolStatus: 'completed',
-        toolResult: 'ok',
-      },
-    ], {
-      streaming: { content: 'discard this partial', turnId: RETRY_TURN_ID },
-    })
+    )
 
     const next = applyEvent(state, {
       type: 'text_discard',
@@ -120,19 +133,22 @@ describe('Pi retry lifecycle event processing', () => {
   })
 
   it('does not clear streaming state belonging to a different turn', () => {
-    const state = makeState([
+    const state = makeState(
+      [
+        {
+          id: 'failed-partial',
+          role: 'assistant',
+          content: 'discard this partial',
+          timestamp: 1,
+          turnId: RETRY_TURN_ID,
+          isStreaming: true,
+          isPending: true,
+        },
+      ],
       {
-        id: 'failed-partial',
-        role: 'assistant',
-        content: 'discard this partial',
-        timestamp: 1,
-        turnId: RETRY_TURN_ID,
-        isStreaming: true,
-        isPending: true,
+        streaming: { content: 'other partial', turnId: 'turn-other' },
       },
-    ], {
-      streaming: { content: 'other partial', turnId: 'turn-other' },
-    })
+    )
 
     const next = applyEvent(state, {
       type: 'text_discard',
@@ -183,7 +199,7 @@ describe('Pi retry lifecycle event processing', () => {
       turnId: RETRY_TURN_ID,
     })
     state = applyEvent(state, { type: 'text_discard', sessionId: SESSION_ID, turnId: RETRY_TURN_ID })
-    state = beginBackoff(state)
+    state = beginBackoff(state, { attempt: 0, nextRetryInMs: 1000 })
     state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'active' })
 
     state = applyEvent(state, {
@@ -193,7 +209,7 @@ describe('Pi retry lifecycle event processing', () => {
       turnId: RETRY_TURN_ID,
     })
     state = applyEvent(state, { type: 'text_discard', sessionId: SESSION_ID, turnId: RETRY_TURN_ID })
-    state = beginBackoff(state, 'Connection Error. Retrying in 4s (attempt 2/4)...')
+    state = beginBackoff(state, { message: 'Connection Error. Retrying in 4s (attempt 2)...', attempt: 1, nextRetryInMs: 4000 })
     state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'active' })
 
     state = applyEvent(state, {
@@ -210,7 +226,8 @@ describe('Pi retry lifecycle event processing', () => {
       messageId: 'successful-response',
       timestamp: 10,
     })
-    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end' })
+    // The retried run recovered: the terminal `retry end` carries recovered=true.
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: true, attempt: 2 })
 
     expect(messageIds(state)).toEqual([
       'completed-same-turn',
@@ -221,8 +238,9 @@ describe('Pi retry lifecycle event processing', () => {
     expect(state.session.messages.find(message => message.id === 'successful-response')?.content).toBe('Good answer.')
     expect(state.session.messages.some(message => message.content?.includes('First failed answer'))).toBe(false)
     expect(state.session.messages.some(message => message.content?.includes('Different failed answer'))).toBe(false)
-    expect(retryRows(state)).toHaveLength(0)
+    expect(retryingRows(state)).toHaveLength(0)
     expect(state.session.currentStatus).toBeUndefined()
+    expect(state.session.retryState).toMatchObject({ status: 'recovered', attempt: 2 })
     expect(state.streaming).toBeNull()
   })
 
@@ -265,8 +283,9 @@ describe('Pi retry lifecycle event processing', () => {
       turnId: RETRY_TURN_ID,
     })
     state = applyEvent(state, { type: 'text_discard', sessionId: SESSION_ID, turnId: RETRY_TURN_ID })
-    state = beginBackoff(state)
-    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end' })
+    state = beginBackoff(state, { attempt: 1, nextRetryInMs: 10000 })
+    // Ladder gave up: terminal `retry end` with recovered=false.
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: false, attempt: 2 })
     state = applyEvent(state, {
       type: 'typed_error',
       sessionId: SESSION_ID,
@@ -284,9 +303,127 @@ describe('Pi retry lifecycle event processing', () => {
     expect(messageIds(state)).toEqual(['completed', 'intermediate', 'other-turn', expect.stringMatching(/^msg-/)])
     expect(state.session.messages.some(message => message.content?.includes('final failed partial'))).toBe(false)
     expect(state.session.messages.at(-1)?.role).toBe('error')
-    expect(retryRows(state)).toHaveLength(0)
+    expect(retryingRows(state)).toHaveLength(0)
     expect(state.session.currentStatus).toBeUndefined()
+    // The 'failed' outcome from `retry end` lingers on complete (cleared next user turn).
+    expect(state.session.retryState).toMatchObject({ status: 'failed', attempt: 2 })
     expect(state.streaming).toBeNull()
+  })
+
+  // --- retryState drives the single process-block retry line ---
+
+  it('sets a single retryState on backoff (no status row, no currentStatus)', () => {
+    const state = beginBackoff(makeState(), { attempt: 1, nextRetryInMs: 5000 })
+    expect(retryingRows(state)).toHaveLength(0)
+    expect(state.session.currentStatus).toBeUndefined()
+    expect(state.session.retryState).toMatchObject({ status: 'retrying', attempt: 1 })
+    expect(state.session.retryState?.nextRetryAt).toBeGreaterThan(Date.now() + 4000)
+  })
+
+  it('keeps retryState retrying on active, and marks it failed on a plain end', () => {
+    let state = beginBackoff(makeState(), { attempt: 1, nextRetryInMs: 5000 })
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'active' })
+    expect(state.session.retryState?.status).toBe('retrying')
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end' })
+    expect(state.session.retryState).toMatchObject({ status: 'failed', attempt: 1 })
+  })
+
+  it('marks retryState recovered on a successful end', () => {
+    const state = beginBackoff(makeState(), { attempt: 2, nextRetryInMs: 10000 })
+    const next = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: true, attempt: 2 })
+    expect(next.session.retryState).toMatchObject({ status: 'recovered', attempt: 2 })
+  })
+
+  it('advances the single retryState across backoff attempts without stacking rows', () => {
+    const compacting = {
+      id: 'compacting',
+      role: 'status',
+      content: 'Compacting context...',
+      statusType: 'compacting',
+      timestamp: 1,
+    }
+    let state = beginBackoff(makeState([compacting]), { attempt: 1, nextRetryInMs: 1000 })
+    state = beginBackoff(state, { message: 'Connection Error. Retrying in 4s (attempt 2)...', attempt: 2, nextRetryInMs: 4000 })
+
+    expect(retryingRows(state)).toHaveLength(0)
+    expect(messageIds(state)).toContain('compacting')
+    expect(state.session.retryState).toMatchObject({ status: 'retrying', attempt: 2 })
+    expect(state.session.currentStatus).toBeUndefined()
+  })
+
+  it('does not change retryState on a text delta or tool start during backoff', () => {
+    let state = beginBackoff(makeState(), { attempt: 1, nextRetryInMs: 2000 })
+
+    state = applyEvent(state, {
+      type: 'text_delta',
+      sessionId: SESSION_ID,
+      delta: 'late failed-attempt delta',
+      turnId: RETRY_TURN_ID,
+    })
+    expect(state.session.retryState?.status).toBe('retrying')
+
+    state = applyEvent(state, {
+      type: 'tool_start',
+      sessionId: SESSION_ID,
+      toolUseId: 'tool-1',
+      toolName: 'Read',
+      toolInput: { file_path: 'README.md' },
+      turnId: RETRY_TURN_ID,
+    })
+    expect(state.session.retryState?.status).toBe('retrying')
+    expect(retryingRows(state)).toHaveLength(0)
+  })
+
+  // --- fail-safe on terminal events ---
+
+  it('clears a stuck retrying state on complete', () => {
+    const state = beginBackoff(makeState(), { attempt: 1, nextRetryInMs: 1000 })
+    const next = applyEvent(state, { type: 'complete', sessionId: SESSION_ID })
+    expect(next.session.retryState).toBeUndefined()
+  })
+
+  it('marks a stuck retrying state failed on a terminal error', () => {
+    const state = beginBackoff(makeState(), { attempt: 1, nextRetryInMs: 1000 })
+    const next = applyEvent(state, {
+      type: 'error',
+      sessionId: SESSION_ID,
+      error: 'request failed',
+      timestamp: 10,
+    })
+    expect(next.session.retryState?.status).toBe('failed')
+    expect(next.session.messages.at(-1)?.role).toBe('error')
+  })
+
+  it('marks a stuck retrying state failed on a terminal typed_error', () => {
+    const state = beginBackoff(makeState(), { attempt: 1, nextRetryInMs: 1000 })
+    const next = applyEvent(state, {
+      type: 'typed_error',
+      sessionId: SESSION_ID,
+      error: {
+        code: 'network_error',
+        title: 'Connection Error',
+        message: 'Could not reach the AI service.',
+        actions: [],
+        canRetry: true,
+      },
+      timestamp: 10,
+    })
+    expect(next.session.retryState?.status).toBe('failed')
+  })
+
+  it('leaves no retry line after interruption', () => {
+    const state = beginBackoff(makeState(), { attempt: 1, nextRetryInMs: 1000 })
+    const next = applyEvent(state, {
+      type: 'interrupted',
+      sessionId: SESSION_ID,
+      message: {
+        id: 'interrupted',
+        role: 'info',
+        content: 'Response interrupted',
+        timestamp: 10,
+      },
+    })
+    expect(next.session.retryState).toBeUndefined()
   })
 
   it('keeps the session processing after an error until the actual complete event', () => {
@@ -336,137 +473,5 @@ describe('Pi retry lifecycle event processing', () => {
       messageId: 'verified-final',
     })
     expect(state.session.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'Verified answer' })
-  })
-
-  it('upserts a single transient retry row as backoff attempts advance', () => {
-    const compacting = {
-      id: 'compacting',
-      role: 'status',
-      content: 'Compacting context...',
-      statusType: 'compacting',
-      timestamp: 1,
-    }
-    let state = beginBackoff(makeState([compacting]))
-    state = beginBackoff(state, 'Connection Error. Retrying in 4s (attempt 2/4)...')
-
-    expect(retryRows(state)).toHaveLength(1)
-    expect(retryRows(state)[0]?.content).toBe('Connection Error. Retrying in 4s (attempt 2/4)...')
-    expect(messageIds(state)).toContain('compacting')
-    expect(state.session.currentStatus).toEqual({
-      message: 'Connection Error. Retrying in 4s (attempt 2/4)...',
-      statusType: 'retrying',
-    })
-  })
-
-  for (const phase of ['active', 'end'] as const) {
-    it(`removes the transient retry row and indicator on retry ${phase}`, () => {
-      const compacting = {
-        id: 'compacting',
-        role: 'status',
-        content: 'Compacting context...',
-        statusType: 'compacting',
-        timestamp: 1,
-      }
-      const state = beginBackoff(makeState([compacting]))
-      const next = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase })
-
-      expect(retryRows(next)).toHaveLength(0)
-      expect(messageIds(next)).toContain('compacting')
-      expect(next.session.currentStatus).toBeUndefined()
-    })
-  }
-
-  it('does not infer retry activation from a text delta or tool start during backoff', () => {
-    const statusText = 'Connection Error. Retrying in 2s (attempt 1/4)...'
-    let state = beginBackoff(makeState(), statusText)
-
-    state = applyEvent(state, {
-      type: 'text_delta',
-      sessionId: SESSION_ID,
-      delta: 'late failed-attempt delta',
-      turnId: RETRY_TURN_ID,
-    })
-    expect(state.session.currentStatus?.message).toBe(statusText)
-    expect(retryRows(state)).toHaveLength(1)
-
-    state = applyEvent(state, {
-      type: 'tool_start',
-      sessionId: SESSION_ID,
-      toolUseId: 'tool-1',
-      toolName: 'Read',
-      toolInput: { file_path: 'README.md' },
-      turnId: RETRY_TURN_ID,
-    })
-    expect(state.session.currentStatus?.message).toBe(statusText)
-    expect(retryRows(state)).toHaveLength(1)
-  })
-
-  const terminalEvents: Array<{ label: string; event: AgentEvent; dropCompacting?: boolean }> = [
-    {
-      label: 'complete',
-      event: { type: 'complete', sessionId: SESSION_ID },
-    },
-    {
-      label: 'plain error',
-      // A failed turn ends any in-flight compaction: the compacting row is
-      // dropped (the error card carries the failure) — 2026-10-05 UI fix.
-      event: { type: 'error', sessionId: SESSION_ID, error: 'request failed', timestamp: 10 },
-      dropCompacting: true,
-    },
-    {
-      label: 'typed error',
-      event: {
-        type: 'typed_error',
-        sessionId: SESSION_ID,
-        error: {
-          code: 'network_error',
-          title: 'Connection Error',
-          message: 'Could not reach the AI service.',
-          actions: [],
-          canRetry: true,
-        },
-        timestamp: 10,
-      },
-      dropCompacting: true,
-    },
-  ]
-
-  for (const { label, event, dropCompacting } of terminalEvents) {
-    it(`removes retry UI as a fail-safe on ${label}`, () => {
-      const compacting = {
-        id: 'compacting',
-        role: 'status',
-        content: 'Compacting context...',
-        statusType: 'compacting',
-        timestamp: 1,
-      }
-      const state = beginBackoff(makeState([compacting]))
-      const next = applyEvent(state, event)
-
-      expect(retryRows(next)).toHaveLength(0)
-      if (dropCompacting) {
-        expect(messageIds(next)).not.toContain('compacting')
-      } else {
-        expect(messageIds(next)).toContain('compacting')
-      }
-      expect(next.session.currentStatus).toBeUndefined()
-    })
-  }
-
-  it('leaves no retry status spinner after interruption', () => {
-    const state = beginBackoff(makeState())
-    const next = applyEvent(state, {
-      type: 'interrupted',
-      sessionId: SESSION_ID,
-      message: {
-        id: 'interrupted',
-        role: 'info',
-        content: 'Response interrupted',
-        timestamp: 10,
-      },
-    })
-
-    expect(retryRows(next)).toHaveLength(0)
-    expect(next.session.currentStatus).toBeUndefined()
   })
 })

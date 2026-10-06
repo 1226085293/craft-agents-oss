@@ -293,6 +293,8 @@ describe('Pi SDK auto-retry integration', () => {
         type: 'retry',
         phase: 'backoff',
         message: expect.stringContaining('Retrying'),
+        attempt: expect.any(Number),
+        nextRetryInMs: expect.any(Number),
       },
     ]);
     const retriedAgentStart = result.trace.find(
@@ -308,7 +310,7 @@ describe('Pi SDK auto-retry integration', () => {
       attempt: 1,
     });
     expect(successfulRetryEnd?.adapted).toEqual([
-      { type: 'retry', phase: 'end' },
+      { type: 'retry', phase: 'end', recovered: true, attempt: 1 },
       { type: 'info', message: 'Recovered after 1 retry' },
     ]);
     expect(
@@ -388,7 +390,11 @@ describe('Pi SDK auto-retry integration', () => {
         type: 'retry',
         phase: 'backoff',
         message: expect.stringContaining('Retrying'),
+        attempt: expect.any(Number),
+        nextRetryInMs: expect.any(Number),
       },
+      // releaseHeldRetryError keeps the legacy shape: the renderer derives
+      // the attempt count from the preceding backoff's retryState.
       { type: 'retry', phase: 'end' },
     ]);
 

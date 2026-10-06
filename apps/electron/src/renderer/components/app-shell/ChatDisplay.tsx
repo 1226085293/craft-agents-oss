@@ -339,6 +339,75 @@ interface ProcessingIndicatorProps {
   statusMessage?: string
 }
 
+/** Live MM:SS countdown toward `target` (epoch ms); null when not targeting. */
+function useRetryCountdown(target?: number): string | null {
+  const [now, setNow] = React.useState(() => Date.now())
+  React.useEffect(() => {
+    if (target == null) return
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [target])
+  if (target == null) return null
+  const seconds = Math.max(0, Math.ceil((target - now) / 1000))
+  const mm = String(Math.floor(seconds / 60)).padStart(2, '0')
+  const ss = String(seconds % 60).padStart(2, '0')
+  return `${mm}:${ss}`
+}
+
+interface RetryLineState {
+  status: 'retrying' | 'recovered' | 'failed'
+  /** Number of retries already completed. */
+  attempt: number
+  /** Epoch ms when the next retry fires (drives the live countdown). */
+  nextRetryAt?: number
+}
+
+/**
+ * RetryStatusLine - the single retry-status line shown INSIDE the process
+ * block. Exactly one line, three states:
+ *   - retrying:  已重试 x 次，下次重试倒计时 00:00...
+ *   - recovered: 重试 x 次恢复会话
+ *   - failed:    重试 x 次后失败
+ * Replaces the old below-block retry card + transient status rows.
+ */
+function RetryStatusLine({ retryState, onStop }: { retryState: RetryLineState; onStop?: () => void }) {
+  const { t } = useTranslation()
+  const countdown = useRetryCountdown(retryState.status === 'retrying' ? retryState.nextRetryAt : undefined)
+  const isRetrying = retryState.status === 'retrying'
+  const colorClass =
+    retryState.status === 'recovered' ? 'text-success' : isRetrying ? 'text-info' : 'text-destructive'
+
+  const body = isRetrying
+    ? t('chat.retryLineRetrying', { times: retryState.attempt, time: countdown ?? '--:--' })
+    : retryState.status === 'recovered'
+      ? t('chat.retryLineRecovered', { times: retryState.attempt })
+      : t('chat.retryLineFailed', { times: retryState.attempt })
+
+  return (
+    <div className={cn('flex items-center gap-2 px-3 py-1 -mb-1 text-[13px] select-none', colorClass)}>
+      <div className="w-3 h-3 flex items-center justify-center shrink-0">
+        {isRetrying ? (
+          <Spinner className="text-[10px]" />
+        ) : retryState.status === 'recovered' ? (
+          <CheckCircle2 className="w-3 h-3 text-success" />
+        ) : (
+          <CircleAlert className="w-3 h-3 text-destructive" />
+        )}
+      </div>
+      <span>{body}</span>
+      {isRetrying && onStop && (
+        <button
+          onClick={onStop}
+          className="ml-1 text-xs px-1.5 py-px rounded border border-info/20 text-info/80 hover:text-info hover:border-info/40 transition-colors"
+        >
+          {t('chat.stopRetrying')}
+        </button>
+      )}
+    </div>
+  )
+}
+
 /**
  * ProcessingIndicator - Shows cycling status messages with elapsed time
  * Matches TurnCard header layout for visual continuity
@@ -2217,6 +2286,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                                 onSendMessage(lastUserMsg.content)
                               }
                             } : undefined}
+                            onStop={handleStop}
                           />
                         </div>
                       )
@@ -2453,6 +2523,10 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                     </AnimatePresence>
                   </motion.div>
                 </AnimatePresence>
+                {/* Single retry-status line inside the process block (retrying / recovered / failed). */}
+                {session.retryState && (
+                  <RetryStatusLine retryState={session.retryState} onStop={handleStop} />
+                )}
                 {/* Processing Indicator - always visible while processing */}
                 {session.isProcessing && (() => {
                   // Find the last user message timestamp for accurate elapsed time
@@ -2724,12 +2798,14 @@ interface MessageBubbleProps {
   onCancelQueued?: (messageId: string) => void
   /** Callback to promote a queued user message into immediate guidance */
   onGuideQueued?: (messageId: string) => void
+  /** Unified retry ladder: stop the background retry loop (error cards). */
+  onStop?: () => void
 }
 
 /**
  * ErrorMessage - Separate component for error messages to allow useState hook
  */
-function ErrorMessage({ message, onOpenUrl, sessionId, onRetry }: { message: Message; onOpenUrl?: (url: string) => void; sessionId?: string; onRetry?: () => void }) {
+function ErrorMessage({ message, onOpenUrl, sessionId, onRetry, onStop }: { message: Message; onOpenUrl?: (url: string) => void; sessionId?: string; onRetry?: () => void; onStop?: () => void }) {
   const { t } = useTranslation()
   const hasDetails = (message.errorDetails && message.errorDetails.length > 0) || message.errorOriginal
   const [detailsOpen, setDetailsOpen] = React.useState(false)
@@ -2737,21 +2813,32 @@ function ErrorMessage({ message, onOpenUrl, sessionId, onRetry }: { message: Mes
     if (a.action === 'open_url') return !!a.url && !!onOpenUrl
     return true
   })
-
+  // The retry-ladder progress now lives in the process-block retry line
+  // (RetryStatusLine). Error cards are terminal (destructive); only legacy
+  // persisted transient cards (retryPending) keep a stop control.
   return (
     <div className="flex justify-start mt-4">
-      {/* Subtle bg (3% opacity) + tinted shadow for softer error appearance */}
       <div
         className="max-w-[80%] shadow-tinted rounded-[8px] pl-5 pr-4 pt-2 pb-2.5 break-words"
         style={{
-          backgroundColor: 'oklch(from var(--destructive) l c h / 0.03)',
+          backgroundColor: `oklch(from var(--destructive) l c h / 0.03)`,
           '--shadow-color': 'var(--destructive-rgb)',
         } as React.CSSProperties}
       >
-        <div className="text-xs text-destructive/50 mb-0.5 font-semibold">
-          {message.errorTitle || t('common.error')}
+        <div className="flex items-center gap-2 mb-0.5">
+          <div className="text-xs font-semibold text-destructive/50">
+            {message.errorTitle || t('common.error')}
+          </div>
         </div>
         <p className="text-sm text-destructive">{message.content}</p>
+        {message.retryPending && onStop && (
+          <button
+            onClick={() => onStop()}
+            className="mt-2 text-xs px-2 py-0.5 rounded border border-info/20 text-info/80 hover:text-info hover:border-info/40 transition-colors"
+          >
+            {t('chat.stopRetrying')}
+          </button>
+        )}
 
         {/* Action buttons */}
         {actions && actions.length > 0 && (
@@ -2813,6 +2900,7 @@ function MessageBubble({
   onRetry,
   onCancelQueued,
   onGuideQueued,
+  onStop,
 }: MessageBubbleProps) {
   const { t } = useTranslation()
 
@@ -2881,7 +2969,7 @@ function MessageBubble({
 
   // === ERROR MESSAGE: Red bordered bubble with warning icon and collapsible details ===
   if (message.role === 'error') {
-    return <ErrorMessage message={message} onOpenUrl={onOpenUrl} sessionId={sessionId} onRetry={onRetry} />
+    return <ErrorMessage message={message} onOpenUrl={onOpenUrl} sessionId={sessionId} onRetry={onRetry} onStop={onStop} />
   }
 
   // === STATUS MESSAGE: Matches ProcessingIndicator layout for visual consistency ===

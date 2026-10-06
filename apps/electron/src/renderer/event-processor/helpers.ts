@@ -6,6 +6,8 @@
  */
 
 import type { Message, Session } from '../../shared/types'
+import type { RetryLadderRow } from '@craft-agent/core'
+import { settleRetryRowAsFailed, findActiveRetryRowIndex } from '@craft-agent/shared/retry/retry-row'
 
 let messageIdCounter = 0
 
@@ -156,15 +158,69 @@ export function insertMessageAt(
   }
 }
 
-/** Remove transient retry activity without disturbing compaction or history. */
-export function clearRetryStatus(session: Session): Session {
-  const messages = session.messages.filter(m => !(m.role === 'status' && m.statusType === 'retrying'))
-  const isRetrying = session.currentStatus?.statusType === 'retrying'
-  if (messages.length === session.messages.length && !isRetrying) return session
+/**
+ * Upsert the PERSISTED retry-ladder row (role 'status', statusType 'retrying')
+ * with a new payload — created on the first backoff, updated in place on
+ * backoff/active/end. The row lives in session.messages so it survives
+ * session switches and app restarts (mirrors the session manager's own copy).
+ */
+export function upsertRetryRow(session: Session, payload: RetryLadderRow): Session {
+  // Only the row of the CURRENT turn may be updated in place — a row left
+  // behind by a previous settled turn must not be recycled (new turn, new
+  // ladder, new row).
+  const idx = findActiveRetryRowIndex(session.messages)
+  if (idx !== -1) {
+    return {
+      ...session,
+      messages: session.messages.map((m, i) => (i === idx ? { ...m, retry: payload } : m)),
+    }
+  }
+  return appendMessage(session, {
+    id: generateMessageId(),
+    role: 'status',
+    statusType: 'retrying',
+    content: '',
+    timestamp: payload.startedAt,
+    retry: payload,
+  } as Message)
+}
+
+/**
+ * Fail-safe for the persisted retry row: a ladder that ended WITHOUT its
+ * terminal `retry end` event (subprocess exit, guardrail stop, unexpected
+ * generator failure, stale restored rung) must not leave a spinning
+ * "重试中 · 第 x 次" line in the process block. Settle it to 'failed' — the
+ * retries did not recover. No-op when the row is absent or already terminal.
+ */
+export function settleStuckRetryRow(session: Session, now = Date.now()): Session {
+  const idx = findActiveRetryRowIndex(session.messages)
+  if (idx === -1) return session
+  const row = session.messages[idx]!
+  if (row.retry?.status !== 'retrying') return session
   return {
     ...session,
-    messages,
-    ...(isRetrying ? { currentStatus: undefined } : {}),
+    messages: session.messages.map((m, i) =>
+      i === idx ? { ...m, retry: settleRetryRowAsFailed(row.retry, now) } : m
+    ),
+  }
+}
+
+/**
+ * Drop a pending "Compacting context..." status row when the turn fails.
+ * The error card itself carries the failure, so a still-spinning compacting
+ * row would wrongly suggest compaction is in flight. Status rows are
+ * transient (not persisted), so removing them is safe.
+ */
+export function dropCompactingStatus(session: Session): Session {
+  const hasCompacting = session.messages.some(m => m.role === 'status' && m.statusType === 'compacting')
+  const isCompacting = session.currentStatus?.statusType === 'compacting'
+  if (!hasCompacting && !isCompacting) return session
+  return {
+    ...session,
+    messages: hasCompacting
+      ? session.messages.filter(m => !(m.role === 'status' && m.statusType === 'compacting'))
+      : session.messages,
+    ...(isCompacting ? { currentStatus: undefined } : {}),
   }
 }
 

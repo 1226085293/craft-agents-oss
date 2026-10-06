@@ -27,6 +27,7 @@
     "./credentials": "./src/credentials/index.ts",
     "./mcp": "./src/mcp/index.ts",
     "./prompts": "./src/prompts/index.ts",
+    "./retry/retry-row": "./src/retry/retry-row.ts",
     "./sessions": "./src/sessions/index.ts",
     "./projects": "./src/projects/index.ts",
     "./projects/types": "./src/projects/types.ts",

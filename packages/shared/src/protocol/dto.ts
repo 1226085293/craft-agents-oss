@@ -68,6 +68,7 @@ export interface Session {
    */
   hasUnread?: boolean
   enabledSourceSlugs?: string[]
+  sourceScope?: 'auto' | 'only' | 'exclude'
   workingDirectory?: string
   sessionFolderPath?: string
   sharedUrl?: string
@@ -381,18 +382,27 @@ export interface PermissionModeState {
 export type SessionEvent =
   | { type: 'text_discard'; sessionId: string; turnId: string }
   | { type: 'text_demote'; sessionId: string; turnId: string }
-  | { type: 'retry'; sessionId: string; phase: 'backoff'; message: string }
-  | { type: 'retry'; sessionId: string; phase: 'active' | 'end' }
+  /**
+   * Re-promote an intermediate reply to the result bubble (2026-10-07,
+   * session 261007-wise-horizon). Carries the demoted text so the
+   * messaging-channel renderer can re-attach it ahead of the drained
+   * steer's answer; the session record flips isIntermediate on the
+   * matching message so it is a result bubble on reload too.
+   */
+  | { type: 'text_promote'; sessionId: string; turnId: string; text: string }
+  | { type: 'retry'; sessionId: string; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number }
+  | { type: 'retry'; sessionId: string; phase: 'active' | 'end'; recovered?: boolean; attempt?: number; /** Ladder-start epoch ms + frozen duration — authoritative even when the row was lost (reload/restart), so the terminal line never shows 00:00. */ startedAt?: number; elapsedMs?: number }
   | { type: 'text_delta'; sessionId: string; delta: string; turnId?: string }
-  | { type: 'text_complete'; sessionId: string; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; timestamp?: number; messageId?: string }
+  | { type: 'text_complete'; sessionId: string; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; timestamp?: number; /** Streaming start time (first text_delta) for process-card ordering; `timestamp` stays the completion time */ startedAt?: number; messageId?: string }
   | { type: 'tool_start'; sessionId: string; toolName: string; toolUseId: string; toolInput: Record<string, unknown>; toolIntent?: string; toolDisplayName?: string; toolDisplayMeta?: ToolDisplayMeta; turnId?: string; parentToolUseId?: string; timestamp?: number; messageId?: string }
   | { type: 'tool_result'; sessionId: string; toolUseId: string; toolName: string; result: string; turnId?: string; parentToolUseId?: string; isError?: boolean; timestamp?: number }
-  | { type: 'error'; sessionId: string; error: string; timestamp?: number }
-  | { type: 'typed_error'; sessionId: string; error: TypedError; timestamp?: number }
+  | { type: 'error'; sessionId: string; error: string; timestamp?: number; retryPending?: boolean; retryAttempt?: number }
+  | { type: 'typed_error'; sessionId: string; error: TypedError; timestamp?: number; retryPending?: boolean; retryAttempt?: number }
   | { type: 'complete'; sessionId: string; tokenUsage?: Session['tokenUsage']; hasUnread?: boolean; backgroundTasksAlive?: boolean }
   | { type: 'interrupted'; sessionId: string; message?: Message; queuedMessages?: string[] }
-  | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'verification' | 'verification_passed' | 'verification_failed' }
-  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'verification_passed' | 'verification_failed'; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string }
+  | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'verification' | 'verification_passed' | 'verification_failed'; timestamp?: number }
+  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'verification_passed' | 'verification_failed' | 'system_stop'; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string }
+  | { type: 'system_stop_notice'; sessionId: string; reason: string; message: string; timestamp?: number }
   | { type: 'title_generated'; sessionId: string; title: string }
   | { type: 'title_regenerating'; sessionId: string; isRegenerating: boolean }
   | { type: 'async_operation'; sessionId: string; isOngoing: boolean }
@@ -402,7 +412,7 @@ export type SessionEvent =
   | { type: 'credential_request'; sessionId: string; request: CredentialRequest }
   | { type: 'permission_mode_changed'; sessionId: string; permissionMode: PermissionMode; previousPermissionMode?: PermissionMode; transitionDisplay?: string; modeVersion?: number; changedAt?: string; changedBy?: PermissionModeState['changedBy'] }
   | { type: 'plan_submitted'; sessionId: string; message: Message }
-  | { type: 'sources_changed'; sessionId: string; enabledSourceSlugs: string[] }
+  | { type: 'sources_changed'; sessionId: string; enabledSourceSlugs: string[]; sourceScope?: 'auto' | 'only' | 'exclude' }
   | { type: 'labels_changed'; sessionId: string; labels: string[] }
   | { type: 'project_id_changed'; sessionId: string; projectId: string | null }
   | { type: 'connection_changed'; sessionId: string; connectionSlug: string; supportsBranching?: boolean }
@@ -429,7 +439,6 @@ export type SessionEvent =
   | { type: 'session_unshared'; sessionId: string }
   | { type: 'auth_request'; sessionId: string; message: Message; request: SharedAuthRequest }
   | { type: 'auth_completed'; sessionId: string; requestId: string; success: boolean; cancelled?: boolean; error?: string }
-  | { type: 'source_activated'; sessionId: string; sourceSlug: string; originalMessage: string }
   | { type: 'usage_update'; sessionId: string; tokenUsage: { inputTokens: number; contextWindow?: number } }
   | { type: 'message_annotations_updated'; sessionId: string; messageId: string; annotations: AnnotationV1[] }
   | { type: 'working_directory_error'; sessionId: string; error: string }
@@ -493,7 +502,7 @@ export type SessionCommand =
   | { type: 'setPermissionMode'; mode: PermissionMode }
   | { type: 'setThinkingLevel'; level: ThinkingLevel }
   | { type: 'updateWorkingDirectory'; dir: string }
-  | { type: 'setSources'; sourceSlugs: string[] }
+  | { type: 'setSources'; sourceSlugs: string[]; sourceScope?: 'auto' | 'only' | 'exclude' }
   | { type: 'setLabels'; labels: string[] }
   | { type: 'setProjectId'; projectId: string | null }
   | { type: 'setKanbanColumn'; column: string | null }
@@ -535,6 +544,8 @@ export interface PermissionRequest extends BasePermissionRequest {
 
 export interface PermissionResponseOptions {
   rememberForMinutes?: number
+  /** 数据源调用确认策略：once=仅本次 / session=本会话 / always=工具级始终允许（持久）/ deny=本会话禁止 / deny-permanent=工具级永久禁止（持久） */
+  sourcePermission?: 'once' | 'session' | 'always' | 'deny' | 'deny-permanent'
 }
 
 // Re-export for handler convenience

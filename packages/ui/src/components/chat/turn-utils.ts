@@ -20,6 +20,24 @@ export type { ActivityItem }
 // ============================================================================
 
 /**
+ * Keep live activity rows (Thinking / verification / active tools) at the tail.
+ *
+ * Exception (2026-10-08): the retry-ladder row (statusType 'retrying') is
+ * TIME-ANCHORED at the ladder start — it must keep its chronological position
+ * (BEFORE any retried-run rows that follow) even while its status is
+ * 'running'; otherwise a later retried-run tool row (status 'completed')
+ * would sort BEFORE the running retry line and push it to the tail.
+ */
+export function sortActivitiesForDisplay<T extends ActivityItem>(activities: T[]): T[] {
+  return [...activities].sort((a, b) => {
+    const aRetry = a.type === 'status' && a.statusType === 'retrying'
+    const bRetry = b.type === 'status' && b.statusType === 'retrying'
+    if (aRetry || bRetry) return a.timestamp - b.timestamp
+    return Number(a.status === 'running') - Number(b.status === 'running') || a.timestamp - b.timestamp
+  })
+}
+
+/**
  * Strip error wrapper tags and prefixes from tool error messages.
  * The Claude Agent SDK wraps errors in tags like <error><tool_use_error>...</tool_use_error></error>
  * which aren't user-friendly. Additionally, errorResponse() and blockWithReason() prefix
@@ -81,28 +99,29 @@ export type Turn = AssistantTurn | UserTurn | SystemTurn | AuthRequestTurn
 /**
  * Build a stable UI identity key for an assistant turn card.
  *
- * Why this exists:
- * - Backend turnId can be reused across visually split assistant cards
- *   (e.g., steer/interruption boundaries).
- * - Expansion state must be keyed by UI-card identity, not raw backend turnId.
+ * The key must be a pure function of data that is FIXED for the turn's whole
+ * lifetime, because expansion state (in-memory sets, persisted localStorage)
+ * and the user's expanded/collapsed intent are keyed by it:
+ *
+ * - `response.messageId` only exists after the final reply lands, so keying on
+ *   it would switch the key mid-turn (streaming → landed). That silently
+ *   collapses the process block the user opened while the turn was streaming,
+ *   and it was the reason the old "promoted from intermediate" special case
+ *   existed for restart-recovery turns — every normally-completed turn hits
+ *   the same switch.
+ * - `index` is the render position, which shifts whenever earlier turns are
+ *   loaded (ChatDisplay reverse pagination grows startIndex) or inserted
+ *   (deferred queued messages flush). The renderer passes TurnCards as memoized
+ *   components whose toggle callback closes over the key; when the key drifts
+ *   while `isExpanded` stays the same (false→false), the memo compare skips
+ *   re-render, so clicks operate on a stale key and appear to do nothing until
+ *   the session is re-opened (which resets the pagination and the key).
+ * - Backend turnId can be reused across visually split assistant cards (e.g.,
+ *   steer/interruption boundaries); adding the turn-open timestamp keeps split
+ *   cards distinct since each card opens at its own first-message timestamp.
  */
-export function getAssistantTurnUiKey(turn: AssistantTurn, index: number): string {
-  if (turn.response?.messageId) {
-    // When the response was promoted from the last intermediate activity (a turn
-    // that ended without a natural final reply — e.g. after restart recovery
-    // re-runs the interrupted request), the messageId belongs to that intermediate
-    // message, not a real assistant reply. Using it as the UI key would change
-    // the key between the in-flight (no response) and recovered (promoted) states,
-    // losing the persisted expanded/collapsed state and hiding the already
-    // completed steps inside the card after an app restart.
-    const promotedFromIntermediate = turn.activities.some(
-      a => a.id === turn.response?.messageId && a.type === 'intermediate'
-    )
-    if (!promotedFromIntermediate) {
-      return `assistant:msg:${turn.response.messageId}`
-    }
-  }
-  return `assistant:turn:${turn.turnId}:${turn.timestamp}:${index}`
+export function getAssistantTurnUiKey(turn: AssistantTurn, _index: number): string {
+  return `assistant:turn:${turn.turnId}:${turn.timestamp}`
 }
 
 // ============================================================================
@@ -345,13 +364,8 @@ function extractTodosFromActivities(activities: ActivityItem[]): TodoItem[] | un
 export interface GroupTurnsOptions {
   /**
    * Whether the session is still actively processing.
-   *
-   * When `false`, the open turn (if any has activities) is marked complete
-   * before the final flush, so the existing "promote last intermediate text
-   * to response" branch fires and the chat doesn't sit on "Thinking..." forever
-   * when a turn ends on a tool call with no non-intermediate `text_complete`.
-   *
-   * Mirrors the messaging-gateway/renderer.ts lastAssistantText fallback.
+   * When false, the open process card is marked complete; it does not imply a
+   * final assistant response exists.
    */
   isSessionProcessing?: boolean
 }
@@ -378,46 +392,20 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
   // assistant response they trigger has its own turnId and still renders normally.
   const visibleMessages = messages.filter(m => !m.hidden)
   // Sort by timestamp for correct chronological order
-  // This ensures correct turn grouping even if messages are added out of order during streaming
-  const sortedMessages = [...visibleMessages].sort((a, b) => a.timestamp - b.timestamp)
-
-  // Pre-scan (double-bubble fix, 2026-10-03 verification replay incident):
-  // when a turn flushes BETWEEN a demoted intermediate reply (isIntermediate
-  // — e.g. the defense-hold demotion) and its same-turnId replayed final,
-  // the intermediate's promotion-to-response would surface it as Turn A's
-  // reply while the replay becomes Turn B's reply → two response bubbles
-  // for one turn. Record every turnId that carries a REAL final (non-
-  // intermediate, landed, non-blank) assistant message so promotion can
-  // defer to that replay. If the replay never lands (verification failed
-  // without re-delivery), the turnId is absent from the set and the
-  // fallback promotion of the demoted intermediate still happens.
-  const turnIdHasFinalResponse = new Set<string>()
-  for (const m of sortedMessages) {
-    if (
-      m.role === 'assistant'
-      && !m.isIntermediate
-      && !m.isPending
-      && m.turnId
-      && m.content?.trim()
-    ) {
-      turnIdHasFinalResponse.add(m.turnId)
-    }
-  }
+  // This ensures correct turn grouping even if messages are added out of order during streaming.
+  // USER messages sort by their HANDLING time (startedAt — the guide-click /
+  // drain re-stamp, 2026-10-07 plain-jade) so a steered guidance message is
+  // grouped into the card where the agent ACTUALLY read it (the drain
+  // round), not the card where it was typed. Assistant/tool messages keep
+  // their completion timestamp.
+  const sortKey = (m: Message) =>
+    m.role === 'user' ? (m.startedAt ?? m.timestamp) : m.timestamp
+  const sortedMessages = [...visibleMessages].sort((a, b) => sortKey(a) - sortKey(b))
 
   const turns: Turn[] = []
   let currentTurn: AssistantTurn | null = null
   let lastUserTurn: UserTurn | null = null
   let deferredQueuedUserTurns: UserTurn[] = []
-  /**
-   * True once an assistant message carrying `aborted` lands in the current turn.
-   * The user cut the run short (Stop, or a mid-stream redirect), so the turn has
-   * no result and its trailing intermediate text must stay a process step.
-   * The flag is set by the message itself and survives a session reload, which
-   * is what makes this work for the silent redirect — no info message is written
-   * there, so there is no flush-time signal to key off of.
-   */
-  let turnAborted = false
-
   const flushDeferredQueuedUserTurns = () => {
     if (deferredQueuedUserTurns.length === 0) return
     for (const userTurn of deferredQueuedUserTurns) {
@@ -427,7 +415,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
     deferredQueuedUserTurns = []
   }
 
-  const flushCurrentTurn = (interrupted = false, suppressPromotion = false) => {
+  const flushCurrentTurn = (interrupted = false) => {
     if (currentTurn) {
       // Sort activities by timestamp to ensure correct chronological order
       // This is necessary because buffering can delay when messages are added
@@ -458,44 +446,8 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
         currentTurn.isComplete = true
       }
 
-      // If no response but we have intermediate text, promote the last one to response
-      // Don't do this for interrupted turns - respect user interruptions
-      // Don't do this for turns that failed or were aborted - those have no result
-      // Don't do this for turns with plans - the plan is the final output
-      // Only promote when turn is complete (processing indicator hidden)
-      const hasPlan = currentTurn.activities.some(a => a.type === 'plan')
-      if (!interrupted && !suppressPromotion && !turnAborted && !hasPlan && !currentTurn.response && currentTurn.isComplete && currentTurn.activities.length > 0) {
-        // Find the last intermediate text activity (reverse to get most recent).
-        // Only non-blank content is promotable — a whitespace-only intermediate
-        // would surface as an empty response bubble (same root cause as the
-        // blank 'stop' final above).
-        const lastTextActivity = [...currentTurn.activities]
-          .reverse()
-          .find(a =>
-            a.type === 'intermediate'
-            && a.content?.trim()
-            // Same-turnId replay takes over as the visible reply — never
-            // promote the demoted intermediate into a second bubble.
-            && !turnIdHasFinalResponse.has(a.turnId ?? '')
-          )
-
-        if (lastTextActivity?.content?.trim()) {
-          currentTurn.response = {
-            text: lastTextActivity.content,
-            isStreaming: false,
-            messageId: lastTextActivity.id,
-            timestamp: lastTextActivity.timestamp,
-          }
-          // The commentary is now the turn's visible reply. Flag its step row so
-          // the steps list skips it — otherwise the same text renders twice
-          // (once as the response, once as a process row).
-          lastTextActivity.promotedToResponse = true
-        }
-      }
-
       turns.push(currentTurn)
       currentTurn = null
-      turnAborted = false
       flushDeferredQueuedUserTurns()
     }
   }
@@ -539,7 +491,10 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
           status: 'completed',
           content: message.content,
           displayName: 'Guidance',
-          timestamp: message.timestamp,
+          // Row position = the moment the user actually guided (引导 click
+          // stamps startedAt — 2026-10-07 plain-jade), NOT the earlier
+          // queue/send time; falls back to timestamp for pre-stamp records.
+          timestamp: message.startedAt ?? message.timestamp,
           statusType: 'guidance',
           depth: 0,
         })
@@ -588,14 +543,26 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
           timestamp: message.timestamp,
         }
       }
+      // Retry-ladder row (2026-10-08): the persisted status line carries a
+      // structured `retry` payload — derive the activity status from it so a
+      // reloaded row is never mistaken for a spinning "重试中" line.
+      const isRetryRow = message.statusType === 'retrying'
+      const retryRowStatus = isRetryRow
+        ? message.retry?.status === 'recovered'
+          ? 'completed' as const
+          : message.retry?.status === 'failed'
+            ? 'error' as const
+            : 'running' as const
+        : 'running' as const
       const statusActivity: ActivityItem = {
         id: message.id,
         type: 'status',
-        status: 'running',
+        status: retryRowStatus,
         content: message.content,
         timestamp: message.timestamp,
         statusType: message.statusType,
         depth: 0,
+        ...(isRetryRow && message.retry ? { retry: message.retry } : {}),
       }
       currentTurn.activities.push(statusActivity)
       continue
@@ -623,18 +590,42 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
     // update the pending 'verification' status step; the replayed final
     // reply arrives as its own assistant message and becomes the response.
     if (message.role === 'info' && (message.statusType === 'verification_passed' || message.statusType === 'verification_failed')) {
-      if (currentTurn) {
-        const statusIdx = currentTurn.activities.findIndex(
-          a => a.type === 'status' && a.statusType === 'verification'
-        )
-        const existingActivity = currentTurn.activities[statusIdx]
-        if (statusIdx !== -1 && existingActivity) {
-          currentTurn.activities[statusIdx] = {
-            ...existingActivity,
-            status: message.statusType === 'verification_passed' ? 'completed' : 'error',
-            content: message.content,
+      const verdictStatus = message.statusType === 'verification_passed' ? 'completed' : 'error'
+      const statusIdx = currentTurn?.activities.findIndex(
+        a => a.type === 'status' && a.statusType === 'verification'
+      ) ?? -1
+      const existingActivity = statusIdx !== -1 ? currentTurn!.activities[statusIdx] : undefined
+      if (statusIdx !== -1 && existingActivity) {
+        currentTurn!.activities[statusIdx] = {
+          ...existingActivity,
+          status: verdictStatus,
+          content: message.content,
+        }
+      } else {
+        // The renderer folded the transient status row into this info message
+        // (and status rows are not persisted), so recreate the verdict card
+        // to keep the verification outcome visible on reload.
+        if (!currentTurn) {
+          currentTurn = {
+            type: 'assistant',
+            turnId: message.turnId || message.id,
+            activities: [],
+            response: undefined,
+            intent: undefined,
+            isStreaming: false,
+            isComplete: false,
+            timestamp: message.timestamp,
           }
         }
+        currentTurn.activities.push({
+          id: message.id,
+          type: 'status',
+          status: verdictStatus,
+          content: message.content,
+          timestamp: message.timestamp,
+          statusType: 'verification',
+          depth: 0,
+        })
       }
       continue  // Don't create a separate system turn
     }
@@ -645,11 +636,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
       const isInterruption = message.role === 'info'
       // For error/warning (not info), the previous turn is complete
       if (currentTurn && !isInterruption) currentTurn.isComplete = true
-      // An error or warning is the turn's outcome — the trailing intermediate
-      // text is unfinished commentary, not a reply. Suppress promotion so the
-      // run reports the failure instead of the last thing it happened to say.
-      const suppressPromotion = message.role !== 'info'
-      flushCurrentTurn(isInterruption, suppressPromotion)
+      flushCurrentTurn(isInterruption)
       turns.push({
         type: 'system',
         message,
@@ -717,10 +704,6 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
 
     // Assistant messages are the response part of a turn
     if (message.role === 'assistant') {
-      // An aborted message means the user cut this run short. Record it on the
-      // turn so the trailing intermediate text is never promoted to a response.
-      if (message.aborted) turnAborted = true
-
       // Intermediate messages OR pending messages (don't know yet) are activities, not responses
       // Pending: streaming text where we don't yet know if it's intermediate - treat as intermediate
       // until text_complete arrives with the definitive isIntermediate flag
@@ -755,7 +738,12 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
           type: 'intermediate',
           status: message.isPending ? 'running' : 'completed',
           content: message.content,
-          timestamp: message.timestamp,
+          // Process-card rows sort by when the block first became VISIBLE
+          // (first text_delta), falling back to the completion timestamp for
+          // blocks that never streamed (older records / immediate replies).
+          // This keeps a user guidance sent mid-stream AFTER the thinking
+          // blocks that were already visible when it was sent.
+          timestamp: message.startedAt ?? message.timestamp,
           parentId: message.parentToolUseId,
           turnId: message.turnId,
         }
@@ -831,11 +819,9 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
     }
   }
 
-  // Session-complete fallback (mirrors messaging-gateway/renderer.ts lastAssistantText fallback).
-  // When the session has stopped processing and the open turn has activities but never received
-  // a non-intermediate assistant final, mark it complete so the existing "promote last
-  // intermediate to response" branch in flushCurrentTurn fires. Without this the chat sits on
-  // "Thinking…" forever when a turn ends on a tool call.
+  // A terminal complete event closes the process card, but is not itself a
+  // final assistant response. Keep intermediate commentary as activity text;
+  // only a landed non-intermediate assistant message may populate response.
   if (
     options.isSessionProcessing === false
     && currentTurn

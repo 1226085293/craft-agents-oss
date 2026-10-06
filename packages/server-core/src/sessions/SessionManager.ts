@@ -7,7 +7,7 @@ import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger 
 import { basename, dirname, isAbsolute, join } from 'path'
 import { existsSync } from 'fs'
 import { copyFile, readFile, writeFile, mkdir, stat, rm, readdir } from 'fs/promises'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { type AgentEvent, setPermissionMode, setTransientPermissionMode, clearTransientPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
 import {
   resolveSessionConnection,
@@ -26,6 +26,7 @@ import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
 import { i18n } from '@craft-agent/shared/i18n'
+import { nextRetryRowPayload, settleRetryRowAsFailed, findActiveRetryRowIndex } from '@craft-agent/shared/retry/retry-row'
 import {
   getWorkspaces,
   getWorkspaceByNameOrId,
@@ -76,16 +77,16 @@ import {
   type SessionHeader,
   pickSessionFields,
 } from '@craft-agent/shared/sessions'
-import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, TokenRefreshManager } from '@craft-agent/shared/sources'
+import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, TokenRefreshManager, loadSourceConfig, saveSourceConfig } from '@craft-agent/shared/sources'
 import { listTaskSlugs, parseTaskSpec, uniqueTaskSlug } from '@craft-agent/shared/tasks'
-import { resolveUsageTarget, resolveSkillReadUsageTarget, appendUsage } from '@craft-agent/shared/usage'
+import { resolveUsageTarget, resolveSkillReadUsageTarget, resolveSkillCommandUsageTarget, appendUsage } from '@craft-agent/shared/usage'
 import { createTaskFromSpec, resolveCreateTaskProjectId } from '../tasks'
 import { buildPagesToolCallbacks } from '../pages/tool-callbacks'
 import { buildServersFromSources as buildServersFromSourcesShared } from '../sources/build-servers'
 import { ConfigWatcher, type ConfigWatcherCallbacks } from '@craft-agent/shared/config'
 import { getValidClaudeOAuthToken } from '@craft-agent/shared/auth'
 import { resolveAuthEnvVars } from '@craft-agent/shared/config'
-import { toolMetadataStore, getLastApiError } from '@craft-agent/shared/interceptor'
+import { toolMetadataStore, getLastApiError, getLastErrorFromHistory } from '@craft-agent/shared/interceptor'
 import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
@@ -93,7 +94,7 @@ import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/share
 import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
 import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta, type TokenUsage } from '@craft-agent/core/types'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages, normalizePath } from '@craft-agent/shared/utils'
-import { loadAllSkills, loadSkillBySlug, invalidateSkillsCache, type LoadedSkill } from '@craft-agent/shared/skills'
+import { loadAllSkills, invalidateSkillsCache } from '@craft-agent/shared/skills'
 import { getMemoryStorePath, loadMemoryStore, saveMemoryStore, recordExtraction } from '@craft-agent/shared/memory';
 import { addMemoryEntry, deleteMemoryEntry, queryMemories, getMemoryStats as getMemStats } from '@craft-agent/shared/memory/store';
 import { invalidateContextFileCache } from '@craft-agent/shared/prompts/system'
@@ -189,6 +190,11 @@ const MAX_ANNOTATION_JSON_BYTES = 32 * 1024
 // are ignored, so the watcher does not roll back the in-memory mutation we
 // just persisted. See onSessionMetadataChange.
 const METADATA_WRITE_GUARD_MS = 5000
+
+// Coalesce bursts of source-change events into a single reload. Windows
+// fs.watch can emit many attribute-only events in one burst (hourly storm
+// 2026-10-08); without throttling each event rebuilds every session's MCP.
+const SOURCE_RELOAD_THROTTLE_MS = 10_000
 
 /**
  * Text sent to the session when a plan is approved from outside the desktop
@@ -716,7 +722,7 @@ interface RunningBackgroundTask {
   agentsCompleted?: number
 }
 
-interface ManagedSession {
+export interface ManagedSession {
   id: string
   workspace: Workspace
   agent: AgentInstance | null  // Lazy-loaded - null until first message
@@ -742,6 +748,23 @@ interface ManagedSession {
   processingGeneration: number
   /** Runtime-only timestamp for the currently active agent run. */
   currentRunStartedAt?: number
+  /**
+   * Streaming START time per sub-turn (first text_delta of each assistant
+   * text block). Carried onto the persisted message as `startedAt`: the UI
+   * sorts process-card rows by startedAt, so a user guidance sent
+   * mid-stream sorts AFTER the block that was already visible when it was
+   * sent. `timestamp` stays the completion time (bubble display, unread).
+   */
+  streamStartAtByTurn?: Map<string, number>
+  /**
+   * 2026-10-07 plain-jade: the id of the guidance message awaiting its
+   * DRAIN re-stamp. Set when the user guides a queued message (the row is
+   * stamped at the guide click); when the spliced steer user message
+   * actually enters the agent's context (`steer_injected`), the message's
+   * `startedAt` is re-stamped to that drain moment (row position + display
+   * time = "actual handling time") and this is cleared.
+   */
+  steerDrainPendingFor?: string
   // NOTE: Parent-child tracking state (pendingTools, parentToolStack, toolToParentMap,
   // pendingTextParent) has been removed. CraftAgent now provides parentToolUseId
   // directly on all events using the SDK's authoritative parent_tool_use_id field.
@@ -786,8 +809,24 @@ interface ManagedSession {
    * Set to false when user views the session (and not processing).
    */
   hasUnread?: boolean
-  // Per-session source selection (slugs of enabled sources)
+  // User-owned source picker state persisted to session metadata.
   enabledSourceSlugs?: string[]
+  /** 选择器模式：auto（默认）= 已授权源中 Agent 自主；only = 仅这些；exclude = 排除这些 */
+  sourceScope?: 'auto' | 'only' | 'exclude'
+  /** Source slugs currently applied to the live agent and connection pool. */
+  appliedSourceSlugs?: string[]
+  /** Source snapshot is being prepared before processing starts. */
+  sourceTurnStarting?: boolean
+  /** Snapshot of the source set in use by the current turn. */
+  processingSourceSlugs?: string[]
+  /** A picker change arrived while the current turn retained its source snapshot. */
+  pendingSourceSync?: boolean
+  /** Monotonic selection version protects against stale asynchronous pool builds. */
+  sourceSelectionVersion?: number
+  /** Serializes live-pool updates so a newer picker choice cannot be overwritten by an older build. */
+  sourceSyncPromise?: Promise<void>
+  /** 空闲自动断开 MCP 连接的计时器（单 writer 型 MCP 需要释放连接给其他会话） */
+  mcpIdleDisconnectTimer?: ReturnType<typeof setTimeout>
   /**
    * Explicit MCP server configs for isolated execution.
    * When set, the session uses a dedicated MCP pool with only these servers,
@@ -956,6 +995,17 @@ interface ManagedSession {
   // Ephemeral — not persisted to disk. Cleared after one-shot injection.
   wasInterrupted?: boolean
   /**
+   * Whether the previous turn ended in an error (model-layer failure, stream
+   * stall, exhausted retry ladder — any TERMINAL error event). Ephemeral:
+   * set by the error/typed_error handlers, consumed (one-shot) on the next
+   * user message, which then carries a "resume the unfinished request" system
+   * reminder — the user's follow-up is treated as guidance to the interrupted
+   * request, not as a fresh, unrelated message (2026-10-07, session
+   * 261007-focal-twilight: after a stall the user sent "." and the model
+   * answered only the literal "." because nothing flagged the aborted turn).
+   */
+  abnormalTurnEnd?: boolean
+  /**
    * Runtime-only: Pi SDK message id → Craft assistant message id.
    * Populated when a `text_complete` arrives carrying `sdkMessageId`, and read
    * when the follow-up `pi_turn_anchor` event arrives (deferred by one microtask
@@ -963,51 +1013,9 @@ interface ManagedSession {
    * Capped at PI_SDK_MESSAGE_ID_CACHE_LIMIT to bound memory in long sessions.
    */
   piSdkMessageToCraftMessage?: Map<string, string>
-  // Source-activation auto-retry (craft-agents-oss#804). When a source activates
-  // mid-turn, we re-send the original message with a "[<slug> activated]" suffix
-  // after a short delay. The pending slot lets `sendMessage` dedup a duplicate
-  // RPC from a legacy renderer that still ships the client-side auto_retry.
-  autoRetryTimer?: ReturnType<typeof setTimeout>
-  autoRetryPending?: {
-    content: string
-    deadlineMs: number
-    /** True after the first matching sendMessage consumes the slot; later matches drop. */
-    committed: boolean
-  }
 }
 
 const PI_SDK_MESSAGE_ID_CACHE_LIMIT = 256
-
-export interface AutoRetryPendingHost {
-  autoRetryPending?: {
-    content: string
-    deadlineMs: number
-    committed: boolean
-  }
-}
-
-export function claimAutoRetryPending(
-  host: AutoRetryPendingHost,
-  message: string,
-  nowMs = Date.now(),
-): 'send' | 'drop' {
-  const pending = host.autoRetryPending
-  if (pending && message === pending.content) {
-    if (nowMs < pending.deadlineMs) {
-      if (pending.committed) return 'drop'
-      pending.committed = true
-      return 'send'
-    }
-    host.autoRetryPending = undefined
-    return 'send'
-  }
-
-  if (pending && nowMs >= pending.deadlineMs) {
-    host.autoRetryPending = undefined
-  }
-
-  return 'send'
-}
 
 /**
  * Create a ManagedSession from any session-like source (SessionMetadata, SessionConfig, StoredSession).
@@ -1172,6 +1180,8 @@ export class SessionManager implements ISessionManager {
   private deltaFlushTimers: Map<string, NodeJS.Timeout> = new Map()
   // Config watchers for live updates (sources, etc.) - one per workspace
   private configWatchers: Map<string, ConfigWatcher> = new Map()
+  // Last source-reload timestamp per workspace root (throttle guard)
+  private lastSourceReloadAt: Map<string, number> = new Map()
   // Automation systems for workspace event automations - one per workspace (includes scheduler, diffing, and handlers)
   private automationSystems: Map<string, AutomationSystem> = new Map()
   // Pending credential request resolvers (keyed by requestId)
@@ -1181,6 +1191,8 @@ export class SessionManager implements ISessionManager {
     sessionId: string
     type?: 'bash' | 'file_write' | 'mcp_mutation' | 'api_mutation' | 'admin_approval'
     commandHash?: string
+    toolName?: string
+    sourceSlug?: string
   }> = new Map()
   // Privileged approval binding + audit logger
   private privilegedExecutionBroker = new PrivilegedExecutionBroker(sessionLog)
@@ -1765,8 +1777,20 @@ export class SessionManager implements ISessionManager {
 
   /**
    * Reload sources for all sessions in a workspace, skipping those currently processing.
+   * Throttled: Windows fs.watch can deliver a burst of source-change events
+   * (e.g. hourly reload storm 2026-10-08), each of which would otherwise
+   * rebuild every session's MCP servers and re-spawn subprocesses. The
+   * throttle coalesces a burst into a single reload.
    */
   private async reloadSourcesForWorkspace(workspaceRootPath: string): Promise<void> {
+    const now = Date.now()
+    const last = this.lastSourceReloadAt.get(workspaceRootPath) ?? 0
+    if (now - last < SOURCE_RELOAD_THROTTLE_MS) {
+      sessionLog.debug(`Throttling source reload for ${workspaceRootPath} (${now - last}ms since last)`)
+      return
+    }
+    this.lastSourceReloadAt.set(workspaceRootPath, now)
+
     for (const [_, managed] of this.sessions) {
       if (managed.workspace.rootPath === workspaceRootPath) {
         if (managed.isProcessing) {
@@ -1847,7 +1871,7 @@ export class SessionManager implements ISessionManager {
     managed.agent.setAllSources(allSources)
 
     // Rebuild MCP and API servers for session's enabled sources
-    const enabledSlugs = managed.enabledSourceSlugs || []
+    const enabledSlugs = this.resolveSessionSourceSlugs(managed)
     const enabledSources = allSources.filter(s =>
       enabledSlugs.includes(s.config.slug) && isSourceUsable(s)
     )
@@ -2044,6 +2068,7 @@ export class SessionManager implements ISessionManager {
             // session list shows the right chips — sessions without one hydrate any legacy
             // body value on message load (see hydrateMessagesForColdPersist).
             enabledSourceSlugs: meta.enabledSourceSlugs,
+            sourceScope: meta.sourceScope,
             workingDirectory: meta.workingDirectory ?? wsDefaultWorkingDir,
           })
 
@@ -2113,6 +2138,25 @@ export class SessionManager implements ISessionManager {
     this.enqueuePersist(managed)
   }
 
+  /**
+   * Fail-safe for the PERSISTED retry row (2026-10-08): a ladder that ended
+   * WITHOUT its terminal `retry end` event (subprocess exit, guardrail stop,
+   * unexpected generator failure, stale restored rung) must not leave a
+   * spinning "重试中" row in the transcript. Settle it to 'failed' — the
+   * retries did not recover. No-op when the row is absent or already
+   * terminal (recovered/failed), so the normal `retry end` settlement is
+   * never overwritten.
+   */
+  private settleStuckRetryRow(managed: ManagedSession, now = Date.now()): void {
+    const idx = findActiveRetryRowIndex(managed.messages)
+    if (idx === -1) return
+    const m = managed.messages[idx]!
+    if (m.retry?.status === 'retrying') {
+      managed.messages[idx] = { ...m, retry: settleRetryRowAsFailed(m.retry, now) }
+      this.persistSession(managed)
+    }
+  }
+
   // Cold-persist hydration. Mirrors the messages/queue-recovery half of
   // loadMessagesFromDisk but skips the metadata field syncs. Sets
   // messagesLoaded=true so subsequent persistSession calls take the fast path.
@@ -2128,6 +2172,7 @@ export class SessionManager implements ISessionManager {
       // loadSessionsFromDisk). Populate from disk only if not already set in
       // memory — a caller may have mutated them via setSessionSources etc.
       if (managed.enabledSourceSlugs === undefined) managed.enabledSourceSlugs = stored.enabledSourceSlugs
+      if (managed.sourceScope === undefined) managed.sourceScope = stored.sourceScope
       if (managed.lastReadMessageId === undefined) managed.lastReadMessageId = stored.lastReadMessageId
       if (managed.hasUnread === undefined) managed.hasUnread = stored.hasUnread
       if (managed.sharedUrl === undefined) managed.sharedUrl = stored.sharedUrl
@@ -2221,6 +2266,48 @@ export class SessionManager implements ISessionManager {
     )
 
     if (recoverable.length === 0) {
+      // 2026-10-04 amber-plain freeze: a turn can die mid-tool-loop leaving an
+      // executing/pending tool result (or intermediate reasoning) with NO user
+      // message left to replay — e.g. an auto-queued follow-up / verification
+      // turn interrupted by a restart. Every user-replay path above finds
+      // nothing, so the restored session would sit idle until the turn-idle
+      // watchdog finally fired. When the trailing activity is genuinely
+      // dangling (`hasDanglingTail` = an intermediate assistant message or a
+      // tool row still executing/pending) and no user owns it, enqueue ONE
+      // synthetic recovery message that resumes the turn from the last tool
+      // result. A user-STOPPED turn has no dangling tail (its trailing tool
+      // rows are finished, status undefined/completed), so this never
+      // resurrects a Stop.
+      const lastToolAnchor = this.findDanglingTailToolAnchor(trailing)
+      const alreadyRecovering = lastToolAnchor
+        ? managed.messageQueue.some(
+            q => q.resumeToolMessageId === lastToolAnchor.id && !q.messageId,
+          )
+        : false
+      if (hasDanglingTail && !trailingOwnsDanglingTail && lastToolAnchor && !alreadyRecovering) {
+        managed.messageQueue.push({
+          message: 'The previous turn was interrupted by a restart while a tool was still running. Continue from the last tool result without re-running completed work.',
+          resumeToolMessageId: lastToolAnchor.id,
+          resumeToolName: lastToolAnchor.toolName,
+          resumeTurnId: lastToolAnchor.turnId,
+          messageId: undefined,
+          attachments: undefined,
+          storedAttachments: undefined,
+          options: undefined,
+        })
+        sessionLog.info('Recovering dangling tool-loop turn with no replayable user message', {
+          sessionId: managed.id,
+          anchor: lastToolAnchor.id,
+          turnId: lastToolAnchor.turnId,
+        })
+        if (!managed.isProcessing) {
+          setImmediate(() => {
+            this.processNextQueuedMessage(managed.id)
+          })
+        }
+        return
+      }
+
       sessionLog.debug('No pending user turns for restart recovery', {
         sessionId: managed.id,
         terminalMessageId: managed.messages[lastTerminalResponseIndex]?.id,
@@ -2230,37 +2317,55 @@ export class SessionManager implements ISessionManager {
       return
     }
 
+    // Within a single interrupted window (consecutive user messages with no
+    // terminal response between them) exactly ONE message owns the turn — the
+    // first. Any additional recoverable messages are steers the user injected
+    // while that turn was still running (e.g. "继续", "好了吗", "."), not
+    // independent requests. Enqueueing a recovery turn for EACH one drains
+    // them one-by-one, so after the real work completes the model is re-run
+    // once per steer and emits duplicate results (2026-10-07 session
+    // 261006-aware-quasar: nudges "继续"/"好了吗" were each replayed as a fresh
+    // turn after the task finished, one even pushing the branch again). Fold
+    // the steers back into the owning turn as guidance so they render as guide
+    // bubbles under the user's message and are never independently recovered.
+    const recoverOwner = recoverable[0]
+    let foldedGuidance = 0
+    for (const steer of recoverable.slice(1)) {
+      steer.isGuidance = true
+      steer.isQueued = false
+      foldedGuidance++
+    }
+
     sessionLog.info('Recovering pending user turn(s) without final assistant response', {
       sessionId: managed.id,
-      count: recoverable.length,
-      messageIds: recoverable.map(m => m.id),
+      ownerMessageId: recoverOwner.id,
+      recoveredCount: recoverable.length,
+      foldedGuidance,
     })
 
-    for (const msg of recoverable) {
-      const resumeTool = this.findRecoverableToolAnchor(managed.messages, msg)
-      // Do NOT mark these messages `isQueued`: the UI treats that flag as a
-      // LIVE mid-stream queue item — it defers the bubble below the running
-      // process block and shows the queued/guide/cancel chip (turn-utils
-      // deferral + UserMessageBubble). A recovered message is already part of
-      // the transcript history: the no-re-stamp replay below keeps its
-      // original timestamp, so it must stay in chronological place without
-      // the queued styling (2026-10-01: after a restart, previously-sent
-      // messages rendered below the process cards with a "queued" badge).
-      // Clear any stale persisted flag instead — replay is driven by the
-      // queue entry, not by the message flag.
-      msg.isQueued = false
-      managed.messageQueue.push({
-        message: msg.content,
-        internalMessage: this.buildRecoveredTurnPrompt(managed.messages, msg),
-        resumeToolMessageId: resumeTool?.id,
-        resumeToolName: resumeTool?.toolName,
-        resumeTurnId: resumeTool?.turnId,
-        messageId: msg.id,
-        attachments: undefined,
-        storedAttachments: msg.attachments,
-        options: undefined,
-      })
-    }
+    const resumeTool = this.findRecoverableToolAnchor(managed.messages, recoverOwner)
+    // Do NOT mark the owner `isQueued`: the UI treats that flag as a
+    // LIVE mid-stream queue item — it defers the bubble below the running
+    // process block and shows the queued/guide/cancel chip (turn-utils
+    // deferral + UserMessageBubble). A recovered message is already part of
+    // the transcript history: the no-re-stamp replay below keeps its
+    // original timestamp, so it must stay in chronological place without
+    // the queued styling (2026-10-01: after a restart, previously-sent
+    // messages rendered below the process cards with a "queued" badge).
+    // Clear any stale persisted flag instead — replay is driven by the
+    // queue entry, not by the message flag.
+    recoverOwner.isQueued = false
+    managed.messageQueue.push({
+      message: recoverOwner.content,
+      internalMessage: this.buildRecoveredTurnPrompt(managed.messages, recoverOwner),
+      resumeToolMessageId: resumeTool?.id,
+      resumeToolName: resumeTool?.toolName,
+      resumeTurnId: resumeTool?.turnId,
+      messageId: recoverOwner.id,
+      attachments: undefined,
+      storedAttachments: recoverOwner.attachments,
+      options: undefined,
+    })
 
     // Process queue when the session becomes active (lazy load) or when a cold
     // persist forced hydration. Use setImmediate to avoid re-entering the load
@@ -2300,6 +2405,24 @@ export class SessionManager implements ISessionManager {
     )
   }
 
+  /**
+   * Find the dangling, still-in-flight tool row at the end of a restarted
+   * turn that has no user message to replay. Only an explicitly-unfinished
+   * tool (status `executing`/`pending`) counts — a finished tool row
+   * (status undefined/`completed`, as left behind by a user Stop) is NOT
+   * evidence of a torn turn, so a stopped turn is never resurrected.
+   * Mirrors the `hasDanglingTail` tool test in `recoverPendingUserTurns`.
+   */
+  private findDanglingTailToolAnchor(trailing: Message[]): Message | undefined {
+    for (let i = trailing.length - 1; i >= 0; i--) {
+      const m = trailing[i]!
+      if (this.isToolLikeMessage(m) && (m.toolStatus === 'executing' || m.toolStatus === 'pending')) {
+        return m
+      }
+    }
+    return undefined
+  }
+
   private buildRecoveredTurnPrompt(messages: Message[], userMessage: Message): string {
     const userIndex = messages.findIndex(m => m.id === userMessage.id)
     if (userIndex === -1) return userMessage.content
@@ -2335,10 +2458,14 @@ export class SessionManager implements ISessionManager {
   // Caller must ensure `managed.messagesLoaded` is true.
   private enqueuePersist(managed: ManagedSession): void {
     try {
-      // Filter out transient status messages (progress indicators like "Compacting...")
+      // Filter out transient status messages (progress indicators like
+      // "Compacting...") — EXCEPT the persisted retry-ladder row
+      // (statusType 'retrying' + `retry` payload, 2026-10-08): it must
+      // survive reloads so the process block keeps its final state
+      // (重试中 / 重试成功 / 重试失败) after session switches/restarts.
       // Error messages are now persisted with rich fields for diagnostics
       const persistableMessages = managed.messages.filter(m =>
-        m.role !== 'status'
+        m.role !== 'status' || m.statusType === 'retrying'
       )
 
       const storedSession: StoredSession = {
@@ -2452,20 +2579,14 @@ export class SessionManager implements ISessionManager {
     managed.pendingAuthRequestId = undefined
     managed.pendingAuthRequest = undefined
 
-    // Auto-enable the source in the session after successful auth
+    // Authentication never changes the user's per-session source selection.
+    // Clear a refresh cooldown so a source the user already selected can use
+    // its newly saved credential on a later request.
     if (result.success && result.sourceSlug) {
-      const slugSet = new Set(managed.enabledSourceSlugs || [])
-      if (!slugSet.has(result.sourceSlug)) {
-        slugSet.add(result.sourceSlug)
-        managed.enabledSourceSlugs = Array.from(slugSet)
-        sessionLog.info(`Auto-enabled source ${result.sourceSlug} in session ${sessionId} after auth`)
-      }
-
-      // Clear any refresh cooldown so the source is immediately usable
       managed.tokenRefreshManager.clearCooldown(result.sourceSlug)
     }
 
-    // Persist session with updated auth message and enabled sources
+    // Persist the auth-request result without changing enabledSourceSlugs
     this.persistSession(managed)
 
     // Update bridge-mcp-server config/credentials for backends that need it
@@ -3041,6 +3162,7 @@ export class SessionManager implements ISessionManager {
       managed.lastReadMessageId = storedSession.lastReadMessageId
       managed.hasUnread = storedSession.hasUnread  // Explicit unread flag for NEW badge state machine
       managed.enabledSourceSlugs = storedSession.enabledSourceSlugs
+      managed.sourceScope = storedSession.sourceScope
       managed.sharedUrl = storedSession.sharedUrl
       managed.sharedId = storedSession.sharedId
       // Sync name from disk - ensures title persistence across lazy loading
@@ -3511,11 +3633,6 @@ export class SessionManager implements ISessionManager {
             sessionId: storedSession.id,
             deleteFromRuntimeSessions: (id) => {
               const m = this.sessions.get(id)
-              if (m?.autoRetryTimer) {
-                clearTimeout(m.autoRetryTimer)
-                m.autoRetryTimer = undefined
-              }
-              if (m) m.autoRetryPending = undefined
               this.sessions.delete(id)
             },
             deleteStoredSession,
@@ -3635,6 +3752,24 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * SHA-256 fingerprint of a connection's current API key (or undefined when
+   * it has none). Credential rotation cannot be re-routed in-place, so the
+   * fingerprint is part of the restart signature (see runtime-config.ts).
+   * Best-effort: unavailable credential storage must not break refresh.
+   */
+  private async resolveApiKeyFingerprint(connectionSlug: string | undefined): Promise<string | undefined> {
+    if (!connectionSlug) return undefined
+    try {
+      const apiKey = await getCredentialManager().getLlmApiKey(connectionSlug)
+      if (apiKey) return createHash('sha256').update(apiKey).digest('hex')
+    } catch {
+      // Best-effort: missing/stale credential storage must not break refresh.
+    }
+    return undefined
+  }
+
+
+  /**
    * Refresh an existing agent's runtime config in place when the session's
    * resolved connection signature has drifted from what the agent was created
    * with. No-ops when the agent doesn't exist, when the signature still
@@ -3658,14 +3793,6 @@ export class SessionManager implements ISessionManager {
    *     can't apply the update.
    */
   private async tryRefreshAgentRuntime(managed: ManagedSession, reason: string): Promise<void> {
-    // Serialize against any in-flight refresh on this session. The waiter
-    // doesn't propagate the prior call's errors — those are logged at the
-    // origin call site.
-    const inflight = this.agentRefreshLocks.get(managed.id)
-    if (inflight) {
-      await inflight.catch(() => undefined)
-    }
-
     if (!managed.agent) return
 
     const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
@@ -3675,11 +3802,24 @@ export class SessionManager implements ISessionManager {
       managedModel: managed.model,
     })
     const connection = backendContext.connection
+    // Resolve the fingerprint before the lock gate below: it is async and
+    // must not sit between the lock check and lock registration, or two
+    // concurrent callers would both pass the gate and refresh twice.
+    const apiKeyFingerprint = await this.resolveApiKeyFingerprint(connection?.slug)
+
+    // Serialize against any in-flight refresh on this session. The waiter
+    // doesn't propagate the prior call's errors — those are logged at the
+    // origin call site.
+    const inflight = this.agentRefreshLocks.get(managed.id)
+    if (inflight) {
+      await inflight.catch(() => undefined)
+    }
     const sigInput = {
       connection,
       provider: backendContext.provider,
       authType: backendContext.authType,
       resolvedModel: backendContext.resolvedModel,
+      apiKeyFingerprint,
     }
     const runtimeSignature = buildBackendRuntimeSignature(sigInput)
     const restartSignature = buildRestartRequiredSignature(sigInput)
@@ -3822,11 +3962,13 @@ export class SessionManager implements ISessionManager {
       managedModel: managed.model,
     })
     const connection = backendContext.connection
+    const apiKeyFingerprint = await this.resolveApiKeyFingerprint(connection?.slug)
     const sigInput = {
       connection,
       provider: backendContext.provider,
       authType: backendContext.authType,
       resolvedModel: backendContext.resolvedModel,
+      apiKeyFingerprint,
     }
     const runtimeSignature = buildBackendRuntimeSignature(sigInput)
     const restartSignature = buildRestartRequiredSignature(sigInput)
@@ -3878,7 +4020,7 @@ export class SessionManager implements ISessionManager {
       // If mcpServerConfigs is explicitly set (spawned session with isolation), use those directly
       let mcpServers: Record<string, import('@craft-agent/shared/agent/backend').SdkMcpServerConfig>
       let apiServers: Record<string, import('@craft-agent/shared/mcp').ApiServerConfig>
-      let enabledSlugs = managed.enabledSourceSlugs || []
+      let enabledSlugs = this.resolveSessionSourceSlugs(managed)
       let enabledSources: import('@craft-agent/shared/sources').LoadedSource[] = []
 
       if (managed.mcpServerConfigs && Object.keys(managed.mcpServerConfigs).length > 0) {
@@ -4490,6 +4632,12 @@ export class SessionManager implements ISessionManager {
         rememberForMinutes?: number;
         commandHash?: string;
         approvalTtlSeconds?: number;
+        sourceSlug?: string;
+        sourceName?: string;
+        sourceRisk?: 'low' | 'medium' | 'high' | 'critical';
+        requiredPermission?: string;
+        dataScope?: string;
+        isAuthorizationRequest?: boolean;
       }) => {
         sessionLog.info(`Permission request for session ${managed.id}:`, request.command)
         let brokerMetadata: {
@@ -4519,6 +4667,8 @@ export class SessionManager implements ISessionManager {
           sessionId: managed.id,
           type: request.type,
           commandHash: effectiveCommandHash,
+          toolName: request.toolName,
+          sourceSlug: request.sourceSlug,
         })
 
         if (request.type === 'admin_approval' && effectiveCommandHash && this.hasActiveAdminRememberApproval(managed.id, effectiveCommandHash)) {
@@ -5089,32 +5239,6 @@ ${request.prompt}`;
             platform: args.platform,
           })
         },
-        activateSourceInSessionFn: async (sourceSlug: string) => {
-          const cb = managed.agent?.onSourceActivationRequest
-          if (!cb) {
-            return { ok: false, reason: 'Agent has no activation callback wired' }
-          }
-          const ok = await cb(sourceSlug)
-          if (!ok) {
-            return {
-              ok: false,
-              reason: 'Activation failed — source may be unusable (disabled/unauthenticated) or server build failed. Check session logs.',
-            }
-          }
-          // Both backends need the current turn to end before new tools are visible:
-          // Claude SDK freezes mcpServers at query() start; Pi only picks up new proxy
-          // tool defs on the next handlePrompt (`toolsChanged` flag in pi-agent-server).
-          // Mark a pending restart on the agent — ClaudeAgent/PiAgent consume it after
-          // the next tool_result, yield source_activated, and forceAbort. The
-          // `source_activated` handler in this class then schedules a server-side
-          // resend of the original user message with a "[{slug} activated]" suffix —
-          // landing in a fresh turn with tools live (craft-agents-oss#804).
-          const userMessage = managed.agent?.getCurrentTurnUserMessage?.() ?? ''
-          if (userMessage) {
-            managed.agent?.setPendingSourceActivationRestart({ sourceSlug, userMessage })
-          }
-          return { ok: true, availability: 'next-turn' as const }
-        },
       })
 
       // WS2 keep-alive: forward background task events that arrive BETWEEN turns
@@ -5126,91 +5250,6 @@ ${request.prompt}`;
       managed.agent.setBackgroundEventSink?.((event: AgentEvent) => {
         void this.processEvent(managed, event)
       })
-
-      // Wire up onSourceActivationRequest to auto-enable sources when agent tries to use them
-      managed.agent.onSourceActivationRequest = async (sourceSlug: string): Promise<boolean> => {
-        sessionLog.info(`Source activation request for session ${managed.id}:`, sourceSlug)
-
-        const workspaceRootPath = managed.workspace.rootPath
-
-        // Check if source is already enabled
-        if (managed.enabledSourceSlugs?.includes(sourceSlug)) {
-          sessionLog.info(`Source ${sourceSlug} already in enabledSourceSlugs, checking server status`)
-          // Source is in the list but server might not be active (e.g., build failed previously)
-        }
-
-        // Load the source to check if it exists and is ready
-        const sources = getSourcesBySlugs(workspaceRootPath, [sourceSlug])
-        if (sources.length === 0) {
-          sessionLog.warn(`Source ${sourceSlug} not found in workspace`)
-          return false
-        }
-
-        const source = sources[0]
-
-        // Check if source is usable (enabled and authenticated if auth is required)
-        if (!isSourceUsable(source)) {
-          sessionLog.warn(`Source ${sourceSlug} is not usable (disabled or requires authentication)`)
-          return false
-        }
-
-        // Track whether we added this slug (for rollback on failure)
-        const slugSet = new Set(managed.enabledSourceSlugs || [])
-        const wasAlreadyEnabled = slugSet.has(sourceSlug)
-
-        // Add to enabled sources if not already there
-        if (!wasAlreadyEnabled) {
-          slugSet.add(sourceSlug)
-          managed.enabledSourceSlugs = Array.from(slugSet)
-          sessionLog.info(`Added source ${sourceSlug} to session enabled sources`)
-        }
-
-        // Build server configs for all enabled sources
-        const allEnabledSources = getSourcesBySlugs(workspaceRootPath, managed.enabledSourceSlugs || [])
-        // Pass session path so large API responses can be saved to session folder
-        const sessionPath = getSessionStoragePath(workspaceRootPath, managed.id)
-        const { mcpServers, apiServers, errors } = await buildServersFromSources(allEnabledSources, sessionPath, managed.tokenRefreshManager, managed.agent?.getSummarizeCallback())
-
-        if (errors.length > 0) {
-          sessionLog.warn(`Source build errors during auto-enable:`, errors)
-        }
-
-        // Check if our target source was built successfully
-        const sourceBuilt = sourceSlug in mcpServers || sourceSlug in apiServers
-        if (!sourceBuilt) {
-          sessionLog.warn(`Source ${sourceSlug} failed to build`)
-          // Only remove if WE added it (not if it was already there)
-          if (!wasAlreadyEnabled) {
-            slugSet.delete(sourceSlug)
-            managed.enabledSourceSlugs = Array.from(slugSet)
-          }
-          return false
-        }
-
-        // Apply source servers to the agent
-        const intendedSlugs = allEnabledSources
-          .filter(isSourceUsable)
-          .map(s => s.config.slug)
-
-        // Update bridge-mcp-server config/credentials for backends that need it
-        await applyBridgeUpdates(managed.agent!, sessionPath, allEnabledSources, mcpServers, managed.id, workspaceRootPath, 'source enable', managed.poolServer?.url)
-
-        await managed.agent!.setSourceServers(mcpServers, apiServers, intendedSlugs)
-
-        sessionLog.info(`Auto-enabled source ${sourceSlug} for session ${managed.id}`)
-
-        // Persist session with updated enabled sources
-        this.persistSession(managed)
-
-        // Notify renderer of source change
-        this.sendEvent({
-          type: 'sources_changed',
-          sessionId: managed.id,
-          enabledSourceSlugs: managed.enabledSourceSlugs || [],
-        }, managed.workspace.id)
-
-        return true
-      }
 
       // NOTE: Source reloading is now handled by ConfigWatcher callbacks
       // which detect filesystem changes and update all affected sessions.
@@ -5637,24 +5676,178 @@ ${request.prompt}`;
   // ============================================
 
   /**
-   * Update session's enabled sources
-   * If agent exists, builds and applies servers immediately.
-   * Otherwise, servers will be built fresh on next message.
+   * Update the user's source-picker selection (本次范围约束，不影响长期授权).
+   * If a turn is running, apply the change after it ends so its tools/connections stay stable.
+   *
+   * @param sourceScope 'auto' = 已授权源中由 Agent 自主；'only' = 仅这些；'exclude' = 排除这些。
+   * 旧会话兼容：scope 缺省时，已存在 enabledSourceSlugs 视为 'only'，否则 'auto'。
    */
-  async setSessionSources(sessionId: string, sourceSlugs: string[]): Promise<void> {
+  async setSessionSources(sessionId: string, sourceSlugs: string[], sourceScope?: 'auto' | 'only' | 'exclude'): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
       throw new Error(`Session not found: ${sessionId}`)
     }
 
-    const workspaceRootPath = managed.workspace.rootPath
-    sessionLog.info(`Setting sources for session ${sessionId}:`, sourceSlugs)
+    sessionLog.info(`Setting sources for session ${sessionId} (scope=${sourceScope ?? managed.sourceScope ?? 'auto'}):`, sourceSlugs)
 
-    // Clean up credential cache for sources being disabled (security)
-    // This removes decrypted tokens from disk when sources are no longer active
     const previousSlugs = new Set(managed.enabledSourceSlugs || [])
     const newSlugs = new Set(sourceSlugs)
-    const disabledSlugs = [...previousSlugs].filter(prevSlug => !newSlugs.has(prevSlug))
+    const disabledSlugs = [...previousSlugs].filter(slug => !newSlugs.has(slug))
+
+    // This is the user's picker state, not a report of every runtime source.
+    // Persist and send it immediately; only tool-pool reconciliation is deferred.
+    managed.enabledSourceSlugs = [...sourceSlugs]
+    if (sourceScope) {
+      managed.sourceScope = sourceScope
+    } else if (managed.sourceScope === undefined) {
+      // 新/旧会话兼容：有选择 → only；无（空/缺省）→ auto
+      managed.sourceScope = sourceSlugs.length > 0 ? 'only' : 'auto'
+    }
+    managed.sourceSelectionVersion = (managed.sourceSelectionVersion ?? 0) + 1
+
+    if (managed.agent && managed.isProcessing) {
+      managed.pendingSourceSync = true
+    } else if (managed.agent) {
+      await this.queueSessionSourceSync(managed)
+    } else {
+      const applied = this.resolveSessionSourceSlugs(managed)
+      if (disabledSlugs.length > 0) {
+        try {
+          await cleanupSourceRuntimeArtifacts(managed.workspace.rootPath, disabledSlugs)
+        } catch (err) {
+          sessionLog.warn(`Failed to clean up source runtime artifacts: ${err}`)
+        }
+      }
+      managed.appliedSourceSlugs = [...applied]
+    }
+
+    this.persistSession(managed)
+    this.sendEvent({
+      type: 'sources_changed',
+      sessionId,
+      enabledSourceSlugs: managed.enabledSourceSlugs,
+      sourceScope: managed.sourceScope,
+    }, managed.workspace.id)
+
+    sessionLog.info(`Session ${sessionId} sources updated: ${sourceSlugs.length} sources (scope=${managed.sourceScope})`)
+  }
+
+  /**
+   * 会话停止处理 5 分钟后断开本会话 MCP 连接（保留 agent/pool 对象）。
+   * 下一轮 sendMessage 的 hasSources 分支会重新 sync 连接；
+   * 活动开始（sendMessage）会取消本计时器。
+   */
+  private scheduleMcpIdleDisconnect(managed: ManagedSession): void {
+    if (managed.mcpIdleDisconnectTimer) clearTimeout(managed.mcpIdleDisconnectTimer)
+    managed.mcpIdleDisconnectTimer = setTimeout(async () => {
+      managed.mcpIdleDisconnectTimer = undefined
+      const m = this.sessions.get(managed.id)
+      if (!m || m.isProcessing || !m.mcpPool) return
+      try {
+        await m.mcpPool.disconnectAll()
+        sessionLog.info(`Idle MCP connections released for session ${m.id}`)
+      } catch (err) {
+        sessionLog.warn(`Idle MCP disconnect failed for ${m.id}: ${err}`)
+      }
+    }, 5 * 60 * 1000)
+    managed.mcpIdleDisconnectTimer.unref?.()
+  }
+
+  /**
+   * 解析本次会话范围内应启用的来源 slug：
+   * - auto：全部已授权（enabled + 已鉴权）源，Agent 自主选择
+   * - only：已授权 ∩ 用户选择
+   * - exclude：已授权 − 用户排除
+   * 旧会话兼容：无 sourceScope 且有选择 → only；否则 auto。
+   */
+  private resolveSessionSourceSlugs(managed: ManagedSession): string[] {
+    const scope = managed.sourceScope ?? (managed.enabledSourceSlugs && managed.enabledSourceSlugs.length > 0 ? 'only' : 'auto')
+    const authorized = loadWorkspaceSources(managed.workspace.rootPath)
+      .filter(isSourceUsable)
+      .map(s => s.config.slug)
+    const selected = managed.enabledSourceSlugs ?? []
+    if (scope === 'only') return selected.filter(slug => authorized.includes(slug))
+    if (scope === 'exclude') return authorized.filter(slug => !selected.includes(slug))
+    return authorized
+  }
+
+  private queueSessionSourceSync(managed: ManagedSession): Promise<void> {
+    const next = (managed.sourceSyncPromise ?? Promise.resolve())
+      .catch((error) => sessionLog.warn(`Prior source sync failed for ${managed.id}: ${error}`))
+      .then(() => this.syncSessionSources(managed))
+    managed.sourceSyncPromise = next
+    const clear = () => {
+      if (managed.sourceSyncPromise === next) managed.sourceSyncPromise = undefined
+    }
+    void next.then(clear, clear)
+    return next
+  }
+
+  private async flushPendingSessionSources(managed: ManagedSession): Promise<void> {
+    while (managed.pendingSourceSync || managed.sourceSyncPromise) {
+      if (managed.isProcessing) return
+      if (managed.pendingSourceSync && !managed.sourceSyncPromise) {
+        managed.pendingSourceSync = false
+        void this.queueSessionSourceSync(managed)
+      }
+      const sync = managed.sourceSyncPromise
+      if (!sync) continue
+      try {
+        await sync
+      } catch (error) {
+        managed.pendingSourceSync = true
+        throw error
+      }
+    }
+  }
+
+  /** Apply the user's selected sources to the live agent and pool. */
+  private async syncSessionSources(managed: ManagedSession): Promise<void> {
+    const workspaceRootPath = managed.workspace.rootPath
+    const selectionVersion = managed.sourceSelectionVersion ?? 0
+    const sourceSlugs = this.resolveSessionSourceSlugs(managed)
+    const disabledSlugs = (managed.appliedSourceSlugs ?? []).filter(slug => !sourceSlugs.includes(slug))
+
+    if (!managed.agent) {
+      managed.appliedSourceSlugs = [...sourceSlugs]
+      return
+    }
+    if (managed.isProcessing || selectionVersion !== managed.sourceSelectionVersion) {
+      managed.pendingSourceSync = true
+      return
+    }
+
+    const sessionPath = getSessionStoragePath(workspaceRootPath, managed.id)
+    const sources = getSourcesBySlugs(workspaceRootPath, sourceSlugs)
+    const { mcpServers, apiServers, errors } = await buildServersFromSources(
+      sources,
+      sessionPath,
+      managed.tokenRefreshManager,
+      managed.agent.getSummarizeCallback(),
+    )
+    if (errors.length > 0) sessionLog.warn(`Source build errors:`, errors)
+
+    // The turn may have started, or the user may have changed their selection,
+    // while connections were being built. Never let a stale async build replace
+    // the running turn's snapshot or a newer picker choice.
+    if (managed.isProcessing || selectionVersion !== managed.sourceSelectionVersion) {
+      managed.pendingSourceSync = true
+      return
+    }
+
+    const allSources = loadAllSources(workspaceRootPath)
+    managed.agent.setAllSources(allSources)
+    const usableSources = sources.filter(isSourceUsable)
+    const intendedSlugs = usableSources.map(s => s.config.slug)
+
+    await applyBridgeUpdates(managed.agent, sessionPath, usableSources, mcpServers, managed.id, workspaceRootPath, 'source config change', managed.poolServer?.url)
+    if (managed.isProcessing || selectionVersion !== managed.sourceSelectionVersion) {
+      managed.pendingSourceSync = true
+      return
+    }
+
+    await managed.agent.setSourceServers(mcpServers, apiServers, intendedSlugs)
+    managed.appliedSourceSlugs = [...sourceSlugs]
     if (disabledSlugs.length > 0) {
       try {
         await cleanupSourceRuntimeArtifacts(workspaceRootPath, disabledSlugs)
@@ -5662,47 +5855,8 @@ ${request.prompt}`;
         sessionLog.warn(`Failed to clean up source runtime artifacts: ${err}`)
       }
     }
-
-    // Store the selection
-    managed.enabledSourceSlugs = sourceSlugs
-
-    // If agent exists, build and apply servers immediately
-    if (managed.agent) {
-      const sources = getSourcesBySlugs(workspaceRootPath, sourceSlugs)
-      // Pass session path so large API responses can be saved to session folder
-      const sessionPath = getSessionStoragePath(workspaceRootPath, sessionId)
-      const { mcpServers, apiServers, errors } = await buildServersFromSources(sources, sessionPath, managed.tokenRefreshManager, managed.agent.getSummarizeCallback())
-      if (errors.length > 0) {
-        sessionLog.warn(`Source build errors:`, errors)
-      }
-
-      // Set all sources for context (agent sees full list with descriptions, including built-ins)
-      const allSources = loadAllSources(workspaceRootPath)
-      managed.agent.setAllSources(allSources)
-
-      // Set active source servers (tools are only available from these)
-      const intendedSlugs = sources.filter(isSourceUsable).map(s => s.config.slug)
-
-      // Update bridge-mcp-server config/credentials for backends that need it
-      const usableSources = sources.filter(isSourceUsable)
-      await applyBridgeUpdates(managed.agent, sessionPath, usableSources, mcpServers, managed.id, workspaceRootPath, 'source config change', managed.poolServer?.url)
-
-      await managed.agent.setSourceServers(mcpServers, apiServers, intendedSlugs)
-
-      sessionLog.info(`Applied ${Object.keys(mcpServers).length} MCP + ${Object.keys(apiServers).length} API sources to active agent (${allSources.length} total)`)
-    }
-
-    // Persist the session with updated sources
-    this.persistSession(managed)
-
-    // Notify renderer of the source change
-    this.sendEvent({
-      type: 'sources_changed',
-      sessionId,
-      enabledSourceSlugs: sourceSlugs,
-    }, managed.workspace.id)
-
-    sessionLog.info(`Session ${sessionId} sources updated: ${sourceSlugs.length} sources`)
+    managed.pendingSourceSync = selectionVersion !== managed.sourceSelectionVersion
+    sessionLog.info(`Applied ${Object.keys(mcpServers).length} MCP + ${Object.keys(apiServers).length} API sources to active agent (${allSources.length} total)`)
   }
 
   /**
@@ -6474,13 +6628,6 @@ ${request.prompt}`;
       })
     }
 
-    // Cancel any pending source-activation auto-retry timer (craft-agents-oss#804).
-    if (managed.autoRetryTimer) {
-      clearTimeout(managed.autoRetryTimer)
-      managed.autoRetryTimer = undefined
-    }
-    managed.autoRetryPending = undefined
-
     this.sessions.delete(sessionId)
 
     // Clean up session metadata in AutomationSystem (prevents memory leak)
@@ -6715,6 +6862,33 @@ ${request.prompt}`;
     if (!managed) {
       throw new Error(`Session ${sessionId} not found`)
     }
+
+    const ownsSourceStartup = !managed.isProcessing && !managed.sourceTurnStarting
+    if (ownsSourceStartup) {
+      managed.sourceTurnStarting = true
+      // 用户消息 = 会话活动：取消空闲断开计时器
+      if (managed.mcpIdleDisconnectTimer) {
+        clearTimeout(managed.mcpIdleDisconnectTimer)
+        managed.mcpIdleDisconnectTimer = undefined
+      }
+    }
+    const duringSourceStartup = async <T>(work: Promise<T>): Promise<T> => {
+      try {
+        return await work
+      } catch (error) {
+        if (ownsSourceStartup && managed.sourceTurnStarting && !managed.isProcessing) {
+          managed.sourceTurnStarting = false
+          managed.processingSourceSlugs = undefined
+          if (managed.pendingSourceSync) {
+            void this.flushPendingSessionSources(managed).catch(syncError => {
+              sessionLog.error(`Failed to flush source selection after send preparation failed for ${sessionId}:`, syncError)
+            })
+          }
+        }
+        throw error
+      }
+    }
+
     // A message composed on the desktop client means the user is now driving
     // from the desktop, not a bound mobile/chat channel — so this turn must not
     // inherit a stale `mobileEngaged` flag from an earlier phone message (which
@@ -6725,26 +6899,16 @@ ${request.prompt}`;
     }
     this.setLastMessageClientId(sessionId, rpcContext?.callerClientId)
 
-    // Source-activation auto-retry dedup (craft-agents-oss#804). When the server
-    // has just scheduled or committed a "[<slug> activated]" retry, drop a matching
-    // duplicate that arrives from a legacy renderer still running the client-side
-    // auto_retry. The first matching caller wins (server timer or legacy RPC,
-    // whichever arrives first), subsequent matching calls within the deadline drop.
-    if (claimAutoRetryPending(managed, message) === 'drop') {
-      sessionLog.info(`sendMessage: dropped duplicate source-activation retry for ${sessionId}`)
-      return
-    }
-
     // Clear any pending plan execution state when a new user message is sent.
     // This acts as a safety valve - if the user moves on, we don't want to
     // auto-execute an old plan later.
-    await clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
+    await duringSourceStartup(clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId))
 
     // Ensure messages are loaded before we try to add new ones
-    await this.ensureMessagesLoaded(managed)
+    await duringSourceStartup(this.ensureMessagesLoaded(managed))
 
     if (attachments?.length && (!storedAttachments || storedAttachments.length === 0)) {
-      const persisted = await this.persistTransientAttachments(managed, sessionId, attachments)
+      const persisted = await duringSourceStartup(this.persistTransientAttachments(managed, sessionId, attachments))
       attachments = persisted.attachments.length > 0 ? persisted.attachments : undefined
       storedAttachments = persisted.storedAttachments.length > 0 ? persisted.storedAttachments : undefined
     }
@@ -6798,16 +6962,18 @@ ${request.prompt}`;
     // - 'queue': hold the message untouched; the current turn keeps running
     //   to natural completion; replay as a new turn afterwards. NO call to
     //   `agent.redirect()`, NO forceAbort, NO interruption.
-    if (managed.isProcessing) {
+    if (managed.isProcessing || managed.sourceTurnStarting && !ownsSourceStartup) {
       const connection = resolveSessionConnection(managed.llmConnection, undefined)
       // Per-send override wins over the connection default. Desktop submits
       // busy-session messages as queue by default, while messaging channels
       // submit them as steer/guidance by default.
       // Fallback to 'steer' when no connection is resolvable — preserves
       // today's exact behavior (call redirect, take whatever it returns).
-      const behavior = options?.midStreamBehavior === 'queue' || options?.midStreamBehavior === 'steer'
-        ? options.midStreamBehavior
-        : connection ? resolveMidStreamBehavior(connection) : 'steer'
+      const behavior = options?.midStreamBehavior === 'queue' || managed.sourceTurnStarting && !ownsSourceStartup
+        ? 'queue'
+        : options?.midStreamBehavior === 'steer'
+          ? 'steer'
+          : connection ? resolveMidStreamBehavior(connection) : 'steer'
 
       const agent = managed.agent
 
@@ -7001,6 +7167,10 @@ ${request.prompt}`;
 
     managed.lastMessageAt = Date.now()
     this.setProcessing(managed, true)
+    managed.sourceTurnStarting = false
+    // 快照初始化：已应用集优先；从未应用过（全新 auto 会话）→ 按授权范围 resolve，
+    // 避免空数组([])吃掉“全部授权源”的默认语义（用户手动 only+空选择仍尊重 applied=[]）。
+    managed.processingSourceSlugs = [...(managed.processingSourceSlugs ?? managed.appliedSourceSlugs ?? this.resolveSessionSourceSlugs(managed))]
     managed.currentRunStartedAt = Date.now()
     managed.streamingText = ''
     managed.streamingTurnId = undefined
@@ -7050,69 +7220,19 @@ ${request.prompt}`;
     // This prevents the finally block from clobbering state when a follow-up message arrives.
     const myGeneration = managed.processingGeneration
 
-    // Pre-enable sources required by invoked skills (Issue #249)
-    // This eliminates the two-turn penalty where the agent discovers missing sources at runtime.
-    // Uses targeted loadSkillBySlug() instead of loadAllSkills() to avoid O(N) filesystem scans.
-    if (options?.skillSlugs?.length) {
-      try {
-        const workspaceRoot = managed.workspace.rootPath
-
-        const requiredSources = new Set<string>()
-        for (const slug of options.skillSlugs) {
-          const skill = loadSkillBySlug(workspaceRoot, slug, managed.workingDirectory)
-          if (skill?.metadata.requiredSources) {
-            for (const src of skill.metadata.requiredSources) {
-              requiredSources.add(src)
-            }
-          }
-        }
-
-        if (requiredSources.size > 0) {
-          const currentSlugs = new Set(managed.enabledSourceSlugs || [])
-          const toEnable: string[] = []
-          const skipped: string[] = []
-          const candidateSlugs = Array.from(requiredSources)
-          const loadedSources = getSourcesBySlugs(workspaceRoot, candidateSlugs)
-          const usableSources = new Set(
-            loadedSources
-              .filter(isSourceUsable)
-              .map(source => source.config.slug)
-          )
-
-          for (const srcSlug of candidateSlugs) {
-            if (currentSlugs.has(srcSlug)) continue
-            if (usableSources.has(srcSlug)) {
-              toEnable.push(srcSlug)
-            } else {
-              skipped.push(srcSlug)
-            }
-          }
-
-          if (skipped.length > 0) {
-            sessionLog.warn(`Skill requires sources that are not usable (missing or unauthenticated): ${skipped.join(', ')}`)
-          }
-
-          if (toEnable.length > 0) {
-            managed.enabledSourceSlugs = [...(managed.enabledSourceSlugs || []), ...toEnable]
-            sessionLog.info(`Pre-enabled sources for skill invocation: ${toEnable.join(', ')}`)
-            this.persistSession(managed)
-            this.sendEvent({
-              type: 'sources_changed',
-              sessionId,
-              enabledSourceSlugs: managed.enabledSourceSlugs,
-            }, managed.workspace.id)
-          }
-        }
-      } catch (e) {
-        sessionLog.warn(`Failed to pre-enable skill sources for session ${sessionId}:`, e)
-      }
-    }
-
     // Start perf span for entire sendMessage flow
     const sendSpan = perf.span('session.sendMessage', { sessionId })
 
     const workspaceRootPath = managed.workspace.rootPath
-    const enabledSlugs = managed.enabledSourceSlugs ?? []
+    if (ownsSourceStartup) {
+      await duringSourceStartup(this.flushPendingSessionSources(managed))
+      // 与 setProcessing 处同源：applied 未初始化（auto 首轮）→ resolve 授权源；
+      // flush 之后 applied 可能已更新，优先采用最新 applied。
+      managed.processingSourceSlugs = [...(managed.processingSourceSlugs && managed.processingSourceSlugs.length > 0
+        ? managed.processingSourceSlugs
+        : managed.appliedSourceSlugs ?? this.resolveSessionSourceSlugs(managed))]
+    }
+    const enabledSlugs = [...(managed.processingSourceSlugs ?? managed.appliedSourceSlugs ?? this.resolveSessionSourceSlugs(managed))]
     const hasSources = enabledSlugs.length > 0
 
     // Load enabled sources up-front so we can refresh tokens BEFORE getOrCreateAgent
@@ -7159,6 +7279,7 @@ ${request.prompt}`;
         const usableSources = sources.filter(isSourceUsable)
         const intendedSlugs = usableSources.map(s => s.config.slug)
         await agent.setSourceServers(mcpServers, apiServers, intendedSlugs)
+        managed.appliedSourceSlugs = [...enabledSlugs]
         await applyBridgeUpdates(agent, sessionPath, usableSources, mcpServers, sessionId, workspaceRootPath, 'send message', managed.poolServer?.url)
         sessionLog.info(`Applied ${mcpCount} MCP + ${apiCount} API sources to session ${sessionId} (${allSources.length} total)`)
       }
@@ -7203,7 +7324,15 @@ ${request.prompt}`;
           effectiveMessage = `${effectiveMessage}\n\n<system-reminder>This message arrived from the ${options.platform} messaging channel. ${platformHint}</system-reminder>`
         }
       }
-      if (managed.wasInterrupted) {
+      if (managed.abnormalTurnEnd) {
+        // 2026-10-07 (session 261007-focal-twilight): the previous turn died on an
+        // error (stall / model failure / exhausted retries). The user's follow-up
+        // — even a minimal one like "." — is guidance for the SAME interrupted
+        // request, so steer the model toward finishing it instead of treating
+        // the message in isolation.
+        effectiveMessage = `${effectiveMessage}\n\n<system-reminder>The previous turn ended in an error and the user's request may not have been fully answered. The new message above is the user's follow-up to that SAME interrupted request — treat it as guidance for completing it: first finish what was left undone (if the new message adds no new requirements, continue the original request). Only switch topics if the user clearly started a new one.</system-reminder>`
+        managed.abnormalTurnEnd = false
+      } else if (managed.wasInterrupted) {
         effectiveMessage = `${effectiveMessage}\n\n<system-reminder>The previous assistant response was interrupted by the user and may be incomplete. Do not repeat or continue the interrupted response unless asked. Focus on the new message above.</system-reminder>`
         managed.wasInterrupted = false
       }
@@ -7297,13 +7426,21 @@ ${request.prompt}`;
           // If the last user message is newer than any assistant response, we got no reply
           // This can happen due to context overflow or API issues
           if (lastUserMsg && (!lastAssistantMsg || lastUserMsg.timestamp > lastAssistantMsg.timestamp)) {
+            // NOTE: a system guardrail stop (busy-limit cap / no-progress streak)
+            // also lands here; that case already emitted a `system_stop_notice`
+            // event with the real reason — the generic text below is only the
+            // fallback when no specific cause is known.
             sessionLog.warn(`Session ${sessionId} completed without assistant response - possible context overflow or API issue`)
 
             // Check if there's a captured API error that explains the silent failure.
             // Pass explicit session path to avoid reading from the wrong session
             // (_sessionDir singleton can be clobbered by concurrent sessions).
             const sessionErrorPath = getSessionStoragePath(managed.workspace.rootPath, managed.id)
-            const apiError = getLastApiError(sessionErrorPath)
+            // Prefer the DURABLE per-session history: it survives the
+            // retry-ladder backoff window (no 5-minute staleness drop) and
+            // cannot be stolen by a probe's consume-on-read of the
+            // single-slot file. The consuming pop is only a last resort.
+            const apiError = getLastErrorFromHistory(sessionErrorPath) ?? getLastApiError(sessionErrorPath)
 
             if (apiError) {
               const isImageError = apiError.message?.includes('image exceeds')
@@ -7505,6 +7642,18 @@ ${request.prompt}`;
       if (guidanceMessage) {
         guidanceMessage.isQueued = false
         guidanceMessage.isGuidance = true
+        // Position the in-card guidance ROW at the moment the user actually
+        // guided (this 引导 click) — not the earlier queue/send time
+        // (2026-10-07 plain-jade): the user sends into the queue while the
+        // agent works, new steps appear, and only THEN clicks 引导; the row
+        // must land BELOW the steps that were visible at the click.
+        // `timestamp` keeps its meaning (queue/send time — bubble display);
+        // `startedAt` drives the card row ordering (`startedAt ?? timestamp`).
+        guidanceMessage.startedAt = this.monotonic()
+        // The row will be RE-stamped to the drain moment when the spliced
+        // steer user message actually enters the agent's context
+        // (steer_injected → "actual handling time", plain-jade).
+        managed.steerDrainPendingFor = guidanceMessage.id
       }
       this.sendEvent({
         type: 'user_message',
@@ -7514,6 +7663,7 @@ ${request.prompt}`;
           role: 'user',
           content: queued.message,
           timestamp: this.monotonic(),
+          startedAt: this.monotonic(),
           isGuidance: true,
         },
         status: 'accepted',
@@ -7578,12 +7728,9 @@ ${request.prompt}`;
     // telling the LLM the previous response was cut short
     managed.wasInterrupted = true
 
-    // Mark the in-flight assistant message as aborted. Turn grouping must never
-    // promote the last intermediate ("thinking") text to a final reply — an
-    // interrupted turn has no result. Both the Stop button and the silent
-    // mid-stream redirect pass through here, so this is the single place that
-    // can record the abort; doing it server-side also means the decision
-    // survives an app reload (persistSession snapshots the full message list).
+    // Persist an abort marker on the in-flight assistant message. This records
+    // the abandoned turn for restart recovery, defense evaluation and downstream
+    // delivery suppression. Stop and silent mid-stream redirect share this path.
     for (let i = managed.messages.length - 1; i >= 0; i--) {
       const msg = managed.messages[i]!
       if (msg.role !== 'assistant') continue
@@ -7788,8 +7935,23 @@ ${request.prompt}`;
 
     // 1. Cleanup state
     this.setProcessing(managed, false)
+    managed.sourceTurnStarting = false
     managed.currentRunStartedAt = undefined
+    managed.processingSourceSlugs = undefined
     managed.stopRequested = false  // Reset for next turn
+
+    // Apply the latest picker state only after the old turn is over, and before
+    // any queued user message is allowed to start.
+    try {
+      await this.flushPendingSessionSources(managed)
+    } catch (error) {
+      sessionLog.error(`Failed to apply deferred source selection for ${sessionId}:`, error)
+    }
+
+    // 空闲释放：单 writer 型 MCP（如 codegraph）按会话常驻时，其他会话无法并发连接。
+    // 会话停止处理 5 分钟后断开本会话 MCP 连接（guide 预期“空闲时 0 常驻”）；
+    // 下一轮消息发送时 hasSources 分支会重新 sync 连接。
+    this.scheduleMcpIdleDisconnect(managed)
 
     // Clear any per-send permission-mode override applied for the turn that
     // just finished. The persisted/diagnostics mode is untouched — this only
@@ -8280,7 +8442,35 @@ ${request.prompt}`;
         }
       }
 
-      sessionLog.info(`Permission response for ${requestId}: allowed=${allowed}, alwaysAllow=${alwaysAllow}`)
+      // 来源工具级策略（评审 #1/#5）：按工具粒度落库，绝不放大到整源
+      const sourcePermission = options?.sourcePermission
+      const toolName = requestMeta?.toolName
+      const sourceSlug = requestMeta?.sourceSlug
+      if (sourcePermission && toolName && sourceSlug && (sourcePermission === 'always' || sourcePermission === 'deny-permanent')) {
+        try {
+          const config = loadSourceConfig(managed.workspace.rootPath, sourceSlug)
+          if (config) {
+            config.sourceToolPolicies = {
+              ...(config.sourceToolPolicies ?? {}),
+              [toolName]: sourcePermission === 'always' ? 'auto' : 'deny',
+            }
+            saveSourceConfig(managed.workspace.rootPath, config)
+            // 让运行层立即感知（pre-tool gate / ask 管线读取最新策略）
+            managed.agent.setAllSources(loadAllSources(managed.workspace.rootPath))
+            sessionLog.info(`Persisted tool-level source policy: ${toolName} -> ${sourcePermission === 'always' ? 'auto' : 'deny'} (${sourceSlug})`)
+          }
+        } catch (err) {
+          sessionLog.warn(`Failed to persist source tool policy for ${toolName}: ${err}`)
+        }
+      } else if (sourcePermission === 'deny' && toolName) {
+        // 本会话禁止：加入 session deny 集合，后续调用直接 block（不再询问）
+        const denied = new Set(managed.agent.getSourceSessionDeny())
+        denied.add(toolName)
+        managed.agent.setSourceSessionDeny([...denied])
+        sessionLog.info(`Added tool to session deny: ${toolName}`)
+      }
+
+      sessionLog.info(`Permission response for ${requestId}: allowed=${allowed}, alwaysAllow=${alwaysAllow}, sourcePermission=${sourcePermission ?? 'none'}`)
       managed.agent.respondToPermission(requestId, allowed, alwaysAllow)
 
       // Broadcast so other clients (e.g. the desktop app) drop the matching
@@ -8888,6 +9078,16 @@ ${request.prompt}`;
       case 'text_delta':
         managed.streamingText += event.text
         managed.streamingTurnId = event.turnId
+        // Record when this text block first became visible (first delta) —
+        // attached to its text_complete as `startedAt` for display ordering.
+        if (event.turnId) {
+          let starts = managed.streamStartAtByTurn
+          if (!starts) {
+            starts = new Map()
+            managed.streamStartAtByTurn = starts
+          }
+          if (!starts.has(event.turnId)) starts.set(event.turnId, this.monotonic())
+        }
         // Queue delta for batched sending (performance: reduces IPC from 50+/sec to ~20/sec)
         this.queueDelta(sessionId, workspaceId, event.text, event.turnId)
         break
@@ -8908,7 +9108,7 @@ ${request.prompt}`;
         // into the process block so the verified replay / follow-up continuation
         // is the single final bubble. Persists isIntermediate for reload.
         for (let i = managed.messages.length - 1; i >= 0; i--) {
-          const m = managed.messages[i]
+          const m = managed.messages[i]!
           if (m.role === 'assistant' && m.turnId === event.turnId && m.isIntermediate !== true) {
             managed.messages[i] = { ...m, isIntermediate: true }
             break
@@ -8919,10 +9119,124 @@ ${request.prompt}`;
         break
       }
 
-      case 'retry':
-        // Retry progress is transient; do not persist it as transcript history.
+      case 'retry': {
+        // 2026-10-08: the retry ladder's process-block line is PERSISTED as a
+        // status row (statusType 'retrying' + structured `retry` payload) so
+        // it survives session switches and app restarts with its final state
+        // (重试中 / 重试成功 / 重试失败). One row per ladder: created on the
+        // first backoff, updated in place on backoff/active, settled in place
+        // on end. Its timestamp anchors the ladder start, keeping it BEFORE
+        // any retried-run messages that follow (chronological position).
+        const now = Date.now()
+        // Cold-start guard: a synchronous persistSession() below must not
+        // hydrate the disk snapshot OVER a row we are about to create — if
+        // the session was never loaded, load it first (hydrate is idempotent
+        // on messagesLoaded).
+        if (!managed.messagesLoaded) {
+          this.hydrateMessagesForColdPersist(managed)
+        }
+        // Only the row of the CURRENT turn may be updated in place — a row
+        // left behind by a previous settled turn must not be recycled.
+        const retryIdx = findActiveRetryRowIndex(managed.messages)
+        const prevRow = retryIdx !== -1 ? managed.messages[retryIdx]!.retry : undefined
+        const nextPayload = nextRetryRowPayload(event, prevRow, now)
+        if (retryIdx !== -1) {
+          managed.messages[retryIdx] = { ...managed.messages[retryIdx]!, retry: nextPayload }
+        } else {
+          managed.messages.push({
+            id: generateMessageId(),
+            role: 'status',
+            statusType: 'retrying',
+            content: '',
+            timestamp: nextPayload.startedAt,
+            retry: nextPayload,
+          })
+        }
+        this.persistSession(managed)
+        this.sendEvent({ ...event, sessionId }, workspaceId)
+
+        // Once the ladder is past its 10s rung it surfaces a NON-terminal error
+        // card (retryPending) while it keeps retrying in the background. Settle
+        // that card when the ladder ends:
+        //   - recovered → the retry succeeded, so the card is stale: drop it.
+        //   - failed    → the ladder is done; the card becomes the turn's
+        //                 terminal error (guidance injection on the next turn).
+        if (event.phase === 'end') {
+          const recovered = event.recovered === true
+          let changed = false
+          for (let i = managed.messages.length - 1; i >= 0; i--) {
+            const m = managed.messages[i]!
+            if (m.role !== 'error' || m.retryPending !== true) continue
+            changed = true
+            if (recovered) {
+              managed.messages.splice(i, 1)
+              this.sendEvent({ type: 'message_removed', sessionId, messageId: m.id }, workspaceId)
+            } else {
+              managed.messages[i] = { ...m, retryPending: false }
+            }
+          }
+          if (changed) {
+            if (!recovered) managed.abnormalTurnEnd = true
+            this.persistSession(managed)
+          }
+        }
+        break
+      }
+
+      case 'text_promote': {
+        // Queued-follow-up re-promotion (2026-10-07, session 261007-wise-horizon):
+        // a mid-turn user steer was drained; the MAIN reply was demoted to a
+        // process-card line while the drain's answer became the sole result
+        // bubble. Flip the demoted record back to a result bubble (persist for
+        // reload) and forward so the live UI/routing layer re-attaches it.
+        // No-op when the matching record is missing or already non-intermediate
+        // (duplicate/late event).
+        const text = (event.text ?? '').trim()
+        if (text.length > 0) {
+          let flipped: { id: string } | null = null
+          for (let i = managed.messages.length - 1; i >= 0; i--) {
+            const m = managed.messages[i]!
+            if (m.role === 'assistant' && m.turnId === event.turnId && m.isIntermediate === true) {
+              managed.messages[i] = { ...m, isIntermediate: false }
+              flipped = { id: m.id }
+              break
+            }
+          }
+          if (flipped) {
+            managed.lastMessageRole = 'assistant'
+            managed.lastFinalMessageId = flipped.id
+            this.persistSession(managed)
+          }
+        }
         this.sendEvent({ ...event, sessionId }, workspaceId)
         break
+      }
+
+      case 'steer_injected': {
+        // 2026-10-07 plain-jade: the spliced steer/follow-up user message
+        // just entered the agent's context — the moment the pending
+        // guidance was ACTUALLY processed. Re-stamp the guidance's
+        // startedAt to this drain time (row position + bubble display time
+        // = "actual handling time") and re-merge it into the live state.
+        // The user_message re-emit is idempotent (renderer merges by id;
+        // the gateway only books state on user_message, never forwards it).
+        if (managed.steerDrainPendingFor) {
+          const target = managed.messages.find(m => m.id === managed.steerDrainPendingFor)
+          if (target) {
+            const reStamped = { ...target, startedAt: this.monotonic() }
+            managed.messages[managed.messages.indexOf(target)] = reStamped
+            this.persistSession(managed)
+            this.sendEvent({
+              type: 'user_message',
+              sessionId,
+              message: reStamped,
+              status: 'accepted',
+            }, workspaceId)
+          }
+          managed.steerDrainPendingFor = undefined
+        }
+        break
+      }
 
       case 'text_complete': {
         // Defense in depth: a whitespace-only text_complete is not a reply —
@@ -8937,11 +9251,23 @@ ${request.prompt}`;
         // Flush any pending deltas before sending complete (ensures renderer has all content)
         this.flushDelta(sessionId, workspaceId)
 
+        // Attach the moment this block first became visible (first delta, or
+        // the model's message_start for thinking-only blocks the adapter
+        // stamps as event.startedAt) as `startedAt` so the UI can place
+        // process-card rows in the order the user saw them — WITHOUT
+        // changing `timestamp`, which stays the completion time (bubble
+        // display, unread/lastMessage logic).
+        const streamStart =
+          event.startedAt ??
+          (event.turnId ? managed.streamStartAtByTurn?.get(event.turnId) : undefined)
+        if (event.turnId) managed.streamStartAtByTurn?.delete(event.turnId)
+
         const assistantMessage: Message = {
           id: generateMessageId(),
           role: 'assistant',
           content: event.text,
           timestamp: this.monotonic(),
+          ...(streamStart ? { startedAt: streamStart } : {}),
           isIntermediate: event.isIntermediate,
           turnId: event.turnId,
           parentToolUseId: event.parentToolUseId,
@@ -8987,7 +9313,7 @@ ${request.prompt}`;
           }
         }
 
-        this.sendEvent({ type: 'text_complete', sessionId, text: event.text, isIntermediate: event.isIntermediate, turnId: event.turnId, parentToolUseId: event.parentToolUseId, timestamp: assistantMessage.timestamp, messageId: assistantMessage.id }, workspaceId)
+        this.sendEvent({ type: 'text_complete', sessionId, text: event.text, isIntermediate: event.isIntermediate, turnId: event.turnId, parentToolUseId: event.parentToolUseId, timestamp: assistantMessage.timestamp, ...(assistantMessage.startedAt ? { startedAt: assistantMessage.startedAt } : {}), messageId: assistantMessage.id }, workspaceId)
 
         // Persist session after complete message to prevent data loss on quit
         this.persistSession(managed)
@@ -9240,23 +9566,23 @@ ${request.prompt}`;
           ? event.input
           : managed.pendingReadToolInputs?.get(event.toolUseId)) ?? existingToolMsg?.toolInput
         managed.pendingReadToolInputs?.delete(event.toolUseId)
+        const usageToolName = event.toolName || existingToolMsg?.toolName || toolName
+        const skillUsageContext = {
+          workspaceRootPath: managed.workspace.rootPath,
+          workingDirectory: managed.workingDirectory,
+        }
+        // The Read resolver first (native Read of a SKILL.md), then the
+        // command resolver (shell `cat`/`type`/`Get-Content` of a skill file).
         const readTarget = !managed.recordedUsageToolUseIds?.has(event.toolUseId)
-          ? resolveSkillReadUsageTarget(
-            event.toolName || existingToolMsg?.toolName || toolName,
-            readInput,
-            inferredError,
-            {
-              workspaceRootPath: managed.workspace.rootPath,
-              workingDirectory: managed.workingDirectory,
-            },
-          )
+          ? resolveSkillReadUsageTarget(usageToolName, readInput, inferredError, skillUsageContext)
+            ?? resolveSkillCommandUsageTarget(usageToolName, readInput, inferredError, skillUsageContext)
           : null
         if (readTarget) {
           if (!managed.recordedUsageToolUseIds) managed.recordedUsageToolUseIds = new Set()
           managed.recordedUsageToolUseIds.add(event.toolUseId)
           appendUsage({
             ...readTarget,
-            toolName: 'Read',
+            toolName: usageToolName,
             workspaceId,
             sessionId,
           })
@@ -9356,11 +9682,13 @@ ${request.prompt}`;
           message: event.message,
           statusType: event.message.includes('Compacting')
             ? 'compacting'
-            : (((event as { statusType?: string }).statusType ?? '') as '' | 'verification' | 'verification_passed' | 'verification_failed') || undefined
+            : (((event as { statusType?: string }).statusType ?? '') as '' | 'verification' | 'verification_passed' | 'verification_failed') || undefined,
+          timestamp: this.monotonic(),
         }, workspaceId)
         break
 
       case 'info': {
+        const isSystemStop = (event as { statusType?: string }).statusType === 'system_stop'
         const isCompactionComplete = event.message.startsWith('Compacted')
         const infoTimestamp = this.monotonic()
 
@@ -9389,27 +9717,44 @@ ${request.prompt}`;
           // Claude backend's ring refreshes on the next real usage event.
         }
 
+        // System-initiated stop (guardrail kill: busy-limit cap / no-progress
+        // streak): surface the reason as a dedicated event so the UI and
+        // bound messaging channels can show WHY the turn ended instead of
+        // leaving a silent stop that reads as a hung session.
+        if (isSystemStop) {
+          const stopReason = (event as { stopReason?: string }).stopReason ?? 'system_stop'
+          sessionLog.warn(`Session ${sessionId} stopped by system guardrail (${stopReason}): ${event.message}`)
+          this.sendEvent({
+            type: 'system_stop_notice',
+            sessionId,
+            reason: stopReason,
+            message: event.message,
+            timestamp: infoTimestamp,
+          }, workspaceId)
+          break
+        }
+
         const isVerificationPassed = (event as { statusType?: string }).statusType === 'verification_passed'
         const isVerificationFailed = (event as { statusType?: string }).statusType === 'verification_failed'
         const finalText = (event as { finalText?: string }).finalText
-        if (isVerificationPassed && typeof finalText === 'string') {
-          // Verification passed (2026-10-02 redesign): persist the replayed
-          // final reply as a real assistant message so it survives reload,
-          // then forward the info event (renderer folds it into the card).
-          // Inherit the draft's turnId (if this draft was demoted by
-          // text_demote in the same turn) so reload groups it into the SAME
-          // process card instead of a separate reply card.
-          const replayTurnId = [...managed.messages].reverse()
-            .find((m): m is Message => m.role === 'assistant' && m.content === finalText)?.turnId
-          const replayed: Message = {
+
+        // Persist verification outcomes alongside compaction_complete so the
+        // "验证成功/失败" card survives a session switch (2026-10-07
+        // 261007-pearl-amber: verification result vanished from the process
+        // block after switching sessions because it was a transient info
+        // event, never written to disk). Same shape as the compaction message.
+        if (isVerificationPassed || isVerificationFailed) {
+          const verificationMessage: Message = {
             id: generateMessageId(),
-            role: 'assistant',
-            content: finalText,
+            role: 'info',
+            content: event.message,
             timestamp: infoTimestamp,
-            ...(replayTurnId ? { turnId: replayTurnId } : {}),
+            statusType: isVerificationPassed ? 'verification_passed' : 'verification_failed',
+            infoLevel: isVerificationPassed ? 'success' : 'warning',
           }
-          managed.messages.push(replayed)
+          managed.messages.push(verificationMessage)
         }
+
         this.sendEvent({
           type: 'info',
           sessionId,
@@ -9452,14 +9797,37 @@ ${request.prompt}`;
         }
 
         // AgentEvent uses `message` not `error`
+        // Unified retry ladder (2026-10-07): a TERMINAL error (not a
+        // retryPending card — those keep the turn alive in the background)
+        // means the turn died. Flag it so the next user message injects
+        // "resume the interrupted request" guidance instead of a clean start.
+        if (!event.retryPending) {
+          managed.abnormalTurnEnd = true
+          // 2026-10-08: the ladder's terminal `retry end` normally settles the
+          // persisted row; a terminal error WITHOUT it (subprocess exit,
+          // unexpected generator failure) must settle the row too.
+          this.settleStuckRetryRow(managed)
+        }
         const errorMessage: Message = {
           id: generateMessageId(),
           role: 'error',
           content: event.message,
           timestamp: this.monotonic()
         }
+        // Unified retry ladder: mark the persisted message non-terminal too.
+        errorMessage.retryPending = event.retryPending
+        errorMessage.retryAttempt = event.retryAttempt
         managed.messages.push(errorMessage)
-        this.sendEvent({ type: 'error', sessionId, error: event.message, timestamp: errorMessage.timestamp }, workspaceId)
+        this.sendEvent({
+          type: 'error',
+          sessionId,
+          error: event.message,
+          timestamp: errorMessage.timestamp,
+          // Unified retry ladder: non-terminal marker + attempt number so the
+          // renderer styles the card as "retrying" instead of terminal.
+          retryPending: event.retryPending,
+          retryAttempt: event.retryAttempt,
+        }, workspaceId)
         break
       }
 
@@ -9493,6 +9861,15 @@ ${request.prompt}`;
           break
         }
 
+        // Terminal typed error (the retryPending variant keeps the turn alive
+        // in the background retry ladder — do NOT flag those).
+        if (!event.retryPending) {
+          managed.abnormalTurnEnd = true
+          // 2026-10-08: settle the persisted retry row if the ladder ended
+          // without its terminal `retry end` event.
+          this.settleStuckRetryRow(managed)
+        }
+
         // Build rich error message with all diagnostic fields for persistence and UI display
         const typedErrorMessage: Message = {
           id: generateMessageId(),
@@ -9506,6 +9883,9 @@ ${request.prompt}`;
           errorDetails: event.error.details,
           errorOriginal: event.error.originalError,
           errorCanRetry: event.error.canRetry,
+          // Unified retry ladder: non-terminal marker + attempt number.
+          retryPending: event.retryPending,
+          retryAttempt: event.retryAttempt,
         }
         managed.messages.push(typedErrorMessage)
         // Send typed_error event with full structure for renderer to handle
@@ -9522,6 +9902,10 @@ ${request.prompt}`;
             originalError: event.error.originalError,
           },
           timestamp: typedErrorMessage.timestamp,
+          // Unified retry ladder: non-terminal marker + attempt number so the
+          // renderer styles the card as "retrying" instead of terminal.
+          retryPending: event.retryPending,
+          retryAttempt: event.retryAttempt,
         }, workspaceId)
         break
 
@@ -9707,66 +10091,62 @@ ${request.prompt}`;
         }, workspaceId)
         break
 
-      case 'source_activated': {
-        // A source was auto-activated mid-turn. The server schedules a re-send of the
-        // original message with a "[<slug> activated]" suffix so headless deployments
-        // (WebUI, docker server) chain activations the same way the renderer used to.
-        // The renderer still receives the event to render activation feedback, but no
-        // longer fires its own auto_retry (see processor.ts).
-        sessionLog.info(`Source "${event.sourceSlug}" activated for session ${sessionId}, scheduling auto-retry`)
-
-        this.sendEvent({
-          type: 'source_activated',
-          sessionId,
-          sourceSlug: event.sourceSlug,
-          originalMessage: event.originalMessage,
-        }, workspaceId)
-
-        if (!managed) break
-
-        const originalMessage = event.originalMessage ?? ''
-        if (!originalMessage.trim()) {
-          sessionLog.warn(`Source "${event.sourceSlug}" activated for session ${sessionId}, but originalMessage was empty; skipping auto-retry`)
-          break
-        }
-
-        const messageWithSuffix = `${originalMessage}\n\n[${event.sourceSlug} activated]`
-        const messageCountAtSchedule = managed.messages.length
-
-        // Stash the retry payload so a duplicate sendMessage from a legacy renderer
-        // (mixed-version rollout: new server + v0.9.5 Electron client) gets deduped.
-        // 2s window covers WS latency tail on flaky mobile / proxy links.
-        managed.autoRetryPending = {
-          content: messageWithSuffix,
-          deadlineMs: Date.now() + 2000,
-          committed: false,
-        }
-
-        if (managed.autoRetryTimer) clearTimeout(managed.autoRetryTimer)
-        managed.autoRetryTimer = setTimeout(() => {
-          const current = this.sessions.get(sessionId)
-          if (!current) return
-          current.autoRetryTimer = undefined
-
-          // If a user follow-up arrived in the 100ms window, skip — they preempted us.
-          if (current.messages.length > messageCountAtSchedule) {
-            sessionLog.info(`Auto-retry skipped for ${sessionId}: follow-up message arrived first`)
-            current.autoRetryPending = undefined
-            return
-          }
-
-          // Note: do NOT clear autoRetryPending here — sendMessage() needs to see it
-          // so a legacy renderer's duplicate RPC arriving ~50ms later gets dropped.
-          // The pending slot is cleared by the deadline check in sendMessage, by the
-          // next matching sendMessage that drops as a duplicate, or by session deletion.
-          this.sendMessage(sessionId, messageWithSuffix).catch(err => {
-            sessionLog.error(`Auto-retry sendMessage failed for ${sessionId}:`, err)
-          })
-        }, 100)
-        break
-      }
-
       case 'complete':
+        // Fail-safe for the persisted retry row: a turn that completed without
+        // the ladder's terminal `retry end` (rare paths) must not leave a
+        // spinning "重试中" row; settle it to 'failed' (the retries did not
+        // recover). No-op once the row is already terminal.
+        this.settleStuckRetryRow(managed)
+        // Clear any leftover streaming-start entries (text blocks discarded
+        // without a text_complete would otherwise linger in the map).
+        managed.streamStartAtByTurn?.clear()
+        managed.steerDrainPendingFor = undefined
+        // 2026-10-07 clever-marble: the drain re-stamp (steer_injected) lands
+        // a guidance row where the agent READ it — but with the ordered-mandate
+        // wrap, the drain round spends its reply COMPLETING THE ORIGINAL TASK
+        // first, so that stamp puts the row in the original task's card, not
+        // the card of the reply that actually answers the guidance. Pair each
+        // guidance of this run with the final reply that answers it (finals
+        // order: [original task, guidance 1, guidance 2, …]) and re-stamp the
+        // row to that reply's startedAt, so each guidance row sits in its
+        // own reply's card. Skipped pairs (model dropped a guidance reply —
+        // the wise-boulder shape) keep their drain stamp.
+        const runStart = managed.currentRunStartedAt
+        if (runStart) {
+          const finals = managed.messages
+            .filter(m => m.role === 'assistant' && m.isIntermediate === false && (m.timestamp ?? 0) >= runStart)
+            .sort((a, b) => a.timestamp - b.timestamp)
+          const guids = managed.messages
+            .filter(m => m.role === 'user' && m.isGuidance && (m.timestamp ?? 0) >= runStart)
+            .sort((a, b) => a.timestamp - b.timestamp)
+          let changed = false
+          for (let i = 0; i < guids.length; i++) {
+            const g = guids[i]!
+            const paired = finals[i + 1]
+            if (!paired) continue
+            // The row leads the round that ANSWERS this guidance: key it just
+            // after the previous final reply (rounds are ordered
+            // [original task, guidance 1, guidance 2, …]). Not the paired
+            // reply's own startedAt — the round's THINKING block starts
+            // before the reply (261007-clever-marble round 2: the user saw
+            // the "asking my name" thinking row ABOVE its guidance row). The
+            // +1 keeps the row strictly after the previous reply's sort key,
+            // so turn grouping flushes the previous card first.
+            const key = finals[i]!.timestamp + 1
+            if (g.startedAt !== key) {
+              const idx = managed.messages.indexOf(g)
+              managed.messages[idx] = { ...g, startedAt: key }
+              this.sendEvent({
+                type: 'user_message',
+                sessionId,
+                message: managed.messages[idx]!,
+                status: 'accepted',
+              }, workspaceId)
+              changed = true
+            }
+          }
+          if (changed) this.persistSession(managed)
+        }
         // Complete event from CraftAgent - accumulate usage from this turn
         // Actual 'complete' sent to renderer comes from the finally block in sendMessage
         if (event.usage) {

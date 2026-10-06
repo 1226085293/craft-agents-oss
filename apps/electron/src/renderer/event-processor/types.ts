@@ -10,6 +10,7 @@ import type { Session, SessionEvent, Message, PermissionRequest, CredentialReque
 /** Explicit SDK retry boundaries; keep their transport shape authoritative. */
 export type TextDiscardEvent = Extract<SessionEvent, { type: 'text_discard' }>
 export type TextDemoteEvent = Extract<SessionEvent, { type: 'text_demote' }>
+export type TextPromoteEvent = Extract<SessionEvent, { type: 'text_promote' }>
 export type RetryEvent = Extract<SessionEvent, { type: 'retry' }>
 
 /**
@@ -51,6 +52,8 @@ export interface TextCompleteEvent {
   parentToolUseId?: string
   /** Timestamp from main process for consistent ordering with session.jsonl */
   timestamp?: number
+  /** Streaming start time (first text_delta) for process-card ordering */
+  startedAt?: number
   /** Authoritative message ID from main process for persistence/branching parity */
   messageId?: string
 }
@@ -122,6 +125,10 @@ export interface ErrorEvent {
   title?: string
   details?: string
   original?: string
+  /** Unified retry ladder: non-terminal marker — the turn keeps retrying in
+   *  the background (2026-10-05). */
+  retryPending?: boolean
+  retryAttempt?: number
   /** Timestamp from main process for consistent ordering */
   timestamp?: number
 }
@@ -154,6 +161,7 @@ export interface SourcesChangedEvent {
   type: 'sources_changed'
   sessionId: string
   enabledSourceSlugs: string[]
+  sourceScope?: 'auto' | 'only' | 'exclude'
 }
 
 /**
@@ -244,6 +252,10 @@ export interface TypedErrorEvent {
   type: 'typed_error'
   sessionId: string
   error: TypedError
+  /** Unified retry ladder: non-terminal marker — the turn keeps retrying in
+   *  the background (2026-10-05). */
+  retryPending?: boolean
+  retryAttempt?: number
   /** Timestamp from main process for consistent ordering */
   timestamp?: number
 }
@@ -273,6 +285,21 @@ export interface InfoEvent {
   timestamp?: number
   /** Verified final reply to replay as THE final bubble (verification_passed) */
   finalText?: string
+}
+
+/**
+ * System stop notice — a guardrail in the agent host stopped the turn on its
+ * own (busy-limit tool-call cap, no-progress repeat streak) instead of the
+ * user pressing Stop. Carries the machine reason + a human-readable message so
+ * the UI can explain WHY the session went quiet.
+ */
+export interface SystemStopNoticeEvent {
+  type: 'system_stop_notice'
+  sessionId: string
+  /** Machine key, e.g. 'busy_limit' | 'no_progress' */
+  reason: string
+  message: string
+  timestamp?: number
 }
 
 /**
@@ -525,17 +552,6 @@ export interface AuthCompletedEvent {
 }
 
 /**
- * Source activated event - a source was auto-activated mid-turn.
- * The server owns the auto-retry; renderers should treat this as UI feedback only.
- */
-export interface SourceActivatedEvent {
-  type: 'source_activated'
-  sessionId: string
-  sourceSlug: string
-  originalMessage: string
-}
-
-/**
  * Usage update event - real-time context usage during processing
  * Allows UI to show growing context as agent processes, not just on complete
  */
@@ -553,7 +569,9 @@ export interface UsageUpdateEvent {
  */
 export type AgentEvent =
   | TextDiscardEvent
+  | SystemStopNoticeEvent
   | TextDemoteEvent
+  | TextPromoteEvent
   | RetryEvent
   | TextDeltaEvent
   | TextCompleteEvent
@@ -600,7 +618,6 @@ export type AgentEvent =
   | SessionUnsharedEvent
   | AuthRequestEvent
   | AuthCompletedEvent
-  | SourceActivatedEvent
   | UsageUpdateEvent
 
 /**

@@ -14,6 +14,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createInterface, type Interface as ReadlineInterface } from 'node:readline';
 import type { AgentEvent } from '@craft-agent/core/types';
 import type { FileAttachment } from '../utils/files.ts';
@@ -32,7 +33,6 @@ import type {
 } from './backend/types.ts';
 import { AbortReason } from './backend/types.ts';
 import { getBackendRuntime } from './backend/internal/driver-types.ts';
-import { SourceActivationDrainController } from './source-activation-drain.ts';
 
 import type { PermissionMode } from './mode-manager.ts';
 import type { ThinkingLevel } from './thinking-levels.ts';
@@ -47,6 +47,7 @@ import { getGitBashPath, type Workspace } from '../config/storage.ts';
 // Event adapter
 import { PiEventAdapter } from './backend/pi/event-adapter.ts';
 import { EventQueue } from './backend/event-queue.ts';
+import { RetryLadder, computeRetryLadderConfig, classifyRetryError, type RetryErrorSnapshot } from './retry-ladder.ts';
 
 // System prompt for Craft Agent context
 import { getSystemPrompt } from '../prompts/system.ts';
@@ -86,6 +87,9 @@ import { getPermissionModeDiagnostics } from './mode-manager.ts';
 
 // McpClientPool for source tool proxying (centralized pool from main process)
 import type { McpClientPool } from '../mcp/mcp-pool.ts';
+import { isSourceUsable } from '../sources/storage.ts';
+import { recordSourceCall } from './source-call-log.ts';
+import { classifySourceToolRisk, parseSourceSlugFromTool } from './source-policy.ts';
 
 // Path utilities
 import { join } from 'path';
@@ -93,6 +97,7 @@ import { homedir } from 'os';
 
 // Session storage (plans folder path)
 import { getSessionDataPath, getSessionPath, getSessionPlansPath } from '../sessions/storage.ts';
+import { ProgressJournal, buildHistoryRecoveryPointer } from './progress-journal.ts';
 
 // Error typing
 import { parseError, type AgentError } from './errors.ts';
@@ -200,6 +205,24 @@ function resolveContextWindow(
 }
 
 /**
+ * Best-effort extraction of a `Retry-After` / `retry_after_seconds` hint from
+ * an error message or structured error (429-class). Returns ms or null.
+ */
+function extractRetryAfterMs(
+  message: string,
+  parsedError?: { code?: string; message?: string } | null,
+): number | null {
+  const haystack = [message, parsedError?.message ?? '', parsedError?.code ?? ''].join(' ');
+  const matches = haystack.match(/retry[-_ ]?after["'\":\s]*(\d+(?:\.\d+)?)/i)
+    ?? haystack.match(/retry_after_seconds["'\":\s]*(\d+(?:\.\d+)?)/i);
+  if (matches) {
+    const seconds = Number(matches[1]);
+    if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000;
+  }
+  return null;
+}
+
+/**
  * Backend implementation using the Pi coding agent SDK via subprocess.
  *
  * Spawns a pi-agent-server subprocess and communicates via JSONL protocol.
@@ -229,6 +252,13 @@ export class PiAgent extends BaseAgent {
   // State
   private _isProcessing: boolean = false;
   private abortReason?: AbortReason;
+  // Guardrail stop (busy-limit cap / no-progress streak) — set when the
+  // subprocess emits a system_stop_notice. The subprocess follows it with an
+  // abort error ('The operation was aborted') that would otherwise arm the
+  // retry ladder and re-run a turn the guardrail already terminated
+  // (2026-10-07 261007-pearl-amber: a busy-loop on a stray `read a.txt` call
+  // was aborted, then re-issued forever because the ladder kept reviving it).
+  private systemStopReason: string | null = null;
 
   // Event adapter
   private adapter: PiEventAdapter;
@@ -241,11 +271,87 @@ export class PiAgent extends BaseAgent {
   private lastSubprocessError: string | null = null;
   private subprocessErrorRepeatCount = 0;
   private static readonly MAX_IDENTICAL_SUBPROCESS_ERRORS = 3;
-  private static readonly DEFAULT_TURN_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+  /**
+   * Turn-idle watchdog ceiling (no events since the last one while the agent
+   * is idle with all tools completed).
+   *
+   * History: shortened from 10 min to 2 min on 2026-10-04 (session
+   * 261004-amber-plain freeze: an application restart orphaned an in-flight
+   * turn, leaving a restored session silent until the ceiling fired).
+   *
+   * Raised to 5 min on 2026-10-05 (session 261005-fresh-tulip repeated
+   * stalls): the ceiling must stay CLEAR of the Pi subprocess's 120 s HTTP
+   * idle timeout (`httpIdleTimeoutMs`, see applyPiResilienceSettings in
+   * pi-agent-server) plus at least one agent-retry backoff cycle. At 120 s
+   * the two timers armed within milliseconds of each other and the watchdog
+   * always won the race, so a silently hanging upstream (no bytes, no error
+   * status) surfaced as "stream stalled … Please retry" before the SDK's
+   * auto-retry policy (4 agent retries + provider retries, CRAFT_PI_RETRY_
+   * SETTINGS) got a chance to run. At 300 s each http-idle timeout lands its
+   * auto_retry_* event inside the watchdog window, re-arms the timer, and
+   * lets the retry ladder progress — or terminate the turn with the REAL api
+   * error once retries are exhausted. A genuinely orphaned/dead stream (no
+   * events at all) is now bounded to 5 minutes instead of 10. The watchdog
+   * still resets on every event and is fully exempt while a tool is actively
+   * running, so a long-but-healthy model call is unaffected. Override with
+   * the CRAFT_PI_TURN_IDLE_TIMEOUT_MS environment variable.
+   */
+  private static readonly DEFAULT_TURN_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+  /**
+   * Capped idle ceiling for in-flight context compaction. While the Pi SDK
+   * runs a threshold/overflow compaction inside the subprocess, the main
+   * stream emits no events at all. The deadline is pinned to
+   * compaction_start + this cap and is NOT extended by heartbeat
+   * `compaction_progress` events, so a genuinely dead compaction still trips
+   * the capped deadline instead of hanging forever, and surfaces a
+   * compaction-specific error instead of the plain turn-stall message. (The
+   * cap existed because a 2026-10-04 deepseek session compacted for 3m40s
+   * and false-positived the then-120s turn watchdog mid-"Compacting
+   * context..."; as of 2026-10-05 the plain turn ceiling is also 300 s, so
+   * the cap governs the same window with the specific message.) Matches the
+   * 300 s `waitForCompaction` / `requestCompact` precedent. Override with
+   * CRAFT_PI_COMPACTION_IDLE_TIMEOUT_MS.
+   */
+  private static readonly DEFAULT_COMPACTION_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
   private activeTurnToolIds = new Set<string>();
   private turnIdleTimer: ReturnType<typeof setTimeout> | null = null;
   private lastTurnEventAt = 0;
+  /**
+   * Compaction watch state: `compaction_start` (any, incl. threshold/overflow)
+   * pins `compactionDeadlineAt`; while set, the turn-idle watchdog tracks that
+   * deadline with the compaction cap instead of the plain 300s turn ceiling.
+   * Dropped on `compaction_end` (and defensively on `agent_end`) — the normal
+   * turn watchdog resumes on the next event.
+   */
+  private compactionInFlight = false;
+  private compactionDeadlineAt: number | null = null;
+
+  // Unified retry ladder (user-confirmed 2026-10-05): single retry owner for
+  // model-level failures. SDK retries are disabled (CRAFT_PI_RETRY_ENABLED=0)
+  // so this ladder drives the 1s/5s/10s/30s/60s/5m/10m schedule + 10m loop.
+  private readonly retryLadder = new RetryLadder(computeRetryLadderConfig());
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Epoch ms when the last retry prompt was sent; 0 = none in flight. */
+  private retryResendAt = 0;
+  /** True once the retried run has emitted at least one event. */
+  private retryRunLive = false;
+  /** True once the retried run has delivered a real (non-intermediate) reply.
+   *  Stronger than retryRunLive: some providers emit consolidated `message`
+   *  events (not message_start/update), so retryRunLive stays false even on a
+   *  successful retry — this reply signal reconciles the ladder instead. */
+  private retryDeliveredReply = false;
+  /** True if the retried run failed (error recorded before its agent_end). */
+  private retryRunHadError = false;
+  /** A `complete` held back while the ladder is active (the error's agent_end
+   *  must not end the turn before the retried run's events can flow). */
+  private heldComplete: AgentEvent | null = null;
+  /** Whether the non-terminal retryPending error card has been surfaced. */
+  private retryErrorSurfaced = false;
+  /** Session root dir (workspace/sessions/{id}) for persisting the ladder
+   *  state across app restarts (2026-10-06 spec: the retry loop must
+   *  survive restarts; restored attempts keep the right rung). */
+  private retryLadderStateDir: string | null = null;
 
   /**
    * Look up the bound project (if any) and return a snapshot for system-prompt injection.
@@ -292,6 +398,15 @@ export class PiAgent extends BaseAgent {
     return Number.isFinite(parsed) ? Math.max(0, parsed) : PiAgent.DEFAULT_TURN_IDLE_TIMEOUT_MS;
   }
 
+  private getCompactionIdleTimeoutMs(): number {
+    const raw = process.env.CRAFT_PI_COMPACTION_IDLE_TIMEOUT_MS;
+    if (!raw) return PiAgent.DEFAULT_COMPACTION_IDLE_TIMEOUT_MS;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0
+      ? parsed
+      : PiAgent.DEFAULT_COMPACTION_IDLE_TIMEOUT_MS;
+  }
+
   private clearTurnIdleWatchdog(): void {
     if (this.turnIdleTimer) {
       clearTimeout(this.turnIdleTimer);
@@ -299,10 +414,134 @@ export class PiAgent extends BaseAgent {
     }
   }
 
+  /**
+   * Idle subprocess reaper — reclaims the ~400MB bun pi-server during long
+   * idle periods. After a turn completes we arm a timer; if no new turn
+   * starts within the timeout the subprocess is killed (next turn respawns
+   * it via ensureSubprocess). Session SDK state is stored in memory + JSONL,
+   * so killing the subprocess only loses the in-process session cache, not
+   * the conversation.
+   */
+  private idleSubprocessReaper: ReturnType<typeof setTimeout> | null = null;
+  /** Epoch ms of the last received compaction_progress heartbeat; null = none yet. */
+  private lastCompactionProgressAt: number | null = null;
+  /** Consecutive deferrals of idle reclaim for an active compaction (bounded). */
+  private idleReaperDeferrals = 0;
+
+  /** Heartbeat considered fresh within this window (heartbeats fire every ~30s). */
+  private static readonly IDLE_SUBPROCESS_HEARTBEAT_GRACE_MS = 5 * 60 * 1000;
+  /** Ceiling on compaction-active deferrals before reclaim proceeds anyway. */
+  private static readonly IDLE_REAPER_MAX_DEFERRALS = 5;
+  private static readonly IDLE_SUBPROCESS_RECLAIM_MS = 10 * 60 * 1000; // 10 minutes
+
+  private getIdleReclaimMs(): number {
+    const raw = process.env.CRAFT_PI_IDLE_REAPER_MS;
+    if (!raw) return PiAgent.IDLE_SUBPROCESS_RECLAIM_MS;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : PiAgent.IDLE_SUBPROCESS_RECLAIM_MS;
+  }
+
+  private scheduleIdleSubprocessReaper(): void {
+    // Never reclaim while a turn is in flight or while the queue holds events
+    // (mini completions / title gen may still run after the main turn).
+    if (!this.subprocess || this._isProcessing || !this.eventQueue.isComplete) {
+      return;
+    }
+    this.cancelIdleSubprocessReaper();
+    // A new cycle resets the deferral bound.
+    this.idleReaperDeferrals = 0;
+    this.armIdleReaper();
+  }
+
+  private armIdleReaper(): void {
+    this.idleSubprocessReaper = setTimeout(() => this.idleReaperFire(), this.getIdleReclaimMs());
+    (this.idleSubprocessReaper as { unref?: () => void }).unref?.();
+  }
+
+  private idleReaperFire(): void {
+    this.idleSubprocessReaper = null;
+    if (this._isProcessing || !this.eventQueue.isComplete) {
+      return; // re-checked at fire time
+    }
+    if (!this.subprocess) {
+      return;
+    }
+
+    // Compaction-activity exemption: a compaction abandoned by an RPC timeout
+    // can still be running — the subprocess keeps going after the main process
+    // gave up (2026-10-08 wild-meadow: ~299s of orphan burning past the RPC
+    // timeout). Killing the subprocess mid-compaction would turn a late-but-
+    // finite result into one that NEVER arrives — no late log, no retry path.
+    // Heartbeat freshness is the primary liveness signal (compaction_progress
+    // every ~30s); compactionInFlight is secondary — it is driven by the
+    // compaction_start/end event stream and is NOT cleared by the RPC timeout
+    // path, so it stays true while the orphan runs.
+    const heartbeatAge = this.lastCompactionProgressAt
+      ? Date.now() - this.lastCompactionProgressAt
+      : Number.POSITIVE_INFINITY;
+    const compactionActive =
+      this.compactionInFlight || heartbeatAge < PiAgent.IDLE_SUBPROCESS_HEARTBEAT_GRACE_MS;
+    if (compactionActive && this.idleReaperDeferrals < PiAgent.IDLE_REAPER_MAX_DEFERRALS) {
+      // Bounded deferral: a healthy-but-runaway compaction (split tree that
+      // never converges, heartbeats never stopping) must still hit a terminal
+      // reclaim — otherwise the reaper's termination guarantee dies. 5 x 10min
+      // is the hard ceiling before reclaim proceeds anyway.
+      this.idleReaperDeferrals += 1;
+      this.debug(
+        `Idle reclaim deferred: active compaction (heartbeat age ${
+          Number.isFinite(heartbeatAge) ? `${Math.round(heartbeatAge / 1000)}s` : 'stale'
+        }, defer #${this.idleReaperDeferrals}/${PiAgent.IDLE_REAPER_MAX_DEFERRALS})`,
+      );
+      this.armIdleReaper();
+      return;
+    }
+    if (compactionActive) {
+      this.debug(
+        `Idle reclaim proceeding after ${this.idleReaperDeferrals} deferrals: ` +
+          `compaction signal ${Number.isFinite(heartbeatAge) ? `heartbeat aged ${Math.round(heartbeatAge / 1000)}s` : 'stale'} — reclaiming Pi subprocess (~400MB)`,
+      );
+    } else {
+      this.debug(`Idle ${Math.round(this.getIdleReclaimMs() / 60000)}min — reclaiming Pi subprocess (~400MB)`);
+    }
+    this.killSubprocess();
+  }
+
+  private cancelIdleSubprocessReaper(): void {
+    if (this.idleSubprocessReaper) {
+      clearTimeout(this.idleSubprocessReaper);
+      this.idleSubprocessReaper = null;
+    }
+  }
+
   private refreshTurnIdleWatchdog(): void {
     this.clearTurnIdleWatchdog();
 
     if (!this._isProcessing || this.eventQueue.isComplete || this.activeTurnToolIds.size > 0) {
+      return;
+    }
+    // The unified retry ladder owns recovery while active; its own rung
+    // timers and retry events govern the turn — the 300 s watchdog must not
+    // race it (previously it fired while the SDK silently retried inside
+    // streamFn and produced the "stream stalled" false positive).
+    if (this.retryLadder.isActive) {
+      return;
+    }
+
+    if (this.compactionInFlight && this.compactionDeadlineAt != null) {
+      // Compaction-aware branch: the deadline is pinned to compaction_start +
+      // the compaction cap, so each refresh (incl. compaction_progress
+      // heartbeats) re-arms against the SAME deadline and never extends it.
+      const delayMs = this.compactionDeadlineAt - Date.now();
+      if (delayMs <= 0) {
+        // Deadline already passed (stale flag after a missed compaction_end)
+        // — fire now instead of arming a zero-delay timer.
+        this.handleCompactionIdleTimeout();
+        return;
+      }
+      this.turnIdleTimer = setTimeout(() => {
+        this.handleCompactionIdleTimeout();
+      }, delayMs);
+      (this.turnIdleTimer as { unref?: () => void }).unref?.();
       return;
     }
 
@@ -315,18 +554,23 @@ export class PiAgent extends BaseAgent {
     (this.turnIdleTimer as { unref?: () => void }).unref?.();
   }
 
-  private handleTurnIdleTimeout(timeoutMs: number): void {
+  /**
+   * Fired when a compaction neither finished nor received its end event
+   * within the capped deadline. Unlike the plain turn stall, the wording
+   * names the compaction so the user is not sent to retry a message that
+   * was mid-compaction all along.
+   */
+  private handleCompactionIdleTimeout(): void {
     this.turnIdleTimer = null;
 
-    if (!this._isProcessing || this.eventQueue.isComplete) return;
-    if (this.activeTurnToolIds.size > 0) {
-      this.refreshTurnIdleWatchdog();
-      return;
-    }
+    if (!this._isProcessing || this.eventQueue.isComplete || !this.compactionInFlight) return;
+    if (this.retryLadder.isActive) return;
 
-    const idleSeconds = Math.max(1, Math.round((Date.now() - this.lastTurnEventAt) / 1000));
-    const timeoutSeconds = Math.max(1, Math.round(timeoutMs / 1000));
-    const message = `Pi agent stream stalled for ${idleSeconds}s with no events after all tools completed (timeout ${timeoutSeconds}s). Please retry the message.`;
+    const capMs = this.getCompactionIdleTimeoutMs();
+    const deadline = this.compactionDeadlineAt ?? Date.now();
+    const stalledSeconds = Math.max(1, Math.round((Date.now() - deadline) / 1000));
+    const capSeconds = Math.max(1, Math.round(capMs / 1000));
+    const message = `Context compaction did not finish: no completion for ${stalledSeconds}s (compaction timeout ${capSeconds}s). Please retry the message.`;
 
     this.debug(message);
     this.eventQueue.enqueue({ type: 'error', message });
@@ -334,8 +578,422 @@ export class PiAgent extends BaseAgent {
     this.eventQueue.complete();
   }
 
+  private clearCompactionWatch(): void {
+    this.compactionInFlight = false;
+    this.compactionDeadlineAt = null;
+  }
+
+  private handleTurnIdleTimeout(timeoutMs: number): void {
+    this.turnIdleTimer = null;
+
+    if (!this._isProcessing || this.eventQueue.isComplete) return;
+    if (this.retryLadder.isActive) return;
+    if (this.activeTurnToolIds.size > 0) {
+      this.refreshTurnIdleWatchdog();
+      return;
+    }
+
+    const idleSeconds = Math.max(1, Math.round((Date.now() - this.lastTurnEventAt) / 1000));
+    const timeoutSeconds = Math.max(1, Math.round(timeoutMs / 1000));
+    const message = `Pi agent stream stalled for ${idleSeconds}s with no events after all tools completed (timeout ${timeoutSeconds}s).`;
+
+    this.debug(message);
+    // Unified retry ladder (2026-10-07): a silent stream after all tools
+    // completed is a TRANSIENT fault class (classifyRetryError agrees), so
+    // hand recovery to the ladder instead of surfacing a terminal
+    // "Please retry the message". The ladder re-issues the model step via the
+    // subprocess `retry` command (agent.continue()), which also DRAINS any
+    // queued guidance/follow-up the SDK never processed — the golden-swamp
+    // case where the queue was held open on queuedFollowUpPending. The
+    // ladder surfaces non-terminally after its 10s rung and terminally only
+    // when exhausted / the user stops.
+    if (this.tryBeginRetryLadder(message, null)) {
+      return;
+    }
+    // Ladder unavailable (abort in flight / subprocess already gone):
+    // fall back to the legacy terminal surface so the turn still settles.
+    this.eventQueue.enqueue({ type: 'error', message: `${message} Please retry the message.` });
+    this.eventQueue.enqueue({ type: 'complete' });
+    this.eventQueue.complete();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Unified retry ladder (user-confirmed 2026-10-05)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Record a model-level failure and take over the turn with the ladder.
+   * Returns true when the ladder owns the error (staged; the queue will be
+   * held by the shouldCompleteQueue guard).
+   *
+   * Guards: turn in flight, no in-flight tool (tool-mid-execution failures are
+   * intentionally NOT retried — duplicated side effects), no user/system stop
+   * in progress, and the subprocess alive. Retries re-run the model for the
+   * same turn via a subprocess `retry` message (agent.continue()), so no
+   * main-process prompt snapshot is needed.
+   */
+  private tryBeginRetryLadder(
+    message: string,
+    parsedError: Partial<AgentError> | null | undefined,
+  ): boolean {
+    if (!this._isProcessing) return false;
+    if (this.abortReason) return false;
+    if (this.activeTurnToolIds.size > 0) return false;
+    if (!this.subprocess) return false;
+    // A guardrail already terminated this turn (busy-limit cap / no-progress
+    // streak). The follow-on abort error must NOT re-arm the ladder — the
+    // turn was stopped deliberately for looping, and re-running it would
+    // reproduce the same loop forever (2026-10-07 261007-pearl-amber).
+    if (this.systemStopReason) {
+      this.debug(`[retry-ladder] Refusing to start after guardrail stop (${this.systemStopReason}): ${message.slice(0, 140)}`);
+      return false;
+    }
+
+    const snapshot = { message, parsedError: parsedError ?? null };
+    if (!this.retryLadder.isActive) {
+      const mode = classifyRetryError(parsedError?.code, message);
+      this.retryLadder.begin(mode, snapshot);
+      this.debug(`[retry-ladder] Started (${mode}) for: ${message.slice(0, 140)}`);
+    } else {
+      this.retryLadder.onFailure(snapshot);
+      this.debug(`[retry-ladder] Retry attempt ${this.retryLadder.attemptCount} failed: ${message.slice(0, 140)}`);
+    }
+    this.retryRunHadError = true;
+    this.retryRunLive = false;
+    this.retryDeliveredReply = false;
+    this.retryResendAt = 0;
+    this.retryErrorSurfaced = false;
+
+    const retryAfterMs = extractRetryAfterMs(message, parsedError);
+    if (retryAfterMs != null) {
+      this.retryLadder.overrideNextDelay(retryAfterMs);
+    }
+
+    this.scheduleNextRetry();
+    return true;
+  }
+
+  private scheduleNextRetry(): void {
+    this.clearRetryTimer();
+    const delay = this.retryLadder.nextDelayMs();
+    if (delay == null) {
+      this.debug('[retry-ladder] Ladder exhausted — surfacing terminal error');
+      this.finishRetryLadder();
+      return;
+    }
+    const attempt = this.retryLadder.attemptCount;
+    this.eventQueue.enqueue({
+      type: 'retry',
+      phase: 'backoff',
+      message: `Model request failed. Retrying in ${Math.max(1, Math.round(delay / 1000))}s (attempt ${attempt + 1})...`,
+      // Retry ordinal (1-based) surfaced to the user: the retry this backoff is
+      // waiting for. `attemptCount` counts FAILED retries, so +1.
+      attempt: attempt + 1,
+      nextRetryInMs: delay,
+    });
+    // Non-terminal error card (2026-10-06 spec): once the ladder is past its
+    // 1s/5s/10s rungs, show a live "API error — retrying in the background"
+    // card (retryPending=true → renderer keeps it while the retry-status line
+    // above it ticks per retry; becomes the terminal card if the ladder
+    // exhausts; cleared on recovery). One-shot per failure. No dedicated stop
+    // control: the chat's stop button terminates the whole session/turn.
+    if (!this.retryErrorSurfaced && this.retryLadder.shouldSurfaceError) {
+      this.retryErrorSurfaced = true;
+      const staged = this.retryLadder.lastErrorSnapshot;
+      // Keep the structured title (e.g. "Connection Error") so the non-terminal
+      // card reads like the terminal one, minus the finality.
+      const stagedTitle = staged?.parsedError?.title;
+      const stagedText = staged?.message ?? '';
+      const detail = stagedTitle ? `${stagedTitle}: ${stagedText}` : stagedText;
+      this.eventQueue.enqueue({
+        type: 'error',
+        message: detail
+          ? `${detail} — retrying in the background. Press stop to end the session.`
+          : 'The AI service is having trouble. Retrying in the background — press stop to end the session.',
+        retryPending: true,
+        retryAttempt: attempt,
+      });
+      this.debug(`[retry-ladder] Surfaced non-terminal retryPending error card (attempt ${attempt})`);
+    }
+    // Restart-resilience: the 10-min loop (up to the 24h cap) must survive an
+    // app restart — persist the ladder state so the next process resumes at
+    // this rung instead of restarting at 1s.
+    this.persistRetryLadderState();
+    this.retryTimer = setTimeout(() => this.fireRetry(), delay);
+    (this.retryTimer as { unref?: () => void }).unref?.();
+  }
+
+  private fireRetry(): void {
+    this.retryTimer = null;
+    if (!this.retryLadder.isActive) return;
+
+    // Genuinely cannot retry: the subprocess is gone. Surface the staged error
+    // as a real terminal (the attempt count reflects retries that actually
+    // fired — not a spurious 0).
+    if (!this.subprocess) {
+      this.debug('[retry-ladder] Cannot retry — subprocess unavailable');
+      this.finishRetryLadder();
+      return;
+    }
+
+    const stdin = this.subprocess.stdin;
+    if (stdin == null) {
+      // Pipe closed — the subprocess is gone; surface the staged terminal error.
+      this.debug('[retry-ladder] stdin unavailable (pipe closed) — terminating');
+      this.finishRetryLadder();
+      return;
+    }
+
+    // Transient stdin backpressure: the pipe buffer is momentarily full. Re-check
+    // shortly instead of aborting the whole ladder as a "0 次后失败" terminal —
+    // that was the observed symptom of retries never actually running.
+    if (!stdin.writable) {
+      this.debug('[retry-ladder] stdin not writable yet — rechecking in 500ms');
+      this.retryTimer = setTimeout(() => this.fireRetry(), 500);
+      (this.retryTimer as { unref?: () => void }).unref?.();
+      return;
+    }
+    // No transient below-block error card: the process block shows a single
+    // retry-status line (retrying / recovered / failed + countdown). The real
+    // error is surfaced only when the ladder finally fails (terminal).
+    // `attempt` is the 1-based ordinal of the retry now in flight.
+    this.eventQueue.enqueue({ type: 'retry', phase: 'active', attempt: this.retryLadder.attemptCount + 1 });
+    this.retryRunLive = false;
+    this.retryDeliveredReply = false;
+    this.retryRunHadError = false;
+    this.retryResendAt = Date.now();
+    // Re-run the model for the SAME turn WITHOUT appending a new user message:
+    // the subprocess re-issues the model step via agent.continue() from its
+    // existing transcript. No duplicate user bubble, no context bloat.
+    this.send({ type: 'retry' });
+    this.debug('[retry-ladder] Re-issued model step (continue) on ladder schedule');
+  }
+
+  /** Reset ladder + timers; enqueue the terminal retry event; complete the queue.
+   *  `forcedTerminal` (user stop / abort): the outcome is always "failed" even
+   *  if the last retried run had gone live — an explicit stop closes the turn. */
+  private finishRetryLadder(opts?: { forcedTerminal?: boolean }): void {
+    this.clearRetryTimer();
+    const staged = this.retryLadder.lastErrorSnapshot;
+    const surfaced = this.retryErrorSurfaced;
+    // 2026-10-08: `retryDeliveredReply` is as strong a recovery signal as
+    // `retryRunLive` — providers that emit consolidated `message`/text events
+    // (not message_start/update) never set retryRunLive, so a succeeded retry
+    // was misjudged as failed ("重试 1 次后失败" next to a real reply). The
+    // agent_end branch already gates on (retryRunLive || retryDeliveredReply);
+    // the settlement must use the SAME union.
+    const succeeded =
+      !opts?.forcedTerminal &&
+      (this.retryRunLive || this.retryDeliveredReply) &&
+      !this.retryRunHadError;
+    // Retries actually performed, as a 1-based count for the UI:
+    // - recovered: includes the retry that succeeded (never counted as a failure).
+    // - failed: every retry failed, so the failure count is the total.
+    const failedAttempts = this.retryLadder.attemptCount;
+    const finalAttempt = succeeded ? failedAttempts + 1 : failedAttempts;
+    // Authoritative ladder timeline: read BEFORE reset so a reload/restart
+    // that lost the persisted row still renders the true duration.
+    const ladderStartedAt = this.retryLadder.startedAtMs;
+    const ladderElapsedMs = ladderStartedAt > 0 ? Math.max(0, Date.now() - ladderStartedAt) : 0;
+    this.retryLadder.reset();
+    this.retryResendAt = 0;
+    this.retryRunLive = false;
+    this.retryDeliveredReply = false;
+    this.retryRunHadError = false;
+    this.retryErrorSurfaced = false;
+    this.heldComplete = null;
+
+    this.eventQueue.enqueue({
+      type: 'retry',
+      phase: 'end',
+      recovered: succeeded,
+      attempt: finalAttempt,
+      startedAt: ladderStartedAt,
+      elapsedMs: ladderElapsedMs,
+    });
+    // Restart-resilience: a settled ladder (recovered or terminal) leaves
+    // nothing for a later process to resume.
+    this.clearPersistedRetryLadderState();
+    if (succeeded) {
+      this.eventQueue.complete();
+      return;
+    }
+    // Not succeeded: surface the staged error terminally (skip when it was
+    // already shown non-terminally), then complete.
+    if (staged && !surfaced) {
+      if (staged.parsedError?.code) {
+        this.eventQueue.enqueue({ type: 'typed_error', error: staged.parsedError as never });
+      } else {
+        this.eventQueue.enqueue({ type: 'error', message: staged.message });
+      }
+    }
+    this.eventQueue.complete();
+  }
+
+  /** Hard-clear ladder state (new turn, subprocess exit, user stop). */
+  private resetRetryLadderState(): void {
+    this.clearRetryTimer();
+    this.retryLadder.reset();
+    this.clearPersistedRetryLadderState();
+    this.retryResendAt = 0;
+    this.retryRunLive = false;
+    this.retryDeliveredReply = false;
+    this.retryRunHadError = false;
+    this.retryErrorSurfaced = false;
+    this.heldComplete = null;
+  }
+
+  private clearRetryTimer(): void {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+  }
+
+  private retryLadderStatePath(): string | null {
+    if (!this.retryLadderStateDir) return null;
+    return join(this.retryLadderStateDir, 'data', 'retry-ladder-state.json');
+  }
+
+  /**
+   * Persist the ladder state so an application restart resumes at the right
+   * rung instead of restarting at 1s (2026-10-06 spec: the 10-min retry
+   * loop is capped at 24h and must survive restarts). Best-effort —
+   * diagnostics persistence must never break the retry path.
+   */
+  private persistRetryLadderState(): void {
+    if (!this.retryLadder.isActive) return;
+    const path = this.retryLadderStatePath();
+    if (!path || !this.retryLadderStateDir) return;
+    // An exhausted ladder is terminal (finishRetryLadder already surfaced it)
+    // — nothing to resume.
+    const nextDelay = this.retryLadder.nextDelayMs();
+    if (nextDelay == null) return;
+    try {
+      const dir = join(this.retryLadderStateDir, 'data');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(
+        path,
+        JSON.stringify({
+          mode: this.retryLadder.errorClass,
+          attempts: this.retryLadder.attemptCount,
+          startedAt: this.retryLadder.startedAtMs,
+          lastError: this.retryLadder.lastErrorSnapshot,
+          nextFireAt: Date.now() + nextDelay,
+          savedAt: Date.now(),
+        }),
+        'utf8',
+      );
+    } catch {
+      // best-effort
+    }
+  }
+
+  private clearPersistedRetryLadderState(): void {
+    const path = this.retryLadderStatePath();
+    if (!path) return;
+    try {
+      if (existsSync(path)) unlinkSync(path);
+    } catch {
+      // best-effort
+    }
+  }
+
+  /**
+   * Restore a ladder persisted before an application restart. Armed but
+   * idle: no timer is scheduled — the NEXT failure re-arms via
+   * `onFailure()` from the restored rung, and a clean turn completion
+   * discards it via the stale-ladder branch of the agent_end guard.
+   */
+  private restorePersistedRetryLadderState(): void {
+    const path = this.retryLadderStatePath();
+    if (!path || !existsSync(path)) return;
+    try {
+      const raw = JSON.parse(readFileSync(path, 'utf8')) as {
+        mode?: string;
+        attempts?: number;
+        startedAt?: number;
+        lastError?: RetryErrorSnapshot | null;
+        nextFireAt?: number;
+      };
+      // Deterministic ladders are short-lived (3 rungs) and already terminal
+      // by restart time — only transient loops are worth resuming.
+      if (raw.mode !== 'transient') {
+        this.clearPersistedRetryLadderState();
+        return;
+      }
+      if (typeof raw.startedAt !== 'number' || typeof raw.nextFireAt !== 'number') {
+        this.clearPersistedRetryLadderState();
+        return;
+      }
+      // 24h loop cap: a ladder older than the cap is exhausted.
+      const capMs = computeRetryLadderConfig().loopCapMs;
+      if (capMs > 0 && Date.now() - raw.startedAt >= capMs) {
+        this.clearPersistedRetryLadderState();
+        return;
+      }
+      this.retryLadder.restoreState({
+        mode: 'transient',
+        attempts: typeof raw.attempts === 'number' ? raw.attempts : 0,
+        startedAt: raw.startedAt,
+        lastError: raw.lastError ?? null,
+      });
+      this.debug(
+        `[retry-ladder] Restored persisted ladder state (attempt ${this.retryLadder.attemptCount}) — next failure continues at the restored rung`,
+      );
+    } catch {
+      this.clearPersistedRetryLadderState(); // corrupted — drop
+    }
+  }
+
   private recordSubprocessTurnProgress(eventType: string, event: Record<string, unknown>): void {
     this.lastTurnEventAt = Date.now();
+
+    // Unified retry ladder: the first MODEL-PROGRESS event after a retry
+    // resend proves the retried run is live (a message began, its stream is
+    // updating, or a tool started executing). 2026-10-06 incident: this used
+    // to fire on the FIRST event of ANY kind — a refused re-issue's synthetic
+    // `agent_end` (sent immediately after the rejected `retry` command) marked
+    // the run "live" before the matching `error` arrived, so the queue
+    // completed and the retry was misjudged as a success.
+    const isModelProgress =
+      eventType === 'message_update' ||
+      eventType === 'message_start' ||
+      eventType === 'tool_execution_start';
+    if (
+      isModelProgress &&
+      this.retryLadder.isActive &&
+      this.retryResendAt > 0 &&
+      Date.now() >= this.retryResendAt
+    ) {
+      this.retryResendAt = 0;
+      this.retryRunLive = true;
+      this.debug(`[retry-ladder] Retried run went live on ${eventType}`);
+    } else if (
+      isModelProgress &&
+      this.retryLadder.isActive &&
+      this.retryResendAt === 0 &&
+      this.retryTimer != null
+    ) {
+      // Spontaneous recovery during the backoff window (2026-10-07): the
+      // stream resumed on its own BEFORE the scheduled retry command was
+      // re-sent (retryTimer still pending, nothing was actually re-issued).
+      // Mark the run live and cancel the pending retry: re-issuing
+      // agent.continue() into an already-streaming session throws
+      // "already processing", which the subprocess would surface as a
+      // spurious error that falsely increments the ladder's attempt count.
+      // With retryRunLive=true the recovered run's natural agent_end
+      // completes the queue (the held-complete suppression is skipped).
+      this.debug(`[retry-ladder] Spontaneous recovery on ${eventType} during backoff — canceling pending retry, marking run live`);
+      this.clearRetryTimer();
+      this.retryRunLive = true;
+      // The run is live and healthy again: the 'had error' marker from the
+      // failure that armed the ladder no longer applies. Without this the
+      // agent_end success branch ((retryRunLive || retryDeliveredReply) &&
+      // !retryRunHadError) would never fire and the queue would stay held —
+      // the exact "turn doesn't end" symptom of 2026-10-07.
+      this.retryRunHadError = false;
+    }
 
     const toolCallId = event.toolCallId as string | undefined;
     if (eventType === 'tool_execution_start' && toolCallId) {
@@ -344,8 +1002,41 @@ export class PiAgent extends BaseAgent {
       this.activeTurnToolIds.delete(toolCallId);
     } else if (eventType === 'agent_end') {
       this.activeTurnToolIds.clear();
+      // Defensive: drop stale compaction state (a missed compaction_end must
+      // not let the cap branch govern the next turn's plain 120s watchdog).
+      this.clearCompactionWatch();
       this.clearTurnIdleWatchdog();
       return;
+    } else if (eventType === 'compaction_start') {
+      // Pin the capped deadline NOW; later heartbeats refresh the timer but
+      // never the deadline (see refreshTurnIdleWatchdog).
+      this.compactionInFlight = true;
+      this.compactionDeadlineAt = Date.now() + this.getCompactionIdleTimeoutMs();
+    } else if (eventType === 'compaction_end') {
+      this.clearCompactionWatch();
+    } else if (eventType === 'compaction_progress') {
+      // Freshness signal for the stale timer and idle reaper (and, per the
+      // 2026-10-08 alignment, the compaction watchdog's deadline too — the
+      // watchdog is a STALENESS guard now, not a total-duration one; a
+      // healthy compaction (heartbeats flowing) must not be killed by a
+      // fixed deadline). Heartbeats fire every ~30s; 5min stale threshold is
+      // orders of magnitude beyond normal gaps.
+      this.lastCompactionProgressAt = Date.now();
+      if (this.compactionInFlight) {
+        this.compactionDeadlineAt = Date.now() + this.getCompactionIdleTimeoutMs();
+      }
+      // 2026-10-08 fix: the subprocess emits heartbeats NESTED under
+      // { type: 'event', event: { type: 'compaction_progress', ... } }, so
+      // the top-level `case 'compaction_progress'` branch (which re-arms)
+      // was dead code on the real link — requestCompact's stale timer never
+      // re-armed and every manual compaction >120s false-positived "stalled".
+      // This chokepoint is where BOTH wire formats converge (the top-level
+      // case also funnels through handleSubprocessEvent), so re-arm here.
+      if (this.pendingCompactions.size > 0) {
+        for (const pending of this.pendingCompactions.values()) {
+          this.rearmCompactStaleness(pending);
+        }
+      }
     }
 
     this.refreshTurnIdleWatchdog();
@@ -410,6 +1101,14 @@ export class PiAgent extends BaseAgent {
   private pendingCompactions: Map<string, {
     resolve: (result: { summary: string; firstKeptEntryId: string; tokensBefore: number } | null) => void;
     reject: (error: Error) => void;
+    /** Epoch ms when the RPC was dispatched; used to measure late-reply drops. */
+    sentAt: number;
+    /** Absolute total-duration timer — set once at send, NEVER re-armed. */
+    capTimer: ReturnType<typeof setTimeout>;
+    /** Activity timer — re-armed on every compaction_progress heartbeat. */
+    staleTimer: ReturnType<typeof setTimeout>;
+    /** Epoch ms of the last heartbeat that re-armed this request. */
+    lastHeartbeatAt?: number;
   }> = new Map();
 
   // Pending auto-compaction toggle requests
@@ -437,19 +1136,8 @@ export class PiAgent extends BaseAgent {
 
   // Current user message (for context in summarization)
   private currentUserMessage: string = '';
-  /**
-   * Progress-anchor ring: recent tool executions, used to re-anchor the
-   * model after forced compaction (2026-10-03 "compaction pump" incident:
-   * the model replans from scratch after every compaction and re-runs its
-   * first step, regrowing the context until it compacts again).
-   * NOTE: the ring deliberately persists across turns (and across defense
-   * resumes) so a resumed segment keeps the no-repeat rule meaningful;
-   * entries are only pruned by the cap (last 20, consecutive duplicates
-   * collapsed) — not cleared on new prompts.  Anchor rendering uses the
-   * last 10 entries.  Entries: tool name + short args, result attached at
-   * tool_result.
-   */
-  private recentToolCalls: Array<{ name: string; args: string; result?: string; isError?: boolean }> = [];
+  /** Session-scoped, bounded JSONL progress ledger; survives subprocess/app restarts. */
+  private readonly progressJournal?: ProgressJournal;
 
   // Pool reference for convenience (from this.config.mcpPool)
   private get mcpPool(): McpClientPool | undefined { return this.config.mcpPool; }
@@ -479,7 +1167,8 @@ export class PiAgent extends BaseAgent {
     '2. call_tool：签名 {name: 工具名, args: 参数对象}，用于调用已展开分类中的工具。',
     '固定层工具（如 call_llm、browser_tool 等核心工具）始终直接可用，无需展开。',
     '调用流程：先 tools_<分类> 展开，再 call_tool 调用。若分类未展开就调用会返回错误，按提示先展开。',
-    '未知工具时 call_tool 会返回候选列表或完整 schema，按提示修正。',
+    '来源工具必须属于本轮用户手动选择的 Active 数据源。不要搜索、启用或重试 Inactive 来源；缺少所需来源时，询问用户在输入框下方手动选择并重发请求。',
+    '未知工具时可通过 call_tool 查看候选列表或 schema；不得借此绕过用户来源选择。',
   ].join('\n');
 
   // RPC request counter for unique IDs
@@ -517,6 +1206,11 @@ export class PiAgent extends BaseAgent {
     this._supportsBranching = true;
 
     this.piSessionId = config.session?.sdkSessionId || null;
+    const sessionId = config.session?.id;
+    if (sessionId && config.workspace.rootPath) {
+      this.progressJournal = new ProgressJournal(getSessionPath(config.workspace.rootPath, sessionId));
+      this.currentUserMessage = this.progressJournal.latestUserRequest() ?? '';
+    }
     this.adapter = new PiEventAdapter();
     this.adapter.setContextWindow(contextWindow);
     if (config.miniModel) {
@@ -526,6 +1220,11 @@ export class PiAgent extends BaseAgent {
     // Set session dir on adapter for concurrent-safe toolMetadataStore lookups
     if (config.session?.id && config.workspace.rootPath) {
       this.adapter.setSessionDir(join(config.workspace.rootPath, 'sessions', config.session.id));
+      // Unified retry ladder persistence (2026-10-06 spec): the retry loop
+      // must survive an application restart — restore the persisted ladder
+      // state so the next failure continues at the rung it left off.
+      this.retryLadderStateDir = join(config.workspace.rootPath, 'sessions', config.session.id);
+      this.restorePersistedRetryLadderState();
     }
 
     // Wire the adapter's async recovery fallbacks into the event queue. They
@@ -571,6 +1270,9 @@ export class PiAgent extends BaseAgent {
    * Lazy initialization -- spawns on first use.
    */
   private async ensureSubprocess(): Promise<void> {
+    // Any activity means the subprocess is back in use — cancel pending reaper.
+    this.cancelIdleSubprocessReaper();
+
     if (this.subprocess && this.subprocessReady) {
       const currentShellPath = this.getConfiguredShellPath();
       if (currentShellPath !== this.subprocessShellPath && !this._isProcessing) {
@@ -1268,6 +1970,24 @@ export class PiAgent extends BaseAgent {
         this.handleSubprocessEvent(msg.event as Record<string, unknown>);
         break;
 
+      case 'compaction_progress':
+        // Compaction heartbeat (server emits one every ~30s while a
+        // compaction runs). Not surfaced to the UI (the adapter filters it)
+        // but must reach the activity tracker: it feeds the stale timer of
+        // the pending compact (and the idle reaper's liveness signal) and
+        // would otherwise be dropped right here — the subprocess keeps
+        // emitting, the main process keeps ignoring.
+        this.handleSubprocessEvent(msg as unknown as Record<string, unknown>);
+        // Compaction is single-flight (the subprocess serializes manual
+        // compacts behind an in-flight one via waitForCompaction), so a
+        // heartbeat without an id can only belong to the one pending request.
+        if (this.pendingCompactions.size > 0) {
+          for (const pending of this.pendingCompactions.values()) {
+            this.rearmCompactStaleness(pending);
+          }
+        }
+        break;
+
       case 'pre_tool_use_request':
         // Subprocess needs permission check + transforms before tool execution
         this.handlePreToolUseRequest(msg as {
@@ -1373,22 +2093,61 @@ export class PiAgent extends BaseAgent {
           break;
         }
         if (msg.passed === true && typeof msg.finalText === 'string') {
-          this.debug(`Verification PASSED — replaying final reply (${msg.finalText.length} chars)`);
-          this.adapter.finalizeVerificationHeld(true);
-          this.eventQueue.enqueue({
-            type: 'info',
-            message: 'Verification passed — delivering final reply',
-            statusType: 'verification_passed',
-            finalText: msg.finalText,
-          });
-          this.eventQueue.complete();
+          if (msg.skipped === true) {
+            // Judge was unavailable (upstream 401/quota/timeout) — the
+            // subprocess failed open: deliver the captured final text as-is.
+            this.debug(`Verification SKIPPED (judge unavailable) — delivering final reply (${msg.finalText.length} chars)`);
+            this.adapter.finalizeVerificationHeld(true);
+            this.eventQueue.enqueue({
+              type: 'info',
+              message: 'Verification skipped (judge unavailable) — delivering final reply',
+              statusType: 'verification_passed',
+            });
+            this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(msg.finalText));
+            this.eventQueue.enqueue({ type: 'complete' });
+            this.eventQueue.complete();
+          } else {
+            this.debug(`Verification PASSED — replaying final reply (${msg.finalText.length} chars)`);
+            this.adapter.finalizeVerificationHeld(true);
+            this.eventQueue.enqueue({
+              type: 'info',
+              message: 'Verification passed — delivering final reply',
+              statusType: 'verification_passed',
+            });
+            this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(msg.finalText));
+            this.eventQueue.enqueue({ type: 'complete' });
+            this.eventQueue.complete();
+          }
         } else {
           this.debug(`Verification FAILED${typeof msg.failReason === 'string' ? `: ${msg.failReason}` : ''} — continuing turn (followUp)`);
           this.adapter.finalizeVerificationHeld(false);
+          this.eventQueue.enqueue({
+            type: 'info',
+            message: 'Verification failed — continuing',
+            statusType: 'verification_failed',
+          });
           // Stay open: the followUp resume continues the turn; its final
           // agent_end (no verification flag) completes the queue.
         }
         break;
+
+      case 'system_stop_notice': {
+        // A guardrail (busy-limit cap / no-progress streak) killed the turn,
+        // not the user. Enqueue it as an info event so SessionManager can
+        // surface the reason (UI banner + messaging-channel notification)
+        // instead of a silent stop reading as a hung session.
+        const reason = typeof msg.reason === 'string' ? msg.reason : 'system_stop';
+        const message = typeof msg.message === 'string' ? msg.message : 'This turn was stopped by the system.';
+        this.debug(`System stop notice (${reason}): ${message}`);
+        this.systemStopReason = reason;
+        this.eventQueue.enqueue({
+          type: 'info',
+          message,
+          statusType: 'system_stop',
+          stopReason: reason,
+        });
+        break;
+      }
 
       case 'defense_resume_status':
         // Defense layer feedback from the subprocess: whether the queued
@@ -1498,6 +2257,14 @@ export class PiAgent extends BaseAgent {
         }
 
         const parsed = parseError(new Error(rawMessage));
+        if (this.tryBeginRetryLadder(rawMessage, parsed)) {
+          // Unified retry ladder took over: the error is staged (not enqueued
+          // yet), the following synthetic agent_end is held by the
+          // shouldCompleteQueue guard, and a retry prompt is re-issued on the
+          // ladder schedule. The error is surfaced non-terminally after the
+          // 10s rung, or terminally when the ladder is exhausted.
+          break;
+        }
         if (parsed.code !== 'unknown_error') {
           this.eventQueue.enqueue({ type: 'typed_error', error: parsed });
         } else {
@@ -1572,9 +2339,10 @@ export class PiAgent extends BaseAgent {
       if (agentEvent.type === 'tool_start' && agentEvent.toolName === 'Read') {
         this.prerequisiteManager.trackReadTool(agentEvent.input as Record<string, unknown>);
       }
-      // Progress-anchor ring bookkeeping (compaction re-injection fuel)
+      // Durable progress ledger (compaction handoff fuel); call IDs keep
+      // parallel same-name tool results attached to the correct invocation.
       if (agentEvent.type === 'tool_start') {
-        this.noteRecentToolEvent('tool_start', agentEvent.toolName, agentEvent.input);
+        this.noteRecentToolEvent('tool_start', agentEvent.toolUseId, agentEvent.toolName, agentEvent.input);
       }
       // Reset prerequisite state on compaction (LLM loses guide content)
       if (agentEvent.type === 'info' && typeof agentEvent.message === 'string' && agentEvent.message.startsWith('Compacted')) {
@@ -1603,9 +2371,22 @@ export class PiAgent extends BaseAgent {
         }
       }
 
+      if (agentEvent.type === 'text_complete' && !agentEvent.isIntermediate && agentEvent.text.trim()) {
+        this.progressJournal?.recordConclusion(agentEvent.text);
+        // A real (non-intermediate) reply from a retried run is the strongest
+        // proof of recovery. Reconcile the ladder on it even when the raw
+        // model-progress event type didn't set retryRunLive (2026-10-06: some
+        // providers emit consolidated `message` events, not message_start/update,
+        // so retryRunLive stayed false and the queue hung open).
+        if (this.retryLadder.isActive && this.retryResendAt > 0) {
+          this.retryResendAt = 0;
+          this.retryDeliveredReply = true;
+        }
+      }
+
       // Fire PostToolUse / PostToolUseFailure hook events (fire-and-forget)
       if (agentEvent.type === 'tool_result') {
-        this.noteRecentToolEvent('tool_result', agentEvent.toolName ?? (event.toolName as string) ?? 'unknown', undefined, agentEvent.result, agentEvent.isError);
+        this.noteRecentToolEvent('tool_result', agentEvent.toolUseId, agentEvent.toolName ?? (event.toolName as string) ?? 'unknown', agentEvent.input, agentEvent.result, agentEvent.isError);
         const hookEvent = agentEvent.isError ? 'PostToolUseFailure' : 'PostToolUse';
         this.emitAutomationEvent(hookEvent, {
           hook_event_name: hookEvent,
@@ -1615,6 +2396,41 @@ export class PiAgent extends BaseAgent {
             ? { error: typeof agentEvent.result === 'string' ? agentEvent.result : undefined }
             : { tool_response: typeof agentEvent.result === 'string' ? agentEvent.result : undefined }),
         });
+      }
+
+      // Unified retry ladder: adapter-released terminal errors (agent_end
+      // willRetry:false with a buffered error) are intercepted BEFORE they
+      // reach the queue. The ladder stages them, holds the queue open, and
+      // re-issues the prompt on its schedule. `continue` skips enqueueing the
+      // error here — the ladder surfaces it per policy (non-terminal after
+      // the 10s rung, terminal on exhaustion).
+      if (
+        (agentEvent.type === 'error' || agentEvent.type === 'typed_error') &&
+        this.tryBeginRetryLadder(
+          agentEvent.type === 'error'
+            ? (agentEvent as { message: string }).message
+            : (agentEvent as { error?: { message?: string } }).error?.message ?? 'Model request failed',
+          // Carry the WHOLE structured error (title / recovery actions /
+          // diagnostics) so the terminal card the ladder eventually surfaces
+          // reads exactly like the same error surfaced without the ladder.
+          agentEvent.type === 'typed_error'
+            ? (agentEvent as { error?: Partial<AgentError> }).error ?? null
+            : null,
+        )
+      ) {
+        continue;
+      }
+
+      // Hold the adapter's `complete` back while the unified retry ladder is
+      // active AND the retried run hasn't delivered a real reply yet. The
+      // error's agent_end yields `complete` right after releasing the error —
+      // if it flowed, SessionManager's chat loop would end the turn BEFORE the
+      // retried run's events can reach the renderer (the 2026-10-06 silent
+      // freeze: session.jsonl stopped at the error and the ladder state was
+      // orphaned with attempts:0). finishRetryLadder() settles the outcome.
+      if (agentEvent.type === 'complete' && this.retryLadder.isActive && !this.retryRunLive && !this.retryDeliveredReply) {
+        this.heldComplete = agentEvent;
+        continue;
       }
 
       this.eventQueue.enqueue(agentEvent);
@@ -1644,6 +2460,50 @@ export class PiAgent extends BaseAgent {
       eventType === 'agent_end' ? (event.queuedFollowUpPending as boolean | undefined) : undefined,
       eventType === 'agent_end' ? (event.defenseVerificationPending as boolean | undefined) : undefined,
     )) {
+      // Unified retry ladder: hold the queue open while a failed turn is
+      // being retried. A retried run that reached agent_end WITHOUT a new
+      // error is a success — clear the ladder and complete. A retried run
+      // that failed again has already re-armed the ladder (recordRetryError),
+      // so it stays held for the next rung.
+      if (this.retryLadder.isActive) {
+        if ((this.retryRunLive || this.retryDeliveredReply) && !this.retryRunHadError) {
+          this.debug('[retry-ladder] Retried run succeeded — clearing ladder');
+          this.finishRetryLadder();
+        } else if (
+          !this.retryRunLive &&
+          !this.retryRunHadError &&
+          this.retryResendAt === 0 &&
+          !this.retryTimer
+        ) {
+          // Stale restored ladder (2026-10-06 restart-resilience): state was
+          // restored from disk on init but NO retry fired in this process —
+          // no timer pending, no resend in flight. A clean agent_end means
+          // the turn recovered on its own (the recovery prompt's model step
+          // succeeded). Discard the restored rung; holding the queue open
+          // here would leak the drain and freeze the UI.
+          this.debug('[retry-ladder] Clean completion with restored (stale) ladder — discarding as recovered');
+          // 2026-10-08: settle the PERSISTED retry row to 'recovered' — the
+          // turn genuinely recovered. Without this terminal event the row
+          // would keep spinning "重试中" in the transcript (server + renderer
+          // settle the row from this event). Carry the authoritative ladder
+          // timeline so a restart that lost the row still shows the real
+          // duration.
+          const staleAttempt = this.retryLadder.attemptCount + 1;
+          const staleStartedAt = this.retryLadder.startedAtMs;
+          const staleElapsedMs = staleStartedAt > 0 ? Math.max(0, Date.now() - staleStartedAt) : 0;
+          this.resetRetryLadderState();
+          this.eventQueue.enqueue({
+            type: 'retry',
+            phase: 'end',
+            recovered: true,
+            attempt: staleAttempt,
+            startedAt: staleStartedAt,
+            elapsedMs: staleElapsedMs,
+          });
+          this.eventQueue.complete();
+        }
+        return;
+      }
       this.eventQueue.complete();
     }
   }
@@ -1710,7 +2570,20 @@ export class PiAgent extends BaseAgent {
       workingDirectory: this.config.session?.workingDirectory,
       activeSourceSlugs: Array.from(this.sourceManager.getActiveSlugs()),
       allSourceSlugs: this.sourceManager.getAllSources().map(s => s.config.slug),
-      hasSourceActivation: !!this.onSourceActivationRequest,
+      authorizedSourceSlugs: this.sourceManager.getAllSources().filter(isSourceUsable).map(s => s.config.slug),
+      sourceConfigs: Object.fromEntries(
+        this.sourceManager.getAllSources()
+          .filter(s => s.config.enabled)
+          .map(s => [s.config.slug, {
+            grantedPermissions: s.config.grantedPermissions,
+            riskLevel: s.config.riskLevel,
+            sourcePolicy: s.config.sourcePolicy,
+            sourceToolPolicies: s.config.sourceToolPolicies,
+            name: s.config.name,
+            tagline: s.config.tagline,
+          }]),
+      ),
+      sourceSessionDeny: this.getSourceSessionDeny(),
       permissionManager: this.permissionManager,
       prerequisiteManager: this.prerequisiteManager,
       rtkContext,
@@ -1738,65 +2611,6 @@ export class PiAgent extends BaseAgent {
           reason: checkResult.reason,
         })}`);
         this.send({ type: 'pre_tool_use_response', requestId, action: 'block', reason: checkResult.reason });
-        return;
-      }
-
-      case 'source_activation_needed': {
-        const { sourceSlug, sourceExists } = checkResult;
-        this.debug(`PreToolUse(sessionId=${sessionId}): Source "${sourceSlug}" not active, attempting activation...`);
-
-        if (this.onSourceActivationRequest) {
-          try {
-            const activated = await this.onSourceActivationRequest(sourceSlug);
-            if (!activated) {
-              const reason = sourceExists
-                ? `Source "${sourceSlug}" is not active. Activate it by @mentioning it in your message or via the source icon at the bottom of the input field.`
-                : `Source "${sourceSlug}" is not available yet. It needs to be created and configured first.`;
-              this.send({ type: 'pre_tool_use_response', requestId, action: 'block', reason });
-              return;
-            }
-            this.debug(`PreToolUse(sessionId=${sessionId}): Source "${sourceSlug}" activated successfully`);
-            this.eventQueue.enqueue({
-              type: 'source_activated' as const,
-              sourceSlug,
-              originalMessage: this.getCurrentTurnUserMessage() ?? '',
-            });
-          } catch (err) {
-            const reason = sourceExists
-              ? `Source "${sourceSlug}" could not be activated: ${err}`
-              : `Source "${sourceSlug}" is not available yet. It needs to be created and configured first.`;
-            this.send({ type: 'pre_tool_use_response', requestId, action: 'block', reason });
-            return;
-          }
-        }
-
-        // Re-run pipeline after activation
-        const postResult = runPreToolUseChecks({
-          toolName,
-          input,
-          sessionId,
-          permissionMode: this.permissionManager.getPermissionMode(),
-          workspaceRootPath: rootPath,
-          workspaceId: workspaceSlug,
-          plansFolderPath,
-          dataFolderPath,
-          workingDirectory: this.config.session?.workingDirectory,
-          activeSourceSlugs: Array.from(this.sourceManager.getActiveSlugs()),
-          allSourceSlugs: this.sourceManager.getAllSources().map(s => s.config.slug),
-          hasSourceActivation: !!this.onSourceActivationRequest,
-          permissionManager: this.permissionManager,
-          prerequisiteManager: this.prerequisiteManager,
-          rtkContext,
-          onDebug: (msg) => this.debug(`PreToolUse(sessionId=${sessionId}): ${msg}`),
-        });
-
-        if (postResult.type === 'modify') {
-          this.send({ type: 'pre_tool_use_response', requestId, action: 'modify', input: postResult.input });
-        } else if (postResult.type === 'block') {
-          this.send({ type: 'pre_tool_use_response', requestId, action: 'block', reason: postResult.reason });
-        } else {
-          this.send({ type: 'pre_tool_use_response', requestId, action: 'allow' });
-        }
         return;
       }
 
@@ -1841,6 +2655,12 @@ export class PiAgent extends BaseAgent {
           rememberForMinutes: checkResult.rememberForMinutes,
           commandHash: checkResult.commandHash,
           approvalTtlSeconds: checkResult.approvalTtlSeconds,
+          sourceSlug: checkResult.sourceSlug,
+          sourceName: checkResult.sourceName,
+          sourceRisk: checkResult.sourceRisk,
+          requiredPermission: checkResult.requiredPermission,
+          dataScope: checkResult.dataScope,
+          isAuthorizationRequest: checkResult.isAuthorizationRequest,
         });
 
         const allowed = await permissionPromise;
@@ -2283,7 +3103,24 @@ export class PiAgent extends BaseAgent {
     const id = msg.id as string;
     const success = Boolean(msg.success);
     const pending = this.pendingCompactions.get(id);
-    if (!pending) return;
+    if (!pending) {
+      // Late reply: the RPC timer already gave up on this compaction. The
+      // subprocess may still have completed the work (and persisted its
+      // compaction record) — log everything we can so a divergence between
+      // the main-process verdict and the data layer is diagnosable from one
+      // line instead of a forensics pass across gateway logs.
+      const requestedAt = typeof msg.requestedAt === 'number' ? (msg.requestedAt as number) : undefined;
+      const lateMs = requestedAt ? Date.now() - requestedAt : undefined;
+      const note = typeof msg.note === 'string' ? (msg.note as string) : undefined;
+      const raw = msg.result as { tokensBefore?: number } | undefined;
+      this.debug(
+        `[compact] Late compact_result dropped (id=${id}): success=${success}` +
+          `${lateMs !== undefined ? `, lateMs=${lateMs}` : ''}` +
+          `${note !== undefined ? `, note=${note}` : ''}` +
+          `${success && raw?.tokensBefore != null ? `, tokensBefore=${raw.tokensBefore}` : ''}`,
+      );
+      return;
+    }
 
     this.pendingCompactions.delete(id);
     if (!success) {
@@ -2354,6 +3191,10 @@ export class PiAgent extends BaseAgent {
     this.subprocessReadyResolve = null;
     this.clearTurnIdleWatchdog();
     this.activeTurnToolIds.clear();
+    // No retry is possible once the subprocess is gone — drop ladder state so
+    // it cannot leak into a future turn (handleSubprocessExit completes the
+    // queue below when processing).
+    this.resetRetryLadderState();
 
     // If we were processing, emit error + complete
     if (this._isProcessing) {
@@ -2435,32 +3276,120 @@ export class PiAgent extends BaseAgent {
   }
 
   /**
+   * Absolute total budget (cap) for a manual compact. The old fixed-300s RPC
+   * timer misjudged healthy-but-long compactions (2026-10-08 wild-meadow:
+   * 599s of continuous, heartbeat-backed work killed at 300s). The default is
+   * now 900s; activity is handled by the staleness timer instead. The
+   * subprocess wait budget CRAFT_PI_COMPACT_WAIT_TIMEOUT_MS (W) stays strictly
+   * below this value. Override with CRAFT_PI_COMPACT_RPC_TIMEOUT_MS.
+   */
+  private static readonly DEFAULT_COMPACT_CAP_MS = 900_000;
+
+  private getCompactRpcTimeoutMs(): number {
+    const raw = process.env.CRAFT_PI_COMPACT_RPC_TIMEOUT_MS;
+    if (!raw) return PiAgent.DEFAULT_COMPACT_CAP_MS;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : PiAgent.DEFAULT_COMPACT_CAP_MS;
+  }
+
+  /**
+   * Activity window (staleness) for a manual compact: if no compaction_progress
+   * heartbeat arrives within this window, the compaction is presumed stalled.
+   * Default 120s = 4 heartbeat cycles (30s each). Override with
+   * CRAFT_PI_COMPACT_STALENESS_MS.
+   */
+  private static readonly DEFAULT_COMPACT_STALENESS_MS = 120_000;
+
+  private getCompactStalenessMs(): number {
+    const raw = process.env.CRAFT_PI_COMPACT_STALENESS_MS;
+    if (!raw) return PiAgent.DEFAULT_COMPACT_STALENESS_MS;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : PiAgent.DEFAULT_COMPACT_STALENESS_MS;
+  }
+
+  /**
+   * Tell the user the work may still complete rather than implying it died
+   * (the subprocess keeps going after the main process gives up).
+   */
+  private static readonly COMPACT_TIMEOUT_HINT =
+    ' Compaction may still be running in the background; retry /compact later to check.';
+
+  /**
+   * Re-arm a pending compact's staleness timer. Heartbeats arrive every ~30s;
+   * each arrival pushes the stall verdict back by one full window. The cap
+   * timer is untouched (absolute).
+   */
+  private rearmCompactStaleness(pending: {
+    staleTimer: ReturnType<typeof setTimeout>;
+    reject: (error: Error) => void;
+    lastHeartbeatAt?: number;
+  }): void {
+    pending.lastHeartbeatAt = Date.now();
+    clearTimeout(pending.staleTimer);
+    pending.staleTimer = setTimeout(() => {
+      const staleMs = this.getCompactStalenessMs();
+      pending.reject(
+        new Error(`compact stalled: no heartbeat for ${Math.floor(staleMs / 1000)}s${PiAgent.COMPACT_TIMEOUT_HINT}`),
+      );
+    }, this.getCompactStalenessMs());
+    (pending.staleTimer as { unref?: () => void }).unref?.();
+  }
+
+  /**
    * Ask subprocess to compact the active session context.
    */
   private async requestCompact(customInstructions?: string): Promise<{ summary: string; firstKeptEntryId: string; tokensBefore: number } | null> {
     await this.ensureSubprocess();
 
     const id = `compact-${++this.rpcIdCounter}`;
-    // GPT-backed Pi compactions on large conversations can legitimately take 60-120s
-    // (single blocking OpenAI summary call, no progress stream). 5 min covers realistic
-    // cases; truly hung subprocesses are caught by the stdio death watchdog.
-    const timeoutMs = 300_000;
+    // Two independent verdicts, per 2026-10-08 review:
+    //  - cap: absolute total budget (set once, never re-armed) — catches a
+    //    genuinely runaway compaction even with heartbeats flowing.
+    //  - stale: activity window (re-armed by every compaction_progress) —
+    //    catches a stalled/dead compaction even when the total looks fine.
+    const capMs = this.getCompactRpcTimeoutMs();
+    const staleMs = this.getCompactStalenessMs();
 
     return new Promise<{ summary: string; firstKeptEntryId: string; tokensBefore: number } | null>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let settled = false;
+      const cleanup = (): void => {
+        const pending = this.pendingCompactions.get(id);
+        if (pending) {
+          clearTimeout(pending.capTimer);
+          clearTimeout(pending.staleTimer);
+        }
+      };
+      const fail = (error: Error): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
         this.pendingCompactions.delete(id);
-        reject(new Error(`compact timed out after ${Math.floor(timeoutMs / 1000)}s`));
-      }, timeoutMs);
+        reject(error);
+      };
+      const succeed = (result: { summary: string; firstKeptEntryId: string; tokensBefore: number } | null): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        this.pendingCompactions.delete(id);
+        resolve(result);
+      };
+
+      const capTimer = setTimeout(() => {
+        fail(new Error(`compact exceeded total budget of ${Math.floor(capMs / 1000)}s (heartbeats active)${PiAgent.COMPACT_TIMEOUT_HINT}`));
+      }, capMs);
+      (capTimer as { unref?: () => void }).unref?.();
+
+      const staleTimer = setTimeout(() => {
+        fail(new Error(`compact stalled: no heartbeat for ${Math.floor(staleMs / 1000)}s${PiAgent.COMPACT_TIMEOUT_HINT}`));
+      }, staleMs);
+      (staleTimer as { unref?: () => void }).unref?.();
 
       this.pendingCompactions.set(id, {
-        resolve: (result) => {
-          clearTimeout(timer);
-          resolve(result);
-        },
-        reject: (error) => {
-          clearTimeout(timer);
-          reject(error);
-        },
+        resolve: succeed,
+        reject: fail,
+        sentAt: Date.now(),
+        capTimer,
+        staleTimer,
       });
 
       this.send({ type: 'compact', id, customInstructions });
@@ -2576,11 +3505,17 @@ export class PiAgent extends BaseAgent {
     // Reset state for new turn
     this._isProcessing = true;
     this.abortReason = undefined;
+    this.systemStopReason = null;
     this.eventQueue.reset();
     this.activeTurnToolIds.clear();
     this.clearTurnIdleWatchdog();
+    this.cancelIdleSubprocessReaper();
     this.lastTurnEventAt = Date.now();
-    this.currentUserMessage = message;
+    // A new user turn cancels any in-flight retry ladder from the previous turn.
+    this.resetRetryLadderState();
+    const rawUserRequest = this.getCurrentTurnUserMessage() ?? message;
+    this.currentUserMessage = rawUserRequest;
+    this.progressJournal?.recordUserRequest(rawUserRequest);
     this.adapter.startTurn();
 
     // Fire UserPromptSubmit hook event (fire-and-forget)
@@ -2740,44 +3675,9 @@ export class PiAgent extends BaseAgent {
       });
       this.refreshTurnIdleWatchdog();
 
-      // Yield events as they arrive. The source-activation drain controller
-      // captures a pending restart on the first triggering tool_result and
-      // drains sibling tool_results from the same parallel-tool batch before
-      // firing `source_activated` + `forceAbort` — Pi's subprocess only picks
-      // up new proxy tools on the next handlePrompt, so the restart is needed
-      // here too. Without the drain, sibling tool_results from parallel
-      // source_test calls are lost (#790).
-      const sourceActivationDrain = new SourceActivationDrainController('fire-on-non-tool-result');
-      for await (const event of this.eventQueue.drain()) {
-        // Pre-yield check: when we're past capture and the incoming event is
-        // not a tool_result, fire BEFORE yielding it (the event belongs to
-        // the about-to-be-aborted next turn — letting it through would leak
-        // a fragment of the cancelled response into the session journal).
-        const preFire = sourceActivationDrain.shouldFireBeforeEvent(event);
-        if (preFire) {
-          this.debug(`source_test activated "${preFire.sourceSlug}", drained sibling tool_results, restarting turn`);
-          yield preFire;
-          this.forceAbort(AbortReason.SourceActivated);
-          return;
-        }
-
-        if (sourceActivationDrain.observe(event, () => this.consumePendingSourceActivationRestart())) {
-          yield event;
-          continue;
-        }
-
-        yield event;
-      }
-
-      // Stream-end fallback: queue drained naturally with a captured restart
-      // still pending. Fire and return (no further events expected).
-      const sourceActivationFireAtEnd = sourceActivationDrain.shouldFireAtBoundary();
-      if (sourceActivationFireAtEnd) {
-        this.debug(`source_test activated "${sourceActivationFireAtEnd.sourceSlug}", stream ended with pending restart, restarting turn`);
-        yield sourceActivationFireAtEnd;
-        this.forceAbort(AbortReason.SourceActivated);
-        return;
-      }
+      // Inactive-source calls are blocked before reaching this event stream;
+      // selected-source changes are deferred by SessionManager until the turn ends.
+      yield* this.eventQueue.drain();
     } catch (error) {
       if (error instanceof Error && error.message.includes('abort')) {
         if (this.abortReason === AbortReason.PlanSubmitted) {
@@ -2792,6 +3692,15 @@ export class PiAgent extends BaseAgent {
       const errorObj = error instanceof Error ? error : new Error(String(error));
       const typedError = this.parsePiError(errorObj);
 
+      // An unexpected generator failure ends the turn for good: no further
+      // ladder round can run, so drop the ladder (timers + persisted rung).
+      // Without this, a restart would re-arm the 10-minute loop for a turn
+      // that already terminated with the error below.
+      if (this.retryLadder.isActive) {
+        this.debug('[retry-ladder] Abandoning ladder after unexpected turn failure');
+        this.resetRetryLadderState();
+      }
+
       if (typedError.code !== 'unknown_error') {
         yield { type: 'typed_error', error: typedError };
       } else {
@@ -2803,6 +3712,12 @@ export class PiAgent extends BaseAgent {
       this.clearTurnIdleWatchdog();
       this.activeTurnToolIds.clear();
       this._isProcessing = false;
+
+      // Idle reclamation: the Pi subprocess holds ~400MB (bun runtime + SDK
+      // session); keeping it alive across idle periods let a handful of
+      // sessions eat multiple GB (2026-10-08 90% memory incident). After the
+      // turn we schedule a reaper; any new turn/activity cancels it.
+      this.scheduleIdleSubprocessReaper();
 
       // Extract memories at turn end (session-end semantics), matching
       // ClaudeAgent behavior. The per-session already-extracted guard in
@@ -3095,7 +4010,13 @@ n   * connection can be adopted mid-session.
 
 
   async abort(reason?: string): Promise<void> {
-    // User stop also cancels any pending auto-retry cycle.
+    // User stop also cancels any pending auto-retry cycle — when the ladder
+    // is active, surface the staged error terminally (and clear the persisted
+    // state) instead of leaving the retryPending card dangling.
+    if (this.retryLadder.isActive) {
+      this.debug('[retry-ladder] User stop during backoff — terminal error + close turn');
+      this.finishRetryLadder({ forcedTerminal: true });
+    }
 
     // Fire Stop hook event (fire-and-forget)
     this.emitAutomationEvent('Stop', { hook_event_name: 'Stop' });
@@ -3121,6 +4042,12 @@ n   * connection can be adopted mid-session.
     // in-flight retry backoff and emits no further agent_end, so a stale hold
     // would leak into the next turn and keep its queue open.
     this.adapter.resetRecoveryState();
+    // Unified retry ladder: user/system stop must always win — no retries after
+    // an explicit abort, and stale timers must not fire into the next turn.
+    // (The user-stop path already surfaced the terminal card via
+    // finishRetryLadder({forcedTerminal}); this hard reset also clears the
+    // persisted state so a later restart does not re-arm the loop.)
+    this.resetRetryLadderState();
 
     // Fire Stop hook event (fire-and-forget)
     this.emitAutomationEvent('Stop', { hook_event_name: 'Stop' });
@@ -3196,40 +4123,50 @@ n   * connection can be adopted mid-session.
     return all.slice(0, 120);
   }
 
-  /** Record a tool start/result into the progress-anchor ring. */
+  /** Record a tool start/result into the durable progress ledger. */
   private noteRecentToolEvent(
     type: 'tool_start' | 'tool_result',
+    callId: string,
     toolName?: string,
     input?: unknown,
     result?: unknown,
     isError?: boolean,
   ): void {
     const name = toolName ?? 'tool';
-    const ring = this.recentToolCalls;
     if (type === 'tool_start') {
-      const args = this.compactToolArgSummary(input);
-      const last = ring[ring.length - 1];
-      // Collapse consecutive duplicates (same tool + args) — the incident
-      // loop was hundreds of identical pairs; a handful is enough context.
-      if (!last || last.name !== name || last.args !== args) {
-        ring.push({ name, args });
-        if (ring.length > 20) ring.shift();
-      }
+      this.progressJournal?.recordToolStart({
+        callId,
+        toolName: name,
+        argsSummary: this.compactToolArgSummary(input),
+      });
       return;
     }
-    // Attach the result to the most recent entry of the same tool.
-    let entry: (typeof ring)[number] | undefined;
-    for (let i = ring.length - 1; i >= 0; i--) {
-      const candidate = ring[i];
-      if (candidate && candidate.name === name) {
-        entry = candidate;
-        break;
+    const text = String(result ?? '').trim().replace(/\s+/g, ' ');
+    this.progressJournal?.recordToolResult({
+      callId,
+      toolName: name,
+      resultSummary: text || '(no output)',
+      isError,
+    });
+
+    // 最小审计：来源工具调用日志（仅元数据，不入参/返回体）
+    const sessionId = this.config.session?.id;
+    if (sessionId) {
+      const parsed = parseSourceSlugFromTool(name);
+      if (parsed) {
+        const source = this.sourceManager.getAllSources().find(s => s.config.slug === parsed.slug);
+        if (source) {
+          const riskInfo = classifySourceToolRisk(name, (input ?? {}) as Record<string, unknown>, source.config);
+          const toolPolicy = source.config.sourceToolPolicies?.[name];
+          recordSourceCall(this.config.workspace.rootPath, sessionId, {
+            tool: name,
+            risk: riskInfo.risk,
+            operation: riskInfo.operation,
+            result: isError ? 'error' : 'ok',
+            confirmed: toolPolicy === 'auto' ? 'always' : this.permissionManager.isCommandWhitelisted(name) ? 'session' : 'none',
+          });
+        }
       }
-    }
-    if (entry) {
-      const text = String(result ?? '').trim().replace(/\s+/g, ' ');
-      entry.result = text ? text.slice(0, 120) : '(no output)';
-      entry.isError = !!isError;
     }
   }
 
@@ -3242,28 +4179,24 @@ n   * connection can be adopted mid-session.
    * Returns null when there is nothing worth anchoring.
    */
   private buildProgressAnchor(): string | null {
-    const executed = this.recentToolCalls;
-    if (!this.currentUserMessage && executed.length === 0) return null;
+    const currentRequest = this.progressJournal?.latestUserRequest() || this.currentUserMessage;
+    const progress = this.progressJournal?.recentSnapshot() ?? '';
+    if (!currentRequest && !progress) return null;
+    const sessionId = this.config.session?.id;
+    const transcriptPath = sessionId
+      ? join(getSessionPath(this.config.workspace.rootPath, sessionId), 'session.jsonl')
+      : '';
     const lines: string[] = [
       '[SYSTEM PROGRESS ANCHOR — context was just compacted. This is a system note, not a user message. Do NOT redo work that is already done.]',
     ];
-    if (this.currentUserMessage) {
-      lines.push(`Current user request: ${this.currentUserMessage.slice(0, 400)}`);
+    if (currentRequest) lines.push(`Current user request: ${currentRequest.slice(0, 1_200)}`);
+    if (progress) {
+      lines.push('Persistent completed/in-progress work (do NOT repeat completed calls):');
+      lines.push(progress);
     }
-    const done = executed
-      .filter(c => c.result !== undefined)
-      .slice(-10)
-      .map(c => {
-        const head = c.name === 'bash' ? c.args : `${c.name} ${c.args}`.trim();
-        const err = c.isError ? ' [FAILED]' : '';
-        return `- already executed: ${head} → ${c.result}${err}`;
-      });
-    if (done.length > 0) {
-      lines.push('Completed tool work in this turn (do NOT re-run these):');
-      lines.push(...done);
-    }
+    if (transcriptPath) lines.push(buildHistoryRecoveryPointer(transcriptPath));
     lines.push(
-      'Your next step MUST differ from the steps above. If a listed call already returned the information you need, cite it instead of re-executing it. If nothing new can be done, report your current conclusion to the user now.',
+      'Your next step MUST differ from completed steps above. If an essential detail is missing, search/read the persisted transcript before repeating work. If nothing new can be done, report the current conclusion to the user now.',
     );
     return lines.join('\n');
   }
@@ -3281,6 +4214,17 @@ n   * connection can be adopted mid-session.
       return false;
     }
     this.debug(`Steering mid-stream: "${message.slice(0, 100)}"`);
+    this.progressJournal?.recordGuidance(message);
+    // User input during a retry backoff window (2026-10-06 spec): the turn is
+    // stalled while the ladder waits for its next rung. Fire the retry NOW
+    // instead of making the user wait up to 10 minutes — the steer arrives
+    // at the subprocess and is queued for the re-issued model step, so the
+    // guidance takes effect immediately rather than after the countdown.
+    if (this.retryLadder.isActive && this.retryTimer != null) {
+      this.debug('[retry-ladder] Steering input during backoff — firing retry immediately');
+      this.clearRetryTimer();
+      this.fireRetry();
+    }
     this.send({ type: 'steer', message });
     this.refreshTurnIdleWatchdog();
     return true;
@@ -3416,6 +4360,7 @@ n   * connection can be adopted mid-session.
    */
   private killSubprocess(): void {
     // Subprocess teardown also tears down any pending auto-retry cycle.
+    this.cancelIdleSubprocessReaper();
 
     if (this.readline) {
       this.readline.close();

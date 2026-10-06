@@ -13,7 +13,9 @@ import {
   groupActivitiesByParent,
   computeLastChildSet,
   isActivityGroup,
+  groupMessagesByTurn,
   type ActivityGroup,
+  type AssistantTurn,
 } from '../turn-utils'
 import type { ActivityItem } from '../TurnCard'
 
@@ -675,5 +677,84 @@ describe('TodoWrite extraction', () => {
     const group = result[0] as ActivityGroup
     expect(group.children.length).toBe(1)
     expect(group.children[0]!.toolName).toBe('TodoWrite')
+  })
+})
+
+// ============================================================================
+// Persisted retry-ladder row grouping (2026-10-08)
+// ============================================================================
+
+describe('persisted retry-ladder row (statusType retrying)', () => {
+  it('maps a retrying row to a running status activity carrying the retry payload', () => {
+    const turns = groupMessagesByTurn([
+      { id: 'user-1', role: 'user', content: 'hello', timestamp: 1 },
+      {
+        id: 'retry-row',
+        role: 'status',
+        statusType: 'retrying',
+        content: '',
+        timestamp: 50,
+        retry: { status: 'retrying', attempt: 2, nextRetryAt: 10_050, startedAt: 50 },
+      },
+    ])
+
+    const turn = turns.find(t => t.type === 'assistant') as AssistantTurn | undefined
+    expect(turn).toBeDefined()
+    const row = turn!.activities.find(a => a.id === 'retry-row')
+    expect(row).toMatchObject({
+      type: 'status',
+      status: 'running',
+      statusType: 'retrying',
+      retry: { status: 'retrying', attempt: 2, nextRetryAt: 10_050, startedAt: 50 },
+    })
+  })
+
+  it('derives completed/error activity status from a settled payload', () => {
+    const turns = groupMessagesByTurn([
+      {
+        id: 'recovered-row',
+        role: 'status',
+        statusType: 'retrying',
+        content: '',
+        timestamp: 10,
+        retry: { status: 'recovered', attempt: 3, startedAt: 1, elapsedMs: 9000 },
+      },
+      {
+        id: 'failed-row',
+        role: 'status',
+        statusType: 'retrying',
+        content: '',
+        timestamp: 20,
+        retry: { status: 'failed', attempt: 4, startedAt: 2, elapsedMs: 8000 },
+      },
+    ])
+
+    const turn = turns.find(t => t.type === 'assistant') as AssistantTurn | undefined
+    const recovered = turn!.activities.find(a => a.id === 'recovered-row')!
+    const failed = turn!.activities.find(a => a.id === 'failed-row')!
+    expect(recovered.status).toBe('completed')
+    expect(failed.status).toBe('error')
+  })
+
+  it('keeps the retry row chronologically before the recovered run messages', () => {
+    const turns = groupMessagesByTurn([
+      { id: 'user-1', role: 'user', content: 'hello', timestamp: 1 },
+      { id: 'tool-1', role: 'tool', toolName: 'Read', toolUseId: 'tu-1', toolStatus: 'completed', toolResult: 'ok', timestamp: 10, turnId: 'turn-1' },
+      {
+        id: 'retry-row',
+        role: 'status',
+        statusType: 'retrying',
+        content: '',
+        timestamp: 20,
+        retry: { status: 'recovered', attempt: 2, startedAt: 20, elapsedMs: 5000 },
+      },
+      { id: 'tool-2', role: 'tool', toolName: 'Bash', toolUseId: 'tu-2', toolStatus: 'completed', toolResult: 'ok', timestamp: 30, turnId: 'turn-1' },
+    ])
+
+    const turn = turns.find(t => t.type === 'assistant') as AssistantTurn | undefined
+    const listed = turn!.activities.map(a => a.id)
+    // 重试成功行位于阶梯触发位置（重试运行的过程消息之前）
+    expect(listed.indexOf('retry-row')).toBeGreaterThan(listed.indexOf('tool-1'))
+    expect(listed.indexOf('retry-row')).toBeLessThan(listed.indexOf('tool-2'))
   })
 })

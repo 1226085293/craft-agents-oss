@@ -2,7 +2,7 @@ import * as React from 'react'
 import { useMemo, useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react'
 import i18n from 'i18next'
 import { useTranslation } from 'react-i18next'
-import type { ToolDisplayMeta, AnnotationV1 } from '@craft-agent/core'
+import type { ToolDisplayMeta, AnnotationV1, RetryLadderRow } from '@craft-agent/core'
 import { normalizePath, pathStartsWith, stripPathPrefix } from '@craft-agent/core/utils'
 import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { motion, AnimatePresence } from 'motion/react'
@@ -39,7 +39,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '../tooltip'
 import { parseDiffFromFile, type FileContents } from '@pierre/diffs'
 import { getDiffStats, getUnifiedDiffStats } from '../code-viewer'
 import { TurnCardActionsMenu } from './TurnCardActionsMenu'
-import { computeLastChildSet, groupActivitiesByParent, isActivityGroup, buildActivityRenderKeys, formatDuration, formatTokens, formatDateTimeFull, deriveTurnPhase, shouldShowThinkingIndicator, type ActivityGroup, type AssistantTurn } from './turn-utils'
+import { computeLastChildSet, groupActivitiesByParent, isActivityGroup, buildActivityRenderKeys, formatDuration, formatTokens, formatDateTimeFull, deriveTurnPhase, shouldShowThinkingIndicator, sortActivitiesForDisplay, type ActivityGroup, type AssistantTurn } from './turn-utils'
 import { extractAnnotationSelectedText } from './follow-up-helpers'
 import {
   formatAnnotationFollowUpTooltipText,
@@ -262,14 +262,11 @@ export interface ActivityItem {
    * intermediate rows can key off it and update in place.
    */
   turnId?: string
-  /**
-   * Set when this intermediate text was promoted to the turn's response (a turn
-   * that ended without a real final reply). Its text is already rendered as the
-   * response, so the steps list must not render it a second time.
-   */
-  promotedToResponse?: boolean
   // Status activities (e.g., compacting)
   statusType?: string  // e.g., 'compacting'
+  /** Persisted retry-ladder payload (statusType 'retrying') — drives the
+   *  retry status line: 重试中 / 重试成功 / 重试失败. */
+  retry?: RetryLadderRow
   // Background task fields
   taskId?: string         // For background Task tools
   shellId?: string        // For background Bash shells
@@ -916,6 +913,97 @@ function TreeViewConnector({ depth }: { depth: number; isLastChild?: boolean }) 
   )
 }
 
+/** Live MM:SS countdown toward `target` (epoch ms); null when not targeting. */
+function useRetryCountdown(target?: number): string | null {
+  const [now, setNow] = React.useState(() => Date.now())
+  React.useEffect(() => {
+    if (target == null) return
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [target])
+  if (target == null) return null
+  const seconds = Math.max(0, Math.ceil((target - now) / 1000))
+  const mm = String(Math.floor(seconds / 60)).padStart(2, '0')
+  const ss = String(seconds % 60).padStart(2, '0')
+  return `${mm}:${ss}`
+}
+
+/** Live MM:SS elapsed since `target` (epoch ms); null when not active. */
+function useElapsedTimer(target?: number): string | null {
+  const [now, setNow] = React.useState(() => Date.now())
+  React.useEffect(() => {
+    if (target == null) return
+    setNow(Date.now())
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [target])
+  if (target == null) return null
+  return formatRetryDuration(Math.max(0, now - target))
+}
+
+/** MM:SS elapsed — same shape as the countdown so the two read consistently. */
+function formatRetryDuration(ms: number): string {
+  const total = Math.max(0, Math.round((Number.isFinite(ms) ? ms : 0) / 1000))
+  const mm = String(Math.floor(total / 60)).padStart(2, '0')
+  const ss = String(total % 60).padStart(2, '0')
+  return `${mm}:${ss}`
+}
+
+/**
+ * RetryStatusRow - the retry-status line rendered INSIDE the process block at
+ * its chronological position (ladder start), so any retried-run rows that
+ * follow appear AFTER it. Four copy variants, all permanent once the ladder
+ * starts (2026-10-08 user spec — countdown/timer/attempt/state must survive):
+ *   - retrying + nextRetryAt: 等待第 n 次重试 (mm:ss)   — live countdown
+ *   - retrying + activeAt:    第 n 次重试中 (mm:ss)     — live elapsed timer
+ *   - recovered:              重试 n 次后恢复 · 耗时 mm:ss
+ *   - failed:                 重试 n 次后失败 · 耗时 mm:ss
+ * No stop control: the chat's stop button ends the whole session/turn.
+ */
+function RetryStatusRow({ retry }: { retry: RetryLadderRow }) {
+  const { t } = useTranslation()
+  const isRetrying = retry.status === 'retrying'
+  // Waiting-for-retry: live countdown toward nextRetryAt.
+  const countdown = useRetryCountdown(isRetrying ? retry.nextRetryAt : undefined)
+  // Retry in flight: live elapsed timer from activeAt.
+  const elapsed = useElapsedTimer(isRetrying ? retry.activeAt : undefined)
+  const colorClass =
+    retry.status === 'recovered' ? 'text-success' : isRetrying ? 'text-info' : 'text-destructive'
+
+  const body = isRetrying
+    ? countdown != null
+      ? t('chat.retryLineWaiting', { times: retry.attempt, time: countdown })
+      : t('chat.retryLineRetryingInFlight', {
+          times: retry.attempt,
+          elapsed: elapsed ?? '00:00',
+        })
+    : retry.status === 'recovered'
+      ? t('chat.retryLineRecovered', {
+          times: retry.attempt,
+          duration: formatRetryDuration(retry.elapsedMs ?? 0),
+        })
+      : t('chat.retryLineFailed', {
+          times: retry.attempt,
+          duration: formatRetryDuration(retry.elapsedMs ?? 0),
+        })
+
+  return (
+    <div className={cn('flex items-center gap-2 py-0.5 select-none', SIZE_CONFIG.fontSize, colorClass)}>
+      <div className={cn(SIZE_CONFIG.iconSize, 'flex items-center justify-center shrink-0')}>
+        {isRetrying ? (
+          <Spinner className={SIZE_CONFIG.spinnerSize} />
+        ) : retry.status === 'recovered' ? (
+          <CheckCircle2 className={SIZE_CONFIG.iconSize} />
+        ) : (
+          <XCircle className={SIZE_CONFIG.iconSize} />
+        )}
+      </div>
+      <span className="truncate flex-1">{body}</span>
+    </div>
+  )
+}
+
 /** Single activity row in expanded view */
 function ActivityRow({ activity, onOpenDetails, isLastChild, sessionFolderPath, displayMode = 'detailed' }: ActivityRowProps) {
   const depth = activity.depth || 0
@@ -974,6 +1062,21 @@ function ActivityRow({ activity, onOpenDetails, isLastChild, sessionFolderPath, 
 
   // Status activities (e.g., compacting, guidance) - system-level with distinct styling
   if (activity.type === 'status') {
+    // Retry-ladder row (statusType 'retrying'): the durable three-state line
+    // (重试中 / 重试成功 / 重试失败). Rendered at its chronological position,
+    // i.e. before any retried-run rows that follow.
+    if (activity.statusType === 'retrying') {
+      return (
+        <div className="flex items-stretch">
+          <TreeViewConnector depth={depth} isLastChild={isLastChild} />
+          <div className="flex-1 min-w-0">
+            <RetryStatusRow
+              retry={activity.retry ?? { status: 'retrying', attempt: 1, startedAt: activity.timestamp }}
+            />
+          </div>
+        </div>
+      )
+    }
     const isRunning = activity.status === 'running'
     const isFailed = activity.status === 'error'
     const isGuidance = activity.statusType === 'guidance'
@@ -2958,23 +3061,20 @@ export const TurnCard = React.memo(function TurnCard({
     [activities, intent, isStreaming, response, isComplete]
   )
 
-  // Sort activities by timestamp for correct chronological order
-  // This handles the live streaming case (turn-utils sorts on flush for completed turns)
+  // Keep any live progress row at the tail even if its original timestamp
+  // predates later tools/status events (stream deltas keep the row's first timestamp).
   const allSortedActivities = useMemo(
-    () => [...activities].sort((a, b) => a.timestamp - b.timestamp),
+    () => sortActivitiesForDisplay(activities),
     [activities]
   )
 
-  // Separate plan activities from regular activities
-  // Plans are rendered as full ResponseCards, not in the collapsible activities section
+  // Plans are rendered as full ResponseCards, not in the collapsible activities section.
   const planActivities = useMemo(
     () => allSortedActivities.filter(a => a.type === 'plan'),
     [allSortedActivities]
   )
-  // Drop commentary that was promoted to the turn's response: its text is
-  // already rendered as the reply, and keeping the row shows it twice.
   const sortedActivities = useMemo(
-    () => allSortedActivities.filter(a => a.type !== 'plan' && !a.promotedToResponse),
+    () => allSortedActivities.filter(a => a.type !== 'plan'),
     [allSortedActivities]
   )
 
@@ -3082,7 +3182,9 @@ export const TurnCard = React.memo(function TurnCard({
     }
   }, [isExpanded, isComplete])
 
-  // Don't render if nothing to show and turn is complete
+  // Don't render if nothing to show and turn is complete.
+  // A retry-status line is itself meaningful process content (it lives in
+  // activities now), so it keeps the turn card alive.
   if (activities.length === 0 && !response && isComplete) {
     return null
   }
@@ -3102,6 +3204,8 @@ export const TurnCard = React.memo(function TurnCard({
       if (a.type === 'intermediate') return !a.content?.trim()
       // Plan activities are meaningful work
       if (a.type === 'plan') return false
+      // Retry-status lines are meaningful process content
+      if (a.type === 'status' && a.statusType === 'retrying') return false
       // Other activity types - consider as no meaningful work
       return true
     })
@@ -3117,6 +3221,14 @@ export const TurnCard = React.memo(function TurnCard({
   // This properly handles the "gap" state (awaiting) between tool completion and next action,
   // which was previously causing the turn card to "disappear".
   const isThinking = shouldShowThinkingIndicator(turnPhase, isBuffering)
+
+  // Retry-status line rides inside the process block as a persisted status
+  // row (activity.statusType 'retrying'). While the ladder is retrying it
+  // replaces the generic "Thinking..." indicator (both convey "waiting"),
+  // so we never show the two at once.
+  const isRetryRetrying = sortedActivities.some(
+    a => a.type === 'status' && a.statusType === 'retrying' && a.status === 'running'
+  )
 
   return (
     <div className="space-y-1">
@@ -3273,7 +3385,7 @@ export const TurnCard = React.memo(function TurnCard({
                       Hidden while a running intermediate row is visible: that row
                       already shows "Thinking..." and will morph into the streamed
                       text in place (no duplicate flash). */}
-                  {isThinking && !animateResponse && !hasVisibleRunningIntermediate && (
+                  {isThinking && !animateResponse && !hasVisibleRunningIntermediate && !isRetryRetrying && (
                     <motion.div
                       key="thinking"
                       initial={{ opacity: 0, x: -8 }}
@@ -3289,6 +3401,7 @@ export const TurnCard = React.memo(function TurnCard({
                       <span>{isBuffering ? 'Preparing response...' : 'Thinking...'}</span>
                     </motion.div>
                   )}
+                  {/* Retry status is a normal activity row now (chronological) */}
                 </div>
                 {/* TodoList - inside expanded section */}
                 {todos && todos.length > 0 && (
@@ -3301,7 +3414,7 @@ export const TurnCard = React.memo(function TurnCard({
       )}
 
       {/* Standalone thinking indicator - when no activities but still working */}
-      {!hasActivities && isThinking && !animateResponse && (
+      {!hasActivities && isThinking && !animateResponse && !isRetryRetrying && (
         <div className={cn("flex items-center gap-2 px-3 py-1.5 text-muted-foreground", SIZE_CONFIG.fontSize)}>
           <Spinner className={SIZE_CONFIG.spinnerSize} />
           <span>{isBuffering ? 'Preparing response...' : 'Thinking...'}</span>
@@ -3449,6 +3562,13 @@ export const TurnCard = React.memo(function TurnCard({
 
   // Re-render when active follow-up annotation state changes (plan CTA label)
   if (prev.hasActiveFollowUpAnnotations !== next.hasActiveFollowUpAnnotations) return false
+
+  // The UI identity key (getAssistantTurnUiKey) is derived from turnId + turn
+  // open-timestamp; if either changes the card identity changed, and the
+  // expansion toggle closure must be refreshed — otherwise clicks keep
+  // operating on a stale key against the new identity (memoized skip breaks
+  // the controlled expanded state).
+  if (prev.timestamp !== next.timestamp) return false
 
   // For complete, non-streaming turns: skip re-render only when both
   // session and turn identities match. Prevents stale local UI state from

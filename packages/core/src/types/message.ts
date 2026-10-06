@@ -248,11 +248,48 @@ export interface StoredAttachment {
 /**
  * Runtime message type (includes transient fields like isStreaming)
  */
+/**
+ * Persisted retry-ladder row payload (2026-10-08).
+ *
+ * The retry mechanism (unified retry ladder) must leave exactly ONE
+ * process-block line behind: 重试中 (retrying) → 重试成功 (recovered) /
+ * 重试失败 (failed). It rides on a `status` message with statusType
+ * 'retrying' and is persisted, so switching sessions or restarting the
+ * app cannot change the displayed state. Its position in the process
+ * block is chronological (ladder start), i.e. before any retried-run
+ * messages that follow.
+ */
+export interface RetryLadderRow {
+  /** Ladder state: 'retrying' (in flight) → 'recovered' | 'failed' (terminal). */
+  status: 'retrying' | 'recovered' | 'failed'
+  /** Retry attempt number (1-based) surfaced to the user ("第 N 次"). */
+  attempt: number
+  /** Epoch ms when the next retry fires (drives the live countdown). Only set
+   *  during the backoff window — cleared once the retry is in flight. */
+  nextRetryAt?: number
+  /** Epoch ms when the ladder began (first backoff) — total-duration anchor. */
+  startedAt: number
+  /** Epoch ms when the CURRENT retry went in flight (drives the live
+   *  "retrying for mm:ss" timer). Set on phase 'active', cleared on the next
+   *  backoff and once the ladder settles. */
+  activeAt?: number
+  /** Frozen total retry duration (ms), set once the ladder settles. */
+  elapsedMs?: number
+}
+
 export interface Message {
   id: string;
   role: MessageRole;
   content: string;
   timestamp: number;
+  /**
+   * For assistant text messages: the moment this block first became visible
+   * (its first text_delta), as opposed to `timestamp` which is the
+   * completion time. The UI sorts process-card rows by startedAt so a user
+   * guidance sent mid-stream renders after the blocks that were already
+   * visible when it was sent.
+   */
+  startedAt?: number;
   // Tool-specific fields
   toolName?: string;
   toolUseId?: string;
@@ -289,11 +326,9 @@ export interface Message {
   isGuidance?: boolean;
   // Intermediate text (commentary between tool calls, not final response)
   isIntermediate?: boolean;
-  // Aborted: this assistant message belonged to a turn the user cut short
-  // (Stop, or a mid-stream redirect). The text stays visible as a process
-  // step, but turn grouping must never promote it to the turn's final reply —
-  // an interrupted turn has no result. Persisted so the grouping decision
-  // survives an app reload.
+  // Aborted: this assistant message belonged to a turn cut short by Stop,
+  // redirect, or internal cancellation. Persisted for restart recovery,
+  // defense evaluation, and messaging delivery suppression.
   aborted?: boolean;
   // Hidden: a system-generated message that must reach the model (it drives a
   // turn) but must NOT render as a bubble in the transcript — e.g. the WS2
@@ -303,8 +338,18 @@ export interface Message {
   hidden?: boolean;
   // Turn ID: Correlation ID from the API's message.id, groups all messages in an assistant turn
   turnId?: string;
-  // Status type for special status messages (retrying is transient renderer state)
+  // Status type for special status messages. 'retrying' marks the PERSISTED
+  // retry-ladder row (role 'status' + `retry` payload); the older transient
+  // renderer retryState is gone (2026-10-08 — the row survives reload).
   statusType?: 'compacting' | 'compaction_complete' | 'retrying' | 'verification' | 'verification_passed' | 'verification_failed';
+  /**
+   * Persisted retry-ladder row payload (2026-10-08). One `status` message per
+   * ladder, created with status 'retrying' and settled in place to
+   * 'recovered'/'failed' when the ladder ends. Persisted by the session
+   * manager so the process-block retry line survives session switches and
+   * app restarts with its final state.
+   */
+  retry?: RetryLadderRow;
   // Info level for info messages (determines icon/color)
   infoLevel?: 'info' | 'warning' | 'error' | 'success';
   // Error-specific fields (for typed errors with diagnostics)
@@ -313,6 +358,10 @@ export interface Message {
   errorDetails?: string[];
   errorOriginal?: string;
   errorCanRetry?: boolean;
+  // Unified retry ladder (2026-10-05): the error is NON-terminal — retries
+  // continue in the background; the renderer styles it as a retrying card.
+  retryPending?: boolean;
+  retryAttempt?: number;
   errorActions?: Array<{
     key: string;
     label: string;
@@ -382,8 +431,12 @@ export interface StoredMessage {
   // Turn grouping - critical for TurnCard rendering after reload
   isIntermediate?: boolean;
   turnId?: string;
-  // Status type (retry progress is not persisted by the session manager)
+  /** Streaming start time (first text_delta) for process-card ordering - persisted */
+  startedAt?: number;
+  // Status type (retry rows are persisted with their `retry` payload)
   statusType?: 'compacting' | 'compaction_complete' | 'retrying' | 'verification' | 'verification_passed' | 'verification_failed';
+  /** Persisted retry-ladder row payload — see RetryLadderRow. */
+  retry?: RetryLadderRow;
   // Info level for info messages (persisted for reload)
   infoLevel?: 'info' | 'warning' | 'error' | 'success';
   // Error display fields
@@ -392,6 +445,9 @@ export interface StoredMessage {
   errorDetails?: string[];
   errorOriginal?: string;
   errorCanRetry?: boolean;
+  // Unified retry ladder (2026-10-05): non-terminal error marker.
+  retryPending?: boolean;
+  retryAttempt?: number;
   errorActions?: Array<{
     key: string;
     label: string;
@@ -539,6 +595,18 @@ export interface PermissionRequest {
   commandHash?: string;
   /** Approval validity window */
   approvalTtlSeconds?: number;
+  /** 数据源 slug（来源工具确认时存在） */
+  sourceSlug?: string;
+  /** 数据源名称 */
+  sourceName?: string;
+  /** 服务端裁定的风险级别 */
+  sourceRisk?: 'low' | 'medium' | 'high' | 'critical';
+  /** 推断的所需权限类别（read/write/external/delete/payment/sensitive） */
+  requiredPermission?: string;
+  /** 数据范围（源 tagline/说明） */
+  dataScope?: string;
+  /** true = 未授权/越界 → 授权请求；false/缺省 = 已授权高风险 → 单次确认 */
+  isAuthorizationRequest?: boolean;
 }
 
 /**
@@ -570,12 +638,32 @@ export type AgentEvent =
    * the single visible final reply — never two identical bubbles.
    */
   | { type: 'text_demote'; turnId: string }
-  | { type: 'retry'; phase: 'backoff'; message: string }
-  | { type: 'retry'; phase: 'active' | 'end' }
+  /**
+   * Re-promote an intermediate reply to the result bubble (2026-10-07,
+   * session 261007-wise-horizon). When a mid-turn user steer was queued and
+   * the SDK drained it, the MAIN reply was demoted to a process-card line
+   * (assistantFollowUpPending hold) while the drained steer's answer became
+   * the sole result bubble — the user's original answer vanished. The event
+   * adapter emits this when the queued-follow-up hold releases on the
+   * drained reply's terminal stop, carrying the demoted text so messaging
+   * channels can re-attach it; the session record flips isIntermediate so
+   * the persisted card line becomes a result bubble on reload.
+   */
+  | { type: 'text_promote'; turnId: string; text: string }
+  /**
+   * 2026-10-07 plain-jade: a spliced steer/follow-up user message just
+   * entered the agent's context — the moment the pending guidance was
+   * ACTUALLY processed (drain time). The main process re-stamps the
+   * guidance row to this moment so its card position and display time
+   * read "actual handling time", not the earlier queue/guide-click time.
+   */
+  | { type: 'steer_injected'; messageId?: string }
+  | { type: 'retry'; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number }
+  | { type: 'retry'; phase: 'active' | 'end'; recovered?: boolean; attempt?: number; startedAt?: number; elapsedMs?: number }
   | { type: 'status'; message: string; statusType?: string }
-  | { type: 'info'; message: string; statusType?: string; finalText?: string }
+  | { type: 'info'; message: string; statusType?: string; finalText?: string; /** Present when statusType === 'system_stop': machine key (e.g. 'busy_limit', 'no_progress') explaining why a guardrail killed the turn. */ stopReason?: string }
   | { type: 'text_delta'; text: string; turnId?: string; parentToolUseId?: string }
-  | { type: 'text_complete'; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; sdkMessageId?: string }
+  | { type: 'text_complete'; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; sdkMessageId?: string; /** Model's message_start time (thinking blocks never stream deltas) - for process-card ordering */ startedAt?: number }
   | { type: 'pi_turn_anchor'; sdkMessageId: string; sdkTurnAnchor: string }
   | { type: 'tool_start'; toolName: string; toolUseId: string; input: Record<string, unknown>; intent?: string; displayName?: string; turnId?: string; parentToolUseId?: string; toolDisplayMeta?: ToolDisplayMeta }
   | { type: 'tool_result'; toolUseId: string; toolName?: string; result: string; isError: boolean; input?: Record<string, unknown>; turnId?: string; parentToolUseId?: string }
@@ -594,8 +682,8 @@ export type AgentEvent =
       commandHash?: string;
       approvalTtlSeconds?: number;
     }
-  | { type: 'error'; message: string }
-  | { type: 'typed_error'; error: TypedError }
+  | { type: 'error'; message: string; retryPending?: boolean; retryAttempt?: number }
+  | { type: 'typed_error'; error: TypedError; retryPending?: boolean; retryAttempt?: number }
   | { type: 'complete'; usage?: AgentEventUsage }
   | { type: 'working_directory_changed'; workingDirectory: string }
   | { type: 'task_backgrounded'; toolUseId: string; taskId: string; intent?: string; turnId?: string; kind?: 'workflow'; workflowId?: string }
@@ -604,7 +692,6 @@ export type AgentEvent =
   | { type: 'task_completed'; taskId: string; status: 'completed' | 'failed' | 'stopped'; outputFile?: string; summary?: string; turnId?: string }
   | { type: 'workflow_agent_completed'; workflowId: string; agentId: string; turnId?: string }
   | { type: 'shell_killed'; shellId: string; turnId?: string }
-  | { type: 'source_activated'; sourceSlug: string; originalMessage: string }
   | { type: 'usage_update'; usage: Pick<AgentEventUsage, 'inputTokens' | 'contextWindow'> }
   | { type: 'steer_undelivered'; message: string };
 

@@ -231,6 +231,38 @@ export function clearLastApiError(): void {
   setStoredError(null);
 }
 
+/**
+ * Read the single-slot `api-error.json` WITHOUT deleting it and WITHOUT the
+ * staleness check. Used by {@link peekStoredError} and as the last-resort
+ * fallback in {@link getLastErrorFromHistory}.
+ */
+function readStoredErrorFile(sessionDir?: string): LastApiError | null {
+  const errorFile = sessionDir ? join(sessionDir, 'api-error.json') : getErrorFilePath();
+  try {
+    if (!existsSync(errorFile)) return null;
+    return JSON.parse(readFileSync(errorFile, 'utf-8')) as LastApiError;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read the single-slot file WITHOUT consuming it.
+ *
+ * `getStoredError()` deletes `api-error.json` on read, so a probe (provider
+ * diagnostics, URL validation) that calls `getLastApiError()` with no session
+ * directory can SILENTLY STEAL the error a session's reporting path was about
+ * to surface — and the `_sessionDir` singleton is clobbered by concurrent
+ * sessions, so such a probe may even pop a *different* session's slot. Probes
+ * should use this non-destructive peek instead. Same 5-minute staleness window
+ * as {@link getLastApiError}.
+ */
+export function peekStoredError(sessionDir?: string): LastApiError | null {
+  const error = readStoredErrorFile(sessionDir);
+  if (error && Date.now() - error.timestamp < MAX_ERROR_AGE_MS) return error;
+  return null;
+}
+
 // ============================================================================
 // API ERROR HISTORY
 // ============================================================================
@@ -327,6 +359,28 @@ export function formatErrorHistoryEntry(error: LastApiError, maxMessageLength = 
   const truncated =
     message.length > maxMessageLength ? `${message.slice(0, maxMessageLength)}…` : message;
   return `${when} ${error.status} ${error.statusText}: ${truncated}`;
+}
+
+/**
+ * Most recent API error for a session, read from the DURABLE per-session
+ * history (`api-errors.jsonl`): never consumes, never deleted, and no
+ * 5-minute staleness drop — the cause survives the whole retry-ladder
+ * backoff window.
+ *
+ * Why this matters: a transient failure (e.g. 429) is normally absorbed by the
+ * unified retry ladder, so the turn may only settle minutes later — long after
+ * the single-slot file was popped (`getStoredError` deletes on read) or aged
+ * past `MAX_ERROR_AGE_MS`. The session's "completed without a response" path
+ * then found nothing and surfaced NO error card, even though a rate limit was
+ * the real cause. The append-only history survives both the backoff window and
+ * any probe's consume-on-read, so the reporting path can always retrieve the
+ * real cause. Falls back to the single slot (non-consuming) when the history
+ * file is missing or empty.
+ */
+export function getLastErrorFromHistory(sessionDir?: string): LastApiError | null {
+  const history = readErrorHistory(sessionDir);
+  if (history.length > 0) return history[history.length - 1] ?? null;
+  return readStoredErrorFile(sessionDir);
 }
 
 // ============================================================================

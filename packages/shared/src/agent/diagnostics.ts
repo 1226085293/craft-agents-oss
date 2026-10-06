@@ -6,7 +6,7 @@
  * sessions don't run Anthropic-specific credential/endpoint checks.
  */
 
-import { getLastApiError } from '../interceptor-common.ts';
+import { peekStoredError } from '../interceptor-common.ts';
 import { type AuthType, getDefaultLlmConnection, getLlmConnection } from '../config/storage.ts';
 import { getCredentialManager } from '../credentials/index.ts';
 import { validateAnthropicConnection } from '../config/llm-validation.ts';
@@ -62,7 +62,7 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, defaultVal
  * Provider-agnostic: HTTP status codes are universal.
  */
 async function checkCapturedApiError(providerLabel: string): Promise<CheckResult> {
-  const apiError = getLastApiError();
+  const apiError = peekStoredError();
 
   if (!apiError) {
     return { ok: true, detail: '✓ API error: None captured' };

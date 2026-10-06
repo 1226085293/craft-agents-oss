@@ -185,8 +185,10 @@ interface ChatDisplayProps {
   // Source selection
   /** Available sources (enabled only) */
   sources?: LoadedSource[]
+  /** 数据源选择器模式：auto（默认）/ only / exclude */
+  sourceScope?: 'auto' | 'only' | 'exclude'
   /** Callback when source selection changes */
-  onSourcesChange?: (slugs: string[]) => void
+  onSourcesChange?: (slugs: string[], sourceScope?: 'auto' | 'only' | 'exclude') => void
   // Skill selection (for @mentions)
   /** Available skills for @mention autocomplete */
   skills?: LoadedSkill[]
@@ -528,6 +530,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   onAttachmentsChange,
   // Sources
   sources,
+  sourceScope,
   onSourcesChange,
   // Skills (for @mentions)
   skills,
@@ -1795,7 +1798,8 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           pendingPermission.sessionId,
           pendingPermission.requestId,
           permResponse.allowed,
-          permResponse.alwaysAllow
+          permResponse.alwaysAllow,
+          permResponse.sourcePermission ? { sourcePermission: permResponse.sourcePermission } : undefined
         )
         return
       }
@@ -2247,6 +2251,10 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                     // Check if this is the last response (for Accept Plan button visibility)
                     const isLastResponse = index === turns.length - 1 || !turns.slice(index + 1).some(t => t.type === 'user')
 
+                    // Retry status is a PERSISTED status activity row now
+                    // (2026-10-08): it rides inside the turn's process block at
+                    // its chronological position, so no per-turn injection here.
+
                     // Assistant turns - render with TurnCard (buffered streaming)
                     const assistantUiKey = getAssistantTurnUiKey(turn, index)
                     return (
@@ -2506,6 +2514,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
               onAttachmentsChange,
               sources,
               enabledSourceSlugs: session.enabledSourceSlugs,
+              sourceScope,
               onSourcesChange,
               skills,
               workspaceId,
@@ -2732,19 +2741,22 @@ function ErrorMessage({ message, onOpenUrl, sessionId, onRetry }: { message: Mes
     if (a.action === 'open_url') return !!a.url && !!onOpenUrl
     return true
   })
-
+  // Retry progress lives inside the process block (the retry-status line).
+  // Error cards carry no stop control: the chat's stop button ends the
+  // session/turn (which also cancels any in-flight retry).
   return (
     <div className="flex justify-start mt-4">
-      {/* Subtle bg (3% opacity) + tinted shadow for softer error appearance */}
       <div
         className="max-w-[80%] shadow-tinted rounded-[8px] pl-5 pr-4 pt-2 pb-2.5 break-words"
         style={{
-          backgroundColor: 'oklch(from var(--destructive) l c h / 0.03)',
+          backgroundColor: `oklch(from var(--destructive) l c h / 0.03)`,
           '--shadow-color': 'var(--destructive-rgb)',
         } as React.CSSProperties}
       >
-        <div className="text-xs text-destructive/50 mb-0.5 font-semibold">
-          {message.errorTitle || t('common.error')}
+        <div className="flex items-center gap-2 mb-0.5">
+          <div className="text-xs font-semibold text-destructive/50">
+            {message.errorTitle || t('common.error')}
+          </div>
         </div>
         <p className="text-sm text-destructive">{message.content}</p>
 
@@ -2825,7 +2837,11 @@ function MessageBubble({
         onUrlClick={onOpenUrl}
         onFileClick={onOpenFile}
         compactMode={compactMode}
-        timestamp={message.timestamp}
+        // 2026-10-07 plain-jade: guidance bubbles show the moment they were
+        // actually handled (引导 click — the main process stamps startedAt),
+        // not the earlier queue/send time; regular messages fall back to
+        // timestamp.
+        timestamp={message.startedAt ?? message.timestamp}
       />
     )
   }

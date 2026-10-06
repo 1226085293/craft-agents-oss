@@ -322,6 +322,26 @@ describe('persistence pipeline filtering', () => {
     expect(filtered.map(m => m.role)).toContain('auth-request')
   })
 
+  it('persistent retry ladder rows survive the status filter (2026-10-08)', () => {
+    const messages: Message[] = [
+      createMessageWithRole('status', { statusType: 'compacting' }),
+      createMessageWithRole('status', {
+        statusType: 'retrying',
+        retry: { status: 'recovered', attempt: 2, startedAt: 1, elapsedMs: 5000 },
+      }),
+      createMessageWithRole('assistant', { isIntermediate: false, id: 'msg-final' }),
+    ]
+
+    // Mirror: persistSession filter — transient status rows drop, the
+    // persisted retry-ladder row (statusType 'retrying') is kept.
+    const filtered = messages.filter(m => m.role !== 'status' || m.statusType === 'retrying')
+
+    expect(filtered).toHaveLength(2)
+    expect(filtered.map(m => m.statusType)).toEqual(['retrying', undefined])
+    const retryRow = filtered[0]!
+    expect(retryRow.retry).toMatchObject({ status: 'recovered', attempt: 2, elapsedMs: 5000 })
+  })
+
   it('intermediate messages are filtered at write time', () => {
     const stored: StoredMessage[] = [
       { id: 'msg-1', type: 'user', content: 'Hello', timestamp: 1 },

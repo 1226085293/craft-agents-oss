@@ -40,6 +40,7 @@ export type {
   AnnotationV1,
   Message,
   StoredMessage,
+  RetryLadderRow,
   TokenUsage,
   AgentEventUsage,
   RecoveryAction,

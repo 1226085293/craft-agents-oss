@@ -32,6 +32,21 @@ describe('Pi retry streaming boundaries', () => {
   beforeEach(() => { jest.useFakeTimers() })
   afterEach(() => { jest.clearAllTimers(); jest.useRealTimers() })
 
+  it('stamps status rows with the main-process monotonic timestamp', async () => {
+    const { manager, events, fire } = harness()
+    manager.monotonic = () => 1234
+
+    await fire({ type: 'status', message: 'Verifying final reply…', statusType: 'verification' })
+
+    expect(events).toContainEqual({
+      type: 'status',
+      sessionId: 'retry-test',
+      message: 'Verifying final reply…',
+      statusType: 'verification',
+      timestamp: 1234,
+    })
+  })
+
   it('discards pending failed deltas before backoff and never sends them later', async () => {
     const { manager, managed, events, fire } = harness()
     await fire({ type: 'text_delta', text: 'Failed partial', turnId: 'attempt-0' })
@@ -49,7 +64,14 @@ describe('Pi retry streaming boundaries', () => {
     expect(managed.streamingTurnId).toBeUndefined()
     expect(manager.pendingDeltas.size).toBe(0)
     expect(manager.deltaFlushTimers.size).toBe(0)
-    expect(managed.messages).toHaveLength(0)
+    // The backoff created the PERSISTED retry row (2026-10-08) — one status
+    // message with the structured `retry` payload.
+    expect(managed.messages).toHaveLength(1)
+    expect(managed.messages[0]).toMatchObject({
+      role: 'status',
+      statusType: 'retrying',
+      retry: { status: 'retrying' },
+    })
   })
 
   it('discards already-flushed partials and persists only the recovered answer', async () => {
@@ -67,9 +89,12 @@ describe('Pi retry streaming boundaries', () => {
     await fire({ type: 'text_complete', text: 'Recovered', turnId: 'attempt-1' })
     await fire({ type: 'retry', phase: 'end' })
 
-    expect(managed.messages).toHaveLength(2)
+    expect(managed.messages).toHaveLength(3)
     expect(managed.messages[0]).toBe(completed)
-    expect(managed.messages[1]).toMatchObject({ role: 'assistant', content: 'Recovered', turnId: 'attempt-1' })
+    // The persisted retry row sits between the earlier commentary and the
+    // recovered answer (chronological ladder start).
+    expect(managed.messages[1]).toMatchObject({ role: 'status', statusType: 'retrying' })
+    expect(managed.messages[2]).toMatchObject({ role: 'assistant', content: 'Recovered', turnId: 'attempt-1' })
     expect(managed.streamingText).toBe('')
     expect(managed.streamingTurnId).toBeUndefined()
     expect(events.filter(e => e.type === 'text_complete')).toHaveLength(1)
@@ -99,12 +124,76 @@ describe('Pi retry streaming boundaries', () => {
     await fire({ type: 'retry', phase: 'end' })
     jest.advanceTimersByTime(100)
     expect(managed.streamingText).toBe('')
-    expect(managed.messages).toHaveLength(0)
+    // Only the persisted retry row remains, settled to 'failed' by `retry end`.
+    expect(managed.messages).toHaveLength(1)
+    expect(managed.messages[0]).toMatchObject({ role: 'status', statusType: 'retrying' })
+    expect((managed.messages[0] as { retry?: { status: string } }).retry).toMatchObject({ status: 'failed' })
     expect(manager.pendingDeltas.size).toBe(0)
     expect(manager.deltaFlushTimers.size).toBe(0)
     expect(events.filter(e => e.type === 'text_discard')).toHaveLength(3)
     expect(events.filter(e => e.type === 'text_delta')).toEqual([
       { type: 'text_delta', sessionId: managed.id, delta: 'Partial 1', turnId: 'attempt-1' },
     ])
+  })
+
+  it('attaches startedAt (first-delta time) to text blocks while keeping timestamp as completion time', async () => {
+    const { manager, managed, events, fire } = harness()
+    let clock = 1000
+    manager.monotonic = () => clock
+
+    // First delta at t=1000 (block becomes visible); it completes at t=2000.
+    await fire({ type: 'text_delta', text: 'Thinking…', turnId: 'turn-1__m1' })
+    clock = 2000
+    await fire({ type: 'text_complete', text: 'Thinking…', turnId: 'turn-1__m1', isIntermediate: true })
+
+    // timestamp stays the completion time (bubble display, unread logic);
+    // startedAt carries the moment the block first became visible so the
+    // process card can order rows by when the user actually saw them.
+    expect(managed.messages[0]).toMatchObject({
+      role: 'assistant',
+      turnId: 'turn-1__m1',
+      timestamp: 2000,
+      startedAt: 1000,
+    })
+    expect(events.find(e => e.type === 'text_complete')).toMatchObject({
+      type: 'text_complete',
+      turnId: 'turn-1__m1',
+      timestamp: 2000,
+      startedAt: 1000,
+    })
+  })
+
+  it('leaves startedAt undefined for text blocks that never streamed', async () => {
+    const { manager, managed, events, fire } = harness()
+    let clock = 1000
+    manager.monotonic = () => clock
+
+    clock = 500
+    await fire({ type: 'text_complete', text: 'Instant answer', turnId: 'turn-2__m1', isIntermediate: false })
+
+    const msg = managed.messages[0]
+    expect(msg).toMatchObject({ role: 'assistant', turnId: 'turn-2__m1', timestamp: 500 })
+    expect(msg.startedAt).toBeUndefined()
+    const forwarded = events.find(e => e.type === 'text_complete')
+    expect(forwarded).toBeDefined()
+    expect(forwarded!).toMatchObject({ type: 'text_complete', turnId: 'turn-2__m1', timestamp: 500 })
+    expect('startedAt' in (forwarded as Record<string, unknown>)).toBe(false)
+  })
+
+  it('prefers event.startedAt (adapter-stamped thinking blocks) over the delta map', async () => {
+    const { manager, managed, events, fire } = harness()
+    let clock = 1000
+    manager.monotonic = () => clock
+
+    // Thinking-only blocks never stream deltas, so the delta map has no entry
+    // for their turnId; the adapter stamps event.startedAt (its message_start
+    // time) instead. That hint must win and persist, timestamp stays 2000.
+    clock = 2000
+    await fire({ type: 'text_complete', text: 'thinking...', turnId: 'turn-3__m1', isIntermediate: true, startedAt: 1500 })
+
+    expect(managed.messages[0]).toMatchObject({ role: 'assistant', turnId: 'turn-3__m1', timestamp: 2000, startedAt: 1500 })
+    const forwarded = events.find(e => e.type === 'text_complete')
+    expect(forwarded).toBeDefined()
+    expect(forwarded!).toMatchObject({ type: 'text_complete', turnId: 'turn-3__m1', timestamp: 2000, startedAt: 1500 })
   })
 })

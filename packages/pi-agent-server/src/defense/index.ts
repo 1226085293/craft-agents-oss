@@ -6,7 +6,6 @@
  * - L1 `system-discipline.ts`: execution-discipline block appended to the
  *   effective system prompt (goal-checklist self-check, actions-before-words,
  *   failure fallback, artifact read-back, balanced wrap-up).
- * - L2 `complexity-score.ts`: side-effect-weighted scoring of tool calls.
  * - L2 `session-lifecycle.ts`: FSM + resume guardrails.
  * - `evaluator.ts`: orchestrates L2 post-stop evaluation.
  *
@@ -34,14 +33,7 @@ export {
   withExecutionDiscipline,
   stripExecutionDiscipline,
 } from './system-discipline.ts';
-export {
-  complexityScore,
-  classify,
-  WEIGHTS,
-  type ComplexityResult,
-  type ToolCallLike,
-} from './complexity-score.ts';
-export { FsWatch, type FsWriteEvidence } from './fs-watch.ts';
+export { type ToolCallLike } from './complexity-score.ts';
 export {
   State,
   SessionLifecycle,

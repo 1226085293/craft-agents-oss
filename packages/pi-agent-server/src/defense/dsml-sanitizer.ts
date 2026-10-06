@@ -59,25 +59,27 @@ function sanitizeNativeMessage(
     });
   if (nativeCalls.length === 0) return undefined;
 
+  // A leaked block may only be stripped when the receiver actually executed a
+  // call with the same name+arguments (existence match — the receiver dedups
+  // identical calls, so N identical leaked blocks may map to one native call).
+  const matchesNative = (call: { name: string; args: Record<string, unknown> | null }): boolean =>
+    call.args !== null && nativeCalls.some((native) =>
+      native.name === call.name && JSON.stringify(native.arguments) === JSON.stringify(call.args));
+
   let changed = false;
-  let callIndex = 0;
   const content = message.content.map((block) => {
     if (block?.type !== 'text' || typeof block.text !== 'string') return block;
     const parsed = parseLeakedToolCalls(block.text);
     if (!parsed.leaked || parsed.calls.length === 0) return block;
-    const calls = parsed.calls;
-    const matched = calls.map((call) => {
-      const native = nativeCalls[callIndex++];
-      return native && native.name === call.name && call.args !== null &&
-        JSON.stringify(native.arguments) === JSON.stringify(call.args);
-    });
-    if (matched.some((value) => !value)) {
-      callIndex -= calls.length;
-      return block;
-    }
+    if (!parsed.calls.every(matchesNative)) return block;
+    // Replace leaked blocks with nothing: the executed toolCall blocks already
+    // render as their own process items, and a VISIBLE placeholder here was
+    // persisted into the transcript and re-fed to the model, which began
+    // echoing the placeholder verbatim (up to 1542x in one response — see
+    // session 261005-azure-stream). Stripping silently keeps the transcript
+    // clean of both raw markup and its echo bait.
     changed = true;
-    const markers = calls.map((call) => `(工具调用 ${call.name}：已识别为工具调用)`);
-    return { ...block, text: cleanLeakedBlocks(block.text, markers) };
+    return { ...block, text: cleanLeakedBlocks(block.text, []) };
   });
   if (!changed) return undefined;
 

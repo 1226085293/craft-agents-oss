@@ -216,8 +216,18 @@ function usableCalls(text: string): UsableCall[] {
   if (!text.includes(DSML_MARKER)) return [];
   const parsed = parseLeakedToolCalls(text);
   if (!parsed.leaked) return [];
-  return parsed.calls.flatMap((call) => call.name && call.args !== null
-    ? [{ name: call.name, args: call.args }]
-    : []);
+  // Repetition failures make the model re-emit the SAME call N times in one
+  // response (observed up to 7x). Execute each unique call once: keying on
+  // name + arguments JSON (key order is stable — args come from JSON.parse).
+  const seen = new Set<string>();
+  const unique: UsableCall[] = [];
+  for (const call of parsed.calls) {
+    if (!call.name || call.args === null) continue;
+    const key = `${call.name}:${JSON.stringify(call.args)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unique.push({ name: call.name, args: call.args });
+  }
+  return unique;
 }
 

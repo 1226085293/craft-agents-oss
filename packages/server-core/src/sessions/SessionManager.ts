@@ -85,7 +85,7 @@ import { buildServersFromSources as buildServersFromSourcesShared } from '../sou
 import { ConfigWatcher, type ConfigWatcherCallbacks } from '@craft-agent/shared/config'
 import { getValidClaudeOAuthToken } from '@craft-agent/shared/auth'
 import { resolveAuthEnvVars } from '@craft-agent/shared/config'
-import { toolMetadataStore, getLastApiError } from '@craft-agent/shared/interceptor'
+import { toolMetadataStore, getLastApiError, getLastErrorFromHistory } from '@craft-agent/shared/interceptor'
 import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
@@ -7339,7 +7339,11 @@ ${request.prompt}`;
             // Pass explicit session path to avoid reading from the wrong session
             // (_sessionDir singleton can be clobbered by concurrent sessions).
             const sessionErrorPath = getSessionStoragePath(managed.workspace.rootPath, managed.id)
-            const apiError = getLastApiError(sessionErrorPath)
+            // Prefer the DURABLE per-session history: it survives the
+            // retry-ladder backoff window (no 5-minute staleness drop) and
+            // cannot be stolen by a probe's consume-on-read of the
+            // single-slot file. The consuming pop is only a last resort.
+            const apiError = getLastErrorFromHistory(sessionErrorPath) ?? getLastApiError(sessionErrorPath)
 
             if (apiError) {
               const isImageError = apiError.message?.includes('image exceeds')

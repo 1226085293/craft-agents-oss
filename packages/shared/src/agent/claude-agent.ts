@@ -61,7 +61,7 @@ import {
   SAFE_MODE_CONFIG,
 } from './mode-manager.ts';
 import { getSessionDataPath, getSessionPlansPath, getSessionPath } from '../sessions/storage.ts';
-import { getLastApiError } from '../interceptor-common.ts';
+import { getLastApiError, peekStoredError } from '../interceptor-common.ts';
 import { extractWorkspaceSlug } from '../utils/workspace.ts';
 import {
   ConfigWatcher,
@@ -2599,7 +2599,7 @@ This is a branched conversation. All prior messages in this conversation are par
     }
 
     const sessionDir = getSessionPath(this.workspaceRootPath, sessionId);
-    return getLastApiError(sessionDir) ?? getLastApiError();
+    return getLastApiError(sessionDir) ?? peekStoredError();
   }
 
   /**

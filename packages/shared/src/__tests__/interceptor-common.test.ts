@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   API_ERROR_HISTORY_LIMIT,
   getLastApiError,
+  getLastErrorFromHistory,
+  peekStoredError,
   setStoredError,
   appendErrorToHistory,
   readErrorHistory,
@@ -154,5 +156,88 @@ describe('API error history', () => {
     const long = formatErrorHistoryEntry(err(400, 'x'.repeat(500)), 20);
     expect(long.length).toBeLessThan(80);
     expect(long).toContain('…');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Non-consuming readers (2026-10-06)
+//
+// getStoredError() DELETES api-error.json on read and getLastApiError() drops
+// anything older than 5 minutes — both let a transient 429 absorbed by the
+// retry ladder vanish before the session's "completed without response" path
+// can surface it. peekStoredError()/getLastErrorFromHistory() fix that:
+// probes must not consume, and the reporting path reads the durable history.
+// ---------------------------------------------------------------------------
+describe('non-consuming API error readers', () => {
+  let dir: string;
+  const slotFile = () => join(dir, 'api-error.json');
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'api-error-peek-'));
+    toolMetadataStore.setSessionDir(dir);
+  });
+
+  afterEach(() => {
+    toolMetadataStore._clearForTesting();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('peekStoredError reads the slot WITHOUT consuming it', () => {
+    setStoredError({ status: 429, statusText: 'Too Many Requests', message: 'rate limited', timestamp: Date.now() });
+
+    const err = peekStoredError(dir);
+    expect(err?.status).toBe(429);
+    // The whole point: the slot must still be there for the session's own
+    // reporting path (getLastApiError would have deleted it).
+    expect(existsSync(slotFile())).toBe(true);
+  });
+
+  it('peekStoredError honors the 5-minute staleness window', () => {
+    writeFileSync(
+      slotFile(),
+      JSON.stringify({ status: 429, statusText: 'Too Many Requests', message: 'stale', timestamp: Date.now() - 6 * 60 * 1000 }),
+      'utf-8',
+    );
+    expect(peekStoredError(dir)).toBeNull();
+
+    writeFileSync(
+      slotFile(),
+      JSON.stringify({ status: 429, statusText: 'Too Many Requests', message: 'fresh', timestamp: Date.now() }),
+      'utf-8',
+    );
+    expect(peekStoredError(dir)?.message).toBe('fresh');
+  });
+
+  it('getLastErrorFromHistory returns the most recent durable entry with no TTL drop', () => {
+    // An hour-old 400 (well past MAX_ERROR_AGE_MS) must still be retrievable.
+    appendErrorToHistory({ status: 400, statusText: 'Bad Request', message: 'old', timestamp: Date.now() - 60 * 60 * 1000 }, dir);
+    expect(getLastErrorFromHistory(dir)?.status).toBe(400);
+
+    appendErrorToHistory({ status: 429, statusText: 'Too Many Requests', message: 'new', timestamp: Date.now() }, dir);
+    const last = getLastErrorFromHistory(dir);
+    expect(last?.status).toBe(429);
+    expect(last?.message).toBe('new');
+  });
+
+  it('getLastErrorFromHistory consumes nothing (slot and history both survive)', () => {
+    setStoredError({ status: 413, statusText: 'Too Large', message: 'tpm', timestamp: Date.now() });
+
+    const err = getLastErrorFromHistory(dir);
+    expect(err?.status).toBe(413);
+    expect(existsSync(slotFile())).toBe(true);
+    expect(readErrorHistory(dir)).toHaveLength(1);
+  });
+
+  it('getLastErrorFromHistory falls back to the slot when the history is empty', () => {
+    writeFileSync(
+      slotFile(),
+      JSON.stringify({ status: 503, statusText: 'Service Unavailable', message: 'no history', timestamp: Date.now() - 30 * 60 * 1000 }),
+      'utf-8',
+    );
+
+    const err = getLastErrorFromHistory(dir);
+    expect(err?.status).toBe(503);
+    // Fallback read is also non-destructive.
+    expect(existsSync(slotFile())).toBe(true);
   });
 });

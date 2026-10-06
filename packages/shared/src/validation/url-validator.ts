@@ -11,7 +11,7 @@ import { getDefaultSummarizationModel } from '../config/models.ts';
 
 import { debug } from '../utils/debug.ts';
 import { parseError, parseSDKErrorText, type AgentError } from '../agent/errors.ts';
-import { getLastApiError } from '../interceptor-common.ts';
+import { peekStoredError } from '../interceptor-common.ts';
 
 export interface UrlValidationResult {
   valid: boolean;
@@ -112,7 +112,7 @@ export async function validateMcpUrl(
     debug('[url-validator] Error:', err);
 
     // Check for captured API error from interceptor (most reliable source)
-    const apiError = getLastApiError();
+    const apiError = peekStoredError();
     if (apiError) {
       debug('[url-validator] Found captured API error:', apiError.status, apiError.message);
       // Create error with status code for accurate detection

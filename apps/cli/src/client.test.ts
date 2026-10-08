@@ -226,6 +226,11 @@ describe('CliRpcClient', () => {
     server = createErrorServer()
     const client = new CliRpcClient(server.url)
     await client.connect()
+    // Bun WebSocket quirk: sending a request in the SAME event-loop turn as
+    // the handshake_ack resolve can lose the response frame (never delivered
+    // to onmessage, so invoke only settles via its 10s timeout). Yielding one
+    // tick lets the socket pump resume before we send.
+    await Bun.sleep(0)
     await expect(client.invoke('system:versions')).rejects.toThrow('test error')
     client.destroy()
   })

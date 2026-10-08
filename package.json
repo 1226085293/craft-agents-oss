@@ -20,7 +20,7 @@
     "apps/*"
   ],
   "scripts": {
-    "test": "bun test && for f in $(find . -name '*.isolated.ts' -not -path './node_modules/*'); do bun test \"$f\" || exit 1; done",
+    "test": "bun test --path-ignore-patterns=\"apps/electron/release/**\" && for f in $(find . -name '*.isolated.ts' -not -path './node_modules/*' -not -path './apps/electron/release/*'); do bun test --path-ignore-patterns=\"apps/electron/release/**\" \"$f\" || exit 1; done",
     "typecheck": "bun run typecheck:shared",
     "pages-worker:dev": "cd workers/pages && bun run dev",
     "pages-worker:test": "cd workers/pages && bun test",
@@ -105,7 +105,7 @@
     "check-version": "bun run scripts/check-version.ts",
     "oss:sync": "bun run scripts/oss-sync.ts",
     "prepare": "husky",
-    "postinstall": "bun scripts/patch-pi-ai-maxtokens.ts && bun scripts/patch-pi-coding-agent-hierarchical-compaction.ts && bun scripts/patch-pi-ai-image-tokens.ts"
+    "postinstall": "bun scripts/patch-pi-ai-maxtokens.ts && bun scripts/patch-pi-coding-agent-hierarchical-compaction.ts && bun scripts/patch-pi-ai-image-tokens.ts && bun scripts/patch-pi-coding-agent-queue-drain.ts"
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "^3.947.0",

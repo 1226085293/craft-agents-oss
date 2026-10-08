@@ -56,6 +56,7 @@ function createMockWindow() {
     loadFile: mock(() => Promise.resolve()),
     loadURL: mock(() => Promise.resolve()),
     getBounds: mock(() => ({ x: 0, y: 0, width: 1400, height: 900 })),
+    setTitle: mock(() => {}),
     close: mock(() => {
       const event = {
         defaultPrevented: false,
@@ -80,6 +81,7 @@ function createMockWindow() {
 mock.module('electron', () => ({
   app: {
     isPackaged: true,
+    getName: () => 'Craft Agents Test',
     quit: appQuit,
   },
   BrowserWindow: class MockBrowserWindow {

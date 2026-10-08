@@ -3,6 +3,7 @@
  * Supports both HTTP and stdio transports for remote and local MCP servers
  */
 
+import { execFile } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -81,9 +82,64 @@ export interface PoolClient {
   close(): Promise<void>;
 }
 
+/**
+ * Kill a subprocess and its ENTIRE descendant tree.
+ *
+ * The MCP SDK's StdioClientTransport.close() only terminates the direct
+ * child (SIGTERM/SIGKILL on a single PID). Sources that spawn nested
+ * processes — e.g. codegraph's npm-shim → rust kernel, or chrome-devtools-mcp
+ * spawned through cmd.exe → node → telemetry watchdog — leave every
+ * grandchild orphaned after close. Over hours of reload storms those orphans
+ * accumulate into tens of node.exe processes eating hundreds of MB each.
+ *
+ * Windows: `taskkill /T /F` recursively terminates the whole tree.
+ * POSIX: walk `ps` output and signal descendants leaf-first.
+ */
+export function killProcessTree(pid: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (process.platform === 'win32') {
+      execFile('taskkill', ['/T', '/F', '/PID', String(pid)], { windowsHide: true }, () => resolve());
+      return;
+    }
+
+    // POSIX fallback: collect descendants via ps, kill leaf-first then root.
+    execFile('ps', ['-A', '-o', 'pid=', '-o', 'ppid='], (err, stdout) => {
+      if (err) {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+        resolve();
+        return;
+      }
+      const children = new Map<number, number[]>();
+      for (const line of stdout.split('\n')) {
+        const [pidStr, ppidStr] = line.trim().split(/\s+/) ?? [];
+        const p = parseInt(pidStr ?? '', 10);
+        const pp = parseInt(ppidStr ?? '', 10);
+        if (Number.isNaN(p) || Number.isNaN(pp)) continue;
+        const list = children.get(pp) ?? [];
+        list.push(p);
+        children.set(pp, list);
+      }
+      const order: number[] = [];
+      const stack = [pid];
+      while (stack.length) {
+        const cur = stack.pop()!;
+        order.push(cur);
+        for (const c of children.get(cur) ?? []) stack.push(c);
+      }
+      for (const p of order.reverse()) {
+        try { process.kill(p, 'SIGKILL'); } catch { /* already gone */ }
+      }
+      resolve();
+    });
+  });
+}
+
 export class CraftMcpClient {
   private client: Client;
   private transport: Transport;
+  private stdioTransport: StdioClientTransport | null = null;
+  /** PID of the spawned stdio subprocess (set after spawn; used for tree-kill). */
+  private stdioPid: number | null = null;
   private connected = false;
 
   constructor(config: McpClientConfig) {
@@ -102,11 +158,13 @@ export class CraftMcpClient {
           processEnv[key] = value;
         }
       }
-      this.transport = new StdioClientTransport({
+      const stdioTransport = new StdioClientTransport({
         command: config.command,
         args: config.args,
         env: { ...processEnv, ...config.env },
       });
+      this.stdioTransport = stdioTransport;
+      this.transport = stdioTransport;
     } else {
       // HTTP transport for remote MCP servers
       this.transport = new StreamableHTTPClientTransport(
@@ -118,24 +176,6 @@ export class CraftMcpClient {
         }
       );
     }
-  }
-
-  async connect(): Promise<void> {
-    if (this.connected) return;
-
-    await this.client.connect(this.transport);
-
-    // Verify connection works by listing tools
-    try {
-      await this.client.listTools();
-    } catch (error) {
-      await this.client.close();
-      throw new Error(
-        `MCP connection failed health check: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-
-    this.connected = true;
   }
 
   async listTools(): Promise<Tool[]> {
@@ -169,7 +209,76 @@ export class CraftMcpClient {
     return result;
   }
 
+  async connect(): Promise<void> {
+    if (this.connected) return;
+
+    // For stdio transports, continuously capture the spawned subprocess PID
+    // from the moment the SDK starts it. The SDK's internal close() (fired on
+    // handshake failure) nulls out its `_process` reference immediately, so by
+    // the time our catch runs the pid is gone — and with it any chance to
+    // tree-kill grandchildren (shim → kernel / cmd → node → watchdog).
+    const pidCapture = this.stdioTransport
+      ? (async () => {
+          for (let i = 0; i < 200 && !this.stdioPid; i++) {
+            const pid = this.stdioTransport!.pid;
+            if (pid) {
+              this.stdioPid = pid;
+              return;
+            }
+            await new Promise((r) => setTimeout(r, 25));
+          }
+        })()
+      : Promise.resolve();
+
+    try {
+      await this.client.connect(this.transport);
+    } catch (error) {
+      // Handshake/initialize failed: the SDK's internal close() only kills the
+      // direct child — nested grandchildren survive. Kill the full tree
+      // (harmless no-op if the capture never found a PID).
+      await pidCapture;
+      await this.killStdioTree();
+      throw error;
+    }
+
+    await pidCapture;
+    // Session established — ensure the real subprocess PID is recorded.
+    this.stdioPid = this.stdioTransport?.pid ?? this.stdioPid;
+
+    // Verify connection works by listing tools
+    try {
+      await this.client.listTools();
+    } catch (error) {
+      await this.killStdioTree();
+      await this.client.close();
+      throw new Error(
+        `MCP connection failed health check: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+
+    this.connected = true;
+  }
+
+  /**
+   * Kill the stdio subprocess and its entire descendant tree (if any).
+   * No-op for non-stdio (HTTP) transports or when nothing was spawned.
+   */
+  private async killStdioTree(): Promise<void> {
+    const pid = this.stdioPid;
+    this.stdioPid = null;
+    if (pid) {
+      await killProcessTree(pid);
+    }
+  }
+
+  /**
+   * Close the connection and ensure the spawned subprocess tree is fully
+   * terminated (grandchildren included — see killProcessTree).
+   */
   async close(): Promise<void> {
+    // Kill the full subprocess tree first; SDK close() alone would only kill
+    // the direct child and orphan any nested node processes.
+    await this.killStdioTree();
     if (this.connected) {
       await this.client.close();
       this.connected = false;

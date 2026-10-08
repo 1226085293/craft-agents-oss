@@ -106,6 +106,28 @@ export class McpClientPool {
   /** Configs used for active MCP connections (for change detection during sync) */
   protected activeConfigs = new Map<string, SdkMcpServerConfig>();
 
+  /**
+   * Configs of lazy sources that were synced but are not yet connected.
+   * callTool() uses these to spawn the server on first tool use.
+   */
+  private pendingLazyConfigs = new Map<string, SdkMcpServerConfig>();
+
+  /**
+   * Config of lazy sources whose tool defs were already probed (cached).
+   * Used to skip repeated probes when sync runs again with an unchanged config.
+   */
+  private probedLazyConfigs = new Map<string, SdkMcpServerConfig>();
+
+  /**
+   * Idle-disconnect timers for CONNECTED lazy sources (on-demand path).
+   * After a tool call the source stays connected for this long; if no further
+   * call arrives the process is released (defs kept, model still sees tools).
+   */
+  private lazyIdleTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+
+  /** How long a connected lazy source stays up after its last tool call. */
+  private static readonly LAZY_IDLE_DISCONNECT_MS = 30_000;
+
   /** Cached tool lists keyed by source slug */
   private toolCache = new Map<string, Tool[]>();
 
@@ -145,6 +167,22 @@ export class McpClientPool {
     this.debugFn?.(`[McpClientPool] ${msg}`);
   }
 
+  /**
+   * True when this source config is marked for lazy (on-demand) connection.
+   * Only stdio subprocess sources support lazy; anything else connects eagerly.
+   */
+  private isLazyConfig(config: SdkMcpServerConfig): boolean {
+    return config.type === 'stdio' && config.lazy === true;
+  }
+
+  /**
+   * Generates proxy tool definitions ALSO for lazy (not-yet-connected) sources
+   * is intentionally NOT done here: lazy sources have no tool list until they
+   * connect. getProxyToolDefs only covers connected sources; a lazy source's
+   * first tool call is routed through on-demandConnect below, and its tools
+   * appear in the pool after connection (toolsChanged notifies subprocesses).
+   */
+
   // ============================================================
   // Connection Lifecycle
   // ============================================================
@@ -157,6 +195,15 @@ export class McpClientPool {
     // listTools() triggers connect() internally for both CraftMcpClient and ApiSourcePoolClient
     const tools = await client.listTools();
     this.clients.set(slug, client);
+    this.registerToolDefs(slug, tools);
+  }
+
+  /**
+   * Register proxy tool mappings + cache for a source's tool list.
+   * Used both by registerClient (live connection) and by lazy probes
+   * (definitions exposed to the model, process not kept resident).
+   */
+  protected registerToolDefs(slug: string, tools: Tool[]): void {
     this.toolCache.set(slug, tools);
 
     for (const tool of tools) {
@@ -176,7 +223,30 @@ export class McpClientPool {
       this.proxyTools.set(proxyName, { slug, originalName: tool.name });
     }
 
-    this.debug(`Connected source ${slug}: ${tools.length} tools`);
+    this.debug(`Source ${slug}: ${tools.length} tools registered`);
+  }
+
+  /**
+   * Probe a lazy source's tool list without keeping the server process alive.
+   * Spawns the stdio subprocess, lists tools, caches the definitions, then
+   * disconnects — the process exits until the first real tool call.
+   */
+  protected async probeLazyTools(slug: string, config: SdkMcpServerConfig): Promise<boolean> {
+    const clientConfig = sdkConfigToClientConfig(config);
+    if (!clientConfig) {
+      this.debug(`Unknown MCP server type for ${slug}: ${(config as { type: string }).type}`);
+      return false;
+    }
+    const client = new CraftMcpClient(clientConfig);
+    try {
+      const tools = await client.listTools(); // triggers connect()
+      this.registerToolDefs(slug, tools);
+      this.activeConfigs.set(slug, config);
+      this.debug(`Lazy source ${slug} probed: ${tools.length} tools`);
+      return true;
+    } finally {
+      await client.close().catch(() => {});
+    }
   }
 
   /**
@@ -228,34 +298,81 @@ export class McpClientPool {
   }
 
   /**
-   * Disconnect a source and remove its tools from the pool.
+   * Arm (or reset) the idle-disconnect timer for a connected lazy source.
+   * After LAZY_IDLE_DISCONNECT_MS without another call the process is
+   * released — tool definitions stay registered so the model still sees the
+   * tools and the next callTool reconnects seamlessly.
    */
-  async disconnect(slug: string): Promise<void> {
+  private armLazyIdleDisconnect(slug: string): void {
+    if (!this.clients.has(slug) || !this.pendingLazyConfigs.has(slug)) return;
+
+    const existing = this.lazyIdleTimers.get(slug);
+    if (existing) clearTimeout(existing);
+
+    const timer = setTimeout(() => {
+      this.lazyIdleTimers.delete(slug);
+      if (this.clients.has(slug) && this.pendingLazyConfigs.has(slug)) {
+        this.debug(`Lazy source ${slug}: idle ${McpClientPool.LAZY_IDLE_DISCONNECT_MS / 1000}s after last use — releasing process (defs kept)`);
+        void this.disconnect(slug, true).catch(() => {});
+      }
+    }, McpClientPool.LAZY_IDLE_DISCONNECT_MS);
+    (timer as { unref?: () => void }).unref?.();
+    this.lazyIdleTimers.set(slug, timer);
+  }
+
+  private clearLazyIdleTimer(slug: string): void {
+    const timer = this.lazyIdleTimers.get(slug);
+    if (timer) {
+      clearTimeout(timer);
+      this.lazyIdleTimers.delete(slug);
+    }
+  }
+
+  /**
+   * Disconnect a source and (by default) remove its tools from the pool.
+   *
+   * @param keepDefs - When true, the proxy tool mappings + cached tool list
+   *   for this slug are preserved even though the client is closed. Used by
+   *   the lazy on-demand path: the model keeps seeing the tools, and the next
+   *   callTool reconnects without a fresh probe.
+   */
+  async disconnect(slug: string, keepDefs = false): Promise<void> {
+    this.clearLazyIdleTimer(slug);
+
     const client = this.clients.get(slug);
     if (client) {
       await client.close().catch(() => {});
       this.clients.delete(slug);
     }
 
-    // Remove proxy tool entries for this slug
-    for (const [proxyName, info] of this.proxyTools) {
-      if (info.slug === slug) this.proxyTools.delete(proxyName);
+    if (!keepDefs) {
+      // Remove proxy tool entries for this slug
+      for (const [proxyName, info] of this.proxyTools) {
+        if (info.slug === slug) this.proxyTools.delete(proxyName);
+      }
+      this.toolCache.delete(slug);
+      this.pendingLazyConfigs.delete(slug);
+      this.probedLazyConfigs.delete(slug);
     }
-    this.toolCache.delete(slug);
     this.activeConfigs.delete(slug);
-    this.debug(`Disconnected source: ${slug}`);
+    this.debug(`Disconnected source: ${slug}${keepDefs ? ' (defs kept)' : ''}`);
   }
 
   /**
    * Disconnect all sources and clear all state.
    */
   async disconnectAll(): Promise<void> {
+    for (const timer of this.lazyIdleTimers.values()) clearTimeout(timer);
+    this.lazyIdleTimers.clear();
+
     const closePromises = Array.from(this.clients.values()).map(c => c.close().catch(() => {}));
     await Promise.all(closePromises);
     this.clients.clear();
     this.toolCache.clear();
     this.proxyTools.clear();
     this.activeConfigs.clear();
+    this.pendingLazyConfigs.clear();
+    this.probedLazyConfigs.clear();
     this.debug('Disconnected all MCP clients');
   }
 
@@ -298,6 +415,16 @@ export class McpClientPool {
     const currentSlugs = new Set(this.clients.keys());
     const failures: string[] = [];
 
+    // Remember desired configs even for lazy (not-yet-connected) sources so
+    // callTool() can connect them on first use.
+    for (const [slug, config] of Object.entries(filteredMcp)) {
+      if (this.isLazyConfig(config)) {
+        this.pendingLazyConfigs.set(slug, config);
+      } else {
+        this.pendingLazyConfigs.delete(slug);
+      }
+    }
+
     // Disconnect sources no longer desired
     for (const slug of currentSlugs) {
       if (!desiredSlugs.has(slug)) {
@@ -307,12 +434,42 @@ export class McpClientPool {
 
     // Connect new MCP sources + reconnect existing ones whose config changed (e.g. refreshed token)
     for (const [slug, config] of Object.entries(filteredMcp)) {
+      // Lazy sources: don't keep a resident process. Probe once to learn the
+      // tool definitions (so the model can call them), then disconnect — the
+      // process is spawned again on first actual tool call. Skip re-probe when
+      // defs are already registered with an unchanged config.
+      if (!currentSlugs.has(slug) && this.isLazyConfig(config)) {
+        const cached = this.toolCache.get(slug);
+        const cachedConfig = this.probedLazyConfigs.get(slug);
+        if (cached && cachedConfig && !mcpConfigChanged(cachedConfig, config)) {
+          this.debug(`Lazy source ${slug}: using cached tool defs (${cached.length} tools)`);
+          continue;
+        }
+        this.debug(`Lazy source ${slug}: probing tool list without keeping process`);
+        try {
+          const done = await this.probeLazyTools(slug, config);
+          if (done) this.probedLazyConfigs.set(slug, config);
+          else failures.push(slug);
+        } catch (err) {
+          this.debug(`Lazy probe failed for ${slug}: ${err instanceof Error ? err.message : String(err)}`);
+          failures.push(slug);
+        }
+        continue;
+      }
       if (!currentSlugs.has(slug)) {
         try {
           await this.connect(slug, config);
         } catch (err) {
-          this.debug(`Failed to connect MCP source ${slug}: ${err instanceof Error ? err.message : String(err)}`);
-          failures.push(slug);
+          // 单 writer 型 MCP（如 codegraph）可能正被其他会话短暂占用：延迟重试一次再放弃
+          const first = err instanceof Error ? err.message : String(err);
+          this.debug(`Failed to connect MCP source ${slug}: ${first}; retrying once after 1.5s`);
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          try {
+            await this.connect(slug, config);
+          } catch (err2) {
+            this.debug(`Failed to connect MCP source ${slug} after retry: ${err2 instanceof Error ? err2.message : String(err2)}`);
+            failures.push(slug);
+          }
         }
       } else {
         const oldConfig = this.activeConfigs.get(slug);
@@ -420,7 +577,26 @@ export class McpClientPool {
 
     const { slug, originalName } = info;
 
-    const client = this.clients.get(slug);
+    let client = this.clients.get(slug);
+    if (!client) {
+      // On-demand connect for lazy sources: the process was not kept resident
+      // during sync (see probeLazyTools). Spawn it now, forward the call.
+      const lazyConfig = this.pendingLazyConfigs.get(slug);
+      if (lazyConfig) {
+        this.debug(`Lazy source ${slug}: connecting on demand for ${originalName}`);
+        try {
+          await this.connect(slug, lazyConfig);
+          client = this.clients.get(slug);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return {
+            content: `MCP source "${slug}" failed to connect on demand: ${msg}`,
+            isError: true,
+            sourceSlug: slug,
+          };
+        }
+      }
+    }
     if (!client) {
       return {
         content: `MCP client for source "${slug}" is not connected.`,
@@ -434,6 +610,10 @@ export class McpClientPool {
         content?: Array<{ type: string; text?: unknown; data?: string; mimeType?: string }>;
         isError?: boolean;
       };
+
+      // Use it and release it: a lazy source stays up briefly after its last
+      // call, then the process is disconnected (defs kept, next call reconnects).
+      this.armLazyIdleDisconnect(slug);
 
       const contentBlocks = result.content || [];
       const parts: string[] = [];

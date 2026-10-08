@@ -34,7 +34,7 @@ export const SERVER_BUILD_ERRORS = {
  */
 export type McpServerConfig =
   | { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }
-  | { type: 'stdio'; command: string; args?: string[]; env?: Record<string, string> };
+  | { type: 'stdio'; command: string; args?: string[]; env?: Record<string, string>; lazy?: boolean };
 
 /**
  * Source with its credential pre-loaded
@@ -96,11 +96,18 @@ export class SourceServerBuilder {
         debug(`[SourceServerBuilder] Stdio source ${source.config.slug} missing command`);
         return null;
       }
+      // Stdio sources default to lazy (on-demand) connection: the process is
+      // NOT kept resident at session start — tool defs are probed once and
+      // the server spawns on first tool call, then disconnects after a short
+      // idle. Set `lazy: false` in the source config for servers that must
+      // stay connected (frequently used, or slow to start).
+      const lazy = mcp.lazy ?? true;
       return {
         type: 'stdio',
         command: mcp.command,
         args: mcp.args,
         env: mcp.env,
+        lazy,
       };
     }
 

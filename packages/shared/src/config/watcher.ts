@@ -220,6 +220,13 @@ export class ConfigWatcher {
   private knownSkills: Set<string> = new Set();
   private knownThemes: Set<string> = new Set();
 
+  /**
+   * Last-seen { mtimeMs, size } per source config.json.
+   * Filters Windows fs.watch attribute/atime-only events where the content
+   * did not actually change (see handleSourceConfigChange).
+   */
+  private sourceConfigFingerprints: Map<string, { mtimeMs: number; size: number }> = new Map();
+
   // Track LLM connections for change detection (JSON string for deep comparison)
   private lastLlmConnectionsHash: string = '';
 
@@ -635,6 +642,7 @@ export class ConfigWatcher {
         if (!currentFolders.has(folder)) {
           debug('[ConfigWatcher] Removed source folder:', folder);
           this.knownSources.delete(folder);
+          this.sourceConfigFingerprints.delete(folder);
           this.callbacks.onSourceChange?.(folder, null);
         }
       }
@@ -654,6 +662,25 @@ export class ConfigWatcher {
    */
   private handleSourceConfigChange(slug: string): void {
     debug('[ConfigWatcher] Source config changed:', slug);
+
+    // Fingerprint guard against atime-only / attribute-only fs.watch noise.
+    // On Windows, touching a file (or another process merely re-reading it)
+    // can emit a change event without any content change (verified 2026-10-08:
+    // `touch -a` triggered `Source changed` while cats did not). During the
+    // hourly reload storm this produced dozens of spurious MCP rebuilds.
+    // If mtime+size are unchanged, the config content is untouched — skip.
+    const configPath = join(this.sourcesDir, slug, 'config.json');
+    try {
+      const st = statSync(configPath);
+      const prev = this.sourceConfigFingerprints.get(slug);
+      if (prev && prev.mtimeMs === st.mtimeMs && prev.size === st.size) {
+        debug('[ConfigWatcher] Source config unchanged (atime-only event), skipping:', slug);
+        return;
+      }
+      this.sourceConfigFingerprints.set(slug, { mtimeMs: st.mtimeMs, size: st.size });
+    } catch {
+      // Config missing (deleted or mid-write) — fall through to normal handling.
+    }
 
     const validation = validateSource(this.workspaceDir, slug);
     if (!validation.valid) {
@@ -686,6 +713,11 @@ export class ConfigWatcher {
 
   /**
    * Handle source guide.md change
+   *
+   * Guides are documentation only: SessionManager explicitly treats guide
+   * changes as broadcast-only (`Source guide changed` → no source reload, no
+   * MCP rebuild). Emitting onSourceChange here too doubled every guide event
+   * into a full session reload during storms, so the extra callback is removed.
    */
   private handleSourceGuideChange(slug: string): void {
     debug('[ConfigWatcher] Source guide changed:', slug);
@@ -693,12 +725,6 @@ export class ConfigWatcher {
     const guide = loadSourceGuide(this.workspaceDir, slug);
     if (guide) {
       this.callbacks.onSourceGuideChange?.(slug, guide);
-    }
-
-    // Also emit full source change
-    const source = loadSource(this.workspaceDir, slug);
-    if (source) {
-      this.callbacks.onSourceChange?.(slug, source);
     }
   }
 

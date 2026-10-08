@@ -22,6 +22,26 @@ export type SourceType = 'mcp' | 'api' | 'local';
 export type SourceMcpAuthType = 'oauth' | 'bearer' | 'none';
 
 /**
+ * 授权层最小权限类别（用户/管理员在设置中授予）。
+ * 与操作类型对应：read=只读查询；write=创建/修改；external=外发/共享；
+ * delete=删除；payment=支付/计费；sensitive=敏感数据（PII/凭证/财务）。
+ */
+export type SourcePermissionKey = 'read' | 'write' | 'external' | 'delete' | 'payment' | 'sensitive';
+
+/**
+ * 数据源/工具风险级别。服务端策略为最终裁定：config.riskLevel 是用户手动
+ * 覆写（可降低），但检测到删除/外发/支付/敏感语义时服务端会强制提升。
+ */
+export type SourceRiskLevel = 'low' | 'medium' | 'high' | 'critical';
+
+/**
+ * 数据源持久授权策略（授权层）：
+ * auto=在授权范围内由 Agent 自主（高风险调用仍按风险规则确认）；
+ * confirm=任何调用都需用户确认；deny=禁止调用。
+ */
+export type SourcePolicyPreference = 'auto' | 'confirm' | 'deny';
+
+/**
  * API authentication types
  */
 export type ApiAuthType = 'bearer' | 'header' | 'query' | 'basic' | 'oauth' | 'none';
@@ -287,6 +307,15 @@ export interface McpSourceConfig {
    */
   env?: Record<string, string>;
 
+  /**
+   * Lazy connect (on-demand).
+   * When true, the MCP server is NOT spawned at session start — it connects
+   * on first tool call instead, then stays connected. For rarely-used local
+   * subprocess servers (e.g. chrome-devtools-mcp) this avoids keeping heavy
+   * processes resident for the whole session.
+   */
+  lazy?: boolean;
+
   // === HTTP/SSE custom headers ===
   /**
    * Custom headers to include in every MCP request.
@@ -466,6 +495,21 @@ export interface FolderSourceConfig {
 
   // Brand theming for this source's UI elements
   brand?: SourceBrand;
+
+  // 授权层（最小权限 + 风险 + 持久策略；MVP 落库，设置 UI 后补）
+  /** 授予的权限类别；缺失时按已鉴权 + 风险规则逐次确认 */
+  grantedPermissions?: SourcePermissionKey[];
+  /** 用户/管理员手动设定的风险级别（服务端最终裁定可再收紧） */
+  riskLevel?: SourceRiskLevel;
+  /** 持久授权策略：auto（默认）/ confirm / deny（源级默认） */
+  sourcePolicy?: SourcePolicyPreference;
+  /**
+   * 工具级持久策略（键 = 代理工具名，如 mcp__crm__send_email）。
+   * “始终允许/永久禁止”必须按此粒度落库，避免放大到同源其他工具。
+   */
+  sourceToolPolicies?: Record<string, SourcePolicyPreference>;
+  /** 授权有效期（ms epoch；空 = 长期）。MVP 落库不校验，后置实现写入与过期检查。 */
+  expiresAt?: number;
 
   // Status tracking
   isAuthenticated?: boolean;

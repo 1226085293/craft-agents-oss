@@ -80,6 +80,12 @@ export type PermissionCallback = (request: {
   rememberForMinutes?: number;
   commandHash?: string;
   approvalTtlSeconds?: number;
+  sourceSlug?: string;
+  sourceName?: string;
+  sourceRisk?: 'low' | 'medium' | 'high' | 'critical';
+  requiredPermission?: string;
+  dataScope?: string;
+  isAuthorizationRequest?: boolean;
 }) => void;
 
 /**
@@ -99,12 +105,6 @@ export type AuthCallback = (request: AuthRequest) => void;
  * Called when a source is activated, deactivated, or modified.
  */
 export type SourceChangeCallback = (slug: string, source: LoadedSource | null) => void;
-
-/**
- * Source activation request callback.
- * Returns true if source was successfully activated.
- */
-export type SourceActivationCallback = (sourceSlug: string) => Promise<boolean>;
 
 // ============================================================
 // Lifecycle Types
@@ -323,6 +323,12 @@ export type SdkMcpServerConfig =
       envVars?: string[];
       /** Working directory for the server process (Codex-specific) */
       cwd?: string;
+      /**
+       * On-demand connection: the server process is NOT spawned at session
+       * sync — tool definitions are probed once, and the process is spawned
+       * on first tool call. For rarely-used local subprocess servers.
+       */
+      lazy?: boolean;
     };
 
 /**
@@ -544,22 +550,12 @@ export interface AgentBackend {
    */
   getActiveSourceSlugs(): string[];
 
-  /**
-   * Get the raw user message for the current turn (cleared between turns).
-   * Used by SessionManager.activateSourceInSessionFn to capture the message
-   * that should be re-sent after a source_test-triggered auto-restart.
-   */
-  getCurrentTurnUserMessage(): string | null;
+  /** 本会话被禁止（deny-session）的来源工具名列表 */
+  getSourceSessionDeny(): string[];
 
-  /**
-   * Schedule a source-activation auto-restart. Consumed by the backend's
-   * event loop after the next tool_result, which yields `source_activated`
-   * and `forceAbort`s the turn. SessionManager's `source_activated` handler
-   * then schedules the server-side resend with a "[{slug} activated]" suffix
-   * (craft-agents-oss#804). Set by SessionManager after a successful mid-turn
-   * activation (source_test auto-enable).
-   */
-  setPendingSourceActivationRestart(pending: { sourceSlug: string; userMessage: string }): void;
+  /** 设置本会话禁止调用的来源工具（清空传 []） */
+  setSourceSessionDeny(tools: string[]): void;
+
 
   /**
    * Get all sources (for context injection).
@@ -640,9 +636,6 @@ export interface AgentBackend {
 
   /** Called with debug messages */
   onDebug: ((message: string) => void) | null;
-
-  /** Called when a source tool is used but source isn't active */
-  onSourceActivationRequest: SourceActivationCallback | null;
 
   /**
    * Called when backend-specific authentication is required.

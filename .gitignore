@@ -95,3 +95,4 @@ credentials.enc
 *.orig
 *.rej
 *.swp
+.worktrees/

@@ -59,7 +59,9 @@ function InlineBadge({ badge }: { badge: ContentBadge }) {
       className="inline-flex items-center gap-1 h-[22px] px-1.5 mx-0.5 rounded-[5px] bg-background shadow-minimal text-[12px] align-middle"
       style={{ verticalAlign: 'middle', transform: 'translateY(-1px)' }}
     >
-      {badge.iconDataUrl ? (
+      {badge.iconEmoji ? (
+        <span className="h-[12px] w-[12px] flex items-center justify-center text-[10px] leading-none shrink-0">{badge.iconEmoji}</span>
+      ) : badge.iconDataUrl ? (
         <img
           src={badge.iconDataUrl}
           alt=""

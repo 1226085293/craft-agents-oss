@@ -12,7 +12,7 @@ import type { ContentBadge } from '@craft-agent/core'
 import type { MentionItemType } from '@/components/ui/mention-menu'
 import type { LoadedSkill, LoadedSource } from '../../shared/types'
 import { AGENTS_PLUGIN_NAME } from '@craft-agent/shared/skills/types'
-import { getSourceIconSync, getSkillIconSync } from './icon-cache'
+import { getSourceIconSync, getSkillIconSync, EMOJI_ICON_PREFIX } from './icon-cache'
 
 // Import and re-export parsing functions from shared (pure string operations, no renderer deps)
 import { parseMentions, stripAllMentions, resolveSkillMentions, resolveSourceMentions, type ParsedMentions } from '@craft-agent/shared/mentions'
@@ -217,6 +217,7 @@ export function extractBadges(
   return matches.map(match => {
     let label = match.id
     let iconDataUrl: string | undefined
+    let iconEmoji: string | undefined
     let filePath: string | undefined
 
     if (match.type === 'skill') {
@@ -224,13 +225,18 @@ export function extractBadges(
       label = skill?.metadata.name || match.id
 
       // Get cached icon as data URL (preserves mime type for SVG, PNG, etc.)
-      iconDataUrl = getSkillIconSync(workspaceId, match.id) ?? undefined
+      // 或 emoji 标记（config.icon 为 emoji 时）——不能塞进 img src
+      const rawIcon = getSkillIconSync(workspaceId, match.id)
+      if (rawIcon?.startsWith(EMOJI_ICON_PREFIX)) iconEmoji = rawIcon.slice(EMOJI_ICON_PREFIX.length)
+      else iconDataUrl = rawIcon ?? undefined
     } else if (match.type === 'source') {
       const source = sourcesBySlug.get(match.id)
       label = source?.config.name || match.id
 
       // Get cached icon as data URL (preserves mime type for SVG, PNG, etc.)
-      iconDataUrl = getSourceIconSync(workspaceId, match.id) ?? undefined
+      const rawIcon = getSourceIconSync(workspaceId, match.id)
+      if (rawIcon?.startsWith(EMOJI_ICON_PREFIX)) iconEmoji = rawIcon.slice(EMOJI_ICON_PREFIX.length)
+      else iconDataUrl = rawIcon ?? undefined
     } else if (match.type === 'file') {
       // Show filename as label, full relative path stored for tooltip
       label = match.id.split('/').pop() || match.id
@@ -256,6 +262,7 @@ export function extractBadges(
       label,
       rawText,
       iconDataUrl,
+      iconEmoji,
       filePath,
       start: match.startIndex,
       end: match.startIndex + match.fullMatch.length,

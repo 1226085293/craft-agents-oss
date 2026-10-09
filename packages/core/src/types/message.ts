@@ -90,6 +90,12 @@ export interface ContentBadge {
   rawText: string;
   /** Icon as data URL (e.g., "data:image/png;base64,...") - preserves mime type */
   iconDataUrl?: string;
+  /**
+   * Emoji icon (e.g., "🛰️") - rendered as text instead of an image.
+   * Set when the source/skill icon in config is an emoji; iconDataUrl stays
+   * undefined in that case (an emoji marker is not a valid image URL).
+   */
+  iconEmoji?: string;
   /** Start position in content string */
   start: number;
   /** End position in content string */

@@ -60,7 +60,9 @@ export function FilterableSelectPopover<T>({
   const { t } = useTranslation()
   const resolvedPlaceholder = filterPlaceholder ?? t('common.search')
   const [filter, setFilter] = React.useState('')
-  const [highlightedIndex, setHighlightedIndex] = React.useState(0)
+  // -1 = 无高亮：默认不高亮（只有鼠标悬停/键盘导航时才高亮；
+  // 键盘 ↑/↓ 从 -1 起步时分别跳到首项/末项）
+  const [highlightedIndex, setHighlightedIndex] = React.useState(-1)
   const [position, setPosition] = React.useState<{ top: number; left: number } | null>(null)
   const inputRef = React.useRef<HTMLInputElement>(null)
   const listRef = React.useRef<HTMLDivElement>(null)
@@ -92,7 +94,7 @@ export function FilterableSelectPopover<T>({
     if (!open) return
 
     setFilter('')
-    setHighlightedIndex(0)
+    setHighlightedIndex(-1)
     updatePosition()
 
     const focusInput = () => inputRef.current?.focus()
@@ -114,8 +116,13 @@ export function FilterableSelectPopover<T>({
   React.useEffect(() => {
     if (highlightedIndex >= filteredItems.length) {
       setHighlightedIndex(Math.max(0, filteredItems.length - 1))
+    } else if (highlightedIndex < 0 && filteredItems.length === 0) {
+      setHighlightedIndex(0)
     }
   }, [filteredItems.length, highlightedIndex])
+
+  // 鼠标移出列表/整框后取消高亮（行间移动时 enter 事件紧随 leave，无闪烁）
+  const clearHighlight = React.useCallback(() => setHighlightedIndex(-1), [])
 
   React.useEffect(() => {
     if (!open || !listRef.current) return
@@ -133,13 +140,15 @@ export function FilterableSelectPopover<T>({
     if (e.key === 'ArrowDown') {
       e.preventDefault()
       if (filteredItems.length === 0) return
-      setHighlightedIndex(prev => (prev + 1) % filteredItems.length)
+      // 从 -1（无高亮）起步时跳到首项
+      setHighlightedIndex(prev => (prev < 0 ? 0 : (prev + 1) % filteredItems.length))
       return
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault()
       if (filteredItems.length === 0) return
-      setHighlightedIndex(prev => (prev - 1 + filteredItems.length) % filteredItems.length)
+      // 从 -1（无高亮）起步时回到最后一项，与初值 0 的环绕行为一致
+      setHighlightedIndex(prev => (Math.max(prev, 0) - 1 + filteredItems.length) % filteredItems.length)
       return
     }
     if (e.key === 'Enter') {
@@ -194,7 +203,7 @@ export function FilterableSelectPopover<T>({
               />
             </div>
 
-            <div ref={listRef} className="max-h-[240px] overflow-y-auto p-1">
+            <div ref={listRef} className="max-h-[240px] overflow-y-auto p-1" onMouseLeave={clearHighlight}>
               {!hasResults ? (
                 <div className="px-3 py-2 text-xs text-muted-foreground select-none">
                   {noResultsState ?? 'No matching items.'}
@@ -210,6 +219,7 @@ export function FilterableSelectPopover<T>({
                       type="button"
                       data-highlighted={highlighted}
                       onMouseEnter={() => setHighlightedIndex(index)}
+                      onMouseLeave={clearHighlight}
                       onClick={() => handleToggle(item)}
                       disabled={disabled}
                       className={cn(

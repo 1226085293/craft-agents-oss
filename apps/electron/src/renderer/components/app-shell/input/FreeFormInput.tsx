@@ -72,6 +72,7 @@ import { CompactWorkingDirectorySelector } from '@/components/ui/CompactWorkingD
 import { ConnectionIcon } from '@/components/icons/ConnectionIcon'
 import { FreeFormInputContextBadge } from './FreeFormInputContextBadge'
 import { derivePickerMode } from './picker-mode'
+import { resolveSlugsOnScopeChange, resolveSlugsOnSourceMention, resolveSlugsOnMentionRemoved } from './source-scope'
 import type { FileAttachment, LoadedSource, LoadedSkill } from '../../../../shared/types'
 import type { PermissionMode } from '@craft-agent/shared/agent/modes'
 import { type ThinkingLevel, THINKING_LEVELS, getThinkingLevelNameKey } from '@craft-agent/shared/agent/thinking-levels'
@@ -662,6 +663,25 @@ export function FreeFormInput({
   const [optimisticSourceSlugs, setOptimisticSourceSlugs] = React.useState(enabledSourceSlugs)
   const [optimisticSourceScope, setOptimisticSourceScope] = React.useState<'auto' | 'only' | 'exclude'>(sourceScope)
 
+  // auto 模式下选择集合不参与会话约束（agent 在已授权源中自主选择），统一视为空：
+  // 避免旧会话残留勾选误导用户，或在 auto 下再次勾选时把旧勾选连带收窄为 only。
+  const effectiveSourceSlugs = React.useMemo(
+    () => (optimisticSourceScope === 'auto' ? [] : optimisticSourceSlugs),
+    [optimisticSourceScope, optimisticSourceSlugs],
+  )
+
+  // 已授权（enabled）源 slug 全集——only ↔ exclude 切换反向运算的全集
+  const authorizedSourceSlugs = React.useMemo(
+    () => sources.filter((s) => s.config.enabled).map((s) => s.config.slug),
+    [sources],
+  )
+
+  // 输入框当前 @ 提及的源——从 auto 切到 only/exclude 时据此默认勾选（未 @ 则不勾选）
+  const mentionedSourceSlugs = React.useMemo(
+    () => parseMentions(input, [], sources.map((s) => s.config.slug)).sources,
+    [input, sources],
+  )
+
   React.useEffect(() => {
     setOptimisticSourceScope(sourceScope)
   }, [sourceScope])
@@ -1138,22 +1158,20 @@ export function FreeFormInput({
 
   // Handle mention selection (sources, skills, files)
   const handleMentionSelect = React.useCallback((item: MentionItem) => {
-    // For sources: enable the source immediately
+    // For sources: 按当前模式联动选择集合（auto 不改变；only 未选则勾选；exclude 已选则取消），scope 不变
     if (item.type === 'source' && item.source && onSourcesChange) {
       const slug = item.source.config.slug
       if (!item.source.config.enabled) return // 未授权源不可通过 @ 启用
-      if (!optimisticSourceSlugs.includes(slug)) {
-        const newSlugs = [...optimisticSourceSlugs, slug]
-        const scope: 'auto' | 'only' | 'exclude' = optimisticSourceScope === 'auto' ? 'only' : optimisticSourceScope
-        setOptimisticSourceSlugs(newSlugs)
-        setOptimisticSourceScope(scope)
-        onSourcesChange(newSlugs, scope)
+      const nextSlugs = resolveSlugsOnSourceMention(optimisticSourceScope, effectiveSourceSlugs, slug)
+      if (nextSlugs !== effectiveSourceSlugs) {
+        setOptimisticSourceSlugs(nextSlugs)
+        onSourcesChange(nextSlugs, optimisticSourceScope)
       }
     }
 
     // Files via @ mention in text are sufficient context for the agent.
     // Skills also don't need special handling beyond text insertion.
-  }, [optimisticSourceSlugs, optimisticSourceScope, onSourcesChange])
+  }, [optimisticSourceScope, effectiveSourceSlugs, onSourcesChange])
 
   // Inline mention hook (for skills, sources, and files)
   const inlineMention = useInlineMention({
@@ -1440,16 +1458,10 @@ export function FreeFormInput({
     const sourceSlugs = sources.map(s => s.config.slug)
     const mentions = parseMentions(input, skillSlugs, sourceSlugs)
 
-    // Enable any mentioned sources that aren't already enabled
-    if (mentions.sources.length > 0 && onSourcesChange) {
-      const newSlugs = [...new Set([...optimisticSourceSlugs, ...mentions.sources])]
-      if (newSlugs.length > optimisticSourceSlugs.length) {
-        const scope: 'auto' | 'only' | 'exclude' = optimisticSourceScope === 'auto' ? 'only' : optimisticSourceScope
-        setOptimisticSourceSlugs(newSlugs)
-        setOptimisticSourceScope(scope)
-        onSourcesChange(newSlugs, scope)
-      }
-    }
+    // 发送时不再根据 @ 提及修改勾选状态——勾选集以数据源选择器为准
+    // （每次勾选/取消/切模式都已通过 onSourcesChange 实时同步到父级）：
+    // 仅这些模式下取消勾选某源后，即使输入文本 @ 了它，也保持未激活。
+    // 输入文本中的 @ 源提及保留在消息里（agent 侧可见），但不改变会话的源作用域。
 
     const attachmentSnapshot = attachments
 
@@ -1473,7 +1485,7 @@ export function FreeFormInput({
     })
 
     return true
-  }, [input, attachments, followUpItems, disabled, disableSend, onInputChange, onAttachmentsChange, onSubmit, skills, sources, optimisticSourceSlugs, onSourcesChange, onWorkingDirectoryChange, homeDir])
+  }, [input, attachments, followUpItems, disabled, disableSend, onInputChange, onAttachmentsChange, onSubmit, skills, sources, effectiveSourceSlugs, optimisticSourceScope, onSourcesChange, onWorkingDirectoryChange, homeDir])
 
   const submitQueuedMessage = React.useCallback(() => submitMessage({ midStreamBehavior: 'queue' }), [submitMessage])
 
@@ -1620,15 +1632,18 @@ export function FreeFormInput({
       const prevMentions = parseMentions(prevValue, [], sourceSlugs)
       const currMentions = parseMentions(nextValue, [], sourceSlugs)
 
-      // Remove sources that were mentioned before but not anymore
+      // Remove sources that were mentioned before but not anymore.
+      // 仅 only 模式联动取消勾选；auto / exclude 不因删除提及文本反向修改选择
       const removedSources = prevMentions.sources.filter(slug => !currMentions.sources.includes(slug))
       if (removedSources.length > 0) {
-        const newSlugs = optimisticSourceSlugs.filter(slug => !removedSources.includes(slug))
-        setOptimisticSourceSlugs(newSlugs)
-        onSourcesChange(newSlugs)
+        const nextSlugs = resolveSlugsOnMentionRemoved(optimisticSourceScope, effectiveSourceSlugs, removedSources)
+        if (nextSlugs !== effectiveSourceSlugs) {
+          setOptimisticSourceSlugs(nextSlugs)
+          onSourcesChange(nextSlugs, optimisticSourceScope)
+        }
       }
     }
-  }, [syncToParent, sources, optimisticSourceSlugs, onSourcesChange])
+  }, [syncToParent, sources, optimisticSourceScope, effectiveSourceSlugs, onSourcesChange])
 
   // Handle input with cursor position (for menu detection)
   const handleRichInput = React.useCallback((value: string, cursorPosition: number) => {
@@ -2006,12 +2021,12 @@ export function FreeFormInput({
               <FreeFormInputContextBadge
                 buttonRef={sourceButtonRef}
                 icon={
-                  optimisticSourceSlugs.length === 0 ? (
+                  effectiveSourceSlugs.length === 0 ? (
                     <DatabaseZap className="h-4 w-4" />
                   ) : (
                     <div className="flex items-center -ml-0.5">
                       {(() => {
-                        const enabledSources = sources.filter(s => optimisticSourceSlugs.includes(s.config.slug))
+                        const enabledSources = sources.filter(s => effectiveSourceSlugs.includes(s.config.slug))
                         const displaySources = enabledSources.slice(0, 3)
                         const remainingCount = enabledSources.length - 3
                         return (
@@ -2040,16 +2055,16 @@ export function FreeFormInput({
                   )
                 }
                 label={
-                  optimisticSourceSlugs.length === 0
+                  effectiveSourceSlugs.length === 0
                     ? t("chat.sourcesTooltip")
                     : (() => {
-                        const enabledSources = sources.filter(s => optimisticSourceSlugs.includes(s.config.slug))
+                        const enabledSources = sources.filter(s => effectiveSourceSlugs.includes(s.config.slug))
                         if (enabledSources.length === 1) return enabledSources[0].config.name
                         return t("chat.sourcesCount", { count: enabledSources.length })
                       })()
                 }
                 isExpanded={false}
-                hasSelection={optimisticSourceSlugs.length > 0}
+                hasSelection={effectiveSourceSlugs.length > 0}
                 showChevron={false}
                 isOpen={sourceDropdownOpen}
                 disabled={disabled}
@@ -2060,19 +2075,21 @@ export function FreeFormInput({
                 open={sourceDropdownOpen}
                 onOpenChange={setSourceDropdownOpen}
                 sources={sources}
-                selectedSlugs={optimisticSourceSlugs}
+                selectedSlugs={effectiveSourceSlugs}
                 sourceScope={optimisticSourceScope}
                 onScopeChange={(scope) => {
+                  const nextSlugs = resolveSlugsOnScopeChange(optimisticSourceScope, scope, effectiveSourceSlugs, authorizedSourceSlugs, mentionedSourceSlugs)
                   setOptimisticSourceScope(scope)
-                  onSourcesChange?.(optimisticSourceSlugs, scope)
+                  if (nextSlugs !== effectiveSourceSlugs) setOptimisticSourceSlugs(nextSlugs)
+                  onSourcesChange?.(nextSlugs, scope)
                 }}
                 onToggleSlug={(slug) => {
                   const source = sources.find(s => s.config.slug === slug)
                   if (source && !source.config.enabled) return
-                  const isEnabled = optimisticSourceSlugs.includes(slug)
+                  const isEnabled = effectiveSourceSlugs.includes(slug)
                   const newSlugs = isEnabled
-                    ? optimisticSourceSlugs.filter(currentSlug => currentSlug !== slug)
-                    : [...optimisticSourceSlugs, slug]
+                    ? effectiveSourceSlugs.filter(currentSlug => currentSlug !== slug)
+                    : [...effectiveSourceSlugs, slug]
                   // auto 模式下首次选择来源 → 收窄为“仅这些”
                   const scope: 'auto' | 'only' | 'exclude' = optimisticSourceScope === 'auto' ? 'only' : optimisticSourceScope
                   setOptimisticSourceSlugs(newSlugs)
@@ -2118,12 +2135,12 @@ export function FreeFormInput({
               <FreeFormInputContextBadge
                 buttonRef={sourceButtonRef}
                 icon={
-                  optimisticSourceSlugs.length === 0 ? (
+                  effectiveSourceSlugs.length === 0 ? (
                     <DatabaseZap className="h-4 w-4" />
                   ) : (
                     <div className="flex items-center -ml-0.5">
                       {(() => {
-                        const enabledSources = sources.filter(s => optimisticSourceSlugs.includes(s.config.slug))
+                        const enabledSources = sources.filter(s => effectiveSourceSlugs.includes(s.config.slug))
                         const displaySources = enabledSources.slice(0, 3)
                         const remainingCount = enabledSources.length - 3
                         return (
@@ -2152,17 +2169,17 @@ export function FreeFormInput({
                   )
                 }
                 label={
-                  optimisticSourceSlugs.length === 0
+                  effectiveSourceSlugs.length === 0
                     ? t("chat.chooseSources")
                     : (() => {
-                        const enabledSources = sources.filter(s => optimisticSourceSlugs.includes(s.config.slug))
+                        const enabledSources = sources.filter(s => effectiveSourceSlugs.includes(s.config.slug))
                         if (enabledSources.length === 1) return enabledSources[0].config.name
                         if (enabledSources.length === 2) return enabledSources.map(s => s.config.name).join(', ')
                         return t("chat.sourcesCount", { count: enabledSources.length })
                       })()
                 }
                 isExpanded={isEmptySession}
-                hasSelection={optimisticSourceSlugs.length > 0}
+                hasSelection={effectiveSourceSlugs.length > 0}
                 showChevron={true}
                 isOpen={sourceDropdownOpen}
                 disabled={disabled}
@@ -2176,19 +2193,21 @@ export function FreeFormInput({
                 onOpenChange={setSourceDropdownOpen}
                 anchorRef={sourceButtonRef}
                 sources={sources}
-                selectedSlugs={optimisticSourceSlugs}
+                selectedSlugs={effectiveSourceSlugs}
                 sourceScope={optimisticSourceScope}
                 onScopeChange={(scope) => {
+                  const nextSlugs = resolveSlugsOnScopeChange(optimisticSourceScope, scope, effectiveSourceSlugs, authorizedSourceSlugs, mentionedSourceSlugs)
                   setOptimisticSourceScope(scope)
-                  onSourcesChange?.(optimisticSourceSlugs, scope)
+                  if (nextSlugs !== effectiveSourceSlugs) setOptimisticSourceSlugs(nextSlugs)
+                  onSourcesChange?.(nextSlugs, scope)
                 }}
                 onToggleSlug={(slug) => {
                   const source = sources.find(s => s.config.slug === slug)
                   if (source && !source.config.enabled) return
-                  const isEnabled = optimisticSourceSlugs.includes(slug)
+                  const isEnabled = effectiveSourceSlugs.includes(slug)
                   const newSlugs = isEnabled
-                    ? optimisticSourceSlugs.filter(currentSlug => currentSlug !== slug)
-                    : [...optimisticSourceSlugs, slug]
+                    ? effectiveSourceSlugs.filter(currentSlug => currentSlug !== slug)
+                    : [...effectiveSourceSlugs, slug]
                   // auto 模式下首次选择来源 → 收窄为“仅这些”
                   const scope: 'auto' | 'only' | 'exclude' = optimisticSourceScope === 'auto' ? 'only' : optimisticSourceScope
                   setOptimisticSourceSlugs(newSlugs)

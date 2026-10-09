@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import { Check, DatabaseZap } from 'lucide-react'
 import { FilterableSelectPopover } from '@craft-agent/ui'
 
@@ -27,6 +28,7 @@ export function SourceSelectorPopover({
   onScopeChange,
   onToggleSlug,
 }: SourceSelectorPopoverProps) {
+  const { t } = useTranslation()
   return (
     <FilterableSelectPopover
       open={open}
@@ -37,15 +39,9 @@ export function SourceSelectorPopover({
       getLabel={(source) => source.config.name}
       isSelected={(source) => selectedSlugs.includes(source.config.slug)}
       onToggle={(source) => onToggleSlug(source.config.slug)}
-      filterPlaceholder="Search sources..."
-      emptyState={(
-        <>
-          No sources configured.
-          <br />
-          Add sources in Settings.
-        </>
-      )}
-      noResultsState="No matching sources."
+      filterPlaceholder={t('common.search')}
+      emptyState={t('sourcesList.noSourcesConfigured')}
+      noResultsState={t('chat.noResults')}
       minWidth={220}
       maxWidth={340}
       header={(
@@ -63,13 +59,13 @@ export function SourceSelectorPopover({
                     : 'text-muted-foreground hover:bg-foreground/5',
                 )}
               >
-                {mode === 'auto' ? 'Auto' : mode === 'only' ? 'Only these' : 'Exclude these'}
+                {mode === 'auto' ? t('chat.sourceScopeAuto') : mode === 'only' ? t('chat.sourceScopeOnly') : t('chat.sourceScopeExclude')}
               </button>
             ))}
           </div>
           {sourceScope === 'auto' && (
             <div className="mt-1 text-[10px] leading-tight text-muted-foreground">
-              Auto = agent chooses among authorized sources
+              {t('chat.sourceScopeAutoHint')}
             </div>
           )}
         </div>
@@ -92,7 +88,7 @@ export function SourceSelectorPopover({
           <div className="flex-1 min-w-0 truncate">
             {source.config.name}
             {state.disabled && (
-              <span className="ml-1.5 text-[10px] text-muted-foreground">unauthorized — authorize in Settings</span>
+              <span className="ml-1.5 text-[10px] text-muted-foreground">{t('chat.sourceUnauthorizedHint')}</span>
             )}
           </div>
           <div

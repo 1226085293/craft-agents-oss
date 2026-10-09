@@ -170,8 +170,6 @@ export {
   handleMicrosoftOAuthTrigger,
   // Credential Prompt
   handleCredentialPrompt,
-  // Update Preferences
-  handleUpdatePreferences,
   // Transform Data
   handleTransformData,
   // Script Sandbox
@@ -200,7 +198,6 @@ export type {
   SlackOAuthTriggerArgs,
   MicrosoftOAuthTriggerArgs,
   CredentialPromptArgs,
-  UpdatePreferencesArgs,
   TransformDataArgs,
   ScriptSandboxArgs,
   RenderTemplateArgs,
@@ -224,7 +221,6 @@ export {
   SourceOAuthTriggerSchema,
   CredentialPromptSchema,
   CallLlmSchema,
-  UpdatePreferencesSchema,
   TransformDataSchema,
   ScriptSandboxSchema,
   RenderTemplateSchema,

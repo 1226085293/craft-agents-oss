@@ -202,9 +202,10 @@ export const CHANNEL_MAP = {
   // Debug logging
   debugLog: invoke(RPC_CHANNELS.debug.LOG),
 
-  // User Preferences
-  readPreferences: invoke(RPC_CHANNELS.preferences.READ),
-  writePreferences: invoke(RPC_CHANNELS.preferences.WRITE),
+  // Appearance file (unified UI/appearance settings)
+  readAppearance: invoke(RPC_CHANNELS.appearance.READ),
+  writeAppearance: invoke(RPC_CHANNELS.appearance.WRITE),
+  onAppearanceChange: listener(RPC_CHANNELS.appearance.CHANGED),
 
   // Session Drafts
   getDraft: invoke(RPC_CHANNELS.drafts.GET),

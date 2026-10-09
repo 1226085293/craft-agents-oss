@@ -1,12 +1,12 @@
 import { describe, it, expect, mock, beforeEach } from 'bun:test'
 
-// Stub the preferences module so we can toggle `getCoAuthorPreference` per test
-// without touching disk. `formatPreferencesForPrompt` is stubbed to '' because
-// it's unrelated to the behavior under test here.
+// Stub the appearance (user-context) module so we can toggle `getCoAuthorPreference`
+// per test without touching disk. `formatUserContextForPrompt` is stubbed to ''
+// because it's unrelated to the behavior under test here.
 let mockIncludeCoAuthoredBy = true
-mock.module('../../config/preferences.ts', () => ({
+mock.module('../../config/appearance.ts', () => ({
   getCoAuthorPreference: () => mockIncludeCoAuthoredBy,
-  formatPreferencesForPrompt: () => '',
+  formatUserContextForPrompt: () => '',
 }))
 
 import { getSystemPrompt, formatProjectContextForPrompt } from '../system'

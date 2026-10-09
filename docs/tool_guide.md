@@ -16,7 +16,6 @@
 - [source_slack_oauth_trigger](#source_slack_oauth_trigger)
 - [source_microsoft_oauth_trigger](#source_microsoft_oauth_trigger)
 - [source_credential_prompt](#source_credential_prompt)
-- [update_user_preferences](#update_user_preferences)
 - [transform_data](#transform_data)
 - [script_sandbox](#script_sandbox)
 - [render_template](#render_template)
@@ -61,7 +60,7 @@
 - `config` — config.json（工作区、模型、设置）
 - `sources` — 所有 source config.json
 - `statuses` — statuses config.json
-- `preferences` — preferences.json
+- `appearance` — appearance.json（统一外观配置）
 - `permissions` — permissions.json 文件
 - `automations` — automations.json
 - `tool-icons` — tool-icons.json
@@ -120,10 +119,6 @@ auth 模式与字段：
 
 可选字段：`labels`（字段标签）、`description`（给用户看说明）、`hint`（去哪找凭据）、`passwordRequired`、`headerNames`。
 ⚠️ 调用后执行暂停等待用户输入。
-
-## update_user_preferences
-
-了解到用户信息（名字、时区、地点，或值得记忆的上下文）时更新偏好记忆。只更新已确认字段，不要猜。
 
 ## transform_data
 

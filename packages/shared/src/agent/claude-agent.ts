@@ -29,7 +29,7 @@ import { loadPlanFromPath, type SessionConfig as Session } from '../sessions/sto
 import { loadProjectById, getProjectAssetsPath, listProjectAssets, getProjectMemoryPath, loadProjectMemory } from '../projects/storage.ts';
 import { DEFAULT_MODEL, isClaudeModel, isAdaptiveThinkingAlwaysOnModel, getDefaultSummarizationModel, getModelContextWindow } from '../config/models.ts';
 import { getCredentialManager } from '../credentials/index.ts';
-import { loadPreferences, formatPreferencesForPrompt, getCoAuthorPreference } from '../config/preferences.ts';
+import { formatUserContextForPrompt, getCoAuthorPreference } from '../config/appearance.ts';
 import type { FileAttachment } from '../utils/files.ts';
 import type { LLMQueryRequest, LLMQueryResult } from './llm-tool.ts';
 import { consumeLlmQueryMessages } from './claude-llm-query.ts';
@@ -1059,7 +1059,7 @@ export class ClaudeAgent extends BaseAgent {
 
       // Pin system prompt components on first chat() call for consistency after compaction
       // The SDK's resume mechanism expects system prompt consistency within a session
-      const currentPreferencesPrompt = formatPreferencesForPrompt();
+      const currentPreferencesPrompt = formatUserContextForPrompt();
       const currentCoAuthorPref = getCoAuthorPreference();
 
       if (this.pinnedPreferencesPrompt === null) {
@@ -1132,7 +1132,7 @@ export class ClaudeAgent extends BaseAgent {
 
       // Build full MCP servers set first, then filter for mini agents
       const fullMcpServers: Options['mcpServers'] = {
-        // Session-scoped tools (SubmitPlan, source_test, update_user_preferences, transform_data, etc.)
+        // Session-scoped tools (SubmitPlan, source_test, transform_data, etc.)
         session: getSessionScopedTools(sessionId, this.workspaceRootPath),
         // Per-source proxy servers from centralized MCP pool (MCP + API sources)
         // Each source gets its own SDK server keyed by slug (e.g., 'linear', 'github', 'gmail')

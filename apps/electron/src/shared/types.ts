@@ -467,9 +467,10 @@ export interface ElectronAPI {
   // Folder dialog
   openFolderDialog(): Promise<string | null>
 
-  // User Preferences
-  readPreferences(): Promise<{ content: string; exists: boolean; path: string }>
-  writePreferences(content: string): Promise<{ success: boolean; error?: string }>
+  // Appearance file (unified UI/appearance settings)
+  readAppearance(): Promise<{ content: string; exists: boolean; path: string }>
+  writeAppearance(content: string): Promise<{ success: boolean; error?: string }>
+  onAppearanceChange(callback: (content: string) => void): () => void
 
   // Session Drafts (persisted composer state — text + attachment refs)
   getDraft(sessionId: string): Promise<import('@craft-agent/shared/config').SessionDraft | null>

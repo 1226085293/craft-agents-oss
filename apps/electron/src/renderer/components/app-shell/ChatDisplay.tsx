@@ -1139,16 +1139,16 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   const [overlayState, setOverlayState] = useState<OverlayState>(null)
 
   // Diff viewer settings - loaded from user preferences on mount, persisted on change
-  // These settings are stored in ~/.craft-agent/preferences.json (not localStorage)
+  // These settings are stored in ~/.craft-agent/appearance.json (not localStorage)
   const [diffViewerSettings, setDiffViewerSettings] = useState<Partial<DiffViewerSettings>>({})
 
-  // Load diff viewer settings from preferences on mount
+  // Load diff viewer settings from appearance.json on mount
   useEffect(() => {
-    window.electronAPI.readPreferences().then(({ content }) => {
+    window.electronAPI.readAppearance().then(({ content }) => {
       try {
         const prefs = JSON.parse(content)
-        if (prefs.diffViewer) {
-          setDiffViewerSettings(prefs.diffViewer)
+        if (prefs.diff) {
+          setDiffViewerSettings(prefs.diff)
         }
       } catch {
         // Ignore parse errors, use defaults
@@ -1156,19 +1156,18 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     })
   }, [])
 
-  // Persist diff viewer settings to preferences when changed
+  // Persist diff viewer settings to appearance.json when changed
   const handleDiffViewerSettingsChange = useCallback((settings: DiffViewerSettings) => {
     setDiffViewerSettings(settings)
-    // Read current preferences, merge in new settings, write back
-    window.electronAPI.readPreferences().then(({ content }) => {
+    // Read current appearance, merge in new diff settings, write back
+    window.electronAPI.readAppearance().then(({ content }) => {
       try {
         const prefs = JSON.parse(content)
-        prefs.diffViewer = settings
-        prefs.updatedAt = Date.now()
-        window.electronAPI.writePreferences(JSON.stringify(prefs, null, 2))
+        prefs.diff = settings
+        window.electronAPI.writeAppearance(JSON.stringify(prefs, null, 2))
       } catch {
-        // If preferences malformed, create fresh with just diffViewer
-        window.electronAPI.writePreferences(JSON.stringify({ diffViewer: settings, updatedAt: Date.now() }, null, 2))
+        // If appearance malformed, create fresh with just diff settings
+        window.electronAPI.writeAppearance(JSON.stringify({ diff: settings }, null, 2))
       }
     })
   }, [])

@@ -9,7 +9,7 @@ const getDefaultThinkingLevelMock = mock(() => 'think')
 const setDefaultThinkingLevelMock = mock((_level: string) => true)
 
 mock.module('@craft-agent/shared/config', () => ({
-  getPreferencesPath: () => '/tmp/preferences.json',
+  getAppearancePath: () => '/tmp/appearance.json',
   getSessionDraft: () => null,
   setSessionDraft: () => {},
   deleteSessionDraft: () => {},

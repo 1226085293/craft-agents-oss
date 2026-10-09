@@ -67,12 +67,11 @@ export const DEFAULT_TOOL_CATEGORIES: ToolCategoriesConfig = {
     {
       name: 'compute',
       metaToolName: 'tools_compute',
-      description: '数据处理与计算：脚本执行、数据转换、LLM 批量调用、偏好设置。',
+      description: '数据处理与计算：脚本执行、数据转换、LLM 批量调用。',
       tools: [
         'script_sandbox',
         'transform_data',
         'call_llm',
-        'update_user_preferences',
       ],
     },
     {

@@ -289,12 +289,12 @@ export const mockElectronAPI = {
   },
 
   // ChatDisplay required mocks
-  readPreferences: async () => {
-    return { diffViewerSettings: { showFilePath: true, expandedSections: {} } }
+  readAppearance: async () => {
+    return { content: '{}', exists: true, path: '/tmp/appearance.json' }
   },
 
-  writePreferences: async (prefs: unknown) => {
-    console.log('[Playground] writePreferences called:', prefs)
+  writeAppearance: async (content: string) => {
+    console.log('[Playground] writeAppearance called:', content)
   },
 
   // FreeFormInput required mocks

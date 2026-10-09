@@ -3,17 +3,17 @@
  *
  * Provides utilities for building system prompts and context blocks that both
  * ClaudeAgent and PiAgent can use. Handles workspace capabilities, recovery
- * context, and user preferences formatting.
+ * context, and user-context (timezone/country/language) formatting.
  *
  * Key responsibilities:
  * - Build workspace capabilities context
  * - Format recovery context for session resume failures
  * - Build session state context blocks
- * - Format user preferences for prompt injection
+ * - Format user context (derived from the local system) for prompt injection
  */
 
 import { isLocalMcpEnabled } from '../../workspaces/storage.ts';
-import { formatPreferencesForPrompt } from '../../config/preferences.ts';
+import { formatUserContextForPrompt } from '../../config/appearance.ts';
 import { formatSessionState } from '../mode-manager.ts';
 import { getDateTimeContext, getWorkingDirectoryContext } from '../../prompts/system.ts';
 import { getSessionPlansPath, getSessionDataPath, getSessionPath } from '../../sessions/storage.ts';
@@ -230,15 +230,16 @@ Please continue the conversation naturally from where we left off.
   }
 
   // ============================================================
-  // User Preferences
+  // User Context
   // ============================================================
 
   /**
-   * Format user preferences for prompt injection.
-   * Preferences are pinned on first call to ensure consistency within a session.
+   * Format the user-context block for prompt injection (timezone/country
+   * derived from the local system, language from the app setting).
+   * Pinned on first call to ensure consistency within a session.
    *
-   * @param forceRefresh - Force refresh of cached preferences
-   * @returns Formatted preferences string
+   * @param forceRefresh - Force refresh of cached user context
+   * @returns Formatted user-context string
    */
   formatPreferences(forceRefresh = false): string {
     // Return pinned preferences if available (ensures session consistency)
@@ -247,7 +248,7 @@ Please continue the conversation naturally from where we left off.
     }
 
     // Load and format preferences (function loads internally)
-    this.pinnedPreferencesPrompt = formatPreferencesForPrompt();
+    this.pinnedPreferencesPrompt = formatUserContextForPrompt();
     return this.pinnedPreferencesPrompt;
   }
 

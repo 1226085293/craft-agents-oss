@@ -389,7 +389,6 @@ const SETTINGS_ICONS: Record<SettingsSubpage, string> = {
   messaging: 'MessageSquare',
   server: 'Server',
   shortcuts: 'Keyboard',
-  preferences: 'UserCircle',
 }
 
 /**

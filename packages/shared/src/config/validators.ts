@@ -6,10 +6,10 @@
  *
  * Validates:
  * - config.json: Main app configuration
- * - preferences.json: User preferences
+ * - appearance.json: Unified UI/appearance settings (theme, ui, board, diff, icons)
  * - sources/{slug}/config.json: Workspace-scoped source configs
  * - permissions.json: Permission rules for Explore mode
- * - tool-icons/tool-icons.json: CLI tool icon mappings
+ * - tool-icons/ tool icon assets (mapping lives in appearance.json)
  */
 
 import { z } from 'zod';
@@ -28,7 +28,7 @@ import type { LanguageCode } from '../i18n/languages.ts';
 // ============================================================
 
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
-const PREFERENCES_FILE = join(CONFIG_DIR, 'preferences.json');
+const APPEARANCE_FILE = join(CONFIG_DIR, 'appearance.json');
 
 // ============================================================
 // Validation Result Types
@@ -107,22 +107,38 @@ export const StoredConfigSchema = z.object({
   // Permission mode and cyclable modes are now per-workspace in workspace config.json
 });
 
-// --- preferences.json ---
+// --- appearance.json ---
 
-const LocationSchema = z.object({
-  city: z.string().optional(),
-  region: z.string().optional(),
-  country: z.string().optional(),
-});
-
-export const UserPreferencesSchema = z.object({
-  name: z.string().optional(),
-  timezone: z.string().optional(),  // TODO: Could validate against IANA timezone list
-  location: LocationSchema.optional(),
-  // Internal: mirrors Appearance → Language. Not user-editable.
-  // Validated against the registry-derived supported set.
-  uiLanguage: z.enum([...SUPPORTED_LANGUAGE_CODES] as [LanguageCode, ...LanguageCode[]]).optional(),
-  updatedAt: z.number().int().min(0).optional(),
+const AppearanceConfigSchema = z.object({
+  theme: z.object({
+    mode: z.enum(['light', 'dark', 'system']).optional(),
+    colorTheme: z.string().optional(),
+    font: z.string().optional(),
+  }).optional(),
+  ui: z.object({
+    language: z.enum([...SUPPORTED_LANGUAGE_CODES] as [LanguageCode, ...LanguageCode[]]).optional(),
+    backgroundFinishedChip: z.boolean().optional(),
+    projectColorTreatment: z.string().optional(),
+    workspaceAvatarColors: z.record(z.string(), z.string()).optional(),
+  }).optional(),
+  board: z.object({
+    columnColors: z.record(z.string(), z.string()).optional(),
+    livePulse: z.boolean().optional(),
+    columnStatus: z.record(z.string(), z.string()).optional(),
+  }).optional(),
+  diff: z.object({
+    diffStyle: z.enum(['unified', 'split']).optional(),
+    disableBackground: z.boolean().optional(),
+  }).optional(),
+  icons: z.object({
+    version: z.number().int().min(1).optional(),
+    tools: z.array(z.object({
+      id: z.string().min(1).regex(/^[a-z0-9-]+$/, 'ID must be lowercase alphanumeric with hyphens'),
+      displayName: z.string().min(1),
+      icon: z.string().min(1),
+      commands: z.array(z.string().min(1)).min(1),
+    })).optional(),
+  }).optional(),
 }).passthrough();
 
 // ============================================================
@@ -255,21 +271,21 @@ export function validateConfig(): ValidationResult {
 }
 
 /**
- * Validate preferences.json
+ * Validate appearance.json (optional — missing is a warning)
  */
-export function validatePreferences(): ValidationResult {
+export function validateAppearance(): ValidationResult {
   const errors: ValidationIssue[] = [];
   const warnings: ValidationIssue[] = [];
 
-  // Check if file exists (preferences are optional)
-  if (!existsSync(PREFERENCES_FILE)) {
+  // Check if file exists (appearance settings are optional)
+  if (!existsSync(APPEARANCE_FILE)) {
     return {
       valid: true,
       errors: [],
       warnings: [{
-        file: 'preferences.json',
+        file: 'appearance.json',
         path: '',
-        message: 'Preferences file does not exist (using defaults)',
+        message: 'Appearance file does not exist (using defaults)',
         severity: 'warning',
       }],
     };
@@ -278,13 +294,13 @@ export function validatePreferences(): ValidationResult {
   // Parse JSON
   let content: unknown;
   try {
-    const raw = readFileSync(PREFERENCES_FILE, 'utf-8');
+    const raw = readFileSync(APPEARANCE_FILE, 'utf-8');
     content = safeJsonParse(raw);
   } catch (e) {
     return {
       valid: false,
       errors: [{
-        file: 'preferences.json',
+        file: 'appearance.json',
         path: '',
         message: `Invalid JSON: ${e instanceof Error ? e.message : 'Unknown error'}`,
         severity: 'error',
@@ -294,32 +310,9 @@ export function validatePreferences(): ValidationResult {
   }
 
   // Validate schema
-  const result = UserPreferencesSchema.safeParse(content);
+  const result = AppearanceConfigSchema.safeParse(content);
   if (!result.success) {
-    errors.push(...zodErrorToIssues(result.error, 'preferences.json'));
-  } else {
-    const prefs = result.data;
-
-    // Warn about missing recommended fields
-    if (!prefs.name) {
-      warnings.push({
-        file: 'preferences.json',
-        path: 'name',
-        message: 'User name is not set',
-        severity: 'warning',
-        suggestion: 'Setting a name helps personalize agent responses',
-      });
-    }
-
-    if (!prefs.timezone) {
-      warnings.push({
-        file: 'preferences.json',
-        path: 'timezone',
-        message: 'Timezone is not set',
-        severity: 'warning',
-        suggestion: 'Setting timezone helps with date/time formatting',
-      });
-    }
+    errors.push(...zodErrorToIssues(result.error, 'appearance.json'));
   }
 
   return {
@@ -337,7 +330,7 @@ export function validatePreferences(): ValidationResult {
 export function validateAll(workspaceId?: string, workspaceRoot?: string): ValidationResult {
   const results: ValidationResult[] = [
     validateConfig(),
-    validatePreferences(),
+    validateAppearance(),
     validateToolIcons(),
   ];
 
@@ -1735,7 +1728,7 @@ const ToolIconEntrySchema = z.object({
 });
 
 /**
- * Zod schema for the full tool-icons.json config.
+ * Zod schema for the tool icon mappings config (appearance.json → icons).
  * Contains a version number and array of tool icon mappings.
  */
 const ToolIconsConfigSchema = z.object({
@@ -1745,11 +1738,13 @@ const ToolIconsConfigSchema = z.object({
 
 /**
  * Validate tool-icons config from a JSON string (no disk reads).
- * Used by PreToolUse hook to validate before writing to disk.
- * Checks JSON syntax, Zod schema, duplicate IDs, and duplicate commands.
+ * Used by the appearance.json write path to validate before persisting.
+ * Accepts either the full appearance.json (icons section) or a legacy
+ * `{ version, tools }` payload. Checks JSON syntax, Zod schema, duplicate
+ * IDs, and duplicate commands.
  */
 export function validateToolIconsContent(jsonString: string): ValidationResult {
-  const file = 'tool-icons/tool-icons.json';
+  const file = 'appearance.json[icons]';
   const errors: ValidationIssue[] = [];
   const warnings: ValidationIssue[] = [];
 
@@ -1770,8 +1765,14 @@ export function validateToolIconsContent(jsonString: string): ValidationResult {
     };
   }
 
+  // Normalize: full appearance.json or a bare { version, tools } payload
+  const icons =
+    content && typeof content === 'object' && 'icons' in (content as Record<string, unknown>)
+      ? (content as { icons?: unknown }).icons
+      : content;
+
   // Validate against Zod schema
-  const result = ToolIconsConfigSchema.safeParse(content);
+  const result = ToolIconsConfigSchema.safeParse(icons);
   if (!result.success) {
     errors.push(...zodErrorToIssues(result.error, file));
     return { valid: false, errors, warnings };
@@ -1835,23 +1836,23 @@ export function validateToolIconsContent(jsonString: string): ValidationResult {
 }
 
 /**
- * Validate tool-icons/tool-icons.json from disk.
- * Reads the file, runs content validation, and also checks that referenced icon files exist.
+ * Validate the tool icon mappings from appearance.json (icons section) on disk.
+ * Reads the file, runs content validation, and also checks that referenced icon
+ * files exist in the tool-icons directory.
  */
 export function validateToolIcons(): ValidationResult {
   const toolIconsDir = getToolIconsDir();
-  const configPath = join(toolIconsDir, 'tool-icons.json');
-  const file = 'tool-icons/tool-icons.json';
+  const file = 'appearance.json[icons]';
 
   // File is optional — missing is just a warning
-  if (!existsSync(configPath)) {
+  if (!existsSync(APPEARANCE_FILE)) {
     return {
       valid: true,
       errors: [],
       warnings: [{
         file,
         path: '',
-        message: 'Tool icons config does not exist (using defaults)',
+        message: 'Appearance file does not exist (using defaults)',
         severity: 'warning',
       }],
     };
@@ -1860,7 +1861,7 @@ export function validateToolIcons(): ValidationResult {
   // Read file and delegate to content validator
   let raw: string;
   try {
-    raw = readFileSync(configPath, 'utf-8');
+    raw = readFileSync(APPEARANCE_FILE, 'utf-8');
   } catch (e) {
     return {
       valid: false,
@@ -1878,15 +1879,16 @@ export function validateToolIcons(): ValidationResult {
 
   // Filesystem-specific check: verify referenced icon files exist
   try {
-    const parsed = safeJsonParse(raw) as Record<string, unknown>;
-    if (parsed.tools && Array.isArray(parsed.tools)) {
-      for (const tool of parsed.tools) {
+    const parsed = safeJsonParse(raw) as { icons?: { tools?: Array<{ id: string; icon: string }> } };
+    const tools = parsed?.icons?.tools;
+    if (tools && Array.isArray(tools)) {
+      for (const tool of tools) {
         if (tool.icon) {
           const iconPath = join(toolIconsDir, tool.icon);
           if (!existsSync(iconPath)) {
             result.warnings.push({
               file: `tool-icons/${tool.icon}`,
-              path: `tools[id=${tool.id}].icon`,
+              path: `icons.tools[id=${tool.id}].icon`,
               message: `Icon file '${tool.icon}' not found in tool-icons directory`,
               severity: 'warning',
               suggestion: `Place '${tool.icon}' in ~/.craft-agent/tool-icons/`,

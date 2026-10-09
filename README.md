@@ -496,7 +496,7 @@ Configuration is stored at `~/.craft-agent/`:
 ~/.craft-agent/
 ├── config.json              # Main config (workspaces, LLM connections)
 ├── credentials.enc          # Encrypted credentials (AES-256-GCM)
-├── preferences.json         # User preferences
+├── appearance.json         # Unified appearance settings (theme, ui, board, diff, icons)
 ├── theme.json               # App-level theme
 └── workspaces/
     └── {id}/

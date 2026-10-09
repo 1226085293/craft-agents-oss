@@ -95,7 +95,7 @@ mock.module('@craft-agent/shared/config', () => ({
   getAllSessionDrafts: () => [],
   getGitBashPath: () => null,
   // Handler-required stubs: prevent SyntaxError in handler modules loaded by registration test
-  getPreferencesPath: () => '/tmp/preferences.json',
+  getAppearancePath: () => '/tmp/appearance.json',
   getSessionDraft: () => null,
   setSessionDraft: async () => {},
   deleteSessionDraft: async () => {},

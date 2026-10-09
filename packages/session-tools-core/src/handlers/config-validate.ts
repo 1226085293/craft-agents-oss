@@ -20,7 +20,7 @@ import {
 import { getSourceConfigPath } from '../source-helpers.ts';
 
 export interface ConfigValidateArgs {
-  target: 'config' | 'sources' | 'statuses' | 'preferences' | 'permissions' | 'automations' | 'tool-icons' | 'all';
+  target: 'config' | 'sources' | 'statuses' | 'appearance' | 'permissions' | 'automations' | 'tool-icons' | 'all';
   sourceSlug?: string;
 }
 
@@ -56,8 +56,8 @@ export async function handleConfigValidate(
         case 'statuses':
           result = ctx.validators.validateStatuses(ctx.workspacePath);
           break;
-        case 'preferences':
-          result = ctx.validators.validatePreferences();
+        case 'appearance':
+          result = ctx.validators.validateAppearance();
           break;
         case 'permissions':
           result = ctx.validators.validatePermissions(ctx.workspacePath, sourceSlug);
@@ -136,9 +136,9 @@ export async function handleConfigValidate(
       return successResponse(formatValidationResult(result));
     }
 
-    case 'preferences': {
+    case 'appearance': {
       const result = validateJsonFileHasFields(
-        join(craftAgentRoot, 'preferences.json'),
+        join(craftAgentRoot, 'appearance.json'),
         []
       );
       return successResponse(formatValidationResult(result));
@@ -165,8 +165,8 @@ export async function handleConfigValidate(
 
     case 'tool-icons': {
       const result = validateJsonFileHasFields(
-        join(craftAgentRoot, 'tool-icons', 'tool-icons.json'),
-        ['version', 'tools']
+        join(craftAgentRoot, 'appearance.json'),
+        []
       );
       return successResponse(formatValidationResult(result));
     }
@@ -176,17 +176,17 @@ export async function handleConfigValidate(
         join(craftAgentRoot, 'config.json'),
         ['workspaces']
       );
-      const prefsResult = validateJsonFileHasFields(
-        join(craftAgentRoot, 'preferences.json'),
+      const appearanceResult = validateJsonFileHasFields(
+        join(craftAgentRoot, 'appearance.json'),
         []
       );
-      const merged = mergeResults(configResult, prefsResult);
+      const merged = mergeResults(configResult, appearanceResult);
       return successResponse(formatValidationResult(merged));
     }
 
     default:
       return errorResponse(
-        `Unknown validation target: ${target}. Valid targets: config, sources, statuses, preferences, permissions, automations, tool-icons, all`
+        `Unknown validation target: ${target}. Valid targets: config, sources, statuses, appearance, permissions, automations, tool-icons, all`
       );
   }
 }

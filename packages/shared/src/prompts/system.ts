@@ -1,4 +1,4 @@
-import { formatPreferencesForPrompt, getCoAuthorPreference } from '../config/preferences.ts';
+import { formatUserContextForPrompt, getCoAuthorPreference } from '../config/appearance.ts';
 import { formatSkillsBlock } from '../skills/skills-prompt.ts';
 import { getBrowserToolEnabled } from '../config/storage.ts';
 import { debug } from '../utils/debug.ts';
@@ -364,7 +364,7 @@ export function getSystemPrompt(
   }
 
   // Use pinned preferences if provided (for session consistency after compaction)
-  const preferences = pinnedPreferencesPrompt ?? formatPreferencesForPrompt();
+  const preferences = pinnedPreferencesPrompt ?? formatUserContextForPrompt();
   const debugContext = debugMode?.enabled ? formatDebugModeContext(debugMode.logFilePath) : '';
 
   // Get project context files for monorepo support (lives in system prompt for persistence across compaction)
@@ -663,10 +663,6 @@ Prefer \`craft-agent\` CLI over direct file edits for labels, sources, skills, a
 - Skills help: \`craft-agent skill --help\`
 - Automations help: \`craft-agent automation --help\`
 - Canonical reference: \`${DOC_REFS.craftCli}\`` : ''}
-
-## User preferences
-
-You can store/update user preferences via \`update_user_preferences\`. When you learn the user's name, timezone, location, language, or other relevant context, proactively offer to save it.
 
 ## Interaction Guidelines
 

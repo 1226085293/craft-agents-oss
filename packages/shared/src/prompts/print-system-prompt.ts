@@ -57,7 +57,7 @@ printAnnotation('Built once per session, passed to SDK, enables prompt caching')
 printAnnotation('The SDK also uses preset: "claude_code" which adds Claude Code\'s base system prompt');
 printAnnotation('');
 printAnnotation('Composed of:');
-printAnnotation('  1. User Preferences (if set) - formatPreferencesForPrompt()');
+printAnnotation('  1. User Context (from local system) - formatUserContextForPrompt()');
 printAnnotation('  2. Craft Agent Environment Marker - version, platform, arch');
 printAnnotation('  3. Core Instructions - capabilities, sources, guidelines');
 printAnnotation('  4. Configuration Documentation Refs - permissions, skills, themes, statuses');
@@ -208,7 +208,7 @@ ${colors.bold}SDK Configuration:${colors.reset}
   systemPrompt.append: getSystemPrompt() ${colors.dim}// Craft Agent additions (static, cacheable)${colors.reset}
 
 ${colors.bold}Static System Prompt Components:${colors.reset}
-  1. User Preferences (if set)           ${colors.dim}// formatPreferencesForPrompt()${colors.reset}
+  1. User Context (from local system)  ${colors.dim}// formatUserContextForPrompt()${colors.reset}
   2. Craft Agent Environment Marker      ${colors.dim}// Version, platform, arch${colors.reset}
   3. Core Instructions                   ${colors.dim}// Capabilities, sources, guidelines${colors.reset}
   4. Configuration Documentation Refs    ${colors.dim}// Permissions, skills, themes, statuses${colors.reset}

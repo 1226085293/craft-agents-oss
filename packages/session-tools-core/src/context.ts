@@ -129,7 +129,7 @@ export interface ValidatorInterface {
   validateSource(workspaceRootPath: string, sourceSlug: string): import('./types.js').ValidationResult;
   validateAllSources(workspaceRootPath: string): import('./types.js').ValidationResult;
   validateStatuses(workspaceRootPath: string): import('./types.js').ValidationResult;
-  validatePreferences(): import('./types.js').ValidationResult;
+  validateAppearance(): import('./types.js').ValidationResult;
   validatePermissions(workspaceRootPath: string, sourceSlug?: string): import('./types.js').ValidationResult;
   validateAutomations(workspaceRootPath: string): import('./types.js').ValidationResult;
   validateToolIcons(): import('./types.js').ValidationResult;
@@ -287,24 +287,12 @@ export interface SessionToolContext {
    */
   testGoogleSource?(source: SourceConfig): Promise<ApiTestResult>;
 
-  // ============================================================
-  // Preferences (for update_user_preferences)
-  // ============================================================
-
   /**
    * Submit developer feedback. Injected by each backend:
    * - Claude: writes JSON files to ~/.craft-agent/feedback/
    * - Codex/Pi: could send over IPC or write directly
    */
   submitFeedback?(feedback: import('./types.ts').DeveloperFeedback): void;
-
-  /**
-   * Update user preferences. Injected by each backend:
-   * - Claude: calls updatePreferences() from config/preferences.ts
-   * - Codex/session-mcp-server: writes directly to preferences.json
-   * - Pi: calls updatePreferences() from config/preferences.ts
-   */
-  updatePreferences?(updates: Record<string, unknown>): void;
 
   // ============================================================
   // Session Self-Management (for set_session_labels, etc.)

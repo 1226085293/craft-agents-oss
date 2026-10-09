@@ -158,13 +158,13 @@ When resolving locale merge conflicts, run `bun run validate:ci` and trust the r
 The main-process i18n instance has **no detection plugin** (no `localStorage` in Node) and would otherwise reset to `fallbackLng: 'en'` on every restart. To keep main + renderer in sync across launches:
 
 - **Renderer** uses `i18next-browser-languagedetector` → `localStorage` (`i18nextLng`). Survives restart.
-- **Main** hydrates on startup from `preferences.uiLanguage` in `~/.craft-agent/preferences.json`. Maintained only by the `i18n:changeLanguage` IPC handler in `apps/electron/src/main/index.ts`.
+- **Main** hydrates on startup from `ui.language` in `~/.craft-agent/appearance.json` (the unified appearance config). Maintained only by the `i18n:changeLanguage` IPC handler in `apps/electron/src/main/index.ts`.
 - **Renderer → main sync** happens on every Appearance change AND once at renderer startup (so a freshly-installed app immediately learns the persisted language).
 - The IPC handler validates the incoming code against `SUPPORTED_LANGUAGE_CODES` and `setPersistedUiLanguage()` no-ops if the value is unchanged — startup pushes don't churn the file or the config watcher.
 
-`uiLanguage` is **not** user-editable through `update_user_preferences`. The Appearance dropdown is the only writer.
+`uiLanguage` is **not** user-editable — the Appearance dropdown is the only writer.
 
-**Session-title language** resolves from this same persisted `uiLanguage` via `resolveTitleLanguageName()` (`config/preferences.ts`), **not** `i18n.resolvedLanguage`. The main-process i18n value hydrates asynchronously at startup and can still read the `'en'` fallback when an early title generates, which forced English titles for non-English chats (#885). When no language is persisted the helper returns `undefined`, so the title prompt auto-detects the conversation language instead of defaulting to English. Used at both `SessionManager` title sites (`generateTitle`, `refreshTitle`).
+**Session-title language** resolves from this same persisted `uiLanguage` via `resolveTitleLanguageName()` (`config/appearance.ts`), **not** `i18n.resolvedLanguage`. The main-process i18n value hydrates asynchronously at startup and can still read the `'en'` fallback when an early title generates, which forced English titles for non-English chats (#885). When no language is persisted the helper returns `undefined`, so the title prompt auto-detects the conversation language instead of defaulting to English. Used at both `SessionManager` title sites (`generateTitle`, `refreshTitle`).
 
 ## Token refresh for API sources
 

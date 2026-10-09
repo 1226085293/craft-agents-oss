@@ -1,5 +1,4 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef, useMemo, type ReactNode } from 'react'
-import * as storage from '@/lib/local-storage'
 import {
   resolveTheme,
   themeToCSS,
@@ -10,6 +9,7 @@ import {
   type ThemeFile,
   type ShikiThemeConfig,
 } from '@config/theme'
+import { getAppearanceCache, initAppearance, updateAppearance } from '@/lib/appearance-bridge'
 
 export type ThemeMode = 'light' | 'dark' | 'system'
 export type FontFamily = 'inter' | 'system'
@@ -64,14 +64,6 @@ interface ThemeContextType {
   shikiConfig: ShikiThemeConfig
 }
 
-interface StoredTheme {
-  mode: ThemeMode
-  colorTheme: string
-  font?: FontFamily
-  /** True when user explicitly changed theme in UI (not auto-saved on startup) */
-  isUserOverride?: boolean
-}
-
 const ThemeContext = createContext<ThemeContextType | undefined>(undefined)
 
 const bundledThemeModules = import.meta.glob('../../../resources/themes/*.json', {
@@ -103,13 +95,17 @@ function getSystemPreference(): 'light' | 'dark' {
   return 'light'
 }
 
-function loadStoredTheme(): StoredTheme | null {
-  if (typeof window === 'undefined') return null
-  return storage.get<StoredTheme | null>(storage.KEYS.theme, null)
+function loadStoredTheme(): { mode?: string; colorTheme?: string; font?: string } | null {
+  const theme = getAppearanceCache()?.theme
+  if (!theme) return null
+  return { mode: theme.mode, colorTheme: theme.colorTheme, font: theme.font }
 }
 
-function saveTheme(theme: StoredTheme): void {
-  storage.set(storage.KEYS.theme, theme)
+function saveTheme(theme: { mode: ThemeMode; colorTheme: string; font: FontFamily }): void {
+  void updateAppearance((config) => ({
+    ...config,
+    theme: { ...config.theme, ...theme },
+  }))
 }
 
 export function ThemeProvider({
@@ -121,16 +117,28 @@ export function ThemeProvider({
 }: ThemeProviderProps) {
   const stored = loadStoredTheme()
 
-  // === Preference state (persisted at app level) ===
-  const [mode, setModeState] = useState<ThemeMode>(stored?.mode ?? defaultMode)
-  // Only use localStorage colorTheme if user explicitly set it via UI
-  const [colorTheme, setColorThemeState] = useState<string>(() => {
-    if (stored?.isUserOverride && stored.colorTheme) {
-      return stored.colorTheme
+  // === Preference state (persisted in appearance.json) ===
+  const [mode, setModeState] = useState<ThemeMode>((stored?.mode as ThemeMode) ?? defaultMode)
+  const [colorTheme, setColorThemeState] = useState<string>(stored?.colorTheme ?? defaultColorTheme)
+  const [font, setFontState] = useState<FontFamily>((stored?.font as FontFamily) ?? defaultFont)
+
+  // Hydrate from the appearance file once the bridge has loaded (after the
+  // localStorage → appearance.json one-time migration).
+  useEffect(() => {
+    let cancelled = false
+    void initAppearance().then(() => {
+      if (cancelled) return
+      const theme = getAppearanceCache()?.theme
+      if (!theme) return
+      setModeState((prev) => (theme.mode ? (theme.mode as ThemeMode) : prev))
+      setColorThemeState((prev) => (theme.colorTheme ? theme.colorTheme : prev))
+      setFontState((prev) => (theme.font ? (theme.font as FontFamily) : prev))
+    })
+    return () => {
+      cancelled = true
     }
-    return defaultColorTheme // Will be updated by config.json effect
-  })
-  const [font, setFontState] = useState<FontFamily>(stored?.font ?? defaultFont)
+  }, [])
+
   const [systemPreference, setSystemPreference] = useState<'light' | 'dark'>(getSystemPreference)
   const [previewColorTheme, setPreviewColorTheme] = useState<string | null>(null)
 
@@ -140,11 +148,9 @@ export function ThemeProvider({
   // Track if we're receiving an external update to prevent echo broadcasts
   const isExternalUpdate = useRef(false)
 
-  // Load app-level colorTheme from config.json on mount (only if user hasn't overridden)
+  // Load app-level colorTheme from config/appearance on mount (as a fallback
+  // when the appearance file has no explicit theme section yet)
   useEffect(() => {
-    // Skip if user has explicitly set a theme via UI
-    if (stored?.isUserOverride) return
-
     window.electronAPI?.getColorTheme?.().then((configTheme) => {
       if (configTheme && configTheme !== 'default') {
         setColorThemeState(configTheme)
@@ -423,7 +429,6 @@ export function ThemeProvider({
         mode: preferences.mode as ThemeMode,
         colorTheme: preferences.colorTheme,
         font: preferences.font as FontFamily,
-        isUserOverride: true
       })
       setTimeout(() => {
         isExternalUpdate.current = false
@@ -436,9 +441,7 @@ export function ThemeProvider({
   // === Setters with persistence and broadcast ===
   const setMode = useCallback((newMode: ThemeMode) => {
     setModeState(newMode)
-    // Preserve existing isUserOverride flag
-    const existing = loadStoredTheme()
-    saveTheme({ mode: newMode, colorTheme, font, isUserOverride: existing?.isUserOverride })
+    saveTheme({ mode: newMode, colorTheme, font })
     if (!isExternalUpdate.current && window.electronAPI?.broadcastThemePreferences) {
       window.electronAPI.broadcastThemePreferences({ mode: newMode, colorTheme, font })
     }
@@ -447,7 +450,7 @@ export function ThemeProvider({
   const setColorTheme = useCallback((newTheme: string) => {
     setColorThemeState(newTheme)
     // Mark as user override - user explicitly changed theme via UI
-    saveTheme({ mode, colorTheme: newTheme, font, isUserOverride: true })
+    saveTheme({ mode, colorTheme: newTheme, font })
     if (!isExternalUpdate.current && window.electronAPI?.broadcastThemePreferences) {
       window.electronAPI.broadcastThemePreferences({ mode, colorTheme: newTheme, font })
     }
@@ -455,9 +458,7 @@ export function ThemeProvider({
 
   const setFont = useCallback((newFont: FontFamily) => {
     setFontState(newFont)
-    // Preserve existing isUserOverride flag
-    const existing = loadStoredTheme()
-    saveTheme({ mode, colorTheme, font: newFont, isUserOverride: existing?.isUserOverride })
+    saveTheme({ mode, colorTheme, font: newFont })
     if (!isExternalUpdate.current && window.electronAPI?.broadcastThemePreferences) {
       window.electronAPI.broadcastThemePreferences({ mode, colorTheme, font: newFont })
     }

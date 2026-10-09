@@ -31,7 +31,7 @@ import {
   validateSource,
   validateAllSources,
   validateStatuses,
-  validatePreferences,
+  validateAppearance,
   validateAll,
   validateSkill,
   validateWorkspacePermissions,
@@ -62,7 +62,6 @@ import {
 import { isGoogleOAuthConfigured as isGoogleOAuthConfiguredImpl } from '../auth/google-oauth.ts';
 import { debug } from '../utils/debug.ts';
 import { getSessionPlansPath, getSessionPath, getSessionDataPath } from '../sessions/storage.ts';
-import { updatePreferences as updatePreferencesImpl } from '../config/preferences.ts';
 
 // Re-export types that may be needed by consumers
 export type { SessionToolContext, SessionToolCallbacks } from '@craft-agent/session-tools-core';
@@ -120,7 +119,7 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
     validateSource: (wsPath: string, slug: string) => validateSource(wsPath, slug),
     validateAllSources: (wsPath: string) => validateAllSources(wsPath),
     validateStatuses: (wsPath: string) => validateStatuses(wsPath),
-    validatePreferences: () => validatePreferences(),
+    validateAppearance: () => validateAppearance(),
     validatePermissions: (wsPath: string, sourceSlug?: string) => {
       if (sourceSlug) {
         return validateSourcePermissions(wsPath, sourceSlug);
@@ -224,9 +223,6 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
     fs,
     validators,
     credentialManager,
-    updatePreferences: (updates: Record<string, unknown>) => {
-      updatePreferencesImpl(updates as any);
-    },
     submitFeedback: (feedback: DeveloperFeedback) => {
       const feedbackDir = join(CONFIG_DIR, 'feedback');
       mkdirSync(feedbackDir, { recursive: true });

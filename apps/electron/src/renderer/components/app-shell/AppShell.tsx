@@ -530,7 +530,6 @@ function AppShellContent({
     onRenameSession,
     onOpenSettings,
     onOpenKeyboardShortcuts,
-    onOpenStoredUserPreferences,
     onReset,
     onSendMessage,
     openNewChat,
@@ -2430,7 +2429,6 @@ function AppShellContent({
           onOpenSettings={onOpenSettings}
           onOpenSettingsSubpage={handleSettingsClick}
           onOpenKeyboardShortcuts={onOpenKeyboardShortcuts}
-          onOpenStoredUserPreferences={onOpenStoredUserPreferences}
           onBack={goBack}
           onForward={goForward}
           canGoBack={canGoBack}

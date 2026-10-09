@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'path'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
-import { getPreferencesPath, getSessionDraft, setSessionDraft, deleteSessionDraft, getAllSessionDrafts, getWorkspaceByNameOrId, getDefaultThinkingLevel, setDefaultThinkingLevel } from '@craft-agent/shared/config'
+import { getAppearancePath, getSessionDraft, setSessionDraft, deleteSessionDraft, getAllSessionDrafts, getWorkspaceByNameOrId, getDefaultThinkingLevel, setDefaultThinkingLevel } from '@craft-agent/shared/config'
 import { isValidThinkingLevel, normalizeThinkingLevel, THINKING_LEVEL_IDS } from '@craft-agent/shared/agent/thinking-levels'
 
 const VALID_THINKING_LEVELS_LIST = THINKING_LEVEL_IDS.map(id => `'${id}'`).join(', ')
@@ -14,8 +14,8 @@ import { isValidWorkingDirectory } from '../../utils/path-validation'
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.workspace.SETTINGS_GET,
   RPC_CHANNELS.workspace.SETTINGS_UPDATE,
-  RPC_CHANNELS.preferences.READ,
-  RPC_CHANNELS.preferences.WRITE,
+  RPC_CHANNELS.appearance.READ,
+  RPC_CHANNELS.appearance.WRITE,
   RPC_CHANNELS.drafts.GET,
   RPC_CHANNELS.drafts.SET,
   RPC_CHANNELS.drafts.DELETE,
@@ -193,23 +193,23 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
   })
 
   // ============================================================
-  // User Preferences
+  // Appearance file (read/write — unified UI/appearance settings)
   // ============================================================
 
-  // Read user preferences file
-  server.handle(RPC_CHANNELS.preferences.READ, async () => {
-    const path = getPreferencesPath()
+  // Read the appearance file
+  server.handle(RPC_CHANNELS.appearance.READ, async () => {
+    const path = getAppearancePath()
     if (!existsSync(path)) {
       return { content: '{}', exists: false, path }
     }
     return { content: readFileSync(path, 'utf-8'), exists: true, path }
   })
 
-  // Write user preferences file (validates JSON before saving)
-  server.handle(RPC_CHANNELS.preferences.WRITE, async (_, content: string) => {
+  // Write the appearance file (validates JSON before saving)
+  server.handle(RPC_CHANNELS.appearance.WRITE, async (_, content: string) => {
     try {
       JSON.parse(content) // Validate JSON
-      const path = getPreferencesPath()
+      const path = getAppearancePath()
       mkdirSync(dirname(path), { recursive: true })
       writeFileSync(path, content, 'utf-8')
       return { success: true }

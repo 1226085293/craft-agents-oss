@@ -6,11 +6,12 @@
  * top-right corner — the in-app complement to the OS notification, which only
  * fires when the whole app is unfocused. This atom gates whether that chip is shown.
  *
- * It's an appearance *preference*, so it persists to localStorage via
- * `atomWithStorage` (same pattern as `kanbanLivePulseAtom` in `./kanban`) —
- * reactive, multi-window, no RPC/disk-config. The value is read reactively in two
- * places (the App-level completion detector and the chat-view render gate), which
- * is exactly what a persisted atom is for. Per-machine, not workspace-synced.
+ * It's an appearance setting, so it persists to the unified appearance file
+ * (appearance.json) via the appearance-backed atom storage (replaces the old
+ * localStorage backend) — reactive, multi-window. The value is read reactively
+ * in two places (the App-level completion detector and the chat-view render
+ * gate), which is exactly what a persisted atom is for. Per-machine, not
+ * workspace-synced.
  *
  * The chip's transient runtime state — the queue of finished sessions plus its
  * push/dismiss action atoms — lives below the preference. The queue is a plain
@@ -20,11 +21,13 @@
 
 import { atom } from 'jotai'
 import { atomWithStorage } from 'jotai/utils'
+import { createAppearanceAtomStorage } from './appearance-atom-storage'
 
 /** Whether the in-app "background session finished" chip is shown. Default off. */
 export const showBackgroundFinishedChipAtom = atomWithStorage<boolean>(
   'craft-show-background-finished-chip',
-  false
+  false,
+  createAppearanceAtomStorage()
 )
 
 export interface BackgroundFinishedEntry {

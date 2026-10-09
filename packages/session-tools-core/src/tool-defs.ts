@@ -29,7 +29,6 @@ import {
   handleMicrosoftOAuthTrigger,
 } from './handlers/source-oauth.ts';
 import { handleCredentialPrompt } from './handlers/credential-prompt.ts';
-import { handleUpdatePreferences } from './handlers/update-preferences.ts';
 import { handleTransformData } from './handlers/transform-data.ts';
 import { handleScriptSandbox } from './handlers/script-sandbox.ts';
 import { handleRenderTemplate } from './handlers/render-template.ts';
@@ -122,15 +121,6 @@ export const CallLlmSchema = z.object({
     properties: z.record(z.string(), z.unknown()),
     required: z.array(z.string()).optional(),
   }).optional().describe('Custom JSON Schema for structured output'),
-});
-
-export const UpdatePreferencesSchema = z.object({
-  name: z.string().optional().describe("The user's preferred name or how they'd like to be addressed"),
-  timezone: z.string().optional().describe("The user's timezone in IANA format (e.g., 'America/New_York', 'Europe/London')"),
-  city: z.string().optional().describe("The user's city"),
-  region: z.string().optional().describe("The user's state/region/province"),
-  country: z.string().optional().describe("The user's country"),
-  includeCoAuthoredBy: z.boolean().optional().describe("Whether to include 'Co-Authored-By: Craft Agent' trailer on git commits. Defaults to true."),
 });
 
 export const TransformDataSchema = z.object({
@@ -335,7 +325,6 @@ export const TOOL_DESCRIPTIONS = {
   source_slack_oauth_trigger: `Trigger Slack OAuth for a Slack API source; opens browser for user sign-in. Pauses until OAuth completes.`,
   source_microsoft_oauth_trigger: `Trigger Microsoft OAuth for a Microsoft API source; opens browser for sign-in. Services: Outlook, Calendar, OneDrive, Teams, SharePoint. Pauses until OAuth completes.`,
   source_credential_prompt: `Ask the user for non-OAuth credentials via secure input UI. Modes: bearer (single token), basic (user+password), header (API key with header name), query (API key query param), multi-header (multiple keys). Pauses for user input.`,
-  update_user_preferences: `Update stored user preferences (name, timezone, city, region, country, git co-author). Use only when you have CONFIRMED information; never guess.`,
   transform_data: `Run a transform script to turn data files into tables, or decode HTML for rich previews. Input files as CLI args, last arg = output path (Python: sys.argv[1:-1], Node/Bun: process.argv.slice(2, -1)). Output JSON {title, columns, rows} for datatable/spreadsheet, or any HTML. Isolated subprocess: no API keys, 30s timeout.`,
   script_sandbox: `Run a short Python/Node/Bun diagnostic in an isolated subprocess (no network, no credentials). Returns stdout/exit code/timeout. Great when strict Explore-mode parsing blocks inline Bash. Input files limited to session dir; timeout default 5s, max 15s.`,
   render_template: `Render a source HTML template with a data payload (source guide.md lists templates under Templates). Returns a file path; use the path as 'src' in an html-preview block. Mustache syntax.`,
@@ -417,7 +406,6 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'source_slack_oauth_trigger', description: TOOL_DESCRIPTIONS.source_slack_oauth_trigger, inputSchema: SourceOAuthTriggerSchema, executionMode: 'registry', safeMode: 'block', handler: handleSlackOAuthTrigger },
   { name: 'source_microsoft_oauth_trigger', description: TOOL_DESCRIPTIONS.source_microsoft_oauth_trigger, inputSchema: SourceOAuthTriggerSchema, executionMode: 'registry', safeMode: 'block', handler: handleMicrosoftOAuthTrigger },
   { name: 'source_credential_prompt', description: TOOL_DESCRIPTIONS.source_credential_prompt, inputSchema: CredentialPromptSchema, executionMode: 'registry', safeMode: 'block', handler: handleCredentialPrompt },
-  { name: 'update_user_preferences', description: TOOL_DESCRIPTIONS.update_user_preferences, inputSchema: UpdatePreferencesSchema, executionMode: 'registry', safeMode: 'block', handler: handleUpdatePreferences },
   { name: 'transform_data', description: TOOL_DESCRIPTIONS.transform_data, inputSchema: TransformDataSchema, executionMode: 'registry', safeMode: 'allow', handler: handleTransformData },
   { name: 'script_sandbox', description: TOOL_DESCRIPTIONS.script_sandbox, inputSchema: ScriptSandboxSchema, executionMode: 'registry', safeMode: 'allow', handler: handleScriptSandbox },
   { name: 'render_template', description: TOOL_DESCRIPTIONS.render_template, inputSchema: RenderTemplateSchema, executionMode: 'registry', safeMode: 'allow', handler: handleRenderTemplate },

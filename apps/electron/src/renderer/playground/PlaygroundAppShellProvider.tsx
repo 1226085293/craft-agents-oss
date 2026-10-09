@@ -63,7 +63,6 @@ const playgroundValue: AppShellContextType = {
   onSelectWorkspace: logCall('onSelectWorkspace'),
   onOpenSettings: logCall('onOpenSettings'),
   onOpenKeyboardShortcuts: logCall('onOpenKeyboardShortcuts'),
-  onOpenStoredUserPreferences: logCall('onOpenStoredUserPreferences'),
   onReset: logCall('onReset'),
   onSessionOptionsChange: logCall('onSessionOptionsChange'),
   onInputChange: logCall('onInputChange'),

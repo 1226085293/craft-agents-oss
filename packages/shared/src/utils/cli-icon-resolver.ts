@@ -21,6 +21,7 @@ import { existsSync } from 'fs';
 import { join, basename } from 'path';
 import { parse as shellParse } from 'shell-quote';
 import { encodeIconToDataUrl } from './icon-encoder.ts';
+import { getAppearanceSection } from '../config/appearance.ts';
 import { readJsonFileSync } from './files.ts';
 
 // ============================================
@@ -268,25 +269,27 @@ export function extractCommandNames(commandStr: string): string[] {
 const TOOL_ICONS_JSON = 'tool-icons.json';
 
 /**
- * Loads tool icon config from a directory containing tool-icons.json.
+ * Loads tool icon config from the unified appearance configuration
+ * (appearance.json → icons section).
  *
- * @param toolIconsDir - Path to the tool-icons directory (e.g. ~/.craft-agent/tool-icons/)
+ * @param _toolIconsDir - Kept for call-site compatibility; icon assets still
+ *   resolve against the tool-icons directory, but the mapping lives in
+ *   appearance.json.
  * @returns Parsed config or null if missing/invalid
  */
-export function loadToolIconConfig(toolIconsDir: string): ToolIconConfig | null {
+export function loadToolIconConfig(_toolIconsDir: string): ToolIconConfig | null {
   try {
-    const configPath = join(toolIconsDir, TOOL_ICONS_JSON);
-    if (!existsSync(configPath)) {
+    const icons = getAppearanceSection('icons');
+    if (!icons?.tools || !Array.isArray(icons.tools)) {
       return null;
     }
-    const config = readJsonFileSync<ToolIconConfig>(configPath);
 
     // Basic validation
-    if (!config.tools || !Array.isArray(config.tools)) {
+    if (icons.tools.length === 0 || icons.tools.some(t => !t.id || !t.icon)) {
       return null;
     }
 
-    return config;
+    return { version: icons.version ?? 1, tools: icons.tools };
   } catch {
     return null;
   }

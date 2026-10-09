@@ -6,7 +6,7 @@
  * - Calling `i18n.changeLanguage(persisted)` after `setupI18n()` makes
  *   `i18n.resolvedLanguage` match the persisted value.
  *
- * Together these mean: if `preferences.json` has `uiLanguage: 'hu'` on disk,
+ * Together these mean: if `appearance.json` has `ui.language: 'hu'` on disk,
  * main-process `i18n.resolvedLanguage` will be `'hu'` after the bootstrap
  * block in `apps/electron/src/main/index.ts` runs — which is the actual
  * thing that broke title generation across restarts.
@@ -57,7 +57,7 @@ describe('main-process i18n bootstrap', () => {
       )
       expect(r.exitCode).toBe(0)
       expect(JSON.parse(r.stdout)).toEqual({ persisted: 'hu', resolved: 'hu' })
-      expect(existsSync(join(configDir, 'preferences.json'))).toBe(true)
+      expect(existsSync(join(configDir, 'appearance.json'))).toBe(true)
     } finally {
       rmSync(configDir, { recursive: true, force: true })
     }
@@ -91,8 +91,8 @@ describe('main-process i18n bootstrap', () => {
     const configDir = mkdtempSync(join(tmpdir(), 'i18n-bootstrap-'))
     try {
       writeFileSync(
-        join(configDir, 'preferences.json'),
-        JSON.stringify({ uiLanguage: 'xx' }),
+        join(configDir, 'appearance.json'),
+        JSON.stringify({ ui: { language: 'xx' } }),
         'utf-8',
       )
       const r = runScript(

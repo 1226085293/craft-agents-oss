@@ -73,7 +73,6 @@ export function ResetConfirmationDialog({
         <ul className="list-disc list-inside text-sm text-muted-foreground space-y-1 pl-2">
           <li>{t("dialog.reset.workspaces")}</li>
           <li>{t("dialog.reset.credentials")}</li>
-          <li>{t("dialog.reset.preferences")}</li>
         </ul>
 
         <div className="bg-amber-500/10 border border-amber-500/30 rounded-md p-3 text-sm">

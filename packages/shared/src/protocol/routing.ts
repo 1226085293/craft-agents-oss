@@ -349,9 +349,9 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.pi.GET_PROVIDER_BASE_URL,
   RPC_CHANNELS.pi.GET_PROVIDER_MODELS,
 
-  // preferences — workspace-level preferences
-  RPC_CHANNELS.preferences.READ,
-  RPC_CHANNELS.preferences.WRITE,
+  // appearance — unified appearance file read/write
+  RPC_CHANNELS.appearance.READ,
+  RPC_CHANNELS.appearance.WRITE,
 
   // drafts — workspace content
   RPC_CHANNELS.drafts.GET,

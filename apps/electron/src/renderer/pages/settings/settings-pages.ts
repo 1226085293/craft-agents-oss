@@ -24,7 +24,6 @@ import LabelsSettingsPage from './LabelsSettingsPage'
 import MessagingSettingsPage from './MessagingSettingsPage'
 import ServerSettingsPage from './ServerSettingsPage'
 import ShortcutsPage from './ShortcutsPage'
-import PreferencesPage from './PreferencesPage'
 
 /**
  * Map of settings subpage IDs to their page components.
@@ -41,7 +40,6 @@ export const SETTINGS_PAGE_COMPONENTS: Record<SettingsSubpage, ComponentType> = 
   messaging: MessagingSettingsPage,
   server: ServerSettingsPage,
   shortcuts: ShortcutsPage,
-  preferences: PreferencesPage,
 }
 
 /**

@@ -166,7 +166,6 @@ export const NavigationRegistry = {
       permissions: PlaceholderComponent, // PermissionsSettingsPage
       labels: PlaceholderComponent, // LabelsSettingsPage
       shortcuts: PlaceholderComponent, // ShortcutsPage
-      preferences: PlaceholderComponent, // PreferencesPage
     },
     defaultDetails: 'app', // Always has a default
     getFirstItem: () => 'app',

@@ -135,7 +135,7 @@ export default function AppearanceSettingsPage() {
   // Tool icon mappings loaded from main process
   const [toolIcons, setToolIcons] = useState<ToolIconMapping[]>([])
 
-  // Resolved path to tool-icons.json (needed for EditPopover and "Edit File" action)
+  // Resolved path to appearance.json (needed for EditPopover and "Edit File" action)
   const [toolIconsJsonPath, setToolIconsJsonPath] = useState<string | null>(null)
 
   // Connection icon visibility toggle
@@ -255,7 +255,7 @@ export default function AppearanceSettingsPage() {
           window.electronAPI.getHomeDir(),
         ])
         setToolIcons(mappings)
-        setToolIconsJsonPath(`${homeDir}/.craft-agent/tool-icons/tool-icons.json`)
+        setToolIconsJsonPath(`${homeDir}/.craft-agent/appearance.json`)
       } catch (error) {
         console.error('Failed to load tool icon mappings:', error)
       }

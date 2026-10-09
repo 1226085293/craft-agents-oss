@@ -17,7 +17,7 @@ import './index.css'
 // Initialize i18n before any React rendering
 setupI18n([LanguageDetector, initReactI18next])
 
-// One-shot bootstrap: ensure the main process's i18n + preferences.json learn
+// One-shot bootstrap: ensure the main process's i18n + appearance.json learn
 // the language we just restored from localStorage. The main-process IPC handler
 // validates the code and persists idempotently, so this is safe to run on every
 // renderer startup. Without this push, a freshly-installed (or freshly-upgraded)

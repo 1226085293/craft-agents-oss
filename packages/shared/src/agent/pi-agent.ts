@@ -51,7 +51,7 @@ import { RetryLadder, computeRetryLadderConfig, classifyRetryError, type RetryEr
 
 // System prompt for Craft Agent context
 import { getSystemPrompt } from '../prompts/system.ts';
-import { getCoAuthorPreference } from '../config/preferences.ts';
+import { getCoAuthorPreference } from '../config/appearance.ts';
 import { loadProjectById, getProjectAssetsPath, listProjectAssets, getProjectMemoryPath, loadProjectMemory } from '../projects/storage.ts';
 import type { ProjectPromptContext } from '../projects/types.ts';
 

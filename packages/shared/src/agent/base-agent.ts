@@ -76,7 +76,7 @@ import {
   type MemoryExtractionInput,
 } from '../memory/index.ts';
 import { getMemoryStorePath } from '../memory/store.ts';
-import { resolveTitleLanguageName } from '../config/preferences.ts';
+import { resolveTitleLanguageName } from '../config/appearance.ts';
 import type { MemoryConfig } from '../memory/types.ts';
 import { DEFAULT_MEMORY_CONFIG } from '../memory/types.ts';
 // Execution journal — tool dispatch/outcome tracking

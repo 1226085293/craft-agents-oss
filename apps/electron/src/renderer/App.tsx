@@ -37,6 +37,7 @@ import { formatSessionLoadFailure, shouldTreatSessionLoadFailureAsTransportFallb
 import { extractWorkspaceSlugFromPath } from '@craft-agent/shared/utils/workspace-slug'
 import { DEFAULT_THINKING_LEVEL } from '@craft-agent/shared/agent/thinking-levels'
 import { initRendererPerf } from './lib/perf'
+import { initAppearance } from '@/lib/appearance-bridge'
 import {
   initializeSessionsAtom,
   addSessionAtom,
@@ -287,6 +288,12 @@ export default function App() {
     window.electronAPI.isDebugMode().then((isDebug) => {
       initRendererPerf(isDebug)
     })
+  }, [])
+
+  // Initialize the appearance bridge (loads appearance.json, migrates legacy
+  // localStorage keys once, subscribes to cross-window appearance changes).
+  useEffect(() => {
+    void initAppearance()
   }, [])
 
   // App state: loading -> check auth -> onboarding or ready
@@ -1794,10 +1801,6 @@ export default function App() {
     void openSettingsWindow('shortcuts', windowWorkspaceId)
   }, [windowWorkspaceId])
 
-  const handleOpenStoredUserPreferences = useCallback(() => {
-    void openSettingsWindow('preferences', windowWorkspaceId)
-  }, [windowWorkspaceId])
-
   // Show reset confirmation dialog
   const handleReset = useCallback(() => {
     setShowResetDialog(true)
@@ -1943,7 +1946,6 @@ export default function App() {
     // App actions
     onOpenSettings: handleOpenSettings,
     onOpenKeyboardShortcuts: handleOpenKeyboardShortcuts,
-    onOpenStoredUserPreferences: handleOpenStoredUserPreferences,
     onReset: handleReset,
     // Session options
     onSessionOptionsChange: handleSessionOptionsChange,
@@ -1986,7 +1988,6 @@ export default function App() {
     handleRefreshWorkspaces,
     handleOpenSettings,
     handleOpenKeyboardShortcuts,
-    handleOpenStoredUserPreferences,
     handleReset,
     handleSessionOptionsChange,
     handleInputChange,

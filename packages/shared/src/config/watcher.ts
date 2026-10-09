@@ -6,7 +6,7 @@
  *
  * Watched paths:
  * - ~/.craft-agent/config.json - Main app configuration
- * - ~/.craft-agent/preferences.json - User preferences
+ * - ~/.craft-agent/appearance.json - Unified UI/appearance settings
  * - ~/.craft-agent/theme.json - App-level theme overrides
  * - ~/.craft-agent/themes/*.json - Preset theme files (app-level)
  * - ~/.craft-agent/workspaces/{slug}/ - Workspace directory (recursive)
@@ -24,11 +24,11 @@ import { CONFIG_DIR } from './paths.ts';
 import { debug } from '../utils/debug.ts';
 import { expandPath } from '../utils/paths.ts';
 import { readJsonFileSync } from '../utils/files.ts';
+import { loadAppearanceConfig } from './appearance.ts';
 import { perf } from '../utils/perf.ts';
 import { loadStoredConfig, type StoredConfig } from './storage.ts';
 import {
   validateConfig,
-  validatePreferences,
   validateSource,
   type ValidationResult,
 } from './validators.ts';
@@ -77,7 +77,6 @@ export function _getActiveWatchers(): ReadonlyMap<string, string> {
 // ============================================================
 
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
-const PREFERENCES_FILE = join(CONFIG_DIR, 'preferences.json');
 
 // Debounce delay in milliseconds
 const DEBOUNCE_MS = 100;
@@ -91,29 +90,13 @@ const SESSION_META_DEBOUNCE_MS = platform() === 'win32' ? 300 : DEBOUNCE_MS;
 // ============================================================
 
 /**
- * User preferences structure (mirrors UserPreferencesSchema)
- */
-export interface UserPreferences {
-  name?: string;
-  timezone?: string;
-  location?: {
-    city?: string;
-    region?: string;
-    country?: string;
-  };
-  /** Internal: mirrors Appearance → Language. Maintained by the main-process i18n IPC handler. */
-  uiLanguage?: string;
-  updatedAt?: number;
-}
-
-/**
  * Callbacks for config changes
  */
 export interface ConfigWatcherCallbacks {
   /** Called when config.json changes */
   onConfigChange?: (config: StoredConfig) => void;
-  /** Called when preferences.json changes */
-  onPreferencesChange?: (prefs: UserPreferences) => void;
+  /** Called when appearance.json changes */
+  onAppearanceChange?: (config: import('./appearance.ts').AppearanceConfig) => void;
   /** Called when LLM connections array changes (add/remove/update connections) */
   onLlmConnectionsChange?: (connections: import('./storage.ts').LlmConnection[]) => void;
 
@@ -178,26 +161,6 @@ export interface ConfigWatcherCallbacks {
   onValidationError?: (file: string, result: ValidationResult) => void;
   /** Called when an error occurs reading/parsing a file */
   onError?: (file: string, error: Error) => void;
-}
-
-// ============================================================
-// Preferences Loading
-// ============================================================
-
-/**
- * Load preferences from file
- */
-export function loadPreferences(): UserPreferences | null {
-  if (!existsSync(PREFERENCES_FILE)) {
-    return null;
-  }
-
-  try {
-    return readJsonFileSync<UserPreferences>(PREFERENCES_FILE);
-  } catch (error) {
-    debug('[ConfigWatcher] Error loading preferences', error);
-    return null;
-  }
 }
 
 // ============================================================
@@ -375,7 +338,7 @@ export class ConfigWatcher {
   }
 
   /**
-   * Watch global config files (config.json, preferences.json)
+   * Watch global config files (config.json, theme.json)
    */
   private watchGlobalConfigs(): void {
     // Ensure config directory exists
@@ -384,14 +347,14 @@ export class ConfigWatcher {
     }
 
     try {
-      // Watch the config directory for changes to config.json, preferences.json, and theme.json
+      // Watch the config directory for changes to config.json and theme.json
       const watcher = watch(CONFIG_DIR, (eventType, filename) => {
         if (!filename) return;
 
         if (filename === 'config.json') {
           this.debounce('config.json', () => this.handleConfigChange());
-        } else if (filename === 'preferences.json') {
-          this.debounce('preferences.json', () => this.handlePreferencesChange());
+        } else if (filename === 'appearance.json') {
+          this.debounce('appearance.json', () => this.handleAppearanceChange());
         } else if (filename === 'theme.json') {
           this.debounce('app-theme', () => this.handleAppThemeChange());
         }
@@ -913,22 +876,11 @@ export class ConfigWatcher {
   }
 
   /**
-   * Handle preferences.json change
+   * Handle appearance.json change
    */
-  private handlePreferencesChange(): void {
-    debug('[ConfigWatcher] preferences.json changed');
-
-    const validation = validatePreferences();
-    if (!validation.valid) {
-      debug('[ConfigWatcher] Preferences validation failed:', validation.errors);
-      this.callbacks.onValidationError?.('preferences.json', validation);
-      return;
-    }
-
-    const prefs = loadPreferences();
-    if (prefs) {
-      this.callbacks.onPreferencesChange?.(prefs);
-    }
+  private handleAppearanceChange(): void {
+    debug('[ConfigWatcher] appearance.json changed');
+    this.callbacks.onAppearanceChange?.(loadAppearanceConfig());
   }
 
   // ============================================================

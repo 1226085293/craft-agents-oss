@@ -31,7 +31,6 @@ import {
   getWorkspaces,
   getWorkspaceByNameOrId,
   loadConfigDefaults,
-  loadPreferences,
   migrateDefaultContextWindowConfig,
   migrateLegacyCredentials,
   migrateLegacyLlmConnectionsConfig,
@@ -542,7 +541,6 @@ async function resolveToolDisplayMeta(
           'source_credential_prompt': 'Enter Credentials',
           'transform_data': 'Transform Data',
           'render_template': 'Render Template',
-          'update_user_preferences': 'Update Preferences',
           'send_developer_feedback': 'Send Feedback',
           'browser_tool': 'Browser',
         },
@@ -1182,12 +1180,6 @@ export class SessionManager implements ISessionManager {
   // Delta batching for performance - reduces IPC events from 50+/sec to ~20/sec
   private pendingDeltas: Map<string, PendingDelta> = new Map()
   private deltaFlushTimers: Map<string, NodeJS.Timeout> = new Map()
-  // Thinking deltas get their OWN batch + timer so reasoning chunks never
-  // interleave with answer text inside a single IPC event (each batched delta
-  // carries ONE turnId; mixing would mis-tag chunks). 2026-10-09 "invisible
-  // process" fix.
-  private pendingThinkingDeltas: Map<string, PendingDelta> = new Map()
-  private thinkingFlushTimers: Map<string, NodeJS.Timeout> = new Map()
   // Config watchers for live updates (sources, etc.) - one per workspace
   private configWatchers: Map<string, ConfigWatcher> = new Map()
   // Last source-reload timestamp per workspace root (throttle guard)
@@ -1606,6 +1598,10 @@ export class SessionManager implements ISessionManager {
         sessionLog.info(`Status icon changed: ${iconFilename} in ${workspaceId}`)
         this.broadcastStatusesChanged(workspaceId)
       },
+      onAppearanceChange: () => {
+        sessionLog.info(`Appearance changed in ${workspaceId}`)
+        this.broadcastAppearanceChanged()
+      },
       onLabelConfigChange: () => {
         sessionLog.info(`Label config changed in ${workspaceId}`)
         this.broadcastLabelsChanged(workspaceId)
@@ -1839,6 +1835,12 @@ export class SessionManager implements ISessionManager {
     if (!this.eventSink) return
     sessionLog.info(`Broadcasting app theme changed`)
     this.eventSink(RPC_CHANNELS.theme.APP_CHANGED, { to: 'all' }, theme)
+  }
+
+  private broadcastAppearanceChanged(): void {
+    if (!this.eventSink) return
+    sessionLog.info('Broadcasting appearance changed')
+    this.eventSink(RPC_CHANNELS.appearance.CHANGED, { to: 'all' }, undefined)
   }
 
   private broadcastLlmConnectionsChanged(): void {
@@ -6620,12 +6622,6 @@ ${request.prompt}`;
       this.deltaFlushTimers.delete(sessionId)
     }
     this.pendingDeltas.delete(sessionId)
-    const thinkingTimer = this.thinkingFlushTimers.get(sessionId)
-    if (thinkingTimer) {
-      clearTimeout(thinkingTimer)
-      this.thinkingFlushTimers.delete(sessionId)
-    }
-    this.pendingThinkingDeltas.delete(sessionId)
     this.clearAdminRememberApprovalsForSession(sessionId)
     this.clearPendingPermissionRequestsForSession(sessionId)
 
@@ -6758,12 +6754,6 @@ ${request.prompt}`;
       this.deltaFlushTimers.delete(sessionId)
     }
     this.pendingDeltas.delete(sessionId)
-    const thinkingTimer = this.thinkingFlushTimers.get(sessionId)
-    if (thinkingTimer) {
-      clearTimeout(thinkingTimer)
-      this.thinkingFlushTimers.delete(sessionId)
-    }
-    this.pendingThinkingDeltas.delete(sessionId)
     this.messageLoadingPromises.delete(sessionId)
     this.clearAdminRememberApprovalsForSession(sessionId)
     this.clearPendingPermissionRequestsForSession(sessionId)
@@ -9126,84 +9116,10 @@ ${request.prompt}`;
         this.queueDelta(sessionId, workspaceId, event.text, event.turnId)
         break
 
-      case 'thinking_delta': {
-        // 2026-10-09 d4f "invisible process": live reasoning stream. Same
-        // batching as text_delta but a SEPARATE pending queue + flush timer so
-        // thinking and answer text never interleave in one IPC batch (a single
-        // batched delta carries ONE turnId — mixing them would mis-tag chunks).
-        if (event.turnId) {
-          let starts = managed.streamStartAtByTurn
-          if (!starts) {
-            starts = new Map()
-            managed.streamStartAtByTurn = starts
-          }
-          if (!starts.has(event.turnId)) starts.set(event.turnId, this.monotonic())
-        }
-        this.queueThinkingDelta(sessionId, workspaceId, event.text, event.turnId)
-        break
-      }
-
-      case 'thinking_complete': {
-        // Flush any pending thinking deltas before sending the terminal event
-        // (ordering: renderer sees the last chunk before the completion).
-        this.flushThinkingDelta(sessionId, workspaceId)
-
-        const streamStart =
-          event.startedAt ??
-          (event.turnId ? managed.streamStartAtByTurn?.get(event.turnId) : undefined)
-        if (event.turnId) managed.streamStartAtByTurn?.delete(event.turnId)
-
-        // Persist a TRUNCATED copy (context hygiene: full reasoning blocks are
-        // tens of thousands of chars; the live UI view keeps the complete text
-        // via the thinking_delta stream, but what goes into the session record
-        // and future LLM context stays bounded — same cap as the adapter's
-        // extractThinkingFromMessage fallback).
-        const text = typeof event.text === 'string' ? event.text : ''
-        if (!text.trim()) break
-        const MAX_THINKING_CHARS = 2000
-        const persisted = text.length <= MAX_THINKING_CHARS
-          ? text
-          : `${text.slice(0, MAX_THINKING_CHARS)}…`
-
-        const assistantMessage: Message = {
-          id: generateMessageId(),
-          role: 'assistant',
-          content: persisted,
-          timestamp: this.monotonic(),
-          ...(streamStart ? { startedAt: streamStart } : {}),
-          isIntermediate: true,
-          turnId: event.turnId,
-        }
-        managed.messages.push(assistantMessage)
-        // NOTE: intentionally NOT touching managed.streamingText / streamingTurnId —
-        // those belong to the answer-text channel; thinking has its own queue/batch
-        // and must never disturb an in-flight text stream (thinking→text→thinking
-        // alternation within one turn).
-
-        // Send the FULL text to the live renderer — the persisted row (and
-        // therefore a reload) shows the truncated copy, but the live process
-        // step keeps everything the user already saw stream in.
-        this.sendEvent({
-          type: 'thinking_complete',
-          sessionId,
-          text,
-          turnId: event.turnId,
-          timestamp: assistantMessage.timestamp,
-          ...(streamStart ? { startedAt: streamStart } : {}),
-          messageId: assistantMessage.id,
-        }, workspaceId)
-
-        this.persistSession(managed)
-        break
-      }
-
       case 'text_discard':
         // Discard, NEVER flush, the failed attempt's batch before announcing
         // backoff. Otherwise a delayed failed token can arrive after retry start.
         this.discardDelta(sessionId, event.turnId)
-        // The adapter also discards a streamed thinking step under its own
-        // turnId on error/abort — clear its batch too (2026-10-09).
-        this.discardThinkingDelta(sessionId, event.turnId)
         if (managed.streamingTurnId === event.turnId) {
           managed.streamingText = ''
           managed.streamingTurnId = undefined
@@ -10410,24 +10326,6 @@ ${request.prompt}`;
     }
   }
 
-  /** Batch live reasoning deltas separately from answer text (2026-10-09). */
-  private queueThinkingDelta(sessionId: string, workspaceId: string, delta: string, turnId?: string): void {
-    const existing = this.pendingThinkingDeltas.get(sessionId)
-    if (existing) {
-      existing.delta += delta
-      if (turnId) existing.turnId = turnId
-    } else {
-      this.pendingThinkingDeltas.set(sessionId, { delta, turnId })
-    }
-
-    if (!this.thinkingFlushTimers.has(sessionId)) {
-      const timer = setTimeout(() => {
-        this.flushThinkingDelta(sessionId, workspaceId)
-      }, DELTA_BATCH_INTERVAL_MS)
-      this.thinkingFlushTimers.set(sessionId, timer)
-    }
-  }
-
   /** Remove a failed assistant's unsent batch without affecting another stream. */
   private discardDelta(sessionId: string, turnId: string): void {
     if (this.pendingDeltas.get(sessionId)?.turnId !== turnId) return
@@ -10435,15 +10333,6 @@ ${request.prompt}`;
     if (timer) clearTimeout(timer)
     this.deltaFlushTimers.delete(sessionId)
     this.pendingDeltas.delete(sessionId)
-  }
-
-  /** Drop batched reasoning deltas for a failed/aborted turn (2026-10-09). */
-  private discardThinkingDelta(sessionId: string, turnId: string): void {
-    if (this.pendingThinkingDeltas.get(sessionId)?.turnId !== turnId) return
-    const timer = this.thinkingFlushTimers.get(sessionId)
-    if (timer) clearTimeout(timer)
-    this.thinkingFlushTimers.delete(sessionId)
-    this.pendingThinkingDeltas.delete(sessionId)
   }
 
   /**
@@ -10468,26 +10357,6 @@ ${request.prompt}`;
         turnId: pending.turnId
       }, workspaceId)
       this.pendingDeltas.delete(sessionId)
-    }
-  }
-
-  /** Flush batched reasoning deltas (2026-10-09). */
-  private flushThinkingDelta(sessionId: string, workspaceId: string): void {
-    const timer = this.thinkingFlushTimers.get(sessionId)
-    if (timer) {
-      clearTimeout(timer)
-      this.thinkingFlushTimers.delete(sessionId)
-    }
-
-    const pending = this.pendingThinkingDeltas.get(sessionId)
-    if (pending && pending.delta) {
-      this.sendEvent({
-        type: 'thinking_delta',
-        sessionId,
-        delta: pending.delta,
-        turnId: pending.turnId
-      }, workspaceId)
-      this.pendingThinkingDeltas.delete(sessionId)
     }
   }
 
@@ -11034,11 +10903,6 @@ ${request.prompt}`;
     }
     this.deltaFlushTimers.clear()
     this.pendingDeltas.clear()
-    for (const [sessionId, timer] of this.thinkingFlushTimers) {
-      clearTimeout(timer)
-    }
-    this.thinkingFlushTimers.clear()
-    this.pendingThinkingDeltas.clear()
 
     // Clear pending credential resolvers (they won't be resolved, but prevents memory leak)
     this.pendingCredentialResolvers.clear()

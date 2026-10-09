@@ -17,7 +17,6 @@ export type DocFeature =
   | 'workspaces'
   | 'themes'
   | 'app-settings'
-  | 'preferences'
   | 'automations'
   | 'messaging'
 
@@ -96,12 +95,6 @@ export const DOCS: Record<DocFeature, DocInfo> = {
     title: 'App Settings',
     summary:
       'Configure global app settings like your default model, authentication method, and workspace list. Settings are stored in ~/.craft-agent/config.json.',
-  },
-  preferences: {
-    path: '/reference/config/preferences',
-    title: 'Preferences',
-    summary:
-      'Personal preferences like your name, timezone, and language that help the agent personalize responses. Stored in ~/.craft-agent/preferences.json.',
   },
   automations: {
     path: '/automations/overview',

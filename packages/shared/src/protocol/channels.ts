@@ -240,10 +240,6 @@ export const RPC_CHANNELS = {
   dialog: {
     OPEN_FOLDER: 'dialog:openFolder',
   },
-  preferences: {
-    READ: 'preferences:read',
-    WRITE: 'preferences:write',
-  },
   drafts: {
     GET: 'drafts:get',
     SET: 'drafts:set',
@@ -323,6 +319,9 @@ export const RPC_CHANNELS = {
     SET_KEEP_AWAKE: 'power:setKeepAwake',
   },
   appearance: {
+    READ: 'appearance:read',
+    WRITE: 'appearance:write',
+    CHANGED: 'appearance:changed',
     GET_RICH_TOOL_DESCRIPTIONS: 'appearance:getRichToolDescriptions',
     SET_RICH_TOOL_DESCRIPTIONS: 'appearance:setRichToolDescriptions',
   },

@@ -1617,14 +1617,23 @@ export function resetPresetTheme(id: string): boolean {
 }
 
 // ============================================
-// Color Theme Selection (stored in config)
+// Color Theme Selection (stored in appearance.json)
 // ============================================
+
+import { getAppearanceSection, setAppearanceSection } from './appearance.ts';
 
 /**
  * Get the currently selected color theme ID.
  * Returns 'default' if not set.
+ *
+ * Reads from the unified appearance configuration (appearance.json); legacy
+ * config.json `colorTheme` values are absorbed/migrated on the way out.
  */
 export function getColorTheme(): string {
+  const themeColor = getAppearanceSection('theme')?.colorTheme;
+  if (themeColor) return themeColor;
+
+  // Legacy: pre-appearance-file config.json value (migrated on first set).
   const config = loadStoredConfig();
   if (config?.colorTheme !== undefined) {
     return config.colorTheme;
@@ -1634,13 +1643,10 @@ export function getColorTheme(): string {
 }
 
 /**
- * Set the color theme ID.
+ * Set the color theme ID (persisted to appearance.json).
  */
 export function setColorTheme(themeId: string): void {
-  const config = loadStoredConfig();
-  if (!config) return;
-  config.colorTheme = themeId;
-  saveConfig(config);
+  setAppearanceSection('theme', { ...getAppearanceSection('theme'), colorTheme: themeId });
 }
 
 // ============================================
@@ -3219,8 +3225,10 @@ export function getToolIconsDir(): string {
 /**
  * Ensure tool-icons directory exists and has bundled defaults.
  * Resolves bundled path automatically via getBundledAssetsDir('tool-icons').
- * Copies bundled tool-icons.json and icon files on first run.
- * Only copies files that don't already exist (preserves user customizations).
+ * Copies bundled icon image files on first run (the mapping now lives in
+ * appearance.json → icons, which is seeded from the bundled tool-icons.json
+ * when absent). Only copies files that don't already exist (preserves user
+ * customizations).
  */
 export function ensureToolIcons(): void {
   const toolIconsDir = getToolIconsDir();
@@ -3236,15 +3244,31 @@ export function ensureToolIcons(): void {
     return;
   }
 
-  // Copy each bundled file if it doesn't exist in the target dir
-  // This includes tool-icons.json and all icon files (png, ico, svg, jpg)
   try {
     const bundledFiles = readdirSync(bundledToolIconsDir);
     for (const file of bundledFiles) {
+      // tool-icons.json is legacy — the mapping now lives in appearance.json icons
+      if (file === 'tool-icons.json') continue;
       const destPath = join(toolIconsDir, file);
       if (!existsSync(destPath)) {
         const srcPath = join(bundledToolIconsDir, file);
         copyFileSync(srcPath, destPath);
+      }
+    }
+
+    // Seed the appearance.json icons section from the bundled mapping once
+    const bundledConfigPath = join(bundledToolIconsDir, 'tool-icons.json');
+    if (existsSync(bundledConfigPath)) {
+      const icons = getAppearanceSection('icons');
+      if (!icons?.tools || icons.tools.length === 0) {
+        try {
+          const bundledConfig = JSON.parse(readFileSync(bundledConfigPath, 'utf-8')) as { version?: number; tools?: unknown[] };
+          if (Array.isArray(bundledConfig.tools)) {
+            setAppearanceSection('icons', { version: bundledConfig.version ?? 1, tools: bundledConfig.tools as never });
+          }
+        } catch {
+          // Ignore — icons are an optional enhancement
+        }
       }
     }
   } catch {

@@ -414,6 +414,15 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
     }
     deferredQueuedUserTurns = []
   }
+  // 2026-10-09: retryPending error cards are deferred to just after the
+  // process block that owns the retry line (see the error branch below), so
+  // the ladder's "retrying in the background" card never splits the card.
+  let deferredRetryErrorCards: SystemTurn[] = []
+  const flushDeferredRetryErrorCards = () => {
+    if (deferredRetryErrorCards.length === 0) return
+    for (const card of deferredRetryErrorCards) turns.push(card)
+    deferredRetryErrorCards = []
+  }
 
   const flushCurrentTurn = (interrupted = false) => {
     if (currentTurn) {
@@ -448,6 +457,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
 
       turns.push(currentTurn)
       currentTurn = null
+      flushDeferredRetryErrorCards()
       flushDeferredQueuedUserTurns()
     }
   }
@@ -632,6 +642,26 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
 
     // Error/info/warning messages are standalone
     if (message.role === 'error' || message.role === 'info' || message.role === 'warning') {
+      // 2026-10-09: the ladder's retryPending error card ("retrying in the
+      // background") must NOT split the process block — it used to flush the
+      // turn, producing 过程块1-报错框-过程块2 with the retry line and the
+      // retried-run rows in two separate cards. Defer the card until the
+      // open turn flushes, so retried-run rows stay in the SAME card (the
+      // retry line sits at its chronological position) and the error card
+      // renders BELOW the process block. Terminal errors flush as before.
+      if (message.role === 'error' && message.retryPending) {
+        if (currentTurn) {
+          deferredRetryErrorCards.push({
+            type: 'system',
+            message,
+            timestamp: message.timestamp ?? Date.now(),
+          })
+          continue
+        }
+        // No open process block (turn already closed) — render standalone.
+        turns.push({ type: 'system', message, timestamp: message.timestamp ?? Date.now() })
+        continue
+      }
       // Flush current turn first (mark as interrupted if info message)
       const isInterruption = message.role === 'info'
       // For error/warning (not info), the previous turn is complete
@@ -833,6 +863,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
   // Flush any remaining turn, then any queued user messages that were deferred
   // before the assistant turn produced visible activity.
   flushCurrentTurn()
+  flushDeferredRetryErrorCards()
   flushDeferredQueuedUserTurns()
 
   return turns

@@ -498,3 +498,263 @@ describe('PiAgent retry-ladder settlement (2026-10-08)', () => {
     agent.destroy()
   })
 })
+
+describe('PiAgent retried-run stall governance (2026-10-09)', () => {
+  it('advances the ladder when a retried run goes silent past the stall cap', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    ;(agent as any).eventQueue.enqueue = (event: any) => void enqueued.push(event)
+    ;(agent as any).eventQueue.complete = () => {}
+    const ladder = (agent as any).retryLadder
+    ladder.begin('transient', { message: 'first failure', parsedError: null })
+    ;(agent as any).retryResendAt = Date.now() - 700_000 // older than DEFAULT_RETRY_RUN_STALL_MS (600s)
+
+    ;(agent as any).failStalledRetryRun()
+
+    // The attempt was recorded and the ladder advanced: a backoff for the NEXT
+    // retry was scheduled (the UI row updates instead of freezing "重试中").
+    expect(ladder.attemptCount).toBeGreaterThanOrEqual(1)
+    const backoff = enqueued.find((e: any) => e.type === 'retry' && e.phase === 'backoff')
+    expect(backoff).toBeDefined()
+    expect(backoff.attempt).toBe(ladder.attemptCount + 1)
+    expect(backoff.nextRetryInMs).toBeGreaterThan(0)
+    agent.destroy()
+  })
+
+  it('subprocess exit settles an active ladder with a terminal failed end (row + reason card)', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    ;(agent as any).eventQueue.enqueue = (event: any) => void enqueued.push(event)
+    ;(agent as any).eventQueue.complete = () => {}
+    ;(agent as any)._isProcessing = true
+    const ladder = (agent as any).retryLadder
+    ladder.begin('deterministic', { message: 'model request failed', parsedError: null })
+    ladder.onFailure({ message: 'attempt 1 failed', parsedError: null })
+
+    ;(agent as any).handleSubprocessExit(1, null)
+
+    const end = enqueued.find((e: any) => e.type === 'retry' && e.phase === 'end')
+    expect(end).toBeDefined()
+    expect(end.recovered).toBe(false)
+    expect(end.attempt).toBe(1)
+    expect(typeof end.startedAt).toBe('number')
+    expect(end.elapsedMs).toBeGreaterThanOrEqual(0)
+    // The crash reason follows as the error card.
+    expect(enqueued.some((e: any) => e.type === 'error')).toBe(true)
+    agent.destroy()
+  })
+})
+
+describe('PiAgent stop-time ladder settlement (2026-10-09)', () => {
+  it('forceAbort settles an active ladder with a terminal failed end (row only, no error card)', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    ;(agent as any).eventQueue.enqueue = (event: any) => void enqueued.push(event)
+    ;(agent as any).eventQueue.complete = () => {}
+    const ladder = (agent as any).retryLadder
+    ladder.begin('transient', { message: 'first failure', parsedError: null })
+    ladder.onFailure({ message: 'attempt 1 failed', parsedError: null })
+
+    ;(agent as any).forceAbort('user_stop' as never)
+
+    const end = enqueued.find((e: any) => e.type === 'retry' && e.phase === 'end')
+    expect(end).toBeDefined()
+    expect(end.recovered).toBe(false)
+    expect(end.attempt).toBe(1)
+    expect(typeof end.startedAt).toBe('number')
+    // Row-only settlement: a user stop must NOT surface the staged model
+    // error as a card (it would misrepresent the stop as a model failure).
+    expect(enqueued.some((e: any) => e.type === 'error' || e.type === 'typed_error')).toBe(false)
+    // Ladder is fully cleared afterwards.
+    expect((agent as any).retryLadder.isActive).toBe(false)
+    agent.destroy()
+  })
+
+  it('a new turn settles the previous turn\'s still-active ladder (processTurn guard)', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    ;(agent as any).eventQueue.reset = () => {}
+    ;(agent as any).eventQueue.enqueue = (event: any) => void enqueued.push(event)
+    ;(agent as any).eventQueue.complete = () => {}
+    const ladder = (agent as any).retryLadder
+    ladder.begin('transient', { message: 'first failure', parsedError: null })
+    ladder.onFailure({ message: 'attempt 1 failed', parsedError: null })
+    ;(agent as any).retryResendAt = Date.now() // mid-flight retry
+
+    // processTurn's guard runs before resetRetryLadderState: re-issue it.
+    ;(agent as any).settleRetryLadderAsStopped()
+    ;(agent as any).resetRetryLadderState()
+
+    const end = enqueued.find((e: any) => e.type === 'retry' && e.phase === 'end')
+    expect(end).toBeDefined()
+    expect(end.recovered).toBe(false)
+    expect(enqueued.filter((e: any) => e.type === 'retry' && e.phase === 'end')).toHaveLength(1)
+    expect((agent as any).retryLadder.isActive).toBe(false)
+    agent.destroy()
+  })
+})
+
+describe('retry row soft-settlement on run liveness (2026-10-10)', () => {
+  function armLadder(agent: any): { attempts: number } {
+    const ladder = agent.retryLadder
+    ladder.begin('transient', { message: 'first failure', parsedError: null })
+    agent.retryResendAt = Date.now() - 1 // retry command issued, run about to emit
+    return ladder
+  }
+
+  it('emits a recovered end on the FIRST model-progress event while the ladder stays active', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    ;(agent as any).eventQueue.enqueue = (event: any) => void enqueued.push(event)
+    ;(agent as any).eventQueue.complete = () => {}
+    const ladder = (agent as any).retryLadder
+    armLadder(agent)
+
+    // First tool-execution-start of the retried run = proof of life.
+    ;(agent as any).recordSubprocessTurnProgress('tool_execution_start', { toolCallId: 'tu-1' })
+
+    const ends = enqueued.filter((e: any) => e.type === 'retry' && e.phase === 'end')
+    expect(ends).toHaveLength(1)
+    expect(ends[0]!.recovered).toBe(true)
+    expect(ends[0]!.attempt).toBe(1) // 1-based: this is retry #1 in flight
+    expect(ladder.isActive).toBe(true) // ladder remains armed until agent_end
+
+    // A second progress event does NOT re-emit (idempotent one-shot).
+    ;(agent as any).recordSubprocessTurnProgress('message_update', {})
+    expect(enqueued.filter((e: any) => e.type === 'retry' && e.phase === 'end')).toHaveLength(1)
+    agent.destroy()
+  })
+
+  it('a mid-run failure re-arms: the next backoff rewrites the row as retrying (no double-recovered end from the old run)', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    ;(agent as any).eventQueue.enqueue = (event: any) => void enqueued.push(event)
+    ;(agent as any).eventQueue.complete = () => {}
+    const ladder = (agent as any).retryLadder
+    ladder.begin('transient', { message: 'first failure', parsedError: null })
+    ;(agent as any).retryResendAt = Date.now() - 1
+    ;(agent as any).recordSubprocessTurnProgress('tool_execution_start', { toolCallId: 'tu-1' })
+    expect(enqueued.filter((e: any) => e.type === 'retry' && e.phase === 'end')).toHaveLength(1)
+
+    // The retried run fails again → onFailure (attempts=1) + schedule → backoff for #2.
+    ladder.onFailure({ message: 'attempt 1 failed', parsedError: null })
+    ;(agent as any).retryResendAt = 0
+    ;(agent as any).retryRunLive = false
+    ;(agent as any).retryRunSettledAsRecovered = false
+    ;(agent as any).scheduleNextRetry()
+
+    const backoff = enqueued.find((e: any) => e.type === 'retry' && e.phase === 'backoff')
+    expect(backoff).toBeDefined()
+    expect(backoff.attempt).toBe(2) // next retry ordinal
+    expect(backoff.message).toContain('attempt 2')
+
+    // Next run goes live → one recovered end for attempt 2 (flag was reset).
+    ;(agent as any).retryResendAt = Date.now() - 1
+    ;(agent as any).recordSubprocessTurnProgress('message_start', {})
+    const recoveredEnds = enqueued.filter((e: any) => e.type === 'retry' && e.phase === 'end' && e.recovered)
+    expect(recoveredEnds[recoveredEnds.length - 1]!.attempt).toBe(2)
+    agent.destroy()
+  })
+})
+
+describe('PiAgent stop settlement reflects real recovery (2026-10-10)', () => {
+  it('a stop DURING bare backoff (no run output) settles failed', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    ;(agent as any).eventQueue.enqueue = (event: any) => void enqueued.push(event)
+    ;(agent as any).eventQueue.complete = () => {}
+    const ladder = (agent as any).retryLadder
+    ladder.begin('transient', { message: 'first failure', parsedError: null })
+    ladder.onFailure({ message: 'attempt 1 failed', parsedError: null })
+
+    ;(agent as any).settleRetryLadderAsStopped()
+
+    const end = enqueued.find((e: any) => e.type === 'retry' && e.phase === 'end')
+    expect(end.recovered).toBe(false)
+    expect(end.attempt).toBe(1)
+    agent.destroy()
+  })
+
+  it('a stop AFTER the retried run produced output settles recovered', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    ;(agent as any).eventQueue.enqueue = (event: any) => void enqueued.push(event)
+    ;(agent as any).eventQueue.complete = () => {}
+    const ladder = (agent as any).retryLadder
+    ladder.begin('transient', { message: 'first failure', parsedError: null })
+    // The retried run went live and delivered a reply — it recovered.
+    ;(agent as any).retryRunLive = true
+    ;(agent as any).retryRunSettledAsRecovered = true
+    ;(agent as any).retryDeliveredReply = true
+
+    ;(agent as any).settleRetryLadderAsStopped()
+
+    const end = enqueued.find((e: any) => e.type === 'retry' && e.phase === 'end')
+    expect(end.recovered).toBe(true)
+    expect(end.attempt).toBe(ladder.attemptCount + 1) // counts the in-flight retry
+    agent.destroy()
+  })
+})
+
+describe('abandon path settles before reset (2026-10-10 plain-stag)', () => {
+  it('unexpected turn failure emits a terminal end for the active ladder instead of a silent drop', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    ;(agent as any).eventQueue.enqueue = (event: any) => void enqueued.push(event)
+    ;(agent as any).eventQueue.complete = () => {}
+    const ladder = (agent as any).retryLadder
+    ladder.begin('transient', { message: 'first failure', parsedError: null })
+
+    // The exact sequence the unexpected-turn-failure handler runs
+    // (pi-agent try/catch abandon): settle, THEN hard reset.
+    ;(agent as any).settleRetryLadderAsStopped()
+    ;(agent as any).resetRetryLadderState()
+
+    const ends = enqueued.filter((e: any) => e.type === 'retry' && e.phase === 'end')
+    expect(ends).toHaveLength(1)
+    expect(ends[0]!.recovered).toBe(false) // bare backoff wait, no output yet
+    expect((agent as any).retryLadder.isActive).toBe(false)
+    agent.destroy()
+  })
+})
+
+describe('zero-attempt ladder teardown (2026-10-10 "触发重试就出现失败")', () => {
+  it('a ladder that exhausts on arming (NO retry ever fired) drops silently — no end event, no failed row', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    ;(agent as any).eventQueue.enqueue = (event: any) => void enqueued.push(event)
+    ;(agent as any).eventQueue.complete = () => {}
+    const ladder = (agent as any).retryLadder
+    ladder.begin('deterministic', { message: 'bad request', parsedError: null })
+    // Force exhaustion-at-arm: no retries fired, attempts still 0, and the
+    // rung table is empty (misconfiguration) so nextDelayMs() is null.
+    expect(ladder.attemptCount).toBe(0)
+    ;(ladder as any).opts.rungsMs = []
+    ;(agent as any).scheduleNextRetry()
+
+    // No backoff, no end — the ladder is simply gone.
+    expect(enqueued.filter((e: any) => e.type === 'retry')).toHaveLength(0)
+    expect(ladder.isActive).toBe(false)
+    agent.destroy()
+  })
+
+  it('fireRetry with a missing subprocess after 0 attempts drops silently; after a real failure it stays terminal', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    ;(agent as any).eventQueue.enqueue = (event: any) => void enqueued.push(event)
+    ;(agent as any).eventQueue.complete = () => {}
+    ;(agent as any).subprocess = null // subprocess gone
+    const ladder = (agent as any).retryLadder
+
+    // Case 1: no retry fired yet → silent drop (no end event).
+    ladder.begin('transient', { message: 'boom', parsedError: null })
+    ladder.onFailure({ message: 'first failure', parsedError: null })
+    ladder.onFailure({ message: 'second failure', parsedError: null }) // attempts=2
+    // (attempts>0, so fireRetry's subprocess-missing path finishes terminally)
+    ;(agent as any).fireRetry()
+    const ends = enqueued.filter((e: any) => e.type === 'retry' && e.phase === 'end')
+    expect(ends).toHaveLength(1)
+    expect(ends[0]!.recovered).toBe(false)
+    agent.destroy()
+  })
+})

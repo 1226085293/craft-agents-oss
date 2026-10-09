@@ -758,3 +758,56 @@ describe('persisted retry-ladder row (statusType retrying)', () => {
     expect(listed.indexOf('retry-row')).toBeLessThan(listed.indexOf('tool-2'))
   })
 })
+
+describe('retryPending error card does not split the process block (2026-10-09)', () => {
+  it('defers the retry-promise card until after the turn that owns the retry line, keeping one card', () => {
+    const turns = groupMessagesByTurn([
+      { id: 'user-1', role: 'user', content: 'hello', timestamp: 1 },
+      { id: 'tool-1', role: 'tool', toolName: 'Read', toolUseId: 'tu-1', toolStatus: 'completed', toolResult: 'ok', timestamp: 10, turnId: 'turn-1' },
+      {
+        id: 'retry-row',
+        role: 'status',
+        statusType: 'retrying',
+        content: '',
+        timestamp: 20,
+        retry: { status: 'retrying', attempt: 1, startedAt: 20 },
+      },
+      {
+        id: 'retry-card',
+        role: 'error',
+        content: 'API error — retrying in the background',
+        retryPending: true,
+        retryAttempt: 1,
+        timestamp: 21,
+      },
+      { id: 'tool-2', role: 'tool', toolName: 'Bash', toolUseId: 'tu-2', toolStatus: 'completed', toolResult: 'ok', timestamp: 30, turnId: 'turn-1' },
+      { id: 'final', role: 'assistant', content: 'Recovered answer', timestamp: 40, turnId: 'turn-1', isIntermediate: false, isPending: false },
+    ])
+
+    // One assistant card (tool-1 + retry row + tool-2 + final), then the system card BELOW it.
+    const assistantIdx = turns.findIndex(t => t.type === 'assistant')
+    const systemIdx = turns.findIndex(t => t.type === 'system')
+    expect(assistantIdx).toBeGreaterThanOrEqual(0)
+    expect(systemIdx).toBeGreaterThan(assistantIdx)
+    expect(turns.filter(t => t.type === 'assistant')).toHaveLength(1)
+    const turn = turns[assistantIdx] as AssistantTurn
+    const ids = turn.activities.map(a => a.id)
+    expect(ids).toEqual(['tool-1', 'retry-row', 'tool-2'])
+    // Chronological retry line before the retried-run rows.
+    expect(ids.indexOf('retry-row')).toBeLessThan(ids.indexOf('tool-2'))
+  })
+
+  it('keeps terminal error cards (non retryPending) splitting as before', () => {
+    const turns = groupMessagesByTurn([
+      { id: 'user-1', role: 'user', content: 'hello', timestamp: 1 },
+      { id: 'tool-1', role: 'tool', toolName: 'Read', toolUseId: 'tu-1', toolStatus: 'completed', toolResult: 'ok', timestamp: 10, turnId: 'turn-1' },
+      { id: 'terminal', role: 'error', content: 'fatal', timestamp: 20 },
+      { id: 'tool-2', role: 'tool', toolName: 'Bash', toolUseId: 'tu-2', toolStatus: 'completed', toolResult: 'ok', timestamp: 30, turnId: 'turn-1' },
+    ])
+    // Terminal error still closes the current card.
+    const assistantTurns = turns.filter(t => t.type === 'assistant')
+    const systemTurns = turns.filter(t => t.type === 'system')
+    expect(assistantTurns).toHaveLength(2)
+    expect(systemTurns).toHaveLength(1)
+  })
+})

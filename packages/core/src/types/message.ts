@@ -664,7 +664,7 @@ export type AgentEvent =
    * read "actual handling time", not the earlier queue/guide-click time.
    */
   | { type: 'steer_injected'; messageId?: string }
-  | { type: 'retry'; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number }
+  | { type: 'retry'; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number; /** Ladder-start epoch ms — anchors the row on the ladder's real start (2026-10-10), so a later `end` re-finds the same row by startedAt. */ startedAt?: number }
   | { type: 'retry'; phase: 'active' | 'end'; recovered?: boolean; attempt?: number; startedAt?: number; elapsedMs?: number }
   | { type: 'status'; message: string; statusType?: string }
   | { type: 'info'; message: string; statusType?: string; finalText?: string; /** Present when statusType === 'system_stop': machine key (e.g. 'busy_limit', 'no_progress') explaining why a guardrail killed the turn. */ stopReason?: string }

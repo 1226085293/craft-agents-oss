@@ -41,6 +41,35 @@ export interface TextDeltaEvent {
 }
 
 /**
+ * Thinking delta event - streaming reasoning content (2026-10-09).
+ * Same shape as TextDeltaEvent but rendered as a live process step, never
+ * appended to the answer bubble.
+ */
+export interface ThinkingDeltaEvent {
+  type: 'thinking_delta'
+  sessionId: string
+  delta: string
+  turnId?: string
+}
+
+/**
+ * Thinking complete event - terminates a streamed thinking step (2026-10-09).
+ * Carries the FULL reasoning text for the live view.
+ */
+export interface ThinkingCompleteEvent {
+  type: 'thinking_complete'
+  sessionId: string
+  text: string
+  turnId?: string
+  /** Timestamp from main process */
+  timestamp?: number
+  /** Streaming start time for process-card ordering */
+  startedAt?: number
+  /** Authoritative message ID from main process */
+  messageId?: string
+}
+
+/**
  * Text complete event - finalizes streaming text
  */
 export interface TextCompleteEvent {
@@ -575,6 +604,8 @@ export type AgentEvent =
   | RetryEvent
   | TextDeltaEvent
   | TextCompleteEvent
+  | ThinkingDeltaEvent
+  | ThinkingCompleteEvent
   | ToolStartEvent
   | ToolResultEvent
   | CompleteEvent

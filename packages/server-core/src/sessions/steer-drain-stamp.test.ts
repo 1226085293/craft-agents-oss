@@ -8,6 +8,10 @@ type EventHarness = {
   processEvent(managed: ManagedSession, event: AgentEvent): Promise<void>
   pendingDeltas: Map<string, { delta: string; turnId?: string }>
   deltaFlushTimers: Map<string, ReturnType<typeof setTimeout>>
+  // 2026-10-09: thinking-delta batches mirror the text batches (Object.create
+  // harness skips class-field initializers, so these must be set up manually).
+  pendingThinkingDeltas: Map<string, { delta: string; turnId?: string }>
+  thinkingFlushTimers: Map<string, ReturnType<typeof setTimeout>>
   sendEvent(event: SessionEvent, workspaceId?: string): void
   persistSession(managed: ManagedSession): void
   monotonic(): number
@@ -19,6 +23,8 @@ function harness() {
   const events: SessionEvent[] = []
   manager.pendingDeltas = new Map()
   manager.deltaFlushTimers = new Map()
+  manager.pendingThinkingDeltas = new Map()
+  manager.thinkingFlushTimers = new Map()
   manager.sendEvent = event => { events.push(event) }
   manager.persistSession = () => {}
   manager.monotonic = () => Date.now()

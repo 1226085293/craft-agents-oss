@@ -31,6 +31,10 @@ describe('SessionManager skill Read usage tracking', () => {
       const manager = Object.create(SessionManager.prototype);
       manager.pendingDeltas = new Map();
       manager.deltaFlushTimers = new Map();
+      // 2026-10-09: thinking-delta batches (Object.create skips class-field
+      // initializers, so these must be set up manually).
+      manager.pendingThinkingDeltas = new Map();
+      manager.thinkingFlushTimers = new Map();
       manager.sendEvent = () => {};
       manager.persistSession = () => {};
       manager.flushSession = async () => {};

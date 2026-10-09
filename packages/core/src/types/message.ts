@@ -670,6 +670,20 @@ export type AgentEvent =
   | { type: 'info'; message: string; statusType?: string; finalText?: string; /** Present when statusType === 'system_stop': machine key (e.g. 'busy_limit', 'no_progress') explaining why a guardrail killed the turn. */ stopReason?: string }
   | { type: 'text_delta'; text: string; turnId?: string; parentToolUseId?: string }
   | { type: 'text_complete'; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; sdkMessageId?: string; /** Model's message_start time (thinking blocks never stream deltas) - for process-card ordering */ startedAt?: number }
+  /**
+   * Streaming reasoning/thinking delta (2026-10-09 d4f "invisible process" fix).
+   * Pi SDK emits a thinking_delta per reasoning_content chunk; previously the
+   * adapter dropped them and the UI stayed blank for the whole stream (deepseek
+   * reasoning channels put nearly all narrative in the thinking block). These
+   * events render as a live process step while the model reasons. Distinct from
+   * text_delta so messaging channels / CLI can ignore thinking without
+   * polluting the answer bubble.
+   */
+  | { type: 'thinking_delta'; text: string; turnId?: string }
+  /** Terminal event for a streamed thinking block — carries the COMPLETE
+   *  thinking text so the live process step stays full (the persisted record
+   *  is separately truncated for context hygiene). */
+  | { type: 'thinking_complete'; text: string; turnId?: string; sdkMessageId?: string; /** Model's message_start time - for process-card ordering */ startedAt?: number }
   | { type: 'pi_turn_anchor'; sdkMessageId: string; sdkTurnAnchor: string }
   | { type: 'tool_start'; toolName: string; toolUseId: string; input: Record<string, unknown>; intent?: string; displayName?: string; turnId?: string; parentToolUseId?: string; toolDisplayMeta?: ToolDisplayMeta }
   | { type: 'tool_result'; toolUseId: string; toolName?: string; result: string; isError: boolean; input?: Record<string, unknown>; turnId?: string; parentToolUseId?: string }

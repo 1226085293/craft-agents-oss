@@ -2025,4 +2025,166 @@ describe('PiEventAdapter', () => {
   // or absent) and report exactly once. User aborts (stopReason 'aborted') are
   // never deferred or recovered. See plans/termination-progress-fix.md step 1.
 
+  // ============================================================
+  // Streaming thinking deltas (2026-10-09 "invisible process" fix)
+  // ============================================================
+  //
+  // Reasoning channels (deepseek-v4-flash via discovery-api.intern-ai.org.cn)
+  // stream nearly all narrative as `thinking_delta` chunks long before any
+  // text_delta arrives. Regression baseline: these were dropped, so the UI
+  // stayed blank for the ENTIRE stream (44–166s in real sessions) and only got
+  // a truncated 2000-char process step at message_end.
+
+  describe('streaming thinking deltas', () => {
+    it('forwards thinking_delta with its own t-prefixed sub-turnId', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'reasoning…' },
+      } as any));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: 'thinking_delta',
+        text: 'reasoning…',
+      });
+      // t-prefix keeps thinking isolated from the text channel's m-prefix
+      expect(events[0].turnId).toMatch(/^pi-turn-1__t0$/);
+    });
+
+    it('reuses the same thinking sub-turnId across consecutive deltas', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      const e1 = collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'One' },
+      } as any));
+      const e2 = collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_delta', delta: ' Two' },
+      } as any));
+      expect(e1[0].turnId).toBe(e2[0].turnId);
+    });
+
+    it('terminates the thinking step on thinking_end with the COMPLETE text', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'Think A. ' },
+      } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'Think B.' },
+      } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_end', content: 'Think A. Think B.' },
+      } as any));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: 'thinking_complete',
+        text: 'Think A. Think B.',
+      });
+    });
+
+    it('falls back to thinking_end content when no deltas were seen', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_end', content: 'Lone block' },
+      } as any));
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: 'thinking_complete',
+        text: 'Lone block',
+      });
+    });
+
+    it('does NOT synthesize a truncated text_complete after a streamed thinking block (no double record)', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({ type: 'message_start', message: { role: 'assistant' } } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'deep reasoning' },
+      } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_end', content: 'deep reasoning' },
+      } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'thinking', thinking: 'deep reasoning' }, { type: 'text', text: '\n\n' }],
+        },
+      } as any));
+      // No truncated text_complete for the thinking block — only the terminal
+      // events for whatever text remains.
+      expect(events.filter((e: any) => e.type === 'text_complete').length).toBe(0);
+    });
+
+    it('synthesizes the truncated text_complete ONLY for non-streaming reasoning (regression guard)', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({ type: 'message_start', message: { role: 'assistant' } } as any));
+      // No thinking_delta streamed — the message_end fallback must still fire.
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'thinking', thinking: 'deep reasoning' }, { type: 'text', text: '\n\n' }],
+        },
+      } as any));
+      const thinking = events.find((e: any) => e.type === 'text_complete');
+      expect(thinking).toBeDefined();
+      expect(thinking!.isIntermediate).toBe(true);
+      expect(thinking!.text).toBe('deep reasoning');
+    });
+
+    it('closes a streamed thinking step at message_end when thinking_end was never emitted', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'Think A.' },
+      } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'toolUse',
+          content: [{ type: 'thinking', thinking: 'Think A.' }, { type: 'text', text: '\n\n' }],
+        },
+      } as any));
+      const tc = events.find((e: any) => e.type === 'thinking_complete');
+      expect(tc).toBeDefined();
+      expect(tc!.text).toBe('Think A.');
+    });
+
+    it('discards the half-streamed thinking step on error', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'partial think' },
+      } as any));
+      const events = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: { role: 'assistant', stopReason: 'error', errorMessage: 'boom' },
+      } as any));
+      expect(events.find((e: any) => (e as any).type === 'text_discard')).toBeDefined();
+    });
+
+    it('thinking channel does not disturb the text channel sub-turn counter naming', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      const t = collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'x' },
+      } as any));
+      const m = collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'text_delta', delta: 'Hi' },
+      } as any));
+      expect(t[0].turnId).toMatch(/__t0$/);
+      expect(m[0].turnId).toMatch(/__m1$/);
+    });
+  });
+
 });

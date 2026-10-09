@@ -112,6 +112,18 @@ export class PiEventAdapter extends BaseEventAdapter {
   private subTurnCounter: number = 0;
   private messageSubTurnId: string | null = null;
 
+  // Streaming thinking (reasoning) channel — 2026-10-09 d4f "invisible process" fix.
+  // The SDK streams thinking_delta per reasoning_content chunk; before this the
+  // adapter dropped them and the UI stayed blank for the whole stream (deepseek
+  // reasoning puts nearly all narrative in the thinking block). Thinking gets a
+  // SEPARATE sub-turn id ('t' prefix) and is NEVER folded into the text channel:
+  // - text_delta / messageSubTurnId / hasStreamedDeltas stay text-only
+  // - thinking_delta events feed the UI's live process step (isPending)
+  // - thinking_end (fallback: message_end) terminates it with the COMPLETE text
+  private thinkingSubTurnId: string | null = null;
+  private thinkingBuffer: string = '';
+  private hasStreamedThinking: boolean = false;
+
   // When the current assistant message started (its message_start event).
   // Thinking-only blocks never stream text deltas — their thinking text is
   // synthesized as an intermediate text_complete at message_end, so the
@@ -594,6 +606,9 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.subTurnCounter = 0;
     this.messageSubTurnId = null;
     this.messageStartAt = null;
+    this.thinkingSubTurnId = null;
+    this.thinkingBuffer = '';
+    this.hasStreamedThinking = false;
     // A new Craft turn can only start once the previous queue completed (or
     // was force-aborted), so any recovery state left over here is stale.
     //
@@ -839,6 +854,9 @@ export class PiEventAdapter extends BaseEventAdapter {
         // Keep sub-turn IDs unique across SDK turns/retries within this Craft
         // turn. startTurn() is the only place the counter resets.
         this.messageSubTurnId = null;
+        this.thinkingSubTurnId = null;
+        this.thinkingBuffer = '';
+        this.hasStreamedThinking = false;
         break;
 
       // ============================================================
@@ -873,6 +891,50 @@ export class PiEventAdapter extends BaseEventAdapter {
             text: amEvent.delta,
             turnId: this.messageSubTurnId,
           };
+        } else if (amEvent.type === 'thinking_delta' && amEvent.delta) {
+          // 2026-10-09 d4f "invisible process": real-time reasoning stream.
+          // The SDK emits thinking_delta per reasoning_content chunk; reasoning
+          // channels (deepseek-v4-flash etc.) put nearly all narrative in the
+          // thinking block, so WITHOUT this the UI would stay blank for the
+          // entire (often multi-minute) stream and only get a truncated
+          // 2000-char step at message_end (extractThinkingFromMessage).
+          //
+          // Thinking keeps its OWN sub-turn id ('t' prefix) and does NOT touch
+          // messageSubTurnId / hasStreamedDeltas — the text state machine stays
+          // untouched so tool commentary and final replies are unaffected.
+          this.hasStreamedThinking = true;
+          if (!this.thinkingSubTurnId) {
+            this.thinkingSubTurnId = this.nextSubTurnId('t');
+          }
+          // Keep the FULL text: the terminal thinking_complete must carry the
+          // complete reasoning (the persisted record is truncated separately).
+          this.thinkingBuffer += amEvent.delta;
+          yield {
+            type: 'thinking_delta',
+            text: amEvent.delta,
+            turnId: this.thinkingSubTurnId,
+          };
+        } else if (amEvent.type === 'thinking_end') {
+          // Terminate the live thinking step with the COMPLETE reasoning text.
+          // The UI keeps the full live view; the persisted row is truncated by
+          // SessionManager for context hygiene. Handles both cases: delta-chan
+          // streams (buffer holds the text) and once-off thinking_end from
+          // endpoints that deliver the whole block in the terminal event.
+          this.hasStreamedThinking = true;
+          if (this.thinkingSubTurnId || this.extractThinkingFromStream(amEvent)) {
+            const turnId = this.thinkingSubTurnId ?? this.nextSubTurnId('t');
+            const completeText =
+              this.thinkingBuffer || this.extractThinkingFromStream(amEvent);
+            this.thinkingBuffer = '';
+            this.thinkingSubTurnId = null;
+            if (completeText) {
+              yield {
+                type: 'thinking_complete',
+                text: completeText,
+                turnId,
+              };
+            }
+          }
         }
         break;
       }
@@ -905,6 +967,14 @@ export class PiEventAdapter extends BaseEventAdapter {
             yield { type: 'text_discard', turnId: this.messageSubTurnId };
             this.messageSubTurnId = null;
             this.hasStreamedDeltas = false;
+          }
+          // A streamed-thinking step is also an unfinished partial — drop it so
+          // its half-rendered content can't linger as a completed-looking row.
+          if (this.thinkingSubTurnId) {
+            yield { type: 'text_discard', turnId: this.thinkingSubTurnId };
+            this.thinkingSubTurnId = null;
+            this.thinkingBuffer = '';
+            this.hasStreamedThinking = false;
           }
           // Context overflow: hand recovery to the SDK's _runAutoCompaction
           // and keep the UI quiet until we know the outcome (recovered turn
@@ -956,6 +1026,12 @@ export class PiEventAdapter extends BaseEventAdapter {
             this.messageSubTurnId = null;
             this.hasStreamedDeltas = false;
           }
+          if (this.thinkingSubTurnId) {
+            yield { type: 'text_discard', turnId: this.thinkingSubTurnId };
+            this.thinkingSubTurnId = null;
+            this.thinkingBuffer = '';
+            this.hasStreamedThinking = false;
+          }
           break;
         }
 
@@ -967,8 +1043,35 @@ export class PiEventAdapter extends BaseEventAdapter {
         // nearly all their narrative into the 'thinking' content block and emit
         // little visible text between tool calls, so the UI would otherwise show
         // nothing while the model works (2026-10-04 d4f "invisible process").
+        //
+        // 2026-10-09: when the SDK streamed thinking_delta, the live process step
+        // was already fed per-chunk and terminated by thinking_end (a
+        // thinking_complete carrying the FULL text). This message_end fallback
+        // must then NOT synthesize a second (truncated) record — it only fires
+        // for non-streaming reasoning or when thinking_end was never emitted
+        // (some endpoints deliver the thinking block only at message_end).
         const thinking = this.extractThinkingFromMessage(event.message);
-        if (thinking) {
+        if (this.hasStreamedThinking) {
+          if (this.thinkingSubTurnId) {
+            // Streamed but no thinking_end arrived (endpoint didn't emit it):
+            // close the live step now with whatever was streamed.
+            const turnId = this.thinkingSubTurnId;
+            const completeText = this.thinkingBuffer || thinking;
+            this.thinkingBuffer = '';
+            this.thinkingSubTurnId = null;
+            if (completeText) {
+              yield {
+                type: 'thinking_complete',
+                text: completeText,
+                turnId,
+              };
+            }
+          }
+          // Live step already delivered via thinking_complete — no text_complete
+          // synthesis here (would double the persisted record).
+        } else if (thinking) {
+          // Non-streaming reasoning (or thinking only visible at message_end):
+          // keep the original single-shot synthesis.
           yield {
             type: 'text_complete',
             text: thinking,
@@ -979,6 +1082,9 @@ export class PiEventAdapter extends BaseEventAdapter {
             ...(this.messageStartAt ? { startedAt: this.messageStartAt } : {}),
           };
         }
+        this.thinkingBuffer = '';
+        this.thinkingSubTurnId = null;
+        this.hasStreamedThinking = false;
         // Pi SDK stopReason: 'toolUse' means the model will call tools next (intermediate commentary),
         // 'stop'/'end_turn' means final response. Same logic as Claude's stop_reason === 'tool_use'.
         // Hold-open override (2026-10-04 fleet-mist user rule: a reply bubble
@@ -1623,6 +1729,19 @@ export class PiEventAdapter extends BaseEventAdapter {
     return joined.length <= MAX_THINKING_CHARS
       ? joined
       : `${joined.slice(0, MAX_THINKING_CHARS)}…`;
+  }
+
+  /**
+   * Extract the COMPLETE (untruncated) thinking text from an SDK thinking_end
+   * stream event — used as a fallback when this adapter never saw the
+   * thinking_delta chunks (e.g. only the terminal event was forwarded). The
+   * SDK's thinking_end carries the full content block.
+   */
+  private extractThinkingFromStream(amEvent: AssistantMessageEvent): string {
+    if ('content' in amEvent && typeof amEvent.content === 'string') {
+      return amEvent.content;
+    }
+    return '';
   }
 
   /**

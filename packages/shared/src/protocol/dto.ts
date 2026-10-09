@@ -394,6 +394,8 @@ export type SessionEvent =
   | { type: 'retry'; sessionId: string; phase: 'active' | 'end'; recovered?: boolean; attempt?: number; /** Ladder-start epoch ms + frozen duration — authoritative even when the row was lost (reload/restart), so the terminal line never shows 00:00. */ startedAt?: number; elapsedMs?: number }
   | { type: 'text_delta'; sessionId: string; delta: string; turnId?: string }
   | { type: 'text_complete'; sessionId: string; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; timestamp?: number; /** Streaming start time (first text_delta) for process-card ordering; `timestamp` stays the completion time */ startedAt?: number; messageId?: string }
+  | { type: 'thinking_delta'; sessionId: string; delta: string; turnId?: string }
+  | { type: 'thinking_complete'; sessionId: string; text: string; turnId?: string; timestamp?: number; startedAt?: number; messageId?: string }
   | { type: 'tool_start'; sessionId: string; toolName: string; toolUseId: string; toolInput: Record<string, unknown>; toolIntent?: string; toolDisplayName?: string; toolDisplayMeta?: ToolDisplayMeta; turnId?: string; parentToolUseId?: string; timestamp?: number; messageId?: string }
   | { type: 'tool_result'; sessionId: string; toolUseId: string; toolName: string; result: string; turnId?: string; parentToolUseId?: string; isError?: boolean; timestamp?: number }
   | { type: 'error'; sessionId: string; error: string; timestamp?: number; retryPending?: boolean; retryAttempt?: number }

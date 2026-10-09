@@ -594,8 +594,15 @@ async function main(): Promise<void> {
   // 5. Start Electron (build already verified)
   console.log("🚀 Starting Electron...\n");
 
+  // Optional extra CLI args for the Electron binary (space-separated), e.g.:
+  //   ELECTRON_EXTRA_ARGS="--user-data-dir=C:/isolated/dir" bun run electron:dev
+  // Lets a dev instance use its own userData → no single-instance lock
+  // conflict with an installed app (parallel isolated instances).
+  const extraElectronArgs =
+    process.env.ELECTRON_EXTRA_ARGS?.trim().split(/\s+/).filter(Boolean) ?? [];
+
   const electronProc = spawn({
-    cmd: [ELECTRON_BIN, "apps/electron"],
+    cmd: [ELECTRON_BIN, "apps/electron", ...extraElectronArgs],
     cwd: ROOT_DIR,
     stdin: "ignore",
     stdout: "inherit",

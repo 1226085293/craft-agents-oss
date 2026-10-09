@@ -15,7 +15,8 @@
 
 import { useCallback, useEffect, useRef } from 'react'
 import { getDefaultStore } from 'jotai'
-import { sessionMetaMapAtom } from '@/atoms/sessions'
+import { sessionMetaMapAtom, sessionAtomFamily } from '@/atoms/sessions'
+import { hasRunningTool } from '@/lib/session-recovery-utils'
 
 type JotaiStore = ReturnType<typeof getDefaultStore>
 
@@ -67,6 +68,18 @@ export function useStaleSessionRecovery({
 
         if (now - lastEvent < STALE_THRESHOLD_MS) {
           continue // Still within threshold
+        }
+
+        // A tool is still in flight (e.g. `sleep 240`, a long install), so no
+        // events have arrived for minutes but the session is NOT stuck. A stale
+        // refresh here would knock the renderer's transient UI state (optimistic
+        // queued bubbles, queue-time timestamps) off the running turn. Skip and
+        // re-arm the clock: when the tool completes it emits events that reset
+        // the watchdog naturally. (2026-10-08 sunny-pond: sleep 240 wiped a
+        // queued bubble's 排队中 badge and re-sorted it between process blocks.)
+        if (hasRunningTool(store.get(sessionAtomFamily(sessionId))?.messages)) {
+          lastEventTimestamps.current.set(sessionId, now)
+          continue
         }
 
         if (refreshingSessionIds.current.has(sessionId)) {

@@ -33,6 +33,7 @@ import { attachmentFromContentRef, toDraftRef } from './lib/drafts'
 import { stripMarkdown } from './utils/text'
 import { coerceInputText } from './lib/input-text'
 import { getSessionsToRefreshAfterStaleReconnect } from './lib/reconnect-recovery'
+import { preserveQueuedFlags } from './lib/session-recovery-utils'
 import { formatSessionLoadFailure, shouldTreatSessionLoadFailureAsTransportFallback } from './lib/session-load'
 import { extractWorkspaceSlugFromPath } from '@craft-agent/shared/utils/workspace-slug'
 import { DEFAULT_THINKING_LEVEL } from '@craft-agent/shared/agent/thinking-levels'
@@ -516,7 +517,14 @@ export default function App() {
       const preservedStaleMessages = !!prevSession && prevSession.messages.length > 0 && (!fresh.messages || fresh.messages.length === 0)
       const nextSession = preservedStaleMessages
         ? { ...fresh, messages: prevSession.messages }
-        : fresh
+        : {
+            ...fresh,
+            // The server snapshot carries no `isQueued` (renderer-only flag).
+            // Re-apply it so a queued bubble keeps its 排队中 badge and stays
+            // deferred to the end of the running turn instead of collapsing to
+            // a sent message between process blocks. (2026-10-08 sunny-pond.)
+            messages: preserveQueuedFlags(fresh.messages ?? [], prevSession?.messages),
+          }
 
       clearStreamingState(sessionId)
       replaceLoadedSession(nextSession)

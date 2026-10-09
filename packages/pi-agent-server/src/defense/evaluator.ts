@@ -186,12 +186,15 @@ export class DefenseEvaluator {
    *
    * `endsWithEmptyResponse` flags the pathological case where the FINAL
    * assistant message carries NO visible content at all. Observed variants:
-   * finish_reason=stop with 0 output tokens (gateway fault); finish_reason=
-   * length with output burned on invisible reasoning (max_tokens
-   * truncation); and finish_reason=stop with thinking-only content (the
-   * 2026-10-01 incidents, 261001-ready-sunset / 261001-calm-pond: a clean
-   * stop that emitted only a reasoning block the user can never see).
-   * All are silent deliveries, not real completions. Unlike silent-stop
+   * finish_reason=stop with 0 output tokens (gateway fault); and
+   * finish_reason=length with output burned on invisible reasoning
+   * (max_tokens truncation — stays fault-class via truncatedFinal even if
+   * a thinking block was shown). Thinking-only content is NOT empty since
+   * 2026-10-09 (d4f fix streams thinking_delta per reasoning_content chunk
+   * into the UI), so the 2026-10-01 thinking-only-stop incidents
+   * (261001-ready-sunset / 261001-calm-pond) no longer qualify.
+   * All remaining variants are silent deliveries, not real completions.
+   * Unlike silent-stop
    * (which scans the whole run), this signal anchors strictly on the last
    * message: earlier progress updates in a long tool chain must not mask
    * it (2026-08-22 incidents).

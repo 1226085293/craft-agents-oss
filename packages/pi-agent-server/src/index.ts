@@ -644,15 +644,16 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     //   - stopReason="length" + N output tokens → reasoning burned the whole
     //     max_tokens budget without emitting a visible block (truncation)
     //   - stopReason="length" + thinking-only content (2026-08-28 incident:
-    //     ~109K ctx, reasoning ate the budget, output=0) → the reasoning
-    //     block is NOT visible to the user, so the reply is still empty.
+    //     ~109K ctx, reasoning ate the budget, output=0) → truncated; the
+    //     reply never completed (still fault-class via truncatedFinal below).
     //   - stopReason="stop" + thinking-only content (2026-10-01 incidents,
     //     261001-ready-sunset out=363 / 261001-calm-pond out=1442): a clean
-    //     stop whose final message carries ONLY a thinking block. The user
-    //     saw a progress note and then NOTHING — a silent delivery. The
-    //     pre-2026-10-01 "deliberate reasoning-only finish is normal" rule
-    //     let real hung sessions pass as done; the thinking block is not
-    //     visible to the user, so the reply is still empty.
+    //     stop with ONLY a thinking block. At the time thinking was NOT
+    //     visible to the user — a silent delivery. Since 2026-10-09 (d4f
+    //     fix) the SDK streams thinking_delta per reasoning_content chunk
+    //     into the UI, so a thinking block IS user-visible content and a
+    //     thinking-only clean stop is a legitimate (if thought-heavy)
+    //     delivery, not an empty one.
     // All are infrastructure/quality faults, not intentional finishes.
     // Anchoring strictly on the LAST assistant message is essential: run-
     // wide text scanning is already covered by hasVisibleText above and
@@ -661,17 +662,27 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     // toolUse, not a clean stop, so it never reaches this branch).
     let endsWithEmptyResponse = false;
     if (lastAssistant) {
+      // 2026-10-09 (d4f fix): the SDK streams thinking_delta per reasoning
+      // chunk into the UI, so 'thinking' blocks are user-visible content.
+      // A thinking-only clean stop is a legitimate delivery; only a final
+      // message with NEITHER visible text NOR visible thinking is empty.
       const hasVisibleTextBlock = Array.isArray(lastAssistant.content)
-        && lastAssistant.content.some(
-          (c) => (c as { type?: string })?.type === 'text'
-            && String((c as { text?: unknown }).text ?? '').trim().length > 0,
-        );
+        && lastAssistant.content.some((c) => {
+          const type = (c as { type?: string })?.type;
+          if (type === 'text') {
+            return String((c as { text?: unknown }).text ?? '').trim().length > 0;
+          }
+          if (type === 'thinking') {
+            return String((c as { thinking?: unknown }).thinking ?? '').trim().length > 0;
+          }
+          return false;
+        });
       const cleanStop = lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length';
-      // ANY clean stop whose final message lacks a visible text block is a
-      // silent delivery: empty content (gateway fault), thinking-only
-      // content that burned the budget on 'length' (truncation), or a
-      // thinking-only 'stop' (2026-10-01 incidents) — thinking blocks are
-      // invisible to the user, so the reply is still empty.
+      // ANY clean stop whose final message lacks BOTH visible text and a
+      // visible thinking block is a silent delivery: empty content (gateway
+      // fault). Thinking-only 'length' stays fault-class via truncatedFinal
+      // (the reply never completed); thinking-only 'stop' is a delivery
+      // since 2026-10-09 (thinking is visible in the UI).
       endsWithEmptyResponse = cleanStop && !hasVisibleTextBlock;
     }
     // Repetition-loop (degeneration) detection (2026-08-28 incident): the

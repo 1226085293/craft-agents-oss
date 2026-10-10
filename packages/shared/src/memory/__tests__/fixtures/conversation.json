@@ -1,0 +1,5 @@
+[
+  { "role": "user", "content": "我得用 pnpm 把依赖装一下，帮我看看有什么坑" },
+  { "role": "assistant", "content": "pnpm workspaces 的 install 有些环境问题需要注意" },
+  { "role": "user", "content": "顺便，周五的报告别忘了" }
+]

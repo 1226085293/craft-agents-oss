@@ -1,5 +1,7 @@
 import type { MemoryEntry, MemoryStore, MemoryType, SessionMemoryStore } from './types.ts'
+import { foldLegacyMemoryType, memoryConfig, equalTag, normalizeTag } from './types.ts'
 import { isSemanticDuplicate } from './extractor.ts'
+import { adjudicateCandidates, routeAdjudicationTargets, type AdjudicationResult } from './adjudicator.ts'
 
 interface ConsolidationResponse {
   promotions: Array<{ id: string; content: string; type: MemoryType; tags: string[] }>
@@ -22,7 +24,7 @@ function parseResponse(response: string): ConsolidationResponse {
   }
   if (!Array.isArray(parsed.promotions) || !Array.isArray(parsed.conflicts)) throw new Error('Invalid consolidation response')
   for (const item of parsed.promotions) {
-    if (!item || typeof item.id !== 'string' || typeof item.content !== 'string' || !['fact', 'preference', 'workflow', 'reminder', 'context'].includes(item.type) || !Array.isArray(item.tags)) throw new Error('Invalid memory promotion')
+    if (!item || typeof item.id !== 'string' || typeof item.content !== 'string' || !['factual', 'behavioral', 'reminder', 'fact', 'preference', 'workflow', 'context'].includes(item.type) || !Array.isArray(item.tags)) throw new Error('Invalid memory promotion')
   }
   for (const item of parsed.conflicts) {
     if (!item || typeof item.oldId !== 'string' || typeof item.newId !== 'string' || typeof item.reason !== 'string' || !item.reason.trim()) throw new Error('Invalid memory conflict')
@@ -89,10 +91,9 @@ Automatic rejections:
 Expected outcome: 0-3 promotions per batch is normal. An empty promotions array is a GOOD result. When in doubt, reject.
 Conflict rule: report a conflict ONLY when the candidate DIRECTLY contradicts or explicitly replaces an existing global memory of the SAME subject (changed preference, corrected fact). If uncertain or the contexts differ, promote normally and keep both — additions are cheap, deletions are not.
 Return JSON only:
-{"promotions":[{"id":"candidate id","content":"...","type":"fact|preference|workflow|reminder|context","tags":[]}],"conflicts":[{"oldId":"existing global id","newId":"candidate id","reason":"..."}]}
+{"promotions":[{"id":"candidate id","content":"...","type":"factual|behavioral|reminder","tags":[]}],"conflicts":[{"oldId":"existing global id","newId":"candidate id","reason":"..."}]}
 Rules: every promotions[].id must be one of the candidate ids below; every conflicts[].newId must be a candidate you ALSO include in promotions; every conflicts[].oldId must be one of the existing global memory ids below; never invent or guess ids. If nothing qualifies, return empty arrays.
 Candidates: ${JSON.stringify(candidates)}
-Existing global memories: ${JSON.stringify(globalEntries)}
 Current global memory count: ${globalEntries.length}`
 }
 
@@ -121,6 +122,12 @@ function isTimeoutLlmError(error: unknown): boolean {
   return /timed?\s*out|timeout/i.test(message)
 }
 
+/** Deterministic model-output shape errors that warrant split-on-double-failure. */
+function isJsonParseError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /Invalid consolidation response|Invalid memory promotion|Invalid memory conflict/i.test(message)
+}
+
 /** Default backoff delays between transient-error retries. */
 export const DEFAULT_RETRY_DELAYS_MS = [5_000, 15_000, 30_000]
 
@@ -138,12 +145,25 @@ async function cancelAwareSleep(ms: number, isCancelled?: () => boolean): Promis
 interface BatchResult {
   promoted: number
   trashed: number
+  /** Ids actually promoted (post-adjudication), for session promoted:true marking. */
+  promotedIds: string[]
 }
 
 interface BatchDeps {
   globalStore: MemoryStore
   evaluate: (prompt: string) => Promise<string>
+  /** Mini-model completion used by the write-time adjudication gate (§5.1). */
+  runMiniCompletion: (prompt: string) => Promise<string | null>
   options: ConsolidationOptions
+  /** Called when the adjudication gate wants to record an audit entry. */
+  recordBlocked?: (record: { candidateContent: string; candidateType: MemoryType; sourceSessionId: string; sourceMessageId?: string; matchedGlobalId?: string; matchedContent?: string; verdict: string; reason: string; shadow: boolean }) => void
+}
+
+async function splitOrReconcile(batch: MemoryEntry[], deps: BatchDeps): Promise<BatchResult> {
+  const mid = Math.ceil(batch.length / 2)
+  const first = await evaluateBatch(batch.slice(0, mid), deps)
+  const second = await evaluateBatch(batch.slice(mid), deps)
+  return { promoted: first.promoted + second.promoted, trashed: first.trashed + second.trashed, promotedIds: [...first.promotedIds, ...second.promotedIds] }
 }
 
 /**
@@ -152,26 +172,42 @@ interface BatchDeps {
  * - a timed-out batch is SPLIT IN HALF and each half is processed (smaller
  *   prompts complete within the LLM deadline far more reliably than
  *   retrying the same oversized prompt)
+ * - a batch that fails JSON parsing TWICE is also SPLIT IN HALF (removes the
+ *   permanent-stall path); a single-entry batch still failing twice is
+ *   promoted anyway (additions are cheap) with a warning
  * - deterministic failures propagate immediately
  */
 async function evaluateBatch(batch: MemoryEntry[], deps: BatchDeps): Promise<BatchResult> {
   const { globalStore, evaluate, options } = deps
   let attempt = 0
+  let parseFailures = 0
   for (;;) {
     const prompt = buildConsolidationPrompt(globalStore.entries, batch, options.language)
     try {
       const response = await evaluate(prompt)
       if (options.isCancelled?.()) throw new Error('Memory consolidation cancelled')
-      return applyBatchResponse(batch, parseResponse(response), globalStore)
+      return await applyBatchResponse(batch, parseResponse(response), globalStore, deps)
     } catch (error) {
       if (options.isCancelled?.()) throw new Error('Memory consolidation cancelled')
       if (error instanceof TransientLlmError) throw error // retries exhausted → surface
-      if (!isTransientLlmError(error)) throw error // deterministic → surface
+      if (!isTransientLlmError(error)) {
+        if (isJsonParseError(error)) {
+          parseFailures += 1
+          if (parseFailures >= 2 && batch.length > 1) {
+            console.warn(`[memory] JSON parse failed twice for batch of ${batch.length}; splitting in half`)
+            return await splitOrReconcile(batch, deps)
+          }
+          if (parseFailures >= 2) {
+            // Single entry can't be split further. Promote as-is (additions are cheap).
+            console.warn(`[memory] JSON parse failed twice for single-entry batch; promoting candidate anyway`)
+            return await promoteRaw(batch, globalStore)
+          }
+          continue // retry the same full batch once
+        }
+        throw error // deterministic failure (auth etc.) → surface
+      }
       if (isTimeoutLlmError(error) && batch.length > 1) {
-        const mid = Math.ceil(batch.length / 2)
-        const first = await evaluateBatch(batch.slice(0, mid), deps)
-        const second = await evaluateBatch(batch.slice(mid), deps)
-        return { promoted: first.promoted + second.promoted, trashed: first.trashed + second.trashed }
+        return await splitOrReconcile(batch, deps)
       }
       attempt += 1
       const delays = options.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS
@@ -185,7 +221,21 @@ async function evaluateBatch(batch: MemoryEntry[], deps: BatchDeps): Promise<Bat
   }
 }
 
-function applyBatchResponse(batch: MemoryEntry[], response: ConsolidationResponse, globalStore: MemoryStore): BatchResult {
+/** Promote raw batch entries (no model verdict available) — single-entry parse-failure path. */
+async function promoteRaw(batch: MemoryEntry[], globalStore: MemoryStore): Promise<BatchResult> {
+  const promotedIds: string[] = []
+  const dedupPool = [...globalStore.entries]
+  for (const source of batch) {
+    if (isSemanticDuplicate(source, dedupPool)) continue
+    const promoted: MemoryEntry = { ...source, createdAt: new Date().toISOString(), updatedAt: undefined }
+    globalStore.entries.push(promoted)
+    dedupPool.push(promoted)
+    promotedIds.push(source.id)
+  }
+  return { promoted: promotedIds.length, trashed: 0, promotedIds }
+}
+
+async function applyBatchResponse(batch: MemoryEntry[], response: ConsolidationResponse, globalStore: MemoryStore, deps: BatchDeps): Promise<BatchResult> {
   let trashed = 0
   const candidateIds = new Set(batch.map(entry => entry.id))
   // SANITIZE: the model occasionally hallucinates ids (candidates from other
@@ -220,21 +270,95 @@ function applyBatchResponse(batch: MemoryEntry[], response: ConsolidationRespons
   }
   const conflictNewIds = new Set(conflicts.map(conflict => conflict.newId))
   const promotedEntries: MemoryEntry[] = []
+  const finalIds: string[] = []
+  const recordBlocked = (verdict: string, candidate: MemoryEntry, target: MemoryEntry | undefined, reason: string, shadow: boolean) => {
+    deps.recordBlocked?.({
+      candidateContent: candidate.content,
+      candidateType: candidate.type,
+      sourceSessionId: candidate.sourceSessionId,
+      sourceMessageId: candidate.sourceMessageId ?? undefined,
+      matchedGlobalId: target?.id,
+      matchedContent: target?.content,
+      verdict,
+      reason,
+      shadow,
+    })
+    if (verdict === 'duplicate' || verdict === 'l1-fallback') {
+      globalStore.dedupBlockedCount = (globalStore.dedupBlockedCount ?? 0) + 1
+    }
+  }
+  const promote = (entry: MemoryEntry) => {
+    promotedEntries.push({ ...entry, id: entry.id, createdAt: new Date().toISOString(), updatedAt: undefined, sourceSessionId: entry.sourceSessionId })
+    finalIds.push(entry.id)
+  }
   for (const item of promotions) {
     const source = batch.find(entry => entry.id === item.id)!
-    const candidate = { ...source, type: item.type, content: item.content.trim(), tags: item.tags }
-    // P0-3: batch-internal dedup — also compare against entries promoted
-    // EARLIER IN THIS BATCH. Previously only the pre-existing global store
-    // was checked, so two near-identical promotions from one batch both
-    // slipped in. promotedEntries is live as the loop runs, so this catches
-    // later siblings against earlier ones.
+    const candidate = { ...source, type: foldLegacyMemoryType(item.type), content: item.content.trim(), tags: item.tags.map(normalizeTag) }
+    // L1 coarse dedup against the PRE-EXISTING global store only (§4.3 “L1 粗筛
+    // 照常”，shadow-inclusive). Same-batch duplicates are NOT coarse-screened
+    // here — the adjudication gate below owns them (取代 P0-3 批内去重) so the
+    // L3 verdict can distinguish duplicate vs conflict vs update (偏好变更).
+    if (!conflictNewIds.has(item.id) && isSemanticDuplicate(candidate, nextEntries)) {
+      recordBlocked('duplicate', candidate, undefined, 'L1 coarse dedup vs existing global', false)
+      continue
+    }
     const dedupPool = [...nextEntries, ...promotedEntries]
-    if (!conflictNewIds.has(item.id) && isSemanticDuplicate(candidate, dedupPool)) continue
-    promotedEntries.push({ ...candidate, id: source.id, createdAt: new Date().toISOString(), updatedAt: undefined, sourceSessionId: source.sourceSessionId })
+    // Write-time adjudication gate (§5.1). When disabled → plain promote.
+    if (!memoryConfig.adjudication.enabled) {
+      promote(candidate)
+      continue
+    }
+    const adjudicated = await adjudicateCandidates([candidate], dedupPool, {
+      runMiniCompletion: deps.runMiniCompletion ?? (async () => null),
+      shadow: deps.options.adjudicationShadow ?? memoryConfig.adjudication.shadow,
+    })
+    const result: AdjudicationResult | undefined = adjudicated.get(candidate.id)
+    if (!result) {
+      promote(candidate)
+      continue
+    }
+    const target = result.target
+    const shadow = result.shadow
+    const softDelete = (id: string, reason: string, replacedBy: string) => {
+      const index = nextEntries.findIndex(e => e.id === id)
+      if (index >= 0) {
+        const [old] = nextEntries.splice(index, 1)
+        if (old) nextTrash.push({ entry: old, deletedAt: new Date().toISOString(), reason, replacedById: replacedBy })
+        trashed++
+      }
+    }
+    if (result.verdict === 'duplicate') {
+      if (result.fallback === 'l1-fallback') {
+        // P0-4 fallback semantics: L1-high duplicate dropped even in shadow.
+        recordBlocked('l1-fallback', candidate, target, result.reason, shadow)
+        continue
+      }
+      recordBlocked('duplicate', candidate, target, result.reason, shadow)
+      if (!shadow) continue
+      promote(candidate) // shadow: observe only, still promote
+      continue
+    }
+    if (result.verdict === 'conflict') {
+      recordBlocked('conflict', candidate, target, result.reason, shadow)
+      if (!shadow && target) softDelete(target.id, result.reason || 'conflict', source.id)
+      promote(candidate)
+      continue
+    }
+    if (result.verdict === 'update') {
+      recordBlocked('update', candidate, target, result.reason, shadow)
+      if (!shadow && target && result.mergedContent) {
+        softDelete(target.id, 'merged', source.id)
+        promote({ ...candidate, content: result.mergedContent })
+      } else {
+        promote(candidate)
+      }
+      continue
+    }
+    promote(candidate) // unrelated
   }
   globalStore.entries = [...nextEntries, ...promotedEntries]
   globalStore.trash = nextTrash
-  return { promoted: promotedEntries.length, trashed }
+  return { promoted: promotedEntries.length, trashed, promotedIds: finalIds }
 }
 
 /** Result of consolidating a single session (may span multiple batches). */
@@ -247,6 +371,16 @@ export interface MemoryConsolidationSessionResult {
 export interface ConsolidationOptions {
   /** Preferred output language for promoted memories (native name, e.g. "简体中文"). */
   language?: string
+  /**
+   * Mini-model completion used by the write-time adjudication gate (§5.1).
+   * Absent → the gate degrades to plain promotion (L1 coarse dedup only).
+   */
+  runMiniCompletion?: (prompt: string) => Promise<string | null>
+  /**
+   * Override adjudication shadow mode for this run (default: memoryConfig config).
+   * Exposed so tests can verify real dispositions without mutating config.
+   */
+  adjudicationShadow?: boolean
   /**
    * Called AFTER a session's candidates were fully processed (across all of
    * its batches) and its consolidated marker advanced — i.e. only once the
@@ -276,7 +410,27 @@ export async function consolidateSessionMemories(
 ): Promise<{ promoted: number; trashed: number }> {
   let promoted = 0
   let trashed = 0
-  const deps: BatchDeps = { globalStore, evaluate, options }
+  const deps: BatchDeps = {
+    globalStore,
+    evaluate,
+    runMiniCompletion: options.runMiniCompletion ?? (async () => null),
+    options,
+    recordBlocked: (record) => {
+      globalStore.blocked ??= []
+      globalStore.blocked.push({
+        candidateContent: record.candidateContent,
+        candidateType: record.candidateType,
+        sourceSessionId: record.sourceSessionId,
+        sourceMessageId: record.sourceMessageId,
+        matchedGlobalId: record.matchedGlobalId,
+        matchedContent: record.matchedContent,
+        verdict: record.verdict as never,
+        reason: record.reason,
+        shadow: record.shadow,
+        blockedAt: new Date().toISOString(),
+      })
+    },
+  }
   for (const session of sessionStores) {
     const known = new Set(session.consolidatedEntryIds ?? [])
     const candidates = session.entries.filter(entry => !known.has(entry.id))
@@ -284,11 +438,19 @@ export async function consolidateSessionMemories(
     const batches = splitConsolidationBatches(candidates)
     let sessionPromoted = 0
     let sessionTrashed = 0
+    const markPromoted = new Set<string>()
     for (const batch of batches) {
       const batchResult = await evaluateBatch(batch, deps)
       sessionPromoted += batchResult.promoted
       sessionTrashed += batchResult.trashed
+      for (const id of batchResult.promotedIds) markPromoted.add(id)
     }
+    // §5.1: mark session entries that were actually promoted (dual-pool dedup).
+    for (const entry of session.entries) {
+      if (markPromoted.has(entry.id)) entry.promoted = true
+    }
+    // §3.3 vocabulary growth gate: promote tags seen ≥ promoteFrequency times.
+    applyVocabularyGrowth(globalStore, candidates.filter(c => markPromoted.has(c.id)))
     // Mark the session as consolidated ONLY after every batch succeeded.
     // The caller persists inside onSessionConsolidated, so a restart or model
     // failure never leaves a session marked without its work having completed.
@@ -299,4 +461,41 @@ export async function consolidateSessionMemories(
     options.onSessionConsolidated?.(session, { promoted: sessionPromoted, trashed: sessionTrashed })
   }
   return { promoted, trashed }
+}
+
+/** §3.3: accumulate promotion tag frequencies; fold new tags into the vocabulary at ≥promoteFrequency. */
+function applyVocabularyGrowth(globalStore: MemoryStore, promotedEntries: MemoryEntry[]): void {
+  if (promotedEntries.length === 0) return
+  globalStore.tagFrequency ??= {}
+  globalStore.tagVocabulary ??= []
+  const threshold = memoryConfig.tags.promoteFrequency
+  const vocabSet = new Set(globalStore.tagVocabulary)
+  let changed = false
+  for (const entry of promotedEntries) {
+    for (const tag of entry.tags) {
+      globalStore.tagFrequency[tag] = (globalStore.tagFrequency[tag] ?? 0) + 1
+      if (!vocabSet.has(tag) && globalStore.tagFrequency[tag] >= threshold) {
+        vocabSet.add(tag)
+        globalStore.tagVocabulary.push(tag)
+        changed = true
+      }
+    }
+  }
+  if (changed) {
+    // Keep vocabulary frequency-sorted (highest first).
+    globalStore.tagVocabulary.sort((a, b) => (globalStore.tagFrequency![b] ?? 0) - (globalStore.tagFrequency![a] ?? 0))
+    // Bound the vocabulary: it grows monotonically otherwise (every promoted
+    // tag reaching the frequency threshold joins). Keep only the top-N most
+    // frequent tags; the extraction prompt consumes at most vocabPromptLimit
+    // (top 80) anyway, so a large tail is pure accumulation cost.
+    const maxSize = memoryConfig.tags.vocabMaxSize
+    if (globalStore.tagVocabulary.length > maxSize) {
+      const kept = globalStore.tagVocabulary.slice(0, maxSize)
+      globalStore.tagVocabulary = kept
+      // Also evict dropped tags from the frequency map to avoid unbounded growth.
+      const dropped = new Set(vocabSet)
+      for (const tag of kept) dropped.delete(tag)
+      for (const tag of dropped) delete globalStore.tagFrequency[tag]
+    }
+  }
 }

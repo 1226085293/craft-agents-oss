@@ -4,8 +4,8 @@
  * Reads/writes workspace-scoped memory.json for structured memory management.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync } from 'node:fs';
+import { join, dirname, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type {
   MemoryEntry,
@@ -17,25 +17,90 @@ import type {
   MemoryAction,
   MemoryType,
 } from './types.ts';
+import { normalizeTag, foldLegacyMemoryType, memoryConfig } from './types.ts';
 
 /** Path to the workspace-level memory store file */
 export function getMemoryStorePath(workspaceRootPath: string): string {
   return join(workspaceRootPath, 'memory.json');
 }
 
+/** Tag-frequency collector used by the  vocabulary bootstrap. */
+function countTags(tagCounts: Map<string, number>, tags: string[]): void {
+  for (const tag of tags) {
+    tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
+  }
+}
+
+/**
+ * Idempotent  migration (§1.3): folds legacy five-class types into the
+ * three-class schema, normalizes tags, backfills promptVersion / lastInjectedAt
+ * / promoted, bootstraps tagVocabulary (global + session stores) and
+ * priorityTags. Runs at most once (schemaVersion guard); repeating produces
+ * zero diff.
+ */
+export function migrateMemoryStore(store: MemoryStore, workspaceRootPath: string): boolean {
+  if (store.schemaVersion === memoryConfig.schemaVersion) return false;
+
+  for (const entry of [...store.entries, ...(store.trash ?? []).map(rec => rec.entry)]) {
+    entry.type = foldLegacyMemoryType(entry.type);
+    entry.tags = entry.tags.map(normalizeTag);
+    if (entry.promptVersion === undefined || entry.promptVersion === null) entry.promptVersion = 'legacy';
+    if (entry.lastInjectedAt === undefined) entry.lastInjectedAt = null;
+    if (entry.promoted === undefined) entry.promoted = false;
+  }
+
+  // Vocabulary bootstrap: aggregate global + all session stores, frequency-sorted.
+  const tagCounts = new Map<string, number>();
+  countTags(tagCounts, store.entries.flatMap(e => e.tags));
+  try {
+    const sessionsDir = join(workspaceRootPath, 'sessions');
+    if (existsSync(sessionsDir)) {
+      for (const sessionDir of readdirSync(sessionsDir)) {
+        const sessionPath = join(sessionsDir, sessionDir, 'memory.json');
+        if (!existsSync(sessionPath)) continue;
+        try {
+          const sessionStore = JSON.parse(readFileSync(sessionPath, 'utf-8'));
+          countTags(tagCounts, (sessionStore.entries ?? []).flatMap((e: { tags: string[] }) => e.tags ?? []));
+        } catch {
+          // Skip unreadable session store — migration must never hard-fail.
+        }
+      }
+    }
+  } catch {
+    // No sessions dir — vocabulary comes from global entries alone.
+  }
+
+  store.tagVocabulary = [...tagCounts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([tag]) => tag);
+  // priorityTags bootstrap: no hard-coded seed in source (config priorityTags is []) → top-5 by frequency.
+  store.priorityTags = store.tagVocabulary.slice(0, 5);
+  store.blocked ??= [];
+  store.extractionRetryQueue ??= [];
+  store.schemaVersion = memoryConfig.schemaVersion;
+  return true;
+}
+
 /**
  * Load the memory store for a workspace.
- * Returns an empty store if the file doesn't exist.
+ * Returns an empty store if the file doesn't exist. Migrates V1/V2 stores to
+ *  in place (and persists immediately) when the schemaVersion is missing.
  */
 export function loadMemoryStore(workspaceRootPath: string): MemoryStore {
   const filePath = getMemoryStorePath(workspaceRootPath);
   if (!existsSync(filePath)) {
     return {
       version: 1,
+      schemaVersion: memoryConfig.schemaVersion,
       entries: [],
       trash: [],
       extractionHistory: [],
       totalInjectionTokens: 0,
+      tagVocabulary: [],
+      priorityTags: [],
+      blocked: [],
+      extractionRetryQueue: [],
+      tagFrequency: {},
     };
   }
 
@@ -48,6 +113,12 @@ export function loadMemoryStore(workspaceRootPath: string): MemoryStore {
     if (!store.trash) store.trash = [];
     if (store.totalInjectionTokens === undefined) store.totalInjectionTokens = 0;
 
+    // one-shot idempotent migration (persist immediately so it runs once).
+    if (store.schemaVersion !== memoryConfig.schemaVersion) {
+      const migrated = migrateMemoryStore(store, workspaceRootPath);
+      if (migrated) saveMemoryStore(workspaceRootPath, store);
+    }
+
     // Clean up expired entries
     const now = new Date().toISOString();
     store.entries = store.entries.filter(e => !e.expiresAt || e.expiresAt > now);
@@ -58,16 +129,52 @@ export function loadMemoryStore(workspaceRootPath: string): MemoryStore {
     console.warn(`[Memory] Failed to load memory store from ${filePath}, starting fresh`);
     return {
       version: 1,
+      schemaVersion: memoryConfig.schemaVersion,
       entries: [],
       trash: [],
       extractionHistory: [],
       totalInjectionTokens: 0,
+      tagVocabulary: [],
+      priorityTags: [],
+      blocked: [],
+      extractionRetryQueue: [],
+      tagFrequency: {},
     };
   }
 }
 
+/** Scroll the current store file into memory.backup.{N}.json (keep retention.snapshots). */
+function rotateBackup(filePath: string): void {
+  if (!existsSync(filePath)) return;
+  const dir = dirname(filePath);
+  const base = basename(filePath, '.json');
+  const max = memoryConfig.retention.snapshots;
+  const oldest = join(dir, `${base}.backup.${max - 1}.json`);
+  if (existsSync(oldest)) {
+    try { unlinkSync(oldest); } catch {}
+  }
+  for (let i = max - 2; i >= 0; i--) {
+    const from = join(dir, `${base}.backup.${i}.json`);
+    const to = join(dir, `${base}.backup.${i + 1}.json`);
+    if (existsSync(from)) {
+      try { renameSync(from, to); } catch {}
+    }
+  }
+  try { renameSync(filePath, join(dir, `${base}.backup.0.json`)); } catch {}
+}
+
+/**  retention caps applied silently at save time (LRU: keep the newest). */
+function applyRetentionLimits(store: MemoryStore): void {
+  const R = memoryConfig.retention;
+  if (store.trash && store.trash.length > R.trash) store.trash = store.trash.slice(-R.trash);
+  if (store.extractionHistory.length > R.extractionHistory) store.extractionHistory = store.extractionHistory.slice(-R.extractionHistory);
+  if (store.blocked && store.blocked.length > R.blocked) store.blocked = store.blocked.slice(-R.blocked);
+  if (store.extractionRetryQueue && store.extractionRetryQueue.length > R.retryQueue) store.extractionRetryQueue = store.extractionRetryQueue.slice(-R.retryQueue);
+}
+
 /**
- * Save the memory store to disk (atomic write via tmp file).
+ * Save the memory store to disk: atomic write (tmp + rename) with snapshot
+ * rotation (memory.backup.N.json) and  retention GC applied first.
  */
 export function saveMemoryStore(
   workspaceRootPath: string,
@@ -78,6 +185,9 @@ export function saveMemoryStore(
 
   try {
     mkdirSync(workspaceRootPath, { recursive: true });
+    if (store.schemaVersion !== memoryConfig.schemaVersion) store.schemaVersion = memoryConfig.schemaVersion;
+    applyRetentionLimits(store);
+    rotateBackup(filePath);
     writeFileSync(tmpPath, JSON.stringify(store, null, 2), 'utf-8');
     // Atomic rename
     renameSync(tmpPath, filePath);
@@ -90,7 +200,8 @@ export function saveMemoryStore(
 }
 
 /**
- * Add a new memory entry.
+ * Add a new memory entry. Tags are normalized (trim/lowercase/plural-fold)
+ * before storage;  provenance fields accepted via opts.
  */
 export function addMemoryEntry(
   store: MemoryStore | SessionMemoryStore,
@@ -99,16 +210,22 @@ export function addMemoryEntry(
   sourceSessionId: string,
   tags: string[] = [],
   confidence: number = 0.8,
+  opts?: { promptVersion?: string; sourceMessageId?: string; dueAt?: string; conflictWith?: string[]; mergeWith?: string[] },
 ): MemoryEntry {
   const entry: MemoryEntry = {
     id: randomUUID(),
     type,
     content,
     sourceSessionId,
-    tags,
+    tags: tags.map(normalizeTag),
     confidence,
     createdAt: new Date().toISOString(),
     injectedCount: 0,
+    ...(opts?.promptVersion !== undefined ? { promptVersion: opts.promptVersion } : {}),
+    ...(opts?.sourceMessageId !== undefined ? { sourceMessageId: opts.sourceMessageId } : {}),
+    ...(opts?.dueAt !== undefined ? { dueAt: opts.dueAt } : {}),
+    ...(opts?.conflictWith !== undefined ? { conflictWith: opts.conflictWith } : {}),
+    ...(opts?.mergeWith !== undefined ? { mergeWith: opts.mergeWith } : {}),
   };
 
   store.entries.push(entry);
@@ -128,7 +245,7 @@ export function updateMemoryEntry(
 
   if (updates.content !== undefined) entry.content = updates.content;
   if (updates.type !== undefined) entry.type = updates.type;
-  if (updates.tags !== undefined) entry.tags = updates.tags;
+  if (updates.tags !== undefined) entry.tags = updates.tags.map(normalizeTag);
   if (updates.confidence !== undefined) entry.confidence = updates.confidence;
   entry.updatedAt = new Date().toISOString();
 
@@ -200,7 +317,7 @@ export function queryMemories(
   } = args;
 
   const queryTerms = query.toLowerCase().split(/\s+/).filter(t => t.length > 0);
-  const requestedTags = tags ? tags.split(',').map(t => t.trim().toLowerCase()) : [];
+  const requestedTags = tags ? tags.split(',').map(t => normalizeTag(t)) : [];
 
   let results = store.entries.filter(entry => {
     // Filter by type
@@ -211,7 +328,7 @@ export function queryMemories(
 
     // Filter by tags (if specified)
     if (requestedTags.length > 0) {
-      const entryTags = entry.tags.map(t => t.toLowerCase());
+      const entryTags = entry.tags.map(normalizeTag);
       if (!requestedTags.some(rt => entryTags.includes(rt))) return false;
     }
 
@@ -252,16 +369,6 @@ export function queryMemories(
 }
 
 /**
- * Mark a memory as injected into a session.
- */
-export function markMemoryInjected(store: MemoryStore, id: string): void {
-  const entry = store.entries.find(e => e.id === id);
-  if (entry) {
-    entry.injectedCount += 1;
-  }
-}
-
-/**
  * Record an extraction pass.
  */
 export function recordExtraction(
@@ -281,47 +388,6 @@ export function recordExtraction(
 }
 
 /**
- * Apply a memory action (add/update/delete).
- */
-export function applyMemoryAction(
-  store: MemoryStore,
-  action: MemoryAction,
-): { success: boolean; entryId?: string } {
-  switch (action.type) {
-    case 'add': {
-      const entry = addMemoryEntry(
-        store,
-        action.content,
-        action.typeLabel,
-        'manual', // Manual additions come from the user, not a session
-        action.tags || [],
-        action.confidence ?? 1.0,
-      );
-      return { success: true, entryId: entry.id };
-    }
-
-    case 'update': {
-      const entry = updateMemoryEntry(store, action.id, {
-        content: action.content,
-        tags: action.tags,
-        confidence: action.confidence,
-      });
-      return { success: !!entry, entryId: action.id };
-    }
-
-    case 'delete': {
-      const success = deleteMemoryEntry(store, action.id);
-      return { success, entryId: action.id };
-    }
-
-    case 'inject': {
-      markMemoryInjected(store, action.id);
-      return { success: true, entryId: action.id };
-    }
-  }
-}
-
-/**
  * Get statistics about the memory store.
  */
 export function getMemoryStats(store: MemoryStore): {
@@ -332,11 +398,9 @@ export function getMemoryStats(store: MemoryStore): {
   totalInjectionTokens: number;
 } {
   const entriesByType: Record<MemoryType, number> = {
-    fact: 0,
-    preference: 0,
-    workflow: 0,
+    factual: 0,
+    behavioral: 0,
     reminder: 0,
-    context: 0,
   };
 
   for (const entry of store.entries) {

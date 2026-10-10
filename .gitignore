@@ -96,3 +96,10 @@ credentials.enc
 *.rej
 *.swp
 .worktrees/
+
+# dev instance logs (craft-dev-instance skill)
+dev-run.log
+dev-run-err.log
+
+# CDP debugging scripts (craft-dev-instance)
+cdp-*.mjs

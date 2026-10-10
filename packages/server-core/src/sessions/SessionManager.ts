@@ -26,7 +26,7 @@ import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
 import { i18n } from '@craft-agent/shared/i18n'
-import { nextRetryRowPayload, settleRetryRowAsFailed, findActiveRetryRowIndex, findLastRetryRowIndex, findLastRetryRowByStartedAt, findRetryRowForLadder } from '@craft-agent/shared/retry/retry-row'
+import { nextRetryRowPayload, settleRetryRowAsFailed, findActiveRetryRowIndex } from '@craft-agent/shared/retry/retry-row'
 import {
   getWorkspaces,
   getWorkspaceByNameOrId,
@@ -735,10 +735,6 @@ export interface ManagedSession {
    * the user opens the session on the desktop client (markSessionRead).
    */
   mobileEngaged?: boolean
-  /** 2026-10-10: true while a retry ladder is mid-flight (backoff/active,
-   *  false on its terminal end) — gates the complete/error fail-safe so it
-   *  never settles the "重试中" row mid-retry. */
-  retryLadderActive?: boolean
   /** Set when user requests stop - allows event loop to drain before clearing isProcessing */
   stopRequested?: boolean
   lastMessageAt: number
@@ -2160,19 +2156,7 @@ export class SessionManager implements ISessionManager {
    * never overwritten.
    */
   private settleStuckRetryRow(managed: ManagedSession, now = Date.now()): void {
-    // 2026-10-10: while a retry ladder is STILL retrying (backoff/active
-    // received, no terminal end yet), the row must not be settled — a
-    // "重试 1 次后失败 · 00:00" beside "第 N 次重试中" was this fail-safe
-    // firing mid-ladder. Success/failure only appear at the real end (the
-    // terminal `retry end` flips retryLadderActive off).
-    if (managed.retryLadderActive) return
-    // 2026-10-09: scan TURN-UNBOUND — a retry row left dangling by an
-    // interrupted turn (user stop / new message while the retried run was in
-    // flight) still shows status 'retrying' AFTER the next user message,
-    // which the turn-scoped findActiveRetryRowIndex never reaches. A row in
-    // 'retrying' is by construction the un-settled ladder, so there is no
-    // cross-turn reuse risk: settled rows are recovered/failed.
-    const idx = findLastRetryRowIndex(managed.messages)
+    const idx = findActiveRetryRowIndex(managed.messages)
     if (idx === -1) return
     const m = managed.messages[idx]!
     if (m.retry?.status === 'retrying') {
@@ -9161,41 +9145,9 @@ ${request.prompt}`;
         }
         // Only the row of the CURRENT turn may be updated in place — a row
         // left behind by a previous settled turn must not be recycled.
-        let retryIdx = findActiveRetryRowIndex(managed.messages)
-        // 2026-10-09: a terminal `end` can arrive AFTER a turn boundary (the
-        // turn was interrupted and a new user message already landed — the
-        // stop path settles the row via a late `retry end`). The turn-scoped
-        // index stops at the new user message, so fall back to the last
-        // retrying row: a row still in 'retrying' is the un-settled ladder by
-        // construction, and a duplicate/stray end must NOT clobber an already
-        // terminal row (recovered/failed) — leave those untouched.
-        if (retryIdx === -1 && event.phase === 'end') {
-          const lastIdx = findLastRetryRowIndex(managed.messages)
-          if (lastIdx !== -1 && managed.messages[lastIdx]!.retry?.status === 'retrying') {
-            retryIdx = lastIdx
-          }
-        }
-        // 2026-10-10: a soft `end recovered` (the run went live) already
-        // settled the row; the terminal `end` from agent_end finds no
-        // UNSETTLED row. Match it by the ladder's authoritative startedAt and
-        // re-settle IN PLACE (refresh elapsedMs) — never stack a duplicate row
-        // for one ladder.
-        if (retryIdx === -1 && event.phase === 'end') {
-          retryIdx = findLastRetryRowByStartedAt(managed.messages, event.startedAt)
-        }
-        // 2026-10-10 (apt-lion): a backoff/active of the SAME ladder that
-        // follows a soft-settled "recovered" row must REVIVE that row, not
-        // stack a fresh one — the ladder is single, so its one row carries
-        // retrying→recovered→retrying→… until the terminal end.
-        if (retryIdx === -1 && event.phase !== 'end') {
-          retryIdx = findRetryRowForLadder(managed.messages, event.startedAt)
-        }
+        const retryIdx = findActiveRetryRowIndex(managed.messages)
         const prevRow = retryIdx !== -1 ? managed.messages[retryIdx]!.retry : undefined
         const nextPayload = nextRetryRowPayload(event, prevRow, now)
-        // 2026-10-10: track ladder liveness — while retrying, the
-        // complete/error fail-safe must NOT settle the row (success/failure
-        // only when the retry has REALLY finished).
-        managed.retryLadderActive = nextPayload.status === 'retrying'
         if (retryIdx !== -1) {
           managed.messages[retryIdx] = { ...managed.messages[retryIdx]!, retry: nextPayload }
         } else {

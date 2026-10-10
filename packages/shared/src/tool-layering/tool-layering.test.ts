@@ -153,6 +153,22 @@ describe('storage', () => {
       rmSync(ws, { recursive: true, force: true });
     }
   });
+
+  it('keeps built-in memory tools fixed even when workspace config clears fixedLayer', () => {
+    const ws = mkdtempSync(join(tmpdir(), 'tl-'));
+    try {
+      mkdirSync(join(ws, 'config'));
+      writeFileSync(
+        join(ws, 'config/tool_layering.json'),
+        JSON.stringify({ mode: 'auto', enterThresholdTokens: 8000, fixedLayer: [] }),
+      );
+      const resolved = loadToolLayering(ws, [...ALL_TOOLS, 'add_memory', 'query_memories'], true);
+      expect(resolved.fixedLayer).toContain('add_memory');
+      expect(resolved.fixedLayer).toContain('query_memories');
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
 });
 describe('assembler', () => {
   const mkDef = (name: string, description = 'd', inputSchema: Record<string, unknown> = {}) => ({

@@ -123,8 +123,8 @@ describe('extractMemories — batch-internal semantic dedup', () => {
     const store = makeStore();
     const result = await extractMemories(input, store, {
       runMiniCompletion: async () => JSON.stringify([
-        { type: 'fact', content: 'The build pipeline uses Bun with pnpm workspaces for every package', tags: ['build'], confidence: 0.9 },
-        { type: 'fact', content: 'The build pipeline uses Bun with pnpm workspaces for every package except the cli app', tags: ['build'], confidence: 0.9 },
+        { type: 'factual', content: 'The build pipeline uses Bun with pnpm workspaces for every package', tags: ['build'], confidence: 0.9 },
+        { type: 'factual', content: 'The build pipeline uses Bun with pnpm workspaces for every package except the cli app', tags: ['build'], confidence: 0.9 },
       ]),
       existingEntries: [],
       semanticDedup: true,
@@ -147,12 +147,13 @@ describe('extractMemories — cross-store dedup against global entries (P0-4)', 
     let blocked = 0;
     await extractMemories({ sessionId: 's-xstore', messages: [], existingTags: [] }, store, {
       runMiniCompletion: async () => JSON.stringify([
-        { type: 'preference', content: 'The user prefers pnpm for package management across all projects', tags: ['pnpm'], confidence: 0.95 },
+        { type: 'behavioral', content: 'The user prefers pnpm for package management across all projects', tags: ['pnpm'], confidence: 0.95 },
       ]),
       existingEntries: [],
       semanticDedup: true,
+      adjudicationShadow: false,
       globalEntries: [
-        { id: 'g1', type: 'preference', content: 'The user prefers pnpm for package management across all projects', sourceSessionId: 'old-session', tags: ['pnpm'], confidence: 0.95, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 },
+        { id: 'g1', type: 'behavioral', content: 'The user prefers pnpm for package management across all projects', sourceSessionId: 'old-session', tags: ['pnpm'], confidence: 0.95, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 },
       ],
       onDedupBlocked: () => { blocked += 1; },
     });
@@ -165,12 +166,12 @@ describe('extractMemories — cross-store dedup against global entries (P0-4)', 
     let blocked = 0;
     await extractMemories({ sessionId: 's-xstore2', messages: [], existingTags: [] }, store, {
       runMiniCompletion: async () => JSON.stringify([
-        { type: 'fact', content: 'The user prefers pnpm for package management across all projects', tags: ['pnpm'], confidence: 0.95 },
+        { type: 'factual', content: 'The user prefers pnpm for package management across all projects', tags: ['pnpm'], confidence: 0.95 },
       ]),
       existingEntries: [],
       semanticDedup: true,
       globalEntries: [
-        { id: 'g1', type: 'preference', content: 'The build pipeline uses Bun with pnpm workspaces', sourceSessionId: 'old-session', tags: ['build'], confidence: 0.95, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 },
+        { id: 'g1', type: 'behavioral', content: 'The build pipeline uses Bun with pnpm workspaces', sourceSessionId: 'old-session', tags: ['build'], confidence: 0.95, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 },
       ],
       onDedupBlocked: () => { blocked += 1; },
     });

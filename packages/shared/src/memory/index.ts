@@ -9,7 +9,6 @@
  * - store.ts: Read/write operations for memory.json
  * - extractor.ts: LLM-based knowledge extraction from transcripts
  * - injector.ts: Relevance scoring and context building for injection
- * - memory-tool.ts: memory_query and memory_manage tools
  */
 
 // Types
@@ -33,8 +32,11 @@ export type {
 
 export {
   DEFAULT_MEMORY_INJECTION_CONFIG,
-  BEHAVIORAL_MEMORY_TYPES,
-  isBehavioralMemoryType,
+  normalizeTag,
+  foldLegacyMemoryType,
+  memoryConfig,
+  type BlockedRecord,
+  type ExtractionRetryItem,
 } from './types.ts';
 
 // Store
@@ -50,9 +52,7 @@ export {
   updateMemoryEntry,
   deleteMemoryEntry,
   queryMemories,
-  markMemoryInjected,
   recordExtraction,
-  applyMemoryAction,
   getMemoryStats,
 } from './store.ts';
 
@@ -65,12 +65,13 @@ export {
   deleteSessionMemory,
 } from './session-store.ts';
 
+export { withMemoryWriteLock } from './write-lock.ts';
+
 // Extractor
 export {
   buildExtractionPrompt,
   parseExtractionResponse,
   extractMemories,
-  estimateMemoryExtractionTokens,
   type MemoryExtractorOptions,
 } from './extractor.ts';
 
@@ -81,10 +82,10 @@ export {
   buildMemoryContext,
   extractContextKeywords,
   extractWeightedKeywords,
+  scheduleKeywordExpansion,
+  recencyMultiplier,
+  isColdMemory,
   type WeightedKeyword,
-  formatMemoriesForPrompt,
-  hasMemories,
-  previewMemoryInjection,
 } from './injector.ts';
 
 export {
@@ -95,14 +96,3 @@ export {
   type MemoryConsolidationSessionResult,
 } from './consolidation.ts';
 export { MemoryConsolidationScheduler, type MemorySchedule } from './scheduler.ts';
-
-// Tools
-export {
-  createMemoryQueryTool,
-  createMemoryManageTool,
-  handleMemoryQuery,
-  handleMemoryManage,
-  registerMemoryTools,
-  MemoryQuerySchema,
-  MemoryManageSchema,
-} from './memory-tool.ts';

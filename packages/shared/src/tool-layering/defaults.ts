@@ -10,10 +10,20 @@ import type { ToolLayeringConfig, ToolCategoriesConfig } from './types.ts';
 import { DEFAULT_ENTER_THRESHOLD_TOKENS } from './types.ts';
 
 /** Default layering config: auto mode, 8000 token threshold, empty fixed layer. */
+/**
+ * Built-in memory tools that are ALWAYS in the fixed layer.
+ * Memory tools are first-class session tools: the agent must be able to
+ * call them directly at any moment (explicit memory requests), regardless
+ * of tool-layering config or category buckets. `loadToolLayering` merges
+ * these unconditionally, so a workspace config cannot fold them away.
+ */
+export const ALWAYS_FIXED_TOOLS: readonly string[] = ['add_memory', 'query_memories'];
+
+/** Default layering config: auto mode, 8000 token threshold. */
 export const DEFAULT_TOOL_LAYERING: ToolLayeringConfig = {
   mode: 'auto',
   enterThresholdTokens: DEFAULT_ENTER_THRESHOLD_TOKENS,
-  fixedLayer: [],
+  fixedLayer: [...ALWAYS_FIXED_TOOLS],
 };
 
 /** Default category buckets for the 34 session tools. */

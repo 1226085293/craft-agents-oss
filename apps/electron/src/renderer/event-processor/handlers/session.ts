@@ -46,7 +46,7 @@ import type {
   UsageUpdateEvent,
   Effect,
 } from '../types'
-import type { Message, Session } from '../../../shared/types'
+import type { Message } from '../../../shared/types'
 import { generateMessageId, appendMessage, updateMessageAt, dropCompactingStatus, upsertRetryRow, settleStuckRetryRow } from '../helpers'
 import { nextRetryRowPayload, findActiveRetryRowIndex } from '@craft-agent/shared/retry/retry-row'
 
@@ -239,13 +239,7 @@ export function handleRetry(state: SessionState, event: RetryEvent): ProcessResu
   const activeIdx = findActiveRetryRowIndex(state.session.messages)
   const prev = activeIdx !== -1 ? state.session.messages[activeIdx]?.retry : undefined
   const payload = nextRetryRowPayload(event, prev, Date.now())
-  // 2026-10-10: track ladder liveness — while retrying, the complete/error
-  // fail-safe must NOT settle the row (success/failure only at the real end).
-  const ladderActive = payload.status === 'retrying'
-  const session = {
-    ...(upsertRetryRow(state.session, payload) as Session),
-    retryLadderActive: ladderActive,
-  }
+  const session = upsertRetryRow(state.session, payload)
   // Mirror the session manager on phase 'end': a FAILED ladder turns any
   // still-pending retry error card (retryPending) into the turn's TERMINAL
   // error card — otherwise the user would see the failed retry line without

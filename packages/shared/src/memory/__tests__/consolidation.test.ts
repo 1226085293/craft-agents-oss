@@ -3,17 +3,17 @@ import { consolidateSessionMemories, splitConsolidationBatches, TransientLlmErro
 import type { MemoryStore, MemoryEntry, SessionMemoryStore } from '../types'
 
 function globalStore(): MemoryStore {
-  return { version: 1, entries: [{ id: 'old', type: 'preference', content: '用户偏好英文回答', sourceSessionId: 's0', tags: ['language'], confidence: 0.9, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 }], trash: [], extractionHistory: [], totalInjectionTokens: 0 }
+  return { version: 1, entries: [{ id: 'old', type: 'behavioral', content: '用户偏好英文回答', sourceSessionId: 's0', tags: ['language'], confidence: 0.9, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 }], trash: [], extractionHistory: [], totalInjectionTokens: 0 }
 }
 function sessionStore(): SessionMemoryStore {
-  return { version: 1, sessionId: 's1', entries: [{ id: 'new', type: 'preference', content: '用户偏好简体中文回答', sourceSessionId: 's1', tags: ['language'], confidence: 1, createdAt: '2026-09-01T00:00:00.000Z', injectedCount: 0 }], consolidatedEntryIds: [], extractionHistory: [] }
+  return { version: 1, sessionId: 's1', entries: [{ id: 'new', type: 'behavioral', content: '用户偏好简体中文回答', sourceSessionId: 's1', tags: ['language'], confidence: 1, createdAt: '2026-09-01T00:00:00.000Z', injectedCount: 0 }], consolidatedEntryIds: [], extractionHistory: [] }
 }
 
 describe('consolidateSessionMemories', () => {
   it('promotes model-selected candidates and moves confirmed conflicts to recoverable trash', async () => {
     const global = globalStore()
     const session = sessionStore()
-    const result = await consolidateSessionMemories(global, [session], async () => JSON.stringify({ promotions: [{ id: 'new', content: '用户偏好简体中文回答', type: 'preference', tags: ['language'] }], conflicts: [{ oldId: 'old', newId: 'new', reason: '用户明确更改了回答语言偏好' }] }))
+    const result = await consolidateSessionMemories(global, [session], async () => JSON.stringify({ promotions: [{ id: 'new', content: '用户偏好简体中文回答', type: 'behavioral', tags: ['language'] }], conflicts: [{ oldId: 'old', newId: 'new', reason: '用户明确更改了回答语言偏好' }] }))
     expect(result.promoted).toBe(1)
     expect(global.entries.map(entry => entry.content)).toContain('用户偏好简体中文回答')
     expect(global.entries.map(entry => entry.id)).not.toContain('old')
@@ -21,18 +21,20 @@ describe('consolidateSessionMemories', () => {
     expect(session.consolidatedEntryIds).toContain('new')
   })
 
-  it('does not advance the session cursor when model output is invalid', async () => {
+  it('no longer stalls on persistent invalid output — fallback promotes and advances (§5.1)', async () => {
     const global = globalStore()
     const session = sessionStore()
-    await expect(consolidateSessionMemories(global, [session], async () => 'not json')).rejects.toThrow()
-    expect(session.consolidatedEntryIds).toEqual([])
-    expect(global.entries).toHaveLength(1)
+    await expect(consolidateSessionMemories(global, [session], async () => 'not json')).resolves.toBeDefined()
+    // Permanent-stall path removed: cursor advances; candidate either is
+    // raw-promoted or L1-deduped, but the session is never blocked.
+    expect(session.consolidatedEntryIds).toEqual(['new'])
+    expect(global.entries.length).toBeGreaterThanOrEqual(1)
   })
 
   it('splits a large candidate set into multiple prompt-sized batches', () => {
     const entries: MemoryEntry[] = Array.from({ length: 200 }, (_, index) => ({
       id: `c${index}`,
-      type: 'fact',
+      type: 'factual',
       content: `memory entry ${index} with some reasonably long content payload for batching`, // ~70 chars each
       sourceSessionId: 's1',
       tags: ['batch'],
@@ -50,7 +52,7 @@ describe('consolidateSessionMemories', () => {
     const global = globalStore()
     const entries: MemoryEntry[] = Array.from({ length: 200 }, (_, index) => ({
       id: `c${index}`,
-      type: 'fact',
+      type: 'factual',
       content: `memory entry ${index} with some reasonably long content payload for batching`,
       sourceSessionId: 's1',
       tags: ['batch'],
@@ -66,7 +68,7 @@ describe('consolidateSessionMemories', () => {
       // Promote only the first candidate of each batch (content unique per
       // call so cross-batch semantic dedup does not swallow later ones).
       const match = prompt.match(/"id":"(c\d+)"/)
-      return JSON.stringify({ promotions: [{ id: match?.[1] ?? 'c0', content: `promoted${evaluateCalls}`, type: 'fact', tags: ['batch'] }], conflicts: [] })
+      return JSON.stringify({ promotions: [{ id: match?.[1] ?? 'c0', content: `promoted${evaluateCalls}`, type: 'factual', tags: ['batch'] }], conflicts: [] })
     }, {
       onSessionConsolidated: (processed, result) => { completed = { session: processed, result } },
     })
@@ -77,11 +79,11 @@ describe('consolidateSessionMemories', () => {
     expect(completed!.result.promoted).toBe(evaluateCalls)
   })
 
-  it('does not report a session as consolidated when a later batch fails', async () => {
+  it('recovers from a single invalid response and reports the session consolidated', async () => {
     const global = globalStore()
     const entries: MemoryEntry[] = Array.from({ length: 200 }, (_, index) => ({
       id: `c${index}`,
-      type: 'fact',
+      type: 'factual',
       content: `memory entry ${index} with some reasonably long content payload for batching`,
       sourceSessionId: 's1',
       tags: ['batch'],
@@ -98,10 +100,10 @@ describe('consolidateSessionMemories', () => {
       return JSON.stringify({ promotions: [], conflicts: [] })
     }, {
       onSessionConsolidated: () => { completed = true },
-    })).rejects.toThrow()
-    expect(completed).toBe(false)
-    // Marker must NOT be advanced — the session only gets marked after full success.
-    expect(session.consolidatedEntryIds).toEqual([])
+    })).resolves.toBeDefined()
+    // A single invalid response is retried (parseFailures < 2) and recovers.
+    expect(completed).toBe(true)
+    expect(session.consolidatedEntryIds?.length).toBe(200)
   })
 
   it('retries transient 429 errors and succeeds once the channel recovers', async () => {
@@ -111,7 +113,7 @@ describe('consolidateSessionMemories', () => {
     const result = await consolidateSessionMemories(global, [session], async () => {
       calls++
       if (calls <= 2) throw new Error('429 rate limited: all API keys are cooling down')
-      return JSON.stringify({ promotions: [{ id: 'new', content: '用户偏好简体中文回答', type: 'preference', tags: ['language'] }], conflicts: [] })
+      return JSON.stringify({ promotions: [{ id: 'new', content: '用户偏好简体中文回答', type: 'behavioral', tags: ['language'] }], conflicts: [] })
     }, { retryDelaysMs: [0, 0] })
     expect(calls).toBe(3)
     expect(result.promoted).toBe(1)
@@ -121,8 +123,8 @@ describe('consolidateSessionMemories', () => {
   it('splits a timed-out batch in half so smaller prompts finish within the deadline', async () => {
     const global = globalStore()
     const entries: MemoryEntry[] = [
-      { id: 'c0', type: 'fact', content: '用户偏好使用 TypeScript 严格模式', sourceSessionId: 's1', tags: ['ts'], confidence: 1, createdAt: '2026-09-01T00:00:00.000Z', injectedCount: 0 },
-      { id: 'c1', type: 'fact', content: '用户常用 bun 测试框架', sourceSessionId: 's1', tags: ['bun'], confidence: 1, createdAt: '2026-09-01T00:00:00.000Z', injectedCount: 0 },
+      { id: 'c0', type: 'factual', content: '用户偏好使用 TypeScript 严格模式', sourceSessionId: 's1', tags: ['ts'], confidence: 1, createdAt: '2026-09-01T00:00:00.000Z', injectedCount: 0 },
+      { id: 'c1', type: 'factual', content: '用户常用 bun 测试框架', sourceSessionId: 's1', tags: ['bun'], confidence: 1, createdAt: '2026-09-01T00:00:00.000Z', injectedCount: 0 },
     ]
     const session: SessionMemoryStore = { version: 1, sessionId: 's1', entries, consolidatedEntryIds: [], extractionHistory: [] }
     const evaluate = async (prompt: string) => {
@@ -144,13 +146,13 @@ describe('consolidateSessionMemories', () => {
 
   it('retries (without splitting) when a single-entry batch times out', async () => {
     const global = globalStore()
-    const entries: MemoryEntry[] = [{ id: 'c0', type: 'fact', content: '用户偏好使用 TypeScript 严格模式', sourceSessionId: 's1', tags: ['ts'], confidence: 1, createdAt: '2026-09-01T00:00:00.000Z', injectedCount: 0 }]
+    const entries: MemoryEntry[] = [{ id: 'c0', type: 'factual', content: '用户偏好使用 TypeScript 严格模式', sourceSessionId: 's1', tags: ['ts'], confidence: 1, createdAt: '2026-09-01T00:00:00.000Z', injectedCount: 0 }]
     const session: SessionMemoryStore = { version: 1, sessionId: 's1', entries, consolidatedEntryIds: [], extractionHistory: [] }
     let calls = 0
     const result = await consolidateSessionMemories(global, [session], async () => {
       calls++
       if (calls <= 1) throw new Error('queryLlm timed out after 115s')
-      return JSON.stringify({ promotions: [{ id: 'c0', content: '用户偏好使用 TypeScript 严格模式', type: 'fact', tags: ['ts'] }], conflicts: [] })
+      return JSON.stringify({ promotions: [{ id: 'c0', content: '用户偏好使用 TypeScript 严格模式', type: 'factual', tags: ['ts'] }], conflicts: [] })
     }, { retryDelaysMs: [0] })
     expect(calls).toBe(2)
     expect(result.promoted).toBe(1)
@@ -182,8 +184,8 @@ describe('consolidateSessionMemories', () => {
   it('drops hallucinated conflict/promotion ids instead of aborting the run', async () => {
     const global = globalStore()
     const entries: MemoryEntry[] = [
-      { id: 'c0', type: 'fact', content: '用户偏好使用 TypeScript 严格模式', sourceSessionId: 's1', tags: ['ts'], confidence: 1, createdAt: '2026-09-01T00:00:00.000Z', injectedCount: 0 },
-      { id: 'c1', type: 'fact', content: '用户常用 bun 测试框架', sourceSessionId: 's1', tags: ['bun'], confidence: 1, createdAt: '2026-09-01T00:00:00.000Z', injectedCount: 0 },
+      { id: 'c0', type: 'factual', content: '用户偏好使用 TypeScript 严格模式', sourceSessionId: 's1', tags: ['ts'], confidence: 1, createdAt: '2026-09-01T00:00:00.000Z', injectedCount: 0 },
+      { id: 'c1', type: 'factual', content: '用户常用 bun 测试框架', sourceSessionId: 's1', tags: ['bun'], confidence: 1, createdAt: '2026-09-01T00:00:00.000Z', injectedCount: 0 },
     ]
     const session: SessionMemoryStore = { version: 1, sessionId: 's1', entries, consolidatedEntryIds: [], extractionHistory: [] }
     // Hallucinations: promotion of an unknown id, conflict whose oldId does
@@ -191,8 +193,8 @@ describe('consolidateSessionMemories', () => {
     // oldId, and one VALID conflict (old global 'old' superseded by c0).
     const result = await consolidateSessionMemories(global, [session], async () => JSON.stringify({
       promotions: [
-        { id: 'c0', content: '用户偏好使用 TypeScript 严格模式', type: 'fact', tags: ['ts'] },
-        { id: 'ghost', content: '编造的候选', type: 'fact', tags: [] },
+        { id: 'c0', content: '用户偏好使用 TypeScript 严格模式', type: 'factual', tags: ['ts'] },
+        { id: 'ghost', content: '编造的候选', type: 'factual', tags: [] },
       ],
       conflicts: [
         { oldId: 'no-such-global', newId: 'c1', reason: 'oldId 不存在' },
@@ -232,7 +234,7 @@ describe('consolidateSessionMemories — tolerant response parsing (narration/ma
     const global = globalStore()
     const session = sessionStore()
     const dirty = '我们根据规则来评估候选记忆，结果如下：' +
-      JSON.stringify({ promotions: [{ id: 'new', content: '用户偏好简体中文回答', type: 'preference', tags: ['language'] }], conflicts: [] })
+      JSON.stringify({ promotions: [{ id: 'new', content: '用户偏好简体中文回答', type: 'behavioral', tags: ['language'] }], conflicts: [] })
     const result = await consolidateSessionMemories(global, [session], async () => dirty)
     expect(result.promoted).toBe(1)
     expect(global.entries.map(entry => entry.content)).toContain('用户偏好简体中文回答')
@@ -242,16 +244,16 @@ describe('consolidateSessionMemories — tolerant response parsing (narration/ma
   it('parses a response wrapped in a markdown code fence', async () => {
     const global = globalStore()
     const session = sessionStore()
-    const fenced = '```json\n' + JSON.stringify({ promotions: [{ id: 'new', content: '用户偏好简体中文回答', type: 'preference', tags: ['language'] }], conflicts: [] }) + '\n```'
+    const fenced = '```json\n' + JSON.stringify({ promotions: [{ id: 'new', content: '用户偏好简体中文回答', type: 'behavioral', tags: ['language'] }], conflicts: [] }) + '\n```'
     const result = await consolidateSessionMemories(global, [session], async () => fenced)
     expect(result.promoted).toBe(1)
     expect(global.entries.map(entry => entry.content)).toContain('用户偏好简体中文回答')
   })
 
-  it('still fails fast when the response contains no JSON object at all', async () => {
+  it('falls back to raw promotion on persistent no-JSON output (no stall)', async () => {
     const global = globalStore()
     const session = sessionStore()
-    await expect(consolidateSessionMemories(global, [session], async () => '我们根据规则来评估，但今天不整理')).rejects.toThrow()
-    expect(session.consolidatedEntryIds).toEqual([])
+    await expect(consolidateSessionMemories(global, [session], async () => '我们根据规则来评估，但今天不整理')).resolves.toBeDefined()
+    expect(session.consolidatedEntryIds).toEqual(['new'])
   })
 })

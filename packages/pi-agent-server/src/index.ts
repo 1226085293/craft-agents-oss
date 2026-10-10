@@ -644,16 +644,15 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     //   - stopReason="length" + N output tokens → reasoning burned the whole
     //     max_tokens budget without emitting a visible block (truncation)
     //   - stopReason="length" + thinking-only content (2026-08-28 incident:
-    //     ~109K ctx, reasoning ate the budget, output=0) → truncated; the
-    //     reply never completed (still fault-class via truncatedFinal below).
+    //     ~109K ctx, reasoning ate the budget, output=0) → the reasoning
+    //     block is NOT visible to the user, so the reply is still empty.
     //   - stopReason="stop" + thinking-only content (2026-10-01 incidents,
     //     261001-ready-sunset out=363 / 261001-calm-pond out=1442): a clean
-    //     stop with ONLY a thinking block. At the time thinking was NOT
-    //     visible to the user — a silent delivery. Since 2026-10-09 (d4f
-    //     fix) the SDK streams thinking_delta per reasoning_content chunk
-    //     into the UI, so a thinking block IS user-visible content and a
-    //     thinking-only clean stop is a legitimate (if thought-heavy)
-    //     delivery, not an empty one.
+    //     stop whose final message carries ONLY a thinking block. The user
+    //     saw a progress note and then NOTHING — a silent delivery. The
+    //     pre-2026-10-01 "deliberate reasoning-only finish is normal" rule
+    //     let real hung sessions pass as done; the thinking block is not
+    //     visible to the user, so the reply is still empty.
     // All are infrastructure/quality faults, not intentional finishes.
     // Anchoring strictly on the LAST assistant message is essential: run-
     // wide text scanning is already covered by hasVisibleText above and
@@ -662,27 +661,17 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     // toolUse, not a clean stop, so it never reaches this branch).
     let endsWithEmptyResponse = false;
     if (lastAssistant) {
-      // 2026-10-09 (d4f fix): the SDK streams thinking_delta per reasoning
-      // chunk into the UI, so 'thinking' blocks are user-visible content.
-      // A thinking-only clean stop is a legitimate delivery; only a final
-      // message with NEITHER visible text NOR visible thinking is empty.
       const hasVisibleTextBlock = Array.isArray(lastAssistant.content)
-        && lastAssistant.content.some((c) => {
-          const type = (c as { type?: string })?.type;
-          if (type === 'text') {
-            return String((c as { text?: unknown }).text ?? '').trim().length > 0;
-          }
-          if (type === 'thinking') {
-            return String((c as { thinking?: unknown }).thinking ?? '').trim().length > 0;
-          }
-          return false;
-        });
+        && lastAssistant.content.some(
+          (c) => (c as { type?: string })?.type === 'text'
+            && String((c as { text?: unknown }).text ?? '').trim().length > 0,
+        );
       const cleanStop = lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length';
-      // ANY clean stop whose final message lacks BOTH visible text and a
-      // visible thinking block is a silent delivery: empty content (gateway
-      // fault). Thinking-only 'length' stays fault-class via truncatedFinal
-      // (the reply never completed); thinking-only 'stop' is a delivery
-      // since 2026-10-09 (thinking is visible in the UI).
+      // ANY clean stop whose final message lacks a visible text block is a
+      // silent delivery: empty content (gateway fault), thinking-only
+      // content that burned the budget on 'length' (truncation), or a
+      // thinking-only 'stop' (2026-10-01 incidents) — thinking blocks are
+      // invisible to the user, so the reply is still empty.
       endsWithEmptyResponse = cleanStop && !hasVisibleTextBlock;
     }
     // Repetition-loop (degeneration) detection (2026-08-28 incident): the
@@ -2833,7 +2822,12 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     // SDK (see system-prompt-override.ts). When defense is enabled, the Layer 1
     // execution-discipline block is appended.
     if (msg.systemPrompt) {
-      applySystemPromptOverrideWithDefense(session, msg.systemPrompt, defenseEnabled);
+      // Wire-level confirmation of what the subprocess actually received — the
+      // main-process "appended" log is code-side, this is the message payload.
+      const sp = msg.systemPrompt;
+      const hintAt = sp.indexOf('<memory-existence-hint>');
+      debugLog(`[prompt-payload] systemPrompt=${sp.length} chars, existence-hint=${hintAt >= 0 ? 'PRESENT@' + hintAt : 'ABSENT'}, query_memories=${sp.includes('query_memories') ? 'in-description' : 'NOT-IN-SYSPROMPT'}`);
+      applySystemPromptOverrideWithDefense(session, sp, defenseEnabled);
     }
 
     // Wire up event handler

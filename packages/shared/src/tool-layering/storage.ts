@@ -21,7 +21,7 @@ import {
   TOOL_CATEGORIES_FILE,
   MISC_CATEGORY_NAME,
 } from './types.ts';
-import { DEFAULT_TOOL_LAYERING, DEFAULT_TOOL_CATEGORIES } from './defaults.ts';
+import { ALWAYS_FIXED_TOOLS, DEFAULT_TOOL_LAYERING, DEFAULT_TOOL_CATEGORIES } from './defaults.ts';
 import { validateToolLayering, ensureMiscBucket } from './validation.ts';
 
 export interface LoadToolLayeringOptions {
@@ -54,7 +54,13 @@ export function loadToolLayering(
 
   // Normalize mode enum.
   const mode = normalizeMode(layering.mode);
-  const fixedLayer = layering.fixedLayer ?? [];
+  // Built-in memory tools are always fixed, regardless of workspace config:
+  // they must stay directly callable so explicit memory requests are never
+  // folded behind a meta tool. Dedupe keeps config-provided duplicates empty.
+  const fixedLayer = [
+    ...ALWAYS_FIXED_TOOLS,
+    ...(layering.fixedLayer ?? []).filter(t => !ALWAYS_FIXED_TOOLS.includes(t as (typeof ALWAYS_FIXED_TOOLS)[number])),
+  ];
   const enterThresholdTokens =
     typeof layering.enterThresholdTokens === 'number' && layering.enterThresholdTokens > 0
       ? layering.enterThresholdTokens

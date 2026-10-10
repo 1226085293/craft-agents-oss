@@ -41,7 +41,7 @@ function targetStore(): MemoryStore {
     entries: [
       {
         id: 'target-workflow',
-        type: 'workflow',
+        type: 'behavioral',
         content: '更新craft按照仓库docs下的文档进行',
         tags: [],
         confidence: 1,

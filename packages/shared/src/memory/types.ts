@@ -10,8 +10,55 @@
 // Memory Entry
 // ============================================================================
 
-/** Type of memory fact */
-export type MemoryType = 'fact' | 'preference' | 'workflow' | 'reminder' | 'context';
+/** Type of memory fact — three-class schema (【决策】). */
+export type MemoryType = 'factual' | 'behavioral' | 'reminder';
+
+/** Legacy five-class extraction types (kept as prompt-side scaffold only). */
+export const LEGACY_MEMORY_TYPES = ['fact', 'context', 'preference', 'workflow', 'reminder'] as const;
+export type LegacyMemoryType = (typeof LEGACY_MEMORY_TYPES)[number];
+
+/**
+ * Fold a legacy five-class type into the three-class schema.
+ * fact|context → factual; preference|workflow → behavioral; reminder → reminder.
+ * Already-folded three-class values pass through unchanged (idempotent —
+ * required for the once-only migration to be repeat-safe). Unknown values
+ * fall back to 'factual' (tolerant migration).
+ */
+export function foldLegacyMemoryType(type: string): MemoryType {
+  if (type === 'factual' || type === 'behavioral' || type === 'reminder') return type;
+  switch (type) {
+    case 'fact':
+    case 'context':
+      return 'factual';
+    case 'preference':
+    case 'workflow':
+      return 'behavioral';
+    case 'reminder':
+      return 'reminder';
+    default:
+      return 'factual';
+  }
+}
+
+/**
+ * Normalize a tag for storage/comparison: trim, lowercase, collapse runs of
+ * whitespace to '-', fold common English plurals. Idempotent.
+ */
+export function normalizeTag(tag: string): string {
+  const t = tag.trim().toLowerCase().replace(/\s+/g, '-');
+  if (t.length <= 3) return t;
+  if (t.endsWith('ies')) return `${t.slice(0, -3)}y`;
+  if (t.endsWith('es')) return t.slice(0, -2);
+  if (t.endsWith('s') && !t.endsWith('ss') && !t.endsWith('us') && !t.endsWith('is')) {
+    return t.slice(0, -1);
+  }
+  return t;
+}
+
+/** Equality across normalized tags (replaces exact-match in L1/Injection/L3 routing). */
+export function equalTag(a: string, b: string): boolean {
+  return normalizeTag(a) === normalizeTag(b);
+}
 
 /** A single persistent memory entry */
 export interface MemoryEntry {
@@ -25,6 +72,13 @@ export interface MemoryEntry {
   sourceSessionId: string;
   /** Tags for retrieval (lowercase, no spaces) */
   tags: string[];
+  /**
+   * Precomputed retrieval keywords (written with the entry): phrases a user
+   * might use to ASK about this memory (同义问法、称呼、怎么问你…). Read path
+   * matches query terms against content ∪ retrievalKeywords — pure string
+   * ops, zero LLM, so semantically bridged queries hit deterministically.
+   */
+  retrievalKeywords?: string[];
   /** Extraction confidence: 0.0–1.0 */
   confidence: number;
   /** When the memory was created (ISO 8601) */
@@ -35,6 +89,20 @@ export interface MemoryEntry {
   expiresAt?: string;
   /** Whether this memory has been injected into a session */
   injectedCount: number;
+  /** Last ISO timestamp this entry was selected for injection (). */
+  lastInjectedAt?: string | null;
+  /** Prompt version that produced this entry; legacy entries backfilled "legacy". */
+  promptVersion?: string | null;
+  /** Due timestamp (ISO) — only for reminder entries; produced by extraction. */
+  dueAt?: string | null;
+  /** Source transcript message id (poisoning audit & blocked attribution). */
+  sourceMessageId?: string | null;
+  /** True after this session entry was promoted into the global store (dual-pool dedup). */
+  promoted?: boolean;
+  /** Global entry ids adjudicated as conflict (extraction marks, promotion consumes). */
+  conflictWith?: string[];
+  /** Global entry ids adjudicated as update/merge (extraction marks, promotion consumes). */
+  mergeWith?: string[];
 }
 
 // ============================================================================
@@ -43,8 +111,10 @@ export interface MemoryEntry {
 
 /** Workspace-scoped memory store file structure */
 export interface MemoryStore {
-  /** Schema version — increment when format changes */
+  /** Legacy schema marker — kept for backward compatibility ( uses schemaVersion). */
   version: 1;
+  /**  schema version. Missing/<3 triggers the once-only idempotent migration (§1.3). */
+  schemaVersion?: number;
   /** All active global memory entries */
   entries: MemoryEntry[];
   /** Recoverable deleted or superseded entries */
@@ -63,6 +133,16 @@ export interface MemoryStore {
    * survives restarts — console debug output is not persisted.
    */
   dedupBlockedCount?: number;
+  /** : controlled tag vocabulary (frequency-sorted; extraction prompt top-N). */
+  tagVocabulary?: string[];
+  /** : priority tags subset — +5 injection bonus only applies to these. */
+  priorityTags?: string[];
+  /** : adjudication/redaction audit trail (LRU-capped). */
+  blocked?: BlockedRecord[];
+  /** : failed-extraction retry queue (window snapshot based). */
+  extractionRetryQueue?: ExtractionRetryItem[];
+  /** : cumulative tag frequency across promotions (vocabulary growth gate). */
+  tagFrequency?: Record<string, number>;
 }
 
 /** A recoverable global-memory deletion record. */
@@ -71,6 +151,46 @@ export interface MemoryTrashEntry {
   deletedAt: string;
   reason?: string;
   replacedById?: string;
+}
+
+// ============================================================================
+// Adjudication audit & retry records (§1)
+// ============================================================================
+
+/** Verdict produced by the adjudication pipeline (L1 fallback included). */
+export type BlockedVerdict =
+  | 'duplicate'
+  | 'conflict'
+  | 'update'
+  | 'unrelated-shadow'
+  | 'l1-fallback'
+  | 'sensitive';
+
+/** Blocked/audit record appended to store.blocked (content is redacted). */
+export interface BlockedRecord {
+  /** Candidate content, redacted (secret → [REDACTED]) before storage. */
+  candidateContent: string;
+  candidateType: MemoryType;
+  sourceSessionId: string;
+  sourceMessageId?: string;
+  matchedGlobalId?: string;
+  matchedContent?: string;
+  verdict: BlockedVerdict;
+  reason: string;
+  /** True when recorded in shadow mode (no disposition applied). */
+  shadow: boolean;
+  blockedAt: string;
+}
+
+/** Failed-extraction retry item (window snapshot so retry replays same messages). */
+export interface ExtractionRetryItem {
+  sessionId: string;
+  strategy: 'compaction' | 'session_end';
+  /** Message-id snapshot of the failed window; retry must use the SAME window. */
+  throughMessageId: string;
+  reason: string;
+  attempts: number;
+  failedAt: string;
 }
 
 /** Session-local memory store; it is scoped by its containing session directory. */
@@ -137,16 +257,49 @@ export interface MemoryExtractionInput {
 // ============================================================================
 
 /**
- * Memory types that carry user intent (things to do / follow-up actions).
- * These get a reserved quota in injection so instruction-like memories are
- * not crowded out by high-scoring background knowledge noise.
+ * Memory types that get behavioral treatment (常规 behavioral + due reminders).
+ * Reminder-due entries additionally use the forced-injection channel (Phase 3).
  */
-export const BEHAVIORAL_MEMORY_TYPES: readonly MemoryType[] = ['preference', 'workflow', 'reminder'];
+export const BEHAVIORAL_MEMORY_TYPES: readonly MemoryType[] = ['behavioral', 'reminder'];
 
 /** True when a memory type represents user-intent behavior (vs background knowledge). */
 export function isBehavioralMemoryType(type: MemoryType): boolean {
   return (BEHAVIORAL_MEMORY_TYPES as readonly string[]).includes(type);
 }
+
+// ============================================================================
+// Feature configuration (every knob switchable; each independently revertible)
+// ============================================================================
+
+/**
+ *  memory feature configuration. All features default to safe states:
+ * adjudication starts in SHADOW mode (records only, no disposition),
+ * expansion is enabled but zero-sync-wait on the read path.
+ */
+export const memoryConfig = {
+  schemaVersion: 3,
+  types: { schema: ['factual', 'behavioral', 'reminder'] as const },
+  adjudication: {
+    enabled: true,
+    /** Shadow mode: verdicts recorded, dispositions NOT applied (【决策】 initial). */
+    shadow: true,
+    l1: { grayLow: 0.5, grayHigh: 0.75, dupTag: 0.75, dupContent: 0.85 },
+    /** 'auto': use host embedding if available, otherwise skip (known degradation). */
+    l2: { mode: 'auto' as const, routeCosine: 0.82 },
+    l3: { maxTargets: 3, candidatesPerCall: 6, timeoutMs: 30_000 },
+  },
+  expansion: { enabled: true, timeoutMs: 500, topicSwitchJaccard: 0.5, variantWeight: 0.6 },
+  decay: { coldDays: 180 },
+  reminder: { lookaheadDays: 7, maxSlots: 2 },
+  tags: { vocabPromptLimit: 80, vocabMaxSize: 200, maxNewPerExtraction: 1, promoteFrequency: 3 },
+  safety: {
+    /** Frame text around injected memory blocks neutralizing directive language. */
+    injectionFrame: true,
+    /** Redact secrets at extraction (blocked verdict 'sensitive'). */
+    redact: true,
+  },
+  retention: { snapshots: 5, trash: 200, extractionHistory: 100, blocked: 300, retryQueue: 20 },
+} as const;
 
 /** Configuration for memory injection into a session */
 export interface MemoryInjectionConfig {
@@ -165,19 +318,18 @@ export interface MemoryInjectionConfig {
    * even if it is fresh or high-confidence. Set to 0 to disable the gate and
    * always inject up to `maxMemories` (previous behavior).
    *
-   * Background knowledge memories (fact/context) use this gate; behavioral
+   * Background knowledge memories (factual) use this gate; behavioral
    * memories use {@link minBehavioralRelevanceScore} (lower, easier).
    */
   minRelevanceScore: number;
   /**
-   * Minimum TOPICAL score for behavior-type memories (preference/workflow/
-   * reminder). Kept lower than `minRelevanceScore` so instruction-like
+   * Minimum TOPICAL score for behavior-type memories (behavioral/reminder). Kept lower than `minRelevanceScore` so instruction-like
    * memories are easier to recall even with fuzzy wording.
    */
   minBehavioralRelevanceScore: number;
   /**
    * Reserved seats for behavior-type memories inside the injection list.
-   * Guarantees at least this many workflow/preference/reminder memories when
+   * Guarantees at least this many behavioral/reminder memories when
    * enough qualify, so high-scoring knowledge noise cannot occupy every slot.
    */
   behavioralQuota: number;

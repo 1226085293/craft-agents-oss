@@ -416,6 +416,12 @@ export const CHANNEL_MAP = {
   onMemoryConsolidationProgress: listener(RPC_CHANNELS.memory.MEMORY_CONSOLIDATE_PROGRESS),
   getMemorySchedule: invoke(RPC_CHANNELS.memory.MEMORY_SCHEDULE_GET),
   setMemorySchedule: invoke(RPC_CHANNELS.memory.MEMORY_SCHEDULE_SET),
+  getMemoryBlocked: invoke(RPC_CHANNELS.memory.MEMORY_GET_BLOCKED),
+  listMemoryBackups: invoke(RPC_CHANNELS.memory.MEMORY_LIST_BACKUPS),
+  restoreMemoryBackup: invoke(RPC_CHANNELS.memory.MEMORY_RESTORE_BACKUP),
+  getMemoryVocabulary: invoke(RPC_CHANNELS.memory.MEMORY_GET_VOCABULARY),
+  setMemoryVocabulary: invoke(RPC_CHANNELS.memory.MEMORY_SET_VOCABULARY),
+  deleteMemoryBackup: invoke(RPC_CHANNELS.memory.MEMORY_DELETE_BACKUP),
 
   // Usage (source & skill usage stats)
   getUsageStats: invoke(RPC_CHANNELS.usage.GET_STATS),

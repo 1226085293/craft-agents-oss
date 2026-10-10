@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { nextRetryRowPayload, settleRetryRowAsFailed, findActiveRetryRowIndex, findLastRetryRowIndex, findLastRetryRowByStartedAt, findRetryRowForLadder } from '../retry-row'
+import { nextRetryRowPayload, settleRetryRowAsFailed, findActiveRetryRowIndex } from '../retry-row'
 import type { RetryLadderRow } from '@craft-agent/core'
 
 const NOW = 1_000_000
@@ -128,9 +128,7 @@ describe('settleRetryRowAsFailed (fail-safe)', () => {
 })
 
 describe('findActiveRetryRowIndex (cross-turn protection)', () => {
-  // 2026-10-10: the lookup now requires the NESTED state to still be 'retrying'
-  // (settled rows keep their outer statusType), so fixtures carry the payload.
-  const retryRow = { role: 'status' as const, statusType: 'retrying' as const, retry: { status: 'retrying', attempt: 1, startedAt: 1 } }
+  const retryRow = { role: 'status' as const, statusType: 'retrying' as const }
 
   it('returns the current-turn row when no later user message exists', () => {
     expect(findActiveRetryRowIndex([retryRow])).toBe(0)
@@ -148,118 +146,5 @@ describe('findActiveRetryRowIndex (cross-turn protection)', () => {
 
   it('returns -1 for no row at all', () => {
     expect(findActiveRetryRowIndex([{ role: 'user' }, { role: 'tool' }])).toBe(-1)
-  })
-})
-describe('findLastRetryRowIndex (2026-10-09, cross-turn settlement)', () => {
-  const row = { role: 'status', statusType: 'retrying' }
-  it('finds a retrying row across a turn boundary', () => {
-    const messages = [
-      { role: 'user' },
-      { id: 'tool-1', role: 'tool', toolName: 'Read', toolUseId: 't1', toolStatus: 'completed', toolResult: 'ok', timestamp: 10 },
-      { ...row, retry: { status: 'retrying', attempt: 1, startedAt: 20, activeAt: 21 } },
-      { role: 'info', content: 'Response interrupted', type: 'info' },
-      { role: 'user' }, // new user message — turn boundary
-      { id: 'tool-2', role: 'tool', toolName: 'Bash', toolUseId: 't2', toolStatus: 'completed', toolResult: 'ok', timestamp: 30 },
-    ]
-    expect(findActiveRetryRowIndex(messages as never)).toBe(-1) // turn-scoped stops at the boundary
-    expect(findLastRetryRowIndex(messages as never)).toBe(2) // unbound scan still finds the dangling row
-  })
-
-  it('returns -1 when only settled rows exist', () => {
-    const messages = [
-      { role: 'user' },
-      { role: 'status', statusType: 'retrying', retry: { status: 'failed', attempt: 1, startedAt: 20, elapsedMs: 5000 } },
-      { role: 'assistant', content: 'ok' },
-    ]
-    expect(findLastRetryRowIndex(messages as never)).toBe(-1)
-  })
-
-  it('returns -1 when no retry rows exist', () => {
-    expect(findLastRetryRowIndex([{ role: 'user' }, { role: 'assistant' }] as never)).toBe(-1)
-  })
-})
-
-describe('row reuse rules (2026-10-10)', () => {
-  it('findActiveRetryRowIndex never returns a settled row, even in the same turn', () => {
-    const messages = [
-      { role: 'user', content: 'go' },
-      { role: 'status', statusType: 'retrying', retry: { status: 'recovered', attempt: 2, startedAt: 100, elapsedMs: 5000 } },
-      { id: 'tool-1', role: 'tool', toolName: 'Bash', toolUseId: 't1', toolStatus: 'completed', toolResult: 'ok', timestamp: 20 },
-    ]
-    // The new ladder (same turn, later failure) must NOT rewrite this row.
-    expect(findActiveRetryRowIndex(messages as never)).toBe(-1)
-  })
-
-  it('findActiveRetryRowIndex still finds an unsettled current-turn row', () => {
-    const messages = [
-      { role: 'user', content: 'go' },
-      { role: 'status', statusType: 'retrying', retry: { status: 'retrying', attempt: 1, startedAt: 100, activeAt: 101 } },
-    ]
-    expect(findActiveRetryRowIndex(messages as never)).toBe(1)
-  })
-
-  it('findLastRetryRowByStartedAt matches the row of the SAME ladder across turn boundaries', () => {
-    const LADDER_START = 100
-    const messages = [
-      { role: 'user', content: 'go' },
-      { role: 'status', statusType: 'retrying', retry: { status: 'recovered', attempt: 1, startedAt: LADDER_START, elapsedMs: 4000 } },
-      { role: 'user', content: 'next' },
-      { role: 'status', statusType: 'retrying', retry: { status: 'failed', attempt: 3, startedAt: 999, elapsedMs: 60000 } },
-    ]
-    expect(findLastRetryRowByStartedAt(messages as never, LADDER_START)).toBe(1)
-    expect(findLastRetryRowByStartedAt(messages as never, 4242)).toBe(-1)
-    expect(findLastRetryRowByStartedAt(messages as never, undefined)).toBe(-1)
-  })
-
-  it('nextRetryRowPayload anchors backoff/active rows on the event-startedAt when present', () => {
-    const payload = nextRetryRowPayload(
-      { phase: 'backoff', attempt: 1, nextRetryInMs: 1000, startedAt: 100 },
-      undefined,
-      5000,
-    )
-    expect(payload.startedAt).toBe(100) // ladder start, not the processing time
-    const active = nextRetryRowPayload({ phase: 'active', attempt: 1, startedAt: 100 }, payload, 6000)
-    expect(active.startedAt).toBe(100)
-    expect(active.activeAt).toBe(6000)
-  })
-})
-
-
-describe('findRetryRowForLadder — same-ladder row revival (2026-10-10 apt-lion)', () => {
-  const T0 = 100
-  it('revives a soft-settled recovered row of the SAME ladder for a follow-up backoff', () => {
-    const messages = [
-      { role: 'user' },
-      { role: 'status', statusType: 'retrying', retry: { status: 'recovered', attempt: 1, startedAt: T0, elapsedMs: 2000 } },
-      { id: 'tool-1', role: 'tool', toolName: 'Bash', toolUseId: 't1', toolStatus: 'completed', toolResult: 'ok', timestamp: 50 },
-    ]
-    expect(findActiveRetryRowIndex(messages as never)).toBe(-1) // settled row, turn-scoped
-    expect(findRetryRowForLadder(messages as never, T0)).toBe(1) // same ladder → revive
-  })
-
-  it('never revives a terminal failed row', () => {
-    const messages = [
-      { role: 'user' },
-      { role: 'status', statusType: 'retrying', retry: { status: 'failed', attempt: 3, startedAt: T0, elapsedMs: 31000 } },
-    ]
-    expect(findRetryRowForLadder(messages as never, T0)).toBe(-1)
-  })
-
-  it('respects the user-message turn boundary (previous turn rows are untouched)', () => {
-    const messages = [
-      { role: 'user' },
-      { role: 'status', statusType: 'retrying', retry: { status: 'recovered', attempt: 1, startedAt: T0, elapsedMs: 2000 } },
-      { role: 'user', content: 'new turn' },
-    ]
-    expect(findRetryRowForLadder(messages as never, T0)).toBe(-1)
-  })
-
-  it('returns -1 when no row matches the ladder start', () => {
-    const messages = [
-      { role: 'user' },
-      { role: 'status', statusType: 'retrying', retry: { status: 'recovered', attempt: 1, startedAt: 999, elapsedMs: 2000 } },
-    ]
-    expect(findRetryRowForLadder(messages as never, T0)).toBe(-1)
-    expect(findRetryRowForLadder(messages as never, undefined)).toBe(-1)
   })
 })

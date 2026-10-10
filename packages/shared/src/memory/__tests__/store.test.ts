@@ -37,7 +37,7 @@ describe('global memory trash', () => {
   it('soft-deletes to trash, restores the original entry, and clears trash permanently', () => {
     const root = makeRoot()
     const store = loadMemoryStore(root)
-    const entry = addMemoryEntry(store, '用户偏好简体中文', 'preference', 'manual')
+    const entry = addMemoryEntry(store, '用户偏好简体中文', 'behavioral', 'manual')
 
     expect(softDeleteMemoryEntry(store, entry.id, 'replaced by newer preference')).toBe(true)
     expect(store.entries).toHaveLength(0)

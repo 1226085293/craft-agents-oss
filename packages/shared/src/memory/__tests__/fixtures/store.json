@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "schemaVersion": 3,
+  "entries": [
+    { "id": "g-pnpm", "type": "behavioral", "content": "The user prefers pnpm as the package manager", "sourceSessionId": "s-old", "tags": ["pnpm", "dependencies"], "confidence": 0.95, "createdAt": "2026-01-05T00:00:00.000Z", "injectedCount": 3, "lastInjectedAt": null, "promptVersion": "pre-v3", "promoted": false },
+    { "id": "g-yarn", "type": "behavioral", "content": "The user used yarn globally before switching", "sourceSessionId": "s-old", "tags": ["yarn", "dependencies"], "confidence": 0.9, "createdAt": "2026-01-05T00:00:00.000Z", "injectedCount": 1, "lastInjectedAt": null, "promptVersion": "pre-v3", "promoted": false },
+    { "id": "g-cold", "type": "factual", "content": "Legacy migration notes for the billing service", "sourceSessionId": "s-old", "tags": ["billing", "legacy"], "confidence": 0.8, "createdAt": "2025-01-01T00:00:00.000Z", "injectedCount": 0, "lastInjectedAt": null, "promptVersion": "pre-v3", "promoted": false },
+    { "id": "g-reminder", "type": "reminder", "content": "Deliver the Q3 report on Friday", "sourceSessionId": "s-old", "tags": ["delivery", "report"], "confidence": 0.95, "createdAt": "2026-09-20T00:00:00.000Z", "injectedCount": 0, "lastInjectedAt": null, "dueAt": null, "promptVersion": "extract-v3", "promoted": false }
+  ],
+  "trash": [],
+  "extractionHistory": [],
+  "totalInjectionTokens": 0,
+  "blocked": [],
+  "tagVocabulary": ["pnpm", "dependencies", "yarn", "billing", "delivery", "report"],
+  "priorityTags": ["pnpm"],
+  "extractionRetryQueue": [],
+  "tagFrequency": {},
+  "dedupBlockedCount": 0
+}

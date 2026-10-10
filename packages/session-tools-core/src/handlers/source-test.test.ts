@@ -352,7 +352,7 @@ describe('source_test API connection branches', () => {
 // - refresh fallback only on miss
 // - works for `oauth` AND `bearer` whose token lives in the credential store
 // - existing `headerNames` flow still merges credential headers, accessToken
-//   stays undefined (regression guard).
+// stays undefined (regression guard).
 
 type ValidateMcpCall = Parameters<NonNullable<SessionToolContext['validateMcpConnection']>>[0];
 

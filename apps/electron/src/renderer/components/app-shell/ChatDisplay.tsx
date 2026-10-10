@@ -1177,9 +1177,23 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     setOverlayState(null)
   }, [])
 
-  // (overlayCards / activityOutputOverlayData / useStackedActivityOverlay are
-  // derived after allTurns below — they re-resolve the open activity against the
-  // live turn grouping so streaming thinking content keeps updating.)
+  // Extract overlay cards for activity-based overlays (Input/Output, future extensible)
+  const overlayCards = useMemo(() => {
+    if (!overlayState || overlayState.type !== 'activity') return []
+    return extractOverlayCards(overlayState.activity)
+  }, [overlayState])
+
+  // Parsed output data for legacy output-only activity overlays
+  const activityOutputOverlayData = useMemo(() => {
+    if (!overlayState || overlayState.type !== 'activity') return null
+    return extractOverlayData(overlayState.activity)
+  }, [overlayState])
+
+  // Stacked input/output cards are only enabled for Bash and MCP tools
+  const useStackedActivityOverlay = useMemo(() => {
+    if (!overlayState || overlayState.type !== 'activity') return false
+    return isStackedActivityTool(overlayState.activity)
+  }, [overlayState])
 
   // Pop-out handler - opens message in overlay (read-only markdown)
   const handlePopOut = useCallback((message: Message) => {
@@ -1839,53 +1853,6 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
   // Keep ref in sync for scroll handler
   totalTurnCountRef.current = allTurns.length
-
-  // 2026-10-09 d4f "live thinking": overlayState holds the click-time SNAPSHOT of
-  // the activity; while a thinking block streams, its message (and therefore the
-  // derived activity) grows on every thinking_delta. Re-resolve the snapshot from
-  // the current turn grouping so the open overlay follows the LIVE content.
-  // Matching is by turnId (stable across the streaming lifetime — the renderer's
-  // temp message id is swapped for the main-process id only on completion), so an
-  // overlay opened mid-stream keeps updating until the block finishes.
-  const liveActivity = React.useMemo(() => {
-    if (!overlayState || overlayState.type !== 'activity') return null
-    const snapshot = overlayState.activity
-    if (!snapshot?.turnId) return snapshot
-    for (const t of allTurns) {
-      if (t.type !== 'assistant') continue
-      const found = t.activities.find(
-        a => a.turnId === snapshot.turnId && a.type === snapshot.type && a.id === snapshot.id
-      )
-      if (found) return found
-    }
-    // Fallback: id was replaced on completion — match by turnId + type only.
-    for (const t of allTurns) {
-      if (t.type !== 'assistant') continue
-      const found = t.activities.find(
-        a => a.turnId === snapshot.turnId && a.type === snapshot.type
-      )
-      if (found) return found
-    }
-    return snapshot
-  }, [overlayState, allTurns])
-
-  // Extract overlay cards for activity-based overlays (Input/Output, future extensible)
-  const overlayCards = React.useMemo(() => {
-    if (!liveActivity) return []
-    return extractOverlayCards(liveActivity)
-  }, [liveActivity])
-
-  // Parsed output data for legacy output-only activity overlays
-  const activityOutputOverlayData = React.useMemo(() => {
-    if (!liveActivity) return null
-    return extractOverlayData(liveActivity)
-  }, [liveActivity])
-
-  // Stacked input/output cards are only enabled for Bash and MCP tools
-  const useStackedActivityOverlay = React.useMemo(() => {
-    if (!liveActivity) return false
-    return isStackedActivityTool(liveActivity)
-  }, [liveActivity])
 
   // Reverse pagination: only render last N turns for fast initial render
   const startIndex = Math.max(0, allTurns.length - visibleTurnCount)

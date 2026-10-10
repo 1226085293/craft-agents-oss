@@ -39,7 +39,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '../tooltip'
 import { parseDiffFromFile, type FileContents } from '@pierre/diffs'
 import { getDiffStats, getUnifiedDiffStats } from '../code-viewer'
 import { TurnCardActionsMenu } from './TurnCardActionsMenu'
-import { computeLastChildSet, groupActivitiesByParent, isActivityGroup, buildActivityRenderKeys, formatDuration, formatTokens, formatDateTimeFull, deriveTurnPhase, shouldShowThinkingIndicator, sortActivitiesForDisplay, canOpenActivityDetails, type ActivityGroup, type AssistantTurn } from './turn-utils'
+import { computeLastChildSet, groupActivitiesByParent, isActivityGroup, buildActivityRenderKeys, formatDuration, formatTokens, formatDateTimeFull, deriveTurnPhase, shouldShowThinkingIndicator, sortActivitiesForDisplay, type ActivityGroup, type AssistantTurn } from './turn-utils'
 import { extractAnnotationSelectedText } from './follow-up-helpers'
 import {
   formatAnnotationFollowUpTooltipText,
@@ -1013,10 +1013,7 @@ function ActivityRow({ activity, onOpenDetails, isLastChild, sessionFolderPath, 
   if (activity.type === 'intermediate') {
     const isThinking = activity.status === 'running'
     const displayContent = isThinking ? 'Thinking...' : stripMarkdown(activity.content || '')
-    // 2026-10-09 d4f: streaming (running) rows are clickable too — the details
-    // overlay follows the LIVE content while the model reasons, so clicking a
-    // live "Thinking..." row opens the reasoning text as it streams in.
-    const canOpen = canOpenActivityDetails(activity) && !!onOpenDetails
+    const isComplete = activity.status === 'completed'
     return (
       <div className="flex items-stretch">
         <TreeViewConnector depth={depth} isLastChild={isLastChild} />
@@ -1025,7 +1022,7 @@ function ActivityRow({ activity, onOpenDetails, isLastChild, sessionFolderPath, 
             "group/row flex items-center gap-2 py-0.5 text-foreground/75 flex-1 min-w-0",
             SIZE_CONFIG.fontSize
           )}
-          onClick={canOpen ? onOpenDetails : undefined}
+          onClick={onOpenDetails && isComplete ? onOpenDetails : undefined}
         >
           {isThinking ? (
             <div className={cn(SIZE_CONFIG.iconSize, "flex items-center justify-center shrink-0")}>
@@ -1034,9 +1031,9 @@ function ActivityRow({ activity, onOpenDetails, isLastChild, sessionFolderPath, 
           ) : (
             <MessageCircleDashed className={cn(SIZE_CONFIG.iconSize, "shrink-0")} />
           )}
-          <span className={cn("truncate flex-1", canOpen && "group-hover/row:underline cursor-pointer")}>{displayContent}</span>
+          <span className={cn("truncate flex-1", onOpenDetails && isComplete && "group-hover/row:underline")}>{displayContent}</span>
           {/* Open details button */}
-          {canOpen && (
+          {onOpenDetails && isComplete && (
             <div
               role="button"
               tabIndex={0}

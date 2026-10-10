@@ -148,6 +148,7 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   // appearance — local UI preferences
   RPC_CHANNELS.appearance.GET_RICH_TOOL_DESCRIPTIONS,
   RPC_CHANNELS.appearance.SET_RICH_TOOL_DESCRIPTIONS,
+  RPC_CHANNELS.appearance.CHANGED,
 
   // caching — prompt cache and context settings
   RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE,
@@ -544,6 +545,12 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.memory.MEMORY_TRASH_DELETE_MANY,
   RPC_CHANNELS.memory.MEMORY_SCHEDULE_GET,
   RPC_CHANNELS.memory.MEMORY_SCHEDULE_SET,
+  RPC_CHANNELS.memory.MEMORY_GET_BLOCKED,
+  RPC_CHANNELS.memory.MEMORY_LIST_BACKUPS,
+  RPC_CHANNELS.memory.MEMORY_RESTORE_BACKUP,
+  RPC_CHANNELS.memory.MEMORY_GET_VOCABULARY,
+  RPC_CHANNELS.memory.MEMORY_SET_VOCABULARY,
+  RPC_CHANNELS.memory.MEMORY_DELETE_BACKUP,
 ])
 
 // ---------------------------------------------------------------------------

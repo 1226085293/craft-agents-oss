@@ -51,11 +51,6 @@ export interface Session {
   name?: string
   /** Preview of first user message (from JSONL header, for lazy-loaded sessions) */
   preview?: string
-  /** 2026-10-10: true while a retry ladder is mid-flight (backoff/active;
-   *  false on its terminal end). Gate for the complete/error fail-safe: it
-   *  must NOT settle the "重试中" row while the ladder is still retrying —
-   *  success/failure only appear when the retry has REALLY finished. */
-  retryLadderActive?: boolean
   lastMessageAt: number
   messages: Message[]
   isProcessing: boolean
@@ -395,7 +390,7 @@ export type SessionEvent =
    * matching message so it is a result bubble on reload too.
    */
   | { type: 'text_promote'; sessionId: string; turnId: string; text: string }
-  | { type: 'retry'; sessionId: string; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number; /** Ladder-start epoch ms (row anchoring, 2026-10-10) */ startedAt?: number }
+  | { type: 'retry'; sessionId: string; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number }
   | { type: 'retry'; sessionId: string; phase: 'active' | 'end'; recovered?: boolean; attempt?: number; /** Ladder-start epoch ms + frozen duration — authoritative even when the row was lost (reload/restart), so the terminal line never shows 00:00. */ startedAt?: number; elapsedMs?: number }
   | { type: 'text_delta'; sessionId: string; delta: string; turnId?: string }
   | { type: 'text_complete'; sessionId: string; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; timestamp?: number; /** Streaming start time (first text_delta) for process-card ordering; `timestamp` stays the completion time */ startedAt?: number; messageId?: string }

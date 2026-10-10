@@ -289,10 +289,15 @@ export const AddMemorySchema = z.object({
   scope: z.enum(['session', 'global']).describe('session for temporary facts related only to this conversation; global only for durable user preferences, rules, and reusable knowledge'),
   id: z.string().optional(),
   content: z.string().min(1).max(4000).optional(),
-  type: z.enum(['fact', 'preference', 'workflow', 'reminder', 'context']).optional(),
+  type: z.enum(['factual', 'behavioral', 'reminder']).optional().describe('factual = facts/context; behavioral = preferences/workflows; reminder = dated reminders'),
   tags: z.array(z.string()).optional(),
 });
-export const QueryMemoriesSchema = z.object({ query: z.string().min(1) });
+export const QueryMemoriesSchema = z.object({
+  query: z.string().min(1),
+  type: z.enum(['factual', 'behavioral', 'reminder']).optional().describe('Filter by memory type (legacy 5-class entries are folded: fact/context→factual, preference/workflow→behavioral)'),
+  tags: z.array(z.string()).optional().describe('Filter by tags (entry matches if it contains any listed tag)'),
+  limit: z.number().int().min(1).max(50).optional().describe('Maximum results (default: 10)'),
+});
 
 export const DeliverFileSchema = z.object({
   path: z.string().describe('Absolute or session/workspace-relative path to the file to deliver.'),
@@ -346,8 +351,8 @@ export const TOOL_DESCRIPTIONS = {
   list_sessions: `List sessions (workspace-wide; total + paginated results, limit 20 default, sort/filters via status/label/search). Use get_session_info for details on a specific.`,
   list_background_tasks: `List background agents/tasks tracked for a session: running, finished, or orphaned (terminated when the turn launched them ended). Authoritative answer for 'what is running / what's the status?'. Omit sessionId for the current session.`,
   send_agent_message: `Send a message to another session; the target receives it with your session ID so it can reply. Use to coordinate spawned sessions, follow-up instructions, or relay information. Find ids via list_sessions or use the sessionId from spawn_session.`,
-  add_memory: `Add a memory. Use session scope for temporary/task-specific context; use global only for durable user preferences, rules, and reusable knowledge that should persist across sessions.`,
-  query_memories: `Search the current session's memories and workspace-global memories for relevant context.`,
+  add_memory: `Store information that should persist beyond this conversation. Use when the user wants something retained for later — a fact, preference, instruction, name or alias, or a rule — and write it down instead of only acknowledging it in your reply. Use session scope for temporary/task-specific facts about this conversation; use global scope for durable user preferences, rules, and reusable knowledge that should persist across sessions.`,
+  query_memories: `Check what has been stored before answering. Call this proactively whenever the question may depend on information from earlier conversations (preferences, rules, facts, names) instead of guessing from current context alone. Performs semantic expansion internally when surface keywords miss. Searches this session's memories and workspace-global memories.`,
   deliver_file: `Deliver a local file as an attachment to the messaging channel(s) bound to this session (Telegram/WhatsApp/Lark/QQ). Use when the user asks to send/forward a generated/downloaded file to their phone or app. Prefer this over printing a link when a real attachment is wanted.`,
   list_messaging_channels: `List messaging channels (Telegram/WhatsApp/Lark/QQ) bound to this session — shows which external chat apps are connected to send/receive files.`,
   unbind_messaging_channel: `Disconnect a messaging channel from this session so messages stop forwarding. Optionally specify platform (e.g. telegram); default removes all.`,

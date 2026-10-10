@@ -56,6 +56,13 @@ export interface SessionToolCallbacks {
    * Codex: sends __CALLBACK__ message to stderr
    */
   onAuthRequest(request: AuthRequest): void;
+
+  /**
+   * Lightweight LLM call for tool-internal subtasks (keyword expansion,
+   * short classification). Runs on the default model with thinking disabled
+   * and a timeout; returns null on failure/timeout — callers must fall back.
+   */
+  runMiniCompletion?(prompt: string): Promise<string | null>;
 }
 
 // ============================================================

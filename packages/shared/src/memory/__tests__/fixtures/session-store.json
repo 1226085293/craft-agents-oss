@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "sessionId": "replay-session",
+  "entries": [
+    { "id": "s-promoted", "type": "behavioral", "content": "The user prefers pnpm as the package manager", "sourceSessionId": "replay-session", "tags": ["pnpm", "dependencies"], "confidence": 0.95, "createdAt": "2026-10-01T00:00:00.000Z", "injectedCount": 0, "lastInjectedAt": null, "promptVersion": "extract-v3", "promoted": true },
+    { "id": "s-conflict", "type": "behavioral", "content": "The user switched from yarn to pnpm this month", "sourceSessionId": "replay-session", "tags": ["pnpm"], "confidence": 0.95, "createdAt": "2026-10-02T00:00:00.000Z", "injectedCount": 0, "lastInjectedAt": null, "promptVersion": "extract-v3", "promoted": false, "conflictWith": ["g-yarn"] }
+  ],
+  "consolidatedEntryIds": [],
+  "extractionHistory": []
+}

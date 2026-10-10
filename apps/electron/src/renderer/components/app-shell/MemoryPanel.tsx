@@ -2,9 +2,10 @@ import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import type { DateRange } from 'react-day-picker'
 import { cn } from '@/lib/utils'
+import type { MemoryType } from '@craft-agent/shared/memory'
 import {
   Brain, Trash2, Plus, Search, RotateCcw, Pencil, Check, X, Sparkles,
-  Loader2, CalendarDays, Clock, ArrowLeft, SearchX, XCircle,
+  Loader2, CalendarDays, Clock, ArrowLeft, SearchX, XCircle, Database,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -27,6 +28,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { MemoryScheduleDialog, type MemoryScheduleState } from './MemoryScheduleDialog'
+import { MemoryDataPanel } from './MemoryDataPanel'
+import { isColdMemory } from '@craft-agent/shared/memory/browser'
 
 interface MemoryPanelProps {
   workspaceRootPath?: string
@@ -34,8 +37,6 @@ interface MemoryPanelProps {
   scope?: 'global' | 'session'
   className?: string
 }
-
-type MemoryType = 'fact' | 'preference' | 'workflow' | 'reminder' | 'context'
 
 interface MemoryEntry {
   id: string
@@ -45,6 +46,9 @@ interface MemoryEntry {
   confidence: number
   createdAt: string
   sourceSessionId: string
+  lastInjectedAt?: string | null
+  dueAt?: string | null
+  promptVersion?: string | null
 }
 
 interface TrashedMemory {
@@ -64,7 +68,7 @@ type TimeRangeFilter = 'all' | 'day' | 'week' | 'month' | 'custom'
 type SortOrder = 'newest' | 'oldest'
 type ConfirmAction = 'clearTrash' | 'deleteSelected' | null
 
-const MEMORY_TYPES: MemoryType[] = ['fact', 'preference', 'workflow', 'reminder', 'context']
+const MEMORY_TYPES: MemoryType[] = ['factual', 'behavioral', 'reminder']
 
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -91,11 +95,9 @@ function formatRangeDate(date: Date): string {
 }
 
 const TYPE_COLORS: Record<string, string> = {
-  fact: 'bg-blue-500/10 text-blue-500 border-blue-500/20',
-  preference: 'bg-green-500/10 text-green-500 border-green-500/20',
-  workflow: 'bg-purple-500/10 text-purple-500 border-purple-500/20',
+  factual: 'bg-blue-500/10 text-blue-500 border-blue-500/20',
+  behavioral: 'bg-green-500/10 text-green-500 border-green-500/20',
   reminder: 'bg-amber-500/10 text-amber-500 border-amber-500/20',
-  context: 'bg-gray-500/10 text-gray-500 border-gray-500/20',
 }
 
 /**
@@ -153,14 +155,15 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
 
   // Add / edit / trash
   const [newMemory, setNewMemory] = React.useState('')
-  const [newMemoryType, setNewMemoryType] = React.useState<MemoryType>('fact')
+  const [newMemoryType, setNewMemoryType] = React.useState<MemoryType>('factual')
   const [showAddForm, setShowAddForm] = React.useState(false)
   const [showTrash, setShowTrash] = React.useState(false)
+  const [dataPanelOpen, setDataPanelOpen] = React.useState(false)
   const [trash, setTrash] = React.useState<TrashedMemory[]>([])
   const [selectedIds, setSelectedIds] = React.useState<string[]>([])
   const [editingId, setEditingId] = React.useState<string | null>(null)
   const [editContent, setEditContent] = React.useState('')
-  const [editType, setEditType] = React.useState<MemoryType>('fact')
+  const [editType, setEditType] = React.useState<MemoryType>('factual')
   const [confirmAction, setConfirmAction] = React.useState<ConfirmAction>(null)
 
   // Consolidation (event-driven: the run lives on the server, the UI mirrors it)
@@ -175,7 +178,9 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
   // Range-selection anchor for shift+click (Windows-style file selection)
   const [selectionAnchorId, setSelectionAnchorId] = React.useState<string | null>(null)
 
-  const typeLabel = React.useCallback((type: string) => t(`memory.type.${type}`, { defaultValue: type }), [t])
+  const typeLabel = React.useCallback((type: string) => t(`memory.type.${type}`, {
+    defaultValue: ({ factual: 'Factual', behavioral: 'Behavioral', reminder: 'Reminder' } as Record<string, string>)[type] ?? type,
+  }), [t])
 
   const loadMemories = React.useCallback(async () => {
     if (!workspaceRootPath) return
@@ -537,6 +542,16 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
           variant="ghost"
           size="sm"
           className="h-7 gap-1 text-xs"
+          onClick={() => setDataPanelOpen(true)}
+          title={t('memory.dataManagement', { defaultValue: 'Audit / vocabulary / snapshots' })}
+        >
+          <Database className="h-3.5 w-3.5" />
+          {t('memory.data', { defaultValue: 'Data' })}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1 text-xs"
           onClick={() => setShowTrash(true)}
           aria-label={t('memory.trash', { count: trash.length })}
         >
@@ -866,24 +881,28 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
             )
         ) : filteredMemories.length === 0 ? (
           isEmptyGuide ? (
-            <div className="flex h-full min-h-[260px] w-full flex-col items-center justify-center gap-3 px-6 text-center">
-              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-foreground/5 text-muted-foreground">
-                <Brain className="h-6 w-6" />
+            scope === 'global' ? (
+              <div className="flex h-full min-h-[260px] w-full flex-col items-center justify-center gap-3 px-6 text-center">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-foreground/5 text-muted-foreground">
+                  <Brain className="h-6 w-6" />
+                </div>
+                <p className="max-w-[340px] text-xs leading-relaxed text-muted-foreground">
+                  {t('memory.emptyGuide')}
+                </p>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className="h-8 gap-1 text-xs"
+                  onClick={handleConsolidate}
+                  disabled={isConsolidating}
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  {t('memory.consolidate')}
+                </Button>
               </div>
-              <p className="max-w-[340px] text-xs leading-relaxed text-muted-foreground">
-                {t('memory.emptyGuide')}
-              </p>
-              <Button
-                variant="secondary"
-                size="sm"
-                className="h-8 gap-1 text-xs"
-                onClick={handleConsolidate}
-                disabled={isConsolidating}
-              >
-                <Sparkles className="h-3.5 w-3.5" />
-                {t('memory.consolidate')}
-              </Button>
-            </div>
+            ) : (
+              <EmptyState icon={<Brain className="h-5 w-5" />} label={t('memory.empty')} />
+            )
           ) : (
             <EmptyState icon={<SearchX className="h-5 w-5" />} label={t('memory.noResults')} />
           )
@@ -919,6 +938,16 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
                 >
                   {typeLabel(memory.type)}
                 </Badge>
+                {memory.dueAt ? (
+                  <Badge variant="outline" className="mt-0.5 shrink-0 px-1.5 py-0 text-[10px] text-amber-500 border-amber-500/30">
+                    due {new Date(memory.dueAt).toLocaleDateString()}
+                  </Badge>
+                ) : null}
+                {isColdMemory(memory.lastInjectedAt ?? null, memory.createdAt) ? (
+                  <Badge variant="outline" className="mt-0.5 shrink-0 px-1.5 py-0 text-[10px] text-slate-400 border-foreground/10" title="Cold: not recalled in a long time">
+                    cold
+                  </Badge>
+                ) : null}
                 {editingId === memory.id ? (
                   <div
                     className="flex min-w-0 flex-1 flex-col gap-1.5"
@@ -1022,6 +1051,11 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
           onSave={handleScheduleSave}
         />
       )}
+      <MemoryDataPanel
+        workspaceRootPath={workspaceRootPath}
+        open={dataPanelOpen}
+        onOpenChange={setDataPanelOpen}
+      />
     </div>
   )
 }

@@ -1,4 +1,6 @@
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
+import { existsSync, readFileSync, readdirSync, statSync, copyFileSync } from 'node:fs'
+import { join, dirname, basename } from 'node:path'
 import {
   loadMemoryStore,
   saveMemoryStore,
@@ -10,10 +12,10 @@ import {
   permanentlyDeleteTrashEntries,
   getMemoryStats,
 } from '@craft-agent/shared/memory/store'
-import { consolidateSessionMemories, MemoryConsolidationScheduler } from '@craft-agent/shared/memory'
+import { consolidateSessionMemories, MemoryConsolidationScheduler, withMemoryWriteLock, type MemoryStore } from '@craft-agent/shared/memory'
 import { resolveTitleLanguageName, getDefaultLlmConnection, getLlmConnection } from '@craft-agent/shared/config'
 import { listSessions as listStoredSessions } from '@craft-agent/shared/sessions'
-import { addSessionMemory, deleteSessionMemory, updateSessionMemory, loadSessionMemoryStore, saveSessionMemoryStore } from '@craft-agent/shared/memory'
+import { addSessionMemory, deleteSessionMemory, updateSessionMemory, loadSessionMemoryStore, saveSessionMemoryStore, normalizeTag } from '@craft-agent/shared/memory'
 import type { HandlerDeps } from '../handler-deps'
 import type { RpcServer } from '@craft-agent/server-core/transport'
 
@@ -44,7 +46,27 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.memory.MEMORY_TRASH_DELETE_MANY,
   RPC_CHANNELS.memory.MEMORY_SCHEDULE_GET,
   RPC_CHANNELS.memory.MEMORY_SCHEDULE_SET,
+  RPC_CHANNELS.memory.MEMORY_GET_BLOCKED,
+  RPC_CHANNELS.memory.MEMORY_LIST_BACKUPS,
+  RPC_CHANNELS.memory.MEMORY_RESTORE_BACKUP,
+  RPC_CHANNELS.memory.MEMORY_GET_VOCABULARY,
+  RPC_CHANNELS.memory.MEMORY_SET_VOCABULARY,
+  RPC_CHANNELS.memory.MEMORY_DELETE_BACKUP,
 ] as const
+
+
+/**
+ * Load → mutate → save under the process write lock (§1.4). UI 操作与 cron 整理
+ * 共用同一 mutex，避免交错写坏 memory.json。
+ */
+async function mutateStore<T>(workspaceRootPath: string, mutate: (store: MemoryStore) => T | Promise<T>): Promise<T> {
+  return withMemoryWriteLock(async () => {
+    const store = loadMemoryStore(workspaceRootPath)
+    const result = await mutate(store)
+    saveMemoryStore(workspaceRootPath, store)
+    return result
+  })
+}
 
 /**
  * Memory is workspace-scoped: the store must live at `<workspaceRoot>/memory.json`
@@ -117,6 +139,8 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
       return response
     }, {
       language,
+      // Write-time adjudication gate needs the mini-model completion (§5.1).
+      runMiniCompletion: agent.runMiniCompletion ? agent.runMiniCompletion.bind(agent) : undefined,
       // Check the cooperative-cancel flag between LLM calls and backoff
       // sleeps so "Cancel" settles quickly even while retrying.
       isCancelled: () => consolidationCancelled.get(workspaceRootPath) === true,
@@ -135,8 +159,11 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
         // batches). Session stores are saved one-by-one, so a restart or
         // model failure mid-run never marks a session as organized without
         // its work having completed — completed sessions keep their markers.
-        saveMemoryStore(workspaceRootPath, globalStore)
-        saveSessionMemoryStore(workspaceRootPath, session)
+        // Writes go under the shared memory write lock (§1.4 UI/cron 共用).
+        void withMemoryWriteLock(() => {
+          saveMemoryStore(workspaceRootPath, globalStore)
+          saveSessionMemoryStore(workspaceRootPath, session)
+        })
         done += 1
         const runState = consolidationRunState.get(workspaceRootPath)
         if (runState) runState.done = done
@@ -190,41 +217,32 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
     if (!workspaceRootPath) throw new Error('workspaceRootPath is required')
     if (!data?.content?.trim()) throw new Error('content is required')
 
-    const store = loadMemoryStore(workspaceRootPath)
-    const entry = addMemoryEntry(
-      store,
-      data.content.trim(),
-      data.type as any,
-      'manual',
-      data.tags || [],
-      data.confidence ?? 1.0,
-    )
-    saveMemoryStore(workspaceRootPath, store)
-    return { id: entry.id }
+    return mutateStore(workspaceRootPath, (store) => {
+      const entry = addMemoryEntry(
+        store,
+        data.content.trim(),
+        data.type as any,
+        'manual',
+        data.tags || [],
+        data.confidence ?? 1.0,
+      )
+      return { id: entry.id }
+    })
   })
 
   server.handle(RPC_CHANNELS.memory.MEMORY_DELETE, async (_ctx: unknown, workspaceRootPath: string, id: string) => {
     if (!workspaceRootPath) throw new Error('workspaceRootPath is required')
-    const store = loadMemoryStore(workspaceRootPath)
-    const success = softDeleteMemoryEntry(store, id)
-    saveMemoryStore(workspaceRootPath, store)
-    return { success }
+    return mutateStore(workspaceRootPath, (store) => ({ success: softDeleteMemoryEntry(store, id) }))
   })
 
   server.handle(RPC_CHANNELS.memory.MEMORY_DELETE_MANY, async (_ctx: unknown, workspaceRootPath: string, ids: string[]) => {
     if (!workspaceRootPath || !Array.isArray(ids)) throw new Error('workspaceRootPath and ids are required')
-    const store = loadMemoryStore(workspaceRootPath)
-    const deleted = ids.filter(id => softDeleteMemoryEntry(store, id))
-    saveMemoryStore(workspaceRootPath, store)
-    return { deleted: deleted.length }
+    return mutateStore(workspaceRootPath, (store) => ({ deleted: ids.filter(id => softDeleteMemoryEntry(store, id)).length }))
   })
 
   server.handle(RPC_CHANNELS.memory.MEMORY_UPDATE, async (_ctx: unknown, workspaceRootPath: string, id: string, updates: { content?: string; type?: string; tags?: string[] }) => {
     if (!workspaceRootPath) throw new Error('workspaceRootPath is required')
-    const store = loadMemoryStore(workspaceRootPath)
-    const entry = updateMemoryEntry(store, id, { ...updates, type: updates.type as any })
-    saveMemoryStore(workspaceRootPath, store)
-    return { success: !!entry }
+    return mutateStore(workspaceRootPath, (store) => ({ success: !!updateMemoryEntry(store, id, { ...updates, type: updates.type as any }) }))
   })
 
   server.handle(RPC_CHANNELS.memory.MEMORY_GET_TRASH, async (_ctx: unknown, workspaceRootPath: string) => {
@@ -234,26 +252,17 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
 
   server.handle(RPC_CHANNELS.memory.MEMORY_RESTORE, async (_ctx: unknown, workspaceRootPath: string, id: string) => {
     if (!workspaceRootPath) throw new Error('workspaceRootPath is required')
-    const store = loadMemoryStore(workspaceRootPath)
-    const success = restoreMemoryEntry(store, id)
-    if (success) saveMemoryStore(workspaceRootPath, store)
-    return { success }
+    return mutateStore(workspaceRootPath, (store) => ({ success: restoreMemoryEntry(store, id) }))
   })
 
   server.handle(RPC_CHANNELS.memory.MEMORY_CLEAR_TRASH, async (_ctx: unknown, workspaceRootPath: string) => {
     if (!workspaceRootPath) throw new Error('workspaceRootPath is required')
-    const store = loadMemoryStore(workspaceRootPath)
-    const count = clearMemoryTrash(store)
-    saveMemoryStore(workspaceRootPath, store)
-    return { count }
+    return mutateStore(workspaceRootPath, (store) => ({ count: clearMemoryTrash(store) }))
   })
 
   server.handle(RPC_CHANNELS.memory.MEMORY_TRASH_DELETE_MANY, async (_ctx: unknown, workspaceRootPath: string, ids: string[]) => {
     if (!workspaceRootPath || !Array.isArray(ids)) throw new Error('workspaceRootPath and ids are required')
-    const store = loadMemoryStore(workspaceRootPath)
-    const deleted = permanentlyDeleteTrashEntries(store, ids)
-    saveMemoryStore(workspaceRootPath, store)
-    return { deleted }
+    return mutateStore(workspaceRootPath, (store) => ({ deleted: permanentlyDeleteTrashEntries(store, ids) }))
   })
 
   server.handle(RPC_CHANNELS.memory.MEMORY_SESSION_GET, async (_ctx: unknown, workspaceRootPath: string, sessionId: string) => {
@@ -295,10 +304,10 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
     if (typeof schedule?.enabled !== 'boolean') throw new Error('enabled is required')
     const { Cron } = await import('croner')
     try { new Cron(schedule.cron, { timezone: schedule.timezone }) } catch { throw new Error('Invalid consolidation cron expression') }
-    const store = loadMemoryStore(workspaceRootPath)
-    store.consolidationSchedule = { enabled: schedule.enabled, cron: schedule.cron, ...(schedule.timezone ? { timezone: schedule.timezone } : {}) }
-    saveMemoryStore(workspaceRootPath, store)
-    return { success: true }
+    return mutateStore(workspaceRootPath, (store) => {
+      store.consolidationSchedule = { enabled: schedule.enabled, cron: schedule.cron, ...(schedule.timezone ? { timezone: schedule.timezone } : {}) }
+      return { success: true }
+    })
   })
 
   server.handle(RPC_CHANNELS.memory.MEMORY_CONSOLIDATE_CANCEL, async (_ctx: unknown, workspaceRootPath: string) => {
@@ -361,5 +370,81 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
       throw new Error('Agent not initialized for this session')
     }
     return agent.extractSessionMemories()
+  })
+
+  // ---- audit & retention UI (§5.4) -------------------------------------
+
+  server.handle(RPC_CHANNELS.memory.MEMORY_GET_BLOCKED, async (_ctx: unknown, workspaceRootPath: string) => {
+    const store = loadMemoryStore(workspaceRootPath)
+    return [...(store.blocked ?? [])].reverse()
+  })
+
+  server.handle(RPC_CHANNELS.memory.MEMORY_LIST_BACKUPS, async (_ctx: unknown, workspaceRootPath: string) => {
+    const filePath = join(workspaceRootPath, 'memory.json')
+    const dir = dirname(filePath)
+    const base = basename(filePath, '.json')
+    const backups: Array<{ index: number, size: number, updatedAt: string }> = []
+    try {
+      for (let i = 0; i < 5; i++) {
+        const p = join(dir, `${base}.backup.${i}.json`)
+        if (!existsSync(p)) continue
+        const st = statSync(p)
+        backups.push({ index: i, size: st.size, updatedAt: st.mtime.toISOString() })
+      }
+    } catch { /* listing is best-effort */ }
+    const current = existsSync(filePath) ? statSync(filePath).size : 0
+    return { current, backups }
+  })
+
+  server.handle(RPC_CHANNELS.memory.MEMORY_RESTORE_BACKUP, async (_ctx: unknown, workspaceRootPath: string, index: number) => {
+    if (typeof index !== 'number' || index < 0 || index >= 5) return { ok: false, reason: 'invalid backup index' }
+    const filePath = join(workspaceRootPath, 'memory.json')
+    const backupPath = join(dirname(filePath), `${basename(filePath, '.json')}.backup.${index}.json`)
+    if (!existsSync(backupPath)) return { ok: false, reason: 'backup not found' }
+    try {
+      const tmpPath = filePath + '.restore.tmp'
+      copyFileSync(backupPath, tmpPath)
+      const { renameSync } = await import('node:fs')
+      renameSync(tmpPath, filePath)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  server.handle(RPC_CHANNELS.memory.MEMORY_DELETE_BACKUP, async (_ctx: unknown, workspaceRootPath: string, index: number) => {
+    if (typeof index !== 'number' || index < 0 || index >= 5) return { ok: false, reason: 'invalid backup index' }
+    const filePath = join(workspaceRootPath, 'memory.json')
+    const backupPath = join(dirname(filePath), `${basename(filePath, '.json')}.backup.${index}.json`)
+    if (!existsSync(backupPath)) return { ok: false, reason: 'backup not found' }
+    try {
+      const { unlinkSync } = await import('node:fs')
+      unlinkSync(backupPath)
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  server.handle(RPC_CHANNELS.memory.MEMORY_GET_VOCABULARY, async (_ctx: unknown, workspaceRootPath: string) => {
+    const store = loadMemoryStore(workspaceRootPath)
+    return { tagVocabulary: store.tagVocabulary ?? [], priorityTags: store.priorityTags ?? [] }
+  })
+
+  server.handle(RPC_CHANNELS.memory.MEMORY_SET_VOCABULARY, async (_ctx: unknown, workspaceRootPath: string, payload: { tagVocabulary?: string[]; priorityTags?: string[] }) => {
+    return mutateStore(workspaceRootPath, (store) => {
+      if (Array.isArray(payload.tagVocabulary)) {
+        store.tagVocabulary = payload.tagVocabulary
+          .map((t: string) => String(t).trim().toLowerCase())
+          .filter((t: string) => t.length > 0)
+      }
+      if (Array.isArray(payload.priorityTags)) {
+        const vocab = new Set(store.tagVocabulary ?? [])
+        store.priorityTags = payload.priorityTags
+          .map((t: string) => String(t).trim().toLowerCase())
+          .filter((t: string) => t.length > 0 && vocab.has(t)) // controlled subset of the vocabulary
+      }
+      return { ok: true, tagVocabulary: store.tagVocabulary ?? [], priorityTags: store.priorityTags ?? [] }
+    })
   })
 }

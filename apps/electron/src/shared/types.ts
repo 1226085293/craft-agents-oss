@@ -701,6 +701,12 @@ export interface ElectronAPI {
   onMemoryConsolidationProgress(callback: (progress: MemoryConsolidationProgress) => void): () => void
   getMemorySchedule(workspaceRootPath: string): Promise<{ enabled: boolean; cron: string; timezone?: string }>
   setMemorySchedule(workspaceRootPath: string, schedule: { enabled: boolean; cron: string; timezone?: string }): Promise<{ success: boolean }>
+  getMemoryBlocked(workspaceRootPath: string): Promise<{ blocked: Array<import('@craft-agent/shared/memory').BlockedRecord> }>
+  listMemoryBackups(workspaceRootPath: string): Promise<{ backups: Array<{ index: number; updatedAt: string; size: number }> }>
+  restoreMemoryBackup(workspaceRootPath: string, index: number): Promise<{ ok: boolean; entries: number }>
+  getMemoryVocabulary(workspaceRootPath: string): Promise<{ tagVocabulary: string[]; priorityTags: string[] }>
+  setMemoryVocabulary(workspaceRootPath: string, payload: { tagVocabulary?: string[]; priorityTags?: string[] }): Promise<{ ok: boolean; tagVocabulary?: string[]; priorityTags?: string[] }>
+  deleteMemoryBackup(workspaceRootPath: string, index: number): Promise<{ ok: boolean; reason?: string }>
   extractSessionMemories(sessionId: string): Promise<{ extracted: number; discarded: number }>
 
   // Usage (source & skill usage stats)
@@ -828,7 +834,7 @@ export interface ElectronAPI {
   onMessagingPendingChanged(callback: (workspaceId: string) => void): () => void
 }
 // Memory types
-export type MemoryType = 'fact' | 'preference' | 'workflow' | 'reminder' | 'context';
+export type MemoryType = import('@craft-agent/shared/memory').MemoryType;
 export interface MemoryEntry {
   id: string;
   type: MemoryType;

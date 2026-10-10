@@ -13,7 +13,7 @@ describe('session memory store', () => {
     const workspace = root()
     const a = loadSessionMemoryStore(workspace, 'session-a')
     const b = loadSessionMemoryStore(workspace, 'session-b')
-    addSessionMemory(a, '当前会话部署端口是 8080', 'context')
+    addSessionMemory(a, '当前会话部署端口是 8080', 'factual')
     saveSessionMemoryStore(workspace, a)
 
     expect(getSessionMemoryStorePath(workspace, 'session-a')).toContain(join('sessions', 'session-a', 'memory.json'))

@@ -520,6 +520,12 @@ export const RPC_CHANNELS = {
     MEMORY_TRASH_DELETE_MANY: 'memory:trash:deleteMany',
     MEMORY_SCHEDULE_GET: 'memory:schedule:get',
     MEMORY_SCHEDULE_SET: 'memory:schedule:set',
+    MEMORY_GET_BLOCKED: 'memory:getBlocked',
+    MEMORY_LIST_BACKUPS: 'memory:listBackups',
+    MEMORY_RESTORE_BACKUP: 'memory:restoreBackup',
+    MEMORY_GET_VOCABULARY: 'memory:getVocabulary',
+    MEMORY_SET_VOCABULARY: 'memory:setVocabulary',
+    MEMORY_DELETE_BACKUP: 'memory:deleteBackup',
   },
   usage: {
     GET_STATS: 'usage:getStats',

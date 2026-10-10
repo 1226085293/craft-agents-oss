@@ -885,22 +885,6 @@ export function getTurnIntent(turn: AssistantTurn): string | undefined {
 }
 
 /**
- * Whether an activity row can open its details overlay.
- *
- * 2026-10-09 d4f "live thinking": streaming intermediate rows (the live
- * "Thinking..." step) are clickable too — the details overlay re-resolves the
- * activity against the live turn grouping, so clicking a row mid-stream opens
- * the reasoning text as it continues to grow.
- */
-export function canOpenActivityDetails(activity: ActivityItem): boolean {
-  if (activity.type === 'intermediate') {
-    return activity.status === 'running' || activity.status === 'completed'
-  }
-  // Tool/status rows keep the completed-only behavior.
-  return activity.status === 'completed'
-}
-
-/**
  * Check if any activity in the turn is still running
  */
 export function hasPendingActivities(turn: AssistantTurn): boolean {

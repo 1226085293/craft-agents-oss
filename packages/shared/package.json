@@ -26,6 +26,8 @@
     "./config/types": "./src/config/types.ts",
     "./credentials": "./src/credentials/index.ts",
     "./mcp": "./src/mcp/index.ts",
+    "./memory": "./src/memory/index.ts",
+    "./memory/browser": "./src/memory/browser.ts",
     "./prompts": "./src/prompts/index.ts",
     "./retry/retry-row": "./src/retry/retry-row.ts",
     "./sessions": "./src/sessions/index.ts",

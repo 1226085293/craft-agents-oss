@@ -135,58 +135,12 @@ export interface CollapsedPaginationResult {
   collapsedGroupsMeta: CollapsedGroupMeta[]
 }
 
-/**
- * Unread-mode pagination: unread sessions are the entire point of this view,
- * so they must never be hidden behind the display limit. Every unread item is
- * rendered (unless the unread bucket is collapsed — then its count is surfaced
- * via collapsedGroupsMeta), and pagination applies only to the read bucket.
- * Counts are computed from the full item list, never the truncated window, so
- * the "Unread (n)" header can't lie about sessions that exist but sit beyond
- * the first page.
- */
-function computeUnreadPagination(
-  items: SessionMeta[],
-  displayLimit: number,
-  collapsedGroups?: Set<string>,
-): CollapsedPaginationResult {
-  const unreadItems = items.filter(item => item.hasUnread === true)
-  const readItems = items.filter(item => item.hasUnread !== true)
-
-  // Safety guard (mirrors the single-group rule below): if the current view
-  // has only one bucket there is no meaningful collapse UX, so both buckets
-  // render fully and collapsed state is ignored.
-  const canCollapse = unreadItems.length > 0 && readItems.length > 0
-
-  const collapsedUnread = canCollapse && collapsedGroups?.has('unread-yes') === true
-  const collapsedRead = canCollapse && collapsedGroups?.has('unread-no') === true
-
-  const meta: CollapsedGroupMeta[] = []
-  if (collapsedUnread) meta.push({ key: 'unread-yes', count: unreadItems.length })
-  if (collapsedRead) meta.push({ key: 'unread-no', count: readItems.length })
-
-  const paginatedItems: SessionMeta[] = [
-    ...(collapsedUnread ? [] : unreadItems),
-    ...(collapsedRead ? [] : readItems.slice(0, displayLimit)),
-  ]
-
-  return {
-    paginatedItems,
-    hasMore: !collapsedRead && displayLimit < readItems.length,
-    collapsedGroupsMeta: meta,
-  }
-}
-
 export function computeCollapsedPagination(
   items: SessionMeta[],
   displayLimit: number,
   collapsedGroups?: Set<string>,
   groupingMode?: 'date' | 'status' | 'unread' | 'project',
 ): CollapsedPaginationResult {
-  // Unread grouping gets dedicated pagination: unread items are never truncated.
-  if (groupingMode === 'unread') {
-    return computeUnreadPagination(items, displayLimit, collapsedGroups)
-  }
-
   // Fast path: no collapse state → original slice
   if (!collapsedGroups || collapsedGroups.size === 0) {
     return {

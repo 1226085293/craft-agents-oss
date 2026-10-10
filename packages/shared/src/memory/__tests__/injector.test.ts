@@ -19,7 +19,7 @@ function makeEntry(partial: Partial<MemoryEntry> & { content: string }): MemoryE
   idCounter += 1
   return {
     id: `mem-${idCounter}`,
-    type: 'fact',
+    type: 'factual',
     tags: [],
     confidence: 0.9,
     createdAt: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
@@ -108,7 +108,7 @@ describe('selectRelevantMemories', () => {
     // Generic label `craft-agent` shared by a flood of unrelated knowledge.
     const knowledgeNoise = Array.from({ length: 12 }, (_, i) =>
       makeEntry({
-        type: i % 2 === 0 ? 'fact' : 'context',
+        type: 'factual',
         tags: ['craft-agent', `noise-${i}`],
         content: `Craft Agent background detail number ${i}: credentials backup storage file paths keys loss handling process across sessions.`,
         confidence: 0.95,
@@ -116,7 +116,7 @@ describe('selectRelevantMemories', () => {
       }))
     const workflow = makeEntry({
       id: 'target-workflow',
-      type: 'workflow',
+      type: 'behavioral',
       tags: [],
       confidence: 1,
       content: '用户要求完成工作后自己更新craft按照仓库docs里的文档流程进行',
@@ -138,9 +138,9 @@ describe('selectRelevantMemories', () => {
   })
 
   it('behavioral quota guarantees seats for user-intent memories even when knowledge scores higher', () => {
-    const hotKnowledge = makeEntry({ type: 'context', content: 'active link from government official', createdAt: new Date().toISOString() })
+    const hotKnowledge = makeEntry({ type: 'factual', content: 'active link from government official', createdAt: new Date().toISOString() })
     const midWorkflow = makeEntry({
-      type: 'workflow',
+      type: 'behavioral',
       content: '发布前按照仓库docs下的文档流程更新craft',
       createdAt: new Date().toISOString(),
     })
@@ -152,7 +152,7 @@ describe('selectRelevantMemories', () => {
       minRelevanceScore: 0, // let knowledge in easily
     })
     // Both entries make it, but the workflow is not dropped in the process
-    expect(selected.some(m => m.type === 'workflow')).toBe(true)
+    expect(selected.some(m => m.type === 'behavioral')).toBe(true)
   })
 
   it('returns nothing when no memory matches the conversation (recall gate works)', () => {
@@ -191,12 +191,10 @@ describe('selectRelevantMemories', () => {
     expect(selected.some(m => m.id === bigMem.id)).toBe(false)
   })
 
-  it('isBehavioralMemoryType groups workflow/preference/reminder together', () => {
-    expect(isBehavioralMemoryType('workflow')).toBe(true)
-    expect(isBehavioralMemoryType('preference')).toBe(true)
+  it('isBehavioralMemoryType groups behavioral/reminder together (three-class)', () => {
+    expect(isBehavioralMemoryType('behavioral')).toBe(true)
     expect(isBehavioralMemoryType('reminder')).toBe(true)
-    expect(isBehavioralMemoryType('fact')).toBe(false)
-    expect(isBehavioralMemoryType('context')).toBe(false)
+    expect(isBehavioralMemoryType('factual')).toBe(false)
   })
 })
 
@@ -208,14 +206,70 @@ describe('buildMemoryContext', () => {
   it('groups injected memories by type with heading labels', async () => {
     const { buildMemoryContext } = await import('../injector')
     const ctx = buildMemoryContext([
-      makeEntry({ type: 'workflow', content: '更新流程A' }),
-      makeEntry({ type: 'fact', content: '事实B' }),
+      makeEntry({ type: 'behavioral', content: '更新流程A' }),
+      makeEntry({ type: 'factual', content: '事实B' }),
     ])
-    expect(ctx).toContain('Workflows')
+    expect(ctx).toContain('Behaviors')
     expect(ctx).toContain('Facts')
     expect(ctx).toContain('更新流程A')
     expect(ctx).toContain('事实B')
     expect(ctx).toContain('<cross_session_memory>')
     expect(ctx).toContain('</cross_session_memory>')
+  })
+
+  it('does not score interrogative words against unrelated content (stopword regression)', async () => {
+    // The 0cf61f8b-style entry contains "为什么" — querying "你叫什么名字"
+    // must NOT hit it via the shared "什么" substring after stopword removal.
+    const noise = makeEntry({
+      type: 'behavioral',
+      tags: [],
+      content: '在与用户排查问题，用户质疑"为什么要打诊断？按现在的数据不是不能定位错误吗"',
+      createdAt: new Date().toISOString(),
+    })
+    const store = makeStore([noise])
+    const msgs = [{ role: 'user', content: '你叫什么名字' }] as const
+    const selected = selectRelevantMemories(store, [...msgs] as any, noConfig)
+    expect(selected.some(m => m.id === noise.id)).toBe(false)
+  })
+
+  it('hits retrievalKeywords precomputed at write time (scheme C) with zero LLM', async () => {
+    // Write-time keywords bridge the lexical gap: the query shares no word
+    // with raw content, only with retrievalKeywords.
+    const xiao2 = makeEntry({
+      id: 'xiao2-retrieval',
+      type: 'behavioral',
+      tags: [],
+      content: '用户希望以后称助手为「小二」',
+      retrievalKeywords: ['称呼小二', '叫什么名字', '昵称', '名字'],
+      createdAt: new Date().toISOString(),
+    })
+    const noise = makeEntry({
+      type: 'behavioral',
+      tags: [],
+      content: '压缩超时排查',
+      retrievalKeywords: ['压缩', '超时', '诊断'],
+      createdAt: new Date().toISOString(),
+    })
+    const store = makeStore([noise, xiao2])
+    const msgs = [{ role: 'user', content: '你叫什么名字' }] as const
+    const selected = selectRelevantMemories(store, [...msgs] as any, noConfig)
+    expect(selected.some(m => m.id === 'xiao2-retrieval')).toBe(true)
+    expect(selected.some(m => m.id === noise.id)).toBe(false)
+  })
+
+  it('hits entries through write-side retrieval keywords (zero lexical overlap)', async () => {
+    // Query terms share NO surface overlap with the content; the entry's
+    // precomputed retrieval keywords bridge the gap (scheme C).
+    const entry = makeEntry({
+      type: 'behavioral',
+      tags: [],
+      content: '用户要求以后称呼 agent 为「小二」。',
+      retrievalKeywords: ['名字', '称呼', '昵称', '怎么叫你', 'what is your name'],
+      createdAt: new Date().toISOString(),
+    })
+    const store = makeStore([entry])
+    const msgs = [{ role: 'user', content: '你叫什么名字' }] as const
+    const selected = selectRelevantMemories(store, [...msgs] as any, noConfig)
+    expect(selected.some(m => m.id === entry.id)).toBe(true)
   })
 })

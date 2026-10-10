@@ -11,20 +11,15 @@ import { DefenseEvaluator } from './evaluator.ts';
  * normal — no resume, user left hanging.
  *
  * Fix: anchor strictly on the LAST assistant message and treat any clean
- * stop (stopReason=stop|length) whose final message carries NO visible
- * text block as a fault that must trigger an automatic resume — empty
- * content, or thinking-only content (thinking blocks were invisible to the
- * user at the time).
+ * stop (stopReason=stop|length) whose final message carries NO visible text
+ * block as a fault that must trigger an automatic resume — empty content,
+ * or thinking-only content (thinking blocks are invisible to the user).
  *
  * 2026-10-01 incidents (261001-ready-sunset / 261001-calm-pond): both
  * sessions ended with a CLEAN stop whose final assistant message carried
- * ONLY a thinking block (output=363 / 1442, zero visible text). Those
- * sessions were correctly resumed back then. Since 2026-10-09 (d4f fix)
- * the SDK streams thinking_delta per reasoning_content chunk into the UI,
- * so a thinking block IS user-visible content: a thinking-only clean stop
- * is now a legitimate delivery and must NOT resume. Only 'length'
- * thinking-only stops remain fault-class (truncation — the reply never
- * completed).
+ * ONLY a thinking block (output=363 / 1442, zero visible text). The old
+ * rule "thinking-only + stop is a deliberate finish" let them pass as
+ * state=done — the user saw a progress note and then nothing.
  */
 
 /** Build an evaluator primed with a read-only tool chain (like the incident). */
@@ -58,22 +53,13 @@ function scan(evaluator: DefenseEvaluator, endMessages: unknown[]) {
   let truncatedFinal = false;
   if (lastAssistant) {
     const hasVisibleTextBlock = Array.isArray(lastAssistant.content)
-      && lastAssistant.content.some((c) => {
-        const type = (c as { type?: string })?.type;
-        if (type === 'text') {
-          return String((c as { text?: unknown }).text ?? '').trim().length > 0;
-        }
-        // Since 2026-10-09 (d4f fix) thinking_delta streams into the UI:
-        // a 'thinking' block is user-visible content, so it counts.
-        if (type === 'thinking') {
-          return String((c as { thinking?: unknown }).thinking ?? '').trim().length > 0;
-        }
-        return false;
-      });
+      && lastAssistant.content.some(
+        (c) => (c as { type?: string })?.type === 'text'
+          && String((c as { text?: unknown }).text ?? '').trim().length > 0,
+      );
     const cleanStop = lastAssistant.stopReason === 'stop' || lastAssistant.stopReason === 'length';
-    // ANY clean stop without BOTH visible text and visible thinking in the
-    // final message is an empty delivery (empty content). 'length' stays
-    // fault-class via truncatedFinal (reply never completed).
+    // ANY clean stop without a visible text block in the final message is
+    // an empty delivery (empty content OR thinking-only content).
     endsWithEmptyResponse = cleanStop && !hasVisibleTextBlock;
     // Mirrors pi-agent-server/src/index.ts: a max_tokens truncation
     // (stopReason='length') cuts the final off — including the partial-text
@@ -123,13 +109,12 @@ describe('empty terminal response defense (2026-08-22 incidents)', () => {
     expect(result.resumeMessage).toContain('EMPTY response');
   });
 
-  it('resumes when reasoning burns the budget (stopReason=length, thinking-only content)', () => {
+  it('resumes when reasoning burns the budget invisibly (stopReason=length, thinking-only content)', () => {
     // 2026-08-28 incident: the final assistant message carried ONLY a
     // thinking block (content.length===1) so the old no-blocks check
     // missed it entirely. With stopReason=length the budget died before
-    // any visible text was emitted. Even though thinking is user-visible
-    // since 2026-10-09, 'length' means the reply never completed — still a
-    // truncation fault that must trigger an automatic resume.
+    // any visible text was emitted — an infrastructure fault that must
+    // trigger an automatic resume.
     const e = incidentEvaluator();
     const result = scan(e, [
       { role: 'assistant', content: [{ type: 'text', text: '让我检查关键前提' }], stopReason: 'toolUse' },
@@ -137,7 +122,7 @@ describe('empty terminal response defense (2026-08-22 incidents)', () => {
       { role: 'assistant', content: [{ type: 'thinking', thinking: 'OK so the sessionMetaMapAtom is populated with messageCount...' }], stopReason: 'length', usage: { input: 108881, output: 0 } },
     ]);
     expect(result.shouldResume).toBe(true);
-    expect(result.resumeMessage).toContain('CUT OFF');
+    expect(result.resumeMessage).toContain('EMPTY response');
   });
 
   it('does NOT resume on a healthy short final reply', () => {
@@ -157,20 +142,19 @@ describe('empty terminal response defense (2026-08-22 incidents)', () => {
     expect(result.shouldResume).toBe(false);
   });
 
-  it('does NOT resume on a thinking-only clean stop (thinking visible since 2026-10-09)', () => {
-    // 2026-10-01 incidents (261001-ready-sunset / 261001-calm-pond) ended
-    // with stopReason="stop" carrying ONLY a thinking block — resumed back
-    // then because thinking was invisible to the user. Since 2026-10-09
-    // (d4f fix) the SDK streams thinking_delta per reasoning_content chunk
-    // into the UI: the thinking block IS user-visible, so a thinking-only
-    // clean stop is a legitimate delivery, not an empty one — no resume.
+  it('resumes when the final message is thinking-only on a clean stop (2026-10-01 incidents)', () => {
+    // 261001-ready-sunset (out=363) / 261001-calm-pond (out=1442): a
+    // stopReason="stop" whose final message carries ONLY a thinking block.
+    // The thinking block is invisible to the user, so the delivery is
+    // empty and must trigger a resume — the old "deliberate reasoning-only
+    // finish" rule hung real sessions.
     const e = incidentEvaluator();
     const result = scan(e, [
       { role: 'assistant', content: [{ type: 'text', text: 'progress note' }], stopReason: 'toolUse' },
       { role: 'assistant', content: [{ type: 'thinking', thinking: '...' }], stopReason: 'stop', usage: { output: 1442 } },
     ]);
-    expect(result.shouldResume).toBe(false);
-    expect(result.state).toBe('done');
+    expect(result.shouldResume).toBe(true);
+    expect(result.resumeMessage).toContain('EMPTY response');
   });
 
   it('does NOT resume after a user abort even if the final reply was empty', () => {

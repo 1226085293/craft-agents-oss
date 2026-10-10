@@ -36,6 +36,40 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-install-restart-win.
 
 ## ❌ 错误的做法（会导致更新失败）
 
+### ⚠️ Agent 会话内更新（重要注意事项）
+
+当 **Craft Agents 的 agent 会话**（非人工终端）执行更新时：
+
+1. **不要直接运行 `build-win.ps1` 或 `build-install-restart-win.ps1` 的完整构建**——
+   `build-win.ps1` 会终止所有 `node` / `npm` / `electron` / `electron-builder` 进程，
+   这会**杀掉调用者自己的命令管道**（表现为立刻 `Command timed out after 2 seconds`），
+   甚至可能波及宿主应用。这是 2026-10-10 实测踩坑。
+2. **推荐在 agent 会话内走后台独立打包**：先用 `bun run electron:build` 构建 dist，
+   再用 `Start-Process` 后台运行 `bunx electron-builder --config electron-builder.yml --win`
+   （输出重定向到日志，不杀任何进程），轮询日志直到 exe 时间戳更新。
+3. **安装前必须核对安装包时间戳**：`release/Craft-Agents-x64.exe` 的 `LastWriteTime`
+   必须晚于本次构建开始时间。脚本已内置校验（构建模式下拒绝旧包），但手动运行时
+   仍要自查——2026-10-10 曾因打包被截断而误装 18:27 旧包，用户看到旧版界面。
+4. 安装/重启步骤可交回 `build-install-restart-win.ps1 -SkipBuild` 执行（它用 detached
+   helper 处理宿主中断，脚本本身安全）。
+
+### 验证更新是否成功（Windows）
+
+安装完成后在 agent 会话内核查：
+
+```powershell
+# 1. helper 日志（安装器退出码必须为 0，且出现新 PID）
+Get-Content "$env:TEMP\craft-agents-install-restart-*.log" | Select-Object -Last 8
+
+# 2. 安装目录 main.cjs 时间戳 ≈ 本次构建时间（不是旧版本时间）
+(Get-Item "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\dist\main.cjs").LastWriteTime
+
+# 3. 确认 V3 记忆系统特征已打包（例如 ALWAYS_FIXED_TOOLS / existence-hint / retrievalKeywords）
+Select-String -Path "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\dist\main.cjs" -Pattern "ALWAYS_FIXED_TOOLS","retrievalKeywords" | Select-Object -First 2
+```
+
+## ❌ 错误的做法（会导致更新失败）
+
 ### 错误 1：只运行构建命令
 ```powershell
 # ❌ 这只构建开发版本，不会安装或重启

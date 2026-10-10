@@ -13,6 +13,7 @@
 param(
     [switch]$SkipBuild,
     [switch]$SkipDependencyInstall,
+    [switch]$SkipProcessKill,
     [switch]$NoInstall,
     [int]$RestartDelaySeconds = 2
 )
@@ -38,11 +39,13 @@ $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
 Remove-Item Env:WIN_CSC_LINK -ErrorAction SilentlyContinue
 Remove-Item Env:CSC_LINK -ErrorAction SilentlyContinue
 
+$BuildStartedAt = Get-Date
 if (-not $SkipBuild) {
     Write-Host ""
     Write-Host "=== Building installer ===" -ForegroundColor Cyan
     $BuildArgs = @()
     if ($SkipDependencyInstall) { $BuildArgs += "-SkipDependencyInstall" }
+    if ($SkipProcessKill) { $BuildArgs += "-SkipProcessKill" }
     & $BuildScript @BuildArgs
     if ($LASTEXITCODE -ne 0) {
         throw "build-win.ps1 failed with exit code $LASTEXITCODE"
@@ -51,12 +54,16 @@ if (-not $SkipBuild) {
     Write-Host "Skipping build because -SkipBuild was supplied." -ForegroundColor Yellow
 }
 
+# Select the installer produced by THIS run. When building, require the exe to be
+# newer than the build start — a stale installer left by an earlier interrupted
+# run must never be installed silently (2026-10-10: 18:27 exe was installed
+# after a truncated pack, shipping old UI). With -SkipBuild we keep the newest.
 $Installer = Get-ChildItem -Path $ReleaseDir -Filter "Craft-Agents-*.exe" -File -ErrorAction SilentlyContinue |
+    Where-Object { $SkipBuild -or $_.LastWriteTime -ge $BuildStartedAt.AddMinutes(-1) } |
     Sort-Object LastWriteTime -Descending |
     Select-Object -First 1
-
 if (-not $Installer) {
-    throw "Installer not found in $ReleaseDir"
+    throw "Installer not found in $ReleaseDir; build may not have produced a fresh exe (last-modified check against build start)."
 }
 
 Write-Host ""

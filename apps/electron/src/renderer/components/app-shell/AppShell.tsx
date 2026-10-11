@@ -940,6 +940,19 @@ function AppShellContent({
   // Automations — state, handlers, loading, subscriptions
   const activeWorkspace = workspaces.find(w => w.id === activeWorkspaceId)
 
+  // Global memory count (for the "记忆" sidebar badge — same style as
+  // sources/skills/projects counts). Reloaded when the workspace changes.
+  const [memoryCount, setMemoryCount] = React.useState(0)
+  React.useEffect(() => {
+    const root = activeWorkspace?.rootPath
+    if (!root) return
+    let cancelled = false
+    void window.electronAPI.getMemoryStats(root).then(res => {
+      if (!cancelled) setMemoryCount(res.entries?.length ?? 0)
+    }).catch(() => { /* badge is best-effort */ })
+    return () => { cancelled = true }
+  }, [activeWorkspace?.rootPath])
+
   // Send to Workspace dialog state (driven by sendToWorkspaceAtom set from SessionMenu/BatchSessionMenu)
   const sendToWorkspaceIds = useAtomValue(sendToWorkspaceAtom)
   const setSendToWorkspaceIds = useSetAtom(sendToWorkspaceAtom)
@@ -2652,6 +2665,7 @@ function AppShellContent({
                         {
                           id: "nav:sources:memories",
                           title: t("memory.globalTitle"),
+                          label: String(memoryCount > 0 ? memoryCount : ''),
                           icon: Brain,
                           variant: navState.navigator === 'sources' && navState.details?.type === 'memory' ? "default" : "ghost",
                           onClick: () => navigate(routes.view.memories()),

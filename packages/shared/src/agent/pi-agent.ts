@@ -2704,6 +2704,24 @@ export class PiAgent extends BaseAgent {
             elapsedMs: staleElapsedMs,
           });
           this.eventQueue.complete();
+        } else if (this.retryResendAt !== 0 && !this.retryRunLive && !this.retryDeliveredReply && !this.retryTimer) {
+          // 2026-10-11 (apt-slate, plain-stag "153:37"): a resend WAS fired
+          // (fireRetry) but the subprocess ended its turn WITHOUT producing
+          // anything AND without re-arming the ladder (no timer, no staged
+          // error — the SDK's own retry channel gave up silently). The ladder
+          // is a corpse: still active with its stale armed moment (e.g.
+          // 16:01:44). Holding the queue open here froze the turn for HOURS,
+          // and the next chatImpl's settleRetryLadderAsStopped then emitted an
+          // end carrying that OLD startedAt — SessionManager rendered it as a
+          // stale "重试 0 次后失败 · 耗时 153:37" row at the top of the NEW
+          // turn. Settle NOW (failed, real attempt count) and let the turn
+          // complete normally; the held complete (if any) is released below.
+          this.debug('[retry-ladder] Resend produced no output and nothing re-armed the ladder — settling as failed');
+          this.settleRetryLadderAsStopped();
+          // The held complete (if the SDK already sent one) is superseded by
+          // the explicit queue termination below — drop the stale hold.
+          this.heldComplete = null;
+          this.eventQueue.complete();
         }
         return;
       }

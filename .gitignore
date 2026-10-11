@@ -98,8 +98,9 @@ credentials.enc
 .worktrees/
 
 # dev instance logs (craft-dev-instance skill)
-dev-run.log
-dev-run-err.log
+dev-run*.log
+dev-run*-err.log
 
 # CDP debugging scripts (craft-dev-instance)
 cdp-*.mjs
+dev-restart.ps1

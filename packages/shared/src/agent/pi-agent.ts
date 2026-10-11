@@ -343,6 +343,24 @@ export class PiAgent extends BaseAgent {
    *  events (not message_start/update), so retryRunLive stays false even on a
    *  successful retry — this reply signal reconciles the ladder instead. */
   private retryDeliveredReply = false;
+  /** True once the retry row was soft-settled as recovered (2026-10-10): as
+   *  soon as a retried run EMITS (model progress / delivered reply) the row
+   *  becomes "重试 x 次后恢复 · 耗时" instead of counting forever, even
+   *  though the run is still in flight (agent_end finishes it later — the
+   *  second end event is idempotent). Reset when the run is re-issued or the
+   *  ladder is cleared. */
+  private retryRunSettledAsRecovered = false;
+  /** 2026-10-11 (fine-cloud): attempt ordinal frozen at soft-settle time —
+   *  the terminal `end` of the SAME ladder re-settles the row with this
+   *  attempt so the visible "重试 N 次后恢复" text is not rewritten by the
+   *  post-restartCycle recount (which would flip 3 → 1). Reset on re-issue. */
+  private retrySoftSettleAttempt = 0;
+  /** 2026-10-11 (fine-cloud #3): ladder start frozen at soft-settle time —
+   *  restartCycle() advances the ladder start (so the NEXT cycle's row sorts
+   *  at its real timeline position), but the terminal `end` of the SAME
+   *  ladder must still re-settle the SOFT-SETTLED row, which carries the
+   *  ORIGINAL start. Reset on re-issue. */
+  private retrySoftSettleStartedAt = 0;
   /** True if the retried run failed (error recorded before its agent_end). */
   private retryRunHadError = false;
   /** A `complete` held back while the ladder is active (the error's agent_end
@@ -728,6 +746,19 @@ export class PiAgent extends BaseAgent {
     this.clearRetryTimer();
     const delay = this.retryLadder.nextDelayMs();
     if (delay == null) {
+      // 2026-10-10 (user report: "只要触发重试就出现失败语句"): a ladder that
+      // exhausts immediately on arming — before ANY retry was ever fired —
+      // must not emit a terminal "重试 N 次后失败 · 00:00" row (it never
+      // retried: attemptCount is still 0; the terminal verdict would appear
+      // next to a running "第 N 次重试中"). Silent drop: nothing was surfaced
+      // (no backoff event), so there is no row to settle.
+      if (this.retryLadder.attemptCount === 0) {
+        this.debug(
+          `[retry-ladder] Ladder exhausted on arming (attempts=0, startedAt=${this.retryLadder.startedAtMs}, age=${Date.now() - this.retryLadder.startedAtMs}ms) — dropping silently`,
+        );
+        this.resetRetryLadderState();
+        return;
+      }
       this.debug('[retry-ladder] Ladder exhausted — surfacing terminal error');
       this.finishRetryLadder();
       return;
@@ -741,6 +772,13 @@ export class PiAgent extends BaseAgent {
       // waiting for. `attemptCount` counts FAILED retries, so +1.
       attempt: attempt + 1,
       nextRetryInMs: delay,
+      // 2026-10-10: the event's startedAt is the LADDER start — the matching
+      // key every terminal `end` re-finds this ladder's rows by. The row's
+      // DISPLAY anchor is its own cycle start: nextRetryRowPayload stamps
+      // backoffAt (= processing time ≈ this emit moment) on the first backoff
+      // of each cycle, and the process block sorts by that (2026-10-11
+      // swift-slate).
+      startedAt: this.retryLadder.startedAtMs,
     });
     // Non-terminal error card (2026-10-06 spec): once the ladder is past its
     // 1s/5s/10s rungs, show a live "API error — retrying in the background"
@@ -783,6 +821,10 @@ export class PiAgent extends BaseAgent {
     // fired — not a spurious 0).
     if (!this.subprocess) {
       this.debug('[retry-ladder] Cannot retry — subprocess unavailable');
+      if (this.retryLadder.attemptCount === 0) {
+        this.resetRetryLadderState();
+        return;
+      }
       this.finishRetryLadder();
       return;
     }
@@ -791,6 +833,10 @@ export class PiAgent extends BaseAgent {
     if (stdin == null) {
       // Pipe closed — the subprocess is gone; surface the staged terminal error.
       this.debug('[retry-ladder] stdin unavailable (pipe closed) — terminating');
+      if (this.retryLadder.attemptCount === 0) {
+        this.resetRetryLadderState();
+        return;
+      }
       this.finishRetryLadder();
       return;
     }
@@ -808,10 +854,13 @@ export class PiAgent extends BaseAgent {
     // retry-status line (retrying / recovered / failed + countdown). The real
     // error is surfaced only when the ladder finally fails (terminal).
     // `attempt` is the 1-based ordinal of the retry now in flight.
-    this.eventQueue.enqueue({ type: 'retry', phase: 'active', attempt: this.retryLadder.attemptCount + 1 });
+    this.eventQueue.enqueue({ type: 'retry', phase: 'active', attempt: this.retryLadder.attemptCount + 1, startedAt: this.retryLadder.startedAtMs });
     this.retryRunLive = false;
     this.retryDeliveredReply = false;
     this.retryRunHadError = false;
+    this.retryRunSettledAsRecovered = false;
+    this.retrySoftSettleAttempt = 0;
+    this.retrySoftSettleStartedAt = 0;
     this.retryResendAt = Date.now();
     // Re-run the model for the SAME turn WITHOUT appending a new user message:
     // the subprocess re-issues the model step via agent.continue() from its
@@ -841,10 +890,23 @@ export class PiAgent extends BaseAgent {
     // - recovered: includes the retry that succeeded (never counted as a failure).
     // - failed: every retry failed, so the failure count is the total.
     const failedAttempts = this.retryLadder.attemptCount;
-    const finalAttempt = succeeded ? failedAttempts + 1 : failedAttempts;
+    // Success by counts: a soft-settled recovery already froze its attempt
+    // ordinal ("重试 3 次后恢复") — the terminal re-settle must keep it, not
+    // recount from the post-restartCycle zero. Without a soft settle the
+    // in-flight retry that succeeded is counted (failed + 1).
+    const finalAttempt = succeeded
+      ? this.retryRunSettledAsRecovered
+        ? this.retrySoftSettleAttempt
+        : failedAttempts + 1
+      : failedAttempts;
     // Authoritative ladder timeline: read BEFORE reset so a reload/restart
-    // that lost the persisted row still renders the true duration.
-    const ladderStartedAt = this.retryLadder.startedAtMs;
+    // that lost the persisted row still renders the true duration. When a
+    // soft recovery closed the visible cycle, the terminal end refers to the
+    // SOFT-SETTLED row (which carries the ORIGINAL start — restartCycle
+    // advances the ladder start for the NEXT cycle's rows).
+    const ladderStartedAt = this.retryRunSettledAsRecovered && this.retrySoftSettleStartedAt > 0
+      ? this.retrySoftSettleStartedAt
+      : this.retryLadder.startedAtMs;
     const ladderElapsedMs = ladderStartedAt > 0 ? Math.max(0, Date.now() - ladderStartedAt) : 0;
     this.retryLadder.reset();
     this.retryResendAt = 0;
@@ -852,6 +914,9 @@ export class PiAgent extends BaseAgent {
     this.retryDeliveredReply = false;
     this.retryRunHadError = false;
     this.retryErrorSurfaced = false;
+    this.retryRunSettledAsRecovered = false;
+    this.retrySoftSettleAttempt = 0;
+    this.retrySoftSettleStartedAt = 0;
     this.heldComplete = null;
 
     this.eventQueue.enqueue({
@@ -881,6 +946,83 @@ export class PiAgent extends BaseAgent {
     this.eventQueue.complete();
   }
 
+  /**
+   * 2026-10-10: soft-settle the PERSISTED retry row as recovered the moment a
+   * retried run proves itself alive (first model-progress event / delivered
+   * reply), instead of waiting for its agent_end. The user perceives the
+   * process block as "restored" as soon as new rows stream in — counting
+   * "第 N 次重试中" beside them reads as a stuck state (fresh-hill report:
+   * the run had emitted many process messages while the row still ticked).
+   * The ladder STAYS active for the rest of the run (a mid-run failure still
+   * advances it); finishRetryLadder emits a second, idempotent end with the
+   * same attempt and a newer elapsedMs.
+   */
+  private settleRetryRowAsRecovered(): void {
+    if (!this.retryLadder.isActive || this.retryRunSettledAsRecovered) return;
+    this.retryRunSettledAsRecovered = true;
+    const startedAt = this.retryLadder.startedAtMs;
+    this.retrySoftSettleAttempt = this.retryLadder.attemptCount + 1;
+    this.retrySoftSettleStartedAt = startedAt;
+    this.eventQueue.enqueue({
+      type: 'retry',
+      phase: 'end',
+      recovered: true,
+      attempt: this.retrySoftSettleAttempt,
+      startedAt,
+      elapsedMs: startedAt > 0 ? Math.max(0, Date.now() - startedAt) : 0,
+    });
+    // 2026-10-11 (user spec, fine-cloud): a visible "重试 N 次后恢复" closes
+    // the retry CYCLE — a later failure in the same turn must start a NEW
+    // row whose attempt count begins at 1 ("等待第 1 次重试"), rungs restart
+    // at 1s, instead of continuing the recovered row's count (3 → 4). The
+    // ladder itself stays active for the in-flight run.
+    this.retryLadder.restartCycle();
+  }
+
+  /**
+   * 2026-10-09: settle an in-flight ladder as FAILED without the staged error
+   * card. Used when a turn is torn down by user stop or a new user turn while
+   * the retried run was mid-flight — claiming "recovered" would be a lie, and
+   * surfacing the staged model error as a card would misrepresent a
+   * user-initiated stop as a model failure. Emits the terminal `retry end` so
+   * BOTH server and renderer settle the persisted row, keeping the
+   * authoritative attempt/startedAt/elapsedMs. No-op when no ladder is active
+   * (a stop after a settled ladder must not re-emit).
+   */
+  private settleRetryLadderAsStopped(): void {
+    if (!this.retryLadder.isActive) return;
+    // A soft-settled recovery closed the visible cycle: a stop now refers to
+    // the SOFT-SETTLED row (original start), not the advanced cycle start.
+    const startedAt = this.retryRunSettledAsRecovered && this.retrySoftSettleStartedAt > 0
+      ? this.retrySoftSettleStartedAt
+      : this.retryLadder.startedAtMs;
+    // 2026-10-10 (user report: "实际重试成功了却显示失败文本"): a retried run
+    // that had ALREADY produced output — soft-settled as recovered, or live
+    // (message progress / delivered reply) at stop time — genuinely
+    // recovered; stopping it keeps that verdict (the row stays "重试 N 次后
+    // 恢复", the retryPending card is cleared on the recovered end). Only a
+    // stop while still in a bare backoff wait (no output yet) is a failure.
+    // Same 1-based attempt formula as finishRetryLadder: recovered counts
+    // the in-flight retry, failed does not.
+    const recovered =
+      this.retryRunSettledAsRecovered ||
+      this.retryRunLive ||
+      this.retryDeliveredReply;
+    const attempt = recovered
+      ? this.retryRunSettledAsRecovered
+        ? this.retrySoftSettleAttempt
+        : this.retryLadder.attemptCount + 1
+      : this.retryLadder.attemptCount;
+    this.eventQueue.enqueue({
+      type: 'retry',
+      phase: 'end',
+      recovered,
+      attempt,
+      startedAt,
+      elapsedMs: startedAt > 0 ? Math.max(0, Date.now() - startedAt) : 0,
+    });
+  }
+
   /** Hard-clear ladder state (new turn, subprocess exit, user stop). */
   private resetRetryLadderState(): void {
     this.clearRetryTimer();
@@ -891,6 +1033,9 @@ export class PiAgent extends BaseAgent {
     this.retryDeliveredReply = false;
     this.retryRunHadError = false;
     this.retryErrorSurfaced = false;
+    this.retryRunSettledAsRecovered = false;
+    this.retrySoftSettleAttempt = 0;
+    this.retrySoftSettleStartedAt = 0;
     this.heldComplete = null;
   }
 
@@ -1020,6 +1165,11 @@ export class PiAgent extends BaseAgent {
       this.retryResendAt = 0;
       this.retryRunLive = true;
       this.debug(`[retry-ladder] Retried run went live on ${eventType}`);
+      // 2026-10-10: the run is provably alive — settle the row to
+      // "重试 N 次后恢复 · 耗时" NOW (the ladder stays active; agent_end
+      // re-settles idempotently), so the row never counts beside freshly
+      // streamed process rows as "第 N 次重试中".
+      this.settleRetryRowAsRecovered();
     } else if (
       isModelProgress &&
       this.retryLadder.isActive &&
@@ -1038,6 +1188,7 @@ export class PiAgent extends BaseAgent {
       this.debug(`[retry-ladder] Spontaneous recovery on ${eventType} during backoff — canceling pending retry, marking run live`);
       this.clearRetryTimer();
       this.retryRunLive = true;
+      this.settleRetryRowAsRecovered();
       // The run is live and healthy again: the 'had error' marker from the
       // failure that armed the ladder no longer applies. Without this the
       // agent_end success branch ((retryRunLive || retryDeliveredReply) &&
@@ -2432,6 +2583,7 @@ export class PiAgent extends BaseAgent {
         if (this.retryLadder.isActive && this.retryResendAt > 0) {
           this.retryResendAt = 0;
           this.retryDeliveredReply = true;
+          this.settleRetryRowAsRecovered();
         }
       }
 
@@ -3591,7 +3743,12 @@ export class PiAgent extends BaseAgent {
     this.clearTurnIdleWatchdog();
     this.cancelIdleSubprocessReaper();
     this.lastTurnEventAt = Date.now();
-    // A new user turn cancels any in-flight retry ladder from the previous turn.
+    // A new user turn cancels any in-flight retry ladder from the previous
+    // turn — but first settle its row terminally (2026-10-09: an interrupted
+    // retried run used to be silently dropped here, leaving the persisted
+    // row "重试中" forever; the row now reads failed with real attempt/elapsed
+    // and the next turn's messages sort after it).
+    this.settleRetryLadderAsStopped();
     this.resetRetryLadderState();
     const rawUserRequest = this.getCurrentTurnUserMessage() ?? message;
     this.currentUserMessage = rawUserRequest;
@@ -3784,6 +3941,14 @@ export class PiAgent extends BaseAgent {
       // that already terminated with the error below.
       if (this.retryLadder.isActive) {
         this.debug('[retry-ladder] Abandoning ladder after unexpected turn failure');
+        // 2026-10-10 (plain-stag): this is a TERMINATION PATH — settle the
+        // row first. It used to reset silently, leaving the row suspended;
+        // the next error then armed a NEW ladder whose instant terminal end
+        // rendered as a spurious "重试 1 次后失败 · 耗时 00:00" beside the
+        // recovered line, once per failure. Every hard teardown of an active
+        // ladder must go through the settlement exit below (processTurn,
+        // forceAbort, subprocess exit — and here).
+        this.settleRetryLadderAsStopped();
         this.resetRetryLadderState();
       }
 
@@ -4133,6 +4298,13 @@ n   * connection can be adopted mid-session.
     // (The user-stop path already surfaced the terminal card via
     // finishRetryLadder({forcedTerminal}); this hard reset also clears the
     // persisted state so a later restart does not re-arm the loop.)
+    // 2026-10-09: emit the terminal `retry end` BEFORE the hard reset — the
+    // previous comment assumed the user-stop path ran finishRetryLadder via
+    // abort(), but SessionManager calls forceAbort() directly, so a ladder
+    // active at stop time was reset silently and its persisted row spun
+    // "重试中" forever. Settling here (row only, no staged error card — a
+    // stop is not a model failure).
+    this.settleRetryLadderAsStopped();
     this.resetRetryLadderState();
 
     // Fire Stop hook event (fire-and-forget)

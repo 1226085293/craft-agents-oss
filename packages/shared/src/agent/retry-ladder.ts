@@ -89,6 +89,12 @@ export class RetryLadder {
   private startedAt = 0;
   private lastError: RetryErrorSnapshot | null = null;
   private nextDelayOverride: number | null = null;
+  /** 2026-10-11 (fine-cloud): set by restartCycle() — the FIRST failure of
+   *  the new cycle must not increment `attempts` (a fresh ladder's first
+   *  failure goes through begin(), which keeps attempts=0), so its backoff
+   *  reads "等待第 1 次重试" instead of the carried-over 2. Consumed by the
+   *  first onFailure(). */
+  private cycleResetPending = false;
 
   constructor(opts: RetryLadderOptions) {
     this.opts = { ...opts, now: opts.now ?? (() => Date.now()) };
@@ -123,6 +129,7 @@ export class RetryLadder {
     this.startedAt = this.now();
     this.lastError = error;
     this.nextDelayOverride = null;
+    this.cycleResetPending = false;
   }
 
   /**
@@ -145,11 +152,19 @@ export class RetryLadder {
     this.startedAt = state.startedAt;
     this.lastError = state.lastError;
     this.nextDelayOverride = null;
+    this.cycleResetPending = false;
   }
 
   /** A retry was fired and failed — advance the ladder. */
   onFailure(error: RetryErrorSnapshot): void {
-    this.attempts += 1;
+    // 2026-10-11 (fine-cloud): the first failure after restartCycle() keeps
+    // attempts=0 — equivalent to a fresh begin(), so the upcoming backoff
+    // reads "等待第 1 次重试" instead of the carried-over 2.
+    if (this.cycleResetPending) {
+      this.cycleResetPending = false;
+    } else {
+      this.attempts += 1;
+    }
     this.lastError = error;
     this.nextDelayOverride = null;
   }
@@ -160,6 +175,22 @@ export class RetryLadder {
     this.attempts = 0;
     this.lastError = null;
     this.nextDelayOverride = null;
+    this.cycleResetPending = false;
+  }
+
+  /**
+   * 2026-10-11 (fine-cloud, user spec): a SOFT-settled recovery closes the
+   * VISIBLE retry cycle — the row reads "重试 N 次后恢复" and the next failure
+   * must start a NEW row whose attempt count begins at 1 ("等待第 1 次重试"),
+   * with the rung schedule restarting at 1s. The ladder itself stays active
+   * (the retried run is still in flight); only the failure/attempt counter
+   * resets. The next onFailure() is the new cycle's first failure and must
+   * not increment the counter (see cycleResetPending). Start time, error
+   * class and staged error are untouched.
+   */
+  restartCycle(): void {
+    this.attempts = 0;
+    this.cycleResetPending = true;
   }
 
   /** Hard reset (user stop, subprocess exit, new user turn). */

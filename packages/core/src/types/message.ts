@@ -273,8 +273,17 @@ export interface RetryLadderRow {
   /** Epoch ms when the next retry fires (drives the live countdown). Only set
    *  during the backoff window — cleared once the retry is in flight. */
   nextRetryAt?: number
-  /** Epoch ms when the ladder began (first backoff) — total-duration anchor. */
+  /** Epoch ms when the ladder began (first backoff) — MATCHING key for the
+   *  terminal `end` (findLastRetryRowByStartedAt); NOT the display anchor. */
   startedAt: number
+  /** 2026-10-11 (swift-slate): epoch ms when THIS row's retry cycle actually
+   *  started (the first backoff of the cycle, i.e. when the failure was
+   *  noticed). Every cycle of the same ladder keeps its own value — it is the
+   *  row's timeline anchor (the status message's timestamp / process-block
+   *  sort key) and its elapsed base ("耗时 mm:ss" counts from here, never
+   *  from the ladder start). The terminal `end` settles the row in place and
+   *  keeps this value. */
+  backoffAt?: number
   /** Epoch ms when the CURRENT retry went in flight (drives the live
    *  "retrying for mm:ss" timer). Set on phase 'active', cleared on the next
    *  backoff and once the ladder settles. */
@@ -664,7 +673,7 @@ export type AgentEvent =
    * read "actual handling time", not the earlier queue/guide-click time.
    */
   | { type: 'steer_injected'; messageId?: string }
-  | { type: 'retry'; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number }
+  | { type: 'retry'; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number; /** Ladder-start epoch ms — anchors the row on the ladder's real start (2026-10-10), so a later `end` re-finds the same row by startedAt. */ startedAt?: number }
   | { type: 'retry'; phase: 'active' | 'end'; recovered?: boolean; attempt?: number; startedAt?: number; elapsedMs?: number }
   | { type: 'status'; message: string; statusType?: string }
   | { type: 'info'; message: string; statusType?: string; finalText?: string; /** Present when statusType === 'system_stop': machine key (e.g. 'busy_limit', 'no_progress') explaining why a guardrail killed the turn. */ stopReason?: string }

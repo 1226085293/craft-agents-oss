@@ -48,7 +48,7 @@ function retryPayload(state: SessionState): any {
 
 function beginBackoff(
   state: SessionState,
-  opts: { message?: string; attempt?: number; nextRetryInMs?: number } = {},
+  opts: { message?: string; attempt?: number; nextRetryInMs?: number; startedAt?: number } = {},
 ): SessionState {
   return applyEvent(state, {
     type: 'retry',
@@ -57,6 +57,7 @@ function beginBackoff(
     message: opts.message ?? 'Connection Error. Retrying in 2s (attempt 1)...',
     ...(opts.attempt != null ? { attempt: opts.attempt } : {}),
     ...(opts.nextRetryInMs != null ? { nextRetryInMs: opts.nextRetryInMs } : {}),
+    ...(opts.startedAt != null ? { startedAt: opts.startedAt } : {}),
   })
 }
 
@@ -409,14 +410,17 @@ describe('Pi retry lifecycle event processing', () => {
 
   // --- fail-safe on terminal events ---
 
-  it('settles a stuck retrying row to failed on complete (never a stale spinner)', () => {
+  it('complete during a live ladder keeps the row retrying; the terminal end settles it (2026-10-10)', () => {
     const state = beginBackoff(makeState(), { attempt: 1, nextRetryInMs: 1000 })
     const next = applyEvent(state, { type: 'complete', sessionId: SESSION_ID })
     expect(retryRows(next)).toHaveLength(1)
-    expect(retryPayload(next)).toMatchObject({ status: 'failed', attempt: 1 })
+    // The ladder is still retrying in the background — no premature failure.
+    expect(retryPayload(next)).toMatchObject({ status: 'retrying', attempt: 1 })
+    const ended = applyEvent(next, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: false, attempt: 1, startedAt: 1, elapsedMs: 46000 })
+    expect(retryPayload(ended)).toMatchObject({ status: 'failed', attempt: 1 })
   })
 
-  it('marks a stuck retrying row failed on a terminal error', () => {
+  it('does NOT mark the retrying row failed on a terminal error while the ladder is still live (2026-10-10)', () => {
     const state = beginBackoff(makeState(), { attempt: 1, nextRetryInMs: 1000 })
     const next = applyEvent(state, {
       type: 'error',
@@ -424,8 +428,13 @@ describe('Pi retry lifecycle event processing', () => {
       error: 'request failed',
       timestamp: 10,
     })
-    expect(retryPayload(next)).toMatchObject({ status: 'failed', attempt: 1 })
+    // The ladder is still retrying in the background — success/failure only
+    // appear when the retry has REALLY finished (the terminal end event).
+    expect(retryPayload(next)).toMatchObject({ status: 'retrying', attempt: 1 })
     expect(next.session.messages.at(-1)?.role).toBe('error')
+    // The terminal end settles it.
+    const ended = applyEvent(next, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: false, attempt: 1, startedAt: 1, elapsedMs: 46000 })
+    expect(retryPayload(ended)).toMatchObject({ status: 'failed', attempt: 1, elapsedMs: expect.any(Number) })
   })
 
   it('does not settle the retry row on a non-terminal retryPending error card', () => {
@@ -442,7 +451,7 @@ describe('Pi retry lifecycle event processing', () => {
     expect(retryPayload(next)).toMatchObject({ status: 'retrying', attempt: 1 })
   })
 
-  it('marks a stuck retrying row failed on a terminal typed_error', () => {
+  it('does NOT mark the retrying row failed on a terminal typed_error while the ladder is still live (2026-10-10)', () => {
     const state = beginBackoff(makeState(), { attempt: 1, nextRetryInMs: 1000 })
     const next = applyEvent(state, {
       type: 'typed_error',
@@ -456,10 +465,10 @@ describe('Pi retry lifecycle event processing', () => {
       },
       timestamp: 10,
     })
-    expect(retryPayload(next)).toMatchObject({ status: 'failed', attempt: 1 })
+    expect(retryPayload(next)).toMatchObject({ status: 'retrying', attempt: 1 })
   })
 
-  it('keeps the persisted retry row on interruption, settled to failed', () => {
+  it('keeps the persisted retry row on interruption — terminal state comes from the stop-settlement end (2026-10-10)', () => {
     const state = beginBackoff(makeState(), { attempt: 1, nextRetryInMs: 1000 })
     const next = applyEvent(state, {
       type: 'interrupted',
@@ -471,10 +480,12 @@ describe('Pi retry lifecycle event processing', () => {
         timestamp: 10,
       },
     })
-    // The row is durable: it survives the interruption and shows the terminal
-    // state (the ladder did not recover).
+    // The row is durable. While the ladder is live it stays retrying — the
+    // stop-path `retry end` (settleRetryLadderAsStopped) settles it.
     expect(retryRows(next)).toHaveLength(1)
-    expect(retryPayload(next)).toMatchObject({ status: 'failed', attempt: 1 })
+    expect(retryPayload(next)).toMatchObject({ status: 'retrying', attempt: 1 })
+    const ended = applyEvent(next, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: false, attempt: 1, startedAt: 1, elapsedMs: 46000 })
+    expect(retryPayload(ended)).toMatchObject({ status: 'failed', attempt: 1, elapsedMs: expect.any(Number) })
   })
 
   it('keeps the session processing after an error until the actual complete event', () => {
@@ -524,5 +535,340 @@ describe('Pi retry lifecycle event processing', () => {
       messageId: 'verified-final',
     })
     expect(state.session.messages.at(-1)).toMatchObject({ role: 'assistant', content: 'Verified answer' })
+  })
+})
+
+describe('retry end settlement across a turn boundary (2026-10-09)', () => {
+  it('a terminal failed end after an interrupted turn settles the dangling row instead of appending a new one', () => {
+    let state = makeState([])
+    // Turn A: backoff creates the row, the retried run goes live...
+    state = beginBackoff(state, { attempt: 1 })
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'active', attempt: 1 })
+    // ...the turn is interrupted and a NEW user message lands (turn boundary).
+    state = applyEvent(state, {
+      type: 'user_message',
+      sessionId: SESSION_ID,
+      message: { id: 'user-2', role: 'user', content: 'continue', timestamp: 50 },
+      status: 'accepted',
+    })
+    expect(retryRows(state)).toHaveLength(1)
+    expect(retryPayload(state).status).toBe('retrying')
+    // Turn B completes; the stop-path settlement event arrives afterwards.
+    state = applyEvent(state, {
+      type: 'retry',
+      sessionId: SESSION_ID,
+      phase: 'end',
+      recovered: false,
+      attempt: 1,
+      startedAt: 10,
+      elapsedMs: 40000,
+    })
+    // Still exactly one row, now settled failed — no stacking, no stale spinner.
+    expect(retryRows(state)).toHaveLength(1)
+    expect(retryPayload(state)).toMatchObject({
+      status: 'failed',
+      attempt: 1,
+      startedAt: 10,
+      elapsedMs: 40000,
+    })
+  })
+
+  it('a backoff in the NEW turn never recycles the previous turn\'s dangling row', () => {
+    let state = makeState([])
+    state = beginBackoff(state, { attempt: 1 })
+    expect(retryRows(state)).toHaveLength(1)
+    // New user message = new turn.
+    state = applyEvent(state, {
+      type: 'user_message',
+      sessionId: SESSION_ID,
+      message: { id: 'user-2', role: 'user', content: 'continue', timestamp: 50 },
+      status: 'accepted',
+    })
+    // New ladder backoff in turn B: its OWN new row, the dangling one untouched.
+    state = beginBackoff(state, { attempt: 1 })
+    const rows = retryRows(state)
+    expect(rows).toHaveLength(2)
+    expect(rows[0]!.retry.status).toBe('retrying') // turn A dangling row
+    expect(rows[1]!.retry.status).toBe('retrying') // turn B active row
+  })
+})
+
+describe('retry row reuse rules (2026-10-10)', () => {
+  it('a NEW ladder in the same turn gets its OWN row — it never rewrites the settled one', () => {
+    let state = makeState([])
+    state = beginBackoff(state, { attempt: 1 })
+    // First ladder recovers: the row is settled in place.
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: true, attempt: 1, startedAt: 10, elapsedMs: 40000 })
+    expect(retryRows(state)).toHaveLength(1)
+    expect(retryPayload(state)).toMatchObject({ status: 'recovered', attempt: 1 })
+    // Process rows stream in, then a SECOND failure arms a fresh ladder...
+    state = applyEvent(state, {
+      type: 'tool_result',
+      sessionId: SESSION_ID,
+      toolUseId: 't1',
+      toolName: 'Bash',
+      result: 'ok',
+      timestamp: 40,
+    })
+    state = beginBackoff(state, { attempt: 1 })
+    const rows = retryRows(state)
+    expect(rows).toHaveLength(2) // stacked, not rewritten
+    expect(rows[0]!.retry).toMatchObject({ status: 'recovered', attempt: 1 }) // old row untouched
+    expect(rows[1]!.retry.status).toBe('retrying')
+  })
+
+  it('a soft end followed by the terminal end settles ONE row (no duplication)', () => {
+    let state = makeState([])
+    // The backoff carries the ladder start (10) — same key the terminal end
+    // uses to re-find the row.
+    state = beginBackoff(state, { attempt: 1, startedAt: 10 })
+    // Soft settlement: the run went live — row becomes recovered.
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: true, attempt: 1, startedAt: 10, elapsedMs: 12000 })
+    expect(retryRows(state)).toHaveLength(1)
+    expect(retryPayload(state)).toMatchObject({ status: 'recovered', elapsedMs: expect.any(Number) })
+    // agent_end's terminal end re-settles the SAME row (refreshed elapsed), no second row.
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: true, attempt: 1, startedAt: 10, elapsedMs: 12000 })
+    const rows = retryRows(state)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.retry).toMatchObject({ status: 'recovered', attempt: 1, elapsedMs: expect.any(Number) })
+  })
+})
+
+describe('soft-recovery closes the retry cycle — new row, attempt recount (2026-10-11 fine-cloud)', () => {
+  const T0 = 1000
+
+  it('a follow-up backoff after a soft-settled recovery starts a NEW row numbered from 1', () => {
+    let state = makeState([])
+    // Ladder arms; first backoff creates the row.
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'backoff', message: 'retrying…', attempt: 3, nextRetryInMs: 1000, startedAt: T0 })
+    // Run goes live → soft-settled "重试 3 次后恢复".
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: true, attempt: 3, startedAt: T0, elapsedMs: 5000 })
+    expect(retryRows(state)).toHaveLength(1)
+    // The same run then fails again — the recovery closed the CYCLE. The new
+    // backoff must ADD a fresh row whose attempt starts at 1 (user spec:
+    // "增加一条新的重试状态…从第一次重试开始"), NOT rewrite the recovered row.
+    // The backoff carries its ACTUAL emit moment as startedAt (2026-10-11
+    // windy-ruby): the process block sorts rows by this timestamp, so the new
+    // row lands at the moment the failure really happened — after the
+    // recovered row AND any process rows that streamed in between — never
+    // above older entries.
+    const failAt = T0 + 60_000
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'backoff', message: 'retrying…', attempt: 1, nextRetryInMs: 1000, startedAt: failAt })
+    const rows = retryRows(state)
+    expect(rows).toHaveLength(2)
+    expect(rows[0]!.retry).toMatchObject({ status: 'recovered', attempt: 3, startedAt: T0 })
+    expect(rows[1]!.retry).toMatchObject({ status: 'retrying', attempt: 1, startedAt: failAt })
+    // The new cycle's terminal end settles ITS row; the recovered row keeps
+    // its "重试 3 次后恢复" text.
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: false, attempt: 1, startedAt: failAt, elapsedMs: 31319 })
+    const settled = retryRows(state)
+    expect(settled).toHaveLength(2)
+    expect(settled[0]!.retry).toMatchObject({ status: 'recovered', attempt: 3 })
+    expect(settled[1]!.retry).toMatchObject({ status: 'failed', attempt: 1, elapsedMs: expect.any(Number) })
+  })
+
+  it('a soft-settled row re-settled by the same ladder\'s terminal recovered end keeps its frozen attempt', () => {
+    // Soft settle froze attempt 3; the terminal `end recovered` from agent_end
+    // (same ladder, same startedAt, no new backoff in between) must re-settle
+    // the SAME row WITHOUT rewriting the visible attempt to the new count.
+    let state = makeState([])
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'backoff', message: 'retrying…', attempt: 3, nextRetryInMs: 1000, startedAt: T0 })
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: true, attempt: 3, startedAt: T0, elapsedMs: 5000 })
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: true, attempt: 3, startedAt: T0, elapsedMs: 9018 })
+    const rows = retryRows(state)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.retry).toMatchObject({ status: 'recovered', attempt: 3, startedAt: T0 })
+    // Elapsed re-computed from the row's own anchor at settle time.
+    expect(typeof rows[0]!.retry?.elapsedMs).toBe('number')
+  })
+
+  it('a backoff of a DIFFERENT ladder (new startedAt) stacks its own row', () => {
+    let state = makeState([])
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'backoff', message: 'retrying…', attempt: 1, nextRetryInMs: 1000, startedAt: T0 })
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: true, attempt: 1, startedAt: T0, elapsedMs: 2000 })
+    expect(retryRows(state)).toHaveLength(1)
+    // A genuinely new ladder (different start) adds its own row below.
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'backoff', message: 'retrying…', attempt: 1, nextRetryInMs: 1000, startedAt: T0 + 15000 })
+    const rows = retryRows(state)
+    expect(rows).toHaveLength(2)
+    expect(rows[0]!.retry).toMatchObject({ status: 'recovered', startedAt: T0 })
+    expect(rows[1]!.retry).toMatchObject({ status: 'retrying', startedAt: T0 + 15000 })
+  })
+})
+
+describe('ladder-liveness gate on fail-safe settlement (2026-10-10)', () => {
+  it('complete/error during an ACTIVE ladder does not settle the retrying row', () => {
+    let state = makeState([])
+    state = beginBackoff(state, { attempt: 1 }) // ladder live → retryLadderActive=true
+    expect(state.session.retryLadderActive).toBe(true)
+
+    // A terminal error / complete arrives mid-ladder: the row must stay retrying.
+    state = applyEvent(state, {
+      type: 'error',
+      sessionId: SESSION_ID,
+      error: 'Something died mid-retry',
+    })
+    expect(retryRows(state)).toHaveLength(1)
+    expect(retryPayload(state).status).toBe('retrying')
+
+    state = applyEvent(state, { type: 'complete', sessionId: SESSION_ID })
+    expect(retryPayload(state).status).toBe('retrying')
+
+    // The ladder's terminal end flips the gate off and settles the row.
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: false, attempt: 1, startedAt: 1, elapsedMs: 46000 })
+    expect(state.session.retryLadderActive).toBe(false)
+    expect(retryPayload(state)).toMatchObject({ status: 'failed', elapsedMs: expect.any(Number) })
+  })
+
+  it('terminal end turns the gate off so a subsequent complete settles a STILL-retrying row', () => {
+    let state = makeState([])
+    state = beginBackoff(state, { attempt: 1 })
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: false, attempt: 1, startedAt: 1, elapsedMs: 46000 })
+    expect(state.session.retryLadderActive).toBe(false)
+    // A row left spinning after the real end (rare path) still gets settled.
+    state = beginBackoff(state, { attempt: 1 }) // gate on again — simulate a NEW ladder
+    expect(state.session.retryLadderActive).toBe(true)
+  })
+})
+
+describe('non-terminal retryPending error card lifecycle (2026-10-10)', () => {
+  function pendingCards(state: SessionState): any[] {
+    return state.session.messages.filter(m => m.role === 'error' && m.retryPending)
+  }
+
+  it('later retryPending error events UPDATE the existing card in place — one box, never stacked', () => {
+    let state = makeState([])
+    state = beginBackoff(state, { attempt: 3, nextRetryInMs: 20000 })
+    state = applyEvent(state, {
+      type: 'error',
+      sessionId: SESSION_ID,
+      error: 'Connection Error: failure 1 — retrying in the background. Press stop to end the session.',
+      retryPending: true,
+      retryAttempt: 3,
+      timestamp: 100,
+    })
+    expect(pendingCards(state)).toHaveLength(1)
+    const firstCard = pendingCards(state)[0]!
+
+    // Failures past the surface rung (4th, 5th, …) must refresh the SAME card
+    // — the latest error message + attempt number — not append another box.
+    state = applyEvent(state, {
+      type: 'error',
+      sessionId: SESSION_ID,
+      error: 'Connection Error: failure 2 — retrying in the background. Press stop to end the session.',
+      retryPending: true,
+      retryAttempt: 4,
+      timestamp: 200,
+    })
+    state = applyEvent(state, {
+      type: 'error',
+      sessionId: SESSION_ID,
+      error: 'Connection Error: failure 3 — retrying in the background. Press stop to end the session.',
+      retryPending: true,
+      retryAttempt: 5,
+      timestamp: 300,
+    })
+
+    expect(pendingCards(state)).toHaveLength(1)
+    const updated = pendingCards(state)[0]!
+    expect(updated.id).toBe(firstCard.id) // same message, content replaced in place
+    expect(updated.content).toBe('Connection Error: failure 3 — retrying in the background. Press stop to end the session.')
+    expect(updated.retryAttempt).toBe(5)
+  })
+
+  it('a terminal retryPending card from a PREVIOUS ladder is not recycled by a new ladder\'s card', () => {
+    let state = makeState([])
+    // Ladder 1 surfaces a card, then FAILS terminally → card flips to terminal.
+    state = beginBackoff(state, { attempt: 3, nextRetryInMs: 20000 })
+    state = applyEvent(state, {
+      type: 'error',
+      sessionId: SESSION_ID,
+      error: 'old ladder failure — retrying in the background.',
+      retryPending: true,
+      retryAttempt: 3,
+      timestamp: 100,
+    })
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: false, attempt: 3, startedAt: 1, elapsedMs: 42000 })
+    expect(pendingCards(state)).toHaveLength(0)
+
+    // Ladder 2 surfaces a NEW card — must be a fresh message, not the flipped one.
+    state = beginBackoff(state, { attempt: 3, nextRetryInMs: 20000 })
+    state = applyEvent(state, {
+      type: 'error',
+      sessionId: SESSION_ID,
+      error: 'new ladder failure — retrying in the background.',
+      retryPending: true,
+      retryAttempt: 3,
+      timestamp: 200,
+    })
+    const cards = state.session.messages.filter(m => m.role === 'error')
+    expect(cards).toHaveLength(2) // terminal card + new pending card
+    expect(cards[1]!.retryPending).toBe(true)
+    expect(cards[1]!.content).toBe('new ladder failure — retrying in the background.')
+  })
+
+  it('an end recovered DROPS the retryPending card — the retry succeeded, the box is stale', () => {
+    let state = makeState([])
+    state = beginBackoff(state, { attempt: 3, nextRetryInMs: 20000 })
+    state = applyEvent(state, {
+      type: 'error',
+      sessionId: SESSION_ID,
+      error: 'Connection Error — retrying in the background. Press stop to end the session.',
+      retryPending: true,
+      retryAttempt: 3,
+      timestamp: 100,
+    })
+    expect(pendingCards(state)).toHaveLength(1)
+
+    // The ladder recovers: the card must disappear from the renderer copy
+    // (the server broadcasts message_removed too, but the renderer card was
+    // created with a local id, so the removal is mirrored here).
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: true, attempt: 3, startedAt: 1, elapsedMs: 42000 })
+    expect(pendingCards(state)).toHaveLength(0)
+    expect(state.session.messages.some(m => m.role === 'error')).toBe(false)
+  })
+
+  it('an end failed flips the retryPending card to terminal (it becomes the failure reason)', () => {
+    let state = makeState([])
+    state = beginBackoff(state, { attempt: 3, nextRetryInMs: 20000 })
+    state = applyEvent(state, {
+      type: 'error',
+      sessionId: SESSION_ID,
+      error: 'Connection Error — retrying in the background. Press stop to end the session.',
+      retryPending: true,
+      retryAttempt: 3,
+      timestamp: 100,
+    })
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: false, attempt: 3, startedAt: 1, elapsedMs: 42000 })
+    const cards = state.session.messages.filter(m => m.role === 'error')
+    expect(cards).toHaveLength(1)
+    expect(cards[0]!.retryPending).toBe(false) // terminal, kept as the final reason card
+    expect(cards[0]!.content).toBe('Connection Error — retrying in the background. Press stop to end the session.')
+  })
+})
+
+describe('verdictless retry end without a row (2026-10-10, 261010-warm-carbon)', () => {
+  it('does NOT fabricate a phantom "重试 1 次后失败 · 耗时 00:00" row', () => {
+    // Reproduces the warm-carbon transcript: the adapter closes its retry
+    // channel with `{ type: 'retry', phase: 'end' }` while no ladder row exists
+    // (backoff never landed in this copy). It used to APPEND a failed row with
+    // attempt 1, startedAt=now, elapsed≈0 — the exact "重试1次后失败·耗时00:00"
+    // line the user saw next to the real "重试1次后恢复·耗时00:03".
+    let state = makeState([])
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end' })
+    expect(retryRows(state)).toHaveLength(0)
+    expect(state.session.retryLadderActive).toBeUndefined() // gate untouched
+  })
+
+  it('the ladder\'s own soft settle afterwards still produces its recovered row (one row, no phantom pairing)', () => {
+    let state = makeState([])
+    // Adapter channel close first — creates nothing.
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end' })
+    // The unified ladder's soft-settle recovered end lands (ladder start T0).
+    const T0 = Date.now() - 2915
+    state = applyEvent(state, { type: 'retry', sessionId: SESSION_ID, phase: 'end', recovered: true, attempt: 1, startedAt: T0, elapsedMs: 2915 })
+    const rows = retryRows(state)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.retry).toMatchObject({ status: 'recovered', attempt: 1, startedAt: T0 })
   })
 })

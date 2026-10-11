@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 import { RetryLadder, classifyRetryError, type RetryLadderOptions } from '../retry-ladder.ts';
 
-function makeLadder(overrides: Partial<RetryLadderOptions> = {}): { ladder: RetryLadder; now: () => number } {
+function makeLadder(overrides: Partial<RetryLadderOptions> = {}): { ladder: RetryLadder; now: () => number; setNow: (t: number) => void } {
   let tick = 0;
   const now = () => tick;
   const ladder = new RetryLadder({
@@ -13,7 +13,7 @@ function makeLadder(overrides: Partial<RetryLadderOptions> = {}): { ladder: Retr
     now,
     ...overrides,
   });
-  return { ladder, now: () => tick };
+  return { ladder, now, setNow: (t: number) => { tick = t; } };
 }
 
 describe('RetryLadder — transient schedule', () => {
@@ -119,3 +119,36 @@ describe('classifyRetryError', () => {
     expect(classifyRetryError(undefined, 'HTTP 404 model not found')).toBe('deterministic');
   });
 });
+
+describe('restartCycle (2026-10-11 fine-cloud user spec)', () => {
+  it('resets the failure count and advances the cycle start, keeping the ladder active', () => {
+    const { ladder } = makeLadder()
+    ladder.begin('transient', { message: 'boom' })
+    ladder.onFailure({ message: '1' })
+    ladder.onFailure({ message: '2' })
+    ladder.onFailure({ message: '3' })
+    expect(ladder.attemptCount).toBe(3)
+    expect(ladder.startedAtMs).toBe(0)
+    expect(ladder.isActive).toBe(true)
+    // Soft recovery ends the visible cycle: next failure starts counting at 1.
+    // The ladder start is NOT moved — rows anchor on the backoff's actual emit
+    // moment (pi-agent sends startedAt: Date.now()), so the cycle start stays
+    // the ladder's authoritative anchor for elapsed/persist matching.
+    ladder.restartCycle()
+    expect(ladder.attemptCount).toBe(0)
+    expect(ladder.isActive).toBe(true)
+    expect(ladder.startedAtMs).toBe(0)
+    // The next backoff delay starts from the 1s rung again.
+    expect(ladder.nextDelayMs()).toBe(1_000)
+    // The FIRST failure of the new cycle keeps attempts=0 (fresh-begin
+    // semantics) so its backoff reads "等待第 1 次重试" — the upcoming retry
+    // is the cycle's first, not the carried-over fourth.
+    ladder.onFailure({ message: '4' })
+    expect(ladder.attemptCount).toBe(0)
+    expect(ladder.nextDelayMs()).toBe(1_000)
+    // The SECOND failure advances to 1 → next retry is attempt 2.
+    ladder.onFailure({ message: '5' })
+    expect(ladder.attemptCount).toBe(1)
+    expect(ladder.nextDelayMs()).toBe(5_000)
+  })
+})

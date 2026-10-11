@@ -46,7 +46,7 @@ import type {
   UsageUpdateEvent,
   Effect,
 } from '../types'
-import type { Message } from '../../../shared/types'
+import type { Message, Session } from '../../../shared/types'
 import { generateMessageId, appendMessage, updateMessageAt, dropCompactingStatus, upsertRetryRow, settleStuckRetryRow } from '../helpers'
 import { nextRetryRowPayload, findActiveRetryRowIndex } from '@craft-agent/shared/retry/retry-row'
 
@@ -154,12 +154,44 @@ export function handleError(
     content: event.error,
     timestamp: event.timestamp ?? Date.now(),
   }
+  // Mirror the session manager: the ladder's non-terminal card must carry the
+  // retryPending marker on the LIVE copy too (2026-10-10). It used to be
+  // dropped here, so the live card rendered as a plain terminal error box and
+  // was never dropped on recovery — the marker only ever arrived via the next
+  // full session refresh. With the marker, the in-place update below and the
+  // recovered/failed handling in handleRetry work immediately.
+  if (event.retryPending) {
+    errorMessage.retryPending = true
+    errorMessage.retryAttempt = event.retryAttempt
+  }
+
+  // 2026-10-10: the ladder's non-terminal card is SINGLE — once one exists
+  // (retryPending), later failed attempts UPDATE its content in place
+  // (latest error message + attempt) instead of stacking a card per failure.
+  // The server mirrors this; handleRetry drops the card on recovery and
+  // flips it terminal when the ladder exhausts.
+  const lastPendingCardIdx = event.retryPending
+    ? messagesWithFailedTools.findLastIndex(m => m.role === 'error' && m.retryPending)
+    : -1
+  const finalMessages =
+    lastPendingCardIdx !== -1
+      ? messagesWithFailedTools.map((m, i) =>
+          i === lastPendingCardIdx
+            ? {
+                ...m,
+                content: event.error,
+                retryAttempt: event.retryAttempt ?? m.retryAttempt,
+                timestamp: event.timestamp ?? Date.now(),
+              }
+            : m
+        )
+      : [...messagesWithFailedTools, errorMessage]
 
   return {
     state: {
       session: {
         ...settled,
-        messages: [...messagesWithFailedTools, errorMessage],
+        messages: finalMessages,
       },
       streaming,
     },
@@ -239,23 +271,39 @@ export function handleRetry(state: SessionState, event: RetryEvent): ProcessResu
   const activeIdx = findActiveRetryRowIndex(state.session.messages)
   const prev = activeIdx !== -1 ? state.session.messages[activeIdx]?.retry : undefined
   const payload = nextRetryRowPayload(event, prev, Date.now())
-  const session = upsertRetryRow(state.session, payload)
+  // 2026-10-10: a verdictless end with no row to settle (adapter channel
+  // close) produces no row and no card change — it is not a ladder verdict.
+  if (payload === null) {
+    return { state, effects: [] }
+  }
+  // 2026-10-10: track ladder liveness — while retrying, the complete/error
+  // fail-safe must NOT settle the row (success/failure only at the real end).
+  const ladderActive = payload.status === 'retrying'
+  const session = {
+    ...(upsertRetryRow(state.session, payload) as Session),
+    retryLadderActive: ladderActive,
+  }
   // Mirror the session manager on phase 'end': a FAILED ladder turns any
   // still-pending retry error card (retryPending) into the turn's TERMINAL
   // error card — otherwise the user would see the failed retry line without
-  // the final error reason below the process block. On recovery the server
-  // removes the card (message_removed), so nothing to do here.
+  // the final error reason below the process block. A RECOVERED ladder DROPS
+  // those cards — the retry succeeded, so "retrying in the background" is
+  // stale. The server splices its own copies and broadcasts message_removed,
+  // but the renderer card was created with a LOCAL id (never the server's),
+  // so the removal must be mirrored here too, or the stale card lingers until
+  // the next full session refresh (2026-10-10 user report).
   const settled =
-    event.phase === 'end' && event.recovered !== true
-      ? {
+    event.phase !== 'end'
+      ? session
+      : {
           ...session,
-          messages: session.messages.map(m =>
-            m.role === 'error' && m.retryPending
-              ? { ...m, retryPending: false }
-              : m
-          ),
+          messages:
+            event.recovered === true
+              ? session.messages.filter(m => !(m.role === 'error' && m.retryPending))
+              : session.messages.map(m =>
+                  m.role === 'error' && m.retryPending ? { ...m, retryPending: false } : m
+                ),
         }
-      : session
   return {
     state: {
       session: settled,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { nextRetryRowPayload, settleRetryRowAsFailed, findActiveRetryRowIndex } from '../retry-row'
+import { nextRetryRowPayload, settleRetryRowAsFailed, findActiveRetryRowIndex, findLastRetryRowIndex, findLastRetryRowByStartedAt } from '../retry-row'
 import type { RetryLadderRow } from '@craft-agent/core'
 
 const NOW = 1_000_000
@@ -12,6 +12,7 @@ describe('nextRetryRowPayload (shared retry-row state machine)', () => {
       attempt: 1,
       nextRetryAt: NOW + 5000,
       startedAt: NOW,
+      backoffAt: NOW,
     })
   })
 
@@ -23,6 +24,7 @@ describe('nextRetryRowPayload (shared retry-row state machine)', () => {
       attempt: 2,
       nextRetryAt: NOW + 3000 + 4000,
       startedAt: NOW,
+      backoffAt: NOW,
     })
   })
 
@@ -33,15 +35,17 @@ describe('nextRetryRowPayload (shared retry-row state machine)', () => {
       status: 'retrying',
       attempt: 1,
       startedAt: NOW,
+      backoffAt: NOW,
       activeAt: NOW + 2000,
     })
     // The next backoff clears activeAt (waiting phase again).
-    const nextBackoff = nextRetryRowPayload({ phase: 'backoff', attempt: 2, nextRetryInMs: 4000 }, active, NOW + 8000)
+    const nextBackoff = nextRetryRowPayload({ phase: 'backoff', attempt: 2, nextRetryInMs: 4000 }, active, NOW + 8000)!
     expect(nextBackoff).toEqual({
       status: 'retrying',
       attempt: 2,
       nextRetryAt: NOW + 8000 + 4000,
       startedAt: NOW,
+      backoffAt: NOW,
     })
     expect(nextBackoff.activeAt).toBeUndefined()
   })
@@ -49,11 +53,12 @@ describe('nextRetryRowPayload (shared retry-row state machine)', () => {
   it('settles to recovered with total elapsed on a successful end', () => {
     const first = nextRetryRowPayload({ phase: 'backoff', attempt: 1, nextRetryInMs: 1000 }, undefined, NOW)
     const active = nextRetryRowPayload({ phase: 'active' }, first, NOW + 1000)
-    const end = nextRetryRowPayload({ phase: 'end', recovered: true, attempt: 2 }, active, NOW + 60_000)
+    const end = nextRetryRowPayload({ phase: 'end', recovered: true, attempt: 2 }, active, NOW + 60_000)!
     expect(end).toEqual({
       status: 'recovered',
       attempt: 2,
       startedAt: NOW,
+      backoffAt: NOW,
       elapsedMs: 60_000,
     })
     // activeAt is a transient in-flight marker — never in a settled payload.
@@ -62,7 +67,7 @@ describe('nextRetryRowPayload (shared retry-row state machine)', () => {
 
   it('settles to failed when the ladder exhausts', () => {
     const first = nextRetryRowPayload({ phase: 'backoff', attempt: 1, nextRetryInMs: 1000 }, undefined, NOW)
-    const end = nextRetryRowPayload({ phase: 'end', recovered: false, attempt: 3 }, first, NOW + 90_000)
+    const end = nextRetryRowPayload({ phase: 'end', recovered: false, attempt: 3 }, first, NOW + 90_000)!
     expect(end.status).toBe('failed')
     expect(end.attempt).toBe(3)
     expect(end.elapsedMs).toBe(90_000)
@@ -75,6 +80,7 @@ describe('nextRetryRowPayload (shared retry-row state machine)', () => {
       status: 'recovered',
       attempt: 1,
       startedAt: NOW,
+      backoffAt: NOW,
       elapsedMs: 10_000,
     })
   })
@@ -97,16 +103,22 @@ describe('nextRetryRowPayload (shared retry-row state machine)', () => {
       status: 'failed',
       attempt: 1,
       startedAt: NOW - 328_000,
+      backoffAt: NOW,
       elapsedMs: 328_000,
     })
-    // Event elapsed wins even when a (stale/different) row exists.
+    // A row that EXISTS keeps its own anchor — 2026-10-11 (swift-slate): the
+    // end event carries the LADDER start, which must not overwrite every
+    // cycle row's real timeline anchor (that pinned all rows to the ladder
+    // start and made elapsed accumulate across cycles). Elapsed is computed
+    // from the row's own start; the event's timeline only applies when the
+    // row was lost.
     const withRow = nextRetryRowPayload(
       { phase: 'end', recovered: true, attempt: 2, startedAt: NOW - 60_000, elapsedMs: 60_000 },
       { status: 'retrying', attempt: 1, startedAt: NOW - 999, nextRetryAt: NOW + 5000 },
       NOW,
-    )
-    expect(withRow.elapsedMs).toBe(60_000)
-    expect(withRow.startedAt).toBe(NOW - 60_000)
+    )!
+    expect(withRow.startedAt).toBe(NOW - 999) // the row's own anchor wins
+    expect(withRow.elapsedMs).toBe(999) // elapsed from the row's own start
   })
 })
 
@@ -128,7 +140,9 @@ describe('settleRetryRowAsFailed (fail-safe)', () => {
 })
 
 describe('findActiveRetryRowIndex (cross-turn protection)', () => {
-  const retryRow = { role: 'status' as const, statusType: 'retrying' as const }
+  // 2026-10-10: the lookup now requires the NESTED state to still be 'retrying'
+  // (settled rows keep their outer statusType), so fixtures carry the payload.
+  const retryRow = { role: 'status' as const, statusType: 'retrying' as const, retry: { status: 'retrying', attempt: 1, startedAt: 1 } }
 
   it('returns the current-turn row when no later user message exists', () => {
     expect(findActiveRetryRowIndex([retryRow])).toBe(0)
@@ -146,5 +160,105 @@ describe('findActiveRetryRowIndex (cross-turn protection)', () => {
 
   it('returns -1 for no row at all', () => {
     expect(findActiveRetryRowIndex([{ role: 'user' }, { role: 'tool' }])).toBe(-1)
+  })
+})
+describe('findLastRetryRowIndex (2026-10-09, cross-turn settlement)', () => {
+  const row = { role: 'status', statusType: 'retrying' }
+  it('finds a retrying row across a turn boundary', () => {
+    const messages = [
+      { role: 'user' },
+      { id: 'tool-1', role: 'tool', toolName: 'Read', toolUseId: 't1', toolStatus: 'completed', toolResult: 'ok', timestamp: 10 },
+      { ...row, retry: { status: 'retrying', attempt: 1, startedAt: 20, activeAt: 21 } },
+      { role: 'info', content: 'Response interrupted', type: 'info' },
+      { role: 'user' }, // new user message — turn boundary
+      { id: 'tool-2', role: 'tool', toolName: 'Bash', toolUseId: 't2', toolStatus: 'completed', toolResult: 'ok', timestamp: 30 },
+    ]
+    expect(findActiveRetryRowIndex(messages as never)).toBe(-1) // turn-scoped stops at the boundary
+    expect(findLastRetryRowIndex(messages as never)).toBe(2) // unbound scan still finds the dangling row
+  })
+
+  it('returns -1 when only settled rows exist', () => {
+    const messages = [
+      { role: 'user' },
+      { role: 'status', statusType: 'retrying', retry: { status: 'failed', attempt: 1, startedAt: 20, elapsedMs: 5000 } },
+      { role: 'assistant', content: 'ok' },
+    ]
+    expect(findLastRetryRowIndex(messages as never)).toBe(-1)
+  })
+
+  it('returns -1 when no retry rows exist', () => {
+    expect(findLastRetryRowIndex([{ role: 'user' }, { role: 'assistant' }] as never)).toBe(-1)
+  })
+})
+
+describe('row reuse rules (2026-10-10)', () => {
+  it('findActiveRetryRowIndex never returns a settled row, even in the same turn', () => {
+    const messages = [
+      { role: 'user', content: 'go' },
+      { role: 'status', statusType: 'retrying', retry: { status: 'recovered', attempt: 2, startedAt: 100, elapsedMs: 5000 } },
+      { id: 'tool-1', role: 'tool', toolName: 'Bash', toolUseId: 't1', toolStatus: 'completed', toolResult: 'ok', timestamp: 20 },
+    ]
+    // The new ladder (same turn, later failure) must NOT rewrite this row.
+    expect(findActiveRetryRowIndex(messages as never)).toBe(-1)
+  })
+
+  it('findActiveRetryRowIndex still finds an unsettled current-turn row', () => {
+    const messages = [
+      { role: 'user', content: 'go' },
+      { role: 'status', statusType: 'retrying', retry: { status: 'retrying', attempt: 1, startedAt: 100, activeAt: 101 } },
+    ]
+    expect(findActiveRetryRowIndex(messages as never)).toBe(1)
+  })
+
+  it('findLastRetryRowByStartedAt matches the row of the SAME ladder across turn boundaries', () => {
+    const LADDER_START = 100
+    const messages = [
+      { role: 'user', content: 'go' },
+      { role: 'status', statusType: 'retrying', retry: { status: 'recovered', attempt: 1, startedAt: LADDER_START, elapsedMs: 4000 } },
+      { role: 'user', content: 'next' },
+      { role: 'status', statusType: 'retrying', retry: { status: 'failed', attempt: 3, startedAt: 999, elapsedMs: 60000 } },
+    ]
+    expect(findLastRetryRowByStartedAt(messages as never, LADDER_START)).toBe(1)
+    expect(findLastRetryRowByStartedAt(messages as never, 4242)).toBe(-1)
+    expect(findLastRetryRowByStartedAt(messages as never, undefined)).toBe(-1)
+  })
+
+  it('nextRetryRowPayload anchors backoff/active rows on the event-startedAt when present', () => {
+    const payload = nextRetryRowPayload(
+      { phase: 'backoff', attempt: 1, nextRetryInMs: 1000, startedAt: 100 },
+      undefined,
+      5000,
+    )!
+    expect(payload.startedAt).toBe(100) // ladder start, not the processing time
+    const active = nextRetryRowPayload({ phase: 'active', attempt: 1, startedAt: 100 }, payload, 6000)!
+    expect(active.startedAt).toBe(100)
+    expect(active.activeAt).toBe(6000)
+  })
+})
+
+
+
+describe('verdictless end (2026-10-10, 261010-warm-carbon)', () => {
+  const T0 = 1_700_000_000_000
+
+  it('a verdictless end with no row returns null — never fabricates a phantom failed row', () => {
+    // The Pi adapter closes its retry channel with `{ type: 'retry', phase: 'end' }`
+    // (no recovered/attempt/startedAt). With no ladder row present this used to
+    // APPEND "重试 1 次后失败 · 耗时 00:00" (attempt 1, startedAt=now, elapsed 0).
+    const payload = nextRetryRowPayload({ phase: 'end' } as never, undefined, T0)
+    expect(payload).toBeNull()
+  })
+
+  it('a verdictless end with a row to settle still settles it (no regression)', () => {
+    const prev = { status: 'retrying' as const, attempt: 1, startedAt: T0 - 4000 }
+    const payload = nextRetryRowPayload({ phase: 'end' } as never, prev, T0)
+    expect(payload).toMatchObject({ status: 'failed', attempt: 1, startedAt: T0 - 4000 })
+  })
+
+  it('an end that carries ANY verdict field is never suppressed, even without a row', () => {
+    expect(nextRetryRowPayload({ phase: 'end', recovered: true, attempt: 1, startedAt: T0 } as never, undefined, T0))
+      .toMatchObject({ status: 'recovered', attempt: 1 })
+    expect(nextRetryRowPayload({ phase: 'end', recovered: false, attempt: 2, startedAt: T0 } as never, undefined, T0))
+      .toMatchObject({ status: 'failed', attempt: 2 })
   })
 })

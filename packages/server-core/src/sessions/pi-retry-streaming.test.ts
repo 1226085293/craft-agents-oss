@@ -202,4 +202,98 @@ describe('Pi retry streaming boundaries', () => {
     expect(forwarded).toBeDefined()
     expect(forwarded!).toMatchObject({ type: 'text_complete', turnId: 'turn-3__m1', timestamp: 2000, startedAt: 1500 })
   })
+
+  it('drops a terminal end whose startedAt predates the current turn (late settlement of a previous turn\'s ladder)', async () => {
+    // pt-slate repro (2026-10-11): the 18:35:20 new turn's FIRST row was a
+    // stale "重试 0 次后失败 · 耗时 153:37" — the end event carried the previous
+    // turn's startedAt (16:01:44.426) with elapsedMs measured from it. The
+    // previous turn already has its recovered row + terminal error card, so
+    // no new row may be fabricated at the top of the new turn.
+    const { manager, managed, events, fire } = harness()
+    const turnStart = 1800000000000 // 18:35:20 — the new turn's user message
+    ;(managed.messages as any[]).push({ id: 'user-new', role: 'user', timestamp: turnStart, content: 'hello' })
+    ;(managed.messages as any[]).push({
+      id: 'row-old',
+      role: 'status',
+      statusType: 'retrying',
+      timestamp: 1600000000000,
+      // Realistic: the old row's startedAt (.090) differs from the event's
+      // (.426) — findLastRetryRowByStartedAt misses, yet the end must still
+      // NOT be fabricated at the top of the new turn.
+      retry: { status: 'recovered', attempt: 1, startedAt: 1600000000000, backoffAt: 1600000000000 },
+    })
+
+    await fire({
+      type: 'retry',
+      phase: 'end',
+      recovered: false,
+      attempt: 0,
+      startedAt: 1601000000000,
+      elapsedMs: 9216688, // 153:37 measured from the OLD anchor
+    })
+
+    // The event is still forwarded to the renderer...
+    expect(events).toContainEqual(expect.objectContaining({ type: 'retry', phase: 'end', sessionId: managed.id }))
+    // ...but NO new row is appended — the previous turn's rows stay untouched.
+    expect(managed.messages).toHaveLength(2)
+    expect(managed.messages[1]).toMatchObject({ role: 'status', retry: { status: 'recovered' } })
+    expect((managed.messages as any[]).some(m => m.retry?.status === 'failed')).toBe(false)
+    // The ladder liveness gate must not flip on a dropped end.
+    expect(managed.retryLadderActive ?? false).toBe(false)
+  })
+
+  it('drops a late end even when its startedAt matches a previous-turn row (leaves the old row terminal)', async () => {
+    // A late end whose startedAt DOES match the old row would otherwise
+    // re-settle it (recovered → failed attempt 0, now-16:01 = 153:37 duration)
+    // via findLastRetryRowByStartedAt — the old turn's verdict must stay.
+    const { managed, fire } = harness()
+    const turnStart = 1800000000000
+    ;(managed.messages as any[]).push({ id: 'user-new', role: 'user', timestamp: turnStart, content: 'hello' })
+    ;(managed.messages as any[]).push({
+      id: 'row-old',
+      role: 'status',
+      statusType: 'retrying',
+      timestamp: 1600000000000,
+      retry: { status: 'recovered', attempt: 1, startedAt: 1600000000000, backoffAt: 1600000000000 },
+    })
+
+    await fire({
+      type: 'retry',
+      phase: 'end',
+      recovered: false,
+      attempt: 0,
+      startedAt: 1600000000000,
+      elapsedMs: 9216688,
+    })
+
+    expect(managed.messages).toHaveLength(2)
+    expect(managed.messages[1]).toMatchObject({ role: 'status', retry: { status: 'recovered' } })
+    expect((managed.messages as any[]).filter(m => m.role === 'status')).toHaveLength(1)
+  })
+
+  it('still creates a row for a same-turn terminal end (no matching row)', async () => {
+    // Regression guard: an end that belongs to THIS turn (startedAt >= the
+    // current user message) keeps the existing behavior of creating a
+    // terminal row when no row matches it yet.
+    const { managed, events, fire } = harness()
+    const turnStart = 1800000000000
+    ;(managed.messages as any[]).push({ id: 'user-new', role: 'user', timestamp: turnStart, content: 'hello' })
+
+    await fire({
+      type: 'retry',
+      phase: 'end',
+      recovered: false,
+      attempt: 1,
+      startedAt: turnStart + 5000,
+      elapsedMs: 5000,
+    })
+
+    expect(events).toContainEqual(expect.objectContaining({ type: 'retry', phase: 'end', sessionId: managed.id }))
+    expect(managed.messages).toHaveLength(2)
+    expect(managed.messages[1]).toMatchObject({
+      role: 'status',
+      statusType: 'retrying',
+      retry: { status: 'failed', attempt: 1 },
+    })
+  })
 })

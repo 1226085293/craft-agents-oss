@@ -9162,6 +9162,32 @@ ${request.prompt}`;
         // Only the row of the CURRENT turn may be updated in place — a row
         // left behind by a previous settled turn must not be recycled.
         let retryIdx = findActiveRetryRowIndex(managed.messages)
+        // 2026-10-11 (apt-slate, plain-stag "153:37"): LATE-settlement guard —
+        // a terminal `end` whose startedAt predates the current turn's user
+        // message is the PREVIOUS turn's ladder being settled by the NEXT
+        // chatImpl (the frozen turn never released its held complete; the end
+        // carries the OLD startedAt with elapsedMs measured from it, e.g.
+        // now − 16:01:44 = 153:37). It must neither fabricate a row at the
+        // top of the new turn nor re-settle the previous turn's already-term
+        // inal rows. Forward the event only — the old turn already carries its
+        // own recovered row + terminal error card.
+        if (event.phase === 'end' && typeof event.startedAt === 'number') {
+          let lastUserTs: number | undefined
+          for (let i = managed.messages.length - 1; i >= 0; i--) {
+            const m = managed.messages[i]!
+            if (m.role === 'user' && m.isGuidance !== true) {
+              lastUserTs = m.timestamp
+              break
+            }
+          }
+          if (lastUserTs !== undefined && event.startedAt < lastUserTs) {
+            sessionLog.debug(
+              `retry: dropping late end (startedAt ${event.startedAt} < turn start ${lastUserTs}) — stale ladder from a previous turn`,
+            )
+            this.sendEvent({ ...event, sessionId }, workspaceId)
+            break
+          }
+        }
         // 2026-10-09: a terminal `end` can arrive AFTER a turn boundary (the
         // turn was interrupted and a new user message already landed — the
         // stop path settles the row via a late `retry end`). The turn-scoped

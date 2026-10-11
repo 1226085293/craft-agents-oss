@@ -1861,6 +1861,12 @@ export class SessionManager implements ISessionManager {
     this.eventSink(RPC_CHANNELS.pages.CHANGED, { to: 'workspace', workspaceId }, workspaceId, pages)
   }
 
+  /** Notify renderers that global memory changed (badges/counts must refresh). */
+  broadcastMemoryChanged(workspaceId: string): void {
+    if (!this.eventSink) return
+    this.eventSink(RPC_CHANNELS.memory.MEMORY_CHANGED, { to: 'workspace', workspaceId }, workspaceId)
+  }
+
   private broadcastDefaultPermissionsChanged(): void {
     if (!this.eventSink) return
     sessionLog.info('Broadcasting default permissions changed')

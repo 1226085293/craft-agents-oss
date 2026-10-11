@@ -118,6 +118,7 @@ const EXPECTED_CHANNELS: string[] = [
   "labels:list",
   "logo:getUrl",
   "memory:add",
+  "memory:changed",
   "memory:clearTrash",
   "memory:consolidate",
   "memory:consolidate:cancel",

@@ -941,17 +941,27 @@ function AppShellContent({
   const activeWorkspace = workspaces.find(w => w.id === activeWorkspaceId)
 
   // Global memory count (for the "记忆" sidebar badge — same style as
-  // sources/skills/projects counts). Reloaded when the workspace changes.
+  // sources/skills/projects counts). Reloaded when the workspace changes
+  // and after every memory write broadcast (live badge).
   const [memoryCount, setMemoryCount] = React.useState(0)
-  React.useEffect(() => {
+  const refreshMemoryCount = React.useCallback(async () => {
     const root = activeWorkspace?.rootPath
     if (!root) return
-    let cancelled = false
-    void window.electronAPI.getMemoryStats(root).then(res => {
-      if (!cancelled) setMemoryCount(res.entries?.length ?? 0)
-    }).catch(() => { /* badge is best-effort */ })
-    return () => { cancelled = true }
+    try {
+      const res = await window.electronAPI.getMemoryStats(root)
+      setMemoryCount(res.entries?.length ?? 0)
+    } catch { /* badge is best-effort */ }
   }, [activeWorkspace?.rootPath])
+  React.useEffect(() => {
+    void refreshMemoryCount()
+  }, [refreshMemoryCount])
+  React.useEffect(() => {
+    const cleanup = window.electronAPI.onMemoryChanged((workspaceId) => {
+      if (workspaceId !== activeWorkspaceId) return
+      void refreshMemoryCount()
+    })
+    return cleanup
+  }, [activeWorkspaceId, refreshMemoryCount])
 
   // Send to Workspace dialog state (driven by sendToWorkspaceAtom set from SessionMenu/BatchSessionMenu)
   const sendToWorkspaceIds = useAtomValue(sendToWorkspaceAtom)

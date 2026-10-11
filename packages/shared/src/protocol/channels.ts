@@ -526,6 +526,8 @@ export const RPC_CHANNELS = {
     MEMORY_GET_VOCABULARY: 'memory:getVocabulary',
     MEMORY_SET_VOCABULARY: 'memory:setVocabulary',
     MEMORY_DELETE_BACKUP: 'memory:deleteBackup',
+    /** Broadcast after any global-memory write, so UI counts stay live. */
+    MEMORY_CHANGED: 'memory:changed',
   },
   usage: {
     GET_STATS: 'usage:getStats',

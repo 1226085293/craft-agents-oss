@@ -57,15 +57,34 @@ export const HANDLED_CHANNELS = [
 
 /**
  * Load → mutate → save under the process write lock (§1.4). UI 操作与 cron 整理
- * 共用同一 mutex，避免交错写坏 memory.json。
+ * 共用同一 mutex，避免交错写坏 memory.json。任何写操作完成后广播
+ * memory:changed，renderer 侧计数徽章实时刷新。
  */
 async function mutateStore<T>(workspaceRootPath: string, mutate: (store: MemoryStore) => T | Promise<T>): Promise<T> {
   return withMemoryWriteLock(async () => {
     const store = loadMemoryStore(workspaceRootPath)
     const result = await mutate(store)
     saveMemoryStore(workspaceRootPath, store)
+    notifyMemoryChanged(workspaceRootPath)
     return result
   })
+}
+
+/** Broadcast MEMORY_CHANGED to the owning workspace (best-effort). */
+type MemorySessionManagerLike = {
+  getWorkspaces(): Array<{ rootPath: string; id: string }>;
+  broadcastMemoryChanged?(workspaceId: string): void;
+};
+let memorySessionManager: MemorySessionManagerLike = { getWorkspaces: () => [] };
+function notifyMemoryChanged(workspaceRootPath: string): void {
+  try {
+    const workspace = memorySessionManager.getWorkspaces().find(item => item.rootPath === workspaceRootPath)
+    if (workspace && memorySessionManager.broadcastMemoryChanged) {
+      memorySessionManager.broadcastMemoryChanged(workspace.id)
+    }
+  } catch {
+    // Broadcast is best-effort; a missing workspace lookup must not break writes.
+  }
 }
 
 /**
@@ -74,6 +93,7 @@ async function mutateStore<T>(workspaceRootPath: string, mutate: (store: MemoryS
  */
 export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): void {
   const { sessionManager } = deps
+  memorySessionManager = sessionManager
   const scheduled = new Map<string, { signature: string; scheduler: MemoryConsolidationScheduler }>()
   // Cooperative cancellation flag per workspace, set by MEMORY_CONSOLIDATE_CANCEL
   // and checked between LLM batches by the running consolidation.
@@ -163,6 +183,7 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
         void withMemoryWriteLock(() => {
           saveMemoryStore(workspaceRootPath, globalStore)
           saveSessionMemoryStore(workspaceRootPath, session)
+          notifyMemoryChanged(workspaceRootPath)
         })
         done += 1
         const runState = consolidationRunState.get(workspaceRootPath)
@@ -406,6 +427,7 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
       copyFileSync(backupPath, tmpPath)
       const { renameSync } = await import('node:fs')
       renameSync(tmpPath, filePath)
+      notifyMemoryChanged(workspaceRootPath)
       return { ok: true }
     } catch (error) {
       return { ok: false, reason: error instanceof Error ? error.message : String(error) }

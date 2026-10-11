@@ -74,6 +74,13 @@ export interface ISessionManager {
   setEventSink(sink: EventSink): void
   flushAllSessions(): Promise<void>
 
+  /**
+   * Broadcast that workspace global memory changed (write handlers call this
+   * so renderer badges/counts refresh live). Optional: headless backends that
+   * do not render memory UI may omit it.
+   */
+  broadcastMemoryChanged?(workspaceId: string): void
+
   // ---------------------------------------------------------------------------
   // Session CRUD
   // ---------------------------------------------------------------------------

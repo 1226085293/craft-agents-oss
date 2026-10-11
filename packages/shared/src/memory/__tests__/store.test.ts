@@ -57,3 +57,34 @@ describe('global memory trash', () => {
     expect(JSON.parse(readFileSync(join(root, 'memory.json'), 'utf8')).trash).toEqual([])
   })
 })
+
+describe('concurrent write protection (A+B)', () => {
+  it('merges an externally-written entry instead of clobbering it', () => {
+    const root = makeRoot()
+    // Process A: load, add an entry, keep the in-memory store without saving.
+    const storeA = loadMemoryStore(root)
+    addMemoryEntry(storeA, '进程A的记忆', 'factual', 'manual')
+
+    // Process B simulates another instance: writes its own store to disk.
+    const storeB = loadMemoryStore(root)
+    addMemoryEntry(storeB, '进程B的记忆', 'factual', 'manual')
+    saveMemoryStore(root, storeB)
+
+    // Process A flushes now — the file changed since its load; both entries
+    // must survive (A's own + B's), not just A's.
+    saveMemoryStore(root, storeA)
+    const after = loadMemoryStore(root)
+    const contents = after.entries.map(e => e.content)
+    expect(contents).toContain('进程A的记忆')
+    expect(contents).toContain('进程B的记忆')
+  })
+
+  it('does not merge when the file is unchanged (normal path)', () => {
+    const root = makeRoot()
+    const store = loadMemoryStore(root)
+    addMemoryEntry(store, '普通写入', 'factual', 'manual')
+    saveMemoryStore(root, store)
+    const after = loadMemoryStore(root)
+    expect(after.entries.map(e => e.content)).toEqual(['普通写入'])
+  })
+})

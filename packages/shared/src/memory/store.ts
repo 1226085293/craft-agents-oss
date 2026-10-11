@@ -4,7 +4,7 @@
  * Reads/writes workspace-scoped memory.json for structured memory management.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname, basename } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -16,8 +16,85 @@ import type {
   MemoryQueryResult,
   MemoryAction,
   MemoryType,
+  MemoryTrashEntry,
+  BlockedRecord,
+  ExtractionRetryItem,
 } from './types.ts';
 import { normalizeTag, foldLegacyMemoryType, memoryConfig } from './types.ts';
+
+/**
+ * Concurrency guard (A+B, 2026-10-11): track the last seen mtime PER STORE
+ * INSTANCE. Multiple processes (installed app + dev instance) share the same
+ * memory.json; a second process writing its own stale snapshot can silently
+ * wipe another's entries. Before saving we re-stat: if the file changed since
+ * THIS store instance was loaded/saved, re-read the on-disk store and merge
+ * the caller's changes on top instead of clobbering. Keyed by store object
+ * (not workspace) so two live snapshots of the same file keep independent
+ * baselines — exactly like two OS processes would.
+ */
+const storeMtimes = new WeakMap<MemoryStore, number>();
+
+function fileMtimeMs(filePath: string): number | null {
+  try {
+    return statSync(filePath).mtimeMs;
+  } catch {
+    return null; // file missing
+  }
+}
+
+/**
+ * Merge the caller's store over a fresher on-disk store. Entries are keyed by
+ * id: on-disk-only entries survive (added by another process), caller entries
+ * win on id collision (this process just modified them). Non-entry fields
+ * (trash, vocabulary, history, stats) follow the same keep-both merge.
+ */
+function mergeWithDisk(disk: MemoryStore, incoming: MemoryStore): MemoryStore {
+  const entries = new Map<string, MemoryEntry>();
+  for (const e of disk.entries ?? []) entries.set(e.id, e);
+  for (const e of incoming.entries ?? []) entries.set(e.id, e);
+
+  const trash = new Map<string, MemoryTrashEntry>();
+  for (const t of disk.trash ?? []) trash.set(t.entry.id, t);
+  for (const t of incoming.trash ?? []) trash.set(t.entry.id, t);
+
+  const blocked = new Map<string, BlockedRecord>();
+  for (const b of disk.blocked ?? []) blocked.set(blockKey(b), b);
+  for (const b of incoming.blocked ?? []) blocked.set(blockKey(b), b);
+
+  const history = new Map<string, MemoryExtractionRecord>();
+  for (const h of disk.extractionHistory ?? []) history.set(historyKey(h), h);
+  for (const h of incoming.extractionHistory ?? []) history.set(historyKey(h), h);
+
+  const retry = new Map<string, ExtractionRetryItem>();
+  for (const r of disk.extractionRetryQueue ?? []) retry.set(retryKey(r), r);
+  for (const r of incoming.extractionRetryQueue ?? []) retry.set(retryKey(r), r);
+
+  return {
+    ...disk,
+    entries: [...entries.values()],
+    trash: [...trash.values()],
+    blocked: [...blocked.values()],
+    extractionHistory: [...history.values()],
+    extractionRetryQueue: [...retry.values()],
+    tagVocabulary: mergeArray(disk.tagVocabulary ?? [], incoming.tagVocabulary ?? []),
+    priorityTags: mergeArray(disk.priorityTags ?? [], incoming.priorityTags ?? []),
+    tagFrequency: { ...(disk.tagFrequency ?? {}), ...(incoming.tagFrequency ?? {}) },
+  };
+}
+
+function mergeArray(a: string[], b: string[]): string[] {
+  const s = new Set([...a, ...b]);
+  return [...s];
+}
+function blockKey(b: BlockedRecord): string {
+  return `${b.sourceSessionId}|${b.sourceMessageId ?? ''}|${b.candidateContent}`;
+}
+function historyKey(h: MemoryExtractionRecord): string {
+  return `${h.sessionId}|${h.strategy ?? ''}|${h.newEntryIds?.join(',') ?? ''}`;
+}
+function retryKey(r: ExtractionRetryItem): string {
+  return `${r.sessionId}|${r.strategy ?? ''}|${r.throughMessageId ?? ''}`;
+}
 
 /** Path to the workspace-level memory store file */
 export function getMemoryStorePath(workspaceRootPath: string): string {
@@ -88,25 +165,31 @@ export function migrateMemoryStore(store: MemoryStore, workspaceRootPath: string
  */
 export function loadMemoryStore(workspaceRootPath: string): MemoryStore {
   const filePath = getMemoryStorePath(workspaceRootPath);
+  const mtime = fileMtimeMs(filePath);
+  const empty: MemoryStore = {
+    version: 1,
+    schemaVersion: memoryConfig.schemaVersion,
+    entries: [],
+    trash: [],
+    extractionHistory: [],
+    totalInjectionTokens: 0,
+    tagVocabulary: [],
+    priorityTags: [],
+    blocked: [],
+    extractionRetryQueue: [],
+    tagFrequency: {},
+  };
+  // Baseline on the store instance: missing file → 0 (any real file is newer
+  // → merge on save); existing file → its mtime.
+  storeMtimes.set(empty, mtime ?? 0);
   if (!existsSync(filePath)) {
-    return {
-      version: 1,
-      schemaVersion: memoryConfig.schemaVersion,
-      entries: [],
-      trash: [],
-      extractionHistory: [],
-      totalInjectionTokens: 0,
-      tagVocabulary: [],
-      priorityTags: [],
-      blocked: [],
-      extractionRetryQueue: [],
-      tagFrequency: {},
-    };
+    return empty;
   }
 
   try {
     const raw = readFileSync(filePath, 'utf-8');
     const store: MemoryStore = JSON.parse(raw);
+    storeMtimes.set(store, mtime ?? 0);
 
     // Ensure backward compatibility: add missing fields
     if (!store.extractionHistory) store.extractionHistory = [];
@@ -127,7 +210,7 @@ export function loadMemoryStore(workspaceRootPath: string): MemoryStore {
   } catch {
     // Corrupted file — return empty store
     console.warn(`[Memory] Failed to load memory store from ${filePath}, starting fresh`);
-    return {
+    const empty: MemoryStore = {
       version: 1,
       schemaVersion: memoryConfig.schemaVersion,
       entries: [],
@@ -140,6 +223,8 @@ export function loadMemoryStore(workspaceRootPath: string): MemoryStore {
       extractionRetryQueue: [],
       tagFrequency: {},
     };
+    storeMtimes.set(empty, mtime ?? 0);
+    return empty;
   }
 }
 
@@ -185,18 +270,50 @@ export function saveMemoryStore(
 
   try {
     mkdirSync(workspaceRootPath, { recursive: true });
+
+    // A (§2026-10-11): another process may have written this file since our
+    // last load/save (installed app + dev instance share memory.json). Merge
+    // rather than clobber: re-read the on-disk store and fold our changes in.
+    const lastSeen = storeMtimes.get(store);
+    const diskMtime = fileMtimeMs(filePath);
+    if (lastSeen !== undefined && diskMtime !== null && diskMtime > lastSeen + 1) {
+      try {
+        const disk = loadMemoryStoreNoCache(workspaceRootPath);
+        const merged = mergeWithDisk(disk, store);
+        Object.assign(store, merged);
+        console.warn(`[Memory] Concurrent store change detected (${filePath}); merged ${disk.entries?.length ?? 0} disk entries with ${store.entries.length} incoming.`);
+      } catch {
+        // If re-read fails, fall through and write our snapshot (best effort).
+      }
+    }
+
     if (store.schemaVersion !== memoryConfig.schemaVersion) store.schemaVersion = memoryConfig.schemaVersion;
     applyRetentionLimits(store);
     rotateBackup(filePath);
     writeFileSync(tmpPath, JSON.stringify(store, null, 2), 'utf-8');
     // Atomic rename
     renameSync(tmpPath, filePath);
+    // B: update the baseline so the next save doesn't misread our own write
+    // as an external change.
+    const newMtime = fileMtimeMs(filePath);
+    if (newMtime !== null) storeMtimes.set(store, newMtime);
   } catch (error) {
     // Clean up tmp file on failure
     try { unlinkSync(tmpPath); } catch {}
     console.error('[Memory] Failed to save memory store:', error);
     throw error;
   }
+}
+
+/** Load from disk without touching the shared mtime baseline (merge path). */
+function loadMemoryStoreNoCache(workspaceRootPath: string): MemoryStore {
+  const filePath = getMemoryStorePath(workspaceRootPath);
+  const raw = readFileSync(filePath, 'utf-8');
+  const store: MemoryStore = JSON.parse(raw);
+  if (!store.extractionHistory) store.extractionHistory = [];
+  if (!store.trash) store.trash = [];
+  if (store.totalInjectionTokens === undefined) store.totalInjectionTokens = 0;
+  return store;
 }
 
 /**

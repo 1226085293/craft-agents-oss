@@ -315,10 +315,14 @@ export abstract class BaseAgent implements AgentBackend {
     return this._journalState;
   }
 
-  /** Persist memory store to disk */
+  /** Persist memory store to disk, then drop the in-process snapshot (B):
+   *  the next getter re-reads the file, so a second process (dev instance /
+   *  installed app) writing between our turns is never clobbered by stale
+   *  in-memory state on a later flush. */
   persistMemoryStore(): void {
     if (this._memoryStore) {
       saveMemoryStore(this.config.workspace.rootPath, this._memoryStore);
+      this._memoryStore = undefined;
     }
   }
 

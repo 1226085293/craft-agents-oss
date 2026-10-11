@@ -625,6 +625,9 @@ export interface AgentBackend {
   /** Called when agent submits a plan */
   onPlanSubmitted: PlanCallback | null;
 
+  /** Called when agent writes global memory (host should broadcast memory:changed). */
+  onMemoryChanged: (() => void) | null;
+
   /** Called when a source requires authentication */
   onAuthRequest: AuthCallback | null;
 

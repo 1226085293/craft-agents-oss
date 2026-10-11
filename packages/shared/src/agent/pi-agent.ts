@@ -3120,6 +3120,11 @@ export class PiAgent extends BaseAgent {
     this._sessionToolContext.callbacks.runMiniCompletion =
       (prompt: string) => this.runMiniCompletion(prompt);
 
+    // Global-memory writes via tools → host broadcast (live UI counts).
+    this._sessionToolContext.callbacks.onMemoryChanged = () => {
+      this.onMemoryChanged?.();
+    };
+
     // Attach session self-management bindings (lazy getters from callback registry)
     attachSessionSelfManagementBindings(this._sessionToolContext, sessionId);
 

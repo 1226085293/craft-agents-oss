@@ -63,6 +63,13 @@ export interface SessionToolCallbacks {
    * and a timeout; returns null on failure/timeout — callers must fall back.
    */
   runMiniCompletion?(prompt: string): Promise<string | null>;
+
+  /**
+   * Called after this tool writes global memory, so the host can broadcast
+   * memory:changed and UI badges/counts refresh live. Optional — hosts that
+   * don't track memory UI may omit it.
+   */
+  onMemoryChanged?(): void;
 }
 
 // ============================================================

@@ -213,6 +213,8 @@ export async function handleAddMemory(ctx: SessionToolContext, args: { action: '
       store.entries.push(entry)
       mkdirSync(dirname(path), { recursive: true })
       ctx.fs.writeFile(path, JSON.stringify(store, null, 2))
+      // Host-side notification: UI badges/counts stay live after tool writes.
+      if (args.scope === 'global') ctx.callbacks?.onMemoryChanged?.()
       return ok(`Added ${args.scope} memory ${entry.id}.`)
     }
     const index = store.entries.findIndex((entry: { id: string; sourceSessionId?: string }) => entry.id === args.id && (args.scope === 'global' || entry.sourceSessionId === ctx.sessionId))
@@ -235,6 +237,7 @@ export async function handleAddMemory(ctx: SessionToolContext, args: { action: '
     }
     mkdirSync(dirname(path), { recursive: true })
     ctx.fs.writeFile(path, JSON.stringify(store, null, 2))
+    if (args.scope === 'global') ctx.callbacks?.onMemoryChanged?.()
     return ok(`${args.scope} memory ${action} completed.`)
   } catch (cause) {
     return error(`Failed to add memory: ${cause instanceof Error ? cause.message : String(cause)}`)

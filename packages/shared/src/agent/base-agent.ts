@@ -256,6 +256,13 @@ export abstract class BaseAgent implements AgentBackend {
   onPermissionRequest: PermissionCallback | null = null;
   onPlanSubmitted: PlanCallback | null = null;
   onAuthRequest: AuthCallback | null = null;
+
+  /**
+   * Fired when a session tool writes global memory (add/update/delete via
+   * add_memory). The host (SessionManager) uses it to broadcast memory:changed
+   * so UI badges/counts refresh live. Optional — hosts may leave it null.
+   */
+  onMemoryChanged: (() => void) | null = null;
   onSourceChange: SourceChangeCallback | null = null;
   onSourcesListChange: ((sources: LoadedSource[]) => void) | null = null;
   onConfigValidationError: ((file: string, errors: string[]) => void) | null = null;

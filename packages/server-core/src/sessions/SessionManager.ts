@@ -4772,6 +4772,11 @@ export class SessionManager implements ISessionManager {
         }, managed.workspace.id)
       }
 
+      // Tool writes to global memory → live UI badge/count updates.
+      managed.agent.onMemoryChanged = () => {
+        this.broadcastMemoryChanged(managed.workspace.id)
+      }
+
       // Wire up onPlanSubmitted to add plan message to conversation
       managed.agent.onPlanSubmitted = async (planPath) => {
         sessionLog.info(`Plan submitted for session ${managed.id}:`, planPath)

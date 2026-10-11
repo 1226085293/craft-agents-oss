@@ -600,8 +600,11 @@ export function buildMemoryContext(
     for (const entry of entries) {
       const tagStr = entry.tags.length > 0 ? ` #${entry.tags.join(' #')}` : '';
       // Timestamp lets the model distinguish same-tag facts by recency (e.g.
-      // a renamed alias supersedes the old one). Keep it compact: date only.
-      const date = entry.createdAt ? entry.createdAt.slice(0, 10) : '';
+      // a renamed alias supersedes the old one). Show the LAST modification
+      // time (updatedAt when the entry was edited, else createdAt) so an
+      // update advances the visible date. Keep it compact: date only.
+      const lastModified = entry.updatedAt ?? entry.createdAt;
+      const date = lastModified ? lastModified.slice(0, 10) : '';
       lines.push(`  • (${date}) ${entry.content}${tagStr}`);
     }
     lines.push('');

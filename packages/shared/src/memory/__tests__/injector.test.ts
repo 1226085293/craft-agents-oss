@@ -217,6 +217,17 @@ describe('buildMemoryContext', () => {
     expect(ctx).toContain('</cross_session_memory>')
   })
 
+  it('shows the last modification date (updatedAt when present, else createdAt)', async () => {
+    const { buildMemoryContext } = await import('../injector')
+    const ctx = buildMemoryContext([
+      makeEntry({ type: 'factual', content: '旧创建新修改', createdAt: '2026-10-01T08:00:00.000Z', updatedAt: '2026-10-11T09:00:00.000Z' }),
+      makeEntry({ type: 'factual', content: '只有创建时间', createdAt: '2026-10-05T08:00:00.000Z' }),
+    ])
+    expect(ctx).toContain('(2026-10-11) 旧创建新修改')
+    expect(ctx).toContain('(2026-10-05) 只有创建时间')
+    expect(ctx).not.toContain('(2026-10-01)')
+  })
+
   it('does not score interrogative words against unrelated content (stopword regression)', async () => {
     // The 0cf61f8b-style entry contains "为什么" — querying "你叫什么名字"
     // must NOT hit it via the shared "什么" substring after stopword removal.

@@ -45,6 +45,7 @@ interface MemoryEntry {
   tags: string[]
   confidence: number
   createdAt: string
+  updatedAt?: string
   sourceSessionId: string
   lastInjectedAt?: string | null
   dueAt?: string | null
@@ -318,13 +319,13 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
     }
     if (activeTimeRange) {
       list = list.filter(m => {
-        const ts = new Date(m.createdAt).getTime()
+        const ts = new Date(m.updatedAt ?? m.createdAt).getTime()
         return ts >= activeTimeRange.from && ts <= activeTimeRange.to
       })
     }
-    // Default: newest first.
+    // Default: newest first (by last modification time).
     return [...list].sort((a, b) => {
-      const diff = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+      const diff = new Date(b.updatedAt ?? b.createdAt).getTime() - new Date(a.updatedAt ?? a.createdAt).getTime()
       return sortOrder === 'newest' ? diff : -diff
     })
   }, [memories, searchQuery, typeFilter, activeTimeRange, sortOrder])
@@ -973,7 +974,7 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
                   <div className="min-w-0 flex-1">
                     <p className="text-[13px] leading-relaxed break-words">{memory.content}</p>
                     <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground">
-                      <span>{formatLastExtractionTime(memory.createdAt)}</span>
+                      <span>{formatLastExtractionTime(memory.updatedAt ?? memory.createdAt)}</span>
                       {memory.tags.length > 0 && (
                         <span className="truncate">#{memory.tags.slice(0, 3).join(' #')}{memory.tags.length > 3 ? '…' : ''}</span>
                       )}

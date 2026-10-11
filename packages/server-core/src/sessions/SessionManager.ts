@@ -1863,7 +1863,11 @@ export class SessionManager implements ISessionManager {
 
   /** Notify renderers that global memory changed (badges/counts must refresh). */
   broadcastMemoryChanged(workspaceId: string): void {
-    if (!this.eventSink) return
+    if (!this.eventSink) {
+      sessionLog.info('[Memory] broadcastMemoryChanged skipped: no eventSink')
+      return
+    }
+    sessionLog.info(`[Memory] Broadcasting memory changed for workspace ${workspaceId}`)
     this.eventSink(RPC_CHANNELS.memory.MEMORY_CHANGED, { to: 'workspace', workspaceId }, workspaceId)
   }
 

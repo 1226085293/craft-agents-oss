@@ -557,10 +557,17 @@ while (-not $builderSuccess -and $builderRetry -lt $maxBuilderRetries) {
         if ($builderRetry -lt $maxBuilderRetries) {
             Write-Host "  Waiting 10 seconds before retry..." -ForegroundColor Yellow
 
-            # Kill any processes that might be holding file locks
-            Get-Process -Name 'node', 'npm' -ErrorAction SilentlyContinue | ForEach-Object {
-                Write-Host "    Killing $($_.ProcessName) (PID: $($_.Id))..." -ForegroundColor Yellow
-                Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+            if ($SkipProcessKill) {
+                # Agent sessions must NOT kill node/npm on retry either — that can
+                # terminate the caller's own pipeline/host (see -SkipProcessKill doc
+                # above). Wait for file handles to release and retry as-is.
+                Write-Host "    -SkipProcessKill: skipping retry process kill, waiting for file handles..." -ForegroundColor Yellow
+            } else {
+                # Kill any processes that might be holding file locks
+                Get-Process -Name 'node', 'npm' -ErrorAction SilentlyContinue | ForEach-Object {
+                    Write-Host "    Killing $($_.ProcessName) (PID: $($_.Id))..." -ForegroundColor Yellow
+                    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
+                }
             }
 
             Start-Sleep -Seconds 10

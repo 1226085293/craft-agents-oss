@@ -44,11 +44,39 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-install-restart-win.
    `build-win.ps1` 会终止所有 `node` / `npm` / `electron` / `electron-builder` 进程，
    这会**杀掉调用者自己的命令管道**（表现为立刻 `Command timed out after 2 seconds`），
    甚至可能波及宿主应用。这是 2026-10-10 实测踩坑。
-2. **推荐在 agent 会话内走后台独立打包**：先用 `bun run electron:build` 构建 dist，
-   再用 `Start-Process` 后台运行 `bunx electron-builder --config electron-builder.yml --win`
-   （输出重定向到日志，不杀任何进程），轮询日志直到 exe 时间戳更新。
-3. **安装前必须核对安装包时间戳**：`release/Craft-Agents-x64.exe` 的 `LastWriteTime`
-   必须晚于本次构建开始时间。脚本已内置校验（构建模式下拒绝旧包），但手动运行时
+2. **推荐在 agent 会话内走后台独立打包**，二选一：
+
+   **A. 完整管线（推荐）**：后台运行 `build-win.ps1`，它包含全部 staging 步骤
+   （vendor/bun、SDK 二进制、ripgrep、interceptor / wa-worker / pi-agent-server 构建）：
+
+   ```powershell
+   # 日志重定向后轮询，直到 apps/electron/release/Craft-Agents-x64.exe 生成
+   powershell -NoProfile -ExecutionPolicy Bypass -File "<repo>\apps\electron\scripts\build-win.ps1" -SkipProcessKill -SkipDependencyInstall
+   ```
+
+   - `-SkipProcessKill`：全程不杀 `node`/`npm` 进程——**包括 electron-builder 失败重试分支**
+     （`build-win.ps1` 已按此约定实现；2026-10-12 修复前重试分支仍会杀进程，
+     agent 会话内打包失败会波及宿主）。
+   - `-SkipDependencyInstall`：依赖刚装过或确认 `bun install` 无变化时用，省 2-3 分钟。
+
+   **B. 快捷路径（仅刷新 dist，staging 产物已知最新时）**：先 `bun run electron:build`，
+   再用 `Start-Process` 后台运行 electron-builder，**工作目录必须是 `apps/electron`**
+   （`afterPack.cjs` 在 `apps/electron/scripts/` 下，`electron-builder.yml` 中的相对路径
+   按工作目录解析——从仓库根目录运行会报 `Cannot find module '...scripts\afterPack.cjs'`，
+   2026-10-12 实测踩坑）：
+
+   ```powershell
+   Start-Process -FilePath '<repo>\node_modules\.bin\electron-builder.exe' -ArgumentList '--win','--x64' -WorkingDirectory '<repo>\apps\electron' -WindowStyle Hidden -RedirectStandardOutput '<repo>\packaging.log' -RedirectStandardError '<repo>\packaging-err.log' -PassThru
+   ```
+
+   - 优先用 `node_modules\.bin\electron-builder.exe`（`bun install` 不生成 .cmd shim，
+     裸 `npx`/`bunx` 在部分环境不可用，与 `build-win.ps1` 的调用方式保持一致）。
+   - 快捷路径**不含 staging**：若依赖升级过或 `vendor/bun`、SDK、ripgrep 可能过期，
+     走 A，或逐项核对时间戳后再走 B。
+   - 启动前删除旧安装包 `apps/electron/release/*.exe`，避免误装旧包（10-10 incident）。
+   - 轮询日志直到 exe 时间戳更新，再核对时间戳（见下一条）。
+3. **安装前必须核对安装包时间戳**：`apps/electron/release/Craft-Agents-x64.exe`
+   （不是仓库根目录的 `release/`）的 `LastWriteTime` 必须晚于本次构建开始时间。脚本已内置校验（构建模式下拒绝旧包），但手动运行时
    仍要自查——2026-10-10 曾因打包被截断而误装 18:27 旧包，用户看到旧版界面。
 4. 安装/重启步骤可交回 `build-install-restart-win.ps1 -SkipBuild` 执行（它用 detached
    helper 处理宿主中断，脚本本身安全）。
@@ -68,11 +96,30 @@ Get-Content "$env:TEMP\craft-agents-install-restart-*.log" | Select-Object -Last
 Select-String -Path "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\dist\main.cjs" -Pattern "ALWAYS_FIXED_TOOLS","retrievalKeywords" | Select-Object -First 2
 ```
 
+## 补充踩坑（2026-10-12 重建实测）
+
+- **`git pull` 报 TLS 瞬断**（`unexpected eof while reading` / `error:0A000126`）：
+  多为网络抖动，直接重试即可；重试前先 `git fetch` 确认远端 HEAD。
+- **bash 中调用 `powershell -File .\xxx.ps1`**：反斜杠会被转义吞掉（变成
+  `.build-...ps1` 报"文件不存在"），一律用**绝对路径**（Git Bash 里写
+  `"E:\craft-agents-oss\build-install-restart-win.ps1"`）。
+- **bash 中 `powershell -Command` 引用 `$env:` 变量**：`$env` 会被 bash 展开为空，
+  整个 `-Command` 参数必须用**单引号**包裹（或写入 .ps1 文件执行）。
+- **快捷路径 staging 核对清单**（B 路径适用）：
+  - `apps/electron/vendor/bun/bun.exe` 存在且可独占打开
+  - `apps/electron/node_modules/@anthropic-ai/claude-agent-sdk` 与
+    `claude-agent-sdk-binary`（含 ~210MB `claude.exe`）时间戳 ≥ 依赖更新后最近一次构建
+  - `apps/electron/node_modules/@vscode/ripgrep/bin/rg.exe` 与
+    `node_modules/@vscode/ripgrep-win32-x64/bin/rg.exe` 内容一致（`cmp` 核对）
+  - `apps/electron/dist/interceptor.cjs`、`packages/messaging-whatsapp-worker/dist/worker.cjs`、
+    `packages/pi-agent-server/dist/index.js` 时间戳 ≥ 对应源码最近修改时间
+
 ## ❌ 错误的做法（会导致更新失败）
 
 ### 错误 1：只运行构建命令
 ```powershell
-# ❌ 这只构建开发版本，不会安装或重启
+# ❌ 这只构建产物，不会安装或重启——把它当作"完整更新"是错的。
+# （作为 agent 快捷路径的打包前置步骤是允许的，见上方 A/B 选项 B。）
 bun run electron:build
 ```
 

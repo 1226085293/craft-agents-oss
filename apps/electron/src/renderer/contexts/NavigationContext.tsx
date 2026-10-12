@@ -53,6 +53,7 @@ import { routes, type Route, type ViewRoute } from '../../shared/routes'
 import { parsePermissionMode } from '@craft-agent/shared/agent/mode-types'
 import type { DraftAttachmentRef } from '@craft-agent/shared/config'
 import { NAVIGATE_EVENT, type NavigateOptions } from '../lib/navigate'
+import { dispatchFocusInputEvent } from '@/components/app-shell/input/focus-input-events'
 import { openSettingsWindow } from '@/lib/settings-window'
 import { normalizePanelRouteForReconcile } from './navigation-reconcile'
 import { buildSemanticHistoryKey, canRunInitialRestore } from './navigation-history'
@@ -770,6 +771,13 @@ export function NavigationProvider({
             store.set(updateFocusedPanelRouteAtom, route)
             // Session selection sync handled by effect
           }
+
+          // Focus the new session's input via the queued mechanism once the
+          // session exists and the panel route is set. Synchronous focus here
+          // would race Windows TSF IME context registration during the mount
+          // burst (duplicated plain chars on first keystroke); FreeFormInput
+          // consumes this pending request with its 120ms delay.
+          dispatchFocusInputEvent({ sessionId: session.id })
 
           // Parse badges from params
           let badges: ContentBadge[] | undefined

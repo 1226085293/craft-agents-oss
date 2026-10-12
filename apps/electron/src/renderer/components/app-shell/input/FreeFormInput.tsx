@@ -1014,9 +1014,18 @@ export function FreeFormInput({
       const targetSessionId = detail?.sessionId
       if (!shouldHandleScopedInputEvent({ sessionId, isFocusedPanel, targetSessionId })) return
 
-      if (targetSessionId) {
+      // Session switch: targetSessionId is the NEW sessionId (different from current sessionId).
+      // In this case, do NOT clear the pending focus — let the queued focus effect (120ms delay)
+      // handle it after the re-render burst settles, to avoid racing Windows TSF IME context.
+      // Popover/dropdown close: targetSessionId === sessionId (or undefined) — clear pending
+      // and focus immediately since there's no re-render burst.
+      const isSessionSwitch = targetSessionId && targetSessionId !== sessionId
+      if (targetSessionId && !isSessionSwitch) {
         clearPendingFocusForSession(targetSessionId)
       }
+
+      // For session switch, skip immediate focus; queued focus will handle after 120ms.
+      if (isSessionSwitch) return
 
       richInputRef.current?.focus()
       // Restore caret position if saved, then clear it (one-shot)

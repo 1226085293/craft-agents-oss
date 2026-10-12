@@ -612,7 +612,12 @@ export function SessionList({
   const handleSelectSession = useCallback((row: SessionListRow, index: number) => {
     selectSession(row.item.id, index)
     navigateToSession(row.item.id)
-  }, [selectSession, navigateToSession])
+    // Route focus through the queued mechanism (120ms delay in FreeFormInput)
+    // so the session-switch re-render burst settles before focusing — immediate
+    // focus mid-update races Windows TSF IME context registration and makes the
+    // first keystroke miss the IME (duplicated plain chars, e.g. "nn").
+    onFocusChatInput?.(row.item.id)
+  }, [selectSession, navigateToSession, onFocusChatInput])
 
   const handleSelectSessionById = useCallback((sessionId: string) => {
     const index = rowIndexMap.get(sessionId) ?? -1

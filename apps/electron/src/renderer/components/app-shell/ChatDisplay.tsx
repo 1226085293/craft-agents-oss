@@ -701,7 +701,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
   // Register as focus zone - when zone gains focus, focus the textarea
   // Guard with isFocusedPanelRef so only the focused panel responds in multi-panel layouts
-  const { zoneRef, isFocused } = useFocusZone({
+  const { zoneRef, isFocused, intent } = useFocusZone({
     zoneId: 'chat',
     enabled: isFocusedPanel,
     focusFirst: () => {
@@ -756,15 +756,19 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
   // Focus textarea when zone gains focus via keyboard (Tab, Cmd+3, ArrowRight)
   // Requires isFocused to be true - respects zone architecture
-  // Does NOT auto-focus just because session changed (that would steal focus from SessionList)
+  // Does NOT auto-focus just because session changed (that would steal focus from SessionList
+  // and race Windows TSF IME context registration, causing duplicated plain chars on first keystroke).
+  // The queued focus in FreeFormInput (120ms delay) handles post-session-switch/new-chat focus correctly.
+  // 'programmatic' intent (e.g. new-chat focusZone) also defers to that queued path instead of
+  // focusing synchronously mid-render.
   // Uses isSearchModeActive (prop) instead of isSearchActive (query-based) to prevent
   // focus stealing when search is open but query is empty
   // In multi-panel layouts, only the focused panel should auto-focus its textarea
   useEffect(() => {
-    if (session && !isSearchModeActive && isFocused && isFocusedPanel) {
+    if (!isSearchModeActive && isFocused && isFocusedPanel && intent !== 'programmatic') {
       textareaRef.current?.focus()
     }
-  }, [session?.id, isFocused, isSearchModeActive, isFocusedPanel])
+  }, [isFocused, isSearchModeActive, isFocusedPanel, intent])
 
   useEffect(() => {
     let isMounted = true

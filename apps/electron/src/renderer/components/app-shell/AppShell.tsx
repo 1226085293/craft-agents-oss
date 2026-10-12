@@ -2126,8 +2126,11 @@ function AppShellContent({
       newPanel ? { newPanel: true, targetLaneId: 'main' } : undefined
     )
 
-    // Focus the chat input after navigation completes
-    setTimeout(() => focusZone('chat', { intent: 'programmatic' }), 50)
+    // Focus the chat input after navigation completes. moveFocus:false keeps
+    // the zone state correct (hotkey context) but defers DOM focus to the queued
+    // mechanism dispatched by NavigationContext after the new session exists —
+    // synchronous focus mid-render races Windows TSF IME context registration.
+    setTimeout(() => focusZone('chat', { intent: 'programmatic', moveFocus: false }), 50)
   }, [activeWorkspace, focusZone, navigate, resolveInheritedNewSessionParams])
 
   // Create a brand new dedicated browser window and focus it.

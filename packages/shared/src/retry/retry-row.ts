@@ -223,3 +223,39 @@ export function settleRetryRowAsFailed(
     elapsedMs: Math.max(0, now - startedAt),
   }
 }
+
+/**
+ * 2026-10-12 (user spec "one entry per ladder"): find the row of the CURRENT
+ * turn's ladder that a backoff/active event may REVIVE.
+ *
+ * Within ONE ladder, repeated failures must stay on ONE row: an intermediate
+ * terminal verdict (`end failed` from the SDK/auto-retry channel) settles the
+ * row to 'failed', but the unified ladder keeps going — the next backoff must
+ * revive THAT row in place (attempt advances 1→2→3) instead of appending a
+ * fresh line per failure.
+ *
+ * A 'recovered' row is deliberately NOT matched: recovery closes the visible
+ * cycle — a later failure starts a NEW ladder/row whose attempt count begins
+ * at 1 (fine-cloud spec, 2026-10-11). Bounded by the first regular user
+ * message (the ladder is per-turn).
+ */
+export function findRetryRowForLadder(
+  messages: Array<{ role?: string; statusType?: string; retry?: { status?: string; startedAt?: number }; isGuidance?: boolean }>,
+  startedAt?: number,
+): number {
+  if (typeof startedAt !== 'number') return -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!
+    if (m.role === 'user' && !m.isGuidance) return -1
+    const nested = m.retry?.status
+    if (
+      m.role === 'status' &&
+      m.statusType === 'retrying' &&
+      m.retry?.startedAt === startedAt &&
+      (nested === 'retrying' || nested === 'failed')
+    ) {
+      return i
+    }
+  }
+  return -1
+}

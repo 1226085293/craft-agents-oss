@@ -1146,15 +1146,19 @@ export class PiAgent extends BaseAgent {
     this.lastTurnEventAt = Date.now();
 
     // Unified retry ladder: the first MODEL-PROGRESS event after a retry
-    // resend proves the retried run is live (a message began, its stream is
-    // updating, or a tool started executing). 2026-10-06 incident: this used
+    // resend proves the retried run is live. 2026-10-06 incident: this used
     // to fire on the FIRST event of ANY kind — a refused re-issue's synthetic
     // `agent_end` (sent immediately after the rejected `retry` command) marked
     // the run "live" before the matching `error` arrived, so the queue
     // completed and the retry was misjudged as a success.
+    // 2026-10-12 (spry-stone "21s" loop): `message_start` is NOT progress — it
+    // only means the SDK opened a message/stream object and can fire on a
+    // connection that then hangs for 20s+ and dies (SSE idle cut). Treating it
+    // as recovery showed "重试 1 次后恢复" on every hung attempt, reset the
+    // cycle count via restartCycle and looped the ladder forever. Live proof
+    // requires actual content (`message_update`) or a real tool execution.
     const isModelProgress =
       eventType === 'message_update' ||
-      eventType === 'message_start' ||
       eventType === 'tool_execution_start';
     if (
       isModelProgress &&

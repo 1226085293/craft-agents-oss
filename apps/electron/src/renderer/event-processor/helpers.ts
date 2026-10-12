@@ -7,7 +7,7 @@
 
 import type { Message, Session } from '../../shared/types'
 import type { RetryLadderRow } from '@craft-agent/core'
-import { settleRetryRowAsFailed, findActiveRetryRowIndex, findLastRetryRowIndex, findLastRetryRowByStartedAt } from '@craft-agent/shared/retry/retry-row'
+import { settleRetryRowAsFailed, findActiveRetryRowIndex, findLastRetryRowIndex, findLastRetryRowByStartedAt, findRetryRowForLadder } from '@craft-agent/shared/retry/retry-row'
 
 let messageIdCounter = 0
 
@@ -188,6 +188,14 @@ export function upsertRetryRow(session: Session, payload: RetryLadderRow | null)
       // a second row. (Mirrors the server's case 'retry' fallback exactly.)
       idx = findLastRetryRowByStartedAt(session.messages, payload.startedAt)
     }
+  }
+  // 2026-10-12 (user spec "one entry per ladder"): a backoff/active with no
+  // retrying row still belongs to the CURRENT ladder when its previous
+  // attempt was settled 'failed' by an intermediate verdict — revive that row
+  // in place (attempt advances 1→2→3 …) instead of stacking one failed line
+  // per attempt. 'recovered' rows are never revived (new cycle = new row).
+  if (idx === -1 && payload.status === 'retrying') {
+    idx = findRetryRowForLadder(session.messages, payload.startedAt)
   }
   if (idx !== -1) {
     return {

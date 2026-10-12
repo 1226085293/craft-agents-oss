@@ -296,4 +296,39 @@ describe('Pi retry streaming boundaries', () => {
       retry: { status: 'failed', attempt: 1 },
     })
   })
+
+  it('never persists a terminal end with attempt 0 (2026-10-11 spry-stone: "重试 0 次后失败")', async () => {
+    // A stale zero-attempt settle (ladder that never counted a failure, its
+    // end landing after a pipeline delay, often into a NEW turn) must not be
+    // persisted — "重试 0 次后失败 · 耗时 xx:xx" is meaningless to the user.
+    const { managed, events, fire } = harness()
+
+    // (a) no rows at all: nothing created.
+    await fire({
+      type: 'retry',
+      phase: 'end',
+      recovered: false,
+      attempt: 0,
+      startedAt: 1800000005000,
+      elapsedMs: 127000,
+    })
+    expect(managed.messages.filter(m => m.statusType === 'retrying')).toHaveLength(0)
+    // Event still forwarded (renderer applies the same rule).
+    expect(events).toContainEqual(expect.objectContaining({ type: 'retry', phase: 'end' }))
+
+    // (b) an existing retrying row is left retrying — the zero-attempt end is
+    // not a real verdict either.
+    await fire({ type: 'retry', phase: 'backoff', message: 'Retrying...', attempt: 1 })
+    await fire({
+      type: 'retry',
+      phase: 'end',
+      recovered: false,
+      attempt: 0,
+      startedAt: 1800000005000,
+      elapsedMs: 127000,
+    })
+    const rows = managed.messages.filter(m => m.statusType === 'retrying')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.retry?.status).toBe('retrying')
+  })
 })

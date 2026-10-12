@@ -283,8 +283,13 @@ describe('PiAgent subprocess error handling', () => {
       expect((agent as any).retryTimer != null).toBe(true)
 
       // The stream spontaneously recovers BEFORE any retry command was sent.
+      // (2026-10-12 spry-stone: a bare `message_start` is NOT proof of a
+      // recovered stream — real content must arrive to mark the run live.)
       ;(agent as any).handleSubprocessEvent({ type: 'message_start' })
-      expect((agent as any).retryTimer).toBeNull() // pending retry canceled
+      expect((agent as any).retryTimer).not.toBeNull() // still waiting: no content yet
+      expect((agent as any).retryRunLive).not.toBe(true)
+      ;(agent as any).handleSubprocessEvent({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'x' } })
+      expect((agent as any).retryTimer).toBeNull() // pending retry canceled now
       expect((agent as any).retryRunLive).toBe(true)
 
       // The recovered run ends naturally → the queue must complete now, not
@@ -542,5 +547,46 @@ describe('PiAgent retried-run stall governance (2026-10-09)', () => {
     // The crash reason follows as the error card.
     expect(enqueued.some((e: any) => e.type === 'error')).toBe(true)
     agent.destroy()
+  })
+})
+
+describe('PiAgent retry live-proof (2026-10-12 spry-stone 21s loop)', () => {
+  it('a bare message_start after resend is NOT recovery — the ladder stays retrying and counts', async () => {
+    const cfg = createConfig()
+    const ladderStatePath = join(cfg.workspace.rootPath, 'sessions', cfg.session!.id, 'data', 'retry-ladder-state.json')
+    rmSync(ladderStatePath, { force: true })
+    const agent = new PiAgent(cfg)
+    const enqueued: any[] = []
+    const queue = (agent as any).eventQueue
+    queue.enqueue = (event: any) => { enqueued.push(event) }
+    ;(agent as any).subprocess = {
+      stdin: { writable: true, write() {} },
+      kill() { /* no-op */ },
+    }
+    try {
+      ;(agent as any)._isProcessing = true
+      ;(agent as any).adapter.startTurn()
+
+      // 2026-10-12 spry-stone: resend fires, then the SDK only emits
+      // message_start (stream object opened) — the connection hangs and dies.
+      ;(agent as any).retryLadder.begin('transient', { message: 'hang' })
+      ;(agent as any).retryResendAt = Date.now() - 1
+      ;(agent as any).handleSubprocessEvent({ type: 'message_start' })
+
+      // No recovery: no recovered end, retryRunLive stays false, the ladder
+      // keeps counting (no restartCycle wipe).
+      expect(enqueued.some(e => e.type === 'retry' && e.phase === 'end' && e.recovered === true)).toBe(false)
+      expect((agent as any).retryRunLive).toBe(false)
+
+      // Real content later IS progress: only the first content delta settles
+      // the row as recovered (attempt = cycle count + 1).
+      ;(agent as any).handleSubprocessEvent({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'ok' } })
+      const end = enqueued.find(e => e.type === 'retry' && e.phase === 'end' && e.recovered === true)
+      expect(end).toBeDefined()
+      expect(end.attempt).toBe(1) // begin held attempts=0 → cycle attempt 1
+    } finally {
+      agent.destroy()
+      rmSync(ladderStatePath, { force: true })
+    }
   })
 })

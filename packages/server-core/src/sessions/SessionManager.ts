@@ -26,7 +26,7 @@ import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
 import { i18n } from '@craft-agent/shared/i18n'
-import { nextRetryRowPayload, settleRetryRowAsFailed, findActiveRetryRowIndex, findLastRetryRowIndex, findLastRetryRowByStartedAt } from '@craft-agent/shared/retry/retry-row'
+import { nextRetryRowPayload, settleRetryRowAsFailed, findActiveRetryRowIndex, findLastRetryRowIndex, findLastRetryRowByStartedAt, findRetryRowForLadder } from '@craft-agent/shared/retry/retry-row'
 import {
   getWorkspaces,
   getWorkspaceByNameOrId,
@@ -9224,6 +9224,13 @@ ${request.prompt}`;
         if (retryIdx === -1 && event.phase === 'end') {
           retryIdx = findLastRetryRowByStartedAt(managed.messages, event.startedAt)
         }
+        // 2026-10-12 (user spec "one entry per ladder"): a backoff/active with
+        // no retrying row revives the CURRENT ladder's previously-failed row
+        // in place (attempt 1→2→3 …) — never stack one failed line per
+        // attempt. 'recovered' rows are not revived (new cycle = new row).
+        if (retryIdx === -1 && event.phase !== 'end') {
+          retryIdx = findRetryRowForLadder(managed.messages, event.startedAt)
+        }
         const prevRow = retryIdx !== -1 ? managed.messages[retryIdx]!.retry : undefined
         const nextPayload = nextRetryRowPayload(event, prevRow, now)
         // 2026-10-10 (261010-warm-carbon): a verdictless end that found no
@@ -9233,6 +9240,18 @@ ${request.prompt}`;
         // applies the same rule) but touch neither the rows, the liveness
         // gate, nor the error cards.
         if (nextPayload === null) {
+          this.sendEvent({ ...event, sessionId }, workspaceId)
+          break
+        }
+        // 2026-10-11 (spry-stone): a TERMINAL verdict with attempt < 1 would
+        // render as "重试 0 次后失败 · 耗时 xx:xx" — a ladder that never
+        // counted a single failure, its stale end landing after a pipeline
+        // delay (often into a NEW turn). Such a row is meaningless; forward
+        // the event but never persist it.
+        if (event.phase === 'end' && nextPayload.attempt < 1) {
+          sessionLog.debug(
+            `retry: dropping zero-attempt terminal end (status ${nextPayload.status}) — never render 重试 0 次`,
+          )
           this.sendEvent({ ...event, sessionId }, workspaceId)
           break
         }
@@ -9268,7 +9287,11 @@ ${request.prompt}`;
           let changed = false
           for (let i = managed.messages.length - 1; i >= 0; i--) {
             const m = managed.messages[i]!
-            if (m.role !== 'error' || m.retryPending !== true) continue
+            // Ladder cards = (retryPending || retryAttempt): flipped cards
+            // (retryPending=false after an intermediate end failed) must be
+            // spliced on recovery / flipped on the real terminal end too —
+            // a successful retry clears the box no matter its flip state.
+            if (m.role !== 'error' || (m.retryPending !== true && m.retryAttempt == null)) continue
             changed = true
             if (recovered) {
               managed.messages.splice(i, 1)
@@ -9922,11 +9945,12 @@ ${request.prompt}`;
         if (event.retryPending) {
           for (let i = managed.messages.length - 1; i >= 0; i--) {
             const m = managed.messages[i]!
-            if (m.role === 'error' && m.retryPending) {
+            if (m.role === 'error' && (m.retryPending || (event.retryAttempt != null && m.retryAttempt === event.retryAttempt - 1))) {
               managed.messages[i] = {
                 ...m,
                 content: event.message,
                 retryAttempt: event.retryAttempt ?? m.retryAttempt,
+                retryPending: true, // reactivate a flipped card (2026-10-12)
                 timestamp: now,
               }
               errorTimestamp = now

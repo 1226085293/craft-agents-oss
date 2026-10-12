@@ -170,8 +170,19 @@ export function handleError(
   // (latest error message + attempt) instead of stacking a card per failure.
   // The server mirrors this; handleRetry drops the card on recovery and
   // flips it terminal when the ladder exhausts.
+  // 2026-10-12: a ladder card is (retryPending) — OR a previous surface of
+  // the SAME ladder whose retryAttempt is exactly one behind the current one
+  // (an intermediate `end failed` FLIPS it to retryPending=false, but the
+  // ladder keeps going; the next surface must update THAT card in place —
+  // reactivate — instead of stacking a new box). A flipped card of a
+  // PREVIOUS ladder is not recycled behind a fresh sequence.
   const lastPendingCardIdx = event.retryPending
-    ? messagesWithFailedTools.findLastIndex(m => m.role === 'error' && m.retryPending)
+    ? messagesWithFailedTools.findLastIndex(
+        m =>
+          m.role === 'error' &&
+          (m.retryPending ||
+            (event.retryAttempt != null && m.retryAttempt === event.retryAttempt - 1)),
+      )
     : -1
   const finalMessages =
     lastPendingCardIdx !== -1
@@ -181,6 +192,7 @@ export function handleError(
                 ...m,
                 content: event.error,
                 retryAttempt: event.retryAttempt ?? m.retryAttempt,
+                retryPending: true, // reactivate a flipped card (2026-10-12)
                 timestamp: event.timestamp ?? Date.now(),
               }
             : m
@@ -276,6 +288,12 @@ export function handleRetry(state: SessionState, event: RetryEvent): ProcessResu
   if (payload === null) {
     return { state, effects: [] }
   }
+  // 2026-10-11 (spry-stone): a terminal verdict with attempt < 1 ("重试 0 次
+  // 后失败") is a stale zero-attempt settle — mirror the server, never render
+  // it.
+  if (event.phase === 'end' && payload.attempt < 1) {
+    return { state, effects: [] }
+  }
   // 2026-10-10: track ladder liveness — while retrying, the complete/error
   // fail-safe must NOT settle the row (success/failure only at the real end).
   const ladderActive = payload.status === 'retrying'
@@ -299,9 +317,13 @@ export function handleRetry(state: SessionState, event: RetryEvent): ProcessResu
           ...session,
           messages:
             event.recovered === true
-              ? session.messages.filter(m => !(m.role === 'error' && m.retryPending))
+              ? session.messages.filter(
+                  m => !(m.role === 'error' && (m.retryPending || m.retryAttempt != null)),
+                )
               : session.messages.map(m =>
-                  m.role === 'error' && m.retryPending ? { ...m, retryPending: false } : m
+                  m.role === 'error' && (m.retryPending || m.retryAttempt != null)
+                    ? { ...m, retryPending: false }
+                    : m
                 ),
         }
   return {

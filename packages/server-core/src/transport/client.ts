@@ -19,6 +19,32 @@ import {
 } from '@craft-agent/shared/protocol'
 import type { RpcClient } from './types'
 import { serializeEnvelope, deserializeEnvelope } from './codec'
+// 2026-10-12 (dev blank renderer): this module is bundled into the Electron
+// PRELOAD (bootstrap.ts → WsRpcClient), which runs in a sandboxed context that
+// has WebCrypto (getRandomValues) but NOT Node's crypto.randomUUID. Calling
+// crypto.randomUUID there threw at ws.onopen and left the window blank.
+// Prefer the native UUID when present; fall back to a getRandomValues v4.
+function newUuid(): string {
+  const c = globalThis.crypto
+  if (c && typeof (c as { randomUUID?: () => string }).randomUUID === 'function') {
+    return (c as { randomUUID: () => string }).randomUUID()
+  }
+  if (c && typeof c.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16)
+    c.getRandomValues(bytes)
+    bytes[6] = (bytes[6]! & 0x0f) | 0x40 // version 4
+    bytes[8] = (bytes[8]! & 0x3f) | 0x80 // RFC 4122 variant
+    const h = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+    return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`
+  }
+  // Last resort: Math.random fallback (ids are correlation-only)
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {
+    const r = (Math.random() * 16) | 0
+    const v = ch === 'x' ? r : (r & 0x3) | 0x8
+    return v.toString(16)
+  })
+}
+
 
 // ---------------------------------------------------------------------------
 // Pending request state
@@ -183,7 +209,7 @@ export class WsRpcClient implements RpcClient {
         return
       }
 
-      const id = crypto.randomUUID()
+      const id = newUuid()
       const timeout = setTimeout(() => {
         this.pending.delete(id)
         reject(new Error(`Request timeout: ${channel} (${this.requestTimeout}ms)`))
@@ -402,7 +428,7 @@ export class WsRpcClient implements RpcClient {
 
       // Send handshake (includes reconnection info if available)
       const handshake: MessageEnvelope = {
-        id: crypto.randomUUID(),
+        id: newUuid(),
         type: 'handshake',
         protocolVersion: PROTOCOL_VERSION,
         workspaceId: this.workspaceId,
@@ -827,7 +853,7 @@ export class WsRpcClient implements RpcClient {
     this.ackTimer = setInterval(() => {
       if (this.connected && this.lastSeenSeq > 0) {
         const ack: MessageEnvelope = {
-          id: crypto.randomUUID(),
+          id: newUuid(),
           type: 'sequence_ack',
           lastSeq: this.lastSeenSeq,
         }

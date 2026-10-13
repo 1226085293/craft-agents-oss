@@ -54,8 +54,12 @@ files:
   - resources/bin/linux-x64/**/*
   # Include bundled Bun runtime (platform-specific, set by build script)
   - vendor/bun/**/*
-  # Exclude everything from node_modules (will use extraResources for SDK)
-  - "!node_modules/**/*"
+  # Exclude nothing — npm module collector fills node_modules from the
+  # dependency tree (declared in this package.json). The explicit exclusion
+  # below is removed because electron-builder 26 treats a `files` whitelist
+  # as authoritative and would otherwise drop every dependency (filesCount=0).
+  # node_modules/**/*
+  - "node_modules/**/*"
 
 # Since SDK 0.2.113 the SDK ships a thin core (`@anthropic-ai/claude-agent-sdk`)
 # and a per-platform optional dependency (`-darwin-arm64`, `-darwin-x64`, etc.)
@@ -119,6 +123,25 @@ mac:
     # ripgrep (used by packages/server-core/src/services/search.ts).
     - from: node_modules/@vscode/ripgrep
       to: app/node_modules/@vscode/ripgrep
+    # Memory embedding engine (bge-small-zh-v1.5): transformers.js runtime +
+    # its ONNX wasm kernels + deps (jinja/tokenizers/sharp native). Bun
+    # hoists npm deps to the repo-root node_modules, so `from` must point
+    # there (../../ from apps/electron) — the local node_modules copy may
+    # not exist in a fresh checkout.
+    - from: E:/craft-agents-oss/node_modules/@huggingface/transformers
+      to: app/node_modules/@huggingface/transformers
+    - from: E:/craft-agents-oss/node_modules/@huggingface/jinja
+      to: app/node_modules/@huggingface/jinja
+    - from: E:/craft-agents-oss/node_modules/@huggingface/tokenizers
+      to: app/node_modules/@huggingface/tokenizers
+    - from: E:/craft-agents-oss/node_modules/onnxruntime-web
+      to: app/node_modules/onnxruntime-web
+    - from: E:/craft-agents-oss/node_modules/onnxruntime-node
+      to: app/node_modules/onnxruntime-node
+    - from: E:/craft-agents-oss/node_modules/onnxruntime-common
+      to: app/node_modules/onnxruntime-common
+    - from: E:/craft-agents-oss/node_modules/sharp
+      to: app/node_modules/sharp
     # WhatsApp worker subprocess (self-contained; Baileys bundled in).
     - from: ../../packages/messaging-whatsapp-worker/dist/worker.cjs
       to: messaging-whatsapp-worker/worker.cjs
@@ -188,6 +211,15 @@ win:
       to: vendor/bun/bun.exe
     - from: resources/bin/win32-x64
       to: app/resources/bin/win32-x64
+    # Embedding runtime fix (2026-10-13): onnxruntime-common is the shared
+    # transitive dep that @huggingface/transformers's node build imports
+    # directly, but electron-builder's npm collector (bun monorepo hoisting)
+    # does NOT recurse into it — so it must be copied explicitly. Without it
+    # the embedding engine fails with ERR_MODULE_NOT_FOUND at runtime.
+    # (transformers/jinja/tokenizers/onnxruntime-node/web/sharp are already
+    # collected as declared deps via the files whitelist.)
+    - from: E:/craft-agents-oss/node_modules/onnxruntime-common
+      to: app/node_modules/onnxruntime-common
     # WhatsApp worker subprocess (self-contained; Baileys bundled in).
     - from: ../../packages/messaging-whatsapp-worker/dist/worker.cjs
       to: messaging-whatsapp-worker/worker.cjs

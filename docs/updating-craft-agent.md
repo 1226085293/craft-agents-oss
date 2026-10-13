@@ -92,8 +92,16 @@ Get-Content "$env:TEMP\craft-agents-install-restart-*.log" | Select-Object -Last
 # 2. 安装目录 main.cjs 时间戳 ≈ 本次构建时间（不是旧版本时间）
 (Get-Item "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\dist\main.cjs").LastWriteTime
 
-# 3. 确认 V3 记忆系统特征已打包（例如 ALWAYS_FIXED_TOOLS / existence-hint / retrievalKeywords）
-Select-String -Path "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\dist\main.cjs" -Pattern "ALWAYS_FIXED_TOOLS","retrievalKeywords" | Select-Object -First 2
+# 3. 确认记忆系统特征已打包（embedding 单轨：bge-small-zh 模型 + 语义检索）
+Select-String -Path "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\dist\main.cjs" -Pattern "encodeText","No embedding model path resolved" | Select-Object -First 2
+# 3b. 确认 transformers 是 external（非内联）：main.cjs 里应有 `import("@huggingface/transformers")`，
+#     且不应出现 onnxruntime_binding（内联会裁剪 native binding 导致主进程 embedding 失效）
+(Get-Content "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\dist\main.cjs" -Raw) -match 'import\("@huggingface/transformers"\)'
+# 4. 确认内置 embedding 模型在安装目录（模型随安装位置走，装 D 盘即在 D 盘）
+Test-Path "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\dist\resources\models\bge-small-zh-v1.5\onnx\model_quantized.onnx"
+# 5. 确认 embedding 运行时依赖齐全（onnxruntime-common 是传递依赖，缺了会 ERR_MODULE_NOT_FOUND）
+Test-Path "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\node_modules\onnxruntime-common\package.json"
+Test-Path "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\node_modules\@huggingface\transformers\package.json"
 ```
 
 ## 补充踩坑（2026-10-12 重建实测）
@@ -113,6 +121,19 @@ Select-String -Path "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\a
     `node_modules/@vscode/ripgrep-win32-x64/bin/rg.exe` 内容一致（`cmp` 核对）
   - `apps/electron/dist/interceptor.cjs`、`packages/messaging-whatsapp-worker/dist/worker.cjs`、
     `packages/pi-agent-server/dist/index.js` 时间戳 ≥ 对应源码最近修改时间
+  - **embedding 运行时（2026-10-13 新增）**：
+    - `apps/electron/dist/resources/models/bge-small-zh-v1.5/onnx/model_quantized.onnx` 存在（~24MB，内置记忆模型）
+    - 打包后 `resources/app/node_modules/@huggingface/transformers`、`onnxruntime-web`、
+      `onnxruntime-node`、`onnxruntime-common`、`sharp` 均在（embedding 引擎运行时依赖；
+      `onnxruntime-common` 是 transformers 的传递依赖，electron-builder 的 npm collector
+      在 bun monorepo 下不递归收集传递依赖，必须显式声明为依赖 + extraResources 拷贝——
+      缺了会 ERR_MODULE_NOT_FOUND，embedding 全挂、记忆全不注入——2026-10-13 实测坑）
+    - **main.cjs 必须 external `@huggingface/transformers`**（esbuild `--external`，
+      build:main / build:main:win / build-win.ps1 三处同步）：若内联，esbuild 会
+      dead-code-eliminate 掉 onnxruntime-node 的 native binding 加载器，主进程
+      （encodeEmbedding 回调运行处）embedding 静默失效——这是"语义检索不命中"的真凶
+  - 构建链尾会运行 `bun scripts/validate-assets.ts`（main.cjs/preload/interceptor/renderer/
+    pi-agent-server/模型/内置资产存在性校验；缺失任一即报错退出，防止带病打包）
 
 ## ❌ 错误的做法（会导致更新失败）
 
@@ -263,6 +284,20 @@ tail -f /tmp/craft-server.log
 ```
 
 ## 故障排除
+
+### 问题：安装器退出码 2（Installer exited with code 2）
+**原因**：`build-install-restart-win.ps1` 的 helper 只杀 `Craft Agents` 主进程，
+未杀 `pi-agent-server` 子进程（bun.exe）。子进程动态加载了安装目录
+`node_modules/@huggingface/transformers`，持有文件句柄，NSIS 覆盖文件失败。
+**解决**：helper 已修复——杀主进程后额外扫 `pi-agent-server` 子进程（排除自身
+进程树）。若仍偶发，手动杀 `bun.exe`（命令行含 `pi-agent-server`）后重试。
+
+### 问题：安装后记忆不注入 / query_memories 返回空（语义检索失效）
+**排查顺序**：
+1. 核对 main.cjs 是否 external transformers（见上文 3b），内联即踩坑；
+2. 核对 `onnxruntime-common` 是否在安装目录 node_modules；
+3. 用安装目录 node_modules 跑独立探针验证 `pipeline('feature-extraction')` 能 encode（dims=[1,512]）；
+4. 检查 `memory.json` 条目是否已有 `embedding` 字段（backfill 是否成功写入）。
 
 ### 问题：更新后进程没有重启
 **原因**：`pkill` 未匹配到正确进程名

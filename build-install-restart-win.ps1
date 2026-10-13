@@ -105,7 +105,26 @@ try {
         Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
     }
 
-    Start-Sleep -Seconds 2
+    # Also stop subprocesses (pi-agent-server etc.) that may hold file handles
+    # on the install dir's node_modules (e.g. @huggingface/transformers loaded
+    # by the embedding engine). Without this, NSIS fails to overwrite files
+    # with exit code 2.
+    # IMPORTANT: exclude our own process ($PID) and its parent so we never kill
+    # the very helper doing the install. Only match node/bun subprocesses whose
+    # command line references the pi-agent-server entrypoint — NOT powershell
+    # (our helper's parent command line also contains the install dir path and
+    # would otherwise match a naive '@craft-agentelectron' filter).
+    $myPid = $PID
+    $parentPid = (Get-CimInstance Win32_Process -Filter "ProcessId = $myPid" -ErrorAction SilentlyContinue).ParentProcessId
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ProcessId -ne $myPid -and $_.ProcessId -ne $parentPid -and
+        $_.CommandLine -and $_.CommandLine -like '*pi-agent-server*'
+    } | ForEach-Object {
+        Write-Log "Stopping subprocess PID $($_.ProcessId) $($_.Name)"
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+
+    Start-Sleep -Seconds 3
 
     Write-Log "Running silent installer..."
     $proc = Start-Process -FilePath $InstallerPath -ArgumentList "/S" -Wait -PassThru

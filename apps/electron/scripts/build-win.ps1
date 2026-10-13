@@ -335,7 +335,14 @@ $MainArgs = @(
     # the app on load (ERR_INVALID_ARG_VALUE). Externalize it so Node loads it natively
     # as ESM — the SDK core is staged into the app's node_modules above (step 4).
     # Must stay in sync with package.json build:main and scripts/electron-dev.ts.
-    "--external:@anthropic-ai/claude-agent-sdk"
+    "--external:@anthropic-ai/claude-agent-sdk",
+    # Embedding engine (bge-small-zh-v1.5): transformers.js + onnxruntime must
+    # NOT be inlined — esbuild dead-code-eliminates the onnxruntime-node native
+    # binding loader when it bundles them, breaking embedding in the Electron
+    # MAIN process (where the encodeEmbedding callback runs). Keep external so
+    # Node resolves the full package (incl. native binding) from node_modules.
+    # Must stay in sync with package.json build:main / build:main:win.
+    "--external:@huggingface/transformers"
 )
 # Add OAuth defines if env vars are set
 if ($env:GOOGLE_OAUTH_CLIENT_ID) {
@@ -433,6 +440,14 @@ try {
     bun scripts/copy-assets.ts
     if ($LASTEXITCODE -ne 0) { throw "Asset copy failed" }
     Write-Host "  Assets copied" -ForegroundColor Green
+
+    # Validate critical build artifacts BEFORE packaging (main.cjs, preloads,
+    # pi-agent-server, embedding model, bundled assets). Exit early with a
+    # clear message instead of shipping a broken installer.
+    Write-Host "  Validating build assets..."
+    bun scripts/validate-assets.ts
+    if ($LASTEXITCODE -ne 0) { throw "Build asset validation failed" }
+    Write-Host "  Build assets validated" -ForegroundColor Green
 } finally {
     Pop-Location
 }

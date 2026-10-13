@@ -71,6 +71,9 @@ registerBunOAuthFlows();
 // Model resolution (extracted for testability + custom-endpoint precedence)
 import { resolvePiModel, isDeniedMiniModelId, isModelNotFoundError } from './model-resolution.ts';
 import { pickProviderAppropriateMiniModel } from './pick-mini-model.ts';
+// Retry-step classification (2026-10-13): pure whitelist + busy-detector
+// extracted so the handleRetry re-runnable decision is unit-testable.
+import { classifyRetryStep, isSdkBusyRejection } from './retry-step-classifier.ts';
 import {
   CRAFT_PI_EPHEMERAL_QUERY_DEADLINE_MS,
   craftCompactionSettings,
@@ -123,6 +126,7 @@ import { detectRepetitionLoop, extractAssistantText, selectVerificationCandidate
 import { createDsmlSanitizerExtension } from './defense/dsml-sanitizer.ts';
 import { installDsmlReceiver } from './dsml-receiver.ts';
 import { drainQueuedFollowUp } from './defense/resume-followup.ts';
+import { runVerificationJudge } from './defense/verification-judge.ts';
 import { ToolLoopDetector, fingerprintToolCall, digestResult, shouldRejectEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
 import { normalizeShellTimeout } from './shell-timeout.ts';
@@ -363,6 +367,19 @@ interface OutboundVerificationResult {
   skipReason?: string;
 }
 
+/**
+ * Judge unavailable on one verification attempt — informs the main process
+ * so it renders a "Verification skipped (reason) — retrying N/M" process
+ * block while KEEPING the verification hold (no delivery yet). The final
+ * `verification_result` decides the turn.
+ */
+interface OutboundVerificationSkip {
+  type: 'verification_skip';
+  attempt: number;
+  totalAttempts: number;
+  reason: string;
+}
+
 type OutboundMessage =
   | OutboundReady
   | OutboundEvent
@@ -378,6 +395,7 @@ type OutboundMessage =
   | OutboundSwitchConnectionResult
   | OutboundSessionIdUpdate
   | OutboundDefenseResumeStatus
+  | OutboundVerificationSkip
   | OutboundSystemStopNotice
   | OutboundVerificationResult
   | OutboundError;
@@ -864,10 +882,7 @@ async function doVerificationCheck(
   // delivery check while keeping the ephemeral query cheap.
   const candidate = finalText.slice(0, 6000);
   const userMsg = (currentUserMessage || '').slice(0, 2000);
-  let verdict: string | null = null;
-  try {
-    verdict = await runMiniCompletion(
-      `[Defense verification] Judge whether the assistant's FINAL REPLY is a valid, complete answer to the USER'S MESSAGE. This judgment gates program-side verification delivery — be fair: any reasonably complete answer (including a "done, here's what I did" summary with the key results) PASSES. Only fail when the reply is missing, off-topic, a clear refusal, factually empty, or stops mid-sentence.
+  const prompt = `[Defense verification] Judge whether the assistant's FINAL REPLY is a valid, complete answer to the USER'S MESSAGE. This judgment gates program-side verification delivery — be fair: any reasonably complete answer (including a "done, here's what I did" summary with the key results) PASSES. Only fail when the reply is missing, off-topic, a clear refusal, factually empty, or stops mid-sentence.
 
 USER'S MESSAGE:
 <user>
@@ -879,18 +894,31 @@ FINAL REPLY (assistant, last message in the turn):
 ${candidate}
 </reply>
 
-Answer with EXACTLY one word: PASS or FAIL.`);
-  } catch (error) {
-    debugLog(`[defense] verification LLM threw: ${error instanceof Error ? error.message : String(error)}`);
-  }
+Answer with EXACTLY one word: PASS or FAIL.`;
 
-  // Judge UNAVAILABLE (verdict is null — upstream error, quota, timeout, or
-  // an empty judge response): fail OPEN. The verification's job is to judge
-  // the reply's CONTENT; it must not gate delivery on whether the judge's own
-  // upstream happened to work. Deliver the captured final text as-is.
+  // Judge invocation with retry (2026-10-13 spec): an unavailable judge
+  // (upstream timeout / quota / transport error / empty response) MUST NOT
+  // fail open — the verification is re-run until it succeeds (PASS/FAIL) or
+  // the attempt budget is exhausted. Each unavailable attempt surfaces as a
+  // `verification_skip` event so the UI renders "Verification skipped
+  // (reason) — retrying N/M" process blocks; exhaustion resolves to the
+  // FAILED lane (follow-up resume), NOT a delivery.
+  const { verdict, lastFault } = await runVerificationJudge(prompt, {
+    runAttempt: (p) => runMiniCompletion(p),
+    onSkip: (attempt, totalAttempts, reason) => {
+      debugLog(`[defense] verification judge attempt ${attempt}/${totalAttempts} unavailable (${reason}) — retrying`);
+      send({ type: 'verification_skip', attempt, totalAttempts, reason });
+    },
+    delay: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  });
+
+  // Judge unavailable after ALL attempts — the verification FAILS (follow-up
+  // resume; bounded by the SessionLifecycle chain caps). No fail-open
+  // delivery: an unverified reply must not reach the user as-is.
   if (verdict == null) {
-    debugLog(`[defense] verification SKIPPED (judge unavailable) (${verifyReason ?? 'none'}) — failing open, delivering final text`);
-    send({ type: 'verification_result', passed: true, finalText, skipped: true, skipReason: 'judge-unavailable' });
+    debugLog(`[defense] verification judge unavailable after all attempts (${lastFault}) — verification FAILED, following up`);
+    send({ type: 'verification_result', passed: false, failReason: `judge-unavailable: ${lastFault}` });
+    if (opts.resumeMessage) queueDefenseResume(session, opts.resumeMessage);
     return;
   }
 
@@ -2301,6 +2329,15 @@ const STALL_EXEMPTION_GRACE_MS = 30_000;
 // path was still unwinding, it stays a user abort.
 let stallAbortInProgress = false;
 let userAbortRequested = false;
+// Persistent abort attribution (2026-10-13, session 261008-plain-stag):
+// stallAbortInProgress/userAbortRequested are transient (reset when the
+// abort settles), but handleRetry inspects the transcript AFTER the abort —
+// it must know whether the aborted assistant message at the tail came from
+// a USER stop (P0 rule: never revive a deliberately stopped turn) or from a
+// SYSTEM abort (stall watchdog / retry-busy abort / tool-loop guard), whose
+// empty aborted step is a re-runnable model step. Written at every abort
+// origin, read by handleRetry's re-runnable whitelist.
+let lastAbortReason: 'user' | 'system' | null = null;
 // Set when the defense evaluator queues a resume followUp; read by the stall
 // catch to decide whether the turn was recovered (and must not be reported
 // as a terminal prompt error).
@@ -2875,6 +2912,7 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
       // synchronously inside abort()'s waitForIdle) attributes the abort to
       // the watchdog and still evaluates instead of skipping.
       stallAbortInProgress = true;
+      lastAbortReason = 'system';
       let finalError: unknown = stallErr;
       // session.abort() waits for idle — INCLUDING any defense-queued
       // continuation run (the SDK drains queued follow-ups via
@@ -2987,26 +3025,25 @@ async function handleRetry(): Promise<void> {
     //  2. A clean stop ('stop'/'length') with NO visible text — an empty
     //     terminal response the main-process retry ladder routed here
     //     (2026-10-06 spec: all model-layer failures enter the ladder).
-    // Any OTHER assistant message (a real reply, an aborted run, a
+    //  3. (2026-10-13, session 261008-plain-stag) A SYSTEM-aborted step with
+    //     NO visible text — session.abort() stamps this SAME empty shape;
+    //     it is exactly as re-runnable as a failed step (strip + continue).
+    //     Attribution is mandatory: a USER stop's aborted message is
+    //     terminal (P0 rule — never revive a deliberately stopped turn);
+    //     only abortReason='system' (stall watchdog / retry-busy abort /
+    //     tool-loop guard) opens the strip path. The 2026-10-13 incident
+    //     wedged the ladder here: the retry's own busy-abort stamped an
+    //     aborted step, the whitelist refused it, and every later rung
+    //     died with "no re-runnable model step" forever.
+    // Any OTHER assistant message (a real reply, a user-stopped run, a
     // tool-call step) is NOT re-runnable: refuse as before.
+    // The whitelist / attribution logic lives in retry-step-classifier.ts
+    // (pure, unit-tested); this block only executes the verdict.
     const am = lastMessage as unknown as PiAssistantMessage;
-    const hasVisibleText = Array.isArray(am.content)
-      && (am.content as Array<{ type?: string; text?: unknown }>).some(
-        (c) => c?.type === 'text' && String(c.text ?? '').trim().length > 0,
-      );
-    const isFailedStep = am.stopReason === 'error';
-    const isEmptyCleanStop = (am.stopReason === 'stop' || am.stopReason === 'length') && !hasVisibleText;
-    // Silent-stream recovery (2026-10-07, session 261007-focal-twilight / golden-swamp):
-    // a DELIVERED reply while queued guidance/follow-ups are still pending is the
-    // case where the SDK answered the original question but never drained the
-    // queued follow-up — the main process held its queue open on
-    // queuedFollowUpPending, the stall watchdog fired, and the retry ladder
-    // re-issued us here. agent.continue() DRAINS the follow-up queue and
-    // answers the pending guidance within the SAME turn, so this is re-runnable
-    // WITHOUT stripping (the delivered reply stays in context).
     const pendingFollowUps =
       (piSession as unknown as { pendingMessageCount?: number })?.pendingMessageCount ?? 0;
-    if (!isFailedStep && !isEmptyCleanStop && pendingFollowUps === 0) {
+    const verdict = classifyRetryStep(am, lastAbortReason, pendingFollowUps);
+    if (verdict.kind === 'refuse') {
       debugLog(`[retry] cannot continue — last assistant is not re-runnable (stopReason=${am.stopReason ?? 'unknown'})`);
       send({
         type: 'error',
@@ -3016,7 +3053,7 @@ async function handleRetry(): Promise<void> {
       send({ type: 'event', event: { type: 'agent_end', messages: [], willRetry: false } });
       return;
     }
-    if (isFailedStep || isEmptyCleanStop) {
+    if (verdict.kind === 'strip') {
       // Strip the unusable assistant message — the SDK's documented mutation
       // (assigning a new array copies the top-level array; session persistence
       // keeps the original transcript intact) — so continue() re-runs the
@@ -3024,9 +3061,11 @@ async function handleRetry(): Promise<void> {
       const agentState = (session.agent as unknown as { state: { messages: unknown[] } }).state;
       agentState.messages = agentState.messages.slice(0, -1);
       debugLog(
-        `[retry] stripped ${isFailedStep
+        `[retry] stripped ${verdict.why === 'failed_step'
           ? `failed assistant message (stopReason=error${am.errorMessage ? `: ${String(am.errorMessage).slice(0, 120)}` : ''})`
-          : 'empty assistant message (clean stop, no visible text)'}` +
+          : verdict.why === 'system_aborted'
+            ? 'system-aborted assistant message (no visible text) — re-running the interrupted model step'
+            : 'empty assistant message (clean stop, no visible text)'}` +
         ' — re-running model step via continue()',
       );
     } else {
@@ -3049,6 +3088,14 @@ async function handleRetry(): Promise<void> {
     contPromise = session.agent.continue();
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
+    // Busy rejection (2026-10-13): another continuation (queued-follow-up
+    // drain / earlier retry) owns the recovery. Defer to it — never abort
+    // the in-flight run and never surface a spurious error that re-arms the
+    // ladder against the drain it should be waiting for.
+    if (isSdkBusyRejection(errorMsg)) {
+      debugLog(`[retry] continue() busy (${errorMsg}) — deferring to in-flight continuation (no abort, no error)`);
+      return;
+    }
     debugLog(`[retry] continue() rejected: ${errorMsg}`);
     send({ type: 'error', message: errorMsg, code: 'prompt_error' });
     send({ type: 'event', event: { type: 'agent_end', messages: [], willRetry: false } });
@@ -3060,11 +3107,23 @@ async function handleRetry(): Promise<void> {
     await awaitTurnWithStallDetection(contPromise, activeToolDeadline);
   } catch (stallErr) {
     const errorMsg = stallErr instanceof Error ? stallErr.message : String(stallErr);
+    // Busy rejection (2026-10-13): the SDK was mid-run on the drain's
+    // continue() when this retry landed — the exact 02:46:27 collision
+    // (261008-plain-stag). Not a stall: the in-flight continuation's own
+    // model events settle the main-process ladder (retryRunLive on
+    // message_update / tool_execution_start). Aborting here killed the
+    // drain and stamped an empty stopReason='aborted' step the whitelist
+    // refused forever. Defer and let the in-flight run complete.
+    if (isSdkBusyRejection(errorMsg)) {
+      debugLog(`[retry] continue() busy (${errorMsg}) — deferring to in-flight continuation (no abort, no error)`);
+      return;
+    }
     // Mirror handlePrompt: abort to reset SDK internal state, then surface the
     // failure. The main-process ladder re-arms on the error event (or stays
     // held) per its own schedule.
     debugLog(`[retry] stalled or failed: ${errorMsg}; aborting session to reset state`);
     stallAbortInProgress = true;
+    lastAbortReason = 'system';
     try {
       await piSession?.abort().catch(() => { /* already aborted */ });
     } finally {
@@ -3128,6 +3187,9 @@ async function handleAbort(): Promise<void> {
   // stop while a stall-abort round is still unwinding). Cleared after the
   // abort settles — every agent_end emitted in between is user-attributed.
   userAbortRequested = true;
+  // Persistent attribution for the aborted assistant message this stop will
+  // stamp: handleRetry must NOT strip/retry a user-stopped turn (P0 rule).
+  lastAbortReason = 'user';
   try {
     if (piSession) {
       try {

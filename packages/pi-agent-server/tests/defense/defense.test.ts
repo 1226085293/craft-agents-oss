@@ -148,21 +148,24 @@ describe('DefenseEvaluator', () => {
     expect(result.resumeMessage).toBeDefined();
   });
 
-  it('resume message frames a verification-delivery judgment, not a task re-run (2026-10-01 spec)', () => {
+  it('resume message orders a direct delivery, not a delivery self-judgment (2026-10-13 rewrite)', () => {
     const evalr = new DefenseEvaluator({ verifyMinSteps: 1 });
     evalr.recordToolCall({ type: 'read', output: 'ok' });
     const result = evalr.evaluate();
     const msg = result.resumeMessage!;
-    // The step asks the model to judge correspondence with the user's message…
+    // The FIRST instruction is the delivery act itself…
     expect(msg).toContain('Verification delivery');
-    expect(msg).toContain('corresponds to the user');
-    // …and on the "corresponds" branch it re-delivers the final reply verbatim
-    // (one effective reply, no second different answer).
+    expect(msg).toContain('Write the COMPLETE final reply');
+    // …and an already-correct draft is re-delivered verbatim (one effective
+    // reply, no second different answer).
     expect(msg).toContain('verbatim');
     expect(msg).toContain('do NOT re-run the task');
-    // The "does not correspond" branch: reason + continue.
-    expect(msg).toContain('state the reason');
-    expect(msg).toContain('continue the task');
+    // Two prohibitions learned from 261013-mild-stream: no meta-narration
+    // about the delivery, no re-running investigation done earlier this turn.
+    expect(msg).toContain('Do NOT write narration about the delivery process');
+    expect(msg).toContain('do NOT run them');
+    // A corrected version must be delivered in full — never a patch/diff.
+    expect(msg).toContain('never a patch');
   });
 
   it('does not resume on clean completion', () => {

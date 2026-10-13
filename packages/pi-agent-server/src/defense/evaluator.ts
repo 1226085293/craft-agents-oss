@@ -423,14 +423,34 @@ export class DefenseEvaluator {
  * Build the verification-delivery resume message.
  *
  * Resume ≠ rerun: the message appends a **verification delivery** step to the
- * SAME session transcript. The model judges whether its final reply (its last
- * assistant message) actually corresponds to the user's message:
- * - corresponds → re-deliver that final reply verbatim, so the user
- *   effectively receives ONE reply — the resumed turn (still inside the same
- *   turn's process block) must not produce a second, different answer;
- * - does not correspond → state the reason, then continue the conversation.
- * The per-signal lines below are judgment aids ("why this check fired"), not
- * new work orders: extra work happens only on the "does not correspond" branch.
+ * SAME session transcript.
+ *
+ * 2026-10-13 261013-mild-stream lesson — the previous wording asked the model
+ * to "judge whether your final reply corresponds … if it does NOT correspond,
+ * state the reason in one short line, then continue". Two bad outcomes were
+ * observed on a real FAIL → resume cycle:
+ *
+ * 1. The model read "then continue" as "continue the investigation", and
+ *    re-ran the four tool calls it had already completed minutes earlier in
+ *    the SAME turn (grep/sed/head on the same targets) — ~1 minute of wasted
+ *    work producing identical results.
+ * 2. Instead of a clean reply, it produced META-NARRATION about its own
+ *    delivery ("my previous final reply already fully delivered the original
+ *    request … now adding the list of ..."). That narration is what the
+ *    judge then saw and PASSed, so it was replayed verbatim as THE final
+ *    reply: the user received a reply *about* the previous reply.
+ *
+ * The rewrite therefore inverts the framing: the FIRST instruction is "write
+ * the complete final reply now", and the checklist operates on the CONTENT
+ * (already answered? tools already run?) instead of on the delivery act. Two
+ * explicit prohibitions are added and repeated for emphasis:
+ * - do NOT narrate the verification/repair process (no "my previous reply
+ *   ...", "now adding ...", "as requested earlier ...");
+ * - do NOT re-run investigation steps already completed in this turn.
+ *
+ * Per-signal lines below remain judgment aids ("why this check fired"), not
+ * new work orders: extra work happens only on the "does not correspond"
+ * branch.
  */
 function buildResumeMessage(
   silentStop: boolean,
@@ -440,15 +460,23 @@ function buildResumeMessage(
   stallAborted = false,
 ): string {
   const lines: string[] = [
-    '[Defense] Verification delivery step — check delivery, do NOT re-run the task.',
-    `Judge whether your final reply (your last assistant message in this conversation) ` +
-      `corresponds to the user's message (the request the user sent in this turn):`,
-    `- If it DOES correspond: your reply now must simply be that final reply content, ` +
-      `verbatim — the same reply from before this verification step. Add no new analysis, ` +
-      `redo no completed work, append no new steps.`,
-    `- If it does NOT correspond (missing, off-target, or unverified): state the reason ` +
-      `in one short line, then continue the task from where it left off.`,
-    `Signals that triggered this verification step:`,
+    '[Defense] Verification delivery step — deliver, do NOT re-run the task.',
+    `Write the COMPLETE final reply to the user's message NOW. Your output must be the ` +
+      `reply itself, ready for the user to read — not a description of it.`,
+    // P1-①: the meta-narration prohibition has to name the failure mode, or
+    // the model keeps "reporting" on its delivery instead of delivering.
+    `Do NOT write narration about the delivery process: no "my previous reply already ` +
+      `delivered ...", no "now adding ...", no "in addition to what I said before ...". ` +
+      `Just give the answer.`,
+    // P0: "continue the task" read as "re-investigate from scratch" is what
+    // duplicated the completed tool calls. Bound the resume to the DELTA.
+    `You already did the research for this turn: the tool calls and searches you ran ` +
+      `earlier in this conversation ARE done — use their results and do NOT run them ` +
+      `again. Only fill a gap you can point to concretely.`,
+    `If an earlier draft of your reply is already complete and correct, output that reply ` +
+      `verbatim. Otherwise output the corrected/merged version in full — never a patch, ` +
+      `diff, or "changes since last time".`,
+    `Signals that triggered this verification step (context, not new work):`,
   ];
   if (stallAborted) {
     lines.push(
@@ -465,15 +493,15 @@ function buildResumeMessage(
       `- Your previous model call returned an EMPTY response (no visible content; ` +
       `likely an upstream fault or max_tokens truncation burning invisible reasoning) — ` +
       `NOT an intentional completion. No final reply exists to verify, so it does NOT ` +
-      `correspond: state that reason, then pick up exactly where you left off.`,
+      `correspond: report your current progress, then pick up exactly where you left off.`,
     );
   }
   if (repetitionLoop) {
     lines.push(
       `- Your previous reply devolved into a REPETITION LOOP (a large share of the output ` +
       `was exact-duplicate text) — a model degeneration, not an answer. It does NOT ` +
-      `correspond to the user's message: state that reason, then give the user a ` +
-      `concise, non-repetitive reply covering the outstanding points.`,
+      `correspond to the user's message: give the user a concise, non-repetitive reply ` +
+      `covering the outstanding points.`,
     );
   }
   if (truncatedFinal) {
@@ -488,7 +516,7 @@ function buildResumeMessage(
   if (silentStop) {
     lines.push(
       `- Your previous turn ended WITHOUT any visible reply to the user. No final reply ` +
-      `exists to verify, so it does NOT correspond: state that reason, report your current ` +
+      `exists to verify, so it does NOT correspond: report your current ` +
       `progress/status to the user now, then continue any remaining work.`,
     );
   }

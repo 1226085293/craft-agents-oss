@@ -9420,6 +9420,29 @@ ${request.prompt}`;
           (event.turnId ? managed.streamStartAtByTurn?.get(event.turnId) : undefined)
         if (event.turnId) managed.streamStartAtByTurn?.delete(event.turnId)
 
+        // Take-over semantics for a same-turnId draft (2026-10-13
+        // 261013-mild-stream incident): when a reply is captured for
+        // program-side verification, the adapter demotes the draft
+        // (text_demote → isIntermediate=true) and later REPLAYS the verified
+        // text carrying the SAME turnId. Persisting the replay as a NEW row
+        // left the transcript with two byte-identical rows for one turnId
+        // (demoted draft + replay) — invisible live because the renderer
+        // overwrites by turnId, but a reload/switch hydrated BOTH rows, so
+        // the same text appeared once in the process card and once as the
+        // final bubble. Reuse the demoted draft's slot instead of appending
+        // so the transcript keeps exactly one row per sub-turn.
+        //
+        // Only a DEMOTED (isIntermediate===true) draft is replaced, and only
+        // by a NON-intermediate takeover: intermediate commentary that reuses
+        // a turnId stays a distinct row, matching the renderer's
+        // handleTextComplete ("each thinking block should be distinct").
+        const takeoverIndex = event.turnId && !event.isIntermediate
+          ? managed.messages.findIndex(m =>
+              m.role === 'assistant' &&
+              m.turnId === event.turnId &&
+              m.isIntermediate === true)
+          : -1
+
         const assistantMessage: Message = {
           id: generateMessageId(),
           role: 'assistant',
@@ -9430,7 +9453,15 @@ ${request.prompt}`;
           turnId: event.turnId,
           parentToolUseId: event.parentToolUseId,
         }
-        managed.messages.push(assistantMessage)
+        if (takeoverIndex !== -1) {
+          // Preserve the draft's original message id: renderer/rpc clients and
+          // the persisted sidecars key off it, and a replacement that changed
+          // the id would orphan optimistic references to the draft.
+          assistantMessage.id = managed.messages[takeoverIndex]!.id
+          managed.messages[takeoverIndex] = assistantMessage
+        } else {
+          managed.messages.push(assistantMessage)
+        }
         managed.streamingText = ''
         managed.streamingTurnId = undefined
 

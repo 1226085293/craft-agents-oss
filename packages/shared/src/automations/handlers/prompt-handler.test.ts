@@ -422,6 +422,56 @@ describe('PromptHandler', () => {
     });
   });
 
+  describe('qqChannels passthrough', () => {
+    it('should pass qqChannels from matcher to pending prompts', async () => {
+      const onPromptsReady = jest.fn();
+      const configProvider = createMockConfigProvider({
+        LabelAdd: [{
+          qqChannels: ['group:AAA', 'user:BBB'],
+          actions: [{ type: 'prompt', prompt: 'Do something' }],
+        }],
+      });
+
+      const handler = new PromptHandler(createOptions({ onPromptsReady }), configProvider);
+      handler.subscribe(bus);
+
+      await bus.emit('LabelAdd', {
+        workspaceId: 'test-workspace',
+        timestamp: Date.now(),
+        label: 'test',
+      });
+
+      expect(onPromptsReady).toHaveBeenCalledTimes(1);
+      const prompts: PendingPrompt[] = onPromptsReady.mock.calls[0]![0];
+      expect(prompts[0]!.qqChannels).toEqual(['group:AAA', 'user:BBB']);
+
+      handler.dispose();
+    });
+
+    it('should leave qqChannels undefined when not specified', async () => {
+      const onPromptsReady = jest.fn();
+      const configProvider = createMockConfigProvider({
+        LabelAdd: [{
+          actions: [{ type: 'prompt', prompt: 'Do something' }],
+        }],
+      });
+
+      const handler = new PromptHandler(createOptions({ onPromptsReady }), configProvider);
+      handler.subscribe(bus);
+
+      await bus.emit('LabelAdd', {
+        workspaceId: 'test-workspace',
+        timestamp: Date.now(),
+        label: 'test',
+      });
+
+      const prompts: PendingPrompt[] = onPromptsReady.mock.calls[0]![0];
+      expect(prompts[0]!.qqChannels).toBeUndefined();
+
+      handler.dispose();
+    });
+  });
+
   describe('llmConnection passthrough', () => {
     it('should pass llmConnection from prompt action to pending prompt', async () => {
       const onPromptsReady = jest.fn();

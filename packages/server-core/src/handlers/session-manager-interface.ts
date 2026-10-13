@@ -370,7 +370,7 @@ export interface ISessionManager {
    * The callback should be best-effort: failures must not block the session.
    */
   setAutomationBinder?(
-    fn: (input: { workspaceId: string; sessionId: string; topicName: string }) => Promise<void>,
+    fn: (input: { workspaceId: string; sessionId: string; topicName: string; qqChannels?: string[] }) => Promise<void>,
   ): void
 
   /** Inject messaging registry for session-scoped messaging tools. */
@@ -401,6 +401,8 @@ export interface ExecutePromptAutomationInput {
    * (created on first use). Silently ignored when prerequisites aren't met.
    */
   telegramTopic?: string
+  /** QQ group channelIds to bind the new session to (e.g. ["group:94A54DAF..."]). */
+  qqChannels?: string[]
   /**
    * When `false`, `executePromptAutomation` returns as soon as the session is
    * created and the prompt is dispatched, instead of awaiting the whole turn.

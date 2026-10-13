@@ -254,6 +254,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           topicName: input.topicName,
+          qqChannels: input.qqChannels,
           reason: result.reason,
           error: result.error,
         })
@@ -730,74 +731,142 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     workspaceId: string
     sessionId: string
     topicName: string
+    qqChannels?: string[]
   }): Promise<
-    | { ok: true; chatId: string; threadId: number; reused: boolean }
+    | { ok: true; chatId?: string; threadId?: number; reused: boolean; boundQqChannels?: string[] }
     | {
         ok: false
-        reason: 'invalid-name' | 'no-supergroup' | 'no-adapter' | 'topic-create-failed'
+        reason: 'invalid-name' | 'no-supergroup' | 'no-adapter' | 'topic-create-failed' | 'no-binder-work'
         error?: string
       }
   > {
     const trimmed = args.topicName?.trim() ?? ''
-    if (trimmed.length === 0 || trimmed.length > 128) {
-      return { ok: false, reason: 'invalid-name' }
+    const qqChannels = args.qqChannels && args.qqChannels.length > 0 ? args.qqChannels : undefined
+
+    // Nothing to bind (no topicName, no qqChannels) — treat as a no-op success.
+    if (trimmed.length === 0 && !qqChannels) {
+      return { ok: true, reused: false }
     }
 
     const state = this.workspaces.get(args.workspaceId) ?? this.bootstrapWorkspace(args.workspaceId)
-    const supergroup = state.configStore.get().platforms.telegram?.supergroup
-    if (!supergroup?.chatId) return { ok: false, reason: 'no-supergroup' }
+    const boundQqChannels: string[] = []
 
-    const adapter = state.gateway.getAdapter('telegram') as TelegramAdapter | undefined
-    if (!adapter || !adapter.isConnected()) {
-      const error = state.runtime.telegram.lastError
-        ? `Telegram adapter is not connected: ${state.runtime.telegram.lastError}`
-        : 'Telegram adapter is not connected. Automation topic binding will retry on the next automation run after Telegram reconnects.'
-      this.setPlatformRuntime(args.workspaceId, state, 'telegram', {
-        configured: true,
-        connected: false,
-        state: 'error',
-        lastError: error,
-      })
-      return { ok: false, reason: 'no-adapter', error }
-    }
-
-    const beforeCacheHit = state.topicRegistry.get(trimmed)
-
-    try {
-      const entry = await state.topicRegistry.findOrCreate({
-        topicName: trimmed,
-        chatId: supergroup.chatId,
-        createTopic: (name) => adapter.createForumTopic(supergroup.chatId, name),
-      })
-
-      state.gateway.getBindingStore().bind(
-        args.workspaceId,
-        args.sessionId,
-        'telegram',
-        entry.chatId,
-        trimmed,
-        undefined,
-        entry.threadId,
-      )
-      this.emitBindingChanged(args.workspaceId)
-
-      return {
-        ok: true,
-        chatId: entry.chatId,
-        threadId: entry.threadId,
-        reused: Boolean(beforeCacheHit),
+    // -- QQ group bindings (independent of Telegram) --
+    if (qqChannels) {
+      const qqAdapter = state.gateway.getAdapter('qq')
+      if (!qqAdapter) {
+        this.log.info('qq group bind skipped — no adapter', {
+          event: 'automation_qq_bind_skipped',
+          workspaceId: args.workspaceId,
+          sessionId: args.sessionId,
+          reason: 'no-qq-adapter',
+          qqChannels,
+        })
+      } else {
+        for (const channelId of qqChannels) {
+          try {
+            state.gateway.getBindingStore().bind(
+              args.workspaceId,
+              args.sessionId,
+              'qq',
+              channelId,
+            )
+            boundQqChannels.push(channelId)
+          } catch (err) {
+            this.log.warn('qq channel bind failed', {
+              event: 'automation_qq_bind_failed',
+              workspaceId: args.workspaceId,
+              sessionId: args.sessionId,
+              channelId,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          }
+        }
+        if (boundQqChannels.length > 0) {
+          this.emitBindingChanged(args.workspaceId)
+        }
       }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      this.log.warn('automation topic bind failed', {
-        event: 'automation_topic_bind_failed',
-        workspaceId: args.workspaceId,
-        sessionId: args.sessionId,
-        topicName: trimmed,
-        error: message,
-      })
-      return { ok: false, reason: 'topic-create-failed', error: message }
     }
+
+    // -- Telegram topic binding (existing logic, only when topicName is set) --
+    if (trimmed.length > 0) {
+      if (trimmed.length > 128) {
+        // Still bind QQ groups if they succeeded — don't return early
+        if (boundQqChannels.length === 0) return { ok: false, reason: 'invalid-name' }
+        return { ok: true, reused: false, boundQqChannels }
+      }
+
+      const supergroup = state.configStore.get().platforms.telegram?.supergroup
+      if (!supergroup?.chatId) {
+        if (boundQqChannels.length === 0) return { ok: false, reason: 'no-supergroup' }
+        // QQ groups were bound; Telegram skipped — treat as overall success
+        return { ok: true, reused: false, boundQqChannels }
+      }
+
+      const adapter = state.gateway.getAdapter('telegram') as TelegramAdapter | undefined
+      if (!adapter || !adapter.isConnected()) {
+        const error = state.runtime.telegram.lastError
+          ? `Telegram adapter is not connected: ${state.runtime.telegram.lastError}`
+          : 'Telegram adapter is not connected. Automation topic binding will retry on the next automation run after Telegram reconnects.'
+        this.setPlatformRuntime(args.workspaceId, state, 'telegram', {
+          configured: true,
+          connected: false,
+          state: 'error',
+          lastError: error,
+        })
+        if (boundQqChannels.length === 0) return { ok: false, reason: 'no-adapter', error }
+        return { ok: true, reused: false, boundQqChannels }
+      }
+
+      const beforeCacheHit = state.topicRegistry.get(trimmed)
+
+      try {
+        const entry = await state.topicRegistry.findOrCreate({
+          topicName: trimmed,
+          chatId: supergroup.chatId,
+          createTopic: (name) => adapter.createForumTopic(supergroup.chatId, name),
+        })
+
+        state.gateway.getBindingStore().bind(
+          args.workspaceId,
+          args.sessionId,
+          'telegram',
+          entry.chatId,
+          trimmed,
+          undefined,
+          entry.threadId,
+        )
+        this.emitBindingChanged(args.workspaceId)
+
+        return {
+          ok: true,
+          chatId: entry.chatId,
+          threadId: entry.threadId,
+          reused: Boolean(beforeCacheHit),
+          boundQqChannels: boundQqChannels.length > 0 ? boundQqChannels : undefined,
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        this.log.warn('automation topic bind failed', {
+          event: 'automation_topic_bind_failed',
+          workspaceId: args.workspaceId,
+          sessionId: args.sessionId,
+          topicName: trimmed,
+          error: message,
+        })
+        if (boundQqChannels.length > 0) return { ok: true, reused: false, boundQqChannels }
+        return { ok: false, reason: 'topic-create-failed', error: message }
+      }
+    }
+
+    // Only qqChannels was set and all succeeded
+    if (qqChannels && boundQqChannels.length === qqChannels.length) {
+      return { ok: true, reused: false, boundQqChannels }
+    }
+    if (qqChannels && boundQqChannels.length === 0) {
+      return { ok: false, reason: 'no-binder-work', error: 'QQ adapter not available' }
+    }
+    return { ok: true, reused: false, boundQqChannels }
   }
 
   /**

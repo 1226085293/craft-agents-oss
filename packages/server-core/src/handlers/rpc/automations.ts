@@ -198,6 +198,7 @@ export function registerAutomationsHandlers(server: RpcServer, deps: HandlerDeps
           thinkingLevel: action.thinkingLevel,
           automationName: payload.automationName,
           telegramTopic: payload.telegramTopic,
+          qqChannels: payload.qqChannels,
           // Test = "did it launch + start producing output", not "did the whole
           // turn finish". Return once the session is created so a long run doesn't
           // trip the 30s RPC timeout (craft-agents-oss#943).

@@ -100,6 +100,7 @@ export function useAutomations(
       permissionMode: automation.permissionMode,
       labels: automation.labels,
       telegramTopic: automation.telegramTopic,
+      qqChannels: automation.qqChannels,
     }).then((result) => {
       const actions = result.actions
       if (!actions || actions.length === 0) {

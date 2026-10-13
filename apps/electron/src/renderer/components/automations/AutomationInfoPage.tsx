@@ -242,6 +242,17 @@ export function AutomationInfoPage({
                 </div>
               </Info_Table.Row>
             )}
+            {automation.qqChannels && automation.qqChannels.length > 0 && (
+              <Info_Table.Row label="QQ Channels">
+                <div className="flex flex-col gap-1">
+                  {automation.qqChannels.map((ch) => (
+                    <div key={ch} className="inline-flex items-center gap-1.5 text-foreground">
+                      <span className="font-mono text-xs">{ch}</span>
+                    </div>
+                  ))}
+                </div>
+              </Info_Table.Row>
+            )}
           </Info_Table>
         </Info_Section>
 
@@ -266,6 +277,7 @@ export function AutomationInfoPage({
                 permissionMode: automation.permissionMode,
                 labels: automation.labels,
                 telegramTopic: automation.telegramTopic,
+                qqChannels: automation.qqChannels,
                 enabled: automation.enabled,
                 actions: automation.actions,
               }, null, 2)}\n\`\`\``}

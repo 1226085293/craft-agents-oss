@@ -146,11 +146,12 @@ export interface IMessagingGatewayRegistry {
     workspaceId: string
     sessionId: string
     topicName: string
+    qqChannels?: string[]
   }): Promise<
-    | { ok: true; chatId: string; threadId: number; reused: boolean }
+    | { ok: true; chatId?: string; threadId?: number; reused: boolean; boundQqGroups?: string[] }
     | {
         ok: false
-        reason: 'invalid-name' | 'no-supergroup' | 'no-adapter' | 'topic-create-failed'
+        reason: 'invalid-name' | 'no-supergroup' | 'no-adapter' | 'topic-create-failed' | 'no-binder-work'
         error?: string
       }
   >

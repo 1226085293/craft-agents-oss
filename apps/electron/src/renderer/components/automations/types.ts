@@ -229,6 +229,8 @@ export interface AutomationListItem {
    * supergroup (created on first use).
    */
   telegramTopic?: string
+  /** QQ channel IDs (group:xxx or user:xxx) that sessions are bound to. */
+  qqChannels?: string[]
   /** Timestamp of last execution (ms since epoch) */
   lastExecutedAt?: number
 }
@@ -464,6 +466,12 @@ export function parseAutomationsConfig(json: unknown): AutomationListItem[] {
       const telegramTopic =
         typeof rawTopic === 'string' && rawTopic.trim().length > 0 ? rawTopic.trim() : undefined
 
+      const rawQq = (matcher as { qqChannels?: unknown }).qqChannels
+      const qqChannels =
+        Array.isArray(rawQq) && rawQq.length > 0
+          ? rawQq.filter((v): v is string => typeof v === 'string')
+          : undefined
+
       items.push({
         id: matcher.id ?? `${eventName}-${index}`,
         event,
@@ -479,6 +487,7 @@ export function parseAutomationsConfig(json: unknown): AutomationListItem[] {
         conditions: matcher.conditions,
         actions,
         telegramTopic,
+        qqChannels,
       })
       index++
     }

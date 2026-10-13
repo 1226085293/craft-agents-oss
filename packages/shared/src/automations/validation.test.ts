@@ -418,4 +418,44 @@ describe('validation', () => {
       }
     });
   });
+
+  describe('qqChannels preservation', () => {
+    it('should preserve qqChannels through the matcher schema', () => {
+      const raw = {
+        automations: {
+          SchedulerTick: [{
+            cron: '0 12 * * *',
+            telegramTopic: 'Daily',
+            qqChannels: ['group:AAA', 'user:BBB'],
+            actions: [{ type: 'prompt', prompt: 'echo test' }],
+          }],
+        },
+      };
+      const result = AutomationsConfigSchema.safeParse(raw);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        const m = result.data.automations['SchedulerTick']![0];
+        expect(m?.qqChannels).toEqual(['group:AAA', 'user:BBB']);
+        // sibling known field must also survive
+        expect(m?.telegramTopic).toBe('Daily');
+      }
+    });
+
+    it('should tolerate matchers without qqChannels', () => {
+      const raw = {
+        automations: {
+          SchedulerTick: [{
+            cron: '0 12 * * *',
+            actions: [{ type: 'prompt', prompt: 'echo test' }],
+          }],
+        },
+      };
+      const result = AutomationsConfigSchema.safeParse(raw);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        const m = result.data.automations['SchedulerTick']![0];
+        expect(m?.qqChannels).toBeUndefined();
+      }
+    });
+  });
 });

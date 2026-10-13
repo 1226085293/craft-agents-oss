@@ -94,7 +94,7 @@ import { type Session, type SessionEvent, type FileAttachment, type SendMessageO
 import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta, type TokenUsage } from '@craft-agent/core/types'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages, normalizePath } from '@craft-agent/shared/utils'
 import { loadAllSkills, invalidateSkillsCache } from '@craft-agent/shared/skills'
-import { getMemoryStorePath, loadMemoryStore, saveMemoryStore, recordExtraction } from '@craft-agent/shared/memory';
+import { getMemoryStorePath, loadMemoryStore, saveMemoryStore, recordExtraction, loadSessionMemoryStore, saveSessionMemoryStore, type SessionMemoryStore } from '@craft-agent/shared/memory';
 import { addMemoryEntry, deleteMemoryEntry, queryMemories, getMemoryStats as getMemStats } from '@craft-agent/shared/memory/store';
 import { invalidateContextFileCache } from '@craft-agent/shared/prompts/system'
 import { getToolIconsDir, getMiniModel } from '@craft-agent/shared/config'
@@ -1250,6 +1250,7 @@ export class SessionManager implements ISessionManager {
     workspaceId: string
     sessionId: string
     topicName: string
+    qqChannels?: string[]
   }) => Promise<void>
 
   /** Messaging gateway registry, injected by the host after bootstrap. */
@@ -1282,7 +1283,7 @@ export class SessionManager implements ISessionManager {
    * package (avoids a package-level circular dependency).
    */
   setAutomationBinder(
-    fn: (input: { workspaceId: string; sessionId: string; topicName: string }) => Promise<void>,
+    fn: (input: { workspaceId: string; sessionId: string; topicName: string; qqChannels?: string[] }) => Promise<void>,
   ): void {
     this.automationBinder = fn
   }
@@ -1737,6 +1738,7 @@ export class SessionManager implements ISessionManager {
                 thinkingLevel: pending.thinkingLevel,
                 automationName: pending.automationName,
                 telegramTopic: pending.telegramTopic,
+                qqChannels: pending.qqChannels,
               })
             )
           )
@@ -3605,6 +3607,37 @@ export class SessionManager implements ISessionManager {
             branchSessionId: storedSession.id,
           })
         }
+      }
+
+      // Branch inherits the source session's session-memory up to the branch
+      // point: entries created at-or-before the anchor message's timestamp
+      // are copied into the branch store (entries made after the anchor
+      // belong to the other timeline and must not leak into this one).
+      try {
+        const branchPointMs = validatedBranch.sourceSession.messages[validatedBranch.branchIdx]?.timestamp
+        const sourceMem = loadSessionMemoryStore(workspaceRootPath, validatedBranch.sourceSessionId)
+        if (sourceMem.entries.some(e => (e.createdAt ? new Date(e.createdAt).getTime() : 0) <= (branchPointMs ?? Number.POSITIVE_INFINITY))) {
+          const branchMem: SessionMemoryStore = {
+            version: 1,
+            sessionId: storedSession.id,
+            entries: sourceMem.entries
+              .filter(e => (e.createdAt ? new Date(e.createdAt).getTime() : 0) <= (branchPointMs ?? Number.POSITIVE_INFINITY))
+              .map(e => ({ ...e })),
+            consolidatedEntryIds: [],
+            extractionHistory: [],
+          }
+          saveSessionMemoryStore(workspaceRootPath, branchMem)
+          sessionLog.info(
+            `Branch memory copied: ${branchMem.entries.length} entries up to branch point ${branchPointMs}`,
+          )
+        }
+      } catch (err) {
+        // Memory inheritance is best-effort — never fail the branch for it.
+        sessionLog.warn('Failed to copy session memory to branch', {
+          err,
+          sourceSessionId: validatedBranch.sourceSessionId,
+          branchSessionId: storedSession.id,
+        })
       }
     }
 
@@ -10481,6 +10514,7 @@ ${request.prompt}`;
       thinkingLevel,
       automationName,
       telegramTopic,
+      qqChannels,
       waitForCompletion,
     } = input
 
@@ -10530,17 +10564,20 @@ ${request.prompt}`;
     // declared `telegramTopic`. Done before `sendMessage` so the first
     // assistant tokens already route through the bound topic. Failure
     // is logged inside the binder; the session continues unbound.
-    if (this.automationBinder && telegramTopic && telegramTopic.trim().length > 0) {
+    const hasQqChannels = qqChannels && qqChannels.length > 0
+    if (this.automationBinder && (telegramTopic || hasQqChannels)) {
       try {
         await this.automationBinder({
           workspaceId,
           sessionId: session.id,
-          topicName: telegramTopic.trim(),
+          topicName: (telegramTopic && telegramTopic.trim().length > 0) ? telegramTopic.trim() : '',
+          qqChannels: hasQqChannels ? qqChannels : undefined,
         })
       } catch (err) {
         sessionLog.warn('[Automations] automation binder threw', {
           sessionId: session.id,
           telegramTopic,
+          qqChannels,
           error: err instanceof Error ? err.message : String(err),
         })
       }

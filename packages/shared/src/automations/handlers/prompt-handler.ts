@@ -57,6 +57,7 @@ export class PromptHandler implements AutomationHandler {
       matcherId: string | undefined;
       automationName: string;
       telegramTopic: string | undefined;
+      qqChannels: string[] | undefined;
       prompts: Array<{ prompt: PromptAction; labels?: string[]; permissionMode?: PermissionMode }>;
     }> = [];
 
@@ -75,6 +76,7 @@ export class PromptHandler implements AutomationHandler {
           matcherId: matcher.id,
           automationName: deriveAutomationName(event, matcher),
           telegramTopic: telegramTopic && telegramTopic.length > 0 ? telegramTopic : undefined,
+          qqChannels: matcher.qqChannels && matcher.qqChannels.length > 0 ? matcher.qqChannels : undefined,
           prompts,
         });
       }
@@ -91,7 +93,7 @@ export class PromptHandler implements AutomationHandler {
     // Process prompts per matcher
     const pendingPrompts: PendingPrompt[] = [];
 
-    for (const { matcherId, automationName, telegramTopic, prompts } of matcherPrompts) {
+    for (const { matcherId, automationName, telegramTopic, qqChannels, prompts } of matcherPrompts) {
       // Topic name accepts env-var expansion so users can route by event payload
       // (e.g. telegramTopic: "Label: $LABEL"). Empty after expansion → drop it.
       const expandedTopic = telegramTopic ? expandEnvVars(telegramTopic, env).trim() : undefined;
@@ -119,6 +121,7 @@ export class PromptHandler implements AutomationHandler {
           model: prompt.model,
           thinkingLevel: prompt.thinkingLevel,
           telegramTopic: finalTopic,
+          qqChannels,
         });
       }
 

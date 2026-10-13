@@ -211,6 +211,13 @@ export interface AutomationMatcher {
    *   - The bot lacks "Manage Topics" permission in the supergroup
    */
   telegramTopic?: string;
+  /**
+   * Optional array of QQ group channelIds (format: "group:<groupOpenId>").
+   * When set, sessions spawned by this matcher are bound to each listed QQ group.
+   * The QQ bot must be connected and in each group for output to be delivered.
+   * Silently ignored for any group where the bot is not present.
+   */
+  qqChannels?: string[];
   actions: AutomationAction[];
 }
 
@@ -314,6 +321,8 @@ export interface PendingPrompt {
   thinkingLevel?: ThinkingLevel;
   /** Forum-topic name to bind the new session to (Telegram supergroup, when paired). */
   telegramTopic?: string;
+  /** QQ group channelIds to bind the new session to. */
+  qqChannels?: string[];
 }
 
 export interface AutomationResult {

@@ -408,7 +408,7 @@ export type SessionEvent =
   | { type: 'complete'; sessionId: string; tokenUsage?: Session['tokenUsage']; hasUnread?: boolean; backgroundTasksAlive?: boolean }
   | { type: 'interrupted'; sessionId: string; message?: Message; queuedMessages?: string[] }
   | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'verification' | 'verification_passed' | 'verification_failed'; timestamp?: number }
-  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'verification_passed' | 'verification_failed' | 'system_stop'; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string }
+  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'system_stop'; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string }
   | { type: 'system_stop_notice'; sessionId: string; reason: string; message: string; timestamp?: number }
   | { type: 'title_generated'; sessionId: string; title: string }
   | { type: 'title_regenerating'; sessionId: string; isRegenerating: boolean }
@@ -848,6 +848,8 @@ export interface TestAutomationPayload {
   labels?: string[]
   /** Forwarded from the matcher; routes test-run sessions into a Telegram topic when paired. */
   telegramTopic?: string
+  /** QQ group channelIds to bind test-run sessions to. */
+  qqChannels?: string[]
 }
 
 export type TestAutomationActionResult =

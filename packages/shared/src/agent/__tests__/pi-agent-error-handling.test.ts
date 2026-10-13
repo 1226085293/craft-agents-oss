@@ -422,6 +422,54 @@ describe('PiAgent verification delivery lifecycle', () => {
     expect(enqueued[4].turnId).toBe(enqueued[0].turnId)
     agent.destroy()
   })
+
+  it('verification_skip renders a retry process block and keeps the hold (2026-10-13)', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    startVerificationHold(agent, enqueued)
+
+    ;(agent as any).handleLine(JSON.stringify({
+      type: 'verification_skip',
+      attempt: 2,
+      totalAttempts: 3,
+      reason: 'queryLlm timed out after 115s',
+    }))
+
+    // A process-block info line only — NO replay, NO complete: the hold stays
+    // open for the eventual verification_result.
+    expect(enqueued.map(event => event.statusType ?? event.type)).toEqual([
+      'text_complete',
+      'text_demote',
+      'verification',
+      'verification',
+    ])
+    expect(enqueued[3].message).toContain('Verification skipped')
+    expect(enqueued[3].message).toContain('retrying 2/3')
+    expect(enqueued).not.toContainEqual({ type: 'complete' })
+    expect(enqueued).not.toContainEqual({ type: 'queue_complete' })
+    agent.destroy()
+  })
+
+  it('passed replay scrubs residual DSML markup from the delivered reply (2026-10-13)', () => {
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    startVerificationHold(agent, enqueued)
+    const M = '\uFF5CDSML\uFF5C'
+    const leaked = '<parameter name="_displayName">查看剩余 diff</' + M + 'parameter>\n</' + M + 'invoke>\n</' + M + 'tool_calls>'
+
+    ;(agent as any).handleLine(JSON.stringify({
+      type: 'verification_result',
+      passed: true,
+      finalText: '前文\n' + leaked + '\n后文',
+    }))
+
+    expect(enqueued[4]).toMatchObject({ type: 'text_complete' })
+    expect(enqueued[4].text).toContain('前文')
+    expect(enqueued[4].text).toContain('后文')
+    expect(enqueued[4].text).not.toContain(M)
+    expect(enqueued[4].text).not.toContain('parameter')
+    agent.destroy()
+  })
 })
 
 describe('PiAgent recovery state on abort', () => {

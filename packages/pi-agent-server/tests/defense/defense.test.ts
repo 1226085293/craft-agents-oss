@@ -202,7 +202,7 @@ describe('DefenseEvaluator', () => {
     expect(evalr.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false }).verifyRequired).toBe(true);
     evalr.resetTurn();
     evalr.recordToolCall({ type: 'read', output: 'ok' });
-    // Fresh turn → verification budget is reset again.
+    // Fresh turn → recovery state resets; a qualifying long turn verifies again.
     expect(evalr.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false }).verifyRequired).toBe(true);
   });
 });

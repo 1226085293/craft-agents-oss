@@ -376,8 +376,12 @@ export class PiEventAdapter extends BaseEventAdapter {
    * `verification_result`. passed=true → the final reply was verified and is
    * replayed verbatim — terminate the queue now (pendingQueueComplete).
    * passed=false → a followUp will continue the turn (LLM repairs the
-   * reply); just release the verification hold — the resumed turn's FINAL
-   * `agent_end` (no flags) completes the queue normally.
+   * reply); just release the verification hold — the queue stays open and
+   * the continuation's `agent_end` settles it. A continuation that still
+   * qualifies (2026-10-12: verification is NOT limited to one attempt per
+   * turn) re-enters the verification hold via its own
+   * defenseVerificationPending agent_end; the cycle repeats until the
+   * reply passes or the recovery budget is exhausted.
    */
   finalizeVerificationHeld(passed: boolean): void {
     // No-op when no verification hold is active: a late/duplicate

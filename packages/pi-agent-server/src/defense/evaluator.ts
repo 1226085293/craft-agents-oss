@@ -106,18 +106,6 @@ export class DefenseEvaluator {
   /** Ladder lane (2026-10-06): empty terminal responses are owned by the main retry ladder. */
   private readonly ladderOwnsEmptyResponse: boolean;
   private toolCalls: ToolCallLike[] = [];
-  /**
-   * Whether the program-side verification has already been attempted on this
-   * turn. The long-turn verification signal is a TURN-LEVEL accumulator
-   * (iterations/elapsed only grow), so after a FAILED verification the
-   * follow-up repair round's own agent_end would re-trigger verifyRequired
-   * — the event adapter demotes the freshly streamed result bubble and runs
-   * a second Verifying/Verification-failed cycle after it (2026-10-05
-   * report: "结果气泡出现后还会出现验证失败的错误"). One verification
-   * attempt per turn: FAIL → followUp → the repaired reply is delivered as
-   * the final bubble; genuine fault-class signals still resume as before.
-   */
-  private verificationAttempted = false;
 
   constructor(options: DefenseOptions = {}) {
     this.enabled = options.enabled ?? true;
@@ -155,7 +143,6 @@ export class DefenseEvaluator {
   /** Reset tool-call buffer for a new turn. */
   resetTurn(): void {
     this.toolCalls = [];
-    this.verificationAttempted = false;
     this.lifecycle.reset();
   }
 
@@ -311,12 +298,19 @@ export class DefenseEvaluator {
     // server passes hasFinalText explicitly so earlier commentary/tool-call
     // text can never be mistaken for a terminal candidate.
     const hasFinalText = lastAssistantMessage?.hasFinalText ?? lastAssistantMessage?.hasVisibleText ?? false;
-    // One verification attempt per turn (2026-10-05): after a FAILED
-    // verification the follow-up repair round's agent_end must deliver the
-    // repaired reply, not re-verify it — the long-turn signal persists
-    // across the resume and would otherwise re-enter the verification hold
-    // and demote the fresh bubble ("结果气泡后又出现验证失败").
-    const verifyRequired = !this.verificationAttempted && hasFinalText && !faultClass && longTurn;
+    // Verification-class signal (user decision, 2026-10-12): as long as the
+    // stop satisfies the verification conditions — a deliverable final
+    // candidate, not a fault, and the long-turn threshold met — verification
+    // fires, WITHOUT a per-turn attempt budget (the 2026-10-05
+    // "verify-once-per-turn" cap is removed). A FAILed verification resumes
+    // via followUp and the repair round gets verified AGAIN — the long-turn
+    // signal is a TURN-LEVEL accumulator (iterations/elapsed only grow), so
+    // every qualifying stop re-enters verification until the reply passes.
+    // There is NO verification attempt limit: the verification lane consumes
+    // no recovery slot and bypasses the maxResumes gate (see decideResume);
+    // the loop ends only on PASS → replay delivery, a genuine fault-class
+    // stop, the user stopping the turn, or the chain time/iteration caps.
+    const verifyRequired = hasFinalText && !faultClass && longTurn;
     // If a verification signal fires without a deliverable final candidate,
     // preserve the ordinary follow-up recovery path instead of opening a
     // program-side verification hold.
@@ -354,10 +348,12 @@ export class DefenseEvaluator {
       };
     }
 
-    // needsEvaluation: build resume context and decide. Verification also
-    // consumes one FSM slot via decideResume — a FAIL ed verification
-    // follows up (a real resume), and repeat fail→re-verify cycles must
-    // respect maxResumes like any other loop.
+    // needsEvaluation: build resume context and decide. Verification runs on
+    // its own lane (verificationLane): it does NOT consume a recovery slot
+    // and bypasses both FAILED gates (maxResumes + no-progress hash) — a
+    // FAILed verification resumes (repair → re-verify) indefinitely until
+    // the reply passes, a fault-class stop takes over, the user stops the
+    // turn, or the chain guardrails (time/iteration caps) fire.
     const resumeMessage = buildResumeMessage(silentStop, emptyResponse, repetitionLoop, truncatedFinal, stallAborted);
 
     // Ladder lane (2026-10-06 spec: all model-layer failures enter the
@@ -389,7 +385,7 @@ export class DefenseEvaluator {
       };
     }
 
-    const decision = this.lifecycle.decideResume(resumeMessage);
+    const decision = this.lifecycle.decideResume(resumeMessage, verifyRequired ? { verificationLane: true } : undefined);
     if (decision === State.FAILED) {
       return {
         evaluated: true,
@@ -402,7 +398,6 @@ export class DefenseEvaluator {
 
     this.lifecycle.markResumed();
     if (verifyRequired) {
-      this.verificationAttempted = true;
       return {
         evaluated: true,
         shouldResume: false,

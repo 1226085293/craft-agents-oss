@@ -222,21 +222,33 @@ export class SessionLifecycle {
   /**
    * Decide whether to resume given the resume context.
    * - Returns RESUME_READY when a resume is allowed.
-   * - Returns FAILED when resume cap is reached or the context shows no progress.
+   * - Returns FAILED when the resume cap is reached or the context shows no
+   *   progress (fault-lane recovery only).
+   *
+   * `opts.verificationLane` (2026-10-12): verification-class follow-ups
+   * bypass BOTH FAILED gates — the no-progress hash check AND the maxResumes
+   * cap — and do not consume a resume slot. Verification is a delivery
+   * iteration, not a recovery budget: a FAILed judge resumes with the SAME
+   * delivery-step message, and that verify→repair→re-verify iteration is
+   * unbounded by design (it ends on PASS → replay delivery, a genuine
+   * fault-class stop, the user stopping the turn, or the chain guardrails
+   * below). The chain budget is still anchored on the first resume so the
+   * time/iteration fail-safes keep governing an endless re-verify loop.
    */
-  decideResume(resumeContext: string): State {
+  decideResume(resumeContext: string, opts?: { verificationLane?: boolean }): State {
     const hash = fnv1a(resumeContext);
-    if (this.resumeCount >= this.maxResumes) {
+    const lane = opts?.verificationLane === true;
+    if (!lane && this.resumeCount >= this.maxResumes) {
       return this.transition(State.FAILED);
     }
-    if (this.lastResumeHash === hash) {
+    if (!lane && this.lastResumeHash === hash) {
       // Same context resumed twice → no progress → fail instead of looping.
       return this.transition(State.FAILED);
     }
     this.lastResumeHash = hash;
-    this.resumeCount += 1;
-    // Anchor the chain budget at the FIRST resume: from here on, iterations
-    // and wall-clock time count toward the loop caps.
+    if (!lane) this.resumeCount += 1;
+    // Anchor the chain budget at the FIRST resume (both lanes): from here on,
+    // iterations and wall-clock time count toward the loop caps.
     if (this.chainStartedAt === null) {
       this.chainStartedAt = Date.now();
       this.chainIterations = 0;

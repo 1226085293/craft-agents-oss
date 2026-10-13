@@ -24,6 +24,8 @@
  * kill + terminal "Automatic recovery unavailable" card was removed.
  */
 
+import { DSML_TAG } from '../../../shared/src/utils/dsml-strip.ts';
+
 /** One intended tool call recovered from a leaked ｜DSML｜ block. */
 export interface ParsedLeakedCall {
   /** Intended tool name as emitted by the model (e.g. "read", "bash"). */
@@ -50,17 +52,24 @@ export function parseLeakedToolCalls(
   text: string | null | undefined,
 ): { leaked: boolean; calls: ParsedLeakedCall[] } {
   const t = text ?? '';
-  if (t.length === 0 || !/<｜DSML｜(tool_calls|invoke)/.test(t)) {
+  // Tolerant mode (2026-10-13): providers also emit ASYMMETRIC variants —
+  // open tags without the ｜DSML｜ prefix while close tags carry it, or vice
+  // versa. When the text contains at least one marker, the prefix on both
+  // open and close tags becomes optional; without any marker the strict
+  // forms are required, so ordinary XML-like prose is never misparsed.
+  const tolerant = t.includes(DSML_TAG);
+  const pre = (): string => (tolerant ? '(?:｜DSML｜)?' : '｜DSML｜');
+  if (t.length === 0 || !new RegExp(`<${pre()}(tool_calls|invoke)`).test(t)) {
     return { leaked: false, calls: [] };
   }
   const calls: ParsedLeakedCall[] = [];
-  const blockRe = /<｜DSML｜invoke\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/｜DSML｜invoke\s*>/g;
+  const blockRe = new RegExp('<' + pre() + 'invoke\\s+name="([^"]+)"[^>]*>([\\s\\S]*?)<\\/' + pre() + 'invoke\\s*>', 'g');
   let m: RegExpExecArray | null;
   while ((m = blockRe.exec(t)) !== null) {
     const name = m[1] ?? '';
     if (!name) continue;
     const body = m[2] ?? '';
-    const argRe = /<｜DSML｜parameter\s+name="arguments"[^>]*>([\s\S]*?)<\/｜DSML｜parameter\s*>/;
+    const argRe = new RegExp('<' + pre() + 'parameter\\s+name="arguments"[^>]*>([\\s\\S]*?)<\\/' + pre() + 'parameter\\s*>');
     const am = argRe.exec(body);
     let rawArgs = (am?.[1] ?? '').trim();
     let args: Record<string, unknown> | null = null;
@@ -81,7 +90,7 @@ export function parseLeakedToolCalls(
     // object, so the single-blob form (and its invalid-JSON failure mode)
     // keeps its existing behavior.
     if (args === null) {
-      const fieldRe = /<｜DSML｜parameter\s+name="([^"]+)"([^>]*)>([\s\S]*?)<\/｜DSML｜parameter\s*>/g;
+      const fieldRe = new RegExp('<' + pre() + 'parameter\\s+name="([^"]+)"([^>]*)>([\\s\\S]*?)<\\/' + pre() + 'parameter\\s*>', 'g');
       const fields: Record<string, unknown> = {};
       let fm: RegExpExecArray | null;
       let sawField = false;

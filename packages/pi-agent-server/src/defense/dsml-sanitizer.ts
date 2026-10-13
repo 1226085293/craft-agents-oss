@@ -10,6 +10,7 @@ import type {
   MessageEndEvent,
 } from '@earendil-works/pi-coding-agent';
 import { cleanLeakedBlocks, parseLeakedToolCalls } from './leaked-toolcall.ts';
+import { containsDsmlMarkup, stripDsmlResidue } from '../../../shared/src/utils/dsml-strip.ts';
 
 type MessageEndResult = { message: unknown };
 
@@ -57,7 +58,11 @@ function sanitizeNativeMessage(
       return separator > 0 && namespace.length === 32 && /^[a-f0-9]+$/.test(namespace) &&
         sequence.length > 0 && [...sequence].every((digit) => digit >= '0' && digit <= '9');
     });
-  if (nativeCalls.length === 0) return undefined;
+  // No native call filter needed before scrubbing (2026-10-13): the receiver
+  // may have injected nothing at all (malformed/asymmetric leaks defeat its
+  // parser too) — marker-bearing text is then PURE residue and must be
+  // scrubbed outright. `matchesNative` below simply never matches, so every
+  // marker-bearing block falls through to stripDsmlResidue.
 
   // A leaked block may only be stripped when the receiver actually executed a
   // call with the same name+arguments (existence match — the receiver dedups
@@ -69,9 +74,28 @@ function sanitizeNativeMessage(
   let changed = false;
   const content = message.content.map((block) => {
     if (block?.type !== 'text' || typeof block.text !== 'string') return block;
+    // Fast gate: no DSML marker at all → nothing to do.
+    if (!containsDsmlMarkup(block.text)) return block;
     const parsed = parseLeakedToolCalls(block.text);
-    if (!parsed.leaked || parsed.calls.length === 0) return block;
-    if (!parsed.calls.every(matchesNative)) return block;
+    if (!parsed.leaked || parsed.calls.length === 0) {
+      // 2026-10-13: malformed/asymmetric leak variants defeat the parser
+      // (no recoverable invoke structure) — scrub ANY residual ＼DSML＼
+      // markup here so it can never reach the user as raw text.
+      const stripped = stripDsmlResidue(block.text);
+      if (stripped !== block.text) {
+        changed = true;
+        return { ...block, text: stripped };
+      }
+      return block;
+    }
+    if (!parsed.calls.every(matchesNative)) {
+      const stripped = stripDsmlResidue(block.text);
+      if (stripped !== block.text) {
+        changed = true;
+        return { ...block, text: stripped };
+      }
+      return block;
+    }
     // Replace leaked blocks with nothing: the executed toolCall blocks already
     // render as their own process items, and a VISIBLE placeholder here was
     // persisted into the transcript and re-fed to the model, which began

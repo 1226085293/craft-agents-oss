@@ -127,6 +127,7 @@ import { createDsmlSanitizerExtension } from './defense/dsml-sanitizer.ts';
 import { installDsmlReceiver } from './dsml-receiver.ts';
 import { drainQueuedFollowUp } from './defense/resume-followup.ts';
 import { runVerificationJudge } from './defense/verification-judge.ts';
+import { buildVerificationJudgePrompt } from './defense/judge-prompt.ts';
 import { ToolLoopDetector, fingerprintToolCall, digestResult, shouldRejectEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
 import { normalizeShellTimeout } from './shell-timeout.ts';
@@ -882,19 +883,7 @@ async function doVerificationCheck(
   // delivery check while keeping the ephemeral query cheap.
   const candidate = finalText.slice(0, 6000);
   const userMsg = (currentUserMessage || '').slice(0, 2000);
-  const prompt = `[Defense verification] Judge whether the assistant's FINAL REPLY is a valid, complete answer to the USER'S MESSAGE. This judgment gates program-side verification delivery — be fair: any reasonably complete answer (including a "done, here's what I did" summary with the key results) PASSES. Only fail when the reply is missing, off-topic, a clear refusal, factually empty, or stops mid-sentence.
-
-USER'S MESSAGE:
-<user>
-${userMsg}
-</user>
-
-FINAL REPLY (assistant, last message in the turn):
-<reply>
-${candidate}
-</reply>
-
-Answer with EXACTLY one word: PASS or FAIL.`;
+  const prompt = buildVerificationJudgePrompt(userMsg, candidate);
 
   // Judge invocation with retry (2026-10-13 spec): an unavailable judge
   // (upstream timeout / quota / transport error / empty response) MUST NOT

@@ -58,9 +58,9 @@ export interface SessionToolCallbacks {
   onAuthRequest(request: AuthRequest): void;
 
   /**
-   * Lightweight LLM call for tool-internal subtasks (keyword expansion,
-   * short classification). Runs on the default model with thinking disabled
-   * and a timeout; returns null on failure/timeout — callers must fall back.
+   * Lightweight LLM call for tool-internal subtasks (short classification).
+   * Runs on the default model with thinking disabled and a timeout; returns
+   * null on failure/timeout — callers must fall back.
    */
   runMiniCompletion?(prompt: string): Promise<string | null>;
 
@@ -70,6 +70,14 @@ export interface SessionToolCallbacks {
    * don't track memory UI may omit it.
    */
   onMemoryChanged?(): void;
+
+  /**
+   * Encode memory content into a semantic embedding vector (host-provided;
+   * the host owns the @craft-agent/shared embedding engine). Optional — when
+   * absent, entries are stored without a vector and the read path encodes
+   * them on demand.
+   */
+  encodeEmbedding?(content: string): Promise<number[]>;
 }
 
 // ============================================================

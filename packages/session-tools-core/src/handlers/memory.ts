@@ -89,43 +89,6 @@ async function detectUpdateTarget(
 }
 
 /**
- * Semantic query expansion: derive synonym/paraphrase search terms from the
- * user's query via the default-model mini completion (thinking disabled,
- * timeout-guarded). Returns [] on failure — callers fall back to the raw
- * surface matches. Using the default session model, not the main agent model.
- */
-async function expandQueryTerms(
-  ctx: SessionToolContext,
-  query: string,
-): Promise<string[]> {
-  const runMini = ctx.callbacks?.runMiniCompletion
-  if (!runMini) return []
-  try {
-    const prompt = [
-      'You are a memory search assistant. Given a user query, produce 4-6 SHORT synonym or paraphrase search terms',
-      '(single words or short phrases, no explanations) that could appear in stored notes about the same topic.',
-      'Cover different wording/angles of the same intent. Respond with a JSON array of strings only:',
-      '["term1","term2"]',
-      '',
-      `User query: ${query}`,
-    ].join('\n')
-    const raw = await Promise.race([
-      runMini(prompt),
-      new Promise<string | null>(resolve => setTimeout(() => resolve(null), 10_000)),
-    ])
-    if (!raw) return []
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed
-      .filter((t): t is string => typeof t === 'string' && t.trim().length > 1)
-      .map(t => t.trim().toLocaleLowerCase())
-      .slice(0, 8)
-  } catch {
-    return []
-  }
-}
-
-/**
  * Write-side retrieval keyword generation (scheme C): when a memory is
  * stored, ask the mini model what phrasing a user might LATER use to ask
  * about it ("名字", "称呼", "怎么叫你"…). Matching the read path against
@@ -133,39 +96,7 @@ async function expandQueryTerms(
  * LLM call on the read path, keeping injection at zero added latency.
  * Failure/timeout degrades to [] (keyword-less entries behave as before).
  */
-async function generateRetrievalKeywords(
-  ctx: SessionToolContext,
-  content: string,
-): Promise<string[]> {
-  const runMini = ctx.callbacks?.runMiniCompletion
-  if (!runMini) return []
-  try {
-    const prompt = [
-      'You are a memory recall assistant. Below is a stored memory. List 4-6 SHORT',
-      'keywords or questions a user might later use to ASK about this exact fact',
-      '(synonyms, paraphrases, likely phrasings). Plain terms only, no explanations,',
-      'Chinese + English where applicable. Respond with a JSON array of strings only:',
-      '["term1","term2"]',
-      '',
-      `Memory: ${content}`,
-    ].join('\n')
-    const raw = await Promise.race([
-      runMini(prompt),
-      new Promise<string | null>(resolve => setTimeout(() => resolve(null), 10_000)),
-    ])
-    if (!raw) return []
-    const parsed: unknown = JSON.parse(raw)
-    if (!Array.isArray(parsed)) return []
-    return parsed
-      .filter((t): t is string => typeof t === 'string' && t.trim().length > 1)
-      .map(t => t.trim().toLocaleLowerCase())
-      .slice(0, 10)
-  } catch {
-    return []
-  }
-}
-
-export async function handleAddMemory(ctx: SessionToolContext, args: { action: 'add' | 'update' | 'delete'; scope: 'session' | 'global'; id?: string; content?: string; type?: string; tags?: string[] }): Promise<ToolResult> {
+export async function handleAddMemory(ctx: SessionToolContext, args: { action: 'add' | 'update' | 'delete'; scope: 'session' | 'global'; id?: string; content?: string; type?: string }): Promise<ToolResult> {
   if (!/^[a-zA-Z0-9_-]+$/.test(ctx.sessionId)) return error('Invalid session ID')
   if (args.action === 'add' && !args.content?.trim()) return error('content is required')
   if (args.action !== 'add' && !args.id) return error('id is required')
@@ -200,16 +131,21 @@ export async function handleAddMemory(ctx: SessionToolContext, args: { action: '
       }
       const entry: {
         id: string; type: string; content: string; sourceSessionId: string;
-        tags: string[]; confidence: number; createdAt: string; injectedCount: number;
-        retrievalKeywords?: string[];
+        embedding?: number[]; confidence: number; createdAt: string; injectedCount: number;
       } = {
         id: crypto.randomUUID(), type: args.type ?? 'factual', content, sourceSessionId: args.scope === 'global' ? 'manual' : ctx.sessionId,
-        tags: args.tags ?? [], confidence: 0.9, createdAt: new Date().toISOString(), injectedCount: 0,
+        confidence: 0.9, createdAt: new Date().toISOString(), injectedCount: 0,
       }
-      // Write-side semantic indexing: precompute likely question phrasings so
-      // the read path can hit this entry with pure string matching. Same
-      // stored-path LLM budget as dedup; failure degrades to [] silently.
-      entry.retrievalKeywords = await generateRetrievalKeywords(ctx, content)
+      // Write-side semantic indexing: store the embedding vector with the
+      // entry so read-path retrieval is pure cosine (zero LLM, 3-4ms).
+      // Failure degrades to entry WITHOUT vector (read path encodes on demand).
+      try {
+        if (ctx.callbacks?.encodeEmbedding) {
+          entry.embedding = await ctx.callbacks.encodeEmbedding(content)
+        }
+      } catch {
+        // Model unavailable — entry still stored; read path falls back.
+      }
       store.entries.push(entry)
       mkdirSync(dirname(path), { recursive: true })
       ctx.fs.writeFile(path, JSON.stringify(store, null, 2))
@@ -230,7 +166,6 @@ export async function handleAddMemory(ctx: SessionToolContext, args: { action: '
       if (entry) {
         if (args.content !== undefined) entry.content = args.content.trim()
         if (args.type !== undefined) entry.type = args.type
-        if (args.tags !== undefined) entry.tags = args.tags
         entry.updatedAt = new Date().toISOString()
         if (args.scope === 'session') store.consolidatedEntryIds = (store.consolidatedEntryIds ?? []).filter((entryId: string) => entryId !== entry.id)
       }
@@ -244,12 +179,12 @@ export async function handleAddMemory(ctx: SessionToolContext, args: { action: '
   }
 }
 
-export async function handleQueryMemories(ctx: SessionToolContext, args: { query: string; type?: 'factual' | 'behavioral' | 'reminder'; tags?: string[]; limit?: number }): Promise<ToolResult> {
+export async function handleQueryMemories(ctx: SessionToolContext, args: { query: string; type?: 'factual' | 'behavioral' | 'reminder'; limit?: number }): Promise<ToolResult> {
   if (!/^[a-zA-Z0-9_-]+$/.test(ctx.sessionId)) return error('Invalid session ID')
   try {
     const stores = [memoryPath(ctx, 'global'), memoryPath(ctx, 'session')]
       .filter(path => ctx.fs.exists(path))
-      .map(path => JSON.parse(ctx.fs.readFile(path)) as { sessionId?: string; entries?: Array<{ type: string; content: string; tags?: string[] }> })
+      .map(path => JSON.parse(ctx.fs.readFile(path)) as { sessionId?: string; entries?: Array<{ type: string; content: string; embedding?: number[] }> })
     // Fold legacy 5-class types into the three-class space so old session
     // stores (pre- extractions) stay searchable and filterable.
     const fold = (type: string): string => {
@@ -257,36 +192,55 @@ export async function handleQueryMemories(ctx: SessionToolContext, args: { query
       if (type === 'preference' || type === 'workflow') return 'behavioral'
       return type === 'reminder' ? 'reminder' : type
     }
-    const search = (terms: string[]): Array<{ type: string; content: string }> =>
-      stores.flatMap(store => (store.entries ?? [])
-        .filter(entry => !store.sessionId || store.sessionId === ctx.sessionId)
-        .filter(entry => terms.some(term =>
-          entry.content.toLocaleLowerCase().includes(term)
-          || (entry as { retrievalKeywords?: string[] }).retrievalKeywords?.some(k => k.includes(term) || term.includes(k))
-        ))
-        .filter(entry => !args.type || fold(entry.type) === args.type)
-        .filter(entry => !args.tags?.length || (entry.tags ?? []).some(tag => args.tags!.includes(tag)))
-        .map(entry => ({ type: fold(entry.type), content: entry.content })))
 
-    // Stage 1: surface keyword match (zero latency).
-    let matches = search(args.query.toLocaleLowerCase().split(/\s+/).filter(Boolean))
-
-    // Stage 2 (only when stage 1 was empty): semantic expansion via the
-    // default-model mini completion (no thinking, timeout-guarded). Failed or
-    // timed-out expansion falls back to the surface result.
-    if (matches.length === 0) {
-      const expanded = await expandQueryTerms(ctx, args.query)
-      if (expanded.length > 0) {
-        matches = search(expanded)
+    // Stage 1: semantic retrieval via embedding (cosine top-k). The query is
+    // encoded with the same engine as injection; entries carry stored vectors
+    // (written at add time) or are encoded on demand. Zero LLM — 3-4ms.
+    let results: Array<{ type: string; content: string; score: number }> = []
+    const encode = ctx.callbacks?.encodeEmbedding
+    if (encode) {
+      try {
+        const queryVector = await encode(args.query)
+        const all = stores.flatMap(store => (store.entries ?? [])
+          .filter(entry => !store.sessionId || store.sessionId === ctx.sessionId)
+          .filter(entry => !args.type || fold(entry.type) === args.type))
+        const scored: Array<{ type: string; content: string; score: number }> = []
+        for (const entry of all) {
+          let vec = entry.embedding
+          if (!vec || vec.length === 0) {
+            try { vec = await encode(entry.content) } catch { /* skip un-encodable */ }
+          }
+          if (!vec || vec.length === 0) continue
+          let dot = 0
+          const len = Math.min(vec.length, queryVector.length)
+          for (let i = 0; i < len; i++) dot += (vec[i] ?? 0) * (queryVector[i] ?? 0)
+          scored.push({ type: fold(entry.type), content: entry.content, score: dot })
+        }
+        scored.sort((a, b) => b.score - a.score)
+        results = scored
+      } catch {
+        // Engine unavailable — fall through to lexical stage.
+        results = []
       }
     }
 
+    // Stage 2 (fallback only): surface keyword match (zero LLM). Used when the
+    // embedding engine is unavailable or produced no hits for a raw query.
+    if (results.length === 0) {
+      const terms = args.query.toLocaleLowerCase().split(/\s+/).filter(Boolean)
+      results = stores.flatMap(store => (store.entries ?? [])
+        .filter(entry => !store.sessionId || store.sessionId === ctx.sessionId)
+        .filter(entry => !args.type || fold(entry.type) === args.type)
+        .filter(entry => terms.some(term => entry.content.toLocaleLowerCase().includes(term)))
+        .map(entry => ({ type: fold(entry.type), content: entry.content, score: 1 })))
+    }
+
     const limit = args.limit ?? 10
-    const results = matches
+    const unique = results
       .filter((entry, index, self) => self.findIndex(s => s.content === entry.content) === index)
       .slice(0, limit)
-    return ok(results.length
-      ? results.map(entry => `[${entry.type}] ${entry.content}`).join('\n')
+    return ok(unique.length
+      ? unique.map(entry => `[${entry.type}] ${entry.content}`).join('\n')
       : 'No relevant memories found.')
   } catch (cause) {
     return error(`Failed to query memories: ${cause instanceof Error ? cause.message : String(cause)}`)

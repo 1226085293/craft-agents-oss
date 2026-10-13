@@ -4,9 +4,8 @@
  * Pipeline per extraction/adjudication candidate, run against the GLOBAL
  * store (session-internal dedup stays in extractor.ts unchanged):
  *
- *   L1 (lexical):   isSemanticDuplicate (Jaccard ≥0.75 + equalTag overlap, or
- *                   ≥0.85 with ≥4 tokens) → L3 route, target carried.
- *   L1 gray:        Jaccard ∈ [0.50, 0.75) AND equalTag overlap → L3 route.
+ *   L1 (lexical):   content-shingle Jaccard ≥ 0.85 (essentially identical)
+ *                   → drop candidate (l1-high); L1 gray [0.50, 0.85) → L3.
  *   L2 (embeddings): host-provided embedding + cosine ≥ 0.82 → L3 route
  *                   (recall net for reworded content). Skipped when no
  *                   embedding hook is available — known degradation only.
@@ -21,7 +20,7 @@
  */
 
 import type { MemoryEntry, MemoryType, BlockedVerdict } from './types.ts';
-import { memoryConfig, equalTag } from './types.ts';
+import { memoryConfig } from './types.ts';
 import { tokenizeMemoryContent, tokenOverlap, isSemanticDuplicate } from './extractor.ts';
 
 // ============================================================================
@@ -95,16 +94,16 @@ export function routeAdjudicationTargets(
 
   for (const entry of globalEntries) {
     const j = jaccardWith(candidate, entry);
-    const tagOverlap = candidate.tags.some(t => entry.tags.some(et => equalTag(t, et)));
 
-    // L1 high: existing isSemanticDuplicate semantics
-    if ((j >= memoryConfig.adjudication.l1.dupTag && tagOverlap)
-      || (j >= memoryConfig.adjudication.l1.dupContent && tokenizeMemoryContent(candidate.content).length >= 4)) {
+    // L1 high: essentially-identical content only (Jaccard >= dupContent, ~0.85).
+    // With tags removed, mid-range similarity is NOT a duplicate verdict — it
+    // routes to L3 so the mini model decides update/merge/conflict semantics.
+    if (j >= memoryConfig.adjudication.l1.dupContent && tokenizeMemoryContent(candidate.content).length >= 4) {
       targets.push({ entry, route: 'l1-high', jaccard: j });
       continue;
     }
-    // L1 gray: [0.50, 0.75) + tag overlap
-    if (j >= memoryConfig.adjudication.l1.grayLow && j < memoryConfig.adjudication.l1.grayHigh && tagOverlap) {
+    // L1 gray: [grayLow, dupContent) — semantic near-miss routes to L3.
+    if (j >= memoryConfig.adjudication.l1.grayLow && j < memoryConfig.adjudication.l1.dupContent) {
       targets.push({ entry, route: 'l1-gray', jaccard: j });
     }
     if (targets.length >= max) break;
@@ -377,9 +376,4 @@ function verdictToBlockedVerdict(verdict: AdjudicatorVerdict, shadow: boolean): 
     case 'update': return 'update';
     default: return shadow ? 'unrelated-shadow' : 'duplicate';
   }
-}
-
-/** Convenience: semantic equality gate used by L1 AND-conditions in consumers. */
-export function hasEqualTagOverlap(candidateTags: string[], existingTags: string[]): boolean {
-  return candidateTags.some(t => existingTags.some(et => equalTag(t, et)));
 }

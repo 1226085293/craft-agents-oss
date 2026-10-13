@@ -14,7 +14,7 @@ import type {
   SessionMemoryStore,
   MemoryExtractionRecord,
 } from './types.ts';
-import { foldLegacyMemoryType, memoryConfig, equalTag } from './types.ts';
+import { foldLegacyMemoryType, memoryConfig } from './types.ts';
 import { addMemoryEntry, recordExtraction } from './store.ts';
 import { adjudicateCandidates } from './adjudicator.ts';
 
@@ -62,25 +62,19 @@ export function tokenOverlap(a: string[], b: string[]): number {
 
 /**
  * Decide whether `candidate` is a near-duplicate of any existing entry.
- * Strong signal: high content overlap AND tag overlap. Weak signal (content
- * alone) only counts if the tags also intersect, so unrelated entries with
- * similar boilerplate don't get dropped.
+ * Pure content-shingle Jaccard (tags removed with embedding track). Strong
+ * signal: high content overlap. Unrelated boilerplate rarely reaches ≥0.85.
  */
 export function isSemanticDuplicate(
-  candidate: { content: string; tags: string[] },
-  existingEntries: Array<{ content: string; tags: string[] }>,
+  candidate: { content: string },
+  existingEntries: Array<{ content: string }>,
 ): boolean {
   const cTokens = tokenizeMemoryContent(candidate.content);
 
   for (const e of existingEntries) {
-    const eTags = e.tags ?? [];
-    // §3.1: tag intersection uses normalized equality (trim/lowercase/
-    // plural-fold) instead of exact matching everywhere, incl. L1 AND here.
-    const tagOverlap = eTags.some(t => candidate.tags.some(ct => equalTag(t, ct)));
     const similarity = tokenOverlap(cTokens, tokenizeMemoryContent(e.content));
 
-    if (similarity >= 0.75 && tagOverlap) return true;          // near-identical + same topic
-    if (similarity >= 0.85 && cTokens.length >= 4) return true; // essentially identical content
+    if (similarity >= 0.75 && cTokens.length >= 4) return true; // essentially identical content
   }
   return false;
 }
@@ -97,7 +91,7 @@ export function isSemanticDuplicate(
  *   "简体中文"); extracted content and tags are written in this language so
  *   memories follow the app's UI language setting.
  */
-export function buildExtractionPrompt(input: MemoryExtractionInput, options?: { language?: string; tagVocabulary?: string[] }): string {
+export function buildExtractionPrompt(input: MemoryExtractionInput, options?: { language?: string }): string {
   const { messages, sessionTitle } = input;
 
   // Build a compact transcript (max ~8000 chars to fit in mini model context).
@@ -138,16 +132,12 @@ export function buildExtractionPrompt(input: MemoryExtractionInput, options?: { 
     : '';
 
   const languageInstruction = options?.language
-    ? `\nLanguage: Write ALL extracted knowledge in ${options.language} — content and tags must be in ${options.language}.`
-    : '';
-
-  const vocabInstruction = options?.tagVocabulary?.length
-    ? `\nTag vocabulary (prefer tags from this list; only add a NEW tag when a genuinely new topic appears, at most ONE new tag per extraction, short and generic): ${options.tagVocabulary.slice(0, 80).join(', ')}`
+    ? `\nLanguage: Write ALL extracted knowledge in ${options.language}.`
     : '';
 
   return `You are a knowledge extraction specialist. Your task is to analyze a conversation transcript and extract persistent, reusable knowledge that should be remembered across future sessions.
 
-${titleContext}${languageInstruction}${vocabInstruction}
+${titleContext}${languageInstruction}
 Conversation transcript:
 ${transcript}
 
@@ -164,9 +154,9 @@ Rules:
 - Each memory should be self-contained and specific (no "user is working on a project")
 - **Write every memory from a third-person observer perspective and always name its subject and context** — the project, tool, error source, or domain it applies to (e.g. "While debugging the retry policy for the XYZ pipeline, the user confirmed ..."). Never write fragments that rely on this conversation to be understood (e.g. "用户已确认三个决策点" without saying what was confirmed and in which context/codebase).
 - Include concrete details: names, paths, versions, configs, API endpoints
+- **Do NOT write the current date/time or this memory's last-update time into the content** — when the memory is read back, its last-update time is attached automatically. Other time facts that belong to the memory itself (e.g. a project deadline, a meeting date) are fine.
 - For workflows, capture the key steps not just the topic
 - Confidence: 0.9-1.0 for direct quotes/stated facts, 0.6-0.8 for inferred knowledge
-- Skip anything that's already in the existing tags list below (avoid duplicates)
 - Skip trivial or obvious information
 - Extract at most 6 memories per extraction window. Fewer is better; an empty array is acceptable.
 - Relevance test: "Would this change how I assist in a FUTURE session?" If no, skip.
@@ -174,13 +164,11 @@ Rules:
 - Never extract session-specific transient state (what a named session did, pending calls, current error states).
 - For reminders with a time meaning, output "dueAt" as an ISO 8601 timestamp (e.g. "2026-10-16T09:00:00.000Z"); otherwise omit dueAt.
 
-Existing tags to avoid duplicating: ${(input.existingTags || []).join(', ') || 'none'}
 
 Output ONLY a valid JSON array (no markdown, no explanation). Each entry must have:
 {
   "type": "fact" | "preference" | "workflow" | "reminder" | "context",
   "content": "the extracted knowledge",
-  "tags": ["tag1", "tag2"],
   "confidence": 0.9,
   "dueAt": "ISO 8601 (reminders only, optional)"
 }
@@ -199,7 +187,6 @@ If nothing worth extracting is found, output an empty array: []`;
 export function parseExtractionResponse(
   response: string | null,
   sourceSessionId: string,
-  existingTags: string[] = [],
 ): { entries: MemoryEntry[]; discarded: number } {
   if (!response) return { entries: [], discarded: 0 };
 
@@ -218,9 +205,6 @@ export function parseExtractionResponse(
     for (const item of items) {
       let type = item.type as MemoryType;
       const content = item.content as string;
-      const tags = Array.isArray(item.tags)
-        ? (item.tags as string[]).map(t => String(t).toLowerCase().replace(/\s+/g, '-'))
-        : [];
       const confidence = typeof item.confidence === 'number'
         ? Math.max(0, Math.min(1, item.confidence))
         : 0.7;
@@ -243,20 +227,12 @@ export function parseExtractionResponse(
         continue;
       }
 
-      // Deduplicate against existing tags
-      const hasOverlap = existingTags.length > 0 &&
-        tags.some(t => existingTags.includes(t));
-      if (hasOverlap && confidence < 0.8) {
-        discarded++;
-        continue;
-      }
 
       const entry: MemoryEntry = {
         id: crypto.randomUUID(),
         type,
         content,
         sourceSessionId,
-        tags,
         confidence,
         createdAt: new Date().toISOString(),
         injectedCount: 0,
@@ -326,7 +302,6 @@ export interface MemoryExtractorOptions {
    *  controlled tag vocabulary (top-N injected into the prompt).
    * Tags from this list are preferred; new tags limited to one per pass.
    */
-  tagVocabulary?: string[];
   /** Called once per candidate blocked (persistent counter / audit). */
   onDedupBlocked?: () => void;
   /** Audit callback: record a BlockedRecord (verdict already folded). */
@@ -369,11 +344,6 @@ export async function extractMemories(
 ): Promise<MemoryExtractionRecord> {
   const { runMiniCompletion, existingEntries, forceExtraction = false, semanticDedup = false, globalEntries } = options;
 
-  // Build list of existing tags for deduplication
-  const existingTags = [
-    ...new Set(existingEntries.flatMap(e => e.tags)),
-  ];
-
   // Check if we already extracted from this session via the SAME strategy.
   // When no strategy is passed (legacy callers), fall back to the original
   // "any extraction from this session" guard so old behavior is preserved.
@@ -395,14 +365,13 @@ export async function extractMemories(
   }
 
   // Build and send extraction prompt (with  vocabulary guidance)
-  const prompt = buildExtractionPrompt(input, { language: options.language, tagVocabulary: options.tagVocabulary });
+  const prompt = buildExtractionPrompt(input, { language: options.language });
   const response = await runMiniCompletion(prompt);
   if (response === null) throw new Error('Memory extraction returned an empty response');
 
   const { entries, discarded } = parseExtractionResponse(
     response,
     input.sessionId,
-    existingTags,
   );
 
   // redaction gate (§5.2): secrets never reach storage; record as 'sensitive'.
@@ -497,7 +466,7 @@ export async function extractMemories(
       }
     }
 
-    const newEntry = addMemoryEntry(store, entry.content, entry.type, entry.sourceSessionId, entry.tags, entry.confidence, {
+    const newEntry = addMemoryEntry(store, entry.content, entry.type, entry.sourceSessionId, entry.confidence, {
       promptVersion: options.promptVersion ?? 'extract-v3',
       sourceMessageId: options.sourceMessageId ?? undefined,
       dueAt: entry.dueAt ?? undefined,

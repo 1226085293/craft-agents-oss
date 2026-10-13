@@ -587,17 +587,16 @@ export interface ElectronAPI {
   getRichToolDescriptions(): Promise<boolean>
   setRichToolDescriptions(enabled: boolean): Promise<void>
 
-  // Prompt caching & context
-  getExtendedPromptCache(): Promise<boolean>
-  setExtendedPromptCache(enabled: boolean): Promise<void>
-  getEnable1MContext(): Promise<boolean>
-  setEnable1MContext(enabled: boolean): Promise<void>
-
   // RTK token optimization
   getRtkEnabled(): Promise<boolean>
   setRtkEnabled(enabled: boolean): Promise<void>
   getRtkStatus(opts?: { forceRecheck?: boolean }): Promise<{ installed: boolean; path: string | null; version: string | null }>
   getRtkGain(): Promise<{ totalCommands: number; totalInput: number; totalOutput: number; totalSaved: number; avgSavingsPct: number; totalTimeMs: number; avgTimeMs: number } | null>
+
+  // Embedding model path (local semantic memory retrieval)
+  getEmbeddingModelPath(): Promise<string | undefined>
+  setEmbeddingModelPath(path: string): Promise<boolean>
+  clearEmbeddingModelPath(): Promise<void>
 
   // Anti early-stop defense
   getDefenseEnabled(): Promise<boolean>
@@ -704,12 +703,6 @@ export interface ElectronAPI {
   onMemoryConsolidationProgress(callback: (progress: MemoryConsolidationProgress) => void): () => void
   getMemorySchedule(workspaceRootPath: string): Promise<{ enabled: boolean; cron: string; timezone?: string }>
   setMemorySchedule(workspaceRootPath: string, schedule: { enabled: boolean; cron: string; timezone?: string }): Promise<{ success: boolean }>
-  getMemoryBlocked(workspaceRootPath: string): Promise<{ blocked: Array<import('@craft-agent/shared/memory').BlockedRecord> }>
-  listMemoryBackups(workspaceRootPath: string): Promise<{ backups: Array<{ index: number; updatedAt: string; size: number }> }>
-  restoreMemoryBackup(workspaceRootPath: string, index: number): Promise<{ ok: boolean; entries: number }>
-  getMemoryVocabulary(workspaceRootPath: string): Promise<{ tagVocabulary: string[]; priorityTags: string[] }>
-  setMemoryVocabulary(workspaceRootPath: string, payload: { tagVocabulary?: string[]; priorityTags?: string[] }): Promise<{ ok: boolean; tagVocabulary?: string[]; priorityTags?: string[] }>
-  deleteMemoryBackup(workspaceRootPath: string, index: number): Promise<{ ok: boolean; reason?: string }>
   extractSessionMemories(sessionId: string): Promise<{ extracted: number; discarded: number }>
 
   // Usage (source & skill usage stats)

@@ -1,10 +1,10 @@
 import type { MemoryEntry, MemoryStore, MemoryType, SessionMemoryStore } from './types.ts'
-import { foldLegacyMemoryType, memoryConfig, equalTag, normalizeTag } from './types.ts'
+import { foldLegacyMemoryType, memoryConfig } from './types.ts'
 import { isSemanticDuplicate } from './extractor.ts'
 import { adjudicateCandidates, routeAdjudicationTargets, type AdjudicationResult } from './adjudicator.ts'
 
 interface ConsolidationResponse {
-  promotions: Array<{ id: string; content: string; type: MemoryType; tags: string[] }>
+  promotions: Array<{ id: string; content: string; type: MemoryType }>
   conflicts: Array<{ oldId: string; newId: string; reason: string }>
 }
 
@@ -24,7 +24,7 @@ function parseResponse(response: string): ConsolidationResponse {
   }
   if (!Array.isArray(parsed.promotions) || !Array.isArray(parsed.conflicts)) throw new Error('Invalid consolidation response')
   for (const item of parsed.promotions) {
-    if (!item || typeof item.id !== 'string' || typeof item.content !== 'string' || !['factual', 'behavioral', 'reminder', 'fact', 'preference', 'workflow', 'context'].includes(item.type) || !Array.isArray(item.tags)) throw new Error('Invalid memory promotion')
+    if (!item || typeof item.id !== 'string' || typeof item.content !== 'string' || !['factual', 'behavioral', 'reminder', 'fact', 'preference', 'workflow', 'context'].includes(item.type) ) throw new Error('Invalid memory promotion')
   }
   for (const item of parsed.conflicts) {
     if (!item || typeof item.oldId !== 'string' || typeof item.newId !== 'string' || typeof item.reason !== 'string' || !item.reason.trim()) throw new Error('Invalid memory conflict')
@@ -34,10 +34,10 @@ function parseResponse(response: string): ConsolidationResponse {
 
 /**
  * Rough estimated characters a candidate entry occupies once rendered into the
- * consolidation prompt (entry content + tags + the JSON wrapper overhead).
+ * consolidation prompt (entry content + the JSON wrapper overhead).
  */
 function candidatePromptChars(entry: MemoryEntry): number {
-  return entry.content.length + entry.tags.join(',').length + 80
+  return entry.content.length + 80
 }
 
 /**
@@ -75,7 +75,7 @@ function buildConsolidationPrompt(
   language?: string,
 ): string {
   const languageInstruction = language
-    ? `\n[Write all promoted content and tags in ${language}.]`
+    ? `\n[Write all promoted content and ${language}.]`
     : ''
   return `Decide which session memories deserve promotion to global memory. Global memory is a small, high-value store: only 8 entries are injected per turn, so the bar is high and the default answer is NO.${languageInstruction}
 A candidate qualifies ONLY if it meets ALL three tests:
@@ -90,8 +90,10 @@ Automatic rejections:
 - Fragments that need the original session to be understood
 Expected outcome: 0-3 promotions per batch is normal. An empty promotions array is a GOOD result. When in doubt, reject.
 Conflict rule: report a conflict ONLY when the candidate DIRECTLY contradicts or explicitly replaces an existing global memory of the SAME subject (changed preference, corrected fact). If uncertain or the contexts differ, promote normally and keep both — additions are cheap, deletions are not.
+
+When rewriting promoted content: Do NOT write the current date/time or this memory's last-update time into the content — the read path attaches the last-update time automatically. Time facts that belong to the memory itself (e.g. a user-defined deadline) are fine.
 Return JSON only:
-{"promotions":[{"id":"candidate id","content":"...","type":"factual|behavioral|reminder","tags":[]}],"conflicts":[{"oldId":"existing global id","newId":"candidate id","reason":"..."}]}
+{"promotions":[{"id":"candidate id","content":"...","type":"factual|behavioral|reminder"}],"conflicts":[{"oldId":"existing global id","newId":"candidate id","reason":"..."}]}
 Rules: every promotions[].id must be one of the candidate ids below; every conflicts[].newId must be a candidate you ALSO include in promotions; every conflicts[].oldId must be one of the existing global memory ids below; never invent or guess ids. If nothing qualifies, return empty arrays.
 Candidates: ${JSON.stringify(candidates)}
 Current global memory count: ${globalEntries.length}`
@@ -293,7 +295,7 @@ async function applyBatchResponse(batch: MemoryEntry[], response: ConsolidationR
   }
   for (const item of promotions) {
     const source = batch.find(entry => entry.id === item.id)!
-    const candidate = { ...source, type: foldLegacyMemoryType(item.type), content: item.content.trim(), tags: item.tags.map(normalizeTag) }
+    const candidate = { ...source, type: foldLegacyMemoryType(item.type), content: item.content.trim() }
     // L1 coarse dedup against the PRE-EXISTING global store only (§4.3 “L1 粗筛
     // 照常”，shadow-inclusive). Same-batch duplicates are NOT coarse-screened
     // here — the adjudication gate below owns them (取代 P0-3 批内去重) so the
@@ -449,8 +451,6 @@ export async function consolidateSessionMemories(
     for (const entry of session.entries) {
       if (markPromoted.has(entry.id)) entry.promoted = true
     }
-    // §3.3 vocabulary growth gate: promote tags seen ≥ promoteFrequency times.
-    applyVocabularyGrowth(globalStore, candidates.filter(c => markPromoted.has(c.id)))
     // Mark the session as consolidated ONLY after every batch succeeded.
     // The caller persists inside onSessionConsolidated, so a restart or model
     // failure never leaves a session marked without its work having completed.
@@ -461,41 +461,4 @@ export async function consolidateSessionMemories(
     options.onSessionConsolidated?.(session, { promoted: sessionPromoted, trashed: sessionTrashed })
   }
   return { promoted, trashed }
-}
-
-/** §3.3: accumulate promotion tag frequencies; fold new tags into the vocabulary at ≥promoteFrequency. */
-function applyVocabularyGrowth(globalStore: MemoryStore, promotedEntries: MemoryEntry[]): void {
-  if (promotedEntries.length === 0) return
-  globalStore.tagFrequency ??= {}
-  globalStore.tagVocabulary ??= []
-  const threshold = memoryConfig.tags.promoteFrequency
-  const vocabSet = new Set(globalStore.tagVocabulary)
-  let changed = false
-  for (const entry of promotedEntries) {
-    for (const tag of entry.tags) {
-      globalStore.tagFrequency[tag] = (globalStore.tagFrequency[tag] ?? 0) + 1
-      if (!vocabSet.has(tag) && globalStore.tagFrequency[tag] >= threshold) {
-        vocabSet.add(tag)
-        globalStore.tagVocabulary.push(tag)
-        changed = true
-      }
-    }
-  }
-  if (changed) {
-    // Keep vocabulary frequency-sorted (highest first).
-    globalStore.tagVocabulary.sort((a, b) => (globalStore.tagFrequency![b] ?? 0) - (globalStore.tagFrequency![a] ?? 0))
-    // Bound the vocabulary: it grows monotonically otherwise (every promoted
-    // tag reaching the frequency threshold joins). Keep only the top-N most
-    // frequent tags; the extraction prompt consumes at most vocabPromptLimit
-    // (top 80) anyway, so a large tail is pure accumulation cost.
-    const maxSize = memoryConfig.tags.vocabMaxSize
-    if (globalStore.tagVocabulary.length > maxSize) {
-      const kept = globalStore.tagVocabulary.slice(0, maxSize)
-      globalStore.tagVocabulary = kept
-      // Also evict dropped tags from the frequency map to avoid unbounded growth.
-      const dropped = new Set(vocabSet)
-      for (const tag of kept) dropped.delete(tag)
-      for (const tag of dropped) delete globalStore.tagFrequency[tag]
-    }
-  }
 }

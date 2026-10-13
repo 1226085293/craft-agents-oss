@@ -27,6 +27,9 @@ import type { LoadedSource } from '../sources/types.ts';
 import { buildCallLlmRequest, type LLMQueryRequest, type LLMQueryResult } from './llm-tool.ts';
 import { getLlmConnections, getDefaultLlmConnection } from '../config/storage.ts';
 import { loadAllSources } from '../sources/storage.ts';
+
+/** Per-workspace guard: one embedding backfill pass at a time. */
+const embeddingBackfillStarted = new Set<string>();
 import { appendUsage } from '../usage/index.ts';
 import type { ApiServerConfig } from '../mcp/mcp-pool.ts';
 
@@ -72,8 +75,6 @@ import {
   loadSessionMemoryStore,
   saveSessionMemoryStore,
   extractMemories,
-  extractWeightedKeywords,
-  scheduleKeywordExpansion,
   type MemoryStore,
   type MemoryExtractionInput,
 } from '../memory/index.ts';
@@ -274,7 +275,6 @@ export abstract class BaseAgent implements AgentBackend {
   // ============================================================
   // Memory & Execution Journal (cross-session persistence)
   // ============================================================
-  protected _memoryStore?: MemoryStore;
   protected _memoryConfig: MemoryConfig = DEFAULT_MEMORY_CONFIG;
   protected _journalState?: JournalState;
 
@@ -292,12 +292,47 @@ export abstract class BaseAgent implements AgentBackend {
   /** Non-null when this turn's injection came up empty but memories exist. */
   protected _pendingExistenceHint: string | null = null;
 
-  /** Get or lazily initialize the memory store for this agent's workspace */
+  /**
+   * Read the memory store from disk every time (no in-process snapshot): the
+   * file may be written by another process (dev instance / installed app) or
+   * hand-edited at any moment, so a cached copy would go stale and clobber
+   * newer content on a later flush. Callers keep their own reference for a
+   * read-modify-write cycle and pass it to {@link persistMemoryStore}.
+   */
   get memoryStore(): MemoryStore {
-    if (!this._memoryStore) {
-      this._memoryStore = loadMemoryStore(this.config.workspace.rootPath);
+    const store = loadMemoryStore(this.config.workspace.rootPath);
+    // One-shot cold backfill (fire-and-forget): legacy/hand-edited entries
+    // carry no embedding vector. Compute them in the background and persist
+    // once, so the first semantic query finds them without an on-demand
+    // encode stall. Repeats as no-op once vectors exist (guard below).
+    void this.ensureEmbeddingBackfill(store);
+    return store;
+  }
+
+  /**
+   * Background embedding backfill — encodes every entry lacking an embedding
+   * vector and persists once. Irreversible dedup guard via a module-level
+   * per-workspace flag so re-entrant getter calls don't queue duplicates.
+   */
+  protected async ensureEmbeddingBackfill(store: MemoryStore): Promise<void> {
+    const hasMissing = store.entries.some(e => !e.embedding || e.embedding.length === 0);
+    if (!hasMissing) return;
+    const key = this.config.workspace.rootPath;
+    if (embeddingBackfillStarted.has(key)) return;
+    embeddingBackfillStarted.add(key);
+    try {
+      const { backfillStoreEmbeddings, encodeText } = await import('../memory/embedding.ts');
+      const encoded = await backfillStoreEmbeddings(store);
+      if (encoded > 0) {
+        // Persist the freshly computed vectors so subsequent loads find them.
+        this.persistMemoryStore(store);
+        this.onDebug?.(`[Memory] Backfilled ${encoded} legacy embeddings`);
+      }
+    } catch (error) {
+      this.onDebug?.(`[Memory] Embedding backfill skipped: ${error}`);
+    } finally {
+      embeddingBackfillStarted.delete(key);
     }
-    return this._memoryStore;
   }
 
   set memoryConfig(config: MemoryConfig) {
@@ -322,15 +357,11 @@ export abstract class BaseAgent implements AgentBackend {
     return this._journalState;
   }
 
-  /** Persist memory store to disk, then drop the in-process snapshot (B):
-   *  the next getter re-reads the file, so a second process (dev instance /
-   *  installed app) writing between our turns is never clobbered by stale
-   *  in-memory state on a later flush. */
-  persistMemoryStore(): void {
-    if (this._memoryStore) {
-      saveMemoryStore(this.config.workspace.rootPath, this._memoryStore);
-      this._memoryStore = undefined;
-    }
+  /** Persist the memory store the caller just modified (atomic write, merges
+   *  any concurrent external change — see saveMemoryStore). Never persists an
+   *  internal snapshot: the caller passes the exact object it mutated. */
+  persistMemoryStore(store: MemoryStore): void {
+    saveMemoryStore(this.config.workspace.rootPath, store);
   }
 
   /** Persist journal state to disk */
@@ -1133,7 +1164,7 @@ ${formattedMessages}
     // message is passed in so the keyword window always contains the user's
     // latest intent — the jsonl-based window alone only holds history from
     // *before* this turn.
-    const memoryContext = this.buildMemoryContext(cleanMessage);
+    const memoryContext = await this.buildMemoryContext(cleanMessage);
 
     // Prepend branch seed context (for seeded branch sessions) and transferred-session summary.
     const branchSeedContext = this.buildBranchSeedContext(this.config.getBranchSeedMessages?.());
@@ -1198,7 +1229,7 @@ ${formattedMessages}
     return `<memory-existence-hint>\nStored memories exist but none matched this question by surface keywords. If the question could involve anything set earlier — identity, names, preferences, rules, past decisions — DO NOT answer from current context alone: call the query_memories tool first and use its results.\n</memory-existence-hint>`;
   }
 
-  protected buildMemoryContext(currentUserMessage?: string): string {
+  protected async buildMemoryContext(currentUserMessage?: string): Promise<string> {
     const sessionId = this.config.session?.id;
     if (!sessionId) return '';
     try {
@@ -1212,15 +1243,7 @@ ${formattedMessages}
       const recentMessages = this.getRecentMessagesForInjection(4);
       const trimmed = currentUserMessage?.trim();
       if (trimmed) recentMessages.push({ role: 'user', content: trimmed });
-      const memories = selectRelevantMemoriesFromScopes(store, sessionStore, recentMessages);
-
-      // V3 §5.3: fire-and-forget semantic variant precompute for NEXT turn
-      // (zero sync await on the read path; 500ms timeout silent abandon).
-      const contextText = trimmed ?? recentMessages.map(m => m.content ?? '').join(' ');
-      if (contextText) {
-        const baseKeywords = extractWeightedKeywords(recentMessages, 30);
-        scheduleKeywordExpansion(contextText, store.tagVocabulary ?? [], this.runMiniCompletion.bind(this), baseKeywords);
-      }
+      const memories = await selectRelevantMemoriesFromScopes(store, sessionStore, recentMessages);
 
       if (memories.length === 0) {
         // Existence hint: memories exist but none matched by surface keywords.
@@ -1242,7 +1265,7 @@ ${formattedMessages}
       // V3 §5.3: persist acquired marks (injectedCount / lastInjectedAt) under
       // the write lock, off the hot path (fire-and-forget, never awaited).
       void withMemoryWriteLock(() => {
-        this.persistMemoryStore();
+        this.persistMemoryStore(store);
         saveSessionMemoryStore(this.config.workspace.rootPath, sessionStore);
       });
 
@@ -1307,6 +1330,7 @@ ${formattedMessages}
       }
 
       const sessionStore = loadSessionMemoryStore(this.config.workspace.rootPath, sessionId);
+      const store = this.memoryStore;
       const extractedThroughIndex = sessionStore.extractedThroughMessageId
         ? messages.findIndex((message: any) => message.id === sessionStore.extractedThroughMessageId)
         : -1;
@@ -1314,14 +1338,14 @@ ${formattedMessages}
       // V3 (§5.2): a pending retry for this (sessionId, strategy) wins over a
       // fresh window — replay the SAME window snapshot (throughMessageId) so
       // failures never double-extract nor skip ahead.
-      const queue = this.memoryStore.extractionRetryQueue ?? [];
+      const queue = store.extractionRetryQueue ?? [];
       const retryItem = queue.find(q => q.sessionId === sessionId && q.strategy === requestedStrategy);
       let retryCapIndex = -1;
       if (retryItem) {
         retryCapIndex = messages.findIndex((m: any) => m.id === retryItem.throughMessageId);
         if (retryCapIndex < 0) {
           // Snapshot message vanished — drop the stale item and use a fresh window.
-          this.memoryStore.extractionRetryQueue = queue.filter(q => q !== retryItem);
+          store.extractionRetryQueue = queue.filter(q => q !== retryItem);
         }
       }
 
@@ -1344,7 +1368,6 @@ ${formattedMessages}
           id: (m as Record<string, unknown>).id as string | undefined,
         })),
         sessionTitle: this.config.session?.name,
-        existingTags: sessionStore.entries.flatMap(e => e.tags),
       };
 
       const result = await extractMemories(input, sessionStore, {
@@ -1353,8 +1376,7 @@ ${formattedMessages}
         semanticDedup: this._memoryConfig.semanticDedup,
         // V3: adjudication pipeline sees the whole global store (§4); the
         // controlled vocabulary is injected into the extraction prompt (§3.2).
-        globalEntries: this.memoryStore.entries,
-        tagVocabulary: this.memoryStore.tagVocabulary ?? [],
+        globalEntries: store.entries,
         adjudicationShadow: memoryConfig.adjudication.shadow,
         promptVersion: 'extract-v3',
         sourceMessageId: lastWindowMessage?.id as string | undefined,
@@ -1363,15 +1385,15 @@ ${formattedMessages}
         // observable for the duplicate-extraction rate across the window.
         onDedupBlocked: () => {
           void withMemoryWriteLock(() => {
-            this.memoryStore.dedupBlockedCount = (this.memoryStore.dedupBlockedCount ?? 0) + 1;
-            this.persistMemoryStore();
+            store.dedupBlockedCount = (store.dedupBlockedCount ?? 0) + 1;
+            this.persistMemoryStore(store);
           });
         },
         // V3 audit trail (§1.2 blocked[]): stored under the write lock.
         onBlocked: (record) => {
           withMemoryWriteLock(() => {
-            this.memoryStore.blocked ??= [];
-            this.memoryStore.blocked.push({
+            store.blocked ??= [];
+            store.blocked.push({
               candidateContent: record.candidateContent,
               candidateType: record.candidateType,
               sourceSessionId: record.sourceSessionId,
@@ -1383,7 +1405,7 @@ ${formattedMessages}
               shadow: record.shadow,
               blockedAt: new Date().toISOString(),
             });
-            this.persistMemoryStore();
+            this.persistMemoryStore(store);
           });
         },
         // Extracted memories follow the app's UI language setting (e.g. 简体中文)
@@ -1396,8 +1418,8 @@ ${formattedMessages}
 
       // Success: clear the retry slot (§5.2 slot consumed only on success).
       if (retryItem) {
-        this.memoryStore.extractionRetryQueue = queue.filter(q => q !== retryItem);
-        this.persistMemoryStore();
+        store.extractionRetryQueue = queue.filter(q => q !== retryItem);
+        this.persistMemoryStore(store);
       }
 
       sessionStore.extractedMessageCount = messages.length;
@@ -1408,9 +1430,10 @@ ${formattedMessages}
     } catch (error) {
       this.onDebug?.(`[Memory] Extraction failed: ${error}`);
       // V3 (§5.2): enqueue a retry carrying the failed window snapshot.
+      const store = this.memoryStore;
       withMemoryWriteLock(() => {
-        this.memoryStore.extractionRetryQueue ??= [];
-        const existing = this.memoryStore.extractionRetryQueue.find(
+        store.extractionRetryQueue ??= [];
+        const existing = store.extractionRetryQueue.find(
           q => q.sessionId === sessionId && q.strategy === requestedStrategy,
         );
         if (existing) {
@@ -1418,12 +1441,12 @@ ${formattedMessages}
           existing.failedAt = new Date().toISOString();
           if (existing.attempts >= 3) {
             this.onDebug?.(`[Memory] Extraction retries exhausted for ${sessionId}/${requestedStrategy}; dropping from queue`);
-            this.memoryStore.extractionRetryQueue = this.memoryStore.extractionRetryQueue.filter(q => q !== existing);
+            store.extractionRetryQueue = store.extractionRetryQueue.filter(q => q !== existing);
           }
         } else {
           const lastId = (messages?.at(-1) as { id?: string } | undefined)?.id;
           if (lastId) {
-            this.memoryStore.extractionRetryQueue.push({
+            store.extractionRetryQueue.push({
               sessionId,
               strategy: requestedStrategy ?? 'session_end',
               throughMessageId: lastId,
@@ -1433,7 +1456,7 @@ ${formattedMessages}
             });
           }
         }
-        this.persistMemoryStore();
+        this.persistMemoryStore(store);
       });
       return { extracted: 0, discarded: 0 };
     }

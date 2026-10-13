@@ -317,17 +317,16 @@ export const CHANNEL_MAP = {
   getBrowserToolEnabled: invoke(RPC_CHANNELS.tools.GET_BROWSER_TOOL_ENABLED),
   setBrowserToolEnabled: invoke(RPC_CHANNELS.tools.SET_BROWSER_TOOL_ENABLED),
 
-  // Prompt caching & context
-  getExtendedPromptCache: invoke(RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE),
-  setExtendedPromptCache: invoke(RPC_CHANNELS.caching.SET_EXTENDED_PROMPT_CACHE),
-  getEnable1MContext: invoke(RPC_CHANNELS.caching.GET_ENABLE_1M_CONTEXT),
-  setEnable1MContext: invoke(RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT),
-
   // RTK token optimization
   getRtkEnabled: invoke(RPC_CHANNELS.rtk.GET_ENABLED),
   setRtkEnabled: invoke(RPC_CHANNELS.rtk.SET_ENABLED),
   getRtkStatus: invoke(RPC_CHANNELS.rtk.GET_STATUS),
   getRtkGain: invoke(RPC_CHANNELS.rtk.GET_GAIN),
+
+  // Embedding model path (local semantic memory retrieval)
+  getEmbeddingModelPath: invoke(RPC_CHANNELS.embedding.GET_PATH),
+  setEmbeddingModelPath: invoke(RPC_CHANNELS.embedding.SET_PATH),
+  clearEmbeddingModelPath: invoke(RPC_CHANNELS.embedding.CLEAR_PATH),
 
   // Anti early-stop defense
   getDefenseEnabled: invoke(RPC_CHANNELS.defense.GET_ENABLED),
@@ -419,12 +418,6 @@ export const CHANNEL_MAP = {
   onMemoryConsolidationProgress: listener(RPC_CHANNELS.memory.MEMORY_CONSOLIDATE_PROGRESS),
   getMemorySchedule: invoke(RPC_CHANNELS.memory.MEMORY_SCHEDULE_GET),
   setMemorySchedule: invoke(RPC_CHANNELS.memory.MEMORY_SCHEDULE_SET),
-  getMemoryBlocked: invoke(RPC_CHANNELS.memory.MEMORY_GET_BLOCKED),
-  listMemoryBackups: invoke(RPC_CHANNELS.memory.MEMORY_LIST_BACKUPS),
-  restoreMemoryBackup: invoke(RPC_CHANNELS.memory.MEMORY_RESTORE_BACKUP),
-  getMemoryVocabulary: invoke(RPC_CHANNELS.memory.MEMORY_GET_VOCABULARY),
-  setMemoryVocabulary: invoke(RPC_CHANNELS.memory.MEMORY_SET_VOCABULARY),
-  deleteMemoryBackup: invoke(RPC_CHANNELS.memory.MEMORY_DELETE_BACKUP),
 
   // Usage (source & skill usage stats)
   getUsageStats: invoke(RPC_CHANNELS.usage.GET_STATS),

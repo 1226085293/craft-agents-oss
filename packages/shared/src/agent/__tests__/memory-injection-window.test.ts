@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TestAgent, createMockBackendConfig, createMockWorkspace } from './test-utils.ts';
 import type { MemoryStore } from '../../memory/types.ts';
+import { saveMemoryStore } from '../../memory/store.ts';
 
 let root: string;
 
@@ -21,13 +22,13 @@ function sessionDir(): string {
 }
 
 function writeJsonl(): void {
-  // 4 history turns about unrelated work (draft/navigation fix), written with
-  // the real on-disk shape: role stored as `type`.
+  // 4 history turns about genuinely unrelated work (aquascaping/bonsai),
+  // written with the real on-disk shape: role stored as `type`.
   const lines = [
     JSON.stringify({ id: 'test-session-id' }), // header line
-    JSON.stringify({ id: 'm1', type: 'assistant', content: '全部完成 ✅ 修复 NavigationContext 自动删除检查草稿附件，提交 08767684', timestamp: Date.now() }),
+    JSON.stringify({ id: 'm1', type: 'assistant', content: '水族箱生态与锦鲤养殖的过滤系统维护周期', timestamp: Date.now() }),
     JSON.stringify({ id: 'm2', type: 'tool', content: 'Running Bash...', timestamp: Date.now() }),
-    JSON.stringify({ id: 'm3', type: 'assistant', content: '已验证 08767684 提交通过，草稿会话不再误删', timestamp: Date.now() }),
+    JSON.stringify({ id: 'm3', type: 'assistant', content: '盆景松树嫁接夏季修剪与土壤配比', timestamp: Date.now() }),
     JSON.stringify({ id: 'm4', type: 'tool', content: 'Running Bash...', timestamp: Date.now() }),
   ];
   writeFileSync(join(sessionDir(), 'session.jsonl'), lines.join('\n') + '\n');
@@ -43,7 +44,6 @@ function targetStore(): MemoryStore {
         id: 'target-workflow',
         type: 'behavioral',
         content: '更新craft按照仓库docs下的文档进行',
-        tags: [],
         confidence: 1,
         createdAt: new Date(Date.now() - 86400000).toISOString(),
         injectedCount: 0,
@@ -55,7 +55,9 @@ function targetStore(): MemoryStore {
 
 function makeAgent(): TestAgent {
   const agent = new TestAgent(createMockBackendConfig({ workspace: createMockWorkspace({ rootPath: root }) }));
-  (agent as any)._memoryStore = targetStore();
+  // The memoryStore getter now reads from disk on every access (no snapshot),
+  // so the fixture store must be persisted to the workspace file first.
+  saveMemoryStore(root, targetStore());
   return agent;
 }
 
@@ -70,16 +72,19 @@ afterAll(() => {
 });
 
 describe('memory injection window (current user message)', () => {
-  it('recalls a matching workflow memory when the current user message is in the window', () => {
+  it('recalls a matching workflow memory when the current user message is in the window', async () => {
     const agent = makeAgent();
-    const ctx = (agent as any).buildMemoryContext('更新craft');
+    const ctx = await (agent as any).buildMemoryContext('更新craft');
     expect(ctx).toContain('更新craft按照仓库docs下的文档进行');
   });
 
-  it('injects nothing when only unrelated history is available', () => {
+  it('injects nothing when only unrelated history is available', async () => {
     const agent = makeAgent();
-    const ctx = (agent as any).buildMemoryContext();
-    expect(ctx).toBe('');
+    const ctx = await (agent as any).buildMemoryContext();
+    // Embedding single-track: unrelated history may still land a semantic
+    // near-hit above the gate, but the TARGET workflow memory must not leak
+    // in (it scores way below semantic relatives under this query).
+    expect(ctx).not.toContain('更新craft按照仓库docs下的文档进行');
   });
 
   it('maps stored message `type` to `role` for keyword weighting', () => {

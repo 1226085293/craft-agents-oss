@@ -40,26 +40,6 @@ export function foldLegacyMemoryType(type: string): MemoryType {
   }
 }
 
-/**
- * Normalize a tag for storage/comparison: trim, lowercase, collapse runs of
- * whitespace to '-', fold common English plurals. Idempotent.
- */
-export function normalizeTag(tag: string): string {
-  const t = tag.trim().toLowerCase().replace(/\s+/g, '-');
-  if (t.length <= 3) return t;
-  if (t.endsWith('ies')) return `${t.slice(0, -3)}y`;
-  if (t.endsWith('es')) return t.slice(0, -2);
-  if (t.endsWith('s') && !t.endsWith('ss') && !t.endsWith('us') && !t.endsWith('is')) {
-    return t.slice(0, -1);
-  }
-  return t;
-}
-
-/** Equality across normalized tags (replaces exact-match in L1/Injection/L3 routing). */
-export function equalTag(a: string, b: string): boolean {
-  return normalizeTag(a) === normalizeTag(b);
-}
-
 /** A single persistent memory entry */
 export interface MemoryEntry {
   /** Unique ID (UUID v4) */
@@ -70,15 +50,13 @@ export interface MemoryEntry {
   content: string;
   /** Source session ID where this was extracted */
   sourceSessionId: string;
-  /** Tags for retrieval (lowercase, no spaces) */
-  tags: string[];
   /**
-   * Precomputed retrieval keywords (written with the entry): phrases a user
-   * might use to ASK about this memory (同义问法、称呼、怎么问你…). Read path
-   * matches query terms against content ∪ retrievalKeywords — pure string
-   * ops, zero LLM, so semantically bridged queries hit deterministically.
+   * Semantic embedding vector (bge-small-zh-v1.5, 512-dim, L2-normalized), if
+   * computed. Absent for legacy entries until backfilled; read path computes
+   * on demand as a fallback. Kept inside the entry so it travels with the
+   * A+B no-snapshot disk model.
    */
-  retrievalKeywords?: string[];
+  embedding?: number[];
   /** Extraction confidence: 0.0–1.0 */
   confidence: number;
   /** When the memory was created (ISO 8601) */
@@ -133,16 +111,10 @@ export interface MemoryStore {
    * survives restarts — console debug output is not persisted.
    */
   dedupBlockedCount?: number;
-  /** : controlled tag vocabulary (frequency-sorted; extraction prompt top-N). */
-  tagVocabulary?: string[];
-  /** : priority tags subset — +5 injection bonus only applies to these. */
-  priorityTags?: string[];
   /** : adjudication/redaction audit trail (LRU-capped). */
   blocked?: BlockedRecord[];
   /** : failed-extraction retry queue (window snapshot based). */
   extractionRetryQueue?: ExtractionRetryItem[];
-  /** : cumulative tag frequency across promotions (vocabulary growth gate). */
-  tagFrequency?: Record<string, number>;
 }
 
 /** A recoverable global-memory deletion record. */
@@ -248,8 +220,6 @@ export interface MemoryExtractionInput {
   }>;
   /** Session title (optional, helps with context) */
   sessionTitle?: string;
-  /** Available tags from the session (for filtering) */
-  existingTags?: string[];
 }
 
 // ============================================================================
@@ -273,8 +243,7 @@ export function isBehavioralMemoryType(type: MemoryType): boolean {
 
 /**
  *  memory feature configuration. All features default to safe states:
- * adjudication starts in SHADOW mode (records only, no disposition),
- * expansion is enabled but zero-sync-wait on the read path.
+ * adjudication starts in SHADOW mode (records only, no disposition).
  */
 export const memoryConfig = {
   schemaVersion: 3,
@@ -283,22 +252,20 @@ export const memoryConfig = {
     enabled: true,
     /** Shadow mode: verdicts recorded, dispositions NOT applied (【决策】 initial). */
     shadow: true,
-    l1: { grayLow: 0.5, grayHigh: 0.75, dupTag: 0.75, dupContent: 0.85 },
+    l1: { grayLow: 0.5, dupContent: 0.85 },
     /** 'auto': use host embedding if available, otherwise skip (known degradation). */
     l2: { mode: 'auto' as const, routeCosine: 0.82 },
     l3: { maxTargets: 3, candidatesPerCall: 6, timeoutMs: 30_000 },
   },
-  expansion: { enabled: true, timeoutMs: 500, topicSwitchJaccard: 0.5, variantWeight: 0.6 },
   decay: { coldDays: 180 },
   reminder: { lookaheadDays: 7, maxSlots: 2 },
-  tags: { vocabPromptLimit: 80, vocabMaxSize: 200, maxNewPerExtraction: 1, promoteFrequency: 3 },
   safety: {
     /** Frame text around injected memory blocks neutralizing directive language. */
     injectionFrame: true,
     /** Redact secrets at extraction (blocked verdict 'sensitive'). */
     redact: true,
   },
-  retention: { snapshots: 5, trash: 200, extractionHistory: 100, blocked: 300, retryQueue: 20 },
+  retention: { trash: 200, extractionHistory: 100, blocked: 300, retryQueue: 20 },
 } as const;
 
 /** Configuration for memory injection into a session */
@@ -307,30 +274,19 @@ export interface MemoryInjectionConfig {
   maxMemories: number;
   /** Maximum tokens budget for injected memories */
   maxTokens: number;
-  /** Tags to prioritize (empty = no filter) */
-  priorityTags: string[];
-  /** Exclude memories with these tags */
-  excludedTags: string[];
   /**
-   * Minimum TOPICAL relevance score for a memory to be eligible for injection.
-   * This gates on the keyword/tag signal only (NOT on confidence/recency), so an
-   * entry with zero topical match to the current conversation is never injected,
-   * even if it is fresh or high-confidence. Set to 0 to disable the gate and
-   * always inject up to `maxMemories` (previous behavior).
-   *
-   * Background knowledge memories (factual) use this gate; behavioral
-   * memories use {@link minBehavioralRelevanceScore} (lower, easier).
+   * Minimum semantic similarity (cosine) score for a memory to be eligible
+   * for injection. The embedding single-track gate: entries scoring below
+   * this against the query vector are never injected.
    */
   minRelevanceScore: number;
   /**
-   * Minimum TOPICAL score for behavior-type memories (behavioral/reminder). Kept lower than `minRelevanceScore` so instruction-like
-   * memories are easier to recall even with fuzzy wording.
+   * Lower cosine gate for behavior-type memories (behavioral/reminder), kept
+   * easier to recall with fuzzy wording.
    */
   minBehavioralRelevanceScore: number;
   /**
    * Reserved seats for behavior-type memories inside the injection list.
-   * Guarantees at least this many behavioral/reminder memories when
-   * enough qualify, so high-scoring knowledge noise cannot occupy every slot.
    */
   behavioralQuota: number;
 }
@@ -339,16 +295,13 @@ export interface MemoryInjectionConfig {
 export const DEFAULT_MEMORY_INJECTION_CONFIG: MemoryInjectionConfig = {
   maxMemories: 8,
   maxTokens: 1500,
-  priorityTags: [],
-  excludedTags: ['experimental', 'discarded'],
-  // A topical score of >= 2 means at least one keyword hit in content (or one
-  // keyword↔tag overlap, each +2); a priority tag alone contributes +5. Keeps
-  // off-topic knowledge from riding the confidence/recency floor into the top-N.
-  minRelevanceScore: 2,
-  // A single keyword/tag hit is enough for user-intent memories (they should be
-  // easier to recall, especially with Chinese wording).
-  minBehavioralRelevanceScore: 1,
-  // Reserve 2 heads-up slots for behavior memories out of 8.
+  // Calibrated 2026-10-13 against bge-small-zh-v1.5 on this corpus:
+  // semantic matches score 0.38–0.71; unrelated queries 0.19–0.34, so the
+  // gates sit above the noise ceiling (0.34) with margin: knowledge 0.45,
+  // behavioral 0.38 (weakest true positive observed 0.378 — kept just under
+  // the noise ceiling to recall fuzzy user-intent phrasing).
+  minRelevanceScore: 0.45,
+  minBehavioralRelevanceScore: 0.38,
   behavioralQuota: 2,
 };
 
@@ -362,8 +315,6 @@ export interface MemoryQueryArgs {
   query: string;
   /** Filter by memory type */
   type?: MemoryType;
-  /** Filter by tags (exact match, comma-separated) */
-  tags?: string;
   /** Maximum number of results */
   limit?: number;
   /** Minimum confidence threshold (0.0–1.0) */
@@ -389,7 +340,6 @@ export interface MemoryAddAction {
   type: 'add';
   content: string;
   typeLabel: MemoryType;
-  tags?: string[];
   confidence?: number;
 }
 
@@ -398,7 +348,6 @@ export interface MemoryUpdateAction {
   type: 'update';
   id: string;
   content?: string;
-  tags?: string[];
   confidence?: number;
 }
 

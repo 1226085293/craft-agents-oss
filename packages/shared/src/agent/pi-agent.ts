@@ -131,6 +131,7 @@ import { extractWorkspaceSlug } from '../utils/workspace.ts';
 
 // LLM tool types
 import { LLM_QUERY_TIMEOUT_MS, type LLMQueryRequest, type LLMQueryResult } from './llm-tool.ts';
+import { stripDsmlResidue } from '../utils/dsml-strip.ts';
 import { executeBrowserToolCommand } from './browser-tool-runtime.ts';
 import { saveBinaryResponse } from '../utils/binary-detection.ts';
 
@@ -363,6 +364,15 @@ export class PiAgent extends BaseAgent {
   private retrySoftSettleStartedAt = 0;
   /** True if the retried run failed (error recorded before its agent_end). */
   private retryRunHadError = false;
+  /** 2026-10-13 (session 261008-plain-stag): true after an agent_end
+   *  annotated queuedFollowUpPending CANCELED the pending retry — the
+   *  subprocess drains the queued guidance itself (scheduleQueuedFollowUpDrain
+   *  → agent.continue()), so the ladder must NOT fire its own continue()
+   *  into the drain (collision → "already processing" → busy-abort → wedged
+   *  transcript). The drain's own model events (message_update /
+   *  tool_execution_start) are the recovery signal: as live as the
+   *  Spontaneous-recovery branch. Reset on re-arm (tryBeginRetryLadder). */
+  private retryDrainPending = false;
   /** A `complete` held back while the ladder is active (the error's agent_end
    *  must not end the turn before the retried run's events can flow). */
   private heldComplete: AgentEvent | null = null;
@@ -732,6 +742,9 @@ export class PiAgent extends BaseAgent {
     this.retryDeliveredReply = false;
     this.retryResendAt = 0;
     this.retryErrorSurfaced = false;
+    // A re-armed ladder is a NEW recovery: any drain handoff from the
+    // previous round no longer applies (2026-10-13).
+    this.retryDrainPending = false;
 
     const retryAfterMs = extractRetryAfterMs(message, parsedError);
     if (retryAfterMs != null) {
@@ -1036,6 +1049,7 @@ export class PiAgent extends BaseAgent {
     this.retryRunSettledAsRecovered = false;
     this.retrySoftSettleAttempt = 0;
     this.retrySoftSettleStartedAt = 0;
+    this.retryDrainPending = false;
     this.heldComplete = null;
   }
 
@@ -1178,7 +1192,7 @@ export class PiAgent extends BaseAgent {
       isModelProgress &&
       this.retryLadder.isActive &&
       this.retryResendAt === 0 &&
-      this.retryTimer != null
+      (this.retryTimer != null || this.retryDrainPending)
     ) {
       // Spontaneous recovery during the backoff window (2026-10-07): the
       // stream resumed on its own BEFORE the scheduled retry command was
@@ -1189,8 +1203,18 @@ export class PiAgent extends BaseAgent {
       // spurious error that falsely increments the ladder's attempt count.
       // With retryRunLive=true the recovered run's natural agent_end
       // completes the queue (the held-complete suppression is skipped).
-      this.debug(`[retry-ladder] Spontaneous recovery on ${eventType} during backoff — canceling pending retry, marking run live`);
+      //
+      // retryDrainPending (2026-10-13, 261008-plain-stag): the SAME signal
+      // after the pending retry was CANCELED by an agent_end(queuedFollowUp
+      // Pending) — the subprocess drain is the recovery owner, retryTimer is
+      // null by construction, and the marker keeps the branch live.
+      this.debug(
+        `[retry-ladder] ${this.retryDrainPending
+          ? `Drain recovery on ${eventType} (queued follow-up, retry canceled)`
+          : `Spontaneous recovery on ${eventType} during backoff`} — canceling pending retry, marking run live`,
+      );
       this.clearRetryTimer();
+      this.retryDrainPending = false;
       this.retryRunLive = true;
       this.settleRetryRowAsRecovered();
       // The run is live and healthy again: the 'had error' marker from the
@@ -2282,6 +2306,20 @@ export class PiAgent extends BaseAgent {
         }
         break;
 
+      case 'verification_skip': {
+        // Judge unavailable on ONE attempt (2026-10-13): the subprocess is
+        // retrying. Render a "Verification skipped (reason) — retrying N/M"
+        // process block and KEEP the verification hold — no delivery yet; the
+        // eventual `verification_result` decides the turn.
+        this.debug(`Verification judge attempt ${msg.attempt}/${msg.totalAttempts} unavailable (${msg.reason}) — retrying`);
+        this.eventQueue.enqueue({
+          type: 'info',
+          message: `Verification skipped (${msg.reason || 'judge unavailable'}) — retrying ${msg.attempt}/${msg.totalAttempts}`,
+          statusType: 'verification',
+        });
+        break;
+      }
+
       case 'verification_result':
         // Program-side verification (2026-10-02 redesign): the subprocess ran a
         // lightweight LLM judge on the captured final reply.
@@ -2299,28 +2337,34 @@ export class PiAgent extends BaseAgent {
           break;
         }
         if (msg.passed === true && typeof msg.finalText === 'string') {
+          // Last-mile scrub (2026-10-13): the captured final text may carry
+          // residual DSML leak markup (malformed variants defeat the subprocess
+          // parser) — never deliver raw markup to the user.
+          const cleanFinal = stripDsmlResidue(msg.finalText);
           if (msg.skipped === true) {
-            // Judge was unavailable (upstream 401/quota/timeout) — the
-            // subprocess failed open: deliver the captured final text as-is.
-            this.debug(`Verification SKIPPED (judge unavailable) — delivering final reply (${msg.finalText.length} chars)`);
+            // Judge was unavailable (upstream 401/quota/timeout) — legacy
+            // fail-open path kept for protocol compatibility with older
+            // subprocesses; the current subprocess retries instead and only
+            // sends passed/failed.
+            this.debug(`Verification SKIPPED (judge unavailable) — delivering final reply (${cleanFinal.length} chars)`);
             this.adapter.finalizeVerificationHeld(true);
             this.eventQueue.enqueue({
               type: 'info',
               message: 'Verification skipped (judge unavailable) — delivering final reply',
               statusType: 'verification_passed',
             });
-            this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(msg.finalText));
+            this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(cleanFinal));
             this.eventQueue.enqueue({ type: 'complete' });
             this.eventQueue.complete();
           } else {
-            this.debug(`Verification PASSED — replaying final reply (${msg.finalText.length} chars)`);
+            this.debug(`Verification PASSED — replaying final reply (${cleanFinal.length} chars)`);
             this.adapter.finalizeVerificationHeld(true);
             this.eventQueue.enqueue({
               type: 'info',
               message: 'Verification passed — delivering final reply',
               statusType: 'verification_passed',
             });
-            this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(msg.finalText));
+            this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(cleanFinal));
             this.eventQueue.enqueue({ type: 'complete' });
             this.eventQueue.complete();
           }
@@ -2332,8 +2376,10 @@ export class PiAgent extends BaseAgent {
             message: 'Verification failed — continuing',
             statusType: 'verification_failed',
           });
-          // Stay open: the followUp resume continues the turn; its final
-          // agent_end (no verification flag) completes the queue.
+          // Stay open: the followUp resume continues the turn; its agent_end
+          // completes the queue — unless the continuation still qualifies and
+          // re-enters verification (no per-turn attempt limit, 2026-10-12),
+          // in which case the verification cycle simply repeats.
         }
         break;
 
@@ -2641,6 +2687,39 @@ export class PiAgent extends BaseAgent {
       }
 
       this.eventQueue.enqueue(agentEvent);
+    }
+
+    // Drain-owned recovery (2026-10-13, session 261008-plain-stag): an
+    // agent_end annotated queuedFollowUpPending means the SUBPROCESS will
+    // drain the queued guidance itself (scheduleQueuedFollowUpDrain →
+    // agent.continue()). Firing this ladder's retry into that drain collides
+    // (continue() → "Agent is already processing") and the subprocess' then-
+    // busy-abort stamped an empty stopReason='aborted' step that the retry
+    // whitelist refused forever — the turn wedged on "Cannot retry: no
+    // re-runnable model step" with the ladder looping in the background.
+    // Cancel the pending retry and mark the drain as the recovery owner: its
+    // own model events (message_update / tool_execution_start) settle the
+    // ladder via the Spontaneous-recovery branch below. Only cancels when
+    // NOTHING was re-issued yet (retryResendAt===0 — a retry already in
+    // flight is the 02:46:27 mirror case; P0/P1 on the subprocess side now
+    // defer instead of aborting, and drain events still mark it live).
+    if (
+      eventType === 'agent_end'
+      && (event as { queuedFollowUpPending?: boolean }).queuedFollowUpPending === true
+      && this.retryLadder.isActive
+      && this.retryResendAt === 0
+    ) {
+      if (this.retryTimer != null) {
+        this.debug('[retry-ladder] agent_end(queuedFollowUpPending) — subprocess drain owns recovery; canceling pending retry');
+        this.clearRetryTimer();
+      } else {
+        this.debug('[retry-ladder] agent_end(queuedFollowUpPending) — drain owns recovery; no pending retry to cancel');
+      }
+      this.retryDrainPending = true;
+      // The failure that armed the ladder is superseded by the drain: as in
+      // Spontaneous recovery, drop the 'had error' marker so the drain's
+      // successful agent_end completes the queue instead of being held.
+      this.retryRunHadError = false;
     }
 
     // Verification card (2026-10-02 redesign): surface a status card after an
@@ -3137,14 +3216,22 @@ export class PiAgent extends BaseAgent {
       },
     });
 
-    // Tool-internal LLM subtasks (query_memories keyword expansion) use the
-    // default model / no thinking (see runMiniCompletion contract).
+    // Tool-internal LLM subtasks use the default model / no thinking
+    // (see runMiniCompletion contract).
     this._sessionToolContext.callbacks.runMiniCompletion =
       (prompt: string) => this.runMiniCompletion(prompt);
 
     // Global-memory writes via tools → host broadcast (live UI counts).
     this._sessionToolContext.callbacks.onMemoryChanged = () => {
       this.onMemoryChanged?.();
+    };
+
+    // Write-side semantic indexing: store embedding vectors with new memory
+    // entries so read-path retrieval is pure cosine. Failures degrade to
+    // entries without a vector (read path encodes on demand).
+    this._sessionToolContext.callbacks.encodeEmbedding = async (content: string) => {
+      const { encodeText } = await import('../memory/embedding.ts');
+      return encodeText(content);
     };
 
     // Attach session self-management bindings (lazy getters from callback registry)

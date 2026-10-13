@@ -32,7 +32,6 @@ export type {
 
 export {
   DEFAULT_MEMORY_INJECTION_CONFIG,
-  normalizeTag,
   foldLegacyMemoryType,
   memoryConfig,
   type BlockedRecord,
@@ -67,6 +66,14 @@ export {
 
 export { withMemoryWriteLock } from './write-lock.ts';
 
+// Embedding engine (semantic single-track retrieval)
+export {
+  encodeText,
+  cosine,
+  semanticTopK,
+  backfillStoreEmbeddings,
+} from './embedding.ts';
+
 // Extractor
 export {
   buildExtractionPrompt,
@@ -82,7 +89,6 @@ export {
   buildMemoryContext,
   extractContextKeywords,
   extractWeightedKeywords,
-  scheduleKeywordExpansion,
   recencyMultiplier,
   isColdMemory,
   type WeightedKeyword,

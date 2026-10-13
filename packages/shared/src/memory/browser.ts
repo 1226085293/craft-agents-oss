@@ -12,8 +12,6 @@ export {
   DEFAULT_MEMORY_INJECTION_CONFIG,
   BEHAVIORAL_MEMORY_TYPES,
   isBehavioralMemoryType,
-  normalizeTag,
-  equalTag,
   foldLegacyMemoryType,
   memoryConfig,
   type MemoryEntry,

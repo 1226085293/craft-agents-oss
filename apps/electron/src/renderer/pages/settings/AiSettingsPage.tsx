@@ -14,6 +14,7 @@ import { useTranslation } from 'react-i18next'
 import { PanelHeader } from '@/components/app-shell/PanelHeader'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import { HeaderMenu } from '@/components/ui/HeaderMenu'
 import { routes } from '@/lib/navigate'
 import { X, MoreHorizontal, Pencil, Trash2, Star, ChevronDown, ChevronRight, CheckCircle2, AlertTriangle, RefreshCcw, Settings2, MessageSquareMore, Zap, Clock, Check } from 'lucide-react'
@@ -665,9 +666,8 @@ export default function AiSettingsPage() {
 
   // Default settings state (app-level)
   const [defaultThinking, setDefaultThinking] = useState<ThinkingLevel>(DEFAULT_THINKING_LEVEL)
-  const [extendedPromptCache, setExtendedPromptCache] = useState(false)
-  const [enable1MContext, setEnable1MContext] = useState(false)
   const [rtkEnabled, setRtkEnabled] = useState(false)
+  const [embeddingModelPath, setEmbeddingModelPath] = useState<string | undefined>(undefined)
   const [rtkStatus, setRtkStatus] = useState<{ installed: boolean; path: string | null; version: string | null } | null>(null)
   const [rtkRechecking, setRtkRechecking] = useState(false)
   const [rtkGain, setRtkGain] = useState<{ totalCommands: number; totalInput: number; totalOutput: number; totalSaved: number; avgSavingsPct: number; totalTimeMs: number; avgTimeMs: number } | null>(null)
@@ -700,17 +700,14 @@ export default function AiSettingsPage() {
         const defaultThinkingLevel = await window.electronAPI.getDefaultThinkingLevel()
         setDefaultThinking(defaultThinkingLevel)
 
-        const extendedCache = await window.electronAPI.getExtendedPromptCache()
-        setExtendedPromptCache(extendedCache)
-
-        const enable1M = await window.electronAPI.getEnable1MContext()
-        setEnable1MContext(enable1M)
-
         const rtkOn = await window.electronAPI.getRtkEnabled()
         setRtkEnabled(rtkOn)
 
         const status = await window.electronAPI.getRtkStatus()
         setRtkStatus(status)
+
+        const embeddingPath = await window.electronAPI.getEmbeddingModelPath()
+        setEmbeddingModelPath(embeddingPath ?? '')
 
         // Check credential health for potential issues (corruption, machine migration)
         const health = await window.electronAPI.getCredentialHealth()
@@ -1016,16 +1013,6 @@ export default function AiSettingsPage() {
     }
   }, [defaultThinking])
 
-  const handleExtendedPromptCacheChange = useCallback(async (enabled: boolean) => {
-    setExtendedPromptCache(enabled)
-    await window.electronAPI?.setExtendedPromptCache(enabled)
-  }, [])
-
-  const handleEnable1MContextChange = useCallback(async (enabled: boolean) => {
-    setEnable1MContext(enabled)
-    await window.electronAPI?.setEnable1MContext(enabled)
-  }, [])
-
   const handleRtkToggle = useCallback(async (enabled: boolean) => {
     setRtkEnabled(enabled)
     await window.electronAPI?.setRtkEnabled(enabled)
@@ -1064,6 +1051,25 @@ export default function AiSettingsPage() {
     // Refresh context so changes propagate immediately
     refreshLlmConnections?.()
   }, [refreshLlmConnections])
+
+  // Persist embedding model path (local ONNX model dir for memory retrieval)
+  const handleEmbeddingModelPathChange = useCallback(async (path: string) => {
+    setEmbeddingModelPath(path)
+    if (!path.trim()) {
+      await window.electronAPI?.clearEmbeddingModelPath()
+      return
+    }
+    const ok = await window.electronAPI?.setEmbeddingModelPath(path.trim())
+    if (ok === false) toast.error(t("settings.ai.embedding.saveFailed"))
+  }, [t])
+
+  // Reset to the bundled default embedding model
+  const handleEmbeddingModelReset = useCallback(async () => {
+    await window.electronAPI?.clearEmbeddingModelPath()
+    const effective = await window.electronAPI?.getEmbeddingModelPath()
+    setEmbeddingModelPath(effective ?? '')
+    toast.success(t("settings.ai.embedding.resetDone"))
+  }, [t])
 
   return (
     <div className="h-full flex flex-col">
@@ -1183,18 +1189,6 @@ export default function AiSettingsPage() {
               {/* Performance */}
               <SettingsSection title={t("settings.ai.performance")} description={t("settings.ai.performanceDesc")}>
                 <SettingsCard>
-                  <SettingsToggle
-                    label={t("settings.ai.extendedContext")}
-                    description={t("settings.ai.extendedContextDesc")}
-                    checked={enable1MContext}
-                    onCheckedChange={handleEnable1MContextChange}
-                  />
-                  <SettingsToggle
-                    label={t("settings.ai.extendedPromptCache")}
-                    description={t("settings.ai.extendedPromptCacheDesc")}
-                    checked={extendedPromptCache}
-                    onCheckedChange={handleExtendedPromptCacheChange}
-                  />
                   {rtkStatus?.installed ? (
                     <>
                       <SettingsToggle
@@ -1253,6 +1247,31 @@ export default function AiSettingsPage() {
                       </Button>
                     </SettingsRow>
                   )}
+                </SettingsCard>
+                <SettingsCard className="mt-6">
+                  <SettingsRow
+                    label={t("settings.ai.embedding.title")}
+                    description={t("settings.ai.embedding.description")}
+                    inCard
+                  >
+                    <div className="flex items-center gap-2">
+                      <Input
+                        value={embeddingModelPath}
+                        onChange={(e) => handleEmbeddingModelPathChange(e.target.value)}
+                        placeholder={t("settings.ai.embedding.placeholder")}
+                        className="w-[220px] bg-muted/50 border-0 shadow-none focus-visible:ring-0 focus-visible:outline-none focus-visible:bg-transparent"
+                      />
+                      <Button
+                        size="sm"
+                        onClick={handleEmbeddingModelReset}
+                        className="bg-background shadow-minimal text-foreground hover:bg-foreground/5 rounded-lg shrink-0"
+                        title={t("settings.ai.embedding.reset")}
+                      >
+                        <RefreshCcw className="size-3" />
+                        {t("settings.ai.embedding.reset")}
+                      </Button>
+                    </div>
+                  </SettingsRow>
                 </SettingsCard>
               </SettingsSection>
 

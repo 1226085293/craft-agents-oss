@@ -329,17 +329,16 @@ export const RPC_CHANNELS = {
     GET_BROWSER_TOOL_ENABLED: 'tools:getBrowserToolEnabled',
     SET_BROWSER_TOOL_ENABLED: 'tools:setBrowserToolEnabled',
   },
-  caching: {
-    GET_EXTENDED_PROMPT_CACHE: 'caching:getExtendedPromptCache',
-    SET_EXTENDED_PROMPT_CACHE: 'caching:setExtendedPromptCache',
-    GET_ENABLE_1M_CONTEXT: 'caching:getEnable1MContext',
-    SET_ENABLE_1M_CONTEXT: 'caching:setEnable1MContext',
-  },
   rtk: {
     GET_ENABLED: 'rtk:getEnabled',
     SET_ENABLED: 'rtk:setEnabled',
     GET_STATUS: 'rtk:getStatus',
     GET_GAIN: 'rtk:getGain',
+  },
+  embedding: {
+    GET_PATH: 'embedding:getPath',
+    SET_PATH: 'embedding:setPath',
+    CLEAR_PATH: 'embedding:clearPath',
   },
   defense: {
     GET_ENABLED: 'defense:getEnabled',
@@ -520,12 +519,6 @@ export const RPC_CHANNELS = {
     MEMORY_TRASH_DELETE_MANY: 'memory:trash:deleteMany',
     MEMORY_SCHEDULE_GET: 'memory:schedule:get',
     MEMORY_SCHEDULE_SET: 'memory:schedule:set',
-    MEMORY_GET_BLOCKED: 'memory:getBlocked',
-    MEMORY_LIST_BACKUPS: 'memory:listBackups',
-    MEMORY_RESTORE_BACKUP: 'memory:restoreBackup',
-    MEMORY_GET_VOCABULARY: 'memory:getVocabulary',
-    MEMORY_SET_VOCABULARY: 'memory:setVocabulary',
-    MEMORY_DELETE_BACKUP: 'memory:deleteBackup',
     /** Broadcast after any global-memory write, so UI counts stay live. */
     MEMORY_CHANGED: 'memory:changed',
   },

@@ -16,22 +16,19 @@ function makeStore(): MemoryStore {
     extractionHistory: [],
     totalInjectionTokens: 0,
     blocked: [],
-    tagFrequency: {},
-    tagVocabulary: ['pkg'],
-    priorityTags: ['pkg'],
     extractionRetryQueue: [],
     dedupBlockedCount: 0,
   };
 }
 
-const input = { sessionId: 's-v3p2', messages: [{ role: 'user' as const, content: '周五前交付 X' }], existingTags: [] };
+const input = { sessionId: 's-v3p2', messages: [{ role: 'user' as const, content: '周五前交付 X' }]};
 
 describe('dueAt extraction (§5.2 reminder semantics)', () => {
   it('stores dueAt when the model emits a valid ISO timestamp', async () => {
     const store = makeStore();
     await extractMemories(input, store, {
       runMiniCompletion: async () => JSON.stringify([
-        { type: 'reminder', content: '周五前交付 X', tags: ['delivery'], confidence: 0.95, dueAt: '2026-10-16T09:00:00.000Z' },
+        { type: 'reminder', content: '周五前交付 X', confidence: 0.95, dueAt: '2026-10-16T09:00:00.000Z' },
       ]),
       existingEntries: [],
     });
@@ -43,7 +40,7 @@ describe('dueAt extraction (§5.2 reminder semantics)', () => {
     const store = makeStore();
     await extractMemories(input, store, {
       runMiniCompletion: async () => JSON.stringify([
-        { type: 'reminder', content: 'maybe friday', tags: [], confidence: 0.9, dueAt: 'not-a-date' },
+        { type: 'reminder', content: 'maybe friday', confidence: 0.9, dueAt: 'not-a-date' },
       ]),
       existingEntries: [],
     });
@@ -57,8 +54,8 @@ describe('redaction gate (safety.redact)', () => {
     const blocked: string[] = [];
     await extractMemories(input, store, {
       runMiniCompletion: async () => JSON.stringify([
-        { type: 'fact', content: 'The API key is sk-1234567890abcdef1234567890abcdef', tags: ['api'], confidence: 0.95 },
-        { type: 'fact', content: 'A normal fact about the pipeline', tags: ['api'], confidence: 0.9 },
+        { type: 'fact', content: 'The API key is sk-1234567890abcdef1234567890abcdef', confidence: 0.95 },
+        { type: 'fact', content: 'A normal fact about the pipeline', confidence: 0.9 },
       ]),
       existingEntries: [],
       onBlocked: (record) => { blocked.push(record.verdict); },
@@ -74,22 +71,16 @@ describe('redaction gate (safety.redact)', () => {
   });
 });
 
-describe('vocabulary guidance & transcript truncation marking', () => {
-  it('injects the top-80 tag vocabulary into the prompt', () => {
-    const prompt = buildExtractionPrompt(input, { tagVocabulary: ['pkg', 'git', 'ui'] });
-    expect(prompt).toContain('Tag vocabulary');
-    expect(prompt).toContain('pkg, git, ui');
-  });
-
+describe('transcript truncation marking', () => {
   it('marks truncation when the transcript exceeds 8000 chars', () => {
     const long = Array.from({ length: 20 }, (_, i) => ({ role: 'user' as const, content: 'x'.repeat(500) }));
-    const prompt = buildExtractionPrompt({ sessionId: 's', messages: long, existingTags: [] });
+    const prompt = buildExtractionPrompt({ sessionId: 's', messages: long});
     expect(prompt).toContain('truncated at 8000 chars');
   });
 });
 
 describe('adjudication wiring (§4.4 left column)', () => {
-  const globalEntry = { id: 'g-old', type: 'behavioral' as const, content: 'The user prefers yarn for package management across all projects', sourceSessionId: 's0', tags: ['pkg'], confidence: 0.95, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 };
+  const globalEntry = { id: 'g-old', type: 'behavioral' as const, content: 'The user prefers yarn for package management across all projects', sourceSessionId: 's0', confidence: 0.95, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 };
 
 /** Model mock that returns extraction output for the extraction prompt and
  *  an L3 verdict (with the prompt-embedded candidate id) for adjudication. */
@@ -106,7 +97,7 @@ const l3Router = (extractionPayload: unknown, verdict: string, targetId?: string
     const blocked: string[] = [];
     await extractMemories(input, store, {
       runMiniCompletion: l3Router(
-        [{ type: 'preference', content: 'The user switched to pnpm for package management across all projects', tags: ['pkg'], confidence: 0.95 }],
+        [{ type: 'preference', content: 'The user switched to pnpm for package management across all projects', confidence: 0.95 }],
         'conflict',
         'g-old',
         'preference changed',
@@ -126,7 +117,7 @@ const l3Router = (extractionPayload: unknown, verdict: string, targetId?: string
     let blockedCount = 0;
     await extractMemories(input, store, {
       runMiniCompletion: l3Router(
-        [{ type: 'preference', content: 'The user prefers yarn for package management across all projects', tags: ['pkg'], confidence: 0.95 }],
+        [{ type: 'preference', content: 'The user prefers yarn for package management across all projects', confidence: 0.95 }],
         'duplicate',
         'g-old',
       ),

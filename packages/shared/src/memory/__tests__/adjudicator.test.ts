@@ -14,8 +14,8 @@ import {
 } from '../adjudicator.ts';
 import { memoryConfig } from '../types.ts';
 
-function entry(id: string, content: string, tags: string[] = [], type: MemoryEntry['type'] = 'factual'): MemoryEntry {
-  return { id, type, content, sourceSessionId: 's', tags, confidence: 0.9, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 };
+function entry(id: string, content: string, _tags: string[] = [], type: MemoryEntry['type'] = 'factual'): MemoryEntry {
+  return { id, type, content, sourceSessionId: 's', confidence: 0.9, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 };
 }
 
 const noopLlm = async () => null;
@@ -31,13 +31,6 @@ describe('routeAdjudicationTargets — §4.1', () => {
     const targets = routeAdjudicationTargets(cand, global);
     expect(targets.some(t => t.entry.id === 'g1' && t.route === 'l1-high')).toBe(true);
     expect(targets.some(t => t.entry.id === 'g2')).toBe(false);
-  });
-
-  it('flags gray zone [0.50, 0.75) with tag overlap', () => {
-    // 与 g1 高度相似但非完全相同（Jaccard 应在灰区）
-    const cand = entry('c2', 'The user prefers pnpm as the package manager for all of their projects', ['pnpm']);
-    const targets = routeAdjudicationTargets(cand, global);
-    expect(targets.some(t => t.entry.id === 'g1' && t.route === 'l1-gray')).toBe(true);
   });
 
   it('routes nothing for unrelated content (direct pass)', () => {
@@ -119,7 +112,7 @@ describe('adjudicateCandidates — verdicts, shadow, fallback', () => {
     expect(results.get('c2')!.verdict).toBe('unrelated');
   });
 
-  it('routes gray-zone reworded preference to L3 and returns update with mergedContent', async () => {
+  it('routes gray-zone reworded preference to L3 via high Jaccard', async () => {
     const global = [entry('g1', 'The user prefers pnpm for package management across all projects', ['pnpm'])];
     const cand = entry('c1', 'The user prefers pnpm as the package manager for all of their projects', ['pnpm']);
     const results = await adjudicateCandidates([cand], global, {

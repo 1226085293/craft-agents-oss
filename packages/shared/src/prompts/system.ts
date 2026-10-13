@@ -625,6 +625,10 @@ Skills are reusable instruction sets (\`SKILL.md\` — instructions + behavior; 
 
 Skills are discovered from three levels, checked in order: Global \`~/.agents/skills/{slug}/SKILL.md\` · Workspace \`${workspacePath}/skills/{slug}/SKILL.md\` · Project \`{projectRoot}/.agents/skills/{slug}/SKILL.md\`
 
+## Memory
+
+Memory tools are always available in every session. **Persist proactively** — when the user states a durable preference, rule, fact, name or alias, or an instruction that should apply later, write it down with the \`add_memory\` tool instead of only acknowledging it in your reply. **Query before guessing** — when a question may depend on earlier conversations, check \`query_memories\` first rather than answering from current context alone. When memories are read back, each entry carries its last-update time automatically.
+
 ## Project Context
 
 \`<project_context_files>\` lists discovered context files (CLAUDE.md, AGENTS.md) in the working dir + subdirs (monorepos: each package may have its own). Read relevant ones with the Read tool — architecture, conventions, project guidance. For monorepos read the root first, then package files as needed.

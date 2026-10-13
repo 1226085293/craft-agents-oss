@@ -150,17 +150,16 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   RPC_CHANNELS.appearance.SET_RICH_TOOL_DESCRIPTIONS,
   RPC_CHANNELS.appearance.CHANGED,
 
-  // caching — prompt cache and context settings
-  RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE,
-  RPC_CHANNELS.caching.SET_EXTENDED_PROMPT_CACHE,
-  RPC_CHANNELS.caching.GET_ENABLE_1M_CONTEXT,
-  RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT,
-
   // rtk — token-optimization opt-in
   RPC_CHANNELS.rtk.GET_ENABLED,
   RPC_CHANNELS.rtk.SET_ENABLED,
   RPC_CHANNELS.rtk.GET_STATUS,
   RPC_CHANNELS.rtk.GET_GAIN,
+
+  // embedding — local semantic memory retrieval model config
+  RPC_CHANNELS.embedding.GET_PATH,
+  RPC_CHANNELS.embedding.SET_PATH,
+  RPC_CHANNELS.embedding.CLEAR_PATH,
 
   // tools — local tool settings
   RPC_CHANNELS.tools.GET_BROWSER_TOOL_ENABLED,
@@ -545,12 +544,6 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.memory.MEMORY_TRASH_DELETE_MANY,
   RPC_CHANNELS.memory.MEMORY_SCHEDULE_GET,
   RPC_CHANNELS.memory.MEMORY_SCHEDULE_SET,
-  RPC_CHANNELS.memory.MEMORY_GET_BLOCKED,
-  RPC_CHANNELS.memory.MEMORY_LIST_BACKUPS,
-  RPC_CHANNELS.memory.MEMORY_RESTORE_BACKUP,
-  RPC_CHANNELS.memory.MEMORY_GET_VOCABULARY,
-  RPC_CHANNELS.memory.MEMORY_SET_VOCABULARY,
-  RPC_CHANNELS.memory.MEMORY_DELETE_BACKUP,
   // Broadcast after global-memory writes (renderer badge/count refresh).
   RPC_CHANNELS.memory.MEMORY_CHANGED,
 ])

@@ -27,10 +27,6 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.power.GET_KEEP_AWAKE,
   RPC_CHANNELS.appearance.GET_RICH_TOOL_DESCRIPTIONS,
   RPC_CHANNELS.appearance.SET_RICH_TOOL_DESCRIPTIONS,
-  RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE,
-  RPC_CHANNELS.caching.SET_EXTENDED_PROMPT_CACHE,
-  RPC_CHANNELS.caching.GET_ENABLE_1M_CONTEXT,
-  RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT,
   RPC_CHANNELS.sessions.GET_MODEL,
   RPC_CHANNELS.sessions.SET_MODEL,
   RPC_CHANNELS.sessions.SWITCH_CONNECTION,
@@ -49,6 +45,9 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.rtk.SET_ENABLED,
   RPC_CHANNELS.rtk.GET_STATUS,
   RPC_CHANNELS.rtk.GET_GAIN,
+  RPC_CHANNELS.embedding.GET_PATH,
+  RPC_CHANNELS.embedding.SET_PATH,
+  RPC_CHANNELS.embedding.CLEAR_PATH,
 ] as const
 
 export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): void {
@@ -297,34 +296,6 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
   })
 
   // ============================================================
-  // Prompt Caching Settings
-  // ============================================================
-
-  // Get extended prompt cache (1h TTL) setting
-  server.handle(RPC_CHANNELS.caching.GET_EXTENDED_PROMPT_CACHE, async () => {
-    const { getExtendedPromptCache } = await import('@craft-agent/shared/config/storage')
-    return getExtendedPromptCache()
-  })
-
-  // Set extended prompt cache (1h TTL) setting
-  server.handle(RPC_CHANNELS.caching.SET_EXTENDED_PROMPT_CACHE, async (_ctx, enabled: boolean) => {
-    const { setExtendedPromptCache } = await import('@craft-agent/shared/config/storage')
-    setExtendedPromptCache(enabled)
-  })
-
-  // Get 1M context window setting
-  server.handle(RPC_CHANNELS.caching.GET_ENABLE_1M_CONTEXT, async () => {
-    const { getEnable1MContext } = await import('@craft-agent/shared/config/storage')
-    return getEnable1MContext()
-  })
-
-  // Set 1M context window setting
-  server.handle(RPC_CHANNELS.caching.SET_ENABLE_1M_CONTEXT, async (_ctx, enabled: boolean) => {
-    const { setEnable1MContext } = await import('@craft-agent/shared/config/storage')
-    setEnable1MContext(enabled)
-  })
-
-  // ============================================================
   // RTK Token-Optimization Settings
   // ============================================================
 
@@ -350,6 +321,28 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
   server.handle(RPC_CHANNELS.rtk.GET_GAIN, async () => {
     const { getRtkGain } = await import('@craft-agent/shared/agent')
     return getRtkGain()
+  })
+
+  // ============================================================
+  // Embedding Model Settings (local semantic memory retrieval)
+  // ============================================================
+
+  // Effective embedding model path (user override ?? bundled default)
+  server.handle(RPC_CHANNELS.embedding.GET_PATH, async () => {
+    const { getEmbeddingModelPath } = await import('@craft-agent/shared/config/storage')
+    return getEmbeddingModelPath()
+  })
+
+  // Set a custom embedding model path
+  server.handle(RPC_CHANNELS.embedding.SET_PATH, async (_ctx, path: string) => {
+    const { setEmbeddingModelPath } = await import('@craft-agent/shared/config/storage')
+    return setEmbeddingModelPath(path)
+  })
+
+  // Revert to the bundled default embedding model
+  server.handle(RPC_CHANNELS.embedding.CLEAR_PATH, async () => {
+    const { clearEmbeddingModelPath } = await import('@craft-agent/shared/config/storage')
+    clearEmbeddingModelPath()
   })
 
   // ============================================================

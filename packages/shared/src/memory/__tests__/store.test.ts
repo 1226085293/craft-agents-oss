@@ -88,3 +88,50 @@ describe('concurrent write protection (A+B)', () => {
     expect(after.entries.map(e => e.content)).toEqual(['普通写入'])
   })
 })
+
+describe('concurrent write protection v2 — disk as truth', () => {
+  it('keeps a hand-edited entry (disk) over a stale in-memory snapshot with equal updatedAt', () => {
+    const root = makeRoot()
+    // Baseline store with an entry both sides will have (stale snapshot version).
+    const baseline = loadMemoryStore(root)
+    addMemoryEntry(baseline, '(2026-10-12) 旧内容', 'factual', 'manual')
+    saveMemoryStore(root, baseline)
+
+    // A "stale" in-memory snapshot (what a long-lived process holds).
+    const stale = loadMemoryStore(root)
+    // Then the user hand-edits the file on disk (same updatedAt — hand edits
+    // do not bump updatedAt), e.g. removes a date prefix.
+    const disk = loadMemoryStore(root)
+    disk.entries[0]!.content = '新内容(手改)'
+    saveMemoryStore(root, disk)
+
+    // The stale snapshot flushes; the hand-edit must survive.
+    saveMemoryStore(root, stale)
+    const after = loadMemoryStore(root)
+    expect(after.entries[0]!.content).toContain('新内容(手改)')
+    expect(after.entries[0]!.content).not.toContain('(2026-10-12)')
+  })
+
+  it('lets a real in-process update (newer updatedAt) win over the disk copy', () => {
+    const root = makeRoot()
+    const base = loadMemoryStore(root)
+    addMemoryEntry(base, 'original', 'factual', 'manual')
+    saveMemoryStore(root, base)
+
+    // Process holds a snapshot, user edits on disk (older timestamp semantics
+    // preserved), then the process performs a REAL update bumping updatedAt.
+    const process = loadMemoryStore(root)
+    const id = process.entries[0]!.id
+    const disk = loadMemoryStore(root)
+    disk.entries[0]!.content = '手改内容'
+    saveMemoryStore(root, disk)
+
+    const entry = process.entries.find(e => e.id === id)!
+    entry.content = '进程真实更新'
+    entry.updatedAt = new Date(Date.now() + 60_000).toISOString() // newer than hand-edit
+    saveMemoryStore(root, process)
+
+    const after = loadMemoryStore(root)
+    expect(after.entries[0]!.content).toBe('进程真实更新')
+  })
+})

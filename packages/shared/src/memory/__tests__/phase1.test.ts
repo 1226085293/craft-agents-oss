@@ -6,8 +6,8 @@ import { describe, it, expect } from 'bun:test';
 import type { MemoryEntry, MemoryStore, SessionMemoryStore } from '../types.ts';
 import { consolidateSessionMemories } from '../consolidation.ts';
 
-function entry(id: string, content: string, tags: string[] = [], type: MemoryEntry['type'] = 'behavioral'): MemoryEntry {
-  return { id, type, content, sourceSessionId: 's1', tags, confidence: 0.9, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 };
+function entry(id: string, content: string, _tags: string[] = [], type: MemoryEntry['type'] = 'behavioral'): MemoryEntry {
+  return { id, type, content, sourceSessionId: 's1', confidence: 0.9, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 };
 }
 
 function globalWith(): MemoryStore {
@@ -19,9 +19,6 @@ function globalWith(): MemoryStore {
     extractionHistory: [],
     totalInjectionTokens: 0,
     blocked: [],
-    tagFrequency: {},
-    tagVocabulary: ['pkg'],
-    priorityTags: ['pkg'],
     extractionRetryQueue: [],
     dedupBlockedCount: 0,
   };
@@ -36,7 +33,7 @@ const l3 = (verdict: string, targetId?: string, mergedContent?: string, reason =
 
 /** Consolidation (main) model answers with a promotion of the given candidate. */
 const evaluatePromotion = (c: MemoryEntry) => async () =>
-  JSON.stringify({ promotions: [{ id: c.id, content: c.content, type: c.type, tags: c.tags }], conflicts: [] });
+  JSON.stringify({ promotions: [{ id: c.id, content: c.content, type: c.type }], conflicts: [] });
 
 describe('write-time gate — shadow OFF (real dispositions, §4.4)', () => {
   it('conflict: promotes new entry, soft-deletes target with replacedById', async () => {
@@ -113,7 +110,7 @@ describe('promoted flag & vocabulary growth gate (§5.1 / §3.3)', () => {
     const cand = entry('c-new', 'A brand new independent fact about gardening', ['garden', 'new-tag'], 'factual');
     const session = sessionWith(cand);
     await consolidateSessionMemories(global, [session], async () =>
-      JSON.stringify({ promotions: [{ id: 'c-new', content: 'A brand new independent fact about gardening', type: 'factual', tags: ['garden', 'new-tag'] }], conflicts: [] }),
+      JSON.stringify({ promotions: [{ id: 'c-new', content: 'A brand new independent fact about gardening', type: 'factual' }], conflicts: [] }),
       { runMiniCompletion: async () => null, adjudicationShadow: false },
     );
     expect(session.entries[0]!.promoted).toBe(true);
@@ -125,13 +122,11 @@ describe('promoted flag & vocabulary growth gate (§5.1 / §3.3)', () => {
     const mk = (id: string, content: string) => entry(id, content, ['fresh-tag'], 'factual');
     const l3ok = async () => JSON.stringify({ promotions: [], conflicts: [] });
     const run = async (c: MemoryEntry) => consolidateSessionMemories(global, [sessionWith(c)], async () =>
-      JSON.stringify({ promotions: [{ id: c.id, content: c.content, type: 'factual', tags: c.tags }], conflicts: [] }),
+      JSON.stringify({ promotions: [{ id: c.id, content: c.content, type: 'factual' }], conflicts: [] }),
       { runMiniCompletion: async () => null, adjudicationShadow: false },
     );
     await run(mk('a', 'A unique fact about aquascaping biotopes'));
     await run(mk('b', 'A distinct note about bonsai wiring techniques'));
-    expect(global.tagVocabulary).not.toContain('fresh-tag');
     await run(mk('c', 'A separate observation about fermentation vessels'));
-    expect(global.tagVocabulary).toContain('fresh-tag');
   });
 });

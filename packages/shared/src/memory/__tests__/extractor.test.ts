@@ -51,7 +51,7 @@ const input = {
 describe('extractMemories — strategy-keyed one-shot guard', () => {
   it('does not record a successful pass when the model returns no response', async () => {
     const store = { version: 1 as const, sessionId: 'session-empty', entries: [], extractionHistory: [] }
-    await expect(extractMemories({ sessionId: 'session-empty', messages: [], existingTags: [] }, store, {
+    await expect(extractMemories({ sessionId: 'session-empty', messages: []}, store, {
       runMiniCompletion: async () => null,
       existingEntries: [],
     })).rejects.toThrow('empty response')
@@ -123,8 +123,8 @@ describe('extractMemories — batch-internal semantic dedup', () => {
     const store = makeStore();
     const result = await extractMemories(input, store, {
       runMiniCompletion: async () => JSON.stringify([
-        { type: 'factual', content: 'The build pipeline uses Bun with pnpm workspaces for every package', tags: ['build'], confidence: 0.9 },
-        { type: 'factual', content: 'The build pipeline uses Bun with pnpm workspaces for every package except the cli app', tags: ['build'], confidence: 0.9 },
+        { type: 'factual', content: 'The build pipeline uses Bun with pnpm workspaces for every package', confidence: 0.9 },
+        { type: 'factual', content: 'The build pipeline uses Bun with pnpm workspaces for every package except the cli app', confidence: 0.9 },
       ]),
       existingEntries: [],
       semanticDedup: true,
@@ -145,15 +145,15 @@ describe('extractMemories — cross-store dedup against global entries (P0-4)', 
   it('blocks a candidate that duplicates a global memory and fires onDedupBlocked', async () => {
     const store = makeStore();
     let blocked = 0;
-    await extractMemories({ sessionId: 's-xstore', messages: [], existingTags: [] }, store, {
+    await extractMemories({ sessionId: 's-xstore', messages: []}, store, {
       runMiniCompletion: async () => JSON.stringify([
-        { type: 'behavioral', content: 'The user prefers pnpm for package management across all projects', tags: ['pnpm'], confidence: 0.95 },
+        { type: 'behavioral', content: 'The user prefers pnpm for package management across all projects', confidence: 0.95 },
       ]),
       existingEntries: [],
       semanticDedup: true,
       adjudicationShadow: false,
       globalEntries: [
-        { id: 'g1', type: 'behavioral', content: 'The user prefers pnpm for package management across all projects', sourceSessionId: 'old-session', tags: ['pnpm'], confidence: 0.95, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 },
+        { id: 'g1', type: 'behavioral', content: 'The user prefers pnpm for package management across all projects', sourceSessionId: 'old-session', confidence: 0.95, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 },
       ],
       onDedupBlocked: () => { blocked += 1; },
     });
@@ -164,14 +164,14 @@ describe('extractMemories — cross-store dedup against global entries (P0-4)', 
   it('does not block a candidate absent from the global store (fresh knowledge passes)', async () => {
     const store = makeStore();
     let blocked = 0;
-    await extractMemories({ sessionId: 's-xstore2', messages: [], existingTags: [] }, store, {
+    await extractMemories({ sessionId: 's-xstore2', messages: []}, store, {
       runMiniCompletion: async () => JSON.stringify([
-        { type: 'factual', content: 'The user prefers pnpm for package management across all projects', tags: ['pnpm'], confidence: 0.95 },
+        { type: 'factual', content: 'The user prefers pnpm for package management across all projects', confidence: 0.95 },
       ]),
       existingEntries: [],
       semanticDedup: true,
       globalEntries: [
-        { id: 'g1', type: 'behavioral', content: 'The build pipeline uses Bun with pnpm workspaces', sourceSessionId: 'old-session', tags: ['build'], confidence: 0.95, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 },
+        { id: 'g1', type: 'behavioral', content: 'The build pipeline uses Bun with pnpm workspaces', sourceSessionId: 'old-session', confidence: 0.95, createdAt: '2026-01-01T00:00:00.000Z', injectedCount: 0 },
       ],
       onDedupBlocked: () => { blocked += 1; },
     });

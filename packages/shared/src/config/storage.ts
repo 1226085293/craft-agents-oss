@@ -100,6 +100,10 @@ export interface StoredConfig {
   networkProxy?: import('./types.ts').NetworkProxySettings;
   // Windows: path to Git Bash (bash.exe) for the SDK subprocess
   gitBashPath?: string;
+  // Path to a local ONNX embedding model directory used for memory semantic
+  // retrieval (bge-small-zh-v1.5 etc.). Empty/undefined = bundled default
+  // model shipped in resources/models/. See getBundledEmbeddingModelPath().
+  embeddingModelPath?: string;
   // User chose "Setup later" during onboarding — skip showing onboarding on next launch
   setupDeferred?: boolean;
   // Server mode — embedded remote server settings
@@ -463,26 +467,6 @@ export function setRichToolDescriptions(enabled: boolean): void {
 }
 
 /**
- * Get whether extended prompt cache (1h TTL) is enabled.
- * When enabled, the interceptor upgrades cache_control TTL from 5m to 1h.
- * Defaults to false if not set.
- */
-export function getExtendedPromptCache(): boolean {
-  const config = loadStoredConfig();
-  return config?.extendedPromptCache ?? false;
-}
-
-/**
- * Set whether extended prompt cache (1h TTL) is enabled.
- */
-export function setExtendedPromptCache(enabled: boolean): void {
-  const config = loadStoredConfig();
-  if (!config) return;
-  config.extendedPromptCache = enabled;
-  saveConfig(config);
-}
-
-/**
  * Get whether the built-in browser tool is enabled.
  * When disabled, browser_tool is not included in session tools.
  * Defaults to true if not set.
@@ -539,21 +523,11 @@ export function setAllowRemoteEvaluate(allowed: boolean): void {
  * When disabled, models use 200K context and the interceptor strips the context-1m beta header.
  * Defaults to false — the 1M beta requires Anthropic Tier 4+, and enabling it by default
  * causes 400 "Invalid Request" for lower-tier API keys on large contexts (issue #567).
- * Users opt in via AI Settings → Performance → Extended Context (1M).
+ * Configured via the `enable1MContext` field in the global config (~/.craft-agent/config.json).
  */
 export function getEnable1MContext(): boolean {
   const config = loadStoredConfig();
   return config?.enable1MContext === true;
-}
-
-/**
- * Set whether 1M context window is enabled.
- */
-export function setEnable1MContext(enabled: boolean): void {
-  const config = loadStoredConfig();
-  if (!config) return;
-  config.enable1MContext = enabled;
-  saveConfig(config);
 }
 
 /**
@@ -730,6 +704,48 @@ export function clearGitBashPath(): void {
   const config = loadStoredConfig();
   if (!config || !config.gitBashPath) return;
   delete config.gitBashPath;
+  saveConfig(config);
+}
+
+/**
+ * Resolve the effective embedding model path: user-configured path wins,
+ * otherwise fall back to the bundled default (resources/models/bge-small-zh-v1.5).
+ * Returns undefined only if neither is available.
+ */
+export function getBundledEmbeddingModelPath(): string | undefined {
+  return getBundledAssetsDir('models/bge-small-zh-v1.5');
+}
+
+/**
+ * Get the effective embedding model path (user override ?? bundled default).
+ */
+export function getEmbeddingModelPath(): string | undefined {
+  const config = loadStoredConfig();
+  return config?.embeddingModelPath ?? getBundledEmbeddingModelPath();
+}
+
+/**
+ * Set a custom embedding model path. Persists to config so it survives restarts.
+ * Returns false if the config could not be loaded (path not persisted).
+ */
+export function setEmbeddingModelPath(path: string): boolean {
+  const config = loadStoredConfig();
+  if (!config) {
+    console.warn('[storage] Failed to persist embedding model path: config could not be loaded');
+    return false;
+  }
+  config.embeddingModelPath = path;
+  saveConfig(config);
+  return true;
+}
+
+/**
+ * Clear a custom embedding model path (revert to bundled default).
+ */
+export function clearEmbeddingModelPath(): void {
+  const config = loadStoredConfig();
+  if (!config || !config.embeddingModelPath) return;
+  delete config.embeddingModelPath;
   saveConfig(config);
 }
 

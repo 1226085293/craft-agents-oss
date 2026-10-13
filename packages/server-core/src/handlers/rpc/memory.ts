@@ -1,6 +1,6 @@
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
-import { existsSync, readFileSync, readdirSync, statSync, copyFileSync } from 'node:fs'
-import { join, dirname, basename } from 'node:path'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   loadMemoryStore,
   saveMemoryStore,
@@ -15,14 +15,13 @@ import {
 import { consolidateSessionMemories, MemoryConsolidationScheduler, withMemoryWriteLock, type MemoryStore } from '@craft-agent/shared/memory'
 import { resolveTitleLanguageName, getDefaultLlmConnection, getLlmConnection } from '@craft-agent/shared/config'
 import { listSessions as listStoredSessions } from '@craft-agent/shared/sessions'
-import { addSessionMemory, deleteSessionMemory, updateSessionMemory, loadSessionMemoryStore, saveSessionMemoryStore, normalizeTag } from '@craft-agent/shared/memory'
+import { addSessionMemory, deleteSessionMemory, updateSessionMemory, loadSessionMemoryStore, saveSessionMemoryStore } from '@craft-agent/shared/memory'
 import type { HandlerDeps } from '../handler-deps'
 import type { RpcServer } from '@craft-agent/server-core/transport'
 
 type MemoryAddPayload = {
   content: string
   type: string
-  tags?: string[]
   confidence?: number
 }
 
@@ -46,12 +45,6 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.memory.MEMORY_TRASH_DELETE_MANY,
   RPC_CHANNELS.memory.MEMORY_SCHEDULE_GET,
   RPC_CHANNELS.memory.MEMORY_SCHEDULE_SET,
-  RPC_CHANNELS.memory.MEMORY_GET_BLOCKED,
-  RPC_CHANNELS.memory.MEMORY_LIST_BACKUPS,
-  RPC_CHANNELS.memory.MEMORY_RESTORE_BACKUP,
-  RPC_CHANNELS.memory.MEMORY_GET_VOCABULARY,
-  RPC_CHANNELS.memory.MEMORY_SET_VOCABULARY,
-  RPC_CHANNELS.memory.MEMORY_DELETE_BACKUP,
 ] as const
 
 
@@ -244,9 +237,19 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
         data.content.trim(),
         data.type as any,
         'manual',
-        data.tags || [],
         data.confidence ?? 1.0,
       )
+      // Write-side semantic indexing (async, non-blocking): once the vector
+      // exists the read path is pure cosine. On failure the entry stays
+      // vector-less and the read path encodes on demand.
+      void import('@craft-agent/shared/memory').then(async ({ encodeText }) => {
+        try {
+          entry.embedding = await encodeText(entry.content)
+          saveMemoryStore(workspaceRootPath, store)
+        } catch {
+          // model unavailable — degrade gracefully
+        }
+      })
       return { id: entry.id }
     })
   })
@@ -261,7 +264,7 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
     return mutateStore(workspaceRootPath, (store) => ({ deleted: ids.filter(id => softDeleteMemoryEntry(store, id)).length }))
   })
 
-  server.handle(RPC_CHANNELS.memory.MEMORY_UPDATE, async (_ctx: unknown, workspaceRootPath: string, id: string, updates: { content?: string; type?: string; tags?: string[] }) => {
+  server.handle(RPC_CHANNELS.memory.MEMORY_UPDATE, async (_ctx: unknown, workspaceRootPath: string, id: string, updates: { content?: string; type?: string; confidence?: number }) => {
     if (!workspaceRootPath) throw new Error('workspaceRootPath is required')
     return mutateStore(workspaceRootPath, (store) => ({ success: !!updateMemoryEntry(store, id, { ...updates, type: updates.type as any }) }))
   })
@@ -294,12 +297,12 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
   server.handle(RPC_CHANNELS.memory.MEMORY_SESSION_ADD, async (_ctx: unknown, workspaceRootPath: string, sessionId: string, data: MemoryAddPayload) => {
     if (!workspaceRootPath || !sessionId || !data?.content?.trim()) throw new Error('workspaceRootPath, sessionId, and content are required')
     const store = loadSessionMemoryStore(workspaceRootPath, sessionId)
-    const entry = addSessionMemory(store, data.content, data.type as any, data.tags ?? [], data.confidence ?? 1)
+    const entry = addSessionMemory(store, data.content, data.type as any, data.confidence ?? 1)
     saveSessionMemoryStore(workspaceRootPath, store)
     return { id: entry.id }
   })
 
-  server.handle(RPC_CHANNELS.memory.MEMORY_SESSION_UPDATE, async (_ctx: unknown, workspaceRootPath: string, sessionId: string, id: string, updates: { content?: string; type?: string; tags?: string[]; confidence?: number }) => {
+  server.handle(RPC_CHANNELS.memory.MEMORY_SESSION_UPDATE, async (_ctx: unknown, workspaceRootPath: string, sessionId: string, id: string, updates: { content?: string; type?: string; confidence?: number }) => {
     if (!workspaceRootPath || !sessionId || !id) throw new Error('workspaceRootPath, sessionId, and id are required')
     const store = loadSessionMemoryStore(workspaceRootPath, sessionId)
     const success = !!updateSessionMemory(store, id, { ...updates, type: updates.type as any })
@@ -391,82 +394,5 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
       throw new Error('Agent not initialized for this session')
     }
     return agent.extractSessionMemories()
-  })
-
-  // ---- audit & retention UI (§5.4) -------------------------------------
-
-  server.handle(RPC_CHANNELS.memory.MEMORY_GET_BLOCKED, async (_ctx: unknown, workspaceRootPath: string) => {
-    const store = loadMemoryStore(workspaceRootPath)
-    return [...(store.blocked ?? [])].reverse()
-  })
-
-  server.handle(RPC_CHANNELS.memory.MEMORY_LIST_BACKUPS, async (_ctx: unknown, workspaceRootPath: string) => {
-    const filePath = join(workspaceRootPath, 'memory.json')
-    const dir = dirname(filePath)
-    const base = basename(filePath, '.json')
-    const backups: Array<{ index: number, size: number, updatedAt: string }> = []
-    try {
-      for (let i = 0; i < 5; i++) {
-        const p = join(dir, `${base}.backup.${i}.json`)
-        if (!existsSync(p)) continue
-        const st = statSync(p)
-        backups.push({ index: i, size: st.size, updatedAt: st.mtime.toISOString() })
-      }
-    } catch { /* listing is best-effort */ }
-    const current = existsSync(filePath) ? statSync(filePath).size : 0
-    return { current, backups }
-  })
-
-  server.handle(RPC_CHANNELS.memory.MEMORY_RESTORE_BACKUP, async (_ctx: unknown, workspaceRootPath: string, index: number) => {
-    if (typeof index !== 'number' || index < 0 || index >= 5) return { ok: false, reason: 'invalid backup index' }
-    const filePath = join(workspaceRootPath, 'memory.json')
-    const backupPath = join(dirname(filePath), `${basename(filePath, '.json')}.backup.${index}.json`)
-    if (!existsSync(backupPath)) return { ok: false, reason: 'backup not found' }
-    try {
-      const tmpPath = filePath + '.restore.tmp'
-      copyFileSync(backupPath, tmpPath)
-      const { renameSync } = await import('node:fs')
-      renameSync(tmpPath, filePath)
-      notifyMemoryChanged(workspaceRootPath)
-      return { ok: true }
-    } catch (error) {
-      return { ok: false, reason: error instanceof Error ? error.message : String(error) }
-    }
-  })
-
-  server.handle(RPC_CHANNELS.memory.MEMORY_DELETE_BACKUP, async (_ctx: unknown, workspaceRootPath: string, index: number) => {
-    if (typeof index !== 'number' || index < 0 || index >= 5) return { ok: false, reason: 'invalid backup index' }
-    const filePath = join(workspaceRootPath, 'memory.json')
-    const backupPath = join(dirname(filePath), `${basename(filePath, '.json')}.backup.${index}.json`)
-    if (!existsSync(backupPath)) return { ok: false, reason: 'backup not found' }
-    try {
-      const { unlinkSync } = await import('node:fs')
-      unlinkSync(backupPath)
-      return { ok: true }
-    } catch (error) {
-      return { ok: false, reason: error instanceof Error ? error.message : String(error) }
-    }
-  })
-
-  server.handle(RPC_CHANNELS.memory.MEMORY_GET_VOCABULARY, async (_ctx: unknown, workspaceRootPath: string) => {
-    const store = loadMemoryStore(workspaceRootPath)
-    return { tagVocabulary: store.tagVocabulary ?? [], priorityTags: store.priorityTags ?? [] }
-  })
-
-  server.handle(RPC_CHANNELS.memory.MEMORY_SET_VOCABULARY, async (_ctx: unknown, workspaceRootPath: string, payload: { tagVocabulary?: string[]; priorityTags?: string[] }) => {
-    return mutateStore(workspaceRootPath, (store) => {
-      if (Array.isArray(payload.tagVocabulary)) {
-        store.tagVocabulary = payload.tagVocabulary
-          .map((t: string) => String(t).trim().toLowerCase())
-          .filter((t: string) => t.length > 0)
-      }
-      if (Array.isArray(payload.priorityTags)) {
-        const vocab = new Set(store.tagVocabulary ?? [])
-        store.priorityTags = payload.priorityTags
-          .map((t: string) => String(t).trim().toLowerCase())
-          .filter((t: string) => t.length > 0 && vocab.has(t)) // controlled subset of the vocabulary
-      }
-      return { ok: true, tagVocabulary: store.tagVocabulary ?? [], priorityTags: store.priorityTags ?? [] }
-    })
   })
 }

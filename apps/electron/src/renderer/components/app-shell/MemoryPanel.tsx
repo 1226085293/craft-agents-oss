@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 import type { MemoryType } from '@craft-agent/shared/memory'
 import {
   Brain, Trash2, Plus, Search, RotateCcw, Pencil, Check, X, Sparkles,
-  Loader2, CalendarDays, Clock, ArrowLeft, SearchX, XCircle, Database,
+  Loader2, CalendarDays, Clock, ArrowLeft, SearchX, XCircle,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -28,7 +28,6 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { MemoryScheduleDialog, type MemoryScheduleState } from './MemoryScheduleDialog'
-import { MemoryDataPanel } from './MemoryDataPanel'
 import { isColdMemory } from '@craft-agent/shared/memory/browser'
 
 interface MemoryPanelProps {
@@ -42,7 +41,6 @@ interface MemoryEntry {
   id: string
   type: MemoryType
   content: string
-  tags: string[]
   confidence: number
   createdAt: string
   updatedAt?: string
@@ -159,7 +157,6 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
   const [newMemoryType, setNewMemoryType] = React.useState<MemoryType>('factual')
   const [showAddForm, setShowAddForm] = React.useState(false)
   const [showTrash, setShowTrash] = React.useState(false)
-  const [dataPanelOpen, setDataPanelOpen] = React.useState(false)
   const [trash, setTrash] = React.useState<TrashedMemory[]>([])
   const [selectedIds, setSelectedIds] = React.useState<string[]>([])
   const [editingId, setEditingId] = React.useState<string | null>(null)
@@ -310,8 +307,7 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
     const query = searchQuery.trim().toLowerCase()
     if (query) {
       list = list.filter(m =>
-        m.content.toLowerCase().includes(query) ||
-        m.tags.some(tag => tag.toLowerCase().includes(query))
+        m.content.toLowerCase().includes(query)
       )
     }
     if (typeFilter !== 'all') {
@@ -346,7 +342,6 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
       await window.electronAPI.addMemory(workspaceRootPath, {
         content: newMemory.trim(),
         type: newMemoryType,
-        tags: [],
         confidence: 1.0,
       })
       setNewMemory('')
@@ -539,16 +534,6 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
       </>
     ) : (
       <>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 gap-1 text-xs"
-          onClick={() => setDataPanelOpen(true)}
-          title={t('memory.dataManagement', { defaultValue: 'Audit / vocabulary / snapshots' })}
-        >
-          <Database className="h-3.5 w-3.5" />
-          {t('memory.data', { defaultValue: 'Data' })}
-        </Button>
         <Button
           variant="ghost"
           size="sm"
@@ -975,9 +960,6 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
                     <p className="text-[13px] leading-relaxed break-words">{memory.content}</p>
                     <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px] text-muted-foreground">
                       <span>{formatLastExtractionTime(memory.updatedAt ?? memory.createdAt)}</span>
-                      {memory.tags.length > 0 && (
-                        <span className="truncate">#{memory.tags.slice(0, 3).join(' #')}{memory.tags.length > 3 ? '…' : ''}</span>
-                      )}
                     </div>
                   </div>
                 )}
@@ -1052,11 +1034,6 @@ export function MemoryPanel({ workspaceRootPath, sessionId, scope = sessionId ? 
           onSave={handleScheduleSave}
         />
       )}
-      <MemoryDataPanel
-        workspaceRootPath={workspaceRootPath}
-        open={dataPanelOpen}
-        onOpenChange={setDataPanelOpen}
-      />
     </div>
   )
 }

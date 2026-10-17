@@ -134,10 +134,27 @@ export abstract class BaseEventAdapter {
   /**
    * Accumulate streaming command output for a tool call.
    * Called from output delta handlers (not emitted as an event).
+   *
+   * Payloads may be true deltas (append) OR cumulative snapshots — the Pi
+   * SDK's shell tools report the ENTIRE output-so-far on every update
+   * (throttled). Appending each snapshot duplicates every line N times
+   * (2026-10-15, session 261013-mild-stream: bash results interleaved as
+   * "A, A B, C A B C…" in session.jsonl / UI while the SDK's own store
+   * stayed clean). Replace when the new payload extends the current buffer
+   * (snapshot case), append otherwise (delta case).
    */
   accumulateOutput(id: string, delta: string): void {
     const current = this.commandOutput.get(id) || '';
-    this.commandOutput.set(id, current + delta);
+    if (delta === current) {
+      return; // Identical snapshot (no new data) — nothing to add.
+    }
+    if (current.length > 0 && delta.startsWith(current)) {
+      // Cumulative snapshot that grew: the payload already contains the
+      // current buffer, so it replaces it rather than duplicating it.
+      this.commandOutput.set(id, delta);
+    } else {
+      this.commandOutput.set(id, current + delta);
+    }
   }
 
   /**

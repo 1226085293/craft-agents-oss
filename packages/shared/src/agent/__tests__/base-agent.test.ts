@@ -217,6 +217,14 @@ describe('BaseAgent', () => {
       // Should not throw
       agent.dispose();
     });
+
+    it('clears the in-memory journal state so the next session starts clean', () => {
+      // Touch the lazy getter so _journalState is populated.
+      void (agent as any).journalState;
+      expect((agent as any)._journalState).toBeDefined();
+      agent.clearHistory();
+      expect((agent as any)._journalState).toBeUndefined();
+    });
   });
 
   describe('Callbacks', () => {

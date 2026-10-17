@@ -16,7 +16,7 @@ export interface ProgressJournalOptions {
   maxRecords?: number;
 }
 
-interface ProgressRecord {
+export interface ProgressRecord {
   version: 1;
   timestamp: string;
   kind: 'user_request' | 'guidance' | 'tool_start' | 'tool_result' | 'conclusion';
@@ -187,23 +187,39 @@ export function loadProgressSnapshot(sessionDir: string, maxChars = 6_000): stri
   return renderProgressSnapshot(readRecords(join(sessionDir, FILE_NAME)), maxChars);
 }
 
+/**
+ * Read the RAW progress ledger records (no rendering/truncation). Used by the
+ * turn-log archiver, which needs the full record stream to rebuild per-turn
+ * files. Returns [] when the ledger does not exist yet.
+ */
+export function loadRawProgressRecords(sessionDir: string): ProgressRecord[] {
+  return readRecords(join(sessionDir, FILE_NAME));
+}
+
 export function loadLatestUserRequest(sessionDir: string): string | undefined {
   return latestRequestFromRecords(readRecords(join(sessionDir, FILE_NAME)));
 }
 
 function latestRequestFromRecords(records: ProgressRecord[]): string | undefined {
+  // Accumulate ALL mid-turn guidance for the current turn. The old behavior
+  // kept only the last steer, so a multi-steer turn lost every earlier one
+  // from the recovery context (and the verification judge saw an incomplete
+  // intent). A new user_request resets the list — guidance from other turns
+  // is never carried over.
   let request: string | undefined;
-  let latestGuidance: string | undefined;
+  const guidance: string[] = [];
   for (const record of records) {
     if (record.kind === 'user_request') {
       request = record.text;
-      latestGuidance = undefined;
+      guidance.length = 0;
     } else if (record.kind === 'guidance' && request && record.text) {
-      latestGuidance = record.text;
+      guidance.push(record.text);
     }
   }
-  if (!request || !latestGuidance) return request;
-  const suffix = `\n\nLatest mid-turn user guidance (retain alongside the original request):\n${latestGuidance}`;
+  if (!request) return undefined;
+  if (guidance.length === 0) return request;
+  const list = guidance.map((g, i) => `${i + 1}. ${g}`).join('\n');
+  const suffix = `\n\nMid-turn user guidance (retain alongside the original request):\n${list}`;
   return request.slice(0, Math.max(0, MAX_REQUEST_CHARS - suffix.length)) + suffix;
 }
 

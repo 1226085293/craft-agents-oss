@@ -2633,6 +2633,8 @@ This is a branched conversation. All prior messages in this conversation are par
     this.pinnedIncludeCoAuthoredBy = null;
     this.pinnedProjectContext = null;
     this.preferencesDriftNotified = false;
+    // Common state reset (usage tracker, prerequisites, journal memory state).
+    super.clearHistory();
   }
 
   /**

@@ -366,6 +366,31 @@ change mid-session.
 - Prefer failing loudly ("this session needs a bigger channel") over silently
   not compacting.
 
+## Two-tier compaction: no-LLM relief before LLM summarization (2026-10-17)
+
+Compaction is expensive (an LLM summarization round-trip, and the summary
+still loses per-turn detail). Since 2026-10-17 the automatic path is two-tier:
+
+1. **Context relief (no LLM)** — a `session_before_compact` extension
+   (`packages/pi-agent-server/src/defense/context-relief.ts`) supplies the
+   compaction result itself when auto-compaction fires. The checkpoint lists
+   each archived turn's user message, conclusion and a pointer to its full
+   turn file (`sessions/{id}/turns/*.md`, written by the turn-log archiver in
+   `packages/shared/src/agent/turn-log.ts`). Zero LLM calls.
+2. **LLM summarization (fallback)** — the hook estimates the post-relief
+   context; when it is still above the ceiling (default 50k tokens, env
+   `CRAFT_RELIEF_MAX_TOKENS`), the hook returns undefined and the SDK's own
+   summarization runs instead.
+
+Manual `/compact` is never intercepted (an explicit summarization request
+stays LLM-backed), and any relief failure fails open to the LLM path.
+
+Turn files are the durable detail source the summary lacks: each file holds
+the user message, mid-turn guidance, process blocks with FULL tool results
+(`session.jsonl` keeps them even though `progress.jsonl` truncates at 1200
+chars), every final assistant bubble, and interruptions (errors, aborts,
+system recovery injections that did not split the turn).
+
 ## Related files
 
 - `packages/pi-agent-server/src/custom-endpoint-models.ts` — synthetic model

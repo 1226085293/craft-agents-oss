@@ -659,6 +659,10 @@ export abstract class BaseAgent implements AgentBackend {
   clearHistory(): void {
     this.usageTracker.reset();
     this.prerequisiteManager.resetReadState();
+    // Drop the in-memory journal so the next session starts with a clean
+    // slate instead of lazily reloading the old execution journal from disk.
+    // The on-disk file stays for debugging — only the memory state resets.
+    this._journalState = undefined;
     this.debug('History cleared');
   }
 

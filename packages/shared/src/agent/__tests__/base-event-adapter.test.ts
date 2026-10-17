@@ -173,6 +173,26 @@ describe('BaseEventAdapter', () => {
       expect(adapter.testConsumeOutput('t1')).toBe('Hello World');
     });
 
+    it('should replace instead of append when the payload is a cumulative snapshot', () => {
+      // Pi SDK shell tools report the ENTIRE output-so-far on every update.
+      adapter.accumulateOutput('t1', 'line 1\n');
+      adapter.accumulateOutput('t1', 'line 1\nline 2\n');
+      adapter.accumulateOutput('t1', 'line 1\nline 2\nline 3\n');
+      expect(adapter.testConsumeOutput('t1')).toBe('line 1\nline 2\nline 3\n');
+    });
+
+    it('should be a no-op for an identical repeated snapshot', () => {
+      adapter.accumulateOutput('t1', 'line 1\n');
+      adapter.accumulateOutput('t1', 'line 1\n');
+      expect(adapter.testConsumeOutput('t1')).toBe('line 1\n');
+    });
+
+    it('should still append unrelated delta payloads', () => {
+      adapter.accumulateOutput('t1', 'stdout: ok');
+      adapter.accumulateOutput('t1', 'stderr: warn');
+      expect(adapter.testConsumeOutput('t1')).toBe('stdout: okstderr: warn');
+    });
+
     it('should delete output after consume', () => {
       adapter.accumulateOutput('t1', 'data');
       adapter.testConsumeOutput('t1');

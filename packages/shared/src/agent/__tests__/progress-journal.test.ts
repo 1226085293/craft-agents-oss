@@ -157,6 +157,39 @@ describe('ProgressJournal', () => {
     expect(restored.latestUserRequest()).toContain('Latest steer: use the SDK summary wrapper.');
   });
 
+  it('accumulates every guidance of the current turn as a numbered list', () => {
+    const dir = makeDir();
+    const journal = new ProgressJournal(dir, { maxBytes: 16_384, maxRecords: 60 });
+    journal.recordUserRequest('完成 1 到 5');
+    journal.recordGuidance('先做 1 和 2');
+    journal.recordGuidance('3 改一下方案');
+    journal.recordConclusion('中间结论');
+    journal.recordGuidance('4 和 5 也一起做完');
+
+    const restored = new ProgressJournal(dir, { maxBytes: 16_384, maxRecords: 60 });
+    const text = restored.latestUserRequest()!;
+    expect(text).toContain('完成 1 到 5');
+    expect(text).toContain('1. 先做 1 和 2');
+    expect(text).toContain('2. 3 改一下方案');
+    expect(text).toContain('3. 4 和 5 也一起做完');
+    expect(text).toContain('Mid-turn user guidance');
+  });
+
+  it('resets guidance accumulation at the next user request', () => {
+    const dir = makeDir();
+    const journal = new ProgressJournal(dir, { maxBytes: 16_384, maxRecords: 60 });
+    journal.recordUserRequest('第一轮');
+    journal.recordGuidance('第一轮的引导');
+    journal.recordUserRequest('第二轮');
+    journal.recordGuidance('第二轮的引导');
+
+    const restored = new ProgressJournal(dir, { maxBytes: 16_384, maxRecords: 60 });
+    const text = restored.latestUserRequest()!;
+    expect(text).toContain('第二轮');
+    expect(text).toContain('第二轮的引导');
+    expect(text).not.toContain('第一轮的引导');
+  });
+
   it('keeps the latest user request when a progress entry exceeds the file budget', () => {
     const dir = makeDir();
     const journal = new ProgressJournal(dir, { maxBytes: 1_024, maxRecords: 30 });

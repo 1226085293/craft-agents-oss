@@ -1116,7 +1116,8 @@ describe('PiEventAdapter', () => {
         args: {},
       } as any));
 
-      // Partial updates
+      // Partial updates (cumulative snapshots — Pi SDK shell tools report
+      // the whole output-so-far each time)
       collect(adapter.adaptEvent({
         type: 'tool_execution_update',
         toolCallId: 'call_1',
@@ -1125,18 +1126,52 @@ describe('PiEventAdapter', () => {
       collect(adapter.adaptEvent({
         type: 'tool_execution_update',
         toolCallId: 'call_1',
-        partialResult: { content: [{ type: 'text', text: 'line 2\n' }] },
+        partialResult: { content: [{ type: 'text', text: 'line 1\nline 2\n' }] },
       } as any));
 
-      // End — should use accumulated output
+      // End WITHOUT a result payload — fall back to the accumulated output.
+      // (Snapshot-aware accumulation keeps 'line 1\nline 2\n', not a
+      // duplicated concatenation.)
       const events = collect(adapter.adaptEvent({
         type: 'tool_execution_end',
         toolCallId: 'call_1',
-        result: 'ignored because accumulated',
+        result: null,
         isError: false,
       } as any));
 
       expect(events[0].result).toBe('line 1\nline 2\n');
+    });
+
+    it('should prefer the authoritative final result over accumulated partials', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({
+        type: 'tool_execution_start',
+        toolCallId: 'call_2',
+        toolName: 'bash',
+        args: {},
+      } as any));
+
+      // Cumulative snapshots on the way in…
+      collect(adapter.adaptEvent({
+        type: 'tool_execution_update',
+        toolCallId: 'call_2',
+        partialResult: { content: [{ type: 'text', text: '=== x64 ===\n' }] },
+      } as any));
+      collect(adapter.adaptEvent({
+        type: 'tool_execution_update',
+        toolCallId: 'call_2',
+        partialResult: { content: [{ type: 'text', text: '=== x64 ===\nhttp=200\n' }] },
+      } as any));
+
+      // …but the final event carries the clean, authoritative result.
+      const events = collect(adapter.adaptEvent({
+        type: 'tool_execution_end',
+        toolCallId: 'call_2',
+        result: '=== x64 ===\nhttp=200\n',
+        isError: false,
+      } as any));
+
+      expect(events[0].result).toBe('=== x64 ===\nhttp=200\n');
     });
 
     it('should use description as intent for bash tools', () => {

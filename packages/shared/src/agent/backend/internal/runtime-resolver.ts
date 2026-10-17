@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import type { BackendHostRuntimeContext } from '../types.ts';
 import { setPathToClaudeCodeExecutable } from '../../options.ts';
 
@@ -42,6 +42,49 @@ function firstExistingPath(candidates: string[]): string | undefined {
     if (existsSync(candidate)) return candidate;
   }
   return undefined;
+}
+
+const APP_ASAR = 'app.asar';
+const APP_ASAR_UNPACKED = 'app.asar.unpacked';
+
+/**
+ * Map a path that lives inside the ASAR archive onto its `asarUnpack` sibling.
+ *
+ * Why this is required: Electron patches the main process's `fs` module, so
+ * `existsSync('.../resources/app.asar/dist/x.js')` happily returns true. That
+ * patch does NOT extend to *external* processes. Every path we hand to
+ * bun.exe / node.exe / rg.exe / claude.exe is a literal filesystem path, and
+ * `app.asar/...` does not exist on disk — bun exits with
+ * `error: Module not found "…/app.asar/dist/resources/pi-agent-server/index.js"`
+ * and each session dies before any upstream request is made.
+ *
+ * electron-builder's `asarUnpack` (apps/electron/electron-builder.yml) extracts
+ * everything we spawn into `app.asar.unpacked/`, so rewrite the path there.
+ * No-op for non-packaged builds and for paths already outside the archive.
+ */
+function toUnpackedPath(p: string | undefined): string | undefined {
+  if (!p) return undefined;
+  const inArchive = `${sep}${APP_ASAR}${sep}`;
+  const unpacked = `${sep}${APP_ASAR_UNPACKED}${sep}`;
+  const idx = p.indexOf(inArchive);
+  if (idx !== -1) {
+    return `${p.slice(0, idx)}${unpacked}${p.slice(idx + inArchive.length)}`;
+  }
+  if (p.endsWith(`${sep}${APP_ASAR}`)) {
+    return `${p.slice(0, -(APP_ASAR.length))}${APP_ASAR_UNPACKED}`;
+  }
+  return p;
+}
+
+/**
+ * `.../resources/app.asar` → `.../resources/app.asar.unpacked`, otherwise the
+ * input unchanged. Used to look for the real on-disk copy *before* falling back
+ * to the in-archive path that `fs` resolves transparently.
+ */
+function toUnpackedRoot(p: string): string {
+  return p.endsWith(`${sep}${APP_ASAR}`)
+    ? `${p.slice(0, -(APP_ASAR.length))}${APP_ASAR_UNPACKED}`
+    : p;
 }
 
 /**
@@ -124,11 +167,28 @@ function resolveClaudeBinaryPath(hostRuntime: BackendHostRuntimeContext): string
     ? join('node_modules', '@anthropic-ai', pkg, binaryName)
     : undefined;
 
-  const candidates: string[] = [
+  // The binary is spawned as a subprocess, so the real on-disk copy wins:
+  // either the `extraResources` copy under <resources>/app/node_modules (all
+  // platforms ship it) or the asarUnpack sibling of the in-archive path.
+  const unpackedRoot = toUnpackedRoot(hostRuntime.appRootPath);
+  const candidates: string[] = [];
+  if (hostRuntime.resourcesPath) {
+    candidates.push(join(hostRuntime.resourcesPath, 'app', aliasRel));
+  }
+  if (unpackedRoot !== hostRuntime.appRootPath) {
+    candidates.push(join(unpackedRoot, aliasRel));
+  }
+  candidates.push(
     join(hostRuntime.appRootPath, aliasRel),
     join(hostRuntime.appRootPath, '..', '..', aliasRel),
-  ];
+  );
   if (platformRel) {
+    if (hostRuntime.resourcesPath) {
+      candidates.push(join(hostRuntime.resourcesPath, 'app', platformRel));
+    }
+    if (unpackedRoot !== hostRuntime.appRootPath) {
+      candidates.push(join(unpackedRoot, platformRel));
+    }
     candidates.push(
       join(hostRuntime.appRootPath, platformRel),
       join(hostRuntime.appRootPath, '..', '..', platformRel),
@@ -165,13 +225,26 @@ function resolveInterceptorBundlePath(hostRuntime: BackendHostRuntimeContext): s
     if (source) return source;
   }
 
+  // Packaged: the interceptor is passed to the spawned bun/node process as
+  // `--preload` / `--require`, so it must be a real file — prefer the
+  // asarUnpack sibling over the in-archive path.
+  const unpackedRoot = toUnpackedRoot(hostRuntime.appRootPath);
+  const bundled = resolveUpwards(unpackedRoot, join('dist', 'interceptor.cjs'))
+    ?? resolveUpwards(unpackedRoot, join('apps', 'electron', 'dist', 'interceptor.cjs'));
+  if (bundled) return bundled;
+
   return resolveUpwards(hostRuntime.appRootPath, join('dist', 'interceptor.cjs'))
     ?? resolveUpwards(hostRuntime.appRootPath, join('apps', 'electron', 'dist', 'interceptor.cjs'));
 }
 
 function resolveServerPath(hostRuntime: BackendHostRuntimeContext, serverName: string): string | undefined {
   if (hostRuntime.isPackaged) {
+    // These entry points are spawned by an external bun/node process, which
+    // cannot read inside app.asar — always take the asarUnpack copy first.
+    const unpackedRoot = toUnpackedRoot(hostRuntime.appRootPath);
     return firstExistingPath([
+      join(unpackedRoot, 'resources', serverName, 'index.js'),
+      join(unpackedRoot, 'dist', 'resources', serverName, 'index.js'),
       join(hostRuntime.appRootPath, 'resources', serverName, 'index.js'),
       join(hostRuntime.appRootPath, 'dist', 'resources', serverName, 'index.js'),
     ]);
@@ -193,12 +266,19 @@ function resolveRipgrepPath(hostRuntime: BackendHostRuntimeContext): string | un
   const ripgrepRelative = join('node_modules', '@vscode', 'ripgrep', 'bin', binaryName);
 
   if (hostRuntime.isPackaged) {
-    const packaged = join(hostRuntime.appRootPath, ripgrepRelative);
+    // rg is spawned as a subprocess → the real on-disk copy is required.
+    // `extraResources` places one at <resources>/app/node_modules/@vscode/ripgrep.
+    if (hostRuntime.resourcesPath) {
+      const fromExtraResources = join(hostRuntime.resourcesPath, 'app', ripgrepRelative);
+      if (existsSync(fromExtraResources)) return fromExtraResources;
+    }
+    const unpackedRoot = toUnpackedRoot(hostRuntime.appRootPath);
+    const packaged = join(unpackedRoot, ripgrepRelative);
     if (existsSync(packaged)) return packaged;
   }
 
   const fromHostRoot = resolveUpwards(hostRuntime.appRootPath, ripgrepRelative, 10);
-  if (fromHostRoot) return fromHostRoot;
+  if (fromHostRoot) return toUnpackedPath(fromHostRoot);
 
   const cwdFallback = join(process.cwd(), ripgrepRelative);
   if (existsSync(cwdFallback)) return cwdFallback;

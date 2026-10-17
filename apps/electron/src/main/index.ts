@@ -71,7 +71,7 @@ if (persistedUiLanguage) {
 const machineId = createHash('sha256').update(hostname() + homedir()).digest('hex').slice(0, 16)
 Sentry.setUser({ id: machineId })
 
-import { join, delimiter } from 'path'
+import { join, delimiter, sep } from 'path'
 import { existsSync, readFileSync } from 'fs'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { SessionManager, setSessionPlatform, setSessionRuntimeHooks } from '@craft-agent/server-core/sessions'
@@ -138,11 +138,26 @@ if (isDebugMode) {
   const resourcesBase = app.isPackaged
     ? join(process.resourcesPath, 'app')
     : join(__dirname, '..')
+
+  // `asar: true` (electron-builder.yml) keeps dist/** inside app.asar. The main
+  // process reads that transparently, but every path below is handed to an
+  // EXTERNAL process — a shell on PATH, `uv run <script>`, the doc file the
+  // agent opens — and external processes cannot read inside an asar archive.
+  // asarUnpack mirrors those trees into app.asar.unpacked/; resolve there.
+  // (In the asar:false layout this is the same <resources>/app/dist/resources.)
+  const packagedAppRoot = app.isPackaged ? app.getAppPath() : process.cwd()
+  const unpackedAppRoot = packagedAppRoot.endsWith(`${sep}app.asar`)
+    ? `${packagedAppRoot.slice(0, -'app.asar'.length)}app.asar.unpacked`
+    : packagedAppRoot
+  const distResourcesBase = app.isPackaged
+    ? join(unpackedAppRoot, 'dist', 'resources')
+    : join(__dirname, 'resources')
+
   const platformKey = `${process.platform}-${process.arch}`
   const uvPlatformDir = join(resourcesBase, 'resources', 'bin', platformKey)
   const uvBinary = join(uvPlatformDir, process.platform === 'win32' ? 'uv.exe' : 'uv')
-  const binDir = join(resourcesBase, 'resources', 'bin')
-  const scriptsDir = join(resourcesBase, 'resources', 'scripts')
+  const binDir = join(distResourcesBase, 'bin')
+  const scriptsDir = join(distResourcesBase, 'scripts')
 
   const bundledUvExists = existsSync(uvBinary)
   const fallbackUv = bundledUvExists ? null : 'uv'
@@ -150,25 +165,28 @@ if (isDebugMode) {
   // Runtime resolver hints for shared session tools
   process.env.CRAFT_IS_PACKAGED = app.isPackaged ? '1' : '0'
   process.env.CRAFT_RESOURCES_BASE = resourcesBase
-  process.env.CRAFT_APP_ROOT = app.isPackaged ? app.getAppPath() : process.cwd()
+  process.env.CRAFT_APP_ROOT = packagedAppRoot
 
   process.env.CRAFT_UV = bundledUvExists ? uvBinary : (fallbackUv ?? uvBinary)
 
-  // Bun runtime (packaged builds should prefer bundled runtime over PATH)
-  const bunBinary = join(resourcesBase, 'vendor', 'bun', process.platform === 'win32' ? 'bun.exe' : 'bun')
+  // Bun runtime (packaged builds should prefer bundled runtime over PATH).
+  // Packaged: extraResources ships it at <resources>/vendor/bun (NOT under
+  // <resources>/app), so resolve from process.resourcesPath.
+  const bunBase = app.isPackaged ? process.resourcesPath : resourcesBase
+  const bunBinary = join(bunBase, 'vendor', 'bun', process.platform === 'win32' ? 'bun.exe' : 'bun')
   if (existsSync(bunBinary)) {
     process.env.CRAFT_BUN = bunBinary
   }
 
   process.env.CRAFT_SCRIPTS = scriptsDir
   process.env.CRAFT_COMMANDS_ENTRY = app.isPackaged
-    ? join(app.getAppPath(), 'packages', 'craft-agents-commands', 'src', 'main.ts')
+    ? join(packagedAppRoot, 'packages', 'craft-agents-commands', 'src', 'main.ts')
     : join(process.cwd(), 'packages', 'craft-agents-commands', 'src', 'main.ts')
   process.env.CRAFT_CLI_ENTRY = app.isPackaged
-    ? join(app.getAppPath(), 'packages', 'craft-cli', 'src', 'cli.ts')
+    ? join(packagedAppRoot, 'packages', 'craft-cli', 'src', 'cli.ts')
     : join(process.cwd(), 'packages', 'craft-cli', 'src', 'cli.ts')
   process.env.CRAFT_COMMANDS_DOC_PATH = app.isPackaged
-    ? join(resourcesBase, 'resources', 'docs', 'craft-cli.md')
+    ? join(distResourcesBase, 'docs', 'craft-cli.md')
     : join(process.cwd(), 'apps', 'electron', 'resources', 'docs', 'craft-cli.md')
   process.env.CRAFT_CLI_DOC_PATH = process.env.CRAFT_COMMANDS_DOC_PATH
   process.env.CRAFT_AGENT_VERSION = app.getVersion()

@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, afterEach } from 'bun:test';
 import { mkdirSync, writeFileSync, rmSync, chmodSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { resolveBackendRuntimePaths } from '../internal/runtime-resolver.ts';
 import { resolveBackendHostTooling } from '../factory.ts';
@@ -231,5 +231,91 @@ describe('resolveInterceptorBundlePath dev-mode source preference', () => {
     };
     const paths = resolveBackendRuntimePaths(hostRuntime);
     expect(paths.interceptorBundlePath).toBe(overridePath);
+  });
+});
+
+/**
+ * Regression: `asar: true` (apps/electron/electron-builder.yml) made every
+ * spawned path resolve to `.../resources/app.asar/...`. Electron's `fs` shim
+ * makes that readable from the main process, but the external bun.exe that
+ * spawns pi-agent-server treats it as a literal path and dies with
+ * `error: Module not found` — so no session ever reached the model.
+ * Everything we spawn must resolve to the `app.asar.unpacked` sibling.
+ */
+describe('asar-aware resolution of spawned entry points', () => {
+  const tmpBase = join(tmpdir(), `asar-resolver-test-${Date.now()}`);
+
+  afterEach(() => {
+    try { rmSync(tmpBase, { recursive: true, force: true }); } catch {}
+  });
+
+  it('prefers the app.asar.unpacked copy of the pi-agent-server entry point', () => {
+    const resources = join(tmpBase, 'resources');
+    const appRoot = join(resources, 'app.asar');
+    const inArchive = join(appRoot, 'dist', 'resources', 'pi-agent-server');
+    const unpacked = join(resources, 'app.asar.unpacked', 'dist', 'resources', 'pi-agent-server');
+    mkdirSync(inArchive, { recursive: true });
+    mkdirSync(unpacked, { recursive: true });
+    writeFileSync(join(inArchive, 'index.js'), '// inside the archive — unreadable by bun.exe\n');
+    const realPath = join(unpacked, 'index.js');
+    writeFileSync(realPath, '// real file on disk\n');
+
+    const hostRuntime: BackendHostRuntimeContext = {
+      appRootPath: appRoot,
+      resourcesPath: resources,
+      isPackaged: true,
+    };
+
+    const paths = resolveBackendRuntimePaths(hostRuntime);
+    expect(paths.piServerPath).toBe(realPath);
+    expect(paths.piServerPath).not.toContain('app.asar' + sep + 'dist');
+  });
+
+  it('prefers the app.asar.unpacked interceptor bundle (passed via --preload/--require)', () => {
+    const resources = join(tmpBase, 'resources2');
+    const appRoot = join(resources, 'app.asar');
+    const inArchive = join(appRoot, 'dist');
+    const unpacked = join(resources, 'app.asar.unpacked', 'dist');
+    mkdirSync(inArchive, { recursive: true });
+    mkdirSync(unpacked, { recursive: true });
+    writeFileSync(join(inArchive, 'interceptor.cjs'), '// in archive\n');
+    const realPath = join(unpacked, 'interceptor.cjs');
+    writeFileSync(realPath, '// real file\n');
+
+    const hostRuntime: BackendHostRuntimeContext = {
+      appRootPath: appRoot,
+      resourcesPath: resources,
+      isPackaged: true,
+    };
+
+    const paths = resolveBackendRuntimePaths(hostRuntime);
+    expect(paths.interceptorBundlePath).toBe(realPath);
+  });
+
+  it('prefers the extraResources ripgrep copy over the in-archive path', () => {
+    const resources = join(tmpBase, 'resources3');
+    const appRoot = join(resources, 'app.asar');
+    const binaryName = process.platform === 'win32' ? 'rg.exe' : 'rg';
+
+    // In-archive copy (transparently readable via Electron's fs shim only).
+    const inArchive = join(appRoot, 'node_modules', '@vscode', 'ripgrep', 'bin');
+    mkdirSync(inArchive, { recursive: true });
+    writeFileSync(join(inArchive, binaryName), 'in-archive\n');
+
+    // extraResources copy — the real file on disk.
+    const extra = join(resources, 'app', 'node_modules', '@vscode', 'ripgrep', 'bin');
+    mkdirSync(extra, { recursive: true });
+    const realPath = join(extra, binaryName);
+    writeFileSync(realPath, '#!/bin/sh\n');
+    chmodSync(realPath, 0o755);
+
+    const hostRuntime: BackendHostRuntimeContext = {
+      appRootPath: appRoot,
+      resourcesPath: resources,
+      isPackaged: true,
+    };
+
+    const result = resolveBackendHostTooling({ hostRuntime });
+    expect(result.ripgrepPath).toBe(realPath);
   });
 });

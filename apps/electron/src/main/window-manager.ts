@@ -287,6 +287,13 @@ export class WindowManager {
     window.once('ready-to-show', () => {
       this.revealWindow(window)
     })
+    // Forward renderer warn/error console lines to the main log so link-click
+    // and other diagnostics are capturable without DevTools.
+    window.webContents.on('console-message', (_event, level, message) => {
+      if (level >= 2) {
+        windowLog.warn(`[renderer-console] ${message}`)
+      }
+    })
     setTimeout(() => {
       this.revealWindow(window)
     }, READY_TO_SHOW_FALLBACK_MS)

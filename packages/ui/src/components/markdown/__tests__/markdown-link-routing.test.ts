@@ -55,10 +55,69 @@ describe('resolveMarkdownLinkTarget', () => {
     })
   })
 
-  it('normalizes windows drive-letter file URLs to local paths', () => {
+  it('normalizes windows drive-letter file URLs to native paths', () => {
     expect(resolveMarkdownLinkTarget('file:///C:/Users/Tester/Deck.pptx')).toEqual({
       kind: 'file',
-      path: 'C:/Users/Tester/Deck.pptx',
+      path: 'C:\\Users\\Tester\\Deck.pptx',
+    })
+  })
+
+  it('normalizes bare forward-slash Windows drive paths to native backslashes', () => {
+    expect(resolveMarkdownLinkTarget('C:/Users/Tester/docs/report.md')).toEqual({
+      kind: 'file',
+      path: 'C:\\Users\\Tester\\docs\\report.md',
+    })
+  })
+
+  it('normalizes mixed-separator Windows paths (forward dir + backslash subpath)', () => {
+    // The legacy jsonl expansion produced `C:/.../dir\plans\x.md` — must still
+    // resolve to a native path instead of being misrouted or failing on disk.
+    expect(
+      resolveMarkdownLinkTarget('C:/Users/12260/.craft-agent/sessions/s/plans/llm-management-redesign.md')
+    ).toEqual({
+      kind: 'file',
+      path: 'C:\\Users\\12260\\.craft-agent\\sessions\\s\\plans\\llm-management-redesign.md',
+    })
+  })
+
+  it('leaves all-backslash Windows paths untouched', () => {
+    expect(resolveMarkdownLinkTarget('C:\\Users\\Tester\\a.md')).toEqual({
+      kind: 'file',
+      path: 'C:\\Users\\Tester\\a.md',
+    })
+  })
+
+  it('does not touch UNC paths or unix paths', () => {
+    expect(resolveMarkdownLinkTarget('\\\\server\\share\\file.md')).toEqual({
+      kind: 'file',
+      path: '\\\\server\\share\\file.md',
+    })
+    expect(resolveMarkdownLinkTarget('/home/u/x.md')).toEqual({
+      kind: 'file',
+      path: '/home/u/x.md',
+    })
+  })
+
+  it('resolves percent-encoded Windows drive paths (Chromium-serialized DOM hrefs)', () => {
+    // When a bare `C:\\...` href reaches the DOM, Chromium serializes it as a
+    // relative URL with a `c:` scheme — percent-encoding every backslash to
+    // `%5C`. The click handler must recognize that form and route it back to
+    // the real on-disk file instead of shell.openExternal (which fails with
+    // "系统找不到指定的文件" on the encoded string).
+    expect(
+      resolveMarkdownLinkTarget(
+        'C:%5CUsers%5C12260%5C.craft-agent%5Csessions%5Cs%5Cplans%5Cllm-management-redesign.md'
+      )
+    ).toEqual({
+      kind: 'file',
+      path: 'C:\\Users\\12260\\.craft-agent\\sessions\\s\\plans\\llm-management-redesign.md',
+    })
+  })
+
+  it('resolves percent-encoded forward-slash drive paths', () => {
+    expect(resolveMarkdownLinkTarget('C:%2FUsers%2FTester%2Fdeck.pptx')).toEqual({
+      kind: 'file',
+      path: 'C:\\Users\\Tester\\deck.pptx',
     })
   })
 

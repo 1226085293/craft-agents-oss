@@ -1,4 +1,4 @@
-import { isFilePathTarget } from './linkify'
+import { isFilePathTarget, normalizeWindowsDrivePath } from './linkify'
 
 export type ResolvedMarkdownLinkTarget =
   | { kind: 'file'; path: string }
@@ -35,10 +35,10 @@ function resolveFileUrlPath(target: string): string | null {
 
     if (parsed.hostname) {
       const hostname = decodeURIComponent(parsed.hostname)
-      return normalizeFileUrlPath(`//${hostname}${pathname}`)
+      return normalizeWindowsDrivePath(normalizeFileUrlPath(`//${hostname}${pathname}`))
     }
 
-    return normalizeFileUrlPath(pathname)
+    return normalizeWindowsDrivePath(normalizeFileUrlPath(pathname))
   } catch {
     return null
   }
@@ -60,7 +60,10 @@ export function resolveMarkdownLinkTarget(target: string): ResolvedMarkdownLinkT
   }
 
   if (isFilePathTarget(trimmed)) {
-    return { kind: 'file', path: decodeFilePath(trimmed) }
+    // Windows drive paths in any separator style (forward, mixed, or
+    // backslash) normalize to native backslash form so the file handler and
+    // fs APIs resolve them consistently on disk.
+    return { kind: 'file', path: normalizeWindowsDrivePath(decodeFilePath(trimmed)) }
   }
 
   return { kind: 'url', url: trimmed }

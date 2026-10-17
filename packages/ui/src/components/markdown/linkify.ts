@@ -31,6 +31,36 @@ const FILE_PATH_TARGET_REGEX = new RegExp(
 // shell.openExternal, which fails at the OS level on raw backslash paths.
 const WINDOWS_DRIVE_PATH_TARGET_REGEX = /^[A-Za-z]:[\\/].+$/
 
+/**
+ * Percent-encoded Windows drive paths (`C:%5CUsers%5C...` or `C:%2FUsers%2F...`).
+ * Chromium serializes a bare `C:\\...` DOM href as a relative URL with a
+ * `c:` scheme — percent-encoding the backslashes — so the href that reaches
+ * the click handler can arrive in this encoded form. Detected separately so
+ * isFilePathTarget accepts it and resolveMarkdownLinkTarget decodes it back
+ * to a real on-disk path before routing to onFileClick.
+ */
+const PERCENT_ENCODED_DRIVE_PATH_REGEX = /^[A-Za-z]:%/i
+
+/** Matches a Windows drive-letter prefix (`C:`) followed by a separator. */
+export const WINDOWS_DRIVE_PATH_REGEX = /^([A-Za-z]):[\\/]/
+
+/**
+ * Normalize a Windows drive path in ANY separator style to native backslash
+ * form: `C:/Users/a\plans\x.md` -> `C:\Users\a\plans\x.md`.
+ *
+ * Older jsonl expansions stored the session dir with forward slashes while the
+ * sub-path kept backslashes (or vice versa). Windows fs APIs and the file
+ * click handler expect a consistent native form; mixed-separator strings can
+ * fail to resolve on disk.
+ *
+ * No-op for non-drive paths (unix paths, URLs, UNC paths).
+ */
+export function normalizeWindowsDrivePath(path: string): string {
+  const m = path.match(WINDOWS_DRIVE_PATH_REGEX)
+  if (!m) return path
+  return m[1] + ':' + path.slice(2).replace(/\//g, '\\')
+}
+
 // Windows UNC paths (`\\\\server\\share\\...` or `\\\\server/share/...`).
 const UNC_PATH_TARGET_REGEX = /^\\\\.+$/
 
@@ -328,6 +358,9 @@ export function hasLinks(text: string): boolean {
 export function isFilePathTarget(target: string): boolean {
   const trimmed = target.trim()
   if (WINDOWS_DRIVE_PATH_TARGET_REGEX.test(trimmed)) return true
+  // Percent-encoded drive path (e.g. `C:%5CUsers%5C...` from Chromium href
+  // serialization) — decode before classification in resolveMarkdownLinkTarget.
+  if (PERCENT_ENCODED_DRIVE_PATH_REGEX.test(trimmed)) return true
   if (UNC_PATH_TARGET_REGEX.test(trimmed)) return true
   return FILE_PATH_TARGET_REGEX.test(trimmed)
 }

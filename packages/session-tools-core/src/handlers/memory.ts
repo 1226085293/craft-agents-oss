@@ -13,6 +13,25 @@ function memoryPath(ctx: SessionToolContext, scope: 'session' | 'global'): strin
 }
 
 /**
+ * Format a memory entry's last-update time as LOCAL "YYYY/M/D HH:mm".
+ * Mirrors `formatLocalTime` in @craft-agent/shared's memory injector so
+ * `query_memories` output and the injected <cross_session_memory> block carry
+ * byte-identical timestamps — the system prompt promises "each entry carries
+ * its last-update time automatically" on read-back, and this handler is one
+ * of the two read paths. Local copy: this package must stay dependency-free
+ * of @craft-agent/shared (see create_task.ts / pages.ts).
+ *
+ * Returns '' for a missing/invalid stamp rather than a bogus date.
+ */
+function formatMemoryStamp(iso: string | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/**
  * Character-bigram Jaccard similarity (0..1), no dependencies.
  * Used for server-side near-duplicate detection before writes.
  */
@@ -33,6 +52,20 @@ function entrySimilarity(a: string, b: string): number {
 
 /** Similarity above this → treat as a duplicate of an existing entry. */
 const MEMORY_DEDUP_SIMILARITY = 0.8
+
+/**
+ * Recommended per-entry budget, in characters.
+ *
+ * The read path injects at most `maxTokens: 1500` across up to `maxMemories: 8`
+ * entries (DEFAULT_MEMORY_INJECTION_CONFIG) — ~187 tokens (~750 chars) per
+ * entry on average. The schema allows 4000 chars, enough for ONE entry to eat
+ * the whole injection budget and crowd out every other memory.
+ *
+ * Soft budget: over-length entries are still stored (some facts are genuinely
+ * long), but the reply carries a split hint so the caller can decompose
+ * "full report" memories into a summary + a session/file pointer.
+ */
+const MEMORY_RECOMMENDED_MAX_CHARS = 800
 
 /**
  * UPDATE an existing one (same subject, same slot, newer value) rather than
@@ -151,7 +184,13 @@ export async function handleAddMemory(ctx: SessionToolContext, args: { action: '
       ctx.fs.writeFile(path, JSON.stringify(store, null, 2))
       // Host-side notification: UI badges/counts stay live after tool writes.
       if (args.scope === 'global') ctx.callbacks?.onMemoryChanged?.()
-      return ok(`Added ${args.scope} memory ${entry.id}.`)
+      // Soft length guard: keep the entry (some facts are genuinely long), but
+      // nudge toward a split when it would dominate the injection budget on
+      // every future read and crowd out other memories.
+      const oversizeHint = content.length > MEMORY_RECOMMENDED_MAX_CHARS
+        ? ` Note: this entry is ${content.length} chars, above the ~${MEMORY_RECOMMENDED_MAX_CHARS}-char budget, so it will crowd out other memories when injected. Consider replacing it with a short summary plus a pointer to the session/file holding the detail.`
+        : ''
+      return ok(`Added ${args.scope} memory ${entry.id}.${oversizeHint}`)
     }
     const index = store.entries.findIndex((entry: { id: string; sourceSessionId?: string }) => entry.id === args.id && (args.scope === 'global' || entry.sourceSessionId === ctx.sessionId))
     if (index < 0) return error('Memory entry not found.')
@@ -184,7 +223,7 @@ export async function handleQueryMemories(ctx: SessionToolContext, args: { query
   try {
     const stores = [memoryPath(ctx, 'global'), memoryPath(ctx, 'session')]
       .filter(path => ctx.fs.exists(path))
-      .map(path => JSON.parse(ctx.fs.readFile(path)) as { sessionId?: string; entries?: Array<{ type: string; content: string; embedding?: number[] }> })
+      .map(path => JSON.parse(ctx.fs.readFile(path)) as { sessionId?: string; entries?: Array<{ type: string; content: string; embedding?: number[]; createdAt?: string; updatedAt?: string }> })
     // Fold legacy 5-class types into the three-class space so old session
     // stores (pre- extractions) stay searchable and filterable.
     const fold = (type: string): string => {
@@ -196,7 +235,7 @@ export async function handleQueryMemories(ctx: SessionToolContext, args: { query
     // Stage 1: semantic retrieval via embedding (cosine top-k). The query is
     // encoded with the same engine as injection; entries carry stored vectors
     // (written at add time) or are encoded on demand. Zero LLM — 3-4ms.
-    let results: Array<{ type: string; content: string; score: number }> = []
+    let results: Array<{ type: string; content: string; score: number; stamp: string }> = []
     const encode = ctx.callbacks?.encodeEmbedding
     if (encode) {
       try {
@@ -204,7 +243,7 @@ export async function handleQueryMemories(ctx: SessionToolContext, args: { query
         const all = stores.flatMap(store => (store.entries ?? [])
           .filter(entry => !store.sessionId || store.sessionId === ctx.sessionId)
           .filter(entry => !args.type || fold(entry.type) === args.type))
-        const scored: Array<{ type: string; content: string; score: number }> = []
+        const scored: Array<{ type: string; content: string; score: number; stamp: string }> = []
         for (const entry of all) {
           let vec = entry.embedding
           if (!vec || vec.length === 0) {
@@ -214,7 +253,9 @@ export async function handleQueryMemories(ctx: SessionToolContext, args: { query
           let dot = 0
           const len = Math.min(vec.length, queryVector.length)
           for (let i = 0; i < len; i++) dot += (vec[i] ?? 0) * (queryVector[i] ?? 0)
-          scored.push({ type: fold(entry.type), content: entry.content, score: dot })
+          // updatedAt wins over createdAt: the injected block uses the same
+          // precedence, so a freshly updated memory reads the same in both.
+          scored.push({ type: fold(entry.type), content: entry.content, score: dot, stamp: formatMemoryStamp(entry.updatedAt ?? entry.createdAt) })
         }
         scored.sort((a, b) => b.score - a.score)
         results = scored
@@ -232,15 +273,18 @@ export async function handleQueryMemories(ctx: SessionToolContext, args: { query
         .filter(entry => !store.sessionId || store.sessionId === ctx.sessionId)
         .filter(entry => !args.type || fold(entry.type) === args.type)
         .filter(entry => terms.some(term => entry.content.toLocaleLowerCase().includes(term)))
-        .map(entry => ({ type: fold(entry.type), content: entry.content, score: 1 })))
+        .map(entry => ({ type: fold(entry.type), content: entry.content, score: 1, stamp: formatMemoryStamp(entry.updatedAt ?? entry.createdAt) })))
     }
 
     const limit = args.limit ?? 10
     const unique = results
       .filter((entry, index, self) => self.findIndex(s => s.content === entry.content) === index)
       .slice(0, limit)
+    // Stamp prefix matches the injected <cross_session_memory> line format
+    // (`<time>: <content>`), so both read paths render identically. Entries
+    // with no usable timestamp degrade to the old stamp-less form.
     return ok(unique.length
-      ? unique.map(entry => `[${entry.type}] ${entry.content}`).join('\n')
+      ? unique.map(entry => `${entry.stamp ? `${entry.stamp}: ` : ''}[${entry.type}] ${entry.content}`).join('\n')
       : 'No relevant memories found.')
   } catch (cause) {
     return error(`Failed to query memories: ${cause instanceof Error ? cause.message : String(cause)}`)

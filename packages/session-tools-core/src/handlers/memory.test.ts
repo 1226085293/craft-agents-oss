@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import type { SessionToolContext } from '../context.ts'
 import { handleAddMemory, handleQueryMemories } from './memory.ts'
 
@@ -176,5 +176,139 @@ describe('memory tool scope isolation', () => {
 
     const global = JSON.parse(readFileSync(join(workspace, 'memory.json'), 'utf8')) as { entries: Array<{ id: string }> }
     expect(global.entries).toHaveLength(2)
+  })
+})
+
+describe('query_memories read-back timestamp', () => {
+  /** Seed a store directly so createdAt/updatedAt are under test control. */
+  function seed(workspace: string, scope: 'session' | 'global', sessionId: string, entries: Array<Record<string, unknown>>): void {
+    const path = scope === 'global'
+      ? join(workspace, 'memory.json')
+      : join(workspace, 'sessions', sessionId, 'memory.json')
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, JSON.stringify(
+      scope === 'global'
+        ? { version: 1, schemaVersion: 3, entries }
+        : { version: 1, sessionId, entries },
+      null, 2,
+    ))
+  }
+
+  it('renders the last-update stamp, matching the injected <cross_session_memory> line format', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'craft-memory-stamp-'))
+    dirs.push(workspace)
+    // 2026-10-16T13:00:00Z == 21:00 local (GMT+8) — the stamp is LOCAL time.
+    seed(workspace, 'global', 'session-a', [
+      { id: 'e1', type: 'factual', content: '构建命令是 bun build', createdAt: '2026-10-16T13:00:00.000Z' },
+    ])
+
+    const result = await handleQueryMemories(context(workspace, 'session-a'), { query: '构建命令' })
+    expect(result.isError).not.toBe(true)
+    // Same shape the injector emits: `<YYYY/M/D HH:mm>: [<type>] <content>`.
+    expect(result.content[0]?.text).toMatch(/^\d{4}\/\d{1,2}\/\d{1,2} \d{2}:\d{2}: \[factual\] 构建命令是 bun build$/)
+  })
+
+  it('prefers updatedAt over createdAt so a revised memory shows the revision time', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'craft-memory-stamp-'))
+    dirs.push(workspace)
+    seed(workspace, 'global', 'session-a', [
+      { id: 'e1', type: 'behavioral', content: '称呼改为「小二」', createdAt: '2026-10-10T02:00:00.000Z', updatedAt: '2026-10-16T13:30:00.000Z' },
+    ])
+
+    const result = await handleQueryMemories(context(workspace, 'session-a'), { query: '称呼' })
+    const text = result.content[0]?.text ?? ''
+    // Must carry the update day, NOT the creation day.
+    expect(text).toContain('2026/10/16')
+    expect(text).not.toContain('2026/10/10')
+  })
+
+  it('degrades to the stamp-less form when the entry has no usable timestamp', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'craft-memory-stamp-'))
+    dirs.push(workspace)
+    seed(workspace, 'global', 'session-a', [
+      { id: 'e1', type: 'factual', content: '无时间戳的旧条目' },
+    ])
+
+    const result = await handleQueryMemories(context(workspace, 'session-a'), { query: '时间戳' })
+    expect(result.isError).not.toBe(true)
+    // Old stores (pre-timestamp) must stay readable — no "Invalid Date".
+    expect(result.content[0]?.text).toBe('[factual] 无时间戳的旧条目')
+  })
+
+  it('treats an unparseable timestamp as absent rather than leaking "Invalid Date"', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'craft-memory-stamp-'))
+    dirs.push(workspace)
+    seed(workspace, 'global', 'session-a', [
+      { id: 'e1', type: 'factual', content: '坏时间戳条目', createdAt: 'not-a-date' },
+    ])
+
+    const result = await handleQueryMemories(context(workspace, 'session-a'), { query: '时间戳' })
+    expect(result.content[0]?.text).toBe('[factual] 坏时间戳条目')
+  })
+
+  it('stamps lexical-fallback hits too, so both retrieval stages agree', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'craft-memory-stamp-'))
+    dirs.push(workspace)
+    // No encodeEmbedding callback → stage 2 (keyword) path is exercised.
+    seed(workspace, 'session', 'session-a', [
+      { id: 's1', type: 'reminder', content: '记得在解锁后切回 intl 出口', createdAt: '2026-10-16T13:45:00.000Z' },
+    ])
+
+    const result = await handleQueryMemories(context(workspace, 'session-a'), { query: 'intl' })
+    expect(result.isError).not.toBe(true)
+    expect(result.content[0]?.text).toMatch(/^\d{4}\/\d{1,2}\/\d{1,2} \d{2}:\d{2}: \[reminder\] 记得在解锁后切回 intl 出口$/)
+  })
+
+  it('stamps the semantic path as well', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'craft-memory-stamp-'))
+    dirs.push(workspace)
+    seed(workspace, 'global', 'session-a', [
+      { id: 'e1', type: 'factual', content: '网关是 workbuddy2api-hub', createdAt: '2026-10-16T13:00:00.000Z' },
+    ])
+    const hashVec = (text: string): number[] => {
+      const v = new Array<number>(8).fill(0)
+      let h = 0
+      for (let i = 0; i < text.length; i++) h = (h * 131 + text.charCodeAt(i)) % 100000007
+      for (let i = 0; i < v.length; i++) v[i] = (Math.sin(h + i * 3.7) + 1) / 2
+      const norm = Math.sqrt(v.reduce((a, b) => a * b * b, 0)) || 1
+      return v.map(x => x / norm)
+    }
+    const semCtx = { ...context(workspace, 'session-a'), callbacks: { ...context(workspace, 'session-a').callbacks, encodeEmbedding: async (s: string) => hashVec(s) } }
+
+    const result = await handleQueryMemories(semCtx, { query: '网关' })
+    expect(result.isError).not.toBe(true)
+    if (result.content[0]?.text !== 'No relevant memories found.') {
+      expect(result.content[0]?.text).toMatch(/^\d{4}\/\d{1,2}\/\d{1,2} \d{2}:\d{2}: \[factual\] /)
+    }
+  })
+})
+
+describe('add_memory length budget', () => {
+  it('nudges toward a split when an entry would dominate the injection budget', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'craft-memory-len-'))
+    dirs.push(workspace)
+    const ctx = context(workspace, 'session-a')
+    // 1200 chars — well under the 4000 schema cap, over the ~800 soft budget.
+    const long = '诊断报告' + '。'.repeat(1196)
+    expect(long.length).toBe(1200)
+
+    const result = await handleAddMemory(ctx, { action: 'add', scope: 'global', content: long, type: 'factual' })
+    const text = result.content[0]?.text ?? ''
+    // Stored, not rejected — and the id is still extractable by the old regex.
+    expect(text).toMatch(/Added global memory [0-9a-f-]+\./)
+    expect(text).toContain('1200 chars')
+    expect(text).toContain('crowd out other memories')
+
+    const global = JSON.parse(readFileSync(join(workspace, 'memory.json'), 'utf8')) as { entries: Array<{ content: string }> }
+    expect(global.entries).toHaveLength(1)
+    expect(global.entries[0]?.content).toBe(long)
+  })
+
+  it('stays silent for an entry inside the budget', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'craft-memory-len-'))
+    dirs.push(workspace)
+    const ctx = context(workspace, 'session-a')
+    const result = await handleAddMemory(ctx, { action: 'add', scope: 'global', content: '网关是 workbuddy2api-hub，不是 uni-api', type: 'factual' })
+    expect(result.content[0]?.text).toMatch(/^Added global memory [0-9a-f-]+\.$/)
   })
 })

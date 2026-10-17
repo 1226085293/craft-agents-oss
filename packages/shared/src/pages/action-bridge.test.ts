@@ -81,11 +81,23 @@ describe('pages/action-bridge', () => {
     };
   }
 
-  async function readAudit(): Promise<Array<Record<string, unknown>>> {
-    // Audit writes are fire-and-forget; give the microtask queue a tick.
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    if (!existsSync(auditPath)) return [];
-    return readFileSync(auditPath, 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  async function readAudit(predicate?: (entries: Array<Record<string, unknown>>) => boolean): Promise<Array<Record<string, unknown>>> {
+    // Audit writes are fire-and-forget; the eviction test mounts 256 leases,
+    // each triggering its own appendFile, so a fixed sleep races disk writes.
+    // Poll until the predicate is satisfied (or we give up) instead.
+    const parse = (): Array<Record<string, unknown>> =>
+      readFileSync(auditPath, 'utf-8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      if (existsSync(auditPath)) {
+        const entries = parse();
+        if (!predicate || predicate(entries)) return entries;
+      }
+      if (Date.now() >= deadline) {
+        return existsSync(auditPath) ? parse() : [];
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
   }
 
   describe('happy path', () => {
@@ -526,7 +538,7 @@ describe('pages/action-bridge', () => {
 
       // …the newest works, and the eviction is on the audit trail.
       expect((await broker.executeAction(page, makeRequest(newest))).ok).toBe(true);
-      const audit = await readAudit();
+      const audit = await readAudit((entries) => entries.some((e) => e.event === 'page_lease_evicted'));
       const eviction = audit.find((e) => e.event === 'page_lease_evicted');
       expect(eviction?.leaseId).toBe(first.leaseId);
       expect(eviction?.reason).toBe('lease-store-full');

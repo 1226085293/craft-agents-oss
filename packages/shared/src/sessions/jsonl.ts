@@ -43,10 +43,32 @@ export function makeSessionPathPortable(jsonLine: string, sessionDir: string): s
 /**
  * Expand the portable session path token back to an absolute path.
  * Applied before JSON.parse so all path references resolve correctly at runtime.
+ *
+ * The session dir is inserted in JSON-escaped native form (backslashes doubled
+ * on Windows). The sub-path that follows the token was written by the model in
+ * native separators (e.g. `{{SESSION_PATH}}\\plans\\x.md`), so expanding to a
+ * forward-slash dir (the old `normalizePath` behavior) produced mixed-separator
+ * paths like `C:/.../dir\plans\x.md` that break URL routing and
+ * `shell.openExternal` on Windows. Native expansion keeps the whole path
+ * consistent. No-op on Unix where sessionDir has no backslashes.
  */
 export function expandSessionPath(jsonLine: string, sessionDir: string): string {
   if (!jsonLine.includes(SESSION_PATH_TOKEN)) return jsonLine;
-  return jsonLine.replaceAll(SESSION_PATH_TOKEN, normalizePath(sessionDir));
+  // jsonLine is the raw JSON text (pre-JSON.parse): backslashes in the value we
+  // insert must be JSON-escaped, JSON.parse restores them on the other side.
+  const jsonEscapedDir = sessionDir.replaceAll('\\', '\\\\');
+  return jsonLine.replaceAll(SESSION_PATH_TOKEN, jsonEscapedDir);
+}
+
+/**
+ * In-memory variant of expandSessionPath: expand the token inside a runtime
+ * string (tool args, loaded message content) rather than a raw JSON line.
+ * Sub-paths follow the token in native separators, so insert the session
+ * directory as-is (no JSON escaping, no forward-slash normalization).
+ */
+export function expandSessionPathInMemory(value: string, sessionDir: string): string {
+  if (!value.includes(SESSION_PATH_TOKEN)) return value;
+  return value.replaceAll(SESSION_PATH_TOKEN, sessionDir);
 }
 
 function normalizePermissionMode(value: unknown): PermissionMode | undefined {

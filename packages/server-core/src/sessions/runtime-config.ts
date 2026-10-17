@@ -64,6 +64,18 @@ function normalizeCustomModels(connection: LlmConnection): Array<Record<string, 
  * fully reset on a runtime update. Likewise an API key rotation: the running
  * subprocess holds the key it was spawned with, so a changed key must also
  * route through dispose + recreate.
+ *
+ * `baseUrl` needs the same treatment. `update_runtime_config` DOES
+ * carry it and `registerCustomEndpointModels` re-registers the provider
+ * with the new URL, but the live `AgentSession` keeps resolving models
+ * through the object it captured at session creation — so the re-registered
+ * URL is only honoured by the NEXT session, not the running one. That gap is
+ * what produced the 2026-10-15 261014-misty-wren incident: a session whose
+ * `baseUrl` was repointed at a now-dead local capture proxy kept retrying
+ * against that dead port forever (9 consecutive `Connection error.` retries,
+ * nothing ever re-read the corrected `baseUrl`). A `baseUrl` change therefore
+ * belongs in this signature: dispose + recreate so the new endpoint is read
+ * fresh from config.
  */
 export function buildRestartRequiredSignature(input: BackendRuntimeSignatureInput): string {
   const { connection, provider, authType, apiKeyFingerprint } = input
@@ -73,6 +85,12 @@ export function buildRestartRequiredSignature(input: BackendRuntimeSignatureInpu
     slug: connection?.slug,
     providerType: connection?.providerType,
     piAuthProvider: connection?.piAuthProvider,
+    // Only for compat providers: those are the connections that carry a
+    // `baseUrl` at all (Anthropic-native connections route through the SDK's
+    // own provider and have no endpoint to drift).
+    ...(connection && isCompatProvider(connection.providerType)
+      ? { baseUrl: connection.baseUrl }
+      : {}),
     apiKeyFingerprint,
   }))
 }

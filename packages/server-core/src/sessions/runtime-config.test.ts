@@ -65,6 +65,46 @@ describe('buildRestartRequiredSignature', () => {
     expect(without).not.toContain('apiKeyFingerprint')
     expect(without).not.toBe(withFingerprint)
   })
+
+  // 2026-10-15, session 261014-misty-wren: a session whose baseUrl was
+  // repointed at a temporary local capture proxy kept retrying against that
+  // dead port forever (9 consecutive `Connection error.` retries) because
+  // `baseUrl` was only in the in-place signature — the in-place path cannot
+  // re-route an already-created AgentSession. baseUrl must force recreate.
+  it('drifts when baseUrl changes (a stale endpoint must force recreate, not in-place refresh)', () => {
+    const before = buildRestartRequiredSignature(restartInput())
+    const after = buildRestartRequiredSignature({
+      ...restartInput(),
+      connection: { ...baseCompat, baseUrl: 'http://127.0.0.1:9999/v1' },
+    })
+
+    expect(after).not.toBe(before)
+  })
+
+  it('stays stable when baseUrl is unchanged (no spurious restarts)', () => {
+    const before = buildRestartRequiredSignature(restartInput())
+    const after = buildRestartRequiredSignature({
+      ...restartInput(),
+      connection: { ...baseCompat },
+    })
+
+    expect(after).toBe(before)
+  })
+
+  it('ignores baseUrl for non-compat providers (Anthropic-native has no endpoint to drift)', () => {
+    const anthropic: LlmConnection = {
+      ...baseCompat,
+      providerType: 'anthropic',
+      baseUrl: 'http://127.0.0.1:1111/v1',
+    }
+    const sigA = buildRestartRequiredSignature({ ...restartInput(), connection: anthropic })
+    const sigB = buildRestartRequiredSignature({
+      ...restartInput(),
+      connection: { ...anthropic, baseUrl: 'http://127.0.0.1:2222/v1' },
+    })
+
+    expect(sigB).toBe(sigA)
+  })
 })
 
 describe('buildBackendRuntimeSignature', () => {

@@ -38,7 +38,11 @@ export default defineConfig({
   build: {
     outDir: resolve(__dirname, 'dist/renderer'),
     emptyDirBeforeWrite: true,
-    sourcemap: true,  // Source maps generated for debugging. Not uploaded to Sentry (see CLAUDE.md).
+    // Source maps are opt-in via CRAFT_RENDERER_SOURCEMAP=1 for local debugging.
+    // They are NOT uploaded to Sentry (see CLAUDE.md) and were excluded from the
+    // installer anyway — generating them cost ~39 MB of output and roughly half
+    // the renderer build time (measured 87s vs 39s on 2026-10-16).
+    sourcemap: process.env.CRAFT_RENDERER_SOURCEMAP === '1',
     rollupOptions: {
       input: {
         main: resolve(__dirname, 'src/renderer/index.html'),

@@ -16,6 +16,11 @@ $RootDir = Split-Path -Parent (Split-Path -Parent $ElectronDir)
 # Configuration
 $BunVersion = "bun-v1.3.9"  # Pinned version for reproducible builds
 
+# Output directory for the installer. Defaults to `release`, but can be
+# overridden when that directory is unavailable (e.g. a stale
+# release/win-unpacked/resources/app.asar still held open by another process).
+$OutDir = if ($env:CRAFT_BUILD_OUT_DIR) { $env:CRAFT_BUILD_OUT_DIR } else { "release" }
+
 Write-Host "=== Building Craft Agents Windows Installer using electron-builder ===" -ForegroundColor Cyan
 
 # Debug: System information
@@ -80,6 +85,39 @@ if (-not $SkipProcessKill) {
     Start-Sleep -Seconds 2
 } else {
     Write-Host "Skipping process kill (-SkipProcessKill)." -ForegroundColor Yellow
+    # Still clear STALE BUILD LEFTOVERS that hold locks on the release dir.
+    # Killing all node/npm would terminate the caller's own pipeline, so match
+    # precisely: only processes whose command line references the build output
+    # dir (previous electron-builder/node children) are targets. Without this a
+    # locked release\win-unpacked\resources\app.asar makes every retry fail and
+    # the whole run burns 3x (build + retries) for nothing.
+    # Release dir may appear in a command line with either separator
+    # (electron-builder uses backslashes, hand-rolled node probes often use
+    # forward slashes), so match on a separator-agnostic form.
+    # NOTE: use String.Replace(), NOT `-replace '\\','/'` — the regex form
+    # yields an empty pattern here and would then match every process.
+    $releaseDir = Join-Path $ElectronDir $OutDir
+    $releaseDirFwd = $releaseDir.Replace('\', '/')
+    $stale = Get-CimInstance Win32_Process -Filter "Name='node.exe' or Name='powershell.exe' or Name='pwsh.exe'" |
+        Where-Object { $_.CommandLine -and ($_.CommandLine.Contains($releaseDir) -or $_.CommandLine.Contains($releaseDirFwd)) -and $_.ProcessId -ne $PID }
+    if ($stale) {
+        foreach ($proc in $stale) {
+            Write-Host "  Killing stale build process $($proc.ProcessId) (holds lock on release dir)" -ForegroundColor Yellow
+            Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 3
+        # Verify the lock is gone; a still-locked app.asar is the #1 cause of
+        # ERR_ELECTRON_BUILDER_CANNOT_EXECUTE.
+        $asarPath = Join-Path $releaseDir "win-unpacked\resources\app.asar"
+        if (Test-Path $asarPath) {
+            Remove-Item $asarPath -Force -ErrorAction SilentlyContinue
+            if (Test-Path $asarPath) {
+                Write-Host "  WARNING: $asarPath is still locked. Delete it manually or close the app holding it." -ForegroundColor Red
+            } else {
+                Write-Host "  release dir lock cleared" -ForegroundColor Green
+            }
+        }
+    }
 }
 
 # 1. Clean previous build artifacts (with retry for locked files)
@@ -87,8 +125,10 @@ Write-Host "Cleaning previous builds..."
 $foldersToClean = @(
     "$ElectronDir\vendor",
     "$ElectronDir\node_modules\@anthropic-ai",
-    "$ElectronDir\packages",
-    "$ElectronDir\release"
+    "$ElectronDir\packages"
+    # NOTE: `$ElectronDir\release` is deliberately NOT cleaned here. The packer
+    # below manages $OutDir itself, and wiping it up front fails when a previous
+    # run's app.asar is still held open by another process.
 )
 foreach ($folder in $foldersToClean) {
     if (Test-Path $folder) {
@@ -545,22 +585,23 @@ while (-not $builderSuccess -and $builderRetry -lt $maxBuilderRetries) {
     $builderRetry++
     Write-Host "  electron-builder attempt $builderRetry of $maxBuilderRetries..." -ForegroundColor Cyan
 
-    # Clean release directory before each attempt to avoid stale files
-    if (Test-Path "$ElectronDir\release") {
-        Write-Host "  Cleaning release directory before attempt..."
-        Remove-Item -Recurse -Force "$ElectronDir\release" -ErrorAction SilentlyContinue
+    # Clean the output directory before each attempt to avoid stale files
+    $OutDirAbs = Join-Path $ElectronDir $OutDir
+    if (Test-Path $OutDirAbs) {
+        Write-Host "  Cleaning output directory ($OutDir) before attempt..."
+        Remove-Item -Recurse -Force $OutDirAbs -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 1
     }
-    New-Item -ItemType Directory -Force -Path "$ElectronDir\release" | Out-Null
+    New-Item -ItemType Directory -Force -Path $OutDirAbs | Out-Null
 
     # Prefer the bun-generated .bin shim (bun install creates no .cmd shims, so
     # plain `npx` fails with "not recognized"); fall back to npx like the
     # esbuild/vite call sites above.
     $ElectronBuilderExe = Join-Path $RootDir "node_modules\.bin\electron-builder.exe"
     if (Test-Path $ElectronBuilderExe) {
-        & $ElectronBuilderExe --win --x64 2>&1 | Tee-Object -Variable builderOutput
+        & $ElectronBuilderExe --win --x64 "-c.directories.output=$OutDir" 2>&1 | Tee-Object -Variable builderOutput
     } else {
-        npx electron-builder --win --x64 2>&1 | Tee-Object -Variable builderOutput
+        npx electron-builder --win --x64 "-c.directories.output=$OutDir" 2>&1 | Tee-Object -Variable builderOutput
     }
 
     if ($LASTEXITCODE -eq 0) {
@@ -597,12 +638,12 @@ if (-not $builderSuccess) {
 }
 
 # 8. Verify the installer was built
-$InstallerPath = Get-ChildItem -Path "$ElectronDir\release" -Filter "*.exe" | Select-Object -First 1
+$InstallerPath = Get-ChildItem -Path $OutDirAbs -Filter "*.exe" | Select-Object -First 1
 
 if (-not $InstallerPath) {
-    Write-Host "ERROR: Installer not found in $ElectronDir\release" -ForegroundColor Red
-    Write-Host "Contents of release directory:"
-    Get-ChildItem "$ElectronDir\release"
+    Write-Host "ERROR: Installer not found in $OutDirAbs" -ForegroundColor Red
+    Write-Host "Contents of output directory:"
+    Get-ChildItem $OutDirAbs
     exit 1
 }
 
@@ -610,3 +651,9 @@ Write-Host ""
 Write-Host "=== Build Complete ===" -ForegroundColor Green
 Write-Host "Installer: $($InstallerPath.FullName)"
 Write-Host "Size: $([math]::Round($InstallerPath.Length / 1MB, 2)) MB"
+
+# Explicit success code. Without it $LASTEXITCODE keeps whatever the last
+# external process (electron-builder / bun / npm) left behind — callers that
+# check `if ($LASTEXITCODE -ne 0) { throw }` then report a failure for a
+# build that actually succeeded (2026-10-17, build-install-restart-win.ps1).
+exit 0

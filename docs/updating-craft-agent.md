@@ -40,24 +40,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-install-restart-win.
 
 当 **Craft Agents 的 agent 会话**（非人工终端）执行更新时：
 
-1. **不要直接运行 `build-win.ps1` 或 `build-install-restart-win.ps1` 的完整构建**——
-   `build-win.ps1` 会终止所有 `node` / `npm` / `electron` / `electron-builder` 进程，
+1. **不要不带 `-SkipProcessKill` 直接运行完整构建**——
+   `build-win.ps1` 默认会终止所有 `node` / `npm` / `electron` / `electron-builder` 进程，
    这会**杀掉调用者自己的命令管道**（表现为立刻 `Command timed out after 2 seconds`），
    甚至可能波及宿主应用。这是 2026-10-10 实测踩坑。
+   **带上 `-SkipProcessKill` 就是安全的**（含 electron-builder 重试分支）。
 2. **推荐在 agent 会话内走后台独立打包**，二选一：
 
-   **A. 完整管线（推荐）**：后台运行 `build-win.ps1`，它包含全部 staging 步骤
-   （vendor/bun、SDK 二进制、ripgrep、interceptor / wa-worker / pi-agent-server 构建）：
+   **A. 一条命令跑完整管线（推荐）**：构建 → 校验 installer 时间戳 → 安装 → 重启，一次调用完成：
 
    ```powershell
-   # 日志重定向后轮询，直到 apps/electron/release/Craft-Agents-x64.exe 生成
-   powershell -NoProfile -ExecutionPolicy Bypass -File "<repo>\apps\electron\scripts\build-win.ps1" -SkipProcessKill -SkipDependencyInstall
+   powershell -NoProfile -ExecutionPolicy Bypass -File "<repo>\build-install-restart-win.ps1" -SkipProcessKill -SkipDependencyInstall
    ```
 
-   - `-SkipProcessKill`：全程不杀 `node`/`npm` 进程——**包括 electron-builder 失败重试分支**
-     （`build-win.ps1` 已按此约定实现；2026-10-12 修复前重试分支仍会杀进程，
-     agent 会话内打包失败会波及宿主）。
-   - `-SkipDependencyInstall`：依赖刚装过或确认 `bun install` 无变化时用，省 2-3 分钟。
+   - `-SkipProcessKill`：**agent 会话内必带**，否则 `build-win.ps1` 会杀掉 node/npm（含调用者自己的管道）。
+   - `-SkipDependencyInstall`：依赖未变时用，省 2-3 分钟。
+   - 只构建不安装：改用 `apps/electron/scripts/build-win.ps1`（同两个开关，含全部 staging）。
 
    **B. 快捷路径（仅刷新 dist，staging 产物已知最新时）**：先 `bun run electron:build`，
    再用 `Start-Process` 后台运行 electron-builder，**工作目录必须是 `apps/electron`**
@@ -78,8 +76,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build-install-restart-win.
 3. **安装前必须核对安装包时间戳**：`apps/electron/release/Craft-Agents-x64.exe`
    （不是仓库根目录的 `release/`）的 `LastWriteTime` 必须晚于本次构建开始时间。脚本已内置校验（构建模式下拒绝旧包），但手动运行时
    仍要自查——2026-10-10 曾因打包被截断而误装 18:27 旧包，用户看到旧版界面。
-4. 安装/重启步骤可交回 `build-install-restart-win.ps1 -SkipBuild` 执行（它用 detached
-   helper 处理宿主中断，脚本本身安全）。
+4. 安装/重启默认已由上一条命令完成（脚本内部用 detached helper 处理宿主中断，
+   脚本本身安全）。只有"已构建好、只想安装"时才单独跑
+   `build-install-restart-win.ps1 -SkipBuild`。
 
 ### 验证更新是否成功（Windows）
 

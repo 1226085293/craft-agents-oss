@@ -17,9 +17,20 @@ coverage
 # logs
 logs
 _.log
+*.log
 report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # local build/install helper log
 update-build.log
+# Build/install run artifacts (regenerated on every rebuild via the
+# A-path commands in docs/updating-craft-agent.md)
+build-win.log
+build-win-err.log
+install-restart.log
+build-start.time
+# Manual build backups made before risky packaging changes
+.build-backup-*/
+release.bak-*/
+release2/
 
 # dotenv environment variable files
 .env

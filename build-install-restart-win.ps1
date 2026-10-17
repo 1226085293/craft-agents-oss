@@ -43,9 +43,15 @@ $BuildStartedAt = Get-Date
 if (-not $SkipBuild) {
     Write-Host ""
     Write-Host "=== Building installer ===" -ForegroundColor Cyan
-    $BuildArgs = @()
-    if ($SkipDependencyInstall) { $BuildArgs += "-SkipDependencyInstall" }
-    if ($SkipProcessKill) { $BuildArgs += "-SkipProcessKill" }
+    # Splat as a HASHTABLE, not a string array. An array of "-Flag" strings
+    # splatted with @Args is passed as POSITIONAL arguments (PowerShell never
+    # re-parses the dash prefix), so build-win.ps1's switch params fail to bind
+    # with "A positional parameter cannot be found that accepts argument
+    # '-SkipDependencyInstall'" (2026-10-17, found while rebuilding after the
+    # compaction-UI fix).
+    $BuildArgs = @{}
+    if ($SkipDependencyInstall) { $BuildArgs.SkipDependencyInstall = $true }
+    if ($SkipProcessKill) { $BuildArgs.SkipProcessKill = $true }
     & $BuildScript @BuildArgs
     if ($LASTEXITCODE -ne 0) {
         throw "build-win.ps1 failed with exit code $LASTEXITCODE"

@@ -7,14 +7,31 @@ electronVersion: "39.2.7"
 # Hook to compile macOS 26+ Liquid Glass icon after packaging
 afterPack: scripts/afterPack.cjs
 
+# Top-level packager option (valid schema location). "maximum" = solid LZMA with
+# the largest dictionary → smallest installer at the cost of a slower compression
+# pass. This offsets the size cost of bundling the embedding runtime.
+compression: maximum
+
+# Only ship the Chromium locale packs we actually reach (en-US + zh-CN).
+# Electron's default set is 55 packs ≈ 45 MB of locale .pak files that are never
+# loadable by this app. Trimming them shrinks both win-unpacked and the NSIS
+# compression input.
+# NOTE: the schema key is `electronLanguages` (a top-level `languages` key is
+# rejected with ValidationError).
+electronLanguages:
+  - en-US
+  - zh-CN
+
 directories:
   output: release
   buildResources: resources
 
+# NOTE: electron-builder's minimatchAll is "last matching pattern wins".
+  # All negative ("!") patterns MUST come after every positive pattern below,
+  # otherwise a later positive glob (e.g. node_modules/**/*) re-includes
+  # what an earlier "!" excluded (this silently shipped 111 MB of .map files).
 files:
   - dist/**/*
-  - "!dist/renderer/src/**"
-  - "!**/*.map"
   - package.json
   # Include bundled MCP servers (bridge + session) for Codex sessions
   - resources/bridge-mcp-server/**/*
@@ -60,6 +77,32 @@ files:
   # as authoritative and would otherwise drop every dependency (filesCount=0).
   # node_modules/**/*
   - "node_modules/**/*"
+  # ------------------------------------------------------------------
+  # Exclusions — MUST stay at the END of this list (last-match-wins).
+  # ------------------------------------------------------------------
+  # Never ship source maps (vite sourcemap:true + npm packages) — 150 MB dead weight.
+  - "!**/*.map"
+  # Never ship the stray "~" dir (old home-dir copies leak session transcripts).
+  - "!~/**/*"
+  - "!dist/renderer/src/**"
+  # Never ship dev-only source/config that is not needed at runtime.
+  - "!src/**/*"
+  - "!scripts/**/*"
+  - "!eslint-rules/**/*"
+  - "!build/**/*"
+  - "!vite.config.ts"
+  - "!tsconfig.json"
+  - "!components.json"
+  - "!eslint.config.mjs"
+  - "!README.md"
+  # SDK ships a thin core + per-platform binary pkg. On Windows only the
+  # target arch (x64) is needed; drop the other platform packages (~208 MB
+  # of duplicate claude.exe). The runtime resolver checks the stable
+  # claude-agent-sdk-binary alias first (runtime-resolver.ts), which is
+  # staged by build-win.ps1, so these are pure duplicates.
+  - "!node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**"
+  - "!node_modules/@anthropic-ai/claude-agent-sdk-darwin*/**"
+  - "!node_modules/@anthropic-ai/claude-agent-sdk-linux*/**"
 
 # Since SDK 0.2.113 the SDK ships a thin core (`@anthropic-ai/claude-agent-sdk`)
 # and a per-platform optional dependency (`-darwin-arm64`, `-darwin-x64`, etc.)
@@ -83,8 +126,43 @@ publish:
   owner: 1226085293
   repo: craft-agents-oss
 
-# Disable ASAR to avoid decompression overhead and click delays
-asar: false
+# Re-enable ASAR: collapses ~43k loose files into one archive, which makes
+# the electron-builder copy/collect stage far faster (the previous asar:false
+# shipped a ~2.2 GB loose tree). asarUnpack below keeps everything that must
+# be a real file on disk (native binaries, executables, ONNX runtime/model,
+# Bun/uv, subprocess entry points).
+asar: true
+# Files that MUST be real paths at runtime are unpacked out of app.asar.
+asarUnpack:
+  # Native Anthropic SDK binary (claude.exe) — spawned as a subprocess.
+  - "**/node_modules/@anthropic-ai/**"
+  # onnxruntime native bindings + bundled embedding model.
+  - "**/node_modules/onnxruntime-node/**"
+  - "**/node_modules/onnxruntime-web/**"
+  - "**/node_modules/@img/sharp*/**"
+  - "**/resources/models/**"
+  # koffi native FFI libs.
+  - "**/node_modules/koffi/**"
+  # ------------------------------------------------------------------
+  # Subprocess entry points. These are passed as ARGUMENTS to an external
+  # bun.exe / node.exe spawn (pi-agent.ts), which CANNOT read inside
+  # app.asar — they must be real files on disk.
+  #   - packages/shared/src/agent/pi-agent.ts:1605 spawns bun with
+  #     [piServerPath] and `--preload <interceptorPath>`
+  #   - runtime-resolver.ts resolveServerPath() returns dist/resources/<name>/index.js
+  # ------------------------------------------------------------------
+  - "**/dist/resources/pi-agent-server/**"
+  - "**/dist/resources/session-mcp-server/**"
+  - "**/dist/resources/bridge-mcp-server/**"
+  - "**/dist/interceptor.cjs"
+  # CLI tool wrappers + Python scripts are exposed to agent Bash sessions via
+  # PATH prepend and CRAFT_SCRIPTS (apps/electron/src/main/index.ts:144-178),
+  # then executed by an EXTERNAL shell / `uv run` — they cannot live in asar.
+  - "**/dist/resources/bin/**"
+  - "**/dist/resources/scripts/**"
+  # Bundled docs (e.g. CRAFT_COMMANDS_DOC_PATH) are opened by the agent from
+  # its own subprocess, which cannot read inside app.asar.
+  - "**/dist/resources/docs/**"
 
 mac:
   category: public.app-category.productivity
@@ -199,6 +277,23 @@ win:
     # See: https://github.com/electron-userland/electron-builder/issues/8250
     - "!vendor/bun/**/*"
     - "!**/resources/bin/win32-x64/**"
+    # ------------------------------------------------------------------
+    # Exclusions — MUST stay at the END of this list (last-match-wins).
+    # ------------------------------------------------------------------
+    # copy-assets.ts copies resources/ -> dist/resources/, so uv.exe exists in BOTH
+    # dist/resources/bin/win32-x64/ (via dist/**/*) and resources/bin/win32-x64
+    # (via the extraResources copy below). The main process resolves
+    # <resources>/app/resources/bin/win32-x64/uv.exe (apps/electron/src/main/index.ts),
+    # so the dist copy is 57 MB of pure duplicate. Keep the extraResources one.
+    - "!dist/resources/bin/win32-x64/**"
+    # onnxruntime-node ships native binaries for every platform (~288 MB total).
+    # The Electron main process only loads win32/x64. Exclude the rest.
+    - "!node_modules/onnxruntime-node/bin/napi-v6/darwin*/**"
+    - "!node_modules/onnxruntime-node/bin/napi-v6/linux*/**"
+    - "!node_modules/onnxruntime-node/bin/napi-v6/win32-arm64/**"
+    # Re-assert source-map exclusion for the win target (parity with root `files`;
+    # platform-specific `files` are merged, so keep it last to win).
+    - "!**/*.map"
   # Copy executables as extraResources to avoid EBUSY file locking (see comment above)
   extraResources:
     - from: node_modules/@anthropic-ai/claude-agent-sdk
@@ -230,6 +325,21 @@ nsis:
   # Bun subprocess cannot read/write files in Program Files due to Windows permissions.
   perMachine: false
   deleteAppDataOnUninstall: true
+  # Ship a single-arch installer whose embedded app archive uses SOLID
+  # compression. electron-builder's default (`differentialPackage` enabled)
+  # forces solid=false + dictSize=1MB so the auto-updater can build small
+  # differential downloads — but that roughly doubles the installer size
+  # (~268 MB -> ~570 MB measured 2026-10-16) and makes the 7z stage the
+  # dominant build cost (~7 min). Local/self-hosted builds value size and
+  # build time over differential update traffic.
+  differentialPackage: false
+  # Only bundle the locales we actually ship UI for (en-US + zh-CN).
+  # Chromium's default 55 packs cost ~45 MB and are never reachable.
+  # Values are locale codes (mapped to NSIS language names: en_US->English,
+  # zh_CN->SimpChinese); display names are rejected by electron-builder.
+  installerLanguages:
+    - en_US
+    - zh_CN
 
 linux:
   icon: resources/icon.png

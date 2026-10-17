@@ -245,6 +245,89 @@ describe('assembler', () => {
   });
 });
 
+describe('assembler: per-source MCP categories', () => {
+  const mkDef = (name: string, description = 'd') => ({
+    name, description, inputSchema: { type: 'object' },
+  });
+  const session = [...ALL_TOOLS].map((n) => mkDef(SESSION_PREFIX + n));
+  const layered = {
+    mode: 'layered' as const,
+    fixedLayer: [],
+    categories: DEFAULT_TOOL_CATEGORIES.categories,
+    enterThresholdTokens: 8000,
+    byTool: new Map(DEFAULT_TOOL_CATEGORIES.categories.flatMap((c) => c.tools.map((t) => [t, c] as const))),
+  };
+  const mcp = [
+    mkDef('mcp__codegraph__codegraph_explore'),
+    mkDef('mcp__chrome-devtools__click'),
+    mkDef('mcp__unmapped__tool'),
+  ];
+  const slugMap = new Map([
+    ['mcp__codegraph__codegraph_explore', 'codegraph'],
+    ['mcp__chrome-devtools__click', 'chrome-devtools'],
+  ]);
+
+  it('buckets MCP tools per source and exposes tools_<slug> meta tools', () => {
+    const a = assembleTools(layered, session, mcp, { mcpToolSlugs: slugMap });
+    expect(a.registry.get('mcp__codegraph__codegraph_explore')!.category).toBe('codegraph');
+    expect(a.registry.get('mcp__chrome-devtools__click')!.category).toBe('chrome-devtools');
+    // no slug mapping → misc fallback
+    expect(a.registry.get('mcp__unmapped__tool')!.category).toBe(MISC_CATEGORY_NAME);
+
+    const metaNames = a.metaTools.map((m) => m.name);
+    expect(metaNames).toContain(SESSION_PREFIX + 'tools_codegraph');
+    expect(metaNames).toContain(SESSION_PREFIX + 'tools_chrome-devtools');
+    // meta tools stay parameter-less but well-formed
+    for (const meta of a.metaTools) {
+      expect((meta.inputSchema as { type?: string }).type).toBe('object');
+    }
+
+    // expand('tools_codegraph') resolves and lists only that source's tools
+    expect(a.categoriesByName.has('codegraph')).toBe(true);
+    const payload = buildExpandPayload(a.categoriesByName.get('codegraph')!, a.registry);
+    expect(payload.tools.map((t) => t.name)).toEqual(['mcp__codegraph__codegraph_explore']);
+  });
+
+  it('misc stays resolvable so a lazily registered tools_misc can be expanded', () => {
+    const a = assembleTools(layered, session, mcp, { mcpToolSlugs: slugMap });
+    expect(a.categoriesByName.has(MISC_CATEGORY_NAME)).toBe(true);
+    const payload = buildExpandPayload(a.categoriesByName.get(MISC_CATEGORY_NAME)!, a.registry);
+    expect(payload.tools.map((t) => t.name)).toEqual(['mcp__unmapped__tool']);
+    // misc must not get an eager meta tool (it is lazily registered)
+    expect(a.metaTools.some((m) => m.name === SESSION_PREFIX + 'tools_misc')).toBe(false);
+  });
+
+  it('sanitizes slugs into legal category/tool names', () => {
+    const a = assembleTools(layered, session, [mkDef('mcp__my.source__x')], {
+      mcpToolSlugs: new Map([['mcp__my.source__x', 'my.source']]),
+    });
+    expect(a.registry.get('mcp__my.source__x')!.category).toBe('my_source');
+    expect(a.metaTools.some((m) => m.name === SESSION_PREFIX + 'tools_my_source')).toBe(true);
+  });
+
+  it('re-assembly after a source is removed drops its entries and category', () => {
+    const withCodegraph = assembleTools(layered, session, mcp, { mcpToolSlugs: slugMap });
+    expect(withCodegraph.categoriesByName.has('codegraph')).toBe(true);
+
+    // Next sync no longer includes the codegraph source (only/exclude scope).
+    const remaining = [mkDef('mcp__chrome-devtools__click')];
+    const a = assembleTools(layered, session, remaining, {
+      mcpToolSlugs: new Map([['mcp__chrome-devtools__click', 'chrome-devtools']]),
+    });
+    expect(a.registry.has('mcp__codegraph__codegraph_explore')).toBe(false);
+    expect(a.categoriesByName.has('codegraph')).toBe(false);
+    expect(a.metaTools.some((m) => m.name === SESSION_PREFIX + 'tools_codegraph')).toBe(false);
+  });
+
+  it('flat mode is unaffected by per-source bucketing', () => {
+    const flat = { ...layered, mode: 'flat' as const };
+    const a = assembleTools(flat, session, mcp, { mcpToolSlugs: slugMap });
+    expect(a.mode).toBe('flat');
+    expect(a.topLevel.length).toBe(ALL_TOOLS.length + mcp.length);
+    expect(a.metaTools.length).toBe(0);
+  });
+});
+
 describe('invariants (spec §5/§6)', () => {
   const mkDef = (name: string, description = 'd', inputSchema: Record<string, unknown> = {}) => ({
     name, description, inputSchema,

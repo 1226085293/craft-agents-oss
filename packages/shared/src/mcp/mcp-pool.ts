@@ -360,20 +360,27 @@ export class McpClientPool {
 
   /**
    * Disconnect all sources and clear all state.
+   *
+   * `keepDefs` preserves cached tool definitions (toolCache/proxyTools) and the
+   * lazy reconnect configs while closing the processes. Used by the idle
+   * disconnect path: the model keeps seeing the tools and lazy sources can
+   * reconnect on first call without waiting for the next source sync.
    */
-  async disconnectAll(): Promise<void> {
+  async disconnectAll(keepDefs = false): Promise<void> {
     for (const timer of this.lazyIdleTimers.values()) clearTimeout(timer);
     this.lazyIdleTimers.clear();
 
     const closePromises = Array.from(this.clients.values()).map(c => c.close().catch(() => {}));
     await Promise.all(closePromises);
     this.clients.clear();
-    this.toolCache.clear();
-    this.proxyTools.clear();
-    this.activeConfigs.clear();
-    this.pendingLazyConfigs.clear();
-    this.probedLazyConfigs.clear();
-    this.debug('Disconnected all MCP clients');
+    if (!keepDefs) {
+      this.toolCache.clear();
+      this.proxyTools.clear();
+      this.activeConfigs.clear();
+      this.pendingLazyConfigs.clear();
+      this.probedLazyConfigs.clear();
+    }
+    this.debug(`Disconnected all MCP clients${keepDefs ? ' (defs kept)' : ''}`);
   }
 
   // ============================================================
@@ -556,6 +563,18 @@ export class McpClientPool {
     }
 
     return defs;
+  }
+
+  /**
+   * Map proxy tool name (mcp__{slug}__{tool}) → source slug.
+   * Used by tool layering to bucket MCP tools into per-source categories.
+   */
+  getProxyToolSlugs(): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const [proxyName, info] of this.proxyTools) {
+      map.set(proxyName, info.slug);
+    }
+    return map;
   }
 
   // ============================================================

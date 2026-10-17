@@ -78,3 +78,54 @@ describe('McpClientPool.ensureConnected', () => {
     }
   });
 });
+
+describe('McpClientPool.getProxyToolSlugs', () => {
+  class ToolsPool extends McpClientPool {
+    override async connect(slug: string, config: SdkMcpServerConfig): Promise<void> {
+      const fake: PoolClient = {
+        listTools: async () => [
+          { name: 'search_code', description: 'd', inputSchema: { type: 'object' } },
+          { name: 'pat.batch', description: 'd', inputSchema: { type: 'object' } },
+        ],
+        callTool: async () => ({ content: [] }),
+        close: async () => {},
+      };
+      await this.registerClient(slug, fake);
+      this.activeConfigs.set(slug, config);
+    }
+  }
+
+  test('maps proxy tool names (incl. sanitized) to source slugs', async () => {
+    const pool = new ToolsPool();
+    await pool.connect('github', httpConfig('a'));
+    const map = pool.getProxyToolSlugs();
+    expect(map.get('mcp__github__search_code')).toBe('github');
+    expect(map.get('mcp__github__pat_batch')).toBe('github');
+    expect(map.size).toBe(2);
+  });
+
+  test('drops mappings when a source is disconnected without keeping defs', async () => {
+    const pool = new ToolsPool();
+    await pool.connect('github', httpConfig('a'));
+    await pool.disconnect('github');
+    expect(pool.getProxyToolSlugs().size).toBe(0);
+  });
+
+  test('keeps defs (and mappings) on idle-style disconnectAll(true)', async () => {
+    const pool = new ToolsPool();
+    await pool.connect('github', httpConfig('a'));
+    await pool.disconnectAll(true);
+    expect(pool.isConnected('github')).toBe(false);
+    // Defs survive so the model keeps seeing the tools and lazy sources can reconnect.
+    expect(pool.getProxyToolDefs().length).toBe(2);
+    expect(pool.getProxyToolSlugs().get('mcp__github__search_code')).toBe('github');
+  });
+
+  test('clears everything on plain disconnectAll()', async () => {
+    const pool = new ToolsPool();
+    await pool.connect('github', httpConfig('a'));
+    await pool.disconnectAll();
+    expect(pool.getProxyToolDefs().length).toBe(0);
+    expect(pool.getProxyToolSlugs().size).toBe(0);
+  });
+});

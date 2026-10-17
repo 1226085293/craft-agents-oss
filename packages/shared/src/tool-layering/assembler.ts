@@ -46,6 +46,13 @@ export interface RegistryEntry {
   fixed: boolean;
 }
 
+/** Optional inputs for per-source MCP categories (layered mode). */
+export interface AssembleOptions {
+  /** Proxy tool name (mcp__{slug}__{tool}) → source slug. Enables dynamic
+   *  per-source categories (tools_<slug>) instead of the misc bucket. */
+  mcpToolSlugs?: Map<string, string>;
+}
+
 export interface AssembledTools {
   mode: 'flat' | 'layered';
   /** register_tools payload: what the model sees top-level. */
@@ -110,9 +117,15 @@ export function stripToolPrefix(fullName: string): string {
   return fullName;
 }
 
+/** Category name must be a legal tool-name segment (tools_<cat>). */
+export function sanitizeCategoryName(slug: string): string {
+  return slug.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
 function bucketFor(
   fullName: string,
   layering: ResolvedToolLayering,
+  mcpToolSlugs?: Map<string, string>,
 ): { category: string; fixed: boolean } {
   const callName = stripToolPrefix(fullName);
   // Fixed layer by either form (config uses plain names, registry has prefixes)
@@ -122,6 +135,11 @@ function bucketFor(
   // Session tools are bucketed by plain name; MCP tools by full name
   const cat = layering.byTool.get(callName) ?? layering.byTool.get(fullName);
   if (cat) return { category: cat.name, fixed: false };
+  // MCP source tools get their own per-source category (tools_<slug>) so any
+  // new source is discoverable without editing config or guide text. Tools
+  // without a slug mapping fall back to the misc bucket.
+  const slug = mcpToolSlugs?.get(fullName);
+  if (slug) return { category: sanitizeCategoryName(slug), fixed: false };
   return { category: MISC_CATEGORY_NAME, fixed: false };
 }
 
@@ -134,16 +152,50 @@ export function assembleTools(
   layering: ResolvedToolLayering,
   sessionTools: ToolDefLike[],
   mcpTools: ToolDefLike[],
+  options?: AssembleOptions,
 ): AssembledTools {
   const all = [...sessionTools, ...mcpTools];
   const mode = decideMode(layering, all);
-  const categoriesByName = new Map(layering.categories.map((c) => [c.name, c]));
+
+  // Dynamic per-source categories: one tools_<slug> entry per MCP source that
+  // actually has tool defs. Zero config — any new source is auto-discoverable.
+  const dynamicCategories: ToolCategory[] = [];
+  const seenCategoryNames = new Set(layering.categories.map((c) => c.name));
+  if (options?.mcpToolSlugs && options.mcpToolSlugs.size > 0) {
+    for (const def of mcpTools) {
+      const slug = options.mcpToolSlugs.get(def.name);
+      if (!slug) continue;
+      const name = sanitizeCategoryName(slug);
+      if (seenCategoryNames.has(name)) continue;
+      seenCategoryNames.add(name);
+      dynamicCategories.push({
+        name,
+        metaToolName: `tools_${name}`,
+        description: `数据源 ${slug} 的 MCP 工具（先展开本分类，再用 call_tool 调用）`,
+        tools: [],
+      });
+    }
+  }
+
+  const allCategories = [...layering.categories, ...dynamicCategories];
+  const categoriesByName = new Map(allCategories.map((c) => [c.name, c]));
+  // The misc bucket has no config entry, but tools_misc can be lazily registered
+  // for tools added mid-session. Keep it resolvable so expand('tools_misc')
+  // works instead of reporting an unknown category.
+  if (!categoriesByName.has(MISC_CATEGORY_NAME)) {
+    categoriesByName.set(MISC_CATEGORY_NAME, {
+      name: MISC_CATEGORY_NAME,
+      metaToolName: `tools_${MISC_CATEGORY_NAME}`,
+      description: '其他工具（会话中途新增，未指定分类）',
+      tools: [],
+    });
+  }
 
   // Registry: EVERY tool (session + MCP) — flat keeps it for parity checks,
   // layered uses it for call_tool dispatch.
   const registry = new Map<string, RegistryEntry>();
   for (const def of all) {
-    const { category, fixed } = bucketFor(def.name, layering);
+    const { category, fixed } = bucketFor(def.name, layering, options?.mcpToolSlugs);
     registry.set(def.name, {
       fullName: def.name,
       callName: stripToolPrefix(def.name),
@@ -170,8 +222,8 @@ export function assembleTools(
         fixedTools.push(entry.def);
       }
     }
-    for (const cat of layering.categories) {
-      if (cat.name === MISC_CATEGORY_NAME) continue; // misc has no meta tool
+    for (const cat of allCategories) {
+      if (cat.name === MISC_CATEGORY_NAME) continue; // misc meta tool is lazy-registered
       metaTools.push(defForMeta(cat));
     }
     callToolDef = buildCallToolDef();

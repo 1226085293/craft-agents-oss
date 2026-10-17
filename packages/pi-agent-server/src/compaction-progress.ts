@@ -19,17 +19,28 @@
  *    repeated per-tick rows would stack near-identical lines with stale
  *    embedded elapsed times.
  * 2. The heartbeat is BOUNDED — it stops at `getCompactionProgressCapMs()`
- *    (defaults to the same CRAFT_PI_COMPACTION_IDLE_TIMEOUT_MS the PiAgent
- *    compaction cap uses, 5 min). Once the heartbeats stop, a dead
- *    compaction still trips the PiAgent's capped compaction deadline —
- *    an unbounded blind timer would re-introduce the amber-plain class of
- *    silent hangs this watchdog family exists to catch.
+ *    (defaults to 15 min, the SAME budget as PiAgent's absolute compaction
+ *    cap `DEFAULT_COMPACT_CAP_MS`). Keeping the two in sync is load-
+ *    bearing: the main process judges liveness by heartbeat freshness
+ *    (120s staleness window). An earlier 5-min heartbeat cap meant a
+ *    healthy compaction whose summary generation outran the cap went
+ *    SILENT at ~270s while still legitimately running — the staleness
+ *    window then false-positived "compact stalled" (2026-10-17
+ *    deft-tide: 9 heartbeats to 270s, compaction persisted successfully
+ *    ~10 min in, user saw the stall error). Once the cap is reached a
+ *    dead compaction still trips the main process's absolute deadline,
+ *    so an unbounded timer is still not needed.
  */
 
 export const COMPACTION_PROGRESS_INTERVAL_MS = 30_000;
 
-/** Heartbeat cap — kept in sync with PiAgent's compaction idle cap. */
-export const DEFAULT_COMPACTION_PROGRESS_CAP_MS = 5 * 60 * 1000;
+/**
+ * Heartbeat cap — MUST stay >= PiAgent.DEFAULT_COMPACT_CAP_MS (900s) so a
+ * healthy long compaction never goes silent while still inside its legal
+ * budget. A silent-but-alive compaction reads as "stalled" to the main
+ * process's 120s staleness window.
+ */
+export const DEFAULT_COMPACTION_PROGRESS_CAP_MS = 15 * 60 * 1000;
 
 export interface CompactionProgressEvent {
   type: 'compaction_progress';

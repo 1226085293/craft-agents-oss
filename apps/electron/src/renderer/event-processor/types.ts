@@ -296,7 +296,9 @@ export interface StatusEvent {
   type: 'status'
   sessionId: string
   message: string
-  statusType?: 'compacting' | 'verification' | 'verification_passed' | 'verification_failed'
+  statusType?: 'compacting' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed'
+  /** Structured interpolation values (e.g. compaction token accounting) */
+  statusParams?: Record<string, string | number>
   /** Timestamp from main process for consistent ordering */
   timestamp?: number
 }
@@ -308,7 +310,9 @@ export interface InfoEvent {
   type: 'info'
   sessionId: string
   message: string
-  statusType?: 'compaction_complete' | 'verification_passed' | 'verification_failed'
+  statusType?: 'compaction_complete' | 'compaction_summary' | 'verification_passed' | 'verification_failed'
+  /** Structured interpolation values (e.g. compaction token accounting) */
+  statusParams?: Record<string, string | number>
   level?: 'info' | 'warning' | 'error' | 'success'
   /** Timestamp from main process for consistent ordering */
   timestamp?: number

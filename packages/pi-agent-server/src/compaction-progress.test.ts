@@ -78,12 +78,18 @@ describe('createCompactionProgressHeartbeat', () => {
 });
 
 describe('getCompactionProgressCapMs', () => {
-  it('defaults to the 5-minute shared cap', () => {
+  it('defaults to 15 min — the main process absolute compaction budget', () => {
+    // Load-bearing invariant: the cap MUST be >= PiAgent.DEFAULT_COMPACT_CAP_MS
+    // (900s). A healthy compaction whose summary generation outruns a shorter
+    // heartbeat cap goes SILENT while still legally running, and the main
+    // process's 120s staleness window then false-positives "compact stalled"
+    // (2026-10-17 deft-tide: heartbeats to 270s, compaction persisted ~10 min
+    // in, user saw the stall error).
     const prev = process.env.CRAFT_PI_COMPACTION_IDLE_TIMEOUT_MS;
     delete process.env.CRAFT_PI_COMPACTION_IDLE_TIMEOUT_MS;
     try {
       expect(getCompactionProgressCapMs()).toBe(DEFAULT_COMPACTION_PROGRESS_CAP_MS);
-      expect(getCompactionProgressCapMs()).toBe(5 * 60 * 1000);
+      expect(getCompactionProgressCapMs()).toBe(15 * 60 * 1000);
     } finally {
       if (prev !== undefined) process.env.CRAFT_PI_COMPACTION_IDLE_TIMEOUT_MS = prev;
     }

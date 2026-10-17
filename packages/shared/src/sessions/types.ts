@@ -44,6 +44,7 @@ export const SESSION_PERSISTENT_FIELDS = [
   'isArchived', 'archivedAt',
   // Branching
   'branchFromMessageId',
+  'branchContextStrategy',
   'branchFromSdkSessionId',
   'branchFromSessionPath',
   'branchFromSdkCwd',

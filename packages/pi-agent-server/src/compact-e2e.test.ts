@@ -248,23 +248,24 @@ afterAll(() => {
 })
 
 describe('compact e2e (real bundle + real SDK compact)', () => {
-  it('T3: honest still-in-progress error while a prior compaction runs', async () => {
-    const env = { CRAFT_PI_COMPACT_WAIT_TIMEOUT_MS: '1500' }
-    const b = startBundle(env)
+  it('T3: a concurrent /compact is SKIPPED outright (no wait, no error)', async () => {
+    const b = startBundle({})
     try {
       await initBundle(b)
       await seedSession(b)
       // Compaction A: D ≈ 50 + 4×1000 = ~4.05s.
       scheduleMockTiming(50, 1000, 4)
       b.send({ type: 'compact', id: 'c-T3a' })
-      await sleep(600) // A is mid-compaction; the pipeline is compacting now.
-      // Retry B waits on A, hits its W=1.5s ceiling while A is still running
-      // → honest error, delivered before any RPC timer could have fired.
+      await sleep(600) // A is mid-compaction; isCompacting is true now.
+      // Retry B arrives while A runs → the gate skips it immediately. No
+      // waiting, no error, and no second compact() racing A (user-confirmed
+      // 2026-10-17).
       b.send({ type: 'compact', id: 'c-T3b' })
       const out = await b.waitFor((o) => o.includes('compact_result') && o.includes('c-T3b'))
-      expect(out).toContain('"success":false')
-      expect(out).toContain('still in progress')
-      // A itself completes normally afterwards, unbothered by B's verdict.
+      expect(out).toContain('"success":true')
+      expect(out).toContain('already in progress')
+      expect(out).toContain('skipped')
+      // A itself completes normally afterwards, unbothered by B.
       await b.waitFor((o) => o.includes('compact_result') && o.includes('c-T3a'), 15_000)
     } finally {
       b.close()
@@ -293,19 +294,18 @@ describe('compact e2e (real bundle + real SDK compact)', () => {
     }
   }, 30_000)
 
-  it('T1: translation — a retry inside the window succeeds with the persisted record', async () => {
-    const env = { CRAFT_PI_COMPACT_WAIT_TIMEOUT_MS: '1500' }
-    const b = startBundle(env)
+  it('T1: the skip needs no env budget — it is a pure isCompacting gate', async () => {
+    const b = startBundle({})
     try {
       await initBundle(b)
       await seedSession(b)
-      // Slow compaction D ≈ 50 + 5×1600 = ~8.05s; first compact trips W at 1.5s.
+      // Slow compaction D ≈ 50 + 5×1600 = ~8.05s.
       scheduleMockTiming(50, 1600, 5)
       b.send({ type: 'compact', id: 'c-T1a' })
-      // Wait for the compaction pipeline to actually start (compaction_start
-      // event), THEN count the retry from that moment.
       await b.waitFor((o) => o.includes('"type":"compaction_start"'))
-      // Retry at r ≈ 6.9s into D → wait window (D−r) ≈ 1.1s < W=1.5s → translation.
+      // Retry deep into A's run — previously this hit a W ceiling and then the
+      // "Already compacted" translation; now it is skipped at the gate with
+      // no dependence on any timeout env.
       await sleep(6_900)
       b.send({ type: 'compact', id: 'c-T1b' })
       const out = await b.waitFor(
@@ -314,10 +314,8 @@ describe('compact e2e (real bundle + real SDK compact)', () => {
       )
       const tail = out.slice(out.lastIndexOf('c-T1b'))
       expect(tail).toContain('"success":true')
-      expect(tail).toContain('"note":"completed by the preceding compaction"')
-      expect(tail).toContain('"tokensBefore":')
-      const tokensBefore = Number(tail.match(/"tokensBefore":(\d+)/)?.[1] ?? 0)
-      expect(tokensBefore).toBeGreaterThan(0)
+      expect(tail).toContain('skipped')
+      expect(tail).not.toContain('"tokensBefore":')
     } finally {
       b.close()
     }

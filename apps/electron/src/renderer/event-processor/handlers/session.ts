@@ -350,11 +350,17 @@ export function handleStatus(
 ): ProcessResult {
   const { session, streaming } = state
 
-  // Idempotent compacting: a repeated compacting status updates the existing
-  // row in place instead of stacking another "Compacting context..." line.
-  const compactingIdx =
-    event.statusType === 'compacting'
-      ? session.messages.findIndex(m => m.role === 'status' && m.statusType === 'compacting')
+  // Idempotent status rows: a repeated compacting/verification status updates
+  // the existing row in place instead of stacking duplicate lines. Compacting
+  // re-emits its "Compacting context..." start; verification re-emits its
+  // "Verification skipped (reason) — retrying N/M" skip lines over the single
+  // "Verifying final reply…" process card (so the skip stays INSIDE the block
+  // and a single card is closed by the later passed/failed result).
+  const updateIdx =
+    event.statusType === 'compacting' || event.statusType === 'verification'
+      ? session.messages.findIndex(
+          m => m.role === 'status' && m.statusType === event.statusType,
+        )
       : -1
 
   const statusMessage: Message = {
@@ -363,12 +369,16 @@ export function handleStatus(
     content: event.message,
     timestamp: event.timestamp ?? Date.now(),
     statusType: event.statusType,
+    ...(event.statusParams ? { statusParams: event.statusParams } : {}),
   }
 
   const updatedSession =
-    compactingIdx !== -1
-      ? updateMessageAt(session, compactingIdx, { content: event.message })
-      : appendMessage(session, statusMessage)
+    updateIdx !== -1
+      ? updateMessageAt(session, updateIdx, { content: event.message })
+      : appendMessage(session, {
+          ...statusMessage,
+          ...(event.statusParams ? { statusParams: event.statusParams } : {}),
+        })
 
   return {
     state: {
@@ -464,6 +474,8 @@ export function handleInfo(
     content: event.message,
     timestamp: event.timestamp ?? Date.now(),
     infoLevel: event.level,
+    ...(event.statusType ? { statusType: event.statusType as Message['statusType'] } : {}),
+    ...(event.statusParams ? { statusParams: event.statusParams } : {}),
   }
 
   return {

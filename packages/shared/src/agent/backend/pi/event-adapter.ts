@@ -1355,17 +1355,29 @@ export class PiEventAdapter extends BaseEventAdapter {
         // Check for block reason
         const blockReason = this.consumeBlockReason(toolCallId, resolvedToolName);
 
-        // Use accumulated output from partial results if available
+        // Use accumulated output from partial updates as a fallback ONLY when
+        // the final event carries no result payload itself. The Pi SDK's
+        // tool_execution_end is authoritative (e.g. bash tools report the
+        // clean full output), while accumulated partials are cumulative
+        // snapshots meant for live UI progress. Preferring them produced
+        // duplicated tool results (2026-10-15, session 261013-mild-stream).
         const accumulatedOutput = this.consumeOutput(toolCallId);
 
         const isError = event.isError;
         let result: string;
 
-        if (accumulatedOutput) {
-          result = accumulatedOutput;
-        } else if (blockReason) {
+        if (blockReason) {
           result = blockReason;
+        } else if (event.result != null) {
+          result = this.extractToolResult(event.result, isError);
+        } else if (accumulatedOutput) {
+          // No authoritative payload on the final event — fall back to what
+          // the partial updates saw (snapshot-aware accumulation above keeps
+          // it clean).
+          result = accumulatedOutput;
         } else {
+          // result == null with nothing accumulated: sentinel string
+          // ('Success' / 'Tool execution failed').
           result = this.extractToolResult(event.result, isError);
         }
 
@@ -1412,6 +1424,27 @@ export class PiEventAdapter extends BaseEventAdapter {
           }
           // Use "Compacted" keyword so session handler detects statusType: 'compaction_complete'
           yield { type: 'info', message: 'Compacted context to fit within limits' };
+          // Token accounting for the process block (user-confirmed 2026-10-17):
+          // "压缩完成：约 A → B（保留 R，压缩 S）". Present only when the
+          // extension produced stats (relief or LLM path — both report).
+          const reliefStats = (compactionEvent.result as { details?: { reliefStats?: unknown } } | undefined)
+            ?.details?.reliefStats as
+            | { before: number; retained: number; compacted: number; checkpoint: number; viaRelief: boolean }
+            | undefined;
+          if (reliefStats && typeof reliefStats.before === 'number' && reliefStats.before > 0) {
+            yield {
+              type: 'status',
+              message: 'Compaction summary',
+              statusType: 'compaction_summary',
+              statusParams: {
+                before: reliefStats.before,
+                retained: reliefStats.retained,
+                compacted: reliefStats.compacted,
+                checkpoint: reliefStats.checkpoint,
+                viaRelief: reliefStats.viaRelief ? 1 : 0,
+              },
+            };
+          }
           // Refresh the context-usage ring immediately: the pre-compaction
           // reading is now stale, and the SDK reports the post-compaction
           // size (estimate) in the CompactionResult.

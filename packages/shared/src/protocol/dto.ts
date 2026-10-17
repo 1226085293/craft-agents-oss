@@ -407,8 +407,8 @@ export type SessionEvent =
   | { type: 'typed_error'; sessionId: string; error: TypedError; timestamp?: number; retryPending?: boolean; retryAttempt?: number }
   | { type: 'complete'; sessionId: string; tokenUsage?: Session['tokenUsage']; hasUnread?: boolean; backgroundTasksAlive?: boolean }
   | { type: 'interrupted'; sessionId: string; message?: Message; queuedMessages?: string[] }
-  | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'verification' | 'verification_passed' | 'verification_failed'; timestamp?: number }
-  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'system_stop'; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string }
+  | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed'; statusParams?: Record<string, string | number>; timestamp?: number }
+  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed' | 'system_stop'; statusParams?: Record<string, string | number>; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string }
   | { type: 'system_stop_notice'; sessionId: string; reason: string; message: string; timestamp?: number }
   | { type: 'title_generated'; sessionId: string; title: string }
   | { type: 'title_regenerating'; sessionId: string; isRegenerating: boolean }

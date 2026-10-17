@@ -47,7 +47,15 @@ import { getGitBashPath, type Workspace } from '../config/storage.ts';
 // Event adapter
 import { PiEventAdapter } from './backend/pi/event-adapter.ts';
 import { EventQueue } from './backend/event-queue.ts';
-import { RetryLadder, computeRetryLadderConfig, classifyRetryError, type RetryErrorSnapshot } from './retry-ladder.ts';
+import {
+  RetryLadder,
+  computeRetryLadderConfig,
+  classifyRetryError,
+  isStallErrorMessage,
+  isNoRerunnableStepRefusal,
+  type RetryErrorSnapshot,
+} from './retry-ladder.ts';
+import { resolveToolTimeoutMs, withToolExecutionTimeout } from './tool-timeouts.ts';
 
 // System prompt for Craft Agent context
 import { getSystemPrompt } from '../prompts/system.ts';
@@ -97,7 +105,9 @@ import { homedir } from 'os';
 
 // Session storage (plans folder path)
 import { getSessionDataPath, getSessionPath, getSessionPlansPath } from '../sessions/storage.ts';
-import { ProgressJournal, buildHistoryRecoveryPointer } from './progress-journal.ts';
+import { ProgressJournal, buildHistoryRecoveryPointer, loadRawProgressRecords } from './progress-journal.ts';
+import { readSessionMessages } from '../sessions/jsonl.ts';
+import { buildTurnLogs, isRealUserMessage, writeTurnLogs } from './turn-log.ts';
 
 // Error typing
 import { parseError, type AgentError } from './errors.ts';
@@ -115,11 +125,9 @@ import {
   assembleTools,
   buildExpandPayload,
   nearestToolNames,
-  EMPTY_INPUT_SCHEMA,
   SESSION_PREFIX,
   CALL_TOOL_NAME,
   type AssembledTools,
-  type RegistryEntry,
   type ResolvedToolLayering,
   type ToolDefLike,
 } from '../tool-layering/index.ts';
@@ -182,6 +190,32 @@ interface PendingEphemeralRequest<T> {
   resolve(value: T): void;
   reject(error: Error): void;
   timeout: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * Token accounting a compaction reports for the summary line
+ * ("压缩完成：约 A → B（保留 R，压缩 S）"). Produced by the subprocess's
+ * context-relief extension on BOTH paths (relief and LLM fallback).
+ */
+interface ReliefStats {
+  before: number;
+  retained: number;
+  compacted: number;
+  checkpoint: number;
+  viaRelief: boolean;
+}
+
+/** Defensive parse of the subprocess's stats payload. */
+function parseReliefStats(raw: unknown): ReliefStats | undefined {
+  const r = raw as Partial<ReliefStats> | undefined;
+  if (!r || typeof r.before !== 'number' || r.before <= 0) return undefined;
+  return {
+    before: r.before,
+    retained: Number(r.retained) || 0,
+    compacted: Number(r.compacted) || 0,
+    checkpoint: Number(r.checkpoint) || 0,
+    viaRelief: r.viaRelief === true,
+  };
 }
 
 /**
@@ -253,6 +287,19 @@ export class PiAgent extends BaseAgent {
   // State
   private _isProcessing: boolean = false;
   private abortReason?: AbortReason;
+  /**
+   * A user stop that arrived while no subprocess existed yet (2026-10-16
+   * 261016-deft-tide). `chat()` spawns the subprocess lazily — and only AFTER
+   * the MCP source probes have resolved (≈1.2 s on this machine). A stop that
+   * lands inside that window reaches `forceAbort()` while
+   * `this.subprocess` is still null, so its `send({type:'abort'})` is dropped
+   * by `send()`'s writability guard and the subprocess runs the prompt to
+   * completion. The flag is latched here; chatImpl checks it right before
+   * sending the prompt and suppresses the turn, and a turn start clears any
+   * latch left over from an abandoned generator so it cannot cancel the next
+   * turn.
+   */
+  private pendingUserStop: boolean = false;
   // Guardrail stop (busy-limit cap / no-progress streak) — set when the
   // subprocess emits a system_stop_notice. The subprocess follows it with an
   // abort error ('The operation was aborted') that would otherwise arm the
@@ -272,6 +319,16 @@ export class PiAgent extends BaseAgent {
   private lastSubprocessError: string | null = null;
   private subprocessErrorRepeatCount = 0;
   private static readonly MAX_IDENTICAL_SUBPROCESS_ERRORS = 3;
+  /**
+   * 2026-10-18: after an INTERNAL stall error, how long the subprocess may
+   * stay silent before it is presumed deadlocked (abort()/continue() never
+   * return) and is restarted. A healthy retry emits model events within
+   * seconds; 2 minutes is a generous liveness window. Env-tunable.
+   */
+  private static readonly STALL_RESTART_TIMEOUT_MS = (() => {
+    const raw = Number(process.env.CRAFT_PI_STALL_RESTART_MS);
+    return Number.isFinite(raw) && raw > 0 ? raw : 120_000;
+  })();
   /**
    * Turn-idle watchdog ceiling (no events since the last one while the agent
    * is idle with all tools completed).
@@ -333,7 +390,17 @@ export class PiAgent extends BaseAgent {
   // Unified retry ladder (user-confirmed 2026-10-05): single retry owner for
   // model-level failures. SDK retries are disabled (CRAFT_PI_RETRY_ENABLED=0)
   // so this ladder drives the 1s/5s/10s/30s/60s/5m/10m schedule + 10m loop.
-  private readonly retryLadder = new RetryLadder(computeRetryLadderConfig());
+  private readonly retryLadder = new RetryLadder({
+    ...computeRetryLadderConfig(),
+    // 2026-10-14: consecutive-failure guard — reuse the user's "自动续跑上限"
+    // (maxResumes) so a TRANSIENT run that fails N retries in a row
+    // hard-stops instead of looping invisibly. env override wins
+    // (debugging). Deterministic errors are exempt: the user chose an
+    // UNBOUNDED ladder for them ("重试改为不设限" — 2026-10-14 copper-spruce),
+    // so a dead API key keeps retrying until the upstream recovers or the
+    // user stops the turn.
+    maxConsecutiveFailures: Number(process.env.CRAFT_PI_RETRY_MAX_CONSECUTIVE ?? getDefenseGuardrails().maxResumes) || 0,
+  });
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Epoch ms when the last retry prompt was sent; 0 = none in flight. */
   private retryResendAt = 0;
@@ -378,6 +445,14 @@ export class PiAgent extends BaseAgent {
   private heldComplete: AgentEvent | null = null;
   /** Whether the non-terminal retryPending error card has been surfaced. */
   private retryErrorSurfaced = false;
+  /** 2026-10-18: stall-recovery watchdog. If an INTERNAL stall produces no
+   *  subprocess activity for this long, the subprocess is presumed deadlocked
+   *  (even abort() does not return) and is restarted — the turn survives. */
+  private stallRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True while a stall-triggered controlled restart is in progress. The exit
+   *  handler must NOT settle the turn/ladder in that window: the fresh
+   *  subprocess resumes the same session and the ladder continues. */
+  private controlledRestartInProgress = false;
   /** Session root dir (workspace/sessions/{id}) for persisting the ladder
    *  state across app restarts (2026-10-06 spec: the retry loop must
    *  survive restarts; restored attempts keep the right rung). */
@@ -526,7 +601,12 @@ export class PiAgent extends BaseAgent {
   private idleReaperFire(): void {
     this.idleSubprocessReaper = null;
     if (this._isProcessing || !this.eventQueue.isComplete) {
-      return; // re-checked at fire time
+      // A turn restarted (or the event stream reopened) right as the timer
+      // fired. Re-arm for a fresh window instead of dying: the turn-end
+      // finally replaces it via scheduleIdleSubprocessReaper() anyway, and a
+      // genuinely stuck turn is owned by the turn-idle watchdog.
+      this.armIdleReaper();
+      return;
     }
     if (!this.subprocess) {
       return;
@@ -578,6 +658,33 @@ export class PiAgent extends BaseAgent {
     }
   }
 
+  /**
+   * Debounced idle-reclaim rebase — the single choke point for "the subprocess
+   * is active again". Cancels the pending reaper and, when no turn is in
+   * flight, immediately re-arms it for a fresh idle window. This makes the
+   * reclaim guarantee ("kill after IDLE_SUBPROCESS_RECLAIM_MS with no activity")
+   * hold relative to the LAST activity.
+   *
+   * Why this covers every path: all subprocess interaction in PiAgent flows
+   * through ensureSubprocess() (chatImpl, title generation, session-end memory
+   * extraction, mini completion, queryLlm, compact / ensure-session-ready /
+   * auto-compaction RPCs) — there is no other place that spawns or touches the
+   * subprocess. Putting the debounce at this boundary covers every activity
+   * instead of requiring a re-arm call at each call site. (2026-10-14: title
+   * generation and session-end memory extraction run AFTER the turn-end
+   * finally already armed the reaper; their ensureSubprocess cancelled the
+   * timer with no re-arm path, leaking the ~400MB subprocess until app exit.)
+   */
+  private touchSubprocessActivity(): void {
+    this.cancelIdleSubprocessReaper();
+    if (this._isProcessing || !this.eventQueue.isComplete) {
+      // A turn is in flight (or its event stream is still open): do not arm —
+      // the turn-end finally re-arms via scheduleIdleSubprocessReaper().
+      return;
+    }
+    this.armIdleReaper();
+  }
+
   private refreshTurnIdleWatchdog(): void {
     this.clearTurnIdleWatchdog();
 
@@ -595,7 +702,8 @@ export class PiAgent extends BaseAgent {
       // in flight — the row then shows "重试中" forever (2026-10-09: observed
       // a retry hanging 20+ min; the user saw the status line frozen). Treat
       // a dead-silent retried run as a failed attempt and let the ladder
-      // advance to its next rung (deterministic ladders still cap at 3).
+      // advance to its next rung (deterministic ladders run the full rung
+      // ladder + loop since 2026-10-14 — "重试改为不设限").
       const stallMs = this.getRetryRunStallMs();
       const anchor =
         this.retryResendAt > 0 ? this.retryResendAt : this.lastTurnEventAt;
@@ -714,10 +822,40 @@ export class PiAgent extends BaseAgent {
   private tryBeginRetryLadder(
     message: string,
     parsedError: Partial<AgentError> | null | undefined,
+    opts?: { internal?: boolean },
   ): boolean {
     if (!this._isProcessing) return false;
     if (this.abortReason) return false;
-    if (this.activeTurnToolIds.size > 0) return false;
+
+    // 2026-10-18: a "no re-runnable model step" refusal is TERMINAL by
+    // nature — the transcript tail is the input of every retry, so retrying
+    // can never change the verdict. Settle the ladder and let the caller
+    // surface one terminal card. (Do NOT classify it deterministic: the
+    // deterministic class is unbounded by default and skips the consecutive-
+    // failure guard, which would turn this into a 24h loop.)
+    if (isNoRerunnableStepRefusal(message)) {
+      this.debug('[retry-ladder] No re-runnable model step — terminal (retrying cannot fix the transcript)');
+      if (this.retryLadder.isActive) {
+        // Settle the visible retry row as FAILED (the refusal is terminal),
+        // then hard-clear the ladder so no timer can fire another retry into
+        // the same non-re-runnable transcript.
+        this.settleRetryLadderAsStopped();
+        this.resetRetryLadderState();
+      }
+      return false;
+    }
+
+    // 2026-10-18: internal recovery faults (turn stall / hung tool) are
+    // allowed to start the ladder even while a tool id is still marked
+    // active — the subprocess has already rejected the hung tool, and the
+    // tool_result event may simply not have been processed yet. Without this
+    // bypass the FIRST stall error becomes a terminal card and the session
+    // ends instead of recovering in the background.
+    const internal = opts?.internal === true || isStallErrorMessage(message);
+    if (this.activeTurnToolIds.size > 0 && !internal) return false;
+    if (internal && this.activeTurnToolIds.size > 0) {
+      this.activeTurnToolIds.clear();
+    }
     if (!this.subprocess) return false;
     // A guardrail already terminated this turn (busy-limit cap / no-progress
     // streak). The follow-on abort error must NOT re-arm the ladder — the
@@ -728,7 +866,11 @@ export class PiAgent extends BaseAgent {
       return false;
     }
 
-    const snapshot = { message, parsedError: parsedError ?? null };
+    const snapshot: RetryErrorSnapshot = {
+      message,
+      parsedError: parsedError ?? null,
+      ...(internal ? { internal: true } : {}),
+    };
     if (!this.retryLadder.isActive) {
       const mode = classifyRetryError(parsedError?.code, message);
       this.retryLadder.begin(mode, snapshot);
@@ -751,6 +893,12 @@ export class PiAgent extends BaseAgent {
       this.retryLadder.overrideNextDelay(retryAfterMs);
     }
 
+    if (internal) {
+      // 2026-10-18: a stall can also mean the subprocess itself is deadlocked.
+      // Arm a liveness watchdog; any real progress event disarms it, total
+      // silence restarts the process (the turn survives).
+      this.armStallRestartWatchdog();
+    }
     this.scheduleNextRetry();
     return true;
   }
@@ -777,10 +925,15 @@ export class PiAgent extends BaseAgent {
       return;
     }
     const attempt = this.retryLadder.attemptCount;
+    const internal = this.retryLadder.internalFailure;
     this.eventQueue.enqueue({
       type: 'retry',
       phase: 'backoff',
-      message: `Model request failed. Retrying in ${Math.max(1, Math.round(delay / 1000))}s (attempt ${attempt + 1})...`,
+      // Internal recovery faults get a neutral status line, not a failure
+      // message — the user should see "recovering", never "failed".
+      message: internal
+        ? `Turn stalled — recovering in ${Math.max(1, Math.round(delay / 1000))}s (attempt ${attempt + 1})...`
+        : `Model request failed. Retrying in ${Math.max(1, Math.round(delay / 1000))}s (attempt ${attempt + 1})...`,
       // Retry ordinal (1-based) surfaced to the user: the retry this backoff is
       // waiting for. `attemptCount` counts FAILED retries, so +1.
       attempt: attempt + 1,
@@ -799,7 +952,7 @@ export class PiAgent extends BaseAgent {
     // above it ticks per retry; becomes the terminal card if the ladder
     // exhausts; cleared on recovery). One-shot per failure. No dedicated stop
     // control: the chat's stop button terminates the whole session/turn.
-    if (!this.retryErrorSurfaced && this.retryLadder.shouldSurfaceError) {
+    if (!internal && !this.retryErrorSurfaced && this.retryLadder.shouldSurfaceError) {
       this.retryErrorSurfaced = true;
       const staged = this.retryLadder.lastErrorSnapshot;
       // Keep the structured title (e.g. "Connection Error") so the non-terminal
@@ -828,6 +981,14 @@ export class PiAgent extends BaseAgent {
   private fireRetry(): void {
     this.retryTimer = null;
     if (!this.retryLadder.isActive) return;
+    if (this.controlledRestartInProgress) {
+      // The subprocess is being replaced — re-check shortly instead of
+      // treating the absent pipe as a terminal ladder failure.
+      this.debug('[retry-ladder] Retry fired during a controlled restart — rechecking in 1s');
+      this.retryTimer = setTimeout(() => this.fireRetry(), 1_000);
+      (this.retryTimer as { unref?: () => void }).unref?.();
+      return;
+    }
 
     // Genuinely cannot retry: the subprocess is gone. Surface the staged error
     // as a real terminal (the attempt count reflects retries that actually
@@ -1060,6 +1221,70 @@ export class PiAgent extends BaseAgent {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Stall-triggered subprocess restart (2026-10-18)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Arm a liveness watchdog after an INTERNAL stall. A healthy retry emits
+   * model/tool events within seconds; total silence for
+   * STALL_RESTART_TIMEOUT_MS means the subprocess itself is deadlocked
+   * (abort()/continue() never return), which no in-process recovery can fix.
+   */
+  private armStallRestartWatchdog(): void {
+    this.clearStallRestartWatchdog();
+    if (!this._isProcessing || !this.subprocess) return;
+    this.stallRestartTimer = setTimeout(() => {
+      this.stallRestartTimer = null;
+      void this.restartSubprocessForStall();
+    }, PiAgent.STALL_RESTART_TIMEOUT_MS);
+    (this.stallRestartTimer as { unref?: () => void }).unref?.();
+  }
+
+  private clearStallRestartWatchdog(): void {
+    if (this.stallRestartTimer) {
+      clearTimeout(this.stallRestartTimer);
+      this.stallRestartTimer = null;
+    }
+  }
+
+  /**
+   * Controlled restart for a deadlocked subprocess. The exit handler runs with
+   * `controlledRestartInProgress` set, so it cleans up pipes/timers WITHOUT
+   * settling the turn or the ladder. A fresh subprocess resumes the same
+   * session from disk and the ladder's retry continues the turn — no user
+   * message, no terminal error card.
+   */
+  private async restartSubprocessForStall(): Promise<void> {
+    if (!this._isProcessing || !this.subprocess || this.controlledRestartInProgress) return;
+    this.debug('[stall-recovery] Subprocess silent after an internal stall — restarting it');
+    this.controlledRestartInProgress = true;
+    try {
+      await this.killSubprocessGracefully();
+      await this.ensureSubprocess();
+      this.debug('[stall-recovery] Subprocess restarted — resuming the turn via the retry ladder');
+      if (this.retryLadder.isActive) {
+        // Do not wait out a long rung: the turn is already stalled. One second
+        // is enough for the fresh subprocess to accept the retry command.
+        this.clearRetryTimer();
+        this.retryTimer = setTimeout(() => this.fireRetry(), 1_000);
+        (this.retryTimer as { unref?: () => void }).unref?.();
+      }
+    } catch (error) {
+      this.debug(`[stall-recovery] Restart failed: ${error instanceof Error ? error.message : String(error)}`);
+      this.controlledRestartInProgress = false;
+      if (this._isProcessing) {
+        this.eventQueue.enqueue({
+          type: 'error',
+          message: 'Pi subprocess became unresponsive after a stall and could not be restarted. Press stop, then send the message again.',
+        });
+        this.eventQueue.complete();
+      }
+      return;
+    }
+    this.controlledRestartInProgress = false;
+  }
+
   private retryLadderStatePath(): string | null {
     if (!this.retryLadderStateDir) return null;
     return join(this.retryLadderStateDir, 'data', 'retry-ladder-state.json');
@@ -1158,6 +1383,12 @@ export class PiAgent extends BaseAgent {
 
   private recordSubprocessTurnProgress(eventType: string, event: Record<string, unknown>): void {
     this.lastTurnEventAt = Date.now();
+    // 2026-10-18: any non-terminal subprocess event proves the process is
+    // alive — disarm the stall-restart watchdog. agent_end is excluded: it is
+    // emitted by the very stall path that armed the watchdog.
+    if (eventType !== 'agent_end') {
+      this.clearStallRestartWatchdog();
+    }
 
     // Unified retry ladder: the first MODEL-PROGRESS event after a retry
     // resend proves the retried run is live. 2026-10-06 incident: this used
@@ -1329,7 +1560,7 @@ export class PiAgent extends BaseAgent {
 
   // Pending compact requests (manual compaction RPC)
   private pendingCompactions: Map<string, {
-    resolve: (result: { summary: string; firstKeptEntryId: string; tokensBefore: number } | null) => void;
+    resolve: (result: { summary: string; firstKeptEntryId: string; tokensBefore: number; estimatedTokensAfter?: number; stats?: ReliefStats } | null) => void;
     reject: (error: Error) => void;
     /** Epoch ms when the RPC was dispatched; used to measure late-reply drops. */
     sentAt: number;
@@ -1386,6 +1617,9 @@ export class PiAgent extends BaseAgent {
     /** Registered meta tool names (mcp__session__tools_<cat>), incl. lazy misc. */
     registeredMetaTools: Set<string>;
   } | null = null;
+
+  /** Session tool defs kept for re-assembly after source sync (layered mode). */
+  private sessionToolDefsForLayering: ToolDefLike[] = [];
 
   /**
    * Stable protocol hint injected in layered mode (never varies per turn)
@@ -1500,8 +1734,13 @@ export class PiAgent extends BaseAgent {
    * Lazy initialization -- spawns on first use.
    */
   private async ensureSubprocess(): Promise<void> {
-    // Any activity means the subprocess is back in use — cancel pending reaper.
-    this.cancelIdleSubprocessReaper();
+    // Any activity (user turn, mini completion, memory extraction, title
+    // generation, RPC) rebases the idle-reclaim window. When the activity runs
+    // AFTER a turn ended (the turn-end finally already armed the reaper), the
+    // pending timer is cancelled and immediately re-armed for a fresh idle
+    // window — otherwise the reaper would stay cancelled for good and the
+    // ~400MB subprocess would leak until app exit (2026-10-14).
+    this.touchSubprocessActivity();
 
     if (this.subprocess && this.subprocessReady) {
       const currentShellPath = this.getConfiguredShellPath();
@@ -1515,6 +1754,16 @@ export class PiAgent extends BaseAgent {
     }
 
     await this.spawnSubprocess();
+    // A fresh spawn is an activity too: re-arm the idle window so a post-turn
+    // spawn (e.g. title gen / memory extraction after a previous reclaim) is
+    // still reclaimed after its own idle window.
+    this.touchSubprocessActivity();
+    // NOTE: a latched pendingUserStop is NOT replayed here (no {type:'abort'}
+    // sent). The only code path that can start a turn on a fresh subprocess is
+    // the prompt send in chatImpl, which checks the latch right before sending
+    // — replaying an abort instead would set lastAbortReason='user' in the
+    // subprocess with NO turn to attribute it to, and that stale value could
+    // later refuse a legitimate system-abort retry (classifyRetryStep).
   }
 
   private getConfiguredShellPath(): string | undefined {
@@ -1747,11 +1996,13 @@ export class PiAgent extends BaseAgent {
    */
   private initToolLayering(sessionToolDefs: ToolDefLike[]): void {
     try {
+      this.sessionToolDefsForLayering = sessionToolDefs;
       const proxyDefs = (this.mcpPool?.getProxyToolDefs() ?? []) as ToolDefLike[];
+      const slugByProxy = this.mcpPool?.getProxyToolSlugs() ?? new Map<string, string>();
       // knownTools for boot validation: session tools by plain name
       const knownTools = sessionToolDefs.map((d) => d.name.replace(SESSION_PREFIX, ''));
       const resolved = loadToolLayering(this.config.workspace.rootPath, knownTools, true);
-      const assembled = assembleTools(resolved, sessionToolDefs, proxyDefs);
+      const assembled = assembleTools(resolved, sessionToolDefs, proxyDefs, { mcpToolSlugs: slugByProxy });
       this.toolLayering = {
         mode: assembled.mode,
         resolved,
@@ -1824,20 +2075,23 @@ export class PiAgent extends BaseAgent {
   }
 
   /**
-   * Send pool's proxy tool defs to subprocess for model visibility.
+   * Send pool's proxy tool defs to the subprocess for model visibility.
    *
-   * Layered mode (spec §7): newly connected MCP tools are NOT advertised
-   * top-level — they fold into the misc bucket (registry) and become reachable
-   * via call_tool. The tools_misc meta tool is lazily registered the first
-   * time anything lands there.
+   * Layered mode: MCP tools are bucketed per source into dynamic categories
+   * (tools_<slug>) so any source is discoverable without config edits; tools
+   * without a slug mapping fall back to the misc bucket. Called after every
+   * source sync so the CURRENT turn sees the assembled categories (the old
+   * path only folded into misc and deferred the new meta tool to the next
+   * prompt's subprocess recreation).
    */
   private registerPoolToolsWithSubprocess(): void {
     if (!this.mcpPool) return;
     const proxyDefs = this.mcpPool.getProxyToolDefs();
-    if (proxyDefs.length === 0) return;
+    const slugByProxy = this.mcpPool.getProxyToolSlugs();
 
     const tl = this.toolLayering;
     if (!tl || tl.mode === 'flat') {
+      if (proxyDefs.length === 0) return;
       this.send({
         type: 'register_tools',
         tools: proxyDefs,
@@ -1846,48 +2100,51 @@ export class PiAgent extends BaseAgent {
       return;
     }
 
-    // Layered: fold MCP tools into the registry; they are NOT top-level.
-    // Also prune registry entries whose MCP source disconnected mid-session
-    // (spec §7: mid-session removals take effect immediately). SDK-level
-    // tools can't be retracted, but MCP tools were never registered top-level
-    // in layered mode, so removing them from the registry fully hides them.
-    const connected = new Set(proxyDefs.map((d) => d.name));
-    for (const [name, entry] of [...tl.assembled.registry]) {
-      if (entry.category !== MISC_CATEGORY_NAME) continue;
-      if (name.startsWith('mcp__') && !connected.has(name)) {
-        tl.assembled.registry.delete(name);
-      }
+    this.reassembleLayeredTools(proxyDefs, slugByProxy);
+  }
+
+  /**
+   * Rebuild the layered assembly from the pool's current tool defs.
+   *
+   * Removing sources prunes their registry entries and categories, which keeps
+   * only/exclude scopes leak-free (a source outside the session scope never
+   * survives as a callable entry or a visible meta tool).
+   */
+  private reassembleLayeredTools(proxyDefs: ToolDefLike[], slugByProxy: Map<string, string>): void {
+    const tl = this.toolLayering;
+    if (!tl) return;
+
+    const assembled = assembleTools(
+      { ...tl.resolved, mode: tl.mode },
+      this.sessionToolDefsForLayering,
+      proxyDefs,
+      { mcpToolSlugs: slugByProxy },
+    );
+    tl.assembled = assembled;
+
+    // Publish meta tools that appeared since the last assembly. Existing meta
+    // tools are already registered; register_tools merges by name.
+    const newMetaTools = assembled.metaTools.filter((m) => !tl.registeredMetaTools.has(m.name));
+    if (newMetaTools.length > 0) {
+      this.send({ type: 'register_tools', tools: newMetaTools });
+      for (const m of newMetaTools) tl.registeredMetaTools.add(m.name);
     }
 
-    let miscAdded = false;
-    for (const def of proxyDefs) {
-      if (tl.assembled.registry.has(def.name)) continue; // already tracked
-      const entry: RegistryEntry = {
-        fullName: def.name,
-        callName: def.name,
-        def,
-        category: MISC_CATEGORY_NAME,
-        fixed: false,
-      };
-      tl.assembled.registry.set(def.name, entry);
-      miscAdded = true;
+    // Forget meta registrations for categories that disappeared. The subprocess
+    // cannot retract a tool definition, but expand() resolves categories through
+    // categoriesByName, so a removed category reports as unknown; a returning
+    // category is re-sent and merges by name.
+    const liveMeta = new Set(assembled.metaTools.map((m) => m.name));
+    const miscMeta = SESSION_PREFIX + 'tools_' + MISC_CATEGORY_NAME;
+    for (const name of [...tl.registeredMetaTools]) {
+      if (name === miscMeta) continue; // misc stays lazily registered
+      if (!liveMeta.has(name)) tl.registeredMetaTools.delete(name);
     }
-    if (miscAdded) {
-      // Lazily publish the misc meta tool so the model can discover the new
-      // tools (spec §7: unclassified tools auto-fold into misc).
-      const miscCat = tl.resolved.categories.find((c) => c.name === MISC_CATEGORY_NAME)
-        ?? { name: MISC_CATEGORY_NAME, metaToolName: undefined, description: '其他工具（会话中途新增，未指定分类）', tools: [] };
-      if (!tl.registeredMetaTools.has(SESSION_PREFIX + 'tools_misc')) {
-        const metaDef = {
-          name: SESSION_PREFIX + 'tools_' + MISC_CATEGORY_NAME,
-          description: miscCat.description,
-          inputSchema: EMPTY_INPUT_SCHEMA,
-        };
-        this.send({ type: 'register_tools', tools: [metaDef] });
-        tl.registeredMetaTools.add(metaDef.name);
-      }
-      this.debug(`[tool-layering] folded ${proxyDefs.length} MCP tools into misc (call_tool dispatch)`);
-    }
+
+    this.debug(
+      `[tool-layering] reassembled: ${assembled.metaTools.length} meta tools ` +
+      `(${assembled.categoriesByName.size} categories), ${assembled.registry.size} foldable tools`,
+    );
   }
 
   /**
@@ -2308,14 +2565,21 @@ export class PiAgent extends BaseAgent {
 
       case 'verification_skip': {
         // Judge unavailable on ONE attempt (2026-10-13): the subprocess is
-        // retrying. Render a "Verification skipped (reason) — retrying N/M"
-        // process block and KEEP the verification hold — no delivery yet; the
-        // eventual `verification_result` decides the turn.
+        // retrying. Emit a STATUS event (not info) so it rides the pending
+        // "Verifying final reply…" process card INSIDE the turn — an `info`
+        // with statusType 'verification' falls through handleInfo's generic
+        // branch and renders as a standalone system line OUTSIDE the process
+        // block. KEEP the verification hold — no delivery yet; the eventual
+        // `verification_result` decides the turn.
         this.debug(`Verification judge attempt ${msg.attempt}/${msg.totalAttempts} unavailable (${msg.reason}) — retrying`);
+        const skipReason = typeof msg.reason === 'string' && msg.reason ? msg.reason : 'judge unavailable'
+        const attemptNum = typeof msg.attempt === 'number' ? msg.attempt : Number(msg.attempt) || 0
+        const totalNum = typeof msg.totalAttempts === 'number' ? msg.totalAttempts : Number(msg.totalAttempts) || 0
         this.eventQueue.enqueue({
-          type: 'info',
-          message: `Verification skipped (${msg.reason || 'judge unavailable'}) — retrying ${msg.attempt}/${msg.totalAttempts}`,
+          type: 'status',
+          message: `Verification skipped (${skipReason}) - retrying ${attemptNum}/${totalNum}`,
           statusType: 'verification',
+          statusParams: { reason: skipReason, attempt: attemptNum, total: totalNum },
         });
         break;
       }
@@ -2341,6 +2605,7 @@ export class PiAgent extends BaseAgent {
           // residual DSML leak markup (malformed variants defeat the subprocess
           // parser) — never deliver raw markup to the user.
           const cleanFinal = stripDsmlResidue(msg.finalText);
+          const stabilized = typeof msg.failReason === 'string' && msg.failReason.startsWith('content stabilized');
           if (msg.skipped === true) {
             // Judge was unavailable (upstream 401/quota/timeout) — legacy
             // fail-open path kept for protocol compatibility with older
@@ -2352,6 +2617,23 @@ export class PiAgent extends BaseAgent {
               type: 'info',
               message: 'Verification skipped (judge unavailable) — delivering final reply',
               statusType: 'verification_passed',
+              statusParams: { skipped: 1 },
+            });
+            this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(cleanFinal));
+            this.eventQueue.enqueue({ type: 'complete' });
+            this.eventQueue.complete();
+          } else if (stabilized) {
+            // Content-stability stop-loss (2026-10-17): a follow-up resume
+            // re-emitted BYTE-IDENTICAL text, so further judging cannot change
+            // the outcome. Deliver it, but say plainly that this was a
+            // stop-loss and NOT an endorsement of the verdict.
+            this.debug(`Verification PASSED (content stabilized, ${cleanFinal.length} chars) — stop-loss delivery`);
+            this.adapter.finalizeVerificationHeld(true);
+            this.eventQueue.enqueue({
+              type: 'info',
+              message: 'Verification passed — delivering final reply',
+              statusType: 'verification_passed',
+              statusParams: { stabilized: 1 },
             });
             this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(cleanFinal));
             this.eventQueue.enqueue({ type: 'complete' });
@@ -2369,12 +2651,28 @@ export class PiAgent extends BaseAgent {
             this.eventQueue.complete();
           }
         } else {
-          this.debug(`Verification FAILED${typeof msg.failReason === 'string' ? `: ${msg.failReason}` : ''} — continuing turn (followUp)`);
+          const failType = typeof msg.failType === 'string' ? msg.failType : undefined;
+          const reasonPath = typeof msg.reasonPath === 'string' ? msg.reasonPath : undefined;
+          const attempt = typeof msg.attempt === 'number' ? msg.attempt : undefined;
+          // Judge was down after every attempt: the reason is an infrastructure
+          // fault, not a verdict — label it as a SKIP (user-confirmed wording)
+          // instead of a rejection, and never persist a reason file (there is
+          // no verdict to explain).
+          const judgeDown = typeof msg.failReason === 'string' && msg.failReason.startsWith('judge-unavailable:');
+          this.debug(`Verification FAILED${typeof msg.failReason === 'string' ? `: ${msg.failReason}` : ''}${failType ? ` [${failType}]` : ''} — continuing turn (followUp)`);
           this.adapter.finalizeVerificationHeld(false);
           this.eventQueue.enqueue({
             type: 'info',
-            message: 'Verification failed — continuing',
-            statusType: 'verification_failed',
+            message: judgeDown
+              ? 'Verification skipped — LLM request error'
+              : 'Verification failed — continuing',
+            statusType: judgeDown ? 'verification_passed' : 'verification_failed',
+            statusParams: {
+              ...(failType ? { failType } : {}),
+              ...(reasonPath ? { reasonPath } : {}),
+              ...(attempt != null ? { attempt } : {}),
+              ...(judgeDown ? { skipped: 1 } : {}),
+            },
           });
           // Stay open: the followUp resume continues the turn; its agent_end
           // completes the queue — unless the continuation still qualifies and
@@ -2509,7 +2807,7 @@ export class PiAgent extends BaseAgent {
         }
 
         const parsed = parseError(new Error(rawMessage));
-        if (this.tryBeginRetryLadder(rawMessage, parsed)) {
+        if (this.tryBeginRetryLadder(rawMessage, parsed, { internal: isStallErrorMessage(rawMessage) })) {
           // Unified retry ladder took over: the error is staged (not enqueued
           // yet), the following synthetic agent_end is held by the
           // shouldCompleteQueue guard, and a retry prompt is re-issued on the
@@ -2657,21 +2955,22 @@ export class PiAgent extends BaseAgent {
       // re-issues the prompt on its schedule. `continue` skips enqueueing the
       // error here — the ladder surfaces it per policy (non-terminal after
       // the 10s rung, terminal on exhaustion).
-      if (
-        (agentEvent.type === 'error' || agentEvent.type === 'typed_error') &&
-        this.tryBeginRetryLadder(
-          agentEvent.type === 'error'
-            ? (agentEvent as { message: string }).message
-            : (agentEvent as { error?: { message?: string } }).error?.message ?? 'Model request failed',
+      if (agentEvent.type === 'error' || agentEvent.type === 'typed_error') {
+        const agentErrorMessage = agentEvent.type === 'error'
+          ? (agentEvent as { message: string }).message
+          : (agentEvent as { error?: { message?: string } }).error?.message ?? 'Model request failed';
+        if (this.tryBeginRetryLadder(
+          agentErrorMessage,
           // Carry the WHOLE structured error (title / recovery actions /
           // diagnostics) so the terminal card the ladder eventually surfaces
           // reads exactly like the same error surfaced without the ladder.
           agentEvent.type === 'typed_error'
             ? (agentEvent as { error?: Partial<AgentError> }).error ?? null
             : null,
-        )
-      ) {
-        continue;
+          { internal: isStallErrorMessage(agentErrorMessage) },
+        )) {
+          continue;
+        }
       }
 
       // Hold the adapter's `complete` back while the unified retry ladder is
@@ -3009,7 +3308,16 @@ export class PiAgent extends BaseAgent {
     }
 
     try {
-      const result = await this.routeToolCall(request.toolName, request.args);
+      // 2026-10-18: never await a proxy tool unbounded. A hung host-side tool
+      // (browser CDP screenshot) used to keep the subprocess's tool promise
+      // pending forever → the SDK's activeRun never cleared → every later
+      // prompt died with "already processing". The timeout turns that into a
+      // normal error toolResult the model can react to.
+      const result = await this.withToolTimeout(
+        request.toolName,
+        request.args,
+        () => this.routeToolCall(request.toolName, request.args),
+      );
       this.send({
         type: 'tool_execute_response',
         requestId: request.requestId,
@@ -3025,6 +3333,20 @@ export class PiAgent extends BaseAgent {
         },
       });
     }
+  }
+
+  /**
+   * Race a proxy-tool execution against its per-tool budget. The underlying
+   * tool may keep running after the timeout (we cannot cancel arbitrary
+   * handlers), but its late result is ignored and the turn is already free to
+   * continue with an error toolResult.
+   */
+  private async withToolTimeout(
+    toolName: string,
+    args: Record<string, unknown>,
+    run: () => Promise<{ content: string; isError: boolean }>,
+  ): Promise<{ content: string; isError: boolean }> {
+    return await withToolExecutionTimeout(run(), resolveToolTimeoutMs(toolName, args), toolName);
   }
 
   /**
@@ -3467,6 +3789,8 @@ export class PiAgent extends BaseAgent {
       summary: String(raw.summary || ''),
       firstKeptEntryId: String(raw.firstKeptEntryId || ''),
       tokensBefore: Number(raw.tokensBefore || 0),
+      estimatedTokensAfter: typeof raw.estimatedTokensAfter === 'number' ? raw.estimatedTokensAfter : undefined,
+      stats: parseReliefStats(raw.stats),
     });
   }
 
@@ -3519,37 +3843,44 @@ export class PiAgent extends BaseAgent {
     this.subprocessReady = null;
     this.subprocessReadyResolve = null;
     this.clearTurnIdleWatchdog();
+    this.clearStallRestartWatchdog();
     this.activeTurnToolIds.clear();
-    // 2026-10-09: a ladder that was active when the subprocess died would
-    // otherwise be silently dropped by resetRetryLadderState() below — the
-    // persisted row kept spinning "重试中" and the crash reason never
-    // surfaced (observed: "重试 1 次后失败 · 总耗时 00:00" with no error card
-    // below). Settle the ladder terminally BEFORE reset so the row reads
-    // failed and the following error event becomes its reason card.
-    if (this._isProcessing && this.retryLadder.isActive) {
-      const ladderStartedAt = this.retryLadder.startedAtMs;
-      this.eventQueue.enqueue({
-        type: 'retry',
-        phase: 'end',
-        recovered: false,
-        attempt: this.retryLadder.attemptCount,
-        startedAt: ladderStartedAt,
-        elapsedMs: ladderStartedAt > 0 ? Math.max(0, Date.now() - ladderStartedAt) : 0,
-      });
-    }
-    // No retry is possible once the subprocess is gone — drop ladder state so
-    // it cannot leak into a future turn (handleSubprocessExit completes the
-    // queue below when processing).
-    this.resetRetryLadderState();
+    if (!this.controlledRestartInProgress) {
+      // 2026-10-09: a ladder that was active when the subprocess died would
+      // otherwise be silently dropped by resetRetryLadderState() below — the
+      // persisted row kept spinning "重试中" and the crash reason never
+      // surfaced (observed: "重试 1 次后失败 · 总耗时 00:00" with no error card
+      // below). Settle the ladder terminally BEFORE reset so the row reads
+      // failed and the following error event becomes its reason card.
+      if (this._isProcessing && this.retryLadder.isActive) {
+        const ladderStartedAt = this.retryLadder.startedAtMs;
+        this.eventQueue.enqueue({
+          type: 'retry',
+          phase: 'end',
+          recovered: false,
+          attempt: this.retryLadder.attemptCount,
+          startedAt: ladderStartedAt,
+          elapsedMs: ladderStartedAt > 0 ? Math.max(0, Date.now() - ladderStartedAt) : 0,
+        });
+      }
+      // No retry is possible once the subprocess is gone — drop ladder state so
+      // it cannot leak into a future turn (handleSubprocessExit completes the
+      // queue below when processing).
+      this.resetRetryLadderState();
 
-    // If we were processing, emit error + complete
-    if (this._isProcessing) {
-      const exitReason = signal ? `signal ${signal}` : `code ${code}`;
-      this.eventQueue.enqueue({
-        type: 'error',
-        message: `Pi subprocess exited unexpectedly (${exitReason})`,
-      });
-      this.eventQueue.complete();
+      // If we were processing, emit error + complete
+      if (this._isProcessing) {
+        const exitReason = signal ? `signal ${signal}` : `code ${code}`;
+        this.eventQueue.enqueue({
+          type: 'error',
+          message: `Pi subprocess exited unexpectedly (${exitReason})`,
+        });
+        this.eventQueue.complete();
+      }
+    } else {
+      // 2026-10-18: stall-triggered controlled restart — the turn and the
+      // ladder survive; a fresh subprocess resumes the same session.
+      this.debug('[stall-recovery] Controlled restart — keeping the turn and retry ladder alive');
     }
 
     // Reject utility calls and clear their deadline timers.
@@ -3684,7 +4015,7 @@ export class PiAgent extends BaseAgent {
   /**
    * Ask subprocess to compact the active session context.
    */
-  private async requestCompact(customInstructions?: string): Promise<{ summary: string; firstKeptEntryId: string; tokensBefore: number } | null> {
+  private async requestCompact(customInstructions?: string): Promise<{ summary: string; firstKeptEntryId: string; tokensBefore: number; estimatedTokensAfter?: number; stats?: ReliefStats } | null> {
     await this.ensureSubprocess();
 
     const id = `compact-${++this.rpcIdCounter}`;
@@ -3696,7 +4027,7 @@ export class PiAgent extends BaseAgent {
     const capMs = this.getCompactRpcTimeoutMs();
     const staleMs = this.getCompactStalenessMs();
 
-    return new Promise<{ summary: string; firstKeptEntryId: string; tokensBefore: number } | null>((resolve, reject) => {
+    return new Promise<{ summary: string; firstKeptEntryId: string; tokensBefore: number; estimatedTokensAfter?: number; stats?: ReliefStats } | null>((resolve, reject) => {
       let settled = false;
       const cleanup = (): void => {
         const pending = this.pendingCompactions.get(id);
@@ -3712,7 +4043,7 @@ export class PiAgent extends BaseAgent {
         this.pendingCompactions.delete(id);
         reject(error);
       };
-      const succeed = (result: { summary: string; firstKeptEntryId: string; tokensBefore: number } | null): void => {
+      const succeed = (result: { summary: string; firstKeptEntryId: string; tokensBefore: number; estimatedTokensAfter?: number } | null): void => {
         if (settled) return;
         settled = true;
         cleanup();
@@ -3836,6 +4167,18 @@ export class PiAgent extends BaseAgent {
       this.piSessionId = sessionId;
       this.config.onSdkSessionIdUpdate?.(sessionId);
     }
+
+    // NOTE: the branch's context-usage ring is NOT seeded here. SessionManager
+    // stamps the inherited size on the branch header while copying the
+    // parent's messages (seedInheritedContextUsage), which is the only place
+    // that sees the transcript truncated at the branch point.
+    //
+    // The previous agent-side seed was dead code and, worse, wrong: it called
+    // `this.onUsageUpdate`, which no host ever assigns (the UsageTracker's
+    // recordMessageUsage is never invoked either), and it read the parent's
+    // full session file — i.e. the parent's CURRENT context, including turns
+    // made after the fork, rather than the context inherited at the branch
+    // point (2026-10-18).
   }
 
   // ============================================================
@@ -3851,6 +4194,11 @@ export class PiAgent extends BaseAgent {
     // Reset state for new turn
     this._isProcessing = true;
     this.abortReason = undefined;
+    // A stop latched by a PREVIOUS turn (e.g. its generator was abandoned
+    // before it could consume the flag) is stale — dropping it here keeps it
+    // from silently cancelling this new turn. A stop that lands DURING this
+    // turn's spawn window arrives after this line and is honoured below.
+    this.pendingUserStop = false;
     this.systemStopReason = null;
     this.eventQueue.reset();
     this.activeTurnToolIds.clear();
@@ -3867,6 +4215,13 @@ export class PiAgent extends BaseAgent {
     const rawUserRequest = this.getCurrentTurnUserMessage() ?? message;
     this.currentUserMessage = rawUserRequest;
     this.progressJournal?.recordUserRequest(rawUserRequest);
+    // Turn-log archiver: a REAL user message starts a new turn, so first
+    // archive the completed turns (best-effort, idempotent — existing files
+    // are never rewritten). System injections (recovery resumes, aborts) do
+    // NOT trigger archiving; they belong to the previous turn.
+    if (isRealUserMessage(rawUserRequest)) {
+      this.archiveTurnLogs({ excludeLast: true });
+    }
     this.adapter.startTurn();
 
     // Fire UserPromptSubmit hook event (fire-and-forget)
@@ -3922,7 +4277,41 @@ export class PiAgent extends BaseAgent {
           yield {
             type: 'info',
             message: `Compacted context to fit within limits (from ~${compactResult.tokensBefore.toLocaleString()} tokens)`,
+            statusType: 'compaction_complete',
+            statusParams: { tokens: compactResult.tokensBefore.toLocaleString() },
           };
+          // Token accounting as its own line (user-confirmed 2026-10-17):
+          // "压缩完成：约 A → B（保留 R，压缩 S）". Rendered by the same
+          // i18n branch as the auto path's process-block row.
+          const stats = compactResult.stats;
+          if (stats && stats.before > 0) {
+            yield {
+              type: 'info',
+              message: 'Compaction summary',
+              statusType: 'compaction_summary',
+              statusParams: {
+                before: stats.before,
+                retained: stats.retained,
+                compacted: stats.compacted,
+                checkpoint: stats.checkpoint,
+                viaRelief: stats.viaRelief ? 1 : 0,
+              },
+            };
+          }
+          // Refresh the context-usage ring immediately (mirrors the auto
+          // compaction path in event-adapter.ts: the subprocess reports the
+          // post-compaction estimate, and the pre-compaction reading is now
+          // stale). 2026-10-17: UI kept showing the old size after /compact.
+          const postTokens = compactResult.estimatedTokensAfter;
+          if (typeof postTokens === 'number' && postTokens > 0) {
+            yield {
+              type: 'usage_update',
+              usage: {
+                inputTokens: postTokens,
+                contextWindow: this.usageTracker.getContextWindow(),
+              },
+            };
+          }
         } else {
           yield { type: 'info', message: 'Compacted context to fit within limits' };
         }
@@ -4020,6 +4409,19 @@ export class PiAgent extends BaseAgent {
         message,
       ].filter(Boolean);
       const userMessage = userParts.join('\n\n');
+
+      // A user stop that landed before the subprocess existed means this turn
+      // was cancelled before it ever started. Do not send the prompt — the
+      // subprocess would otherwise execute work the user already stopped, and
+      // its events would surface as a phantom process block below "Response
+      // interrupted". Returning without yielding lets SessionManager's
+      // loop-exit logic route this the same way as every other stopped turn
+      // (stopRequested → interrupted).
+      if (this.pendingUserStop) {
+        this.pendingUserStop = false;
+        this.debug('[abort] prompt suppressed — user stop predates this turn');
+        return;
+      }
 
       // Send prompt to subprocess
       const turnId = `turn-${++this.rpcIdCounter}`;
@@ -4393,7 +4795,7 @@ n   * connection can be adopted mid-session.
     this.pendingPermissions.clear();
 
     // Send abort to subprocess
-    this.send({ type: 'abort' });
+    this.sendAbortOrLatch('soft abort');
     this.clearTurnIdleWatchdog();
     this.activeTurnToolIds.clear();
     this.eventQueue.complete();
@@ -4462,7 +4864,30 @@ n   * connection can be adopted mid-session.
     this.eventQueue.complete();
 
     // For other reasons, send abort to subprocess
-    this.send({ type: 'abort' });
+    // (latched when the subprocess is not up yet — see pendingUserStop)
+    this.sendAbortOrLatch(`forceAbort(${reason})`);
+  }
+
+  /**
+   * Deliver a user stop to the subprocess, or latch it for delivery after the
+   * next spawn.
+   *
+   * `send()` silently drops every command while the subprocess stdin is not
+   * writable, which is exactly the state during the lazy spawn window in
+   * `chat()` (MCP source probes run first). A stop lost here leaves the
+   * subprocess executing a turn the user already cancelled — the 2026-10-16
+   * 261016-deft-tide incident, where tool blocks kept landing for minutes
+   * after "Response interrupted" had been shown.
+   */
+  private sendAbortOrLatch(context: string): void {
+    if (this.subprocess?.stdin?.writable) {
+      this.send({ type: 'abort' });
+      return;
+    }
+    this.pendingUserStop = true;
+    this.debug(
+      `[abort] ${context}: no writable subprocess yet — latched, will replay after spawn`
+    );
   }
 
   /**
@@ -4622,10 +5047,42 @@ n   * connection can be adopted mid-session.
   }
 
   override clearHistory(): void {
+    // Archive every turn (including the open one) before the session resets —
+    // the turn files are the only durable record of what happened before
+    // /clear, and the archiver is idempotent.
+    this.archiveTurnLogs({ excludeLast: false });
     this.piSessionId = null;
     this.killSubprocess();
     super.clearHistory();
     this.debug('History cleared - next chat will start new subprocess');
+  }
+
+  /**
+   * Archive completed turns as Markdown files (sessions/{id}/turns/).
+   * Best-effort and idempotent: builds ALL turns from the live ledgers and
+   * writes only the missing files, so re-runs are no-ops and a write failure
+   * never breaks the agent.
+   *
+   * @param opts.excludeLast  Skip the final (open) turn — called at the start
+   *                          of a new real user message, while the last turn's
+   *                          bubbles may not be flushed to session.jsonl yet.
+   */
+  private archiveTurnLogs(opts: { excludeLast: boolean }): void {
+    const sessionId = this.config.session?.id;
+    const workspaceRoot = this.config.workspace.rootPath;
+    if (!sessionId || !workspaceRoot) return;
+    try {
+      const sessionDir = getSessionPath(workspaceRoot, sessionId);
+      const progress = loadRawProgressRecords(sessionDir);
+      if (progress.length === 0) return;
+      const messages = readSessionMessages(join(sessionDir, 'session.jsonl'));
+      const turns = buildTurnLogs(progress, messages);
+      const toWrite = opts.excludeLast && turns.length > 0 ? turns.slice(0, -1) : turns;
+      const written = writeTurnLogs(sessionDir, toWrite);
+      if (written > 0) this.debug(`[TurnLog] archived ${written} turn file(s)`);
+    } catch (err) {
+      this.debug(`[TurnLog] archive failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   destroy(): void {
@@ -4638,6 +5095,8 @@ n   * connection can be adopted mid-session.
 
     this._sessionToolContext = null;
     // Pool clients are owned by the main process — don't close them here.
+    // Archive every turn (including the open one) before teardown.
+    this.archiveTurnLogs({ excludeLast: false });
     this.killSubprocess();
     this.debug('PiAgent destroyed');
   }

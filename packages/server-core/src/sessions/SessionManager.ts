@@ -58,7 +58,7 @@ import {
   getPendingPlanExecution as getStoredPendingPlanExecution,
   getSessionAttachmentsPath,
   getSessionPath as getSessionStoragePath,
-  expandSessionPath,
+  expandSessionPathInMemory,
   ensureSessionDir,
   getSessionFilePath,
   generateSessionId,
@@ -85,14 +85,14 @@ import { buildServersFromSources as buildServersFromSourcesShared } from '../sou
 import { ConfigWatcher, type ConfigWatcherCallbacks } from '@craft-agent/shared/config'
 import { getValidClaudeOAuthToken } from '@craft-agent/shared/auth'
 import { resolveAuthEnvVars } from '@craft-agent/shared/config'
-import { toolMetadataStore, getLastApiError, getLastErrorFromHistory } from '@craft-agent/shared/interceptor'
+import { toolMetadataStore, getLastApiError, getLastErrorFromHistory, peekStoredError, readErrorHistory } from '@craft-agent/shared/interceptor'
 import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/shared/mcp'
 import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
 import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta, type TokenUsage } from '@craft-agent/core/types'
-import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages, normalizePath } from '@craft-agent/shared/utils'
+import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages } from '@craft-agent/shared/utils'
 import { loadAllSkills, invalidateSkillsCache } from '@craft-agent/shared/skills'
 import { getMemoryStorePath, loadMemoryStore, saveMemoryStore, recordExtraction, loadSessionMemoryStore, saveSessionMemoryStore, type SessionMemoryStore } from '@craft-agent/shared/memory';
 import { addMemoryEntry, deleteMemoryEntry, queryMemories, getMemoryStats as getMemStats } from '@craft-agent/shared/memory/store';
@@ -123,6 +123,131 @@ let _platform: PlatformServices | null = null
 // Scoped logger — upgraded from console fallback when setSessionPlatform() is called.
 // Named `sessionLog` so all ~30 existing call sites remain unchanged.
 let sessionLog: Logger = createScopedLogger(CONSOLE_LOGGER, 'session')
+
+/**
+ * GHOST-CARD GUARD (2026-10-14, 261014-ruby-flower).
+ *
+ * A verification-class turn demotes its draft (isIntermediate=true) while the
+ * judge runs; on PASS the final reply is REPLAYED via a later text_complete
+ * that takes over the demoted slot. When `complete` is processed before that
+ * replay lands, the "no assistant response" heuristic must NOT fire — the reply
+ * is already committed and in flight. The `verification_passed` info row is the
+ * deterministic signal (the adapter enqueues info → replay → complete in that
+ * order). Pure so the guard is unit-testable in isolation.
+ */
+export function hasVerificationReplayPending(
+  messages: ReadonlyArray<{ role: string; statusType?: string; timestamp?: number }>,
+  lastUserTimestamp: number | undefined,
+): boolean {
+  if (lastUserTimestamp == null) return false
+  return messages.some(
+    m =>
+      m.role === 'info' &&
+      m.statusType === 'verification_passed' &&
+      (m.timestamp ?? 0) > lastUserTimestamp,
+  )
+}
+
+/**
+ * Context size a forked branch inherits from its parent: the `contextTokens`
+ * stamped on the parent's last FINAL assistant bubble (intermediate drafts
+ * never carry a context — see Message.contextTokens).
+ *
+ * Returns 0 when the parent has no stamped bubble (historical sessions
+ * created before the stamp existed), which leaves the ring at 0 until the
+ * branch's own first usage event — the pre-fix behaviour.
+ *
+ * Pure so the seeding rule is unit-testable without a live SessionManager.
+ */
+export function readInheritedContextTokens(
+  messages: ReadonlyArray<{ type?: string; role?: string; isIntermediate?: boolean; contextTokens?: number }>,
+): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    // A live ManagedSession holds runtime Messages (`role`); a session read
+    // straight off disk holds StoredMessages (`type`). storedToMessage()
+    // converts type→role and DROPS `type`, so a `type`-only check returned 0
+    // for every real branch while the stored-shape unit tests kept passing —
+    // that is why the 2026-10-17 seed fix never took effect in the app
+    // (2026-10-18, reported as "分叉后上下文占用显示 0%").
+    const kind = m?.role ?? m?.type
+    if (kind !== 'assistant' || m.isIntermediate) continue
+    const ctx = m.contextTokens
+    if (typeof ctx === 'number' && ctx > 0) return ctx
+  }
+  return 0
+}
+
+/**
+ * GHOST-CARD SUPPRESSION (2026-10-16, 261016-soft-channel).
+ *
+ * Three independent reasons the "turn ended without a reply" heuristic must
+ * NOT surface an api-error card:
+ *
+ * 1. STALE ERROR — the captured error predates the current turn's own
+ *    activity. api-error.json / api-errors.jsonl are session-scoped and
+ *    accumulate; a 503 written an hour ago is unrelated to a turn that just
+ *    produced nothing. Compare the error's own timestamp against the last
+ *    user message (an error from BEFORE the user's message cannot describe
+ *    this turn). An error with no usable timestamp is treated as fresh so
+ *    this guard can never hide a real error.
+ *
+ * 2. VERIFICATION-FAILED IN FLIGHT — the adapter's fallback for a FAILed
+ *    judge queues a followUp resume and continues the SAME turn. The
+ *    `complete` can still land before that continuation's reply, so the
+ *    heuristic would misread the in-flight recovery as "no reply".
+ *    `verification_failed` is the deterministic signal here (the sibling of
+ *    the `verification_passed` replay-pending case above).
+ *
+ * 3. RETRY IN FLIGHT — an unsettled `retrying` row (retry.status ===
+ *    'retrying') newer than the last user message means the main-process
+ *    retry ladder still owns the turn. Surfacing a terminal error card
+ *    while the ladder keeps retrying is contradictory.
+ *
+ * Pure so the guard is unit-testable in isolation.
+ */
+export function shouldSuppressGhostErrorCard(
+  messages: ReadonlyArray<{ role: string; statusType?: string; timestamp?: number; retry?: { status?: string } }>,
+  lastUserTimestamp: number | undefined,
+  errorTimestamp: number | undefined,
+  now: number,
+  maxErrorAgeMs: number,
+): boolean {
+  // (1) A captured error that predates this turn's user message — or is
+  // simply too old — cannot explain the current turn.
+  if (
+    typeof errorTimestamp === 'number' &&
+    Number.isFinite(errorTimestamp) &&
+    lastUserTimestamp != null &&
+    errorTimestamp < lastUserTimestamp
+  ) {
+    return true
+  }
+  if (
+    typeof errorTimestamp === 'number' &&
+    Number.isFinite(errorTimestamp) &&
+    maxErrorAgeMs > 0 &&
+    now - errorTimestamp > maxErrorAgeMs
+  ) {
+    return true
+  }
+  if (lastUserTimestamp == null) return false
+  // (2) A FAILed verification hands the turn to the followUp lane, which
+  // keeps running — the reply may simply not have landed yet.
+  const verificationFailedInFlight = messages.some(
+    m => m.role === 'info' && m.statusType === 'verification_failed' && (m.timestamp ?? 0) > lastUserTimestamp,
+  )
+  if (verificationFailedInFlight) return true
+  // (3) An unsettled retry row newer than the user message: the retry
+  // ladder still owns this turn and will keep retrying.
+  return messages.some(
+    m =>
+      m.role === 'status' &&
+      m.statusType === 'retrying' &&
+      m.retry?.status === 'retrying' &&
+      (m.timestamp ?? 0) > lastUserTimestamp,
+  )
+}
 
 export function setSessionPlatform(platform: PlatformServices): void {
   _platform = platform
@@ -2216,10 +2341,40 @@ export class SessionManager implements ISessionManager {
       if (managed.transferredSessionSummary === undefined) managed.transferredSessionSummary = stored.transferredSessionSummary
       if (managed.transferredSessionSummaryApplied === undefined) managed.transferredSessionSummaryApplied = stored.transferredSessionSummaryApplied
 
+      this.seedInheritedContextUsage(managed, 'load')
+
       this.recoverPendingUserTurns(managed)
       sessionLog.debug(`Cold-hydrated ${managed.messages.length} messages for session ${managed.id}`)
     }
     managed.messagesLoaded = true
+  }
+
+  /**
+   * Seed a branch's context-usage ring from the context it inherited.
+   *
+   * A fork starts with the parent's full context but has no usage report of
+   * its own, so the composer ring rendered 0% until the branch's first
+   * assistant message (2026-10-17 jade-stone). The inherited size is stamped
+   * on the branch header when the parent's messages are copied; this helper
+   * re-derives it from the transcript for branch paths that bypass that copy
+   * and repairs branches created before the stamp existed.
+   *
+   * No-op for non-branch sessions and once any real usage has been recorded
+   * (inputTokens > 0). Returns true when a value was applied.
+   */
+  private seedInheritedContextUsage(managed: ManagedSession, source: 'create' | 'load'): boolean {
+    if (!managed.branchFromMessageId || !managed.tokenUsage) return false
+    if (managed.tokenUsage.inputTokens > 0) return false
+    const inherited = readInheritedContextTokens(managed.messages)
+    if (inherited <= 0) return false
+    managed.tokenUsage.inputTokens = inherited
+    managed.tokenUsage.totalTokens = inherited
+    sessionLog.debug?.('Seeded branch usage ring from inherited context', {
+      sessionId: managed.id,
+      source,
+      contextTokens: inherited,
+    })
+    return true
   }
 
   /**
@@ -2268,14 +2423,43 @@ export class SessionManager implements ISessionManager {
     // interrupted tail (thinking + in-flight tool calls + missing final text)
     // is never replayed. Detect that dangling tail and roll the terminal
     // boundary back to the user message that owns it.
+    //
+    // 2026-10-14 261014-prime-moor refinement: "any unsettled row in
+    // trailing" is too broad — the defense verification flow terminates a
+    // turn by settling its last activity in-trailing (final reply, then
+    // verification_failed → replayed draft (intermediate) → … →
+    // verification_passed). Every restart then saw the settled replay row
+    // and re-injected a recovery turn, emitting a duplicate "task complete"
+    // bubble per restart. Judge by the LAST significant row instead: the
+    // tail is dangling only when that last significant row is unsettled;
+    // a trailing settle marker (verification passed, an explicit Stop
+    // marker, plan/auth/error rows) proves the turn reached its terminal
+    // state, so no recovery.
     const trailing = managed.messages.slice(lastTerminalResponseIndex + 1)
-    const hasDanglingTail = trailing.some(m =>
-      (m.role === 'assistant' && m.isIntermediate === true) ||
-      // Only an explicitly-unfinished tool row counts as dangling. Legacy
+    let hasDanglingTail = false
+    for (let i = trailing.length - 1; i >= 0; i--) {
+      const m = trailing[i]!
+      // Only an explicitly-unfinished tool row counts as unsettled. Legacy
       // rows without toolStatus (undefined) are not evidence of a torn turn —
       // they appear after user Stops and in old transcripts.
-      (this.isToolLikeMessage(m) && (m.toolStatus === 'executing' || m.toolStatus === 'pending'))
-    )
+      const unsettled =
+        (m.role === 'assistant' && m.isIntermediate === true) ||
+        (this.isToolLikeMessage(m) && (m.toolStatus === 'executing' || m.toolStatus === 'pending'))
+      if (unsettled) {
+        hasDanglingTail = true
+        break
+      }
+      const settled =
+        m.role === 'plan' ||
+        m.role === 'auth-request' ||
+        m.role === 'error' ||
+        (m.role === 'info' &&
+          (m.statusType === 'verification_passed' || m.content === 'Response interrupted'))
+      if (settled) {
+        hasDanglingTail = false
+        break
+      }
+    }
     // If the trailing slice itself contains a non-guidance user message, that
     // message owns the unfinished activity (e.g. the user re-prompted while the
     // interrupted turn was still running). Rolling the boundary back past it
@@ -3213,6 +3397,11 @@ export class SessionManager implements ISessionManager {
       // Sync transferred session summary state from disk
       managed.transferredSessionSummary = storedSession.transferredSessionSummary
       managed.transferredSessionSummaryApplied = storedSession.transferredSessionSummaryApplied
+      // Repair a branch whose ring is still 0% (created before the inherited
+      // size was stamped on the header, or through a path that skipped the
+      // copy). No-op once the branch has recorded any real usage.
+      this.seedInheritedContextUsage(managed, 'load')
+
       sessionLog.debug(`Lazy-loaded ${managed.messages.length} messages for session ${managed.id}`)
 
       this.recoverPendingUserTurns(managed)
@@ -3556,18 +3745,47 @@ export class SessionManager implements ISessionManager {
 
       const sourceMessages = validatedBranch.sourceSession.messages.slice(0, validatedBranch.branchIdx + 1)
 
+      // A fork inherits the parent's context, so its usage ring must start at
+      // the inherited size instead of 0%. Stamp it on the branch header here —
+      // the one place where the branch's messages AND its header are written
+      // together — so the value survives an app restart that happens before
+      // the branch's first turn.
+      //
+      // Source: the parent's last FINAL assistant bubble at/before the branch
+      // point (per-bubble stamp, unaffected by anything the parent did after
+      // the fork). When the branch is taken at the parent's tip and that
+      // bubble predates the stamp (historical sessions), fall back to the
+      // parent's persisted header usage.
+      const inheritedContextTokens = readInheritedContextTokens(sourceMessages)
+        || (validatedBranch.branchIdx === validatedBranch.sourceSession.messages.length - 1
+          ? validatedBranch.sourceSession.tokenUsage?.inputTokens ?? 0
+          : 0)
+      if (inheritedContextTokens > 0) {
+        branchedStored.tokenUsage = {
+          ...branchedStored.tokenUsage,
+          inputTokens: inheritedContextTokens,
+          totalTokens: inheritedContextTokens,
+        }
+      }
+
       // Re-map embedded paths: source messages were loaded with expandSessionPath(sourceDir),
       // so they contain absolute paths to the *source* session directory. When saved to the
       // branch session, makeSessionPathPortable uses the *branch* dir — which won't match.
       // Fix: replace source dir paths with branch dir paths so tokenization works on save.
-      const sourceDir = normalizePath(getSessionStoragePath(workspaceRootPath, validatedBranch.sourceSessionId))
-      const branchDir = normalizePath(getSessionStoragePath(workspaceRootPath, storedSession.id))
+      // Expansion is native-separator (see expandSessionPath), so remap the in-memory
+      // string values directly instead of the JSON-escaped text.
+      const sourceDir = getSessionStoragePath(workspaceRootPath, validatedBranch.sourceSessionId)
+      const branchDir = getSessionStoragePath(workspaceRootPath, storedSession.id)
       if (sourceDir !== branchDir) {
-        branchedStored.messages = sourceMessages.map(m => {
-          const json = JSON.stringify(m)
-          if (!json.includes(sourceDir)) return m
-          return JSON.parse(json.replaceAll(sourceDir, branchDir)) as StoredMessage
-        })
+        const remapPaths = (value: unknown): unknown => {
+          if (typeof value === 'string') return value.split(sourceDir).join(branchDir)
+          if (Array.isArray(value)) return value.map(remapPaths)
+          if (value && typeof value === 'object') {
+            return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, remapPaths(v)]))
+          }
+          return value
+        }
+        branchedStored.messages = sourceMessages.map(m => remapPaths(m) as StoredMessage)
       } else {
         branchedStored.messages = sourceMessages
       }
@@ -3675,6 +3893,26 @@ export class SessionManager implements ISessionManager {
     // conversation immediately (needed for scroll-to-bottom on panel open)
     if (isBranch) {
       await this.ensureMessagesLoaded(managed)
+
+      // Seed the context-usage ring with the context this fork inherited. The
+      // inherited size is already stamped on the branch header while the
+      // parent's messages are copied (see the branch-copy block above), so
+      // this normally only forwards it to the renderer; it still re-derives
+      // the value for branch paths that bypass that copy.
+      //
+      // The event is emitted here rather than from the agent's onUsageUpdate
+      // because that callback is not attached at branch-creation time
+      // (ensureBranchReady() runs before any usage listener exists).
+      if (this.seedInheritedContextUsage(managed, 'create') && managed.tokenUsage) {
+        this.sendEvent({
+          type: 'usage_update',
+          sessionId: managed.id,
+          tokenUsage: {
+            inputTokens: managed.tokenUsage.inputTokens,
+            contextWindow: managed.tokenUsage.contextWindow,
+          },
+        }, workspaceId)
+      }
 
       const requiresBranchPreflight = managed.branchContextStrategy === 'sdk-fork'
       if (requiresBranchPreflight) {
@@ -3852,10 +4090,17 @@ export class SessionManager implements ISessionManager {
    * the runtime update (or the agent has been disposed for recreation).
    *
    * The helper distinguishes two kinds of drift:
-   *   - Restart-required (provider/auth/slug/piAuthProvider): goes straight
-   *     to dispose + recreate because `update_runtime_config` cannot fully
-   *     re-route credential/provider state in a live subprocess.
-   *   - In-place safe (model/baseUrl/customEndpoint/customModels): attempts
+   *   - Restart-required (provider/auth/slug/piAuthProvider/baseUrl): goes
+   *     straight to dispose + recreate because `update_runtime_config`
+   *     cannot fully re-route credential/provider state in a live
+   *     subprocess. `baseUrl` is in this set for a subtle reason: the
+   *     handler DOES re-register the custom-endpoint provider with the new
+   *     URL, but the already-created `AgentSession` keeps resolving models
+   *     through the object it captured at session creation, so the new URL
+   *     only reaches the NEXT session. A session repointed at a dead local
+   *     endpoint would otherwise retry against it forever (2026-10-15,
+   *     261014-misty-wren).
+   *   - In-place safe (model/customEndpoint/customModels): attempts
    *     `agent.updateRuntimeConfig` and falls back to dispose if the backend
    *     can't apply the update.
    */
@@ -5287,7 +5532,7 @@ ${request.prompt}`;
           //    its session directory (data/, attachments/), so resolve against it
           //    instead of failing with "Only absolute file paths are allowed".
           const sessionDir = getSessionStoragePath(managed.workspace.rootPath, managed.id)
-          let rawPath = expandSessionPath(args.path, sessionDir)
+          let rawPath = expandSessionPathInMemory(args.path, sessionDir)
           if (!isAbsolute(rawPath)) rawPath = join(sessionDir, rawPath)
 
           // Widen the allow-list with the session's own working directory: the agent
@@ -5816,7 +6061,9 @@ ${request.prompt}`;
       const m = this.sessions.get(managed.id)
       if (!m || m.isProcessing || !m.mcpPool) return
       try {
-        await m.mcpPool.disconnectAll()
+        // keepDefs: the model keeps seeing the tools and lazy sources can
+        // reconnect on first call; only the subprocesses are released.
+        await m.mcpPool.disconnectAll(true)
         sessionLog.info(`Idle MCP connections released for session ${m.id}`)
       } catch (err) {
         sessionLog.warn(`Idle MCP disconnect failed for ${m.id}: ${err}`)
@@ -7359,6 +7606,22 @@ ${request.prompt}`;
     }
 
     try {
+      // A stop that arrived while this message was still being prepared (MCP
+      // source probing, OAuth refresh, agent creation — all of which can take
+      // >1 s) must prevent the turn from ever starting. The user already saw
+      // "Response interrupted"; calling agent.chat() here would let the
+      // subprocess execute the turn anyway (2026-10-16 261016-deft-tide:
+      // tool blocks kept landing for minutes below the interruption marker).
+      // Settle the session as interrupted instead — the same path the chat
+      // loop takes when a stop lands mid-turn.
+      if (managed.stopRequested) {
+        sessionLog.info('Skipping chat: stop requested while message was being prepared')
+        sendSpan.mark('chat.skipped_stop_requested')
+        sendSpan.end()
+        await this.onProcessingStopped(sessionId, 'interrupted')
+        return
+      }
+
       sessionLog.info('Starting chat for session:', sessionId)
       sessionLog.info('Workspace:', JSON.stringify(managed.workspace, null, 2))
       sessionLog.info('Message:', visibleMessage)
@@ -7495,9 +7758,96 @@ ${request.prompt}`;
           )
           const lastUserMsg = [...managed.messages].reverse().find(m => m.role === 'user')
 
+          // Session-scoped api-error path. Hoisted out of the diagnostic block
+          // below on purpose: the ghost-card judgment further down reads it too,
+          // and declaring it inside the debug-only `if` left it out of scope
+          // there — every turn that completed without an assistant reply threw
+          // `ReferenceError: sessionErrorPath is not defined` instead of
+          // surfacing the captured API error.
+          const sessionErrorPath = getSessionStoragePath(managed.workspace.rootPath, managed.id)
+
+          // DIAGNOSTIC (2026-10-14): "ghost error card" investigation. Read-only.
+          // A UI error card was produced by this exact branch on 2026-10-13 on turns
+          // whose final reply had demonstrably landed (session.jsonl shows the
+          // assistant row with a LATER timestamp than the last user row). The
+          // judgment below reads as if it must be false in that case, yet the card
+          // appeared — so one of the inputs is not what the code assumes.
+          // This log fires on EVERY completion so we can compare the turns that
+          // entered the branch against the ones that did not. Remove once the
+          // phantom-card root cause is confirmed.
+          if (process.env.CRAFT_DEBUG_TURN_COMPLETION === '1') {
+            const tail = managed.messages.slice(-6).map(m => ({
+              role: m.role,
+              ts: m.timestamp,
+              isInt: m.isIntermediate ?? null,
+              turnId: m.turnId ?? null,
+              id: m.id,
+            }))
+            // NON-CONSUMING reads only. getLastApiError() unlinks api-error.json on
+            // read (getStoredError), and this diagnostic runs BEFORE the business
+            // path — using it would steal the very error that path is about to
+            // surface (the hazard interceptor-common.ts warns about).
+            const history = readErrorHistory(sessionErrorPath)
+            const stored = (history.length > 0 ? history[history.length - 1] : null) ?? peekStoredError(sessionErrorPath)
+            sessionLog.info('[turn-completion-diag]', {
+              sessionId,
+              branchTaken: !!(lastUserMsg && (!lastAssistantMsg || lastUserMsg.timestamp > lastAssistantMsg.timestamp)),
+              lastUserTs: lastUserMsg?.timestamp ?? null,
+              lastAssistantTs: lastAssistantMsg?.timestamp ?? null,
+              lastAssistantId: lastAssistantMsg?.id ?? null,
+              lastAssistantIsInt: lastAssistantMsg?.isIntermediate ?? null,
+              // monotonic()'s internal high-water mark: if this EXCEEDS every
+              // message timestamp, monotonic() was reset/never advanced and the
+              // strict `>` comparison can no longer do what the code assumes.
+              monotonicHighWater: this.lastTimestamp,
+              messageCount: managed.messages.length,
+              tail,
+              storedApiError: stored ? { status: stored.status, ts: stored.timestamp, ageMs: Date.now() - stored.timestamp, message: stored.message } : null,
+            })
+          }
+
           // If the last user message is newer than any assistant response, we got no reply
           // This can happen due to context overflow or API issues
-          if (lastUserMsg && (!lastAssistantMsg || lastUserMsg.timestamp > lastAssistantMsg.timestamp)) {
+          //
+          // GHOST-CARD GUARD (2026-10-14, 261014-ruby-flower): a verification-class
+          // turn demotes its draft (isIntermediate=true) while the judge runs; on
+          // PASS the reply is REPLAYED via a later text_complete that takes over the
+          // demoted slot. If `complete` is processed BEFORE that replay lands, the
+          // check below misreads the turn as "no assistant response" and surfaces a
+          // STALE api-error (all accounts are temporarily unavailable) as a ghost
+          // card after a successful reply. The `verification_passed` info row is the
+          // deterministic signal that a replay is in flight — the adapter enqueues
+          // info → replay → complete in that order (pi-agent.ts verification_result).
+          // When that info is present AND newer than the last user message, the reply
+          // is already committed; skip the ghost path instead of fabricating an error.
+          const verificationReplayPending = hasVerificationReplayPending(
+            managed.messages,
+            lastUserMsg?.timestamp,
+          )
+          // 2026-10-16 (261016-soft-channel): same heuristic, two more ways to
+          // be wrong. (a) the captured api-error can be STALE — the
+          // session-scoped history accumulates, and a 503 written an hour
+          // before this turn got surfaced as a fresh "Service Error" card
+          // next to a successful reply; (b) a FAILed verification or an
+          // unsettled retry row means defense/retry recovery is still in
+          // flight, so "no reply yet" is not a verdict.
+          const storedErrorCandidate = peekStoredError(sessionErrorPath)
+          const historyCandidate = readErrorHistory(sessionErrorPath)
+          const lastHistoryError = historyCandidate.length > 0 ? historyCandidate[historyCandidate.length - 1]! : null
+          const errorCandidateTs = lastHistoryError?.timestamp ?? storedErrorCandidate?.timestamp
+          const ghostCardSuppressed = shouldSuppressGhostErrorCard(
+            managed.messages,
+            lastUserMsg?.timestamp,
+            errorCandidateTs,
+            Date.now(),
+            5 * 60 * 1000,
+          )
+          if (
+            lastUserMsg &&
+            (!lastAssistantMsg || lastUserMsg.timestamp > lastAssistantMsg.timestamp) &&
+            !verificationReplayPending &&
+            !ghostCardSuppressed
+          ) {
             // NOTE: a system guardrail stop (busy-limit cap / no-progress streak)
             // also lands here; that case already emitted a `system_stop_notice`
             // event with the real reason — the generic text below is only the
@@ -7505,9 +7855,8 @@ ${request.prompt}`;
             sessionLog.warn(`Session ${sessionId} completed without assistant response - possible context overflow or API issue`)
 
             // Check if there's a captured API error that explains the silent failure.
-            // Pass explicit session path to avoid reading from the wrong session
-            // (_sessionDir singleton can be clobbered by concurrent sessions).
-            const sessionErrorPath = getSessionStoragePath(managed.workspace.rootPath, managed.id)
+            // Uses the session-scoped path hoisted above (never the _sessionDir
+            // singleton, which concurrent sessions can clobber).
             // Prefer the DURABLE per-session history: it survives the
             // retry-ladder backoff window (no 5-minute staleness drop) and
             // cannot be stolen by a probe's consume-on-read of the
@@ -7914,12 +8263,23 @@ ${request.prompt}`;
           sessionLog.info(`[auth-retry] Retrying message for session ${sessionId}`)
           this.setProcessing(managed, false)
 
-          // Remove the user message that was added for this failed attempt
-          // so we don't get duplicate messages when retrying
-          const lastUserMsgIndex = managed.messages.findLastIndex(m => m.role === 'user')
-          if (lastUserMsgIndex !== -1) {
-            managed.messages.splice(lastUserMsgIndex, 1)
-          }
+          // 2026-10-14 (copper-spruce): RE-BORROW the failed attempt's user
+          // message record instead of splicing it out and re-creating one.
+          // Splicing dropped the bubble from the transcript while the failed
+          // turn's process block (the "重试 N 次后失败" status row, the
+          // "Token expired…" info line) stayed behind — on reload that block
+          // rendered ABOVE the re-created user bubble (stamped at re-send
+          // time), i.e. the process block "jumped up" above its own user
+          // message. Passing the record's id as existingMessageId re-borrows
+          // it: the bubble keeps its original timeline position and no
+          // duplicate is created. Re-borrowing the record ITSELF (even a
+          // hidden system nudge — whose absence from the visible transcript
+          // is unchanged) is safe; re-stamping an OLDER visible bubble is
+          // what must never happen. lastMessageRole flips back to 'user'
+          // only for visible records (a hidden nudge must not drive the
+          // session-list preview).
+          const lastUserMsg = managed.messages.findLast(m => m.role === 'user')
+          if (lastUserMsg && lastUserMsg.hidden !== true) managed.lastMessageRole = 'user'
 
           managed.authRetryInProgress = false
 
@@ -7929,7 +8289,7 @@ ${request.prompt}`;
             retryAttachments,
             retryStoredAttachments,
             retryOptions,
-            undefined,  // existingMessageId
+            lastUserMsg?.id,  // existingMessageId — reuse the original user record
             true        // _isAuthRetry - prevents infinite retry loop
           )
           sessionLog.info(`[auth-retry] Retry completed for session ${sessionId}`)
@@ -9436,12 +9796,38 @@ ${request.prompt}`;
         // by a NON-intermediate takeover: intermediate commentary that reuses
         // a turnId stays a distinct row, matching the renderer's
         // handleTextComplete ("each thinking block should be distinct").
-        const takeoverIndex = event.turnId && !event.isIntermediate
+        //
+        // Cross-turn guard (2026-10-14 261014-prime-moor incident): after a
+        // restart-recovered turn, a demoted-draft row left by a PREVIOUS turn
+        // can carry the same turnId (the pi session continues across the
+        // recovery prompt). Taking over that stale row splices the new final
+        // reply into the MIDDLE of the array while this turn's own
+        // intermediate rows sit AFTER it — the trailing rows stay unsettled,
+        // so the NEXT restart's recoverPendingUserTurns sees a dangling tail
+        // and injects another recovery turn: every restart produced a
+        // duplicate "task complete" bubble until a user Stop coincidentally
+        // left a terminal marker. Only a draft stamped at/after the last
+        // non-guidance user row can belong to the current turn; anything
+        // older stays in place and the final appends as a new row.
+        const takeoverCandidate = event.turnId && !event.isIntermediate
           ? managed.messages.findIndex(m =>
               m.role === 'assistant' &&
               m.turnId === event.turnId &&
               m.isIntermediate === true)
           : -1
+        let takeoverIndex = -1
+        if (takeoverCandidate !== -1) {
+          const draft = managed.messages[takeoverCandidate]!
+          let lastUserTs = 0
+          for (let i = managed.messages.length - 1; i >= 0; i--) {
+            const um = managed.messages[i]!
+            if (um.role === 'user' && um.isGuidance !== true) {
+              lastUserTs = um.timestamp
+              break
+            }
+          }
+          if (draft.timestamp >= lastUserTs) takeoverIndex = takeoverCandidate
+        }
 
         const assistantMessage: Message = {
           id: generateMessageId(),
@@ -9461,6 +9847,13 @@ ${request.prompt}`;
           managed.messages[takeoverIndex] = assistantMessage
         } else {
           managed.messages.push(assistantMessage)
+        }
+        // Stamp this bubble's context size ON the message (Message.contextTokens,
+        // optional — absent on historical sessions and on intermediate drafts).
+        // Only final bubbles state a context. A forked branch reads its parent's
+        // last assistant bubble to seed the usage ring.
+        if (!event.isIntermediate && managed.tokenUsage && managed.tokenUsage.inputTokens > 0) {
+          assistantMessage.contextTokens = managed.tokenUsage.inputTokens;
         }
         managed.streamingText = ''
         managed.streamingTurnId = undefined
@@ -9864,7 +10257,30 @@ ${request.prompt}`;
         break
       }
 
-      case 'status':
+      case 'status': {
+        const stEvt = event as { message?: string; statusType?: string; statusParams?: Record<string, string | number> } | undefined
+        const isSummary = stEvt?.statusType === 'compaction_summary'
+        if (isSummary) {
+          // Token-accounting rows are produced in TWO forms by the pipeline:
+          //   • auto compression → event-adapter emits STATUS
+          //   • manual /compact    → pi-agent emits INFO
+          // Fold both into INFO (fact, not ongoing process) so renderer/
+          // persistence see ONE shape and the row is never a stuck spinner.
+          this.sendEvent({
+            type: 'info',
+            sessionId,
+            message: stEvt!.message ?? 'Compaction summary',
+            statusType: 'compaction_summary',
+            ...(stEvt?.statusParams !== undefined
+              ? { statusParams: stEvt.statusParams }
+              : {}),
+            timestamp: this.monotonic(),
+          }, workspaceId)
+          break
+        }
+      }
+      // Fall through to the plain status forwarding below when not a summary:
+      if ((event as { type?: string }).type === 'status') {
         this.sendEvent({
           type: 'status',
           sessionId,
@@ -9872,24 +10288,34 @@ ${request.prompt}`;
           statusType: event.message.includes('Compacting')
             ? 'compacting'
             : (((event as { statusType?: string }).statusType ?? '') as '' | 'verification' | 'verification_passed' | 'verification_failed') || undefined,
+          // Structured interpolation values (e.g. compaction token accounting)
+          // — forward so the renderer can localize the row (2026-10-17).
+          ...(((event as { statusParams?: Record<string, string | number> }).statusParams) !== undefined
+            ? { statusParams: (event as { statusParams?: Record<string, string | number> }).statusParams }
+            : {}),
           timestamp: this.monotonic(),
         }, workspaceId)
+      }
         break
 
       case 'info': {
         const isSystemStop = (event as { statusType?: string }).statusType === 'system_stop'
         const isCompactionComplete = event.message.startsWith('Compacted')
+        const isCompactionSummary = (event as { statusType?: string }).statusType === 'compaction_summary'
         const infoTimestamp = this.monotonic()
 
         // Persist compaction messages so they survive reload
         // Other info messages are transient (just sent to renderer)
-        if (isCompactionComplete) {
+        if (isCompactionComplete || isCompactionSummary) {
           const compactionMessage: Message = {
             id: generateMessageId(),
             role: 'info',
             content: event.message,
             timestamp: infoTimestamp,
-            statusType: 'compaction_complete',
+            statusType: isCompactionComplete ? 'compaction_complete' : 'compaction_summary',
+            ...(((event as { statusParams?: Record<string, string | number> }).statusParams) !== undefined
+              ? { statusParams: (event as { statusParams?: Record<string, string | number> }).statusParams }
+              : {}),
           }
           managed.messages.push(compactionMessage)
 
@@ -9949,9 +10375,15 @@ ${request.prompt}`;
           sessionId,
           message: event.message,
           statusType: isCompactionComplete ? 'compaction_complete'
+            : isCompactionSummary ? 'compaction_summary'
             : isVerificationPassed ? 'verification_passed'
             : isVerificationFailed ? 'verification_failed'
             : undefined,
+          // Structured interpolation values (e.g. compaction token accounting)
+          // — forward so the renderer can localize the row (2026-10-17).
+          ...(((event as { statusParams?: Record<string, string | number> }).statusParams) !== undefined
+            ? { statusParams: (event as { statusParams?: Record<string, string | number> }).statusParams }
+            : {}),
           timestamp: infoTimestamp,
           ...(typeof finalText === 'string' ? { finalText } : {}),
         }, workspaceId)

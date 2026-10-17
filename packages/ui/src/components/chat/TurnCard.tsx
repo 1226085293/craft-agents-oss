@@ -264,6 +264,9 @@ export interface ActivityItem {
   turnId?: string
   // Status activities (e.g., compacting)
   statusType?: string  // e.g., 'compacting'
+  /** Structured interpolation values for the row's i18n key (e.g. compaction
+   * token accounting: before/retained/compacted/checkpoint/viaRelief). */
+  statusParams?: Record<string, string | number>
   /** Persisted retry-ladder payload (statusType 'retrying') — drives the
    *  retry status line: 重试中 / 重试成功 / 重试失败. */
   retry?: RetryLadderRow

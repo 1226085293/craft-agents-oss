@@ -8,12 +8,107 @@
 import type { Message, StoredMessage, MessageRole } from '@craft-agent/core'
 import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { storedToMessage } from '@craft-agent/core'
+import i18n from 'i18next'
 
 export { storedToMessage }
 import type { ActivityItem, ActivityStatus, ActivityType, ResponseContent, TodoItem } from './TurnCard'
 
 // Re-export ActivityItem for consumers
 export type { ActivityItem }
+
+// ============================================================================
+// Localized process-block status rows
+// ============================================================================
+
+/**
+ * statusType -> i18n key for process-block status/info rows.
+ *
+ * The agent pipeline (pi-agent-server subprocess + shared adapters) emits
+ * these rows with semantic `statusType` markers; the displayed text is
+ * resolved here so a row is never rendered as hardcoded English/Chinese.
+ * Keys live in packages/shared/src/i18n/locales/*.json under `chat.*`.
+ */
+const STATUS_TYPE_I18N_KEY: Record<string, string> = {
+  compacting: 'chat.compactingContext',
+  compaction_complete: 'chat.compactedContext',
+  compaction_summary: 'chat.compactionSummary',
+  verification: 'chat.verifyingFinalReply',
+  verification_passed: 'chat.verificationPassed',
+  verification_failed: 'chat.verificationFailedContinuing',
+  degeneracy_detected: 'chat.degeneracyDetected',
+}
+
+/**
+ * Resolve the display text for a status/info row.
+ *
+ * `statusType` is a ROUTING semantic, not a display key: the renderer and the
+ * session manager match on it (e.g. 'verification' rows are found to settle a
+ * pending verification hold). So variant wording is selected from
+ * `statusParams`, never by inventing new statusTypes.
+ *
+ * Falls back to the pipeline's own `content` when no key resolves, so
+ * unmapped rows keep rendering instead of going blank.
+ */
+function localizeStatusContent(
+  statusType: string | undefined,
+  rawContent: string,
+  params?: Record<string, string | number>,
+): string {
+  if (!statusType) return rawContent
+  let key = STATUS_TYPE_I18N_KEY[statusType]
+  if (!key) return rawContent
+  // Variant rows — same routing statusType, different wording:
+  if (statusType === 'compaction_complete' && params?.tokens != null) {
+    key = 'chat.compactedContextFrom'
+  } else if (statusType === 'verification' && params?.reason != null) {
+    key = 'chat.verificationSkippedRetrying'
+  } else if (statusType === 'verification_passed' && params?.skipped != null) {
+    key = 'chat.verificationSkippedDelivering'
+  } else if (statusType === 'verification_passed' && params?.stabilized != null) {
+    key = 'chat.verificationStabilizedDelivering'
+  } else if (statusType === 'verification_failed' && params?.failType != null) {
+    // 校验失败（<类型>）— 继续执行  — the judge's machine-readable type is
+    // translated through the failType table (never shown as a raw slug);
+    // `reasonPath` (when present) makes the row open the persisted full
+    // reason like any other txt file.
+    key = 'chat.verificationFailedTypedContinuing'
+    params = {
+      ...params,
+      failType: i18n.t(`chat.verificationFailType.${String(params.failType)}`, {
+        defaultValue: i18n.t('chat.verificationFailType.other'),
+      }),
+    }
+  } else if (statusType === 'verification_failed' && params?.skipped != null) {
+    // judge was down on every attempt — an infra fault, not a verdict.
+    key = 'chat.verificationSkippedLlmError'
+  } else if (statusType === 'compaction_summary') {
+    // Token accounting: after = before - compacted + checkpoint tokens, and
+    // the wording distinguishes a no-LLM relief pass from the LLM summary.
+    // Values are pre-formatted ("39.6k") because i18next has no number
+    // formatter wired here and the raw integers would be unreadable.
+    const fmt = (n: number): string => `${(n / 1000).toFixed(1)}k`;
+    const before = Number(params?.before ?? 0);
+    const compacted = Number(params?.compacted ?? 0);
+    const checkpoint = Number(params?.checkpoint ?? 0);
+    params = {
+      ...params,
+      before: fmt(before),
+      retained: fmt(Math.max(0, before - compacted)),
+      compacted: fmt(compacted),
+      after: fmt(Math.max(0, before - compacted + checkpoint)),
+    };
+    if (params?.viaRelief != null && Number(params.viaRelief) === 1) {
+      key = 'chat.compactionSummaryRelief';
+    }
+  }
+  try {
+    const translated = params ? i18n.t(key, params) : i18n.t(key)
+    // i18next returns the key itself when missing — treat that as unmapped.
+    return typeof translated === 'string' && translated !== key ? translated : rawContent
+  } catch {
+    return rawContent
+  }
+}
 
 // ============================================================================
 // Helpers
@@ -568,7 +663,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
         id: message.id,
         type: 'status',
         status: retryRowStatus,
-        content: message.content,
+        content: localizeStatusContent(message.statusType, message.content, message.statusParams),
         timestamp: message.timestamp,
         statusType: message.statusType,
         depth: 0,
@@ -576,6 +671,68 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
       }
       currentTurn.activities.push(statusActivity)
       continue
+    }
+
+    // Info messages with compaction_summary (manual /compact path emits it as
+    // an INFO event while the auto path emits a STATUS event; the renderer
+    // only sees persisted+forwarded rows, so normalize here — see SessionManager
+    // dispatchEvent) create/update the same token-accounting row.
+    if (message.role === 'info' && message.statusType === 'compaction_summary') {
+      const row: ActivityItem = {
+        id: message.id,
+        type: 'status',
+        status: 'completed',
+        content: localizeStatusContent(message.statusType, message.content, message.statusParams),
+        timestamp: message.timestamp,
+        statusType: message.statusType,
+        ...(message.statusParams ? { statusParams: message.statusParams } : {}),
+        depth: 0,
+      }
+      if (currentTurn) {
+        const existingIdx = currentTurn.activities.findIndex(
+          a => a.type === 'status' && a.statusType === 'compaction_summary'
+        )
+        if (existingIdx !== -1) {
+          currentTurn.activities[existingIdx] = row
+        } else {
+          currentTurn.activities.push(row)
+        }
+      } else {
+        // The owning turn was already flushed (reload/replay where the final
+        // assistant message arrived before the summary row). Re-attach to the
+        // LAST assistant turn instead of dropping the row — a compaction
+        // summary that disappears on reload reads as "no stats" (2026-10-17).
+        let lastTurn: AssistantTurn | undefined
+        for (let i = turns.length - 1; i >= 0; i--) {
+          const t = turns[i]
+          if (t?.type === 'assistant') { lastTurn = t as AssistantTurn; break }
+        }
+        if (lastTurn) {
+          const existingIdx = lastTurn.activities.findIndex(
+            a => a.type === 'status' && a.statusType === 'compaction_summary'
+          )
+          if (existingIdx !== -1) {
+            lastTurn.activities[existingIdx] = row
+          } else {
+            lastTurn.activities.push(row)
+          }
+        }
+        // No assistant turn at all (compaction fired between turns): render
+        // as its own standalone card so the stats are never silently lost.
+        if (!lastTurn) {
+          turns.push({
+            type: 'assistant',
+            turnId: message.turnId || message.id,
+            activities: [row],
+            response: undefined,
+            intent: undefined,
+            isStreaming: false,
+            isComplete: true,
+            timestamp: message.timestamp,
+          })
+        }
+      }
+      continue // Don't create a separate system turn / card
     }
 
     // Info messages with compaction_complete update the matching status activity
@@ -589,7 +746,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
           currentTurn.activities[statusIdx] = {
             ...existingActivity,
             status: 'completed',
-            content: message.content,
+            content: localizeStatusContent(message.statusType, message.content, message.statusParams),
           }
         }
       }
@@ -609,7 +766,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
         currentTurn!.activities[statusIdx] = {
           ...existingActivity,
           status: verdictStatus,
-          content: message.content,
+          content: localizeStatusContent(message.statusType, message.content, message.statusParams),
         }
       } else {
         // The renderer folded the transient status row into this info message
@@ -631,7 +788,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
           id: message.id,
           type: 'status',
           status: verdictStatus,
-          content: message.content,
+          content: localizeStatusContent(message.statusType, message.content, message.statusParams),
           timestamp: message.timestamp,
           statusType: 'verification',
           depth: 0,

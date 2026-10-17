@@ -345,6 +345,12 @@ export interface Message {
   // redirect, or internal cancellation. Persisted for restart recovery,
   // defense evaluation, and messaging delivery suppression.
   aborted?: boolean;
+  /**
+   * Context size (input tokens) at the moment this assistant bubble was
+   * delivered. Mirrors StoredMessage.contextTokens — assigned per bubble,
+   * never accumulated; passed through by messageToStored/storedToMessage.
+   */
+  contextTokens?: number;
   // Hidden: a system-generated message that must reach the model (it drives a
   // turn) but must NOT render as a bubble in the transcript — e.g. the WS2
   // background-task-completion nudge that wakes an idle session to present a
@@ -356,7 +362,9 @@ export interface Message {
   // Status type for special status messages. 'retrying' marks the PERSISTED
   // retry-ladder row (role 'status' + `retry` payload); the older transient
   // renderer retryState is gone (2026-10-08 — the row survives reload).
-  statusType?: 'compacting' | 'compaction_complete' | 'retrying' | 'verification' | 'verification_passed' | 'verification_failed';
+  statusType?: 'compacting' | 'compaction_complete' | 'retrying' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected';
+  /** Structured interpolation values for the row's i18n key (e.g. attempt/total, tokens). The renderer resolves display text from `statusType`; these fill its placeholders. */
+  statusParams?: Record<string, string | number>;
   /**
    * Persisted retry-ladder row payload (2026-10-08). One `status` message per
    * ladder, created with status 'retrying' and settled in place to
@@ -449,8 +457,9 @@ export interface StoredMessage {
   /** Streaming start time (first text_delta) for process-card ordering - persisted */
   startedAt?: number;
   // Status type (retry rows are persisted with their `retry` payload)
-  statusType?: 'compacting' | 'compaction_complete' | 'retrying' | 'verification' | 'verification_passed' | 'verification_failed';
-  /** Persisted retry-ladder row payload — see RetryLadderRow. */
+  statusType?: 'compacting' | 'compaction_complete' | 'retrying' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected';
+  /** Structured interpolation values for the row's i18n key — see statusParams above. */
+  statusParams?: Record<string, string | number>;
   retry?: RetryLadderRow;
   // Info level for info messages (persisted for reload)
   infoLevel?: 'info' | 'warning' | 'error' | 'success';
@@ -499,6 +508,14 @@ export interface StoredMessage {
   isGuidance?: boolean;
   // Aborted: turn was cut short by the user (persisted — see Message.aborted)
   aborted?: boolean;
+  /**
+   * Context size (input tokens) at the moment this assistant bubble was
+   * delivered. Optional: absent on historical sessions and on non-assistant
+   * messages. Assigned (never accumulated) per bubble, so a forked branch can
+   * read its parent's last assistant bubble to seed the usage ring, and any
+   * bubble can be traced back to the context size it was produced under.
+   */
+  contextTokens?: number;
 }
 
 /**
@@ -675,8 +692,8 @@ export type AgentEvent =
   | { type: 'steer_injected'; messageId?: string }
   | { type: 'retry'; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number; /** Ladder-start epoch ms — anchors the row on the ladder's real start (2026-10-10), so a later `end` re-finds the same row by startedAt. */ startedAt?: number }
   | { type: 'retry'; phase: 'active' | 'end'; recovered?: boolean; attempt?: number; startedAt?: number; elapsedMs?: number }
-  | { type: 'status'; message: string; statusType?: string }
-  | { type: 'info'; message: string; statusType?: string; finalText?: string; /** Present when statusType === 'system_stop': machine key (e.g. 'busy_limit', 'no_progress') explaining why a guardrail killed the turn. */ stopReason?: string }
+  | { type: 'status'; message: string; statusType?: string; statusParams?: Record<string, string | number> }
+  | { type: 'info'; message: string; statusType?: string; statusParams?: Record<string, string | number>; finalText?: string; /** Present when statusType === 'system_stop': machine key (e.g. 'busy_limit', 'no_progress') explaining why a guardrail killed the turn. */ stopReason?: string }
   | { type: 'text_delta'; text: string; turnId?: string; parentToolUseId?: string }
   | { type: 'text_complete'; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; sdkMessageId?: string; /** Model's message_start time (thinking blocks never stream deltas) - for process-card ordering */ startedAt?: number }
   /**

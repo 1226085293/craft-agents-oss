@@ -443,6 +443,10 @@ describe('PiAgent verification delivery lifecycle', () => {
       'verification',
       'verification',
     ])
+    // Emitted as a STATUS event so it rides the process card inside the turn
+    // (an info with statusType 'verification' would render as a standalone
+    // system line outside the process block — 2026-10-14 fix).
+    expect(enqueued[3].type).toBe('status')
     expect(enqueued[3].message).toContain('Verification skipped')
     expect(enqueued[3].message).toContain('retrying 2/3')
     expect(enqueued).not.toContainEqual({ type: 'complete' })

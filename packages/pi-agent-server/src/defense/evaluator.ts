@@ -146,6 +146,20 @@ export class DefenseEvaluator {
     this.lifecycle.reset();
   }
 
+  /**
+   * Main-process retry ladder re-issued the model step (2026-10-18,
+   * 261017-copper-copper): advance a ladder-handoff FSM from RESUME_READY to
+   * RESUMING so the retried run's post-stop evaluation follows the normal
+   * resume path instead of throwing `resume_ready -> resume_ready`.
+   * No-op when disabled or when the FSM is not parked in the ladder lane.
+   *
+   * @returns true when the FSM was actually advanced.
+   */
+  markLadderResumed(): boolean {
+    if (!this.enabled) return false;
+    return this.lifecycle.markLadderResumed();
+  }
+
   /** Human-readable summary of which resume signal(s) fired (diagnostics). */
   private describeSignals(
     silentStop: boolean,

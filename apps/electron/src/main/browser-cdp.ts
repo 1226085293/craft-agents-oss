@@ -12,6 +12,18 @@
 import type { WebContents } from 'electron'
 import { mainLog } from './logger'
 
+/**
+ * Per-CDP-command timeout. A hung renderer (busy page, suspended tab) makes
+ * `debugger.sendCommand` never resolve. Before 2026-10-18 that left the whole
+ * browser_tool call pending forever, which in turn wedged the agent turn
+ * (session 261016-deft-tide: a screenshot hung for 300s and the stall watchdog
+ * killed the turn). Bound every command so the tool fails fast instead.
+ */
+const CDP_COMMAND_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.CRAFT_BROWSER_CDP_TIMEOUT_MS)
+  return Number.isFinite(raw) && raw > 0 ? raw : 15_000
+})()
+
 export interface AccessibilityNode {
   ref: string           // "@e1", "@e2", etc.
   role: string          // "button", "link", "textbox", etc.
@@ -156,9 +168,22 @@ export class BrowserCDP {
 
   private async send(method: string, params?: Record<string, unknown>): Promise<any> {
     await this.ensureAttached()
+    const command = this.webContents.debugger.sendCommand(method, params)
+    // A late rejection after the timeout must not surface as an unhandled
+    // rejection — the race below has already settled.
+    command.catch(() => {})
+    let timer: ReturnType<typeof setTimeout> | null = null
     try {
-      return await this.webContents.debugger.sendCommand(method, params)
+      return await Promise.race([
+        command,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error(`CDP ${method} timed out after ${CDP_COMMAND_TIMEOUT_MS}ms`))
+          }, CDP_COMMAND_TIMEOUT_MS)
+        }),
+      ])
     } finally {
+      if (timer) clearTimeout(timer)
       // Keep detach countdown tied to completed calls so we do not detach mid-flight.
       this.resetIdleDetachTimer()
     }

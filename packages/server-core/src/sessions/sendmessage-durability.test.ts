@@ -422,6 +422,54 @@ describe('sendMessage durability', () => {
     expect(managed.messageQueue).toHaveLength(0)
   })
 
+  it('does not recover a turn whose unsettled-looking tail was settled by the verification flow (261014-prime-moor)', () => {
+    // Prime-moor shape: the final reply is followed by the defense flow's
+    // settle sequence — verification failed, the replayed draft (an
+    // INTERMEDIATE row), failed again, then PASSED. The old "any
+    // intermediate in trailing" test treated the settled replay row as a
+    // torn turn, so every restart re-injected a recovery prompt and the
+    // session emitted a fresh duplicate "task complete" bubble per
+    // restart. The last significant row is the verification_passed marker
+    // → settled → no recovery.
+    const sessionId = 'recover-settled-verification-tail'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'orig-user', role: 'user', content: '完成后记得提交', timestamp: 1 },
+      { id: 'final', role: 'assistant', content: '✅ 任务完成', timestamp: 2, isIntermediate: false },
+      { id: 'vfail1', role: 'info', content: 'Verification failed — continuing', timestamp: 3, statusType: 'verification_failed' },
+      { id: 'replay', role: 'assistant', content: '✅ 任务完成（replay）', timestamp: 4, isIntermediate: true, turnId: 'pi-turn-1__m5' },
+      { id: 'vfail2', role: 'info', content: 'Verification failed — continuing', timestamp: 5, statusType: 'verification_failed' },
+      { id: 'vpass', role: 'info', content: 'Verification passed — delivering final reply', timestamp: 6, statusType: 'verification_passed' },
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue).toHaveLength(0)
+  })
+
+  it('still recovers a verification flow cut off before its pass marker', () => {
+    // Same shape but the judge never got to pass: the tail's last
+    // significant row is the REPLAYED (intermediate) draft → genuinely
+    // dangling → the owning user request is replayed exactly as before.
+    const sessionId = 'recover-cut-verification-tail'
+    const managed = buildSession(sessionId)
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'orig-user', role: 'user', content: '完成后记得提交', timestamp: 1 },
+      { id: 'final', role: 'assistant', content: '✅ 任务完成', timestamp: 2, isIntermediate: false },
+      { id: 'vfail1', role: 'info', content: 'Verification failed — continuing', timestamp: 3, statusType: 'verification_failed' },
+      { id: 'replay', role: 'assistant', content: '✅ 任务完成（replay）', timestamp: 4, isIntermediate: true, turnId: 'pi-turn-1__m5' },
+      { id: 'vfail2', role: 'info', content: 'Verification failed — continuing', timestamp: 5, statusType: 'verification_failed' },
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue).toHaveLength(1)
+    expect(managed.messageQueue[0]?.messageId).toBe('orig-user')
+    expect(managed.messageQueue[0]?.internalMessage).toContain('Continue the previous user request')
+  })
+
   it('resumes a dangling tool-loop turn that has no user message to replay', () => {
     // 2026-10-04 amber-plain class: an auto-queued follow-up / verification
     // turn dies mid-tool with NO user message in its trail. The user-replay

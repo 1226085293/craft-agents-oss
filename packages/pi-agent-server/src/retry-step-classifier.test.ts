@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 import {
   classifyRetryStep,
   isSdkBusyRejection,
+  isUserStoppedTurn,
   type AbortReason,
   type LastAssistantShape,
 } from './retry-step-classifier.ts';
@@ -123,5 +124,110 @@ describe('AbortReason type surface', () => {
   it('accepts the three server-side values', () => {
     const reasons: AbortReason[] = ['user', 'system', null];
     expect(reasons).toHaveLength(3);
+  });
+});
+/**
+ * 2026-10-18 (session 261016-deft-tide): a tool promise hung, the stall
+ * watchdog aborted the run, and the transcript tail stayed on an assistant
+ * stopReason='toolUse' step with NO toolResult messages. `continue()` cannot
+ * run from an assistant tail, so every retry refused with "no re-runnable
+ * model step" forever. The classifier now synthesizes an error toolResult per
+ * dangling call — but only for SYSTEM-attributed aborts (P0: never revive a
+ * user-stopped turn).
+ */
+describe('classifyRetryStep — dangling toolUse recovery (2026-10-18)', () => {
+  const toolCall = (id: string, name = 'mcp__session__call_tool') => ({ type: 'toolCall', id, name });
+
+  it('system-aborted dangling toolUse synthesizes one error result per call', () => {
+    const verdict = classifyRetryStep(
+      am({ stopReason: 'toolUse', content: [toolCall('call_1')] }),
+      'system',
+      0,
+    );
+    expect(verdict).toEqual({
+      kind: 'synthesize_tool_results',
+      results: [{ toolCallId: 'call_1', toolName: 'mcp__session__call_tool' }],
+    });
+  });
+
+  it('multiple dangling calls all get results', () => {
+    const verdict = classifyRetryStep(
+      am({ stopReason: 'toolUse', content: [toolCall('call_1'), toolCall('call_2', 'Bash')] }),
+      'system',
+      0,
+    );
+    expect(verdict).toEqual({
+      kind: 'synthesize_tool_results',
+      results: [
+        { toolCallId: 'call_1', toolName: 'mcp__session__call_tool' },
+        { toolCallId: 'call_2', toolName: 'Bash' },
+      ],
+    });
+  });
+
+  it('a dangling toolUse step that also carries partial text still synthesizes', () => {
+    const verdict = classifyRetryStep(
+      am({ stopReason: 'toolUse', content: [...TEXT('partial progress'), toolCall('call_1')] }),
+      'system',
+      0,
+    );
+    expect(verdict.kind).toBe('synthesize_tool_results');
+  });
+
+  it('USER-stopped toolUse refuses — P0 intact', () => {
+    expect(classifyRetryStep(
+      am({ stopReason: 'toolUse', content: [toolCall('call_1')] }),
+      'user',
+      0,
+    )).toEqual({ kind: 'refuse' });
+  });
+
+  it('null attribution refuses too (unknown origin is not revived)', () => {
+    expect(classifyRetryStep(
+      am({ stopReason: 'toolUse', content: [toolCall('call_1')] }),
+      null,
+      0,
+    )).toEqual({ kind: 'refuse' });
+  });
+
+  it('a toolUse step with no identifiable toolCall blocks refuses (nothing to synthesize)', () => {
+    expect(classifyRetryStep(
+      am({ stopReason: 'toolUse', content: [{ type: 'text', text: 'no calls' }] }),
+      'system',
+      0,
+    )).toEqual({ kind: 'refuse' });
+  });
+
+  it('missing tool name falls back to "unknown"', () => {
+    const verdict = classifyRetryStep(
+      am({ stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'call_1' }] }),
+      'system',
+      0,
+    );
+    expect(verdict).toEqual({
+      kind: 'synthesize_tool_results',
+      results: [{ toolCallId: 'call_1', toolName: 'unknown' }],
+    });
+  });
+});
+
+
+/**
+ * 2026-10-18 (P0 hardening): handleAbort now rejects the hung tool, so a
+ * user-stopped turn's transcript tail can be a re-runnable toolResult. The
+ * classifier only gates assistant tails; handleRetry uses this latch for the
+ * rest. Attribution is reset at the start of each fresh prompt.
+ */
+describe('isUserStoppedTurn — P0 retry latch (2026-10-18)', () => {
+  it('user attribution refuses a retry (even with a toolResult tail)', () => {
+    expect(isUserStoppedTurn('user')).toBe(true);
+  });
+
+  it('system attribution allows a retry', () => {
+    expect(isUserStoppedTurn('system')).toBe(false);
+  });
+
+  it('null attribution allows a retry', () => {
+    expect(isUserStoppedTurn(null)).toBe(false);
   });
 });

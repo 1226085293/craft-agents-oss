@@ -17,7 +17,7 @@
 import http from 'node:http';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
-import { appendFileSync, mkdirSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { appendFileSync, mkdirSync, readdirSync, statSync, existsSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { execSync } from 'node:child_process';
 
@@ -73,7 +73,11 @@ import { resolvePiModel, isDeniedMiniModelId, isModelNotFoundError } from './mod
 import { pickProviderAppropriateMiniModel } from './pick-mini-model.ts';
 // Retry-step classification (2026-10-13): pure whitelist + busy-detector
 // extracted so the handleRetry re-runnable decision is unit-testable.
-import { classifyRetryStep, isSdkBusyRejection } from './retry-step-classifier.ts';
+import { classifyRetryStep, isSdkBusyRejection, isUserStoppedTurn } from './retry-step-classifier.ts';
+// Pending proxy-tool executions: bounded timeout + bulk reject on stall/abort
+// (2026-10-18, session 261016-deft-tide — a hung tool promise used to wedge
+// the SDK's activeRun forever).
+import { PendingToolExecutions } from './pending-tool-executions.ts';
 import {
   CRAFT_PI_EPHEMERAL_QUERY_DEADLINE_MS,
   craftCompactionSettings,
@@ -108,7 +112,6 @@ import { PI_TOOL_NAME_MAP, THINKING_TO_PI } from '../../shared/src/agent/backend
 import { createCompactionProgressHeartbeat } from './compaction-progress.ts';
 import {
   findLastCompactionRecord,
-  getCompactWaitTimeoutMs,
   translateAlreadyCompacted,
   waitForCompaction,
 } from './compaction-policy.ts';
@@ -124,11 +127,18 @@ import { adaptCredentialForPiSdk, type PiCredential } from './adapt-credential.t
 import { DefenseEvaluator, resolveDefenseEnabled, buildDefenseStopNotice } from './defense/index.ts';
 import { detectRepetitionLoop, extractAssistantText, selectVerificationCandidateText } from './defense/repetition-detector.ts';
 import { createDsmlSanitizerExtension } from './defense/dsml-sanitizer.ts';
+import { createContextReliefExtension } from './defense/context-relief.ts';
 import { installDsmlReceiver } from './dsml-receiver.ts';
 import { drainQueuedFollowUp } from './defense/resume-followup.ts';
 import { runVerificationJudge } from './defense/verification-judge.ts';
 import { buildVerificationJudgePrompt } from './defense/judge-prompt.ts';
+import { parseJudgeVerdict } from './defense/judge-verdict.ts';
 import { ToolLoopDetector, fingerprintToolCall, digestResult, shouldRejectEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
+import {
+  StreamingDegeneracyTracker,
+  DEGENERACY_CORRECTION,
+  DEGENERACY_STATUS_TEXT,
+} from './defense/streaming-degeneracy.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
 import { normalizeShellTimeout } from './shell-timeout.ts';
 import {
@@ -298,7 +308,15 @@ interface OutboundCompactResult {
   type: 'compact_result';
   id: string;
   success: boolean;
-  result?: { summary: string; firstKeptEntryId: string; tokensBefore: number };
+  result?: {
+    summary: string;
+    firstKeptEntryId: string;
+    tokensBefore: number;
+    /** Post-compaction context estimate (SDK) — informational. */
+    estimatedTokensAfter?: number;
+    /** Relief/LLM token accounting for the summary line. */
+    stats?: unknown;
+  };
   errorMessage?: string;
   /** Epoch ms when the subprocess started handling the compact request.
    *  Lets the main process measure how late a dropped reply arrived. */
@@ -366,6 +384,19 @@ interface OutboundVerificationResult {
   failReason?: string;
   skipped?: boolean;
   skipReason?: string;
+  /**
+   * Machine-readable failure type (slug) for the UI's i18n label —
+   * `校验失败（<类型>）— 继续执行`. Only set when passed=false and the
+   * judge actually rendered a typed verdict.
+   */
+  failType?: string;
+  /**
+   * Absolute path to the persisted full reason (sessions/{id}/verification/
+   * *.txt) so the process block can open it like any other txt file.
+   */
+  reasonPath?: string;
+  /** Attempt index within this verification (1-based) — de-dupes the UI row. */
+  attempt?: number;
 }
 
 /**
@@ -438,9 +469,81 @@ let defenseEvaluator: DefenseEvaluator | null = null;
 // Mutable state
 let currentUserMessage = '';
 
+// --- Verification bookkeeping -----------------------------------------------
+// 1-based attempt counter for the CURRENT verification cycle (a cycle is one
+// user turn; every follow-up resume inside it increments). Drives the UI row
+// identity (turnId + attempt) so repeated FAILs are not de-duplicated into one
+// row. Reset at each post-stop trigger.
+let verifyAttemptCount = 0;
+// finalText of the last verification in this cycle. When a follow-up resume
+// re-emits BYTE-IDENTICAL text, further judging cannot change the outcome —
+// deliver it and leave an explicit "content stabilized" process row.
+let lastVerifiedFinalText: string | null = null;
+
 // Pending promises for async handshakes
 const pendingPreToolUse = new Map<string, { resolve: (response: { action: string; input?: Record<string, unknown>; reason?: string }) => void }>();
-const pendingToolExecutions = new Map<string, { resolve: (result: { content: string; isError: boolean }) => void }>();
+const pendingToolExecutions = new PendingToolExecutions();
+
+// ---------------------------------------------------------------------------
+// Proxy-tool execution budgets (subprocess side).
+//
+// The main process enforces its own per-tool timeout; these are the SUBPROCESS
+// fallback that guarantees the SDK's tool promise settles even if the host
+// never replies (main process wedged / IPC response lost). Without them a
+// single hung proxy tool keeps `activeRun` alive forever and every later
+// prompt dies with "Agent is already processing a prompt".
+//
+// The AUTHORITATIVE budgets live in
+// `packages/shared/src/agent/tool-timeouts.ts` (browser 60s / generic 120s /
+// Bash 600s / call_llm 300s). Invariant: every value below MUST stay >= its
+// main-process budget + 60s grace (currently 120/600/660/360) so the host's
+// shorter timeout always fires first and a late reply is a harmless no-op.
+// Change both sides together.
+// ---------------------------------------------------------------------------
+const PROXY_TOOL_TIMEOUT_GRACE_MS = 60_000;
+const DEFAULT_PROXY_TOOL_TIMEOUT_MS = Number(
+  process.env.CRAFT_PI_PROXY_TOOL_TIMEOUT_MS ?? 10 * 60 * 1000,
+);
+const BROWSER_TOOL_TIMEOUT_MS = Number(
+  process.env.CRAFT_PI_BROWSER_TOOL_TIMEOUT_MS ?? 2 * 60 * 1000,
+);
+const BASH_TOOL_TIMEOUT_MS = Number(
+  process.env.CRAFT_PI_BASH_TOOL_TIMEOUT_MS ?? 11 * 60 * 1000,
+);
+const CALL_LLM_TIMEOUT_MS = Number(
+  process.env.CRAFT_PI_CALL_LLM_TIMEOUT_MS ?? 6 * 60 * 1000,
+);
+
+function resolveProxyToolTimeoutMs(toolName: string, args: Record<string, unknown>): number {
+  const nested = typeof args.args === 'object' && args.args !== null
+    ? args.args as Record<string, unknown>
+    : null;
+  const rawTimeout = typeof args.timeout === 'number' ? args.timeout : nested?.timeout;
+  const explicit = typeof rawTimeout === 'number' && Number.isFinite(rawTimeout) && rawTimeout > 0
+    ? rawTimeout * 1000
+    : null;
+  if (explicit != null) return explicit + PROXY_TOOL_TIMEOUT_GRACE_MS;
+  if (toolName === 'Bash') return BASH_TOOL_TIMEOUT_MS;
+  if (toolName === 'call_llm') return CALL_LLM_TIMEOUT_MS;
+  if (toolName === 'mcp__session__call_tool' || toolName === 'call_tool') {
+    const inner = typeof args.name === 'string' ? args.name : '';
+    if (inner === 'browser_tool') return BROWSER_TOOL_TIMEOUT_MS;
+  }
+  return DEFAULT_PROXY_TOOL_TIMEOUT_MS;
+}
+
+/**
+ * Reject every in-flight proxy-tool execution. Called by the stall watchdog
+ * (prompt + retry paths) and user abort BEFORE `session.abort()`, so the SDK
+ * unwinds the tool, appends an error toolResult, and clears `activeRun`.
+ */
+function rejectPendingToolExecutions(reason: string): number {
+  const rejected = pendingToolExecutions.rejectAll(reason);
+  if (rejected > 0) {
+    debugLog(`Rejected ${rejected} pending tool execution(s): ${reason}`);
+  }
+  return rejected;
+}
 
 // Pending session MCP tool calls for completion detection
 const pendingSessionToolCalls = new Map<string, { toolName: string; arguments: Record<string, unknown> }>();
@@ -483,6 +586,13 @@ interface ActiveToolExecution {
 // let the model decide whether guidance conflicts with a running tool and, only
 // in that case, cancel the tool so the same agent turn can replan immediately.
 const activeToolExecutions = new Map<string, ActiveToolExecution>();
+
+// Layer 2c — streaming degeneracy detector (2026-10-16). Catches output
+// that devolves into a repetition loop WHILE STREAMING — the stop-loss window
+// that agent_end-granularity detection (defense/repetition-detector.ts) can
+// never hit. On detection: emit a status line (process block) + queue a
+// correction followUp on the SAME turn. CORRECTION ONLY — never abort.
+const streamingDegeneracy = new StreamingDegeneracyTracker();
 
 // Callback server for call_llm
 let callbackServer: http.Server | null = null;
@@ -603,7 +713,7 @@ const AUTH_HANDOFF_TOOLS = new Set([
 const VERIFICATION_CANDIDATE_MIN_CHARS = 120;
 
 function evaluateDefensePostStop(endMessages?: unknown[]):
-  | { shouldResume: boolean; resumeMessage?: string; verifyRequired?: boolean; verifyReason?: string; finalText?: string; stopNotice?: { reason: string; message: string }; emptyResponseOwned?: boolean }
+  | { shouldResume: boolean; resumeMessage?: string; verifyRequired?: boolean; verifyReason?: string; finalText?: string; stopNotice?: { reason: string; message: string }; emptyResponseOwned?: boolean; defenseError?: string }
   | null {
   if (!defenseEvaluator) return null;
 
@@ -796,8 +906,18 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     }
     return { shouldResume: false, stopNotice: buildDefenseStopNotice(result) ?? undefined };
   } catch (error) {
-    debugLog(`[defense] Post-stop evaluation threw: ${error instanceof Error ? error.message : String(error)}`);
-    return null;
+    const message = error instanceof Error ? error.message : String(error);
+    debugLog(`[defense] Post-stop evaluation threw: ${message}`);
+    // 2026-10-16 (261016-soft-channel): a thrown defense evaluation must NOT
+    // be swallowed into a bare `null`. The caller treats `null` as "no defense
+    // decision" and forwards a plain agent_end — the main process then reads
+    // its own "turn ended without a reply" heuristic and, finding none, may
+    // surface a STALE api-error as a ghost card. More importantly, when the
+    // failure happens on the ladder-lane path, the main process never receives
+    // the error event that arms the retry ladder, so retries stop dead.
+    // Return a non-resuming result carrying the reason so the caller can
+    // surface a terminal error the ladder/user can act on, instead of silence.
+    return { shouldResume: false, defenseError: message };
   }
 }
 
@@ -870,10 +990,11 @@ async function doVerificationCheck(
   opts: { finalText: string; verifyReason?: string; resumeMessage?: string },
 ): Promise<void> {
   const { finalText, verifyReason } = opts;
+  verifyAttemptCount += 1;
   // No captured final text -> nothing to verify -> follow up (LLM continues).
   if (!finalText.trim()) {
     debugLog('[defense] verification: no final text captured — falling back to resume');
-    send({ type: 'verification_result', passed: false, failReason: 'no-final-text' });
+    send({ type: 'verification_result', passed: false, failReason: 'no-final-text', attempt: verifyAttemptCount });
     if (opts.resumeMessage) queueDefenseResume(session, opts.resumeMessage);
     return;
   }
@@ -882,7 +1003,13 @@ async function doVerificationCheck(
   // correspondence, not the whole reply. 6K chars is generous for a
   // delivery check while keeping the ephemeral query cheap.
   const candidate = finalText.slice(0, 6000);
-  const userMsg = (currentUserMessage || '').slice(0, 2000);
+  // Judge against the CURRENT turn's full intent: the user message plus every
+  // mid-turn steer (loadLatestUserRequest accumulates all guidance for the
+  // current turn only — never other turns'). 4K covers a long original
+  // request with several steers without bloating the judge query.
+  const turnIntent = (initConfig?.sessionPath ? loadLatestUserRequest(initConfig.sessionPath) : undefined)
+    || currentUserMessage || '';
+  const userMsg = turnIntent.slice(0, 4000);
   const prompt = buildVerificationJudgePrompt(userMsg, candidate);
 
   // Judge invocation with retry (2026-10-13 spec): an unavailable judge
@@ -893,7 +1020,11 @@ async function doVerificationCheck(
   // (reason) — retrying N/M" process blocks; exhaustion resolves to the
   // FAILED lane (follow-up resume), NOT a delivery.
   const { verdict, lastFault } = await runVerificationJudge(prompt, {
-    runAttempt: (p) => runMiniCompletion(p),
+    // The judge must run on the SESSION's own model, not the cheap miniModel:
+    // it judges the reply that the session model produced, so a weaker model
+    // can misjudge. initConfig.model is the session's current model (kept
+    // current across hot model switches via update_runtime_config).
+    runAttempt: (p) => runMiniCompletion(p, initConfig?.model),
     onSkip: (attempt, totalAttempts, reason) => {
       debugLog(`[defense] verification judge attempt ${attempt}/${totalAttempts} unavailable (${reason}) — retrying`);
       send({ type: 'verification_skip', attempt, totalAttempts, reason });
@@ -906,25 +1037,111 @@ async function doVerificationCheck(
   // delivery: an unverified reply must not reach the user as-is.
   if (verdict == null) {
     debugLog(`[defense] verification judge unavailable after all attempts (${lastFault}) — verification FAILED, following up`);
-    send({ type: 'verification_result', passed: false, failReason: `judge-unavailable: ${lastFault}` });
+    send({ type: 'verification_result', passed: false, failReason: `judge-unavailable: ${lastFault}`, attempt: verifyAttemptCount });
     if (opts.resumeMessage) queueDefenseResume(session, opts.resumeMessage);
     return;
   }
 
-  // FAIL-safe parse: the prompt demands exactly one word (PASS/FAIL), but
-  // models sometimes emit prose. Only an explicit leading "PASS" word passes;
-  // anything else (prose, "The reply misses...", whitespace garbage) falls
-  // back to the conservative resume path instead of delivering unverified.
-  const ok = /^PASS\b/i.test(verdict.trim());
-  if (ok) {
+  // FAIL-safe parse: the prompt demands one line (PASS or FAIL|type|reason).
+  // `other` + empty reason is the "we could not read the verdict" lane, which
+  // the caller labels distinctly from a typed rejection.
+  const parsed = parseJudgeVerdict(verdict);
+
+  // Content-stability stop-loss (user-confirmed 2026-10-17): a follow-up resume
+  // that re-emits BYTE-IDENTICAL final text cannot change any further judging.
+  // Deliver it, but leave an explicit row so the user knows this was a
+  // stop-loss, not an endorsement of the verdict.
+  if (lastVerifiedFinalText !== null && lastVerifiedFinalText === finalText) {
+    debugLog(`[defense] verification PASSED (content stabilized, ${finalText.length} chars, attempt ${verifyAttemptCount}) — stop-loss delivery`);
+    send({
+      type: 'verification_result',
+      passed: true,
+      finalText,
+      failReason: 'content stabilized — retrying cannot change the outcome',
+    });
+    return;
+  }
+  lastVerifiedFinalText = finalText;
+
+  if (parsed.pass) {
     debugLog(`[defense] verification PASSED (${verifyReason ?? 'none'}): replaying ${finalText.length} chars`);
     send({ type: 'verification_result', passed: true, finalText });
     return;
   }
 
-  debugLog(`[defense] verification FAILED (judge said: ${verdict.trim().slice(0, 120)}) (${verifyReason ?? 'none'}) — falling back to follow-up`);
-  send({ type: 'verification_result', passed: false, failReason: verdict.trim().slice(0, 200) });
+  // Typed rejection: persist the FULL reason for the click-to-open file, and
+  // carry the type + path back so the process block renders
+  //   `校验失败（<类型>）— 继续执行`
+  // with the file openable like any other txt.
+  const reasonPath = persistVerificationReason({
+    failType: parsed.pass ? '' : parsed.type,
+    reason: parsed.pass ? '' : parsed.reason,
+    rawVerdict: verdict,
+    verifyReason,
+    finalText,
+    attempt: verifyAttemptCount,
+  });
+  debugLog(`[defense] verification FAILED (type=${parsed.pass ? '-' : parsed.type}, reason=${parsed.pass ? '-' : parsed.reason.slice(0, 120)}) (attempt ${verifyAttemptCount}) — following up`);
+  send({
+    type: 'verification_result',
+    passed: false,
+    failReason: parsed.pass ? '' : parsed.reason,
+    failType: parsed.pass ? undefined : parsed.type,
+    reasonPath: reasonPath ?? undefined,
+    attempt: verifyAttemptCount,
+  });
   if (opts.resumeMessage) queueDefenseResume(session, opts.resumeMessage);
+}
+
+/**
+ * Persist the FULL reason of a typed verification rejection so the process
+ * block can open it like any other txt file.
+ *
+ * Layout: sessions/{id}/verification/<attempt>-<type>.txt
+ * Content: the machine verdict, the judge's reason, the raw judge output
+ * (for post-mortems when the type is wrong), and which reply it judged.
+ *
+ * Best-effort: a failed write returns null and the UI simply has nothing to
+ * open (the short reason is still on the row itself).
+ */
+function persistVerificationReason(info: {
+  failType: string;
+  reason: string;
+  rawVerdict: string;
+  verifyReason?: string;
+  finalText: string;
+  attempt: number;
+}): string | null {
+  try {
+    const sessionPath = initConfig?.sessionPath;
+    if (!sessionPath) return null;
+    const dir = join(sessionPath, 'verification');
+    mkdirSync(dir, { recursive: true });
+    const safeType = (info.failType || 'other').replace(/[^a-z0-9-]/gi, '-');
+    const file = join(dir, `attempt-${String(info.attempt).padStart(3, '0')}-${safeType}.txt`);
+    const body = [
+      `# Verification rejection`,
+      ``,
+      `attempt:       ${info.attempt}`,
+      `trigger:       ${info.verifyReason ?? 'unknown'}`,
+      `type:          ${info.failType || 'other'}`,
+      ``,
+      `## Reason (from the judge)`,
+      info.reason || '(none given)',
+      ``,
+      `## Raw judge output`,
+      info.rawVerdict,
+      ``,
+      `## Reply that was rejected`,
+      info.finalText,
+      ``,
+    ].join('\n');
+    writeFileSync(file, body, 'utf8');
+    return file;
+  } catch (err) {
+    debugLog(`[defense] could not persist verification reason: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
 }
 
 // ============================================================
@@ -1490,6 +1707,17 @@ async function createPiSession(): Promise<AgentSession> {
       settingsManager: sessionOptions.settingsManager,
       extensionFactories: [
         createDsmlSanitizerExtension({ debugLog }),
+        // Context relief: supplies a no-LLM compaction checkpoint from the
+        // turn-log archives for BOTH manual /compact and auto compaction, so
+        // the expensive LLM summarization only runs when relief can't get the
+        // post-relief context under 10% of the live model window.
+        createContextReliefExtension({
+          sessionPath: initConfig.sessionPath,
+          debugLog,
+          // Read per event (not captured): a mid-session model switch changes
+          // the window, and the threshold is window-relative.
+          contextWindow: () => piSession?.agent.state.model?.contextWindow ?? 0,
+        }),
       ],
     });
     await resourceLoader.reload();
@@ -1952,9 +2180,10 @@ function buildProxyTools(): ToolDefinition<any, any>[] {
         args: approvedInput,
       });
 
-      const result = await new Promise<{ content: string; isError: boolean }>((resolve) => {
-        pendingToolExecutions.set(requestId, { resolve });
-      });
+      const result = await pendingToolExecutions.create(
+        requestId,
+        resolveProxyToolTimeoutMs(def.name, approvedInput),
+      );
 
       return {
         content: [{ type: 'text', text: result.content }],
@@ -2226,11 +2455,11 @@ async function preExecuteCallLlm(input: Record<string, unknown>): Promise<LLMQue
   return runEphemeralLlmQuery(nextLocalEphemeralQueryId('callback'), request);
 }
 
-async function runMiniCompletion(prompt: string): Promise<string | null> {
+async function runMiniCompletion(prompt: string, model?: string): Promise<string | null> {
   try {
     const result = await runEphemeralLlmQuery(
       nextLocalEphemeralQueryId('summary'),
-      { prompt },
+      { prompt, ...(model ? { model } : {}) },
     );
     const text = result.text || null;
     debugLog(`[runMiniCompletion] Result: ${text ? `"${text.slice(0, 200)}"` : 'null'}`);
@@ -2469,9 +2698,15 @@ function handleSessionEvent(event: AgentSessionEvent): void {
           debugLog(`Prefetching ${prefetchableToolCalls.length} parallel ${firstPrefetchableToolCall?.name ?? 'tool'} calls`);
           for (const tc of prefetchableToolCalls) {
             const requestId = `prefetch-${tc.id}`;
-            const promise = new Promise<{ content: string; isError: boolean }>((resolve) => {
-              pendingToolExecutions.set(requestId, { resolve });
-            });
+            const promise = pendingToolExecutions.create(
+              requestId,
+              resolveProxyToolTimeoutMs(tc.name!, (tc.arguments ?? {}) as Record<string, unknown>),
+              { active: false },
+            );
+            // A speculative prefetch may never be consumed (the model can
+            // drop the call) — its timeout rejection must not surface as an
+            // unhandled rejection.
+            promise.catch(() => {});
             send({
               type: 'tool_execute_request',
               requestId,
@@ -2480,6 +2715,39 @@ function handleSessionEvent(event: AgentSessionEvent): void {
             });
             prefetchCache.set(tc.id!, promise);
           }
+        }
+      }
+    }
+  }
+
+  // Layer 2c — streaming degeneracy: judge assistant text WHILE it streams.
+  // A new assistant message starts a fresh per-message state machine.
+  if (event.type === 'message_start' && (event as { message?: { role?: string } }).message?.role === 'assistant') {
+    streamingDegeneracy.reset();
+  }
+
+  // Layer 2c — mid-stream repetition-loop detection (2026-10-16).
+  // Runs on streamed text deltas: the moment a loop is statistically visible
+  // (diversity collapse + sustained repetition) we (a) surface a status line
+  // in the process block and (b) queue a correction followUp for the SAME
+  // turn. The in-flight stream is NOT interrupted — correction, never abort.
+  // queueDefenseResume carries its own delivery guarantee
+  // (drainQueuedFollowUp), so calling it mid-stream is safe.
+  if (event.type === 'message_update') {
+    const amEvent = (event as { assistantMessageEvent?: { type?: string; delta?: string } }).assistantMessageEvent;
+    if (amEvent?.type === 'text_delta' && typeof amEvent.delta === 'string' && amEvent.delta.length > 0) {
+      const verdict = streamingDegeneracy.feed(amEvent.delta);
+      if (verdict) {
+        debugLog(
+          `[degeneracy] mid-stream repetition detected — distinctRatio=${verdict.distinctRatio.toFixed(3)} ` +
+          `topGram=${verdict.topGramCount} windows=${verdict.sampledWindows} chars=${streamingDegeneracy.currentChars}`,
+        );
+        send({
+          type: 'event',
+          event: { type: 'status', statusType: 'degeneracy_detected', text: DEGENERACY_STATUS_TEXT } as unknown as OutboundAgentEvent,
+        });
+        if (piSession) {
+          queueDefenseResume(piSession, DEGENERACY_CORRECTION);
         }
       }
     }
@@ -2578,7 +2846,27 @@ function handleSessionEvent(event: AgentSessionEvent): void {
   ) {
     const defenseResult = evaluateDefensePostStop((event as { messages?: unknown[] }).messages);
     if (defenseResult) {
-      if (defenseResult.verifyRequired) {
+      if (defenseResult.defenseError) {
+        // 2026-10-16 (261016-soft-channel): the defense evaluation itself
+        // threw (e.g. an FSM illegal-transition bug). Do NOT stay silent —
+        // a bare null here lets the main process guess from its own heuristics
+        // and stall the retry ladder. Route the fault through the SAME
+        // top-level `error` channel the ladder-lane uses: it feeds
+        // classifyRetryError → transient, so the ladder arms and keeps
+        // retrying while the underlying defect is fixed. No typed `code` on
+        // purpose (an unknown code renders an ugly ERROR title).
+        send({
+          type: 'error',
+          message: `Internal error while evaluating the turn (${defenseResult.defenseError}). Retrying in the background.`,
+        });
+        debugLog(`[defense] agent_end: evaluation error surfaced to retry ladder — ${defenseResult.defenseError}`);
+      } else if (defenseResult.verifyRequired) {
+        // A NEW verification cycle starts here (one per user turn; follow-up
+        // resumes inside it share the cycle). Reset the attempt counter and
+        // the stability baseline so UI rows and the content-stabilized
+        // stop-loss are scoped to this cycle.
+        verifyAttemptCount = 0;
+        lastVerifiedFinalText = null;
         // Verification-class (2026-10-02 user-approved redesign): the turn
         // did NOT stop on a fault — it either wrote without read-back or hit
         // the forced long-turn threshold. The captured final reply is a
@@ -2789,6 +3077,11 @@ async function awaitTurnWithStallDetection(
         // and produce a tool_execution_end event, refreshing the deadline).
         const deadline = activeToolDeadline();
         if (deadline != null && Date.now() < deadline) return;
+        // 2026-10-18: a proxy tool is in flight — its own hard timeout
+        // (pendingToolExecutions.create) is the authority on whether it is
+        // hung. Treating an undeclared-timeout tool as a dead turn killed the
+        // whole run after 300s (the 261016-deft-tide screenshot hang).
+        if (pendingToolExecutions.hasActiveTool()) return;
         if (Date.now() - lastTurnActivityAt > TURN_STALL_TIMEOUT_MS) {
           clearInterval(timer);
           reject(new Error(`Turn stalled: no activity for ${TURN_STALL_TIMEOUT_MS / 1000}s — aborting`));
@@ -2879,6 +3172,11 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     stallAbortInProgress = false;
     userAbortRequested = false;
     defenseResumeQueued = false;
+    // 2026-10-18 (P0 hardening): a fresh prompt starts a fresh turn — clear
+    // the previous turn's abort attribution. Without this reset a user stop
+    // would permanently latch (handleRetry refuses on 'user') and block every
+    // later legitimate retry in this subprocess.
+    lastAbortReason = null;
 
     const promptPromise = session.prompt(msg.message, {
       images: msg.images && msg.images.length > 0 ? msg.images : undefined,
@@ -2901,7 +3199,15 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
       // synchronously inside abort()'s waitForIdle) attributes the abort to
       // the watchdog and still evaluates instead of skipping.
       stallAbortInProgress = true;
-      lastAbortReason = 'system';
+      // 2026-10-18 (P0): never overwrite a user-stop attribution with
+      // 'system'. A stall error can arrive while the user's abort is still
+      // unwinding; flipping the attribution would make the stopped turn
+      // look retryable.
+      if (lastAbortReason !== 'user') lastAbortReason = 'system';
+      // 2026-10-18: reject the hung tool promise FIRST so abort() can reach
+      // idle and the SDK appends an error toolResult instead of leaving the
+      // transcript on a dangling toolUse step.
+      rejectPendingToolExecutions(`Turn stalled — tool execution aborted: ${stallErr instanceof Error ? stallErr.message : String(stallErr)}`);
       let finalError: unknown = stallErr;
       // session.abort() waits for idle — INCLUDING any defense-queued
       // continuation run (the SDK drains queued follow-ups via
@@ -2950,6 +3256,11 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     // reaches the UI.
 
     debugLog(`Prompt failed: ${errorMsg}`);
+    // NOTE: deliberately do NOT reject pending tool executions here. A prompt
+    // can fail with "Agent is already processing" while a LEGITIMATE run
+    // (queued-follow-up drain / defense resume) owns the pending tools — the
+    // stall branch above already rejected only the tools that belong to the
+    // dead turn.
     send({ type: 'error', message: errorMsg, code: 'prompt_error' });
     // Send synthetic agent_end so the main process event queue unblocks.
     // willRetry: false — this is the terminal error path, no retry follows.
@@ -2977,6 +3288,27 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
  * `continue()` busy-loop the retry ladder.
  */
 async function handleRetry(): Promise<void> {
+  // 2026-10-18 (P0 hardening): never revive a turn the user deliberately
+  // stopped. handleAbort now rejects the hung tool, so a stopped turn's
+  // transcript tail can be a re-runnable toolResult — the classifier's
+  // user-stop rule only covers assistant tails. The main process also guards
+  // via abortReason, but this subprocess-side latch closes the narrow race
+  // where a retry command was already in flight when the stop landed. The
+  // attribution is reset at the start of each fresh prompt (handlePrompt),
+  // so this cannot block a later legitimate turn.
+  if (isUserStoppedTurn(lastAbortReason)) {
+    debugLog('[retry] refusing — the turn was stopped by the user (P0)');
+    // Use the refusal message the main process already treats as terminal
+    // (isNoRerunnableStepRefusal) so the ladder settles instead of looping.
+    send({
+      type: 'error',
+      message: 'Cannot retry: the current turn has no re-runnable model step.',
+      code: 'prompt_error',
+    });
+    send({ type: 'event', event: { type: 'agent_end', messages: [], willRetry: false } });
+    return;
+  }
+
   let session: AgentSession;
   try {
     session = await ensureSession();
@@ -3057,6 +3389,41 @@ async function handleRetry(): Promise<void> {
             : 'empty assistant message (clean stop, no visible text)'}` +
         ' — re-running model step via continue()',
       );
+    } else if (verdict.kind === 'synthesize_tool_results') {
+      // 2026-10-18 (261016-deft-tide): the transcript tail is an assistant
+      // toolUse step whose toolCalls never received results (the tool hung and
+      // the stall watchdog aborted). `continue()` cannot run from an assistant
+      // tail — append one isError toolResult per dangling call (in-memory for
+      // this run + persisted so a restart does not resurrect the orphan) and
+      // let the model see that the tools did not complete.
+      const agentState = (session.agent as unknown as { state: { messages: unknown[] } }).state;
+      const sessionManager = (session as unknown as {
+        sessionManager?: { appendMessage?: (message: unknown) => unknown };
+      }).sessionManager;
+      for (const dangling of verdict.results) {
+        const toolResultMessage = {
+          role: 'toolResult',
+          toolCallId: dangling.toolCallId,
+          toolName: dangling.toolName,
+          content: [{
+            type: 'text',
+            text: 'Tool execution was aborted before it returned a result (the turn stalled). '
+              + 'The tool did NOT complete — do not assume it succeeded. Re-issue it only if still needed.',
+          }],
+          isError: true,
+          timestamp: Date.now(),
+        };
+        agentState.messages.push(toolResultMessage);
+        try {
+          sessionManager?.appendMessage?.(toolResultMessage);
+        } catch (persistErr) {
+          debugLog(`[retry] failed to persist synthetic toolResult for ${dangling.toolCallId}: ${persistErr instanceof Error ? persistErr.message : String(persistErr)}`);
+        }
+      }
+      debugLog(
+        `[retry] synthesized ${verdict.results.length} error toolResult(s) for dangling toolUse step `
+        + `(${verdict.results.map((r) => r.toolCallId).join(', ')}) — re-running model step via continue()`,
+      );
     } else {
       debugLog(`[retry] delivered reply with ${pendingFollowUps} pending follow-up(s) — draining via continue() (no strip)`);
     }
@@ -3071,6 +3438,19 @@ async function handleRetry(): Promise<void> {
     }
     return latest;
   };
+
+  // 2026-10-18 (261017-copper-copper): the retry may be the re-issue of a step
+  // the defense parked in the ladder lane (empty terminal response). That
+  // handoff left the FSM at RESUME_READY; the ladder — not the defense
+  // followUp lane — owns the continuation, so nothing advanced it. Without
+  // this, the retried run's post-stop evaluation threw
+  // `Illegal state transition: resume_ready -> resume_ready` and the error was
+  // routed into the retry ladder, which can never re-run an already-delivered
+  // reply — the turn hung until the user stopped it. Advancing here mirrors
+  // the normal resume path (RESUMING → EVALUATING on the next stop).
+  if (defenseEvaluator?.markLadderResumed()) {
+    debugLog('[retry] defense FSM advanced resume_ready -> resuming (ladder re-issue)');
+  }
 
   let contPromise: Promise<void>;
   try {
@@ -3112,7 +3492,11 @@ async function handleRetry(): Promise<void> {
     // held) per its own schedule.
     debugLog(`[retry] stalled or failed: ${errorMsg}; aborting session to reset state`);
     stallAbortInProgress = true;
-    lastAbortReason = 'system';
+    // 2026-10-18 (P0): preserve a user-stop attribution (see handlePrompt).
+    if (lastAbortReason !== 'user') lastAbortReason = 'system';
+    // 2026-10-18: same unblock as the prompt path — reject the hung tool so
+    // abort() settles and the transcript gains a toolResult.
+    rejectPendingToolExecutions(`Turn stalled — tool execution aborted: ${errorMsg}`);
     try {
       await piSession?.abort().catch(() => { /* already aborted */ });
     } finally {
@@ -3141,11 +3525,9 @@ function handleRegisterTools(msg: Extract<InboundMessage, { type: 'register_tool
 }
 
 function handleToolExecuteResponse(msg: Extract<InboundMessage, { type: 'tool_execute_response' }>): void {
-  const pending = pendingToolExecutions.get(msg.requestId);
-  if (pending) {
-    pendingToolExecutions.delete(msg.requestId);
-    pending.resolve(msg.result);
-  } else {
+  if (!pendingToolExecutions.resolve(msg.requestId, msg.result)) {
+    // Late reply after a timeout/stall abort — harmless, the tool already
+    // unwound with an error result.
     debugLog(`No pending tool execution for requestId: ${msg.requestId}`);
   }
 }
@@ -3179,6 +3561,10 @@ async function handleAbort(): Promise<void> {
   // Persistent attribution for the aborted assistant message this stop will
   // stamp: handleRetry must NOT strip/retry a user-stopped turn (P0 rule).
   lastAbortReason = 'user';
+  // 2026-10-18: unblock any in-flight proxy tool BEFORE awaiting abort().
+  // session.abort() waits for idle; a tool promise awaiting a host response
+  // would otherwise keep the run alive forever (the 261016-deft-tide wedge).
+  rejectPendingToolExecutions('Tool execution aborted by user stop');
   try {
     if (piSession) {
       try {
@@ -3323,23 +3709,18 @@ async function handleCompact(msg: Extract<InboundMessage, { type: 'compact' }>):
       // stopReason=stop, stalled surfaced at 13:51:49).
       unsubscribeEvents = session.subscribe(handleSessionEvent);
     }
-    debugLog(`[compact] pre-wait: isCompacting=${session.isCompacting} isIdle=${session.isIdle} toolsChanged=${toolsChanged}`);
-    // Serialize manual /compact behind any in-flight auto-compaction. Public
-    // session.compact() calls agent.abort() and uses its own controller; if
-    // it runs while _runAutoCompaction is suspended, agent state churns and
-    // the SDK's race surface widens. Wait for the auto-compaction to drain
-    // before starting a manual one. The wait budget (W) is strictly below the
-    // main-process RPC budget (R) so an honest "still running" verdict can
-    // always reach the user before the RPC timer gives up on this request.
-    const wait = await waitForCompaction(session, getCompactWaitTimeoutMs());
-    if (wait.timedOut) {
-      // The in-flight compaction is still running past W. Blind-proceeding
-      // here would start a concurrent compact() and re-open the exact SDK
-      // race waitForCompaction exists to prevent — say so honestly instead.
-      const waitSeconds = Math.max(1, Math.round(getCompactWaitTimeoutMs() / 1000));
-      const errorMsg = `A context compaction was still in progress after waiting ${waitSeconds}s — retry once it completes.`;
-      debugLog(`[compact] ${errorMsg}`);
-      sendResult({ success: false, errorMessage: errorMsg });
+    debugLog(`[compact] gate: isCompacting=${session.isCompacting} isIdle=${session.isIdle} toolsChanged=${toolsChanged}`);
+    // Serialize manual /compact: a compaction is already running in THIS
+    // session (auto or another manual request). Concurrent compact() calls
+    // make the SDK abort its own agent run and churn state, so the second
+    // request is SKIPPED outright — no waiting, no error. User-confirmed
+    // 2026-10-17: "如果 isCompacting 为 true 直接返回正在压缩中"。
+    if (session.isCompacting) {
+      debugLog('[compact] skipped — a compaction is already in progress');
+      sendResult({
+        success: true,
+        note: 'A compaction is already in progress — this request was skipped.',
+      });
       return;
     }
     try {
@@ -3351,10 +3732,20 @@ async function handleCompact(msg: Extract<InboundMessage, { type: 'compact' }>):
           summary: result.summary,
           firstKeptEntryId: result.firstKeptEntryId,
           tokensBefore: result.tokensBefore,
+          estimatedTokensAfter: result.estimatedTokensAfter,
+          // Machine-readable relief stats (present only when the extension
+          // produced this compaction) so the UI can render
+          //   压缩完成：约 A → B（保留 R，压缩 S）
+          stats: (result.details as { reliefStats?: unknown } | undefined)?.reliefStats,
         },
       });
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
+      // No waiting any more (2026-10-17: a concurrent compaction is
+      // skipped outright at the gate above), so `waited` is always false and
+      // the translation below can never fire. Kept as a documented no-op so
+      // the shape of this branch stays obvious to the next reader.
+      const wait = { waited: false, timedOut: false };
       if (wait.waited && errorMsg === 'Already compacted') {
         // We waited on a live compaction that then finished and persisted its
         // own record — this request was completed by the preceding compaction.
@@ -3643,10 +4034,7 @@ function handleShutdown(): void {
   }
   pendingPreToolUse.clear();
 
-  for (const [, pending] of pendingToolExecutions) {
-    pending.resolve({ content: 'Server shutting down', isError: true });
-  }
-  pendingToolExecutions.clear();
+  pendingToolExecutions.rejectAll('Server shutting down');
 
   process.exit(0);
 }

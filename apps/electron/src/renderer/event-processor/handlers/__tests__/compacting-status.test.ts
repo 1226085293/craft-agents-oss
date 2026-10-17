@@ -140,3 +140,58 @@ describe('Compacting status lifecycle in event processing', () => {
     ).toBe(true)
   })
 })
+
+describe('Verification status lifecycle in event processing', () => {
+  function verificationRows(state: SessionState): any[] {
+    return state.session.messages.filter(
+      m => m.role === 'status' && m.statusType === 'verification',
+    )
+  }
+
+  function emitVerification(state: SessionState, message: string): SessionState {
+    return applyEvent(state, {
+      type: 'status',
+      sessionId: SESSION_ID,
+      message,
+      statusType: 'verification',
+    })
+  }
+
+  it('keeps verification skip lines inside a single status card (2026-10-14)', () => {
+    let state = emitVerification(makeState(), 'Verifying final reply...')
+    const cardId = verificationRows(state)[0].id
+
+    // A verification_skip status updates the SAME card in place — it must NOT
+    // append a second status row (which would render as a separate process
+    // block line and leave a spinning orphan after pass/fail closes the first).
+    state = emitVerification(state, 'Verification skipped (empty judge response) — retrying 1/3')
+    expect(verificationRows(state)).toHaveLength(1)
+    expect(verificationRows(state)[0].id).toBe(cardId)
+    expect(verificationRows(state)[0].content).toBe('Verification skipped (empty judge response) — retrying 1/3')
+    expect(verificationRows(state)[0].role).toBe('status')
+  })
+
+  it('closes the single verification card on verification_passed', () => {
+    let state = emitVerification(makeState(), 'Verifying final reply...')
+    state = emitVerification(state, 'Verification skipped (judge unavailable) — retrying 1/3')
+    state = applyEvent(state, {
+      type: 'info',
+      sessionId: SESSION_ID,
+      message: 'Verification passed — delivering final reply',
+      statusType: 'verification_passed',
+    } as any)
+
+    expect(verificationRows(state)).toHaveLength(0)
+    expect(
+      state.session.messages.some(
+        m => m.role === 'info' && m.statusType === 'verification_passed',
+      ),
+    ).toBe(true)
+    // Exactly one verdict row — the skip line was folded into it, not a second row.
+    expect(
+      state.session.messages.filter(
+        m => m.role === 'info' && m.statusType === 'verification_passed',
+      ),
+    ).toHaveLength(1)
+  })
+})

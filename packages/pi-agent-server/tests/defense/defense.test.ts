@@ -123,6 +123,86 @@ describe('session-lifecycle', () => {
     // IDLE -> DONE is not a legal transition.
     expect(() => fsm.markDone()).toThrow(/Illegal state transition/);
   });
+
+  it('ladder handoff is idempotent on repeat entry (2026-10-16 261016-soft-channel)', () => {
+    // A turn can route through the ladder lane MORE THAN ONCE — every empty
+    // terminal response re-enters the handoff. The second call found the FSM
+    // already parked at RESUME_READY and threw
+    // `Illegal state transition: resume_ready -> resume_ready`, which the
+    // caller swallowed — the main process never got the error event that arms
+    // the retry ladder, so retries stalled on "重试 1 次后恢复".
+    const fsm = new SessionLifecycle();
+    expect(fsm.markLadderHandoff()).toBe(State.RESUME_READY);
+    // Repeat entry must be a no-op, NOT a throw.
+    expect(() => fsm.markLadderHandoff()).not.toThrow();
+    expect(fsm.markLadderHandoff()).toBe(State.RESUME_READY);
+    expect(fsm.getState()).toBe(State.RESUME_READY);
+  });
+
+  it('ladder handoff re-entry still reaches RESUME_READY from RESUMING', () => {
+    // The in-between step of a ladder cycle: the ladder's re-issue runs the
+    // model step and the FSM moves RESUMING → EVALUATING → RESUME_READY on
+    // the next empty response. This must not throw either.
+    const fsm = new SessionLifecycle();
+    fsm.markLadderHandoff();
+    fsm.markResumed();
+    expect(fsm.getState()).toBe(State.RESUMING);
+    expect(fsm.markLadderHandoff()).toBe(State.RESUME_READY);
+  });
+
+  it('ladder re-issue advances RESUME_READY -> RESUMING (2026-10-18 261017-copper-copper)', () => {
+    // The main-process retry ladder owns the continuation after a handoff and
+    // never calls markResumed(). Without this step the retried run's post-stop
+    // evaluation crashed with `resume_ready -> resume_ready`, and the crash was
+    // routed into the retry ladder — which can never re-run an already-
+    // delivered reply, so the turn hung until the user stopped it.
+    const fsm = new SessionLifecycle();
+    fsm.markLadderHandoff();
+    expect(fsm.markLadderResumed()).toBe(true);
+    expect(fsm.getState()).toBe(State.RESUMING);
+    // The retried run ends with a real reply on a long turn -> verification.
+    expect(fsm.onStop(true)).toBe('evaluate');
+    expect(fsm.decideResume('verify', { verificationLane: true })).toBe(State.RESUME_READY);
+    fsm.markResumed();
+    expect(fsm.getState()).toBe(State.RESUMING);
+  });
+
+  it('markLadderResumed is a no-op outside the ladder lane', () => {
+    const fsm = new SessionLifecycle();
+    fsm.recordIteration(); // RUNNING — a plain stream-error retry path
+    expect(fsm.markLadderResumed()).toBe(false);
+    expect(fsm.getState()).toBe(State.RUNNING);
+    // Terminal states are never revived.
+    fsm.markFailed();
+    expect(fsm.markLadderResumed()).toBe(false);
+    expect(fsm.getState()).toBe(State.FAILED);
+  });
+
+  it('decideResume tolerates a parked RESUME_READY (defensive guard)', () => {
+    // Even if a caller reaches the decision path from the parked handoff state
+    // (no markLadderResumed), the FSM must not throw: an internal invariant
+    // violation must never derail an already-delivered turn into the ladder.
+    const fsm = new SessionLifecycle();
+    fsm.markLadderHandoff();
+    expect(() => fsm.decideResume('verify', { verificationLane: true })).not.toThrow();
+    expect(fsm.getState()).toBe(State.RESUME_READY);
+    // A cap-driven FAILED from the parked state is legal too (was
+    // `resume_ready -> failed` before the normalization).
+    const capped = new SessionLifecycle({ maxResumes: 0 });
+    capped.markLadderHandoff();
+    expect(() => capped.decideResume('fault')).not.toThrow();
+    expect(capped.getState()).toBe(State.FAILED);
+  });
+
+  it('ladder handoff is a no-op once the FSM is terminal', () => {
+    const fsm = new SessionLifecycle();
+    fsm.markLadderHandoff();
+    fsm.markResumed();
+    fsm.markFailed();
+    expect(fsm.isTerminal()).toBe(true);
+    expect(() => fsm.markLadderHandoff()).not.toThrow();
+    expect(fsm.getState()).toBe(State.FAILED);
+  });
 });
 
 describe('DefenseEvaluator', () => {
@@ -197,6 +277,28 @@ describe('DefenseEvaluator', () => {
     r = evalr.evaluate(emptyFinal);
     expect(r.shouldResume).toBe(false);
     expect(r.state).toBe(State.FAILED);
+  });
+
+  it('ladder handoff + long-turn verification does not throw (2026-10-18 261017-copper-copper)', () => {
+    const evalr = new DefenseEvaluator({ verifyMinSteps: 1, ladderOwnsEmptyResponse: true });
+    evalr.recordToolCall({ type: 'read', output: 'ok' });
+    // 1) Empty terminal response → handoff parks the FSM at RESUME_READY.
+    const first = evalr.evaluate({
+      hasVisibleText: false,
+      hasFinalText: false,
+      aborted: false,
+      endsWithEmptyResponse: true,
+    });
+    expect(first.emptyResponseOwned).toBe(true);
+    expect(first.state).toBe(State.RESUME_READY);
+    // 2) The main-process ladder re-issues the model step.
+    expect(evalr.markLadderResumed()).toBe(true);
+    // 3) The retried run delivers a real reply on a long turn → verification
+    //    (this exact sequence used to throw resume_ready -> resume_ready).
+    const second = evalr.evaluate({ hasVisibleText: true, hasFinalText: true, aborted: false });
+    expect(second.evaluated).toBe(true);
+    expect(second.verifyRequired).toBe(true);
+    expect(second.state).toBe(State.RESUMING);
   });
 
   it('resetTurn clears the lifecycle for a fresh prompt turn', () => {

@@ -12,13 +12,20 @@
  * stopReason='aborted' step — the whitelist refused it and every later rung
  * died with "Cannot retry: the current turn has no re-runnable model step.",
  * looping in the background forever.
+ *
+ * 2026-10-18 (session 261016-deft-tide): a second variant — the transcript
+ * tail is an assistant message with stopReason='toolUse' whose toolCalls
+ * never received toolResult messages (the tool promise hung; the stall
+ * watchdog aborted the run). `continue()` cannot run from an assistant tail,
+ * so the whitelist must synthesize error toolResults for the dangling calls
+ * (never strip — stripping leaves the PREVIOUS tool_calls dangling).
  */
 
 export type AbortReason = 'user' | 'system' | null;
 
 export interface LastAssistantShape {
   stopReason?: string | null;
-  content?: Array<{ type?: string; text?: unknown }> | string | null;
+  content?: Array<{ type?: string; text?: unknown; id?: string; name?: string }> | string | null;
   errorMessage?: string | null;
 }
 
@@ -27,6 +34,18 @@ export type RetryStepVerdict =
   | { kind: 'refuse' }
   /** Strip the unusable assistant message, then continue(). */
   | { kind: 'strip'; why: 'failed_step' | 'empty_clean_stop' | 'system_aborted' }
+  /**
+   * (2026-10-18) A dangling tool-call step: the assistant message is the
+   * transcript tail and its toolCalls have NO toolResult messages. Synthesize
+   * one isError toolResult per call, then continue(). This is strictly safer
+   * than stripping the assistant step: stripping leaves the PREVIOUS
+   * tool_calls dangling (same provider-400 risk) and loses the record that the
+   * tool may have partially executed.
+   */
+  | {
+    kind: 'synthesize_tool_results';
+    results: Array<{ toolCallId: string; toolName: string }>;
+  }
   /** Keep the delivered reply in context; continue() drains pending follow-ups. */
   | { kind: 'drain_pending' };
 
@@ -58,6 +77,25 @@ export function classifyRetryStep(
   //    conservative: without proof of a system abort, do not re-run a turn
   //    whose stop might have been deliberate.
   const isEmptySystemAborted = am.stopReason === 'aborted' && !hasVisibleText && abortReason === 'system';
+  // 4. (2026-10-18, session 261016-deft-tide) A DANGLING TOOL-USE step: the
+  //    transcript ends on an assistant message whose toolCalls never received
+  //    toolResult messages. This is the shape left behind when a tool promise
+  //    hangs and the stall watchdog aborts the run (or the process dies
+  //    mid-tool). `continue()` cannot run from an assistant tail, and every
+  //    later retry would refuse forever — the observed "no re-runnable model
+  //    step" loop. Synthesize an error result for EACH dangling call and let
+  //    the model see the failure. Attribution is mandatory for the same P0
+  //    reason as the aborted case: a user stop stays terminal; only a
+  //    system-attributed abort opens this path.
+  const danglingToolCalls = Array.isArray(am.content)
+    ? am.content.filter(
+      (c): c is { type: 'toolCall'; id: string; name?: string } =>
+        c?.type === 'toolCall' && typeof c.id === 'string' && c.id.length > 0,
+    )
+    : [];
+  const isDanglingToolUse = am.stopReason === 'toolUse'
+    && danglingToolCalls.length > 0
+    && abortReason === 'system';
 
   if (isFailedStep || isEmptyCleanStop || isEmptySystemAborted) {
     return {
@@ -67,6 +105,16 @@ export function classifyRetryStep(
         : isEmptySystemAborted
           ? 'system_aborted'
           : 'empty_clean_stop',
+    };
+  }
+
+  if (isDanglingToolUse) {
+    return {
+      kind: 'synthesize_tool_results',
+      results: danglingToolCalls.map((c) => ({
+        toolCallId: c.id,
+        toolName: typeof c.name === 'string' && c.name.length > 0 ? c.name : 'unknown',
+      })),
     };
   }
 
@@ -94,4 +142,17 @@ export function classifyRetryStep(
 export function isSdkBusyRejection(message: string): boolean {
   const m = message.toLowerCase();
   return m.includes('already processing') || m.includes('wait for completion') || m.includes('already busy');
+}
+
+/**
+ * 2026-10-18 (P0 hardening): a retry must never revive a turn the user
+ * deliberately stopped — even when the transcript tail is a re-runnable
+ * toolResult (the 2026-10-18 abort path rejects the hung tool, so the SDK
+ * appends an error toolResult). classifyRetryStep only sees assistant tails;
+ * handleRetry uses this latch for the non-assistant cases. The attribution is
+ * reset at the start of every fresh prompt, so this cannot block a later
+ * legitimate turn.
+ */
+export function isUserStoppedTurn(abortReason: AbortReason): boolean {
+  return abortReason === 'user';
 }

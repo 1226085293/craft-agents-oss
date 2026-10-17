@@ -108,12 +108,56 @@ export class SessionLifecycle {
    * ladder (its own 1s/5s/10s/30s/60s/5m/10m schedule + 24h cap), not the
    * defense chain budget. The next post-stop evaluation re-enters via
    * RESUMING → EVALUATING exactly like a followUp resume.
+   *
+   * IDEMPOTENT (2026-10-16, 261016-soft-channel): a turn can hit the ladder
+   * lane MORE THAN ONCE — each empty terminal response routes through this
+   * handoff. The second round finds the FSM already parked at RESUME_READY
+   * (the first handoff's state, never left because the ladder — not
+   * markResumed — owns the continuation), and the old code called
+   * transition(RESUME_READY) from RESUME_READY, which TRANSITIONS forbids
+   * (RESUME_READY only allows → RESUMING). That threw
+   * `Illegal state transition: resume_ready -> resume_ready`, the evaluator
+   * caller swallowed it, and the main process never received the error event
+   * that arms the retry ladder — the ladder stalled on "重试 1 次后恢复"
+   * with no further retries. Re-entering the same lane is a no-op by
+   * construction, so return the current state instead of transitioning.
    */
   markLadderHandoff(): State {
     if (this.isTerminal()) return this.state;
+    // Already parked in this lane — re-entry is a no-op, not a new handoff.
+    if (this.state === State.RESUME_READY) return this.state;
     if (this.state === State.IDLE) this.transition(State.RUNNING);
     if (this.state === State.RUNNING) this.transition(State.EVALUATING);
+    if (this.state === State.EVALUATING) return this.transition(State.RESUME_READY);
+    // From RESUMING (or any other non-terminal state): take the normal
+    // evaluate path back into RESUME_READY, mirroring a followUp resume.
+    if (this.state === State.RESUMING) this.transition(State.EVALUATING);
     return this.transition(State.RESUME_READY);
+  }
+
+  /**
+   * Ladder re-issue (2026-10-18, 261017-copper-copper): the FSM was parked at
+   * RESUME_READY by markLadderHandoff(), and the main-process retry ladder has
+   * now re-issued the model step (`retry` command → agent.continue()). That
+   * re-issue IS the resume the handoff deferred, so advance RESUME_READY →
+   * RESUMING; the retried run's post-stop evaluation then re-enters through
+   * the normal RESUMING → EVALUATING path.
+   *
+   * Without this the FSM stayed parked at RESUME_READY for the whole retried
+   * run, and the next evaluation crashed with
+   * `Illegal state transition: resume_ready -> resume_ready` (the reply had
+   * already been delivered; the crash was routed into the retry ladder, which
+   * can never re-run a real reply — the turn hung until the user stopped it).
+   *
+   * No-op in every other state: a plain stream-error retry never parked the
+   * FSM (the turn is still RUNNING) and must keep its normal path.
+   *
+   * @returns true when the FSM was parked at RESUME_READY and was advanced.
+   */
+  markLadderResumed(): boolean {
+    if (this.state !== State.RESUME_READY) return false;
+    this.transition(State.RESUMING);
+    return true;
   }
 
   getResumeCount(): number {
@@ -236,6 +280,22 @@ export class SessionLifecycle {
    * time/iteration fail-safes keep governing an endless re-verify loop.
    */
   decideResume(resumeContext: string, opts?: { verificationLane?: boolean }): State {
+    // 2026-10-18 (261017-copper-copper): defensive normalization — the ladder
+    // handoff parks the FSM at RESUME_READY while the MAIN-PROCESS ladder owns
+    // the continuation (it never calls markResumed). If a post-stop evaluation
+    // reaches this decision from that parked state (e.g. the retried run ended
+    // with a real reply and a long-turn verification signal), the final
+    // transition(RESUME_READY) — or a cap-driven transition(FAILED) — is
+    // illegal from RESUME_READY and threw, derailing an already-delivered turn
+    // into the retry ladder. Normalize to the EVALUATING position the caller
+    // would have been in had onStop() run after a resume; every path below is
+    // then legal. (markLadderResumed() in the retry path makes this
+    // unreachable in normal operation; this guard keeps the FSM contract from
+    // turning a coding bug into a hung turn.)
+    if (this.state === State.RESUME_READY) {
+      this.transition(State.RESUMING);
+      this.transition(State.EVALUATING);
+    }
     const hash = fnv1a(resumeContext);
     const lane = opts?.verificationLane === true;
     if (!lane && this.resumeCount >= this.maxResumes) {

@@ -223,6 +223,14 @@ export class DefenseEvaluator {
     truncatedFinal?: boolean;
     /** True when the abort was issued by the stall watchdog, not the user. */
     stallAborted?: boolean;
+    /**
+     * The previous verification round's rejection (2026-10-20 tidy-willow).
+     * Without it the resume message only says "does not correspond" and the
+     * model cannot know WHY, so a FAIL→resume round re-emits or merely
+     * rewords the same answer and FAILs again — 261018-noble-shoal burned
+     * three rounds on the judged-off-topic answer with no idea what was off.
+     */
+    verificationFailure?: { failType?: string; reason?: string };
   }): DefenseEvaluationResult {
     if (!this.enabled) {
       return { evaluated: false, shouldResume: false, state: State.IDLE };
@@ -368,7 +376,7 @@ export class DefenseEvaluator {
     // FAILed verification resumes (repair → re-verify) indefinitely until
     // the reply passes, a fault-class stop takes over, the user stops the
     // turn, or the chain guardrails (time/iteration caps) fire.
-    const resumeMessage = buildResumeMessage(silentStop, emptyResponse, repetitionLoop, truncatedFinal, stallAborted);
+    const resumeMessage = buildResumeMessage(silentStop, emptyResponse, repetitionLoop, truncatedFinal, stallAborted, lastAssistantMessage?.verificationFailure);
 
     // Ladder lane (2026-10-06 spec: all model-layer failures enter the
     // retry mechanism): an EMPTY terminal response is a transient upstream
@@ -472,6 +480,7 @@ function buildResumeMessage(
   repetitionLoop: boolean,
   truncatedFinal: boolean,
   stallAborted = false,
+  verificationFailure?: { failType?: string; reason?: string },
 ): string {
   const lines: string[] = [
     '[Defense] Verification delivery step — deliver, do NOT re-run the task.',
@@ -492,6 +501,21 @@ function buildResumeMessage(
       `diff, or "changes since last time".`,
     `Signals that triggered this verification step (context, not new work):`,
   ];
+  // THE reason the previous reply was rejected (2026-10-20 tidy-willow). The
+  // resume used to carry only signal labels, so the model was told "this does
+  // not correspond" with no way to know what to change: it re-emitted or
+  // rewarmed the same answer and was rejected again, round after round.
+  // Quote the judge verbatim (type + reason) and tie it to the concrete fix.
+  if (verificationFailure && (verificationFailure.reason || verificationFailure.failType)) {
+    const type = verificationFailure.failType ? ` [${verificationFailure.failType}]` : '';
+    const reason = (verificationFailure.reason || '').trim().slice(0, 1200);
+    lines.push(
+      `- YOUR PREVIOUS REPLY WAS REJECTED by the independent verification judge${type}. ` +
+        `Its reason, verbatim:${reason ? `\n  > ${reason.split('\n').join('\n  > ')}` : ' (none given)'}\n` +
+        `Fix exactly that objection in this reply. Do NOT re-deliver the rejected text ` +
+        `unchanged, and do NOT redo completed investigation to do it.`,
+    );
+  }
   if (stallAborted) {
     lines.push(
       `- Your turn was ABORTED BY THE SYSTEM (stall watchdog: no activity for a long time, ` +

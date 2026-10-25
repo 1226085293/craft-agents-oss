@@ -1,0 +1,124 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
+
+  // Static dead-code analysis config. Replaces the deleted scripts/dead-code-sweep.mjs
+  // (file-level reachability only, no symbol/type/duplicate detection).
+  //
+  // Entry patterns mirror what the real build/tooling actually reaches:
+  //   - package.json "main"/"exports" per workspace
+  //   - apps/electron esbuild entry points (main, preload, renderer HTML → tsx)
+  //   - apps/viewer + apps/webui vite roots
+  //
+  // Entries explicitly declared in package.json/exports are auto-detected by knip, so
+  // only non-obvious ones are listed here.
+
+  "ignore": [
+    "**/*.d.ts",
+    "**/.backup*/**",
+    "**/fixtures/**",
+    "**/__tmp_build_call_llm__/**"
+  ],
+
+  "ignoreExportsUsedInFile": true,
+
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/*.ts"],
+      "project": ["scripts/**/*.ts"]
+    },
+
+    "packages/shared": {
+      "entry": [
+        "src/prompts/print-system-prompt.ts",
+        "src/labels/validation.ts",
+        "src/credentials/backends/env.ts",
+        "src/scheduler/index.ts",
+        "src/unified-network-interceptor.ts"
+      ],
+      "project": ["src/**/*.ts"]
+    },
+
+    "packages/core": {
+      "entry": ["src/types/index.ts", "src/utils/index.ts"],
+      "project": ["src/**/*.ts"]
+    },
+
+    "packages/ui": {
+      "entry": ["src/components/chat/index.ts"],
+      "project": ["src/**/*.ts", "src/**/*.tsx"]
+    },
+
+    "packages/server-core": {
+      "entry": ["src/transport/index.ts", "src/runtime/index.ts"],
+      "project": ["src/**/*.ts"]
+    },
+
+    "packages/pi-agent-server": {
+      "entry": ["src/index.ts"],
+      "project": ["src/**/*.ts"]
+    },
+
+    "packages/messaging-whatsapp-worker": {
+      "entry": ["src/worker.ts"],
+      "project": ["src/**/*.ts"]
+    },
+
+    "apps/electron": {
+      // NOTE: knip only extracts <script src> from HTML files declared by plugins.
+      // Vite's getIndexHtmlEntries() reads just <cwd>/index.html; the electron-vite
+      // plugin requires an "electron.vite.config.*" filename. This repo uses a single
+      // vite.config.ts with root=src/renderer and 4 HTML entries, so the four renderer
+      // entries are declared by their .tsx targets instead of as .html.
+      "vite": false,
+      "entry": [
+        "src/main/index.ts",
+        "src/preload/bootstrap.ts",
+        "src/preload/browser-toolbar.ts",
+        "src/renderer/main.tsx",
+        "src/renderer/playground.tsx",
+        "src/renderer/browser-toolbar.tsx",
+        "src/renderer/browser-empty-state.tsx",
+        "src/main/shims/node-fetch.cjs",
+        "src/main/shims/abort-controller.cjs"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "src/**/*.tsx",
+        "src/**/*.cjs",
+        "src/**/*.html"
+      ]
+    },
+
+    "apps/viewer": {
+      "entry": ["index.html"],
+      "project": ["src/**/*.ts", "src/**/*.tsx"]
+    },
+
+    "apps/webui": {
+      "entry": ["src/index.html", "src/login.html"],
+      "project": ["src/**/*.ts", "src/**/*.tsx"]
+    },
+
+    "apps/cli": {
+      "project": ["src/**/*.ts"]
+    }
+  },
+
+  // Webpack shims and other files referenced by build tooling by path only.
+  "ignoreFiles": [
+    "apps/webui/src/shims/**"
+  ],
+
+  // ttlcache is loaded via require() at runtime; @craft-agent/core is consumed through
+  // built dist output, not source imports.
+  "ignoreDependencies": [
+    "@isaacs/ttlcache",
+    "@craft-agent/core"
+  ],
+
+  // OS-level CLI tools invoked through child_process (cross-platform by design).
+  "ignoreBinaries": [
+    "pgrep", "pkill", "osascript", "xclip", "xsel", "wl-paste",
+    "pngpaste", "ioreg", "reg", "tasklist", "chcp", "sandbox-exec", "unshare"
+  ]
+}

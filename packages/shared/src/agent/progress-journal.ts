@@ -206,9 +206,24 @@ function latestRequestFromRecords(records: ProgressRecord[]): string | undefined
   // from the recovery context (and the verification judge saw an incomplete
   // intent). A new user_request resets the list — guidance from other turns
   // is never carried over.
+  //
+  // Read in TIMESTAMP order, not file order (2026-10-20 tidy-willow):
+  // trimToLimits() rewrites the ledger with the protected latest request
+  // MOVED TO THE TOP (`[latestRequest, ...recent, latestGuidance]`), so the
+  // physical line order stops being chronological. Latest-by-position then
+  // picks a stale request — 261018-noble-shoal was judged against 13:09's
+  // question while the user's actual message was 13:30's, so the judge called
+  // a correct answer "答非所问" (off-topic) round after round.
   let request: string | undefined;
   const guidance: string[] = [];
-  for (const record of records) {
+  const ts = (r: ProgressRecord): number => {
+    const parsed = typeof r.timestamp === 'string' ? Date.parse(r.timestamp) : NaN;
+    return Number.isNaN(parsed) ? 0 : parsed;
+  };
+  const ordered = records
+    .map((record, index) => ({ record, index }))
+    .sort((a, b) => ts(a.record) - ts(b.record) || a.index - b.index);
+  for (const { record } of ordered) {
     if (record.kind === 'user_request') {
       request = record.text;
       guidance.length = 0;

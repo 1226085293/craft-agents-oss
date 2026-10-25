@@ -134,3 +134,42 @@ describe('buildResumeMessage — verification delivery wording', () => {
     expect(smsg.resumeMessage).toContain('continue the task')
   });
 });
+
+describe('buildResumeMessage — quotes the judge rejection (2026-10-20 tidy-willow)', () => {
+  // 261018-noble-shoal burned three FAIL→resume rounds with the model blind:
+  // the resume said only "does not correspond" and never carried the judge's
+  // reason, so the model could only re-emit/reword the same answer.
+  it('carries the failType and the verbatim judge reason', () => {
+    const e = longTurnEvaluator()
+    const msg = evaluate(e, {
+      ...COMPLETE_FINAL,
+      verificationFailure: {
+        failType: 'off-topic',
+        reason: '未解释预设类型卡片中必选参数为空的原因，只说明提供商被误删及恢复情况。',
+      },
+    }).resumeMessage!
+
+    expect(msg).toContain('YOUR PREVIOUS REPLY WAS REJECTED')
+    expect(msg).toContain('[off-topic]')
+    expect(msg).toContain('未解释预设类型卡片中必选参数为空的原因')
+    expect(msg).toContain('Fix exactly that objection')
+    expect(msg).toContain('Do NOT re-deliver the rejected text')
+  });
+
+  it('omits the rejection block when there is no failure to report', () => {
+    const e = longTurnEvaluator()
+    const msg = evaluate(e, COMPLETE_FINAL).resumeMessage!
+    expect(msg).not.toContain('YOUR PREVIOUS REPLY WAS REJECTED')
+  });
+
+  it('still quotes a reason when failType is missing', () => {
+    const e = longTurnEvaluator()
+    const msg = evaluate(e, {
+      ...COMPLETE_FINAL,
+      verificationFailure: { reason: 'the reply never answered the actual question' },
+    }).resumeMessage!
+    expect(msg).toContain('YOUR PREVIOUS REPLY WAS REJECTED')
+    expect(msg).toContain('the reply never answered the actual question')
+    expect(msg).not.toContain('[undefined]')
+  });
+});

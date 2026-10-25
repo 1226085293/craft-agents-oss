@@ -194,4 +194,49 @@ describe('Verification status lifecycle in event processing', () => {
       ),
     ).toHaveLength(1)
   })
+
+  // 2026-10-19 tidy-willow: the typed-verification row regressed to the plain
+  // "校验失败 — 继续执行" wording because the status→info conversion dropped
+  // `statusParams`, so the renderer never saw failType/reasonPath.
+  it('keeps failType + reasonPath on the verification_failed row', () => {
+    let state = emitVerification(makeState(), 'Verifying final reply...')
+    state = applyEvent(state, {
+      type: 'info',
+      sessionId: SESSION_ID,
+      message: 'Verification failed — continuing',
+      statusType: 'verification_failed',
+      statusParams: {
+        failType: 'incomplete',
+        reasonPath: 'E:/sessions/s1/verification/attempt-001-incomplete.txt',
+        attempt: 1,
+      },
+    } as any)
+
+    const row = state.session.messages.find(
+      m => m.role === 'info' && m.statusType === 'verification_failed',
+    )
+    expect(row).toBeDefined()
+    expect(row!.statusParams).toMatchObject({
+      failType: 'incomplete',
+      reasonPath: 'E:/sessions/s1/verification/attempt-001-incomplete.txt',
+      attempt: 1,
+    })
+  })
+
+  it('keeps the stabilized marker on the verification_passed row', () => {
+    let state = emitVerification(makeState(), 'Verifying final reply...')
+    state = applyEvent(state, {
+      type: 'info',
+      sessionId: SESSION_ID,
+      message: 'Verification passed — delivering final reply',
+      statusType: 'verification_passed',
+      statusParams: { stabilized: 1 },
+    } as any)
+
+    const row = state.session.messages.find(
+      m => m.role === 'info' && m.statusType === 'verification_passed',
+    )
+    expect(row).toBeDefined()
+    expect(row!.statusParams).toMatchObject({ stabilized: 1 })
+  })
 })

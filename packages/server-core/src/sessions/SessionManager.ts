@@ -2,6 +2,7 @@ import type { EventSink, RpcServer } from '@craft-agent/server-core/transport'
 import { CLIENT_BROWSER_INVOKE } from '@craft-agent/server-core/transport'
 import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, BusyMessageDecision, BusyMessageDecisionInput, GroupChatDecision, GroupChatDecisionInput, GroupChatDecisionAction } from '@craft-agent/server-core/handlers'
 import { RemoteBrowserPaneManager } from './RemoteBrowserPaneManager'
+import { hasBranchForkMetadata, retireBranchForkMetadata } from './branch-fork-metadata'
 import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@craft-agent/server-core/handlers'
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
 import { basename, dirname, isAbsolute, join } from 'path'
@@ -11,7 +12,6 @@ import { createHash, randomUUID } from 'node:crypto'
 import { type AgentEvent, setPermissionMode, setTransientPermissionMode, clearTransientPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
 import {
   resolveSessionConnection,
-  createBackendFromConnection,
   resolveBackendContext,
   createBackendFromResolvedContext,
   cleanupSourceRuntimeArtifacts,
@@ -21,12 +21,13 @@ import {
   type PostInitResult,
 } from '@craft-agent/shared/agent/backend'
 import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, resolveMidStreamBehavior, getPersistedUiLanguage, resolveTitleLanguageName } from '@craft-agent/shared/config'
+import type { LlmConnection } from '@craft-agent/shared/config'
+import { kindRouting, type ModelRequestKind } from '@craft-agent/shared/config'
 import type { MidStreamBehavior } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
 import { InitGate } from '@craft-agent/server-core/domain'
 import { i18n } from '@craft-agent/shared/i18n'
-import { nextRetryRowPayload, settleRetryRowAsFailed, findActiveRetryRowIndex, findLastRetryRowIndex, findLastRetryRowByStartedAt, findRetryRowForLadder } from '@craft-agent/shared/retry/retry-row'
 import {
   getWorkspaces,
   getWorkspaceByNameOrId,
@@ -75,6 +76,7 @@ import {
   type SessionStatus,
   type SessionHeader,
   pickSessionFields,
+  copySessionAssetsForBranch,
 } from '@craft-agent/shared/sessions'
 import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, TokenRefreshManager, loadSourceConfig, saveSourceConfig } from '@craft-agent/shared/sources'
 import { listTaskSlugs, parseTaskSpec, uniqueTaskSlug } from '@craft-agent/shared/tasks'
@@ -83,8 +85,12 @@ import { createTaskFromSpec, resolveCreateTaskProjectId } from '../tasks'
 import { buildPagesToolCallbacks } from '../pages/tool-callbacks'
 import { buildServersFromSources as buildServersFromSourcesShared } from '../sources/build-servers'
 import { ConfigWatcher, type ConfigWatcherCallbacks } from '@craft-agent/shared/config'
-import { getValidClaudeOAuthToken } from '@craft-agent/shared/auth'
 import { resolveAuthEnvVars } from '@craft-agent/shared/config'
+
+import { getGatewayRuntime, loadLlmConfig } from '@craft-agent/shared/config'
+import { schedulePostSwitchCompaction } from './post-switch-compaction'
+import { buildSpawnCompletionNotice, shouldNotifyParent } from './spawn-completion-notice'
+
 import { toolMetadataStore, getLastApiError, getLastErrorFromHistory, peekStoredError, readErrorHistory } from '@craft-agent/shared/interceptor'
 import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
@@ -102,6 +108,7 @@ import { getDefaultSummarizationModel, resolveModelContextWindow } from '@craft-
 import type { SummarizeCallback } from '@craft-agent/shared/sources'
 import { type ThinkingLevel, DEFAULT_THINKING_LEVEL, normalizeThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import { parseError } from '@craft-agent/shared/agent/errors'
+import { copyTurnLogsForBranch } from '@craft-agent/shared/agent/turn-log'
 import { evaluateAutoLabels } from '@craft-agent/shared/labels/auto'
 import { listLabels, loadLabelConfig } from '@craft-agent/shared/labels/storage'
 import { extractLabelId, resolveSessionLabels, findTaskItemLabelId } from '@craft-agent/shared/labels'
@@ -147,6 +154,7 @@ export function hasVerificationReplayPending(
       (m.timestamp ?? 0) > lastUserTimestamp,
   )
 }
+
 
 /**
  * Context size a forked branch inherits from its parent: the `contextTokens`
@@ -199,15 +207,15 @@ export function readInheritedContextTokens(
  *    `verification_failed` is the deterministic signal here (the sibling of
  *    the `verification_passed` replay-pending case above).
  *
- * 3. RETRY IN FLIGHT — an unsettled `retrying` row (retry.status ===
- *    'retrying') newer than the last user message means the main-process
- *    retry ladder still owns the turn. Surfacing a terminal error card
- *    while the ladder keeps retrying is contradictory.
+ * 3. ALREADY SURFACED (2026-10-19) — the turn already shows an error card.
+ *    Appending the api-error fallback on top produced a second box saying the
+ *    same thing in different words; the user spec is "one error box, content =
+ *    the last error".
  *
  * Pure so the guard is unit-testable in isolation.
  */
 export function shouldSuppressGhostErrorCard(
-  messages: ReadonlyArray<{ role: string; statusType?: string; timestamp?: number; retry?: { status?: string } }>,
+  messages: ReadonlyArray<{ role: string; statusType?: string; timestamp?: number }>,
   lastUserTimestamp: number | undefined,
   errorTimestamp: number | undefined,
   now: number,
@@ -232,22 +240,22 @@ export function shouldSuppressGhostErrorCard(
     return true
   }
   if (lastUserTimestamp == null) return false
+  // (4) This turn already has an error card — the ghost fallback would
+  // duplicate the same failure. (Checked before the turn-ownership reasons
+  // because it is the strongest signal: a card already told the user.)
+  const errorCardAlreadySurfaced = messages.some(
+    m => m.role === 'error' && (m.timestamp ?? 0) > lastUserTimestamp,
+  )
+  if (errorCardAlreadySurfaced) return true
   // (2) A FAILed verification hands the turn to the followUp lane, which
   // keeps running — the reply may simply not have landed yet.
   const verificationFailedInFlight = messages.some(
     m => m.role === 'info' && m.statusType === 'verification_failed' && (m.timestamp ?? 0) > lastUserTimestamp,
   )
   if (verificationFailedInFlight) return true
-  // (3) An unsettled retry row newer than the user message: the retry
-  // ladder still owns this turn and will keep retrying.
-  return messages.some(
-    m =>
-      m.role === 'status' &&
-      m.statusType === 'retrying' &&
-      m.retry?.status === 'retrying' &&
-      (m.timestamp ?? 0) > lastUserTimestamp,
-  )
+  return false
 }
+
 
 export function setSessionPlatform(platform: PlatformServices): void {
   _platform = platform
@@ -289,6 +297,220 @@ export function setSessionRuntimeHooks(hooks: Partial<SessionRuntimeHooks>): voi
   }
 }
 
+/**
+ * Gateway override for a connection, or null to keep the legacy path.
+ *
+ * Mirrors the agent-side rule: an explicitly addressed non-Anthropic
+ * connection (self-hosted gateway, local endpoint, proxy) is never re-routed,
+ * because the user chose that exact address.
+ */
+function resolveGatewayOverride(connection: {
+  baseUrl?: string;
+  providerType?: string;
+} | null): { baseUrl: string; clientKey: string } | null {
+  const runtime = getGatewayRuntime()
+  if (!runtime.running) return null
+  const clientKey = runtime.defaultClientKey()
+  if (!clientKey) return null
+  if (connection?.baseUrl && connection.providerType !== 'anthropic') return null
+  return { baseUrl: runtime.baseUrl, clientKey }
+}
+
+
+/**
+ * Raised when the gateway cannot route a session: no strategy selected, or
+ * the selected one is disabled / has no models.
+ *
+ * A distinct type so the send path can tell "you must pick a strategy group"
+ * apart from a provider HTTP failure — the first is a settings problem the
+ * user fixes in the UI, the second is a retryable upstream error, and showing
+ * the wrong one sends people chasing the wrong thing.
+ */
+export class SessionRoutingError extends Error {
+  readonly reason: string;
+  constructor(reason: string) {
+    super(routeRefusalMessage(reason));
+    this.name = 'SessionRoutingError';
+    this.reason = reason;
+  }
+}
+
+/** Human-readable text for each refusal reason the gateway can report. */
+function routeRefusalMessage(reason: string): string {
+  if (reason === 'no_strategy_selected') {
+    // Points at the DEFAULT group, not the group list: sessions created outside
+    // the UI (automations, messaging) have no picker of their own, so setting
+    // the default is the only fix — naming the strategy page sent the user to a
+    // place that cannot help this session.
+    return '该会话没有选择策略组。请在「设置 → LLM 网关 → 设置」里指定默认策略组，或在会话内选择策略组。';
+  }
+  if (reason === 'no_connection') return '无法解析模型连接。';
+  const [kind, detail] = reason.split(':');
+  if (kind === 'strategy_not_found') return `策略组「${detail ?? ''}」不存在，可能已被删除，请重新选择。`;
+  if (kind === 'strategy_disabled') return `策略组「${detail ?? ''}」已停用，请在策略组设置中启用它。`;
+  if (kind === 'strategy_has_no_models') return `策略组「${detail ?? ''}」没有可用模型，请先在其成员提供商上启用模型。`;
+  return `无法通过网关路由（${reason}）`;
+}
+
+/**
+ * Route a session through a gateway strategy group.
+ *
+ * Historically an unset or unknown `strategyId` fell through to the caller's
+ * raw connection — Craft talking straight to an upstream, bypassing the
+ * gateway entirely. That fallback is gone: once the gateway has a usable
+ * config (`enabled`), a session with no strategy has no legitimate route, and
+ * silently using a side channel made "no strategy configured" look like
+ * "working fine" in the UI while traffic never touched the gateway, so none
+ * of it showed up in logs or usage stats.
+ *
+ * The gateway is only enforced when it is actually usable. With no
+ * `llm-config.json` (or no enabled provider/key), `enabled` is false and the
+ * legacy path stays in charge, so a fresh install still works.
+ *
+ * Returns `null` when the session cannot be served — callers must surface that
+ * rather than retry with a different backend.
+ */
+/**
+ * The pure decision behind `applyGatewayStrategy`.
+ *
+ * Takes everything that would otherwise be read from singletons or disk as
+ * arguments, so the guard's rules can be tested directly. Returns the routed
+ * context, or a refusal reason when the session cannot be served.
+ */
+/**
+ * What `get_session_info` should report as a session's routing identity.
+ *
+ * A gateway session keeps the connection it was created with in its record, but
+ * nothing routes through it any more — the gateway does, via the strategy
+ * endpoint. Reporting that slug made an agent tell its user "LLM 连接：
+ * anthropic-api-4" about traffic that no longer went there.
+ *
+ * Without a strategy the stored connection is the truth and is reported as is.
+ */
+export function sessionRoutingInfo(
+  session: { strategy?: string; model?: string; llmConnection?: string },
+  strategies: ReadonlyArray<{ id: string; name?: string; modelAliases?: Record<string, unknown> }>,
+): { llmStrategy?: string; strategyName?: string; llmConnection?: string; model?: string } {
+  const strategyId = session.strategy
+  if (!strategyId) return { llmConnection: session.llmConnection, model: session.model }
+  const strategy = strategies.find((s) => s.id === strategyId)
+  const models = Object.keys(strategy?.modelAliases ?? {})
+  // Same rule the router uses, so the answer matches the next request.
+  const model = models.length
+    ? session.model && models.includes(session.model)
+      ? session.model
+      : models[0]
+    : session.model
+  return {
+    llmStrategy: strategyId,
+    ...(strategy?.name ? { strategyName: strategy.name } : {}),
+    model,
+  }
+}
+
+export function resolveStrategyRoute(params: {
+  /** Gateway has a usable config (>=1 enabled provider with an enabled key + a client key). */
+  gatewayEnabled: boolean
+  /** Gateway process is up. */
+  gatewayRunning: boolean
+  /** Base URL of the running gateway, for the `/s/<id>` path. */
+  gatewayBaseUrl: string
+  strategyId: string | undefined
+  /** Every configured strategy, already read from the config. */
+  strategies: ReadonlyArray<{
+    id: string
+    enabled?: boolean
+    modelAliases?: Record<string, unknown>
+  }>
+  /**
+   * The session's model, when it has one. Absent is normal — a session that
+   * only ever routed through a group has no model of its own, and the router
+   * then takes the group's first model.
+   */
+  resolvedModel?: string
+}):
+  | { ok: true; baseUrl: string; models: string[]; model: string }
+  | { ok: false; reason: 'gateway_unconfigured' }
+  | { ok: false; reason: string } {
+  const { gatewayEnabled, gatewayRunning, gatewayBaseUrl, strategyId, strategies, resolvedModel } = params
+  // `enabled` is the single gate, and it is not a synonym for `running`: the
+  // gateway can be mid-reconcile (or down to start) while the config already
+  // names a usable provider. Checking `running` first would re-open the bypass
+  // on exactly the window where a session needs the guard most.
+  if (!gatewayEnabled) return { ok: false, reason: 'gateway_unconfigured' }
+  if (!gatewayRunning) return { ok: false, reason: 'gateway_not_running' }
+  // Past this point there is no route home: a session with no usable strategy
+  // must be refused rather than handed its raw connection.
+  if (!strategyId) return { ok: false, reason: 'no_strategy_selected' }
+  const strategy = strategies.find((s) => s.id === strategyId)
+  if (!strategy) return { ok: false, reason: `strategy_not_found:${strategyId}` }
+  if (strategy.enabled === false) return { ok: false, reason: `strategy_disabled:${strategyId}` }
+  const models = Object.keys(strategy.modelAliases ?? {})
+  if (models.length === 0) return { ok: false, reason: `strategy_has_no_models:${strategyId}` }
+  const model = resolvedModel && models.includes(resolvedModel) ? resolvedModel : models[0]!
+  return {
+    ok: true,
+    baseUrl: `${gatewayBaseUrl}/s/${encodeURIComponent(strategyId)}`,
+    models,
+    model,
+  }
+}
+
+/**
+ * Test seam for `applyGatewayStrategy`.
+ *
+ * The route depends on two things that are normally process globals — the
+ * gateway runtime singleton and the on-disk config. Arming a real gateway in a
+ * test would bind a port and read the developer's own config, so the two are
+ * injectable here instead. Production leaves this empty and both fall through
+ * to their real sources.
+ */
+export const gatewayRouteDeps: {
+  runtime?: ReturnType<typeof getGatewayRuntime>
+  config?: ReturnType<typeof loadLlmConfig>
+} = {}
+
+export function applyGatewayStrategy(
+  ctx: ReturnType<typeof resolveBackendContext>,
+  strategyId: string | undefined,
+): ReturnType<typeof resolveBackendContext> | null {
+  const runtime = gatewayRouteDeps.runtime ?? getGatewayRuntime();
+  // No fallback to the session's raw connection, for any reason. Returning
+  // the context unchanged when the gateway was down or unconfigured is exactly
+  // how traffic used to escape the logs, the usage totals and the group's
+  // limits — silently, while still appearing to work. A refusal is visible; a
+  // bypass is not. Callers treat null as "do not proceed".
+  const route = resolveStrategyRoute({
+    gatewayEnabled: runtime.enabled,
+    gatewayRunning: runtime.running,
+    gatewayBaseUrl: runtime.baseUrl,
+    strategyId,
+    strategies: (gatewayRouteDeps.config ?? loadLlmConfig())?.strategies ?? [],
+    resolvedModel: ctx.resolvedModel,
+  })
+  if (!route.ok) {
+    runtime.noteRouteRefusal(route.reason);
+    return null;
+  }
+  // A resolved route still needs a connection to rewrite. Absent one there is
+  // nothing to point at the gateway, which is a configuration problem rather
+  // than a routing one.
+  if (!ctx.connection) return null;
+  return {
+    ...ctx,
+    resolvedModel: route.model,
+    connection: {
+      ...ctx.connection,
+      // Anthropic wire format: the gateway serves /v1/messages per strategy.
+      providerType: 'pi_compat',
+      piAuthProvider: 'anthropic',
+      customEndpoint: { ...(ctx.connection.customEndpoint ?? {}), api: 'anthropic-messages' },
+      baseUrl: route.baseUrl,
+      models: route.models,
+    },
+  };
+}
+
 function buildBackendHostRuntimeContext(): BackendHostRuntimeContext {
   if (!_platform) throw new Error('setSessionPlatform() must be called before session creation')
   return {
@@ -296,6 +518,177 @@ function buildBackendHostRuntimeContext(): BackendHostRuntimeContext {
     resourcesPath: _platform.resourcesPath,
     isPackaged: _platform.isPackaged,
   }
+}
+
+/**
+ * The pure decision behind `createAuxiliaryBackend`'s group choice.
+ *
+ * Split out for the same reason `resolveStrategyRoute` is: the rules that
+ * matter here are "which group" and "is there any route home", and both are
+ * worth testing without standing up a subprocess.
+ *
+ * Returns a strategy id, or a refusal reason. **There is no direct-connection
+ * outcome** — that is the whole point of this function's shape. A caller that
+ * cannot resolve a group must degrade, never fall back to the session's raw
+ * connection.
+ */
+export function resolveAuxiliaryStrategyId(params: {
+  kind: ModelRequestKind
+  /** The session's own group, when it has one. */
+  sessionStrategyId?: string
+  /** The config's dedicated group for kinds with no session to inherit. */
+  miniStrategy?: string
+  /**
+   * Last resort for `dedicated` kinds only, when no `miniStrategy` is
+   * configured: the first enabled group. Without it, memory consolidation
+   * would simply be unavailable on a config that never set one up — the work
+   * has no session to inherit from, so it cannot borrow a group the way a
+   * title can. Still a strategy group, never a raw connection.
+   */
+  fallbackStrategyId?: string
+  /** Every configured strategy, already read from the config. */
+  strategies: ReadonlyArray<{ id: string }>
+}):
+  | { ok: true; strategyId: string }
+  | { ok: false; reason: 'no_strategy' | 'not_routed' | `strategy_not_found:${string}` } {
+  // A kind with `routing: 'none'` has no group by definition — it must never be
+  // handed one, or a connection probe would start spending a strategy group's
+  // quota on requests that were never meant to reach the gateway.
+  if (kindRouting(params.kind) === 'none') return { ok: false, reason: 'not_routed' }
+  // Session-scoped kinds inherit the session's group; the rest use the
+  // dedicated one. An unknown kind counts as session-scoped (kindRouting),
+  // because a wrong `dedicated` guess would route work away from the group the
+  // user is looking at.
+  const wantsSessionGroup = kindRouting(params.kind) === 'session'
+  // Session-scoped kinds always follow the session. A `dedicated` kind prefers
+  // its own group, then the caller's session group (memory consolidation runs
+  // on behalf of sessions that already chose one), then the first enabled
+  // group — never a raw connection.
+  const strategyId = wantsSessionGroup
+    ? params.sessionStrategyId ?? params.miniStrategy
+    : params.miniStrategy ?? params.sessionStrategyId ?? params.fallbackStrategyId
+  if (!strategyId) return { ok: false, reason: 'no_strategy' }
+  if (!params.strategies.some((s) => s.id === strategyId)) {
+    return { ok: false, reason: `strategy_not_found:${strategyId}` }
+  }
+  return { ok: true, strategyId }
+}
+
+/**
+ * Create an auxiliary backend — busy / group-chat decisions, title generation,
+ * remote-transfer summaries.
+ *
+ * These used to build from the session's own connection, sending a slice of the
+ * app's traffic straight to the upstream: invisible in the gateway's logs and
+ * usage, and outside its rate limits and cooldowns. They now go through a
+ * strategy group, always.
+ *
+ * There is deliberately **no direct fallback**. A fallback is precisely the
+ * thing that made this traffic invisible in the first place, and a silent
+ * bypass is worse than a loud failure: the request would look like it worked
+ * while quietly escaping the group's limits. Callers handle the throw by
+ * degrading — a busy message queues, a title is simply absent.
+ *
+ * Group resolution, most-preferred first:
+ *
+ *   1. the session's own strategy group
+ *   2. the config's `miniStrategy`
+ *
+ * `kindRouting()` decides which of those a kind is eligible for, so regrouping
+ * a kind later is a one-line change in the registry rather than an edit here.
+ *
+ * `kind` is sent as `X-Craft-Model-Kind` so the gateway stamps it on the usage
+ * row — that is what makes a log line traceable back to the feature that made
+ * it.
+ */
+function createAuxiliaryBackend(options: {
+  workspace: ManagedSession['workspace']
+  /** Session id for the ephemeral agent; also its log prefix. */
+  sessionId: string
+  miniModel?: string
+  /** What this call is for; lands in the log's 类型 column. */
+  kind: ModelRequestKind
+  /**
+   * The session's strategy group, when it has one. Passed in rather than read
+   * here so the caller stays in charge of which group is current.
+   */
+  sessionStrategyId?: string
+}): AgentInstance {
+  const runtime = getGatewayRuntime()
+  if (!runtime.running) {
+    throw new Error(
+      `createAuxiliaryBackend(${options.kind}): the LLM gateway is not running — ` +
+        'auxiliary calls route through a strategy group only',
+    )
+  }
+
+  const cfg = loadLlmConfig()
+  const decision = resolveAuxiliaryStrategyId({
+    kind: options.kind,
+    sessionStrategyId: options.sessionStrategyId,
+    miniStrategy: cfg?.miniStrategy,
+    fallbackStrategyId: cfg?.strategies.find((s) => s.enabled !== false)?.id,
+    strategies: cfg?.strategies ?? [],
+  })
+  if (!decision.ok) {
+    throw new Error(`createAuxiliaryBackend(${options.kind}): ${decision.reason}`)
+  }
+  // `strategies` was checked by the decision above, so this cannot be absent.
+  const strategy = cfg!.strategies.find((s) => s.id === decision.strategyId)!
+
+  const models = Object.keys(strategy.modelAliases ?? {})
+  // A model the strategy actually serves, else the first one: an auxiliary
+  // request naming a model the group does not carry would 404 at the gateway.
+  const model =
+    (options.miniModel && models.includes(options.miniModel) ? options.miniModel : models[0]) ??
+    options.miniModel ??
+    ''
+  // Everything rides on the context, never process.env: several sessions can be
+  // generating titles at once, and a shared env write would have them overwrite
+  // each other's endpoint mid-request.
+  //
+  // The connection is synthetic — `pi_compat` + an explicit baseUrl is the same
+  // shape `testBackendConnection` uses to reach a custom endpoint, so the
+  // driver resolves it without consulting the credential store. The gateway
+  // holds the real upstream key; the client key authenticates this request to
+  // the gateway itself.
+  const gatewayConnection: LlmConnection = {
+    slug: `gateway-${strategy.id}`,
+    name: `Gateway · ${strategy.id}`,
+    providerType: 'pi_compat',
+    baseUrl: `${runtime.baseUrl}/s/${encodeURIComponent(strategy.id)}`,
+    authType: 'api_key_with_endpoint',
+    piAuthProvider: 'anthropic',
+    customEndpoint: { api: 'anthropic-messages' },
+    defaultModel: model,
+    createdAt: 0,
+  }
+  return createBackendFromResolvedContext({
+    context: {
+      connection: gatewayConnection,
+      provider: 'pi',
+      authType: 'api_key_with_endpoint',
+      resolvedModel: model,
+      capabilities: { needsHttpPoolServer: false },
+    },
+    coreConfig: {
+      workspace: options.workspace,
+      requestKind: options.kind,
+      // The subprocess's `runMiniCompletion` resolves its model from this, not
+      // from `model`. Without it the call would fall back to a built-in
+      // summarization model the group does not carry, and the gateway would
+      // reject the request.
+      miniModel: model,
+      session: {
+        id: options.sessionId,
+        workspaceRootPath: options.workspace.rootPath,
+        createdAt: Date.now(),
+        lastUsedAt: Date.now(),
+      },
+      isHeadless: true,
+    },
+    hostRuntime: buildBackendHostRuntimeContext(),
+  }) as AgentInstance
 }
 
 /**
@@ -319,6 +712,8 @@ const METADATA_WRITE_GUARD_MS = 5000
 // fs.watch can emit many attribute-only events in one burst (hourly storm
 // 2026-10-08); without throttling each event rebuilds every session's MCP.
 const SOURCE_RELOAD_THROTTLE_MS = 10_000
+/** How often buffered LLM gateway usage is persisted. */
+const USAGE_FLUSH_INTERVAL_MS = 30_000
 
 /**
  * Text sent to the session when a plan is approved from outside the desktop
@@ -860,10 +1255,6 @@ export interface ManagedSession {
    * the user opens the session on the desktop client (markSessionRead).
    */
   mobileEngaged?: boolean
-  /** 2026-10-10: true while a retry ladder is mid-flight (backoff/active,
-   *  false on its terminal end) — gates the complete/error fail-safe so it
-   *  never settles the "重试中" row mid-retry. */
-  retryLadderActive?: boolean
   /** Set when user requests stop - allows event loop to drain before clearing isProcessing */
   stopRequested?: boolean
   lastMessageAt: number
@@ -995,6 +1386,10 @@ export interface ManagedSession {
   connectionLocked?: boolean
   // Thinking level for this session ('off', 'think', 'max')
   thinkingLevel?: ThinkingLevel
+  // LLM gateway strategy id this session routes through. Sticky and persisted
+  // like thinkingLevel — the composer restores it on reload so a routing choice
+  // survives closing the window.
+  strategy?: string
   // System prompt preset for mini agents ('default' | 'mini')
   systemPromptPreset?: 'default' | 'mini' | string
   // Role/type of the last message (for badge display without loading messages)
@@ -1311,6 +1706,8 @@ export class SessionManager implements ISessionManager {
   private lastSourceReloadAt: Map<string, number> = new Map()
   // Automation systems for workspace event automations - one per workspace (includes scheduler, diffing, and handlers)
   private automationSystems: Map<string, AutomationSystem> = new Map()
+  // Periodic flush of buffered LLM gateway usage records to disk (llm-usage.jsonl)
+  private usageFlushTimer?: NodeJS.Timeout
   // Pending credential request resolvers (keyed by requestId)
   private pendingCredentialResolvers: Map<string, (response: import('@craft-agent/shared/protocol').CredentialResponse) => void> = new Map()
   // Permission request metadata tracking (keyed by requestId)
@@ -1361,6 +1758,11 @@ export class SessionManager implements ISessionManager {
    * subprocess can race the resulting `chat` against the still-pending update.
    */
   private agentRefreshLocks: Map<string, Promise<void>> = new Map()
+  /**
+   * One post-switch compaction per session. The gateway can report a switch
+   * while the turn is still finishing; the map coalesces repeat notifications.
+   */
+  private postSwitchCompactions: Map<string, Promise<void>> = new Map()
   /** Monotonic clock to ensure strictly increasing message timestamps */
   private lastTimestamp = 0
 
@@ -2076,8 +2478,13 @@ export class SessionManager implements ISessionManager {
 
       sessionLog.info(`Reinitializing auth for connection: ${slug} (${connection.authType})`)
 
-      // Resolve auth env vars via shared utility (provider-agnostic)
-      const result = await resolveAuthEnvVars(connection, slug!, manager, getValidClaudeOAuthToken)
+      // Resolve auth env vars via shared utility (provider-agnostic). When the
+      // in-process gateway is armed it owns the upstream credential; the main
+      // process gets the gateway address and the session client key instead, so
+      // supervisor-side calls (summarization, title generation) are subject to
+      // the same scheduling as the subprocess.
+      const gateway = resolveGatewayOverride(connection)
+      const result = await resolveAuthEnvVars(connection, slug!, manager, gateway)
 
       if (!result.success) {
         sessionLog.error(`Auth resolution failed for ${slug}: ${result.warning}`)
@@ -2095,6 +2502,29 @@ export class SessionManager implements ISessionManager {
       sessionLog.error('Failed to reinitialize auth:', error)
       throw error
     }
+  }
+
+  /**
+   * Wire the gateway's route-change signal to this manager.
+   *
+   * The gateway knows *that* a session's key/provider/model changed; it does
+   * not own the conversation and must not compact it. This manager owns both
+   * the session and its agent, so it is the only layer that can wait for the
+   * turn to finish and then call the agent's existing compact path.
+   */
+  private attachGatewayRouteHandler(): void {
+    getGatewayRuntime().setRouteChangeHandler((event) => {
+      schedulePostSwitchCompaction(
+        {
+          getSession: (id) => this.sessions.get(id),
+          sendEvent: (infoEvent, workspaceId) => this.sendEvent(infoEvent as never, workspaceId),
+          log: (message) => sessionLog.warn(message),
+        },
+        event.sessionId,
+        event.reason,
+        this.postSwitchCompactions,
+      )
+    })
   }
 
   async initialize(): Promise<void> {
@@ -2119,6 +2549,36 @@ export class SessionManager implements ISessionManager {
       // API key should have it take effect without needing a separate
       // settings:setupLlmConnection RPC call.
       await syncLlmConnectionApiKeysFromConfig()
+
+      // Arm the in-process LLM gateway before auth resolution, so
+      // reinitializeAuth() below can route through it. No-ops when
+      // llm-config.json is absent or unusable, which leaves the legacy
+      // per-connection path in charge.
+      try {
+        const armed = await getGatewayRuntime().start()
+        sessionLog.info(armed ? `LLM gateway armed on ${getGatewayRuntime().baseUrl}` : 'LLM gateway not armed (no usable llm-config.json)')
+        if (armed) {
+          // Usage is buffered in the gateway and only persisted when drained.
+          // A periodic flush keeps the dashboard fresh without adding a write
+          // to the request path; stop() flushes whatever is left.
+          this.usageFlushTimer = setInterval(() => {
+            try {
+              const written = getGatewayRuntime().flushUsage()
+              if (written > 0) sessionLog.debug(`flushed ${written} LLM usage record(s)`)
+            } catch (error) {
+              sessionLog.warn('LLM usage flush failed:', error)
+            }
+          }, USAGE_FLUSH_INTERVAL_MS)
+        }
+      } catch (error) {
+        // A gateway failure must not block startup: sessions keep the legacy path.
+        sessionLog.error('Failed to start LLM gateway:', error)
+      }
+
+      // Listen for key/model switches so this session can reuse its existing
+      // compaction path afterwards. Installed even when the gateway is not
+      // armed — the runtime holds the closure and the first spawn picks it up.
+      this.attachGatewayRouteHandler()
 
       // Set up authentication environment variables (critical for SDK to work)
       await this.reinitializeAuth()
@@ -2287,37 +2747,6 @@ export class SessionManager implements ISessionManager {
     this.enqueuePersist(managed)
   }
 
-  /**
-   * Fail-safe for the PERSISTED retry row (2026-10-08): a ladder that ended
-   * WITHOUT its terminal `retry end` event (subprocess exit, guardrail stop,
-   * unexpected generator failure, stale restored rung) must not leave a
-   * spinning "重试中" row in the transcript. Settle it to 'failed' — the
-   * retries did not recover. No-op when the row is absent or already
-   * terminal (recovered/failed), so the normal `retry end` settlement is
-   * never overwritten.
-   */
-  private settleStuckRetryRow(managed: ManagedSession, now = Date.now()): void {
-    // 2026-10-10: while a retry ladder is STILL retrying (backoff/active
-    // received, no terminal end yet), the row must not be settled — a
-    // "重试 1 次后失败 · 00:00" beside "第 N 次重试中" was this fail-safe
-    // firing mid-ladder. Success/failure only appear at the real end (the
-    // terminal `retry end` flips retryLadderActive off).
-    if (managed.retryLadderActive) return
-    // 2026-10-09: scan TURN-UNBOUND — a retry row left dangling by an
-    // interrupted turn (user stop / new message while the retried run was in
-    // flight) still shows status 'retrying' AFTER the next user message,
-    // which the turn-scoped findActiveRetryRowIndex never reaches. A row in
-    // 'retrying' is by construction the un-settled ladder, so there is no
-    // cross-turn reuse risk: settled rows are recovered/failed.
-    const idx = findLastRetryRowIndex(managed.messages)
-    if (idx === -1) return
-    const m = managed.messages[idx]!
-    if (m.retry?.status === 'retrying') {
-      managed.messages[idx] = { ...m, retry: settleRetryRowAsFailed(m.retry, now) }
-      this.persistSession(managed)
-    }
-  }
-
   // Cold-persist hydration. Mirrors the messages/queue-recovery half of
   // loadMessagesFromDisk but skips the metadata field syncs. Sets
   // messagesLoaded=true so subsequent persistSession calls take the fast path.
@@ -2399,10 +2828,19 @@ export class SessionManager implements ISessionManager {
         (m.role === 'assistant' && !m.isIntermediate) ||
         m.role === 'plan' ||
         m.role === 'auth-request' ||
-        // cancelProcessing persists this marker for an explicit user Stop.
-        // Late draining tool events must not turn that stop into crash recovery.
-        (m.role === 'info' && m.content === 'Response interrupted') ||
-        (m.role === 'error' && !continuedAfterError)
+        (m.role === 'error' && !continuedAfterError) ||
+        // A compaction notice ENDS the turn: the compaction path yields
+        // `complete` and returns, so the turn never resumes behind it. Without
+        // this a `/compact` that finished was replayed on every restart as an
+        // unfinished request (2026-10-25 261018-noble-shoal).
+        (m.role === 'info' && typeof m.content === 'string' && m.content.startsWith('Compacted')) ||
+        // cancelProcessing persists this marker for an explicit user Stop. A
+        // Stop means the user is done with the turn — including when the work
+        // was mid-flight — so it is terminal however much was left undone.
+        // Only a process that died writes nothing, which is what recovery is
+        // for (2026-10-25 261022-fresh-waterfall: a stopped session must stay
+        // stopped).
+        (m.role === 'info' && m.content === 'Response interrupted')
       ) {
         lastTerminalResponseIndex = i
         break
@@ -2679,13 +3117,10 @@ export class SessionManager implements ISessionManager {
   private enqueuePersist(managed: ManagedSession): void {
     try {
       // Filter out transient status messages (progress indicators like
-      // "Compacting...") — EXCEPT the persisted retry-ladder row
-      // (statusType 'retrying' + `retry` payload, 2026-10-08): it must
-      // survive reloads so the process block keeps its final state
-      // (重试中 / 重试成功 / 重试失败) after session switches/restarts.
+      // "Compacting...") — they are ephemeral and must not be persisted.
       // Error messages are now persisted with rich fields for diagnostics
       const persistableMessages = managed.messages.filter(m =>
-        m.role !== 'status' || m.statusType === 'retrying'
+        m.role !== 'status'
       )
 
       const storedSession: StoredSession = {
@@ -3095,6 +3530,39 @@ export class SessionManager implements ISessionManager {
     return this.sessions.get(sessionId)?.agent ?? null
   }
 
+  /**
+   * Create a short-lived backend for app-level work that has no session of its
+   * own — memory consolidation today.
+   *
+   * Such work used to borrow some live session's agent, which made its requests
+   * indistinguishable from that session's conversation in the gateway log and
+   * charged them to the session's usage. Giving it its own backend is what lets
+   * the log say `记忆` instead of `对话`.
+   *
+   * Throws when no strategy group can be resolved; the caller decides whether
+   * that is fatal (consolidation) or merely degraded.
+   */
+  async createAuxiliaryAgent(options: {
+    kind: ModelRequestKind
+    workspace: ManagedSession['workspace']
+    /** Preferred model within the group; the group's first is used otherwise. */
+    model?: string
+    /** A session's group to fall back on when no dedicated one is configured. */
+    sessionStrategyId?: string
+  }): Promise<AgentInstance> {
+    const agent = createAuxiliaryBackend({
+      workspace: options.workspace,
+      sessionStrategyId: options.sessionStrategyId,
+      // Unique per call: the id is the subprocess's log prefix, and two
+      // consolidations must not look like one.
+      sessionId: `${options.kind}-${randomUUID()}`,
+      miniModel: options.model,
+      kind: options.kind,
+    })
+    await agent.postInit()
+    return agent
+  }
+
   async decideBusyMessage(input: BusyMessageDecisionInput): Promise<BusyMessageDecision> {
     const managed = this.sessions.get(input.sessionId)
     if (!managed) return { action: 'queue' }
@@ -3144,18 +3612,13 @@ export class SessionManager implements ISessionManager {
       try {
         const connection = getLlmConnection(managed.llmConnection)
         const resolvedMiniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
-        temporaryAgent = createBackendFromConnection(managed.llmConnection, {
+        temporaryAgent = createAuxiliaryBackend({
           workspace: managed.workspace,
           miniModel: resolvedMiniModel,
-          session: {
-            id: `busy-decision-${managed.id}`,
-            workspaceRootPath: managed.workspace.rootPath,
-            llmConnection: managed.llmConnection,
-            createdAt: Date.now(),
-            lastUsedAt: Date.now(),
-          },
-          isHeadless: true,
-        }, buildBackendHostRuntimeContext()) as AgentInstance
+          sessionId: `busy-decision-${managed.id}`,
+          kind: 'busy_decision',
+          sessionStrategyId: managed.strategy,
+        })
         await temporaryAgent.postInit()
         agent = temporaryAgent
       } catch (error) {
@@ -3258,18 +3721,13 @@ export class SessionManager implements ISessionManager {
       try {
         const connection = getLlmConnection(managed.llmConnection)
         const resolvedMiniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
-        temporaryAgent = createBackendFromConnection(managed.llmConnection, {
+        temporaryAgent = createAuxiliaryBackend({
           workspace: managed.workspace,
           miniModel: resolvedMiniModel,
-          session: {
-            id: `group-decision-${managed.id}`,
-            workspaceRootPath: managed.workspace.rootPath,
-            llmConnection: managed.llmConnection,
-            createdAt: Date.now(),
-            lastUsedAt: Date.now(),
-          },
-          isHeadless: true,
-        }, buildBackendHostRuntimeContext()) as AgentInstance
+          sessionId: `group-decision-${managed.id}`,
+          kind: 'group_decision',
+          sessionStrategyId: managed.strategy,
+        })
         await temporaryAgent.postInit()
         agent = temporaryAgent
       } catch (error) {
@@ -3444,6 +3902,15 @@ export class SessionManager implements ISessionManager {
       ?? globalDefaults.workspaceDefaults.permissionMode
 
     const userDefaultWorkingDir = wsConfig?.defaults?.workingDirectory || undefined
+    // Every creation path inherits a default group — automations, messaging and
+    // the API included. It resolves here rather than in the composer because
+    // those callers never see a renderer preference. The gateway config carries
+    // the last resort: the settings page can always write it, whatever window
+    // the user happened to be in.
+    const defaultStrategy =
+      options?.strategy ??
+      wsConfig?.defaults?.strategy ??
+      (gatewayRouteDeps.config ?? loadLlmConfig())?.defaultStrategy
     // Resolve thinking level with caller-first precedence, matching permissionMode above:
     //   caller override → workspace default → global default.
     // normalizeThinkingLevel() tolerates undefined/unknown inputs.
@@ -3723,6 +4190,7 @@ export class SessionManager implements ISessionManager {
       name: options?.name,
       permissionMode: defaultPermissionMode,
       workingDirectory: resolvedWorkingDir,
+      ...(defaultStrategy ? { strategy: defaultStrategy } : {}),
       enabledSourceSlugs: options?.enabledSourceSlugs ?? defaultEnabledSourceSlugs,
       hidden: options?.hidden,
       sessionStatus: options?.sessionStatus,
@@ -3825,6 +4293,52 @@ export class SessionManager implements ISessionManager {
             branchSessionId: storedSession.id,
           })
         }
+      }
+
+      // Branch inherits the source session's archived turn logs up to the
+      // branch point. context-relief builds its zero-LLM checkpoint from these
+      // files: without them a forked branch has messages but no turn index, so
+      // /compact falls back to an LLM summary of the whole copied history
+      // (2026-10-18: 5.6MB / 2060 messages → 65s).
+      try {
+        const branchPointMs = validatedBranch.sourceSession.messages[validatedBranch.branchIdx]?.timestamp
+        const copiedTurnLogs = copyTurnLogsForBranch(sourceDir, branchDir, branchPointMs)
+        if (copiedTurnLogs > 0) {
+          sessionLog.info(
+            `Branch turn logs copied: ${copiedTurnLogs} file(s) up to branch point ${branchPointMs}`,
+          )
+        }
+      } catch (err) {
+        // Turn-log inheritance is best-effort — never fail the branch for it.
+        sessionLog.warn('Failed to copy turn logs to branch', {
+          err,
+          sourceSessionId: validatedBranch.sourceSessionId,
+          branchSessionId: storedSession.id,
+        })
+      }
+
+      // Branch inherits the files its copied messages point at: attachments
+      // ({{SESSION_PATH}}/attachments/...), externalized long tool results,
+      // plans and the tool-metadata cache. Without this a fork shows broken
+      // images and the agent cannot re-read an externalized result
+      // (2026-10-18 audit of 261018-bold-bonsai).
+      try {
+        const assets = copySessionAssetsForBranch(sourceDir, branchDir)
+        if (assets.copiedDirs.length > 0 || assets.copiedFiles.length > 0) {
+          sessionLog.info(
+            `Branch assets copied: dirs=[${assets.copiedDirs.join(',')}] files=[${assets.copiedFiles.join(',')}]` +
+              (assets.skippedDirs.length > 0
+                ? ` skipped(over size cap)=[${assets.skippedDirs.join(',')}]`
+                : ''),
+          )
+        }
+      } catch (err) {
+        // Asset inheritance is best-effort — never fail the branch for it.
+        sessionLog.warn('Failed to copy session assets to branch', {
+          err,
+          sourceSessionId: validatedBranch.sourceSessionId,
+          branchSessionId: storedSession.id,
+        })
       }
 
       // Branch inherits the source session's session-memory up to the branch
@@ -4108,11 +4622,25 @@ export class SessionManager implements ISessionManager {
     if (!managed.agent) return
 
     const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
-    const backendContext = resolveBackendContext({
-      sessionConnectionSlug: managed.llmConnection,
-      workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
-      managedModel: managed.model,
-    })
+    const backendContext = applyGatewayStrategy(
+      resolveBackendContext({
+        sessionConnectionSlug: managed.llmConnection,
+        workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+        managedModel: managed.model,
+      }),
+      managed.strategy,
+    )
+    // NOTE: no gateway guard on the *refresh* decision itself, but a refused
+    // route must not be refreshed *into*. There is no direct connection to fall
+    // back to any more, so computing a signature from an absent route would
+    // read as drift and push the live session off its group. Leave the current
+    // runtime alone; the send path is what refuses the turn.
+    if (!backendContext) {
+      sessionLog.info(
+        `Gateway route refused for ${managed.id}; keeping the current runtime (${reason})`,
+      )
+      return
+    }
     const connection = backendContext.connection
     // Resolve the fingerprint before the lock gate below: it is async and
     // must not sit between the lock check and lock registration, or two
@@ -4268,11 +4796,36 @@ export class SessionManager implements ISessionManager {
     await this.tryRefreshAgentRuntime(managed, 'send-path refresh')
 
     const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
-    const backendContext = resolveBackendContext({
-      sessionConnectionSlug: managed.llmConnection,
-      workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
-      managedModel: managed.model,
-    })
+    const backendContext = applyGatewayStrategy(
+      resolveBackendContext({
+        sessionConnectionSlug: managed.llmConnection,
+        workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+        managedModel: managed.model,
+      }),
+      managed.strategy,
+    )
+    // Refused by the gateway guard. The send path already refuses before
+    // reaching here (it has to, to keep the interrupted cleanup intact); this
+    // branch covers a refresh racing a config change mid-turn. Keeping the
+    // existing agent is safer than tearing it down; only when there is nothing
+    // to keep is creating one worthwhile, and building it against a route we
+    // just refused would be wrong — so that case throws and the send path's
+    // own guard reports it.
+    if (!backendContext) {
+      if (managed.agent) return managed.agent
+      // Re-ask the guard for its reason instead of guessing: a session with no
+      // strategy group used to be reported as `gateway_not_running`, which sent
+      // the user hunting for a gateway that was up and healthy the whole time.
+      const refused = resolveStrategyRoute({
+        gatewayEnabled: (gatewayRouteDeps.runtime ?? getGatewayRuntime()).enabled,
+        gatewayRunning: (gatewayRouteDeps.runtime ?? getGatewayRuntime()).running,
+        gatewayBaseUrl: (gatewayRouteDeps.runtime ?? getGatewayRuntime()).baseUrl,
+        strategyId: managed.strategy,
+        strategies: (gatewayRouteDeps.config ?? loadLlmConfig())?.strategies ?? [],
+        resolvedModel: managed.model,
+      })
+      throw new SessionRoutingError(refused.ok ? 'gateway_not_running' : refused.reason)
+    }
     const connection = backendContext.connection
     const apiKeyFingerprint = await this.resolveApiKeyFingerprint(connection?.slug)
     const sigInput = {
@@ -4400,12 +4953,13 @@ export class SessionManager implements ISessionManager {
 
       const onSdkSessionIdUpdate = (sdkSessionId: string) => {
         managed.sdkSessionId = sdkSessionId
-        // Retire branch-only fork metadata now that child session is established
-        if (managed.branchFromSdkSessionId) {
-          sessionLog.info(`Branch fork established for ${managed.id}: child=${sdkSessionId}, retiring parent fork metadata (parent=${managed.branchFromSdkSessionId})`)
-          managed.branchFromSdkSessionId = undefined
-          managed.branchFromSdkCwd = undefined
-          managed.branchFromSdkTurnId = undefined
+        // Retire branch-only fork metadata now that child session is established.
+        // `branchFromSessionPath` is part of this set: the Pi backend keys its
+        // one-shot parent fork on it, so leaving it behind made every restart
+        // re-fork the parent's live transcript into the branch (2026-10-18).
+        if (hasBranchForkMetadata(managed)) {
+          sessionLog.info(`Branch fork established for ${managed.id}: child=${sdkSessionId}, retiring parent fork metadata (parent=${managed.branchFromSdkSessionId ?? managed.branchFromSessionPath})`)
+          retireBranchForkMetadata(managed)
         } else {
           sessionLog.info(`SDK session ID captured for ${managed.id}: ${sdkSessionId}`)
         }
@@ -4422,9 +4976,7 @@ export class SessionManager implements ISessionManager {
 
       const onBranchForkInvalidated = () => {
         managed.sdkSessionId = undefined
-        managed.branchFromSdkSessionId = undefined
-        managed.branchFromSdkCwd = undefined
-        managed.branchFromSdkTurnId = undefined
+        retireBranchForkMetadata(managed)
         sessionLog.info(`Branch fork invalidated for ${managed.id}: cleared all fork metadata`)
         this.persistSession(managed)
         sessionPersistenceQueue.flush(managed.id)
@@ -4501,6 +5053,9 @@ export class SessionManager implements ISessionManager {
         coreConfig: {
         workspace: managed.workspace,
         miniModel,
+        // This is the session's own conversation; every other kind comes from
+        // an auxiliary backend that names itself.
+        requestKind: 'chat',
         thinkingLevel: managed.thinkingLevel,
         session: sessionConfig,
         onSdkSessionIdUpdate,
@@ -5364,6 +5919,10 @@ ${request.prompt}`;
           const targetId = sessionId ?? managed.id
           const session = this.sessions.get(targetId)
           if (!session) return null
+          // A gateway session's stored connection is the one it was *created*
+          // with; traffic goes to the strategy endpoint and the model is chosen
+          // per request. See `sessionRoutingInfo`.
+          const routing = sessionRoutingInfo(session, loadLlmConfig()?.strategies ?? [])
           return {
             id: session.id,
             name: session.name ?? session.id,
@@ -5373,8 +5932,7 @@ ${request.prompt}`;
             createdAt: session.createdAt ?? 0,
             workingDirectory: session.workingDirectory,
             projectId: session.projectId,
-            llmConnection: session.llmConnection,
-            model: session.model,
+            ...routing,
             isActive: session.agent != null,
           }
         },
@@ -6447,18 +7005,13 @@ ${request.prompt}`;
         const connection = getLlmConnection(managed.llmConnection)
         const resolvedMiniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
 
-        agent = createBackendFromConnection(managed.llmConnection, {
+        agent = createAuxiliaryBackend({
           workspace: managed.workspace,
           miniModel: resolvedMiniModel,
-          session: {
-            id: `title-${managed.id}`,
-            workspaceRootPath: managed.workspace.rootPath,
-            llmConnection: managed.llmConnection,
-            createdAt: Date.now(),
-            lastUsedAt: Date.now(),
-          },
-          isHeadless: true,
-        }, buildBackendHostRuntimeContext()) as AgentInstance
+          sessionId: `title-${managed.id}`,
+          kind: 'title',
+          sessionStrategyId: managed.strategy,
+        })
         await agent.postInit()
         isTemporary = true
         sessionLog.info(`refreshTitle: Created temporary agent for session ${sessionId}`)
@@ -7542,6 +8095,18 @@ ${request.prompt}`;
     // Start perf span for entire sendMessage flow
     const sendSpan = perf.span('session.sendMessage', { sessionId })
 
+    // Unconditional stage timing. perf only writes to stderr, which a packaged
+    // Electron app (launched from a shortcut) never captures, and `--debug`
+    // cannot be used to enable it: Electron consumes `--debug` itself
+    // (DEP0062: node --debug is invalid), so the app never starts with it.
+    // Logging here is the only way to see where the pre-spawn time goes on a
+    // real install (2026-10-18: /compact took 12s, 10s before spawn).
+    const sendT0 = Date.now()
+    const markSend = (name: string): void => {
+      sendSpan.mark(name)
+      sessionLog.info(`[send-perf] ${name} +${Date.now() - sendT0}ms`)
+    }
+
     const workspaceRootPath = managed.workspace.rootPath
     if (ownsSourceStartup) {
       await duringSourceStartup(this.flushPendingSessionSources(managed))
@@ -7568,20 +8133,38 @@ ${request.prompt}`;
         sessionLog.warn('[OAuth] Some sources failed token refresh:', refreshResult.failedSources.map(f => f.slug))
       }
       if (refreshResult.refreshedCount > 0) {
-        sendSpan.mark('oauth.refreshed')
+        markSend('oauth.refreshed')
       }
     }
 
     // Get or create the agent (lazy loading). Its internal cold-session build at
     // ~L2956 now sees fresh tokens (or correctly-needs_auth failed sources, since
     // ensureFreshToken mirrors the disk write to source.config in-memory).
-    const agent = await this.getOrCreateAgent(managed)
-    sendSpan.mark('agent.ready')
+    //
+    // Moved INSIDE the try below: `setProcessing(true)` already happened, and
+    // getOrCreateAgent throws when the gateway refuses the route — which is
+    // exactly what a session with no strategy group hits. Escaping the try left
+    // `isProcessing` true forever and the session sat "running" with no error
+    // and no way out (2026-10-25: every scheduled-task session did this).
+    let agent: AgentInstance
+    try {
+      agent = await this.getOrCreateAgent(managed)
+      markSend('agent.ready')
+    } catch (err) {
+      const reason = err instanceof SessionRoutingError ? err.reason : 'agent_unavailable'
+      const message = err instanceof Error ? err.message : String(err)
+      sessionLog.error(`Refusing to send: agent unavailable (${reason})`, { sessionId })
+      markSend('chat.refused_no_route')
+      this.sendEvent({ type: 'error', sessionId, error: message }, managed.workspace.id)
+      await this.onProcessingStopped(sessionId, 'error')
+      sendSpan.end()
+      return
+    }
 
     // Always set all sources for context (even if none are enabled), including built-ins
     const allSources = loadAllSources(workspaceRootPath)
     agent.setAllSources(allSources)
-    sendSpan.mark('sources.loaded')
+    markSend('sources.loaded')
 
     // Apply source servers if any are enabled
     if (hasSources) {
@@ -7602,7 +8185,7 @@ ${request.prompt}`;
         await applyBridgeUpdates(agent, sessionPath, usableSources, mcpServers, sessionId, workspaceRootPath, 'send message', managed.poolServer?.url)
         sessionLog.info(`Applied ${mcpCount} MCP + ${apiCount} API sources to session ${sessionId} (${allSources.length} total)`)
       }
-      sendSpan.mark('servers.applied')
+      markSend('servers.applied')
     }
 
     try {
@@ -7616,10 +8199,42 @@ ${request.prompt}`;
       // loop takes when a stop lands mid-turn.
       if (managed.stopRequested) {
         sessionLog.info('Skipping chat: stop requested while message was being prepared')
-        sendSpan.mark('chat.skipped_stop_requested')
+        markSend('chat.skipped_stop_requested')
         sendSpan.end()
         await this.onProcessingStopped(sessionId, 'interrupted')
         return
+      }
+
+      // Gateway route guard, checked once here rather than inside
+      // getOrCreateAgent: this is after the stop/interrupted settlement, so a
+      // refusal cannot cut that cleanup short, and it is before any subprocess
+      // work, so the user gets the "pick a strategy group" answer immediately
+      // instead of after MCP probing and OAuth refresh.
+      //
+      // It only bites when strategy groups exist AND the gateway is
+      // actually running. A machine that never set the gateway up (or whose
+      // config is a leftover fixture with no groups) must not have every
+      // session blocked by it — that is a different problem from a session
+      // skipping a group it should use. `running` matters because a config on
+      // disk is not a running gateway: refusing every send on a machine that
+      // never started it would punish a setting that was never turned on.
+      const gwRuntime = getGatewayRuntime()
+      const configuredStrategies = loadLlmConfig()?.strategies ?? []
+      if (configuredStrategies.length > 0 && gwRuntime.running) {
+        const route = resolveStrategyRoute({
+          gatewayEnabled: gwRuntime.enabled,
+          gatewayRunning: gwRuntime.running,
+          gatewayBaseUrl: gwRuntime.baseUrl,
+          strategyId: managed.strategy,
+          strategies: configuredStrategies,
+          resolvedModel: managed.model,
+        })
+        if (!route.ok && route.reason !== 'gateway_unconfigured') {
+          sessionLog.warn(`Refusing to send: no gateway route (${route.reason})`, { sessionId })
+          markSend('chat.refused_no_route')
+          sendSpan.end()
+          throw new SessionRoutingError(route.reason)
+        }
       }
 
       sessionLog.info('Starting chat for session:', sessionId)
@@ -7693,7 +8308,7 @@ ${request.prompt}`;
         }, managed.workspace.id)
       }
 
-      sendSpan.mark('chat.starting')
+      markSend('chat.starting')
       const chatIterator = agent.chat(effectiveMessage, modelInputAttachments.attachments)
       sessionLog.info('Got chat iterator, starting iteration...')
 
@@ -7734,7 +8349,7 @@ ${request.prompt}`;
           // The retry will handle its own completion
           if (managed.authRetryInProgress) {
             sessionLog.info('Chat completed but auth retry is in progress, skipping normal completion handling')
-            sendSpan.mark('chat.complete.auth_retry_pending')
+            markSend('chat.complete.auth_retry_pending')
             sendSpan.end()
             return  // Exit function - retry will handle completion
           }
@@ -7744,7 +8359,7 @@ ${request.prompt}`;
           // double cleanup and duplicate UI completion events.
           if (!managed.isProcessing) {
             sessionLog.info('Chat completed after explicit handoff/stop; skipping normal completion handling')
-            sendSpan.mark('chat.complete.already_stopped')
+            markSend('chat.complete.already_stopped')
             sendSpan.end()
             return
           }
@@ -7758,6 +8373,7 @@ ${request.prompt}`;
           )
           const lastUserMsg = [...managed.messages].reverse().find(m => m.role === 'user')
 
+
           // Session-scoped api-error path. Hoisted out of the diagnostic block
           // below on purpose: the ghost-card judgment further down reads it too,
           // and declaring it inside the debug-only `if` left it out of scope
@@ -7765,6 +8381,7 @@ ${request.prompt}`;
           // `ReferenceError: sessionErrorPath is not defined` instead of
           // surfacing the captured API error.
           const sessionErrorPath = getSessionStoragePath(managed.workspace.rootPath, managed.id)
+
 
           // DIAGNOSTIC (2026-10-14): "ghost error card" investigation. Read-only.
           // A UI error card was produced by this exact branch on 2026-10-13 on turns
@@ -7783,6 +8400,8 @@ ${request.prompt}`;
               turnId: m.turnId ?? null,
               id: m.id,
             }))
+
+
             // NON-CONSUMING reads only. getLastApiError() unlinks api-error.json on
             // read (getStoredError), and this diagnostic runs BEFORE the business
             // path — using it would steal the very error that path is about to
@@ -7824,6 +8443,7 @@ ${request.prompt}`;
             managed.messages,
             lastUserMsg?.timestamp,
           )
+
           // 2026-10-16 (261016-soft-channel): same heuristic, two more ways to
           // be wrong. (a) the captured api-error can be STALE — the
           // session-scoped history accumulates, and a 503 written an hour
@@ -7848,6 +8468,7 @@ ${request.prompt}`;
             !verificationReplayPending &&
             !ghostCardSuppressed
           ) {
+
             // NOTE: a system guardrail stop (busy-limit cap / no-progress streak)
             // also lands here; that case already emitted a `system_stop_notice`
             // event with the real reason — the generic text below is only the
@@ -7858,7 +8479,7 @@ ${request.prompt}`;
             // Uses the session-scoped path hoisted above (never the _sessionDir
             // singleton, which concurrent sessions can clobber).
             // Prefer the DURABLE per-session history: it survives the
-            // retry-ladder backoff window (no 5-minute staleness drop) and
+            // gateway's retry/backoff window (no 5-minute staleness drop) and
             // cannot be stolen by a probe's consume-on-read of the
             // single-slot file. The consuming pop is only a last resort.
             const apiError = getLastErrorFromHistory(sessionErrorPath) ?? getLastApiError(sessionErrorPath)
@@ -7924,7 +8545,7 @@ ${request.prompt}`;
             }
           }
 
-          sendSpan.mark('chat.complete')
+          markSend('chat.complete')
           sendSpan.end()
           this.onProcessingStopped(sessionId, 'complete')
           return  // Exit function, skip finally block (onProcessingStopped handles cleanup)
@@ -7939,7 +8560,7 @@ ${request.prompt}`;
       // Loop exited - either via complete event (normal) or generator ended after soft interrupt
       if (!managed.isProcessing) {
         sessionLog.info('Chat loop exited after explicit handoff/stop')
-        sendSpan.mark('chat.exit.already_stopped')
+        markSend('chat.exit.already_stopped')
         sendSpan.end()
       } else if (managed.stopRequested) {
         sessionLog.info('Chat loop completed after stop request - events drained successfully')
@@ -7960,7 +8581,7 @@ ${request.prompt}`;
         const reason = (error as DOMException).cause as AbortReason | undefined
 
         sessionLog.info(`Chat aborted (reason: ${reason || 'unknown'})`)
-        sendSpan.mark('chat.aborted')
+        markSend('chat.aborted')
         sendSpan.setMetadata('abort_reason', reason || 'unknown')
         sendSpan.end()
 
@@ -7978,7 +8599,7 @@ ${request.prompt}`;
         // Report chat/SDK errors via runtime hooks (Electron can forward to Sentry)
         sessionRuntimeHooks.captureException(error, { errorSource: 'chat', sessionId })
 
-        sendSpan.mark('chat.error')
+        markSend('chat.error')
         sendSpan.setMetadata('error', error instanceof Error ? error.message : String(error))
         sendSpan.end()
         this.sendEvent({
@@ -7995,7 +8616,7 @@ ${request.prompt}`;
       // Errors are handled in catch block
       if (managed.isProcessing && managed.processingGeneration === myGeneration) {
         sessionLog.info('Finally block cleanup - unexpected exit')
-        sendSpan.mark('chat.unexpected_exit')
+        markSend('chat.unexpected_exit')
         sendSpan.end()
         this.onProcessingStopped(sessionId, 'interrupted')
       }
@@ -8513,10 +9134,46 @@ ${request.prompt}`;
           : undefined,
         tokenUsage: managed.tokenUsage,
       })
+
+      // 5b. A spawned child reports back to the session that created it. Without
+      // this the parent's turn has already ended by the time the child answers,
+      // so the result is stranded in a session nobody opened (spawn_session is
+      // fire-and-forget by design — see SpawnSessionResult).
+      this.notifySpawnParent(managed, reason, currentFinalMessageId)
     }
 
     // 6. Always persist
     this.persistSession(managed)
+  }
+
+  /**
+   * Push a spawned child's finished-turn result back to its parent session.
+   *
+   * Delivered as a HIDDEN user message through the normal `sendMessage` path —
+   * the same shape as the background-task-completion nudge: an idle parent wakes
+   * up and summarizes, a busy one queues it behind the turn in flight. Never
+   * throws: the child's completion must not depend on the parent accepting the
+   * notice. Conductor children are excluded (see shouldNotifyParent).
+   */
+  private notifySpawnParent(
+    child: ManagedSession,
+    reason: 'complete' | 'interrupted' | 'error' | 'timeout',
+    finalMessageId: string | undefined,
+  ): void {
+    const parent = child.parentSessionId ? this.sessions.get(child.parentSessionId) : undefined
+    if (!shouldNotifyParent(child, Boolean(parent))) return
+    if (!parent) return
+    if (parent.isArchived || child.isArchived) return
+
+    const finalText = finalMessageId
+      ? child.messages.find(m => m.id === finalMessageId)?.content
+      : undefined
+    const notice = buildSpawnCompletionNotice(child, reason, finalText)
+
+    sessionLog.info(`[spawn] reporting sub-session ${child.id} (${reason}) to parent ${parent.id}`)
+    void this.sendMessage(parent.id, notice, undefined, undefined, { hidden: true }).catch((err) => {
+      sessionLog.error(`[spawn] failed to report ${child.id} to parent ${parent.id}:`, err)
+    })
   }
 
   /**
@@ -9401,6 +10058,21 @@ ${request.prompt}`;
   }
 
   /**
+   * Set the LLM gateway strategy for a session.
+   *
+   * Sticky like the thinking level: the composer restores it on reload. An empty
+   * string clears it back to "not chosen", which is the state a new session
+   * starts in — the composer shows that explicitly rather than guessing.
+   */
+  setSessionStrategy(sessionId: string, strategy: string): void {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return
+    managed.strategy = strategy || undefined
+    sessionLog.info(`Session ${sessionId}: strategy set to ${strategy || '(none)'}`)
+    this.persistSession(managed)
+  }
+
+  /**
    * Generate an AI title for a session from the user's first message.
    * Uses the agent's generateTitle() method which handles provider-specific SDK calls.
    * If no agent exists, creates a temporary one using the session's connection.
@@ -9427,18 +10099,13 @@ ${request.prompt}`;
       try {
         const connection = getLlmConnection(managed.llmConnection)
 
-        agent = createBackendFromConnection(managed.llmConnection, {
+        agent = createAuxiliaryBackend({
           workspace: managed.workspace,
           miniModel: connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined,
-          session: {
-            id: `title-${managed.id}`,
-            workspaceRootPath: managed.workspace.rootPath,
-            llmConnection: managed.llmConnection,
-            createdAt: Date.now(),
-            lastUsedAt: Date.now(),
-          },
-          isHeadless: true,
-        }, buildBackendHostRuntimeContext()) as AgentInstance
+          sessionId: `title-${managed.id}`,
+          kind: 'title',
+          sessionStrategyId: managed.strategy,
+        })
         await agent.postInit()
         isTemporary = true
         sessionLog.info(`[generateTitle] Created temporary agent for session ${managed.id}`)
@@ -9548,156 +10215,6 @@ ${request.prompt}`;
         }
         this.persistSession(managed)
         this.sendEvent({ ...event, sessionId }, workspaceId)
-        break
-      }
-
-      case 'retry': {
-        // 2026-10-08: the retry ladder's process-block line is PERSISTED as a
-        // status row (statusType 'retrying' + structured `retry` payload) so
-        // it survives session switches and app restarts with its final state
-        // (重试中 / 重试成功 / 重试失败). One row per ladder: created on the
-        // first backoff, updated in place on backoff/active, settled in place
-        // on end. Its timestamp anchors the ladder start, keeping it BEFORE
-        // any retried-run messages that follow (chronological position).
-        const now = Date.now()
-        // Cold-start guard: a synchronous persistSession() below must not
-        // hydrate the disk snapshot OVER a row we are about to create — if
-        // the session was never loaded, load it first (hydrate is idempotent
-        // on messagesLoaded).
-        if (!managed.messagesLoaded) {
-          this.hydrateMessagesForColdPersist(managed)
-        }
-        // Only the row of the CURRENT turn may be updated in place — a row
-        // left behind by a previous settled turn must not be recycled.
-        let retryIdx = findActiveRetryRowIndex(managed.messages)
-        // 2026-10-11 (apt-slate, plain-stag "153:37"): LATE-settlement guard —
-        // a terminal `end` whose startedAt predates the current turn's user
-        // message is the PREVIOUS turn's ladder being settled by the NEXT
-        // chatImpl (the frozen turn never released its held complete; the end
-        // carries the OLD startedAt with elapsedMs measured from it, e.g.
-        // now − 16:01:44 = 153:37). It must neither fabricate a row at the
-        // top of the new turn nor re-settle the previous turn's already-term
-        // inal rows. Forward the event only — the old turn already carries its
-        // own recovered row + terminal error card.
-        if (event.phase === 'end' && typeof event.startedAt === 'number') {
-          let lastUserTs: number | undefined
-          for (let i = managed.messages.length - 1; i >= 0; i--) {
-            const m = managed.messages[i]!
-            if (m.role === 'user' && m.isGuidance !== true) {
-              lastUserTs = m.timestamp
-              break
-            }
-          }
-          if (lastUserTs !== undefined && event.startedAt < lastUserTs) {
-            sessionLog.debug(
-              `retry: dropping late end (startedAt ${event.startedAt} < turn start ${lastUserTs}) — stale ladder from a previous turn`,
-            )
-            this.sendEvent({ ...event, sessionId }, workspaceId)
-            break
-          }
-        }
-        // 2026-10-09: a terminal `end` can arrive AFTER a turn boundary (the
-        // turn was interrupted and a new user message already landed — the
-        // stop path settles the row via a late `retry end`). The turn-scoped
-        // index stops at the new user message, so fall back to the last
-        // retrying row: a row still in 'retrying' is the un-settled ladder by
-        // construction, and a duplicate/stray end must NOT clobber an already
-        // terminal row (recovered/failed) — leave those untouched.
-        if (retryIdx === -1 && event.phase === 'end') {
-          const lastIdx = findLastRetryRowIndex(managed.messages)
-          if (lastIdx !== -1 && managed.messages[lastIdx]!.retry?.status === 'retrying') {
-            retryIdx = lastIdx
-          }
-        }
-        // 2026-10-10: a soft `end recovered` (the run went live) already
-        // settled the row; the terminal `end` from agent_end finds no
-        // UNSETTLED row. Match it by the ladder's authoritative startedAt and
-        // re-settle IN PLACE (refresh elapsedMs) — never stack a duplicate row
-        // for one ladder.
-        if (retryIdx === -1 && event.phase === 'end') {
-          retryIdx = findLastRetryRowByStartedAt(managed.messages, event.startedAt)
-        }
-        // 2026-10-12 (user spec "one entry per ladder"): a backoff/active with
-        // no retrying row revives the CURRENT ladder's previously-failed row
-        // in place (attempt 1→2→3 …) — never stack one failed line per
-        // attempt. 'recovered' rows are not revived (new cycle = new row).
-        if (retryIdx === -1 && event.phase !== 'end') {
-          retryIdx = findRetryRowForLadder(managed.messages, event.startedAt)
-        }
-        const prevRow = retryIdx !== -1 ? managed.messages[retryIdx]!.retry : undefined
-        const nextPayload = nextRetryRowPayload(event, prevRow, now)
-        // 2026-10-10 (261010-warm-carbon): a verdictless end that found no
-        // row (the Pi adapter closing its retry channel — releaseHeldRetryError
-        // / auto_retry_end cancellation) must NOT fabricate a phantom
-        // "重试 1 次后失败 · 耗时 00:00" row. Forward the event (the renderer
-        // applies the same rule) but touch neither the rows, the liveness
-        // gate, nor the error cards.
-        if (nextPayload === null) {
-          this.sendEvent({ ...event, sessionId }, workspaceId)
-          break
-        }
-        // 2026-10-11 (spry-stone): a TERMINAL verdict with attempt < 1 would
-        // render as "重试 0 次后失败 · 耗时 xx:xx" — a ladder that never
-        // counted a single failure, its stale end landing after a pipeline
-        // delay (often into a NEW turn). Such a row is meaningless; forward
-        // the event but never persist it.
-        if (event.phase === 'end' && nextPayload.attempt < 1) {
-          sessionLog.debug(
-            `retry: dropping zero-attempt terminal end (status ${nextPayload.status}) — never render 重试 0 次`,
-          )
-          this.sendEvent({ ...event, sessionId }, workspaceId)
-          break
-        }
-        // 2026-10-10: track ladder liveness — while retrying, the
-        // complete/error fail-safe must NOT settle the row (success/failure
-        // only when the retry has REALLY finished).
-        managed.retryLadderActive = nextPayload.status === 'retrying'
-        if (retryIdx !== -1) {
-          managed.messages[retryIdx] = { ...managed.messages[retryIdx]!, retry: nextPayload }
-        } else {
-          managed.messages.push({
-            id: generateMessageId(),
-            role: 'status',
-            statusType: 'retrying',
-            content: '',
-            // 2026-10-11 (swift-slate): timeline anchor = the row's own cycle
-            // start (backoffAt), not the ladder start.
-            timestamp: nextPayload.backoffAt ?? nextPayload.startedAt,
-            retry: nextPayload,
-          })
-        }
-        this.persistSession(managed)
-        this.sendEvent({ ...event, sessionId }, workspaceId)
-
-        // Once the ladder is past its 10s rung it surfaces a NON-terminal error
-        // card (retryPending) while it keeps retrying in the background. Settle
-        // that card when the ladder ends:
-        //   - recovered → the retry succeeded, so the card is stale: drop it.
-        //   - failed    → the ladder is done; the card becomes the turn's
-        //                 terminal error (guidance injection on the next turn).
-        if (event.phase === 'end') {
-          const recovered = event.recovered === true
-          let changed = false
-          for (let i = managed.messages.length - 1; i >= 0; i--) {
-            const m = managed.messages[i]!
-            // Ladder cards = (retryPending || retryAttempt): flipped cards
-            // (retryPending=false after an intermediate end failed) must be
-            // spliced on recovery / flipped on the real terminal end too —
-            // a successful retry clears the box no matter its flip state.
-            if (m.role !== 'error' || (m.retryPending !== true && m.retryAttempt == null)) continue
-            changed = true
-            if (recovered) {
-              managed.messages.splice(i, 1)
-              this.sendEvent({ type: 'message_removed', sessionId, messageId: m.id }, workspaceId)
-            } else {
-              managed.messages[i] = { ...m, retryPending: false }
-            }
-          }
-          if (changed) {
-            if (!recovered) managed.abnormalTurnEnd = true
-            this.persistSession(managed)
-          }
-        }
         break
       }
 
@@ -10359,6 +10876,12 @@ ${request.prompt}`;
         // block after switching sessions because it was a transient info
         // event, never written to disk). Same shape as the compaction message.
         if (isVerificationPassed || isVerificationFailed) {
+          // verificationParams (2026-10-19 tidy-willow): the forwarded event
+          // carried statusParams but this PERSISTED copy dropped them, so after
+          // a session switch / reload the row lost its typed label
+          // (`校验失败（<类型>）`) and the clickable reasonPath. Forward-only
+          // params are not durable — the disk copy must carry them too.
+          const verificationParams = (event as { statusParams?: Record<string, string | number> }).statusParams
           const verificationMessage: Message = {
             id: generateMessageId(),
             role: 'info',
@@ -10366,6 +10889,7 @@ ${request.prompt}`;
             timestamp: infoTimestamp,
             statusType: isVerificationPassed ? 'verification_passed' : 'verification_failed',
             infoLevel: isVerificationPassed ? 'success' : 'warning',
+            ...(verificationParams !== undefined ? { statusParams: verificationParams } : {}),
           }
           managed.messages.push(verificationMessage)
         }
@@ -10417,66 +10941,23 @@ ${request.prompt}`;
           break
         }
 
-        // AgentEvent uses `message` not `error`
-        // Unified retry ladder (2026-10-07): a TERMINAL error (not a
-        // retryPending card — those keep the turn alive in the background)
-        // means the turn died. Flag it so the next user message injects
-        // "resume the interrupted request" guidance instead of a clean start.
-        if (!event.retryPending) {
-          managed.abnormalTurnEnd = true
-          // 2026-10-08: the ladder's terminal `retry end` normally settles the
-          // persisted row; a terminal error WITHOUT it (subprocess exit,
-          // unexpected generator failure) must settle the row too.
-          this.settleStuckRetryRow(managed)
-        }
+        // AgentEvent uses `message` not `error`. A terminal error means the
+        // turn died. Flag it so the next user message injects "resume the
+        // interrupted request" guidance instead of a clean start.
+        managed.abnormalTurnEnd = true
         const now = this.monotonic()
-        // 2026-10-10: the ladder's non-terminal card is SINGLE — once one
-        // exists (retryPending), later failed attempts update its content in
-        // place (latest error message + attempt) instead of stacking a card
-        // per failure. Mirrors the renderer's handleError. The card is
-        // spliced on recovery / flipped terminal on exhausted failure in the
-        // case 'retry' end handling.
-        let cardUpdated = false
-        let errorTimestamp = now
-        if (event.retryPending) {
-          for (let i = managed.messages.length - 1; i >= 0; i--) {
-            const m = managed.messages[i]!
-            if (m.role === 'error' && (m.retryPending || (event.retryAttempt != null && m.retryAttempt === event.retryAttempt - 1))) {
-              managed.messages[i] = {
-                ...m,
-                content: event.message,
-                retryAttempt: event.retryAttempt ?? m.retryAttempt,
-                retryPending: true, // reactivate a flipped card (2026-10-12)
-                timestamp: now,
-              }
-              errorTimestamp = now
-              cardUpdated = true
-              break
-            }
-          }
+        const errorMessage: Message = {
+          id: generateMessageId(),
+          role: 'error',
+          content: event.message,
+          timestamp: now,
         }
-        if (!cardUpdated) {
-          const errorMessage: Message = {
-            id: generateMessageId(),
-            role: 'error',
-            content: event.message,
-            timestamp: now
-          }
-          // Unified retry ladder: mark the persisted message non-terminal too.
-          errorMessage.retryPending = event.retryPending
-          errorMessage.retryAttempt = event.retryAttempt
-          errorTimestamp = errorMessage.timestamp
-          managed.messages.push(errorMessage)
-        }
+        managed.messages.push(errorMessage)
         this.sendEvent({
           type: 'error',
           sessionId,
           error: event.message,
-          timestamp: errorTimestamp,
-          // Unified retry ladder: non-terminal marker + attempt number so the
-          // renderer styles the card as "retrying" instead of terminal.
-          retryPending: event.retryPending,
-          retryAttempt: event.retryAttempt,
+          timestamp: now,
         }, workspaceId)
         break
       }
@@ -10511,14 +10992,8 @@ ${request.prompt}`;
           break
         }
 
-        // Terminal typed error (the retryPending variant keeps the turn alive
-        // in the background retry ladder — do NOT flag those).
-        if (!event.retryPending) {
-          managed.abnormalTurnEnd = true
-          // 2026-10-08: settle the persisted retry row if the ladder ended
-          // without its terminal `retry end` event.
-          this.settleStuckRetryRow(managed)
-        }
+        // A terminal typed error means the turn died.
+        managed.abnormalTurnEnd = true
 
         // Build rich error message with all diagnostic fields for persistence and UI display
         const typedErrorMessage: Message = {
@@ -10533,9 +11008,6 @@ ${request.prompt}`;
           errorDetails: event.error.details,
           errorOriginal: event.error.originalError,
           errorCanRetry: event.error.canRetry,
-          // Unified retry ladder: non-terminal marker + attempt number.
-          retryPending: event.retryPending,
-          retryAttempt: event.retryAttempt,
         }
         managed.messages.push(typedErrorMessage)
         // Send typed_error event with full structure for renderer to handle
@@ -10552,10 +11024,6 @@ ${request.prompt}`;
             originalError: event.error.originalError,
           },
           timestamp: typedErrorMessage.timestamp,
-          // Unified retry ladder: non-terminal marker + attempt number so the
-          // renderer styles the card as "retrying" instead of terminal.
-          retryPending: event.retryPending,
-          retryAttempt: event.retryAttempt,
         }, workspaceId)
         break
 
@@ -10742,11 +11210,6 @@ ${request.prompt}`;
         break
 
       case 'complete':
-        // Fail-safe for the persisted retry row: a turn that completed without
-        // the ladder's terminal `retry end` (rare paths) must not leave a
-        // spinning "重试中" row; settle it to 'failed' (the retries did not
-        // recover). No-op once the row is already terminal.
-        this.settleStuckRetryRow(managed)
         // Clear any leftover streaming-start entries (text blocks discarded
         // without a text_complete would otherwise linger in the map).
         managed.streamStartAtByTurn?.clear()
@@ -11123,34 +11586,26 @@ ${request.prompt}`;
       ? (getMiniModel(backendContext.connection) ?? backendContext.connection.defaultModel ?? getDefaultSummarizationModel())
       : getDefaultSummarizationModel()
 
-    const envOverrides: Record<string, string> = {
-      CRAFT_WORKSPACE_PATH: workspaceRootPath,
-      ...(miniModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: miniModel } : {}),
-    }
-
-    const agent = createBackendFromResolvedContext({
-      context: backendContext,
-      hostRuntime: buildBackendHostRuntimeContext(),
-      coreConfig: {
+    // No direct fallback exists any more, so a gateway that is down or a
+    // session without a group throws here. A transfer without a summary is
+    // still a usable transfer; propagating the throw would abort the export
+    // over a cosmetic loss.
+    let agent: AgentInstance
+    try {
+      agent = createAuxiliaryBackend({
         workspace: managed.workspace,
-        session: {
-          id: `${managed.id}-remote-transfer-summary`,
-          workspaceRootPath,
-          createdAt: Date.now(),
-          lastUsedAt: Date.now(),
-          workingDirectory: managed.workingDirectory,
-          sdkCwd: managed.sdkCwd,
-          model: managed.model,
-          llmConnection: managed.llmConnection,
-          permissionMode: managed.permissionMode,
-          previousPermissionMode: managed.previousPermissionMode,
-        },
         miniModel,
-        envOverrides,
-        isHeadless: true,
-      },
-      providerOptions: { piAuthProvider: backendContext.connection?.piAuthProvider },
-    })
+        sessionId: `${managed.id}-remote-transfer-summary`,
+        kind: 'transfer_summary',
+        sessionStrategyId: managed.strategy,
+      })
+    } catch (error) {
+      sessionLog.warn('[transfer] Summary backend unavailable; exporting without a summary', {
+        sessionId: managed.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    }
 
     try {
       return await generateConversationSummary(messages, agent.runMiniCompletion.bind(agent))
@@ -11475,6 +11930,17 @@ ${request.prompt}`;
    * Should be called on app shutdown to prevent resource leaks.
    */
   cleanup(): void {
+    // Flush before tearing anything down: the last 30s of usage is the most
+    // likely to be lost on an abrupt exit, and it is the cheapest to save.
+    if (this.usageFlushTimer) {
+      clearInterval(this.usageFlushTimer)
+      this.usageFlushTimer = undefined
+      try {
+        getGatewayRuntime().flushUsage()
+      } catch {
+        // Best-effort; the periodic flush already covers the normal path.
+      }
+    }
     sessionLog.info('Cleaning up resources...')
 
     // Stop all ConfigWatchers (file system watchers)

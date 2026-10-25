@@ -119,3 +119,66 @@ export function translateAlreadyCompacted(
     result: record,
   };
 }
+// ============================================================================
+// Token accounting for the SDK's own (LLM) compaction path
+// ============================================================================
+
+/** Minimal shape of the SDK's CompactionResult used for accounting. */
+export interface CompactionResultLike {
+  tokensBefore?: number;
+  estimatedTokensAfter?: number;
+  details?: unknown;
+}
+
+/**
+ * Build the relief-stats payload for a compaction the SDK produced itself.
+ *
+ * The relief hook always ships exact numbers on its own path. When the SDK's
+ * LLM summarizer runs instead, its `details` is `{ readFiles, modifiedFiles }`
+ * and there is no slot for accounting — so synthesize the same shape from the
+ * REAL before/after the SDK just computed:
+ *
+ *   before      = tokensBefore        (matches the UI ring)
+ *   after       = estimatedTokensAfter (matches the UI ring after compaction)
+ *   compacted   = before - after
+ *   retained    = the EXACT kept region when the caller has it (measured from
+ *                 the real branch entries with the SDK's own estimator),
+ *                 otherwise min(after, keepRecentTokens) as a floor
+ *   checkpoint  = 0 (already folded into `after` by the SDK's re-estimate)
+ *   viaRelief   = false
+ *
+ * Reporting a floor while `after` is bogus is what produced the misleading
+ * "保留0.0k / 压缩403.6k" line; reporting the measured region keeps this path
+ * consistent with the relief path.
+ */
+export function synthCompactionStats(
+  result: CompactionResultLike,
+  keepRecentTokens: number,
+  /** Exact retained-region tokens, when measured (see measureKeptRegionTokens). */
+  measuredRetained?: number,
+): {
+  before: number;
+  retained: number;
+  compacted: number;
+  checkpoint: number;
+  viaRelief: boolean;
+} {
+  const before = Math.max(0, Math.round(result.tokensBefore ?? 0));
+  const after = Number.isFinite(result.estimatedTokensAfter)
+    ? Math.max(0, Math.round(result.estimatedTokensAfter as number))
+    : before;
+  const floor = Math.max(0, Math.round(keepRecentTokens));
+  // Prefer the measured region; fall back to the floor, then to `after`.
+  const retained = Number.isFinite(measuredRetained) && (measuredRetained as number) >= 0
+    ? Math.min(Math.round(measuredRetained as number), after)
+    : floor > 0
+      ? Math.min(floor, after)
+      : after;
+  return {
+    before,
+    retained,
+    compacted: Math.max(0, before - after),
+    checkpoint: 0,
+    viaRelief: false,
+  };
+}

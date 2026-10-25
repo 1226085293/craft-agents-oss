@@ -1432,6 +1432,13 @@ export class PiEventAdapter extends BaseEventAdapter {
             | { before: number; retained: number; compacted: number; checkpoint: number; viaRelief: boolean }
             | undefined;
           if (reliefStats && typeof reliefStats.before === 'number' && reliefStats.before > 0) {
+            // Real post-compaction context straight from the SDK — this is
+            // what the context ring shows, so the line and the ring agree.
+            const sdkAfter = (compactionEvent.result as { estimatedTokensAfter?: number } | undefined)
+              ?.estimatedTokensAfter;
+            const after = typeof sdkAfter === 'number' && sdkAfter > 0
+              ? sdkAfter
+              : reliefStats.retained + reliefStats.checkpoint;
             yield {
               type: 'status',
               message: 'Compaction summary',
@@ -1441,6 +1448,7 @@ export class PiEventAdapter extends BaseEventAdapter {
                 retained: reliefStats.retained,
                 compacted: reliefStats.compacted,
                 checkpoint: reliefStats.checkpoint,
+                after,
                 viaRelief: reliefStats.viaRelief ? 1 : 0,
               },
             };

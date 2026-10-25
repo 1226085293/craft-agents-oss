@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ProgressRecord } from '../progress-journal.ts'
 import {
   buildTurnLogs,
+  copyTurnLogsForBranch,
   isRealUserMessage,
   renderTurnLog,
   turnLogFileName,
@@ -273,5 +274,59 @@ describe('writeTurnLogs', () => {
     dirs.push(dir)
     expect(writeTurnLogs(dir, [])).toBe(0)
     expect(existsSync(join(dir, 'turns'))).toBe(false)
+  })
+})
+
+/**
+ * A forked branch copies messages but not `turns/`. context-relief builds its
+ * zero-LLM checkpoint from turn files, so without them /compact falls back to
+ * an LLM summary of the whole copied history (2026-10-18: 5.6MB / 2060 msgs
+ * → 65s). The fork must carry the parent's turns up to the branch point.
+ */
+describe('copyTurnLogsForBranch', () => {
+  function seedTurns(): string {
+    const src = mkdtempSync(join(tmpdir(), 'craft-branch-src-'))
+    dirs.push(src)
+    mkdirSync(join(src, 'turns'), { recursive: true })
+    writeFileSync(join(src, 'turns', '2026-10-18T09-00-00-001.md'), 'first')
+    writeFileSync(join(src, 'turns', '2026-10-18T10-00-00-002.md'), 'second')
+    writeFileSync(join(src, 'turns', '2026-10-18T11-00-00-003.md'), 'third')
+    return src
+  }
+
+  it('copies turns at-or-before the branch point, skips later ones', () => {
+    const src = seedTurns()
+    const dest = mkdtempSync(join(tmpdir(), 'craft-branch-dst-'))
+    dirs.push(dest)
+    // Branch point 10:30Z → keeps 09:00 and 10:00, drops 11:00.
+    const copied = copyTurnLogsForBranch(src, dest, Date.UTC(2026, 9, 18, 10, 30, 0))
+    expect(copied).toBe(2)
+    expect(readdirSync(join(dest, 'turns')).sort()).toEqual([
+      '2026-10-18T09-00-00-001.md',
+      '2026-10-18T10-00-00-002.md',
+    ])
+    expect(readFileSync(join(dest, 'turns', '2026-10-18T09-00-00-001.md'), 'utf8')).toBe('first')
+  })
+
+  it('copies everything when the branch point is unknown', () => {
+    const src = seedTurns()
+    const dest = mkdtempSync(join(tmpdir(), 'craft-branch-dst-'))
+    dirs.push(dest)
+    expect(copyTurnLogsForBranch(src, dest, undefined)).toBe(3)
+  })
+
+  it('is idempotent and never overwrites an existing branch file', () => {
+    const src = seedTurns()
+    const dest = mkdtempSync(join(tmpdir(), 'craft-branch-dst-'))
+    dirs.push(dest)
+    expect(copyTurnLogsForBranch(src, dest, Date.UTC(2026, 9, 18, 12, 0, 0))).toBe(3)
+    expect(copyTurnLogsForBranch(src, dest, Date.UTC(2026, 9, 18, 12, 0, 0))).toBe(0)
+  })
+
+  it('returns 0 when the source has no turns directory', () => {
+    const src = mkdtempSync(join(tmpdir(), 'craft-branch-src-'))
+    const dest = mkdtempSync(join(tmpdir(), 'craft-branch-dst-'))
+    dirs.push(src, dest)
+    expect(copyTurnLogsForBranch(src, dest, Date.now())).toBe(0)
   })
 })

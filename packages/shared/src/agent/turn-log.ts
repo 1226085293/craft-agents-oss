@@ -30,7 +30,7 @@
  * overwritten, which makes the archiver idempotent and crash-safe.
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { formatLocalTime } from '../memory/injector.ts';
 import type { ProgressRecord } from './progress-journal.ts';
@@ -387,4 +387,57 @@ export function writeTurnLogs(sessionDir: string, turns: TurnLogData[]): number 
     console.warn('[TurnLog] Failed to write turn logs:', err);
   }
   return written;
+}
+
+/**
+ * Parse the compact ISO prefix of a turn log file name back to epoch ms.
+ * `2026-10-18T09-04-40-029.md` → Date.UTC(2026, 9, 18, 9, 4, 40).
+ */
+function parseTurnLogStartMs(fileName: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-\d{3}\.md$/.exec(fileName);
+  if (!m) return null;
+  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]));
+}
+
+/**
+ * Copy a parent session's archived turn logs into a branch, keeping only the
+ * turns that started at-or-before the branch point.
+ *
+ * Why this exists: context-relief builds its zero-LLM checkpoint from turn
+ * files. A fork copies messages but not `turns/`, so relief finds nothing to
+ * index and /compact falls back to an LLM summary of the ENTIRE copied
+ * history — 5.6MB / 2060 messages took 65s (2026-10-18 261018-vital-moor).
+ *
+ * Idempotent: existing files in the branch are never overwritten.
+ * Best-effort: a failure must never fail the branch.
+ *
+ * @returns Number of files copied.
+ */
+export function copyTurnLogsForBranch(
+  sourceSessionDir: string,
+  branchSessionDir: string,
+  branchPointMs: number | undefined,
+): number {
+  let copied = 0;
+  try {
+    const src = getTurnLogsDir(sourceSessionDir);
+    if (!existsSync(src)) return 0;
+    const dest = getTurnLogsDir(branchSessionDir);
+    mkdirSync(dest, { recursive: true });
+    for (const entry of readdirSync(src)) {
+      if (!entry.endsWith('.md')) continue;
+      const startedAt = parseTurnLogStartMs(entry);
+      // Keep the turn when its start is at-or-before the branch point. A turn
+      // that STARTED before the fork but continued past it is kept: its file
+      // is the record of the shared prefix, and dropping it would leave a hole.
+      if (branchPointMs !== undefined && startedAt !== null && startedAt > branchPointMs) continue;
+      const target = join(dest, entry);
+      if (existsSync(target)) continue;
+      copyFileSync(join(src, entry), target);
+      copied++;
+    }
+  } catch (err) {
+    console.warn('[TurnLog] Failed to copy turn logs to branch:', err);
+  }
+  return copied;
 }

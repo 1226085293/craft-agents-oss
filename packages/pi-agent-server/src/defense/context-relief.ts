@@ -25,6 +25,10 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import {
+  estimateTokens as sdkEstimateTokens,
+  sessionEntryToContextMessages as sdkSessionEntryToContextMessages,
+} from '@earendil-works/pi-coding-agent';
 import type {
   ExtensionAPI,
   InlineExtension,
@@ -46,6 +50,16 @@ export interface ContextReliefDeps {
    * mid-session, so this must never be captured once at registration.
    */
   contextWindow?: () => number;
+  /**
+   * Stash for the retained-region measurement taken during
+   * `session_before_compact`, so the result path (which runs AFTER the SDK
+   * decides who produced the summary) can attach the real number to BOTH the
+   * relief and the LLM compaction.
+   *
+   * Keyed by nothing — there is at most one compaction in flight (the SDK
+   * serializes them, and our manual gate skips concurrent requests).
+   */
+  lastRetainedMeasurement?: { retained: number; keepRecentTokens: number; measuredAt: number };
 }
 
 /** Fallback ceiling when neither reliefMaxTokens nor contextWindow resolves. */
@@ -159,18 +173,24 @@ export function estimateCharsTokens(chars: number): number {
  * Post-relief context estimate. `messagesToSummarize` will be discarded and
  * replaced by the summary, so: tokensBefore - tokensDiscarded + summaryTokens.
  */
+/**
+ * Estimate the post-relief context size.
+ *
+ * Kept region = the SDK's keepRecent floor + the checkpoint text. The
+ * discarded region is NOT re-estimated from `messagesToSummarize`: a single
+ * large tool result stringifies into a multi-megabyte blob whose ÷4 token
+ * count is meaningless (it made the 2026-10-18 threshold check and UI line
+ * both wildly wrong). Since relief replaces everything before the cut point
+ * with the checkpoint, `before - kept` is the honest discarded figure.
+ */
 export function estimatePostReliefTokens(
   tokensBefore: number,
-  messagesToSummarize: unknown[],
   summaryText: string,
+  keepRecentTokens: number,
 ): number {
-  let discarded = 0;
-  try {
-    discarded = estimateCharsTokens(JSON.stringify(messagesToSummarize).length);
-  } catch {
-    discarded = 0;
-  }
-  return Math.max(0, tokensBefore - discarded) + estimateCharsTokens(summaryText.length);
+  const before = Math.max(0, tokensBefore);
+  const kept = Math.max(0, Math.min(before, Math.round(keepRecentTokens)));
+  return kept + estimateCharsTokens(summaryText.length);
 }
 
 /** True when the hook should fall through to the SDK's LLM compaction. */
@@ -182,14 +202,26 @@ export function shouldFallThroughToLlm(postReliefTokens: number, reliefMaxTokens
  * Token accounting for the compaction-summary UI line
  * ("压缩完成：约 A → B（保留 R，压缩 S）").
  *
- * All four numbers use ONE estimation basis (chars/4) so the identity
- * `压缩前 = 保留 + 压缩` holds exactly — mixing the real upstream `tokensBefore`
- * with local estimates would make the line self-contradictory.
+ * Semantics (user-verified 2026-10-18):
+ *   before      real upstream usage (matches the UI ring)
+ *   after       real post-compaction context (SDK's estimatedTokensAfter)
+ *   retained    what the SDK KEEPS, in turn units — the keepRecent region the
+ *               cut point landed on (always >= the keepRecentTokens floor)
+ *   compacted   before - after (the tokens actually eliminated)
+ *   checkpoint  tokens the generated checkpoint text itself adds back
  *
- *   before      tokensBefore (real, from upstream usage — matches the UI ring)
- *   retained    tokens kept in context (the SDK's keepRecent region)
- *   compacted   tokens that were in messagesToSummarize and got replaced
- *   checkpoint  tokens the generated checkpoint itself adds back
+ * The identity the line must satisfy:
+ *   before ≈ retained + compacted
+ * which holds because the discarded region is `before` minus everything the
+ * SDK keeps.
+ *
+ * ⚠️ NEVER estimate the discarded region from
+ * `JSON.stringify(messagesToSummarize)` — a single large tool result
+ * stringifies into a multi-megabyte blob whose ÷4 count is meaningless. That
+ * bug produced the 2026-10-18 line
+ *   "约403.6k→0.6k (保留0.0k, 压缩403.6k)"
+ * where `retained` pinned to 0 and `after` collapsed to the checkpoint alone,
+ * while the UI ring showed 50k. All four numbers must come from real values.
  */
 export interface ReliefStats {
   before: number;
@@ -205,22 +237,60 @@ export function computeReliefStats(
   messagesToSummarize: unknown[],
   summaryText: string,
   viaRelief: boolean,
+  tokensAfter: number,
+  /** Session entries from the event — used to measure the kept region for real. */
+  branchEntries: unknown[] | undefined,
+  /** The SDK's keepRecentTokens floor. */
+  keepRecentTokens: number,
 ): ReliefStats {
-  let discarded = 0;
-  try {
-    discarded = estimateCharsTokens(JSON.stringify(messagesToSummarize).length);
-  } catch {
-    discarded = 0;
+  const before = Math.max(0, Math.round(tokensBefore));
+  const after = Number.isFinite(tokensAfter) ? Math.max(0, Math.round(tokensAfter)) : before;
+  const compacted = Math.max(0, before - after);
+  const checkpoint = estimateCharsTokens(summaryText.length);
+
+  // Retained = the kept region measured with the SDK's own accumulation
+  // algorithm over the real branch entries. Falls back to the floor when the
+  // entries are unavailable (defensive — the line must still render).
+  let retained = Math.max(0, Math.min(after, Math.round(keepRecentTokens)));
+  if (Array.isArray(branchEntries) && branchEntries.length > 0) {
+    const measured = measureKeptRegionTokens(branchEntries, keepRecentTokens);
+    if (measured > 0) retained = measured;
   }
-  const compacted = Math.min(discarded, Math.max(0, tokensBefore));
-  const retained = Math.max(0, tokensBefore - compacted);
-  return {
-    before: tokensBefore,
-    retained,
-    compacted,
-    checkpoint: estimateCharsTokens(summaryText.length),
-    viaRelief,
-  };
+  // Sanity: retained cannot exceed the context that actually survived.
+  retained = Math.min(retained, after);
+
+  void messagesToSummarize;
+  return { before, retained, compacted, checkpoint, viaRelief };
+}
+
+/**
+ * Walk the branch backwards accumulating estimated per-entry tokens until the
+ * keepRecent floor is reached, mirroring the SDK's findCutPoint() so the number
+ * on the summary line means the same thing the cut point actually kept.
+ *
+ * Uses the SDK's own entry->message and token estimators so the two can never
+ * drift (they are exported from the package root and verified at import time).
+ *
+ * Exported so the result path can re-measure for the SDK's LLM compaction
+ * (whose `details` has no stats slot).
+ */
+export function measureKeptRegionTokens(
+  entries: readonly unknown[] | undefined,
+  keepRecentTokens: number,
+): number {
+  if (!Array.isArray(entries) || entries.length === 0) return 0;
+  let accumulated = 0;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i] as Parameters<typeof sdkSessionEntryToContextMessages>[0];
+    if (!entry || typeof entry !== 'object') continue;
+    // Compaction entries are boundaries, not context content.
+    if ((entry as { type?: string }).type === 'compaction') break;
+    for (const message of sdkSessionEntryToContextMessages(entry)) {
+      accumulated += sdkEstimateTokens(message);
+    }
+    if (accumulated >= keepRecentTokens) break;
+  }
+  return Math.round(accumulated);
 }
 
 /** Marker text every relief checkpoint starts with. */
@@ -280,13 +350,39 @@ export function resolveReliefMaxTokens(deps: ContextReliefDeps): number {
  * the post-relief context still exceeds the ceiling.
  *
  * REPEATED COMPACTION (user-confirmed): once the content to be summarized is
- * mostly relief checkpoints, SKIP ONLY relief-first — do NOT abandon the
- * pipeline. Return a `compaction` whose `summary` is undefined so the SDK's
- * own path takes over (`_runAutoCompaction` calls `_runDefaultCompaction`
- * whenever our result carries no summary), then proceeds through the same
- * threshold/LLM accounting. Returning `cancel` instead would surface
- * "Compaction cancelled" as a failure to the user, and returning undefined
- * would skip the SDK's own bookkeeping.
+ * mostly relief checkpoints, SKIP relief-first and return `undefined` (no
+ * `compaction` key) so the SDK's own LLM path runs end to end.
+ *
+ * ⚠️ NEVER return a `compaction` object WITHOUT a `summary` string.
+ *
+ * Root cause of the `/compact` hard failure
+ * `undefined is not an object (evaluating 'message.summary.length')`
+ * (2026-10-18, session 261016-true-sparrow): the SDK's `compact()` branch is
+ *
+ *     if (result?.compaction) {           // agent-session.js
+ *         extensionCompaction = result.compaction;
+ *         summary = extensionCompaction.summary;   // ← undefined
+ *     } else {
+ *         summary = await this._runDefaultCompaction(...);   // LLM path
+ *     }
+ *     ...
+ *     sessionManager.appendCompaction(summary, ...);   // ← writes the entry
+ *
+ * The branch tests the OBJECT, not `summary`. A summary-less compaction object
+ * is therefore truthy, skips the LLM path, and persists a compaction entry
+ * with NO `summary` field. That entry then poisons the session FOREVER: the
+ * next compaction re-enters `findCutPoint()` → `estimateTokens()` →
+ *
+ *     case 'compactionSummary': chars = message.summary.length   // 💥
+ *
+ * which throws on every subsequent /compact until the entry is hand-edited.
+ *
+ * Returning `cancel` instead would surface "Compaction cancelled" as a
+ * user-visible failure, and a summary-less `compaction` object is strictly
+ * worse than either — always prefer `undefined` (LLM path) here. Losing our
+ * `reliefStats` on that path is acceptable: PiAgent synthesizes the same
+ * token-accounting row from `tokensBefore`/`estimatedTokensAfter`
+ * (pi-agent.ts, `stats ?? { before, retained, compacted, viaRelief: false }`).
  */
 export function handleSessionBeforeCompact(
   event: SessionBeforeCompactEvent,
@@ -300,47 +396,82 @@ export function handleSessionBeforeCompact(
 
   // Nothing meaningful left to relieve: the messages to be summarized are
   // (mostly) our own relief checkpoints — re-rendering the same index is a
-  // no-op. Skip relief-first only; the SDK's LLM compaction still runs via
-  // the summary-less compaction result below.
+  // no-op. Skip relief-first; the SDK's LLM compaction runs instead (we
+  // return undefined below rather than a summary-less compaction object).
   const trivial = isTrivialToSummarize(event.preparation.messagesToSummarize);
   if (trivial) {
     debug(deps, 'remaining context is mostly relief checkpoints — skipping relief-first, handing to the LLM path');
   }
 
   const maxTokens = resolveReliefMaxTokens(deps);
-  const postRelief = estimatePostReliefTokens(event.preparation.tokensBefore, event.preparation.messagesToSummarize, summary);
+  const keepRecentTokens = Math.max(
+    0,
+    Math.round(event.preparation.settings?.keepRecentTokens ?? 0),
+  );
+  // Measure the kept region HERE, on both paths. `branchEntries` is available
+  // before the SDK runs, so the LLM path can report the same real `retained`
+  // the relief path does instead of guessing from a floor.
+  const measuredRetained = measureKeptRegionTokens(event.branchEntries, keepRecentTokens);
+  if (deps.lastRetainedMeasurement) {
+    deps.lastRetainedMeasurement.retained = measuredRetained;
+    deps.lastRetainedMeasurement.keepRecentTokens = keepRecentTokens;
+    deps.lastRetainedMeasurement.measuredAt = Date.now();
+  }
+  const postRelief = estimatePostReliefTokens(
+    event.preparation.tokensBefore,
+    summary,
+    keepRecentTokens,
+  );
 
-  // THRESHOLD CHECK — the single gate every compaction runs through, whether
-  // or not relief-first was skipped. Over the ceiling, omit the summary so the
-  // SDK's own LLM summarization runs (same as the trivial case).
+  // THRESHOLD CHECK — the single gate every compaction runs through. Over the
+  // ceiling (or when there is nothing left to relieve) we return undefined so
+  // the SDK's own LLM summarization runs instead.
   const useRelief = !trivial && !shouldFallThroughToLlm(postRelief, maxTokens);
   if (!useRelief) {
     debug(deps, trivial
       ? 'relief skipped (all checkpoints) — LLM path runs'
       : `post-relief estimate ${postRelief} > ${maxTokens} — LLM path runs`);
   } else {
-    debug(deps, `relief compaction: ${turns.length} turn file(s), post-relief ~${postRelief} tokens`);
+    debug(deps, `relief compaction: ${turns.length} turn file(s), post-relief ~${postRelief} tokens (keepRecent ${keepRecentTokens})`);
   }
 
-  // Stats are reported on BOTH paths so the summary line is always available:
-  // for the LLM path they describe what the LLM summarizer consumed.
-  const stats = computeReliefStats(
-    event.preparation.tokensBefore,
-    event.preparation.messagesToSummarize,
-    useRelief ? summary : '',
-    useRelief,
-  );
+  // Relief path: WE supply the summary (no LLM call).
+  if (useRelief) {
+    // Relief replaces everything before the cut point with the checkpoint, so
+    // the post-compaction context is the kept region plus the checkpoint text.
+    // This is exactly what the SDK will report as estimatedTokensAfter, and it
+    // keeps `before - after` an honest "compacted" figure instead of the old
+    // stringify-derived guess.
+    const tokensAfter = postRelief;
+    const stats = computeReliefStats(
+      event.preparation.tokensBefore,
+      event.preparation.messagesToSummarize,
+      summary,
+      true,
+      tokensAfter,
+      event.branchEntries,
+      keepRecentTokens,
+    );
+    return {
+      compaction: {
+        summary,
+        firstKeptEntryId: event.preparation.firstKeptEntryId,
+        tokensBefore: event.preparation.tokensBefore,
+        details: { relief: true, turnFiles: turns.map((t) => t.path), reliefStats: stats },
+      },
+    };
+  }
 
-  return {
-    compaction: {
-      ...(useRelief ? { summary } : {}),
-      firstKeptEntryId: event.preparation.firstKeptEntryId,
-      tokensBefore: event.preparation.tokensBefore,
-      ...(useRelief
-        ? { details: { relief: true, turnFiles: turns.map((t) => t.path), reliefStats: stats } }
-        : { details: { relief: false, reliefStats: stats } }),
-    },
-  };
+  // LLM path: return NO compaction object at all. See the warning above —
+  // a summary-less object is truthy for the SDK, skips its LLM summarizer,
+  // and persists a summary-less compaction entry that bricks every future
+  // /compact in this session.
+  //
+  // `stats` is intentionally dropped: the SDK's own compaction produces
+  // `details = { readFiles, modifiedFiles }` and has no slot for it, but
+  // PiAgent re-synthesizes the token row from before/after counts.
+  debug(deps, 'handing off to the SDK LLM compaction (no compaction object returned)');
+  return undefined;
 }
 
 /** InlineExtension factory for the Pi SDK resource loader. */

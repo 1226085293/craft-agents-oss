@@ -57,7 +57,9 @@ function preparation(overrides: Partial<SessionBeforeCompactEvent['preparation']
     isSplitTurn: false,
     tokensBefore: 60_000,
     fileOps: { readFiles: [], modifiedFiles: [] },
-    settings: {} as never,
+    // Real SDK default so the threshold check and retained accounting see
+    // the same keepRecent floor the SDK's cut point targets.
+    settings: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 } as never,
     ...overrides,
   }
 }
@@ -125,18 +127,24 @@ describe('buildReliefSummary', () => {
 })
 
 describe('estimatePostReliefTokens', () => {
-  it('subtracts discarded messages and adds the summary', () => {
-    // 60k before, ~1k discarded (4k chars/4), summary 400 chars ≈ 100 tokens.
-    const post = estimatePostReliefTokens(60_000, [{ content: 'x'.repeat(4000) }], 'y'.repeat(400))
-    // Exact value depends on JSON serialization overhead — assert the range.
-    expect(post).toBeGreaterThan(58_000)
-    expect(post).toBeLessThan(60_000)
+  // Post-relief context = kept region (keepRecent floor) + checkpoint text.
+  // The discarded region is NOT re-derived from the message payload: a single
+  // large tool result stringifies into a multi-MB blob whose ÷4 count is
+  // meaningless (the 2026-10-18 "→0.6k" bug).
+  it('keeps the keepRecent region and adds the checkpoint', () => {
+    const post = estimatePostReliefTokens(403_600, 'y'.repeat(400), 20_000)
+    // 20_000 kept + 400 chars/4 = 100 checkpoint tokens
+    expect(post).toBe(20_100)
+  })
+
+  it('does not exceed tokensBefore when the keepRecent floor is huge', () => {
+    const post = estimatePostReliefTokens(100, 'x'.repeat(400), 20_000)
+    expect(post).toBe(200) // clamped: 100 kept + 100 checkpoint
   })
 
   it('never goes negative', () => {
-    const post = estimatePostReliefTokens(100, [], 'x'.repeat(4000))
-    expect(post).toBeGreaterThan(100)
-    expect(post).toBeLessThan(2000)
+    const post = estimatePostReliefTokens(-5, '', 0)
+    expect(post).toBe(0)
   })
 })
 
@@ -199,25 +207,21 @@ describe('isTrivialToSummarize', () => {
   })
 })
 
-describe('handler — trivial remaining skips relief-first only', () => {
-  it('returns a summary-less compaction (SDK LLM path runs), NOT undefined and NOT cancel', () => {
+describe('handler — trivial remaining hands off to the LLM', () => {
+  it('returns undefined (SDK LLM path runs), NOT a summary-less compaction', () => {
     const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
     dirs.push(dir)
     writeTurnFile(dir, '2026-10-16T06-53-23-001.md', { user: 'x' })
-    const cp = { text: '[Context relief checkpoint — turns below were archived]' + 'y'.repeat(4000) }
+    const cp = { role: 'custom', text: '[Context relief checkpoint — turns below were archived]' + 'y'.repeat(4000) }
     const result = handleSessionBeforeCompact(
       makeEvent({ preparation: preparation({ tokensBefore: 20_000, messagesToSummarize: [cp] }) }),
       { sessionPath: dir },
     )
-    // The pipeline is NOT abandoned: still a compaction result (SDK books it
-    // and proceeds through its own threshold/LLM accounting), but with no
-    // summary — so the SDK's _runDefaultCompaction runs the LLM fallback.
-    expect(result).toBeDefined()
-    expect(result!.cancel).toBeUndefined()
-    expect(result!.compaction).toBeDefined()
-    expect(result!.compaction!.summary).toBeUndefined()
-    expect((result!.compaction!.details as { relief?: boolean }).relief).toBe(false)
-    expect(result!.compaction!.firstKeptEntryId).toBe('kept-1')
+    // No compaction object and no cancel — the SDK runs its own LLM
+    // summarization. Returning a compaction object with an undefined summary
+    // (the pre-2026-10-18 behaviour) persists a summary-less compaction entry
+    // that makes every later /compact throw in estimateTokens().
+    expect(result).toBeUndefined()
   })
 
   it('normal content keeps relief-first (summary present, details marked)', () => {
@@ -276,41 +280,89 @@ describe('buildReliefSummary — pointer guarantee', () => {
 // ============================================================================
 
 describe('computeReliefStats', () => {
-  it('keeps before = retained + compacted exactly (one estimation basis)', () => {
-    const msgs = [{ content: 'x'.repeat(40_000) }]  // ~10k tokens discarded
-    const s = computeReliefStats(50_000, msgs, 'y'.repeat(400), true)
-    expect(s.before).toBe(50_000)
-    // The invariant the UI relies on: the three numbers never contradict.
-    expect(s.retained + s.compacted).toBe(s.before)
-    expect(s.compacted).toBe(Math.ceil(JSON.stringify(msgs).length / 4))
+  // All numbers must be REAL, not derived from `messagesToSummarize`.
+  // The 2026-10-18 bug: stringifying the payload over-counted so badly that
+  // the UI line read "约403.6k→0.6k (保留0.0k, 压缩403.6k)" while the ring
+  // showed 50k.
+  it('compacted = before - after, retained = the measured kept region', () => {
+    const s = computeReliefStats(403_600, [], 'y'.repeat(400), true, 50_400, [], 20_000)
+    expect(s.before).toBe(403_600)
+    expect(s.compacted).toBe(403_600 - 50_400)   // 353.2k actually eliminated
+    expect(s.retained).toBe(20_000)              // floor fallback (no entries)
     expect(s.checkpoint).toBe(Math.ceil(400 / 4))
     expect(s.viaRelief).toBe(true)
   })
 
-  it('clamps compacted to before when the payload looks larger than the context', () => {
-    const s = computeReliefStats(1_000, [{ content: 'x'.repeat(40_000) }], '', false)
-    expect(s.compacted).toBe(1_000)
-    expect(s.retained).toBe(0)
+  it('measures retained from the real branch entries until the floor is met', () => {
+    const entries = [
+      { type: 'message', message: { role: 'user', content: 'u'.repeat(20_000) } },
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: 'a'.repeat(20_000) }], stopReason: 'stop', usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 } } },
+    ]
+    const s = computeReliefStats(100_000, [], 'y'.repeat(400), true, 30_000, entries, 4_000)
+    expect(s.before).toBe(100_000)
+    expect(s.compacted).toBe(70_000)
+    // Walks back: the newest entry alone estimates to 5_000 tokens, which
+    // already clears the 4_000 floor, so it stops there (same stop rule as
+    // the SDK's findCutPoint).
+    expect(s.retained).toBe(5_000)
+  })
+
+  it('keeps walking while the floor is not yet met', () => {
+    const entries = [
+      { type: 'message', message: { role: 'user', content: 'u'.repeat(20_000) } },
+      { type: 'message', message: { role: 'user', content: 'u'.repeat(20_000) } },
+      { type: 'message', message: { role: 'user', content: 'u'.repeat(20_000) } },
+    ]
+    // Each entry ≈ 5_000 tokens; floor 12_000 → needs the newest three.
+    const s = computeReliefStats(100_000, [], '', true, 30_000, entries, 12_000)
+    expect(s.retained).toBe(15_000)
+  })
+
+  it('stops walking at a compaction boundary', () => {
+    const entries = [
+      { type: 'compaction', summary: 'older checkpoint text' },
+      { type: 'message', message: { role: 'user', content: 'u'.repeat(4_000) } },
+    ]
+    const s = computeReliefStats(50_000, [], '', true, 2_000, entries, 20_000)
+    // Only the post-boundary message counts: 4_000/4 = 1_000 tokens.
+    expect(s.retained).toBe(1_000)
+  })
+
+  it('retained never exceeds the surviving context', () => {
+    const s = computeReliefStats(50_000, [], 'y'.repeat(400), true, 500, [], 20_000)
+    expect(s.retained).toBeLessThanOrEqual(500)
+  })
+
+  it('clamps compacted at 0 when after > before (estimate drift)', () => {
+    const s = computeReliefStats(1_000, [], '', false, 1_500, [], 20_000)
+    expect(s.compacted).toBe(0)
+    // retained is bounded by `after` (the context that actually survived)
+    expect(s.retained).toBe(1_500)
     expect(s.viaRelief).toBe(false)
   })
 
-  it('reports ~zero compacted when there is nothing to summarize', () => {
-    // `JSON.stringify([])` is "[]" — 2 chars — so the floor is 1 token, not 0.
-    const s = computeReliefStats(38_600, [], 'checkpoint', true)
-    expect(s.compacted).toBe(1)
-    expect(s.retained).toBe(38_599)
-  })
-
-  it('tolerates an unserializable payload', () => {
-    const cyclic: Record<string, unknown> = {}
-    cyclic.self = cyclic
-    const s = computeReliefStats(20_000, [cyclic], 'c', true)
+  it('falls back to before when tokensAfter is not a number', () => {
+    const s = computeReliefStats(20_000, [], 'c', true, Number.NaN, [], 20_000)
     expect(s.compacted).toBe(0)
     expect(s.retained).toBe(20_000)
   })
+
+  it('does not throw on an unserializable payload', () => {
+    const cyclic: Record<string, unknown> = {}
+    cyclic.self = cyclic
+    const s = computeReliefStats(20_000, [cyclic], 'c', true, 5_000, [], 20_000)
+    expect(s.before).toBe(20_000)
+    expect(s.compacted).toBe(15_000)
+  })
 })
 
-describe('handler — stats on both paths', () => {
+describe('handler — never returns a summary-less compaction', () => {
+  // Regression guard for the 2026-10-18 brick: the SDK's compact() branch is
+  // `if (result?.compaction)`, which tests the OBJECT and not `summary`.
+  // A summary-less compaction object therefore skips the SDK's own LLM
+  // summarizer and persists a compaction entry with NO `summary` field —
+  // after which EVERY subsequent /compact dies in estimateTokens() with
+  // `undefined is not an object (evaluating 'message.summary.length')`.
   it('relief path reports viaRelief=true and the checkpoint size', () => {
     const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
     dirs.push(dir)
@@ -324,7 +376,7 @@ describe('handler — stats on both paths', () => {
     expect(stats.before).toBe(39_600)
   })
 
-  it('LLM path reports viaRelief=false with the same before', () => {
+  it('LLM path returns NO compaction object (SDK runs its own summarizer)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
     dirs.push(dir)
     writeTurnFile(dir, '2026-10-17T04-00-08-001.md', { user: 'x' })
@@ -332,10 +384,52 @@ describe('handler — stats on both paths', () => {
       makeEvent({ preparation: preparation({ tokensBefore: 100_000 }) }),
       { sessionPath: dir, reliefMaxTokens: 10_000 },
     )
-    expect(r!.compaction!.summary).toBeUndefined()
-    const stats = (r!.compaction!.details as { reliefStats?: { viaRelief: boolean; before: number } }).reliefStats!
-    expect(stats.viaRelief).toBe(false)
-    expect(stats.before).toBe(100_000)
+    // Must be undefined — NOT a compaction object with an undefined summary.
+    expect(r).toBeUndefined()
+  })
+
+  it('records the retained measurement for the LLM path too', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    writeTurnFile(dir, '2026-10-16T06-53-23-001.md', { user: 'x' })
+    // deps carries the stash object the result path reads.
+    const deps: ContextReliefDeps = {
+      sessionPath: dir,
+      reliefMaxTokens: 10_000,
+      lastRetainedMeasurement: { retained: -1, keepRecentTokens: -1, measuredAt: 0 },
+    }
+    const entries = [
+      { type: 'message', message: { role: 'user', content: 'u'.repeat(20_000) } },
+    ]
+    handleSessionBeforeCompact(
+      makeEvent({
+        branchEntries: entries,
+        preparation: preparation({ tokensBefore: 100_000 }),
+      }),
+      deps,
+    )
+    // Both paths stash the measurement — 20_000 chars / 4 = 5_000 tokens.
+    expect(deps.lastRetainedMeasurement!.retained).toBe(5_000)
+    expect(deps.lastRetainedMeasurement!.keepRecentTokens).toBe(20_000)
+    expect(deps.lastRetainedMeasurement!.measuredAt).toBeGreaterThan(0)
+  })
+
+  it('any returned compaction ALWAYS carries a non-empty summary', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    writeTurnFile(dir, '2026-10-16T06-53-23-001.md', { user: '分析打包流程' })
+    // Sweep the plausible token range; every defined result must be relief-shaped.
+    for (const tokensBefore of [1_000, 20_000, 39_600, 60_000, 100_000, 500_000]) {
+      for (const reliefMaxTokens of [undefined, 10_000, 200_000]) {
+        const r = handleSessionBeforeCompact(
+          makeEvent({ preparation: preparation({ tokensBefore }) }),
+          { sessionPath: dir, ...(reliefMaxTokens !== undefined ? { reliefMaxTokens } : {}) },
+        )
+        if (r === undefined) continue // LLM path — fine
+        expect(typeof r.compaction!.summary).toBe('string')
+        expect(r.compaction!.summary!.length).toBeGreaterThan(0)
+      }
+    }
   })
 })
 
@@ -408,11 +502,10 @@ describe('handleSessionBeforeCompact', () => {
       makeEvent({ preparation: preparation({ tokensBefore: 100_000 }) }),
       { sessionPath: dir, reliefMaxTokens: 10_000 },
     )
-    // Same pipeline: no summary → the SDK's LLM summarization runs.
-    expect(result).toBeDefined()
-    expect(result!.compaction!.summary).toBeUndefined()
-    expect((result!.compaction!.details as { relief?: boolean }).relief).toBe(false)
-    expect(result!.cancel).toBeUndefined()
+    // No compaction object at all → the SDK's LLM summarization runs.
+    // (Returning a summary-less compaction object here is what bricked
+    // /compact in session 261016-true-sparrow.)
+    expect(result).toBeUndefined()
   })
 
   it('fails open through the extension wrapper when the handler throws', () => {

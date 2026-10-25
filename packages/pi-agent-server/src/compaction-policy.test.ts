@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import {
   findLastCompactionRecord,
   getCompactWaitTimeoutMs,
+  synthCompactionStats,
   translateAlreadyCompacted,
   waitForCompaction,
   type CompactionWaitResult,
@@ -123,5 +124,68 @@ describe('translateAlreadyCompacted', () => {
   it('never translates unrelated errors', () => {
     expect(translateAlreadyCompacted(waited(true), 'Nothing to compact (session too small)', record)).toBeNull()
     expect(translateAlreadyCompacted(waited(true), 'Compaction cancelled', record)).toBeNull()
+  })
+})
+describe('synthCompactionStats', () => {
+  // The 2026-10-18 regression: stats was undefined on the SDK's LLM path, and
+  // PiAgent's fallback pinned `retained` to 0 while `after` collapsed to the
+  // checkpoint alone -> "约403.6k→0.6k (保留0.0k, 压缩403.6k)".
+  it('derives every number from the real before/after', () => {
+    const s = synthCompactionStats({ tokensBefore: 403_584, estimatedTokensAfter: 50_400 }, 20_000)
+    expect(s.before).toBe(403_584)
+    expect(s.compacted).toBe(403_584 - 50_400)
+    expect(s.retained).toBeLessThanOrEqual(50_400)
+    expect(s.checkpoint).toBe(0)
+    expect(s.viaRelief).toBe(false)
+  })
+
+  it('prefers the MEASURED retained region over the floor', () => {
+    const s = synthCompactionStats(
+      { tokensBefore: 403_584, estimatedTokensAfter: 50_400 },
+      20_000,
+      25_800,
+    )
+    expect(s.retained).toBe(25_800)
+  })
+
+  it('clamps a measured region to the surviving context', () => {
+    // Measurement can exceed `after` when the cut point kept whole turns whose
+    // estimate is larger than the SDK's post-compaction recompute.
+    const s = synthCompactionStats(
+      { tokensBefore: 100_000, estimatedTokensAfter: 4_000 },
+      20_000,
+      30_000,
+    )
+    expect(s.retained).toBe(4_000)
+  })
+
+  it('falls back to the floor when nothing was measured', () => {
+    const s = synthCompactionStats({ tokensBefore: 100_000, estimatedTokensAfter: 60_000 }, 20_000)
+    expect(s.retained).toBe(20_000)
+  })
+
+  it('falls back to after when neither measurement nor floor is usable', () => {
+    const s = synthCompactionStats({ tokensBefore: 100_000, estimatedTokensAfter: 60_000 }, 0)
+    expect(s.retained).toBe(60_000)
+  })
+
+  it('never reports a negative compacted on estimate drift', () => {
+    const s = synthCompactionStats({ tokensBefore: 1_000, estimatedTokensAfter: 1_500 }, 20_000)
+    expect(s.compacted).toBe(0)
+  })
+
+  it('treats a missing estimatedTokensAfter as before', () => {
+    const s = synthCompactionStats({ tokensBefore: 20_000 }, 20_000)
+    expect(s.compacted).toBe(0)
+    expect(s.retained).toBe(20_000)
+  })
+
+  it('ignores a negative measurement', () => {
+    const s = synthCompactionStats(
+      { tokensBefore: 100_000, estimatedTokensAfter: 60_000 },
+      20_000,
+      -5,
+    )
+    expect(s.retained).toBe(20_000)
   })
 })

@@ -19,10 +19,11 @@ import type { CredentialStatus } from '@/components/onboarding/CredentialsStep'
 type DemoStep = 'welcome' | 'provider-select' | 'credentials' | 'local-model' | 'complete'
 
 /** Map ProviderChoice → ApiSetupMethod for the credentials step */
+// OAuth setup methods were removed; every provider choice maps to an API key.
 const CHOICE_TO_METHOD: Record<Exclude<ProviderChoice, 'local'>, ApiSetupMethod> = {
-  claude: 'claude_oauth',
-  chatgpt: 'pi_chatgpt_oauth',
-  copilot: 'pi_copilot_oauth',
+  claude: 'anthropic_api_key',
+  chatgpt: 'pi_api_key',
+  copilot: 'pi_api_key',
   api_key: 'pi_api_key',
 }
 
@@ -168,16 +169,7 @@ export function OnboardingFlowDemo() {
             status={credStatus}
             errorMessage={errorMessage}
             onSubmit={simulateApiKeySubmit}
-            onStartOAuth={simulateOAuthSuccess}
             onBack={handleBack}
-            isWaitingForCode={false}
-            onSubmitAuthCode={() => simulateOAuthSuccess()}
-            onCancelOAuth={handleBack}
-            copilotDeviceCode={
-              method === 'pi_copilot_oauth' && credStatus === 'validating'
-                ? { userCode: 'DEMO-1234', verificationUri: 'https://github.com/login/device' }
-                : undefined
-            }
           />
         )}
 

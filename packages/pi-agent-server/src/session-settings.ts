@@ -56,13 +56,13 @@ export const CRAFT_PI_EPHEMERAL_QUERY_DEADLINE_MS = LLM_QUERY_TIMEOUT_MS - 5_000
 /**
  * Main-chat retry policy for transient provider/transport errors.
  *
- * Default: DISABLED (2026-10-05). The unified retry ladder in
- * `packages/shared/src/agent/retry-ladder.ts` is the single retry owner with
- * the user-approved schedule 1s/5s/10s/30s/60s/5m/10m (+10m loop, 24h cap).
- * The SDK's own agent/provider retries ran silently inside streamFn and
- * emitted no forwarded events, which made the main-process turn-idle watchdog
- * fire mid-retry ("stream stalled") — see 261005-fresh-tulip. Restore the SDK
- * policy with CRAFT_PI_RETRY_ENABLED=1.
+ * Default: DISABLED (2026-10-05). Model-level retry/switch is owned by the
+ * built-in LLM gateway (`packages/shared/src/config/llm-gateway.ts`), which
+ * cools and switches keys transparently inside one request. The SDK's own
+ * agent/provider retries ran silently inside streamFn and emitted no forwarded
+ * events, which made the main-process turn-idle watchdog fire mid-retry
+ * ("stream stalled") — see 261005-fresh-tulip. Restore the SDK policy with
+ * CRAFT_PI_RETRY_ENABLED=1.
  *
  * When enabled: Agent-level (`AgentSession._prepareRetry`, classifier
  * `isRetryableAssistantError` in pi-ai) re-runs a failed assistant turn with

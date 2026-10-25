@@ -34,7 +34,6 @@ import {
   handleCredentialRequest,
   handlePlanSubmitted,
   handleStatus,
-  handleRetry,
   handleInfo,
   handleInterrupted,
   handleTitleGenerated,
@@ -79,9 +78,6 @@ export function processEvent(
 
     case 'text_promote':
       return { state: handleTextPromote(state, event), effects: [] }
-
-    case 'retry':
-      return handleRetry(state, event)
 
     case 'text_delta': {
       const newState = handleTextDelta(state, event)
@@ -259,6 +255,15 @@ export function processEvent(
 
     case 'usage_update':
       return handleUsageUpdate(state, event)
+
+    case 'retry':
+      // The retry lifecycle is rendered from the agent's status/info rows; the
+      // processor itself has no state to mutate. Return a fresh state object so
+      // atom sync observes the event (same contract as the default branch).
+      return {
+        state: { ...state, session: { ...state.session } },
+        effects: [],
+      }
 
     default: {
       // Unknown event type - return state unchanged but as new reference

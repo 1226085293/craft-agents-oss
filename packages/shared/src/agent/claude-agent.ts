@@ -1,5 +1,6 @@
 import { query, createSdkMcpServer, tool, AbortError, type Query, type SDKMessage, type SDKUserMessage, type SDKAssistantMessageError, type Options } from '@anthropic-ai/claude-agent-sdk';
 import { getDefaultOptions, resetClaudeConfigCheck } from './options.ts';
+import { SESSION_HEADER } from '../config/model-request-kind.ts';
 // Local type for SDK user message content blocks (text, image, document)
 // Replaces import from @anthropic-ai/sdk/resources — keeps SDK as agent-only dependency
 type ContentBlockParam =
@@ -16,10 +17,12 @@ import { parseError, type AgentError } from './errors.ts';
 import { mapClaudeSdkAssistantError, type ClaudeSdkApiError } from './claude-sdk-error-mapper.ts';
 import { runErrorDiagnostics } from './diagnostics.ts';
 import { loadStoredConfig, loadConfigDefaults, getDefaultContextWindow, type Workspace, type AuthType, getDefaultLlmConnection, getLlmConnection } from '../config/storage.ts';
-import { getValidClaudeOAuthToken } from '../auth/state.ts';
 import {
   resolveAuthEnvVars,
+  environmentSnapshotKeys,
+  type GatewayAuthOverride,
 } from '../config/llm-connections.ts';
+import { getGatewayRuntime } from '../config/llm-gateway-runtime.ts';
 import type { McpClientPool } from '../mcp/mcp-pool.ts';
 import { isSourceUsable } from '../sources/storage.ts';
 import { recordSourceCall } from './source-call-log.ts';
@@ -907,9 +910,13 @@ export class ClaudeAgent extends BaseAgent {
       return { authInjected: false, authWarning: `Connection not found: ${slug}`, authWarningLevel: 'error' };
     }
 
-    // Resolve auth env vars via shared utility
+    // Resolve auth env vars via shared utility. When the in-process LLM
+    // gateway is armed it owns the upstream address and the credential, so this
+    // agent must not resolve its connection's own key; the client key below is
+    // what authenticates to the gateway.
     const manager = getCredentialManager();
-    const result = await resolveAuthEnvVars(connection, slug, manager, getValidClaudeOAuthToken);
+    const gateway = resolveGatewayForAgent(this.config);
+    const result = await resolveAuthEnvVars(connection, slug, manager, gateway);
 
     if (!result.success) {
       return { authInjected: false, authWarning: result.warning, authWarningLevel: 'error' };
@@ -923,9 +930,10 @@ export class ClaudeAgent extends BaseAgent {
     // parent process into this agent's envOverrides. buildClaudeSubprocessEnv()
     // clears global Claude auth vars before applying overrides, so every
     // subprocess gets the env for its own connection instead of whichever
-    // session initialized last.
+    // session initialized last. Under the gateway only the OAuth token is
+    // inheritable — see environmentSnapshotKeys().
     if (connection.authType === 'environment') {
-      for (const key of ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL']) {
+      for (const key of environmentSnapshotKeys(Boolean(gateway))) {
         const value = process.env[key];
         if (value) envOverrides[key] = value;
       }
@@ -1208,7 +1216,7 @@ export class ClaudeAgent extends BaseAgent {
       const resolvedCwd = this.resolveSpawnCwd({ isRetry: _isRetry, sessionId });
 
       const options: Options = {
-        ...getDefaultOptions(this.config.envOverrides),
+        ...withSessionHeader(getDefaultOptions(this.config.envOverrides), sessionId),
         model: effectiveModel,
         // Capture stderr from SDK subprocess for error diagnostics
         // This helps identify why sessions fail with "process exited with code 1"
@@ -2216,8 +2224,6 @@ This is a branched conversation. All prior messages in this conversation are par
           if (connection) {
             if (connection.authType === 'api_key' || connection.authType === 'api_key_with_endpoint' || connection.authType === 'bearer_token') {
               diagnosticAuthType = 'api_key';
-            } else if (connection.authType === 'oauth') {
-              diagnosticAuthType = 'oauth_token';
             }
           }
           const diagnostics = await runErrorDiagnostics({
@@ -2893,8 +2899,12 @@ This is a branched conversation. All prior messages in this conversation are par
    * Run a simple text completion using Claude SDK.
    * No tools, empty system prompt - just text in → text out.
    * Uses the same auth infrastructure as the main agent.
+   *
+   * `kind` is accepted for interface parity and ignored: this path talks to the
+   * Anthropic API directly, not through the gateway, so there is no usage row to
+   * attribute.
    */
-  async runMiniCompletion(prompt: string): Promise<string | null> {
+  async runMiniCompletion(prompt: string, _kind?: string): Promise<string | null> {
     if (!this.config.miniModel) {
       throw new Error('ClaudeAgent.runMiniCompletion: config.miniModel is required');
     }
@@ -3051,6 +3061,47 @@ This is a branched conversation. All prior messages in this conversation are par
   }
 
   // ============================================================
+}
+
+/**
+ * The gateway override for this agent, or null to use the legacy
+ * per-connection path.
+ *
+ * A connection that pins its own `baseUrl` (a local endpoint, a self-hosted
+ * gateway, a proxy) keeps it: the whole point of that field is that the user
+ * chose an exact address, and the in-process gateway cannot know what lives
+ * behind it.
+ */
+function resolveGatewayForAgent(config: BackendConfig): GatewayAuthOverride | null {
+  const runtime = getGatewayRuntime();
+  if (!runtime.running) return null;
+  const clientKey = runtime.defaultClientKey();
+  if (!clientKey) return null;
+  const connection = getLlmConnection(config.connectionSlug ?? '');
+  // Do not re-route an explicitly addressed non-Anthropic connection.
+  if (connection?.baseUrl && connection.providerType !== 'anthropic') return null;
+  return { baseUrl: runtime.baseUrl, clientKey };
+}
+
+/**
+ * Tag the SDK subprocess's API requests with the Craft session id.
+ *
+ * `ANTHROPIC_CUSTOM_HEADERS` is the only per-subprocess header channel the
+ * Claude CLI exposes, and the gateway needs the id to attribute a key/model
+ * switch to the right conversation. Existing custom headers are preserved:
+ * the variable is newline-separated.
+ */
+function withSessionHeader(options: Partial<Options>, sessionId: string | undefined): Partial<Options> {
+  if (!sessionId) return options;
+  const line = `${SESSION_HEADER}: ${sessionId}`;
+  const existing = options.env?.ANTHROPIC_CUSTOM_HEADERS;
+  return {
+    ...options,
+    env: {
+      ...(options.env ?? {}),
+      ANTHROPIC_CUSTOM_HEADERS: existing ? `${existing}\n${line}` : line,
+    },
+  };
 }
 
 // ============================================================

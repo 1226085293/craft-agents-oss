@@ -11,7 +11,18 @@ import type { Session, SessionEvent, Message, PermissionRequest, CredentialReque
 export type TextDiscardEvent = Extract<SessionEvent, { type: 'text_discard' }>
 export type TextDemoteEvent = Extract<SessionEvent, { type: 'text_demote' }>
 export type TextPromoteEvent = Extract<SessionEvent, { type: 'text_promote' }>
-export type RetryEvent = Extract<SessionEvent, { type: 'retry' }>
+/** Retry lifecycle (backoff / active / end); transport shape is authoritative. */
+export interface RetryEvent {
+  type: 'retry'
+  sessionId: string
+  phase: 'backoff' | 'active' | 'end'
+  message?: string
+  attempt?: number
+  nextRetryInMs?: number
+  recovered?: boolean
+  startedAt?: number
+  elapsedMs?: number
+}
 
 /**
  * Streaming state for a session - replaces streamingTextRef
@@ -154,10 +165,6 @@ export interface ErrorEvent {
   title?: string
   details?: string
   original?: string
-  /** Unified retry ladder: non-terminal marker — the turn keeps retrying in
-   *  the background (2026-10-05). */
-  retryPending?: boolean
-  retryAttempt?: number
   /** Timestamp from main process for consistent ordering */
   timestamp?: number
 }
@@ -281,10 +288,6 @@ export interface TypedErrorEvent {
   type: 'typed_error'
   sessionId: string
   error: TypedError
-  /** Unified retry ladder: non-terminal marker — the turn keeps retrying in
-   *  the background (2026-10-05). */
-  retryPending?: boolean
-  retryAttempt?: number
   /** Timestamp from main process for consistent ordering */
   timestamp?: number
 }

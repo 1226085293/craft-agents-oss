@@ -140,24 +140,7 @@ export const CHANNEL_MAP = {
   getAuthState: invoke(RPC_CHANNELS.onboarding.GET_AUTH_STATE),
   getSetupNeeds: invoke(RPC_CHANNELS.onboarding.GET_AUTH_STATE, r => r.setupNeeds),
   startWorkspaceMcpOAuth: invoke(RPC_CHANNELS.onboarding.START_MCP_OAUTH),
-  startClaudeOAuth: invoke(RPC_CHANNELS.onboarding.START_CLAUDE_OAUTH),
-  exchangeClaudeCode: invoke(RPC_CHANNELS.onboarding.EXCHANGE_CLAUDE_CODE),
-  hasClaudeOAuthState: invoke(RPC_CHANNELS.onboarding.HAS_CLAUDE_OAUTH_STATE),
-  clearClaudeOAuthState: invoke(RPC_CHANNELS.onboarding.CLEAR_CLAUDE_OAUTH_STATE),
   deferSetup: invoke(RPC_CHANNELS.onboarding.DEFER_SETUP),
-
-  // ChatGPT OAuth
-  startChatGptOAuth: invoke(RPC_CHANNELS.chatgpt.START_OAUTH),
-  cancelChatGptOAuth: invoke(RPC_CHANNELS.chatgpt.CANCEL_OAUTH),
-  getChatGptAuthStatus: invoke(RPC_CHANNELS.chatgpt.GET_AUTH_STATUS),
-  chatGptLogout: invoke(RPC_CHANNELS.chatgpt.LOGOUT),
-
-  // GitHub Copilot OAuth
-  startCopilotOAuth: invoke(RPC_CHANNELS.copilot.START_OAUTH),
-  cancelCopilotOAuth: invoke(RPC_CHANNELS.copilot.CANCEL_OAUTH),
-  getCopilotAuthStatus: invoke(RPC_CHANNELS.copilot.GET_AUTH_STATUS),
-  copilotLogout: invoke(RPC_CHANNELS.copilot.LOGOUT),
-  onCopilotDeviceCode: listener(RPC_CHANNELS.copilot.DEVICE_CODE),
 
   // Server info (REMOTE_ELIGIBLE)
   getServerHomeDir: invoke(RPC_CHANNELS.server.HOME_DIR),
@@ -266,6 +249,10 @@ export const CHANNEL_MAP = {
 
   // LLM connections change listener
   onLlmConnectionsChanged: listener(RPC_CHANNELS.llmConnections.CHANGED),
+
+  // In-process LLM gateway: live scheduling state is pushed, config and usage
+  // are pulled on demand.
+  onLlmGatewayStatus: listener(RPC_CHANNELS.llmGateway.STATUS),
 
   // Views
   listViews: invoke(RPC_CHANNELS.views.LIST),
@@ -379,6 +366,16 @@ export const CHANNEL_MAP = {
   'browserPane.stop': invoke(RPC_CHANNELS.browserPane.STOP),
   'browserPane.focus': invoke(RPC_CHANNELS.browserPane.FOCUS),
   'browserPane.emptyStateLaunch': invoke(RPC_CHANNELS.browserPane.LAUNCH),
+  // Standalone page windows (real OS windows)
+  'pageWindow.open': invoke(RPC_CHANNELS.pageWindow.OPEN),
+  'pageWindow.list': invoke(RPC_CHANNELS.pageWindow.LIST),
+  'pageWindow.focus': invoke(RPC_CHANNELS.pageWindow.FOCUS),
+  'pageWindow.close': invoke(RPC_CHANNELS.pageWindow.CLOSE),
+  'pageWindow.minimizeSelf': invoke(RPC_CHANNELS.pageWindow.MINIMIZE_SELF),
+  'pageWindow.closeSelf': invoke(RPC_CHANNELS.pageWindow.CLOSE_SELF),
+  'pageWindow.onStateChanged': listener(RPC_CHANNELS.pageWindow.STATE_CHANGED),
+  'pageWindow.onRemoved': listener(RPC_CHANNELS.pageWindow.REMOVED),
+
   'browserPane.onStateChanged': listener(RPC_CHANNELS.browserPane.STATE_CHANGED),
   'browserPane.onRemoved': listener(RPC_CHANNELS.browserPane.REMOVED),
   'browserPane.onInteracted': listener(RPC_CHANNELS.browserPane.INTERACTED),
@@ -396,6 +393,15 @@ export const CHANNEL_MAP = {
   toggleModel: invoke(RPC_CHANNELS.llmConnections.TOGGLE_MODEL),
   addCustomModel: invoke(RPC_CHANNELS.llmConnections.ADD_CUSTOM_MODEL),
   updateModelEnabled: invoke(RPC_CHANNELS.llmConnections.UPDATE_MODEL_ENABLED),
+  llmGatewayGetStatus: invoke(RPC_CHANNELS.llmGateway.GET_STATUS),
+  llmGatewayGetConfig: invoke(RPC_CHANNELS.llmGateway.GET_CONFIG),
+  llmGatewayGetUsage: invoke(RPC_CHANNELS.llmGateway.GET_USAGE),
+  llmGatewayQueryLogs: invoke(RPC_CHANNELS.llmGateway.QUERY_LOGS),
+  llmGatewayGetProviderDetail: invoke(RPC_CHANNELS.llmGateway.GET_PROVIDER_DETAIL),
+  llmGatewaySaveConfig: invoke(RPC_CHANNELS.llmGateway.SAVE_CONFIG),
+  llmGatewayClearKeyCooldown: invoke(RPC_CHANNELS.llmGateway.CLEAR_KEY_COOLDOWN),
+  llmGatewayTestConnection: invoke(RPC_CHANNELS.llmGateway.TEST_CONNECTION),
+  llmGatewayListModels: invoke(RPC_CHANNELS.llmGateway.LIST_MODELS),
 
   // Memory (workspace-scoped cross-session memory)
   getMemoryStats: invoke(RPC_CHANNELS.memory.MEMORY_GET_STATS),

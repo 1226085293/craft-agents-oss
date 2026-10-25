@@ -109,7 +109,8 @@ export function ChatDisplayMobilePreview({
             onOpenFile={log('onOpenFile')}
             onOpenUrl={log('onOpenUrl')}
             currentModel={model}
-            onModelChange={setModel}
+            effectiveStrategyId=""
+            onStrategyChange={() => {}}
             permissionMode={mode}
             onPermissionModeChange={setMode}
             inputValue={input}

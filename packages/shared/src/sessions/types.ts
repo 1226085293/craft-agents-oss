@@ -35,7 +35,7 @@ export const SESSION_PERSISTENT_FIELDS = [
   // Config
   'enabledSourceSlugs', 'sourceScope', 'permissionMode', 'previousPermissionMode', 'workingDirectory',
   // Model/Connection
-  'model', 'llmConnection', 'connectionLocked', 'thinkingLevel',
+  'model', 'llmConnection', 'connectionLocked', 'thinkingLevel', 'strategy',
   // Sharing
   'sharedUrl', 'sharedId',
   // Plan execution
@@ -159,6 +159,13 @@ export interface SessionConfig {
   connectionLocked?: boolean;
   /** Thinking level for this session ('off', 'think', 'max') */
   thinkingLevel?: ThinkingLevel;
+  /**
+   * LLM gateway strategy id this session routes through.
+   *
+   * Persisted with the session so the composer restores the routing choice
+   * after a reload — otherwise a sticky-looking setting silently resets.
+   */
+  strategy?: string;
   /**
    * Pending plan execution state - tracks "Accept & Compact" flow.
    * When set, indicates a plan needs to be executed after compaction completes.
@@ -293,6 +300,13 @@ export interface SessionHeader {
   connectionLocked?: boolean;
   /** Thinking level for this session ('off', 'think', 'max') */
   thinkingLevel?: ThinkingLevel;
+  /**
+   * LLM gateway strategy id this session routes through.
+   *
+   * Persisted with the session so the composer restores the routing choice
+   * after a reload — otherwise a sticky-looking setting silently resets.
+   */
+  strategy?: string;
   /**
    * Pending plan execution state - tracks "Accept & Compact" flow.
    * When set, indicates a plan needs to be executed after compaction completes.

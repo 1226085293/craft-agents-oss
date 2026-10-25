@@ -492,6 +492,65 @@ describe('sendMessage durability', () => {
     expect(managed.messageQueue[0]?.messageId).toBeUndefined()
   })
 
+  it('does NOT replay a /compact turn that already finished', () => {
+    // 2026-10-25 261018-noble-shoal: the compaction succeeded and the turn ended
+    // behind it (the compaction path yields `complete`), but no terminal row was
+    // persisted, so the /compact user message still read like an unanswered
+    // request and every restart replayed it. The notice is the proof the turn
+    // is over.
+    const managed = buildSession('recover-compaction-done')
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'older-stop', role: 'info', content: 'Response interrupted', timestamp: 1 },
+      { id: 'compact-user', role: 'user', content: '/compact', timestamp: 2 },
+      { id: 'compacted', role: 'info', content: 'Compacted context to fit within limits (from ~457,118 tokens)', timestamp: 3 },
+      { id: 'summary', role: 'info', content: 'Compaction summary', timestamp: 4 },
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue).toHaveLength(0)
+  })
+
+  it('does NOT replay a turn the user stopped, however much work was in flight', () => {
+    // 2026-10-25 261022-fresh-waterfall: a Stop means the user is done with the
+    // turn, including when the task was half finished. Recovery exists for a
+    // process that DIED, which leaves no marker at all — the marker is the proof
+    // the ending was deliberate, so an unfinished tool row behind it changes
+    // nothing.
+    const managed = buildSession('recover-stopped-mid-work')
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'older-error', role: 'error', content: 'Service Error', timestamp: 1 },
+      { id: 'owner', role: 'user', content: '启动dev实例让我看看你的改动', timestamp: 2 },
+      { id: 'thinking', role: 'assistant', content: '先了解启动方式', isIntermediate: true, timestamp: 3 },
+      { id: 'tool-1', role: 'tool', content: 'Running Bash...', timestamp: 4, toolName: 'Bash', toolStatus: 'executing' } as any,
+      { id: 'stop', role: 'info', content: 'Response interrupted', timestamp: 5 },
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue).toHaveLength(0)
+  })
+
+  it('DOES replay the same window when the process died instead of being stopped', () => {
+    // The counterpart: identical work, but the last row is an unfinished tool
+    // rather than a Stop marker. Nothing is written when a process dies, so
+    // recovery is the only thing that can pick the turn back up.
+    const managed = buildSession('recover-killed-mid-work')
+    managed.isProcessing = true
+    managed.messages.push(
+      { id: 'older-error', role: 'error', content: 'Service Error', timestamp: 1 },
+      { id: 'owner', role: 'user', content: '启动dev实例让我看看你的改动', timestamp: 2 },
+      { id: 'thinking', role: 'assistant', content: '先了解启动方式', isIntermediate: true, timestamp: 3 },
+      { id: 'tool-1', role: 'tool', content: 'Running Bash...', timestamp: 4, toolName: 'Bash', toolStatus: 'executing' } as any,
+    )
+
+    ;(sm as unknown as { recoverPendingUserTurns: (managed: any) => void }).recoverPendingUserTurns(managed)
+
+    expect(managed.messageQueue.map(q => q.messageId)).toEqual(['owner'])
+  })
+
   it('does NOT resurrect a user-stopped turn whose trailing tool is finished', () => {
     // A Stop leaves a finished/drain tool row (status undefined) after an
     // interrupt info. That is not a dangling executing/pending tail, so no
@@ -1139,7 +1198,7 @@ describe('abnormal turn-end guidance injection', () => {
     const managed = buildSession(sessionId)
     const prompts: string[] = []
 
-    // Turn 1: terminal error (no retryPending → the turn actually died).
+    // Turn 1: terminal error — the turn actually died.
     managed.agent = makeAgent('err', async function* (message: string) {
       prompts.push(message)
       yield {
@@ -1170,61 +1229,4 @@ describe('abnormal turn-end guidance injection', () => {
     expect(managed.abnormalTurnEnd).toBe(false)
   })
 
-  it('a non-terminal (retryPending) error does NOT flag abnormalTurnEnd — the turn is still alive in the ladder', async () => {
-    const sessionId = 'abnormal-keepalive'
-    const managed = buildSession(sessionId)
-    const prompts: string[] = []
-
-    // Turn 1: ladder surfaces a non-terminal retry card, then recovers.
-    managed.agent = makeAgent('retrying', async function* (message: string) {
-      prompts.push(message)
-      yield { type: 'retry', phase: 'backoff', attempt: 1, message: 'Retrying…' }
-      yield { type: 'error', message: 'Upstream rate limited', retryPending: true, retryAttempt: 1 }
-      yield { type: 'retry', phase: 'end', recovered: true, attempt: 1 }
-      yield { type: 'text_complete', text: 'Recovered answer', isIntermediate: false }
-      yield { type: 'complete' }
-    }) as never
-
-    await sm.sendMessage(sessionId, '原来的问题', undefined, undefined, undefined, undefined, undefined, () => { /* ack */ }).catch(() => { /* post-ack failures ok */ })
-
-    expect(managed.abnormalTurnEnd).not.toBe(true)
-
-    // Turn 2: no resume reminder is injected (the turn recovered cleanly).
-    managed.agent = makeAgent('clean', async function* (message: string) {
-      prompts.push(message)
-      yield { type: 'text_complete', text: 'ok', isIntermediate: false }
-      yield { type: 'complete' }
-    }) as never
-    await sm.sendMessage(sessionId, '.', undefined, undefined, undefined, undefined, undefined, () => { /* ack */ }).catch(() => { /* post-ack failures ok */ })
-
-    expect(prompts[1]).not.toContain('interrupted request')
-
-    // Recovery drops the non-terminal retry card: the error never happened
-    // from the user's point of view.
-    expect(managed.messages.some(m => m.role === 'error')).toBe(false)
-  })
-
-  it('an exhausted ladder turns its retryPending card into the turn terminal error', async () => {
-    const sessionId = 'abnormal-exhausted'
-    const managed = buildSession(sessionId)
-    const prompts: string[] = []
-
-    // Turn 1: the ladder surfaces a non-terminal card, then gives up.
-    managed.agent = makeAgent('exhausted', async function* (message: string) {
-      prompts.push(message)
-      yield { type: 'retry', phase: 'backoff', attempt: 1, message: 'Retrying…' }
-      yield { type: 'error', message: 'Upstream rate limited', retryPending: true, retryAttempt: 1 }
-      yield { type: 'retry', phase: 'end', recovered: false, attempt: 3 }
-      yield { type: 'complete' }
-    }) as never
-
-    await sm.sendMessage(sessionId, '原来的问题', undefined, undefined, undefined, undefined, undefined, () => { /* ack */ }).catch(() => { /* post-ack failures ok */ })
-
-    // The card stays (it IS the failure) but is no longer marked pending…
-    const errors = managed.messages.filter(m => m.role === 'error')
-    expect(errors).toHaveLength(1)
-    expect(errors[0]!.retryPending).toBe(false)
-    // …so the next message gets resume guidance, exactly like any dead turn.
-    expect(managed.abnormalTurnEnd).toBe(true)
-  })
 })

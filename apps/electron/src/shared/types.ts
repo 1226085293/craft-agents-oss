@@ -72,7 +72,8 @@ import type { ExportResourcesOptions, ExportResult, ResourceImportMode, Resource
 export type { ExportResourcesOptions, ExportResult, ResourceImportMode, ResourceBundle, ResourceImportResult };
 
 // LLM connection types
-import type { LlmConnection, LlmConnectionWithStatus, LlmAuthType, LlmProviderType, NetworkProxySettings } from '@craft-agent/shared/config';
+import type { LlmConnection, LlmConnectionWithStatus, LlmAuthType, LlmProviderType, NetworkProxySettings, LlmConfig as LlmConfigDto } from '@craft-agent/shared/config';
+import type { LlmGatewayStatusPayload, LlmProviderDetailPayload } from '@craft-agent/shared/protocol';
 export type { LlmConnection, LlmConnectionWithStatus, LlmAuthType, LlmProviderType, NetworkProxySettings };
 
 // =============================================================================
@@ -213,11 +214,11 @@ import type {
   OAuthResult,
   McpToolsResult,
   GitBashStatus,
-  ClaudeOAuthResult,
   UpdateInfo,
   WorkspaceSettings,
   PermissionModeState,
   BrowserInstanceInfo,
+  PageWindowInfo,
   DeepLinkNavigation,
   TestAutomationPayload,
   TestAutomationResult,
@@ -424,26 +425,8 @@ export interface ElectronAPI {
   getAuthState(): Promise<AuthState>
   getSetupNeeds(): Promise<SetupNeeds>
   startWorkspaceMcpOAuth(mcpUrl: string): Promise<OAuthResult & { clientId?: string }>
-  // Claude OAuth (two-step flow)
-  startClaudeOAuth(): Promise<{ success: boolean; authUrl?: string; error?: string }>
-  exchangeClaudeCode(code: string, connectionSlug: string): Promise<ClaudeOAuthResult>
-  hasClaudeOAuthState(): Promise<boolean>
-  clearClaudeOAuthState(): Promise<{ success: boolean }>
   /** Defer onboarding setup — user chose "Setup later" */
   deferSetup(): Promise<{ success: boolean }>
-
-  // ChatGPT OAuth (for Codex chatgptAuthTokens mode)
-  startChatGptOAuth(connectionSlug: string): Promise<{ success: boolean; error?: string }>
-  cancelChatGptOAuth(): Promise<{ success: boolean }>
-  getChatGptAuthStatus(connectionSlug: string): Promise<{ authenticated: boolean; expiresAt?: number; hasRefreshToken?: boolean }>
-  chatGptLogout(connectionSlug: string): Promise<{ success: boolean }>
-
-  // GitHub Copilot OAuth
-  startCopilotOAuth(connectionSlug: string): Promise<{ success: boolean; error?: string }>
-  cancelCopilotOAuth(): Promise<{ success: boolean }>
-  getCopilotAuthStatus(connectionSlug: string): Promise<{ authenticated: boolean }>
-  copilotLogout(connectionSlug: string): Promise<{ success: boolean }>
-  onCopilotDeviceCode(callback: (data: { userCode: string; verificationUri: string }) => void): () => void
 
   /** Unified LLM connection setup */
   setupLlmConnection(setup: LlmConnectionSetup): Promise<{ success: boolean; error?: string }>
@@ -536,6 +519,22 @@ export interface ElectronAPI {
 
   // LLM connections change listener
   onLlmConnectionsChanged(callback: () => void): () => void
+
+  // In-process LLM gateway — status is pushed, the rest are pulled on demand.
+  llmGatewayGetStatus(): Promise<LlmGatewayStatusPayload>
+  llmGatewayGetConfig(): Promise<LlmConfigDto | null>
+  llmGatewayGetUsage(params?: { range?: import('@craft-agent/shared/config').UsageRange }): Promise<{ overview: unknown; totalRecords: number }>
+  llmGatewayQueryLogs(params?: {
+    tags?: Array<{ field: string; value: string }>
+    sort?: 'desc' | 'asc'
+    limit?: number
+  }): Promise<{ rows: import('@craft-agent/shared/config').LlmUsageRecord[]; truncated: boolean }>
+  llmGatewayGetProviderDetail(providerId: string): Promise<LlmProviderDetailPayload | null>
+  llmGatewaySaveConfig(config: unknown): Promise<{ ok: true } | { ok: false; errors: string[] }>
+  llmGatewayClearKeyCooldown(args: { provider?: string; keyId?: string }): Promise<{ ok: boolean }>
+  llmGatewayTestConnection(params: import('@craft-agent/shared/protocol').LlmGatewayTestConnectionParams): Promise<import('@craft-agent/shared/protocol').LlmGatewayTestConnectionResult>
+  llmGatewayListModels(params: import('@craft-agent/shared/protocol').LlmGatewayListModelsParams): Promise<import('@craft-agent/shared/protocol').LlmGatewayListModelsResult>
+  onLlmGatewayStatus(callback: (status: LlmGatewayStatusPayload) => void): () => void
 
   // Views (workspace-scoped, stored in views.json)
   listViews(workspaceId: string): Promise<import('@craft-agent/shared/views').ViewConfig[]>
@@ -664,6 +663,20 @@ export interface ElectronAPI {
     onStateChanged(callback: (info: BrowserInstanceInfo) => void): () => void
     onRemoved(callback: (id: string) => void): () => void
     onInteracted(callback: (id: string) => void): () => void
+  }
+
+  // Standalone Page windows (real OS windows that can live outside Craft)
+  pageWindow: {
+    open(input: { workspaceId: string; pageSlug: string }): Promise<string>
+    list(): Promise<PageWindowInfo[]>
+    focus(id: string): Promise<void>
+    close(id: string): Promise<void>
+    /** Minimize the calling page window. */
+    minimizeSelf(): Promise<void>
+    /** Close the calling page window. */
+    closeSelf(): Promise<void>
+    onStateChanged(callback: (info: PageWindowInfo) => void): () => void
+    onRemoved(callback: (id: string) => void): () => void
   }
 
   // LLM Connections (provider configurations)

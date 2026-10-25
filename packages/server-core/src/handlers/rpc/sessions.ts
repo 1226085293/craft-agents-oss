@@ -329,6 +329,10 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
           throw new Error(`Invalid thinking level: ${command.level}. Valid values: ${VALID_THINKING_LEVELS_LIST}`)
         }
         return sessionManager.setSessionThinkingLevel(sessionId, command.level)
+      case 'setSessionStrategy':
+        // Routing choice is sticky like the thinking level: persist it so the
+        // composer restores the same strategy after a reload.
+        return sessionManager.setSessionStrategy(sessionId, command.strategy ?? '')
       case 'updateWorkingDirectory':
         return sessionManager.updateWorkingDirectory(sessionId, command.dir)
       case 'setSources':

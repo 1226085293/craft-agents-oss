@@ -772,7 +772,8 @@ function InputContainerPlayground({
             onWorkingDirectoryChange: showWorkingDirectory ? setCwd : undefined,
             followUpItems,
             onSubmit: mockInputCallbacks.onSubmit,
-            onModelChange: setModel,
+            effectiveStrategyId: "",
+            onStrategyChange: () => {},
             onInputChange: setInputValue,
             inputValue,
             onHeightChange: mockInputCallbacks.onHeightChange,
@@ -844,7 +845,7 @@ function ActiveTasksBarContext({ tasks = sampleBackgroundTasks }: ActiveTasksBar
           workingDirectory="/Users/demo/projects/craft-agent"
           sessionId="playground-session"
           onSubmit={mockInputCallbacks.onSubmit}
-          onModelChange={mockInputCallbacks.onModelChange}
+          effectiveStrategyId={mockInputCallbacks.effectiveStrategyId}
           onInputChange={mockInputCallbacks.onInputChange}
           onHeightChange={mockInputCallbacks.onHeightChange}
           onFocusChange={mockInputCallbacks.onFocusChange}
@@ -949,7 +950,7 @@ function PermissionInputToggle({ autoToggle = false, autoToggleInterval = 3000, 
         structuredInput={structuredInput}
         onStructuredResponse={handlePermissionResponse}
         onSubmit={mockInputCallbacks.onSubmit}
-        onModelChange={mockInputCallbacks.onModelChange}
+        effectiveStrategyId={mockInputCallbacks.effectiveStrategyId}
         onInputChange={mockInputCallbacks.onInputChange}
         onHeightChange={mockInputCallbacks.onHeightChange}
         onFocusChange={mockInputCallbacks.onFocusChange}

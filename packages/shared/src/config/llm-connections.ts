@@ -69,23 +69,23 @@ export type LlmConnectionType = 'anthropic' | 'openai' | 'openai-compat';
  * - 'bearer_token': Single bearer token (different header than API key)
  *
  * OAuth flows (browser redirect):
- * - 'oauth': Browser OAuth flow, provider determined by providerType
  *
  * Cloud provider auth:
- * - 'iam_credentials': AWS-style (Access Key + Secret Key + Region)
- * - 'service_account_file': GCP-style JSON file upload
  * - 'environment': Auto-detect from environment variables
  *
  * No auth:
  * - 'none': No authentication required (local models like Ollama)
  */
+/**
+ * Supported auth types. OAuth (`oauth`), AWS IAM (`iam_credentials`) and GCP
+ * service accounts (`service_account_file`) were removed with the OAuth/Bedrock
+ * provider capabilities; a config still carrying one of them is stale rather
+ * than routable.
+ */
 export type LlmAuthType =
   | 'api_key'
   | 'api_key_with_endpoint'
-  | 'oauth'
-  | 'iam_credentials'
   | 'bearer_token'
-  | 'service_account_file'
   | 'environment'
   | 'none';
 
@@ -205,15 +205,6 @@ export interface LlmConnection {
    */
   midStreamBehavior?: MidStreamBehavior;
 
-  // --- Resolved Anthropic OAuth identity (issue #838) ---
-  // Captured from the token-exchange response; lets the UI flag two Claude
-  // connections that resolve to the same underlying account. All optional and
-  // fail-soft — absent identity simply means nothing is shown.
-  oauthAccountUuid?: string;
-  oauthAccountEmail?: string;
-  oauthOrganizationUuid?: string;
-  oauthOrganizationName?: string;
-  oauthProfileVerifiedAt?: number; // epoch ms
 
   // --- Timestamps ---
 
@@ -390,9 +381,6 @@ export function getLlmCredentialKey(slug: string, credentialType: 'api_key' | 'o
  */
 export type LlmCredentialStorageType =
   | 'api_key'           // Single token stored as value
-  | 'oauth_token'       // OAuth tokens (access, refresh, expiry)
-  | 'iam_credentials'   // AWS-style (accessKeyId, secretAccessKey, region)
-  | 'service_account'   // JSON file contents
   | null;               // No storage needed (environment or none)
 
 /**
@@ -408,12 +396,6 @@ export function authTypeToCredentialStorageType(authType: LlmAuthType): LlmCrede
     case 'api_key_with_endpoint':
     case 'bearer_token':
       return 'api_key';
-    case 'oauth':
-      return 'oauth_token';
-    case 'iam_credentials':
-      return 'iam_credentials';
-    case 'service_account_file':
-      return 'service_account';
     case 'environment':
     case 'none':
       return null;
@@ -424,7 +406,7 @@ export function authTypeToCredentialStorageType(authType: LlmAuthType): LlmCrede
  * @deprecated Use authTypeToCredentialStorageType instead.
  * Kept for backwards compatibility during migration.
  */
-export function authTypeToCredentialType(authType: LlmAuthType): 'api_key' | 'oauth_token' | null {
+export function authTypeToCredentialType(authType: LlmAuthType): 'api_key' | null {
   const storageType = authTypeToCredentialStorageType(authType);
   if (storageType === 'api_key' || storageType === 'oauth_token') {
     return storageType;
@@ -749,15 +731,6 @@ export function isSessionConnectionUnavailable(
 }
 
 /**
- * Check if an auth type uses browser OAuth flow.
- * @param authType - LLM auth type
- * @returns true if OAuth browser flow should be triggered
- */
-export function authTypeIsOAuth(authType: LlmAuthType): boolean {
-  return authType === 'oauth';
-}
-
-/**
  * Check if a provider supports a given auth type.
  * Returns valid combinations for the type system.
  *
@@ -770,8 +743,8 @@ export function isValidProviderAuthCombination(
   authType: LlmAuthType
 ): boolean {
   const validCombinations: Record<LlmProviderType, LlmAuthType[]> = {
-    anthropic: ['api_key', 'oauth'],
-    pi: ['api_key', 'oauth', 'iam_credentials', 'environment', 'none'],
+    anthropic: ['api_key'],
+    pi: ['api_key', 'environment', 'none'],
     pi_compat: ['api_key_with_endpoint', 'none'],
   };
 
@@ -944,8 +917,11 @@ export function migrateAuthType(
     case 'api_key':
       // If has custom endpoint, use api_key_with_endpoint
       return hasCustomEndpoint ? 'api_key_with_endpoint' : 'api_key';
+    // OAuth was removed, so a legacy 'oauth' entry migrates to the closest
+    // supported type rather than staying unroutable. It will then fail the
+    // credential check and surface as "no API key", which is the honest state.
     case 'oauth':
-      return 'oauth';
+      return hasCustomEndpoint ? 'api_key_with_endpoint' : 'api_key';
     case 'none':
       return 'none';
   }
@@ -1029,6 +1005,27 @@ export interface ResolvedAuthEnvVars {
 }
 
 /**
+ * Which env vars an environment-auth connection may snapshot from the parent
+ * process.
+ *
+ * Without the gateway this is the full trio: the connection inherits the
+ * parent's address, key and token, and `buildClaudeSubprocessEnv()` gives it a
+ * private copy so concurrent sessions cannot clobber each other.
+ *
+ * Under the gateway the address and the client key are authoritative — they are
+ * what points the subprocess at the in-process gateway and authenticates it.
+ * Snapshotting a parent-process `ANTHROPIC_BASE_URL` here would silently detour
+ * the gateway and send traffic straight to the upstream, bypassing scheduling.
+ * Only the OAuth token stays inheritable, and the gateway branch never emits
+ * one anyway.
+ */
+export function environmentSnapshotKeys(underGateway: boolean): string[] {
+  return underGateway
+    ? ['CLAUDE_CODE_OAUTH_TOKEN']
+    : ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_BASE_URL'];
+}
+
+/**
  * Resolve authentication environment variables for an LLM connection.
  *
  * Provider-agnostic: switches on providerType to determine which env vars
@@ -1045,11 +1042,22 @@ export interface ResolvedAuthEnvVars {
  * @param getValidOAuthToken - Function to get a valid (refreshed) OAuth token
  * @returns Resolved env vars and status
  */
+/**
+ * Optional gateway routing for a session.
+ *
+ * When supplied, the gateway owns the upstream address and the session gets
+ * its client key as `ANTHROPIC_API_KEY`. Both fields are ignored when null.
+ */
+export interface GatewayAuthOverride {
+  baseUrl: string;
+  clientKey: string;
+}
+
 export async function resolveAuthEnvVars(
   connection: LlmConnection,
   connectionSlug: string,
   credentialManager: CredentialManager,
-  getValidOAuthToken: (slug: string) => Promise<{ accessToken?: string | null }>,
+  gateway?: GatewayAuthOverride | null,
 ): Promise<ResolvedAuthEnvVars> {
   const envVars: Record<string, string> = {};
 
@@ -1057,6 +1065,20 @@ export async function resolveAuthEnvVars(
   // OpenAI (Codex), Copilot, and Pi handle auth internally in their postInit()
   if (!isAnthropicProvider(connection.providerType)) {
     return { envVars, success: true };
+  }
+
+  // Gateway branch: the in-process gateway already holds the upstream keys and
+  // the scheduling policy, so this session must not resolve or forward its
+  // connection's own credential. The client key is what authenticates to the
+  // gateway; the gateway maps it to a provider + key itself.
+  if (gateway) {
+    return {
+      envVars: {
+        ANTHROPIC_BASE_URL: gateway.baseUrl,
+        ANTHROPIC_API_KEY: gateway.clientKey,
+      },
+      success: true,
+    };
   }
 
   // Set base URL if configured
@@ -1075,24 +1097,6 @@ export async function resolveAuthEnvVars(
       envVars.ANTHROPIC_API_KEY = 'not-needed';
     } else {
       return { envVars, success: false, warning: `No API key found for: ${connectionSlug}` };
-    }
-  } else if (authType === 'oauth') {
-    if (connection.providerType === 'anthropic') {
-      // Anthropic OAuth uses getValidClaudeOAuthToken which handles token refresh
-      const tokenResult = await getValidOAuthToken(connectionSlug);
-      if (tokenResult.accessToken) {
-        envVars.CLAUDE_CODE_OAUTH_TOKEN = tokenResult.accessToken;
-      } else {
-        return { envVars, success: false, warning: `Failed to get OAuth token for: ${connectionSlug}` };
-      }
-    } else {
-      // Fallback OAuth path (should not be reached after legacy migration)
-      const llmOAuth = await credentialManager.getLlmOAuth(connectionSlug);
-      if (llmOAuth?.accessToken) {
-        envVars.CLAUDE_CODE_OAUTH_TOKEN = llmOAuth.accessToken;
-      } else {
-        return { envVars, success: false, warning: `No OAuth token found for: ${connectionSlug}` };
-      }
     }
   } else if (authType === 'environment') {
     // Environment auth — credentials come from process.env, nothing to inject

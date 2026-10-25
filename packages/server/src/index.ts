@@ -193,16 +193,9 @@ const instance = await (async () => {
       },
       initModelRefreshService: () => initModelRefreshService(async (slug: string) => {
         const manager = getCredentialManager()
-        const [apiKey, oauth] = await Promise.all([
-          manager.getLlmApiKey(slug).catch(() => null),
-          manager.getLlmOAuth(slug).catch(() => null),
-        ])
-        return {
-          apiKey: apiKey ?? undefined,
-          oauthAccessToken: oauth?.accessToken,
-          oauthRefreshToken: oauth?.refreshToken,
-          oauthIdToken: oauth?.idToken,
-        }
+        // OAuth connections were removed, so only the API key is resolved.
+        const apiKey = await manager.getLlmApiKey(slug).catch(() => null)
+        return { apiKey: apiKey ?? undefined }
       }),
       createSessionManager: () => new SessionManager(),
       bindRpcServer: (sm, server) => sm.setRpcServer(server),

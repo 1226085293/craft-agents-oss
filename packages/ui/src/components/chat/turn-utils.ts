@@ -82,20 +82,26 @@ function localizeStatusContent(
     // judge was down on every attempt — an infra fault, not a verdict.
     key = 'chat.verificationSkippedLlmError'
   } else if (statusType === 'compaction_summary') {
-    // Token accounting: after = before - compacted + checkpoint tokens, and
-    // the wording distinguishes a no-LLM relief pass from the LLM summary.
+    // Token accounting: `after` is the real post-compaction context reported by
+    // the SDK (estimatedTokensAfter), and `retained`/`compacted` are measured in
+    // the subprocess. Do NOT re-derive them here — `before - compacted` is not
+    // the kept region when the checkpoint text is folded into `after`, and
+    // re-deriving made the line disagree with the context-use ring
+    // (2026-10-19 first-crane: ring 22k vs line 23.9k).
     // Values are pre-formatted ("39.6k") because i18next has no number
     // formatter wired here and the raw integers would be unreadable.
     const fmt = (n: number): string => `${(n / 1000).toFixed(1)}k`;
     const before = Number(params?.before ?? 0);
+    const retained = Number(params?.retained ?? 0);
     const compacted = Number(params?.compacted ?? 0);
     const checkpoint = Number(params?.checkpoint ?? 0);
     params = {
       ...params,
       before: fmt(before),
-      retained: fmt(Math.max(0, before - compacted)),
+      retained: fmt(retained),
       compacted: fmt(compacted),
-      after: fmt(Math.max(0, before - compacted + checkpoint)),
+      // Prefer the after the backend sent; derive it only as a fallback.
+      after: fmt(Number(params?.after ?? (before - compacted + checkpoint))),
     };
     if (params?.viaRelief != null && Number(params.viaRelief) === 1) {
       key = 'chat.compactionSummaryRelief';
@@ -117,18 +123,14 @@ function localizeStatusContent(
 /**
  * Keep live activity rows (Thinking / verification / active tools) at the tail.
  *
- * Exception (2026-10-08): the retry-ladder row (statusType 'retrying') is
- * TIME-ANCHORED at the ladder start — it must keep its chronological position
- * (BEFORE any retried-run rows that follow) even while its status is
- * 'running'; otherwise a later retried-run tool row (status 'completed')
- * would sort BEFORE the running retry line and push it to the tail.
+ * Rank 0 keeps its chronological slot (completed rows); rank 1 is every other
+ * live row: always last, in start order.
  */
 export function sortActivitiesForDisplay<T extends ActivityItem>(activities: T[]): T[] {
   return [...activities].sort((a, b) => {
-    const aRetry = a.type === 'status' && a.statusType === 'retrying'
-    const bRetry = b.type === 'status' && b.statusType === 'retrying'
-    if (aRetry || bRetry) return a.timestamp - b.timestamp
-    return Number(a.status === 'running') - Number(b.status === 'running') || a.timestamp - b.timestamp
+    const aRank = a.status === 'running' ? 1 : 0
+    const bRank = b.status === 'running' ? 1 : 0
+    return aRank - bRank || a.timestamp - b.timestamp
   })
 }
 
@@ -509,15 +511,6 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
     }
     deferredQueuedUserTurns = []
   }
-  // 2026-10-09: retryPending error cards are deferred to just after the
-  // process block that owns the retry line (see the error branch below), so
-  // the ladder's "retrying in the background" card never splits the card.
-  let deferredRetryErrorCards: SystemTurn[] = []
-  const flushDeferredRetryErrorCards = () => {
-    if (deferredRetryErrorCards.length === 0) return
-    for (const card of deferredRetryErrorCards) turns.push(card)
-    deferredRetryErrorCards = []
-  }
 
   const flushCurrentTurn = (interrupted = false) => {
     if (currentTurn) {
@@ -552,7 +545,6 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
 
       turns.push(currentTurn)
       currentTurn = null
-      flushDeferredRetryErrorCards()
       flushDeferredQueuedUserTurns()
     }
   }
@@ -648,26 +640,37 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
           timestamp: message.timestamp,
         }
       }
-      // Retry-ladder row (2026-10-08): the persisted status line carries a
-      // structured `retry` payload — derive the activity status from it so a
-      // reloaded row is never mistaken for a spinning "重试中" line.
-      const isRetryRow = message.statusType === 'retrying'
-      const retryRowStatus = isRetryRow
-        ? message.retry?.status === 'recovered'
-          ? 'completed' as const
-          : message.retry?.status === 'failed'
-            ? 'error' as const
-            : 'running' as const
-        : 'running' as const
+      // Only token accounting and verification verdicts are FACT rows; every
+      // other status row is live/spinner. Emitting those fact rows as 'running'
+      // left the auto-compaction row spinning forever — the manual path was
+      // already fixed via the info branch (2026-10-19).
+      const isSettledFactRow = message.statusType === 'compaction_summary'
+        || message.statusType === 'compaction_complete'
+        || message.statusType === 'verification_passed'
+        || message.statusType === 'verification_failed'
+      const rowStatus: ActivityStatus = isSettledFactRow ? 'completed' : 'running'
       const statusActivity: ActivityItem = {
         id: message.id,
         type: 'status',
-        status: retryRowStatus,
+        status: rowStatus,
         content: localizeStatusContent(message.statusType, message.content, message.statusParams),
         timestamp: message.timestamp,
         statusType: message.statusType,
         depth: 0,
-        ...(isRetryRow && message.retry ? { retry: message.retry } : {}),
+        // Token-accounting rows carry the numbers; other rows send nothing.
+        ...(message.statusParams ? { statusParams: message.statusParams } : {}),
+      }
+      // Token-accounting rows are idempotent: the auto path can emit more than
+      // one compaction_summary for the same turn (relief pass + LLM fallback).
+      // Update in place so the row never duplicates and the last numbers win.
+      if (message.statusType === 'compaction_summary') {
+        const existingIdx = currentTurn.activities.findIndex(
+          a => a.type === 'status' && a.statusType === 'compaction_summary'
+        )
+        if (existingIdx !== -1) {
+          currentTurn.activities[existingIdx] = statusActivity
+          continue
+        }
       }
       currentTurn.activities.push(statusActivity)
       continue
@@ -677,7 +680,21 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
     // an INFO event while the auto path emits a STATUS event; the renderer
     // only sees persisted+forwarded rows, so normalize here — see SessionManager
     // dispatchEvent) create/update the same token-accounting row.
-    if (message.role === 'info' && message.statusType === 'compaction_summary') {
+    //
+    // Event type is the authoritative manual/auto discriminator:
+    //   type 'info'    → manual /compact — its own turn, NO assistant reply.
+    //                    Standalone card (2026-10-19 first-crane: it used to be
+    //                    re-attached to the previous turn's process block).
+    //   type 'status'  → auto compaction, fired mid-turn. Belongs to the turn
+    //                    that triggered it, so it renders INSIDE that process
+    //                    block where the compaction actually happened.
+    // Prefer currentTurn over the event type only as a safety net: an in-flight
+    // turn means we are mid-turn regardless of which event carried the row.
+    // NOTE: the statusType check is load-bearing. Without it every other info
+    // row (verification verdicts, notices) would fork its own turn.
+    const isManualCompactionSummary =
+      message.role === 'info' && message.statusType === 'compaction_summary'
+    if (isManualCompactionSummary) {
       const row: ActivityItem = {
         id: message.id,
         type: 'status',
@@ -688,51 +705,21 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
         ...(message.statusParams ? { statusParams: message.statusParams } : {}),
         depth: 0,
       }
-      if (currentTurn) {
-        const existingIdx = currentTurn.activities.findIndex(
-          a => a.type === 'status' && a.statusType === 'compaction_summary'
-        )
-        if (existingIdx !== -1) {
-          currentTurn.activities[existingIdx] = row
-        } else {
-          currentTurn.activities.push(row)
-        }
-      } else {
-        // The owning turn was already flushed (reload/replay where the final
-        // assistant message arrived before the summary row). Re-attach to the
-        // LAST assistant turn instead of dropping the row — a compaction
-        // summary that disappears on reload reads as "no stats" (2026-10-17).
-        let lastTurn: AssistantTurn | undefined
-        for (let i = turns.length - 1; i >= 0; i--) {
-          const t = turns[i]
-          if (t?.type === 'assistant') { lastTurn = t as AssistantTurn; break }
-        }
-        if (lastTurn) {
-          const existingIdx = lastTurn.activities.findIndex(
-            a => a.type === 'status' && a.statusType === 'compaction_summary'
-          )
-          if (existingIdx !== -1) {
-            lastTurn.activities[existingIdx] = row
-          } else {
-            lastTurn.activities.push(row)
-          }
-        }
-        // No assistant turn at all (compaction fired between turns): render
-        // as its own standalone card so the stats are never silently lost.
-        if (!lastTurn) {
-          turns.push({
-            type: 'assistant',
-            turnId: message.turnId || message.id,
-            activities: [row],
-            response: undefined,
-            intent: undefined,
-            isStreaming: false,
-            isComplete: true,
-            timestamp: message.timestamp,
-          })
-        }
-      }
-      continue // Don't create a separate system turn / card
+      // A manual /compact is its own turn: never fold it into whatever process
+      // block happens to still be open, and never borrow the previous turn's
+      // block. Standalone card keeps the stats visible and honest.
+      flushCurrentTurn()
+      turns.push({
+        type: 'assistant',
+        turnId: message.turnId || message.id,
+        activities: [row],
+        response: undefined,
+        intent: undefined,
+        isStreaming: false,
+        isComplete: true,
+        timestamp: message.timestamp,
+      })
+      continue
     }
 
     // Info messages with compaction_complete update the matching status activity
@@ -758,15 +745,56 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
     // reply arrives as its own assistant message and becomes the response.
     if (message.role === 'info' && (message.statusType === 'verification_passed' || message.statusType === 'verification_failed')) {
       const verdictStatus = message.statusType === 'verification_passed' ? 'completed' : 'error'
-      const statusIdx = currentTurn?.activities.findIndex(
-        a => a.type === 'status' && a.statusType === 'verification'
-      ) ?? -1
+      // WHICH row does this verdict settle? A verification cycle can run many
+      // rounds (FAIL → followUp → re-verify → FAIL …). A verdict only ever
+      // SETTLES an open row; it NEVER rewrites a settled one (2026-10-20
+      // tidy-willow). Two real-transcript regressions forced this rule:
+      //  - every follow-up resume re-entered the subprocess's verifyRequired
+      //    branch, which reset the attempt counter, so ALL rounds reported
+      //    attempt=1 (261018-noble-shoal: ten failures across six cycles,
+      //    all attempt 1) — matching on attempt alone kept overwriting
+      //    round 1 and rounds 2..N vanished;
+      //  - the stabilized "内容已稳定 — 按现状交付" pass carried no attempt
+      //    at all and fell back to "first verification row", so the failed
+      //    row became a pass line once the final bubble landed.
+      // Open = the live "Verifying final reply…" row (status running); a row
+      // that already shows its verdict (completed/error) is immutable.
+      const thisAttempt = message.statusParams?.attempt
+      let statusIdx = -1
+      if (typeof thisAttempt === 'number') {
+        statusIdx = currentTurn?.activities.findIndex(
+          a => a.type === 'status'
+            && a.statusType === 'verification'
+            && a.statusParams?.attempt === thisAttempt
+            && a.status !== 'completed'
+            && a.status !== 'error'
+        ) ?? -1
+      }
+      if (statusIdx === -1) {
+        // The live status row does not carry an attempt, and some verdicts
+        // (stabilized pass) arrive without one — settle the newest still-open
+        // verification row. If none is open, the recreate branch below
+        // appends a NEW row, so every round stays visible (one row per
+        // verdict, settled rows untouched).
+        statusIdx = currentTurn?.activities.reduce((acc, a, i) =>
+          a.type === 'status'
+            && a.statusType === 'verification'
+            && a.status !== 'completed'
+            && a.status !== 'error'
+            ? i : acc, -1
+        ) ?? -1
+      }
       const existingActivity = statusIdx !== -1 ? currentTurn!.activities[statusIdx] : undefined
       if (statusIdx !== -1 && existingActivity) {
         currentTurn!.activities[statusIdx] = {
           ...existingActivity,
           status: verdictStatus,
           content: localizeStatusContent(message.statusType, message.content, message.statusParams),
+          // statusParams MUST ride the row (2026-10-19 tidy-willow): the typed
+          // label `校验失败（<类型>）` reads params.failType and the clickable
+          // reason link reads params.reasonPath. Without them the row falls
+          // back to the plain "校验失败 — 继续执行" and nothing is openable.
+          ...(message.statusParams ? { statusParams: message.statusParams } : {}),
         }
       } else {
         // The renderer folded the transient status row into this info message
@@ -792,6 +820,7 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
           timestamp: message.timestamp,
           statusType: 'verification',
           depth: 0,
+          ...(message.statusParams ? { statusParams: message.statusParams } : {}),
         })
       }
       continue  // Don't create a separate system turn
@@ -799,26 +828,6 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
 
     // Error/info/warning messages are standalone
     if (message.role === 'error' || message.role === 'info' || message.role === 'warning') {
-      // 2026-10-09: the ladder's retryPending error card ("retrying in the
-      // background") must NOT split the process block — it used to flush the
-      // turn, producing 过程块1-报错框-过程块2 with the retry line and the
-      // retried-run rows in two separate cards. Defer the card until the
-      // open turn flushes, so retried-run rows stay in the SAME card (the
-      // retry line sits at its chronological position) and the error card
-      // renders BELOW the process block. Terminal errors flush as before.
-      if (message.role === 'error' && message.retryPending) {
-        if (currentTurn) {
-          deferredRetryErrorCards.push({
-            type: 'system',
-            message,
-            timestamp: message.timestamp ?? Date.now(),
-          })
-          continue
-        }
-        // No open process block (turn already closed) — render standalone.
-        turns.push({ type: 'system', message, timestamp: message.timestamp ?? Date.now() })
-        continue
-      }
       // Flush current turn first (mark as interrupted if info message)
       const isInterruption = message.role === 'info'
       // For error/warning (not info), the previous turn is complete
@@ -941,6 +950,31 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
         } else {
           intermediateActivity.depth = 0
         }
+        // Byte-identical follow-up resumes collapse into ONE step
+        // (2026-10-19 tidy-willow). A verification FAIL queues a followUp; when
+        // the model re-emits the same reply the judge FAILs again and the cycle
+        // repeats — session 261016-true-sparrow showed FOUR 1734-char copies of
+        // the same answer stacked as separate steps, which reads as "重复回答".
+        // The content-stability stop-loss in pi-agent-server stops the LOOP;
+        // this dedupe keeps already-recorded repeats from rendering.
+        //
+        // MUST search BEFORE pushing: once the candidate is in the list the
+        // lookup matches itself, so a post-push "replace" degenerates into an
+        // append and the repeat survives (verified against the real transcript).
+        const repeatIdx = currentTurn.activities.findIndex(
+          a => a.type === 'intermediate'
+            && a.status !== 'running'
+            && a.content === intermediateActivity.content
+        )
+        if (repeatIdx !== -1) {
+          // Update in place (later message wins) so the step count stays 1
+          // while its timestamp reflects the last emission.
+          currentTurn.activities[repeatIdx] = intermediateActivity
+          if (!message.isPending && !message.isStreaming) {
+            currentTurn.isStreaming = false
+          }
+          continue
+        }
         currentTurn.activities.push(intermediateActivity)
 
         // Update turn streaming state based on this message
@@ -1020,7 +1054,6 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
   // Flush any remaining turn, then any queued user messages that were deferred
   // before the assistant turn produced visible activity.
   flushCurrentTurn()
-  flushDeferredRetryErrorCards()
   flushDeferredQueuedUserTurns()
 
   return turns
@@ -1053,6 +1086,67 @@ export function hasPendingActivities(turn: AssistantTurn): boolean {
  */
 export function hasErrorActivities(turn: AssistantTurn): boolean {
   return turn.activities.some(a => a.status === 'error')
+}
+
+/**
+ * Whether an assistant turn has nothing worth rendering.
+ *
+ * A turn is empty when it has activities but none of them are substantive AND
+ * there is no final response. "Substantive" excludes rows that ARE the
+ * user-facing outcome of a response-less turn:
+ *
+ *   - retry lines (the ladder is the only content while retrying)
+ *   - compaction accounting (`/compact` produces a compaction_summary row and
+ *     NO response at all — hiding the card dropped "压缩完成：约 A → B")
+ *   - verification verdicts (replayed turns can end on the verdict alone)
+ *
+ * Callers still handle the separate `activities.length === 0` case themselves.
+ */
+export function turnHasNoMeaningfulWork(
+  activities: readonly ActivityItem[],
+  hasResponse: boolean,
+): boolean {
+  if (hasResponse) return false
+  if (activities.length === 0) return false
+  return activities.every(a => {
+    // Tool activities must be errors (interrupted/failed)
+    if (a.type === 'tool') return a.status === 'error'
+    // Intermediate activities must have no meaningful content
+    if (a.type === 'intermediate') return !a.content?.trim()
+    // Plan activities are meaningful work
+    if (a.type === 'plan') return false
+    // Status rows that carry the turn's outcome are meaningful
+    if (a.type === 'status') {
+      return !(
+        a.statusType === 'compaction_summary' ||
+        a.statusType === 'compaction_complete' ||
+        a.statusType === 'verification_passed' ||
+        a.statusType === 'verification_failed'
+      )
+    }
+    // Other activity types - consider as no meaningful work
+    return true
+  })
+}
+
+/**
+ * True when a turn is nothing but a compaction accounting row — what a manual
+ * /compact leaves behind (no response, no tools). Such a turn is a result, not
+ * progress: TurnCard renders it flat instead of wrapping it in process-card
+ * chrome, which would both look like "it went into a process block" and print
+ * the same line twice once expanded (header preview + body row).
+ *
+ * Auto compaction never matches: it fires mid-turn, so the turn it settles
+ * carries other activities (2026-10-19 true-sparrow).
+ */
+export function isSoleCompactionResult(
+  activities: readonly ActivityItem[],
+  hasResponse: boolean,
+): boolean {
+  if (hasResponse) return false
+  if (activities.length !== 1) return false
+  const only = activities[0]
+  return only?.type === 'status' && only.statusType === 'compaction_summary'
 }
 
 /**

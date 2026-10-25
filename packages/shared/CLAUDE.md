@@ -85,7 +85,7 @@ Keys use **flat dot-notation** with a category prefix:
 | `sidebar.*` | Left sidebar navigation items | `sidebar.allSessions` |
 | `sidebarMenu.*` | Sidebar context menu actions | `sidebarMenu.addSource` |
 | `sessionMenu.*` | Session context menu actions | `sessionMenu.archive` |
-| `settings.*` | Settings pages — nested by page ID | `settings.ai.connections` |
+| `settings.*` | Settings pages — nested by page ID | `settings.llm.viewConnections` |
 | `chat.*` | Chat input, session viewer, inline UI | `chat.attachFiles` |
 | `toast.*` | Toast/notification messages | `toast.failedToShare` |
 | `errors.*` | Error screens | `errors.sessionNotFound` |

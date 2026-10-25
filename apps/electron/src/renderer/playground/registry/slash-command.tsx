@@ -134,7 +134,8 @@ function SlashCommandDemo() {
         <FreeFormInput
           placeholder="Type / to see commands..."
           currentModel={model}
-          onModelChange={setModel}
+          effectiveStrategyId=""
+          onStrategyChange={() => {}}
           permissionMode={permissionMode}
           onPermissionModeChange={setPermissionMode}
           inputValue={inputValue}

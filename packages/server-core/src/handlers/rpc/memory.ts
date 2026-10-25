@@ -106,21 +106,40 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
     const stores = sessions.map(session => loadSessionMemoryStore(workspaceRootPath, session.id))
       .filter(store => store.entries.some(entry => !(store.consolidatedEntryIds ?? []).includes(entry.id)))
     if (!stores.length) return { promoted: 0, trashed: 0, sessionsProcessed: 0 }
-    // Consolidation runs on the app's DEFAULT LLM connection + default model
-    // (Settings → AI Connections), not on a session's keyword-matched mini
-    // model ("flash"/last-in-list): mini models are the ones that typically
-    // hit rate limits, and consolidation prompts need a full model.
+    // Consolidation is app-level work with no session of its own, so it gets a
+    // backend of its own instead of borrowing a session's agent. Borrowing made
+    // every request look like that session's conversation in the gateway log and
+    // charged the tokens to its usage. The model still comes from the default
+    // connection (Settings → AI Connections), not a mini model: consolidation
+    // prompts need a full model.
     const defaultSlug = getDefaultLlmConnection()
     const defaultModel = defaultSlug ? getLlmConnection(defaultSlug)?.defaultModel : undefined
-    const defaultAgentSession = defaultModel
-      ? sessions.find(session => session.llmConnection === defaultSlug
-        && sessionManager.getSessionAgent?.(session.id)?.queryLlm)
-      : undefined
-    const defaultAgent = defaultAgentSession ? sessionManager.getSessionAgent?.(defaultAgentSession.id) : undefined
-    const agent = defaultAgent
-      ?? sessions.map(session => sessionManager.getSessionAgent?.(session.id)).find(candidate => candidate?.runMiniCompletion)
-    if (!agent || (!agent.queryLlm && !agent.runMiniCompletion)) {
-      throw new Error('No active session agent is available for memory consolidation')
+    // The backend contract this handler needs — narrower than the full agent.
+    type ConsolidationAgent = Awaited<
+      ReturnType<NonNullable<typeof sessionManager.createAuxiliaryAgent>>
+    >
+    let agent: ConsolidationAgent
+    try {
+      if (!sessionManager.createAuxiliaryAgent) {
+        throw new Error('宿主未提供辅助 agent 能力')
+      }
+      // Default to a group the workspace's sessions already use, so an unset
+      // 记忆整理策略组 means "same as the session" rather than "pick one".
+      const sessionStrategyId = sessions
+        .map((s) => (s as { strategy?: string }).strategy)
+        .find((v): v is string => typeof v === 'string' && v.length > 0)
+      agent = await sessionManager.createAuxiliaryAgent({
+        kind: 'memory',
+        workspace,
+        model: defaultModel,
+        ...(sessionStrategyId ? { sessionStrategyId } : {}),
+      })
+    } catch (error) {
+      // No strategy group means no route at all now — say so plainly instead of
+      // failing later with an opaque model error.
+      throw new Error(
+        `记忆整理不可用：${error instanceof Error ? error.message : String(error)}`,
+      )
     }
     const globalStore = loadMemoryStore(workspaceRootPath)
     // Promoted memories follow the app's UI language setting.
@@ -139,21 +158,15 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
         consolidationCancelled.set(workspaceRootPath, false)
         throw new Error('Memory consolidation cancelled')
       }
-      if (defaultAgent && defaultModel) {
-        // Default connection + default model — exactly what the user sees in
-        // Settings (e.g. the "auto" routing model), bypassing the mini model.
-        const completion = await defaultAgent.queryLlm!({ model: defaultModel, prompt })
-        const text = completion?.text?.trim()
-        if (!text) throw new Error('Memory consolidation returned an empty response')
-        return text
-      }
-      const response = await agent.runMiniCompletion!(prompt)
+      // The model comes from the group (forwarded as the backend's miniModel),
+      // so the call site does not pick one.
+      const response = await agent.runMiniCompletion(prompt)
       if (!response) throw new Error('Memory consolidation returned an empty response')
       return response
     }, {
       language,
       // Write-time adjudication gate needs the mini-model completion (§5.1).
-      runMiniCompletion: agent.runMiniCompletion ? agent.runMiniCompletion.bind(agent) : undefined,
+      runMiniCompletion: agent.runMiniCompletion.bind(agent),
       // Check the cooperative-cancel flag between LLM calls and backoff
       // sleeps so "Cancel" settles quickly even while retrying.
       isCancelled: () => consolidationCancelled.get(workspaceRootPath) === true,
@@ -186,6 +199,9 @@ export function registerMemoryHandlers(server: RpcServer, deps: HandlerDeps): vo
     })
     return { ...result, sessionsProcessed: stores.length }
     } finally {
+      // The backend is ours and short-lived; without this every scheduled run
+      // would leave a subprocess behind.
+      agent.destroy()
       const runState = consolidationRunState.get(workspaceRootPath)
       // Only clear the active flag if this very run still owns the state (a
       // newer run may have replaced it after a quick re-trigger).

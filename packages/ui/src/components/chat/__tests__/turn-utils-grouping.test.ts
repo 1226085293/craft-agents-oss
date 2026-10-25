@@ -681,133 +681,87 @@ describe('TodoWrite extraction', () => {
 })
 
 // ============================================================================
-// Persisted retry-ladder row grouping (2026-10-08)
+// Compaction summary row placement (2026-10-19, first-crane)
 // ============================================================================
 
-describe('persisted retry-ladder row (statusType retrying)', () => {
-  it('maps a retrying row to a running status activity carrying the retry payload', () => {
-    const turns = groupMessagesByTurn([
-      { id: 'user-1', role: 'user', content: 'hello', timestamp: 1 },
-      {
-        id: 'retry-row',
-        role: 'status',
-        statusType: 'retrying',
-        content: '',
-        timestamp: 50,
-        retry: { status: 'retrying', attempt: 2, nextRetryAt: 10_050, startedAt: 50 },
-      },
-    ])
+describe('compaction_summary row placement', () => {
+  const reliefParams = {
+    before: 189720,
+    retained: 20099,
+    compacted: 167757,
+    checkpoint: 1963,
+    after: 22062,
+    viaRelief: 1,
+  }
 
-    const turn = turns.find(t => t.type === 'assistant') as AssistantTurn | undefined
-    expect(turn).toBeDefined()
-    const row = turn!.activities.find(a => a.id === 'retry-row')
-    expect(row).toMatchObject({
-      type: 'status',
-      status: 'running',
-      statusType: 'retrying',
-      retry: { status: 'retrying', attempt: 2, nextRetryAt: 10_050, startedAt: 50 },
+  /** A finishing assistant message closes the currently open turn. */
+  const assistantMsg = (ts: number) => ({ id: `a-${ts}`, role: 'assistant', content: 'done', timestamp: ts })
+
+  it('manual /compact (info) renders as its OWN card, not inside the previous turn', () => {
+    resetCounters()
+    const turns = groupMessagesByTurn([
+      assistantMsg(1000),
+      { id: 'u-1', role: 'user', content: '/compact', timestamp: 2000 },
+      { id: 'info-1', role: 'info', content: 'Compaction summary', timestamp: 3000, statusType: 'compaction_summary', statusParams: reliefParams },
+    ] as never[])
+    // user turn + assistant turn + standalone compaction turn.
+    expect(turns).toHaveLength(3)
+    expect(turns.map(t => t.type)).toEqual(['assistant', 'user', 'assistant'])
+    expect(turns[2].activities.some(a => a.statusType === 'compaction_summary')).toBe(true)
+    // The previous assistant turn must NOT have borrowed the row.
+    expect(turns[0].activities).toHaveLength(0)
+  })
+
+  it('manual /compact does not fold into an open process block', () => {
+    resetCounters()
+    const turns = groupMessagesByTurn([
+      { id: 'st-1', role: 'status', content: 'Compacting', timestamp: 1000, statusType: 'compacting' },
+      { id: 'info-1', role: 'info', content: 'Compaction summary', timestamp: 2000, statusType: 'compaction_summary', statusParams: reliefParams },
+    ] as never[])
+    // The open status turn is flushed and the summary starts its own card.
+    expect(turns).toHaveLength(2)
+    expect(turns[0].activities[0].statusType).toBe('compacting')
+    expect(turns[1].activities[0].statusType).toBe('compaction_summary')
+  })
+
+  it('manual /compact keeps the MEASURED retained/after the backend sent', () => {
+    resetCounters()
+    const turns = groupMessagesByTurn([
+      assistantMsg(1000),
+      { id: 'info-1', role: 'info', content: 'Compaction summary', timestamp: 2000, statusType: 'compaction_summary', statusParams: reliefParams },
+    ] as never[])
+    const row = turns[1].activities[0]
+    expect(row.statusParams).toMatchObject({
+      retained: 20099,
+      after: 22062,
+      compacted: 167757,
     })
+    // 189.7 - 167.8 = 22.0k must NOT replace the measured 20.1k.
+    expect(row.statusParams!.retained).not.toBe(189720 - 167757)
   })
 
-  it('derives completed/error activity status from a settled payload', () => {
+  it('auto compaction (status) stays INSIDE the turn that triggered it', () => {
+    resetCounters()
     const turns = groupMessagesByTurn([
-      {
-        id: 'recovered-row',
-        role: 'status',
-        statusType: 'retrying',
-        content: '',
-        timestamp: 10,
-        retry: { status: 'recovered', attempt: 3, startedAt: 1, elapsedMs: 9000 },
-      },
-      {
-        id: 'failed-row',
-        role: 'status',
-        statusType: 'retrying',
-        content: '',
-        timestamp: 20,
-        retry: { status: 'failed', attempt: 4, startedAt: 2, elapsedMs: 8000 },
-      },
-    ])
-
-    const turn = turns.find(t => t.type === 'assistant') as AssistantTurn | undefined
-    const recovered = turn!.activities.find(a => a.id === 'recovered-row')!
-    const failed = turn!.activities.find(a => a.id === 'failed-row')!
-    expect(recovered.status).toBe('completed')
-    expect(failed.status).toBe('error')
+      { id: 'st-1', role: 'status', content: 'Compacting', timestamp: 1000, statusType: 'compacting' },
+      { id: 'st-2', role: 'status', content: 'Compaction summary', timestamp: 2000, statusType: 'compaction_summary', statusParams: reliefParams },
+      assistantMsg(3000),
+    ] as never[])
+    expect(turns).toHaveLength(1)
+    expect(turns[0].activities.map(a => a.statusType)).toEqual(['compacting', 'compaction_summary'])
   })
 
-  it('keeps the retry row chronologically before the recovered run messages', () => {
+  it('a pre-existing summary row in the same turn is updated, not duplicated', () => {
+    resetCounters()
     const turns = groupMessagesByTurn([
-      { id: 'user-1', role: 'user', content: 'hello', timestamp: 1 },
-      { id: 'tool-1', role: 'tool', toolName: 'Read', toolUseId: 'tu-1', toolStatus: 'completed', toolResult: 'ok', timestamp: 10, turnId: 'turn-1' },
-      {
-        id: 'retry-row',
-        role: 'status',
-        statusType: 'retrying',
-        content: '',
-        timestamp: 20,
-        retry: { status: 'recovered', attempt: 2, startedAt: 20, elapsedMs: 5000 },
-      },
-      { id: 'tool-2', role: 'tool', toolName: 'Bash', toolUseId: 'tu-2', toolStatus: 'completed', toolResult: 'ok', timestamp: 30, turnId: 'turn-1' },
-    ])
-
-    const turn = turns.find(t => t.type === 'assistant') as AssistantTurn | undefined
-    const listed = turn!.activities.map(a => a.id)
-    // 重试成功行位于阶梯触发位置（重试运行的过程消息之前）
-    expect(listed.indexOf('retry-row')).toBeGreaterThan(listed.indexOf('tool-1'))
-    expect(listed.indexOf('retry-row')).toBeLessThan(listed.indexOf('tool-2'))
-  })
-})
-
-describe('retryPending error card does not split the process block (2026-10-09)', () => {
-  it('defers the retry-promise card until after the turn that owns the retry line, keeping one card', () => {
-    const turns = groupMessagesByTurn([
-      { id: 'user-1', role: 'user', content: 'hello', timestamp: 1 },
-      { id: 'tool-1', role: 'tool', toolName: 'Read', toolUseId: 'tu-1', toolStatus: 'completed', toolResult: 'ok', timestamp: 10, turnId: 'turn-1' },
-      {
-        id: 'retry-row',
-        role: 'status',
-        statusType: 'retrying',
-        content: '',
-        timestamp: 20,
-        retry: { status: 'retrying', attempt: 1, startedAt: 20 },
-      },
-      {
-        id: 'retry-card',
-        role: 'error',
-        content: 'API error — retrying in the background',
-        retryPending: true,
-        retryAttempt: 1,
-        timestamp: 21,
-      },
-      { id: 'tool-2', role: 'tool', toolName: 'Bash', toolUseId: 'tu-2', toolStatus: 'completed', toolResult: 'ok', timestamp: 30, turnId: 'turn-1' },
-      { id: 'final', role: 'assistant', content: 'Recovered answer', timestamp: 40, turnId: 'turn-1', isIntermediate: false, isPending: false },
-    ])
-
-    // One assistant card (tool-1 + retry row + tool-2 + final), then the system card BELOW it.
-    const assistantIdx = turns.findIndex(t => t.type === 'assistant')
-    const systemIdx = turns.findIndex(t => t.type === 'system')
-    expect(assistantIdx).toBeGreaterThanOrEqual(0)
-    expect(systemIdx).toBeGreaterThan(assistantIdx)
-    expect(turns.filter(t => t.type === 'assistant')).toHaveLength(1)
-    const turn = turns[assistantIdx] as AssistantTurn
-    const ids = turn.activities.map(a => a.id)
-    expect(ids).toEqual(['tool-1', 'retry-row', 'tool-2'])
-    // Chronological retry line before the retried-run rows.
-    expect(ids.indexOf('retry-row')).toBeLessThan(ids.indexOf('tool-2'))
-  })
-
-  it('keeps terminal error cards (non retryPending) splitting as before', () => {
-    const turns = groupMessagesByTurn([
-      { id: 'user-1', role: 'user', content: 'hello', timestamp: 1 },
-      { id: 'tool-1', role: 'tool', toolName: 'Read', toolUseId: 'tu-1', toolStatus: 'completed', toolResult: 'ok', timestamp: 10, turnId: 'turn-1' },
-      { id: 'terminal', role: 'error', content: 'fatal', timestamp: 20 },
-      { id: 'tool-2', role: 'tool', toolName: 'Bash', toolUseId: 'tu-2', toolStatus: 'completed', toolResult: 'ok', timestamp: 30, turnId: 'turn-1' },
-    ])
-    // Terminal error still closes the current card.
-    const assistantTurns = turns.filter(t => t.type === 'assistant')
-    const systemTurns = turns.filter(t => t.type === 'system')
-    expect(assistantTurns).toHaveLength(2)
-    expect(systemTurns).toHaveLength(1)
+      { id: 'st-1', role: 'status', content: 'Compacting', timestamp: 1000, statusType: 'compacting' },
+      { id: 'st-2', role: 'status', content: 'Compaction summary', timestamp: 1500, statusType: 'compaction_summary', statusParams: { ...reliefParams, retained: 1 } },
+      { id: 'st-3', role: 'status', content: 'Compaction summary', timestamp: 2000, statusType: 'compaction_summary', statusParams: reliefParams },
+    ] as never[])
+    // Auto path: one running turn holds all rows.
+    expect(turns).toHaveLength(1)
+    const rows = turns[0].activities.filter(a => a.statusType === 'compaction_summary')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].statusParams!.retained).toBe(20099)
   })
 })

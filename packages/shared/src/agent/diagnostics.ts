@@ -307,31 +307,13 @@ async function checkApiKey(providerLabel: string = 'Anthropic'): Promise<CheckRe
   }
 }
 
-/** Check OAuth token presence */
-async function checkOAuthToken(providerLabel: string = 'Anthropic'): Promise<CheckResult> {
-  try {
-    // Resolve OAuth token from the default LLM connection
-    const defaultConnSlug = getDefaultLlmConnection();
-    const credManager = getCredentialManager();
-    let token: string | null = null;
-    if (defaultConnSlug) {
-      const oauth = await credManager.getLlmOAuth(defaultConnSlug);
-      token = oauth?.accessToken || null;
-    }
-    if (!token) {
-      return {
-        ok: false,
-        detail: '✗ OAuth token: Not found',
-        failCode: 'invalid_credentials',
-        failTitle: 'OAuth Token Missing',
-        failMessage: `Your ${providerLabel} OAuth token is missing. Please re-authenticate.`,
-      };
-    }
-    return { ok: true, detail: '✓ OAuth token: Present' };
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    return { ok: true, detail: `✓ OAuth token: Check failed (${msg})` };
-  }
+/**
+ * OAuth connections were removed, so there is no token to resolve. The check is
+ * kept as a no-op rather than deleted so callers that list it still compile and
+ * the diagnostic output stays shape-compatible.
+ */
+async function checkOAuthToken(_providerLabel: string = 'Anthropic'): Promise<CheckResult> {
+  return { ok: true, detail: '— OAuth token: not applicable' };
 }
 
 /** Check MCP server connectivity with a quick HEAD request */

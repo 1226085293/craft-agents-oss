@@ -25,7 +25,6 @@ import type {
   CredentialRequestEvent,
   PlanSubmittedEvent,
   StatusEvent,
-  RetryEvent,
   InfoEvent,
   SystemStopNoticeEvent,
   InterruptedEvent,
@@ -47,8 +46,7 @@ import type {
   Effect,
 } from '../types'
 import type { Message, Session } from '../../../shared/types'
-import { generateMessageId, appendMessage, updateMessageAt, dropCompactingStatus, upsertRetryRow, settleStuckRetryRow } from '../helpers'
-import { nextRetryRowPayload, findActiveRetryRowIndex } from '@craft-agent/shared/retry/retry-row'
+import { generateMessageId, appendMessage, updateMessageAt, dropCompactingStatus } from '../helpers'
 
 /**
  * Handle complete - agent loop finished
@@ -60,11 +58,7 @@ export function handleComplete(
   state: SessionState,
   event: CompleteEvent
 ): ProcessResult {
-  // Fail-safe (2026-10-08): a turn that completed without the ladder's
-  // terminal `retry end` (rare paths) must not leave a spinning "重试中"
-  // row — settle it to 'failed' (the retries did not recover). No-op once
-  // the row is already terminal. Mirrors the session manager's complete.
-  const session = settleStuckRetryRow(state.session)
+  const session = state.session
 
   // Fail-safe: mark any non-terminal tools as complete.
   // Catches 'executing' (normal) and 'backgrounded' (spurious — e.g. foreground Agent
@@ -104,6 +98,18 @@ export function handleComplete(
     )
   }
 
+  // 2026-10-19 true-sparrow: an unfinished assistant stream must never survive
+  // a turn end. The retry path clears its dead partial on backoff; a failure
+  // that settles the turn WITHOUT a ladder (no re-runnable step, subprocess
+  // gone, guardrail stop) used to leave the row spinning "Thinking…" inside a
+  // completed card forever — the text was never persisted, so only a reload
+  // made it disappear. The turn is over: nothing will ever finalize these rows.
+  const isUnfinishedAssistant = (m: (typeof updatedMessages)[number]) =>
+    m.role === 'assistant' && (m.isStreaming || m.isPending)
+  if (updatedMessages.some(isUnfinishedAssistant)) {
+    updatedMessages = updatedMessages.filter(m => !isUnfinishedAssistant(m))
+  }
+
   return {
     state: {
       session: {
@@ -135,14 +141,8 @@ export function handleError(
   // "Compacting context..." row (the error card carries the failure).
   const session = dropCompactingStatus(state.session)
 
-  // Fail-safe (2026-10-08): a TERMINAL error (NOT the non-terminal
-  // retryPending card — that one keeps retrying in the background) while the
-  // persisted retry row is still 'retrying' means the retries stopped without
-  // recovering — settle the row to 'failed'. Mirrors the session manager.
-  const settled = event.retryPending ? session : settleStuckRetryRow(session)
-
   // Fail-safe: Mark any running tools as failed
-  const messagesWithFailedTools = settled.messages.map(m =>
+  const messagesWithFailedTools = session.messages.map(m =>
     m.role === 'tool' && m.toolResult === undefined && m.toolStatus !== 'completed' && m.toolStatus !== 'error'
       ? { ...m, toolStatus: 'error' as const, toolResult: 'Error occurred', isError: true }
       : m
@@ -154,56 +154,12 @@ export function handleError(
     content: event.error,
     timestamp: event.timestamp ?? Date.now(),
   }
-  // Mirror the session manager: the ladder's non-terminal card must carry the
-  // retryPending marker on the LIVE copy too (2026-10-10). It used to be
-  // dropped here, so the live card rendered as a plain terminal error box and
-  // was never dropped on recovery — the marker only ever arrived via the next
-  // full session refresh. With the marker, the in-place update below and the
-  // recovered/failed handling in handleRetry work immediately.
-  if (event.retryPending) {
-    errorMessage.retryPending = true
-    errorMessage.retryAttempt = event.retryAttempt
-  }
-
-  // 2026-10-10: the ladder's non-terminal card is SINGLE — once one exists
-  // (retryPending), later failed attempts UPDATE its content in place
-  // (latest error message + attempt) instead of stacking a card per failure.
-  // The server mirrors this; handleRetry drops the card on recovery and
-  // flips it terminal when the ladder exhausts.
-  // 2026-10-12: a ladder card is (retryPending) — OR a previous surface of
-  // the SAME ladder whose retryAttempt is exactly one behind the current one
-  // (an intermediate `end failed` FLIPS it to retryPending=false, but the
-  // ladder keeps going; the next surface must update THAT card in place —
-  // reactivate — instead of stacking a new box). A flipped card of a
-  // PREVIOUS ladder is not recycled behind a fresh sequence.
-  const lastPendingCardIdx = event.retryPending
-    ? messagesWithFailedTools.findLastIndex(
-        m =>
-          m.role === 'error' &&
-          (m.retryPending ||
-            (event.retryAttempt != null && m.retryAttempt === event.retryAttempt - 1)),
-      )
-    : -1
-  const finalMessages =
-    lastPendingCardIdx !== -1
-      ? messagesWithFailedTools.map((m, i) =>
-          i === lastPendingCardIdx
-            ? {
-                ...m,
-                content: event.error,
-                retryAttempt: event.retryAttempt ?? m.retryAttempt,
-                retryPending: true, // reactivate a flipped card (2026-10-12)
-                timestamp: event.timestamp ?? Date.now(),
-              }
-            : m
-        )
-      : [...messagesWithFailedTools, errorMessage]
 
   return {
     state: {
       session: {
-        ...settled,
-        messages: finalMessages,
+        ...session,
+        messages: [...messagesWithFailedTools, errorMessage],
       },
       streaming,
     },
@@ -223,12 +179,8 @@ export function handleTypedError(
   // pending compacting row is dropped alongside the retry status.
   const session = dropCompactingStatus(state.session)
 
-  // Fail-safe (2026-10-08): settle the persisted retry row on a TERMINAL
-  // typed error (retryPending cards keep retrying — do NOT settle those).
-  const settled = event.retryPending ? session : settleStuckRetryRow(session)
-
   // Fail-safe: Mark any running tools as failed
-  const messagesWithFailedTools = settled.messages.map(m =>
+  const messagesWithFailedTools = session.messages.map(m =>
     m.role === 'tool' && m.toolResult === undefined && m.toolStatus !== 'completed' && m.toolStatus !== 'error'
       ? { ...m, toolStatus: 'error' as const, toolResult: 'Error occurred', isError: true }
       : m
@@ -258,78 +210,10 @@ export function handleTypedError(
   return {
     state: {
       session: {
-        ...settled,
+        ...session,
         messages: [...messagesWithFailedTools, errorMessage],
       },
       streaming,
-    },
-    effects: [],
-  }
-}
-
-/**
- * Handle retry - the UNIFIED retry ladder (2026-10-05):
- *
- * The ladder's process-block line is PERSISTED (2026-10-08): one status row
- * (role 'status', statusType 'retrying') in session.messages, created on the
- * first backoff and updated IN PLACE by ladder events — so exactly one of
- * 重试中 / 重试成功 / 重试失败 exists at any time, positioned at the ladder
- * start (before any retried-run rows), and it survives session switches and
- * app restarts. The session manager mirrors the same row server-side.
- * Only SDK lifecycle events may end backoff — a delayed token/tool event is
- * not proof of recovery.
- */
-export function handleRetry(state: SessionState, event: RetryEvent): ProcessResult {
-  const activeIdx = findActiveRetryRowIndex(state.session.messages)
-  const prev = activeIdx !== -1 ? state.session.messages[activeIdx]?.retry : undefined
-  const payload = nextRetryRowPayload(event, prev, Date.now())
-  // 2026-10-10: a verdictless end with no row to settle (adapter channel
-  // close) produces no row and no card change — it is not a ladder verdict.
-  if (payload === null) {
-    return { state, effects: [] }
-  }
-  // 2026-10-11 (spry-stone): a terminal verdict with attempt < 1 ("重试 0 次
-  // 后失败") is a stale zero-attempt settle — mirror the server, never render
-  // it.
-  if (event.phase === 'end' && payload.attempt < 1) {
-    return { state, effects: [] }
-  }
-  // 2026-10-10: track ladder liveness — while retrying, the complete/error
-  // fail-safe must NOT settle the row (success/failure only at the real end).
-  const ladderActive = payload.status === 'retrying'
-  const session = {
-    ...(upsertRetryRow(state.session, payload) as Session),
-    retryLadderActive: ladderActive,
-  }
-  // Mirror the session manager on phase 'end': a FAILED ladder turns any
-  // still-pending retry error card (retryPending) into the turn's TERMINAL
-  // error card — otherwise the user would see the failed retry line without
-  // the final error reason below the process block. A RECOVERED ladder DROPS
-  // those cards — the retry succeeded, so "retrying in the background" is
-  // stale. The server splices its own copies and broadcasts message_removed,
-  // but the renderer card was created with a LOCAL id (never the server's),
-  // so the removal must be mirrored here too, or the stale card lingers until
-  // the next full session refresh (2026-10-10 user report).
-  const settled =
-    event.phase !== 'end'
-      ? session
-      : {
-          ...session,
-          messages:
-            event.recovered === true
-              ? session.messages.filter(
-                  m => !(m.role === 'error' && (m.retryPending || m.retryAttempt != null)),
-                )
-              : session.messages.map(m =>
-                  m.role === 'error' && (m.retryPending || m.retryAttempt != null)
-                    ? { ...m, retryPending: false }
-                    : m
-                ),
-        }
-  return {
-    state: {
-      session: settled,
-      streaming: state.streaming,
     },
     effects: [],
   }
@@ -429,9 +313,10 @@ export function handleInfo(
   // The verified reply is delivered separately as text_complete after this
   // event so the card always disappears before its result bubble appears.
   if (event.statusType === 'verification_passed') {
+    const params = event.statusParams
     const updatedMessages = session.messages.map(m =>
       m.role === 'status' && m.statusType === 'verification'
-        ? { ...m, role: 'info' as const, content: event.message, statusType: 'verification_passed' as const, infoLevel: (event.level ?? 'success') as Message['infoLevel'] }
+        ? { ...m, role: 'info' as const, content: event.message, statusType: 'verification_passed' as const, infoLevel: (event.level ?? 'success') as Message['infoLevel'], ...(params !== undefined ? { statusParams: params } : {}) }
         : m
     )
     return {
@@ -449,9 +334,14 @@ export function handleInfo(
   if (event.statusType === 'verification_failed') {
     // Failed: mark the card as a warning — the LLM continues (followUp), so
     // no bubble is replayed here; the continuation's reply renders normally.
+    // statusParams must survive the conversion (2026-10-19 tidy-willow):
+    // failType drives `校验失败（<类型>）— 继续执行` and reasonPath makes the
+    // row open the persisted reason. Dropping them here reverted the row to
+    // the plain "校验失败 — 继续执行" even though the subprocess sent both.
+    const params = event.statusParams
     const updatedMessages = session.messages.map(m =>
       m.role === 'status' && m.statusType === 'verification'
-        ? { ...m, role: 'info' as const, content: event.message, statusType: 'verification_failed' as const, infoLevel: 'warning' as Message['infoLevel'] }
+        ? { ...m, role: 'info' as const, content: event.message, statusType: 'verification_failed' as const, infoLevel: 'warning' as Message['infoLevel'], ...(params !== undefined ? { statusParams: params } : {}) }
         : m
     )
     return {
@@ -543,20 +433,15 @@ export function handleInterrupted(
   state: SessionState,
   event: InterruptedEvent
 ): ProcessResult {
-  // 2026-10-08: the PERSISTED retry row survives interruption — its final
-  // state is durable (重试中/成功/失败 must remain visible). A stuck
-  // 'retrying' row is settled to 'failed' (the ladder did not recover;
-  // mirrors the session manager's fail-safe).
-  const session = settleStuckRetryRow(state.session)
+  const session = state.session
   const effects: Effect[] = []
   const isUserInitiated = !!event.message
 
   // Clear transient streaming state (isPending, isStreaming) and mark running tools as interrupted
   // These fields are not persisted, so this matches the state after a reload
-  // Also filter out transient status messages (compacting etc.) — the persisted
-  // retry row (statusType 'retrying') is kept.
+  // Also filter out transient status messages (compacting etc.).
   const keptMessages = session.messages
-    .filter(m => m.role !== 'status' || m.statusType === 'retrying')
+    .filter(m => m.role !== 'status')
     // Only drop queued bubbles when the user explicitly stopped — silent
     // redirects auto-replay them so they must remain visible (#616).
     .filter(m => !(isUserInitiated && m.isQueued))
@@ -582,7 +467,22 @@ export function handleInterrupted(
       }
       // Clear pending state on assistant messages (transient streaming state)
       if (m.role === 'assistant' && m.isPending) {
-        return { ...m, isPending: false, isStreaming: false, ...(i === lastAbortedIdx ? { aborted: true } : {}) }
+        return {
+          ...m,
+          isPending: false,
+          isStreaming: false,
+          // A pending block is rendered as a PROCESS-CARD row (groupMessagesByTurn
+          // treats `isPending` as intermediate), never as a streaming bubble.
+          // Clearing isPending without classifying the block made the grouper
+          // treat it as the turn's FINAL response, so pressing Stop promoted a
+          // row the user was watching inside the process card into a standalone
+          // bubble at its first-delta timestamp (2026-10-19 true-sparrow). Keep
+          // the block where it was displayed; only an explicit final
+          // (isIntermediate === false, e.g. a backend-classified reply) may
+          // claim the response slot.
+          ...(m.isIntermediate === undefined ? { isIntermediate: true } : {}),
+          ...(i === lastAbortedIdx ? { aborted: true } : {}),
+        }
       }
       // Flag the in-flight assistant message as aborted for restart recovery and
       // defense evaluation. The backend persists the same marker server-side.

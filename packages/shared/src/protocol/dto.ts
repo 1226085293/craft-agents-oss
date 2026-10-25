@@ -51,11 +51,6 @@ export interface Session {
   name?: string
   /** Preview of first user message (from JSONL header, for lazy-loaded sessions) */
   preview?: string
-  /** 2026-10-10: true while a retry ladder is mid-flight (backoff/active;
-   *  false on its terminal end). Gate for the complete/error fail-safe: it
-   *  must NOT settle the "重试中" row while the ladder is still retrying —
-   *  success/failure only appear when the retry has REALLY finished. */
-  retryLadderActive?: boolean
   lastMessageAt: number
   messages: Message[]
   isProcessing: boolean
@@ -81,6 +76,14 @@ export interface Session {
   model?: string
   llmConnection?: string
   thinkingLevel?: ThinkingLevel
+  /**
+   * LLM gateway strategy id this session routes through.
+   *
+   * Mirrors `model` / `llmConnection`: per-session, restored on load. Absent
+   * means the user has not picked a routing policy yet, which the composer
+   * shows as an explicit prompt instead of a silent fallback.
+   */
+  strategy?: string
   lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error'
   lastFinalMessageId?: string
   isAsyncOperationOngoing?: boolean
@@ -145,6 +148,13 @@ export interface CreateSessionOptions {
   workingDirectory?: string | 'user_default' | 'none'
   model?: string
   llmConnection?: string
+  /**
+   * LLM gateway strategy group the new session routes through. Falls back to the
+   * workspace default (`defaults.strategy`) — the same resolution the desktop
+   * composer uses — so a session created outside the UI is never left on
+   * 未选择策略组.
+   */
+  strategy?: string
   systemPromptPreset?: 'default' | 'mini' | string
   hidden?: boolean
   sessionStatus?: SessionStatus
@@ -395,16 +405,14 @@ export type SessionEvent =
    * matching message so it is a result bubble on reload too.
    */
   | { type: 'text_promote'; sessionId: string; turnId: string; text: string }
-  | { type: 'retry'; sessionId: string; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number; /** Ladder-start epoch ms (row anchoring, 2026-10-10) */ startedAt?: number }
-  | { type: 'retry'; sessionId: string; phase: 'active' | 'end'; recovered?: boolean; attempt?: number; /** Ladder-start epoch ms + frozen duration — authoritative even when the row was lost (reload/restart), so the terminal line never shows 00:00. */ startedAt?: number; elapsedMs?: number }
   | { type: 'text_delta'; sessionId: string; delta: string; turnId?: string }
   | { type: 'text_complete'; sessionId: string; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; timestamp?: number; /** Streaming start time (first text_delta) for process-card ordering; `timestamp` stays the completion time */ startedAt?: number; messageId?: string }
   | { type: 'thinking_delta'; sessionId: string; delta: string; turnId?: string }
   | { type: 'thinking_complete'; sessionId: string; text: string; turnId?: string; timestamp?: number; startedAt?: number; messageId?: string }
   | { type: 'tool_start'; sessionId: string; toolName: string; toolUseId: string; toolInput: Record<string, unknown>; toolIntent?: string; toolDisplayName?: string; toolDisplayMeta?: ToolDisplayMeta; turnId?: string; parentToolUseId?: string; timestamp?: number; messageId?: string }
   | { type: 'tool_result'; sessionId: string; toolUseId: string; toolName: string; result: string; turnId?: string; parentToolUseId?: string; isError?: boolean; timestamp?: number }
-  | { type: 'error'; sessionId: string; error: string; timestamp?: number; retryPending?: boolean; retryAttempt?: number }
-  | { type: 'typed_error'; sessionId: string; error: TypedError; timestamp?: number; retryPending?: boolean; retryAttempt?: number }
+  | { type: 'error'; sessionId: string; error: string; timestamp?: number }
+  | { type: 'typed_error'; sessionId: string; error: TypedError; timestamp?: number }
   | { type: 'complete'; sessionId: string; tokenUsage?: Session['tokenUsage']; hasUnread?: boolean; backgroundTasksAlive?: boolean }
   | { type: 'interrupted'; sessionId: string; message?: Message; queuedMessages?: string[] }
   | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed'; statusParams?: Record<string, string | number>; timestamp?: number }
@@ -508,6 +516,7 @@ export type SessionCommand =
   | { type: 'setActiveViewing'; workspaceId: string }
   | { type: 'setPermissionMode'; mode: PermissionMode }
   | { type: 'setThinkingLevel'; level: ThinkingLevel }
+  | { type: 'setSessionStrategy'; strategy: string }
   | { type: 'updateWorkingDirectory'; dir: string }
   | { type: 'setSources'; sourceSlugs: string[]; sourceScope?: 'auto' | 'only' | 'exclude' }
   | { type: 'setLabels'; labels: string[] }
@@ -629,16 +638,6 @@ export interface FileSearchResult {
 // LLM connection types
 // ---------------------------------------------------------------------------
 
-/**
- * Resolved Anthropic OAuth identity (issue #838), captured from the
- * token-exchange response. Shape mirrors `ClaudeOAuthIdentity` in
- * `auth/claude-oauth.ts`; kept in the protocol layer so DTOs stay decoupled
- * from the auth module. All fields optional and fail-soft.
- */
-export interface ClaudeOAuthIdentityDto {
-  account?: { uuid?: string; emailAddress?: string }
-  organization?: { uuid?: string; name?: string }
-}
 
 export interface LlmConnectionSetup {
   slug: string
@@ -661,12 +660,8 @@ export interface LlmConnectionSetup {
   /** AWS region for Pi+Bedrock connections */
   awsRegion?: string
   /** Bedrock authentication method — determines auth type for Pi+Bedrock connections */
-  bedrockAuthMethod?: 'iam_credentials' | 'environment'
-  /**
-   * Resolved Anthropic OAuth identity (issue #838), threaded through setup so it
-   * persists for both new and re-auth connections. Optional and fail-soft.
-   */
-  oauthIdentity?: ClaudeOAuthIdentityDto
+  /** Bedrock auth method — only the AWS credential chain remains; IAM was removed. */
+  bedrockAuthMethod?: 'environment'
 }
 
 export interface TestLlmConnectionParams {
@@ -812,23 +807,10 @@ export interface WorkspaceSettings {
   localMcpEnabled?: boolean
   defaultLlmConnection?: string
   enabledSourceSlugs?: string[]
+  /** Default strategy group for new sessions; '' = none (pick per session). */
+  strategy?: string
 }
 
-// ---------------------------------------------------------------------------
-// Auth result types
-// ---------------------------------------------------------------------------
-
-export interface ClaudeOAuthResult {
-  success: boolean
-  token?: string
-  error?: string
-  /**
-   * Resolved Anthropic identity (issue #838), forwarded to the renderer so it
-   * can thread it into the SETUP payload (which is what persists it). Present
-   * only when the token-exchange response carried identity.
-   */
-  identity?: ClaudeOAuthIdentityDto
-}
 
 // ---------------------------------------------------------------------------
 // Automation types
@@ -899,10 +881,185 @@ export interface BrowserInstanceInfo {
   workspaceId?: string | null
 }
 
+/**
+ * One standalone Page window (a real OS window, not an in-app overlay).
+ * The id is stable per (workspace, page) so opening the same page twice
+ * focuses the existing window instead of creating a duplicate.
+ */
+export interface PageWindowInfo {
+  id: string
+  pageSlug: string
+  workspaceId: string
+  /** Window title as set by the page renderer (page name). */
+  title: string
+  isMinimized: boolean
+  isFocused: boolean
+}
+
 export interface DeepLinkNavigation {
   view?: string
   tabType?: string
   tabParams?: Record<string, string>
   action?: string
   actionParams?: Record<string, string>
+}
+
+// ============================================================================
+// In-process LLM gateway
+// ============================================================================
+
+/** Live scheduling state for the settings page's status strips. */
+export interface LlmGatewayStatusPayload {
+  running: boolean
+  port: number
+  baseUrl: string
+  enabled: boolean
+  /**
+   * Config rebuild counter. The settings page re-reads the config when this
+   * moves, so edits made outside the app land without a manual refresh.
+   * Optional for forward/backward compatibility.
+   */
+  generation?: number
+  strategies: Array<{ id: string; type: string; providers: number }>
+  /**
+   * Last upstream model each strategy routed to, `strategyId -> model`.
+   * Drives the composer's "策略组-当前模型" label. Optional so a renderer
+   * talking to an older main process still compiles.
+   */
+  lastModels?: Record<string, string>
+  coolingKeys: number
+  inFlight: number
+  /** Per-key cooldown state; drives the countdowns in the provider key table. */
+  keyStates?: Array<{
+    provider: string
+    keyId: string
+    cooling: boolean
+    cooldownRemaining: number
+    inFlight: number
+    available: boolean
+    weight: number
+  }>
+}
+
+/** Per-key scheduling snapshot, for the provider detail key table. */
+export interface LlmGatewayKeyState {
+  keyId: string
+  cooling: boolean
+  cooldownRemaining: number
+  inFlight: number
+  available: boolean
+}
+
+/**
+ * One stage of a request's path through the gateway.
+ *
+ * Spans the pipeline the provider detail trace timeline renders — picking a
+ * provider, retrying, cooling a key, the upstream's first chunk, stream end and
+ * the usage write — so a slow request can be attributed to a stage rather than
+ * the provider as a whole.
+ */
+export interface LlmTraceStage {
+  stage:
+    | 'provider_selected'
+    | 'retry_provider'
+    | 'cooldown_provider'
+    | 'upstream_first_chunk'
+    | 'stream_end'
+    | 'usage_recorded'
+  /** Milliseconds since the request started. Null when the stage never ran. */
+  atMs: number | null
+}
+
+export interface LlmTraceRow {
+  ts: number
+  model: string
+  keyId: string
+  /** Owning chat session; absent for memory-extraction and system calls. */
+  sessionId?: string
+  status: 'success' | 'error'
+  statusCode?: number
+  attempts: number
+  retried: boolean
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  firstByteMs?: number
+  totalMs?: number
+  error?: string
+  stages: LlmTraceStage[]
+}
+
+export interface LlmProviderKeyUsage {
+  keyId: string
+  requests: number
+  success: number
+  failed: number
+  successRate: number | null
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  avgFirstByteMs: number | null
+  hourly: Array<{ hour: number; success: number; failed: number }>
+}
+
+/** Everything the provider detail view's three tabs need, in one round-trip. */
+export interface LlmProviderDetailPayload {
+  provider: string
+  requests: number
+  success: number
+  retried: number
+  failed: number
+  successRate: number | null
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  /** Hour-of-day 0..23 x outcome, for the 24h request line and key heatmap. */
+  hourly: Array<{ hour: number; success: number; failed: number }>
+  keys: LlmProviderKeyUsage[]
+  /** Most recent requests, newest first, each with its stage timeline. */
+  recent: LlmTraceRow[]
+}
+
+/** Params for the gateway's explicit "test connection" probe. */
+export interface LlmGatewayTestConnectionParams {
+  /** Provider id from `llm-config.json`. */
+  providerId: string
+  /** Which key to probe; defaults to the provider's first enabled key. */
+  keyId?: string
+  /** Override the upstream model used for the probe. */
+  model?: string
+}
+
+export interface LlmGatewayTestConnectionResult {
+  success: boolean
+  /** Classified, human-readable failure reason, present on failure. */
+  error?: string
+  /** Probe round-trip time, ms. Always present, success or failure. */
+  elapsedMs: number
+}
+
+/**
+ * Ask a provider's upstream which models it exposes.
+ *
+ * `llm-config.json` stores `models` as upstream-id -> public-name, and the
+ * settings page could only ever show the ids already configured somewhere —
+ * there was no way to learn what a freshly added provider actually serves, so
+ * a provider with valid keys sat at "模型 0 个" and every test refused to run
+ * (the probe needs a model name). This closes that loop.
+ */
+export interface LlmGatewayListModelsParams {
+  /** Provider id from `llm-config.json`. */
+  providerId: string
+  /** Which key to authenticate with; defaults to the provider's first enabled key. */
+  keyId?: string
+}
+
+export interface LlmGatewayListModelsResult {
+  success: boolean
+  /** Classified, human-readable failure reason, present on failure. */
+  error?: string
+  /** Upstream model ids, in the order the upstream returned them. */
+  models: string[]
+  /** Round-trip time, ms. Always present, success or failure. */
+  elapsedMs: number
 }

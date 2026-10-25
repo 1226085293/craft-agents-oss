@@ -254,44 +254,6 @@ export interface StoredAttachment {
 /**
  * Runtime message type (includes transient fields like isStreaming)
  */
-/**
- * Persisted retry-ladder row payload (2026-10-08).
- *
- * The retry mechanism (unified retry ladder) must leave exactly ONE
- * process-block line behind: 重试中 (retrying) → 重试成功 (recovered) /
- * 重试失败 (failed). It rides on a `status` message with statusType
- * 'retrying' and is persisted, so switching sessions or restarting the
- * app cannot change the displayed state. Its position in the process
- * block is chronological (ladder start), i.e. before any retried-run
- * messages that follow.
- */
-export interface RetryLadderRow {
-  /** Ladder state: 'retrying' (in flight) → 'recovered' | 'failed' (terminal). */
-  status: 'retrying' | 'recovered' | 'failed'
-  /** Retry attempt number (1-based) surfaced to the user ("第 N 次"). */
-  attempt: number
-  /** Epoch ms when the next retry fires (drives the live countdown). Only set
-   *  during the backoff window — cleared once the retry is in flight. */
-  nextRetryAt?: number
-  /** Epoch ms when the ladder began (first backoff) — MATCHING key for the
-   *  terminal `end` (findLastRetryRowByStartedAt); NOT the display anchor. */
-  startedAt: number
-  /** 2026-10-11 (swift-slate): epoch ms when THIS row's retry cycle actually
-   *  started (the first backoff of the cycle, i.e. when the failure was
-   *  noticed). Every cycle of the same ladder keeps its own value — it is the
-   *  row's timeline anchor (the status message's timestamp / process-block
-   *  sort key) and its elapsed base ("耗时 mm:ss" counts from here, never
-   *  from the ladder start). The terminal `end` settles the row in place and
-   *  keeps this value. */
-  backoffAt?: number
-  /** Epoch ms when the CURRENT retry went in flight (drives the live
-   *  "retrying for mm:ss" timer). Set on phase 'active', cleared on the next
-   *  backoff and once the ladder settles. */
-  activeAt?: number
-  /** Frozen total retry duration (ms), set once the ladder settles. */
-  elapsedMs?: number
-}
-
 export interface Message {
   id: string;
   role: MessageRole;
@@ -359,20 +321,10 @@ export interface Message {
   hidden?: boolean;
   // Turn ID: Correlation ID from the API's message.id, groups all messages in an assistant turn
   turnId?: string;
-  // Status type for special status messages. 'retrying' marks the PERSISTED
-  // retry-ladder row (role 'status' + `retry` payload); the older transient
-  // renderer retryState is gone (2026-10-08 — the row survives reload).
-  statusType?: 'compacting' | 'compaction_complete' | 'retrying' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected';
+  // Status type for special status messages (compaction / verification / …).
+  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected';
   /** Structured interpolation values for the row's i18n key (e.g. attempt/total, tokens). The renderer resolves display text from `statusType`; these fill its placeholders. */
   statusParams?: Record<string, string | number>;
-  /**
-   * Persisted retry-ladder row payload (2026-10-08). One `status` message per
-   * ladder, created with status 'retrying' and settled in place to
-   * 'recovered'/'failed' when the ladder ends. Persisted by the session
-   * manager so the process-block retry line survives session switches and
-   * app restarts with its final state.
-   */
-  retry?: RetryLadderRow;
   // Info level for info messages (determines icon/color)
   infoLevel?: 'info' | 'warning' | 'error' | 'success';
   // Error-specific fields (for typed errors with diagnostics)
@@ -381,10 +333,6 @@ export interface Message {
   errorDetails?: string[];
   errorOriginal?: string;
   errorCanRetry?: boolean;
-  // Unified retry ladder (2026-10-05): the error is NON-terminal — retries
-  // continue in the background; the renderer styles it as a retrying card.
-  retryPending?: boolean;
-  retryAttempt?: number;
   errorActions?: Array<{
     key: string;
     label: string;
@@ -456,11 +404,10 @@ export interface StoredMessage {
   turnId?: string;
   /** Streaming start time (first text_delta) for process-card ordering - persisted */
   startedAt?: number;
-  // Status type (retry rows are persisted with their `retry` payload)
-  statusType?: 'compacting' | 'compaction_complete' | 'retrying' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected';
+  // Status type for special status messages (compaction / verification / …).
+  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected';
   /** Structured interpolation values for the row's i18n key — see statusParams above. */
   statusParams?: Record<string, string | number>;
-  retry?: RetryLadderRow;
   // Info level for info messages (persisted for reload)
   infoLevel?: 'info' | 'warning' | 'error' | 'success';
   // Error display fields
@@ -469,9 +416,6 @@ export interface StoredMessage {
   errorDetails?: string[];
   errorOriginal?: string;
   errorCanRetry?: boolean;
-  // Unified retry ladder (2026-10-05): non-terminal error marker.
-  retryPending?: boolean;
-  retryAttempt?: number;
   errorActions?: Array<{
     key: string;
     label: string;
@@ -728,8 +672,8 @@ export type AgentEvent =
       commandHash?: string;
       approvalTtlSeconds?: number;
     }
-  | { type: 'error'; message: string; retryPending?: boolean; retryAttempt?: number }
-  | { type: 'typed_error'; error: TypedError; retryPending?: boolean; retryAttempt?: number }
+  | { type: 'error'; message: string }
+  | { type: 'typed_error'; error: TypedError }
   | { type: 'complete'; usage?: AgentEventUsage }
   | { type: 'working_directory_changed'; workingDirectory: string }
   | { type: 'task_backgrounded'; toolUseId: string; taskId: string; intent?: string; turnId?: string; kind?: 'workflow'; workflowId?: string }

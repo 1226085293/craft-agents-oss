@@ -138,9 +138,6 @@ mock.module('@craft-agent/shared/agent', () => ({
 mock.module('@craft-agent/shared/agent/backend', () => ({
   ...actualSharedAgentBackendModule,
   resolveSessionConnection: () => null,
-  createBackendFromConnection: () => {
-    throw new Error('not used in this test')
-  },
   resolveBackendContext: () => ({
     provider: mockedProvider,
     resolvedModel: mockedProvider === 'anthropic' ? 'claude-sonnet-4-20250514' : 'pi/gpt-5',

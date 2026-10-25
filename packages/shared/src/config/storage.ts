@@ -84,11 +84,11 @@ export interface StoredConfig {
   // Default context window (in tokens) assumed when a model's window is not
   // configured anywhere (neither the built-in registry nor the connection's
   // model entries). Drives the context-usage ring and the subprocess
-  // compaction reserve. Seeded to 131072 (128k) on startup so it is visible
+  // compaction reserve. Seeded to 512000 (512k) on startup so it is visible
   // and editable here; change it to match your provider's real window.
   defaultContextWindow?: number;
   // Token optimization
-  rtkEnabled?: boolean;  // Route Bash commands through rtk to compress tool output (default: false). https://github.com/rtk-ai/rtk
+  rtkEnabled?: boolean;  // Route Bash commands through rtk to compress tool output (default: true since this build; null means on). https://github.com/rtk-ai/rtk
   // Anti early-stop defense (Pi backend). When enabled, the Pi agent server
   // appends execution discipline (L1) and runs post-stop evaluation (L2).
   // Defaults to true. User-controlled via Settings → Tools.
@@ -327,7 +327,7 @@ export function loadStoredConfig(): StoredConfig | null {
 
 // Legacy credential helpers removed - use connection-aware credential lookup instead:
 // - getAnthropicApiKey() → credentialManager.getLlmApiKey(connectionSlug)
-// - getClaudeOAuthToken() → credentialManager.getLlmOAuth(connectionSlug)
+// - OAuth paths removed: LLM connections are API-key only
 
 export function saveConfig(config: StoredConfig): void {
   ensureConfigDir();
@@ -534,12 +534,18 @@ export function getEnable1MContext(): boolean {
  * Get whether rtk Bash-output compression is enabled.
  * When enabled, the PreToolUse pipeline rewrites Bash commands to their `rtk` equivalents
  * to reduce token consumption on common dev commands (git, ls, grep, test runners, etc.).
- * Defaults to false — opt-in. Requires the `rtk` binary on PATH or bundled with the app.
+ *
+ * Defaults to on so users get the token savings without a setup step. When the
+ * `rtk` binary is not on PATH or bundled, `rewriteBashWithRtk` is a safe
+ * no-op (guards on a null path and returns the command unchanged), so the
+ * default cannot break Bash execution — it simply buys nothing until rtk is
+ * present. Users who prefer raw tool output (or need every tool to be
+ * byte-exact) can turn it off.
  * https://github.com/rtk-ai/rtk
  */
 export function getRtkEnabled(): boolean {
   const config = loadStoredConfig();
-  return config?.rtkEnabled === true;
+  return config?.rtkEnabled !== false;
 }
 
 /**
@@ -1737,10 +1743,8 @@ function migrateCodexCopilotToPi(config: StoredConfig): boolean {
     const providerStr = connection.providerType as string;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const connAny = connection as any;
-    if (providerStr === 'openai' && connection.authType === 'oauth') {
-      connection.providerType = 'pi';
-      connection.piAuthProvider = 'openai-codex';
-      connection.name = 'ChatGPT Plus (via Pi)';
+    if (false) {
+      // OAuth-based ChatGPT connections were removed; nothing to migrate.
       delete connAny.codexPath;
       connection.defaultModel = undefined; // reset — backfill picks Pi default
       connection.models = undefined;
@@ -1797,9 +1801,8 @@ export function shouldMigratePiOpenAiProvider(connection: Pick<LlmConnection, 'p
   // - forcing them to `openai-codex` routes requests to ChatGPT backend auth and breaks on restart.
   if (!isPiProvider(connection.providerType)) return false;
   if (connection.piAuthProvider !== 'openai') return false;
-  if (connection.authType !== 'oauth') return false;
-  if (typeof connection.baseUrl === 'string' && connection.baseUrl.trim().length > 0) return false;
-  return true;
+  // OAuth connections were removed, so there is no oauth state to repair.
+  return false;
 }
 
 export function shouldRepairPiApiKeyCodexProvider(connection: Pick<LlmConnection, 'providerType' | 'piAuthProvider' | 'authType'>): boolean {
@@ -2576,29 +2579,10 @@ export function migrateLegacyLlmConnectionsConfig(): void {
   if (legacyAuthType) {
     let migrated: LlmConnection | null = null;
 
-    if (legacyAuthType === 'oauth_token') {
-      // Claude Max OAuth
-      migrated = {
-        slug: 'claude-max',
-        name: 'Claude Max',
-        providerType: 'anthropic',
-        authType: 'oauth',
-        models: getDefaultModelsForConnection('anthropic'),
-        createdAt: Date.now(),
-      };
-    } else if (legacyAuthType === 'codex_oauth') {
-      // ChatGPT Plus OAuth → Pi backend
-      migrated = {
-        slug: 'codex',
-        name: 'ChatGPT Plus (via Pi)',
-        providerType: 'pi',
-        authType: 'oauth',
-        piAuthProvider: 'openai-codex',
-        modelSelectionMode: 'automaticallySyncedFromProvider',
-        models: getDefaultModelsForConnection('pi', 'openai-codex'),
-        createdAt: Date.now(),
-      };
-    } else if (legacyAuthType === 'codex_api_key') {
+    // OAuth connections (Claude Max, ChatGPT Plus) were removed, so a legacy
+    // oauth_token/codex_oauth entry has no target type to migrate into and is
+    // dropped rather than carried forward as an unroutable connection.
+    if (legacyAuthType === 'codex_api_key') {
       // OpenAI API Key → Pi backend
       migrated = {
         slug: 'codex-api',
@@ -2752,7 +2736,6 @@ function ensureDefaultLlmConnection(config: StoredConfig): boolean {
  * Called on app startup (async operation, credentials use encrypted storage).
  *
  * Migration mapping:
- * - claude_oauth::global → llm_oauth::claude-max
  * - anthropic_api_key::global → llm_api_key::anthropic-api
  *
  * After successful migration, legacy credentials are deleted to prevent
@@ -2761,30 +2744,6 @@ function ensureDefaultLlmConnection(config: StoredConfig): boolean {
 export async function migrateLegacyCredentials(): Promise<void> {
   const manager = getCredentialManager();
   const debug = (await import('../utils/debug.ts')).debug;
-
-  // Migrate Claude OAuth: claude_oauth::global → llm_oauth::claude-max
-  const legacyClaudeOAuth = await manager.getClaudeOAuthCredentials();
-  if (legacyClaudeOAuth?.accessToken) {
-    // Only migrate if llm_oauth::claude-max doesn't exist yet
-    const existingLlmOAuth = await manager.getLlmOAuth('claude-max');
-    if (!existingLlmOAuth) {
-      await manager.setLlmOAuth('claude-max', {
-        accessToken: legacyClaudeOAuth.accessToken,
-        refreshToken: legacyClaudeOAuth.refreshToken,
-        expiresAt: legacyClaudeOAuth.expiresAt,
-      });
-      debug('[storage] Migrated legacy Claude OAuth to llm_oauth::claude-max');
-
-      // Delete legacy credential after successful migration
-      // Global credentials use just the type - the key format is {type}::global
-      try {
-        await manager.delete({ type: 'claude_oauth' });
-        debug('[storage] Deleted legacy claude_oauth::global credential');
-      } catch (error) {
-        debug('[storage] Failed to delete legacy claude_oauth::global:', error);
-      }
-    }
-  }
 
   // Migrate Anthropic API key: anthropic_api_key::global → llm_api_key::anthropic-api
   const legacyApiKey = await manager.getApiKey();
@@ -2964,12 +2923,6 @@ export function updateLlmConnection(slug: string, updates: Partial<Omit<LlmConne
     customEndpoint: updates.customEndpoint !== undefined ? updates.customEndpoint : existing.customEndpoint,
     // Mid-stream send behavior (steer vs queue) — read via resolveMidStreamBehavior()
     midStreamBehavior: updates.midStreamBehavior !== undefined ? updates.midStreamBehavior : existing.midStreamBehavior,
-    // Resolved Anthropic OAuth identity (issue #838) — preserved across unrelated saves
-    oauthAccountUuid: updates.oauthAccountUuid !== undefined ? updates.oauthAccountUuid : existing.oauthAccountUuid,
-    oauthAccountEmail: updates.oauthAccountEmail !== undefined ? updates.oauthAccountEmail : existing.oauthAccountEmail,
-    oauthOrganizationUuid: updates.oauthOrganizationUuid !== undefined ? updates.oauthOrganizationUuid : existing.oauthOrganizationUuid,
-    oauthOrganizationName: updates.oauthOrganizationName !== undefined ? updates.oauthOrganizationName : existing.oauthOrganizationName,
-    oauthProfileVerifiedAt: updates.oauthProfileVerifiedAt !== undefined ? updates.oauthProfileVerifiedAt : existing.oauthProfileVerifiedAt,
     // Timestamps
     lastUsedAt: updates.lastUsedAt !== undefined ? updates.lastUsedAt : existing.lastUsedAt,
   };
@@ -3060,9 +3013,6 @@ export function deleteLlmConnection(slug: string): boolean {
   const credentialManager = getCredentialManager();
   credentialManager.delete({ type: 'llm_api_key', connectionSlug: slug }).catch((error) => {
     console.error(`[storage] Failed to delete API key credential for connection '${slug}':`, error);
-  });
-  credentialManager.delete({ type: 'llm_oauth', connectionSlug: slug }).catch((error) => {
-    console.error(`[storage] Failed to delete OAuth credential for connection '${slug}':`, error);
   });
 
   return true;

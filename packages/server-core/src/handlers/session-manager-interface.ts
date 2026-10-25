@@ -12,6 +12,7 @@ import type { PermissionMode } from '@craft-agent/shared/agent/mode-types'
 import type { ThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import type { AuthResult } from '@craft-agent/shared/agent'
 import type { LLMQueryRequest, LLMQueryResult } from '@craft-agent/shared/agent/llm-tool'
+import type { ModelRequestKind } from '@craft-agent/shared/config'
 import type { IMessagingGatewayRegistry } from './messaging-registry-interface'
 import type {
   Session,
@@ -127,6 +128,7 @@ export interface ISessionManager {
 
   setSessionPermissionMode(sessionId: string, mode: PermissionMode): void
   setSessionThinkingLevel(sessionId: string, level: ThinkingLevel): void
+  setSessionStrategy(sessionId: string, strategy: string): void
   updateWorkingDirectory(sessionId: string, path: string): void
   setSessionSources(sessionId: string, sourceSlugs: string[], sourceScope?: 'auto' | 'only' | 'exclude'): Promise<void>
   setSessionLabels(sessionId: string, labels: string[]): void
@@ -182,6 +184,23 @@ export interface ISessionManager {
     runMiniCompletion?: (prompt: string) => Promise<string | null>
     queryLlm?: (request: LLMQueryRequest) => Promise<LLMQueryResult>
   } | null
+  /**
+   * Create a short-lived backend for app-level work with no session of its own
+   * (memory consolidation). Routed through a strategy group like everything
+   * else, and stamped with `kind` so the gateway log can attribute it.
+   *
+   * Throws when no group can be resolved; callers decide whether that is fatal.
+   */
+  createAuxiliaryAgent?(options: {
+    kind: ModelRequestKind
+    workspace: Workspace
+    model?: string
+    /** A session's group to fall back on when no dedicated one is configured. */
+    sessionStrategyId?: string
+  }): Promise<{
+    runMiniCompletion: (prompt: string) => Promise<string | null>
+    destroy: () => void
+  }>
   /**
    * Lightweight side-channel decision used by messaging adapters when a user
    * sends a follow-up while the session is already running. Implementations

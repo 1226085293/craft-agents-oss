@@ -17,10 +17,8 @@ import type { Message, MessageRole } from '@craft-agent/core'
 // ============================================================================
 
 function simulatePersistAndReload(messages: Message[]): Message[] {
-  // Stage 1: persistSession filters transient status messages — EXCEPT the
-  // persisted retry-ladder row (statusType 'retrying', 2026-10-08) which must
-  // survive reloads with its final state.
-  const afterStatusFilter = messages.filter(m => m.role !== 'status' || m.statusType === 'retrying')
+  // Stage 1: persistSession filters transient status messages.
+  const afterStatusFilter = messages.filter(m => m.role !== 'status')
   // Stage 2: convert to stored
   const stored = afterStatusFilter.map(messageToStored)
   // Stage 3: persistence-queue filters intermediate messages

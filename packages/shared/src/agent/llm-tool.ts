@@ -48,6 +48,13 @@ export interface LLMQueryRequest {
   temperature?: number;
   /** Structured output JSON schema — backends handle natively when possible */
   outputSchema?: Record<string, unknown>;
+  /**
+   * What this call is for (`call_llm`, `verification`, `steer_check`). The
+   * backend tags the resolved model with it so the gateway can attribute the
+   * request; without it the call inherits the process-wide kind, which inside a
+   * session means it shows up as 对话.
+   */
+  kind?: string;
 }
 
 /**

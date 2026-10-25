@@ -8,7 +8,6 @@
  *
  * Examples:
  *   - anthropic_api_key::global
- *   - claude_oauth::global
  *   - source_oauth::{workspaceId}::{sourceId}
  *   - source_bearer::{workspaceId}::{sourceId}
  *
@@ -19,12 +18,8 @@
 export type CredentialType =
   // Global credentials (legacy, kept for backwards compatibility)
   | 'anthropic_api_key'  // Anthropic API key for Claude
-  | 'claude_oauth'       // Claude OAuth token (Max subscription)
   // LLM connection credentials (keyed by connection slug)
   | 'llm_api_key'        // API key for LLM connection
-  | 'llm_oauth'          // OAuth token for LLM connection
-  | 'llm_iam'            // AWS IAM credentials (accessKeyId + secretAccessKey)
-  | 'llm_service_account' // GCP service account JSON
   // Workspace credentials
   | 'workspace_oauth'    // Workspace MCP OAuth token
   // Source credentials (stored at ~/.craft-agent/workspaces/{ws}/sources/{slug}/)
@@ -40,11 +35,7 @@ export type CredentialType =
 /** Valid credential types for validation */
 const VALID_CREDENTIAL_TYPES: readonly CredentialType[] = [
   'anthropic_api_key',
-  'claude_oauth',
   'llm_api_key',
-  'llm_oauth',
-  'llm_iam',
-  'llm_service_account',
   'workspace_oauth',
   'source_oauth',
   'source_bearer',
@@ -64,7 +55,7 @@ export interface CredentialId {
   type: CredentialType;
 
   // LLM connection-scoped format
-  /** LLM connection slug for llm_api_key/llm_oauth credentials */
+  /** LLM connection slug for llm_api_key credentials */
   connectionSlug?: string;
 
   // Workspace-scoped format
@@ -108,26 +99,6 @@ export interface StoredCredential {
    */
   idToken?: string;
 
-  // --- AWS IAM credentials (for llm_iam type) ---
-
-  /** AWS Access Key ID (for IAM credentials) */
-  awsAccessKeyId?: string;
-  /** AWS Secret Access Key (for IAM credentials) - stored in `value` field */
-  // awsSecretAccessKey is stored in the `value` field
-  /** AWS Region (for IAM credentials) */
-  awsRegion?: string;
-  /** AWS Session Token (for temporary credentials) */
-  awsSessionToken?: string;
-
-  // --- GCP Service Account (for llm_service_account type) ---
-
-  /** GCP Project ID (for service account) */
-  gcpProjectId?: string;
-  /** GCP Region (for service account) */
-  gcpRegion?: string;
-  /** Service account email (for identification) */
-  serviceAccountEmail?: string;
-  // Full service account JSON is stored in the `value` field
 }
 
 // Using "::" as delimiter instead of "/" because server names and API names
@@ -160,9 +131,6 @@ function isPageCredential(type: CredentialType): boolean {
 /** LLM connection credential types */
 const LLM_CREDENTIAL_TYPES = [
   'llm_api_key',
-  'llm_oauth',
-  'llm_iam',
-  'llm_service_account',
 ] as const;
 
 /** Check if type is a source credential */
@@ -181,7 +149,6 @@ export function credentialIdToAccount(id: CredentialId): string {
 
   // LLM connection-scoped format:
   // llm_api_key::{connectionSlug}
-  // llm_oauth::{connectionSlug}
   if (isLlmCredential(id.type) && id.connectionSlug) {
     parts.push(id.connectionSlug);
     return parts.join(CREDENTIAL_DELIMITER);
@@ -263,7 +230,6 @@ export function accountToCredentialId(account: string): CredentialId | null {
 
   // LLM connection-scoped format:
   // llm_api_key::{connectionSlug}
-  // llm_oauth::{connectionSlug}
   if (isLlmCredential(type) && parts.length === 2) {
     return { type, connectionSlug: parts[1] };
   }

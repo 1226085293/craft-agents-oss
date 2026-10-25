@@ -4,6 +4,8 @@ import type { IOAuthFlowStore } from './oauth-flow-store-interface'
 import type { IBrowserPaneManager } from './browser-pane-manager-interface'
 import type { IWindowManager } from './window-manager-interface'
 import type { IMessagingGatewayRegistry } from './messaging-registry-interface'
+import type { GatewayRuntime } from '@craft-agent/shared/config'
+import type { LlmUsageRecord } from '@craft-agent/shared/config'
 
 /**
  * Generic handler dependency bag.
@@ -15,6 +17,20 @@ import type { IMessagingGatewayRegistry } from './messaging-registry-interface'
  * get typed access without specialization.  Electron narrows all to their
  * concrete implementations.
  */
+/**
+ * Access to the in-process LLM gateway.
+ *
+ * Injected rather than imported directly so the RPC handlers stay testable and
+ * so a host that never arms the gateway can pass an inert implementation.
+ */
+export interface LlmGatewayAccess {
+  runtime: GatewayRuntime
+  /** Read the append-only usage log. */
+  readUsage: () => LlmUsageRecord[]
+  /** Tell the config watcher the next events are our own save echoing back. */
+  markSelfWrite: (withinMs?: number) => void
+}
+
 export interface HandlerDeps<
   TSessionManager extends ISessionManager = ISessionManager,
   TOAuthFlowStore extends IOAuthFlowStore = IOAuthFlowStore,
@@ -27,4 +43,6 @@ export interface HandlerDeps<
   browserPaneManager?: TBrowserPaneManager
   oauthFlowStore: TOAuthFlowStore
   messagingRegistry?: IMessagingGatewayRegistry
+  /** In-process LLM gateway access. Optional so hosts need not provide it. */
+  llmGateway?: LlmGatewayAccess
 }

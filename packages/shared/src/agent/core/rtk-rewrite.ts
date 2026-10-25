@@ -35,6 +35,43 @@ export interface RtkContext {
   exclude: string[];
 }
 
+/**
+ * Quote the binary path so the shell treats it as one word.
+ *
+ * Windows paths are normalised to forward slashes: the Bash tool runs in Git
+ * Bash, where a bare `C:\Users\...` word has its backslashes read as escapes,
+ * while `C:/Users/...` resolves correctly.
+ */
+function quotePath(path: string): string {
+  return `"${path.replace(/\\/g, '/')}"`;
+}
+
+/**
+ * Point the rewritten command at the binary we actually detected.
+ *
+ * `rtk rewrite` answers with its CLI name (`rtk git status`), not with the path
+ * we spawned. The Bash tool's shell only has the user's PATH — the provisioned
+ * binary lives under the config dir and is not on it — so executing that answer
+ * verbatim failed with `rtk: command not found`, and the command the model had
+ * just been told ran instead never ran at all.
+ *
+ * Every command position is qualified (start, after `&&` / `||` / `;` / `|` /
+ * newline, and inside a leading `(`), because rtk composes rewrites such as
+ * `cd repo && rtk git status`.
+ */
+export function qualifyRtkCommand(command: string, rtkPath: string): string {
+  if (!command || !rtkPath) return command;
+  const quoted = quotePath(rtkPath);
+  return command
+    .split(/(&&|\|\||;|\||\r?\n)/)
+    .map((part) => {
+      const m = part.match(/^(\s*)(\(*)(rtk)(?=\s|$)/);
+      if (!m) return part;
+      return `${m[1]}${m[2]}${quoted}${part.slice(m[0].length)}`;
+    })
+    .join('');
+}
+
 export function rewriteBashWithRtk(
   toolName: string,
   input: Record<string, unknown>,
@@ -77,8 +114,12 @@ export function rewriteBashWithRtk(
       return { modified: false, input };
     }
 
-    onDebug?.(`[rtk] "${command}" → "${rewritten}"`);
-    return { modified: true, input: { ...input, command: rewritten } };
+    // `rtk rewrite` names the CLI, not the binary we spawned, so the answer is
+    // resolved to the detected path before the shell ever sees it.
+    const qualified = qualifyRtkCommand(rewritten, rtkPath);
+
+    onDebug?.(`[rtk] "${command}" → "${qualified}"`);
+    return { modified: true, input: { ...input, command: qualified } };
   } catch (e) {
     onDebug?.(`[rtk] unexpected error: ${e instanceof Error ? e.message : String(e)}`);
     return { modified: false, input };

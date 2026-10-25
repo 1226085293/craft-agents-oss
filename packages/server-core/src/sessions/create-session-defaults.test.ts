@@ -122,6 +122,94 @@ describe('SessionManager.createSession defaults', () => {
     ])
   })
 
+  it('gives every created session the workspace default strategy group', () => {
+    // 2026-10-25: the default group lived in the renderer's localStorage, so only
+    // the "new session" button saw it. Automations and mobile create sessions
+    // server-side, and every one of them came out on 未选择策略组 — which the
+    // gateway then refuses to route.
+    const configDir = mkdtempSync(join(tmpdir(), 'sm-default-strategy-config-'))
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'sm-default-strategy-workspace-'))
+    tempDirs.push(configDir, workspaceRoot)
+
+    writeFileSync(
+      join(configDir, 'config.json'),
+      JSON.stringify(
+        {
+          workspaces: [
+            { id: 'ws-strategy', name: 'Strategy Workspace', rootPath: workspaceRoot, createdAt: Date.now() },
+          ],
+          activeWorkspaceId: 'ws-strategy',
+          activeSessionId: null,
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    )
+
+    writeFileSync(
+      join(configDir, 'config-defaults.json'),
+      JSON.stringify(
+        {
+          workspaceDefaults: {
+            permissionMode: 'ask',
+            cyclablePermissionModes: ['safe', 'ask', 'allow-all'],
+            thinkingLevel: 'medium',
+            localMcpServers: { enabled: true },
+          },
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    )
+
+    writeFileSync(
+      join(workspaceRoot, 'config.json'),
+      JSON.stringify(
+        {
+          id: 'ws-strategy',
+          name: 'Strategy Workspace',
+          slug: 'strategy-workspace',
+          defaults: { permissionMode: 'ask', strategy: 'auto' },
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    )
+
+    const script = `
+      import { readFileSync } from 'node:fs'
+      import { SessionManager } from '${SESSION_MANAGER_MODULE}'
+      import { getSessionFilePath } from '${SESSION_STORAGE_MODULE}'
+
+      const sm = new SessionManager()
+      // No strategy passed: exactly how an automation or a mobile session is
+      // created. The workspace default must reach it anyway.
+      const session = await sm.createSession('ws-strategy')
+      const header = JSON.parse(readFileSync(getSessionFilePath(${JSON.stringify(workspaceRoot)}, session.id), 'utf-8').split('\\n')[0])
+      console.log(JSON.stringify({
+        returned: session.strategy ?? null,
+        persisted: header.strategy ?? header.llmStrategy ?? null,
+      }))
+    `
+
+    const run = Bun.spawnSync([process.execPath, '--eval', script], {
+      env: { ...process.env, CRAFT_CONFIG_DIR: configDir },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    expect(run.exitCode, run.stderr.toString()).toBe(0)
+    const output = JSON.parse(run.stdout.toString().trim().split('\n').at(-1)!)
+
+    expect(output.returned).toBe('auto')
+    expect(output.persisted).toBe('auto')
+  })
+
   it('keeps persisted enabled sources in the metadata-only session list after restart', () => {
     const configDir = mkdtempSync(join(tmpdir(), 'sm-source-metadata-config-'))
     const workspaceRoot = mkdtempSync(join(tmpdir(), 'sm-source-metadata-workspace-'))

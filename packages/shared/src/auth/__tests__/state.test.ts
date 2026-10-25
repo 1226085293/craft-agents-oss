@@ -9,7 +9,6 @@
 import { describe, it, expect, beforeEach, mock } from 'bun:test';
 import {
   getSetupNeeds,
-  performTokenRefresh,
   _resetRefreshMutex,
   type AuthState,
   type TokenResult,
@@ -181,80 +180,6 @@ describe('getSetupNeeds', () => {
     });
   });
 });
-
-// ============================================
-// performTokenRefresh tests
-// ============================================
-
-describe('performTokenRefresh', () => {
-  beforeEach(() => {
-    _resetRefreshMutex();
-  });
-
-  describe('successful refresh', () => {
-    it('should return accessToken on successful refresh', async () => {
-      // Mock the refreshClaudeToken import
-      const mockRefresh = mock(async () => ({
-        accessToken: 'new-access-token',
-        refreshToken: 'new-refresh-token',
-        expiresAt: Date.now() + 3600000,
-      }));
-
-      // We need to test with a real-ish scenario
-      // Since we can't easily mock the import, test the interface
-      const manager = createMockCredentialManager();
-
-      // For this test, we'll verify the TokenResult structure
-      const successResult: TokenResult = {
-        accessToken: 'new-access-token',
-      };
-
-      expect(successResult.accessToken).toBe('new-access-token');
-      expect(successResult.migrationRequired).toBeUndefined();
-    });
-
-    it('should not include migration info on success', async () => {
-      const successResult: TokenResult = {
-        accessToken: 'refreshed-token',
-      };
-
-      expect(successResult.migrationRequired).toBeUndefined();
-    });
-  });
-
-  describe('failed refresh with migration', () => {
-    it('should return migration info for CLI tokens on invalid_grant error', () => {
-      // Simulate the result from a failed refresh with CLI source
-      const failedResult: TokenResult = {
-        accessToken: null,
-        migrationRequired: {
-          reason: 'legacy_token',
-          message: 'Your Claude authentication needs to be refreshed. Please sign in again.',
-        },
-      };
-
-      expect(failedResult.accessToken).toBeNull();
-      expect(failedResult.migrationRequired).toBeDefined();
-      expect(failedResult.migrationRequired?.reason).toBe('legacy_token');
-    });
-
-    it('should not return migration info for native tokens that fail', () => {
-      // Native tokens that fail (e.g., revoked) don't need migration
-      // they just need re-authentication
-      const failedNativeResult: TokenResult = {
-        accessToken: null,
-        // No migrationRequired because source was 'native'
-      };
-
-      expect(failedNativeResult.accessToken).toBeNull();
-      expect(failedNativeResult.migrationRequired).toBeUndefined();
-    });
-  });
-});
-
-// ============================================
-// TokenResult type tests
-// ============================================
 
 describe('TokenResult type', () => {
   it('should allow accessToken with no migration', () => {

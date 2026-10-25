@@ -659,7 +659,17 @@ export interface SessionInfo {
   createdAt: number;
   updatedAt?: number;
   workingDirectory?: string;
+  /** Present only when the session does not route through a strategy group. */
   llmConnection?: string;
+  /**
+   * Gateway strategy this session routes through, when it does. The stored
+   * `llmConnection` is then the connection it was created with, not the one
+   * serving requests, so it is omitted rather than reported stale.
+   */
+  llmStrategy?: string;
+  /** Display name of that strategy, when it has one. */
+  strategyName?: string;
+  /** The model the next request will use. */
   model?: string;
   isActive: boolean;
 }

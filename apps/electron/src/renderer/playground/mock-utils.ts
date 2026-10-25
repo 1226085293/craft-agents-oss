@@ -305,7 +305,7 @@ export const mockElectronAPI = {
 
   getSendMessageKey: async () => 'enter',
   getSpellCheck: async () => true,
-  getDefaultContextWindow: async () => 131_072,
+  getDefaultContextWindow: async () => 512_000,
 
   // Pi provider discovery mocks
   getPiApiKeyProviders: async () => [
@@ -790,9 +790,13 @@ export const mockInputCallbacks = {
     console.log('[Playground] Message submitted:', { message, attachments })
   },
 
-  onModelChange: (model: string) => {
-    console.log('[Playground] Model changed to:', model)
+  // Routing is a strategy choice now; the gateway resolves the model, so the
+  // playground mock only records the selection instead of a model swap.
+  onStrategyChange: (strategyId: string) => {
+    console.log('[Playground] Strategy changed to:', strategyId)
   },
+
+  effectiveStrategyId: 'auto',
 
   onInputChange: (value: string) => {
     console.log('[Playground] Input changed:', value.substring(0, 50) + (value.length > 50 ? '...' : ''))

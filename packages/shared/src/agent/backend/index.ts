@@ -62,7 +62,6 @@ export {
   resolveBackendContext,
   resolveSetupTestConnectionHint,
   createConfigFromConnection,
-  createBackendFromConnection,
   createBackendFromResolvedContext,
   initializeBackendHostRuntime,
   resolveBackendHostTooling,

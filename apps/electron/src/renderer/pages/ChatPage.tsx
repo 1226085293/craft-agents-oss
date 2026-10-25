@@ -20,6 +20,7 @@ import { PanelHeaderCenterButton } from '@/components/ui/PanelHeaderCenterButton
 import { DropdownMenu, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { StyledDropdownMenuContent, StyledDropdownMenuItem, StyledDropdownMenuSeparator } from '@/components/ui/styled-dropdown'
 import { useAppShellContext, usePendingPermission, usePendingCredential, useSessionOptionsFor, useSession as useSessionData } from '@/context/AppShellContext'
+import { useGatewayStrategies } from '@/hooks/useGatewayStrategies'
 import { rendererPerf } from '@/lib/perf'
 import { isAbsolutePath } from '@/lib/drafts'
 import { navigate, routes } from '@/lib/navigate'
@@ -89,6 +90,10 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     setOption,
     setPermissionMode,
   } = useSessionOptionsFor(sessionId)
+
+  // Gateway routing options, kept live from the 2s status push. Read here rather
+  // than in ChatDisplay so the strategy survives a chat-panel remount.
+  const gatewayStrategies = useGatewayStrategies()
 
   // Use per-session atom for isolated updates
   const session = useSessionData(sessionId)
@@ -277,6 +282,32 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     return () => { cancelled = true }
   }, [sessionId, hydrateDraftAttachments])
 
+  // A session that still points at a strategy which has since been disabled,
+  // deleted, or made unusable cannot route: the label goes red and sending is
+  // blocked instead of failing with a 404 from the gateway.
+  const strategyBlockedReason = React.useMemo(() => {
+    // Gateway off / no channel: the server's guard is inert on such a machine
+    // and the legacy direct path still serves the session, so do not block.
+    if (gatewayStrategies.unavailable) return null
+    // A running gateway with no strategy groups at all is the same refusal as
+    // picking none (`no_strategy_selected`) — the server has no direct-path
+    // fallback either. This used to be folded into `unavailable`, which let the
+    // message through and fail a round trip later.
+    if (gatewayStrategies.strategies.length === 0) return '还没有策略组，请先在设置中创建'
+    const id = sessionOpts.strategy
+    // No group picked while groups exist and the gateway is running is exactly
+    // the state the server refuses (`no_strategy_selected`) — there is no
+    // direct-connection fallback any more. Blocking here, where the picker is
+    // one click away, beats a message that fails after a round trip. This
+    // mirrors SessionManager's guard: `strategies.length > 0 && running`.
+    if (!id) return '未选择策略组'
+    const s = gatewayStrategies.strategies.find((x) => x.id === id)
+    if (!s) return `策略组「${id}」不存在`
+    if (s.enabled === false) return `策略组「${id}」已禁用`
+    if (s.usable === false) return `策略组「${id}」不可用：${s.reason ?? '未配置'}`
+    return null
+  }, [sessionOpts.strategy, gatewayStrategies])
+
   const handleAttachmentsChange = React.useCallback((attachments: import('../../shared/types').FileAttachment[]) => {
     setAttachmentsValue(attachments)
     onAttachmentsChange(sessionId, attachments)
@@ -320,8 +351,19 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     [session?.llmConnection, llmConnections]
   )
 
-  // Effective model for this session (session-specific or global fallback)
+  // Effective model for this session (session-specific or global fallback).
+  //
+  // When a gateway strategy is selected, the model the session is *on* is the
+  // one that strategy last routed to — not the connection default, which
+  // describes a different machine. That is what the context ring must size
+  // against, so it wins over both the session override and the connection
+  // default while a strategy is in play.
   const effectiveModel = React.useMemo(() => {
+    const liveStrategyModel = sessionOpts.strategy
+      ? gatewayStrategies.strategies.find((s) => s.id === sessionOpts.strategy)?.lastModel
+      : undefined
+    if (liveStrategyModel) return liveStrategyModel
+
     if (session?.model) return session.model
 
     // When connection is unavailable, don't resolve through a different connection
@@ -333,7 +375,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     const connection = connectionSlug ? llmConnections.find(c => c.slug === connectionSlug) : null
 
     return connection?.defaultModel ?? ''
-  }, [session?.id, session?.model, session?.llmConnection, workspaceDefaultLlmConnection, llmConnections, connectionUnavailable])
+  }, [session?.id, session?.model, session?.llmConnection, workspaceDefaultLlmConnection, llmConnections, connectionUnavailable, sessionOpts.strategy, gatewayStrategies])
 
   // Working directory for this session
   const workingDirectory = session?.workingDirectory
@@ -766,7 +808,11 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
                 onOpenFile={handleOpenFile}
                 onOpenUrl={handleOpenUrl}
                 currentModel={effectiveModel}
-                onModelChange={handleModelChange}
+                gatewayStrategies={gatewayStrategies.strategies}
+                effectiveStrategyId={sessionOpts.strategy ?? ''}
+                onStrategyChange={(id) => setOption('strategy', id)}
+                strategyUnavailable={gatewayStrategies.unavailable}
+                strategyBlockedReason={strategyBlockedReason}
                 onConnectionChange={handleConnectionChange}
                 pendingPermission={undefined}
                 onRespondToPermission={onRespondToPermission}
@@ -844,7 +890,11 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
             onOpenFile={handleOpenFile}
             onOpenUrl={handleOpenUrl}
             currentModel={effectiveModel}
-            onModelChange={handleModelChange}
+            gatewayStrategies={gatewayStrategies.strategies}
+            effectiveStrategyId={sessionOpts.strategy ?? ''}
+            onStrategyChange={(id) => setOption('strategy', id)}
+            strategyUnavailable={gatewayStrategies.unavailable}
+            strategyBlockedReason={strategyBlockedReason}
             onConnectionChange={handleConnectionChange}
             pendingPermission={pendingPermission}
             onRespondToPermission={onRespondToPermission}

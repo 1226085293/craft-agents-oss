@@ -179,6 +179,16 @@ export interface CoreBackendConfig {
   /** Mini/utility model for summarization/title generation/mini-completions */
   miniModel?: string;
 
+  /**
+   * What this backend exists to do — 'chat' for a session's own conversation,
+   * 'title', 'busy_decision', … for the auxiliary ones. Forwarded to the
+   * subprocess, which sends it to the gateway as `x-craft-model-kind`, so a
+   * usage row can be traced back to the feature that produced it.
+   *
+   * Omitted means "unknown" and is rendered as an em dash, never guessed.
+   */
+  requestKind?: string;
+
   /** Initial thinking level */
   thinkingLevel?: ThinkingLevel;
 
@@ -413,8 +423,13 @@ export interface AgentBackend {
   /**
    * Run a simple text completion using the backend's auth infrastructure.
    * Used for connection testing, title generation, and summarization.
+   *
+   * @param kind - Attribution for this call in the gateway log (`memory`,
+   *               `verification`, …). Omitted for work that is genuinely
+   *               `chat`-shaped; without it a call made inside a session
+   *               inherits the session's kind and reads as conversation.
    */
-  runMiniCompletion(prompt: string): Promise<string | null>;
+  runMiniCompletion(prompt: string, kind?: string): Promise<string | null>;
 
   /**
    * Clean up resources (MCP connections, watchers, etc.)
@@ -466,6 +481,23 @@ export interface AgentBackend {
    *                           'session_end' when a turn finishes.
    */
   extractSessionMemories?(options?: { strategy?: 'compaction' | 'session_end' }): Promise<{ extracted: number; discarded: number }>;
+
+  /**
+   * Compact the active session context through the backend's own compaction
+   * path — the same one `/compact` uses (zero-LLM checkpoint first, LLM
+   * summary only over the threshold).
+   *
+   * Called by the session layer after the gateway reports a key/model switch,
+   * once the agent is idle. Optional so a backend without a compaction entry
+   * point simply opts out; this method must never implement its own
+   * compaction algorithm.
+   */
+  compact?(): Promise<{
+    tokensBefore: number;
+    tokensAfter: number;
+    /** Backend-reported accounting for the summary row, when available. */
+    stats?: unknown;
+  } | null>;
 
   // ============================================================
   // Model & Thinking Configuration

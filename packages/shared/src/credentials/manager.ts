@@ -229,51 +229,6 @@ export class CredentialManager {
     await this.set({ type: 'anthropic_api_key' }, { value: key });
   }
 
-  /** Get Claude OAuth token */
-  async getClaudeOAuth(): Promise<string | null> {
-    const cred = await this.get({ type: 'claude_oauth' });
-    return cred?.value || null;
-  }
-
-  /** Set Claude OAuth token */
-  async setClaudeOAuth(token: string): Promise<void> {
-    await this.set({ type: 'claude_oauth' }, { value: token });
-  }
-
-  /** Get Claude OAuth credentials (with refresh token, expiry, and source) */
-  async getClaudeOAuthCredentials(): Promise<{
-    accessToken: string;
-    refreshToken?: string;
-    expiresAt?: number;
-    /** Where the token came from: 'native' (our OAuth), 'cli' (Claude CLI import), or undefined (unknown) */
-    source?: 'native' | 'cli';
-  } | null> {
-    const cred = await this.get({ type: 'claude_oauth' });
-    if (!cred) return null;
-
-    return {
-      accessToken: cred.value,
-      refreshToken: cred.refreshToken,
-      expiresAt: cred.expiresAt,
-      source: cred.source as 'native' | 'cli' | undefined,
-    };
-  }
-
-  /** Set Claude OAuth credentials (with refresh token, expiry, and source) */
-  async setClaudeOAuthCredentials(credentials: {
-    accessToken: string;
-    refreshToken?: string;
-    expiresAt?: number;
-    /** Where the token came from: 'native' (our OAuth), 'cli' (Claude CLI import) */
-    source?: 'native' | 'cli';
-  }): Promise<void> {
-    await this.set({ type: 'claude_oauth' }, {
-      value: credentials.accessToken,
-      refreshToken: credentials.refreshToken,
-      expiresAt: credentials.expiresAt,
-      source: credentials.source,
-    });
-  }
 
   /** Get workspace MCP OAuth credentials */
   async getWorkspaceOAuth(workspaceId: string): Promise<{
@@ -348,47 +303,7 @@ export class CredentialManager {
     return this.delete({ type: 'llm_api_key', connectionSlug });
   }
 
-  /**
-   * Get OAuth token for an LLM connection.
-   * @param connectionSlug - The connection slug
-   * @returns OAuth credentials or null if not found
-   */
-  async getLlmOAuth(connectionSlug: string): Promise<{
-    accessToken: string;
-    refreshToken?: string;
-    expiresAt?: number;
-    /** OIDC id_token (used by OpenAI/Codex) */
-    idToken?: string;
-  } | null> {
-    const cred = await this.get({ type: 'llm_oauth', connectionSlug });
-    if (!cred) return null;
-    return {
-      accessToken: cred.value,
-      refreshToken: cred.refreshToken,
-      expiresAt: cred.expiresAt,
-      idToken: cred.idToken,
-    };
-  }
 
-  /**
-   * Set OAuth token for an LLM connection.
-   * @param connectionSlug - The connection slug
-   * @param credentials - OAuth credentials to store
-   */
-  async setLlmOAuth(connectionSlug: string, credentials: {
-    accessToken: string;
-    refreshToken?: string;
-    expiresAt?: number;
-    /** OIDC id_token (used by OpenAI/Codex) */
-    idToken?: string;
-  }): Promise<void> {
-    await this.set({ type: 'llm_oauth', connectionSlug }, {
-      value: credentials.accessToken,
-      refreshToken: credentials.refreshToken,
-      expiresAt: credentials.expiresAt,
-      idToken: credentials.idToken,
-    });
-  }
 
   /**
    * Delete all credentials for an LLM connection.
@@ -396,98 +311,19 @@ export class CredentialManager {
    */
   async deleteLlmCredentials(connectionSlug: string): Promise<void> {
     await this.delete({ type: 'llm_api_key', connectionSlug });
-    await this.delete({ type: 'llm_oauth', connectionSlug });
-    await this.delete({ type: 'llm_iam', connectionSlug });
-    await this.delete({ type: 'llm_service_account', connectionSlug });
   }
 
   // ============================================================
   // IAM Credentials (AWS Bedrock)
   // ============================================================
 
-  /**
-   * Get IAM credentials for an LLM connection.
-   * @param connectionSlug - The connection slug
-   * @returns IAM credentials or null if not found
-   */
-  async getLlmIamCredentials(connectionSlug: string): Promise<{
-    accessKeyId: string;
-    secretAccessKey: string;
-    region?: string;
-    sessionToken?: string;
-  } | null> {
-    const cred = await this.get({ type: 'llm_iam', connectionSlug });
-    if (!cred || !cred.awsAccessKeyId) return null;
-    return {
-      accessKeyId: cred.awsAccessKeyId,
-      secretAccessKey: cred.value, // Secret key stored in value field
-      region: cred.awsRegion,
-      sessionToken: cred.awsSessionToken,
-    };
-  }
 
-  /**
-   * Set IAM credentials for an LLM connection.
-   * @param connectionSlug - The connection slug
-   * @param credentials - IAM credentials to store
-   */
-  async setLlmIamCredentials(connectionSlug: string, credentials: {
-    accessKeyId: string;
-    secretAccessKey: string;
-    region?: string;
-    sessionToken?: string;
-  }): Promise<void> {
-    await this.set({ type: 'llm_iam', connectionSlug }, {
-      value: credentials.secretAccessKey, // Primary secret in value field
-      awsAccessKeyId: credentials.accessKeyId,
-      awsRegion: credentials.region,
-      awsSessionToken: credentials.sessionToken,
-    });
-  }
 
   // ============================================================
   // Service Account Credentials (GCP Vertex)
   // ============================================================
 
-  /**
-   * Get service account credentials for an LLM connection.
-   * @param connectionSlug - The connection slug
-   * @returns Service account JSON and metadata or null if not found
-   */
-  async getLlmServiceAccount(connectionSlug: string): Promise<{
-    serviceAccountJson: string;
-    projectId?: string;
-    region?: string;
-    email?: string;
-  } | null> {
-    const cred = await this.get({ type: 'llm_service_account', connectionSlug });
-    if (!cred) return null;
-    return {
-      serviceAccountJson: cred.value, // Full JSON stored in value field
-      projectId: cred.gcpProjectId,
-      region: cred.gcpRegion,
-      email: cred.serviceAccountEmail,
-    };
-  }
 
-  /**
-   * Set service account credentials for an LLM connection.
-   * @param connectionSlug - The connection slug
-   * @param credentials - Service account credentials to store
-   */
-  async setLlmServiceAccount(connectionSlug: string, credentials: {
-    serviceAccountJson: string;
-    projectId?: string;
-    region?: string;
-    email?: string;
-  }): Promise<void> {
-    await this.set({ type: 'llm_service_account', connectionSlug }, {
-      value: credentials.serviceAccountJson, // Full JSON in value field
-      gcpProjectId: credentials.projectId,
-      gcpRegion: credentials.region,
-      serviceAccountEmail: credentials.email,
-    });
-  }
 
   // ============================================================
   // Unified Credential Checking
@@ -519,18 +355,6 @@ export class CredentialManager {
       case 'bearer_token':
         return this.hasLlmApiKeyCredential(connectionSlug);
 
-      // OAuth - browser flow
-      case 'oauth':
-        return this.hasLlmOAuthCredential(connectionSlug, providerType);
-
-      // AWS IAM credentials
-      case 'iam_credentials':
-        return this.hasLlmIamCredential(connectionSlug);
-
-      // GCP service account
-      case 'service_account_file':
-        return this.hasLlmServiceAccountCredential(connectionSlug);
-
       default:
         // Exhaustive check - TypeScript will error if we miss a case
         const _exhaustive: never = authType;
@@ -547,41 +371,8 @@ export class CredentialManager {
     return !!apiKey;
   }
 
-  /**
-   * Check if connection has valid OAuth credential.
-   * @internal
-   */
-  private async hasLlmOAuthCredential(
-    connectionSlug: string,
-    providerType?: LlmProviderType
-  ): Promise<boolean> {
-    const oauth = await this.getLlmOAuth(connectionSlug);
-    if (!oauth) return false;
 
-    // Check if expired
-    if (oauth.expiresAt && this.isExpired({ value: oauth.accessToken, expiresAt: oauth.expiresAt })) {
-      return !!oauth.refreshToken; // Can refresh
-    }
-    return true;
-  }
 
-  /**
-   * Check if connection has valid IAM credential.
-   * @internal
-   */
-  private async hasLlmIamCredential(connectionSlug: string): Promise<boolean> {
-    const cred = await this.getLlmIamCredentials(connectionSlug);
-    return !!cred?.accessKeyId && !!cred?.secretAccessKey;
-  }
-
-  /**
-   * Check if connection has valid service account credential.
-   * @internal
-   */
-  private async hasLlmServiceAccountCredential(connectionSlug: string): Promise<boolean> {
-    const cred = await this.getLlmServiceAccount(connectionSlug);
-    return !!cred?.serviceAccountJson;
-  }
 
   /**
    * Check if a credential is expired (with 5-minute buffer).

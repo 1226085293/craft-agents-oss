@@ -22,7 +22,6 @@ import {
   providerTypeToAgentProvider,
   resolveModelForProvider,
   resolveSetupTestConnectionHint,
-  createBackendFromConnection,
   testBackendConnection,
   validateStoredBackendConnection,
 } from '../factory.ts';
@@ -165,10 +164,6 @@ describe('connectionAuthTypeToBackendAuthType (legacy)', () => {
     expect(connectionAuthTypeToBackendAuthType('api_key')).toBe('api_key');
   });
 
-  it('should pass through oauth', () => {
-    expect(connectionAuthTypeToBackendAuthType('oauth')).toBe('oauth');
-  });
-
   it('should map none to undefined', () => {
     expect(connectionAuthTypeToBackendAuthType('none')).toBeUndefined();
   });
@@ -202,8 +197,9 @@ describe('isValidProviderAuthCombination', () => {
       expect(isValidProviderAuthCombination('anthropic', 'api_key')).toBe(true);
     });
 
-    it('should accept oauth auth', () => {
-      expect(isValidProviderAuthCombination('anthropic', 'oauth')).toBe(true);
+    // OAuth was removed, so this combination is no longer valid.
+    it('should reject oauth auth', () => {
+      expect(isValidProviderAuthCombination('anthropic', 'oauth' as never)).toBe(false);
     });
 
     it('should reject api_key_with_endpoint auth', () => {
@@ -220,8 +216,9 @@ describe('isValidProviderAuthCombination', () => {
       expect(isValidProviderAuthCombination('pi', 'api_key')).toBe(true);
     });
 
-    it('should accept oauth auth', () => {
-      expect(isValidProviderAuthCombination('pi', 'oauth')).toBe(true);
+    // OAuth was removed, so this combination is no longer valid.
+    it('should reject oauth auth', () => {
+      expect(isValidProviderAuthCombination('pi', 'oauth' as never)).toBe(false);
     });
 
     it('should accept none auth', () => {

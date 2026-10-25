@@ -134,6 +134,33 @@ Test-Path "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\node_mo
   - 构建链尾会运行 `bun scripts/validate-assets.ts`（main.cjs/preload/interceptor/renderer/
     pi-agent-server/模型/内置资产存在性校验；缺失任一即报错退出，防止带病打包）
 
+## 补充踩坑（2026-10-14 打包安装后启动崩溃实测）
+
+- **症状**：构建安装后启动 Craft Agents 弹 `A JavaScript error occurred in the main process`：
+  `TypeError [ERR_INVALID_ARG_VALUE]: The argument 'filename' must be a file URL object,
+  file URL string, or absolute path string. Received undefined at createRequire`，
+  栈顶为 `packages/shared/src/config/llm-gateway-runtime.ts` →
+  `packages/shared/src/config/index.ts` → 主进程 bundle。
+- **根因**：`llm-gateway-runtime.ts` 在**模块初始化时**执行
+  `createRequire(import.meta.url)`。主进程 bundle 由 esbuild 以
+  `--format=cjs` 打包（`scripts/electron-build-main.ts`），esbuild 会把 bundle 内
+  ESM 模块的 `import.meta` 替换为空对象 `{}`，`import.meta.url` 即 `undefined`，
+  `createRequire(undefined)` 在加载时直接抛错。这与脚本里为 Claude Agent SDK
+  加 `--external:@anthropic-ai/claude-agent-sdk` 绕开的是**同一类坑**（SDK 的
+  `createRequire(import.meta.url)`），只是这次是自己的代码。
+- **修复**：删掉未使用的 `createRequire(import.meta.url)`（该 `require` 在本模块
+  从未被使用），并在文件头注释说明原因，防止后来者再加回来。
+- **预防**：
+  - 凡是被主进程 CJS bundle 收录的模块——注意 `packages/shared/src/config/index.ts`
+    这类 barrel 会把整个目录 re-export 进主进程图——**禁止模块初始化时调用
+    `createRequire(import.meta.url)` 或依赖 `import.meta.*`**。
+  - 确实需要 CJS `require` 的第三方包，照 SDK 先例用 esbuild `--external` 让其
+    以原生 ESM 加载；自有逻辑需要 `import.meta` 的下沉到 ESM 子进程
+    （pi-agent-server / session-mcp-server）。
+  - 改完可在仓库根快速自检：
+    `bun x esbuild packages/shared/src/config/index.ts --bundle --platform=node --format=cjs --outfile=/tmp/x.cjs --external:electron --external:@anthropic-ai/claude-agent-sdk && grep -n createRequire /tmp/x.cjs`
+    （无输出即安全）。
+
 ## ❌ 错误的做法（会导致更新失败）
 
 ### 错误 1：只运行构建命令

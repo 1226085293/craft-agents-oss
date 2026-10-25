@@ -81,10 +81,10 @@ function runEval(configDir: string, code: string): string {
 }
 
 describe('default context window storage', () => {
-  it('falls back to the compiled-in 128k default when config.json has no value', () => {
+  it('falls back to the compiled-in 512k default when config.json has no value', () => {
     const { configDir } = setupWorkspaceConfigDir()
     const output = runEval(configDir, "console.log(String(getDefaultContextWindow()))")
-    expect(output).toBe('131072')
+    expect(output).toBe('512000')
   })
 
   it('persists defaultContextWindow to config.json', () => {
@@ -99,7 +99,7 @@ describe('default context window storage', () => {
   it('reads the user-configured value instead of the compiled-in default', () => {
     const { configDir } = setupWorkspaceConfigDir()
     // The motivating case: a custom endpoint model without a declared window
-    // should follow the user's configured value (e.g. 256k), not 128k.
+    // should follow the user's configured value (e.g. 256k), not 512k.
     runEval(configDir, 'setDefaultContextWindow(262144)')
     const output = runEval(configDir, "console.log(String(getDefaultContextWindow()))")
     expect(output).toBe('262144')
@@ -134,7 +134,7 @@ describe('default context window storage', () => {
     config.defaultContextWindow = -1
     writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8')
 
-    expect(runEval(configDir, "console.log(String(getDefaultContextWindow()))")).toBe('131072')
+    expect(runEval(configDir, "console.log(String(getDefaultContextWindow()))")).toBe('512000')
   })
 
   it('seeds config.json on migration so the value is visible and editable', () => {
@@ -143,7 +143,7 @@ describe('default context window storage', () => {
 
     runEval(configDir, 'migrateDefaultContextWindowConfig()')
 
-    expect(JSON.parse(readFileSync(configPath, 'utf-8')).defaultContextWindow).toBe(131_072)
+    expect(JSON.parse(readFileSync(configPath, 'utf-8')).defaultContextWindow).toBe(512_000)
   })
 
   it('never overwrites an existing (user-edited) value during migration', () => {
@@ -163,6 +163,6 @@ describe('default context window storage', () => {
 
     runEval(configDir, 'migrateDefaultContextWindowConfig()')
 
-    expect(JSON.parse(readFileSync(configPath, 'utf-8')).defaultContextWindow).toBe(131_072)
+    expect(JSON.parse(readFileSync(configPath, 'utf-8')).defaultContextWindow).toBe(512_000)
   })
 })

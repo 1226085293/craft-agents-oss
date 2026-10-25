@@ -42,6 +42,16 @@ export interface WorkspaceConfig {
     model?: string;
     /** Default LLM connection for new sessions (slug). Overrides global default. */
     defaultLlmConnection?: string;
+    /**
+     * LLM gateway strategy group new sessions route through.
+     *
+     * Lives here — not in the renderer's localStorage — so it applies to every
+     * creation path: the "new session" button, scheduled automations, mobile /
+     * messaging sessions and the API. A renderer-only preference could only ever
+     * be seen by the window that set it (2026-10-25: every automation session
+     * came out with 未选择策略组 while the desktop composer picked the default).
+     */
+    strategy?: string;
     enabledSourceSlugs?: string[]; // Sources to enable by default
     permissionMode?: PermissionMode; // Default permission mode ('safe', 'ask', 'allow-all')
     cyclablePermissionModes?: PermissionMode[]; // Which modes can be cycled with SHIFT+TAB (min 2, default: all 3)

@@ -32,10 +32,6 @@ import {
 } from '../../config/storage.ts';
 // Import deprecated type for legacy migration function only
 import type { LlmConnectionType, CustomEndpointConfig } from '../../config/llm-connections.ts';
-// Import validation helpers for provider-auth combinations
-import {
-  isValidProviderAuthCombination,
-} from '../../config/llm-connections.ts';
 import { parseValidationError, type LlmValidationResult } from '../../config/llm-validation.ts';
 import type { ModelFetchResult } from '../../config/model-fetcher.ts';
 // Model resolution utilities
@@ -298,10 +294,7 @@ export function connectionAuthTypeToBackendAuthType(
   switch (authType) {
     case 'api_key':
     case 'api_key_with_endpoint':
-    case 'oauth':
     case 'bearer_token':
-    case 'iam_credentials':
-    case 'service_account_file':
       // Pass through auth types that the backend handles
       return authType;
     case 'none':
@@ -515,63 +508,6 @@ export function createConfigFromConnection(
     // Use connection's default model if no model specified in baseConfig
     model: baseConfig.model || connection.defaultModel,
   };
-}
-
-/**
- * Create backend from an LLM connection slug.
- *
- * @param connectionSlug - The LLM connection slug
- * @param baseConfig - Base backend config (workspace, session, etc.)
- * @returns An initialized AgentBackend instance
- * @throws Error if connection not found or has invalid provider-auth combination
- */
-export function createBackendFromConnection(
-  connectionSlug: string,
-  baseConfig: Omit<BackendConfig, 'provider' | 'authType'>,
-  hostRuntime?: BackendHostRuntimeContext,
-  providerOptions?: BackendProviderOptions,
-): AgentBackend {
-  const connection = getLlmConnection(connectionSlug);
-  if (!connection) {
-    throw new Error(`LLM connection not found: ${connectionSlug}`);
-  }
-
-  // Validate provider-auth combination before creating backend
-  // This catches invalid configurations early with a clear error message
-  if (!isValidProviderAuthCombination(connection.providerType, connection.authType)) {
-    throw new Error(
-      `Invalid LLM connection configuration: provider '${connection.providerType}' ` +
-      `does not support auth type '${connection.authType}'. ` +
-      `Please update the connection settings for '${connection.name}'.`
-    );
-  }
-
-  const context: ResolvedBackendContext = {
-    connection,
-    provider: providerTypeToAgentProvider(connection.providerType || 'anthropic'),
-    authType: connectionAuthTypeToBackendAuthType(connection.authType),
-    resolvedModel: resolveModelForProvider(
-      providerTypeToAgentProvider(connection.providerType || 'anthropic'),
-      baseConfig.model,
-      connection
-    ),
-    capabilities: BACKEND_CAPABILITIES[providerTypeToAgentProvider(connection.providerType || 'anthropic')],
-  };
-
-  if (hostRuntime) {
-    return createBackendFromResolvedContext({
-      context,
-      coreConfig: baseConfig,
-      hostRuntime,
-      providerOptions,
-    });
-  }
-
-  const config = createConfigFromConnection(connection, {
-    ...baseConfig,
-    model: context.resolvedModel,
-  });
-  return createBackend(config);
 }
 
 // ============================================================

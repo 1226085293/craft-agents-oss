@@ -8,11 +8,16 @@
  * Result is cached per process — restart the app to pick up an install
  * or upgrade.
  *
- * Bundling rtk in `apps/electron/resources/bin/` is a separate concern
- * (see plans/rtk-integration-path-a.md); this MVP detects only.
+ * The app also bundles rtk as a per-platform archive that is unpacked into the
+ * config dir on startup (see rtk-provisioner.ts). That provisioned binary is
+ * preferred over PATH so a user's own rtk install cannot silently shadow the
+ * version we ship and validate; PATH remains the fallback for dev and for
+ * headless runs where provisioning has not happened.
  */
 
 import { execFileSync } from 'node:child_process';
+
+import { provisionedRtkPath } from './rtk-provisioner';
 
 const REQUIRED_MIN_VERSION = { major: 0, minor: 23, patch: 0 } as const;
 
@@ -117,6 +122,11 @@ function resolveStatus(): CachedStatus {
 }
 
 function findRtkOnPath(): string | null {
+  // The provisioned binary wins: it is the one whose checksum we verified at
+  // unpack time, so it is known to be a real, runnable rtk.
+  const provisioned = provisionedRtkPath();
+  if (provisioned) return provisioned;
+
   const whichCmd = process.platform === 'win32' ? 'where' : 'which';
   try {
     const result = execFileSync(whichCmd, ['rtk'], { encoding: 'utf-8', timeout: 2000 }).trim();

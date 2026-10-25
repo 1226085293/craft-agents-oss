@@ -184,6 +184,8 @@ export async function createSession(
     sourceScope?: 'auto' | 'only' | 'exclude';
     model?: string;
     llmConnection?: string;
+    /** Gateway strategy group; persisted so a session created outside the UI still routes. */
+    strategy?: string;
     hidden?: boolean;
     sessionStatus?: SessionConfig['sessionStatus'];
     labels?: string[];
@@ -221,6 +223,7 @@ export async function createSession(
     enabledSourceSlugs: options?.enabledSourceSlugs,
     model: options?.model,
     llmConnection: options?.llmConnection,
+    strategy: options?.strategy,
     hidden: options?.hidden,
     sessionStatus: options?.sessionStatus,
     labels: options?.labels,

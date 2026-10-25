@@ -4,7 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { resolveBackendContext } from '@craft-agent/shared/agent/backend'
 import { loadWorkspaceConfig } from '@craft-agent/shared/workspaces'
-import { SessionManager, createManagedSession } from './SessionManager.ts'
+import { SessionManager, createManagedSession, gatewayRouteDeps, applyGatewayStrategy } from './SessionManager.ts'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { buildRestartRequiredSignature } from './runtime-config.ts'
 
@@ -27,6 +27,9 @@ interface AgentStub {
   dispose: () => void
   disposeForRestart?: () => Promise<void>
 }
+
+/** The group every injected session is routed through in these tests. */
+const STRATEGY_ID = 'auto'
 
 function createAgentStub(opts: {
   isProcessing?: boolean
@@ -63,7 +66,7 @@ function injectSession(
     { id, name: id, llmConnection },
     workspace as never,
     { messagesLoaded: true },
-  ) as unknown as { agent: AgentStub | null; backendRuntimeSignature?: string; backendRestartSignature?: string; isProcessing: boolean; llmConnection?: string }
+  ) as unknown as { agent: AgentStub | null; backendRuntimeSignature?: string; backendRestartSignature?: string; isProcessing: boolean; llmConnection?: string; strategy?: string }
   managed.agent = agent
   // Force a stale runtime signature so the helper's comparison always reaches
   // the refresh branch — the signature it computes from real disk config will
@@ -76,7 +79,17 @@ function injectSession(
     managed.backendRestartSignature = opts.backendRestartSignature
   } else {
     const workspaceConfig = loadWorkspaceConfig(workspaceRoot)
-    const ctx = resolveBackendContext({
+    // Same resolution the helper performs, including the gateway rewrite — the
+    // restart signature is compared against what the helper will compute, so
+    // both sides must see the routed context.
+    const routed = applyGatewayStrategy(
+      resolveBackendContext({
+        sessionConnectionSlug: llmConnection,
+        workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+      }),
+      STRATEGY_ID,
+    )
+    const ctx = routed ?? resolveBackendContext({
       sessionConnectionSlug: llmConnection,
       workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
     })
@@ -89,6 +102,9 @@ function injectSession(
   }
   managed.isProcessing = opts.isProcessing ?? false
   managed.llmConnection = llmConnection
+  // Every refresh path now needs a route; without one the helper leaves the
+  // session alone (there is no direct connection to refresh into).
+  managed.strategy = STRATEGY_ID
   ;(sm as unknown as { sessions: Map<string, unknown> }).sessions.set(id, managed)
   return managed
 }
@@ -101,6 +117,17 @@ describe('refreshConnectionRuntime', () => {
   beforeEach(() => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'sm-refresh-'))
     sm = new SessionManager()
+    // Arm a route: a session runtime is only refreshable through a strategy
+    // group now, so without one every case below would be a no-op.
+    gatewayRouteDeps.runtime = {
+      running: true,
+      enabled: true,
+      baseUrl: 'http://127.0.0.1:8799',
+      noteRouteRefusal: () => {},
+    } as never
+    gatewayRouteDeps.config = {
+      strategies: [{ id: STRATEGY_ID, type: 'round_robin', modelAliases: { 'pub-a': 'pub-a' } }],
+    } as never
     // Tests run on the developer's machine where the resolved connection (via
     // the real default-connection fallback) may carry a live API key. Pin the
     // fingerprint source to "no key" so injected pre-rotation signatures stay
@@ -110,6 +137,8 @@ describe('refreshConnectionRuntime', () => {
 
   afterEach(() => {
     keySpy.mockRestore()
+    delete gatewayRouteDeps.runtime
+    delete gatewayRouteDeps.config
     rmSync(tmpRoot, { recursive: true, force: true })
   })
 

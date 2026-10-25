@@ -193,6 +193,18 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   RPC_CHANNELS.browserPane.REMOVED,
   RPC_CHANNELS.browserPane.INTERACTED,
 
+  // pageWindow — standalone page windows. GUI-only like browserPane (no
+  // window exists headless), so they belong with it rather than in
+  // LOCAL_ONLY: the classifier only asks where a channel may be *served*.
+  RPC_CHANNELS.pageWindow.OPEN,
+  RPC_CHANNELS.pageWindow.LIST,
+  RPC_CHANNELS.pageWindow.FOCUS,
+  RPC_CHANNELS.pageWindow.CLOSE,
+  RPC_CHANNELS.pageWindow.MINIMIZE_SELF,
+  RPC_CHANNELS.pageWindow.CLOSE_SELF,
+  RPC_CHANNELS.pageWindow.STATE_CHANGED,
+  RPC_CHANNELS.pageWindow.REMOVED,
+
   // gitbash — Windows-specific local
   RPC_CHANNELS.gitbash.CHECK,
   RPC_CHANNELS.gitbash.BROWSE,
@@ -315,27 +327,22 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.llmConnections.ADD_CUSTOM_MODEL,
   RPC_CHANNELS.llmConnections.UPDATE_MODEL_ENABLED,
 
-  // chatgpt — OAuth via capability passthrough
-  RPC_CHANNELS.chatgpt.START_OAUTH,
-  RPC_CHANNELS.chatgpt.COMPLETE_OAUTH,
-  RPC_CHANNELS.chatgpt.CANCEL_OAUTH,
-  RPC_CHANNELS.chatgpt.GET_AUTH_STATUS,
-  RPC_CHANNELS.chatgpt.LOGOUT,
+  // llmGateway — the in-process gateway lives in the server process and owns
+  // llm-config.json, so its reads and writes must be routed there too.
+  RPC_CHANNELS.llmGateway.GET_STATUS,
+  RPC_CHANNELS.llmGateway.GET_CONFIG,
+  RPC_CHANNELS.llmGateway.GET_USAGE,
+  RPC_CHANNELS.llmGateway.QUERY_LOGS,
+  RPC_CHANNELS.llmGateway.GET_PROVIDER_DETAIL,
+  RPC_CHANNELS.llmGateway.SAVE_CONFIG,
+  RPC_CHANNELS.llmGateway.CLEAR_KEY_COOLDOWN,
+  RPC_CHANNELS.llmGateway.TEST_CONNECTION,
+  RPC_CHANNELS.llmGateway.LIST_MODELS,
+  // The status push is server→client, so it is classified alongside the
+  // request channels rather than left unclassified.
+  RPC_CHANNELS.llmGateway.STATUS,
 
-  // copilot — OAuth via capability passthrough
-  RPC_CHANNELS.copilot.START_OAUTH,
-  RPC_CHANNELS.copilot.CANCEL_OAUTH,
-  RPC_CHANNELS.copilot.GET_AUTH_STATUS,
-  RPC_CHANNELS.copilot.LOGOUT,
-  RPC_CHANNELS.copilot.DEVICE_CODE,
 
-  // Claude OAuth — runs on workspace server so credentials and connection config
-  // end up on the same server that will use them. Browser opening is client-side.
-  // (ChatGPT OAuth stays LOCAL_ONLY — requires localhost callback server.)
-  RPC_CHANNELS.onboarding.START_CLAUDE_OAUTH,
-  RPC_CHANNELS.onboarding.EXCHANGE_CLAUDE_CODE,
-  RPC_CHANNELS.onboarding.HAS_CLAUDE_OAUTH_STATE,
-  RPC_CHANNELS.onboarding.CLEAR_CLAUDE_OAUTH_STATE,
 
   // settings — workspace-level settings
   RPC_CHANNELS.settings.SETUP_LLM_CONNECTION,

@@ -95,7 +95,7 @@ function runInIsolatedConfig(baseUrl: string, script: string): { ok: boolean; ou
       `process.env.CRAFT_CONFIG_DIR = cfgDir;`,
       // The eval script runs with CWD = the server-core package root, so the
       // relative specifiers below resolve against the real source tree.
-      `const { SessionManager, createManagedSession } = require('./src/sessions/SessionManager.ts');`,
+      `const { SessionManager, createManagedSession, gatewayRouteDeps, applyGatewayStrategy } = require('./src/sessions/SessionManager.ts');`,
       `const { resolveBackendContext } = require('@craft-agent/shared/agent/backend');`,
       `const { buildRestartRequiredSignature, buildBackendRuntimeSignature } = require('./src/sessions/runtime-config.ts');`,
     ].join('\n')
@@ -198,21 +198,26 @@ describe('stale endpoint drift forces backend recreate (261014-misty-wren)', () 
     expect(liveSig).not.toBe(staleSig)
   })
 
-  it('a baseUrl-only drift routes through dispose, not the in-place refresh path', () => {
-    // Full SessionManager path, isolating `baseUrl` as the ONLY drift:
+  it('a connection endpoint change does not recreate the session — the gateway owns upstream URLs', () => {
+    // SUPERSEDED BY ROUTING. This used to assert dispose + recreate: the
+    // session held the upstream URL itself, so repointing the connection left
+    // the live subprocess hammering a dead port (261014-misty-wren).
     //
-    //   1. Boot with config pointing at the DEAD endpoint and capture BOTH
-    //      signatures from that real config (no sentinels — a sentinel makes
-    //      the test pass for the wrong reason, e.g. any unrelated field
-    //      change would satisfy it).
-    //   2. Rewrite config.json on disk to the LIVE endpoint, mid-process.
-    //   3. Run refreshConnectionRuntime and assert dispose + recreate.
-    //
-    // Before the fix this took the in-place branch: `update_runtime_config`
-    // re-registered the provider URL, but the live session kept resolving the
-    // old one, so the session kept hitting the dead port.
+    // A routed session talks to the gateway, and its connection is rewritten to
+    // the strategy endpoint, so the upstream URL is no longer part of what the
+    // session holds. An endpoint edit therefore changes nothing the session can
+    // drift on — the gateway's own provider health and circuit breaker own that
+    // failure mode now. The signature test above still pins that `baseUrl` is
+    // part of the restart signature (a gateway/strategy change must still
+    // recreate), which is what keeps this from silently regressing.
     const script = `
       const sm = new SessionManager();
+      gatewayRouteDeps.runtime = {
+        running: true, enabled: true, baseUrl: 'http://127.0.0.1:8799', noteRouteRefusal: () => {},
+      };
+      gatewayRouteDeps.config = {
+        strategies: [{ id: 'auto', type: 'round_robin', modelAliases: { 'pub-a': 'pub-a' } }],
+      };
       const calls = { updateRuntimeConfig: 0, disposed: false };
       const agent = {
         isProcessing: () => false,
@@ -226,29 +231,30 @@ describe('stale endpoint drift forces backend recreate (261014-misty-wren)', () 
       );
       managed.agent = agent;
       managed.isProcessing = false;
+      managed.strategy = 'auto';
 
-      // Step 1 - capture both signatures from the CURRENT (dead) config.
-      const ctxDead = resolveBackendContext({ sessionConnectionSlug: '${SLUG}' });
+      // Step 1 - capture both signatures from the ROUTED context, which is what
+      // the refresh will compare against.
+      const rawCtx = resolveBackendContext({ sessionConnectionSlug: '${SLUG}' });
+      const ctx = applyGatewayStrategy(rawCtx, 'auto');
       const sigArgs = {
-        connection: ctxDead.connection,
-        provider: ctxDead.provider,
-        authType: ctxDead.authType,
-        resolvedModel: ctxDead.resolvedModel,
+        connection: ctx.connection,
+        provider: ctx.provider,
+        authType: ctx.authType,
+        resolvedModel: ctx.resolvedModel,
       };
       managed.backendRestartSignature = buildRestartRequiredSignature(sigArgs);
-      // Also capture the runtime signature from the same dead config, so
-      // baseUrl is the only field that can drift in step 2.
       managed.backendRuntimeSignature = buildBackendRuntimeSignature(sigArgs);
       sm.sessions.set('drift', managed);
 
-      // Step 2 - repoint config.json at the live endpoint, mid-process.
+      // Step 2 - repoint the upstream endpoint, mid-process.
       const fs = require('fs');
       const path = require('path');
       const live = JSON.parse(fs.readFileSync(path.join(cfgDir, 'config.json'), 'utf-8'));
       live.llmConnections[0].baseUrl = '${BASE_URL_B}';
       fs.writeFileSync(path.join(cfgDir, 'config.json'), JSON.stringify(live));
 
-      // Step 3 - the refresh must notice ONLY the baseUrl drift and recreate.
+      // Step 3 - nothing the session holds has drifted, so nothing is touched.
       await sm.refreshConnectionRuntime('${SLUG}');
 
       console.log(JSON.stringify({
@@ -262,8 +268,8 @@ describe('stale endpoint drift forces backend recreate (261014-misty-wren)', () 
     expect(res.ok, res.out).toBe(true)
     const result = JSON.parse(res.out.trim().split('\n').at(-1)!)
     expect(result.updateRuntimeConfig).toBe(0)
-    expect(result.disposed).toBe(true)
-    expect(result.agentIsNull).toBe(true)
+    expect(result.disposed).toBe(false)
+    expect(result.agentIsNull).toBe(false)
   })
   it('an unchanged baseUrl does not force recreate (no spurious restarts)', () => {
     const script = `

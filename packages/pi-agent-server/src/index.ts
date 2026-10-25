@@ -17,7 +17,7 @@
 import http from 'node:http';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
-import { appendFileSync, mkdirSync, readdirSync, statSync, existsSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { execSync } from 'node:child_process';
 
@@ -69,6 +69,7 @@ import { registerBunOAuthFlows } from '@earendil-works/pi-ai/bun-oauth';
 registerBunOAuthFlows();
 
 // Model resolution (extracted for testability + custom-endpoint precedence)
+import { findMostRecentSessionFile, shouldForkBranch } from './branch-fork.ts';
 import { resolvePiModel, isDeniedMiniModelId, isModelNotFoundError } from './model-resolution.ts';
 import { pickProviderAppropriateMiniModel } from './pick-mini-model.ts';
 // Retry-step classification (2026-10-13): pure whitelist + busy-detector
@@ -112,10 +113,12 @@ import { PI_TOOL_NAME_MAP, THINKING_TO_PI } from '../../shared/src/agent/backend
 import { createCompactionProgressHeartbeat } from './compaction-progress.ts';
 import {
   findLastCompactionRecord,
+  synthCompactionStats,
   translateAlreadyCompacted,
   waitForCompaction,
 } from './compaction-policy.ts';
 import { getDefaultSummarizationModel } from '../../shared/src/config/models.ts';
+import { MODEL_KIND_HEADER, MODEL_KIND_OVERRIDE_HEADER, SESSION_HEADER } from '../../shared/src/config/model-request-kind.ts';
 import { createWebFetchTool } from './tools/web-fetch.ts';
 import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
 import { createSearchTool } from './tools/search/create-search-tool.ts';
@@ -127,7 +130,7 @@ import { adaptCredentialForPiSdk, type PiCredential } from './adapt-credential.t
 import { DefenseEvaluator, resolveDefenseEnabled, buildDefenseStopNotice } from './defense/index.ts';
 import { detectRepetitionLoop, extractAssistantText, selectVerificationCandidateText } from './defense/repetition-detector.ts';
 import { createDsmlSanitizerExtension } from './defense/dsml-sanitizer.ts';
-import { createContextReliefExtension } from './defense/context-relief.ts';
+import { createContextReliefExtension, type ContextReliefDeps } from './defense/context-relief.ts';
 import { installDsmlReceiver } from './dsml-receiver.ts';
 import { drainQueuedFollowUp } from './defense/resume-followup.ts';
 import { runVerificationJudge } from './defense/verification-judge.ts';
@@ -166,6 +169,11 @@ interface InitMessage {
   plansFolderPath: string;
   shellPath?: string;
   miniModel?: string;
+  /**
+   * What this backend exists to do ('chat', 'title', …). Sent to the gateway as
+   * a request header so its usage log can attribute the call to a feature.
+   */
+  requestKind?: string;
   agentDir?: string;
   providerType?: string;
   authType?: string;
@@ -245,7 +253,7 @@ type InboundMessage =
   | { type: 'tool_execute_response'; requestId: string; result: { content: string; isError: boolean } }
   | { type: 'pre_tool_use_response'; requestId: string; action: 'allow' | 'block' | 'modify'; input?: Record<string, unknown>; reason?: string }
   | { type: 'abort' }
-  | { type: 'mini_completion'; id: string; prompt: string }
+  | { type: 'mini_completion'; id: string; prompt: string; kind?: string }
   | { type: 'llm_query'; id: string; request: LLMQueryRequest }
   | { type: 'cancel_ephemeral_query'; id: string }
   | { type: 'ensure_session_ready'; id: string }
@@ -437,6 +445,14 @@ type OutboundMessage =
 // ============================================================
 
 let piSession: AgentSession | null = null;
+
+/**
+ * Shared deps of the context-relief extension (created alongside the Pi
+ * session). Held here so the compact result path can read the
+ * retained-region measurement the `session_before_compact` hook took,
+ * and report an exact `retained` for the SDK's LLM compaction too.
+ */
+let contextReliefDeps: ContextReliefDeps | undefined;
 let restoreDsmlReceiver: (() => void) | null = null;
 let piModelRegistry: PiModelRegistry | null = null;
 let moduleCredentialStore: InMemoryCredentialStore | null = null;
@@ -479,6 +495,12 @@ let verifyAttemptCount = 0;
 // re-emits BYTE-IDENTICAL text, further judging cannot change the outcome —
 // deliver it and leave an explicit "content stabilized" process row.
 let lastVerifiedFinalText: string | null = null;
+// The most recent verification rejection (type + judge's reason). Consumed by
+// the NEXT post-stop evaluation so buildResumeMessage can quote it and the
+// repair round knows what to fix instead of blindly re-emitting the rejected
+// answer (2026-10-20 tidy-willow). Cleared on a new user prompt and on PASS,
+// so a stale rejection is never attributed to the wrong round.
+let lastVerificationFailure: { failType?: string; reason?: string } | null = null;
 
 // Pending promises for async handshakes
 const pendingPreToolUse = new Map<string, { resolve: (response: { action: string; input?: Record<string, unknown>; reason?: string }) => void }>();
@@ -626,21 +648,6 @@ function debugLog(message: string): void {
   }
 }
 
-/** Find the most recent .jsonl session file in a directory. */
-function findMostRecentSessionFile(sessionDir: string): string | null {
-  if (!existsSync(sessionDir)) return null;
-  let best: { path: string; mtime: number } | null = null;
-  for (const entry of readdirSync(sessionDir)) {
-    if (!entry.endsWith('.jsonl')) continue;
-    const fullPath = join(sessionDir, entry);
-    const mtime = statSync(fullPath).mtimeMs;
-    if (!best || mtime > best.mtime) {
-      best = { path: fullPath, mtime };
-    }
-  }
-  return best?.path ?? null;
-}
-
 // ============================================================
 // Defense Management
 // ============================================================
@@ -730,6 +737,8 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
     hasFinalText: boolean;
     stopReason?: string;
     stallAborted?: boolean;
+    /** Previous verification round's rejection, injected by the caller. */
+    verificationFailure?: { failType?: string; reason?: string };
   } | undefined;
   let stallKillThisRun = false;
   let lastAssistant: { content?: unknown; stopReason?: string; usage?: { output?: number } } | null = null;
@@ -833,6 +842,9 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
       aborted,
       endsWithEmptyResponse,
       hasRepetitionLoop,
+      // Set before evaluate() when the previous verification round rejected
+      // the reply (2026-10-20 tidy-willow). Consumed by buildResumeMessage.
+      verificationFailure: undefined as { failType?: string; reason?: string } | undefined,
       truncatedFinal,
       stallAborted: stallKillThisRun,
     };
@@ -875,6 +887,25 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
   }
 
   try {
+    // Feed the PREVIOUS round's verdict into this evaluation (2026-10-20
+    // tidy-willow): buildResumeMessage must quote the judge's reason so the
+    // repair round knows what to fix. Without this the resume says only
+    // "does not correspond" and the model re-emits the same text.
+    if (runOutput) {
+      if (lastVerificationFailure) {
+        runOutput.verificationFailure = lastVerificationFailure;
+      }
+    } else {
+      runOutput = {
+        hasVisibleText: false,
+        aborted: false,
+        endsWithEmptyResponse: false,
+        hasRepetitionLoop: false,
+        truncatedFinal: false,
+        hasFinalText: false,
+        ...(lastVerificationFailure ? { verificationFailure: lastVerificationFailure } : {}),
+      };
+    }
     const result = defenseEvaluator.evaluate(runOutput);
     debugLog(
       `[defense] Post-stop result: state=${result.state} evaluated=${result.evaluated} shouldResume=${result.shouldResume}` +
@@ -1024,7 +1055,7 @@ async function doVerificationCheck(
     // it judges the reply that the session model produced, so a weaker model
     // can misjudge. initConfig.model is the session's current model (kept
     // current across hot model switches via update_runtime_config).
-    runAttempt: (p) => runMiniCompletion(p, initConfig?.model),
+    runAttempt: (p) => runMiniCompletion(p, initConfig?.model, 'verification'),
     onSkip: (attempt, totalAttempts, reason) => {
       debugLog(`[defense] verification judge attempt ${attempt}/${totalAttempts} unavailable (${reason}) — retrying`);
       send({ type: 'verification_skip', attempt, totalAttempts, reason });
@@ -1058,6 +1089,11 @@ async function doVerificationCheck(
       passed: true,
       finalText,
       failReason: 'content stabilized — retrying cannot change the outcome',
+      // Carry the attempt so the UI can place the stop-loss row as its own
+      // verdict instead of overwriting the latest failed row (2026-10-20
+      // tidy-willow: this pass used to carry no attempt and the UI's
+      // no-attempt fallback matched the FIRST verification row).
+      attempt: verifyAttemptCount,
     });
     return;
   }
@@ -1065,7 +1101,10 @@ async function doVerificationCheck(
 
   if (parsed.pass) {
     debugLog(`[defense] verification PASSED (${verifyReason ?? 'none'}): replaying ${finalText.length} chars`);
-    send({ type: 'verification_result', passed: true, finalText });
+    // The reply was accepted — a pending rejection must not leak into a
+    // later round's resume message (2026-10-20 tidy-willow).
+    lastVerificationFailure = null;
+    send({ type: 'verification_result', passed: true, finalText, attempt: verifyAttemptCount });
     return;
   }
 
@@ -1082,6 +1121,10 @@ async function doVerificationCheck(
     attempt: verifyAttemptCount,
   });
   debugLog(`[defense] verification FAILED (type=${parsed.pass ? '-' : parsed.type}, reason=${parsed.pass ? '-' : parsed.reason.slice(0, 120)}) (attempt ${verifyAttemptCount}) — following up`);
+  // Remember the rejection so the follow-up resume carries it (2026-10-20
+  // tidy-willow): the model must see what the judge objected to, otherwise it
+  // re-emits the same answer and the cycle repeats.
+  lastVerificationFailure = { failType: parsed.pass ? undefined : parsed.type, reason: parsed.pass ? '' : parsed.reason };
   send({
     type: 'verification_result',
     passed: false,
@@ -1350,6 +1393,20 @@ function registerCustomEndpointModels(
     apiKey: resolveCustomEndpointApiKey(),
     api,
     authHeader: true,
+    // Attribution, not authentication: the gateway stamps this onto the usage
+    // row so the log can say which feature made the request. Registered per
+    // provider rather than per request because the SDK exposes no per-request
+    // header hook, and each backend process serves exactly one kind.
+    ...(initConfig && (initConfig.requestKind || initConfig.sessionId)
+      ? {
+          headers: {
+            ...(initConfig.requestKind ? { [MODEL_KIND_HEADER]: initConfig.requestKind } : {}),
+            // The gateway needs the Craft session id to attribute a key/model
+            // switch to the right conversation. Never forwarded upstream.
+            ...(initConfig.sessionId ? { [SESSION_HEADER]: initConfig.sessionId } : {}),
+          },
+        }
+      : {}),
     models: allIds.map(id => buildCustomEndpointModelDef(
       id,
       connectionDefaults,
@@ -1670,7 +1727,7 @@ async function createPiSession(): Promise<AgentSession> {
     const sessionDir = join(initConfig.sessionPath, '.pi-sessions');
     mkdirSync(sessionDir, { recursive: true });
 
-    if (initConfig.branchFromSessionPath) {
+    if (initConfig.branchFromSessionPath && shouldForkBranch(sessionDir)) {
       // Branching: fork from the parent session's Pi session file.
       // Branches must not silently degrade to fresh sessions.
       const parentPiSessionDir = join(initConfig.branchFromSessionPath, '.pi-sessions');
@@ -1696,28 +1753,36 @@ async function createPiSession(): Promise<AgentSession> {
 
       sessionOptions.sessionManager = forkedSessionManager;
     } else {
+      if (initConfig.branchFromSessionPath) {
+        // The one-shot fork already happened (this branch owns a Pi session).
+        // Re-forking here would copy the parent's LIVE transcript — including
+        // turns made after the branch point — into this branch.
+        debugLog('Branch already materialized; resuming own Pi session instead of re-forking parent');
+      }
       sessionOptions.sessionManager = PiSessionManager.continueRecent(cwd, sessionDir);
     }
 
     // Sanitize residual DSML text after the network receiver converts leaked
     // content into native toolCall blocks. This extension never executes tools.
+    //
+    // The relief deps object is SHARED (not inlined) so the compact result
+    // path can read the retained-region measurement the hook took during
+    // session_before_compact. That is what lets the SDK's own LLM compaction
+    // report an exact `retained` instead of guessing from a floor.
+    contextReliefDeps = {
+      sessionPath: initConfig.sessionPath,
+      debugLog,
+      // Read per event (not captured): a mid-session model switch changes
+      // the window, and the threshold is window-relative.
+      contextWindow: () => piSession?.agent.state.model?.contextWindow ?? 0,
+    };
     const resourceLoader = new DefaultResourceLoader({
       cwd,
       agentDir: sessionOptions.agentDir!,
       settingsManager: sessionOptions.settingsManager,
       extensionFactories: [
         createDsmlSanitizerExtension({ debugLog }),
-        // Context relief: supplies a no-LLM compaction checkpoint from the
-        // turn-log archives for BOTH manual /compact and auto compaction, so
-        // the expensive LLM summarization only runs when relief can't get the
-        // post-relief context under 10% of the live model window.
-        createContextReliefExtension({
-          sessionPath: initConfig.sessionPath,
-          debugLog,
-          // Read per event (not captured): a mid-session model switch changes
-          // the window, and the threshold is window-relative.
-          contextWindow: () => piSession?.agent.state.model?.contextWindow ?? 0,
-        }),
+        createContextReliefExtension(contextReliefDeps),
       ],
     });
     await resourceLoader.reload();
@@ -2282,6 +2347,15 @@ async function queryLlm(
       );
     }
 
+    // Attribution for this one call. The provider header describes the whole
+    // process (a session is `chat`); a `call_llm` or judge request made from
+    // inside that process would otherwise be indistinguishable from the
+    // conversation. The model object is per-call, so it carries the override
+    // through to the wire without touching provider registration.
+    const wireModel = request.kind
+      ? { ...piModel, headers: { ...piModel.headers, [MODEL_KIND_OVERRIDE_HEADER]: request.kind } }
+      : piModel
+
     // Create minimal ephemeral session
     const ephemeralOptions: CreateAgentSessionOptions = {
       cwd: resolvedCwd(),
@@ -2289,7 +2363,7 @@ async function queryLlm(
       tools: [],
       sessionManager: PiSessionManager.inMemory(),
       settingsManager: createCraftSettingsManager('ephemeral'),
-      model: piModel,
+      model: wireModel,
     };
 
     const { session: ephemeralSession } = await createAgentSession(ephemeralOptions);
@@ -2452,14 +2526,22 @@ async function preExecuteCallLlm(input: Record<string, unknown>): Promise<LLMQue
     ? getSessionPath(initConfig.workspaceRootPath, initConfig.sessionId)
     : undefined;
   const request = await buildCallLlmRequest(input, { backendName: 'Pi', sessionPath });
-  return runEphemeralLlmQuery(nextLocalEphemeralQueryId('callback'), request);
+  return runEphemeralLlmQuery(nextLocalEphemeralQueryId('callback'), {
+    ...request,
+    kind: 'call_llm',
+  });
 }
 
-async function runMiniCompletion(prompt: string, model?: string): Promise<string | null> {
+async function runMiniCompletion(
+  prompt: string,
+  model?: string,
+  /** Attribution for this call; omitted for summaries, which are `chat` work. */
+  kind?: string,
+): Promise<string | null> {
   try {
     const result = await runEphemeralLlmQuery(
       nextLocalEphemeralQueryId('summary'),
-      { prompt, ...(model ? { model } : {}) },
+      { prompt, ...(model ? { model } : {}), ...(kind ? { kind } : {}) },
     );
     const text = result.text || null;
     debugLog(`[runMiniCompletion] Result: ${text ? `"${text.slice(0, 200)}"` : 'null'}`);
@@ -2862,11 +2944,19 @@ function handleSessionEvent(event: AgentSessionEvent): void {
         debugLog(`[defense] agent_end: evaluation error surfaced to retry ladder — ${defenseResult.defenseError}`);
       } else if (defenseResult.verifyRequired) {
         // A NEW verification cycle starts here (one per user turn; follow-up
-        // resumes inside it share the cycle). Reset the attempt counter and
-        // the stability baseline so UI rows and the content-stabilized
-        // stop-loss are scoped to this cycle.
-        verifyAttemptCount = 0;
-        lastVerifiedFinalText = null;
+        // resumes inside it share the cycle).
+        //
+        // Do NOT reset `verifyAttemptCount` or `lastVerifiedFinalText` here
+        // (2026-10-19/20 tidy-willow): a follow-up resume re-enters this
+        // branch on EVERY retry. Clearing the attempt counter made every
+        // round report attempt=1 (261018-noble-shoal real transcript: all
+        // ten failures across six cycles carried attempt 1) so the UI
+        // collapsed rounds 2..N into one row; clearing the stability
+        // baseline made the content-stabilized stop-loss unreachable — the
+        // model re-emitted byte-identical text (1734 chars) six times in a
+        // row and each round re-judged + re-followed-up forever. BOTH are
+        // scoped to the USER turn and are reset in handlePrompt() where a
+        // genuinely new request arrives.
         // Verification-class (2026-10-02 user-approved redesign): the turn
         // did NOT stop on a fault — it either wrote without read-back or hit
         // the forced long-turn threshold. The captured final reply is a
@@ -3118,6 +3208,19 @@ function disposeSessionForToolChanges(where: string): void {
 async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): Promise<void> {
 
   currentUserMessage = msg.message;
+  // A NEW user request starts a fresh verification cycle. Clear the attempt
+  // counter and the content-stability baseline here so BOTH are scoped to
+  // ONE user turn: the counter numbers the verification rounds WITHIN the
+  // turn (UI renders one row per round), and a byte-identical reply can only
+  // trigger the stop-loss as a repeated answer to the SAME request, never
+  // across two different requests (2026-10-19/20 tidy-willow). Follow-up
+  // resumes go through session.followUp(), NOT this handler, so they share
+  // the same turn-scoped counter.
+  verifyAttemptCount = 0;
+  lastVerifiedFinalText = null;
+  // A new request invalidates any pending rejection: the next resume belongs
+  // to this request, not the previous one (2026-10-20 tidy-willow).
+  lastVerificationFailure = null;
 
   try {
     // If proxy tools changed since last session creation, dispose and recreate.
@@ -3620,6 +3723,7 @@ async function shouldInterruptActiveToolForGuidance(
         `Elapsed seconds: ${Math.round((Date.now() - active.startedAt) / 1000)}`,
         `User guidance: ${guidance}`,
       ].join('\n'),
+      kind: 'steer_check',
     });
 
     const raw = result.text.trim();
@@ -3640,7 +3744,12 @@ async function handleMiniCompletion(msg: Extract<InboundMessage, { type: 'mini_c
   // as 'error' messages instead of being swallowed and returned as null.
   // runMiniCompletion is kept for the summarize callback where null is acceptable.
   try {
-    const result = await runEphemeralLlmQuery(msg.id, { prompt: msg.prompt });
+    // `kind` attributes the call in the gateway log. Omitted for plain
+    // summaries, which are `chat` work; memory extraction passes `memory`.
+    const result = await runEphemeralLlmQuery(msg.id, {
+      prompt: msg.prompt,
+      ...(msg.kind ? { kind: msg.kind } : {}),
+    });
     send({ type: 'mini_completion_result', id: msg.id, text: result.text || null });
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
@@ -3726,6 +3835,26 @@ async function handleCompact(msg: Extract<InboundMessage, { type: 'compact' }>):
     try {
       debugLog(`[compact] invoking session.compact (isCompacting=${session.isCompacting} isIdle=${session.isIdle})`);
       const result = await session.compact(msg.customInstructions);
+      // Token accounting for the UI line
+      //   "压缩完成：约 A → B（保留 R，压缩 S）"
+      // The relief path ships exact numbers in details.reliefStats. The SDK's
+      // own LLM path returns `details = { readFiles, modifiedFiles }` with no
+      // slot, so synthesize the same shape here from the REAL before/after the
+      // SDK just computed (2026-10-18: previously stats was undefined here and
+      // PiAgent's fallback left `retained` at 0, rendering
+      // "约403.6k→0.6k (保留0.0k, 压缩403.6k)").
+      // keepRecent floor comes from the same settings the SDK applied to
+      // this session (see applyResilienceSettings).
+      const keepRecent = craftCompactionSettings(
+        (session as unknown as { agent?: { state?: { model?: { contextWindow?: number } } } })
+          ?.agent?.state?.model?.contextWindow,
+      ).keepRecentTokens;
+      // The relief hook measured the kept region from the real branch entries
+      // during session_before_compact, on BOTH paths. Reuse it so the SDK's
+      // own compaction reports the same exact `retained` instead of a floor.
+      const measured = contextReliefDeps?.lastRetainedMeasurement;
+      const reliefStats = (result.details as { reliefStats?: unknown } | undefined)?.reliefStats
+        ?? synthCompactionStats(result, keepRecent, measured?.retained);
       sendResult({
         success: true,
         result: {
@@ -3733,10 +3862,9 @@ async function handleCompact(msg: Extract<InboundMessage, { type: 'compact' }>):
           firstKeptEntryId: result.firstKeptEntryId,
           tokensBefore: result.tokensBefore,
           estimatedTokensAfter: result.estimatedTokensAfter,
-          // Machine-readable relief stats (present only when the extension
-          // produced this compaction) so the UI can render
+          // Machine-readable relief stats so the UI can render
           //   压缩完成：约 A → B（保留 R，压缩 S）
-          stats: (result.details as { reliefStats?: unknown } | undefined)?.reliefStats,
+          stats: reliefStats,
         },
       });
     } catch (error) {

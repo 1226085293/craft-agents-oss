@@ -114,25 +114,17 @@ export const anthropicDriver: ProviderDriver = {
     };
   },
   validateStoredConnection: async ({ slug, connection, credentialManager }) => {
-    // After legacy migration, only direct 'anthropic' connections reach this driver.
-
-    if (connection.providerType === 'anthropic' && connection.authType === 'oauth') {
-      const { getValidClaudeOAuthToken } = await import('../../../../auth/state.ts');
-      const tokenResult = await getValidClaudeOAuthToken(slug);
-      if (!tokenResult.accessToken) {
-        const errorMsg = tokenResult.migrationRequired?.message || 'OAuth token expired. Please re-authenticate.';
-        return { success: false, error: errorMsg };
-      }
-      return { success: true };
-    }
-
+    // Only API-key and environment auth remain: OAuth connections were removed,
+    // so an 'oauth' authType is now a stale config entry rather than a path.
+    // `bearerToken` holds the value for bearer_token auth — the name is kept
+    // because validateAnthropicConnection's parameter is spelled that way.
     let apiKey: string | null = null;
-    let oauthToken: string | null = null;
+    let bearerToken: string | null = null;
 
     if (connection.authType === 'api_key' || connection.authType === 'api_key_with_endpoint') {
       apiKey = await credentialManager.getLlmApiKey(slug);
     } else if (connection.authType === 'bearer_token') {
-      oauthToken = await credentialManager.getLlmApiKey(slug);
+      bearerToken = await credentialManager.getLlmApiKey(slug);
     } else if (connection.authType === 'environment') {
       apiKey = process.env.ANTHROPIC_API_KEY || null;
       if (!apiKey) {
@@ -142,7 +134,7 @@ export const anthropicDriver: ProviderDriver = {
       apiKey = 'ollama';
     }
 
-    if (!apiKey && !oauthToken && connection.authType !== 'none') {
+    if (!apiKey && !bearerToken && connection.authType !== 'none') {
       return { success: false, error: 'Could not retrieve credentials' };
     }
 
@@ -150,7 +142,7 @@ export const anthropicDriver: ProviderDriver = {
     const validationResult = await validateAnthropicConnection({
       model: testModel,
       apiKey: apiKey || undefined,
-      oauthToken: oauthToken || undefined,
+      oauthToken: bearerToken || undefined,
       baseUrl: connection.baseUrl || undefined,
     });
 

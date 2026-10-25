@@ -139,8 +139,25 @@ interface ChatDisplayProps {
   onOpenFile: (path: string, sessionId?: string) => void
   onOpenUrl: (url: string) => void
   // Model selection
+  /**
+   * The model this session is actually on. Read-only in the composer now:
+   * routing is a strategy choice and the gateway decides the model, so this is
+   * displayed rather than picked.
+   */
   currentModel: string
-  onModelChange: (model: string, connection?: string) => void
+  /**
+   * Gateway strategy groups, as the composer offers them. Absent means the
+   * gateway surface is not loaded (older main process) — the composer then
+   * shows why it cannot pick rather than an empty list.
+   */
+  gatewayStrategies?: import('./input/StrategySelector').StrategyOption[]
+  /** Selected strategy id for this session; empty = none picked yet. */
+  effectiveStrategyId?: string
+  /** Callback when the user picks a different strategy group. */
+  onStrategyChange?: (strategyId: string) => void
+  /** Why strategies cannot be chosen, when they cannot be. */
+  strategyUnavailable?: string | null
+  strategyBlockedReason?: string | null
   // Connection selection (locked after first message)
   /** Callback when LLM connection changes (only works when session is empty) */
   onConnectionChange?: (connectionSlug: string) => void
@@ -508,7 +525,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   onOpenFile,
   onOpenUrl,
   currentModel,
-  onModelChange,
+  gatewayStrategies,
+  effectiveStrategyId,
+  onStrategyChange,
+  strategyUnavailable,
+  strategyBlockedReason,
   onConnectionChange,
   textareaRef: externalTextareaRef,
   disabled = false,
@@ -2504,7 +2525,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
               onStop: handleStop,
               textareaRef,
               currentModel,
-              onModelChange,
+              gatewayStrategies,
+              effectiveStrategyId,
+              onStrategyChange,
+              strategyUnavailable,
+              strategyBlockedReason,
               thinkingLevel,
               onThinkingLevelChange,
               enabledModes,

@@ -27,7 +27,7 @@ import type {
 } from '../../shared/types'
 import type { SessionStatus as SessionStatusConfig } from '@/config/session-status-config'
 import type { SessionOptions, SessionOptionUpdates } from '../hooks/useSessionOptions'
-import { defaultSessionOptions } from '../hooks/useSessionOptions'
+import { defaultSessionOptions, readDefaultStrategy } from '../hooks/useSessionOptions'
 import { sessionAtomFamily } from '../atoms/sessions'
 
 export interface AppShellContextType {
@@ -258,7 +258,16 @@ export function useSessionOptionsFor(sessionId: string): {
 } {
   const { sessionOptions, onSessionOptionsChange, workspaceDefaultSessionOptions } = useAppShellContext()
 
-  const options = sessionOptions.get(sessionId) ?? workspaceDefaultSessionOptions ?? defaultSessionOptions
+  const options = React.useMemo<SessionOptions>(() => {
+    // A brand-new session has no entry yet; the workspace defaults carry only
+    // permission/thinking, so the routing policy falls through to the user's
+    // default preference. Resolve it here (not at module load) or a default set
+    // in Settings would not reach any session created without a reload.
+    const base = sessionOptions.get(sessionId) ?? workspaceDefaultSessionOptions
+    const merged: SessionOptions = { ...defaultSessionOptions, ...(base ?? {}) }
+    if (merged.strategy === undefined) merged.strategy = readDefaultStrategy()
+    return merged
+  }, [sessionId, sessionOptions, workspaceDefaultSessionOptions])
 
   const setOption = useCallback(<K extends keyof SessionOptions>(
     key: K,

@@ -1375,7 +1375,12 @@ ${formattedMessages}
       };
 
       const result = await extractMemories(input, sessionStore, {
-        runMiniCompletion: this.runMiniCompletion.bind(this),
+        // Extraction runs on the session's own agent, so its calls would
+        // inherit the session's `chat` kind and read as conversation traffic in
+        // the gateway log (and be charged to the session's quota). Tagging them
+        // `memory` is what makes the log say 记忆 — the same fix the dedicated
+        // consolidation backend got.
+        runMiniCompletion: (prompt: string) => this.runMiniCompletion(prompt, 'memory'),
         existingEntries: sessionStore.entries,
         semanticDedup: this._memoryConfig.semanticDedup,
         // V3: adjudication pipeline sees the whole global store (§4); the
@@ -1532,9 +1537,13 @@ ${formattedMessages}
    * Each backend implements using its own SDK (Claude SDK query() or Codex app-server).
    *
    * @param prompt - The prompt to send
+   * @param kind - Attribution for the gateway log (`memory`, `verification`, …).
+   *               Omit for work that is `chat`-shaped; a call made inside a
+   *               session without it inherits the session's kind and the log
+   *               cannot tell background work from the conversation.
    * @returns The model's response text, or null if completion fails
    */
-  abstract runMiniCompletion(prompt: string): Promise<string | null>;
+  abstract runMiniCompletion(prompt: string, kind?: string): Promise<string | null>;
 
   /**
    * Execute an LLM query using the agent's auth infrastructure.

@@ -136,6 +136,7 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
       localMcpEnabled: config?.localMcpServers?.enabled ?? true,
       defaultLlmConnection: config?.defaults?.defaultLlmConnection,
       enabledSourceSlugs: config?.defaults?.enabledSourceSlugs ?? [],
+      strategy: config?.defaults?.strategy ?? '',
     }
   })
 
@@ -147,9 +148,21 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
       : value
 
     // Validate key is a known workspace setting
-    const validKeys = ['name', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'defaultLlmConnection']
+    const validKeys = ['name', 'model', 'enabledSourceSlugs', 'permissionMode', 'cyclablePermissionModes', 'thinkingLevel', 'workingDirectory', 'localMcpEnabled', 'defaultLlmConnection', 'strategy']
     if (!validKeys.includes(key)) {
       throw new Error(`Invalid workspace setting key: ${key}. Valid keys: ${validKeys.join(', ')}`)
+    }
+
+    // The default strategy group must name a real group, or be empty to mean
+    // "no default". A dangling id would route every new session into the
+    // `strategy_not_found` refusal — the very failure this setting exists to
+    // prevent.
+    if (key === 'strategy' && normalizedValue !== undefined && normalizedValue !== null && String(normalizedValue) !== '') {
+      const { loadLlmConfig } = await import('@craft-agent/shared/config')
+      const strategies = loadLlmConfig()?.strategies ?? []
+      if (!strategies.some((s) => s.id === normalizedValue)) {
+        throw new Error(`Strategy group "${normalizedValue}" not found`)
+      }
     }
 
     // Validate defaultLlmConnection exists before saving

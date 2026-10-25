@@ -184,10 +184,6 @@ export const RPC_CHANNELS = {
     GET_AUTH_STATE: 'onboarding:getAuthState',
     VALIDATE_MCP: 'onboarding:validateMcp',
     START_MCP_OAUTH: 'onboarding:startMcpOAuth',
-    START_CLAUDE_OAUTH: 'onboarding:startClaudeOAuth',
-    EXCHANGE_CLAUDE_CODE: 'onboarding:exchangeClaudeCode',
-    HAS_CLAUDE_OAUTH_STATE: 'onboarding:hasClaudeOAuthState',
-    CLEAR_CLAUDE_OAUTH_STATE: 'onboarding:clearClaudeOAuthState',
     DEFER_SETUP: 'onboarding:deferSetup',
   },
   llmConnections: {
@@ -206,19 +202,20 @@ export const RPC_CHANNELS = {
     ADD_CUSTOM_MODEL: 'LLM_Connection:addCustomModel',
     UPDATE_MODEL_ENABLED: 'LLM_Connection:updateModelEnabled',
   },
-  chatgpt: {
-    START_OAUTH: 'chatgpt:startOAuth',
-    COMPLETE_OAUTH: 'chatgpt:completeOAuth',
-    CANCEL_OAUTH: 'chatgpt:cancelOAuth',
-    GET_AUTH_STATUS: 'chatgpt:getAuthStatus',
-    LOGOUT: 'chatgpt:logout',
-  },
-  copilot: {
-    START_OAUTH: 'copilot:startOAuth',
-    CANCEL_OAUTH: 'copilot:cancelOAuth',
-    GET_AUTH_STATUS: 'copilot:getAuthStatus',
-    LOGOUT: 'copilot:logout',
-    DEVICE_CODE: 'copilot:deviceCode',
+  // In-process LLM gateway: config read/write plus a push channel for live
+  // scheduling state (cooldowns, open circuits, in-flight requests). The status
+  // channel follows the same event-sink pattern as llmConnections.CHANGED.
+  llmGateway: {
+    GET_STATUS: 'llm_gateway:getStatus',
+    GET_CONFIG: 'llm_gateway:getConfig',
+    GET_USAGE: 'llm_gateway:getUsage',
+    QUERY_LOGS: 'llm_gateway:queryLogs',
+    GET_PROVIDER_DETAIL: 'llm_gateway:getProviderDetail',
+    SAVE_CONFIG: 'llm_gateway:saveConfig',
+    CLEAR_KEY_COOLDOWN: 'llm_gateway:clearKeyCooldown',
+    TEST_CONNECTION: 'llm_gateway:testConnection',
+    LIST_MODELS: 'llm_gateway:listModels',
+    STATUS: 'llm_gateway:status',
   },
   settings: {
     SETUP_LLM_CONNECTION: 'settings:setupLlmConnection',
@@ -364,6 +361,16 @@ export const RPC_CHANNELS = {
     BROWSE: 'gitbash:browse',
     SET_PATH: 'gitbash:setPath',
     OPEN_PATH: 'gitbash:openPath',
+  },
+  pageWindow: {
+    OPEN: 'page-window:open',
+    LIST: 'page-window:list',
+    FOCUS: 'page-window:focus',
+    CLOSE: 'page-window:close',
+    MINIMIZE_SELF: 'page-window:minimize-self',
+    CLOSE_SELF: 'page-window:close-self',
+    STATE_CHANGED: 'page-window:state-changed',
+    REMOVED: 'page-window:removed',
   },
   browserPane: {
     CREATE: 'browser-pane:create',

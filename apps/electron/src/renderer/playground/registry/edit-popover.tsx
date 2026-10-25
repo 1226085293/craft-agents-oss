@@ -227,7 +227,8 @@ function CompactChatPreview({
               onOpenFile={handleOpenFile}
               onOpenUrl={handleOpenUrl}
               currentModel={model}
-              onModelChange={setModel}
+              effectiveStrategyId=""
+              onStrategyChange={() => {}}
               compactMode={true}
               placeholder={placeholder}
             />
@@ -269,7 +270,8 @@ const mockAppShellContext = {
   onInputChange: () => {},
   onOpenFile: () => {},
   onOpenUrl: () => {},
-  onModelChange: () => {},
+  effectiveStrategyId: "",
+  onStrategyChange: () => {},
   onRefreshWorkspaces: () => {},
   // Session callbacks required by EditPopover
   onCreateSession: async (workspaceId: string) => ({

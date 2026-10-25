@@ -63,33 +63,29 @@ describe('PiAgent system stop notice plumbing', () => {
     agent.destroy()
   })
 
-  it('sets a system-stop state that blocks the retry ladder from reviving the turn', () => {
-    // 2026-10-07 261007-pearl-amber: a busy-loop guardrail aborted the turn,
-    // then the follow-on abort error re-armed the retry ladder and re-ran the
-    // same looping model step forever. The guard must keep the ladder off.
+  it('sets a system-stop state that blocks stall recovery from reviving the turn', () => {
+    // 2026-10-07 261007-pearl-amber: a busy-loop guardrail aborted the turn;
+    // a follow-on stall must not re-issue the same looping model step forever.
     const agent = new PiAgent(createConfig())
 
-    // Prime the processing state so tryBeginRetryLadder's guards otherwise pass.
     ;(agent as any)._isProcessing = true
-    ;(agent as any).subprocess = { kill: () => {} } // non-null so the guard doesn't bail early
+    ;(agent as any).subprocess = { kill: () => {}, stdin: { writable: true } }
+    let sent = 0
+    ;(agent as any).send = () => { sent += 1 }
 
-    // No system stop yet: the ladder would arm.
-    const before = (agent as any).tryBeginRetryLadder('The operation was aborted', null)
-    expect(before).toBe(true)
-    // Clean up so the second call is a fair test.
-    ;(agent as any).retryLadder.reset()
-    ;(agent as any).retryTimer && clearTimeout((agent as any).retryTimer)
-    ;(agent as any).retryTimer = null
+    // No system stop yet: the stall path re-issues the model step.
+    ;(agent as any).handleTurnIdleTimeout(1000)
+    expect(sent).toBe(1)
 
-    // Deliver a guardrail stop notice, then the follow-on abort error.
+    // Deliver a guardrail stop notice, then a follow-on stall.
     ;(agent as any).handleLine(JSON.stringify({
       type: 'system_stop_notice',
       reason: 'no_progress',
       message: 'Turn aborted: 6 consecutive identical tool calls with no progress.',
     }))
 
-    const after = (agent as any).tryBeginRetryLadder('The operation was aborted', null)
-    expect(after).toBe(false)
+    ;(agent as any).handleTurnIdleTimeout(1000)
+    expect(sent).toBe(1) // blocked while the guardrail stop stands
 
     agent.destroy()
   })
@@ -99,15 +95,17 @@ describe('PiAgent system stop notice plumbing', () => {
 
     ;(agent as any).systemStopReason = 'no_progress'
     ;(agent as any)._isProcessing = true
-    ;(agent as any).subprocess = { kill: () => {} }
-    expect((agent as any).tryBeginRetryLadder('The operation was aborted', null)).toBe(false)
+    ;(agent as any).subprocess = { kill: () => {}, stdin: { writable: true } }
+    let sent = 0
+    ;(agent as any).send = () => { sent += 1 }
+
+    ;(agent as any).handleTurnIdleTimeout(1000)
+    expect(sent).toBe(0) // blocked while set
 
     // Simulate a fresh turn resetting the state.
     ;(agent as any).systemStopReason = null
-    ;(agent as any).retryLadder.reset()
-    ;(agent as any).retryTimer && clearTimeout((agent as any).retryTimer)
-    ;(agent as any).retryTimer = null
-    expect((agent as any).tryBeginRetryLadder('The operation was aborted', null)).toBe(true)
+    ;(agent as any).handleTurnIdleTimeout(1000)
+    expect(sent).toBe(1)
 
     agent.destroy()
   })

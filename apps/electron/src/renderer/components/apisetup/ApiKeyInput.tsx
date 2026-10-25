@@ -47,7 +47,6 @@ export interface ApiKeySubmitData {
   modelSelectionMode?: 'automaticallySyncedFromProvider' | 'userDefined3Tier'
   /** Custom endpoint protocol — set when user configures an arbitrary API endpoint */
   customEndpoint?: CustomEndpointConfig
-  /** IAM credentials for Pi+Bedrock (piAuthProvider='amazon-bedrock') setup */
   iamCredentials?: {
     accessKeyId: string
     secretAccessKey: string
@@ -56,7 +55,8 @@ export interface ApiKeySubmitData {
   /** AWS region for Pi+Bedrock */
   awsRegion?: string
   /** Bedrock authentication method — determines auth type for Pi+Bedrock connections */
-  bedrockAuthMethod?: 'iam_credentials' | 'environment'
+  // IAM was removed with the Bedrock provider capability.
+  bedrockAuthMethod?: 'environment'
 }
 
 export interface ApiKeyInputProps {
@@ -210,9 +210,9 @@ export function ApiKeyInput({
   const [modelError, setModelError] = useState<string | null>(null)
 
   // Bedrock auth state
-  const [bedrockAuthMethod, setBedrockAuthMethod] = useState<'iam_credentials' | 'environment'>('iam_credentials')
-  const [awsAccessKeyId, setAwsAccessKeyId] = useState('')
-  const [awsSecretAccessKey, setAwsSecretAccessKey] = useState('')
+  // IAM was removed with the Bedrock provider capability, so only the
+  // environment (AWS credential chain) method remains.
+  const [bedrockAuthMethod] = useState<'environment'>('environment')
   const [awsSessionToken, setAwsSessionToken] = useState('')
   const [awsRegion, setAwsRegion] = useState('us-east-1')
 
@@ -364,27 +364,12 @@ export function ApiKeyInput({
     // Bedrock — routes through Pi SDK with piAuthProvider='amazon-bedrock'.
     // Submit with auth method and optional IAM credentials.
     if (isBedrock) {
-      if (bedrockAuthMethod === 'iam_credentials' && !awsAccessKeyId.trim()) {
-        setModelError('Access Key ID is required for IAM authentication.')
-        return
-      }
-      if (bedrockAuthMethod === 'iam_credentials' && !awsSecretAccessKey.trim()) {
-        setModelError('Secret Access Key is required for IAM authentication.')
-        return
-      }
       const parsedModels = parseModelList(connectionDefaultModel)
       onSubmit({
         apiKey: '',
         piAuthProvider: effectivePiAuthProvider,
         bedrockAuthMethod,
         awsRegion: awsRegion.trim() || 'us-east-1',
-        ...(bedrockAuthMethod === 'iam_credentials' ? {
-          iamCredentials: {
-            accessKeyId: awsAccessKeyId.trim(),
-            secretAccessKey: awsSecretAccessKey.trim(),
-            ...(awsSessionToken.trim() ? { sessionToken: awsSessionToken.trim() } : {}),
-          },
-        } : {}),
         connectionDefaultModel: parsedModels[0],
         models: parsedModels.length > 0 ? parsedModels : undefined,
       })
@@ -556,99 +541,6 @@ export function ApiKeyInput({
       {/* Bedrock Auth Section */}
       {isBedrock && (
         <>
-          {/* Auth Method Toggle */}
-          <div className="space-y-2">
-            <Label>Authentication</Label>
-            <div className={cn(
-              "flex rounded-md shadow-minimal overflow-hidden",
-              "bg-foreground-2",
-              isDisabled && "opacity-50 pointer-events-none"
-            )}>
-              {([
-                { value: 'iam_credentials' as const, label: 'IAM Credentials' },
-                { value: 'environment' as const, label: 'Environment (AWS CLI)' },
-              ]).map(({ value, label }) => (
-                <button
-                  key={value}
-                  type="button"
-                  disabled={isDisabled}
-                  onClick={() => setBedrockAuthMethod(value)}
-                  className={cn(
-                    "flex-1 py-1.5 text-[12px] font-medium transition-colors",
-                    bedrockAuthMethod === value
-                      ? "bg-background text-foreground shadow-minimal"
-                      : "text-foreground/50 hover:text-foreground/70"
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* IAM Credential Fields */}
-          {bedrockAuthMethod === 'iam_credentials' && (
-            <div className="space-y-3">
-              <div className="space-y-1.5">
-                <Label htmlFor="aws-access-key-id" className="text-muted-foreground font-normal text-xs">
-                  Access Key ID
-                </Label>
-                <div className={cn("rounded-md shadow-minimal transition-colors", "bg-foreground-2 focus-within:bg-background")}>
-                  <Input
-                    id="aws-access-key-id"
-                    type="text"
-                    value={awsAccessKeyId}
-                    onChange={(e) => setAwsAccessKeyId(e.target.value)}
-                    placeholder="AKIA..."
-                    className="border-0 bg-transparent shadow-none"
-                    disabled={isDisabled}
-                    autoFocus
-                  />
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="aws-secret-key" className="text-muted-foreground font-normal text-xs">
-                  Secret Access Key
-                </Label>
-                <div className={cn("relative rounded-md shadow-minimal transition-colors", "bg-foreground-2 focus-within:bg-background")}>
-                  <Input
-                    id="aws-secret-key"
-                    type={showValue ? 'text' : 'password'}
-                    value={awsSecretAccessKey}
-                    onChange={(e) => setAwsSecretAccessKey(e.target.value)}
-                    placeholder={t("apiSetup.secretAccessKey")}
-                    className="pr-10 border-0 bg-transparent shadow-none"
-                    disabled={isDisabled}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowValue(!showValue)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    tabIndex={-1}
-                  >
-                    {showValue ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
-                  </button>
-                </div>
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="aws-session-token" className="text-muted-foreground font-normal text-xs">
-                  Session Token <span className="text-foreground/30">· optional</span>
-                </Label>
-                <div className={cn("rounded-md shadow-minimal transition-colors", "bg-foreground-2 focus-within:bg-background")}>
-                  <Input
-                    id="aws-session-token"
-                    type="text"
-                    value={awsSessionToken}
-                    onChange={(e) => setAwsSessionToken(e.target.value)}
-                    placeholder={t("apiSetup.temporaryCredentials")}
-                    className="border-0 bg-transparent shadow-none"
-                    disabled={isDisabled}
-                  />
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* Environment info */}
           {bedrockAuthMethod === 'environment' && (
             <div className="rounded-md bg-foreground-2 p-3">

@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'bun:test'
 import { inferModelSelectionMode, shouldMigratePiOpenAiProvider, shouldRepairPiApiKeyCodexProvider } from '../storage'
+import type { LlmAuthType } from '../llm-connections'
 
 describe('shouldMigratePiOpenAiProvider', () => {
-  it('migrates legacy Pi OAuth OpenAI connections to openai-codex', () => {
+  // OAuth connections were removed, so the legacy `openai` + `oauth` pair this
+  // migration existed for can no longer occur. The function must not resurrect
+  // that path; it returns false and leaves API-key connections alone.
+  it('no longer migrates anything, OAuth having been removed', () => {
     expect(shouldMigratePiOpenAiProvider({
       providerType: 'pi',
       piAuthProvider: 'openai',
-      authType: 'oauth',
-    })).toBe(true)
+      authType: 'oauth' as never,
+    })).toBe(false)
   })
 
   it('does not migrate Pi API key OpenAI connections', () => {
@@ -22,7 +26,7 @@ describe('shouldMigratePiOpenAiProvider', () => {
     expect(shouldMigratePiOpenAiProvider({
       providerType: 'pi',
       piAuthProvider: 'openai',
-      authType: 'oauth',
+      authType: 'oauth' as never,
       baseUrl: 'https://custom.gateway.example/v1',
     })).toBe(false)
   })
@@ -31,7 +35,7 @@ describe('shouldMigratePiOpenAiProvider', () => {
     expect(shouldMigratePiOpenAiProvider({
       providerType: 'pi',
       piAuthProvider: 'openai-codex',
-      authType: 'oauth',
+      authType: 'oauth' as never,
     })).toBe(false)
   })
 })
@@ -57,7 +61,8 @@ describe('shouldRepairPiApiKeyCodexProvider', () => {
     expect(shouldRepairPiApiKeyCodexProvider({
       providerType: 'pi',
       piAuthProvider: 'openai-codex',
-      authType: 'oauth',
+      // Legacy configs can still carry this value; the migration must not fire.
+      authType: 'oauth' as unknown as LlmAuthType,
     })).toBe(false)
   })
 

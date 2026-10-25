@@ -6,8 +6,6 @@
  */
 
 import type { Message, Session } from '../../shared/types'
-import type { RetryLadderRow } from '@craft-agent/core'
-import { settleRetryRowAsFailed, findActiveRetryRowIndex, findLastRetryRowIndex, findLastRetryRowByStartedAt, findRetryRowForLadder } from '@craft-agent/shared/retry/retry-row'
 
 let messageIdCounter = 0
 
@@ -155,96 +153,6 @@ export function insertMessageAt(
     ...session,
     messages,
     ...(updateTimestamp ? { lastMessageAt: Date.now() } : {}),
-  }
-}
-
-/**
- * Upsert the PERSISTED retry-ladder row (role 'status', statusType 'retrying')
- * with a new payload — created on the first backoff, updated in place on
- * backoff/active/end. The row lives in session.messages so it survives
- * session switches and app restarts (mirrors the session manager's own copy).
- */
-export function upsertRetryRow(session: Session, payload: RetryLadderRow | null): Session {
-  // 2026-10-10: a verdictless `retry end` that found no row returns null —
-  // the adapter was closing its retry channel, not ending a real ladder.
-  // Never create a phantom failed line out of thin air.
-  if (payload === null) return session
-  // Only the row of the CURRENT turn may be updated in place — a row left
-  // behind by a previous settled turn must not be recycled (new turn, new
-  // ladder, new row). Exception (2026-10-09): a TERMINAL payload (retry end
-  // recovered/failed) arriving after a turn boundary (interrupted turn
-  // followed by a new user message) must settle the dangling row, or it will
-  // keep spinning "重试中" forever — a row still in `retrying` is the
-  // un-settled ladder by construction, so the unbound scan cannot touch a
-  // settled row of a newer ladder.
-  let idx = findActiveRetryRowIndex(session.messages)
-  if (idx === -1 && payload.status !== 'retrying') {
-    const lastIdx = findLastRetryRowIndex(session.messages)
-    if (lastIdx !== -1 && session.messages[lastIdx]!.retry?.status === 'retrying') {
-      idx = lastIdx
-    } else {
-      // 2026-10-10: a soft `end` already settled the row — the terminal `end`
-      // (same ladder, same startedAt) must re-settle it IN PLACE, not stack
-      // a second row. (Mirrors the server's case 'retry' fallback exactly.)
-      idx = findLastRetryRowByStartedAt(session.messages, payload.startedAt)
-    }
-  }
-  // 2026-10-12 (user spec "one entry per ladder"): a backoff/active with no
-  // retrying row still belongs to the CURRENT ladder when its previous
-  // attempt was settled 'failed' by an intermediate verdict — revive that row
-  // in place (attempt advances 1→2→3 …) instead of stacking one failed line
-  // per attempt. 'recovered' rows are never revived (new cycle = new row).
-  if (idx === -1 && payload.status === 'retrying') {
-    idx = findRetryRowForLadder(session.messages, payload.startedAt)
-  }
-  if (idx !== -1) {
-    return {
-      ...session,
-      messages: session.messages.map((m, i) => (i === idx ? { ...m, retry: payload } : m)),
-    }
-  }
-  return appendMessage(session, {
-    id: generateMessageId(),
-    role: 'status',
-    statusType: 'retrying',
-    content: '',
-    // 2026-10-11 (swift-slate): the message timestamp is the row's TIMELINE
-    // anchor (process-block sort key) — its own cycle start (backoffAt), not
-    // the ladder start (which would float every new cycle's line to the top).
-    timestamp: payload.backoffAt ?? payload.startedAt,
-    retry: payload,
-  } as Message)
-}
-
-/**
- * Fail-safe for the persisted retry row: a ladder that ended WITHOUT its
- * terminal `retry end` event (subprocess exit, guardrail stop, unexpected
- * generator failure, stale restored rung) must not leave a spinning
- * "重试中 · 第 x 次" line in the process block. Settle it to 'failed' — the
- * retries did not recover. No-op when the row is absent or already terminal.
- */
-export function settleStuckRetryRow(session: Session, now = Date.now()): Session {
-  // 2026-10-10: while a retry ladder is STILL retrying (backoff/active
-  // received, no terminal end yet), the row must not be settled — a
-  // "重试 1 次后失败 · 00:00" popping up beside "第 N 次重试中" was exactly
-  // this fail-safe firing mid-ladder. Success/failure only appear when the
-  // retry has REALLY finished (the end event flips retryLadderActive off).
-  if (session.retryLadderActive) return session
-  // 2026-10-09: scan TURN-UNBOUND — a retry row left dangling by an
-  // interrupted turn (user stop / new message while the retried run was in
-  // flight) still shows status 'retrying' AFTER the next user message, which
-  // the turn-scoped findActiveRetryRowIndex never reaches. findLastRetryRowIndex
-  // also requires the nested status to be 'retrying', so settled rows
-  // (recovered/failed) are never re-settled.
-  const idx = findLastRetryRowIndex(session.messages)
-  if (idx === -1) return session
-  const row = session.messages[idx]!
-  if (row.retry?.status !== 'retrying') return session
-  return {
-    ...session,
-    messages: session.messages.map((m, i) =>
-      i === idx ? { ...m, retry: settleRetryRowAsFailed(row.retry, now) } : m
-    ),
   }
 }
 

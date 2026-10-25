@@ -87,10 +87,10 @@ describe('createBuiltInConnection', () => {
     expect(conn.name).toBe('Custom Anthropic-Compatible')
   })
 
-  it('creates claude-max with oauth', () => {
-    const conn = createBuiltInConnection('claude-max')
-    expect(conn.providerType).toBe('anthropic')
-    expect(conn.authType).toBe('oauth')
+  it('no longer offers OAuth-only connection presets', () => {
+    // claude-max (Claude Max OAuth) was removed with the OAuth connection
+    // types. createBuiltInConnection must not produce it any more.
+    expect(() => createBuiltInConnection('claude-max')).toThrow()
   })
 
   it('creates pi-api-key with pi provider', () => {

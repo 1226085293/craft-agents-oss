@@ -1,0 +1,427 @@
+/* Prototype stylesheet, ported verbatim from pages/llm/index.html (v28).
+   Scoped under .llm-proto so the gateway UI keeps the prototype's own visual
+   system without leaking tokens into the rest of the app. */
+.llm-proto{
+  --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
+  --font-mono:ui-monospace,"SF Mono",SFMono-Regular,Consolas,"Liberation Mono",monospace;
+  --prim-accent:#5b5cf4; --prim-accent-soft:#ececfd;
+  --prim-ok:#16a34a; --prim-ok-soft:#e8f7ee;
+  --prim-warn:#d97706; --prim-warn-soft:#fdf3e3;
+  --prim-bad:#dc2626; --prim-bad-soft:#fdeaea;
+  --prim-ink:#191920; --prim-white:#ffffff;
+  --prim-gray-50:#f6f6f8; --prim-gray-100:#f1f1f7; --prim-gray-200:#e4e4ea;
+  --prim-gray-300:#d4d4de; --prim-gray-400:#b9b9c4; --prim-gray-500:#8a8a96;
+  --prim-chart-a:#5b5cf4; --prim-chart-b:#8f8ff8; --prim-chart-c:#b9b9f8; --prim-chart-d:#dcdcfc;
+  --prim-dark-bg:#131318; --prim-dark-surface:#1c1c24; --prim-dark-hover:#242430;
+  --prim-dark-muted:#22222b; --prim-dark-disabled:#191920;
+  --prim-dark-border:#2c2c38; --prim-dark-border-strong:#3a3a48;
+  --prim-dark-text:#ededf4; --prim-dark-text-muted:#9a9aa8; --prim-dark-text-faint:#6c6c7a;
+  --prim-dark-chart-d:#3a3a55;
+}
+.llm-proto{
+  color-scheme: light dark;
+  --color-bg:var(--prim-gray-50);
+  --color-surface:var(--prim-white);
+  --color-surface-hover:var(--prim-gray-100);
+  --color-surface-muted:#f0f0f3;
+  --color-surface-disabled:#f4f4f6;
+  --color-border:var(--prim-gray-200);
+  --color-border-strong:var(--prim-gray-300);
+  --color-text:var(--prim-ink);
+  --color-text-muted:var(--prim-gray-500);
+  --color-text-faint:var(--prim-gray-400);
+  --color-accent:var(--prim-accent);
+  --color-accent-soft:var(--prim-accent-soft);
+  --color-input:#fafafa;
+  --color-seg:#ececf0;
+  --state-ok:var(--prim-ok); --state-ok-soft:var(--prim-ok-soft);
+  --state-warn:var(--prim-warn); --state-warn-soft:var(--prim-warn-soft);
+  --state-bad:var(--prim-bad); --state-bad-soft:var(--prim-bad-soft);
+  --state-unknown:var(--prim-gray-400);
+  --chart-prompt:var(--prim-chart-a); --chart-completion:var(--prim-chart-c);
+  --shadow-sm:0 1px 2px rgba(20,20,40,.05);
+  --shadow-md:0 4px 14px rgba(20,20,40,.09);
+  --radius-sm:6px; --radius-md:8px; --radius-lg:12px; --radius-full:999px;
+  --text-xs:11px; --text-sm:12px; --text-md:13px; --text-base:14px; --text-xl:16px; --text-2xl:22px;
+}
+@media (prefers-color-scheme: dark){
+  .llm-proto{
+    --color-bg:var(--prim-dark-bg);
+    --color-surface:var(--prim-dark-surface);
+    --color-surface-hover:var(--prim-dark-hover);
+    --color-surface-muted:var(--prim-dark-muted);
+    --color-surface-disabled:var(--prim-dark-disabled);
+    --color-border:var(--prim-dark-border);
+    --color-border-strong:var(--prim-dark-border-strong);
+    --color-text:var(--prim-dark-text);
+    --color-text-muted:var(--prim-dark-text-muted);
+    --color-text-faint:var(--prim-dark-text-faint);
+    --color-accent-soft:rgba(91,92,244,.18);
+    --color-input:#262630;
+    --color-seg:#26262f;
+    --state-ok-soft:rgba(22,163,74,.18);
+    --state-warn-soft:rgba(217,119,6,.18);
+    --state-bad-soft:rgba(220,38,38,.18);
+    --shadow-sm:0 1px 2px rgba(0,0,0,.45);
+    --shadow-md:0 4px 14px rgba(0,0,0,.5);
+  }
+}
+.llm-proto, .llm-proto *{box-sizing:border-box;margin:0;padding:0}
+.llm-proto{font-family:var(--font-sans);background:var(--color-bg);color:var(--color-text);font-size:var(--text-base);line-height:1.6;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility;letter-spacing:.01em}
+.llm-proto button{font:inherit;cursor:pointer;border:none;background:none;color:inherit}
+.llm-proto input, .llm-proto select, .llm-proto textarea{font:inherit;color:inherit}
+/* One focus ring only: the global `*:focus-visible{outline:none}` is reset here, so a
+   textarea/input on focus must NOT also draw an outline — that is what read as two boxes. */
+.llm-proto button:focus-visible, .llm-proto input:focus-visible, .llm-proto select:focus-visible{outline:none}
+.llm-proto textarea:focus-visible{outline:none;box-shadow:none}
+.llm-proto .mono{font-family:var(--font-mono)}
+.llm-proto .num{font-variant-numeric:tabular-nums}
+
+.llm-proto .topnav{position:sticky;top:0;z-index:20;background:var(--color-bg);border-bottom:1px solid var(--color-border)}
+.llm-proto .topnav-inner{max-width:960px;margin:0 auto;padding:12px 32px 10px;display:flex;align-items:center;gap:18px}
+.llm-proto .topnav h1{font-size:15px;font-weight:600}
+.llm-proto .topnav nav{display:flex;gap:2px;background:var(--color-seg);border-radius:var(--radius-md);padding:2px}
+.llm-proto .topnav .nav{padding:5px 14px;border-radius:var(--radius-sm);font-size:var(--text-sm);color:var(--color-text-muted);transition:.15s}
+.llm-proto .topnav .nav:hover{color:var(--color-text)}
+.llm-proto .topnav .nav.on{background:var(--color-surface);color:var(--color-text);box-shadow:var(--shadow-sm);font-weight:600}
+.llm-proto .topnav .ver{margin-left:auto;font-size:var(--text-xs);color:var(--color-text-faint)}
+.llm-proto .main{max-width:960px;margin:0 auto;padding:26px 32px 60px}
+.llm-proto .page-title{font-size:18px;font-weight:600;margin-bottom:2px}
+.llm-proto .page-desc{color:var(--color-text-muted);font-size:var(--text-md);margin-bottom:20px}
+.llm-proto .sec-title{font-size:14px;font-weight:600;margin:0 0 10px}
+.llm-proto .card{background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-lg);box-shadow:var(--shadow-sm);padding:14px 16px}
+.llm-proto .card b{font-weight:600}
+.llm-proto .stack{display:flex;flex-direction:column;gap:12px}
+.llm-proto .row{display:flex;align-items:center;gap:8px}
+.llm-proto .spread{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.llm-proto .muted{color:var(--color-text-muted)}
+.llm-proto .faint{color:var(--color-text-faint)}
+.llm-proto .small{font-size:var(--text-sm)}.xs{font-size:var(--text-xs)}
+.llm-proto .hr{border-top:1px solid var(--color-border);margin:12px -16px}
+.llm-proto .seg{display:inline-flex;background:var(--color-seg);border-radius:var(--radius-md);padding:2px;gap:2px;flex-wrap:wrap}
+.llm-proto .seg button{padding:4px 12px;border-radius:var(--radius-sm);font-size:var(--text-sm);color:var(--color-text-muted);transition:.15s}
+.llm-proto .seg button.on{background:var(--color-surface);color:var(--color-text);box-shadow:var(--shadow-sm);font-weight:600}
+.llm-proto .btn{display:inline-flex;align-items:center;gap:6px;border-radius:var(--radius-md);padding:6px 12px;font-size:var(--text-md);border:1px solid var(--color-border);background:var(--color-surface);transition:.15s}
+.llm-proto .btn:hover{border-color:var(--color-border-strong)}
+.llm-proto .btn.primary{background:var(--color-accent);border-color:var(--color-accent);color:var(--prim-white)}
+.llm-proto .btn.primary:hover{filter:brightness(1.06)}
+.llm-proto .btn.danger{color:var(--state-bad);border-color:var(--state-bad-soft)}
+.llm-proto .btn.danger:hover{background:var(--state-bad-soft)}
+.llm-proto .btn.ghost{border-color:transparent;color:var(--color-text-muted)}
+.llm-proto .btn.ghost:hover{background:var(--color-surface-hover);color:var(--color-text)}
+/* Destructive but low-emphasis: a red outline on every key row would shout,
+   while the hover state makes the consequence obvious at the moment of use. */
+.llm-proto .btn.danger-ghost{border-color:transparent;background:transparent;color:var(--color-text-muted)}
+.llm-proto .btn.danger-ghost:hover{background:var(--state-bad-soft);border-color:var(--state-bad-soft);color:var(--state-bad)}
+.llm-proto .btn:disabled{opacity:.45;cursor:not-allowed}
+/* One frame only: the border is the focus ring. `transition` is narrowed to
+   border-color — the bare `.15s` shorthand animates every animatable property,
+   so the background swap lands at the same moment and reads as a second,
+   inner frame around the control. */
+.llm-proto input:not([type]), .llm-proto input[type=text], .llm-proto input[type=number], .llm-proto textarea{border:1px solid var(--color-border);border-radius:var(--radius-md);padding:6px 10px;background:var(--color-input);outline:none;box-shadow:none;transition:border-color .15s;font-size:var(--text-md)}
+.llm-proto input:not([type]):focus, .llm-proto input[type=text]:focus, .llm-proto textarea:focus{border-color:var(--color-accent);background:var(--color-surface)}
+.llm-proto input.sm{padding:4px 8px;font-size:var(--text-sm)}
+.llm-proto input[type=number]{appearance:textfield;-moz-appearance:textfield}
+.llm-proto input[type=number]::-webkit-inner-spin-button, .llm-proto input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.llm-proto select{appearance:none;-webkit-appearance:none;-moz-appearance:none;border:1px solid var(--color-border);border-radius:var(--radius-md);padding:6px 26px 6px 10px;background-color:var(--color-input);background-image:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" fill="none" stroke="%238a8a96" stroke-width="1.5" stroke-linecap="round"/></svg>');background-repeat:no-repeat;background-position:right 8px center;outline:none;transition:.15s;font-size:var(--text-md);cursor:pointer}
+.llm-proto select:focus{border-color:var(--color-accent);background-color:var(--color-surface)}
+.llm-proto select.sm{padding:4px 22px 4px 8px;font-size:var(--text-sm);background-position:right 6px center}
+.llm-proto .checkbox{appearance:none;-webkit-appearance:none;width:16px;height:16px;border:1.5px solid var(--color-border-strong);border-radius:4px;background:var(--color-surface);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:.15s;flex-shrink:0}
+.llm-proto .checkbox:hover{border-color:var(--color-accent)}
+.llm-proto .checkbox:checked{background:var(--color-accent);border-color:var(--color-accent)}
+.llm-proto .checkbox:checked::after{content:"";width:9px;height:9px;background:var(--prim-white);clip-path:polygon(14% 44%,0 65%,50% 100%,100% 16%,80% 0%,43% 62%)}
+.llm-proto .switch{width:34px;height:20px;border-radius:var(--radius-full);background:var(--color-border-strong);position:relative;transition:.2s;flex-shrink:0}
+.llm-proto .switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--color-surface);transition:.2s}
+.llm-proto .switch.on{background:var(--state-ok)}
+.llm-proto .switch.on::after{left:16px}
+.llm-proto .badge{display:inline-flex;align-items:center;gap:4px;border-radius:var(--radius-full);padding:2px 9px;font-size:var(--text-xs);font-weight:600}
+.llm-proto .badge.green{background:var(--state-ok-soft);color:var(--state-ok)}
+.llm-proto .badge.amber{background:var(--state-warn-soft);color:var(--state-warn)}
+.llm-proto .badge.gray{background:var(--color-seg);color:var(--color-text-muted)}
+.llm-proto .badge.red{background:var(--state-bad-soft);color:var(--state-bad)}
+.llm-proto .badge.accent{background:var(--color-accent-soft);color:var(--color-accent)}
+.llm-proto .pill{display:inline-flex;align-items:center;border-radius:var(--radius-full);border:1px solid var(--color-border-strong);padding:3px 12px;font-size:var(--text-sm);transition:.15s;background:var(--color-surface);user-select:none}
+.llm-proto .pill.click:hover{border-color:var(--color-accent);color:var(--color-accent)}
+.llm-proto .pill.plain{border-style:dashed;color:var(--color-text-muted);cursor:default}
+.llm-proto .pill.add{color:var(--color-accent);border-color:var(--color-accent);border-style:dashed}
+.llm-proto .pill.dragging{opacity:.5}
+.llm-proto .pill.wrap{position:relative;cursor:pointer}
+.llm-proto .pill .rm{position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;background:var(--color-bg);border:1px solid var(--color-border-strong);color:var(--color-text-muted);font-size:10px;line-height:1;display:none;align-items:center;justify-content:center}
+.llm-proto .pill.wrap:hover .rm{display:inline-flex}
+.llm-proto .pill .rm:hover{color:var(--state-bad);border-color:var(--state-bad)}
+.llm-proto .pill.win{border-color:var(--color-accent);background:var(--color-accent-soft)}
+/* 模型 pill 上的限时后缀：文字「限时」而非 emoji 闹钟（emoji 在不同平台渲染差异大且与设置按钮重复） */
+.llm-proto .win-sfx{font-style:normal;font-size:10px;line-height:1;padding:2px 6px;border-radius:var(--radius-sm);background:var(--color-accent-soft);color:var(--color-accent);margin-left:6px;flex-shrink:0}
+/* ---------- 限时启用弹窗（v27 视觉重构：去嵌套盒、控件统一样式、footer 与主操作分离）---------- */
+.llm-proto .win-dialog{width:560px;padding:0;overflow:hidden}
+.llm-proto .win-head{padding:18px 22px 16px;border-bottom:1px solid var(--color-border);flex-shrink:0}
+.llm-proto .win-head h3{font-size:17px;font-weight:600;margin-bottom:0;line-height:1.3}
+.llm-proto .win-head .win-sub{font-size:11px;line-height:1.5}
+.llm-proto .win-ico{width:30px;height:30px;border-radius:9px;background:var(--color-accent-soft);color:var(--color-accent);display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
+/* The dialog is capped at .dialog's height with overflow:hidden, so the body
+   must be the only scrolling region — otherwise a tall form (capabilities +
+   the full time-window editor) is clipped with no way to reach it. */
+.llm-proto .win-body{padding:6px 22px 8px;flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--color-border-strong) transparent}
+/* footer 只留主操作「保存」；取消用右上角 ✕ 与遮罩点击，避免出现两个/三个关闭入口 */
+.llm-proto .win-foot{padding:14px 22px 20px;border-top:1px solid var(--color-border);display:flex;align-items:center;gap:8px;flex-shrink:0}
+.llm-proto .wsec{padding:18px 0}
+.llm-proto .wsec + .wsec{margin-top:0;padding-top:18px;border-top:1px solid var(--color-border)}
+.llm-proto .wsec-h{font-size:var(--text-xs);font-weight:600;color:var(--color-text-faint);letter-spacing:.07em;margin-bottom:2px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.llm-proto .wrow{display:flex;align-items:center;gap:12px;min-height:46px}
+.llm-proto .wlab{width:44px;flex-shrink:0;font-size:var(--text-sm);color:var(--color-text-muted)}
+/* Validation hints inside a section body: the "you must fix this" state has to
+   be visible without reading, so it takes the warn colour the badges use. */
+.llm-proto .warn-text{color:var(--state-warn)}
+.llm-proto input[type=time], .llm-proto input[type=date], .llm-proto .wrow input[type=text]{border:1px solid var(--color-border);border-radius:var(--radius-md);padding:5px 8px;background:var(--color-input);outline:none;transition:.15s;font-size:var(--text-sm);font-variant-numeric:tabular-nums;color:inherit}
+.llm-proto input[type=time]:focus, .llm-proto input[type=date]:focus, .llm-proto .wrow input[type=text]:focus{border-color:var(--color-accent);background:var(--color-surface)}
+.llm-proto input[type=time]{width:92px;text-align:center;flex-shrink:0}
+.llm-proto input[type=date]{flex:1;min-width:0}
+/* Capability counts are free text ("1M", "65,536"), so they grow to fill the
+   row instead of taking the date input's flex:1 and collapsing its hint. */
+.llm-proto .wrow input[type=text]{flex:1;min-width:0;max-width:160px}
+.llm-proto .wday{width:30px;height:30px;padding:0;border-radius:8px;border:1px solid var(--color-border);background:var(--color-input);font-size:var(--text-sm);color:var(--color-text-muted);transition:.12s;flex-shrink:0}
+.llm-proto .wday:hover{border-color:var(--color-accent);color:var(--color-accent)}
+.llm-proto .wday.on{background:var(--color-accent);border-color:var(--color-accent);color:var(--prim-white);font-weight:600}
+.llm-proto .spanrow{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--color-border)}
+.llm-proto .spanrow:last-of-type{border-bottom:none}
+.llm-proto .spanrow .idx{width:18px;flex-shrink:0;font-size:var(--text-xs);color:var(--color-text-faint);font-variant-numeric:tabular-nums}
+.llm-proto .spanrow .dur{flex-shrink:0;font-size:var(--text-xs);color:var(--color-text-muted);background:var(--color-seg);border-radius:var(--radius-full);padding:2px 8px}
+.llm-proto .spanrow .del{margin-left:auto;flex-shrink:0}
+.llm-proto .spanrow .night{color:var(--state-warn)}
+.llm-proto .wpreview{display:flex;align-items:center;gap:10px;margin:16px 0 0;padding:10px 14px;background:var(--color-surface-muted);border-radius:var(--radius-md)}
+.llm-proto .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.llm-proto .dot.green{background:var(--state-ok)}.dot.amber{background:var(--state-warn)}.dot.red{background:var(--state-bad)}.dot.gray{background:var(--state-unknown)}
+.llm-proto .kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+.llm-proto .kpi{height:124px;display:flex;flex-direction:column;min-width:0}
+.llm-proto .kpi .lab{font-size:var(--text-xs);color:var(--color-text-muted)}
+.llm-proto .kpi .val{font-size:var(--text-2xl);font-weight:600;margin:2px 0;font-variant-numeric:tabular-nums;white-space:nowrap}
+.llm-proto .kpi .sub{font-size:var(--text-xs);color:var(--color-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.llm-proto .kpi .spark{height:26px;margin-top:auto}
+.llm-proto .rate-ok{color:var(--state-ok)}.rate-warn{color:var(--state-warn)}.rate-bad{color:var(--state-bad)}
+.llm-proto .chart-outer{position:relative}
+.llm-proto .chart-wrap{overflow-x:auto;height:132px;user-select:none;scrollbar-width:thin;scrollbar-color:var(--color-border-strong) transparent}
+.llm-proto .chart-wrap::-webkit-scrollbar{height:6px}
+.llm-proto .chart-wrap::-webkit-scrollbar-track{background:transparent}
+.llm-proto .chart-wrap::-webkit-scrollbar-thumb{background:var(--color-border-strong);border-radius:var(--radius-full)}
+.llm-proto .chart-wrap::-webkit-scrollbar-thumb:hover{background:var(--color-text-faint)}
+.llm-proto .chart-scroll{width:100%;min-width:max-content}
+.llm-proto .chart-bars{display:flex;gap:3px;height:108px;align-items:stretch}
+.llm-proto .chart-labs{display:flex;gap:3px;border-top:1px solid var(--color-border)}
+.llm-proto .bcol{display:flex;flex-direction:column;justify-content:flex-end;gap:1px;height:100%}
+.llm-proto .bcol div{border-radius:2px 2px 0 0}
+.llm-proto .bcol:hover div{filter:brightness(1.08)}
+.llm-proto .lcell{height:15px;font-size:9px;color:var(--color-text-muted);text-align:center;white-space:nowrap;padding-top:2px}
+.llm-proto .chart-tip{position:fixed;left:0;top:0;z-index:60;background:#232330;color:#fff;border-radius:var(--radius-md);padding:6px 10px;font-size:var(--text-xs);line-height:1.55;pointer-events:none;opacity:0;transition:opacity .12s;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.3)}
+.llm-proto .chart-tip.show{opacity:1}
+.llm-proto .chart-tip b{display:block;margin-bottom:2px}
+.llm-proto .chart-zoom{position:absolute;right:8px;bottom:22px;z-index:6;display:flex;align-items:center;gap:4px;background:var(--color-surface);border:1px solid var(--color-border);border-radius:var(--radius-md);padding:3px 6px;box-shadow:var(--shadow-sm);font-size:var(--text-xs);color:var(--color-text-muted)}
+.llm-proto .chart-zoom button{font-size:var(--text-xs);padding:1px 6px;border-radius:var(--radius-sm)}
+.llm-proto .chart-zoom button:hover{background:var(--color-surface-hover)}
+.llm-proto .legend{display:flex;flex-wrap:wrap;gap:12px;margin-top:10px;font-size:var(--text-sm)}
+.llm-proto .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+.llm-proto .avail{display:flex;height:8px;border-radius:4px;overflow:hidden;width:180px;gap:1px;background:var(--color-surface)}
+.llm-proto .avail > span{display:block;height:100%;border-radius:1px}
+.llm-proto .minibar{width:64px;height:4px;border-radius:2px;background:var(--color-seg);overflow:hidden;display:inline-block;vertical-align:middle}
+.llm-proto .minibar i{display:block;height:100%;background:var(--state-ok)}
+.llm-proto .minibar i.warn{background:var(--state-warn)}
+.llm-proto .minibar i.bad{background:var(--state-bad)}
+.llm-proto .linkbtn{color:var(--color-accent);text-decoration:underline dotted;text-underline-offset:2px;font-size:inherit}
+.llm-proto .linkbtn:hover{text-decoration-style:solid}
+.llm-proto .dialog.xwide{width:940px}
+.llm-proto .subtabs{display:inline-flex;background:var(--color-seg);border-radius:var(--radius-md);padding:2px;gap:2px;margin-bottom:14px}
+.llm-proto .subtabs button{padding:5px 14px;border-radius:var(--radius-sm);font-size:var(--text-sm);color:var(--color-text-muted)}
+.llm-proto .subtabs button.on{background:var(--color-surface);color:var(--color-text);box-shadow:var(--shadow-sm);font-weight:600}
+.llm-proto .availrow{border-radius:var(--radius-md);padding:6px 8px;cursor:pointer;transition:background .12s, transform .06s}
+.llm-proto .availrow:hover{background:var(--color-surface-hover)}
+.llm-proto .availrow:active{background:var(--color-surface-muted);transform:scale(.996)}
+.llm-proto table.tbl{width:100%;border-collapse:collapse;font-size:var(--text-md)}
+.llm-proto table.tbl td, .llm-proto table.tbl th{padding:9px 12px;text-align:left;border-top:1px solid var(--color-border)}
+.llm-proto table.tbl th{font-size:var(--text-xs);color:var(--color-text-muted);font-weight:500}
+.llm-proto table.tbl tr:first-child td{border-top:none}
+.llm-proto table.tbl tr:first-child th{border-top:none}
+.llm-proto table.tbl tr.rowclick:hover{background:var(--color-surface-hover);cursor:pointer}
+.llm-proto table.logtbl tr:first-child th{border-top:none;background:var(--color-surface-muted)}
+.llm-proto table.logtbl tbody tr:nth-child(even){background:var(--color-surface-hover)}
+.llm-proto table.logtbl tbody tr.rowclick:hover{background:var(--color-accent-soft)}
+.llm-proto table.logtbl td.num{text-align:right}
+/* 表头与卡片圆角对齐，不再遮盖左上/右上圆角 */
+.llm-proto table.logtbl tbody tr:nth-child(1) th:nth-of-type(1){border-top-left-radius:var(--radius-lg)}
+.llm-proto table.logtbl tbody tr:nth-child(1) th:nth-last-of-type(1){border-top-right-radius:var(--radius-lg)}
+/* 日志表：固定布局、可拖列宽、列间竖线。内容放得下就居中，溢出则左对齐
+   （由 LogsView 在渲染后测量 scrollWidth 并加 .over）。 */
+.llm-proto table.logtbl{table-layout:fixed;border-collapse:separate;border-spacing:0}
+.llm-proto table.logtbl th, .llm-proto table.logtbl td{
+  position:relative;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  text-align:center;border-right:1px solid var(--color-border);
+}
+.llm-proto table.logtbl th:last-child, .llm-proto table.logtbl td:last-child{border-right:none}
+/* 日志表列多，左右内边距收到 8px：状态码这类窄列才放得下标题 */
+.llm-proto table.logtbl th, .llm-proto table.logtbl td{padding-left:8px;padding-right:8px}
+.llm-proto table.logtbl td.over, .llm-proto table.logtbl td.num.over{text-align:left}
+.llm-proto table.logtbl td.num{text-align:center}
+.llm-proto table.logtbl td.detail{white-space:normal;text-align:left;overflow:visible}
+.llm-proto .col-resizer{position:absolute;top:0;right:-4px;width:8px;height:100%;cursor:col-resize;z-index:3}
+.llm-proto .col-resizer:hover{background:var(--color-accent-soft)}
+/* 尾部填充格：把卡片剩余宽度吃掉，但不算一列数据 */
+.llm-proto table.logtbl th.log-spacer, .llm-proto table.logtbl td.log-spacer{border-right:none;padding:0}
+/* 表格卡：裁掉超出圆角的子元素。卡片只有圆角没有裁剪时，横向滚动后停在边角的
+   列（方角、带表头底色）会盖住左上/右上圆角，底部信息条同理——滚动前第一列/
+   最后一列表头自带同款圆角所以看不出问题（2026-10-25 中键拖动后暴露）。 */
+.llm-proto .card.clip{overflow:hidden}
+.llm-proto .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.llm-proto .pcard{position:relative;cursor:pointer;transition:.18s;display:flex;flex-direction:column}
+/* 操作行固定贴卡片底部，与卡片内容长度无关——所有卡片的禁用/启用按钮都在同一高度 */
+.llm-proto .pcard .pact{margin-top:auto;padding-top:10px;justify-content:flex-end}
+.llm-proto .pcard:hover{box-shadow:var(--shadow-md);border-color:var(--color-border-strong)}
+.llm-proto .pcard.cool{background:var(--color-surface-muted)}
+.llm-proto .pcard.disabled{opacity:.62;border-style:dashed;background:var(--color-surface-disabled)}
+.llm-proto .pcard .name{font-weight:600;display:flex;align-items:center;gap:7px}
+.llm-proto .pcard .note{font-size:var(--text-sm);color:var(--color-text-muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.llm-proto .pcard .url{font-size:var(--text-sm);color:var(--color-text-muted);margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.llm-proto .pcard .meta{display:flex;gap:6px;margin-top:10px;flex-wrap:wrap}
+.llm-proto .pcard .sub{margin-top:8px;font-size:var(--text-xs);color:var(--color-text-faint)}
+.llm-proto .corner{position:absolute;top:10px;right:10px}
+.llm-proto .detail-head{padding:16px}
+.llm-proto .detail-head .t{font-size:17px;font-weight:600;display:flex;align-items:center;gap:8px}
+.llm-proto .dinfo{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;font-size:var(--text-sm)}
+.llm-proto .dinfo .lab{color:var(--color-text-faint);text-align:right}
+.llm-proto .dinfo .val{color:var(--color-text);text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+.llm-proto .pills{display:flex;flex-wrap:wrap;gap:6px;padding:12px 16px;border-top:1px solid var(--color-border);align-items:center}
+/* The key list is a `.card` with padding:0, so its radius lives on the card
+   while the rows paint edge-to-edge. Without clipping, the row hover fill and
+   the first/last row corners square off the rounded card. */
+.llm-proto .keylist{overflow:hidden}
+.llm-proto .keyitem{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--color-border)}
+.llm-proto .keyitem:last-child{border-bottom:none}
+.llm-proto .keyitem:not(.dis):hover{background:var(--color-surface-hover)}
+.llm-proto .keyitem.dis{background:var(--color-surface-disabled);opacity:.75}
+.llm-proto .keyitem .left{flex:1;min-width:0}
+.llm-proto .keyitem .kv{font-size:var(--text-md);cursor:text;padding:2px 4px;margin:-2px -4px}
+.llm-proto .keyitem .kv:hover{background:var(--color-accent-soft);border-radius:var(--radius-sm)}
+/* Inline key/note edit — verbatim from the prototype (`.kv-edit` / `.edit-actions`).
+   The row is flex: the input or textarea grows, the two actions keep their
+   natural size beside it. ✓ is the plain .btn; cancel is .btn.ghost with ✕. */
+.llm-proto .kv-edit{display:flex;align-items:flex-start;gap:8px;width:100%}
+.llm-proto .kv-edit textarea,.llm-proto .kv-edit input{flex:1;min-width:0}
+.llm-proto .kv-edit .edit-actions{flex-shrink:0;margin-top:0}
+.llm-proto .edit-actions{display:flex;gap:4px}
+.llm-proto .edit-actions .btn{font-size:var(--text-xs);padding:3px 8px}
+.llm-proto .keyitem .subline{font-size:var(--text-xs);color:var(--color-text-muted);margin-top:2px;cursor:text;padding:2px 4px;margin-left:-4px}
+.llm-proto .keyitem .subline:hover{background:var(--color-accent-soft);border-radius:var(--radius-sm)}
+.llm-proto .keyitem .right{display:flex;align-items:center;gap:8px;flex-shrink:0}
+/* Test over delete: stacking them keeps the row three controls wide instead of
+   four, and the shorter button reads as secondary to the test result. */
+.llm-proto .keyitem .keyacts{display:flex;flex-direction:column;gap:4px;flex-shrink:0}
+.llm-proto .keyitem .keyacts .btn{justify-content:center;min-width:56px}
+.llm-proto .kv-edit{display:flex;align-items:flex-start;gap:8px;width:100%}
+.llm-proto .kv-edit textarea, .llm-proto .kv-edit input{flex:1;min-width:0}
+.llm-proto .kv-edit .edit-actions{flex-shrink:0;margin-top:0}
+.llm-proto .edit-actions{display:flex;gap:4px}
+.llm-proto .edit-actions .btn{font-size:var(--text-xs);padding:3px 8px}
+.llm-proto .typecard{border:1px solid var(--color-border);border-radius:10px;padding:0;margin-top:10px;transition:border-color .15s}
+.llm-proto .typecard:hover{border-color:var(--color-border-strong)}
+/* 折叠头：名称可编辑、右侧用途徽章 + 折叠箭头；展开时箭头旋转 180° */
+.llm-proto .tc-head{display:flex;align-items:center;gap:10px;padding:11px 12px;cursor:pointer;user-select:none}
+.llm-proto .tc-head:hover{background:var(--color-surface-hover)}
+.llm-proto .tc-head .tc-name{width:180px;font-weight:600;flex-shrink:0}
+.llm-proto .tc-usage{display:flex;gap:6px;flex-wrap:wrap;min-width:0;flex:1}
+/* 折叠箭头：不用 transform 旋转，改为 class 切换 path 的 d —— 避免 transform 在部分渲染上下文中不生效/读取不一致 */
+.llm-proto .tc-caret{flex-shrink:0;width:22px;height:22px;border-radius:var(--radius-sm);display:inline-flex;align-items:center;justify-content:center;color:var(--color-text-faint);transition:background .12s, color .12s}
+.llm-proto .tc-head:hover .tc-caret{background:var(--color-seg);color:var(--color-text-muted)}
+.llm-proto .typecard.open .tc-caret{color:var(--color-accent)}
+.llm-proto .tc-del{flex-shrink:0}
+/* 类型卡列表容器：
+   弹窗内：flex 吃满剩余高度，折叠/展开不改变弹窗总高；
+   页面上：固定为「视口 - 上下固定区」的高度，同样内部滚动，
+   这样展开/折叠只滚动列表本身，不会推动下方的「保存类型」按钮。 */
+.llm-proto .tc-list{flex:1 1 auto;min-height:96px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--color-border-strong) transparent;padding-right:4px}
+.llm-proto #main .tc-list{height:calc(100vh - 330px);max-height:calc(100vh - 330px)}
+.llm-proto .tc-list::-webkit-scrollbar{width:6px}
+.llm-proto .tc-list::-webkit-scrollbar-track{background:transparent}
+.llm-proto .tc-list::-webkit-scrollbar-thumb{background:var(--color-border-strong);border-radius:var(--radius-full)}
+.llm-proto .tc-body{display:none;padding:0 12px 12px;border-top:1px solid var(--color-border)}
+.llm-proto .typecard.open .tc-body{display:block}
+.llm-proto .typecard .tgrid{display:grid;grid-template-columns:1fr 1fr;gap:8px 12px;margin-top:10px}
+.llm-proto .typecard label{font-size:var(--text-xs);color:var(--color-text-muted);display:block;margin-bottom:2px}
+.llm-proto .typecard .desc{font-size:10px;color:var(--color-text-faint);margin-top:1px}
+/* 折叠态下的名称输入框去掉边框，视觉上像标题而非表单 */
+.llm-proto .typecard .tc-name{border-color:transparent;background:transparent}
+.llm-proto .typecard .tc-name:hover{border-color:var(--color-border)}
+.llm-proto .typecard .tc-name:focus{border-color:var(--color-accent);background:var(--color-surface)}
+.llm-proto .typecard .tgrid input{width:100%}
+/* 限流窗口一行 = 一个窗口：数量 + 单位 / 每 + 时长 + 单位 + 窗口类型，末尾删除。
+   控件各自带标签或 tooltip，不再依赖上方的说明文字；窄弹窗下允许换行。 */
+.llm-proto .limrow{display:flex;align-items:center;gap:6px;margin-top:6px;flex-wrap:wrap}
+.llm-proto .limrow input[type=number]{width:76px;flex-shrink:0}
+.llm-proto .limrow select{flex:0 0 auto}
+.llm-proto .limrow .lim-eq{flex-shrink:0;font-size:var(--text-xs);color:var(--color-text-faint);padding:0 1px}
+.llm-proto .limrow .lim-del{margin-left:auto;flex-shrink:0;color:var(--color-text-faint)}
+.llm-proto .limrow .lim-del:hover{color:var(--state-bad);background:var(--state-bad-soft)}
+/* 窗口类型分段控件：两种窗口是「选择」而非「开关」，选中态必须肉眼可见 */
+.llm-proto .limseg{display:inline-flex;border:1px solid var(--color-border);border-radius:var(--radius-md);overflow:hidden;flex-shrink:0}
+.llm-proto .limseg button{border:0;background:var(--color-input);color:var(--color-text-muted);font-size:var(--text-xs);padding:4px 10px;cursor:pointer;transition:.15s;line-height:1.4}
+.llm-proto .limseg button+button{border-left:1px solid var(--color-border)}
+.llm-proto .limseg button:hover{color:var(--color-text)}
+.llm-proto .limseg button.on{background:var(--color-accent-soft);color:var(--color-accent);font-weight:600}
+.llm-proto .overlay{position:fixed;inset:0;background:rgba(20,20,40,.45);display:grid;place-items:center;z-index:50;padding:24px;overflow:auto}
+/* 弹窗改 flex 列布局：头/尾固定，body 内滚动 —— 展开/折叠内容不会改变弹窗总高度 */
+.llm-proto .dialog{background:var(--color-surface);border-radius:14px;box-shadow:0 18px 60px rgba(20,20,40,.28);width:560px;max-width:100%;margin:auto;padding:20px;height:min(600px,88vh);overflow:hidden;display:flex;flex-direction:column;scrollbar-width:thin;scrollbar-color:var(--color-border-strong) transparent}
+/* 编辑提供商弹窗：body 高度固定（视口比例），类型区 flex 吃剩余并内部滚动 → 折叠/展开时弹窗总高、footer 位置完全不变 */
+/* 弹窗内：中间内容区（.body）整体滚动，头部 .spread 与 .footer 固定不随滚动消失；
+   类型卡列表不再单独内部滚动，否则出现「双滚动条/滚动条嵌在中部」的观感 */
+.llm-proto .dialog > .spread, .llm-proto .dialog > .footer{flex-shrink:0}
+.llm-proto .dialog.wide.pe-dialog .tc-list{flex:0 0 auto;min-height:0;overflow:visible;padding-right:0}
+.llm-proto .dialog.slim{height:auto}
+.llm-proto .dialog h3{font-size:var(--text-xl);font-weight:600;margin-bottom:12px}
+.llm-proto .dialog .body{display:flex;flex-direction:column;gap:12px;flex:1 1 auto;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--color-border-strong) transparent;padding-right:2px}
+.llm-proto .field label{font-size:var(--text-sm);color:var(--color-text-muted);display:block;margin-bottom:3px}
+/* Two fields on one row, as in the prototype's .grid2: used for the create
+   dialog's 名称 + ID, which are one concept split in two. */
+.llm-proto .grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.llm-proto .grid2 .field{min-width:0}
+/* Form controls fill their field. `textarea` is spelled out because it
+   must also drop the resizer: a user-dragged height would push the dialog
+   past its fixed height and shift the footer. input/select are named too —
+   without this an input inside a non-grid field falls back to its default
+   width (the API address rendered ~170px wide next to 518px siblings). */
+.llm-proto .field input,.llm-proto .field select{width:100%;min-width:0}
+.llm-proto .field textarea{width:100%;min-width:0;resize:none}
+.llm-proto .footer{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
+.llm-proto #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#232330;color:#fff;padding:9px 18px;border-radius:var(--radius-full);font-size:var(--text-md);opacity:0;transition:.25s;z-index:99;pointer-events:none}
+.llm-proto #toast.show{opacity:1}
+.llm-proto .tail-pill{position:fixed;left:50%;bottom:56px;z-index:98;background:var(--color-accent);color:#fff;border-radius:var(--radius-full);padding:7px 16px;font-size:var(--text-sm);font-weight:600;box-shadow:var(--shadow-md);opacity:0;pointer-events:none;transform:translateX(-50%) translateY(8px);transition:.18s}
+.llm-proto .tail-pill.show{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+.llm-proto .notice{padding:9px 13px;border-radius:var(--radius-md);font-size:var(--text-sm)}
+.llm-proto .notice.amber{background:var(--state-warn-soft);color:var(--state-warn)}
+.llm-proto .notice.accent{background:var(--color-accent-soft);color:var(--color-accent)}
+.llm-proto .skel{border:1.5px dashed var(--color-border-strong);border-radius:var(--radius-lg);display:flex;align-items:center;justify-content:center;gap:8px;padding:18px;color:var(--color-text-muted);cursor:pointer;transition:.15s}
+.llm-proto .skel:hover{border-color:var(--color-accent);color:var(--color-accent)}
+.llm-proto .sticky{position:sticky;top:0;background:var(--color-bg);padding-bottom:10px;z-index:10}
+.llm-proto .ostep{width:18px;height:18px;border-radius:50%;background:var(--color-seg);color:var(--color-text-muted);font-size:11px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0}
+.llm-proto .ostep.done{background:var(--state-ok-soft);color:var(--state-ok)}
+
+/* ---- custom dropdown (replaces native <select> popups inside dialogs) ---- */
+.llm-proto .pselect{position:relative;width:100%}
+.llm-proto .pselect-btn{width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;
+  border:1px solid var(--color-border);border-radius:var(--radius-md);padding:6px 10px;background:var(--color-input);
+  font-size:var(--text-md);color:var(--color-text);text-align:left;transition:.15s;cursor:pointer}
+.llm-proto .pselect-btn:hover{border-color:var(--color-border-strong)}
+.llm-proto .pselect-btn.open,.llm-proto .pselect-btn:focus{border-color:var(--color-accent);background:var(--color-surface);outline:none}
+.llm-proto .pselect-btn:disabled{opacity:.55;cursor:not-allowed}
+.llm-proto .pselect-btn svg{flex-shrink:0;color:var(--color-text-faint);transition:transform .15s}
+.llm-proto .pselect-btn.open svg{transform:rotate(180deg)}
+.llm-proto .pselect-pop{position:fixed;z-index:60;background:var(--color-surface);
+  border:1px solid var(--color-border);border-radius:var(--radius-md);box-shadow:var(--shadow-md);
+  padding:4px;max-height:220px;overflow-y:auto;scrollbar-width:thin}
+.llm-proto .pselect-item{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;
+  padding:7px 10px;border-radius:6px;font-size:var(--text-md);color:var(--color-text);text-align:left;cursor:pointer}
+.llm-proto .pselect-item:hover{background:var(--color-surface-hover)}
+.llm-proto .pselect-item.on{color:var(--color-accent);background:var(--color-accent-soft)}
+.llm-proto .pselect-check{font-size:var(--text-sm)}
+/* 列选择浮层：与 pselect-pop 同一套浮层语义，但挂在按钮下方（absolute，非 portal） */
+.llm-proto .colpop{position:absolute;z-index:40;top:calc(100% + 4px);left:0;min-width:150px;
+  padding:8px;box-shadow:var(--shadow-md)}
+.llm-proto select option{background:var(--color-surface);color:var(--color-text)}
+
+/* hover background on the type-card header must not square off the rounded card */
+.llm-proto .typecard{overflow:hidden}

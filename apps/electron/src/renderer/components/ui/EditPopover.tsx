@@ -1062,7 +1062,8 @@ export function EditPopover({
                   onOpenFile={onOpenFile || (() => {})}
                   onOpenUrl={onOpenUrl || (() => {})}
                   currentModel={currentModel}
-                  onModelChange={setCurrentModel}
+                  effectiveStrategyId=""
+                  onStrategyChange={() => {}}
                   pendingPermission={pendingPermission}
                   onRespondToPermission={onRespondToPermission}
                   pendingCredential={pendingCredential}

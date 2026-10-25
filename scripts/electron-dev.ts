@@ -4,7 +4,7 @@
  */
 
 import { spawn, type Subprocess } from "bun";
-import { existsSync, rmSync, cpSync, readFileSync, statSync, mkdirSync } from "fs";
+import { existsSync, rmSync, cpSync, readFileSync, statSync, mkdirSync, writeFileSync } from "fs";
 import { join, basename } from "path";
 import * as esbuild from "esbuild";
 import { downloadUv, type Platform, type Arch } from "./build/common";
@@ -34,7 +34,6 @@ const PI_AGENT_SERVER_OUTPUT = join(PI_AGENT_SERVER_DIR, "dist/index.js");
 // Platform-specific binary paths (bun creates .exe on Windows, no extension on Unix)
 const IS_WINDOWS = process.platform === "win32";
 const BIN_EXT = IS_WINDOWS ? ".exe" : "";
-const VITE_BIN = join(ROOT_DIR, `node_modules/.bin/vite${BIN_EXT}`);
 const ELECTRON_BIN = join(ROOT_DIR, `node_modules/.bin/electron${BIN_EXT}`);
 
 function resolveBuildPlatform(): Platform {
@@ -536,14 +535,18 @@ async function main(): Promise<void> {
   const processes: Subprocess[] = [];
   const esbuildContexts: esbuild.BuildContext[] = [];
 
-  // 1. Vite dev server (strictPort ensures we don't silently switch ports)
+  // 1. Vite dev server. Write the launch command to a .ps1 file and run it via
+  // `powershell -File` (not -Command) so Bun can't mangle the quoted argument.
+  // PowerShell's Start-Process then orphans Vite so Bun cannot reap it —
+  // Bun.spawn reaped Vite ~30s after "ready", which broke HMR.
+  const vitePs = join(ROOT_DIR, "vite-dev.ps1");
+  writeFileSync(vitePs, `Start-Process -FilePath node -ArgumentList 'node_modules/vite/bin/vite.js','dev','--config','apps/electron/vite.config.ts','--port',${vitePort},'--strictPort' -WorkingDirectory '${ROOT_DIR}' -WindowStyle Hidden`);
   const viteProc = spawn({
-    cmd: [VITE_BIN, "dev", "--config", "apps/electron/vite.config.ts", "--port", vitePort, "--strictPort"],
+    cmd: ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", vitePs],
     cwd: ROOT_DIR,
     stdin: "ignore",
-    stdout: "inherit",
-    stderr: "inherit",
-    env: process.env as Record<string, string>,
+    stdout: "ignore",
+    stderr: "ignore",
   });
   processes.push(viteProc);
 

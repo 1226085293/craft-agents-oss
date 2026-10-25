@@ -6,12 +6,13 @@ import { useSetAtom, useStore, useAtomValue, useAtom } from 'jotai'
 import type { Session, Workspace, SessionEvent, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, SetupNeeds, SessionStatus, NewChatActionParams, ContentBadge, LlmConnectionWithStatus, PermissionModeState } from '../shared/types'
 import type { SessionDraft, DraftAttachmentRef } from '@craft-agent/shared/config'
 import type { SessionOptions, SessionOptionUpdates } from './hooks/useSessionOptions'
-import { defaultSessionOptions, mergeSessionOptions } from './hooks/useSessionOptions'
+import { defaultSessionOptions, mergeSessionOptions, readDefaultStrategy } from './hooks/useSessionOptions'
 import { generateMessageId } from '../shared/types'
 import { useEventProcessor } from './event-processor'
 import type { AgentEvent, Effect } from './event-processor'
 import { AppShell } from '@/components/app-shell/AppShell'
 import { SettingsWindowShell } from '@/components/app-shell/SettingsWindowShell'
+import { PageWindowShell } from '@/components/pages/PageWindowShell'
 import type { AppShellContextType } from '@/context/AppShellContext'
 import { OnboardingWizard, ReauthScreen } from '@/components/onboarding'
 import { WorkspacePicker } from '@/components/workspace'
@@ -29,6 +30,7 @@ import { useUpdateChecker } from '@/hooks/useUpdateChecker'
 import { NavigationProvider } from '@/contexts/NavigationContext'
 import { navigate, routes } from './lib/navigate'
 import { isSettingsWindowMode as detectSettingsWindowMode, openSettingsWindow } from './lib/settings-window'
+import { isPageWindowMode, pageSlugFromLocation } from './lib/page-window'
 import { attachmentFromContentRef, toDraftRef } from './lib/drafts'
 import { stripMarkdown } from './utils/text'
 import { coerceInputText } from './lib/input-text'
@@ -339,6 +341,8 @@ export default function App() {
 
   // Get initial sessionId and focused mode from URL params (for "Open in New Window" feature)
   const settingsWindowMode = useMemo(() => detectSettingsWindowMode(), [])
+  const pageWindowMode = useMemo(() => isPageWindowMode(), [])
+  const pageWindowSlug = useMemo(() => pageSlugFromLocation(), [])
   const { initialSessionId, isFocusedMode } = useMemo(() => {
     const params = new URLSearchParams(window.location.search)
     return {
@@ -493,12 +497,17 @@ export default function App() {
         ...current,
         permissionMode: session.permissionMode ?? defaultSessionOptions.permissionMode,
         thinkingLevel: session.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
+        // Restored from the session record when the backend knows it; the
+        // `?? ''` keeps an unknown strategy from reading as `undefined` in the
+        // composer's "未选择策略组" state.
+        strategy: session.strategy ?? current?.strategy ?? '',
       }
 
       const hasExplicitMode = session.permissionMode != null
       const hasNonDefaultThinking = merged.thinkingLevel !== DEFAULT_THINKING_LEVEL
+      const hasStrategy = !!merged.strategy
 
-      if (!hasExplicitMode && !hasNonDefaultThinking && merged.permissionModeVersion == null) {
+      if (!hasExplicitMode && !hasNonDefaultThinking && !hasStrategy && merged.permissionModeVersion == null) {
         next.delete(session.id)
       } else {
         next.set(session.id, merged)
@@ -552,10 +561,15 @@ export default function App() {
       for (const s of loadedSessions) {
         const hasExplicitMode = s.permissionMode != null
         const hasNonDefaultThinking = s.thinkingLevel && s.thinkingLevel !== DEFAULT_THINKING_LEVEL
-        if (hasExplicitMode || hasNonDefaultThinking) {
+        // Strategy is sticky like the thinking level — without it here the
+        // composer loses the routing choice on every cold load (it falls back
+        // to "未选择策略组" even though the record persisted it).
+        const hasStrategy = !!s.strategy
+        if (hasExplicitMode || hasNonDefaultThinking || hasStrategy) {
           optionsMap.set(s.id, {
             permissionMode: s.permissionMode ?? defaultSessionOptions.permissionMode,
             thinkingLevel: s.thinkingLevel ?? DEFAULT_THINKING_LEVEL,
+            strategy: s.strategy ?? '',
           })
         }
       }
@@ -800,9 +814,10 @@ export default function App() {
         })
       }
     }).catch(() => { /* non-fatal startup check */ })
-    if (settingsWindowMode) {
-      // The settings shell does not own chat sessions. Mark readiness without
-      // loading the potentially large session/draft collections.
+    if (settingsWindowMode || pageWindowMode) {
+      // Settings shells and standalone page windows do not own chat sessions.
+      // Mark readiness without loading the potentially large session/draft
+      // collections (this is most of a page window's startup cost).
       setSessionsLoaded(true)
     } else {
       void loadSessionsFromServer()
@@ -815,7 +830,7 @@ export default function App() {
     // Load persisted input drafts into ref (no re-render needed).
     // Attachment files are not read here — hydration happens lazily when the session
     // is opened so app startup isn't delayed by reading potentially large files.
-    if (!settingsWindowMode) {
+    if (!settingsWindowMode && !pageWindowMode) {
       window.electronAPI.getAllDrafts().then((drafts) => {
         if (Object.keys(drafts).length > 0) {
           sessionDraftsRef.current = new Map(Object.entries(drafts))
@@ -824,7 +839,7 @@ export default function App() {
     }
     // Load app-level theme
     window.electronAPI.getAppTheme().then(setAppTheme)
-  }, [appState, loadSessionsFromServer, resolveDefaultConnectionSlug, settingsWindowMode])
+  }, [appState, loadSessionsFromServer, resolveDefaultConnectionSlug, settingsWindowMode, pageWindowMode])
 
   // Subscribe to theme change events (live updates when theme.json changes)
   useEffect(() => {
@@ -876,6 +891,8 @@ export default function App() {
   // This is simpler and more robust than checking event types - we just ask
   // "is this session currently streaming?" and route accordingly.
   useEffect(() => {
+    // Standalone page windows don't own sessions — skip the whole event pipeline.
+    if (pageWindowMode) return
     // Handoff events signal end of streaming - need to sync back to React state
     // Also includes todo_state_changed so status updates immediately reflect in sidebar
     // async_operation included so shimmer effect on session titles updates in real-time
@@ -1151,11 +1168,13 @@ export default function App() {
     syncSessionOptionsFromSession,
     applyPermissionModeState,
     reconcilePermissionModeState,
+    pageWindowMode,
   ])
 
   // Transport reconnect recovery — refresh session metadata plus active/processing
   // session content after stale reconnects.
   useEffect(() => {
+    if (pageWindowMode) return
     const cleanup = window.electronAPI.onReconnected(async (isStale: boolean) => {
       if (!isStale) {
         // Server replayed buffered events — we're caught up, nothing to do
@@ -1206,7 +1225,7 @@ export default function App() {
     })
 
     return cleanup
-  }, [store, sessionSelection.selected, refreshSessionFromServer, refreshSessionListMetadataFromServer])
+  }, [store, sessionSelection.selected, refreshSessionFromServer, refreshSessionListMetadataFromServer, pageWindowMode])
 
   // Listen for menu bar events
   useEffect(() => {
@@ -1228,9 +1247,25 @@ export default function App() {
 
   const handleCreateSession = useCallback(async (workspaceId: string, options?: import('../shared/types').CreateSessionOptions): Promise<Session> => {
     const session = await window.electronAPI.createSession(workspaceId, options)
+    // A new session follows the user's default strategy group. Persist it on
+    // the record now: the composer would otherwise show the default while the
+    // backend still has none, and the server refuses a session with no strategy.
+    const defaultStrategy = session.strategy ?? readDefaultStrategy()
+    if (defaultStrategy && !session.strategy) {
+      try {
+        await window.electronAPI.sessionCommand(session.id, {
+          type: 'setSessionStrategy',
+          strategy: defaultStrategy,
+        })
+      } catch (error) {
+        // A failed seed is not fatal: the composer still shows the default and
+        // the user can pick a group manually.
+        console.warn('[App] Failed to seed the default strategy on a new session:', error)
+      }
+    }
     // Add to per-session atom and metadata map (no sessionsAtom)
     addSession(session)
-    syncSessionOptionsFromSession(session)
+    syncSessionOptionsFromSession(defaultStrategy ? { ...session, strategy: defaultStrategy } : session)
 
     return session
   }, [addSession, syncSessionOptionsFromSession])
@@ -1482,6 +1517,22 @@ export default function App() {
         lastMessageAt: Date.now()
       }))
 
+      // A session whose strategy was never written to the record (e.g. one
+      // created before the default was set) would show the default in the
+      // composer but be refused by the gateway guard. Persist the resolved
+      // default before the turn; sessions that already carry one are untouched.
+      const strategyEntry = sessionOptions.get(sessionId)
+      if (strategyEntry?.strategy === undefined) {
+        const resolved = readDefaultStrategy()
+        if (resolved) {
+          try {
+            await window.electronAPI.sessionCommand(sessionId, { type: 'setSessionStrategy', strategy: resolved })
+          } catch (error) {
+            console.warn('[App] Failed to sync the default strategy before sending:', error)
+          }
+        }
+      }
+
       // Step 6: Send to Claude with processed attachments + stored attachments for persistence
       await window.electronAPI.sendMessage(sessionId, message, processedAttachments, storedAttachments, {
         skillSlugs,
@@ -1526,6 +1577,11 @@ export default function App() {
     if (updates.thinkingLevel !== undefined) {
       // Sync thinking level change with backend (session-level, persisted)
       window.electronAPI.sessionCommand(sessionId, { type: 'setThinkingLevel', level: updates.thinkingLevel })
+    }
+    if (updates.strategy !== undefined) {
+      // Routing choice is sticky like the thinking level — without this the
+      // composer silently forgets the strategy on reload.
+      window.electronAPI.sessionCommand(sessionId, { type: 'setSessionStrategy', strategy: updates.strategy })
     }
   }, [sessionOptions])
 
@@ -2084,12 +2140,7 @@ export default function App() {
             onSelectApiSetupMethod={onboarding.handleSelectApiSetupMethod}
             onSubmitCredential={onboarding.handleSubmitCredential}
             onSubmitLocalModel={onboarding.handleSubmitLocalModel}
-            onStartOAuth={onboarding.handleStartOAuth}
             onFinish={onboarding.handleFinish}
-            isWaitingForCode={onboarding.isWaitingForCode}
-            onSubmitAuthCode={onboarding.handleSubmitAuthCode}
-            onCancelOAuth={onboarding.handleCancelOAuth}
-            copilotDeviceCode={onboarding.copilotDeviceCode}
             onBrowseGitBash={onboarding.handleBrowseGitBash}
             onUseGitBashPath={onboarding.handleUseGitBashPath}
             onRecheckGitBash={onboarding.handleRecheckGitBash}
@@ -2121,6 +2172,20 @@ export default function App() {
   // Show splash until exit animation completes
   const showSplash = !splashHidden
 
+  const navigationProviderProps = {
+    workspaceId: windowWorkspaceId,
+    workspaceSlug: windowWorkspaceSlug,
+    onSwitchWorkspaceBySlug: handleSwitchWorkspaceBySlug,
+    onCreateSession: handleCreateSession,
+    onInputChange: handleInputChange,
+    getDraft,
+    getDraftAttachmentRefs,
+    onAutoDeleteEmptySession: handleAutoDeleteEmptySession,
+    isReady: appState === 'ready',
+    isSessionsReady: sessionsLoaded,
+    remoteWorkspaceId: windowRemoteWorkspaceId,
+  }
+
   // Ready state - main app with splash overlay during data loading
   return (
     <PlatformProvider actions={platformActions}>
@@ -2130,7 +2195,11 @@ export default function App() {
         <DismissibleLayerProvider>
         <ModalProvider>
         <TooltipProvider delayDuration={0}>
-          {settingsWindowMode ? (
+          {pageWindowMode && pageWindowSlug ? (
+            <NavigationProvider {...navigationProviderProps}>
+              <PageWindowShell pageSlug={pageWindowSlug} contextValue={appShellContextValue} />
+            </NavigationProvider>
+          ) : settingsWindowMode ? (
             <div className="h-full min-h-0">
               <SettingsWindowShell
                 contextValue={appShellContextValue}
@@ -2143,19 +2212,7 @@ export default function App() {
               />
             </div>
           ) : (
-            <NavigationProvider
-              workspaceId={windowWorkspaceId}
-              workspaceSlug={windowWorkspaceSlug}
-              onSwitchWorkspaceBySlug={handleSwitchWorkspaceBySlug}
-              onCreateSession={handleCreateSession}
-              onInputChange={handleInputChange}
-              getDraft={getDraft}
-              getDraftAttachmentRefs={getDraftAttachmentRefs}
-              onAutoDeleteEmptySession={handleAutoDeleteEmptySession}
-              isReady={appState === 'ready'}
-              isSessionsReady={sessionsLoaded}
-              remoteWorkspaceId={windowRemoteWorkspaceId}
-            >
+            <NavigationProvider {...navigationProviderProps}>
               {/* Handle window close requests (X button, Cmd+W) - close modal first if open */}
               <WindowCloseHandler />
 

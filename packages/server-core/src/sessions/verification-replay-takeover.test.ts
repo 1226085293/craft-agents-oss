@@ -425,17 +425,32 @@ describe('SessionManager — ghost-card suppression (shouldSuppressGhostErrorCar
     )).toBe(true)
   })
 
-  it('suppresses when an unsettled retrying row is in flight (ladder still owns the turn)', () => {
+  it('suppresses when this turn ALREADY surfaced an error card (one box, 2026-10-19)', () => {
+    // 261018-noble-shoal: the ladder exhausted and rewrote its card, then the
+    // no-reply fallback appended a second "Request Error" box for the same 429.
     expect(shouldSuppressGhostErrorCard(
       [
         { role: 'user', timestamp: 900_000 },
-        { role: 'status', statusType: 'retrying', timestamp: 910_000, retry: { status: 'retrying' } },
+        { role: 'error', timestamp: 920_000 },
+      ],
+      900_000,
+      950_000, // fresh captured error
+      NOW,
+      MAX_AGE,
+    )).toBe(true)
+  })
+
+  it('does NOT treat an error card from an EARLIER turn as already surfaced', () => {
+    expect(shouldSuppressGhostErrorCard(
+      [
+        { role: 'error', timestamp: 800_000 },
+        { role: 'user', timestamp: 900_000 },
       ],
       900_000,
       950_000,
       NOW,
       MAX_AGE,
-    )).toBe(true)
+    )).toBe(false)
   })
 
   it('does NOT suppress for a stale verification_failed from an earlier turn', () => {

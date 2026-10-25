@@ -40,6 +40,7 @@ describe('sortActivitiesForDisplay', () => {
       'thinking-early',
     ])
   })
+
 })
 
 describe('buildActivityRenderKeys', () => {

@@ -138,7 +138,7 @@ export interface ModelDefinition {
  * unavailable — CI, standalone scripts — and keeps the pi-agent-server
  * subprocess and the host display in agreement when no config is passed.
  */
-export const DEFAULT_CONTEXT_WINDOW = 131_072;
+export const DEFAULT_CONTEXT_WINDOW = 512_000;
 
 // ============================================
 // MODEL REGISTRY (Single Source of Truth)

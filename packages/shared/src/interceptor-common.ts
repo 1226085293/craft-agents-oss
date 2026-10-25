@@ -364,18 +364,19 @@ export function formatErrorHistoryEntry(error: LastApiError, maxMessageLength = 
 /**
  * Most recent API error for a session, read from the DURABLE per-session
  * history (`api-errors.jsonl`): never consumes, never deleted, and no
- * 5-minute staleness drop — the cause survives the whole retry-ladder
- * backoff window.
+ * 5-minute staleness drop — the cause survives the whole gateway retry/backoff
+ * window.
  *
  * Why this matters: a transient failure (e.g. 429) is normally absorbed by the
- * unified retry ladder, so the turn may only settle minutes later — long after
- * the single-slot file was popped (`getStoredError` deletes on read) or aged
- * past `MAX_ERROR_AGE_MS`. The session's "completed without a response" path
- * then found nothing and surfaced NO error card, even though a rate limit was
- * the real cause. The append-only history survives both the backoff window and
- * any probe's consume-on-read, so the reporting path can always retrieve the
- * real cause. Falls back to the single slot (non-consuming) when the history
- * file is missing or empty.
+ * built-in LLM gateway (it retries and switches keys transparently), so the
+ * turn may only settle minutes later — long after the single-slot file was
+ * popped (`getStoredError` deletes on read) or aged past `MAX_ERROR_AGE_MS`.
+ * The session's "completed without a response" path then found nothing and
+ * surfaced NO error card, even though a rate limit was the real cause. The
+ * append-only history survives both the backoff window and any probe's
+ * consume-on-read, so the reporting path can always retrieve the real cause.
+ * Falls back to the single slot (non-consuming) when the history file is
+ * missing or empty.
  */
 export function getLastErrorFromHistory(sessionDir?: string): LastApiError | null {
   const history = readErrorHistory(sessionDir);

@@ -131,31 +131,22 @@ describe('PiAgent.queryLlm — subprocess RPC round-trip', () => {
     agent.destroy();
   });
 
-  it('rejects queryLlm and fires refreshAndPushTokens on auth errors for OAuth connections', async () => {
-    const agent = new PiAgent(createConfig({ authType: 'oauth' }));
+  it('rejects queryLlm on auth errors from the subprocess', async () => {
+    const agent = new PiAgent(createConfig());
     const { sent } = installFakeSubprocess(agent);
-
-    // Stub refreshAndPushTokens so we can observe the auth-refresh attempt.
-    let refreshAttempts = 0;
-    (agent as any).refreshAndPushTokens = async () => {
-      refreshAttempts++;
-    };
 
     const pending = agent.queryLlm({ prompt: 'hi' });
     await flushMicrotasks();
     expect(sent).toHaveLength(1);
 
-    // Simulate the subprocess dual-emit: generic `error` first (triggers
-    // centralized auth refresh), then the targeted `llm_query_result` that
-    // rejects the specific promise.
+    // Simulate the subprocess dual-emit: generic `error` first, then the
+    // targeted `llm_query_result` that rejects the specific promise.
     (agent as any).handleLine(JSON.stringify({
       type: 'error',
       code: 'llm_query_error',
       message: 'HTTP 401: Unauthorized',
     }));
 
-    // The generic error loop already rejected the pending query, so the targeted
-    // result handler is a no-op. That's fine — the dual-emit is defense-in-depth.
     let rejection: Error | null = null;
     try {
       await pending;
@@ -166,9 +157,9 @@ describe('PiAgent.queryLlm — subprocess RPC round-trip', () => {
     expect(rejection).not.toBeNull();
     expect(rejection!.message).toContain('401');
 
-    // Yield once so the async refresh closure schedules.
+    // OAuth token refresh was removed with the OAuth connection path, so an
+    // auth error is terminal rather than something the agent retries itself.
     await new Promise((r) => setTimeout(r, 0));
-    expect(refreshAttempts).toBe(1);
     expect((agent as any).pendingLlmQueries.size).toBe(0);
 
     agent.destroy();
@@ -314,6 +305,52 @@ describe('PiAgent.queryLlm — subprocess RPC round-trip', () => {
     expect((r1 as PromiseRejectedResult).reason.message).toMatch(/subprocess exited/i);
     expect((r2 as PromiseRejectedResult).reason.message).toMatch(/subprocess exited/i);
     expect((agent as any).pendingLlmQueries.size).toBe(0);
+
+    agent.destroy();
+  });
+});
+
+describe('PiAgent.runMiniCompletion — attribution', () => {
+  it('forwards the kind so background work is not logged as 对话', async () => {
+    // Memory extraction runs on the session's agent; without the kind the
+    // gateway inherits the process-wide `chat` and the log cannot tell it from
+    // the conversation (2026-10-25: a session-end extraction showed up as 对话).
+    const agent = new PiAgent(createConfig());
+    const { sent } = installFakeSubprocess(agent);
+
+    const pending = agent.runMiniCompletion('extract memories', 'memory');
+    await flushMicrotasks();
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ type: 'mini_completion', prompt: 'extract memories', kind: 'memory' });
+
+    (agent as any).handleLine(JSON.stringify({
+      type: 'mini_completion_result',
+      id: sent[0]!.id,
+      text: 'ok',
+    }));
+    await expect(pending).resolves.toBe('ok');
+
+    agent.destroy();
+  });
+
+  it('omits the kind for chat-shaped work, keeping the envelope unchanged', async () => {
+    const agent = new PiAgent(createConfig());
+    const { sent } = installFakeSubprocess(agent);
+
+    const pending = agent.runMiniCompletion('make a title');
+    await flushMicrotasks();
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ type: 'mini_completion', prompt: 'make a title' });
+    expect('kind' in (sent[0] as object)).toBe(false);
+
+    (agent as any).handleLine(JSON.stringify({
+      type: 'mini_completion_result',
+      id: sent[0]!.id,
+      text: 'ok',
+    }));
+    await expect(pending).resolves.toBe('ok');
 
     agent.destroy();
   });

@@ -53,6 +53,7 @@ import { routes, type Route, type ViewRoute } from '../../shared/routes'
 import { parsePermissionMode } from '@craft-agent/shared/agent/mode-types'
 import type { DraftAttachmentRef } from '@craft-agent/shared/config'
 import { NAVIGATE_EVENT, type NavigateOptions } from '../lib/navigate'
+import { isPageWindowMode } from '../lib/page-window'
 import { dispatchFocusInputEvent } from '@/components/app-shell/input/focus-input-events'
 import { openSettingsWindow } from '@/lib/settings-window'
 import { normalizePanelRouteForReconcile } from './navigation-reconcile'
@@ -275,6 +276,9 @@ export function NavigationProvider({
    * Also persists the URL per-workspace in localStorage for workspace switch restoration.
    */
   const syncUrl = useCallback((push: boolean = false) => {
+    // Standalone page windows must keep their own URL (?windowMode=page&pageSlug=…)
+    // and must never overwrite the main window's saved workspace route.
+    if (isPageWindowMode()) return
     const panels = store.get(panelStackAtom)
     const focusedIdx = store.get(focusedPanelIndexAtom)
     if (panels.length === 0) return
@@ -1018,6 +1022,12 @@ export function NavigationProvider({
 
   useEffect(() => {
     if (!workspaceId || !workspaceSlug || !isSessionsReady) return
+
+    // Page windows have no workspace switcher and no panel stack to restore.
+    if (isPageWindowMode()) {
+      previousWorkspaceSlugRef.current = workspaceSlug
+      return
+    }
 
     if (previousWorkspaceSlugRef.current === null) {
       // First mount — initial route restoration handles it

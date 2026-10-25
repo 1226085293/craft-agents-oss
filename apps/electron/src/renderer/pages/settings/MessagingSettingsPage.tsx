@@ -11,7 +11,7 @@
  *  - Telegram-specific: direct (DM) bindings render directly under the bot
  *    row, then a separator, then a collapsible Supergroup section that
  *    expands to show topic-bound bindings. Mirrors the chevron pattern
- *    used by AiSettingsPage's `WorkspaceOverrideCard`.
+ *    used by the workspace AI overrides card.
  *  - WhatsApp / Lark / QQ: bindings render as a flat list under their bot row.
  */
 

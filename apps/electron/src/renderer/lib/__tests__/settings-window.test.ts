@@ -12,7 +12,7 @@ import {
 
 describe('settings window route helpers', () => {
   it('recognizes the independent settings window query mode', () => {
-    expect(isSettingsWindowMode({ search: '?windowMode=settings&route=settings%2Fai' })).toBe(true)
+    expect(isSettingsWindowMode({ search: '?windowMode=settings&route=settings%2Fllm' })).toBe(true)
     expect(isSettingsWindowMode({ search: '?windowMode=main' })).toBe(false)
     expect(isSettingsWindowMode({ search: '' })).toBe(false)
   })
@@ -35,10 +35,22 @@ describe('settings window route helpers', () => {
   })
 
   it('builds workspace-scoped settings and main-window session links', () => {
+    expect(buildSettingsWindowDeepLink('llm', 'workspace-1'))
+      .toBe('craftagents://workspace/workspace-1/settings/llm')
+    expect(buildSettingsWindowDeepLink('settings/llm', 'workspace-1'))
+      .toBe('craftagents://workspace/workspace-1/settings/llm')
+  })
+
+  it('falls back to app for a subpage that no longer exists', () => {
+    // The old 'ai' page was removed. A deep link still pointing at it must
+    // land somewhere renderable rather than on a dead route.
     expect(buildSettingsWindowDeepLink('ai', 'workspace-1'))
-      .toBe('craftagents://workspace/workspace-1/settings/ai')
+      .toBe('craftagents://workspace/workspace-1/settings/app')
     expect(buildSettingsWindowDeepLink('settings/ai', 'workspace-1'))
-      .toBe('craftagents://workspace/workspace-1/settings/ai')
+      .toBe('craftagents://workspace/workspace-1/settings/app')
+  })
+
+  it('builds session links outside the settings shell', () => {
     expect(buildSettingsWindowDeepLink(undefined, 'workspace-1'))
       .toBe('craftagents://workspace/workspace-1/settings/app')
     expect(buildWorkspaceDeepLink('allSessions/session/session-1', 'workspace-1'))

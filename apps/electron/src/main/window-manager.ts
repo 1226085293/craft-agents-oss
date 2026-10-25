@@ -6,7 +6,7 @@ import { release } from 'os'
 import { fileURLToPath } from 'url'
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config'
 import { classifyExternalUrl, formatBlockedUrlError } from '@craft-agent/shared/utils/url-safety'
-import { RPC_CHANNELS, type WindowCloseRequestSource } from '../shared/types'
+import { RPC_CHANNELS, type PageWindowInfo, type WindowCloseRequestSource } from '../shared/types'
 import type { SavedWindow, WindowMode } from './window-state'
 
 // Vite dev server URL for hot reload
@@ -44,6 +44,19 @@ interface ManagedWindow {
   mode: WindowMode
 }
 
+/**
+ * A standalone Page window. These are real OS windows (draggable outside the
+ * Craft window) but deliberately kept out of `windows`: they must not take
+ * part in the main-window title policy, focused-mode lifecycle, or the
+ * "last window closed → quit" check.
+ */
+interface ManagedPageWindow {
+  id: string
+  window: BrowserWindow
+  pageSlug: string
+  workspaceId: string
+}
+
 export interface CreateWindowOptions {
   /** The workspace to open (empty string for onboarding) */
   workspaceId: string
@@ -68,6 +81,12 @@ export class WindowManager {
   private keyboardCloseIntents: Set<number> = new Set()  // webContents.id flagged by Cmd/Ctrl+W before close
   private keyboardCloseIntentTimeouts: Map<number, NodeJS.Timeout> = new Map()  // Auto-clear stale keyboard-close intents
   private isAppQuitting = false  // Skip layered close interception during app quit
+
+  // Standalone Page windows (aux windows) — see ManagedPageWindow.
+  private pageWindows: Map<string, ManagedPageWindow> = new Map()
+  private auxWindows: Map<number, { window: BrowserWindow; workspaceId: string }> = new Map()
+  private pageWindowStateCallback: ((info: PageWindowInfo) => void) | null = null
+  private pageWindowRemovedCallback: ((id: string) => void) | null = null
 
   /**
    * Set the event sink and client resolver for pushing events via the RPC server
@@ -291,6 +310,10 @@ export class WindowManager {
     // and other diagnostics are capturable without DevTools.
     window.webContents.on('console-message', (_event, level, message) => {
       if (level >= 2) {
+        // electron-log's IPC transport mirrors main-process log lines into the
+        // renderer console; forwarding those back into windowLog recurses
+        // without bound (dev only, but it burns CPU and kills the instance).
+        if (message.includes('[renderer-console]')) return
         windowLog.warn(`[renderer-console] ${message}`)
       }
     })
@@ -594,6 +617,175 @@ export class WindowManager {
     return managed?.window ?? null
   }
 
+  // ------------------------------------------------------------------
+  // Standalone Page windows
+  // ------------------------------------------------------------------
+
+  onPageWindowStateChange(callback: (info: PageWindowInfo) => void): void {
+    this.pageWindowStateCallback = callback
+  }
+
+  onPageWindowRemoved(callback: (id: string) => void): void {
+    this.pageWindowRemovedCallback = callback
+  }
+
+  private toPageWindowInfo(managed: ManagedPageWindow): PageWindowInfo {
+    const { window } = managed
+    const alive = !window.isDestroyed()
+    return {
+      id: managed.id,
+      pageSlug: managed.pageSlug,
+      workspaceId: managed.workspaceId,
+      title: alive ? window.getTitle() : '',
+      isMinimized: alive ? window.isMinimized() : false,
+      isFocused: alive ? window.isFocused() : false,
+    }
+  }
+
+  private emitPageWindowState(managed: ManagedPageWindow): void {
+    // Ignore stale events from a window that was replaced under the same id
+    // (rapid close → reopen).
+    if (this.pageWindows.get(managed.id) !== managed) return
+    this.pageWindowStateCallback?.(this.toPageWindowInfo(managed))
+  }
+
+  /**
+   * Open (or focus) the standalone window for a page. The id is stable per
+   * (workspace, page), so clicking the same page twice never duplicates it.
+   */
+  openPageWindow(input: { workspaceId: string; pageSlug: string }): string {
+    const { workspaceId, pageSlug } = input
+    const id = `${workspaceId}::${pageSlug}`
+    const existing = this.pageWindows.get(id)
+    if (existing && !existing.window.isDestroyed()) {
+      if (existing.window.isMinimized()) existing.window.restore()
+      existing.window.show()
+      existing.window.focus()
+      this.emitPageWindowState(existing)
+      return id
+    }
+
+    const window = new BrowserWindow({
+      width: 900,
+      height: 720,
+      minWidth: 420,
+      minHeight: 320,
+      show: false,
+      frame: false,
+      autoHideMenuBar: true,
+      backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f0f10' : '#ffffff',
+      webPreferences: {
+        preload: join(__dirname, 'bootstrap-preload.cjs'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+        webviewTag: false,
+      },
+    })
+    window.setMenu(null)
+
+    const managed: ManagedPageWindow = { id, window, pageSlug, workspaceId }
+    this.pageWindows.set(id, managed)
+
+    // Register before loadURL: the bootstrap preload resolves the workspace
+    // synchronously (__get-workspace-id) while the renderer is being created.
+    const webContentsId = window.webContents.id
+    this.auxWindows.set(webContentsId, { window, workspaceId })
+
+    const query: Record<string, string> = {
+      workspaceId,
+      windowMode: 'page',
+      pageSlug,
+    }
+    const loadRenderer = () => {
+      if (VITE_DEV_SERVER_URL) {
+        const params = new URLSearchParams(query).toString()
+        window.loadURL(`${VITE_DEV_SERVER_URL}?${params}`)
+      } else {
+        window.loadFile(join(__dirname, 'renderer/index.html'), { query })
+      }
+    }
+    loadRenderer()
+
+    window.once('ready-to-show', () => {
+      if (window.isDestroyed()) return
+      window.show()
+      window.focus()
+    })
+
+    // Dev server may not be up yet; retry instead of showing a white window.
+    let failLoadRetries = 0
+    window.webContents.on('did-fail-load', (_event, errorCode, errorDescription) => {
+      windowLog.warn(`[page-window] Failed to load renderer: ${errorCode} ${errorDescription}`)
+      if (VITE_DEV_SERVER_URL && failLoadRetries < 5) {
+        failLoadRetries++
+        setTimeout(loadRenderer, 1000)
+      }
+    })
+
+    const emitState = () => this.emitPageWindowState(managed)
+    window.on('minimize', emitState)
+    window.on('restore', emitState)
+    window.on('focus', emitState)
+    window.on('blur', emitState)
+    window.on('closed', () => {
+      this.auxWindows.delete(webContentsId)
+      // Only clear the map entry if it still points at this window: a rapid
+      // close → reopen can install a new window under the same id first.
+      if (this.pageWindows.get(id) === managed) {
+        this.pageWindows.delete(id)
+        this.pageWindowRemovedCallback?.(id)
+      }
+    })
+
+    this.emitPageWindowState(managed)
+    return id
+  }
+
+  listPageWindows(): PageWindowInfo[] {
+    return Array.from(this.pageWindows.values())
+      .filter(managed => !managed.window.isDestroyed())
+      .map(managed => this.toPageWindowInfo(managed))
+  }
+
+  focusPageWindow(id: string): void {
+    const managed = this.pageWindows.get(id)
+    if (!managed || managed.window.isDestroyed()) return
+    if (managed.window.isMinimized()) managed.window.restore()
+    managed.window.show()
+    managed.window.focus()
+    this.emitPageWindowState(managed)
+  }
+
+  closePageWindow(id: string): void {
+    const managed = this.pageWindows.get(id)
+    if (!managed || managed.window.isDestroyed()) return
+    managed.window.close()
+  }
+
+  /** Minimize the page window that owns the given webContents (renderer button). */
+  minimizePageWindowSelf(webContentsId: number): void {
+    const aux = this.auxWindows.get(webContentsId)
+    if (!aux || aux.window.isDestroyed()) return
+    aux.window.minimize()
+  }
+
+  /** Close the page window that owns the given webContents (renderer button). */
+  closePageWindowSelf(webContentsId: number): void {
+    const aux = this.auxWindows.get(webContentsId)
+    if (!aux || aux.window.isDestroyed()) return
+    aux.window.close()
+  }
+
+  /** Close every standalone page window (app quit / cleanup). */
+  destroyPageWindows(): void {
+    for (const managed of this.pageWindows.values()) {
+      if (!managed.window.isDestroyed()) managed.window.destroy()
+    }
+    this.pageWindows.clear()
+    this.auxWindows.clear()
+  }
+
   /**
    * Get a regular chat window by workspace ID.
    * Settings windows are intentionally excluded so notifications, session
@@ -652,7 +844,9 @@ export class WindowManager {
    */
   getWorkspaceForWindow(webContentsId: number): string | null {
     const managed = this.windows.get(webContentsId)
-    return managed?.workspaceId ?? null
+    if (managed) return managed.workspaceId
+    // Page windows live in the aux map but still need workspace-scoped RPC.
+    return this.auxWindows.get(webContentsId)?.workspaceId ?? null
   }
 
   /**
@@ -837,9 +1031,9 @@ export class WindowManager {
     if (!focused || focused.isDestroyed()) return null
 
     const managed = this.windows.get(focused.webContents.id)
-    // A settings shell can be OS-focused, but it is never a valid target for
-    // ordinary session deep links or workspace actions.
-    if (managed?.mode === 'settings') return null
+    // Settings shells and standalone page windows can be OS-focused, but they
+    // are never valid targets for session deep links or workspace actions.
+    if (!managed || managed.mode === 'settings') return null
     return focused
   }
 

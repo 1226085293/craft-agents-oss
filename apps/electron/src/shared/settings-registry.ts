@@ -36,7 +36,11 @@ export interface SettingsPageDefinition {
  */
 export const SETTINGS_PAGES = [
   { id: 'app' as const, labelKey: 'settings.app.title', descriptionKey: 'settings.app.description' },
-  { id: 'ai' as const, labelKey: 'settings.ai.title', descriptionKey: 'settings.ai.description' },
+  // One entry for the whole in-process LLM gateway. Its four views live behind
+  // a segmented control inside the page rather than as four more nav rows — the
+  // settings route parser only supports a single segment, so this keeps the
+  // existing 10-item nav unchanged.
+  { id: 'llm' as const, labelKey: 'settings.llm.title', descriptionKey: 'settings.llm.description' },
   { id: 'appearance' as const, labelKey: 'settings.appearance.title', descriptionKey: 'settings.appearance.description' },
   { id: 'input' as const, labelKey: 'settings.input.title', descriptionKey: 'settings.input.description' },
   { id: 'workspace' as const, labelKey: 'settings.workspace.title', descriptionKey: 'settings.workspace.description' },

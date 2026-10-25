@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { AlertTriangle, ArrowLeft, Check, FolderKanban, FolderOpen, Globe2, KeyRound, MoreHorizontal, Pencil, RefreshCw, Sparkles, Trash2 } from 'lucide-react'
+import { AlertTriangle, AppWindow, ArrowLeft, Check, FolderKanban, FolderOpen, Globe2, KeyRound, Minus, MoreHorizontal, Pencil, RefreshCw, Sparkles, Trash2, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAtomValue } from 'jotai'
 import { useTranslation } from 'react-i18next'
@@ -7,6 +7,7 @@ import { useAppShellContext } from '@/context/AppShellContext'
 import { useNavigation } from '@/contexts/NavigationContext'
 import { routes } from '@/lib/navigate'
 import { pagesAtom } from '@/atoms/pages'
+import { cn } from '@/lib/utils'
 import { LoadingIndicator } from '@craft-agent/ui'
 import { Info_Alert } from '@/components/info'
 import {
@@ -30,6 +31,13 @@ import { SharePageDialog, usePageShareCapabilities } from './SharePageDialog'
 
 interface PageViewProps {
   pageSlug: string
+  /**
+   * 'panel' — embedded in a content panel (back button).
+   * 'window' — hosted by a standalone OS window (drag region, minimize/close).
+   */
+  chrome?: 'panel' | 'window'
+  onMinimize?: () => void
+  onClose?: () => void
 }
 
 interface LeaseState {
@@ -47,11 +55,17 @@ interface LeaseState {
  * re-read whenever page.json is stamped (refresh completion), which for
  * live pages flows into the frame as a replacement snapshot.
  */
-export function PageView({ pageSlug }: PageViewProps) {
+export function PageView({
+  pageSlug,
+  chrome = 'panel',
+  onMinimize,
+  onClose,
+}: PageViewProps) {
   const { activeWorkspaceId, onOpenFile, enabledSources } = useAppShellContext()
   const { t } = useTranslation()
   const { navigate } = useNavigation()
   const pages = useAtomValue(pagesAtom)
+  const isWindow = chrome === 'window'
 
   // Prefer the live atom copy; fall back to a direct fetch for deep links
   // that land before the initial pages load.
@@ -178,7 +192,25 @@ export function PageView({ pageSlug }: PageViewProps) {
     }))
   }, [page, navigate, t])
 
-  const handleBack = React.useCallback(() => navigate(routes.view.pages()), [navigate])
+  // Panel mode returns to the Pages library; a standalone window just closes.
+  const handleDismiss = React.useCallback(() => {
+    if (isWindow) onClose?.()
+    else navigate(routes.view.pages())
+  }, [isWindow, onClose, navigate])
+
+  const handleOpenAsWindow = React.useCallback(() => {
+    if (!activeWorkspaceId || !page) return
+    void window.electronAPI.pageWindow.open({
+      workspaceId: activeWorkspaceId,
+      pageSlug: page.config.slug,
+    })
+  }, [activeWorkspaceId, page])
+
+  // Keep the OS window title in sync with the page name.
+  React.useEffect(() => {
+    if (!isWindow) return
+    document.title = page?.config.name ?? t('pages.notFound')
+  }, [isWindow, page?.config.name, t])
 
   const handleOpenFolder = React.useCallback(() => {
     if (page) onOpenFile(page.folderPath)
@@ -207,33 +239,37 @@ export function PageView({ pageSlug }: PageViewProps) {
       } else {
         toast.success(t('toast.pageDeleted', { name: page.config.name }))
       }
-      navigate(routes.view.pages())
+      handleDismiss()
     } catch (err) {
       toast.error(t('toast.pageDeleteFailed'), {
         description: err instanceof Error ? err.message : String(err),
       })
     }
-  }, [activeWorkspaceId, page, t, navigate])
+  }, [activeWorkspaceId, page, t, handleDismiss])
 
   // ------------------------------------------------------------------
   // Render
   // ------------------------------------------------------------------
   if (!page) {
     return (
-      <div className="flex h-full items-center justify-center">
+      <div className="flex h-full flex-col bg-background">
+        {isWindow && <div className="titlebar-drag-region h-10 shrink-0 border-b border-border/50" />}
+        <div className="flex flex-1 items-center justify-center">
         {fallbackResolved ? (
           <div className="flex flex-col items-center gap-3 text-sm text-foreground/50">
             <span>{t('pages.notFound')}</span>
             <button
-              onClick={handleBack}
+              onClick={handleDismiss}
               className="inline-flex h-7 items-center gap-1.5 rounded-[8px] bg-foreground/[0.02] px-3 text-xs font-medium shadow-minimal transition-colors hover:bg-foreground/[0.05]"
             >
-              <ArrowLeft className="h-3.5 w-3.5" /> {t('pages.backToPages')}
+              {isWindow ? <X className="h-3.5 w-3.5" /> : <ArrowLeft className="h-3.5 w-3.5" />}
+              {isWindow ? t('common.close') : t('pages.backToPages')}
             </button>
           </div>
         ) : (
           <LoadingIndicator label={t('common.loading')} />
         )}
+        </div>
       </div>
     )
   }
@@ -243,16 +279,23 @@ export function PageView({ pageSlug }: PageViewProps) {
 
   return (
     <div className="flex h-full flex-col bg-background">
-      {/* Header: back, title, kind, freshness, overflow */}
-      <div className="flex items-center gap-2 border-b border-border/50 px-3 py-2">
-        <button
-          type="button"
-          onClick={handleBack}
-          aria-label={t('pages.backToPages')}
-          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-foreground/60 transition-colors hover:bg-foreground/5 hover:text-foreground"
-        >
-          <ArrowLeft className="h-4 w-4" />
-        </button>
+      {/* Header: back (panel only), title, kind, freshness, overflow, window chrome */}
+      <div
+        className={cn(
+          'flex items-center gap-2 border-b border-border/50 px-3 py-2',
+          isWindow && 'titlebar-drag-region select-none',
+        )}
+      >
+        {!isWindow && (
+          <button
+            type="button"
+            onClick={handleDismiss}
+            aria-label={t('pages.backToPages')}
+            className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-foreground/60 transition-colors hover:bg-foreground/5 hover:text-foreground"
+          >
+            <ArrowLeft className="h-4 w-4" />
+          </button>
+        )}
         {nameDraft !== null ? (
           <input
             autoFocus
@@ -264,11 +307,11 @@ export function PageView({ pageSlug }: PageViewProps) {
               else if (e.key === 'Escape') setNameDraft(null)
             }}
             aria-label={t('pages.renamePage')}
-            className="h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-sm font-medium outline-none focus:border-ring"
+            className="titlebar-no-drag h-7 min-w-0 flex-1 rounded-md border border-border bg-background px-2 text-sm font-medium outline-none focus:border-ring"
           />
         ) : (
           <span
-            className="min-w-0 truncate text-sm font-medium"
+            className="titlebar-no-drag min-w-0 truncate text-sm font-medium"
             title={t('pages.renamePage')}
             onDoubleClick={() => setNameDraft(config.name)}
           >
@@ -284,7 +327,7 @@ export function PageView({ pageSlug }: PageViewProps) {
               onClick={() => setShareOpen(true)}
               aria-label={t('pages.share.title')}
               title={config.share ? t('pages.shared') : t('pages.share.title')}
-              className="flex h-7 items-center gap-1.5 rounded-md px-2 text-foreground/60 transition-colors hover:bg-foreground/5 hover:text-foreground"
+              className="titlebar-no-drag flex h-7 items-center gap-1.5 rounded-md px-2 text-foreground/60 transition-colors hover:bg-foreground/5 hover:text-foreground"
             >
               <Globe2 className={config.share ? 'h-4 w-4 text-sky-600 dark:text-sky-400' : 'h-4 w-4'} />
               {config.share && (
@@ -297,12 +340,18 @@ export function PageView({ pageSlug }: PageViewProps) {
               <button
                 type="button"
                 aria-label={t('common.more')}
-                className="flex h-7 w-7 items-center justify-center rounded-md text-foreground/60 transition-colors hover:bg-foreground/5 hover:text-foreground data-[state=open]:bg-foreground/5"
+                className="titlebar-no-drag flex h-7 w-7 items-center justify-center rounded-md text-foreground/60 transition-colors hover:bg-foreground/5 hover:text-foreground data-[state=open]:bg-foreground/5"
               >
                 <MoreHorizontal className="h-4 w-4" />
               </button>
             </DropdownMenuTrigger>
             <StyledDropdownMenuContent align="end">
+              {!isWindow && (
+                <StyledDropdownMenuItem onClick={handleOpenAsWindow}>
+                  <AppWindow />
+                  {t('pages.openInWindow')}
+                </StyledDropdownMenuItem>
+              )}
               <StyledDropdownMenuItem onClick={() => setNameDraft(config.name)}>
                 <Pencil />
                 {t('pages.renamePage')}
@@ -353,6 +402,28 @@ export function PageView({ pageSlug }: PageViewProps) {
               </StyledDropdownMenuItem>
             </StyledDropdownMenuContent>
           </DropdownMenu>
+          {isWindow && (
+            <>
+              <button
+                type="button"
+                onClick={onMinimize}
+                aria-label={t('pages.minimize')}
+                title={t('pages.minimize')}
+                className="titlebar-no-drag flex h-7 w-7 items-center justify-center rounded-md text-foreground/60 transition-colors hover:bg-foreground/5 hover:text-foreground"
+              >
+                <Minus className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label={t('common.close')}
+                title={t('common.close')}
+                className="titlebar-no-drag flex h-7 w-7 items-center justify-center rounded-md text-foreground/60 transition-colors hover:bg-foreground/5 hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </>
+          )}
         </div>
       </div>
 

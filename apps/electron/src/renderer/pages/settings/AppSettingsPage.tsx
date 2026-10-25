@@ -8,7 +8,7 @@
  * - Network (proxy)
  * - About (version, updates)
  *
- * Note: AI settings (connections, model, thinking) have been moved to AiSettingsPage.
+ * Note: AI settings (connections, model, thinking) have been moved to the LLM settings page.
  * Note: Appearance settings (theme, font) have been moved to AppearanceSettingsPage.
  */
 

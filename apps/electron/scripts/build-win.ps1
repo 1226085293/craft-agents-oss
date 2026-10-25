@@ -4,10 +4,25 @@
 [CmdletBinding()]
 param(
     [switch]$SkipDependencyInstall,
-    [switch]$SkipProcessKill
+    [switch]$SkipProcessKill,
+    # Local rebuilds: skip compression entirely (`compression: store`). The
+    # release default is `maximum`, which costs minutes of 7z time for no
+    # meaningful size win; `store` trades a ~1.5GB installer for the fastest
+    # possible packaging. Irrelevant for a local install, wrong for uploads.
+    [switch]$Fast
 )
 
 $ErrorActionPreference = "Stop"
+
+# Per-step wall clock. Every run prints "[+NNNs] step", so a slow build can
+# be attributed to staging vs packaging without guesswork (2026-10-18: a full
+# rebuild took 10m37s and nobody could say which phase owned it).
+$ScriptStart = Get-Date
+function Write-Step {
+    param([string]$Name)
+    $elapsed = [int]((Get-Date) - $ScriptStart).TotalSeconds
+    Write-Host ("[+{0,4}s] {1}" -f $elapsed, $Name) -ForegroundColor Magenta
+}
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ElectronDir = Split-Path -Parent $ScriptDir
@@ -67,6 +82,7 @@ try {
 Write-Host ""
 
 # 0. Kill any lingering processes that might lock files.
+Write-Step "step 0: process cleanup"
 # -SkipProcessKill: agent sessions running inside Craft Agents must NOT kill
 # node/electron wholesale — that terminates the caller's own pipeline (2026-10-10
 # observed as instant 'Command timed out') and can take down the host app.
@@ -493,6 +509,7 @@ try {
 }
 
 # 7. Package with electron-builder
+Write-Step "step 7: electron-builder packaging"
 Write-Host "Packaging app with electron-builder..."
 
 # Debug: Show bun.exe file info
@@ -598,10 +615,21 @@ while (-not $builderSuccess -and $builderRetry -lt $maxBuilderRetries) {
     # plain `npx` fails with "not recognized"); fall back to npx like the
     # esbuild/vite call sites above.
     $ElectronBuilderExe = Join-Path $RootDir "node_modules\.bin\electron-builder.exe"
+    # These are all positional arguments to an external exe (not PowerShell
+    # named parameters), so array splatting is safe here.
+    $builderArgs = @('--win', '--x64', "-c.directories.output=$OutDir")
+    if ($Fast) {
+        # 'store' skips 7z compression entirely. Measured on this repo: NSIS
+        # went from 219s (maximum) to a fraction of that, at the cost of a
+        # ~1.5GB installer instead of 357MB — the right trade for a local
+        # install, wrong for a release upload.
+        $builderArgs += '-c.compression=store'
+        Write-Host "  -Fast: compression=store (much larger installer, fastest packaging)" -ForegroundColor Cyan
+    }
     if (Test-Path $ElectronBuilderExe) {
-        & $ElectronBuilderExe --win --x64 "-c.directories.output=$OutDir" 2>&1 | Tee-Object -Variable builderOutput
+        & $ElectronBuilderExe @builderArgs 2>&1 | Tee-Object -Variable builderOutput
     } else {
-        npx electron-builder --win --x64 "-c.directories.output=$OutDir" 2>&1 | Tee-Object -Variable builderOutput
+        npx electron-builder @builderArgs 2>&1 | Tee-Object -Variable builderOutput
     }
 
     if ($LASTEXITCODE -eq 0) {
@@ -638,6 +666,7 @@ if (-not $builderSuccess) {
 }
 
 # 8. Verify the installer was built
+Write-Step "step 8: verify installer"
 $InstallerPath = Get-ChildItem -Path $OutDirAbs -Filter "*.exe" | Select-Object -First 1
 
 if (-not $InstallerPath) {
@@ -651,6 +680,7 @@ Write-Host ""
 Write-Host "=== Build Complete ===" -ForegroundColor Green
 Write-Host "Installer: $($InstallerPath.FullName)"
 Write-Host "Size: $([math]::Round($InstallerPath.Length / 1MB, 2)) MB"
+Write-Step "build complete"
 
 # Explicit success code. Without it $LASTEXITCODE keeps whatever the last
 # external process (electron-builder / bun / npm) left behind — callers that

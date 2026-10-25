@@ -20,7 +20,8 @@ import type { LoadedPage } from '@craft-agent/shared/pages/types'
 /**
  * Pages library — the full-width home grid (mirrors the Kanban board pane).
  * Header carries the controlled Project filter (with an Unassigned sentinel)
- * and the New Page action; tiles open the embedded page render.
+ * and the New Page action; tiles open beside the library (or as a floating
+ * window from the context menu).
  */
 export function PagesHome() {
   const { activeWorkspaceId } = useAppShellContext()
@@ -76,9 +77,13 @@ export function PagesHome() {
     return [...list].sort((a, b) => b.config.updatedAt - a.config.updatedAt)
   }, [pages, projectFilter])
 
+  // Pages open as standalone OS windows — never as a panel beside the chat.
   const openPage = React.useCallback(
-    (slug: string) => navigate(routes.view.pages(slug)),
-    [navigate],
+    (slug: string) => {
+      if (!activeWorkspaceId) return
+      void window.electronAPI.pageWindow.open({ workspaceId: activeWorkspaceId, pageSlug: slug })
+    },
+    [activeWorkspaceId],
   )
 
   // Blank page, bound to the first selected (real) project so it stays
@@ -92,13 +97,13 @@ export function PagesHome() {
         kind: 'interactive',
         ...(boundProjectId ? { projectId: boundProjectId } : {}),
       })
-      navigate(routes.view.pages(created.slug))
+      openPage(created.slug)
     } catch (err) {
       toast.error(t('toast.pageCreateFailed'), {
         description: err instanceof Error ? err.message : String(err),
       })
     }
-  }, [activeWorkspaceId, projectFilter, t, navigate])
+  }, [activeWorkspaceId, projectFilter, t, openPage])
 
   const handleAskAgent = React.useCallback(() => {
     navigate(routes.action.newSession({ input: t('pages.askAgentPrompt') }))

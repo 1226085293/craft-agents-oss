@@ -14,8 +14,10 @@ import type {
   UnreadSummary,
   UpdateInfo,
   BrowserInstanceInfo,
+  PageWindowInfo,
   DeepLinkNavigation,
   TaskGenerateResult,
+  LlmGatewayStatusPayload,
 } from './dto'
 
 export interface BroadcastEventMap {
@@ -34,6 +36,7 @@ export interface BroadcastEventMap {
   [RPC_CHANNELS.pages.CHANGED]: [workspaceId: string, pages: LoadedPage[]]
   [RPC_CHANNELS.tasks.GENERATED]: [workspaceId: string, result: TaskGenerateResult]
   [RPC_CHANNELS.llmConnections.CHANGED]: []
+  [RPC_CHANNELS.llmGateway.STATUS]: [status: LlmGatewayStatusPayload]
   [RPC_CHANNELS.permissions.DEFAULTS_CHANGED]: [value: null]
 
   // Theme broadcasts (global)
@@ -59,12 +62,13 @@ export interface BroadcastEventMap {
   [RPC_CHANNELS.browserPane.REMOVED]: [id: string]
   [RPC_CHANNELS.browserPane.INTERACTED]: [id: string]
 
+  // Standalone page window events (global)
+  [RPC_CHANNELS.pageWindow.STATE_CHANGED]: [info: PageWindowInfo]
+  [RPC_CHANNELS.pageWindow.REMOVED]: [id: string]
+
   // Navigation events (per-window)
   [RPC_CHANNELS.notification.NAVIGATE]: [data: { workspaceId: string; sessionId: string }]
   [RPC_CHANNELS.deeplink.NAVIGATE]: [navigation: DeepLinkNavigation]
-
-  // Copilot device code event
-  [RPC_CHANNELS.copilot.DEVICE_CODE]: [data: { userCode: string; verificationUri: string }]
 
   // Menu events (per-window, no payload)
   [RPC_CHANNELS.menu.NEW_CHAT]: []

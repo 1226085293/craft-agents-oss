@@ -90,11 +90,13 @@ import { createApplicationMenu } from './menu'
 import { WindowManager } from './window-manager'
 import { loadWindowState, saveWindowState } from './window-state'
 import { getWorkspaces, getWorkspaceByNameOrId, loadStoredConfig, addWorkspace, saveConfig } from '@craft-agent/shared/config'
+import { provisionBundledRtk } from '@craft-agent/shared/agent'
 import { getDefaultWorkspacesDir } from '@craft-agent/shared/workspaces'
 import { initializeDocs } from '@craft-agent/shared/docs'
 import { initializeReleaseNotes } from '@craft-agent/shared/release-notes'
 import { ensureDefaultPermissions } from '@craft-agent/shared/agent/permissions-config'
 import { ensureToolIcons, ensurePresetThemes } from '@craft-agent/shared/config'
+import { getGatewayRuntime, readLlmUsage } from '@craft-agent/shared/config'
 import { setBundledAssetsRoot } from '@craft-agent/shared/utils'
 import { initializeBackendHostRuntime } from '@craft-agent/shared/agent/backend'
 import { setPowerShellValidatorRoot } from '@craft-agent/shared/agent'
@@ -169,11 +171,34 @@ if (isDebugMode) {
 
   process.env.CRAFT_UV = bundledUvExists ? uvBinary : (fallbackUv ?? uvBinary)
 
+
+  // rtk ships as a compressed archive and is unpacked into the config dir on
+  // first run — an installed app's resources/ is read-only, so it cannot be
+  // extracted in place. Idempotent after the first run, so this is a stat call
+  // on every subsequent start. A failure is not fatal: the detector falls back
+  // to PATH and Bash keeps working unrewritten.
+  try {
+    const rtkResult = provisionBundledRtk(resourcesBase)
+    if (rtkResult.path) {
+      process.env.CRAFT_RTK = rtkResult.path
+      if (rtkResult.reason === 'already-present') {
+        mainLog.debug?.('rtk already provisioned', { path: rtkResult.path })
+      } else {
+        mainLog.info('rtk provisioned from bundled archive', { path: rtkResult.path })
+      }
+    } else if (rtkResult.reason !== 'no-archive') {
+      mainLog.warn('rtk provisioning failed; falling back to PATH', { reason: rtkResult.reason })
+    }
+  } catch (error) {
+    mainLog.warn('rtk provisioning threw; continuing without it', { error: String(error) })
+  }
+
   // Bun runtime (packaged builds should prefer bundled runtime over PATH).
   // Packaged: extraResources ships it at <resources>/vendor/bun (NOT under
   // <resources>/app), so resolve from process.resourcesPath.
   const bunBase = app.isPackaged ? process.resourcesPath : resourcesBase
   const bunBinary = join(bunBase, 'vendor', 'bun', process.platform === 'win32' ? 'bun.exe' : 'bun')
+
   if (existsSync(bunBinary)) {
     process.env.CRAFT_BUN = bunBinary
   }
@@ -722,6 +747,15 @@ app.whenReady().then(async () => {
             browserPaneManager: browserPaneManager ?? undefined,
             oauthFlowStore: ofs,
             messagingRegistry: messagingHandle.registry,
+            llmGateway: {
+              runtime: getGatewayRuntime(),
+              readUsage: () => readLlmUsage(),
+              markSelfWrite: (withinMs?: number) => {
+                // The watcher lives inside the runtime, so the suppression
+                // window is applied through it rather than reached for directly.
+                getGatewayRuntime().markConfigSelfWrite(withinMs)
+              },
+            },
           }
         },
         // Headless: register only core handlers (no GUI handlers for browser, settings, etc.)
@@ -734,16 +768,9 @@ app.whenReady().then(async () => {
         initModelRefreshService: () => initModelRefreshService(async (slug: string) => {
           const { getCredentialManager } = await import('@craft-agent/shared/credentials')
           const manager = getCredentialManager()
-          const [apiKey, oauth] = await Promise.all([
-            manager.getLlmApiKey(slug).catch(() => null),
-            manager.getLlmOAuth(slug).catch(() => null),
-          ])
-          return {
-            apiKey: apiKey ?? undefined,
-            oauthAccessToken: oauth?.accessToken,
-            oauthRefreshToken: oauth?.refreshToken,
-            oauthIdToken: oauth?.idToken,
-          }
+          // OAuth connections were removed, so only the API key is resolved.
+          const apiKey = await manager.getLlmApiKey(slug).catch(() => null)
+          return { apiKey: apiKey ?? undefined }
         }),
         onClientConnected: ({ clientId, webContentsId }) => {
           if (webContentsId != null) clientMap.set(webContentsId, clientId)
@@ -1263,6 +1290,9 @@ async function performQuitCleanup(): Promise<void> {
   }
 
   // Clean up browser pane instances
+  if (windowManager) {
+    windowManager.destroyPageWindows()
+  }
   if (browserPaneManager) {
     browserPaneManager.destroyAll()
   }

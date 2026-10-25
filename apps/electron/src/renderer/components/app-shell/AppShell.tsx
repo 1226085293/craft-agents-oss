@@ -2737,7 +2737,14 @@ function AppShellContent({
                         title: p.config.name,
                         icon: PanelsTopLeft,
                         variant: (isPagesNavigation(navState) && navState.details?.pageSlug === p.config.slug) ? "default" as const : "ghost" as const,
-                        onClick: () => navigate(routes.view.pages(p.config.slug)),
+                        onClick: () => {
+                          if (activeWorkspaceId) {
+                            void window.electronAPI.pageWindow.open({
+                              workspaceId: activeWorkspaceId,
+                              pageSlug: p.config.slug,
+                            })
+                          }
+                        },
                       })),
                     },
                     {

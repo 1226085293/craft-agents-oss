@@ -25,7 +25,7 @@ import {
 import type { SettingsMenuItem } from "../../../shared/menu-schema"
 import { SquarePenRounded } from "../icons/SquarePenRounded"
 import { useEffect, useRef, useState } from "react"
-import { BrowserTabStrip } from "../browser/BrowserTabStrip"
+import { TopBarShelf } from "./TopBarShelf"
 import type { Workspace } from "../../../shared/types"
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher"
 import { CompactWorkspaceSwitcher } from "./CompactWorkspaceSwitcher"
@@ -222,7 +222,7 @@ export function TopBar({
       {!isCompact && (
       <div ref={rightSlotRef} className="flex min-w-0 shrink-0 items-center justify-end gap-1" style={{ paddingRight: 12 }}>
         <div className="min-w-0">
-          <BrowserTabStrip activeSessionId={activeSessionId} maxVisibleBadges={maxVisibleBrowserBadges} />
+          <TopBarShelf activeSessionId={activeSessionId} maxVisibleBrowserBadges={maxVisibleBrowserBadges} />
         </div>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>

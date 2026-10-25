@@ -185,6 +185,43 @@ describe('handleInterrupted — aborted marker', () => {
     expect(assistant?.isStreaming).toBe(false)
   })
 
+  it('keeps the in-flight pending block a process-card row (no bubble promotion)', () => {
+    // 2026-10-19 true-sparrow: the pending block was visible as a row inside
+    // the process card. Clearing isPending without classifying it made the
+    // turn grouper read it as the turn's final response, so Stop promoted the
+    // row into a standalone bubble stamped at its first delta.
+    const state = makeState([
+      { id: 'u1', role: 'user', content: 'investigate' },
+      { id: 'a1', role: 'assistant', content: 'let me look', isIntermediate: true },
+      { id: 'a2', role: 'assistant', content: '复现确认。现在实施…', isPending: true, isStreaming: true },
+    ])
+    const event: InterruptedEvent = {
+      type: 'interrupted',
+      sessionId: 'session-1',
+      message: { id: 'stop', role: 'info', content: 'Response interrupted', timestamp: 2 },
+    }
+
+    const next = handleInterrupted(state, event)
+    const inFlight = next.state.session.messages.find(m => m.id === 'a2')
+    expect(inFlight?.isPending).toBe(false)
+    expect(inFlight?.isIntermediate).toBe(true)
+  })
+
+  it('does not overwrite an explicit final classification on a pending message', () => {
+    const state = makeState([
+      { id: 'u1', role: 'user', content: 'hi' },
+      { id: 'a1', role: 'assistant', content: 'partial answer', isPending: true, isIntermediate: false },
+    ])
+    const event: InterruptedEvent = {
+      type: 'interrupted',
+      sessionId: 'session-1',
+      message: { id: 'stop', role: 'info', content: 'Response interrupted', timestamp: 2 },
+    }
+
+    const next = handleInterrupted(state, event)
+    expect(next.state.session.messages.find(m => m.id === 'a1')?.isIntermediate).toBe(false)
+  })
+
   it('indexes the abort flag after status messages are filtered out', () => {
     // Status messages are dropped before the map runs; computing the index
     // against the pre-filter array would flag the wrong message.

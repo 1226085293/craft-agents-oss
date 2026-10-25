@@ -12,7 +12,7 @@
  *   4. Supergroup section
  *      - When unpaired: a "Pair Supergroup" CTA row.
  *      - When paired: collapsible chevron row that expands to the
- *        topic-bound bindings, mirroring AiSettingsPage's
+ *        topic-bound bindings, mirroring the messaging settings'
  *        `WorkspaceOverrideCard` chevron pattern.
  *
  * Self-contained on purpose — does NOT import `MessagingSettingsPage` or

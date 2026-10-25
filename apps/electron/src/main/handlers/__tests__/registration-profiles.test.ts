@@ -92,7 +92,8 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     automations,
     files,
     labels,
-    llm,
+    llmConnections,
+    llmGateway,
     oauth,
     pages,
     projects,
@@ -115,6 +116,7 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     import('@craft-agent/server-core/handlers/rpc/files'),
     import('@craft-agent/server-core/handlers/rpc/labels'),
     import('@craft-agent/server-core/handlers/rpc/llm-connections'),
+    import('@craft-agent/server-core/handlers/rpc/llm-gateway'),
     import('@craft-agent/server-core/handlers/rpc/oauth'),
     import('@craft-agent/server-core/handlers/rpc/pages'),
     import('@craft-agent/server-core/handlers/rpc/projects'),
@@ -138,7 +140,8 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     ...automations.HANDLED_CHANNELS,
     ...files.HANDLED_CHANNELS,
     ...labels.HANDLED_CHANNELS,
-    ...llm.HANDLED_CHANNELS,
+    ...llmConnections.HANDLED_CHANNELS,
+    ...llmGateway.HANDLED_CHANNELS,
     ...oauth.HANDLED_CHANNELS,
     ...projects.HANDLED_CHANNELS,
     ...pages.HANDLED_CHANNELS,
@@ -159,8 +162,9 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
 }
 
 async function getExpectedGuiChannels(): Promise<Set<string>> {
-  const [browser, system, workspace, settings] = await Promise.all([
+  const [browser, pageWindow, system, workspace, settings] = await Promise.all([
     import('../browser'),
+    import('../page-window'),
     import('../system'),
     import('../workspace'),
     import('../settings'),
@@ -168,6 +172,7 @@ async function getExpectedGuiChannels(): Promise<Set<string>> {
 
   return new Set([
     ...browser.HANDLED_CHANNELS,
+    ...pageWindow.HANDLED_CHANNELS,
     ...system.GUI_HANDLED_CHANNELS,
     ...workspace.GUI_HANDLED_CHANNELS,
     ...settings.GUI_HANDLED_CHANNELS,

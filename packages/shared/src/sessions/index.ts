@@ -98,6 +98,14 @@ export {
 // Field utilities
 export { pickSessionFields } from './utils.ts';
 
+// Branch asset inheritance (attachments / downloads / plans / long_responses)
+export {
+  copySessionAssetsForBranch,
+  BRANCH_ASSET_DIRS,
+  BRANCH_ASSET_FILES,
+  type BranchAssetsCopyResult,
+} from './branch-assets.ts';
+
 // Slug generator utilities
 export {
   generateDatePrefix,

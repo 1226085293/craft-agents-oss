@@ -14,6 +14,7 @@ param(
     [switch]$SkipBuild,
     [switch]$SkipDependencyInstall,
     [switch]$SkipProcessKill,
+    [switch]$Fast,
     [switch]$NoInstall,
     [int]$RestartDelaySeconds = 2
 )
@@ -52,6 +53,7 @@ if (-not $SkipBuild) {
     $BuildArgs = @{}
     if ($SkipDependencyInstall) { $BuildArgs.SkipDependencyInstall = $true }
     if ($SkipProcessKill) { $BuildArgs.SkipProcessKill = $true }
+    if ($Fast) { $BuildArgs.Fast = $true }
     & $BuildScript @BuildArgs
     if ($LASTEXITCODE -ne 0) {
         throw "build-win.ps1 failed with exit code $LASTEXITCODE"

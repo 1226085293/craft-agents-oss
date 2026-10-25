@@ -1,13 +1,21 @@
-import { describe, it, expect, mock, beforeEach } from 'bun:test'
+import { afterAll, describe, it, expect, mock, beforeEach } from 'bun:test'
 
 /**
  * Tests that all OAuth prepare functions correctly support callbackUrl
  * as an alternative to callbackPort for WebUI deployments.
  */
 
-// Mock fetch globally to prevent real HTTP requests during metadata discovery
+// Mock fetch to prevent real HTTP requests during metadata discovery.
+// NOTE: Bun runs every test file in ONE process, so a module-scope global
+// patch leaks into the files that run after this one (the LLM gateway tests
+// fetch their own loopback server and got this 404 instead). Restore it when
+// the file finishes.
+const realFetch = globalThis.fetch
 const mockFetch = mock(() => Promise.resolve(new Response('Not Found', { status: 404 })))
 globalThis.fetch = mockFetch as any
+afterAll(() => {
+  globalThis.fetch = realFetch
+})
 
 import { prepareGoogleOAuth } from '../google-oauth'
 

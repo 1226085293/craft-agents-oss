@@ -7,12 +7,14 @@ export { registerCoreRpcHandlers }
 import { registerSystemGuiHandlers } from './system'
 import { registerWorkspaceGuiHandlers } from './workspace'
 import { registerBrowserHandlers } from './browser'
+import { registerPageWindowHandlers } from './page-window'
 import { registerSettingsGuiHandlers } from './settings'
 
 export function registerGuiRpcHandlers(server: RpcServer, deps: HandlerDeps): void {
   registerSystemGuiHandlers(server, deps)
   registerWorkspaceGuiHandlers(server, deps)
   registerBrowserHandlers(server, deps)
+  registerPageWindowHandlers(server, deps)
   registerSettingsGuiHandlers(server, deps)
 }
 

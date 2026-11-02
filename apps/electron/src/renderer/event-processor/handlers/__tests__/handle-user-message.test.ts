@@ -81,33 +81,10 @@ describe('handleUserMessage queued replay', () => {
     }
   })
 
-  it('ignores a late queued event after the message is already processing', () => {
-    const state = makeState([
-      {
-        id: 'optimistic-follow-up',
-        role: 'user',
-        content: 'follow up',
-        timestamp: 300,
-        isQueued: false,
-      },
-    ])
-    const lateQueuedEvent: UserMessageEvent = {
-      ...processingEvent(200),
-      status: 'queued',
-    }
-
-    const next = handleUserMessage(state, lateQueuedEvent)
-
-    expect(next.state).toBe(state)
-    expect(next.state.session.messages[0]?.timestamp).toBe(300)
-    expect(next.state.session.messages[0]?.isQueued).toBe(false)
-  })
-
-  it("preserves isProcessing=true on 'queued' while the current turn is still streaming", () => {
-    // The current assistant turn is still running (isProcessing=true) and a
-    // mid-stream send is queued. 'queued' must NOT flip isProcessing to false,
-    // otherwise groupMessagesByTurn treats the session as complete and promotes
-    // the in-flight thinking text into a "final" reply box (#616).
+  it('removes the optimistic row and preserves isProcessing on a queued event (panel owns the queue)', () => {
+    // 2026-10-22 queued-panel: a 'queued' confirmation means the message is
+    // pending in the composer panel, not transcript content. The optimistic
+    // bubble is removed; isProcessing stays (the current turn still streams).
     const state = makeState([
       { id: 'user-1', role: 'user', content: 'first', timestamp: 100 },
       {
@@ -128,8 +105,47 @@ describe('handleUserMessage queued replay', () => {
     const next = handleUserMessage(state, queuedEvent)
 
     expect(next.state.session.isProcessing).toBe(true)
-    const message = next.state.session.messages.find(m => m.id === 'optimistic-follow-up')
-    expect(message?.isQueued).toBe(true)
+    expect(next.state.session.messages.some(m => m.id === 'optimistic-follow-up')).toBe(false)
+  })
+
+  it('a queued event without a matching optimistic row is a no-op (panel data arrives via queued_messages_changed)', () => {
+    const state = makeState([
+      { id: 'user-1', role: 'user', content: 'first', timestamp: 100 },
+    ])
+
+    const queuedEvent: UserMessageEvent = {
+      ...processingEvent(250),
+      status: 'queued',
+    }
+
+    const next = handleUserMessage(state, queuedEvent)
+
+    expect(next.state).toBe(state)
+  })
+
+  it('a late queued event for an already-processing message removes nothing (idempotent)', () => {
+    // The optimistic row was already removed when the message started
+    // processing; a late 'queued' re-delivery must not resurrect anything.
+    const state = makeState([
+      {
+        id: 'optimistic-follow-up',
+        role: 'user',
+        content: 'follow up',
+        timestamp: 300,
+        isQueued: false,
+      },
+    ])
+    const lateQueuedEvent: UserMessageEvent = {
+      ...processingEvent(200),
+      status: 'queued',
+    }
+
+    const next = handleUserMessage(state, lateQueuedEvent)
+
+    // Row still there (it is no longer pending — it is the live turn's user
+    // message), and no regression happened.
+    expect(next.state.session.messages[0]?.timestamp).toBe(300)
+    expect(next.state.session.messages[0]?.isQueued).toBe(false)
   })
 
   it("preserves isProcessing=false on 'queued' after the current turn completed", () => {
@@ -158,9 +174,9 @@ describe('handleUserMessage queued replay', () => {
     expect(next.state.session.isProcessing).toBe(false)
   })
 
-  it('preserves the guide-click startedAt when merging an accepted steer into a queued bubble', () => {
+  it('preserves the guide-click startedAt when merging an accepted steer into a queued row', () => {
     // 2026-10-07 plain-jade: the main process stamps startedAt at the guide
-    // click. The renderer merge must pass it through to the queued bubble so
+    // click. The renderer merge must pass it through to the queued row so
     // the in-card row positions by startedAt ?? timestamp; the display
     // timestamp stays the send time.
     const state = makeState([

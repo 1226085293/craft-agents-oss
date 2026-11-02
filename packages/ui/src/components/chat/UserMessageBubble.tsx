@@ -8,11 +8,9 @@
  * - Markdown rendering for links and code
  * - Optional file attachments with thumbnails
  * - Content badges for @mentions (sources, skills)
- * - Pending/queued states (Electron only)
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Clock, CornerDownRight, X } from 'lucide-react'
+import { type ReactNode } from 'react'
 import type { StoredAttachment, ContentBadge } from '@craft-agent/core'
 import { normalizePath } from '@craft-agent/core/utils'
 import { cn } from '../../lib/utils'
@@ -305,6 +303,16 @@ function renderContentWithBadges(
   return <p className="text-sm">{elements}</p>
 }
 
+/** Viewport rect of an inline capsule (anchor for its hover preview). */
+export interface AttachmentRect {
+  top: number
+  right: number
+  bottom: number
+  left: number
+  width: number
+  height: number
+}
+
 export interface UserMessageBubbleProps {
   /** Message content (markdown supported) */
   content: string
@@ -316,27 +324,38 @@ export interface UserMessageBubbleProps {
   onFileClick?: (path: string) => void
   /** Stored attachments (images, documents) */
   attachments?: StoredAttachment[]
+  /**
+   * Render the attachments yourself (app-provided capsules).
+   *
+   * The built-in row draws its own thumbnails, which is why sent messages never
+   * matched the composer. Hosts that share the composer's capsule design pass
+   * this to render identical, hover-previewable chips instead.
+   */
+  renderAttachments?: (attachments: StoredAttachment[]) => React.ReactNode
+  /**
+   * Pre-rendered inline HTML (attachment capsules / mention badges).
+   *
+   * When set it replaces the markdown text AND the attachment row: the chips are
+   * inline in the message at their token positions, so a separate row above the
+   * bubble would duplicate them (and it is the row that used to hide the text
+   * after an attachment).
+   */
+  contentHtml?: string
+  /** Pointer entered an inline capsule inside `contentHtml`. */
+  onContentAttachmentHover?: (token: string, rect: AttachmentRect) => void
+  /** Pointer left the inline capsule. */
+  onContentAttachmentLeave?: () => void
+  /** Double-click on an inline capsule - open the attachment itself. */
+  onContentAttachmentActivate?: (token: string) => void
   /** Content badges for inline display (sources, skills) */
   badges?: ContentBadge[]
   /** Whether the message is awaiting backend confirmation. User bubbles stay visually stable. */
   isPending?: boolean
-  /** Whether the message is queued (badge shown) */
-  isQueued?: boolean
-  /** Callback to promote an already-sent queued message to guidance */
-  onGuideQueued?: () => void
-  /** Callback to cancel/remove an already-sent queued message */
-  onCancelQueued?: () => void
   /** Compact mode - reduces padding for popover embedding */
   compactMode?: boolean
   /** Message timestamp (ms epoch) - shown right-aligned below the bubble */
   timestamp?: number
 }
-
-/** Minimum visible duration of the "Queued" chip. Both backends ack
- * mid-stream sends within ~50–150ms, which would otherwise make the chip
- * flash too briefly to register. Hold it long enough for the user to
- * actually read it. */
-const QUEUED_MIN_VISIBLE_MS = 2500
 
 export function UserMessageBubble({
   content,
@@ -344,63 +363,17 @@ export function UserMessageBubble({
   onUrlClick,
   onFileClick,
   attachments,
+  renderAttachments,
+  contentHtml,
+  onContentAttachmentHover,
+  onContentAttachmentLeave,
+  onContentAttachmentActivate,
   badges,
-  isQueued,
-  onGuideQueued,
-  onCancelQueued,
   compactMode,
   timestamp,
 }: UserMessageBubbleProps) {
   const { t } = useTranslation()
   const hasAttachments = attachments && attachments.length > 0
-
-  // Show the queued chip while `isQueued` is true AND for at least
-  // QUEUED_MIN_VISIBLE_MS after it first became true — even if the backend
-  // acks in <150ms. Pure UI state; `isQueued` remains the persisted source
-  // of truth.
-  const [showQueued, setShowQueued] = useState(isQueued ?? false)
-  const queuedShownAtRef = useRef<number | null>(isQueued ? Date.now() : null)
-  const clearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  useEffect(() => {
-    return () => {
-      if (clearTimerRef.current) clearTimeout(clearTimerRef.current)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (clearTimerRef.current) {
-      clearTimeout(clearTimerRef.current)
-      clearTimerRef.current = null
-    }
-
-    if (isQueued) {
-      setShowQueued(true)
-      if (queuedShownAtRef.current === null) {
-        queuedShownAtRef.current = Date.now()
-      }
-      return
-    }
-
-    // isQueued flipped to false. Keep the chip up for the remainder of
-    // the minimum visible window, then clear.
-    if (queuedShownAtRef.current === null) return
-
-    const elapsed = Date.now() - queuedShownAtRef.current
-    const remaining = Math.max(0, QUEUED_MIN_VISIBLE_MS - elapsed)
-
-    if (remaining === 0) {
-      setShowQueued(false)
-      queuedShownAtRef.current = null
-      return
-    }
-
-    clearTimerRef.current = setTimeout(() => {
-      setShowQueued(false)
-      queuedShownAtRef.current = null
-      clearTimerRef.current = null
-    }, remaining)
-  }, [isQueued])
 
   // Separate edit_request badges (rendered above bubble) from other badges (rendered inline)
   const editRequestBadges = badges?.filter(isEditRequestBadge) ?? []
@@ -423,8 +396,9 @@ export function UserMessageBubble({
 
   return (
     <div className={cn("flex flex-col items-end gap-3 w-full", className)}>
-      {/* Attachment preview row - stored attachments with thumbnails */}
-      {hasAttachments && (
+      {/* Attachment row - host-provided capsules when available */}
+      {hasAttachments && !contentHtml && renderAttachments && renderAttachments(attachments!)}
+      {hasAttachments && !contentHtml && !renderAttachments && (
         <div className="flex gap-2 justify-end max-w-[80%] flex-wrap">
           {attachments!.map((att, i) => {
             const isImage = att.type === 'image'
@@ -491,14 +465,6 @@ export function UserMessageBubble({
         </div>
       )}
 
-      {/* Text content bubble. Queued messages render an inline header chip
-          inside the bubble (Clock icon + 'Queued' italic) instead of a
-          separate pill below — keeps the chat to one bubble per message
-          while the chip and pulsing icon make the waiting state obvious
-          (#616 follow-up). */}
-      {/* Flex column + items-end keeps the bubble shrink-to-fit (a block
-          w-full wrapper would stretch it to 100% before max-w caps it) and
-          right-aligns the timestamp below the bubble. */}
       <div className="w-full flex flex-col items-end">
       <div
         className={cn(
@@ -506,53 +472,32 @@ export function UserMessageBubble({
           compactMode ? "px-4 py-2" : "px-5 py-3.5"
         )}
       >
-        {showQueued && (
+        {contentHtml ? (
           <div
-            className="mb-2 flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-foreground/55"
-            role="status"
-            aria-live="polite"
-          >
-            <div className="flex min-w-0 items-center gap-1.5">
-              <Clock className="h-3 w-3 shrink-0 animate-pulse" aria-hidden="true" />
-              <span className="text-[11px] italic leading-none">{t('chat.queuedBadge')}</span>
-            </div>
-            {(onGuideQueued || onCancelQueued) && (
-              <div className="flex shrink-0 items-center gap-1 rounded-full bg-background/45 p-0.5 shadow-minimal ring-1 ring-foreground/8">
-                {onGuideQueued && (
-                  <button
-                    type="button"
-                    className="inline-flex h-5 items-center gap-1 rounded-full px-2 text-[11px] font-medium leading-none text-foreground/75 transition-colors hover:bg-background hover:text-foreground"
-                    title={t('chat.queuedAction.guideLabel')}
-                    aria-label={t('chat.queuedAction.guideLabel')}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      onGuideQueued()
-                    }}
-                  >
-                    <CornerDownRight className="h-3 w-3" aria-hidden="true" />
-                    {t('chat.queuedAction.guide')}
-                  </button>
-                )}
-                {onCancelQueued && (
-                  <button
-                    type="button"
-                    className="inline-flex h-5 items-center gap-1 rounded-full px-2 text-[11px] font-medium leading-none text-foreground/60 transition-colors hover:bg-destructive/10 hover:text-destructive"
-                    title={t('chat.queuedAction.cancelLabel')}
-                    aria-label={t('chat.queuedAction.cancelLabel')}
-                    onClick={(event) => {
-                      event.stopPropagation()
-                      onCancelQueued()
-                    }}
-                  >
-                    <X className="h-3 w-3" aria-hidden="true" />
-                    {t('chat.queuedAction.cancel')}
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-        {hasInlineBadges
+            className="text-sm [&_p]:m-0"
+            onMouseOver={(event) => {
+              const chip = (event.target as HTMLElement | null)?.closest?.('[data-attachment="true"]')
+              const token = chip?.getAttribute('data-attachment-text')
+              if (!chip || !token) return
+              const rect = chip.getBoundingClientRect()
+              onContentAttachmentHover?.(token, {
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
+                left: rect.left,
+                width: rect.width,
+                height: rect.height,
+              })
+            }}
+            onMouseLeave={() => onContentAttachmentLeave?.()}
+            onDoubleClick={(event) => {
+              const chip = (event.target as HTMLElement | null)?.closest?.('[data-attachment="true"]')
+              const token = chip?.getAttribute('data-attachment-text')
+              if (token) onContentAttachmentActivate?.(token)
+            }}
+            dangerouslySetInnerHTML={{ __html: contentHtml }}
+          />
+        ) : hasInlineBadges
           ? renderContentWithBadges(displayContent, inlineBadges, onUrlClick, onFileClick)
           : (
             <Markdown

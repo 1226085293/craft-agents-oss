@@ -14,9 +14,9 @@ function makeState(messages: any[]): SessionState {
   }
 }
 
-describe('handleInterrupted (#616)', () => {
+describe('handleInterrupted (#616 → 2026-10-22 queued-panel)', () => {
   describe('user-initiated stop (event.message present)', () => {
-    it('removes queued bubbles AND emits restore_input', () => {
+    it('appends the notice, keeps the queue rows, emits NO restore_input', () => {
       const state = makeState([
         { id: 'msg-1', role: 'user', content: 'first' },
         { id: 'msg-2', role: 'user', content: 'queued one', isQueued: true },
@@ -27,26 +27,24 @@ describe('handleInterrupted (#616)', () => {
         type: 'interrupted',
         sessionId: 'session-1',
         message: { id: 'info-1', role: 'info', content: 'Response interrupted', timestamp: 0 } as any,
-        queuedMessages: ['queued one', 'queued two'],
       }
 
       const next = handleInterrupted(state, event)
 
-      // queued bubbles dropped
+      // 2026-10-22 queued-panel: queued messages stay in the message list (the
+      // turn grouper skips rendering them); the queue panel owns their display.
       const ids = next.state.session.messages.map(m => m.id)
-      expect(ids).not.toContain('msg-2')
-      expect(ids).not.toContain('msg-3')
+      expect(ids).toContain('msg-2')
+      expect(ids).toContain('msg-3')
       // info message appended
       expect(ids).toContain('info-1')
-      // restore_input effect emitted with combined text
-      expect(next.effects).toEqual([
-        { type: 'restore_input', text: 'queued one\n\nqueued two' },
-      ])
+      // nothing to restore — the queue panel above the composer keeps them
+      expect(next.effects).toEqual([])
       // isProcessing cleared
       expect(next.state.session.isProcessing).toBe(false)
     })
 
-    it('still works when no queued bubbles exist', () => {
+    it('still works when no queued rows exist', () => {
       const state = makeState([
         { id: 'msg-1', role: 'user', content: 'first' },
       ])
@@ -63,7 +61,7 @@ describe('handleInterrupted (#616)', () => {
   })
 
   describe('silent redirect (event.message absent)', () => {
-    it('KEEPS queued bubbles in chat and does NOT emit restore_input (#616 fix)', () => {
+    it('keeps queued rows and emits no effects (stop ends only the current message)', () => {
       const state = makeState([
         { id: 'msg-1', role: 'user', content: 'first' },
         { id: 'msg-2', role: 'user', content: 'queued during run', isQueued: true },
@@ -73,17 +71,14 @@ describe('handleInterrupted (#616)', () => {
         type: 'interrupted',
         sessionId: 'session-1',
         // no message field — silent redirect
-        queuedMessages: ['queued during run'],
       }
 
       const next = handleInterrupted(state, event)
 
-      // queued bubble must remain so the user sees it
       const ids = next.state.session.messages.map(m => m.id)
       expect(ids).toContain('msg-2')
       // no info bubble appended
       expect(ids).not.toContain('info-1')
-      // critically: no restore_input effect — backend will auto-replay
       expect(next.effects).toEqual([])
       // isProcessing still gets cleared
       expect(next.state.session.isProcessing).toBe(false)

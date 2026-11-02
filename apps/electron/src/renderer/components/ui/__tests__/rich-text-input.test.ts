@@ -5,7 +5,19 @@ import {
   syncCompositionFromKeydown,
   isImeCompositionPaste,
   needsTsfRepair,
+  parseAttachmentClipboardPayload,
+  serializeAttachmentClipboardPayload,
 } from '../rich-text-input'
+import type { FileAttachment } from '../../../../shared/types'
+
+const reportAttachment: FileAttachment = {
+  type: 'text',
+  path: 'report.md',
+  name: 'report.md',
+  mimeType: 'text/markdown',
+  text: '# report',
+  size: 8,
+}
 
 describe('isEscapeDuringComposition', () => {
   it('returns true for Escape when local composition ref is active', () => {
@@ -101,12 +113,45 @@ describe('needsTsfRepair', () => {
   it('repairs when the element holds text and no composition is live', () => {
     expect(needsTsfRepair({ hasExistingText: true, isComposing: false })).toBe(true)
   })
-
   it('skips empty elements - they are not affected by the TSF first-focus bug', () => {
     expect(needsTsfRepair({ hasExistingText: false, isComposing: false })).toBe(false)
   })
 
   it('never runs mid-composition', () => {
     expect(needsTsfRepair({ hasExistingText: true, isComposing: true })).toBe(false)
+  })
+})
+
+describe('attachment clipboard payload', () => {
+  it('round-trips the text model and the attachment payloads', () => {
+    const text = 'see [attachment:report.md] please'
+    const parsed = parseAttachmentClipboardPayload(
+      serializeAttachmentClipboardPayload(text, [reportAttachment])
+    )
+
+    expect(parsed).not.toBeNull()
+    expect(parsed?.text).toBe(text)
+    expect(parsed?.attachments).toHaveLength(1)
+    // The bytes matter: a tag alone is dead in another conversation.
+    expect(parsed?.attachments[0].text).toBe('# report')
+    expect(parsed?.attachments[0].name).toBe('report.md')
+  })
+
+  it('rejects payloads without usable attachments', () => {
+    expect(parseAttachmentClipboardPayload('')).toBeNull()
+    expect(parseAttachmentClipboardPayload('not json')).toBeNull()
+    expect(parseAttachmentClipboardPayload(JSON.stringify({ text: 'x' }))).toBeNull()
+    expect(
+      parseAttachmentClipboardPayload(JSON.stringify({ text: 'x', attachments: [{ nope: true }] }))
+    ).toBeNull()
+  })
+
+  it('drops malformed entries but keeps the valid ones', () => {
+    const parsed = parseAttachmentClipboardPayload(
+      JSON.stringify({ text: 'x', attachments: [{ nope: true }, reportAttachment] })
+    )
+
+    expect(parsed?.attachments).toHaveLength(1)
+    expect(parsed?.attachments[0].name).toBe('report.md')
   })
 })

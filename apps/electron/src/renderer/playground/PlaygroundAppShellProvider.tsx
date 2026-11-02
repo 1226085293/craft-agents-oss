@@ -40,20 +40,18 @@ const playgroundValue: AppShellContextType = {
   getDraft: () => '',
   getDraftAttachmentRefs: () => [],
   hydrateDraftAttachments: async () => [],
+  draftsLoadedVersion: 0,
   sessionOptions: new Map(),
   onCreateSession: (async () => {
     throw new Error('[Playground] onCreateSession is not available')
   }) as AppShellContextType['onCreateSession'],
   onSendMessage: logCall('onSendMessage'),
   onRenameSession: logCall('onRenameSession'),
-  onFlagSession: logCall('onFlagSession'),
-  onUnflagSession: logCall('onUnflagSession'),
   onArchiveSession: logCall('onArchiveSession'),
   onUnarchiveSession: logCall('onUnarchiveSession'),
   onMarkSessionRead: logCall('onMarkSessionRead'),
   onMarkSessionUnread: logCall('onMarkSessionUnread'),
   onSetActiveViewingSession: logCall('onSetActiveViewingSession'),
-  onSessionStatusChange: logCall('onSessionStatusChange'),
   onDeleteSession: async () => {
     console.log('[Playground AppShell] onDeleteSession called')
     return false

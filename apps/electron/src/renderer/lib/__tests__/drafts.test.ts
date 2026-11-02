@@ -3,7 +3,9 @@ import type { FileAttachment } from '@craft-agent/shared/protocol'
 import {
   CONTENT_PERSIST_CAP,
   attachmentFromContentRef,
+  attachmentsEmissionKey,
   isAbsolutePath,
+  nextAttachmentsEmission,
   toDraftRef,
 } from '../drafts'
 
@@ -128,5 +130,43 @@ describe('attachmentFromContentRef', () => {
   it('returns null for refs without content (Track P case — caller must use RPC instead)', () => {
     const restored = attachmentFromContentRef({ path: '/Users/me/a.png', name: 'a.png' })
     expect(restored).toBeNull()
+  })
+})
+
+
+describe('nextAttachmentsEmission', () => {
+  const img = { type: 'image', name: 'c918c4_pasted-image-1.png' }
+
+  it('stays silent for the very first list of a mount', () => {
+    // The first list is whatever the parent handed down (seed / empty composer) —
+    // reporting it as an edit is wrong.
+    expect(nextAttachmentsEmission(null, [])).toEqual({ key: '', emit: false })
+    expect(nextAttachmentsEmission(null, [img]).emit).toBe(false)
+  })
+
+  it('stays silent when the same list is replayed (React.StrictMode double effect)', () => {
+    const first = nextAttachmentsEmission(null, [])
+    // Second invocation of the same mount effect: previousKey is now '', list unchanged.
+    expect(nextAttachmentsEmission(first.key, [])).toEqual({ key: '', emit: false })
+  })
+
+  it('does not report an empty list over a seeded one', () => {
+    // Regression: StrictMode spent the old one-shot skip flag on its first run, so the
+    // second run reported [] and the parent persisted a draft with no attachment bytes.
+    const seeded = nextAttachmentsEmission(null, [img])
+    expect(nextAttachmentsEmission(seeded.key, []).emit).toBe(true) // a real removal
+    const replay = nextAttachmentsEmission('image:c918c4_pasted-image-1.png', [img])
+    expect(replay.emit).toBe(false)
+  })
+
+  it('reports additions, removals and renames', () => {
+    expect(nextAttachmentsEmission('', [img]).emit).toBe(true)
+    expect(nextAttachmentsEmission('image:c918c4_pasted-image-1.png', []).emit).toBe(true)
+    expect(nextAttachmentsEmission('image:old.png', [{ type: 'image', name: 'new.png' }]).emit).toBe(true)
+  })
+
+  it('distinguishes two attachments that share a name (multiset)', () => {
+    const two = [{ type: 'image', name: 'a.png' }, { type: 'image', name: 'a.png' }]
+    expect(attachmentsEmissionKey(two)).not.toBe(attachmentsEmissionKey([{ type: 'image', name: 'a.png' }]))
   })
 })

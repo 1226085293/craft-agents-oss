@@ -27,13 +27,8 @@ import {
   type MentionItem,
   type MentionItemType,
 } from '@/components/ui/mention-menu'
-import {
-  InlineLabelMenu,
-  useInlineLabelMenu,
-} from '@/components/ui/label-menu'
-import type { LabelConfig } from '@craft-agent/shared/labels'
 import { parseMentions } from '@/lib/mentions'
-import { RichTextInput, type RichTextInputHandle } from '@/components/ui/rich-text-input'
+import { RichTextInput, type AttachmentChipRect, type RichTextInputHandle } from '@/components/ui/rich-text-input'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@craft-agent/ui'
 import {
   DropdownMenu,
@@ -45,7 +40,19 @@ import { cn } from '@/lib/utils'
 import { coerceInputText } from '@/lib/input-text'
 import { isAbsolutePath } from '@/lib/drafts'
 import { isMac } from '@/lib/platform'
+import {
+  attachmentTokenKey,
+  ensureAttachmentTokens,
+  filterAttachmentsByTokens,
+  findAttachmentForToken,
+  findAttachmentTokens,
+  formatAttachmentToken,
+} from '@/lib/attachment-tokens'
+import { AttachmentChipPreview } from './AttachmentChipPreview'
+import { nextAttachmentsEmission } from '@/lib/drafts'
 import { AttachmentPreview } from '../AttachmentPreview'
+import { BackgroundTaskToolbar } from './BackgroundTaskToolbar'
+import { useHydrateBackgroundTasks } from '@/hooks/useHydrateBackgroundTasks'
 import { ImageSupportWarningBanner } from './ImageSupportWarningBanner'
 import { ANTHROPIC_MODELS, getModelShortName, getModelDisplayName, resolveModelContextWindow, type ModelDefinition } from '@config/models'
 import {
@@ -55,7 +62,6 @@ import {
 } from '@config/llm-connections'
 import { useOptionalAppShellContext } from '@/context/AppShellContext'
 import { useTheme } from '@/hooks/useTheme'
-import { EditPopover, getEditConfig } from '@/components/ui/EditPopover'
 import { SourceAvatar } from '@/components/ui/source-avatar'
 import { SourceSelectorPopover } from '@/components/ui/SourceSelectorPopover'
 import { CompactSourceSelector } from '@/components/ui/CompactSourceSelector'
@@ -177,6 +183,13 @@ export interface FreeFormInputProps {
    * actually on, but it is no longer user-editable here.
    */
   currentModel: string
+  /**
+   * The session's own model (the session record's `model`) — what a request will
+   * ask the group for. Kept separate from `currentModel`, which is the model
+   * live traffic last landed on: the label must predict, and history made it
+   * disagree with the very next request (2026-10-29, `261029-airy-orbit`).
+   */
+  sessionModel?: string
   /** Gateway strategy groups, as the composer should offer them. */
   gatewayStrategies?: StrategyOption[]
   /** Selected strategy id; empty means "none chosen yet". */
@@ -224,13 +237,6 @@ export interface FreeFormInputProps {
   // Skill selection (for @mentions)
   /** Available skills for @mention autocomplete */
   skills?: LoadedSkill[]
-  // Label selection (for #labels)
-  /** Available labels for #label autocomplete */
-  labels?: LabelConfig[]
-  /** Currently applied session labels */
-  sessionLabels?: string[]
-  /** Callback when a label is added via # menu */
-  onLabelAdd?: (labelId: string) => void
   /** Workspace ID for loading skill icons */
   workspaceId?: string
   /** Current working directory path */
@@ -242,7 +248,6 @@ export interface FreeFormInputProps {
   /** Session ID for scoping events like approve-plan */
   sessionId?: string
   /** Current session status of the session (for # menu state selection) */
-  currentSessionStatus?: string
   /** Disable send action (for tutorial guidance) */
   disableSend?: boolean
   /** Whether the session is empty (no messages yet) - affects context badge prominence */
@@ -311,6 +316,7 @@ export function FreeFormInput({
   onStop,
   inputRef: externalInputRef,
   currentModel,
+  sessionModel,
   gatewayStrategies,
   effectiveStrategyId,
   onStrategyChange,
@@ -333,15 +339,11 @@ export function FreeFormInput({
   sourceScope = 'auto',
   onSourcesChange,
   skills = [],
-  labels = [],
-  sessionLabels = [],
-  onLabelAdd,
   workspaceId,
   workingDirectory,
   onWorkingDirectoryChange,
   sessionFolderPath,
   sessionId,
-  currentSessionStatus,
   disableSend = false,
   isEmptySession = false,
   contextStatus,
@@ -478,16 +480,6 @@ export function FreeFormInput({
     if (!effectiveConnection) return null
     return llmConnections.find(c => c.slug === effectiveConnection) ?? null
   }, [llmConnections, effectiveConnection])
-
-
-  // Access sessionStatuses and onSessionStatusChange from context for the # menu state picker
-  const sessionStatuses = appShellCtx?.sessionStatuses ?? []
-  const onSessionStatusChange = appShellCtx?.onSessionStatusChange
-  // Resolve workspace rootPath for "Add New Label" deep link
-  const workspaceRootPath = React.useMemo(() => {
-    if (!appShellCtx || !workspaceId) return null
-    return appShellCtx.workspaces.find(w => w.id === workspaceId)?.rootPath ?? null
-  }, [appShellCtx, workspaceId])
 
   // Workspace slug for SDK skill qualification (server-computed)
   // SDK expects "workspaceSlug:skillSlug" format, NOT UUID
@@ -647,22 +639,103 @@ export function FreeFormInput({
     attachmentsRef.current = attachments
   }, [attachments])
 
+  /**
+   * Attachments whose chip was deleted, kept briefly so an undo can restore a
+   * *live* chip instead of a dead tag.
+   *
+   * Deleting a chip drops the attachment (the token is the source of truth).
+   * Ctrl+Z puts the token back, and the attachment has to come back with it —
+   * otherwise the restored chip has no bytes, no preview and won't be sent.
+   */
+  const droppedAttachmentsRef = React.useRef(new Map<string, FileAttachment>())
+  /** Bound on the revival stash so long sessions don't hoard bytes. */
+  const DROPPED_ATTACHMENTS_LIMIT = 20
+
+  /**
+   * Keep `attachments` in step with the tokens in the text.
+   *
+   * Does both directions of the same contract: a token that disappeared drops
+   * its attachment (into the revival stash), and a token that reappeared pulls
+   * its attachment back out.
+   */
+  const reconcileAttachments = React.useCallback((prev: FileAttachment[], text: string): FileAttachment[] => {
+    const kept = filterAttachmentsByTokens(prev, text)
+    if (kept !== prev) {
+      for (const attachment of prev) {
+        if (kept.includes(attachment)) continue
+        droppedAttachmentsRef.current.set(attachmentTokenKey(attachment.name), attachment)
+        if (droppedAttachmentsRef.current.size > DROPPED_ATTACHMENTS_LIMIT) {
+          const oldest = droppedAttachmentsRef.current.keys().next().value
+          if (oldest !== undefined) droppedAttachmentsRef.current.delete(oldest)
+        }
+      }
+    }
+
+    const present = new Set(kept.map(attachment => attachmentTokenKey(attachment.name)))
+    const revived: FileAttachment[] = []
+    for (const token of findAttachmentTokens(text)) {
+      if (present.has(token.key)) continue
+      const stashed = droppedAttachmentsRef.current.get(token.key)
+      if (!stashed) continue
+      revived.push(stashed)
+      present.add(token.key)
+    }
+
+    return revived.length > 0 ? [...kept, ...revived] : kept
+  }, [])
+
+  /**
+   * Resolve the payload behind a chip for Ctrl+C / Ctrl+X.
+   *
+   * Copying must move the attachment itself: a `[attachment:…]` tag only
+   * resolves against the composer that staged it, which is why a chip copied
+   * into another conversation arrived dead.
+   */
+  const getAttachmentClipboardPayload = React.useCallback((token: string): FileAttachment | null => {
+    return findAttachmentForToken(attachmentsRef.current, token) ?? null
+  }, [])
+
+  /** Stage attachments that arrived on the clipboard from another composer. */
+  const handlePasteAttachments = React.useCallback((incoming: FileAttachment[]) => {
+    if (incoming.length === 0) return
+    setAttachments(prev => {
+      const next = [...prev]
+      for (const attachment of incoming) {
+        const key = attachmentTokenKey(attachment.name)
+        const index = next.findIndex(existing => attachmentTokenKey(existing.name) === key)
+        if (index >= 0) next[index] = attachment
+        else next.push(attachment)
+      }
+      return next
+    })
+  }, [])
+
   // Seed from parent when `attachmentsValue` changes (e.g., switching sessions).
-  // `skipPersistRef` tells the save effect below that the next `attachments` change
-  // is a prop-driven seed, not user intent — otherwise we'd echo the seed back to
-  // the parent and risk persisting A's attachments under B's sessionId.
+  // The save effect below is value-keyed, so a prop-driven seed does not echo back
+  // to the parent as a user edit.
   const attachmentsRefsKey = React.useMemo(() => {
     if (!attachmentsValue) return ''
     return attachmentsValue.map(a => a.path).join('|')
   }, [attachmentsValue])
   const prevAttachmentsRefsKey = React.useRef(attachmentsRefsKey)
-  const skipPersistRef = React.useRef(true) // treat initial mount as a prop-seed
+  /** Last text the parent handed us (used to tell "user edit" from "draft restore"). */
+  const lastParentTextRef = React.useRef(coerceInputText(inputValue))
   React.useEffect(() => {
     if (attachmentsValue === undefined) return
     if (attachmentsRefsKey === prevAttachmentsRefsKey.current) return
     prevAttachmentsRefsKey.current = attachmentsRefsKey
-    skipPersistRef.current = true
     setAttachments(attachmentsValue)
+
+    // Drafts written before inline tokens existed kept the text and the
+    // attachments apart: give the seeded attachments their tokens once. Guarded
+    // by "the local text is still exactly what the parent gave us" — a chip the
+    // user just deleted must never be re-created here (that is what put a dead
+    // chip at the end of the input).
+    if (inputRef.current !== lastParentTextRef.current) return
+    const next = ensureAttachmentTokens(inputRef.current, attachmentsValue)
+    if (next === inputRef.current) return
+    setInput(next)
+    prevInputValueRef.current = next
   }, [attachmentsValue, attachmentsRefsKey])
 
   // Persist user-initiated attachment changes back to the parent. The parent stores
@@ -670,12 +743,20 @@ export function FreeFormInput({
   // change — add/remove/send-clear.
   const onAttachmentsChangeRef = React.useRef(onAttachmentsChange)
   onAttachmentsChangeRef.current = onAttachmentsChange
+  // Emit on *value* change, never on effect invocation.
+  //
+  // A one-shot "skip the next run" flag is not safe here: the app root is wrapped
+  // in React.StrictMode, which runs mount effects twice — the first run spends the
+  // flag and the second one then reports the composer's still-empty list as a real
+  // edit. The parent believes every attachment was removed and persists a
+  // text-with-tokens-only draft, so a staged image is gone on the next restart.
+  // Comparing against the last emitted key makes the effect idempotent and keeps
+  // the prop-driven seed (and StrictMode's replay) silent.
+  const lastEmittedAttachmentsKeyRef = React.useRef<string | null>(null)
   React.useEffect(() => {
-    if (skipPersistRef.current) {
-      skipPersistRef.current = false
-      return
-    }
-    onAttachmentsChangeRef.current?.(attachments)
+    const { key, emit } = nextAttachmentsEmission(lastEmittedAttachmentsKeyRef.current, attachments)
+    lastEmittedAttachmentsKeyRef.current = key
+    if (emit) onAttachmentsChangeRef.current?.(attachments)
   }, [attachments])
 
   // Optimistic state for source selection - updates UI immediately before IPC round-trip completes
@@ -719,15 +800,27 @@ export function FreeFormInput({
     }
   }, [enabledSourceSlugs])
 
-  // Sync from parent when inputValue changes externally (e.g., switching sessions)
+  // Sync from parent when the draft text changes externally (session switch,
+  // queued-message edit, draft hydration).
+  //
+  // The local composer is authoritative while the user edits: adopting a parent
+  // value mid-edit is exactly what resurrected a chip the user had just deleted
+  // (the parent's text still carried the token for one debounce window). So a
+  // parent value is adopted only when everything local has already been synced
+  // back, and only when the parent's text itself actually changed.
   const prevInputValueRef = React.useRef(coerceInputText(inputValue))
   React.useEffect(() => {
     if (inputValue === undefined) return
-    const nextInputValue = coerceInputText(inputValue)
-    if (nextInputValue !== prevInputValueRef.current) {
-      setInput(nextInputValue)
-      prevInputValueRef.current = nextInputValue
-    }
+    const parentText = coerceInputText(inputValue)
+    if (parentText === lastParentTextRef.current) return
+    lastParentTextRef.current = parentText
+    if (inputRef.current !== prevInputValueRef.current) return
+
+    // Adopt verbatim. Tokens are only ever added at seed time (see the
+    // attachments seed effect); appending them here is what used to resurrect a
+    // just-deleted attachment at the end of the input.
+    setInput(parentText)
+    prevInputValueRef.current = parentText
   }, [inputValue])
 
   // Debounced sync to parent (saves draft without blocking typing)
@@ -820,6 +913,17 @@ export function FreeFormInput({
   // Track last caret position for focus restoration (e.g., after permission mode popover closes)
   const lastCaretPositionRef = React.useRef<number | null>(null)
 
+  // Restore persisted (undelivered) background-task rows on mount / session
+  // switch. Lives here rather than inside the popover: that component renders
+  // null when its list is empty, so a hook there could never fill it.
+  useHydrateBackgroundTasks(sessionId)
+
+  // ------------------------------------------------------------------
+  // Background task / child session actions now live in BackgroundTaskToolbar,
+  // a shared component rendered next to the permission-mode selector in both
+  // the desktop (ActiveOptionBadges) and compact (this composer) layouts.
+  // ------------------------------------------------------------------
+
   // Listen for craft:insert-text events (generic mechanism for inserting text into input)
   // Used by components that want to pre-fill the input with text
   React.useEffect(() => {
@@ -841,6 +945,47 @@ export function FreeFormInput({
     window.addEventListener('craft:insert-text', handleInsertText as EventListener)
     return () => window.removeEventListener('craft:insert-text', handleInsertText as EventListener)
   }, [sessionId, isFocusedPanel, syncToParent, richInputRef])
+
+  /**
+   * Restore a draft atomically (used when editing a queued message).
+   *
+   * The normal channel for a restored draft is the `inputValue` prop, but that
+   * path deliberately refuses to adopt a parent value while the local composer
+   * has unsynced edits — to stop the parent from resurrecting a chip the user
+   * just deleted. Editing a queued message is not that case: it is an explicit
+   * user action, and the refusal left the attachments staged with no text, so
+   * the composer showed "only the attachments". Text and payloads therefore
+   * land together here, bypassing the guards.
+   */
+  React.useEffect(() => {
+    const handleRestoreDraft = (
+      e: CustomEvent<{ text?: string; attachments?: FileAttachment[]; sessionId?: string }>
+    ) => {
+      const targetSessionId = e.detail?.sessionId
+      if (!shouldHandleScopedInputEvent({ sessionId, isFocusedPanel, targetSessionId })) return
+
+      const text = coerceInputText(e.detail?.text)
+      const nextAttachments = e.detail?.attachments ?? []
+
+      // Keep the adopt-effect quiet: this text is already what the parent has.
+      lastParentTextRef.current = text
+      prevInputValueRef.current = text
+      setInput(text)
+      setAttachments(nextAttachments)
+
+      if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current)
+      onInputChange?.(text)
+      onAttachmentsChange?.(nextAttachments)
+
+      requestAnimationFrame(() => {
+        richInputRef.current?.focus()
+        richInputRef.current?.setSelectionRange(text.length, text.length)
+      })
+    }
+
+    window.addEventListener('craft:restore-draft', handleRestoreDraft as EventListener)
+    return () => window.removeEventListener('craft:restore-draft', handleRestoreDraft as EventListener)
+  }, [sessionId, isFocusedPanel, onInputChange, onAttachmentsChange, richInputRef])
 
   const clearInputDraft = React.useCallback(() => {
     setInput('')
@@ -962,10 +1107,21 @@ export function FreeFormInput({
   // If the page reloaded after compaction completed (awaitingCompaction = false),
   // we need to send the plan execution message that was interrupted by the reload.
   // Also listen for compaction-complete in case CMD+R happened during compaction.
+  //
+  // NOTE: `onSubmit` is an unstable reference from the parent (re-created every
+  // render, and the composer re-renders every ~2s when the LLM-gateway pushes
+  // status). Depending on it made this effect re-run on every render, re-reading
+  // the full session.jsonl from disk every 2s. Keep the latest callbacks in refs
+  // and depend only on sessionId so the recovery check runs once per session.
+  const hasExecutedRef = React.useRef(false)
+  const onSubmitRef = React.useRef(onSubmit)
+  onSubmitRef.current = onSubmit
+
   React.useEffect(() => {
     if (!sessionId) return
 
-    let hasExecuted = false
+    // A fresh session gets a fresh one-shot guard.
+    hasExecutedRef.current = false
 
     const isExpectedReconnectError = (error: unknown): boolean => {
       const message = error instanceof Error ? error.message : String(error)
@@ -976,7 +1132,7 @@ export function FreeFormInput({
     }
 
     const executePendingPlan = async () => {
-      if (hasExecuted) return
+      if (hasExecutedRef.current) return
 
       try {
         const pending = await window.electronAPI.getPendingPlanExecution(sessionId)
@@ -990,12 +1146,12 @@ export function FreeFormInput({
 
         // Compaction completed but we never sent the execution message (page reloaded).
         // Send it now and clear the pending state.
-        hasExecuted = true
+        hasExecutedRef.current = true
         const executionMessage = buildPlanApprovalMessage({
           planPath: pending.planPath,
           draftInput: pending.draftInputSnapshot,
         })
-        onSubmit(executionMessage, undefined)
+        onSubmitRef.current(executionMessage, undefined)
 
         await window.electronAPI.sessionCommand(sessionId, {
           type: 'clearPendingPlanExecution',
@@ -1023,7 +1179,7 @@ export function FreeFormInput({
     return () => {
       window.removeEventListener('craft:compaction-complete', handleCompactionComplete as unknown as EventListener)
     }
-  }, [sessionId, onSubmit])
+  }, [sessionId])
 
   // Listen for craft:focus-input events (restore focus after popover/dropdown closes)
   React.useEffect(() => {
@@ -1118,6 +1274,8 @@ export function FreeFormInput({
           const attachment = await readFileAsAttachment(files[i], fileNames[i])
           if (attachment) {
             setAttachments(prev => [...prev, attachment])
+            // Chip lands at the caret so the attachment sits where the user is typing
+            addAttachmentChip(attachment)
           }
         } catch (error) {
           console.error('[FreeFormInput] Failed to process pasted file:', error)
@@ -1211,47 +1369,6 @@ export function FreeFormInput({
     workspaceId: workspaceSlug,
   })
 
-  // Inline label menu hook (for #labels)
-  const handleLabelSelect = React.useCallback((labelId: string) => {
-    onLabelAdd?.(labelId)
-  }, [onLabelAdd])
-
-  const inlineLabel = useInlineLabelMenu({
-    inputRef: richInputRef,
-    labels,
-    sessionLabels,
-    onSelect: handleLabelSelect,
-    sessionStatuses,
-    activeStateId: currentSessionStatus,
-  })
-
-  // "Add New Label" handler: cleans up the #trigger text and opens a controlled
-  // EditPopover so the user can describe the label before the agent creates it.
-  const [addLabelPopoverOpen, setAddLabelPopoverOpen] = React.useState(false)
-  const [addLabelPrefill, setAddLabelPrefill] = React.useState('')
-  const handleAddLabel = React.useCallback((prefill: string) => {
-    if (!workspaceRootPath) return
-
-    // Remove the #trigger text from input
-    const cleaned = inlineLabel.handleSelect('')
-    setInput(cleaned)
-    syncToParent(cleaned)
-    inlineLabel.close()
-
-    // Store the prefill text (e.g., "Test" from "#Test") to pre-fill the popover
-    // Format: "Add new label {prefill}" so user can just press enter or modify
-    setAddLabelPrefill(prefill ? t('labels.addNewLabel', { prefill }) : '')
-
-    // Open the EditPopover for label creation
-    setAddLabelPopoverOpen(true)
-  }, [workspaceRootPath, inlineLabel, syncToParent, t])
-
-  // Memoize the add-label config so the EditPopover doesn't recreate on every render
-  const addLabelEditConfig = React.useMemo(() => {
-    if (!workspaceRootPath) return null
-    return getEditConfig('add-label', workspaceRootPath)
-  }, [workspaceRootPath])
-
   // Report height changes to parent (for external animation sync)
   React.useLayoutEffect(() => {
     if (!onHeightChange || !containerRef.current) return
@@ -1288,12 +1405,61 @@ export function FreeFormInput({
   // Check if running in Electron environment (has electronAPI)
   const hasElectronAPI = typeof window !== 'undefined' && !!window.electronAPI
 
+  /**
+   * Stage a freshly read attachment and give it its inline chip.
+   *
+   * The chip is the attachment's anchor: the token inside the chip is what the
+   * model reads to know which part of the message the file belongs to. When the
+   * composer happens to be unmounted (collapsed compact bar) or disabled, the
+   * token is appended to the text instead, so the attachment is never staged
+   * without a position.
+   */
+  const addAttachmentChip = React.useCallback((attachment: FileAttachment) => {
+    if (richInputRef.current?.insertAttachment(attachment)) return
+
+    const current = inputRef.current
+    const token = formatAttachmentToken(attachment.name)
+    const next = current.trim().length > 0 ? `${current} ${token}` : token
+    setInput(next)
+    syncToParent(next)
+  }, [richInputRef, syncToParent])
+
   // Shared helper: read a File, add as attachment, decrement loading count
   const processFileAttachment = async (file: File, overrideName?: string) => {
     try {
       const attachment = await readFileAsAttachment(file, overrideName)
       if (attachment) {
-        setAttachments(prev => [...prev, attachment])
+        // Persist immediately so the chip and the inline token both carry the
+        // real (unique) stored filename — the same name the model will later
+        // Read from `attachments/`. Without this the composer would show the
+        // original name (`pasted-image-1.png`) and only reveal the stored name
+        // after send, making the two disagree.
+        let staged = attachment
+        if (hasElectronAPI && sessionId) {
+          try {
+            const stored = await window.electronAPI.storeAttachment(sessionId, attachment)
+            if (stored?.storedPath) {
+              const realName = stored.storedPath.split(/[\\/]/).pop()
+              staged = {
+                ...attachment,
+                name: realName ?? attachment.name,
+                id: stored.id,
+                storedPath: stored.storedPath,
+                thumbnailBase64: stored.thumbnailBase64 ?? attachment.thumbnailBase64,
+                markdownPath: stored.markdownPath,
+                wasResized: stored.wasResized,
+                resizedBase64: stored.resizedBase64,
+                originalSize: stored.originalSize,
+              }
+            }
+          } catch (error) {
+            // Fall back to staging transiently; send will persist it.
+            console.error('[FreeFormInput] Failed to store attachment at attach time:', error)
+          }
+        }
+        setAttachments(prev => [...prev, staged])
+        // Insert the chip at the caret instead of stacking it above the input
+        addAttachmentChip(staged)
       }
     } catch (error) {
       console.error('[FreeFormInput] Failed to read file:', error)
@@ -1322,10 +1488,26 @@ export function FreeFormInput({
     e.target.value = ''
   }
 
-  const handleRemoveAttachment = (index: number) => {
-    setAttachments(prev => prev.filter((_, i) => i !== index))
-  }
+  // Inline chip hover card: the chip is ~one character wide, so the name, kind
+  // and thumbnail only exist in this floating card.
+  const [chipPreview, setChipPreview] = React.useState<{ token: string; rect: AttachmentChipRect } | null>(null)
+  const handleChipHover = React.useCallback((token: string, rect: AttachmentChipRect) => {
+    setChipPreview({ token, rect })
+  }, [])
+  const handleChipLeave = React.useCallback(() => setChipPreview(null), [])
+  React.useEffect(() => {
+    setChipPreview(null)
+  }, [sessionId])
 
+  const handleChipActivate = React.useCallback((token: string) => {
+    const attachment = findAttachmentForToken(attachmentsRef.current, token)
+    if (!attachment) return
+    const index = attachmentsRef.current.indexOf(attachment)
+    if (index >= 0) handleAttachmentDoubleClick(index)
+  }, [handleAttachmentDoubleClick])
+  const previewedChip = chipPreview
+    ? findAttachmentForToken(attachments, chipPreview.token)
+    : undefined
   // Drag and drop handlers
   const handleDragEnter = (e: React.DragEvent) => {
     e.preventDefault()
@@ -1453,9 +1635,10 @@ export function FreeFormInput({
       size: new Blob([text]).size,
     }
     setAttachments(prev => [...prev, attachment])
-    // Focus input after adding attachment
+    // Insert the chip at the caret and keep focus in the composer
     richInputRef.current?.focus()
-  }, []) // No deps needed - uses ref
+    addAttachmentChip(attachment)
+  }, [addAttachmentChip]) // Reads the caret through the input ref
 
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault()
@@ -1574,18 +1757,6 @@ export function FreeFormInput({
       }
     }
 
-    // Don't submit when label menu is open - let it handle navigation keys
-    if (inlineLabel.isOpen) {
-      if (e.key === 'Enter' || e.key === 'Tab' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
-        return
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault()
-        inlineLabel.close()
-        return
-      }
-    }
-
     // Plain Arrow Up with no draft content cancels the running turn and recalls
     // its prompt through ChatDisplay.handleStop. The pure guard deliberately
     // treats whitespace, attachments, loading files, and follow-up chips as draft
@@ -1602,7 +1773,7 @@ export function FreeFormInput({
       attachmentCount: attachments.length,
       loadingAttachmentCount: loadingCount,
       followUpItemCount: followUpItems.length,
-      inlineMenuOpen: inlineMention.isOpen || inlineSlash.isOpen || inlineLabel.isOpen,
+      inlineMenuOpen: inlineMention.isOpen || inlineSlash.isOpen,
       disabled,
       disableSend,
     })) {
@@ -1652,6 +1823,10 @@ export function FreeFormInput({
     const prevValue = inputRef.current
 
     setInput(nextValue)
+    // Deleting a chip (Backspace, Delete, Ctrl+A+Delete) must drop the attachment
+    // with it — the token in the text is the single source of truth. Undo puts
+    // the token back, and `reconcileAttachments` revives the payload with it.
+    setAttachments(prev => reconcileAttachments(prev, nextValue))
     syncToParent(nextValue) // Debounced sync to parent for draft persistence
 
     // Sync source selection when mentions are removed from input
@@ -1673,7 +1848,7 @@ export function FreeFormInput({
         }
       }
     }
-  }, [syncToParent, sources, optimisticSourceScope, effectiveSourceSlugs, onSourcesChange])
+  }, [syncToParent, sources, optimisticSourceScope, effectiveSourceSlugs, onSourcesChange, reconcileAttachments])
 
   // Handle input with cursor position (for menu detection)
   const handleRichInput = React.useCallback((value: string, cursorPosition: number) => {
@@ -1684,10 +1859,7 @@ export function FreeFormInput({
 
     // Update inline mention state (for @mentions - skills, sources, folders)
     inlineMention.handleInputChange(nextValue, cursorPosition)
-
-    // Update inline label state (for #labels)
-    inlineLabel.handleInputChange(nextValue, cursorPosition)
-  }, [inlineSlash, inlineMention, inlineLabel])
+  }, [inlineSlash, inlineMention])
 
   // Handle inline slash command selection (removes the /command text)
   const handleInlineSlashCommandSelect = React.useCallback((commandId: SlashCommandId) => {
@@ -1716,25 +1888,6 @@ export function FreeFormInput({
       richInputRef.current?.setSelectionRange(cursorPosition, cursorPosition)
     }, 0)
   }, [inlineMention, syncToParent])
-
-  // Handle inline label selection (removes the #label text from input)
-  const handleInlineLabelSelect = React.useCallback((labelId: string) => {
-    const newValue = inlineLabel.handleSelect(labelId)
-    setInput(newValue)
-    syncToParent(newValue)
-    richInputRef.current?.focus()
-  }, [inlineLabel, syncToParent])
-
-  // Handle inline state selection from # menu (removes #text, changes session state)
-  const handleInlineStateSelect = React.useCallback((stateId: string) => {
-    const newValue = inlineLabel.handleSelect('')
-    setInput(newValue)
-    syncToParent(newValue)
-    if (sessionId) {
-      onSessionStatusChange?.(sessionId, stateId)
-    }
-    richInputRef.current?.focus()
-  }, [inlineLabel, syncToParent, sessionId, onSessionStatusChange])
 
   const followUpLayoutKey = React.useMemo(
     () => followUpItems.map(item => [
@@ -1818,44 +1971,6 @@ export function FreeFormInput({
           isSearching={inlineMention.isSearching}
         />
 
-        {/* Inline Label & State Autocomplete (#labels / #states) */}
-        <InlineLabelMenu
-          open={inlineLabel.isOpen}
-          onOpenChange={(open) => !open && inlineLabel.close()}
-          items={inlineLabel.items}
-          onSelect={handleInlineLabelSelect}
-          onAddLabel={handleAddLabel}
-          filter={inlineLabel.filter}
-          position={inlineLabel.position}
-          states={inlineLabel.states}
-          activeStateId={inlineLabel.activeStateId}
-          onSelectState={handleInlineStateSelect}
-        />
-
-        {/* Controlled EditPopover for "Add New Label" — opens when user selects
-            the option from the # menu with no matches.
-            Spread the full config so optional fields like `inlineExecution`,
-            `displayLabel`, and `displayLabelKey` reach the popover. The previous
-            cherry-pick dropped `inlineExecution: true`, which made the popover
-            fall back to the same-window deep-link path; that worked inside
-            Electron but launched the desktop app from the WebUI via `craftagents://`.
-            Match the AppShell pattern (which already uses spread). */}
-        {addLabelEditConfig && (
-          <EditPopover
-            trigger={<span className="absolute top-0 left-0 w-0 h-0 overflow-hidden" />}
-            open={addLabelPopoverOpen}
-            onOpenChange={setAddLabelPopoverOpen}
-            {...addLabelEditConfig}
-            defaultValue={addLabelPrefill}
-            secondaryAction={workspaceRootPath ? {
-              label: 'Edit File',
-              filePath: `${workspaceRootPath}/labels/config.json`,
-            } : undefined}
-            side="top"
-            align="start"
-          />
-        )}
-
         {/* Pre-flight image-support warning — only for pi_compat connections
             where the renderer can both detect text-only models and offer to
             flip the per-model supportsImages override on the spot. */}
@@ -1866,14 +1981,10 @@ export function FreeFormInput({
           />
         )}
 
-        {/* Attachment Preview */}
-        <AttachmentPreview
-          attachments={attachments}
-          onRemove={handleRemoveAttachment}
-          onDoubleClick={handleAttachmentDoubleClick}
-          disabled={disabled}
-          loadingCount={loadingCount}
-        />
+        {/* Inline attachment chips live inside the input itself; this is their hover card */}
+        {chipPreview && previewedChip ? (
+          <AttachmentChipPreview attachment={previewedChip} rect={chipPreview.rect} />
+        ) : null}
 
         {/* Follow-up context chips */}
         <AnimatePresence initial={false}>
@@ -1983,6 +2094,12 @@ export function FreeFormInput({
           skills={skills}
           sources={sources}
           workspaceId={workspaceSlug}
+          attachments={attachments}
+          onAttachmentHover={handleChipHover}
+          onAttachmentLeave={handleChipLeave}
+          onAttachmentActivate={handleChipActivate}
+          getAttachmentClipboardPayload={getAttachmentClipboardPayload}
+          onPasteAttachments={handlePasteAttachments}
           className="pl-5 pr-4 pt-4 pb-3 overflow-y-auto min-h-[88px]"
           style={{ maxHeight: inputMaxHeight }}
           data-tutorial="chat-input"
@@ -2020,6 +2137,9 @@ export function FreeFormInput({
               onPermissionModeChange={onPermissionModeChange}
             />
           )}
+          {/* Background work + followed sessions sit right after the execution
+              mode button (执行 → 后台任务 → 子会话). */}
+          {sessionId && <BackgroundTaskToolbar sessionId={sessionId} />}
           {/* Strategy + next model: the gateway picks the upstream, so this is
               the only model-shaped control the composer offers. */}
           {enableCompactModelPicker && (
@@ -2027,6 +2147,7 @@ export function FreeFormInput({
               strategies={gatewayStrategies ?? []}
               value={effectiveStrategyId ?? ''}
               currentModel={currentModel}
+              sessionModel={sessionModel}
               onChange={(id) => onStrategyChange?.(id)}
               unavailable={strategyUnavailable}
               blockedReason={strategyBlockedReason}
@@ -2306,6 +2427,7 @@ export function FreeFormInput({
               strategies={gatewayStrategies ?? []}
               value={effectiveStrategyId ?? ''}
               currentModel={currentModel}
+              sessionModel={sessionModel}
               onChange={(id) => onStrategyChange?.(id)}
               unavailable={strategyUnavailable}
               blockedReason={strategyBlockedReason}

@@ -83,3 +83,28 @@ export function attachmentFromContentRef(ref: DraftAttachmentRef): FileAttachmen
     thumbnailBase64: ref.content.thumbnailBase64,
   }
 }
+
+/** Stable identity of a staged attachment list, used for change detection. */
+export function attachmentsEmissionKey(
+  attachments: readonly { type: string; name: string }[],
+): string {
+  return attachments.map((a) => `${a.type}:${a.name}`).join('|')
+}
+
+/**
+ * Decide whether a composer attachment list should be reported to the parent.
+ *
+ * `previousKey === null` means this mount has never reported anything, so the first
+ * list is the prop-seeded state — not a user edit. Anything equal to the previous key
+ * is a replay and must stay silent, which is what keeps React.StrictMode's double
+ * mount effect from reporting an empty list over a seeded one (doing so made the
+ * parent persist a text-with-tokens-only draft and lose the staged image bytes).
+ */
+export function nextAttachmentsEmission(
+  previousKey: string | null,
+  attachments: readonly { type: string; name: string }[],
+): { key: string; emit: boolean } {
+  const key = attachmentsEmissionKey(attachments)
+  if (previousKey === null) return { key, emit: false }
+  return { key, emit: key !== previousKey }
+}

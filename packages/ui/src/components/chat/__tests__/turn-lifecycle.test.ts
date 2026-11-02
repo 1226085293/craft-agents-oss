@@ -554,30 +554,29 @@ describe('edge cases', () => {
 })
 
 describe('hidden messages', () => {
-  const base = Date.now()
-  const messages = [
-    { id: 'u1', role: 'user', content: '1分钟后给我发消息', timestamp: base } as Message,
-    { id: 'tool1', role: 'tool', content: 'Running Bash...', timestamp: base + 100, toolName: 'Bash', toolUseId: 'call-1', toolStatus: 'running' } as Message,
-    { id: 'q1', role: 'user', content: '再帮我查一下天气', timestamp: base + 200, isQueued: true } as Message,
-  ]
+  it('skips queued rows from the transcript (2026-10-22 queued-panel)', () => {
+    const base = Date.now()
+    const messages = [
+      { id: 'u1', role: 'user', content: '1分钟后给我发消息', timestamp: base } as Message,
+      { id: 'tool1', role: 'tool', content: 'Running Bash...', timestamp: base + 100, toolName: 'Bash', toolUseId: 'call-1', toolStatus: 'running' } as Message,
+      { id: 'q1', role: 'user', content: '再帮我查一下天气', timestamp: base + 200, isQueued: true } as Message,
+    ]
 
-  const turns = groupMessagesByTurn(messages)
-  expect(turns).toHaveLength(3)
-  expect(turns[0]?.type).toBe('user')
-  expect(turns[1]?.type).toBe('assistant')
-  expect(turns[2]?.type).toBe('user')
-  if (turns[0]?.type !== 'user') throw new Error('expected first user turn')
-  if (turns[1]?.type !== 'assistant') throw new Error('expected assistant turn')
-  if (turns[2]?.type !== 'user') throw new Error('expected queued user turn')
+    // Queued messages render in the composer panel, never as turns.
+    const turns = groupMessagesByTurn(messages)
+    expect(turns).toHaveLength(2)
+    expect(turns[0]?.type).toBe('user')
+    expect(turns[1]?.type).toBe('assistant')
+    if (turns[0]?.type !== 'user') throw new Error('expected first user turn')
+    if (turns[1]?.type !== 'assistant') throw new Error('expected assistant turn')
 
-  expect(turns[0].message.id).toBe('u1')
-  expect(turns[1].activities.map(a => a.id)).toEqual(['tool1'])
-  expect(turns[1].isComplete).toBe(false)
-  expect(turns[2].message.id).toBe('q1')
-  expect(turns[2].message.isQueued).toBe(true)
+    expect(turns[0].message.id).toBe('u1')
+    expect(turns[1].activities.map(a => a.id)).toEqual(['tool1'])
+    expect(turns[1].isComplete).toBe(false)
+  })
 })
 
-it('keeps queued user messages after the assistant block even if they arrive before first activity', () => {
+it('drops queued rows that arrive before first activity and before the process block', () => {
   const base = Date.now()
   const messages = [
     { id: 'u1', role: 'user', content: '1分钟后给我发消息', timestamp: base } as Message,
@@ -585,16 +584,15 @@ it('keeps queued user messages after the assistant block even if they arrive bef
     { id: 'tool1', role: 'tool', content: 'Running Bash...', timestamp: base + 200, toolName: 'Bash', toolUseId: 'call-1', toolStatus: 'running' } as Message,
   ]
 
+  // 2026-10-22: the queued row is panel content — it must not add a turn at any
+  // position (neither before nor after the process block).
   const turns = groupMessagesByTurn(messages)
-  expect(turns).toHaveLength(3)
+  expect(turns).toHaveLength(2)
   expect(turns[0]?.type).toBe('user')
   expect(turns[1]?.type).toBe('assistant')
-  expect(turns[2]?.type).toBe('user')
   if (turns[1]?.type !== 'assistant') throw new Error('expected assistant turn')
-  if (turns[2]?.type !== 'user') throw new Error('expected queued user turn')
 
   expect(turns[1].activities.map(a => a.id)).toEqual(['tool1'])
-  expect(turns[2].message.id).toBe('q1')
 })
 
 it('keeps steered guidance under the original user turn without splitting assistant activities', () => {
@@ -650,7 +648,7 @@ describe('hidden messages', () => {
   })
 })
 
-it('renders queued user messages after the active assistant process block', () => {
+it('does not render a queued row after the active assistant process block', () => {
   const base = Date.now()
   const messages = [
     { id: 'u1', role: 'user', content: 'first question', timestamp: base } as Message,
@@ -659,24 +657,21 @@ it('renders queued user messages after the active assistant process block', () =
     { id: 'q1', role: 'user', content: 'queued follow-up', timestamp: base + 300, isQueued: true } as Message,
   ]
 
-  // The queued user message must appear AFTER the assistant process block,
-  // not between the original user message and its assistant block.
+  // 2026-10-22 queued-panel: the queued follow-up now lives in the composer
+  // panel, so the transcript is just user1 → assistant (with the streamed reply).
   const turns = groupMessagesByTurn(messages)
-  expect(turns).toHaveLength(3)
+  expect(turns).toHaveLength(2)
   expect(turns[0]?.type).toBe('user')
   expect(turns[1]?.type).toBe('assistant')
-  expect(turns[2]?.type).toBe('user')
 
   if (turns[0]?.type !== 'user') throw new Error('expected first user turn')
   if (turns[1]?.type !== 'assistant') throw new Error('expected assistant turn')
-  if (turns[2]?.type !== 'user') throw new Error('expected queued user turn')
 
   expect(turns[0].message.id).toBe('u1')
   expect(turns[1].activities.map(a => a.id)).toEqual(['tool1'])
   expect((turns[1] as AssistantTurn).response?.messageId).toBe('a1')
   expect((turns[1] as AssistantTurn).isComplete).toBe(false)
-  expect(turns[2].message.id).toBe('q1')
-  expect(turns[2].message.isQueued).toBe(true)
+  expect(turns.some(t => t.type === 'user' && (t as { message: Message }).message.id === 'q1')).toBe(false)
 })
 
 // ============================================================================

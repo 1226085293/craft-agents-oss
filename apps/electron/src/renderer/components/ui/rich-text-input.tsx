@@ -4,13 +4,20 @@ import { coerceInputText } from '@/lib/input-text'
 import { cn } from '@/lib/utils'
 import { findMentionMatches, parseMentions, type MentionMatch } from '@/lib/mentions'
 import {
+  attachmentTokenKey,
+  findAttachmentTokens,
+  formatAttachmentToken,
+  hasAttachmentToken,
+  resolveAttachmentTokens,
+} from '@/lib/attachment-tokens'
+import {
   loadSourceIcon,
   loadSkillIcon,
   getSourceIconSync,
   getSkillIconSync,
   EMOJI_ICON_PREFIX,
 } from '@/lib/icon-cache'
-import type { LoadedSkill, LoadedSource } from '../../../shared/types'
+import type { FileAttachment, LoadedSkill, LoadedSource } from '../../../shared/types'
 import type { MentionItemType } from './mention-menu'
 
 // ============================================================================
@@ -19,6 +26,97 @@ import type { MentionItemType } from './mention-menu'
 
 /** Line count threshold for auto-converting pasted text to file attachment */
 const LONG_TEXT_LINE_THRESHOLD = 100
+
+/** Upper bound on stored undo steps (text + caret snapshots are tiny). */
+const HISTORY_LIMIT = 200
+
+/**
+ * Clipboard MIME carrying attachment payloads next to the text model.
+ *
+ * Copying a chip must move the *attachment*, not just its `[attachment:…]`
+ * tag: the tag only resolves against the source composer's staged list, so it
+ * went dead as soon as it was pasted into another conversation. Unknown MIMEs
+ * are ignored by other apps, which still receive the plain-text tokens and the
+ * real files below.
+ */
+const ATTACHMENT_CLIPBOARD_MIME = 'application/x-craft-attachments'
+
+/**
+ * Rebuild a clipboard `File` from a staged attachment (best effort).
+ *
+ * Lets a chip copied in one conversation be pasted into Explorer/Word (or any
+ * other app) as the underlying file, not as a tag.
+ */
+function fileAttachmentToFile(attachment: FileAttachment): File | null {
+  const type = attachment.mimeType || 'application/octet-stream'
+  try {
+    if (typeof attachment.text === 'string' && attachment.text.length > 0) {
+      return new File([attachment.text], attachment.name, { type })
+    }
+    if (attachment.base64) {
+      const binary = atob(attachment.base64.replace(/^data:[^;]+;base64,/, ''))
+      const bytes = new Uint8Array(binary.length)
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i)
+      return new File([bytes], attachment.name, { type })
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
+/** Serialize the clipboard payload written by copy/cut (text model + payloads). */
+export function serializeAttachmentClipboardPayload(text: string, attachments: FileAttachment[]): string {
+  return JSON.stringify({ text, attachments })
+}
+
+/** Parse a clipboard payload written by the copy/cut handlers. */
+export function parseAttachmentClipboardPayload(
+  raw: string
+): { text: string; attachments: FileAttachment[] } | null {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+    const { text, attachments } = parsed as { text?: unknown; attachments?: unknown }
+    if (typeof text !== 'string' || !Array.isArray(attachments)) return null
+    const valid = attachments.filter((candidate): candidate is FileAttachment => {
+      if (!candidate || typeof candidate !== 'object') return false
+      const attachment = candidate as Partial<FileAttachment>
+      return typeof attachment.name === 'string' && typeof attachment.type === 'string'
+    })
+    return valid.length > 0 ? { text, attachments: valid } : null
+  } catch {
+    return null
+  }
+}
+
+/** One undo step: the text model and the caret offset it was edited at. */
+interface HistoryEntry {
+  text: string
+  cursor: number
+}
+
+/**
+ * Display data for one inline attachment chip.
+ *
+ * Deliberately narrow: the composer only needs an icon, a tooltip and the name
+ * that keys the inline token. Bytes stay in the parent's `FileAttachment`.
+ */
+export interface RichTextAttachmentChip {
+  name: string
+  type: FileAttachment['type']
+  mimeType?: string
+}
+
+/** Where a chip sits on screen, reported on hover so the parent can place a card. */
+export interface AttachmentChipRect {
+  top: number
+  right: number
+  bottom: number
+  left: number
+  width: number
+  height: number
+}
 
 export interface EscapeCompositionEventLike {
   key?: string
@@ -216,6 +314,26 @@ export interface RichTextInputProps extends Omit<React.HTMLAttributes<HTMLDivEle
   onPaste?: (e: React.ClipboardEvent) => void
   /** Called when pasted text exceeds line threshold - should create file attachment */
   onLongTextPaste?: (text: string) => void
+  /**
+   * Staged attachments. Their inline tokens in `value` render as atomic chips,
+   * ~one character wide, at exactly the position the user dropped them.
+   */
+  attachments?: RichTextAttachmentChip[]
+  /** Hover over a chip (token text + viewport rect), for a preview card. */
+  onAttachmentHover?: (token: string, rect: AttachmentChipRect) => void
+  /** Pointer left the chip. */
+  onAttachmentLeave?: () => void
+  /** Double-click / Enter on a chip - open the attachment preview. */
+  onAttachmentActivate?: (token: string) => void
+  /**
+   * Resolve the staged attachment behind a chip (by its token text) so
+   * copy/cut put the attachment itself on the clipboard instead of only its
+   * inline tag. This is what makes Ctrl+C / Ctrl+X on a chip survive a paste
+   * into a different conversation.
+   */
+  getAttachmentClipboardPayload?: (tokenText: string) => FileAttachment | null
+  /** Stage attachments that arrived on the clipboard from another composer. */
+  onPasteAttachments?: (attachments: FileAttachment[]) => void
 }
 
 export interface RichTextInputHandle {
@@ -235,6 +353,13 @@ export interface RichTextInputHandle {
   getCaretRect: () => DOMRect | null
   /** The underlying div element */
   element: HTMLDivElement | null
+  /**
+   * Insert an attachment chip at the caret (or append it when the caret is
+   * outside the input). The chip behaves like a single character from then on.
+   * Returns false when the composer is not editable right now (disabled or not
+   * mounted), so the caller can fall back to appending the token itself.
+   */
+  insertAttachment: (attachment: RichTextAttachmentChip) => boolean
 }
 
 // ============================================================================
@@ -322,6 +447,69 @@ function renderBadgeHTML(
 }
 
 // ============================================================================
+// Inline attachment chip
+// ============================================================================
+
+// 12x12 image glyph
+const IMAGE_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="shrink-0 text-muted-foreground"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="m21 15-4.35-4.35a2 2 0 0 0-2.83 0L4 21"/></svg>`
+
+// 12x12 text glyph (lines) - "readable text", code included
+const TEXT_ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" class="shrink-0 text-muted-foreground"><path d="M4 6h16M4 12h16M4 18h9"/></svg>`
+
+/** Extensions treated as "readable text" (same bucket as `type: 'text'`). */
+const TEXT_EXTENSIONS = new Set([
+  'txt', 'text', 'md', 'markdown', 'mdx', 'rst', 'log', 'csv', 'tsv', 'tex',
+  ...CODE_EXTENSIONS,
+])
+
+function isTextAttachment(attachment: RichTextAttachmentChip): boolean {
+  if (attachment.type === 'text') return true
+  if (attachment.mimeType?.startsWith('text/')) return true
+  const ext = attachment.name.split('.').pop()?.toLowerCase()
+  return ext ? TEXT_EXTENSIONS.has(ext) : false
+}
+
+function escapeAttr(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+/**
+ * Render one attachment as an atomic inline chip.
+ *
+ * Shape is fixed: a long pill of constant width, icon on the left, file name on
+ * the right with an ellipsis when it does not fit. Keeping the width fixed
+ * means a row of chips lines up and the caret never reflows while typing.
+ *
+ * `contenteditable="false"` is what makes the chip behave like a single unit:
+ * the caret hops over it, Backspace/Delete remove it whole and shift-selection
+ * expands across it in one step. The token is carried in `data-attachment-text`
+ * so the text model can be rebuilt from the DOM without knowing anything about
+ * the attachment itself.
+ */
+export function renderAttachmentChipHTML(attachment: RichTextAttachmentChip, token: string): string {
+  // Three icon buckets, matching the three kinds users think in:
+  // image / readable text (code included) / everything else.
+  const icon = attachment.type === 'image'
+    ? IMAGE_ICON_SVG
+    : isTextAttachment(attachment)
+      ? TEXT_ICON_SVG
+      : FILE_ICON_SVG
+  const title = escapeAttr(attachment.name || '')
+  const tokenAttr = escapeAttr(token)
+  const label = escapeAttr(attachment.name || '')
+
+  // The trailing zero-width space lives INSIDE the chip on purpose: it gives
+  // Chromium a text node to anchor the caret to right after the chip, without
+  // creating an extra editable caret stop. A ZWS as a sibling text node would
+  // make "caret right of the chip → press Left" take two presses instead of one.
+  return `<span contenteditable="false" data-attachment="true" data-attachment-text="${tokenAttr}" title="${title}" class="attachment-chip inline-flex items-center gap-1 h-[1.45em] w-[132px] shrink-0 mx-0.5 px-1.5 rounded-full bg-foreground/8 text-[11px] leading-none text-foreground/80 align-middle overflow-hidden select-none [&_*]:selection:bg-transparent selection:bg-transparent" style="vertical-align: -0.2em">${icon}<span class="min-w-0 flex-1 truncate text-left">${label}</span>\u200B</span>`
+}
+
+// ============================================================================
 // Helper: Extract plain text from contenteditable
 // ============================================================================
 
@@ -343,6 +531,13 @@ function getTextFromElement(element: HTMLElement): string {
         if (mentionText) {
           text += mentionText
         }
+        return // Don't process children
+      }
+
+      // Inline attachment chips serialize back to their token
+      if (el.getAttribute('data-attachment') === 'true') {
+        const attachmentText = el.getAttribute('data-attachment-text')
+        if (attachmentText) text += attachmentText
         return // Don't process children
       }
 
@@ -392,6 +587,56 @@ function getTextFromElement(element: HTMLElement): string {
   })
 
   return text
+}
+
+/**
+ * Find the attachment chip immediately before/after a collapsed caret.
+ *
+ * Zero-width spaces are DOM-only artifacts that sit right next to a chip, so
+ * they are skipped: without that the caret practically never looks adjacent to
+ * the chip and Backspace silently does nothing (the "chip won't delete" bug).
+ */
+function findAdjacentChip(root: HTMLElement, direction: 'backward' | 'forward'): HTMLElement | null {
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) return null
+  const range = selection.getRangeAt(0)
+  if (!root.contains(range.startContainer)) return null
+
+  let node: Node = range.startContainer
+  let offset = range.startOffset
+
+  // Inside a text node, only its very edge can be adjacent to a chip.
+  if (node.nodeType === Node.TEXT_NODE) {
+    const text = node.textContent ?? ''
+    const before = text.slice(0, offset).replace(/\u200B/g, '')
+    const after = text.slice(offset).replace(/\u200B/g, '')
+    if (direction === 'backward' ? before.length > 0 : after.length > 0) return null
+    const parent = node.parentNode
+    if (!parent) return null
+    offset = Array.prototype.indexOf.call(parent.childNodes, node) + (direction === 'forward' ? 1 : 0)
+    node = parent
+  }
+
+  if (node.nodeType !== Node.ELEMENT_NODE) return null
+  const container = node as HTMLElement
+  let index = direction === 'backward' ? offset - 1 : offset
+
+  while (index >= 0 && index < container.childNodes.length) {
+    const sibling = container.childNodes[index]
+
+    if (sibling.nodeType === Node.TEXT_NODE) {
+      // Skip the zero-width space that follows/precedes a chip.
+      if ((sibling.textContent ?? '').replace(/\u200B/g, '').length > 0) return null
+      index += direction === 'backward' ? -1 : 1
+      continue
+    }
+
+    if (sibling.nodeType !== Node.ELEMENT_NODE) return null
+    const el = sibling as HTMLElement
+    return el.getAttribute('data-attachment') === 'true' ? el : null
+  }
+
+  return null
 }
 
 // ============================================================================
@@ -458,11 +703,33 @@ function setCursorPosition(element: HTMLElement, targetPosition: number): void {
       if (el.getAttribute('data-mention') === 'true') {
         const mentionText = el.getAttribute('data-mention-text') || ''
         const mentionLength = mentionText.length
+        const index = Array.from(el.parentNode!.childNodes).indexOf(el)
+        // A target at the badge's left edge belongs BEFORE it; only an offset
+        // strictly inside the text it represents is "after the badge".
+        if (currentPos >= targetPosition) return { node: el.parentNode!, offset: index }
         if (currentPos + mentionLength >= targetPosition) {
           // Position cursor after the badge
-          return { node: el.parentNode!, offset: Array.from(el.parentNode!.childNodes).indexOf(el) + 1 }
+          return { node: el.parentNode!, offset: index + 1 }
         }
         currentPos += mentionLength
+        return null
+      }
+
+      // Attachment chips are atomic too: advance by the token and place the
+      // caret after the chip when the target offset falls inside it. Descending
+      // into the chip would target its label text (non-editable) instead.
+      if (el.getAttribute('data-attachment') === 'true') {
+        const tokenText = el.getAttribute('data-attachment-text') || ''
+        const tokenLength = tokenText.length
+        const index = Array.from(el.parentNode!.childNodes).indexOf(el)
+        // Same boundary rule as badges: the left edge is before the chip. Using
+        // `>=` here jumped the caret over the whole chip, which looked like it
+        // drifted right after a paste that ended right before a tag.
+        if (currentPos >= targetPosition) return { node: el.parentNode!, offset: index }
+        if (currentPos + tokenLength >= targetPosition) {
+          return { node: el.parentNode!, offset: index + 1 }
+        }
+        currentPos += tokenLength
         return null
       }
 
@@ -501,15 +768,71 @@ function setCursorPosition(element: HTMLElement, targetPosition: number): void {
   }
 }
 
+/**
+ * Insert HTML at the caret and return the last inserted node.
+ *
+ * The caret has to end up immediately after what was inserted. Deriving that
+ * from a text offset is unreliable right after a cut: the cut rewrites the whole
+ * editor DOM, so an offset measured "before" the insert can describe the old
+ * markup and the caret lands off by the characters preceding the insertion.
+ * Anchoring to the inserted node instead is exact, whatever came before.
+ */
+function insertHtmlAtCaret(element: HTMLElement, html: string): Node | null {
+  const template = document.createElement('template')
+  template.innerHTML = html
+  const fragment = template.content
+  const lastNode = fragment.lastChild
+  if (!lastNode) return null
+
+  // An empty contenteditable is rendered as a single <br> placeholder. Inserting
+  // beside it leaves the <br> in front of the new content, which the text model
+  // reads as a leading newline (Ctrl+A, Ctrl+X, Ctrl+V added one). Drop it and
+  // start from a genuinely empty editor instead.
+  if (element.childNodes.length === 1 && (element.firstChild as HTMLElement | null)?.nodeName === 'BR') {
+    element.innerHTML = ''
+    const fresh = document.createRange()
+    fresh.setStart(element, 0)
+    fresh.collapse(true)
+    const freshSelection = window.getSelection()
+    freshSelection?.removeAllRanges()
+    freshSelection?.addRange(fresh)
+  }
+
+  const selection = window.getSelection()
+  const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null
+  if (range && element.contains(range.commonAncestorContainer)) {
+    range.deleteContents()
+    range.insertNode(fragment)
+    return lastNode
+  }
+
+  // No usable caret (focus lost): append so the insertion is never dropped.
+  element.appendChild(fragment)
+  return lastNode
+}
+
+/** Collapse the selection immediately after `node`. */
+function placeCaretAfter(node: Node): void {
+  const parent = node.parentNode
+  const selection = window.getSelection()
+  if (!parent || !selection) return
+  const range = document.createRange()
+  range.setStartAfter(node)
+  range.collapse(true)
+  selection.removeAllRanges()
+  selection.addRange(range)
+}
+
 // ============================================================================
 // Convert text with mentions to HTML
 // ============================================================================
 
-function textToHTML(
+export function textToHTML(
   text: string,
   skills: LoadedSkill[],
   sources: LoadedSource[],
-  workspaceId?: string
+  workspaceId?: string,
+  attachments?: readonly RichTextAttachmentChip[]
 ): string {
   if (!text) return ''
 
@@ -524,24 +847,11 @@ function textToHTML(
     .replace(/>/g, '&gt;')
     .replace(/\n/g, '<br>')
 
-  if (matches.length === 0) {
-    return escapeHTML(text)
-  }
-
-  let html = ''
-  let lastIndex = 0
-
-  // If first match starts at position 0, prepend zero-width space for contenteditable cursor fix
-  if (matches[0].startIndex === 0) {
-    html += '\u200B'
-  }
+  // Everything that renders as an atomic chip: mention badges and attachment
+  // capsules, positioned in one ordered pass so the two can interleave.
+  const spans: Array<{ start: number; end: number; html: string }> = []
 
   for (const match of matches) {
-    // Add escaped text before this mention
-    if (match.startIndex > lastIndex) {
-      html += escapeHTML(text.slice(lastIndex, match.startIndex))
-    }
-
     // Determine label and data for badge
     let label = match.id
     let skill: LoadedSkill | undefined
@@ -571,14 +881,43 @@ function textToHTML(
       'data-mention="true"',
       `data-mention="true" data-mention-text="${match.fullMatch.replace(/"/g, '&quot;')}"`
     )
-    html += withMentionText
-    // Zero-width space after badge ensures cursor can be placed after the last badge
-    html += '\u200B'
-
-    lastIndex = match.startIndex + match.fullMatch.length
+    spans.push({
+      start: match.startIndex,
+      end: match.startIndex + match.fullMatch.length,
+      html: withMentionText,
+    })
   }
 
-  // Add remaining text after last mention
+  for (const { token, attachment } of resolveAttachmentTokens(text, attachments)) {
+    spans.push({ start: token.start, end: token.end, html: renderAttachmentChipHTML(attachment, token.raw) })
+  }
+
+  if (spans.length === 0) return escapeHTML(text)
+
+  spans.sort((a, b) => a.start - b.start)
+
+  let html = ''
+  let lastIndex = 0
+
+  // A chip at offset 0 needs a leading zero-width space so the caret can be
+  // placed before it at all (contenteditable cursor fix).
+  if (spans[0].start === 0) {
+    html += '\u200B'
+  }
+
+  for (const span of spans) {
+    if (span.start < lastIndex) continue // overlapping token: keep the first
+    // Add escaped text before this chip
+    if (span.start > lastIndex) {
+      html += escapeHTML(text.slice(lastIndex, span.start))
+    }
+
+    html += span.html
+
+    lastIndex = span.end
+  }
+
+  // Add remaining text after the last chip
   if (lastIndex < text.length) {
     html += escapeHTML(text.slice(lastIndex))
   }
@@ -590,9 +929,13 @@ function textToHTML(
 // Check if mentions have changed (for determining if we need to re-render HTML)
 // ============================================================================
 
-function getMentionSignature(text: string, skillSlugs: string[], sourceSlugs: string[]): string {
+function getInlineSignature(text: string, skillSlugs: string[], sourceSlugs: string[]): string {
   const matches = findMentionMatches(text, skillSlugs, sourceSlugs)
-  return matches.map(m => `${m.type}:${m.id}:${m.startIndex}`).join('|')
+  const mentions = matches.map(m => `${m.type}:${m.id}:${m.startIndex}`)
+  // Attachment tokens participate too: a token appearing/disappearing is exactly
+  // what turns into (or out of) a chip, so it must trigger the HTML rewrite.
+  const attachments = findAttachmentTokens(text).map(t => `${t.key}:${t.start}`)
+  return [...mentions, ...attachments].join('|')
 }
 
 // ============================================================================
@@ -667,6 +1010,14 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
       onInput,
       onPaste,
       onLongTextPaste,
+      onCopy: onCopyProp,
+      onCut: onCutProp,
+      attachments,
+      getAttachmentClipboardPayload,
+      onPasteAttachments,
+      onAttachmentHover,
+      onAttachmentLeave,
+      onAttachmentActivate,
       ...restProps
     },
     forwardedRef
@@ -695,6 +1046,45 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
     const pendingCursorRef = React.useRef<number | null>(null)
     /** Timestamp of the last TSF recovery cycle (dedupes the re-entrant focus event). */
     const tsfRepairAtRef = React.useRef(0)
+    /** Latest staged attachments (ref form: read inside DOM event handlers). */
+    const attachmentsRef = React.useRef<RichTextAttachmentChip[]>(attachments ?? [])
+    attachmentsRef.current = attachments ?? []
+    /**
+     * Chips inserted before the parent's `attachments` prop caught up.
+     *
+     * `insertAttachment()` runs synchronously, while React state lands on the
+     * next render; without this the freshly inserted token would serialize fine
+     * but the follow-up HTML rewrite would no longer recognise it as a chip.
+     */
+    const insertedChipsRef = React.useRef(new Map<string, RichTextAttachmentChip>())
+    /** Attachment currently under the pointer (hover card anchor). */
+    const hoveredChipRef = React.useRef<HTMLElement | null>(null)
+    /** Imperative chip insertion (assigned after `handleInput` exists). */
+    const insertAttachmentRef = React.useRef<(attachment: RichTextAttachmentChip) => boolean>(() => false)
+    /**
+     * Undo/redo history.
+     *
+     * The DOM cannot own this: re-rendering chips/badges writes `innerHTML`,
+     * which wipes Chromium's native undo stack (and direct node removal never
+     * enters it). Snapshots of the text model plus the caret are the only
+     * reliable source of truth here.
+     */
+    const historyRef = React.useRef<{ past: HistoryEntry[]; future: HistoryEntry[] }>({ past: [], future: [] })
+    const currentEntryRef = React.useRef<HistoryEntry>({ text: safeValue, cursor: safeValue.length })
+    const resetHistory = React.useCallback((text: string, cursor: number) => {
+      historyRef.current = { past: [], future: [] }
+      currentEntryRef.current = { text, cursor }
+    }, [])
+
+    const getChipAttachments = React.useCallback((): RichTextAttachmentChip[] => {
+      const merged = [...attachmentsRef.current]
+      for (const chip of insertedChipsRef.current.values()) {
+        if (!merged.some(existing => attachmentTokenKey(existing.name) === attachmentTokenKey(chip.name))) {
+          merged.push(chip)
+        }
+      }
+      return merged
+    }, [])
 
     const skillSlugs = React.useMemo(() => skills.map(s => s.slug), [skills])
     const sourceSlugs = React.useMemo(() => sources.map(s => s.config.slug), [sources])
@@ -753,6 +1143,9 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
         return rect
       },
       get element() { return divRef.current },
+      insertAttachment: (attachment: RichTextAttachmentChip) => {
+        return insertAttachmentRef.current(attachment)
+      },
     }), [])
 
     // Handle input events
@@ -771,13 +1164,26 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
       lastValueRef.current = newText
       cursorPositionRef.current = cursorPos
 
-      // Check if mentions changed - if so, we need to re-render HTML
-      const newSignature = getMentionSignature(newText, skillSlugs, sourceSlugs)
+      // Record one history step per distinct text state. Repeated input events
+      // that only move the caret update the current snapshot instead of
+      // pushing a new step, so Ctrl+Z undoes real edits only.
+      const currentEntry = currentEntryRef.current
+      if (newText !== currentEntry.text) {
+        historyRef.current.past.push(currentEntry)
+        if (historyRef.current.past.length > HISTORY_LIMIT) historyRef.current.past.shift()
+        historyRef.current.future.length = 0
+        currentEntryRef.current = { text: newText, cursor: cursorPos }
+      } else {
+        currentEntryRef.current = { text: currentEntry.text, cursor: cursorPos }
+      }
+
+      // Check if mentions/chips changed - if so, we need to re-render HTML
+      const newSignature = getInlineSignature(newText, skillSlugs, sourceSlugs)
       if (newSignature !== lastMentionSignatureRef.current) {
         lastMentionSignatureRef.current = newSignature
-        // Re-render with badges
+        // Re-render with badges and attachment chips
         isInternalUpdate.current = true
-        const html = textToHTML(newText, skills, sources, workspaceId)
+        const html = textToHTML(newText, skills, sources, workspaceId, getChipAttachments())
         divRef.current.innerHTML = html || '<br>' // Empty contenteditable needs a BR
         // Restore cursor
         setCursorPosition(divRef.current, cursorPos)
@@ -786,7 +1192,104 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
 
       onChange(newText)
       onInput?.(newText, cursorPos)
-    }, [onChange, onInput, skills, sources, skillSlugs, sourceSlugs, workspaceId])
+    }, [onChange, onInput, skills, sources, skillSlugs, sourceSlugs, workspaceId, getChipAttachments])
+
+    /**
+     * Insert a chip at the caret.
+     *
+     * Insertion goes through `insertHTML` (not `insertNode`) so the browser's
+     * undo stack keeps working. The chip carries its own zero-width space
+     * internally, so the caret lands right after it without an extra stop;
+     * `handleInput()` then re-syncs the text model (token included) and
+     * re-renders the chip from the token, so DOM and value cannot drift apart.
+     */
+    insertAttachmentRef.current = (attachment: RichTextAttachmentChip) => {
+      const el = divRef.current
+      if (!el || disabled) return false
+
+      insertedChipsRef.current.set(attachmentTokenKey(attachment.name), attachment)
+
+      const token = formatAttachmentToken(attachment.name)
+      // No trailing zero-width space here: the chip carries its own (inside the
+      // atomic node), so the caret crosses the chip in a single step.
+      const html = renderAttachmentChipHTML(attachment, token)
+
+      el.focus()
+      const selection = window.getSelection()
+      const caretInside = !!selection && selection.rangeCount > 0 && el.contains(selection.anchorNode)
+      if (!caretInside) {
+        // No caret in the input (e.g. attachment added while a menu had focus):
+        // append so the chip is never silently dropped.
+        const range = document.createRange()
+        range.selectNodeContents(el)
+        range.collapse(false)
+        selection?.removeAllRanges()
+        selection?.addRange(range)
+      }
+
+      const inserted = insertHtmlAtCaret(el, html)
+      if (!inserted) return false
+      // Caret anchored to the inserted chip, then publish. The signature is
+      // pre-armed so `handleInput` does not rewrite innerHTML (which would move
+      // the caret from an offset again).
+      placeCaretAfter(inserted)
+      lastMentionSignatureRef.current = getInlineSignature(getTextFromElement(el), skillSlugs, sourceSlugs)
+      handleInput()
+      return true
+    }
+
+    /**
+     * Rebuild the editor from a history snapshot.
+     *
+     * Always a full re-render: a queued chip may have been deleted and the DOM
+     * no longer matches the text model, so replaying DOM operations is not an
+     * option. The caret is restored from the snapshot's model offset.
+     */
+    const applyHistoryEntry = React.useCallback((entry: HistoryEntry) => {
+      const el = divRef.current
+      if (!el) return
+      isInternalUpdate.current = true
+      el.innerHTML = textToHTML(entry.text, skills, sources, workspaceId, getChipAttachments()) || '<br>'
+      lastValueRef.current = entry.text
+      lastMentionSignatureRef.current = getInlineSignature(entry.text, skillSlugs, sourceSlugs)
+      cursorPositionRef.current = entry.cursor
+      isInternalUpdate.current = false
+
+      el.focus()
+      setCursorPosition(el, entry.cursor)
+      onChange(entry.text)
+      onInput?.(entry.text, entry.cursor)
+    }, [skills, sources, workspaceId, skillSlugs, sourceSlugs, getChipAttachments, onChange, onInput])
+
+    /** Step through history. `redo` walks forward, otherwise backwards. */
+    const stepHistory = React.useCallback((redo: boolean): boolean => {
+      const history = historyRef.current
+      const from = redo ? history.future : history.past
+      const to = redo ? history.past : history.future
+      const entry = from.pop()
+      if (!entry) return false
+      to.push(currentEntryRef.current)
+      currentEntryRef.current = entry
+      applyHistoryEntry(entry)
+      return true
+    }, [applyHistoryEntry])
+
+    /**
+     * Backspace/Delete on a chip.
+     *
+     * Chromium often leaves the chip in place when the caret sits right next to
+     * it (the zero-width space beside the chip absorbs the keystroke), so the
+     * atomic deletion is performed explicitly: remove the node, then publish.
+     */
+    const deleteAdjacentChip = React.useCallback((direction: 'backward' | 'forward'): boolean => {
+      const el = divRef.current
+      if (!el) return false
+      const chip = findAdjacentChip(el, direction)
+      if (!chip) return false
+      chip.remove()
+      handleInput()
+      return true
+    }, [handleInput])
 
     // Handle composition (IME)
     React.useEffect(() => () => {
@@ -842,8 +1345,30 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
         return
       }
 
+      // Undo/redo. Handled here because the chip/badge re-render destroys the
+      // browser's own undo stack. Always intercept while focused: letting the
+      // event through would replay Chromium's partial history against our DOM
+      // when our own history is empty, desyncing the text model.
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.nativeEvent.isComposing) {
+        const key = e.key.toLowerCase()
+        if (key === 'z' || key === 'y') {
+          e.preventDefault()
+          stepHistory(key === 'y' || e.shiftKey)
+          return
+        }
+      }
+
+      // Explicit atomic deletion for chips (Backspace/Delete next to a chip).
+      if (!e.nativeEvent.isComposing && (e.key === 'Backspace' || e.key === 'Delete')) {
+        const direction = e.key === 'Backspace' ? 'backward' : 'forward'
+        if (deleteAdjacentChip(direction)) {
+          e.preventDefault()
+          return
+        }
+      }
+
       onKeyDown?.(e)
-    }, [onKeyDown])
+    }, [onKeyDown, deleteAdjacentChip, stepHistory])
 
     // Handle paste - delegate files to parent, manually insert plain text
     const handlePasteInternal = React.useCallback((e: React.ClipboardEvent) => {
@@ -852,6 +1377,47 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
       // either block the commit or duplicate the committed characters. Leave
       // the event untouched so the browser applies the IME's own insertion.
       if (isImeCompositionPaste(e, isComposing.current)) return
+
+      // Attachments copied from a composer (possibly in another conversation).
+      // Preferred over the plain-text tokens below: the payload restores the
+      // real attachment, so the chip paste is live in *this* composer too.
+      const attachmentPayload = parseAttachmentClipboardPayload(
+        e.clipboardData?.getData(ATTACHMENT_CLIPBOARD_MIME) ?? ''
+      )
+      if (attachmentPayload) {
+        const el = divRef.current
+        if (!el) return
+        e.preventDefault()
+        // Register the chips before rendering: the parent's `attachments` state
+        // only lands on the next render, and until then the tokens would
+        // serialize as plain text.
+        for (const attachment of attachmentPayload.attachments) {
+          insertedChipsRef.current.set(attachmentTokenKey(attachment.name), {
+            name: attachment.name,
+            type: attachment.type,
+            mimeType: attachment.mimeType,
+          })
+        }
+        onPasteAttachments?.(attachmentPayload.attachments)
+        el.focus()
+        // Insert through the browser command and let it own the caret: it places
+        // the caret immediately after the inserted run (right after a pasted
+        // chip). Any offset we compute ourselves becomes a second opinion, and
+        // applying it after the browser already moved the caret is exactly how a
+        // paste ends up shifted by the text that preceded it.
+        const inserted = insertHtmlAtCaret(
+          el,
+          textToHTML(attachmentPayload.text, skills, sources, workspaceId, getChipAttachments())
+        )
+        if (inserted) placeCaretAfter(inserted)
+        // The inserted markup already renders chips/badges, so suppress the
+        // signature-triggered rewrite for this input: that rewrite restores the
+        // caret from an offset measured before the browser settled the
+        // selection.
+        lastMentionSignatureRef.current = getInlineSignature(getTextFromElement(el), skillSlugs, sourceSlugs)
+        handleInput()
+        return
+      }
 
       // Check if we have files - let parent handle that
       const hasFiles = e.clipboardData?.files && e.clipboardData.files.length > 0
@@ -866,19 +1432,181 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
 
       const text = e.clipboardData?.getData('text/plain')
       if (!text) return
+      // Windows clipboards use CRLF. A CR survives into the DOM as an invisible
+      // character that still counts toward model offsets, which is exactly the
+      // kind of off-by-a-few noise that makes a caret look shifted.
+      const normalizedText = text.replace(/\r\n?/g, '\n')
+
+      const el = divRef.current
+      if (!el) return
 
       // Check if text is too long - convert to file attachment instead
-      const lineCount = text.split('\n').length
+      const lineCount = normalizedText.split('\n').length
       if (lineCount > LONG_TEXT_LINE_THRESHOLD && onLongTextPaste) {
-        onLongTextPaste(text)
+        onLongTextPaste(normalizedText)
         return
       }
 
-      // Use execCommand to insert text - this integrates with the browser's
-      // native undo stack so CMD+Z works after paste. Manual DOM manipulation
-      // (range.insertNode) bypasses the undo history.
-      document.execCommand('insertText', false, text)
-    }, [onPaste, onLongTextPaste])
+      // Tokens of attachments that are still staged come back as chips, so
+      // copying a chip (or a run of text containing one) and pasting it again
+      // restores the real attachment instead of a dead `[attachment:…]` string.
+      const chipAttachments = getChipAttachments()
+      el.focus()
+      // See the payload branch above: the browser's own insertion keeps the caret
+      // correct, and the signature is pre-armed so `handleInput` does not rewrite
+      // the DOM (and reposition the caret) right after the paste.
+      const inserted = insertHtmlAtCaret(el, textToHTML(normalizedText, skills, sources, workspaceId, chipAttachments))
+      if (inserted) placeCaretAfter(inserted)
+      lastMentionSignatureRef.current = getInlineSignature(getTextFromElement(el), skillSlugs, sourceSlugs)
+      handleInput()
+    }, [onPaste, onLongTextPaste, onPasteAttachments, getChipAttachments, skills, sources, workspaceId, handleInput])
+
+    //
+    // Selection helpers for Ctrl+C / Ctrl+X over chips.
+    //
+    // The browser's native copy of a chip yields markup that means nothing to
+    // the clipboard (bytes can't travel), so a selection containing a chip is
+    // serialized through the text model instead: chips become their tokens.
+    // Plain text selections are left completely alone (native rich copy).
+    //
+
+    const getSelectedText = React.useCallback((): string | null => {
+      const el = divRef.current
+      if (!el) return null
+      const selection = window.getSelection()
+      if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null
+      const range = selection.getRangeAt(0)
+      if (!el.contains(range.commonAncestorContainer)) return null
+
+      const holder = document.createElement('div')
+      holder.appendChild(range.cloneContents())
+      return getTextFromElement(holder)
+    }, [])
+
+    /**
+     * Tokens of the chips inside the current selection, in document order.
+     *
+     * The chip's `data-attachment-text` is the token itself, so the parent can
+     * resolve the staged payload by token without re-deriving the name.
+     */
+    const getSelectedAttachmentTokens = React.useCallback((): string[] => {
+      const el = divRef.current
+      if (!el) return []
+      const selection = window.getSelection()
+      if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return []
+      const range = selection.getRangeAt(0)
+      if (!el.contains(range.commonAncestorContainer)) return []
+
+      const tokens: string[] = []
+      for (const chip of Array.from(el.querySelectorAll<HTMLElement>('[data-attachment="true"]'))) {
+        if (!range.intersectsNode(chip)) continue
+        const token = chip.getAttribute('data-attachment-text')
+        if (token) tokens.push(token)
+      }
+      return tokens
+    }, [])
+
+    /**
+     * Put the attachments themselves on the clipboard.
+     *
+     * The plain-text tokens stay as a fallback, but a tag is meaningless
+     * outside the composer that staged it: pasting `[attachment:x]` into
+     * another conversation used to leave a dead chip. The payload MIME carries
+     * name/type/bytes so any composer can stage it again, and the same copy is
+     * also exposed as real files for apps outside Craft.
+     */
+    const writeAttachmentClipboard = React.useCallback((
+      clipboard: DataTransfer | null,
+      text: string,
+      tokens: string[],
+    ) => {
+      if (!clipboard || tokens.length === 0) return
+
+      const attachments: FileAttachment[] = []
+      const files: File[] = []
+      for (const token of tokens) {
+        const payload = getAttachmentClipboardPayload?.(token)
+        if (!payload) continue
+        attachments.push(payload)
+        const file = fileAttachmentToFile(payload)
+        if (file) files.push(file)
+      }
+      if (attachments.length === 0) return
+
+      clipboard.setData(ATTACHMENT_CLIPBOARD_MIME, serializeAttachmentClipboardPayload(text, attachments))
+      for (const file of files) {
+        try {
+          // Chromium materializes file items as real OS clipboard files, so the
+          // same Ctrl+C also pastes into Explorer / Word / any other app.
+          clipboard.items.add(file)
+        } catch {
+          // Platforms that refuse file items still keep the MIME payload above.
+        }
+      }
+    }, [getAttachmentClipboardPayload])
+
+    const handleCopyInternal = React.useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
+      onCopyProp?.(e)
+      if (e.defaultPrevented) return
+
+      const text = getSelectedText()
+      if (!text || !hasAttachmentToken(text)) return
+      // Chips travel as attachments, not as tags: the clipboard carries the
+      // payloads so the paste works in any composer (other conversations) and
+      // as real files so it also works outside the app.
+      writeAttachmentClipboard(e.clipboardData, text, getSelectedAttachmentTokens())
+      e.clipboardData?.setData('text/plain', text)
+      e.preventDefault()
+    }, [onCopyProp, getSelectedText, writeAttachmentClipboard, getSelectedAttachmentTokens])
+
+    const handleCutInternal = React.useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
+      onCutProp?.(e)
+      if (e.defaultPrevented) return
+
+      const text = getSelectedText()
+      if (!text || !hasAttachmentToken(text)) return
+      writeAttachmentClipboard(e.clipboardData, text, getSelectedAttachmentTokens())
+      e.clipboardData?.setData('text/plain', text)
+      e.preventDefault()
+      // `delete` runs through the native command so undo history stays coherent.
+      document.execCommand('delete')
+    }, [onCutProp, getSelectedText, writeAttachmentClipboard, getSelectedAttachmentTokens])
+
+    // Hover / double-click on chips (preview card + preview overlay).
+    const handleMouseOverInternal = React.useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+      const chip = (e.target as HTMLElement | null)?.closest?.('[data-attachment="true"]') as HTMLElement | null
+      if (!chip || !divRef.current?.contains(chip)) return
+      if (hoveredChipRef.current === chip) return
+
+      hoveredChipRef.current = chip
+      const rect = chip.getBoundingClientRect()
+      onAttachmentHover?.(chip.getAttribute('data-attachment-text') ?? '', {
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+        left: rect.left,
+        width: rect.width,
+        height: rect.height,
+      })
+    }, [onAttachmentHover])
+
+    const handleMouseOutInternal = React.useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+      const chip = hoveredChipRef.current
+      if (!chip) return
+      const next = e.relatedTarget as Node | null
+      if (next && chip.contains(next)) return
+      hoveredChipRef.current = null
+      onAttachmentLeave?.()
+    }, [onAttachmentLeave])
+
+    const handleDoubleClickInternal = React.useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+      const chip = (e.target as HTMLElement | null)?.closest?.('[data-attachment="true"]') as HTMLElement | null
+      if (!chip || !divRef.current?.contains(chip)) return
+      const token = chip.getAttribute('data-attachment-text')
+      if (!token) return
+      e.preventDefault()
+      onAttachmentActivate?.(token)
+    }, [onAttachmentActivate])
 
     // Handle focus
     const handleFocus = React.useCallback((e: React.FocusEvent<HTMLDivElement>) => {
@@ -919,23 +1647,25 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
       if (isComposing.current) return
       if (lastValueRef.current === safeValue) return
 
-      // External value change - update content
-      const nextMentionSignature = getMentionSignature(safeValue, skillSlugs, sourceSlugs)
-      const mentionSignatureChanged = nextMentionSignature !== lastMentionSignatureRef.current
+      // External value change - update content. The edit history belongs to the
+      // previous document, so it must not survive into the new one.
+      resetHistory(safeValue, pendingCursorRef.current ?? safeValue.length)
+      const nextInlineSignature = getInlineSignature(safeValue, skillSlugs, sourceSlugs)
+      const inlineSignatureChanged = nextInlineSignature !== lastMentionSignatureRef.current
       lastValueRef.current = safeValue
-      lastMentionSignatureRef.current = nextMentionSignature
+      lastMentionSignatureRef.current = nextInlineSignature
 
       // Re-serializing a tree that already matches the requested value is pure
       // collateral damage: it destroys the browser's edit context, which on
       // Windows leaves the *next* keystroke outside the IME (it lands as plain
       // text / duplicated letters). Skip the rewrite when both the text and the
-      // mention signature are already in sync.
-      if (!mentionSignatureChanged && getTextFromElement(divRef.current) === safeValue) {
+      // inline-chip signature are already in sync.
+      if (!inlineSignatureChanged && getTextFromElement(divRef.current) === safeValue) {
         pendingCursorRef.current = null
         return
       }
 
-      const html = textToHTML(safeValue, skills, sources, workspaceId)
+      const html = textToHTML(safeValue, skills, sources, workspaceId, getChipAttachments())
       divRef.current.innerHTML = html || '<br>'
       // Writing innerHTML drops the node's edit context. When the user holds
       // focus, re-prime TSF against the rewritten DOM by detouring focus
@@ -958,7 +1688,7 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
         setCursorPosition(divRef.current, cursorPos)
         pendingCursorRef.current = null // Clear after use
       }
-    }, [safeValue, skills, sources, skillSlugs, sourceSlugs, workspaceId])
+    }, [safeValue, skills, sources, skillSlugs, sourceSlugs, workspaceId, getChipAttachments])
 
     // Initialize content on mount
     React.useEffect(() => {
@@ -970,11 +1700,42 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
       // keystroke falls through as plain text / duplicated letters).
       document.execCommand('defaultParagraphSeparator', false, 'br')
       if (!divRef.current) return
-      lastMentionSignatureRef.current = getMentionSignature(safeValue, skillSlugs, sourceSlugs)
-      const html = textToHTML(safeValue, skills, sources, workspaceId)
+      lastMentionSignatureRef.current = getInlineSignature(safeValue, skillSlugs, sourceSlugs)
+      const html = textToHTML(safeValue, skills, sources, workspaceId, getChipAttachments())
       divRef.current.innerHTML = html || '<br>'
       lastValueRef.current = safeValue
+      resetHistory(safeValue, safeValue.length)
     }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+    /**
+     * Track caret moves that do not produce an input event (clicks, arrow keys,
+     * Home/End).
+     *
+     * History snapshots are pushed by `handleInput`, which only runs on edits —
+     * so without this the "state before this edit" snapshot carried the caret
+     * from the last *typing*, not from where the user actually was. Undoing a
+     * paste then threw the caret back to that older position (paste after "4",
+     * undo, caret jumps to after "3").
+     */
+    React.useEffect(() => {
+      const handleSelectionChange = () => {
+        const el = divRef.current
+        if (!el || document.activeElement !== el) return
+        const selection = window.getSelection()
+        if (!selection || selection.rangeCount === 0) return
+        if (!selection.isCollapsed) return
+        const range = selection.getRangeAt(0)
+        if (!el.contains(range.startContainer)) return
+
+        const cursor = getCursorPosition(el, currentEntryRef.current.cursor)
+        if (currentEntryRef.current.cursor === cursor) return
+        currentEntryRef.current = { text: currentEntryRef.current.text, cursor }
+        cursorPositionRef.current = cursor
+      }
+
+      document.addEventListener('selectionchange', handleSelectionChange)
+      return () => document.removeEventListener('selectionchange', handleSelectionChange)
+    }, [])
 
     // Handle selection changes to highlight badges when selected
     React.useEffect(() => {
@@ -993,8 +1754,8 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
 
         const range = selection.getRangeAt(0)
 
-        // Get all mention badges
-        const badges = divRef.current.querySelectorAll('.mention-badge') as NodeListOf<HTMLElement>
+        // Get all mention badges and attachment chips
+        const badges = divRef.current.querySelectorAll('.mention-badge, .attachment-chip') as NodeListOf<HTMLElement>
 
         badges.forEach((badge) => {
           // Check if badge is within selection range
@@ -1005,12 +1766,13 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
             range.compareBoundaryPoints(Range.START_TO_END, badgeRange) > 0 &&
             range.compareBoundaryPoints(Range.END_TO_START, badgeRange) < 0
 
+          const isMentionBadge = badge.classList.contains('mention-badge')
           if (isSelected) {
             badge.style.backgroundColor = getSelectionColor()
-            badge.classList.remove('bg-background')
+            if (isMentionBadge) badge.classList.remove('bg-background')
           } else {
             badge.style.backgroundColor = ''
-            badge.classList.add('bg-background')
+            if (isMentionBadge) badge.classList.add('bg-background')
           }
         })
       }
@@ -1062,6 +1824,11 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
           onFocus={handleFocus}
           onBlur={handleBlur}
           onPaste={handlePasteInternal}
+          onCopy={handleCopyInternal}
+          onCut={handleCutInternal}
+          onMouseOver={handleMouseOverInternal}
+          onMouseOut={handleMouseOutInternal}
+          onDoubleClick={handleDoubleClickInternal}
           onCompositionStart={handleCompositionStart}
           onCompositionEnd={handleCompositionEnd}
           aria-disabled={disabled}

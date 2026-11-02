@@ -5,13 +5,17 @@ import { join } from 'node:path'
 import type { ExtensionAPI, InlineExtension, SessionBeforeCompactEvent } from '@earendil-works/pi-coding-agent'
 import {
   buildReliefSummary,
+  buildTurnPrefixSummary,
   computeReliefStats,
   createContextReliefExtension,
   estimatePostReliefTokens,
   handleSessionBeforeCompact,
+  handleSessionCompact,
   isTrivialToSummarize,
   listTurnFiles,
+  loadCompactionBoundary,
   resolveReliefMaxTokens,
+  saveCompactionBoundary,
   shouldFallThroughToLlm,
   type ContextReliefDeps,
 } from './context-relief.ts'
@@ -114,15 +118,78 @@ describe('buildReliefSummary', () => {
     expect(outcomeLine.length).toBeLessThan(350)
   })
 
-  it('stops adding turns once the budget is exhausted', () => {
+  it('indexes every turn (no budget) newest-first', () => {
     const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
     dirs.push(dir)
     const paths = [1, 2, 3].map(i =>
       writeTurnFile(dir, `2026-10-16T06-53-23-00${i}.md`, { user: `turn ${i}`, conclusion: `done ${i}` }),
     )
-    const small = buildReliefSummary(paths.map(p => ({ path: p, fileName: p })), 400)
-    expect(small).toContain('turn 1')
-    expect(small).not.toContain('turn 3')
+    const summary = buildReliefSummary(paths.map(p => ({ path: p, fileName: p })))
+    // No char budget: every turn keeps its entry and pointer, latest first.
+    expect(summary).toContain('turn 3')
+    expect(summary).toContain('turn 2')
+    expect(summary).toContain('turn 1')
+    expect(summary.indexOf('turn 3')).toBeLessThan(summary.indexOf('turn 2'))
+    expect(summary.indexOf('turn 2')).toBeLessThan(summary.indexOf('turn 1'))
+  })
+
+  it('lists turns newest-first so the latest work leads the checkpoint', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    const paths = [1, 2, 3].map(i =>
+      writeTurnFile(dir, `2026-10-16T06-53-23-00${i}.md`, { user: `turn ${i}`, conclusion: `done ${i}` }),
+    )
+    const summary = buildReliefSummary(paths.map(p => ({ path: p, fileName: p })))
+    const a = summary.indexOf('turn 3')
+    const b = summary.indexOf('turn 2')
+    const c = summary.indexOf('turn 1')
+    expect(a).toBeGreaterThan(-1)
+    expect(b).toBeGreaterThan(-1)
+    expect(c).toBeGreaterThan(-1)
+    expect(a).toBeLessThan(b)
+    expect(b).toBeLessThan(c)
+  })
+})
+
+describe('buildTurnPrefixSummary', () => {
+  it('extracts the user request verbatim and strips the injected system header', () => {
+    const prefix = [
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text: "**USER'S DATE AND TIME: ...**\n\n<session_state>\n…\n</session_state>\n<sources>\n…\n</sources>\n<cross_session_memory>\n…\n</cross_session_memory>\n\n1，点击后展示实时输出\n2，耗时也需要在任务条目真实展示",
+          },
+        ],
+      },
+    ]
+    const out = buildTurnPrefixSummary(prefix)
+    expect(out).toContain('## Current request')
+    expect(out).toContain('1，点击后展示实时输出')
+    expect(out).toContain('2，耗时也需要在任务条目真实展示')
+    expect(out).not.toContain('session_state')
+    expect(out).not.toContain('sources')
+    expect(out).not.toContain('cross_session_memory')
+  })
+
+  it('returns empty when there is no user message', () => {
+    expect(buildTurnPrefixSummary([])).toBe('')
+    expect(buildTurnPrefixSummary([{ role: 'assistant', content: 'x' }])).toBe('')
+  })
+
+  it('handles string content and drops a trailing system-reminder', () => {
+    const out = buildTurnPrefixSummary([
+      { role: 'user', content: 'do the thing\n\n<system-reminder>telegram</system-reminder>' },
+    ])
+    expect(out).toContain('do the thing')
+    expect(out).not.toContain('system-reminder')
+  })
+
+  it('keeps the user text when no system header is present', () => {
+    const out = buildTurnPrefixSummary([{ role: 'user', content: 'plain request' }])
+    expect(out).toContain('## Current request')
+    expect(out).toContain('plain request')
   })
 })
 
@@ -242,15 +309,15 @@ describe('handler — trivial remaining hands off to the LLM', () => {
 // ============================================================================
 
 describe('buildReliefSummary — pointer guarantee', () => {
-  it('keeps at least the pointer line per turn even under a tiny budget', () => {
+  it('always leaves a pointer per turn (no budget)', () => {
     const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
     dirs.push(dir)
     const path = writeTurnFile(dir, '2026-10-16T06-53-23-001.md', {
       user: '每天中午 12 点抓取热点简报…' + 'z'.repeat(200),
       conclusion: '抓取完成' + 'z'.repeat(200),
     })
-    // Budget that cannot fit the user message — the pointer must survive.
-    const summary = buildReliefSummary([{ path, fileName: '001.md' }], 400)
+    // No char budget — the pointer always survives.
+    const summary = buildReliefSummary([{ path, fileName: '001.md' }])
     expect(summary).toContain('## Turn 1')
     expect(summary).toContain(`Details: ${path}`)
   })
@@ -438,13 +505,13 @@ describe('handler — never returns a summary-less compaction', () => {
 // ============================================================================
 
 function harness(deps: ContextReliefDeps) {
-  let handler: ((event: SessionBeforeCompactEvent, ctx: unknown) => unknown) | undefined
+  const handlers: Record<string, ((event: never, ctx: unknown) => unknown) | undefined> = {}
   const extension = createContextReliefExtension(deps) as InlineExtension & { factory: (api: ExtensionAPI) => void }
   extension.factory({
-    on: (_name: string, callback: unknown) => { handler = callback as never },
+    on: (name: string, callback: unknown) => { handlers[name] = callback as never },
   } as unknown as ExtensionAPI)
   return {
-    fire: (event: SessionBeforeCompactEvent) => handler!(event, {}),
+    fire: (event: SessionBeforeCompactEvent) => handlers['session_before_compact']!(event, {}),
   }
 }
 
@@ -464,6 +531,43 @@ describe('handleSessionBeforeCompact', () => {
     // Both triggers resolve to the same relief compaction, not an LLM call.
     expect(manual?.compaction?.summary).toBe(auto?.compaction?.summary)
     expect(manual?.compaction?.summary).toContain('分析打包流程')
+  })
+
+  it('surfaces the split-turn request verbatim so the active goal is never lost', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    writeTurnFile(dir, '2026-10-16T06-53-23-001.md', { user: '分析打包流程' })
+    const result = handleSessionBeforeCompact(
+      makeEvent({
+        preparation: preparation({
+          tokensBefore: 20_000,
+          isSplitTurn: true,
+          turnPrefixMessages: [
+            { role: 'user', content: '1，点击后展示实时输出\n2，耗时也需要在任务条目真实展示' },
+          ],
+        }),
+      }),
+      { sessionPath: dir },
+    )
+    expect(result?.compaction?.summary).toContain('## Current request')
+    expect(result?.compaction?.summary).toContain('点击后展示实时输出')
+    // The current request leads the checkpoint (goal anchor first).
+    const reqIdx = result!.compaction!.summary!.indexOf('## Current request')
+    const cpIdx = result!.compaction!.summary!.indexOf('[Context relief checkpoint')
+    expect(reqIdx).toBeGreaterThan(-1)
+    expect(cpIdx).toBeGreaterThan(-1)
+    expect(reqIdx).toBeLessThan(cpIdx)
+  })
+
+  it('does not add a request header when the turn is not split', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    writeTurnFile(dir, '2026-10-16T06-53-23-001.md', { user: '分析打包流程' })
+    const result = handleSessionBeforeCompact(
+      makeEvent({ preparation: preparation({ tokensBefore: 20_000, isSplitTurn: false }) }),
+      { sessionPath: dir },
+    )
+    expect(result?.compaction?.summary).not.toContain('## Current request')
   })
 
   it('returns undefined when no turn files exist (LLM compaction takes over)', () => {
@@ -523,3 +627,98 @@ describe('handleSessionBeforeCompact', () => {
     expect(brokenResult).toBeUndefined() // wrapper caught it, fail-open to LLM
   })
 })
+
+// ============================================================================
+// Compaction boundary (no-char-budget checkpoint)
+// ============================================================================
+
+describe('compaction boundary', () => {
+  it('loadCompactionBoundary returns 0 when absent, save/load round-trips', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    expect(loadCompactionBoundary(dir)).toBe(0)
+    expect(loadCompactionBoundary(undefined)).toBe(0)
+    saveCompactionBoundary(dir, 7)
+    expect(loadCompactionBoundary(dir)).toBe(7)
+    // Corrupt file → 0 (never throws).
+    writeFileSync(join(dir, 'meta', 'context-relief-boundary.json'), '{not json', 'utf-8')
+    expect(loadCompactionBoundary(dir)).toBe(0)
+  })
+
+  it('saveCompactionBoundary ignores non-positive / non-integer values', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    saveCompactionBoundary(dir, 0)
+    saveCompactionBoundary(dir, -1)
+    saveCompactionBoundary(dir, 2.5)
+    expect(loadCompactionBoundary(dir)).toBe(0)
+  })
+
+  it('saveCompactionBoundary is monotonic (never shrinks)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    saveCompactionBoundary(dir, 5)
+    saveCompactionBoundary(dir, 3) // backwards — ignored
+    expect(loadCompactionBoundary(dir)).toBe(5)
+    saveCompactionBoundary(dir, 8) // forwards — applied
+    expect(loadCompactionBoundary(dir)).toBe(8)
+  })
+
+  it('only indexes turns NEWER than the persisted boundary', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    writeTurnFile(dir, '2026-10-16T06-53-23-001.md', { user: 'old turn 1' })
+    writeTurnFile(dir, '2026-10-16T06-53-23-002.md', { user: 'old turn 2' })
+    writeTurnFile(dir, '2026-10-16T06-53-23-003.md', { user: 'new turn 3' })
+    writeTurnFile(dir, '2026-10-16T06-53-23-004.md', { user: 'new turn 4' })
+    saveCompactionBoundary(dir, 2)
+    const result = handleSessionBeforeCompact(
+      makeEvent({ preparation: preparation({ tokensBefore: 20_000 }) }),
+      { sessionPath: dir },
+    )
+    expect(result?.compaction?.summary).toContain('new turn 3')
+    expect(result?.compaction?.summary).toContain('new turn 4')
+    expect(result?.compaction?.summary).not.toContain('old turn 1')
+    expect(result?.compaction?.summary).not.toContain('old turn 2')
+  })
+
+  it('returns undefined (LLM path) when every turn is already checkpointed', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    writeTurnFile(dir, '2026-10-16T06-53-23-001.md', { user: 'old' })
+    writeTurnFile(dir, '2026-10-16T06-53-23-002.md', { user: 'old' })
+    saveCompactionBoundary(dir, 2)
+    const result = handleSessionBeforeCompact(
+      makeEvent({ preparation: preparation({ tokensBefore: 20_000 }) }),
+      { sessionPath: dir },
+    )
+    expect(result).toBeUndefined()
+  })
+
+  it('stashes the relief boundary, then session_compact persists it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    writeTurnFile(dir, '2026-10-16T06-53-23-001.md', { user: 'x' })
+    writeTurnFile(dir, '2026-10-16T06-53-23-002.md', { user: 'y' })
+    const deps: ContextReliefDeps = { sessionPath: dir }
+    handleSessionBeforeCompact(
+      makeEvent({ preparation: preparation({ tokensBefore: 20_000 }) }),
+      deps,
+    )
+    // Stashed for the success event, but NOT yet on disk.
+    expect(deps.pendingCompactionBoundary).toBe(2)
+    expect(loadCompactionBoundary(dir)).toBe(0)
+    handleSessionCompact({ type: 'session_compact' } as never, deps)
+    expect(loadCompactionBoundary(dir)).toBe(2)
+    expect(deps.pendingCompactionBoundary).toBeUndefined()
+  })
+
+  it('session_compact with no pending boundary is a no-op', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-relief-'))
+    dirs.push(dir)
+    const deps: ContextReliefDeps = { sessionPath: dir }
+    handleSessionCompact({ type: 'session_compact' } as never, deps)
+    expect(loadCompactionBoundary(dir)).toBe(0)
+  })
+})
+

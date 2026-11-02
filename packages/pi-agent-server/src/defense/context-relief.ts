@@ -23,7 +23,7 @@
  * the turn-log archiver; this module only reads those files.
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   estimateTokens as sdkEstimateTokens,
@@ -33,6 +33,8 @@ import type {
   ExtensionAPI,
   InlineExtension,
   SessionBeforeCompactEvent,
+  SessionCompactEvent,
+  SessionEntry,
 } from '@earendil-works/pi-coding-agent';
 
 export interface ContextReliefDeps {
@@ -60,6 +62,13 @@ export interface ContextReliefDeps {
    * serializes them, and our manual gate skips concurrent requests).
    */
   lastRetainedMeasurement?: { retained: number; keepRecentTokens: number; measuredAt: number };
+  /**
+   * Compaction boundary computed during `session_before_compact` and written
+   * to disk on `session_compact` (i.e. only after the compaction actually
+   * succeeded). Both relief and LLM paths set this; the value is the max
+   * turnIndex whose content is now fully covered by a checkpoint/summary.
+   */
+  pendingCompactionBoundary?: number;
 }
 
 /** Fallback ceiling when neither reliefMaxTokens nor contextWindow resolves. */
@@ -75,8 +84,18 @@ export const RELIEF_CONTEXT_RATIO = 0.1;
 /** Per-turn budget inside the relief summary (chars). */
 const USER_MSG_MAX_CHARS = 200;
 const CONCLUSION_MAX_CHARS = 300;
-/** Total relief summary budget (chars) — keeps the checkpoint cheap. */
-const SUMMARY_MAX_CHARS = 8_000;
+/** Split-turn prefix budget (chars) — the current request, kept verbatim. */
+const TURN_PREFIX_MAX_CHARS = 1_500;
+
+/**
+ * Sidecar that records how far relief/LLM compaction has already consumed the
+ * turn archive: the max 1-based turnIndex already folded into a checkpoint.
+ * The next compaction only indexes turn files NEWER than this boundary, so no
+ * char budget is needed — the boundary IS the budget (see buildReliefSummary).
+ * Stored under {sessionPath}/meta/ next to the other compaction sidecars.
+ */
+const COMPACTION_BOUNDARY_VERSION = 1;
+const COMPACTION_BOUNDARY_FILE = 'context-relief-boundary.json';
 
 export interface TurnFileRef {
   /** Absolute path to the turn markdown file. */
@@ -104,6 +123,119 @@ export function listTurnFiles(sessionPath: string | undefined): TurnFileRef[] {
   }
 }
 
+/** Parse the 1-based turn index from a turn file name (`...-001.md` → 1). */
+function parseTurnFileIndex(fileName: string): number {
+  const m = /-(\d{3})\.md$/.exec(fileName);
+  if (!m) return 0;
+  const n = Number(m[1]);
+  return Number.isInteger(n) && n > 0 ? n : 0;
+}
+
+/**
+ * Parse the turn start from a turn file name. The compact ISO prefix is UTC
+ * (turn-log.ts writes `turnStartIso.slice(0, 19)` from a Z-suffixed timestamp),
+ * so Date.UTC matches how the archiver round-trips it.
+ */
+function parseTurnFileStartMs(fileName: string): number | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})-\d{3}\.md$/.exec(fileName);
+  if (!m) return null;
+  return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6]));
+}
+
+function toMs(ts: string | number | undefined): number | null {
+  if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+  if (typeof ts === 'string' && ts) {
+    const ms = Date.parse(ts);
+    return Number.isNaN(ms) ? null : ms;
+  }
+  return null;
+}
+
+/**
+ * Load the persisted compaction boundary: the max turnIndex already folded
+ * into a checkpoint (relief or LLM). Returns 0 when absent (fresh session).
+ */
+export function loadCompactionBoundary(sessionPath: string | undefined): number {
+  if (!sessionPath) return 0;
+  try {
+    const raw = readFileSync(join(sessionPath, 'meta', COMPACTION_BOUNDARY_FILE), 'utf-8');
+    const parsed = JSON.parse(raw) as { compactedThroughTurnIndex?: unknown };
+    const n = Number(parsed?.compactedThroughTurnIndex);
+    return Number.isInteger(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Persist the compaction boundary. Best-effort: a failed write must never
+ * fail the compaction (the worst case is a redundant re-index next time).
+ */
+export function saveCompactionBoundary(sessionPath: string | undefined, turnIndex: number): void {
+  if (!sessionPath || !Number.isInteger(turnIndex) || turnIndex <= 0) return;
+  try {
+    // Monotonic: the boundary only advances. A backwards value (e.g. an LLM
+    // cut point that landed before an already-consumed turn) must never shrink
+    // it — shrinking would re-open already-checkpointed turns to re-indexing.
+    const current = loadCompactionBoundary(sessionPath);
+    if (turnIndex <= current) return;
+    mkdirSync(join(sessionPath, 'meta'), { recursive: true });
+    writeFileSync(
+      join(sessionPath, 'meta', COMPACTION_BOUNDARY_FILE),
+      JSON.stringify({ version: COMPACTION_BOUNDARY_VERSION, compactedThroughTurnIndex: turnIndex }),
+      'utf-8',
+    );
+  } catch {
+    // best-effort — a failed boundary write only costs a redundant re-index.
+  }
+}
+
+/**
+ * LLM-path boundary: the max turnIndex whose turn is FULLY consumed by the
+ * SDK's own summarization. `messagesToSummarize` covers everything before the
+ * cut point, but a split turn only contributes its prefix — its suffix stays
+ * in the kept region, so it must NOT be marked fully consumed (its turn file
+ * still needs a pointer on the next relief pass).
+ */
+function computeLlmBoundary(
+  branchEntries: SessionEntry[],
+  firstKeptEntryId: string,
+  isSplitTurn: boolean,
+  turns: TurnFileRef[],
+): number {
+  const cutIdx = branchEntries.findIndex((e) => e.id === firstKeptEntryId);
+  if (cutIdx < 0) return 0;
+
+  let cutTurnStartMs: number | null = null;
+  if (isSplitTurn) {
+    // Walk back from the cut entry to the user message that started this turn.
+    for (let i = cutIdx; i >= 0; i--) {
+      const e = branchEntries[i]!;
+      if (e.type === 'message') {
+        const m = (e as { message?: { role?: unknown } }).message;
+        if (m && typeof m === 'object' && m.role === 'user') {
+          cutTurnStartMs = toMs(e.timestamp);
+          break;
+        }
+      }
+    }
+  }
+  if (cutTurnStartMs == null) {
+    // Non-split: the cut entry IS the turn boundary (a user message).
+    cutTurnStartMs = toMs(branchEntries[cutIdx]!.timestamp);
+  }
+  if (cutTurnStartMs == null) return 0;
+
+  let boundary = 0;
+  for (const t of turns) {
+    const startMs = parseTurnFileStartMs(t.fileName);
+    if (startMs != null && startMs < cutTurnStartMs) {
+      boundary = Math.max(boundary, parseTurnFileIndex(t.fileName));
+    }
+  }
+  return boundary;
+}
+
 /** Extract a `## Heading` section body (up to the next `## ` heading). */
 function extractSection(md: string, heading: string): string {
   const startIdx = md.indexOf(`\n## ${heading}`);
@@ -125,14 +257,25 @@ function truncate(text: string, max: number): string {
  * For each turn: heading (number + local time), user message, conclusion (if
  * any), and a pointer to the turn file. The pointer is what lets the resumed
  * agent re-read process blocks and full results with the Read tool.
+ *
+ * Ordered NEWEST FIRST so the latest work leads the checkpoint.
+ *
+ * NO CHAR BUDGET: the caller pre-filters to the turns NEWER than the last
+ * compaction boundary, and this function indexes ALL of them. The old
+ * `SUMMARY_MAX_CHARS` budget made the checkpoint smaller than the real
+ * discarded content — the threshold check then under-estimated and let relief
+ * "win" with an incomplete index (dropping older turns' pointers), instead of
+ * handing the oversized content to the LLM path. The boundary (not a budget)
+ * is what bounds the checkpoint now (session 261031-long-cherry).
  */
-export function buildReliefSummary(turns: TurnFileRef[], budgetChars = SUMMARY_MAX_CHARS): string {
+export function buildReliefSummary(turns: TurnFileRef[]): string {
   const lines: string[] = [
     '[Context relief checkpoint — turns below were archived to disk, NOT summarized by an LLM. For details on any turn (process blocks, full tool results, guidance), read the turn file with the Read tool.]',
     '',
   ];
-  let used = lines.join('\n').length;
-  for (const turn of turns) {
+  // Newest first (see docstring). Iterate a reversed copy so callers keep
+  // their oldest-first input intact.
+  for (const turn of [...turns].reverse()) {
     let md = '';
     try {
       md = readFileSync(turn.path, 'utf-8');
@@ -143,23 +286,18 @@ export function buildReliefSummary(turns: TurnFileRef[], budgetChars = SUMMARY_M
     const header = headerMatch ? headerMatch[1] : turn.fileName;
     const userMsg = truncate(extractSection(md, 'User message'), USER_MSG_MAX_CHARS);
     const conclusion = truncate(extractSection(md, 'Conclusion'), CONCLUSION_MAX_CHARS);
-    // The Details line is the non-negotiable part: even a turn whose text
-    // cannot fit the budget MUST leave a pointer, otherwise a small budget
-    // (e.g. 10% of a tiny window) could drop every entry and produce an
-    // empty checkpoint.
+    // The Details line is non-negotiable: every indexed turn MUST leave a
+    // pointer so the resumed agent can re-read its full record.
     const pointer = `Details: ${turn.path}`;
-    const overhead = `## ${header}`.length + pointer.length + 2;
-    if (used + overhead > budgetChars) break;
     let block = `## ${header}`;
-    if (userMsg && used + overhead + userMsg.length + 7 <= budgetChars) {
+    if (userMsg) {
       block += `\nUser: ${userMsg}`;
     }
-    if (conclusion && used + overhead + conclusion.length + 9 <= budgetChars) {
+    if (conclusion) {
       block += `\nOutcome: ${conclusion}`;
     }
     block += `\n${pointer}`;
     lines.push(block, '');
-    used += block.length + 2;
   }
   return lines.join('\n').trimEnd();
 }
@@ -384,6 +522,55 @@ export function resolveReliefMaxTokens(deps: ContextReliefDeps): number {
  * token-accounting row from `tokensBefore`/`estimatedTokensAfter`
  * (pi-agent.ts, `stats ?? { before, retained, compacted, viaRelief: false }`).
  */
+
+/**
+ * Build a no-LLM "current request" header from a split-turn prefix.
+ *
+ * The SDK's own compaction path LLM-summarizes the turn prefix (the current
+ * request + early progress) into a "Turn Context" section when the cut point
+ * lands mid-turn. The relief path skips that summarization, so without this the
+ * prefix — including the user's actual request — is silently dropped and a
+ * resumed agent loses the active goal (session 261029-quiet-jasmine).
+ *
+ * Surfaces the FIRST user message verbatim (minus the injected system header),
+ * which is the one thing a resumed agent must have to continue correctly.
+ */
+export function buildTurnPrefixSummary(turnPrefixMessages: readonly unknown[]): string {
+  if (!Array.isArray(turnPrefixMessages) || turnPrefixMessages.length === 0) return '';
+  const userMsg = turnPrefixMessages.find(
+    (m): m is { content?: unknown } => !!m && typeof m === 'object' && (m as { role?: unknown }).role === 'user',
+  );
+  if (!userMsg) return '';
+
+  const content = userMsg.content;
+  let text = '';
+  if (typeof content === 'string') {
+    text = content;
+  } else if (Array.isArray(content)) {
+    text = content
+      .filter((b): b is { type?: string; text?: string } => !!b && typeof b === 'object' && (b as { type?: string }).type === 'text')
+      .map((b) => b.text ?? '')
+      .join('\n');
+  }
+  if (!text.trim()) return '';
+
+  // Drop the injected system header (re-injected every turn; it would otherwise
+  // swallow the budget) — keep everything after the last system block.
+  let cut = -1;
+  for (const tag of ['</session_state>', '</sources>', '</cross_session_memory>']) {
+    const idx = text.lastIndexOf(tag);
+    if (idx >= 0) cut = Math.max(cut, idx + tag.length);
+  }
+  if (cut >= 0) text = text.slice(cut);
+  // Drop any trailing injected <system-reminder> (Craft-injected, not intent).
+  const reminderIdx = text.indexOf('<system-reminder>');
+  if (reminderIdx >= 0) text = text.slice(0, reminderIdx);
+
+  text = text.trim();
+  if (!text) return '';
+  return `## Current request (split turn — original user message)\n${truncate(text, TURN_PREFIX_MAX_CHARS)}`;
+}
+
 export function handleSessionBeforeCompact(
   event: SessionBeforeCompactEvent,
   deps: ContextReliefDeps,
@@ -391,8 +578,34 @@ export function handleSessionBeforeCompact(
   const turns = listTurnFiles(deps.sessionPath);
   if (turns.length === 0) return undefined;
 
-  const summary = buildReliefSummary(turns);
+  // Only index turn files NEWER than the last compaction boundary. The
+  // boundary is the checkpoint's budget: turns before it are already folded
+  // into a prior checkpoint, so re-indexing them is a no-op (and would waste
+  // the space the still-unconsumed turns need). No char budget — the boundary
+  // (not SUMMARY_MAX_CHARS) bounds the checkpoint (see buildReliefSummary).
+  const boundary = loadCompactionBoundary(deps.sessionPath);
+  const freshTurns = turns.filter((t) => parseTurnFileIndex(t.fileName) > boundary);
+  if (freshTurns.length === 0) {
+    // Everything on disk is already checkpointed — nothing new to index.
+    // Hand to the LLM path (it can consolidate the existing checkpoints).
+    debug(deps, `no turn files newer than boundary ${boundary} — handing to the LLM path`);
+    return undefined;
+  }
+
+  let summary = buildReliefSummary(freshTurns);
   if (!summary) return undefined;
+
+  // Split turn: the cut point landed mid-turn, so the SDK handed us the turn
+  // prefix (the current request + early progress) separately. On its own LLM
+  // path it summarizes that prefix; the relief path skips that summarization,
+  // so we surface the original user request verbatim — otherwise it is dropped
+  // and a resumed agent loses the active goal (session 261029-quiet-jasmine).
+  const turnPrefix = event.preparation.isSplitTurn
+    ? buildTurnPrefixSummary(event.preparation.turnPrefixMessages)
+    : '';
+  if (turnPrefix) {
+    summary = `${turnPrefix}\n\n${summary}`;
+  }
 
   // Nothing meaningful left to relieve: the messages to be summarized are
   // (mostly) our own relief checkpoints — re-rendering the same index is a
@@ -432,11 +645,18 @@ export function handleSessionBeforeCompact(
       ? 'relief skipped (all checkpoints) — LLM path runs'
       : `post-relief estimate ${postRelief} > ${maxTokens} — LLM path runs`);
   } else {
-    debug(deps, `relief compaction: ${turns.length} turn file(s), post-relief ~${postRelief} tokens (keepRecent ${keepRecentTokens})`);
+    debug(deps, `relief compaction: ${freshTurns.length} turn file(s), post-relief ~${postRelief} tokens (keepRecent ${keepRecentTokens})`);
   }
 
   // Relief path: WE supply the summary (no LLM call).
   if (useRelief) {
+    // Relief indexes every turn newer than the boundary, so the new boundary
+    // is simply the newest indexed turn. Written to disk only AFTER the
+    // compaction succeeds (on `session_compact`) — never here.
+    deps.pendingCompactionBoundary = freshTurns.reduce(
+      (max, t) => Math.max(max, parseTurnFileIndex(t.fileName)),
+      0,
+    );
     // Relief replaces everything before the cut point with the checkpoint, so
     // the post-compaction context is the kept region plus the checkpoint text.
     // This is exactly what the SDK will report as estimatedTokensAfter, and it
@@ -457,7 +677,7 @@ export function handleSessionBeforeCompact(
         summary,
         firstKeptEntryId: event.preparation.firstKeptEntryId,
         tokensBefore: event.preparation.tokensBefore,
-        details: { relief: true, turnFiles: turns.map((t) => t.path), reliefStats: stats },
+        details: { relief: true, turnFiles: freshTurns.map((t) => t.path), reliefStats: stats },
       },
     };
   }
@@ -470,8 +690,29 @@ export function handleSessionBeforeCompact(
   // `stats` is intentionally dropped: the SDK's own compaction produces
   // `details = { readFiles, modifiedFiles }` and has no slot for it, but
   // PiAgent re-synthesizes the token row from before/after counts.
+  deps.pendingCompactionBoundary = computeLlmBoundary(
+    event.branchEntries,
+    event.preparation.firstKeptEntryId,
+    event.preparation.isSplitTurn,
+    turns,
+  );
   debug(deps, 'handing off to the SDK LLM compaction (no compaction object returned)');
   return undefined;
+}
+
+/**
+ * Persist the compaction boundary after a successful compaction. Fired on
+ * `session_compact` — which the SDK emits for BOTH the relief and the LLM
+ * path — so the boundary only advances when the compaction actually landed
+ * (a failed/aborted LLM compaction must not advance it).
+ */
+export function handleSessionCompact(_event: SessionCompactEvent, deps: ContextReliefDeps): void {
+  const boundary = deps.pendingCompactionBoundary;
+  if (boundary != null && boundary > 0) {
+    saveCompactionBoundary(deps.sessionPath, boundary);
+    debug(deps, `compaction boundary advanced to turn ${boundary}`);
+  }
+  deps.pendingCompactionBoundary = undefined;
 }
 
 /** InlineExtension factory for the Pi SDK resource loader. */
@@ -489,6 +730,22 @@ export function createContextReliefExtension(deps: ContextReliefDeps): InlineExt
         }
       };
       api.on('session_before_compact', handler as unknown as never);
+
+      const onCompacted = (event: SessionCompactEvent) => {
+        try {
+          handleSessionCompact(event, deps);
+        } catch (err) {
+          debug(deps, `session_compact handler failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      };
+      api.on('session_compact', onCompacted as unknown as never);
+
+      // A failed/aborted compaction must not leak a pending boundary into the
+      // NEXT compaction (which would advance the boundary without consuming
+      // the turns in between).
+      api.on('session_compact_failed', (() => {
+        deps.pendingCompactionBoundary = undefined;
+      }) as unknown as never);
     },
   };
 }

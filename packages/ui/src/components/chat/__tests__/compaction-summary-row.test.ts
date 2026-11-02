@@ -86,6 +86,27 @@ describe('groupMessagesByTurn — compaction_summary row', () => {
     expect(assistantTurnsOnly[0].activities).toHaveLength(0)
   })
 
+  it('auto compaction that lands between two blocks joins the block it enabled', () => {
+    // 2026-10-25: the relief pass ends the SDK turn, so the summary is emitted
+    // with nothing open and becomes a one-row card *between* two blocks of the
+    // same work — "压缩完成" then looked like a notice outside the process
+    // block. It belongs at the top of the block it made room for.
+    const messages = [
+      userMsg(),
+      { id: 'tool-1', role: 'tool', content: 'read a file', timestamp: 210 } as Message,
+      { id: 'a-1', role: 'assistant', content: 'done', timestamp: 250, isIntermediate: false } as Message,
+      infoSummary({ before: 862000, retained: 20100, compacted: 841300, checkpoint: 600, viaRelief: 1 }),
+      { id: 'tool-2', role: 'tool', content: 'ran a command', timestamp: 400 } as Message,
+      { id: 'a-2', role: 'assistant', content: 'done again', timestamp: 450, isIntermediate: false } as Message,
+    ]
+    const turns = groupMessagesByTurn(messages)
+    const assistantTurnCount = turns.filter(t => t.type === 'assistant').length
+    expect(assistantTurnCount).toBe(2)
+    const second = turns.filter(t => t.type === 'assistant')[1] as AssistantTurn
+    // The row moved into the following block, ahead of its own steps.
+    expect(second.activities[0]?.statusType).toBe('compaction_summary')
+  })
+
   it('auto compaction (status) stays INSIDE the turn that triggered it', () => {
     const messages = [
       userMsg(),

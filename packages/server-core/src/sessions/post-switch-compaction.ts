@@ -9,6 +9,8 @@
  * tune any compaction logic.
  */
 
+import { buildCompactionSummaryParams } from '@craft-agent/shared/agent/compaction-summary';
+
 export interface PostSwitchCompactSession {
   agent?: {
     isProcessing(): boolean;
@@ -92,23 +94,29 @@ export function schedulePostSwitchCompaction(
       );
 
       if (before > 0) {
-        deps.sendEvent(
-          {
-            type: 'info',
-            sessionId,
-            message: 'Compaction summary',
-            statusType: 'compaction_summary',
-            statusParams: {
-              before,
-              retained: stats?.retained ?? after,
-              compacted: stats?.compacted ?? Math.max(0, before - after),
-              checkpoint: stats?.checkpoint ?? 0,
-              after,
-              viaRelief: stats?.viaRelief ? 1 : 0,
+        // Same accounting as the /compact and auto paths (see
+        // buildCompactionSummaryParams): the arrow target is the SDK's real
+        // post-compaction size, and retained is derived from it so the row
+        // adds up and matches the context ring.
+        const summaryParams = buildCompactionSummaryParams({
+          tokensBefore: before,
+          estimatedTokensAfter: after,
+          retained: stats?.retained,
+          checkpoint: stats?.checkpoint,
+          viaRelief: stats?.viaRelief,
+        });
+        if (summaryParams) {
+          deps.sendEvent(
+            {
+              type: 'info',
+              sessionId,
+              message: 'Compaction summary',
+              statusType: 'compaction_summary',
+              statusParams: summaryParams,
             },
-          },
-          managed.workspace.id,
-        );
+            managed.workspace.id,
+          );
+        }
       }
     } catch (error) {
       // Best-effort: a failed compaction must not break the session, and the

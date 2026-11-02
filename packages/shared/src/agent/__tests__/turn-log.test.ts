@@ -330,3 +330,41 @@ describe('copyTurnLogsForBranch', () => {
     expect(copyTurnLogsForBranch(src, dest, Date.now())).toBe(0)
   })
 })
+
+// ============================================================================
+// Closing a finished turn (turn-end archiving)
+// ============================================================================
+
+describe('buildTurnLogs — closing a finished turn', () => {
+  const start = '2026-10-16T06:00:00.000Z'
+
+  it('stamps the last turn end when the caller archives a finished turn', () => {
+    const progress: ProgressRecord[] = [
+      rec({ kind: 'user_request', text: 'hi', timestamp: start }),
+      rec({ kind: 'conclusion', text: 'done', timestamp: '2026-10-16T06:00:10.000Z' }),
+    ]
+    const messages: TurnSessionMessage[] = [
+      sess({
+        type: 'assistant',
+        content: 'answer',
+        isIntermediate: false,
+        timestamp: Date.parse('2026-10-16T06:00:10.000Z'),
+      }),
+    ]
+
+    const turns = buildTurnLogs(progress, messages, { closeOpenTurnAt: '2026-10-16T06:00:12.000Z' })
+
+    expect(turns).toHaveLength(1)
+    expect(turns[0]!.turnEndIso).toBe('2026-10-16T06:00:12.000Z')
+    // The end is stamped AFTER attribution, so the reply that finished the turn
+    // must still belong to it.
+    expect(turns[0]!.assistantReplies).toHaveLength(1)
+  })
+
+  it('leaves the open turn open when no close timestamp is given', () => {
+    const progress: ProgressRecord[] = [rec({ kind: 'user_request', text: 'hi', timestamp: start })]
+    const turns = buildTurnLogs(progress, [])
+    expect(turns).toHaveLength(1)
+    expect(turns[0]!.turnEndIso).toBeNull()
+  })
+})

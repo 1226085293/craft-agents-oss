@@ -26,7 +26,7 @@ import { getSessionScopedToolCallbacks } from './session-scoped-tool-callback-re
  * Attach session self-management bindings to a SessionToolContext.
  *
  * Defines lazy getters for the session-management callbacks (labels, status,
- * archive, list/info, resolve helpers), messaging, createTask, and pages.
+ * archive, list/info, resolve helpers), messaging, and pages.
  *
  * @param context - The SessionToolContext to augment (mutated in place)
  * @param sessionId - The session ID for registry lookup and getSessionInfo defaulting
@@ -37,22 +37,6 @@ export function attachSessionSelfManagementBindings(
 ): void {
   // Direct pass-through bindings — signatures match, no wrapping needed.
   // Each getter resolves fresh from the registry on every access.
-
-  Object.defineProperty(context, 'setSessionLabels', {
-    get() {
-      return getSessionScopedToolCallbacks(sessionId)?.setSessionLabelsFn;
-    },
-    configurable: true,
-    enumerable: true,
-  });
-
-  Object.defineProperty(context, 'setSessionStatus', {
-    get() {
-      return getSessionScopedToolCallbacks(sessionId)?.setSessionStatusFn;
-    },
-    configurable: true,
-    enumerable: true,
-  });
 
   Object.defineProperty(context, 'archiveSession', {
     get() {
@@ -81,17 +65,17 @@ export function attachSessionSelfManagementBindings(
     enumerable: true,
   });
 
-  Object.defineProperty(context, 'resolveLabels', {
+  Object.defineProperty(context, 'getBackgroundTaskOutput', {
     get() {
-      return getSessionScopedToolCallbacks(sessionId)?.resolveLabelsFn;
+      return getSessionScopedToolCallbacks(sessionId)?.getBackgroundTaskOutputFn;
     },
     configurable: true,
     enumerable: true,
   });
 
-  Object.defineProperty(context, 'resolveStatus', {
+  Object.defineProperty(context, 'stopBackgroundTask', {
     get() {
-      return getSessionScopedToolCallbacks(sessionId)?.resolveStatusFn;
+      return getSessionScopedToolCallbacks(sessionId)?.stopBackgroundTaskFn;
     },
     configurable: true,
     enumerable: true,
@@ -100,6 +84,31 @@ export function attachSessionSelfManagementBindings(
   Object.defineProperty(context, 'sendAgentMessage', {
     get() {
       return getSessionScopedToolCallbacks(sessionId)?.sendAgentMessageFn;
+    },
+    configurable: true,
+    enumerable: true,
+  });
+
+  // Subscription bindings — follow / unfollow another session's turns.
+  Object.defineProperty(context, 'subscribeSessionFn', {
+    get() {
+      return getSessionScopedToolCallbacks(sessionId)?.subscribeSessionFn;
+    },
+    configurable: true,
+    enumerable: true,
+  });
+
+  Object.defineProperty(context, 'unsubscribeSessionFn', {
+    get() {
+      return getSessionScopedToolCallbacks(sessionId)?.unsubscribeSessionFn;
+    },
+    configurable: true,
+    enumerable: true,
+  });
+
+  Object.defineProperty(context, 'listSubscriptionsFn', {
+    get() {
+      return getSessionScopedToolCallbacks(sessionId)?.listSubscriptionsFn;
     },
     configurable: true,
     enumerable: true,
@@ -134,13 +143,6 @@ export function attachSessionSelfManagementBindings(
     enumerable: true,
   });
 
-  Object.defineProperty(context, 'createTask', {
-    get() {
-      return getSessionScopedToolCallbacks(sessionId)?.createTaskFn;
-    },
-    configurable: true,
-    enumerable: true,
-  });
 
   Object.defineProperty(context, 'pages', {
     get() {

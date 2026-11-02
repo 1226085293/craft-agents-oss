@@ -57,27 +57,20 @@ export function useBackgroundTasks({ sessionId }: UseBackgroundTasksOptions): Us
   }, [setTasks])
 
   const killTask = useCallback(async (taskId: string, type: 'agent' | 'shell') => {
-    // Find the task to get its toolUseId
-    const task = tasks.find(t => t.id === taskId)
-
-    if (type === 'shell') {
-      // Use KillShell IPC for shells
-      try {
+    try {
+      if (type === 'shell') {
         await window.electronAPI.killShell(sessionId, taskId)
-      } catch {
-        // Shell may already be gone - that's OK, still remove from UI
+      } else {
+        // Stops the detached proxy tool cooperatively, then force-settles it
+        // after 5s. The stopped event removes the chip; keeping it here lets
+        // the caller render a spinner until this Promise resolves.
+        await window.electronAPI.stopBackgroundTask(sessionId, taskId, 'user')
       }
-    } else {
-      // For agents, we don't have a direct kill mechanism yet
-      // The model would need to use TaskOutput to check status
-      console.warn('Killing agent tasks not yet implemented')
+    } catch (error) {
+      // Leave the chip in place so the user can retry or dismiss it.
+      console.error(`Failed to stop background task ${taskId}:`, error)
     }
-
-    // Always remove from UI after kill attempt
-    if (task) {
-      setTasks(prev => prev.filter(t => t.id !== taskId))
-    }
-  }, [sessionId, tasks, setTasks])
+  }, [sessionId])
 
   return {
     tasks,

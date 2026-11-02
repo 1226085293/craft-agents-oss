@@ -32,16 +32,15 @@ export const DEFAULT_TOOL_CATEGORIES: ToolCategoriesConfig = {
     {
       name: 'workspace',
       metaToolName: 'tools_workspace',
-      description: '会话与任务管理：会话信息、标签、状态、任务板、归档、后台任务。',
+      description: '会话与任务管理：会话信息、归档、后台任务。',
       tools: [
         'get_session_info',
-        'set_session_labels',
-        'set_session_status',
         'archive_session',
         'list_sessions',
         'list_background_tasks',
-        'create_task',
-        'send_agent_message',
+        'get_background_task_output',
+        'stop_background_task',
+              'send_agent_message',
         'deliver_file',
         'list_messaging_channels',
         'unbind_messaging_channel',
@@ -93,8 +92,8 @@ export const DEFAULT_TOOL_CATEGORIES: ToolCategoriesConfig = {
     {
       name: 'agent',
       metaToolName: 'tools_agent',
-      description: 'agent 运行时辅助：计划提交、浏览器自动化、子会话派生。',
-      tools: ['SubmitPlan', 'browser_tool', 'spawn_session'],
+      description: 'agent 运行时辅助：计划提交、浏览器自动化、子会话派生与关注。',
+      tools: ['SubmitPlan', 'browser_tool', 'spawn_session', 'subscribe_session', 'unsubscribe_session', 'list_subscriptions'],
     },
   ],
 };

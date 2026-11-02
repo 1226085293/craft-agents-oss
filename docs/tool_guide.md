@@ -36,6 +36,7 @@
 - [get_session_info](#get_session_info)
 - [list_sessions](#list_sessions)
 - [list_background_tasks](#list_background_tasks)
+- [stop_background_task](#stop_background_task)
 - [send_agent_message](#send_agent_message)
 - [deliver_file](#deliver_file)
 - [list_messaging_channels](#list_messaging_channels)
@@ -261,6 +262,10 @@ auth 模式与字段：
 状态含义：`running` 后台运行、未上报完成；`completed/failed/stopped` 收到终止通知；`orphaned` 启动轮结束但任务未完成（随子进程被终止）。
 
 不要瞎猜 "app 重启了"——照报表真实返回即可。省略 sessionId 查当前会话。
+
+## stop_background_task
+
+停止一个正在运行的后台 shell/agent，并记录停止来源（`model` 或 `user`）。停止通知投递完成前记录保留，之后自动删除；可用 `list_background_tasks` 确认剩余任务。`orphaned`（重启中断）没有进程可杀，调用等同清理记录。
 
 ## send_agent_message
 

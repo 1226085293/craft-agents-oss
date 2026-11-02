@@ -25,7 +25,6 @@ export interface SessionMeta {
   workspaceId: string
   lastMessageAt?: number
   isProcessing?: boolean
-  isFlagged?: boolean
   lastReadMessageId?: string
   workingDirectory?: string
   enabledSourceSlugs?: string[]
@@ -46,8 +45,18 @@ export interface SessionMeta {
   labels?: string[]
   /** Permission mode ('safe', 'ask', 'allow-all') — used by view expressions */
   permissionMode?: string
-  /** Session status for filtering */
-  sessionStatus?: string
+  /** Folder id inside this session's project tree (undefined = root) */
+  folderId?: string | null
+  /** Set when archived because an ancestor folder/project was archived (D23/D28) */
+  archivedByParent?: string
+  /** Folder snapshot at archive time (D8 restore hint) */
+  archivedFolderId?: string | null
+  archivedFolderPath?: string[]
+  archivedProjectId?: string
+  /** Manual order among siblings of the same kind (D32) */
+  sortOrder?: string
+  /** Non-null = pinned (D33) */
+  pinnedAt?: number
   /** Role/type of the last message (for badge display without loading messages) */
   lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error'
   /** Whether an async operation is ongoing (sharing, updating share, revoking, title regeneration) */
@@ -80,18 +89,6 @@ export interface SessionMeta {
   projectId?: string
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task) */
   parentSessionId?: string
-  /** Kanban board column id ('todo' | 'in-progress' | 'done'); independent of sessionStatus */
-  kanbanColumn?: string
-  /** Tasks Conductor: slug of the task spec this session belongs to (orchestrator + child nodes) */
-  taskSlug?: string
-  /** Tasks Conductor: id of the run that spawned this child session (Conductor-owned children only) */
-  taskRunId?: string
-  /** Tasks Conductor: id of the DAG node this child session executes (Conductor-owned children only) */
-  taskNodeId?: string
-  /** Tasks Conductor: total DAG node count (orchestrator only) — stable board progress denominator while children spawn lazily */
-  taskNodeCount?: number
-  /** Tasks Conductor: a generate-time draft orchestrator, hidden from the board until adopted by createTask. */
-  taskDraft?: boolean
 }
 
 /**
@@ -513,7 +510,12 @@ export const removeSessionAtom = atom(
 
     // Clean up additional atom families to prevent memory leaks
     // These store per-session UI state that should be garbage collected
-    backgroundTasksAtomFamily.remove(sessionId)
+    //
+    // EXCEPTION: backgroundTasksAtomFamily is deliberately NOT removed. Its rows
+    // mirror the backend's persisted task list, and dropping them on unload made
+    // a running task disappear from the composer until the next event arrived.
+    // The rows are bounded (one per undispatched task) and cleared when the
+    // backend reports delivery, so they do not leak.
   }
 )
 
@@ -598,7 +600,7 @@ export const syncSessionsToAtomsAtom = atom(
  * Uses promise deduplication to prevent redundant IPC calls from concurrent requests.
  *
  * IMPORTANT: This only merges messages into the existing session atom.
- * UI state fields (hasUnread, isFlagged, sessionStatus, etc.) are preserved from
+ * UI state fields (hasUnread, folderId, etc.) are preserved from
  * the in-memory atom, NOT overwritten with potentially stale disk data.
  * This prevents a race condition where optimistic updates (e.g., clearing the
  * NEW badge on session view) get clobbered by async message loading that reads
@@ -643,7 +645,7 @@ async function loadSessionMessages(
     }
 
     // Merge messages and disk-only fields into existing session, preserving in-memory UI state.
-    // The renderer's atom is authoritative for UI fields (hasUnread, isFlagged, etc.)
+    // The renderer's atom is authoritative for UI fields (hasUnread, folderId, etc.)
     // because optimistic updates may have changed them since the disk write.
     // tokenUsage and sessionFolderPath are only returned by getSession() (not getSessions()),
     // so they must be explicitly merged here to be available after app restart.
@@ -775,7 +777,7 @@ export interface BackgroundTask {
   /** Task or shell ID */
   id: string
   /** Task type. 'workflow' = a fan-out Workflow launch (many sub-agents). */
-  type: 'agent' | 'shell' | 'workflow'
+  type: 'agent' | 'shell' | 'workflow' | 'subscription'
   /** Tool use ID for correlation with messages */
   toolUseId: string
   /** Workflow run id (wf_...) — set for type 'workflow'; correlates agent-completed updates. */
@@ -798,6 +800,10 @@ export interface BackgroundTask {
   outputFile?: string
   /** Short summary, set when task_completed arrives */
   summary?: string
+  /** Raw command (shell tasks), set when shell_backgrounded arrives. */
+  command?: string
+  /** True while a user/model stop request is settling (up to 5s). */
+  stopping?: boolean
 }
 
 /**
@@ -809,6 +815,87 @@ export const backgroundTasksAtomFamily = atomFamily(
   (_sessionId: string) => atom<BackgroundTask[]>([]),
   (a, b) => a === b
 )
+
+// ============================================================
+// Background-task lifecycle helpers
+//
+// These used to live in components/app-shell/background-task-chip-state.ts,
+// which owned the old always-visible chip row. That row is gone (replaced by
+// the popover in BackgroundTasksPopover), but the "is this task still alive?"
+// reasoning is still needed — a missing lifecycle signal is not proof that a
+// task stopped, and a late progress event must never resurrect a finished one.
+// Keeping that logic in the data layer means no component has to own it.
+// ============================================================
+
+/**
+ * A missing lifecycle signal is not proof that a task stopped. After this long,
+ * mark it `stale` (unknown) instead of letting it read as confidently running.
+ */
+export const RUNNING_SIGNAL_TIMEOUT_MS = 20 * 60_000
+
+/**
+ * Record evidence that a task is still alive. A stale task can recover to
+ * running, but late progress must never resurrect a truly terminal task.
+ */
+export function markBackgroundTaskSignal(
+  task: BackgroundTask,
+  now: number,
+): BackgroundTask {
+  if (task.status !== 'running' && task.status !== 'stale') return task
+  return {
+    ...task,
+    status: 'running',
+    lastSignalAt: now,
+  }
+}
+
+/**
+ * Turn-end death is authoritative only when the backend did not keep background
+ * tasks alive. Both running and uncertain/stale tasks become truly orphaned.
+ * Subscriptions are session-level and outlive the turn, so they are untouched.
+ */
+export function markLiveBackgroundTasksOrphaned(
+  tasks: BackgroundTask[],
+  now: number,
+): BackgroundTask[] {
+  let changed = false
+  const next = tasks.map((task) => {
+    if (task.type === 'subscription') return task
+    if (task.status !== 'running' && task.status !== 'stale') return task
+    changed = true
+    return {
+      ...task,
+      status: 'orphaned' as const,
+      completedAt: now,
+    }
+  })
+  return changed ? next : tasks
+}
+
+/**
+ * Split a session's tracked entries into the two lists the composer shows.
+ *
+ * - `tasks` = background WORK the agent launched: shells, detached agents,
+ *   workflows. These are the things with a command/output and a Stop action.
+ * - `childSessions` = sessions this one subscribes to (spawn_session follow).
+ *   They are not work items: clicking one navigates to that session, and
+ *   "stop" means stop that session + unsubscribe.
+ *
+ * A task is only removed once its result has been DELIVERED to the model, so
+ * list membership means "still worth showing", not "still running".
+ */
+export function splitBackgroundEntries(entries: BackgroundTask[]): {
+  tasks: BackgroundTask[]
+  childSessions: BackgroundTask[]
+} {
+  const tasks: BackgroundTask[] = []
+  const childSessions: BackgroundTask[] = []
+  for (const entry of entries) {
+    if (entry.type === 'subscription') childSessions.push(entry)
+    else tasks.push(entry)
+  }
+  return { tasks, childSessions }
+}
 
 /**
  * Window's current workspace ID — shared between Root (ThemeProvider) and App.

@@ -40,6 +40,7 @@ export async function handleListBackgroundTasks(
 
     const running = tasks.filter((t) => t.status === 'running');
     const orphaned = tasks.filter((t) => t.status === 'orphaned');
+    const restartKilled = tasks.filter((t) => t.stopReason === 'app_restart');
     const terminal = tasks.filter(
       (t) => t.status === 'completed' || t.status === 'failed' || t.status === 'stopped'
     );
@@ -49,6 +50,9 @@ export async function handleListBackgroundTasks(
       `${running.length} running, ${orphaned.length} orphaned, ${terminal.length} finished.` +
       (orphaned.length > 0
         ? ` Orphaned tasks were terminated when their owning turn ended (the per-turn subprocess was torn down); their in-process state was lost.`
+        : '') +
+      (restartKilled.length > 0
+        ? ` ${restartKilled.length} task(s) were killed by a Craft Agent restart (stopReason: app_restart) — this was an abnormal stop, NOT a user stop and NOT a failure of the command itself. Do not claim they completed; do not silently re-run them.`
         : '');
 
     return successResponse(`${summary}\n\n${JSON.stringify(tasks, null, 2)}`);

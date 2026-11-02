@@ -139,6 +139,16 @@ function fmtDuration(startIso: string, endIso: string): number | undefined {
 export function buildTurnLogs(
   progressRecords: ProgressRecord[],
   sessionMessages: TurnSessionMessage[],
+  opts?: {
+    /**
+     * Stamp the last (otherwise open) turn with this end time. Callers that
+     * archive a FINISHED turn — turn end, destroy, clear — pass this so the
+     * file reads as a closed record instead of a permanently open one.
+     * Omitted by the "archive before the next user message" path, which closes
+     * the previous turn with that message's timestamp instead.
+     */
+    closeOpenTurnAt?: string;
+  },
 ): TurnLogData[] {
   const sessionTools = new Map<string, TurnSessionMessage>();
   const sessionAssistant: Array<{ ms: number; text: string }> = [];
@@ -243,6 +253,13 @@ export function buildTurnLogs(
       if (endMs != null && a.ms >= endMs) continue;
       turn.assistantReplies.push({ iso: new Date(a.ms).toISOString(), text: a.text });
     }
+  }
+
+  // Stamp AFTER attribution: the end time bounds which assistant bubbles belong
+  // to the turn, so setting it first could drop the very reply that finished it.
+  if (opts?.closeOpenTurnAt) {
+    const last = turns[turns.length - 1];
+    if (last && !last.turnEndIso) last.turnEndIso = opts.closeOpenTurnAt;
   }
 
   return turns;

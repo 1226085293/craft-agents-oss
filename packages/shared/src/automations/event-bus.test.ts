@@ -26,9 +26,9 @@ describe('WorkspaceEventBus', () => {
   describe('emit', () => {
     it('should emit events to registered handlers', async () => {
       const handler = jest.fn();
-      bus.on('LabelAdd', handler);
+      bus.on('PermissionModeChange', handler);
 
-      await bus.emit('LabelAdd', {
+      await bus.emit('PermissionModeChange', {
         sessionId: 'session-1',
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
@@ -44,10 +44,10 @@ describe('WorkspaceEventBus', () => {
     it('should emit to multiple handlers for the same event', async () => {
       const handler1 = jest.fn();
       const handler2 = jest.fn();
-      bus.on('LabelAdd', handler1);
-      bus.on('LabelAdd', handler2);
+      bus.on('PermissionModeChange', handler1);
+      bus.on('PermissionModeChange', handler2);
 
-      await bus.emit('LabelAdd', {
+      await bus.emit('PermissionModeChange', {
         sessionId: 'session-1',
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
@@ -59,30 +59,30 @@ describe('WorkspaceEventBus', () => {
     });
 
     it('should not emit to handlers for different events', async () => {
-      const labelHandler = jest.fn();
-      const flagHandler = jest.fn();
-      bus.on('LabelAdd', labelHandler);
-      bus.on('FlagChange', flagHandler);
+      const modeHandler = jest.fn();
+      const pathHandler = jest.fn();
+      bus.on('PermissionModeChange', modeHandler);
+      bus.on('SessionPathChange', pathHandler);
 
-      await bus.emit('LabelAdd', {
+      await bus.emit('PermissionModeChange', {
         sessionId: 'session-1',
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
-        label: 'test-label',
+        newMode: 'execute',
       });
 
-      expect(labelHandler).toHaveBeenCalledTimes(1);
-      expect(flagHandler).not.toHaveBeenCalled();
+      expect(modeHandler).toHaveBeenCalledTimes(1);
+      expect(pathHandler).not.toHaveBeenCalled();
     });
 
     it('should catch and log handler errors without stopping other handlers', async () => {
       const errorHandler = jest.fn().mockRejectedValue(new Error('Test error'));
       const successHandler = jest.fn();
-      bus.on('LabelAdd', errorHandler);
-      bus.on('LabelAdd', successHandler);
+      bus.on('PermissionModeChange', errorHandler);
+      bus.on('PermissionModeChange', successHandler);
 
       // Should not throw
-      await bus.emit('LabelAdd', {
+      await bus.emit('PermissionModeChange', {
         sessionId: 'session-1',
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
@@ -95,10 +95,10 @@ describe('WorkspaceEventBus', () => {
 
     it('should not emit after disposal', async () => {
       const handler = jest.fn();
-      bus.on('LabelAdd', handler);
+      bus.on('PermissionModeChange', handler);
       bus.dispose();
 
-      await bus.emit('LabelAdd', {
+      await bus.emit('PermissionModeChange', {
         sessionId: 'session-1',
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
@@ -112,16 +112,16 @@ describe('WorkspaceEventBus', () => {
   describe('on/off', () => {
     it('should register handlers', () => {
       const handler = jest.fn();
-      bus.on('LabelAdd', handler);
-      expect(bus.getHandlerCount('LabelAdd')).toBe(1);
+      bus.on('PermissionModeChange', handler);
+      expect(bus.getHandlerCount('PermissionModeChange')).toBe(1);
     });
 
     it('should unregister handlers', async () => {
       const handler = jest.fn();
-      bus.on('LabelAdd', handler);
-      bus.off('LabelAdd', handler);
+      bus.on('PermissionModeChange', handler);
+      bus.off('PermissionModeChange', handler);
 
-      await bus.emit('LabelAdd', {
+      await bus.emit('PermissionModeChange', {
         sessionId: 'session-1',
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
@@ -134,8 +134,8 @@ describe('WorkspaceEventBus', () => {
     it('should not register handlers after disposal', () => {
       bus.dispose();
       const handler = jest.fn();
-      bus.on('LabelAdd', handler);
-      expect(bus.getHandlerCount('LabelAdd')).toBe(0);
+      bus.on('PermissionModeChange', handler);
+      expect(bus.getHandlerCount('PermissionModeChange')).toBe(0);
     });
   });
 
@@ -144,14 +144,14 @@ describe('WorkspaceEventBus', () => {
       const anyHandler = jest.fn();
       bus.onAny(anyHandler);
 
-      await bus.emit('LabelAdd', {
+      await bus.emit('PermissionModeChange', {
         sessionId: 'session-1',
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
         label: 'test-label',
       });
 
-      await bus.emit('FlagChange', {
+      await bus.emit('PermissionModeChange', {
         sessionId: 'session-1',
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
@@ -159,8 +159,8 @@ describe('WorkspaceEventBus', () => {
       });
 
       expect(anyHandler).toHaveBeenCalledTimes(2);
-      expect(anyHandler).toHaveBeenCalledWith('LabelAdd', expect.anything());
-      expect(anyHandler).toHaveBeenCalledWith('FlagChange', expect.anything());
+      expect(anyHandler).toHaveBeenCalledWith('PermissionModeChange', expect.anything());
+      expect(anyHandler).toHaveBeenCalledWith('PermissionModeChange', expect.anything());
     });
 
     it('should unregister any-handlers', async () => {
@@ -168,7 +168,7 @@ describe('WorkspaceEventBus', () => {
       bus.onAny(anyHandler);
       bus.offAny(anyHandler);
 
-      await bus.emit('LabelAdd', {
+      await bus.emit('PermissionModeChange', {
         sessionId: 'session-1',
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
@@ -181,8 +181,8 @@ describe('WorkspaceEventBus', () => {
 
   describe('dispose', () => {
     it('should clear all handlers', () => {
-      bus.on('LabelAdd', jest.fn());
-      bus.on('FlagChange', jest.fn());
+      bus.on('PermissionModeChange', jest.fn());
+      bus.on('PermissionModeChange', jest.fn());
       bus.onAny(jest.fn());
 
       expect(bus.getHandlerCount()).toBeGreaterThan(0);
@@ -201,11 +201,12 @@ describe('WorkspaceEventBus', () => {
   });
 
   describe('rate limiting', () => {
-    const labelPayload = () => ({
+    const modePayload = () => ({
       sessionId: 'session-1',
       workspaceId: 'test-workspace',
       timestamp: Date.now(),
-      label: 'test-label',
+      oldMode: 'explore',
+      newMode: 'execute',
     });
 
     const schedulerPayload = () => ({
@@ -217,10 +218,10 @@ describe('WorkspaceEventBus', () => {
 
     it('should drop events exceeding rate limit (10/min for normal events)', async () => {
       const handler = jest.fn();
-      bus.on('LabelAdd', handler);
+      bus.on('PermissionModeChange', handler);
 
       for (let i = 0; i < 15; i++) {
-        await bus.emit('LabelAdd', labelPayload());
+        await bus.emit('PermissionModeChange', modePayload());
       }
 
       expect(handler).toHaveBeenCalledTimes(10);
@@ -241,23 +242,23 @@ describe('WorkspaceEventBus', () => {
       jest.useFakeTimers();
       try {
         const handler = jest.fn();
-        bus.on('LabelAdd', handler);
+        bus.on('PermissionModeChange', handler);
 
         // Exhaust the limit
         for (let i = 0; i < 10; i++) {
-          await bus.emit('LabelAdd', labelPayload());
+          await bus.emit('PermissionModeChange', modePayload());
         }
         expect(handler).toHaveBeenCalledTimes(10);
 
         // 11th should be dropped
-        await bus.emit('LabelAdd', labelPayload());
+        await bus.emit('PermissionModeChange', modePayload());
         expect(handler).toHaveBeenCalledTimes(10);
 
         // Advance past the window
         jest.advanceTimersByTime(61_000);
 
         // Should fire again
-        await bus.emit('LabelAdd', labelPayload());
+        await bus.emit('PermissionModeChange', modePayload());
         expect(handler).toHaveBeenCalledTimes(11);
       } finally {
         jest.useRealTimers();
@@ -265,35 +266,37 @@ describe('WorkspaceEventBus', () => {
     });
 
     it('should rate limit per-event-type independently', async () => {
-      const labelHandler = jest.fn();
-      const flagHandler = jest.fn();
-      bus.on('LabelAdd', labelHandler);
-      bus.on('FlagChange', flagHandler);
+      const modeHandler = jest.fn();
+      const pathHandler = jest.fn();
+      bus.on('PermissionModeChange', modeHandler);
+      bus.on('SessionPathChange', pathHandler);
 
-      // Exhaust LabelAdd limit
+      // Exhaust the PermissionModeChange limit
       for (let i = 0; i < 12; i++) {
-        await bus.emit('LabelAdd', labelPayload());
+        await bus.emit('PermissionModeChange', modePayload());
       }
 
-      // FlagChange should still work
-      await bus.emit('FlagChange', {
+      // SessionPathChange should still work
+      await bus.emit('SessionPathChange', {
         sessionId: 'session-1',
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
-        isFlagged: true,
+        changeType: 'folder',
+        oldPath: null,
+        newPath: 'folder-1',
       });
 
-      expect(labelHandler).toHaveBeenCalledTimes(10);
-      expect(flagHandler).toHaveBeenCalledTimes(1);
+      expect(modeHandler).toHaveBeenCalledTimes(10);
+      expect(pathHandler).toHaveBeenCalledTimes(1);
     });
 
     it('should log warning when rate limited', async () => {
       const warnSpy = spyOn(console, 'warn').mockImplementation(() => {});
       const handler = jest.fn();
-      bus.on('LabelAdd', handler);
+      bus.on('PermissionModeChange', handler);
 
       for (let i = 0; i < 11; i++) {
-        await bus.emit('LabelAdd', labelPayload());
+        await bus.emit('PermissionModeChange', modePayload());
       }
 
       // The debug logger uses console internally — check that rate limit warning was logged
@@ -305,18 +308,18 @@ describe('WorkspaceEventBus', () => {
 
   describe('getHandlerCount', () => {
     it('should return count for specific event', () => {
-      bus.on('LabelAdd', jest.fn());
-      bus.on('LabelAdd', jest.fn());
-      bus.on('FlagChange', jest.fn());
+      bus.on('PermissionModeChange', jest.fn());
+      bus.on('SessionPathChange', jest.fn());
+      bus.on('SchedulerTick', jest.fn());
 
-      expect(bus.getHandlerCount('LabelAdd')).toBe(2);
-      expect(bus.getHandlerCount('FlagChange')).toBe(1);
-      expect(bus.getHandlerCount('LabelRemove')).toBe(0);
+      expect(bus.getHandlerCount('PermissionModeChange')).toBe(1);
+      expect(bus.getHandlerCount('SessionPathChange')).toBe(1);
+      expect(bus.getHandlerCount('PreToolUse')).toBe(0);
     });
 
     it('should return total count without argument', () => {
-      bus.on('LabelAdd', jest.fn());
-      bus.on('FlagChange', jest.fn());
+      bus.on('PermissionModeChange', jest.fn());
+      bus.on('PermissionModeChange', jest.fn());
       bus.onAny(jest.fn());
 
       expect(bus.getHandlerCount()).toBe(3);

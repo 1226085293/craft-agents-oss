@@ -144,18 +144,18 @@ describe('evaluateConditions', () => {
   describe('state condition', () => {
     it('should match exact value', () => {
       const conditions: AutomationCondition[] = [
-        { condition: 'state', field: 'isFlagged', value: true },
+        { condition: 'state', field: 'retryCount', value: 3 },
       ];
-      expect(evaluateConditions(conditions, ctx({ isFlagged: true }))).toBe(true);
-      expect(evaluateConditions(conditions, ctx({ isFlagged: false }))).toBe(false);
+      expect(evaluateConditions(conditions, ctx({ retryCount: 3 }))).toBe(true);
+      expect(evaluateConditions(conditions, ctx({ retryCount: 5 }))).toBe(false);
     });
 
     it('should match string value', () => {
       const conditions: AutomationCondition[] = [
-        { condition: 'state', field: 'label', value: 'urgent' },
+        { condition: 'state', field: 'newMode', value: 'urgent' },
       ];
-      expect(evaluateConditions(conditions, ctx({ label: 'urgent' }))).toBe(true);
-      expect(evaluateConditions(conditions, ctx({ label: 'low' }))).toBe(false);
+      expect(evaluateConditions(conditions, ctx({ newMode: 'urgent' }))).toBe(true);
+      expect(evaluateConditions(conditions, ctx({ newMode: 'low' }))).toBe(false);
     });
 
     it('should fail when field is missing', () => {
@@ -328,7 +328,7 @@ describe('evaluateConditions', () => {
         const conditions: AutomationCondition[] = [{
           condition: 'not',
           conditions: [
-            { condition: 'state', field: 'isFlagged', value: true },
+            { condition: 'state', field: 'newMode', value: 'urgent' },
           ],
         }];
         expect(evaluateConditions(conditions, ctx({ isFlagged: false }))).toBe(true);
@@ -338,37 +338,37 @@ describe('evaluateConditions', () => {
         const conditions: AutomationCondition[] = [{
           condition: 'not',
           conditions: [
-            { condition: 'state', field: 'isFlagged', value: true },
+            { condition: 'state', field: 'newMode', value: 'urgent' },
           ],
         }];
-        expect(evaluateConditions(conditions, ctx({ isFlagged: true }))).toBe(false);
+        expect(evaluateConditions(conditions, ctx({ newMode: 'urgent' }))).toBe(false);
       });
     });
 
     describe('nesting', () => {
       it('should handle nested composition', () => {
-        // (mode=safe OR mode=ask) AND NOT(isFlagged=true)
+        // (newMode=explore OR newMode=execute) AND NOT(newMode=urgent)
         const conditions: AutomationCondition[] = [{
           condition: 'and',
           conditions: [
             {
               condition: 'or',
               conditions: [
-                { condition: 'state', field: 'mode', value: 'safe' },
-                { condition: 'state', field: 'mode', value: 'ask' },
+                { condition: 'state', field: 'newMode', value: 'explore' },
+                { condition: 'state', field: 'newMode', value: 'execute' },
               ],
             },
             {
               condition: 'not',
               conditions: [
-                { condition: 'state', field: 'isFlagged', value: true },
+                { condition: 'state', field: 'newMode', value: 'urgent' },
               ],
             },
           ],
         }];
-        expect(evaluateConditions(conditions, ctx({ mode: 'safe', isFlagged: false }))).toBe(true);
-        expect(evaluateConditions(conditions, ctx({ mode: 'safe', isFlagged: true }))).toBe(false);
-        expect(evaluateConditions(conditions, ctx({ mode: 'allow-all', isFlagged: false }))).toBe(false);
+        expect(evaluateConditions(conditions, ctx({ newMode: 'explore' }))).toBe(true);
+        expect(evaluateConditions(conditions, ctx({ newMode: 'urgent' }))).toBe(false);
+        expect(evaluateConditions(conditions, ctx({ newMode: 'execute' }))).toBe(true);
       });
 
       it('should fail at max nesting depth', () => {
@@ -398,11 +398,11 @@ describe('evaluateConditions', () => {
   describe('top-level AND', () => {
     it('should AND multiple top-level conditions', () => {
       const conditions: AutomationCondition[] = [
-        { condition: 'state', field: 'isFlagged', value: true },
-        { condition: 'state', field: 'label', value: 'urgent' },
+        { condition: 'state', field: 'newMode', value: 'urgent' },
+        { condition: 'state', field: 'newMode', value: 'urgent' },
       ];
-      expect(evaluateConditions(conditions, ctx({ isFlagged: true, label: 'urgent' }))).toBe(true);
-      expect(evaluateConditions(conditions, ctx({ isFlagged: true, label: 'low' }))).toBe(false);
+      expect(evaluateConditions(conditions, ctx({ permissionMode: 'execute', newMode: 'urgent' }))).toBe(true);
+      expect(evaluateConditions(conditions, ctx({ permissionMode: 'execute', newMode: 'low' }))).toBe(false);
     });
   });
 });
@@ -417,40 +417,40 @@ describe('matcherMatches with conditions', () => {
       matcher: '^urgent$',
       actions: [{ type: 'prompt' as const, prompt: 'test' }],
     };
-    expect(matcherMatches(matcher, 'LabelAdd', { label: 'urgent' })).toBe(true);
+    expect(matcherMatches(matcher, 'PermissionModeChange', { newMode: 'urgent' })).toBe(true);
   });
 
   it('should pass when matcher matches and conditions pass', () => {
     const matcher = {
       matcher: '^urgent$',
       conditions: [
-        { condition: 'state' as const, field: 'isFlagged', value: true },
+        { condition: 'state' as const, field: 'newMode', value: 'urgent' },
       ],
       actions: [{ type: 'prompt' as const, prompt: 'test' }],
     };
-    expect(matcherMatches(matcher, 'LabelAdd', { label: 'urgent', isFlagged: true })).toBe(true);
+    expect(matcherMatches(matcher, 'PermissionModeChange', { newMode: 'urgent' })).toBe(true);
   });
 
   it('should fail when matcher matches but conditions fail', () => {
     const matcher = {
       matcher: '^urgent$',
       conditions: [
-        { condition: 'state' as const, field: 'isFlagged', value: true },
+        { condition: 'state' as const, field: 'newMode', value: 'execute' },
       ],
       actions: [{ type: 'prompt' as const, prompt: 'test' }],
     };
-    expect(matcherMatches(matcher, 'LabelAdd', { label: 'urgent', isFlagged: false })).toBe(false);
+    expect(matcherMatches(matcher, 'PermissionModeChange', { newMode: 'urgent' })).toBe(false);
   });
 
   it('should fail when matcher does not match (conditions not evaluated)', () => {
     const matcher = {
       matcher: '^urgent$',
       conditions: [
-        { condition: 'state' as const, field: 'isFlagged', value: true },
+        { condition: 'state' as const, field: 'newMode', value: 'urgent' },
       ],
       actions: [{ type: 'prompt' as const, prompt: 'test' }],
     };
-    expect(matcherMatches(matcher, 'LabelAdd', { label: 'low', isFlagged: true })).toBe(false);
+    expect(matcherMatches(matcher, 'PermissionModeChange', { newMode: 'low' })).toBe(false);
   });
 
   it('should work with PermissionModeChange and from/to', () => {
@@ -486,7 +486,7 @@ describe('matcherMatches with conditions', () => {
       conditions: [],
       actions: [{ type: 'prompt' as const, prompt: 'test' }],
     };
-    expect(matcherMatches(matcher, 'LabelAdd', { label: 'urgent' })).toBe(true);
+    expect(matcherMatches(matcher, 'PermissionModeChange', { newMode: 'urgent' })).toBe(true);
   });
 
   it('should preserve backward compatibility (no conditions field)', () => {
@@ -494,7 +494,7 @@ describe('matcherMatches with conditions', () => {
       matcher: '^done$',
       actions: [{ type: 'prompt' as const, prompt: 'test' }],
     };
-    expect(matcherMatches(matcher, 'SessionStatusChange', { newState: 'done' })).toBe(true);
+    expect(matcherMatches(matcher, 'PermissionModeChange', { newMode: 'done' })).toBe(true);
   });
 });
 

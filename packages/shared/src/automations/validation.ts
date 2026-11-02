@@ -10,8 +10,15 @@ import { isAbsolute, join } from 'node:path';
 import { resolveAutomationsConfigPath } from './resolve-config-path.ts';
 import { AUTOMATIONS_CONFIG_FILE } from './constants.ts';
 import { AutomationsConfigSchema, zodErrorToIssues, DEPRECATED_EVENT_ALIASES } from './schemas.ts';
-import { isValidLabelId } from '../labels/storage.ts';
-import { extractLabelId } from '../labels/values.ts';
+// Labels were removed from the product (B6). Automations must still parse
+// label matchers written in existing automations.json files, so keep the
+// string-level parsing here and skip the "does this label still exist" check —
+// there is no label config to check against any more.
+const VALUE_SEPARATOR = '::';
+function extractLabelId(entry: string): string {
+  const separatorIndex = entry.indexOf(VALUE_SEPARATOR);
+  return separatorIndex === -1 ? entry : entry.substring(0, separatorIndex);
+}
 import { getLlmConnection } from '../config/storage.ts';
 import { getDefaultModelsForConnection } from '../config/llm-connections.ts';
 import type { ModelDefinition } from '../config/models.ts';
@@ -340,13 +347,12 @@ export function validateAutomations(workspaceRoot: string): ValidationResult {
             for (const label of matcher.labels) {
               // Extract label ID (handles "priority::3" -> "priority")
               const labelId = extractLabelId(label);
-              if (!isValidLabelId(workspaceRoot, labelId)) {
+              if (!labelId) {
                 warnings.push({
                   file,
                   path: `automations.${event}[${i}].labels`,
-                  message: `Label "${labelId}" does not exist in workspace`,
+                  message: `Label matcher is empty`,
                   severity: 'warning',
-                  suggestion: `Create this label in labels/config.json or use an existing label ID`,
                 });
               }
             }

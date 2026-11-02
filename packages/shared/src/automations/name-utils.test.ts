@@ -19,14 +19,14 @@ describe('deriveAutomationName', () => {
     const matcher: AutomationMatcher = {
       actions: [{ type: 'prompt', prompt: '@linear check for issues' }],
     };
-    expect(deriveAutomationName('LabelAdd', matcher)).toBe('linear prompt');
+    expect(deriveAutomationName('PermissionModeChange', matcher)).toBe('linear prompt');
   });
 
   it('should use prompt text when no @mention and prompt is short', () => {
     const matcher: AutomationMatcher = {
       actions: [{ type: 'prompt', prompt: 'Review the code' }],
     };
-    expect(deriveAutomationName('LabelAdd', matcher)).toBe('Review the code');
+    expect(deriveAutomationName('PermissionModeChange', matcher)).toBe('Review the code');
   });
 
   it('should truncate long prompts to 40 chars', () => {
@@ -34,7 +34,7 @@ describe('deriveAutomationName', () => {
     const matcher: AutomationMatcher = {
       actions: [{ type: 'prompt', prompt: longPrompt }],
     };
-    const result = deriveAutomationName('LabelAdd', matcher);
+    const result = deriveAutomationName('PermissionModeChange', matcher);
     expect(result).toBe(longPrompt.slice(0, 40) + '...');
     expect(result.length).toBe(43); // 40 + '...'
   });
@@ -44,14 +44,14 @@ describe('deriveAutomationName', () => {
     const matcher: AutomationMatcher = {
       actions: [{ type: 'prompt', prompt }],
     };
-    expect(deriveAutomationName('LabelAdd', matcher)).toBe(prompt);
+    expect(deriveAutomationName('PermissionModeChange', matcher)).toBe(prompt);
   });
 
   it('should fall back to event name when no actions', () => {
     const matcher: AutomationMatcher = {
       actions: [],
     };
-    expect(deriveAutomationName('LabelAdd', matcher)).toBe('LabelAdd');
+    expect(deriveAutomationName('PermissionModeChange', matcher)).toBe('PermissionModeChange');
   });
 
   it('should prefer matcher.name over @mention', () => {
@@ -59,6 +59,6 @@ describe('deriveAutomationName', () => {
       name: 'Custom Name',
       actions: [{ type: 'prompt', prompt: '@linear do something' }],
     };
-    expect(deriveAutomationName('LabelAdd', matcher)).toBe('Custom Name');
+    expect(deriveAutomationName('PermissionModeChange', matcher)).toBe('Custom Name');
   });
 });

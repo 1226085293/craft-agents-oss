@@ -30,25 +30,23 @@ import {
   isSourcesNavigation,
   isSettingsNavigation,
   isSkillsNavigation,
-  isAutomationsNavigation,
   isProjectsNavigation,
   isPagesNavigation,
+  isAutomationsNavigation,
 } from '@/contexts/NavigationContext'
 import { useSessionSelection, useIsMultiSelectActive, useSelectedIds, useSelectionCount } from '@/hooks/useSession'
 import { sourceSelection, skillSelection, automationSelection } from '@/hooks/useEntitySelection'
-import { extractLabelId } from '@craft-agent/shared/labels'
-import type { SessionStatusId } from '@/config/session-status-config'
 import { SourceInfoPage, ChatPage } from '@/pages'
 import SkillInfoPage from '@/pages/SkillInfoPage'
 import { getSettingsPageComponent } from '@/pages/settings/settings-pages'
-import { AutomationInfoPage } from '../automations/AutomationInfoPage'
 import ProjectInfoPage from '@/pages/ProjectInfoPage'
-import { KanbanBoardContainer } from './kanban/KanbanBoardContainer'
+import { AutomationInfoPage } from '../automations/AutomationInfoPage'
+import type { ExecutionEntry } from '../automations/types'
+import { automationsAtom } from '@/atoms/automations'
+import { useAutomations } from '@/hooks/useAutomations'
 import { PagesHome } from '../pages/PagesHome'
 import { MemoryPanel } from './MemoryPanel'
 import { PageView } from '../pages/PageView'
-import type { ExecutionEntry } from '../automations/types'
-import { automationsAtom } from '@/atoms/automations'
 import { SendResourceToWorkspaceDialog, type SendResourceType } from './SendResourceToWorkspaceDialog'
 
 export interface MainContentPanelProps {
@@ -76,18 +74,7 @@ export function MainContentPanel({
   const {
     activeWorkspaceId,
     workspaces,
-    onSessionStatusChange,
     onArchiveSession,
-    onSessionLabelsChange,
-    sessionStatuses,
-    labels,
-    onTestAutomation,
-    onToggleAutomation,
-    onDuplicateAutomation,
-    onDeleteAutomation,
-    onReplayAutomation,
-    automationTestResults,
-    getAutomationHistory,
     activeSessionWorkingDirectory,
   } = useAppShellContext()
 
@@ -97,35 +84,6 @@ export function MainContentPanel({
   const selectionCount = useSelectionCount()
   const { clearMultiSelect } = useSessionSelection()
   const sessionMetaMap = useAtomValue(sessionMetaMapAtom)
-  const automations = useAtomValue(automationsAtom)
-
-  // Execution history for the selected automation
-  const selectedAutomationId = isAutomationsNavigation(navState) ? navState.details?.automationId : undefined
-  const [executions, setExecutions] = useState<ExecutionEntry[]>([])
-
-  useEffect(() => {
-    if (!selectedAutomationId || !getAutomationHistory) {
-      setExecutions([])
-      return
-    }
-    let stale = false
-
-    // Initial fetch
-    getAutomationHistory(selectedAutomationId).then(entries => {
-      if (!stale) setExecutions(entries)
-    })
-
-    // Re-fetch on automation changes (live updates when automations fire)
-    const cleanup = window.electronAPI.onAutomationsChanged(() => {
-      if (!stale) {
-        getAutomationHistory(selectedAutomationId).then(entries => {
-          if (!stale) setExecutions(entries)
-        })
-      }
-    })
-
-    return () => { stale = true; cleanup() }
-  }, [selectedAutomationId, getAutomationHistory])
 
   // Source multi-select state
   const isSourceMultiSelectActive = sourceSelection.useIsMultiSelectActive()
@@ -144,6 +102,39 @@ export function MainContentPanel({
   const automationSelectionCount = automationSelection.useSelectionCount()
   const selectedAutomationIds = automationSelection.useSelectedIds()
   const { clearMultiSelect: clearAutomationSelection } = automationSelection.useSelection()
+
+  const automations = useAtomValue(automationsAtom)
+  const {
+    automationTestResults,
+    handleTestAutomation,
+    handleToggleAutomation,
+    handleDuplicateAutomation,
+    handleDeleteAutomation,
+    getAutomationHistory,
+    handleReplayAutomation,
+  } = useAutomations(activeWorkspaceId ?? null)
+
+  // Execution history for the selected automation (live-refreshed when automations fire)
+  const selectedAutomationId = isAutomationsNavigation(navState) ? navState.details?.automationId : undefined
+  const [executions, setExecutions] = useState<ExecutionEntry[]>([])
+
+  useEffect(() => {
+    if (!selectedAutomationId || !getAutomationHistory) {
+      setExecutions([])
+      return
+    }
+    let stale = false
+    getAutomationHistory(selectedAutomationId).then(entries => {
+      if (!stale) setExecutions(entries)
+    })
+    const cleanup = window.electronAPI.onAutomationsChanged(() => {
+      if (stale) return
+      getAutomationHistory(selectedAutomationId).then(entries => {
+        if (!stale) setExecutions(entries)
+      })
+    })
+    return () => { stale = true; cleanup() }
+  }, [selectedAutomationId, getAutomationHistory])
 
   // Send to Workspace dialog state (shared across resource types)
   const [sendDialogOpen, setSendDialogOpen] = useState(false)
@@ -169,33 +160,6 @@ export function MainContentPanel({
     return metas
   }, [selectedIds, sessionMetaMap])
 
-  const activeStatusId = useMemo((): SessionStatusId | null => {
-    if (selectedMetas.length === 0) return null
-    const first = (selectedMetas[0].sessionStatus || 'todo') as SessionStatusId
-    const allSame = selectedMetas.every(meta => (meta.sessionStatus || 'todo') === first)
-    return allSame ? first : null
-  }, [selectedMetas])
-
-  const appliedLabelIds = useMemo(() => {
-    if (selectedMetas.length === 0) return new Set<string>()
-    const toLabelSet = (meta: SessionMeta) =>
-      new Set((meta.labels || []).map(entry => extractLabelId(entry)))
-    const [first, ...rest] = selectedMetas.map(toLabelSet)
-    const intersection = new Set(first)
-    for (const labelSet of rest) {
-      for (const id of [...intersection]) {
-        if (!labelSet.has(id)) intersection.delete(id)
-      }
-    }
-    return intersection
-  }, [selectedMetas])
-
-  // Batch operations for multi-select
-  const handleBatchSetStatus = useCallback((status: SessionStatusId) => {
-    selectedIds.forEach(sessionId => {
-      onSessionStatusChange(sessionId, status)
-    })
-  }, [selectedIds, onSessionStatusChange])
 
   const handleBatchArchive = useCallback(() => {
     selectedIds.forEach(sessionId => {
@@ -204,22 +168,6 @@ export function MainContentPanel({
     clearMultiSelect()
   }, [selectedIds, onArchiveSession, clearMultiSelect])
 
-  const handleBatchToggleLabel = useCallback((labelId: string) => {
-    if (!onSessionLabelsChange) return
-    const allHaveLabel = selectedMetas.every(meta =>
-      (meta.labels || []).some(entry => extractLabelId(entry) === labelId)
-    )
-
-    selectedMetas.forEach(meta => {
-      const labels = meta.labels || []
-      const hasLabel = labels.some(entry => extractLabelId(entry) === labelId)
-      const filtered = labels.filter(entry => extractLabelId(entry) !== labelId)
-      const nextLabels = allHaveLabel
-        ? filtered
-        : (hasLabel ? labels : [...labels, labelId])
-      onSessionLabelsChange(meta.id, nextLabels)
-    })
-  }, [selectedMetas, onSessionLabelsChange])
 
   // Wrap content with StoplightProvider so PanelHeaders auto-compensate in focused mode.
   // Also renders the Send to Workspace dialog (portal-based, so it overlays regardless of position).
@@ -328,6 +276,7 @@ export function MainContentPanel({
     )
   }
 
+
   // Automations navigator - show automation info, multi-select panel, or empty state
   if (isAutomationsNavigation(navState)) {
     if (isAutomationMultiSelectActive) {
@@ -351,11 +300,11 @@ export function MainContentPanel({
               automation={automation}
               executions={executions}
               testResult={automationTestResults?.[automation.id]}
-              onTest={onTestAutomation ? () => onTestAutomation(automation.id) : undefined}
-              onToggleEnabled={onToggleAutomation ? () => onToggleAutomation(automation.id) : undefined}
-              onDuplicate={onDuplicateAutomation ? () => onDuplicateAutomation(automation.id) : undefined}
-              onDelete={onDeleteAutomation ? () => onDeleteAutomation(automation.id) : undefined}
-              onReplay={onReplayAutomation}
+              onTest={handleTestAutomation ? () => handleTestAutomation(automation.id) : undefined}
+              onToggleEnabled={handleToggleAutomation ? () => handleToggleAutomation(automation.id) : undefined}
+              onDuplicate={handleDuplicateAutomation ? () => handleDuplicateAutomation(automation.id) : undefined}
+              onDelete={handleDeleteAutomation ? () => handleDeleteAutomation(automation.id) : undefined}
+              onReplay={handleReplayAutomation}
             />
           </Panel>
         )
@@ -404,27 +353,12 @@ export function MainContentPanel({
 
   // Chats navigator - show chat, multi-select panel, or empty state
   if (isSessionsNavigation(navState)) {
-    // Board view: full-width Kanban over all sessions (placement independent of status)
-    if (navState.viewMode === 'board') {
-      return wrapWithStoplight(
-        <Panel variant="grow" className={className}>
-          <KanbanBoardContainer />
-        </Panel>
-      )
-    }
-
     // Multi-select mode: show batch actions panel
     if (isMultiSelectActive) {
       return wrapWithStoplight(
         <Panel variant="grow" className={className}>
           <MultiSelectPanel
             count={selectionCount}
-            sessionStatuses={sessionStatuses}
-            activeStatusId={activeStatusId}
-            onSetStatus={handleBatchSetStatus}
-            labels={labels}
-            appliedLabelIds={appliedLabelIds}
-            onToggleLabel={handleBatchToggleLabel}
             onArchive={handleBatchArchive}
             onClearSelection={clearMultiSelect}
           />

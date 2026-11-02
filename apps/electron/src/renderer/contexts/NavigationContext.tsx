@@ -40,8 +40,6 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { useAtomValue, useSetAtom, useStore } from 'jotai'
 import { useSession } from '@/hooks/useSession'
-import { useLabels } from '@/hooks/useLabels'
-import { matchesLabelFilter } from '@craft-agent/shared/labels'
 import {
   parseRoute,
   parseRouteToNavigationState,
@@ -73,9 +71,9 @@ import {
   isSourcesNavigation,
   isSettingsNavigation,
   isSkillsNavigation,
-  isAutomationsNavigation,
   isProjectsNavigation,
   isPagesNavigation,
+  isAutomationsNavigation,
   DEFAULT_NAVIGATION_STATE,
 } from '../../shared/types'
 import { sessionMetaMapAtom, updateSessionMetaAtom, type SessionMeta } from '@/atoms/sessions'
@@ -98,7 +96,7 @@ export type { Route }
 
 // Re-export navigation state types for consumers
 export type { NavigationState, SessionFilter }
-export { isSessionsNavigation, isSourcesNavigation, isSettingsNavigation, isSkillsNavigation, isAutomationsNavigation, isProjectsNavigation, isPagesNavigation }
+export { isSessionsNavigation, isSourcesNavigation, isSettingsNavigation, isSkillsNavigation, isProjectsNavigation, isPagesNavigation, isAutomationsNavigation }
 
 // =============================================================================
 // Context
@@ -178,9 +176,6 @@ export function NavigationProvider({
   const sessionMetaMap = useAtomValue(sessionMetaMapAtom)
   const sessionMetas = useMemo(() => Array.from(sessionMetaMap.values()), [sessionMetaMap])
   const updateSessionMeta = useSetAtom(updateSessionMetaAtom)
-  // Label tree for filter matching (auto-select must agree with the visible list).
-  const { labels: labelConfigs } = useLabels(workspaceId)
-
   const pushPanel = useSetAtom(pushPanelAtom)
 
   // Store reference for reading fresh atom values in callbacks (avoids stale closures)
@@ -561,27 +556,15 @@ export function NavigationProvider({
         switch (filter.kind) {
           case 'allSessions':
             return session.isArchived !== true
-          case 'flagged':
-            return session.isFlagged === true && session.isArchived !== true
           case 'archived':
             return session.isArchived === true
-          case 'state':
-            return session.sessionStatus === filter.stateId && session.isArchived !== true
-          case 'label': {
-            if (session.isArchived === true) return false
-            // Shared predicate — descendant-aware and project-scoped, matching
-            // exactly what the session list renders (auto-select must agree).
-            return matchesLabelFilter(session, filter, labelConfigs)
-          }
-          case 'view':
-            if (session.isArchived === true) return false
-            return true
+
           default:
             return false
         }
       })
     },
-    [sessionMetas, workspaceId, labelConfigs]
+    [sessionMetas, workspaceId]
   )
 
   const getFirstSessionId = useCallback(
@@ -651,11 +634,8 @@ export function NavigationProvider({
       }
 
       // Sessions: auto-select last/first session.
-      // Board view has no per-session detail, so skip auto-selection — otherwise
-      // navigating to the board would immediately resolve into a chat route.
       if (
         isSessionsNavigation(nextState) &&
-        nextState.viewMode !== 'board' &&
         !nextState.details &&
         !options?.skipAutoSelect
       ) {
@@ -720,43 +700,33 @@ export function NavigationProvider({
           if (parsed.params.systemPrompt) {
             createOptions.systemPromptPreset = parsed.params.systemPrompt as 'default' | 'mini' | string
           }
-          if (parsed.params.status) {
-            createOptions.sessionStatus = parsed.params.status
-          }
-          if (parsed.params.label) {
-            createOptions.labels = [parsed.params.label]
-          }
           if (parsed.params.project) {
             createOptions.projectId = parsed.params.project
           }
+          if (parsed.params.folder) {
+            // Created from a folder-scoped list: keep the session inside that folder,
+            // otherwise it lands at the root and the list it came from filters it out.
+            createOptions.folderId = parsed.params.folder
+          }
           const session = await onCreateSession(workspaceId, createOptions)
+
+          if (parsed.params.folder) {
+            await window.electronAPI.sessionCommand(session.id, { type: 'setFolder', folderId: parsed.params.folder })
+            updateSessionMeta(session.id, { folderId: parsed.params.folder })
+          }
 
           if (parsed.params.name) {
             await window.electronAPI.sessionCommand(session.id, { type: 'rename', name: parsed.params.name })
           }
 
-          if (parsed.params.status) {
-            updateSessionMeta(session.id, { sessionStatus: parsed.params.status })
-          }
-          if (parsed.params.label) {
-            updateSessionMeta(session.id, { labels: [parsed.params.label] })
-          }
-
-          if (parsed.params.status) {
-            await window.electronAPI.sessionCommand(session.id, { type: 'setSessionStatus', state: parsed.params.status })
-          }
-          if (parsed.params.label) {
-            await window.electronAPI.sessionCommand(session.id, { type: 'setLabels', labels: [parsed.params.label] })
-          }
 
           // Determine navigation filter
-          const filter: import('../../shared/types').SessionFilter =
-            parsed.params.status ? { kind: 'state', stateId: parsed.params.status } :
-            parsed.params.label ? { kind: 'label', labelId: parsed.params.label } :
-            { kind: 'allSessions' }
+          // Status dimension removed: legacy `state:` links no longer derive a
+          // state filter — they land on the unfiltered session list instead.
+          const filter: import('../../shared/types').SessionFilter = { kind: 'allSessions' }
 
           // Navigate the panel(s) to the new session, preserving the inherited filter
-          // (state/label) so creating from e.g. the Backlog list stays in the Backlog list.
+          // so creating from e.g. a scoped list stays in that list.
           const newState: NavigationState = {
             navigator: 'sessions',
             filter,
@@ -824,18 +794,6 @@ export function NavigationProvider({
         case 'delete-session':
           if (parsed.id) {
             await window.electronAPI.deleteSession(parsed.id)
-          }
-          break
-
-        case 'flag-session':
-          if (parsed.id) {
-            await window.electronAPI.sessionCommand(parsed.id, { type: 'flag' })
-          }
-          break
-
-        case 'unflag-session':
-          if (parsed.id) {
-            await window.electronAPI.sessionCommand(parsed.id, { type: 'unflag' })
           }
           break
 
@@ -1274,21 +1232,10 @@ export function NavigationProvider({
       case 'allSessions':
         navigate(routes.view.allSessions(sessionId))
         break
-      case 'flagged':
-        navigate(routes.view.flagged(sessionId))
-        break
       case 'archived':
         navigate(routes.view.archived(sessionId))
         break
-      case 'state':
-        navigate(routes.view.state(filter.stateId, sessionId))
-        break
-      case 'label':
-        navigate(routes.view.label(filter.labelId, sessionId))
-        break
-      case 'view':
-        navigate(routes.view.view(filter.viewId, sessionId))
-        break
+
       default:
         navigate(routes.view.allSessions(sessionId))
     }

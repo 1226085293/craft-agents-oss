@@ -100,13 +100,8 @@ export {
   InvalidPageSlugError,
 } from './validation.ts';
 
-// Refresh hook (synthetic cron matchers)
-export {
-  buildPageRefreshMatchers,
-  pageRefreshMatcherId,
-  isPageRefreshMatcherId,
-  PAGE_REFRESH_MATCHER_PREFIX,
-} from './refresh.ts';
+// Page action script executor (argv spawn, no shell)
+ export { executeScriptAction, buildBaseScriptEnv, clampScriptTimeout, DEFAULT_SCRIPT_TIMEOUT_MS, type ScriptAction, type ScriptActionResult, type ScriptActionRuntime } from './script-exec.ts';
 
 // Data writes (Node-safe: the SQLite work happens in a spawned Bun one-shot)
 export {

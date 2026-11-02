@@ -8,7 +8,7 @@ import type { WebhookAction } from './types.ts';
 
 const env = {
   CRAFT_WH_SESSION_ID: 'sess-123',
-  CRAFT_WH_EVENT: 'LabelAdd',
+  CRAFT_WH_EVENT: 'PermissionModeChange',
   API_TOKEN: 'tok-secret',
 };
 
@@ -29,7 +29,7 @@ describe('expandWebhookAction', () => {
       headers: { 'X-Event': '${CRAFT_WH_EVENT}', 'X-Static': 'unchanged' },
     };
     const result = expandWebhookAction(action, env);
-    expect(result.headers).toEqual({ 'X-Event': 'LabelAdd', 'X-Static': 'unchanged' });
+    expect(result.headers).toEqual({ 'X-Event': 'PermissionModeChange', 'X-Static': 'unchanged' });
   });
 
   it('expands string body', () => {
@@ -50,7 +50,7 @@ describe('expandWebhookAction', () => {
       body: { id: '${CRAFT_WH_SESSION_ID}', event: '${CRAFT_WH_EVENT}' },
     };
     const result = expandWebhookAction(action, env);
-    expect(result.body).toEqual({ id: 'sess-123', event: 'LabelAdd' });
+    expect(result.body).toEqual({ id: 'sess-123', event: 'PermissionModeChange' });
   });
 
   it('expands basic auth credentials', () => {

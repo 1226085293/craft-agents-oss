@@ -190,7 +190,8 @@ export function registerAutomationsHandlers(server: RpcServer, deps: HandlerDeps
           workspaceId: payload.workspaceId,
           workspaceRootPath: workspace.rootPath,
           prompt: action.prompt,
-          labels: payload.labels,
+          // Labels are gone from the product (B6); the DTO no longer carries
+          // them, so the prompt automation runs without label context.
           permissionMode: payload.permissionMode,
           mentions: references.mentions,
           llmConnection: action.llmConnection,

@@ -2,9 +2,8 @@ import type { RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 
 import { registerAuthHandlers } from './auth'
-import { registerAutomationsHandlers } from './automations'
 import { registerFilesHandlers } from './files'
-import { registerLabelsHandlers } from './labels'
+import { registerFoldersHandlers } from './folders'
 import { registerLlmConnectionsHandlers } from './llm-connections'
 import { registerLlmGatewayHandlers } from './llm-gateway'
 import { registerOAuthHandlers } from './oauth'
@@ -21,14 +20,13 @@ import { registerProjectsHandlers } from './projects'
 import { registerPagesHandlers } from './pages'
 import { registerSkillsHandlers } from './skills'
 import { registerSourcesHandlers } from './sources'
-import { registerStatusesHandlers } from './statuses'
 import { registerSystemCoreHandlers } from './system'
-import { registerTasksHandlers } from './tasks'
 import { registerTransferHandlers } from './transfer'
 import { registerWorkspaceCoreHandlers } from './workspace'
 import { registerMessagingHandlers } from './messaging'
 import { registerMemoryHandlers } from './memory'
 import { registerUsageHandlers } from './usage'
+import { registerAutomationsHandlers } from './automations'
 
 export function registerCoreRpcHandlers(
   server: RpcServer,
@@ -36,10 +34,9 @@ export function registerCoreRpcHandlers(
   serverCtx?: ServerHandlerContext,
 ): void {
   registerAuthHandlers(server, deps)
-  registerAutomationsHandlers(server, deps)
   registerFilesHandlers(server, deps)
-  registerLabelsHandlers(server, deps)
-  registerLlmConnectionsHandlers(server, deps)
+  registerFoldersHandlers(server, deps)
+registerLlmConnectionsHandlers(server, deps)
   registerLlmGatewayHandlers(server, deps)
   registerOAuthHandlers(server, deps)
   registerOnboardingHandlers(server, deps)
@@ -51,12 +48,11 @@ export function registerCoreRpcHandlers(
   registerPagesHandlers(server, deps)
   registerSkillsHandlers(server, deps)
   registerSourcesHandlers(server, deps)
-  registerStatusesHandlers(server, deps)
   registerSystemCoreHandlers(server, deps)
-  registerTasksHandlers(server, deps)
   registerTransferHandlers(server)
   registerWorkspaceCoreHandlers(server, deps)
   registerMessagingHandlers(server, deps)
   registerMemoryHandlers(server, deps)
   registerUsageHandlers(server, deps)
+  registerAutomationsHandlers(server, deps)
 }

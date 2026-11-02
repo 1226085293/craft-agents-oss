@@ -19,7 +19,19 @@ import {
 } from '@/components/info'
 import { useNavigation } from '@/contexts/NavigationContext'
 import { cn } from '@/lib/utils'
-import { formatShortRelativeTime } from '@/components/automations/utils'
+/** Format a timestamp as a compact relative time string (e.g. "3m ago", "2h ago", "5d ago"). */
+function formatShortRelativeTime(timestamp: number): string {
+  const diff = Date.now() - timestamp
+  const seconds = Math.floor(diff / 1000)
+  const minutes = Math.floor(diff / 60000)
+  const hours = Math.floor(diff / 3600000)
+  const days = Math.floor(diff / 86400000)
+
+  if (seconds < 60) return 'Just now'
+  if (minutes < 60) return `${minutes}m ago`
+  if (hours < 24) return `${hours}h ago`
+  return `${days}d ago`
+}
 import type { UsageStats, UsageRecord, Session } from '../../../shared/types'
 
 export interface UsageHistorySectionProps {

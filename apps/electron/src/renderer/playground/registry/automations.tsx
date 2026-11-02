@@ -111,8 +111,7 @@ function CronBuilderPlayground({
 /** Wrapper showing all AutomationAvatar variants in a grid */
 function AutomationAvatarGallery() {
   const events: AutomationTrigger[] = [
-    'SchedulerTick', 'LabelAdd', 'LabelRemove', 'LabelConfigChange',
-    'PermissionModeChange', 'FlagChange', 'TodoStateChange',
+    'SchedulerTick', 'PermissionModeChange', 'SessionPathChange',
     'PreToolUse', 'PostToolUse', 'PostToolUseFailure',
     'Notification', 'UserPromptSubmit', 'SessionStart', 'SessionEnd',
     'Stop', 'SubagentStart', 'SubagentStop', 'PreCompact',
@@ -193,10 +192,10 @@ const mockAutomations: AutomationListItem[] = [
   },
   {
     id: 'automation-2',
-    event: 'LabelAdd',
+    event: 'PermissionModeChange',
     matcherIndex: 0,
-    name: 'Urgent Label Notification',
-    summary: 'When "urgent" label is added',
+    name: 'Mode Change Notification',
+    summary: 'When the permission mode changes',
     enabled: true,
     matcher: '^urgent$',
     actions: [{ type: 'prompt', prompt: 'Send a macOS notification: "Urgent task flagged!"' }],
@@ -216,7 +215,7 @@ const mockAutomations: AutomationListItem[] = [
   },
   {
     id: 'automation-4',
-    event: 'LabelAdd',
+    event: 'PermissionModeChange',
     matcherIndex: 1,
     name: 'Label Change Logger',
     summary: 'Logs all label additions',
@@ -275,7 +274,7 @@ const mockAutomations: AutomationListItem[] = [
   },
   {
     id: 'automation-9',
-    event: 'SessionStatusChange',
+    event: 'SessionPathChange',
     matcherIndex: 0,
     name: 'Done after 9 AM (priority)',
     summary: 'When status → done, if after 9 AM and has priority label',
@@ -314,24 +313,24 @@ const mockAutomations: AutomationListItem[] = [
 
 const mockExecutions: ExecutionEntry[] = [
   { id: 'ex-1', automationId: 'automation-1', event: 'SchedulerTick', status: 'success', duration: 42, timestamp: now - 120_000, actionSummary: 'prompt → @weather forecast' },
-  { id: 'ex-2', automationId: 'automation-4', event: 'LabelAdd', status: 'success', duration: 8, timestamp: now - 300_000, actionSummary: 'echo "[...] Added: urgent"' },
+  { id: 'ex-2', automationId: 'automation-4', event: 'PermissionModeChange', status: 'success', duration: 8, timestamp: now - 300_000, actionSummary: 'echo "[...] Added: urgent"' },
   { id: 'ex-3', automationId: 'automation-5', event: 'SchedulerTick', status: 'error', duration: 1200, timestamp: now - 900_000, error: 'Connection refused' },
   { id: 'ex-4', automationId: 'automation-3', event: 'PreToolUse', status: 'blocked', duration: 0, timestamp: now - 3600_000, actionSummary: 'git diff --cached --check' },
   { id: 'ex-5', automationId: 'automation-1', event: 'SchedulerTick', status: 'success', duration: 38, timestamp: now - 86400_000, actionSummary: 'prompt → @weather forecast' },
   { id: 'ex-6', automationId: 'automation-6', event: 'PostToolUse', status: 'success', duration: 5, timestamp: now - 172800_000, actionSummary: 'echo "[...] Tool completed: Bash"' },
   // Webhook entries with expandable details
   {
-    id: 'ex-7', automationId: 'automation-1', event: 'SessionStatusChange', status: 'success', duration: 45, timestamp: now - 60_000,
+    id: 'ex-7', automationId: 'automation-1', event: 'SessionPathChange', status: 'success', duration: 45, timestamp: now - 60_000,
     actionSummary: 'Webhook POST http://localhost:8888/status-change',
     webhookDetails: { method: 'POST', url: 'http://localhost:8888/status-change', statusCode: 200, durationMs: 45, responseBody: '{"ok":true,"received":"status-change"}' },
   },
   {
-    id: 'ex-8', automationId: 'automation-1', event: 'SessionStatusChange', status: 'error', duration: 3200, timestamp: now - 600_000,
+    id: 'ex-8', automationId: 'automation-1', event: 'SessionPathChange', status: 'error', duration: 3200, timestamp: now - 600_000,
     actionSummary: 'Webhook POST https://api.example.com/notify (2 attempts)',
     webhookDetails: { method: 'POST', url: 'https://api.example.com/notify', statusCode: 502, durationMs: 3200, attempts: 2, error: 'Bad Gateway' },
   },
   {
-    id: 'ex-9', automationId: 'automation-1', event: 'LabelAdd', status: 'success', duration: 120, timestamp: now - 1800_000,
+    id: 'ex-9', automationId: 'automation-1', event: 'PermissionModeChange', status: 'success', duration: 120, timestamp: now - 1800_000,
     actionSummary: 'Webhook PUT https://hooks.slack.com/services/T.../B.../xxx',
     webhookDetails: { method: 'PUT', url: 'https://hooks.slack.com/services/T.../B.../xxx', statusCode: 200, durationMs: 120, responseBody: 'ok' },
   },

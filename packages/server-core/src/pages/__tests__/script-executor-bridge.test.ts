@@ -9,7 +9,7 @@
 import { describe, test, expect } from 'bun:test'
 import { join } from 'node:path'
 import { createPagesScriptExecutor } from '../script-executor-bridge'
-import type { ScriptAction, ScriptActionResult } from '@craft-agent/shared/automations'
+import type { ScriptAction, ScriptActionResult } from '@craft-agent/shared/pages'
 import type { Logger } from '@craft-agent/server-core/runtime'
 
 const log: Logger = { debug() {}, info() {}, warn() {}, error() {} } as unknown as Logger

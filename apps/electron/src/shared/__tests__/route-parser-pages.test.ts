@@ -76,11 +76,4 @@ describe('pages routes', () => {
     expect(parseNavigationStateKey('pages/page/my-dash')).toEqual(detail)
   })
 
-  test('automations panel key round-trips (regression: id had a leading slash)', () => {
-    const detail: NavigationState = {
-      navigator: 'automations',
-      details: { type: 'automation', automationId: 'auto-1' },
-    }
-    expect(parseNavigationStateKey(getNavigationStateKey(detail))).toEqual(detail)
-  })
 })

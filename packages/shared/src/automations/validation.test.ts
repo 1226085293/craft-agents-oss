@@ -11,7 +11,7 @@ describe('validation', () => {
     it('should accept a valid config', () => {
       const config = {
         automations: {
-          SessionStatusChange: [{
+          PermissionModeChange: [{
             matcher: 'done',
             actions: [{ type: 'prompt', prompt: 'echo done' }],
           }],
@@ -57,7 +57,7 @@ describe('validation', () => {
     it('should accept config with disabled matchers', () => {
       const config = {
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             enabled: false,
             matcher: 'bug',
             actions: [{ type: 'prompt', prompt: 'echo disabled' }],
@@ -85,7 +85,7 @@ describe('validation', () => {
     it('should accept thinkingLevel on prompt actions', () => {
       const config = {
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             matcher: 'review',
             actions: [{ type: 'prompt', prompt: 'Audit changes', thinkingLevel: 'high' }],
           }],
@@ -93,7 +93,7 @@ describe('validation', () => {
       };
       const result = validateAutomationsConfig(config);
       expect(result.valid).toBe(true);
-      const action = result.config?.automations.LabelAdd?.[0]?.actions[0];
+      const action = result.config?.automations.PermissionModeChange?.[0]?.actions[0];
       expect(action).toMatchObject({ thinkingLevel: 'high' });
     });
 
@@ -113,7 +113,7 @@ describe('validation', () => {
       // 'think' values from old configs don't break automation parsing.
       const config = {
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             matcher: 'review',
             actions: [{ type: 'prompt', prompt: 'echo', thinkingLevel: 'think' }],
           }],
@@ -121,14 +121,14 @@ describe('validation', () => {
       };
       const result = validateAutomationsConfig(config);
       expect(result.valid).toBe(true);
-      const action = result.config?.automations.LabelAdd?.[0]?.actions[0];
+      const action = result.config?.automations.PermissionModeChange?.[0]?.actions[0];
       expect(action).toMatchObject({ thinkingLevel: 'medium' });
     });
 
     it('should accept prompt actions without thinkingLevel (backward compat)', () => {
       const config = {
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             matcher: 'review',
             actions: [{ type: 'prompt', prompt: 'echo' }],
           }],
@@ -136,14 +136,14 @@ describe('validation', () => {
       };
       const result = validateAutomationsConfig(config);
       expect(result.valid).toBe(true);
-      const action = result.config?.automations.LabelAdd?.[0]?.actions[0];
+      const action = result.config?.automations.PermissionModeChange?.[0]?.actions[0];
       expect(action).toEqual({ type: 'prompt', prompt: 'echo' });
     });
 
     it('should reject state conditions with no operator', () => {
       const config = {
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             conditions: [{ condition: 'state', field: 'mode' }],
             actions: [{ type: 'prompt', prompt: 'test' }],
           }],
@@ -157,7 +157,7 @@ describe('validation', () => {
     it('should reject state conditions with conflicting operator groups', () => {
       const config = {
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             conditions: [{ condition: 'state', field: 'mode', value: 'ask', not_value: 'safe' }],
             actions: [{ type: 'prompt', prompt: 'test' }],
           }],
@@ -171,7 +171,7 @@ describe('validation', () => {
     it('should reject semantically invalid time values in object validation path', () => {
       const config = {
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             conditions: [{ condition: 'time', after: '25:61' }],
             actions: [{ type: 'prompt', prompt: 'test' }],
           }],
@@ -190,7 +190,7 @@ describe('validation', () => {
 
       const config = {
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             conditions: [nested],
             actions: [{ type: 'prompt', prompt: 'test' }],
           }],
@@ -206,7 +206,7 @@ describe('validation', () => {
     it('should accept valid JSON config', () => {
       const json = JSON.stringify({
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             matcher: 'bug',
             actions: [{ type: 'prompt', prompt: 'echo bug' }],
           }],
@@ -226,7 +226,7 @@ describe('validation', () => {
     it('should reject ReDoS patterns (nested quantifiers)', () => {
       const json = JSON.stringify({
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             matcher: '(a+)+',
             actions: [{ type: 'prompt', prompt: 'echo test' }],
           }],
@@ -240,7 +240,7 @@ describe('validation', () => {
     it('should reject ReDoS patterns (repeated alternation)', () => {
       const json = JSON.stringify({
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             matcher: '(a|b)+',
             actions: [{ type: 'prompt', prompt: 'echo test' }],
           }],
@@ -253,7 +253,7 @@ describe('validation', () => {
     it('should reject ReDoS patterns (repeated greedy quantifiers)', () => {
       const json = JSON.stringify({
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             matcher: '.*.*',
             actions: [{ type: 'prompt', prompt: 'echo test' }],
           }],
@@ -266,7 +266,7 @@ describe('validation', () => {
     it('should reject invalid regex syntax', () => {
       const json = JSON.stringify({
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             matcher: '[invalid',
             actions: [{ type: 'prompt', prompt: 'echo test' }],
           }],
@@ -280,7 +280,7 @@ describe('validation', () => {
     it('should reject regex patterns that are too long', () => {
       const json = JSON.stringify({
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             matcher: 'a'.repeat(501),
             actions: [{ type: 'prompt', prompt: 'echo test' }],
           }],
@@ -323,7 +323,7 @@ describe('validation', () => {
     it('should warn about allow-all permission mode', () => {
       const json = JSON.stringify({
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             permissionMode: 'allow-all',
             actions: [{ type: 'prompt', prompt: 'echo danger' }],
           }],
@@ -344,7 +344,7 @@ describe('validation', () => {
     it('should warn when cron is used on non-SchedulerTick event', () => {
       const json = JSON.stringify({
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             cron: '0 9 * * *',
             actions: [{ type: 'prompt', prompt: 'echo test' }],
           }],
@@ -357,7 +357,7 @@ describe('validation', () => {
     it('should accept valid simple regex patterns', () => {
       const json = JSON.stringify({
         automations: {
-          LabelAdd: [{
+          PermissionModeChange: [{
             matcher: 'bug|feature|fix',
             actions: [{ type: 'prompt', prompt: 'echo matched' }],
           }],
@@ -382,80 +382,4 @@ describe('validation', () => {
     });
   });
 
-  describe('deprecated event aliases', () => {
-    it('should accept TodoStateChange as deprecated alias', () => {
-      const config = JSON.stringify({
-        automations: {
-          TodoStateChange: [{
-            actions: [{ type: 'prompt', prompt: 'echo test' }],
-          }],
-        },
-      });
-      const result = validateAutomationsContent(config);
-      expect(result.valid).toBe(true);
-      expect(result.warnings).toContainEqual(
-        expect.objectContaining({
-          path: 'automations.TodoStateChange',
-          severity: 'warning',
-          suggestion: expect.stringContaining('SessionStatusChange'),
-        })
-      );
-    });
-
-    it('should rewrite TodoStateChange to SessionStatusChange in schema transform', () => {
-      const raw = {
-        automations: {
-          TodoStateChange: [{
-            actions: [{ type: 'prompt', prompt: 'echo test' }],
-          }],
-        },
-      };
-      const result = AutomationsConfigSchema.safeParse(raw);
-      expect(result.success).toBe(true);
-      if (result.success) {
-        expect(result.data.automations['SessionStatusChange']).toBeDefined();
-        expect(result.data.automations['TodoStateChange']).toBeUndefined();
-      }
-    });
-  });
-
-  describe('qqChannels preservation', () => {
-    it('should preserve qqChannels through the matcher schema', () => {
-      const raw = {
-        automations: {
-          SchedulerTick: [{
-            cron: '0 12 * * *',
-            telegramTopic: 'Daily',
-            qqChannels: ['group:AAA', 'user:BBB'],
-            actions: [{ type: 'prompt', prompt: 'echo test' }],
-          }],
-        },
-      };
-      const result = AutomationsConfigSchema.safeParse(raw);
-      expect(result.success).toBe(true);
-      if (result.success) {
-        const m = result.data.automations['SchedulerTick']![0];
-        expect(m?.qqChannels).toEqual(['group:AAA', 'user:BBB']);
-        // sibling known field must also survive
-        expect(m?.telegramTopic).toBe('Daily');
-      }
-    });
-
-    it('should tolerate matchers without qqChannels', () => {
-      const raw = {
-        automations: {
-          SchedulerTick: [{
-            cron: '0 12 * * *',
-            actions: [{ type: 'prompt', prompt: 'echo test' }],
-          }],
-        },
-      };
-      const result = AutomationsConfigSchema.safeParse(raw);
-      expect(result.success).toBe(true);
-      if (result.success) {
-        const m = result.data.automations['SchedulerTick']![0];
-        expect(m?.qqChannels).toBeUndefined();
-      }
-    });
-  });
 });

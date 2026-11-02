@@ -1,5 +1,5 @@
 /**
- * SendResourceToWorkspaceDialog — Copy a source, skill, or automation to another workspace.
+ * SendResourceToWorkspaceDialog — Copy a source or skill to another workspace.
  *
  * Uses the resources:export → resources:import RPC pipeline.
  * Supports both local and remote target workspaces:
@@ -130,7 +130,6 @@ export function SendResourceToWorkspaceDialog({
       const exportOptions: ExportResourcesOptions = {}
       if (resourceType === 'source') exportOptions.sources = resourceIds
       else if (resourceType === 'skill') exportOptions.skills = resourceIds
-      else if (resourceType === 'automation') exportOptions.automations = resourceIds
 
       const { bundle, warnings: exportWarnings } = await window.electronAPI.exportResources(
         activeWorkspaceId,

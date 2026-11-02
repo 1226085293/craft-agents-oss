@@ -36,7 +36,7 @@ describe('AutomationSystem', () => {
     it('should load automations.json if present', async () => {
       writeFileSync(join(tempDir, AUTOMATIONS_CONFIG_FILE), JSON.stringify({
         automations: {
-          LabelAdd: [
+          PermissionModeChange: [
             {
               matcher: 'test',
               actions: [{ type: 'prompt', prompt: 'echo hello' }],
@@ -51,7 +51,7 @@ describe('AutomationSystem', () => {
       });
 
       const config = system.getConfig();
-      expect(config?.automations.LabelAdd).toHaveLength(1);
+      expect(config?.automations.PermissionModeChange).toHaveLength(1);
 
       await system.dispose();
     });
@@ -72,7 +72,7 @@ describe('AutomationSystem', () => {
     it('should preserve thinkingLevel on prompt actions through load', async () => {
       writeFileSync(join(tempDir, AUTOMATIONS_CONFIG_FILE), JSON.stringify({
         automations: {
-          LabelAdd: [
+          PermissionModeChange: [
             {
               matcher: 'review',
               actions: [{
@@ -93,7 +93,7 @@ describe('AutomationSystem', () => {
       });
 
       const config = system.getConfig();
-      const action = config?.automations.LabelAdd?.[0]?.actions[0];
+      const action = config?.automations.PermissionModeChange?.[0]?.actions[0];
       expect(action).toMatchObject({
         type: 'prompt',
         thinkingLevel: 'high',
@@ -105,7 +105,7 @@ describe('AutomationSystem', () => {
     it('should reject semantically invalid conditions at load time', async () => {
       writeFileSync(join(tempDir, AUTOMATIONS_CONFIG_FILE), JSON.stringify({
         automations: {
-          LabelAdd: [
+          PermissionModeChange: [
             {
               conditions: [{ condition: 'time', after: '25:99' }],
               actions: [{ type: 'prompt', prompt: 'echo hello' }],
@@ -137,7 +137,7 @@ describe('AutomationSystem', () => {
       // Create automations.json
       writeFileSync(join(tempDir, AUTOMATIONS_CONFIG_FILE), JSON.stringify({
         automations: {
-          LabelAdd: [
+          PermissionModeChange: [
             {
               matcher: 'test',
               actions: [{ type: 'prompt', prompt: 'echo hello' }],
@@ -149,7 +149,7 @@ describe('AutomationSystem', () => {
       const result = system.reloadConfig();
       expect(result.success).toBe(true);
       expect(result.automationCount).toBe(1);
-      expect(system.getConfig()?.automations.LabelAdd).toHaveLength(1);
+      expect(system.getConfig()?.automations.PermissionModeChange).toHaveLength(1);
 
       await system.dispose();
     });
@@ -163,7 +163,7 @@ describe('AutomationSystem', () => {
       // Invalid JSON structure (actions must have at least one action)
       writeFileSync(join(tempDir, AUTOMATIONS_CONFIG_FILE), JSON.stringify({
         automations: {
-          LabelAdd: [
+          PermissionModeChange: [
             { matcher: 'test', actions: 'not-an-array' }, // Invalid: actions should be an array
           ],
         },
@@ -184,7 +184,7 @@ describe('AutomationSystem', () => {
 
       writeFileSync(join(tempDir, AUTOMATIONS_CONFIG_FILE), JSON.stringify({
         automations: {
-          LabelAdd: [
+          PermissionModeChange: [
             {
               conditions: [{ condition: 'time', before: '99:00' }],
               actions: [{ type: 'prompt', prompt: 'echo hello' }],
@@ -227,7 +227,7 @@ describe('AutomationSystem', () => {
     it('should return matchers for configured events', async () => {
       writeFileSync(join(tempDir, AUTOMATIONS_CONFIG_FILE), JSON.stringify({
         automations: {
-          LabelAdd: [
+          PermissionModeChange: [
             { matcher: 'test1', actions: [{ type: 'prompt', prompt: 'echo 1' }] },
             { matcher: 'test2', actions: [{ type: 'prompt', prompt: 'echo 2' }] },
           ],
@@ -239,7 +239,7 @@ describe('AutomationSystem', () => {
         workspaceId: 'test-workspace',
       });
 
-      const matchers = system.getMatchersForEvent('LabelAdd');
+      const matchers = system.getMatchersForEvent('PermissionModeChange');
       expect(matchers).toHaveLength(2);
       expect(matchers[0]?.matcher).toBe('test1');
 
@@ -252,7 +252,7 @@ describe('AutomationSystem', () => {
         workspaceId: 'test-workspace',
       });
 
-      const matchers = system.getMatchersForEvent('LabelAdd');
+      const matchers = system.getMatchersForEvent('PermissionModeChange');
       expect(matchers).toEqual([]);
 
       await system.dispose();
@@ -282,99 +282,6 @@ describe('AutomationSystem', () => {
       await system.dispose();
     });
 
-    it('should emit LabelAdd event for new labels', async () => {
-      const system = new AutomationSystem({
-        workspaceRootPath: tempDir,
-        workspaceId: 'test-workspace',
-      });
-
-      const emitSpy = spyOn(system.eventBus, 'emit');
-
-      const events = await system.updateSessionMetadata('session-1', {
-        labels: ['label-1', 'label-2'],
-      });
-
-      expect(events).toContain('LabelAdd');
-      expect(emitSpy).toHaveBeenCalledWith('LabelAdd', expect.objectContaining({
-        label: 'label-1',
-      }));
-      expect(emitSpy).toHaveBeenCalledWith('LabelAdd', expect.objectContaining({
-        label: 'label-2',
-      }));
-
-      await system.dispose();
-    });
-
-    it('should emit LabelRemove event for removed labels', async () => {
-      const system = new AutomationSystem({
-        workspaceRootPath: tempDir,
-        workspaceId: 'test-workspace',
-      });
-
-      // Set initial state
-      system.setInitialSessionMetadata('session-1', {
-        labels: ['label-1', 'label-2'],
-      });
-
-      const emitSpy = spyOn(system.eventBus, 'emit');
-
-      const events = await system.updateSessionMetadata('session-1', {
-        labels: ['label-1'], // label-2 removed
-      });
-
-      expect(events).toContain('LabelRemove');
-      expect(emitSpy).toHaveBeenCalledWith('LabelRemove', expect.objectContaining({
-        label: 'label-2',
-      }));
-
-      await system.dispose();
-    });
-
-    it('should emit FlagChange event', async () => {
-      const system = new AutomationSystem({
-        workspaceRootPath: tempDir,
-        workspaceId: 'test-workspace',
-      });
-
-      const emitSpy = spyOn(system.eventBus, 'emit');
-
-      const events = await system.updateSessionMetadata('session-1', {
-        isFlagged: true,
-      });
-
-      expect(events).toContain('FlagChange');
-      expect(emitSpy).toHaveBeenCalledWith('FlagChange', expect.objectContaining({
-        isFlagged: true,
-      }));
-
-      await system.dispose();
-    });
-
-    it('should emit SessionStatusChange event', async () => {
-      const system = new AutomationSystem({
-        workspaceRootPath: tempDir,
-        workspaceId: 'test-workspace',
-      });
-
-      system.setInitialSessionMetadata('session-1', {
-        sessionStatus: 'todo',
-      });
-
-      const emitSpy = spyOn(system.eventBus, 'emit');
-
-      const events = await system.updateSessionMetadata('session-1', {
-        sessionStatus: 'done',
-      });
-
-      expect(events).toContain('SessionStatusChange');
-      expect(emitSpy).toHaveBeenCalledWith('SessionStatusChange', expect.objectContaining({
-        oldState: 'todo',
-        newState: 'done',
-      }));
-
-      await system.dispose();
-    });
-
     it('should not emit events when metadata unchanged', async () => {
       const system = new AutomationSystem({
         workspaceRootPath: tempDir,
@@ -383,16 +290,12 @@ describe('AutomationSystem', () => {
 
       system.setInitialSessionMetadata('session-1', {
         permissionMode: 'explore',
-        labels: ['label-1'],
-        isFlagged: false,
       });
 
       const emitSpy = spyOn(system.eventBus, 'emit');
 
       const events = await system.updateSessionMetadata('session-1', {
         permissionMode: 'explore',
-        labels: ['label-1'],
-        isFlagged: false,
       });
 
       expect(events).toEqual([]);
@@ -409,12 +312,10 @@ describe('AutomationSystem', () => {
 
       await system.updateSessionMetadata('session-1', {
         permissionMode: 'execute',
-        labels: ['label-1'],
       });
 
       const stored = system.getSessionMetadata('session-1');
       expect(stored?.permissionMode).toBe('execute');
-      expect(stored?.labels).toEqual(['label-1']);
 
       await system.dispose();
     });
@@ -436,25 +337,6 @@ describe('AutomationSystem', () => {
       system.removeSessionMetadata('session-1');
 
       expect(system.getSessionMetadata('session-1')).toBeUndefined();
-
-      await system.dispose();
-    });
-  });
-
-  describe('emitLabelConfigChange', () => {
-    it('should emit LabelConfigChange event', async () => {
-      const system = new AutomationSystem({
-        workspaceRootPath: tempDir,
-        workspaceId: 'test-workspace',
-      });
-
-      const emitSpy = spyOn(system.eventBus, 'emit');
-
-      await system.emitLabelConfigChange();
-
-      expect(emitSpy).toHaveBeenCalledWith('LabelConfigChange', expect.objectContaining({
-        workspaceId: 'test-workspace',
-      }));
 
       await system.dispose();
     });

@@ -51,7 +51,7 @@ describe('parseAutomationsConfig', () => {
           { cron: '0 9 * * *', actions: [{ type: 'prompt', prompt: 'Run backup' }] },
           { cron: '0 18 * * *', actions: [{ type: 'prompt', prompt: 'Run cleanup' }] },
         ],
-        LabelAdd: [
+        PermissionModeChange: [
           { matcher: 'urgent', actions: [{ type: 'prompt', prompt: 'Handle urgent' }] },
         ],
       },
@@ -62,7 +62,7 @@ describe('parseAutomationsConfig', () => {
     expect(items[0].matcherIndex).toBe(0)
     expect(items[1].event).toBe('SchedulerTick')
     expect(items[1].matcherIndex).toBe(1)
-    expect(items[2].event).toBe('LabelAdd')
+    expect(items[2].event).toBe('PermissionModeChange')
     expect(items[2].matcherIndex).toBe(0)
   })
 

@@ -26,19 +26,13 @@ import {
 import { getWorkspaceSourcesPath, getWorkspaceSkillsPath } from '../workspaces/storage.ts'
 import { loadSourceConfig, getSourcePath } from '../sources/storage.ts'
 import { validateSourceConfig } from '../config/validators.ts'
-import { AUTOMATIONS_CONFIG_FILE, AUTOMATIONS_HISTORY_FILE, AUTOMATIONS_RETRY_QUEUE_FILE } from '../automations/constants.ts'
-import { validateAutomationsConfig } from '../automations/validation.ts'
-import { generateShortId } from '../automations/resolve-config-path.ts'
-import { VALID_EVENTS } from '../automations/schemas.ts'
 import { debug } from '../utils/debug.ts'
 
 import type { FolderSourceConfig } from '../sources/types.ts'
-import type { AutomationMatcher } from '../automations/types.ts'
 import type {
   ResourceBundle,
   SourceBundleEntry,
   SkillBundleEntry,
-  AutomationBundleEntry,
   ExportResourcesOptions,
   ExportResult,
   ResourceImportMode,
@@ -149,13 +143,6 @@ export function exportResources(
     bundle.resources.skills = exportSkills(workspaceRootPath, options.skills, warnings)
   }
 
-  // --- Export automations ---
-  // Normalize: true → 'all', false/undefined → skip
-  const automationSelection = options.automations === true ? 'all' : options.automations
-  if (automationSelection) {
-    bundle.resources.automations = exportAutomations(workspaceRootPath, automationSelection, warnings)
-  }
-
   // Validate total size
   const bundleJson = JSON.stringify(bundle)
   if (Buffer.byteLength(bundleJson) > MAX_BUNDLE_SIZE_BYTES) {
@@ -258,148 +245,6 @@ function exportSkills(
   }
 
   return entries
-}
-
-// ============================================================
-// Export: Automations
-// ============================================================
-
-/** Header keys that are known to carry secrets (case-insensitive match) */
-const SECRET_HEADER_PATTERNS = [
-  /^authorization$/i,
-  /^proxy-authorization$/i,
-  /api[-_]?key/i,
-]
-
-function isSecretHeader(key: string): boolean {
-  return SECRET_HEADER_PATTERNS.some(p => p.test(key))
-}
-
-/** Returns true if the value references an env var template like $VAR_NAME or ${VAR} (safe to keep) */
-function isTemplatedValue(value: string): boolean {
-  return /\$[A-Z_]|\$\{/.test(value)
-}
-
-/**
- * Sanitize a single automation matcher for export.
- * Strips webhook auth credentials and known auth headers.
- */
-function sanitizeAutomationMatcher(
-  matcher: AutomationMatcher,
-  label: string,
-  warnings: string[],
-): AutomationMatcher {
-  // Deep clone to avoid mutating the original
-  const sanitized: AutomationMatcher = JSON.parse(JSON.stringify(matcher))
-
-  if (!sanitized.actions) return sanitized
-
-  for (const action of sanitized.actions) {
-    if (action.type !== 'webhook') continue
-
-    // Strip auth field entirely (bearer tokens, basic auth passwords)
-    if (action.auth) {
-      delete (action as unknown as Record<string, unknown>).auth
-      warnings.push(`Automation '${label}': stripped webhook auth credentials`)
-    }
-
-    // Strip known auth headers (unless templated)
-    if (action.headers) {
-      const keysToStrip = Object.keys(action.headers).filter(
-        key => isSecretHeader(key) && !isTemplatedValue(action.headers![key]!),
-      )
-      for (const key of keysToStrip) {
-        delete action.headers[key]
-        warnings.push(`Automation '${label}': stripped webhook header '${key}'`)
-      }
-      // Clean up empty headers object
-      if (Object.keys(action.headers).length === 0) {
-        delete (action as unknown as Record<string, unknown>).headers
-      }
-    }
-  }
-
-  return sanitized
-}
-
-function exportAutomations(
-  workspaceRootPath: string,
-  selection: string[] | 'all',
-  warnings: string[],
-): AutomationBundleEntry[] {
-  const automationsPath = join(workspaceRootPath, AUTOMATIONS_CONFIG_FILE)
-
-  if (!existsSync(automationsPath)) {
-    warnings.push('No automations.json found in workspace')
-    return []
-  }
-
-  // Read and validate via the full validation pipeline
-  let raw: unknown
-  try {
-    raw = JSON.parse(readFileSync(automationsPath, 'utf-8'))
-  } catch (err) {
-    warnings.push(`Failed to read automations.json: ${err}`)
-    return []
-  }
-
-  const validation = validateAutomationsConfig(raw)
-  if (!validation.valid || !validation.config) {
-    warnings.push(`automations.json is invalid: ${validation.errors.join('; ')}`)
-    return []
-  }
-
-  // Flatten { event: matchers[] } into individual entries
-  const allEntries: AutomationBundleEntry[] = []
-  for (const [event, matchers] of Object.entries(validation.config.automations)) {
-    if (!matchers) continue
-    for (const matcher of matchers) {
-      // Ensure every matcher has an ID (backfill if missing)
-      const id = matcher.id || generateShortId()
-      allEntries.push({
-        id,
-        name: matcher.name,
-        event,
-        matcher: { ...matcher, id },
-      })
-    }
-  }
-
-  // Apply selection filter
-  let selected: AutomationBundleEntry[]
-  if (selection === 'all') {
-    selected = allEntries
-  } else {
-    const matched = new Set<string>()
-    selected = []
-    for (const selector of selection) {
-      const matches = allEntries.filter(
-        e => e.id === selector || (e.name !== undefined && e.name === selector),
-      )
-      if (matches.length === 0) {
-        warnings.push(`Automation selector '${selector}' did not match any automation`)
-      } else if (matches.length > 1 && matches.every(m => m.id !== selector)) {
-        // Name matched multiple — warn about ambiguity but include all
-        warnings.push(`Automation name '${selector}' matched ${matches.length} automations`)
-      }
-      for (const m of matches) {
-        if (!matched.has(m.id)) {
-          matched.add(m.id)
-          selected.push(m)
-        }
-      }
-    }
-  }
-
-  // Sanitize each entry
-  return selected.map(entry => ({
-    ...entry,
-    matcher: sanitizeAutomationMatcher(
-      entry.matcher,
-      entry.name ?? entry.id,
-      warnings,
-    ),
-  }))
 }
 
 // ============================================================
@@ -522,51 +367,6 @@ export function validateResourceBundle(bundle: unknown): { valid: boolean; error
     }
   }
 
-  // Validate automations
-  if (res.automations !== undefined) {
-    if (!Array.isArray(res.automations)) {
-      errors.push('resources.automations must be an array')
-    } else {
-      const ids = new Set<string>()
-      for (let i = 0; i < res.automations.length; i++) {
-        const entry = res.automations[i]
-        const prefix = `automations[${i}]`
-
-        if (!entry || typeof entry !== 'object') {
-          errors.push(`${prefix}: not an object`)
-          continue
-        }
-
-        const e = entry as Record<string, unknown>
-
-        if (typeof e.id !== 'string' || !e.id) {
-          errors.push(`${prefix}: missing or invalid id`)
-          continue
-        }
-
-        if (ids.has(e.id as string)) {
-          errors.push(`${prefix}: duplicate id '${e.id}'`)
-        }
-        ids.add(e.id as string)
-
-        if (typeof e.event !== 'string' || !e.event) {
-          errors.push(`${prefix}: missing or invalid event`)
-        } else if (!VALID_EVENTS.includes(e.event as string)) {
-          errors.push(`${prefix}: unknown event type '${e.event}'`)
-        }
-
-        if (!e.matcher || typeof e.matcher !== 'object') {
-          errors.push(`${prefix}: missing or invalid matcher`)
-        } else {
-          const m = e.matcher as Record<string, unknown>
-          if (!Array.isArray(m.actions) || m.actions.length === 0) {
-            errors.push(`${prefix}: matcher must have at least one action`)
-          }
-        }
-      }
-    }
-  }
-
   // Validate total bundle size
   try {
     const size = Buffer.byteLength(JSON.stringify(bundle))
@@ -632,7 +432,6 @@ export async function importResources(
     return {
       sources: { ...failedBucket },
       skills: { ...failedBucket },
-      automations: { ...failedBucket },
     }
   }
 
@@ -647,14 +446,9 @@ export async function importResources(
     ? importSkills(workspaceRootPath, bundle.resources.skills, mode)
     : emptyBucketResult()
 
-  const automationsResult = bundle.resources.automations?.length
-    ? importAutomations(workspaceRootPath, bundle.resources.automations, mode)
-    : emptyBucketResult()
-
   return {
     sources: sourcesResult,
     skills: skillsResult,
-    automations: automationsResult,
   }
 }
 
@@ -800,193 +594,6 @@ function importSkills(
       const message = err instanceof Error ? err.message : String(err)
       result.failed.push({ id: entry.slug, error: message })
     }
-  }
-
-  return result
-}
-
-// ============================================================
-// Import: Automations
-// ============================================================
-
-/** Display label for an automation entry (name if available, otherwise ID) */
-function automationLabel(entry: AutomationBundleEntry): string {
-  return entry.name ?? entry.id
-}
-
-/**
- * Find a matcher by ID across all event arrays.
- * Returns { event, index } if found, undefined otherwise.
- */
-function findMatcherById(
-  automations: Record<string, AutomationMatcher[]>,
-  id: string,
-): { event: string; index: number } | undefined {
-  for (const [event, matchers] of Object.entries(automations)) {
-    for (let i = 0; i < matchers.length; i++) {
-      if (matchers[i]?.id === id) return { event, index: i }
-    }
-  }
-  return undefined
-}
-
-/**
- * Filter JSONL file to remove entries matching a set of matcher IDs.
- * Used for selective history/retry-queue cleanup on overwrite.
- */
-function filterJsonlByMatcherIds(filePath: string, idsToRemove: Set<string>): void {
-  if (!existsSync(filePath) || idsToRemove.size === 0) return
-
-  try {
-    const raw = readFileSync(filePath, 'utf-8')
-    const lines = raw.split('\n')
-    const kept: string[] = []
-
-    for (const line of lines) {
-      if (!line.trim()) continue
-      try {
-        const entry = JSON.parse(line)
-        if (entry.matcherId && idsToRemove.has(entry.matcherId)) continue
-        // History entries use automationId
-        if (entry.automationId && idsToRemove.has(entry.automationId)) continue
-        kept.push(line)
-      } catch {
-        // Keep unparseable lines (don't silently drop data)
-        kept.push(line)
-      }
-    }
-
-    writeFileSync(filePath, kept.length > 0 ? kept.join('\n') + '\n' : '', 'utf-8')
-  } catch {
-    // Non-critical: cleanup failure doesn't block import
-  }
-}
-
-function importAutomations(
-  workspaceRootPath: string,
-  entries: AutomationBundleEntry[],
-  mode: ResourceImportMode,
-): ImportBucketResult {
-  const result = emptyBucketResult()
-  const configPath = join(workspaceRootPath, AUTOMATIONS_CONFIG_FILE)
-
-  // Read existing config (if present)
-  let existingConfig: { version?: number; automations: Record<string, AutomationMatcher[]> }
-
-  if (existsSync(configPath)) {
-    try {
-      const raw = JSON.parse(readFileSync(configPath, 'utf-8'))
-      const validation = validateAutomationsConfig(raw)
-      if (validation.valid && validation.config) {
-        existingConfig = {
-          version: (raw as Record<string, unknown>).version as number | undefined,
-          automations: validation.config.automations as Record<string, AutomationMatcher[]>,
-        }
-      } else if (mode === 'overwrite') {
-        // Existing config is invalid but we're overwriting — start fresh
-        result.warnings.push('Existing automations.json is invalid, starting fresh in overwrite mode')
-        existingConfig = { version: 2, automations: {} }
-      } else {
-        // Skip mode + invalid existing config — can't safely merge
-        const errorMsg = `Cannot merge into invalid existing automations.json: ${validation.errors.join('; ')}`
-        for (const entry of entries) {
-          result.failed.push({ id: automationLabel(entry), error: errorMsg })
-        }
-        return result
-      }
-    } catch (err) {
-      if (mode === 'overwrite') {
-        result.warnings.push(`Existing automations.json is unreadable (${err}), starting fresh in overwrite mode`)
-        existingConfig = { version: 2, automations: {} }
-      } else {
-        const errorMsg = `Cannot read existing automations.json: ${err}`
-        for (const entry of entries) {
-          result.failed.push({ id: automationLabel(entry), error: errorMsg })
-        }
-        return result
-      }
-    }
-  } else {
-    // No existing file — create new
-    existingConfig = { version: 2, automations: {} }
-  }
-
-  const overwrittenIds = new Set<string>()
-
-  // Merge entries
-  for (const entry of entries) {
-    // Backfill ID if missing
-    const id = entry.id || generateShortId()
-    const matcher: AutomationMatcher = { ...entry.matcher, id }
-    const label = entry.name ?? id
-
-    // Check if automation with this ID already exists
-    const existing = findMatcherById(existingConfig.automations, id)
-
-    if (existing) {
-      if (mode === 'skip') {
-        result.skipped.push(label)
-        continue
-      }
-      // Overwrite: remove old, insert new at same position
-      existingConfig.automations[existing.event]!.splice(existing.index, 1)
-      // Clean up empty event arrays
-      if (existingConfig.automations[existing.event]!.length === 0) {
-        delete existingConfig.automations[existing.event]
-      }
-      overwrittenIds.add(id)
-    }
-
-    // Insert into the target event's matcher array
-    if (!existingConfig.automations[entry.event]) {
-      existingConfig.automations[entry.event] = []
-    }
-    existingConfig.automations[entry.event]!.push(matcher)
-    result.imported.push(label)
-  }
-
-  // Validate the merged full config (schema + semantic: regex, cron, timezone, conditions)
-  const mergedValidation = validateAutomationsConfig({
-    version: existingConfig.version,
-    automations: existingConfig.automations,
-  })
-
-  if (!mergedValidation.valid) {
-    // Reject the entire import — merged config is invalid
-    const errorMsg = `Merged automations config is invalid: ${mergedValidation.errors.join('; ')}`
-    result.imported = []
-    result.skipped = []
-    for (const entry of entries) {
-      result.failed.push({ id: automationLabel(entry), error: errorMsg })
-    }
-    return result
-  }
-
-  // Write atomically: temp file + rename
-  try {
-    const configObj = {
-      version: existingConfig.version ?? 2,
-      automations: existingConfig.automations,
-    }
-    const tmpPath = configPath + `.tmp-${randomUUID().slice(0, 8)}`
-    writeFileSync(tmpPath, JSON.stringify(configObj, null, 2) + '\n', 'utf-8')
-    renameSync(tmpPath, configPath)
-  } catch (err) {
-    const errorMsg = `Failed to write automations.json: ${err}`
-    result.imported = []
-    for (const entry of entries) {
-      result.failed.push({ id: automationLabel(entry), error: errorMsg })
-    }
-    return result
-  }
-
-  // Selectively clear history + retry queue for overwritten matcher IDs
-  if (overwrittenIds.size > 0) {
-    const historyPath = join(workspaceRootPath, AUTOMATIONS_HISTORY_FILE)
-    const retryPath = join(workspaceRootPath, AUTOMATIONS_RETRY_QUEUE_FILE)
-    filterJsonlByMatcherIds(historyPath, overwrittenIds)
-    filterJsonlByMatcherIds(retryPath, overwrittenIds)
-    result.warnings.push(`Cleared history/retry entries for ${overwrittenIds.size} overwritten automation(s)`)
   }
 
   return result

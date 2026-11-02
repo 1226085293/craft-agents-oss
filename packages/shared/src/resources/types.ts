@@ -9,7 +9,6 @@
 
 import type { BundleFile } from '../utils/bundle-files.ts'
 import type { FolderSourceConfig } from '../sources/types.ts'
-import type { AutomationMatcher } from '../automations/types.ts'
 
 // ============================================================
 // Bundle Format
@@ -31,7 +30,6 @@ export interface ResourceBundle {
     sources?: SourceBundleEntry[]
     skills?: SkillBundleEntry[]
     /** Per-automation entries (sanitized — webhook auth stripped) */
-    automations?: AutomationBundleEntry[]
   }
 }
 
@@ -61,21 +59,6 @@ export interface SkillBundleEntry {
   files: BundleFile[]
 }
 
-/**
- * An automation in the bundle.
- * Matcher config is sanitized (webhook auth stripped).
- */
-export interface AutomationBundleEntry {
-  /** Automation ID (6-char hex from automations.json) */
-  id: string
-  /** Display name (denormalized from matcher.name — metadata only, not used for identity) */
-  name?: string
-  /** Event type this automation is registered under */
-  event: string
-  /** The full matcher config (sanitized — webhook auth stripped) */
-  matcher: AutomationMatcher
-}
-
 // ============================================================
 // Import/Export Options & Results
 // ============================================================
@@ -96,7 +79,6 @@ export interface ExportResourcesOptions {
   /** Skill slugs to export, or 'all' for every skill */
   skills?: string[] | 'all'
   /** Automation IDs/names to export, 'all' for every automation, or true (= 'all') */
-  automations?: boolean | string[] | 'all'
 }
 
 /**
@@ -128,7 +110,6 @@ export interface ImportBucketResult {
 export interface ResourceImportResult {
   sources: ImportBucketResult
   skills: ImportBucketResult
-  automations: ImportBucketResult
 }
 
 // ============================================================

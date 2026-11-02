@@ -13,10 +13,7 @@ const CATEGORY_BADGE: Record<EventCategory, { label: string; color: BadgeColor }
   'agent-pre':   { label: 'Before',    color: 'warning' },
   'agent-post':  { label: 'After',     color: 'success' },
   'agent-error': { label: 'On Error',  color: 'destructive' },
-  'label':       { label: 'Event',     color: 'default' },
   'permission':  { label: 'Event',     color: 'default' },
-  'flag':        { label: 'Event',     color: 'default' },
-  'todo':        { label: 'Event',     color: 'default' },
   'session':     { label: 'Event',     color: 'default' },
   'other':       { label: 'Event',     color: 'default' },
 }

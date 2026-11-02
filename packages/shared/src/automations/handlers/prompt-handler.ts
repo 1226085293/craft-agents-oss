@@ -64,10 +64,10 @@ export class PromptHandler implements AutomationHandler {
     for (const matcher of matchers) {
       if (!matcherMatches(matcher, event, payload as unknown as Record<string, unknown>)) continue;
 
-      const prompts: Array<{ prompt: PromptAction; labels?: string[]; permissionMode?: PermissionMode }> = [];
+      const prompts: Array<{ prompt: PromptAction; permissionMode?: PermissionMode }> = [];
       for (const action of matcher.actions) {
         if (action.type === 'prompt') {
-          prompts.push({ prompt: action, labels: matcher.labels, permissionMode: matcher.permissionMode });
+          prompts.push({ prompt: action, permissionMode: matcher.permissionMode });
         }
       }
       if (prompts.length > 0) {

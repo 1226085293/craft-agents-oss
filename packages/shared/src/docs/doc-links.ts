@@ -11,14 +11,12 @@ export type DocFeature =
   | 'sources-mcp'
   | 'sources-local'
   | 'skills'
-  | 'statuses'
   | 'permissions'
-  | 'labels'
   | 'workspaces'
   | 'themes'
   | 'app-settings'
-  | 'automations'
   | 'messaging'
+  | 'automations'
 
 export interface DocInfo {
   /** Path relative to DOC_BASE_URL */
@@ -60,29 +58,17 @@ export const DOCS: Record<DocFeature, DocInfo> = {
     summary:
       'Reusable instruction sets that teach your agent specialized behaviors. Create a SKILL.md file and invoke it with @mention in your messages.',
   },
-  statuses: {
-    path: '/statuses/overview',
-    title: 'Statuses',
-    summary:
-      'Organize conversations into workflow states like Todo, In Progress, and Done. Open statuses appear in your inbox; closed ones move to the archive.',
-  },
   permissions: {
     path: '/core-concepts/permissions',
     title: 'Permissions',
     summary:
       'Control how much autonomy your agent has. Explore mode is read-only, Ask to Edit prompts before changes, and Execute mode runs without prompts.',
   },
-  labels: {
-    path: '/labels/overview',
-    title: 'Labels',
-    summary:
-      'Tag sessions with colored labels for organization and filtering. Labels support hierarchical nesting, typed values, and auto-apply rules that extract data from messages using regex patterns.',
-  },
   workspaces: {
     path: '/go-further/workspaces',
     title: 'Workspaces',
     summary:
-      'Separate configurations for different contexts like personal projects or work. Each workspace has its own sources, skills, statuses, and session history.',
+      'Separate configurations for different contexts like personal projects or work. Each workspace has its own sources, skills, and session history.',
   },
   themes: {
     path: '/go-further/themes',
@@ -96,17 +82,17 @@ export const DOCS: Record<DocFeature, DocInfo> = {
     summary:
       'Configure global app settings like your default model, authentication method, and workspace list. Settings are stored in ~/.craft-agent/config.json.',
   },
-  automations: {
-    path: '/automations/overview',
-    title: 'Automations',
-    summary:
-      'Automate actions when events occur — run commands on schedules, react to label changes, or trigger prompts. Configured in automations.json.',
-  },
   messaging: {
     path: '/messaging/overview',
     title: 'Messaging',
     summary:
       'Connect a session to a chat platform — Telegram, WhatsApp, or Lark / Feishu — and reach your agent from anywhere. Pair workspace supergroups, route automations to forum topics, and send rich replies natively.',
+  },
+  automations: {
+    path: '/automations/overview',
+    title: 'Automations',
+    summary:
+      'Run work without asking: bind an event or a cron schedule to actions that send a prompt, call a webhook, or run a script — with an execution history you can replay.',
   },
 }
 

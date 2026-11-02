@@ -8,10 +8,7 @@
 import * as React from 'react'
 import {
   Clock,
-  Tag,
   Shield,
-  Flag,
-  ListChecks,
   Zap,
   CheckCircle2,
   AlertTriangle,
@@ -40,10 +37,7 @@ const sizeConfig: Record<AvatarSize, { container: string; icon: string }> = {
 
 const categoryConfig: Record<EventCategory, { icon: React.ElementType; bg: string; text: string }> = {
   scheduled:    { icon: Clock,          bg: 'bg-success/10',      text: 'text-success' },
-  label:        { icon: Tag,            bg: 'bg-accent/10',       text: 'text-accent' },
   permission:   { icon: Shield,         bg: 'bg-warning/10',      text: 'text-warning' },
-  flag:         { icon: Flag,           bg: 'bg-info/10',         text: 'text-info' },
-  todo:         { icon: ListChecks,     bg: 'bg-info/10',         text: 'text-info' },
   'agent-pre':  { icon: Zap,            bg: 'bg-warning/10',      text: 'text-warning' },
   'agent-post': { icon: CheckCircle2,   bg: 'bg-success/10',      text: 'text-success' },
   'agent-error':{ icon: AlertTriangle,  bg: 'bg-destructive/10',  text: 'text-destructive' },

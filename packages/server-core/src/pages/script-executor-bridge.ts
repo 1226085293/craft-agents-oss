@@ -25,7 +25,7 @@ import {
   buildBaseScriptEnv,
   type ScriptAction,
   type ScriptActionResult,
-} from '@craft-agent/shared/automations'
+} from '@craft-agent/shared/pages'
 import type { PageScriptRuntime } from '@craft-agent/core'
 import type { Logger } from '@craft-agent/server-core/runtime'
 

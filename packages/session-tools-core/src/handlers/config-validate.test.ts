@@ -31,27 +31,3 @@ function createCtx(workspacePath: string) {
     loadSourceConfig: () => null,
   } as const;
 }
-
-describe('config-validate automations target', () => {
-  let tempDir: string;
-
-  beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'config-validate-automations-test-'));
-  });
-
-  afterEach(() => {
-    rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  it('validates automations.json when present', async () => {
-    writeFileSync(join(tempDir, 'automations.json'), JSON.stringify({ version: 2, automations: {} }));
-
-    const result = await handleConfigValidate(createCtx(tempDir), { target: 'automations' });
-    expect(result.content[0]?.text).toContain('Validation passed');
-  });
-
-  it('returns no-config message when automations.json does not exist', async () => {
-    const result = await handleConfigValidate(createCtx(tempDir), { target: 'automations' });
-    expect(result.content[0]?.text).toContain('No automations.json');
-  });
-});

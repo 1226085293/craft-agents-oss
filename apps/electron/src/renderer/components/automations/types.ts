@@ -20,13 +20,8 @@ import { DEFAULT_WEBHOOK_METHOD } from './constants'
 // ============================================================================
 
 export type AppEvent =
-  | 'LabelAdd'
-  | 'LabelRemove'
-  | 'LabelConfigChange'
   | 'PermissionModeChange'
-  | 'FlagChange'
-  | 'TodoStateChange'
-  | 'SessionStatusChange'
+  | 'SessionPathChange'
   | 'SchedulerTick'
 
 export type AgentEvent =
@@ -47,8 +42,7 @@ export type AgentEvent =
 export type AutomationTrigger = AppEvent | AgentEvent
 
 export const APP_EVENTS: AppEvent[] = [
-  'LabelAdd', 'LabelRemove', 'LabelConfigChange',
-  'PermissionModeChange', 'FlagChange', 'TodoStateChange', 'SessionStatusChange', 'SchedulerTick'
+  'PermissionModeChange', 'SessionPathChange', 'SchedulerTick'
 ]
 
 export const AGENT_EVENTS: AgentEvent[] = [
@@ -306,13 +300,8 @@ export interface TestResult {
 /** Maps internal event names to user-friendly labels */
 export const EVENT_DISPLAY_NAMES: Record<AutomationTrigger, string> = {
   // App events
-  LabelAdd:             'Label Added',
-  LabelRemove:          'Label Removed',
-  LabelConfigChange:    'Label Settings Changed',
   PermissionModeChange: 'Permission Changed',
-  FlagChange:           'Flag Changed',
-  TodoStateChange:      'Task Updated',
-  SessionStatusChange:  'Status Changed',
+  SessionPathChange:    'Session Path Changed',
   SchedulerTick:        'Scheduled',
 
   // Agent events
@@ -353,10 +342,7 @@ export function getPermissionDisplayName(mode?: PermissionMode): string {
 
 export type EventCategory =
   | 'scheduled'
-  | 'label'
   | 'permission'
-  | 'flag'
-  | 'todo'
   | 'agent-pre'
   | 'agent-post'
   | 'agent-error'
@@ -500,18 +486,11 @@ export function getEventCategory(event: AutomationTrigger): EventCategory {
   switch (event) {
     case 'SchedulerTick':
       return 'scheduled'
-    case 'LabelAdd':
-    case 'LabelRemove':
-    case 'LabelConfigChange':
-      return 'label'
     case 'PermissionModeChange':
     case 'PermissionRequest':
       return 'permission'
-    case 'FlagChange':
-      return 'flag'
-    case 'TodoStateChange':
-    case 'SessionStatusChange':
-      return 'todo'
+    case 'SessionPathChange':
+      return 'session'
     case 'PreToolUse':
     case 'UserPromptSubmit':
     case 'Setup':

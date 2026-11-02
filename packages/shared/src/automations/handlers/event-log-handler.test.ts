@@ -58,7 +58,7 @@ describe('EventLogHandler', () => {
       handler.subscribe(bus);
 
       const timestamp = Date.now();
-      await bus.emit('LabelAdd', {
+      await bus.emit('PermissionModeChange', {
         workspaceId: 'test-workspace',
         timestamp,
         label: 'test-label',
@@ -67,7 +67,7 @@ describe('EventLogHandler', () => {
       const loggerInstance = mockLoggerInstances[0]!;
       expect(loggerInstance.log).toHaveBeenCalledTimes(1);
       expect(loggerInstance.log).toHaveBeenCalledWith(expect.objectContaining({
-        type: 'LabelAdd',
+        type: 'PermissionModeChange',
         workspaceId: 'test-workspace',
       }));
 
@@ -78,13 +78,13 @@ describe('EventLogHandler', () => {
       const handler = new EventLogHandler(createOptions());
       handler.subscribe(bus);
 
-      await bus.emit('LabelAdd', {
+      await bus.emit('PermissionModeChange', {
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
         label: 'first',
       });
 
-      await bus.emit('LabelRemove', {
+      await bus.emit('PermissionModeChange', {
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
         label: 'second',
@@ -100,7 +100,7 @@ describe('EventLogHandler', () => {
       const handler = new EventLogHandler(createOptions());
       handler.subscribe(bus);
 
-      await bus.emit('LabelAdd', {
+      await bus.emit('PermissionModeChange', {
         workspaceId: 'test-workspace',
         sessionId: 'session-123',
         timestamp: Date.now(),
@@ -184,7 +184,7 @@ describe('EventLogHandler', () => {
       handler.subscribe(bus);
       await handler.dispose();
 
-      await bus.emit('LabelAdd', {
+      await bus.emit('PermissionModeChange', {
         workspaceId: 'test-workspace',
         timestamp: Date.now(),
         label: 'test',

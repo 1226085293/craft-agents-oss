@@ -182,9 +182,7 @@ export const AutomationMatcherSchema = z.object({
  * Old names are accepted during schema validation and silently rewritten to canonical names.
  * A console.warn() is emitted at runtime so users know to update their configs.
  */
-export const DEPRECATED_EVENT_ALIASES: Record<string, string> = {
-  'TodoStateChange': 'SessionStatusChange',
-};
+export const DEPRECATED_EVENT_ALIASES: Record<string, string> = {};
 
 /** All valid event names: canonical events + deprecated aliases. Derived from types.ts. */
 export const VALID_EVENTS: readonly string[] = [

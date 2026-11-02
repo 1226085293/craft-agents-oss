@@ -2,7 +2,6 @@
  * SchedulerService - Emits SchedulerTick events every minute
  *
  * Aligned to minute boundaries for consistent timing.
- * Automations can subscribe using cron expressions in automations.json.
  */
 
 export interface SchedulerTickPayload {

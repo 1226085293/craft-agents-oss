@@ -3,7 +3,6 @@
  *
  * Single read/write path to the unified appearance configuration
  * (~/.craft-agent/appearance.json) for all renderer consumers:
- * ThemeContext (mode/colorTheme/font), kanban atoms, workspace-avatar
  * colors, background-finished chip, project color treatment, diff viewer
  * and tool icon mappings.
  *
@@ -20,9 +19,6 @@ import { KEYS as STORAGE_KEYS } from '@/lib/local-storage'
 // browser storage API — these keys predate the typed local-storage wrapper).
 const LEGACY_KEYS = {
   theme: 'theme',
-  kanbanColumnColors: 'craft-kanban-column-colors',
-  kanbanLivePulse: 'craft-kanban-live-pulse',
-  kanbanColumnStatus: 'craft-kanban-column-status',
   workspaceAvatarColors: 'craft-workspace-avatar-colors',
   backgroundFinishedChip: 'craft-show-background-finished-chip',
   projectColorTreatment: 'project-color-treatment',
@@ -156,26 +152,6 @@ function migrateLegacyLocalStorage(config: AppearanceConfig): { config: Appearan
 
   const ui: AppearanceUiSettings = { ...next.ui }
   const board: AppearanceBoardSettings = { ...next.board }
-
-  // Kanban appearance
-  const columnColors = rawGetJson<Record<string, string>>(LEGACY_KEYS.kanbanColumnColors)
-  if (columnColors && typeof columnColors === 'object') {
-    board.columnColors = { ...board.columnColors, ...columnColors }
-    rawRemove(LEGACY_KEYS.kanbanColumnColors)
-    dirty = true
-  }
-  const livePulse = rawGetJson<boolean | null>(LEGACY_KEYS.kanbanLivePulse)
-  if (livePulse !== null && livePulse !== undefined) {
-    board.livePulse = livePulse
-    rawRemove(LEGACY_KEYS.kanbanLivePulse)
-    dirty = true
-  }
-  const columnStatus = rawGetJson<Record<string, string>>(LEGACY_KEYS.kanbanColumnStatus)
-  if (columnStatus && typeof columnStatus === 'object') {
-    board.columnStatus = { ...board.columnStatus, ...columnStatus }
-    rawRemove(LEGACY_KEYS.kanbanColumnStatus)
-    dirty = true
-  }
 
   // Workspace avatar colors
   const avatarColors = rawGetJson<Record<string, string>>(LEGACY_KEYS.workspaceAvatarColors)

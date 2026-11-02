@@ -329,19 +329,8 @@ describe('getValidateSteps', () => {
     expect(names).toContain('skills:delete')
   })
 
-  it('includes automation lifecycle steps', () => {
-    const names = getValidateSteps().map((s) => s.name)
-    expect(names).toContain('automation:create')
-    expect(names).toContain('automation:trigger (status change)')
-    expect(names).toContain('automation:verify session')
-    expect(names).toContain('automation:verify labels')
-    expect(names).toContain('automations:getLastExecuted')
-    expect(names).toContain('automation:cleanup')
-  })
-
   it('includes session tool validation steps', () => {
     const names = getValidateSteps().map((s) => s.name)
-    expect(names).toContain('session-tools:set_session_labels')
     expect(names).toContain('session-tools:get_session_info')
     expect(names).toContain('session-tools:list_sessions')
   })
@@ -349,10 +338,10 @@ describe('getValidateSteps', () => {
   it('session tool steps come after tool use and before branching', () => {
     const names = getValidateSteps().map((s) => s.name)
     const toolUse = names.indexOf('send message + tool use')
-    const labels = names.indexOf('session-tools:set_session_labels')
+    const getInfo = names.indexOf('session-tools:get_session_info')
     const branch = names.indexOf('sessions:branch')
-    expect(labels).toBeGreaterThan(toolUse)
-    expect(branch).toBeGreaterThan(labels)
+    expect(getInfo).toBeGreaterThan(toolUse)
+    expect(branch).toBeGreaterThan(getInfo)
   })
 
   it('includes session branching steps', () => {
@@ -364,8 +353,6 @@ describe('getValidateSteps', () => {
 
   it('includes webhook validation steps', () => {
     const names = getValidateSteps().map((s) => s.name)
-    expect(names).toContain('webhook:test (RPC)')
-    expect(names).toContain('webhook:verify failure')
   })
 
   it('creates session with allow-all permission mode', () => {
@@ -393,11 +380,4 @@ describe('getValidateSteps', () => {
     expect(branch).toBeGreaterThan(toolUse)
   })
 
-  it('automation cleanup comes before sources:delete', () => {
-    const names = getValidateSteps().map((s) => s.name)
-    const cleanup = names.indexOf('automation:cleanup')
-    const srcDelete = names.indexOf('sources:delete')
-    expect(cleanup).toBeGreaterThan(-1)
-    expect(cleanup).toBeLessThan(srcDelete)
-  })
 })

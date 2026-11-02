@@ -36,7 +36,7 @@ describe('normalizePanelRouteForReconcile', () => {
   it('normalizes each session panel route independently', () => {
     const resolver = (state: NavigationState): NavigationState => {
       if (state.navigator === 'sessions' && !state.details) {
-        const sessionId = state.filter.kind === 'flagged' ? 'flagged-1' : 'all-1'
+        const sessionId = state.filter.kind === 'archived' ? 'flagged-1' : 'all-1'
         return {
           ...state,
           details: { type: 'session', sessionId },
@@ -45,10 +45,10 @@ describe('normalizePanelRouteForReconcile', () => {
       return state
     }
 
-    const routes = ['allSessions', 'flagged'] as const
+    const routes = ['allSessions', 'archived'] as const
     const normalized = routes.map((route) => normalizePanelRouteForReconcile(route, resolver))
 
-    expect(normalized).toEqual(['allSessions/session/all-1', 'flagged/session/flagged-1'])
+    expect(normalized).toEqual(['allSessions/session/all-1', 'archived/session/flagged-1'])
   })
 
   it('keeps route unchanged when resolver leaves state without details', () => {

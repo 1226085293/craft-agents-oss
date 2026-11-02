@@ -18,7 +18,6 @@ import { DeletePageDialog } from './DeletePageDialog'
 import type { LoadedPage } from '@craft-agent/shared/pages/types'
 
 /**
- * Pages library — the full-width home grid (mirrors the Kanban board pane).
  * Header carries the controlled Project filter (with an Unassigned sentinel)
  * and the New Page action; tiles open beside the library (or as a floating
  * window from the context menu).

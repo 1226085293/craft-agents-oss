@@ -42,11 +42,9 @@ export const routes = {
      * @param input - Optional initial message to pre-fill or send
      * @param name - Optional session name
      * @param send - If true and input is provided, immediately sends the message
-     * @param status - Optional status/todo-state ID to apply to the new session
-     * @param label - Optional label ID to apply to the new session
      * @param project - Optional project id to bind the new session to
      */
-    newSession: (params?: { input?: string; name?: string; send?: boolean; status?: string; label?: string; project?: string }) =>
+    newSession: (params?: { input?: string; name?: string; send?: boolean; project?: string }) =>
       `action/new-session${toQueryString(params ? { ...params, send: params.send ? 'true' : undefined } : undefined)}` as const,
 
     /** Rename a session */
@@ -56,14 +54,6 @@ export const routes = {
     /** Delete a session (with confirmation) */
     deleteSession: (sessionId: string) =>
       `action/delete-session/${sessionId}` as const,
-
-    /** Toggle flag on a session */
-    flagSession: (sessionId: string) =>
-      `action/flag-session/${sessionId}` as const,
-
-    /** Unflag a session */
-    unflagSession: (sessionId: string) =>
-      `action/unflag-session/${sessionId}` as const,
 
     /** Start OAuth flow for a source */
     oauth: (sourceSlug: string) => `action/oauth/${sourceSlug}` as const,
@@ -97,31 +87,21 @@ export const routes = {
     allSessions: (sessionId?: string) =>
       sessionId ? `allSessions/session/${sessionId}` as const : 'allSessions' as const,
 
-    /** Flagged view (sessions navigator, flagged filter) */
-    flagged: (sessionId?: string) =>
-      sessionId ? `flagged/session/${sessionId}` as const : 'flagged' as const,
-
     /** Archived view (sessions navigator, archived filter) */
     archived: (sessionId?: string) =>
       sessionId ? `archived/session/${sessionId}` as const : 'archived' as const,
 
-    /** Todo state filter view (sessions navigator, state filter) */
-    state: (stateId: string, sessionId?: string) =>
+    /** Folder scope (sessions navigator). Folder ids are slugs inside one project/root tree. */
+    folder: (folderId: string, sessionId?: string) =>
       sessionId
-        ? `state/${stateId}/session/${sessionId}` as const
-        : `state/${stateId}` as const,
+        ? `folder/${encodeURIComponent(folderId)}/session/${sessionId}` as const
+        : `folder/${encodeURIComponent(folderId)}` as const,
 
-    /** Label filter view (sessions navigator, label filter — includes descendants via tree hierarchy) */
-    label: (labelId: string, sessionId?: string) =>
-      sessionId
-        ? `label/${encodeURIComponent(labelId)}/session/${sessionId}` as const
-        : `label/${encodeURIComponent(labelId)}` as const,
-
-    /** View filter (sessions navigator, view filter — evaluated dynamically) */
-    view: (viewId: string, sessionId?: string) =>
-      sessionId
-        ? `view/${encodeURIComponent(viewId)}/session/${sessionId}` as const
-        : `view/${encodeURIComponent(viewId)}` as const,
+    /** Archive tree (projects / folders / sessions). `nodeId` = `project:{id}` | `folder:{id}`. */
+    archive: (nodeId?: string, sessionId?: string) => {
+      const base = nodeId ? `archive/${encodeURIComponent(nodeId)}` : 'archive'
+      return (sessionId ? `${base}/session/${sessionId}` : base) as string
+    },
 
     /** Sources view (sources navigator) - supports type filtering */
     sources: (params?: { sourceSlug?: string; type?: 'api' | 'mcp' | 'local' }) => {
@@ -161,7 +141,12 @@ export const routes = {
       return `skills/skill/${skillSlug}` as const
     },
 
-    /** Automations view (automations navigator) - supports type filtering */
+    /** Settings view (settings navigator) - uses SettingsSubpage from registry */
+    settings: (subpage?: SettingsSubpage) =>
+      subpage
+        ? `settings/${subpage}` as const
+        : 'settings' as const,
+
     automations: (params?: { automationId?: string; type?: 'scheduled' | 'event' | 'agentic' }) => {
       const { automationId, type } = params ?? {}
       const base = type ? `automations/${type}` : 'automations'
@@ -181,12 +166,6 @@ export const routes = {
     automationsAgentic: (automationId?: string) =>
       automationId ? `automations/agentic/automation/${automationId}` as const : 'automations/agentic' as const,
 
-    /** Settings view (settings navigator) - uses SettingsSubpage from registry */
-    settings: (subpage?: SettingsSubpage) =>
-      subpage
-        ? `settings/${subpage}` as const
-        : 'settings' as const,
-
     /** Projects view (projects navigator) */
     projects: (projectSlug?: string) =>
       projectSlug
@@ -199,8 +178,6 @@ export const routes = {
         ? `pages/page/${pageSlug}` as const
         : 'pages' as const,
 
-    /** Kanban board view (sessions navigator, board view mode, all sessions) */
-    board: () => 'board' as const,
   },
 } as const
 

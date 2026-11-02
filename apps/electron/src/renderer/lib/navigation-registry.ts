@@ -46,7 +46,7 @@ export interface DetailsProps {
  */
 export interface NavigationData {
   /** All sessions in the current filter */
-  sessions: Array<{ id: string; isFlagged?: boolean; stateId?: string }>
+  sessions: Array<{ id: string; stateId?: string }>
   /** All sources */
   sources: Array<{ slug: string }>
   /** Current session filter (if in sessions mode) */
@@ -79,7 +79,7 @@ export type NavigatorType = 'sessions' | 'sources' | 'settings'
 /**
  * Session filter kinds that map to sidebar routes
  */
-export type SessionFilterKind = 'allSessions' | 'flagged' | 'state'
+export type SessionFilterKind = 'allSessions' | 'state'
 
 // =============================================================================
 // Details Page Metadata
@@ -130,12 +130,6 @@ export const NavigationRegistry = {
 
       let filtered = ctx.sessions
       switch (filter.kind) {
-        case 'flagged':
-          filtered = ctx.sessions.filter(s => s.isFlagged)
-          break
-        case 'state':
-          filtered = ctx.sessions.filter(s => s.stateId === filter.stateId)
-          break
         case 'allSessions':
         default:
           // allSessions shows all sessions
@@ -163,7 +157,6 @@ export const NavigationRegistry = {
       input: PlaceholderComponent, // InputSettingsPage
       workspace: PlaceholderComponent, // WorkspaceSettingsPage
       permissions: PlaceholderComponent, // PermissionsSettingsPage
-      labels: PlaceholderComponent, // LabelsSettingsPage
       shortcuts: PlaceholderComponent, // ShortcutsPage
     },
     defaultDetails: 'app', // Always has a default

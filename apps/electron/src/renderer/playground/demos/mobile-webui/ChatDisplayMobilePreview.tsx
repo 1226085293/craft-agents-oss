@@ -6,7 +6,6 @@ import { MobileWebUIFrame, type MobileDevice } from './MobileWebUIFrame'
 import { MobilePlaygroundProviders } from './MobilePlaygroundProviders'
 import {
   MOCK_MESSAGES,
-  MOCK_LABELS,
   MOCK_LLM_CONNECTIONS,
   MOCK_SESSION_STATUSES,
   MOCK_SOURCES,
@@ -118,10 +117,6 @@ export function ChatDisplayMobilePreview({
             sources={MOCK_SOURCES}
             onSourcesChange={log('onSourcesChange')}
             skills={MOCK_SKILLS}
-            labels={MOCK_LABELS}
-            onLabelsChange={log('onLabelsChange')}
-            sessionStatuses={MOCK_SESSION_STATUSES}
-            onSessionStatusChange={log('onSessionStatusChange')}
             workspaceId={MOBILE_WORKSPACE_ID}
             compactMode={true}
             enableCompactModelPicker={true}

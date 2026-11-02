@@ -283,6 +283,34 @@ export function handleTaskCompleted(
       toolStatus: event.status === 'failed' ? 'error' : 'completed',
       toolResult: event.summary || `Background task ${event.status}`,
     })
+
+    // A task stopped after the turn ended is its own turn: insert a standalone
+    // info row before the task's process row so turn grouping starts a new
+    // process block below the separator with the task entry as its first item.
+    // Mid-turn stops stay inside the ongoing process block (streaming === true).
+    const separatorId = `bg-stop-${event.taskId}`
+    if (
+      event.status === 'stopped' &&
+      !streaming &&
+      !updatedSession.messages.some(m => m.id === separatorId)
+    ) {
+      const separator: Message = {
+        id: separatorId,
+        role: 'info',
+        content: `——后台任务 ${event.taskId} 已停止——`,
+        // Keep the separator adjacent to the task row after turn-utils sorts
+        // messages by timestamp. Date.now() would sort after the task row and
+        // leave the separator at the end of the process block instead of above it.
+        timestamp: updatedSession.messages[toolIndex]!.timestamp,
+      }
+      const messages = [
+        ...updatedSession.messages.slice(0, toolIndex),
+        separator,
+        ...updatedSession.messages.slice(toolIndex),
+      ]
+      return { session: { ...updatedSession, messages }, streaming }
+    }
+
     return { session: updatedSession, streaming }
   }
 

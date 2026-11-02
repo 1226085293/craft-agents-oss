@@ -19,7 +19,6 @@ function memoryPath(ctx: SessionToolContext, scope: 'session' | 'global'): strin
  * byte-identical timestamps — the system prompt promises "each entry carries
  * its last-update time automatically" on read-back, and this handler is one
  * of the two read paths. Local copy: this package must stay dependency-free
- * of @craft-agent/shared (see create_task.ts / pages.ts).
  *
  * Returns '' for a missing/invalid stamp rather than a bogus date.
  */

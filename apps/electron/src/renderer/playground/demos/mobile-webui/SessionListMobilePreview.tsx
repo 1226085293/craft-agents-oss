@@ -1,10 +1,9 @@
 import * as React from 'react'
-import { SessionList, type ChatGroupingMode } from '@/components/app-shell/SessionList'
+import { SessionList } from '@/components/app-shell/SessionList'
 import { MobileWebUIFrame, type MobileDevice } from './MobileWebUIFrame'
 import { MobilePlaygroundProviders } from './MobilePlaygroundProviders'
 import {
   MOCK_SESSIONS,
-  MOCK_LABELS,
   MOCK_SESSION_STATUSES,
   MOBILE_WORKSPACE_ID,
 } from './mock-mobile-data'
@@ -17,7 +16,6 @@ interface SessionListMobilePreviewProps {
   device?: MobileDevice
   showBezel?: boolean
   /** How sessions are grouped in the list. */
-  groupingMode?: ChatGroupingMode
   /** Activate the search header. */
   searchActive?: boolean
   /** Initial search query for the header. */
@@ -34,7 +32,6 @@ interface SessionListMobilePreviewProps {
 export function SessionListMobilePreview({
   device = 'iphone-15',
   showBezel = true,
-  groupingMode = 'date',
   searchActive = false,
   searchQuery = '',
   empty = false,
@@ -54,25 +51,17 @@ export function SessionListMobilePreview({
               console.log('[Mobile SessionList] onDelete', id)
               return true
             }}
-            onFlag={log('onFlag')}
-            onUnflag={log('onUnflag')}
             onArchive={log('onArchive')}
             onUnarchive={log('onUnarchive')}
             onMarkUnread={log('onMarkUnread')}
-            onSessionStatusChange={log('onSessionStatusChange')}
             onRename={log('onRename')}
             onFocusChatInput={log('onFocusChatInput')}
             onSessionSelect={log('onSessionSelect')}
             onOpenInNewWindow={log('onOpenInNewWindow')}
-            onNavigateToView={log('onNavigateToView')}
             searchActive={searchActive}
             searchQuery={query}
             onSearchChange={setQuery}
             onSearchClose={() => setQuery('')}
-            sessionStatuses={MOCK_SESSION_STATUSES}
-            labels={MOCK_LABELS}
-            onLabelsChange={log('onLabelsChange')}
-            groupingMode={groupingMode}
             workspaceId={MOBILE_WORKSPACE_ID}
           />
         </div>

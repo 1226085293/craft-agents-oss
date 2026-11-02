@@ -3,7 +3,7 @@ import type { ComponentEntry } from './types'
 import { AttachmentPreview } from '@/components/app-shell/AttachmentPreview'
 import { SetupAuthBanner } from '@/components/app-shell/SetupAuthBanner'
 import { TurnCard, type ActivityItem } from '@craft-agent/ui'
-import type { BackgroundTask } from '@/components/app-shell/ActiveTasksBar'
+import type { BackgroundTask } from '@/atoms/sessions'
 import { ActiveOptionBadges } from '@/components/app-shell/ActiveOptionBadges'
 import { ChatInputZone, InputContainer } from '@/components/app-shell/input'
 import { setRecentWorkingDirs } from '@/components/app-shell/input/working-directory-history'
@@ -12,8 +12,7 @@ import { EmptyStateHint, getHintCount, getHintTemplate } from '@/components/chat
 import { Button } from '@/components/ui/button'
 import { motion } from 'motion/react'
 import { ArrowUp, Paperclip, ChevronDown, Circle, Sparkles } from 'lucide-react'
-import type { LabelConfig } from '@craft-agent/shared/labels'
-import type { SessionStatus } from '@/config/session-status-config'
+type SessionStatus = { id: string; label: string; color?: string; icon?: any; [key: string]: any }
 import type { FileAttachment, PermissionRequest, PermissionMode } from '../../../shared/types'
 import { cn } from '@/lib/utils'
 import { AppShellProvider } from '@/context/AppShellContext'
@@ -142,13 +141,6 @@ const longRunningTasks: BackgroundTask[] = [
   },
 ]
 
-const inputContainerSampleLabels: LabelConfig[] = [
-  { id: 'bug', name: 'Bug', color: { light: '#EF4444', dark: '#F87171' } },
-  { id: 'priority', name: 'Priority', color: { light: '#F59E0B', dark: '#FBBF24' }, valueType: 'number' },
-  { id: 'due-date', name: 'Due Date', color: { light: '#3B82F6', dark: '#60A5FA' }, valueType: 'date' },
-  { id: 'sprint', name: 'Sprint', color: { light: '#8B5CF6', dark: '#A78BFA' }, valueType: 'string' },
-]
-
 const inputContainerSampleStatuses: SessionStatus[] = [
   {
     id: 'todo',
@@ -204,7 +196,6 @@ const playgroundAppShellContext = {
   onMarkSessionRead: () => {},
   onMarkSessionUnread: () => {},
   onSetActiveViewingSession: () => {},
-  onSessionStatusChange: () => {},
   onDeleteSession: async () => true,
   onOpenFile: () => {},
   onOpenUrl: () => {},
@@ -544,9 +535,7 @@ interface InputContainerPlaygroundProps {
   compactMode?: boolean
   showOptionBadges?: boolean
   showTasks?: boolean
-  showLabels?: boolean
   showStatuses?: boolean
-  labelCount?: number
   showSources?: boolean
   sourceCount?: number
   showWorkingDirectory?: boolean
@@ -569,9 +558,7 @@ function InputContainerPlayground({
   compactMode = false,
   showOptionBadges = true,
   showTasks = true,
-  showLabels = true,
   showStatuses = true,
-  labelCount = 3,
   showSources = true,
   sourceCount = 2,
   showWorkingDirectory = true,
@@ -609,20 +596,6 @@ function InputContainerPlayground({
   React.useEffect(() => {
     setCwd(workingDirectory)
   }, [workingDirectory])
-
-  const labels = React.useMemo(() => inputContainerSampleLabels.slice(0, Math.max(1, Math.min(labelCount, inputContainerSampleLabels.length))), [labelCount])
-
-  const [sessionLabels, setSessionLabels] = React.useState<string[]>(['bug', 'priority::2', 'sprint::Q1-S3'])
-
-  React.useEffect(() => {
-    const next = labels.map((label) => {
-      if (label.id === 'priority') return 'priority::2'
-      if (label.id === 'due-date') return 'due-date::2026-03-15'
-      if (label.id === 'sprint') return 'sprint::Q1-S3'
-      return label.id
-    })
-    setSessionLabels(next)
-  }, [labels])
 
   const sources = React.useMemo(() => mockSources.slice(0, Math.max(1, Math.min(sourceCount, mockSources.length))), [sourceCount])
   const defaultEnabled = React.useMemo(() => sources.slice(0, Math.min(2, sources.length)).map(source => source.config.slug), [sources])
@@ -746,16 +719,7 @@ function InputContainerPlayground({
           showOptionBadges={showOptionBadges}
           permissionMode={mode}
           onPermissionModeChange={setMode}
-          tasks={showTasks ? sampleBackgroundTasks : []}
           sessionId={playgroundSessionId}
-          onKillTask={(taskId) => console.log('[Playground] Kill task:', taskId)}
-          onInsertMessage={setInputValue}
-          sessionLabels={showLabels ? sessionLabels : []}
-          labels={showLabels ? labels : []}
-          onLabelsChange={setSessionLabels}
-          sessionStatuses={showStatuses ? inputContainerSampleStatuses : []}
-          currentSessionStatus={showStatuses ? currentSessionStatus : undefined}
-          onSessionStatusChange={setCurrentSessionStatus}
           inputProps={{
             placeholder,
             disabled,
@@ -827,9 +791,7 @@ function ActiveTasksBarContext({ tasks = sampleBackgroundTasks }: ActiveTasksBar
         <ActiveOptionBadges
           permissionMode={permissionMode}
           onPermissionModeChange={setPermissionMode}
-          tasks={tasks}
           sessionId="playground-session"
-          onKillTask={(taskId) => console.log('[Playground] Kill task:', taskId)}
         />
 
         {/* Real InputContainer */}
@@ -1331,18 +1293,6 @@ export const chatComponents: ComponentEntry[] = [
         defaultValue: true,
       },
       {
-        name: 'showLabels',
-        description: 'Include label badges and value editing',
-        control: { type: 'boolean' },
-        defaultValue: true,
-      },
-      {
-        name: 'labelCount',
-        description: 'Number of label configs to show',
-        control: { type: 'number', min: 1, max: 4, step: 1 },
-        defaultValue: 3,
-      },
-      {
         name: 'showStatuses',
         description: 'Include session status badge and menu',
         control: { type: 'boolean' },
@@ -1497,8 +1447,6 @@ export const chatComponents: ComponentEntry[] = [
         name: 'Label-heavy Review',
         description: 'Many labels + status for metadata density checks',
         props: {
-          showLabels: true,
-          labelCount: 4,
           showStatuses: true,
           showTasks: false,
         },

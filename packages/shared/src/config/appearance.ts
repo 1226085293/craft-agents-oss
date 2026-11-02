@@ -9,7 +9,6 @@ import { LOCALE_REGISTRY, type LanguageCode } from '../i18n/registry.ts';
  * Unified appearance configuration (~/.craft-agent/appearance.json).
  *
  * All UI/appearance-domain settings live here, one section per UI area:
- * theme (mode/colorTheme/font), ui (language + UI toggles), board (kanban
  * appearance + drop-status automation), diff (diff viewer display) and icons
  * (CLI tool icon mappings). The legacy `preferences.json` and the appearance
  * fields previously spread across config.json / localStorage are migrated in

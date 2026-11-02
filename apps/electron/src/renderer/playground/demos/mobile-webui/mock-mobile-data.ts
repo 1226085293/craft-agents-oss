@@ -8,11 +8,10 @@
  */
 
 import type { Message } from '@craft-agent/core/types'
-import type { LabelConfig } from '@craft-agent/shared/labels'
 import type { LlmConnectionWithStatus } from '@config/llm-connections'
 import type { LoadedSource, LoadedSkill, Session, Workspace } from '../../../../shared/types'
 import type { SessionMeta } from '@/atoms/sessions'
-import type { SessionStatus } from '@/config/session-status-config'
+type SessionStatus = { id: string; label: string; color?: string; icon?: any; [key: string]: any }
 import * as React from 'react'
 import { Circle } from 'lucide-react'
 
@@ -30,13 +29,6 @@ export const MOCK_WORKSPACE: Workspace = {
   rootPath: '/mock/workspaces/mobile',
   createdAt: Date.now() - 30 * ONE_DAY,
 }
-
-export const MOCK_LABELS: LabelConfig[] = [
-  { id: 'feature', name: 'Feature', color: { light: '#10B981', dark: '#34D399' } },
-  { id: 'bug', name: 'Bug', color: { light: '#EF4444', dark: '#F87171' } },
-  { id: 'priority', name: 'Priority', color: { light: '#F59E0B', dark: '#FBBF24' }, valueType: 'number' },
-  { id: 'design', name: 'Design', color: { light: '#8B5CF6', dark: '#A78BFA' } },
-]
 
 export const MOCK_SESSION_STATUSES: SessionStatus[] = [
   {
@@ -85,10 +77,7 @@ export const MOCK_SESSIONS: SessionMeta[] = [
     name: 'Fix mobile nav crash on iOS Safari',
     workspaceId: MOBILE_WORKSPACE_ID,
     lastMessageAt: now() - 4 * ONE_MINUTE,
-    sessionStatus: 'in-progress',
-    isFlagged: true,
     hasUnread: true,
-    labels: ['bug', 'priority::1'],
     isProcessing: true,
   },
   {
@@ -96,15 +85,12 @@ export const MOCK_SESSIONS: SessionMeta[] = [
     name: 'Compact toolbar variants for narrow panels',
     workspaceId: MOBILE_WORKSPACE_ID,
     lastMessageAt: now() - 35 * ONE_MINUTE,
-    sessionStatus: 'todo',
-    labels: ['feature', 'design'],
   },
   {
     id: 'mobile-s-3',
     name: 'Why does the chat input lose focus after submit?',
     workspaceId: MOBILE_WORKSPACE_ID,
     lastMessageAt: now() - 2 * ONE_HOUR,
-    sessionStatus: 'needs-review',
     hasUnread: true,
     lastMessageRole: 'plan',
   },
@@ -113,47 +99,36 @@ export const MOCK_SESSIONS: SessionMeta[] = [
     name: 'Migrate session list grouping to atom-based store',
     workspaceId: MOBILE_WORKSPACE_ID,
     lastMessageAt: now() - 5 * ONE_HOUR,
-    sessionStatus: 'in-progress',
-    labels: ['feature'],
   },
   {
     id: 'mobile-s-5',
     name: 'Audit accessibility for the new app menu',
     workspaceId: MOBILE_WORKSPACE_ID,
     lastMessageAt: now() - ONE_DAY - 30 * ONE_MINUTE,
-    sessionStatus: 'todo',
-    labels: ['design'],
   },
   {
     id: 'mobile-s-6',
     name: 'Fold "Help" submenu into root on compact mode',
     workspaceId: MOBILE_WORKSPACE_ID,
     lastMessageAt: now() - ONE_DAY - 3 * ONE_HOUR,
-    sessionStatus: 'done',
-    isFlagged: true,
   },
   {
     id: 'mobile-s-7',
     name: 'Permission mode badge truncation on narrow widths',
     workspaceId: MOBILE_WORKSPACE_ID,
     lastMessageAt: now() - 2 * ONE_DAY,
-    sessionStatus: 'needs-review',
-    labels: ['bug'],
   },
   {
     id: 'mobile-s-8',
     name: 'Spec the swipe-to-archive interaction',
     workspaceId: MOBILE_WORKSPACE_ID,
     lastMessageAt: now() - 3 * ONE_DAY,
-    sessionStatus: 'todo',
-    labels: ['design', 'feature'],
   },
   {
     id: 'mobile-s-9',
     name: 'Old: investigate dropdown click-through on Android',
     workspaceId: MOBILE_WORKSPACE_ID,
     lastMessageAt: now() - 8 * ONE_DAY,
-    sessionStatus: 'done',
     isArchived: true,
     archivedAt: now() - 7 * ONE_DAY,
   },
@@ -162,7 +137,6 @@ export const MOCK_SESSIONS: SessionMeta[] = [
     name: 'Profile session list scroll perf on iPhone SE',
     workspaceId: MOBILE_WORKSPACE_ID,
     lastMessageAt: now() - 14 * ONE_DAY,
-    sessionStatus: 'done',
   },
 ]
 
@@ -339,7 +313,6 @@ export function buildMockSession(
     isProcessing: options.isProcessing ?? false,
     lastMessageAt: now(),
     permissionMode: 'ask',
-    sessionStatus: 'in-progress',
     createdAt: now() - ONE_HOUR,
   }
 }

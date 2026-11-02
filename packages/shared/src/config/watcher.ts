@@ -21,6 +21,7 @@ import { join, dirname, basename, relative } from 'path';
 import { platform } from 'os';
 import type { FSWatcher } from 'fs';
 import { CONFIG_DIR } from './paths.ts';
+import { AUTOMATIONS_CONFIG_FILE } from '../automations/constants.ts';
 import { debug } from '../utils/debug.ts';
 import { expandPath } from '../utils/paths.ts';
 import { readJsonFileSync } from '../utils/files.ts';
@@ -45,14 +46,9 @@ import { getWorkspacePath, getWorkspaceSourcesPath, getWorkspaceSkillsPath } fro
 import type { LoadedSkill } from '../skills/types.ts';
 import { loadWorkspacePages } from '../pages/storage.ts';
 import { loadSkill, loadAllSkills, invalidateSkillsCache, skillNeedsIconDownload, downloadSkillIcon } from '../skills/storage.ts';
-import {
-  loadStatusConfig,
-  statusNeedsIconDownload,
-  downloadStatusIcon,
-} from '../statuses/storage.ts';
+
 import { readSessionHeader } from '../sessions/jsonl.ts';
 import type { SessionHeader } from '../sessions/types.ts';
-import { AUTOMATIONS_CONFIG_FILE } from '../automations/constants.ts';
 import { loadAppTheme, loadPresetThemes, loadPresetTheme, getAppThemesDir } from './storage.ts';
 import type { ThemeOverrides, PresetTheme } from './theme.ts';
 
@@ -121,16 +117,6 @@ export interface ConfigWatcherCallbacks {
   onWorkspacePermissionsChange?: (workspaceId: string) => void;
   /** Called when a source's permissions.json changes */
   onSourcePermissionsChange?: (sourceSlug: string) => void;
-
-  // Status callbacks
-  /** Called when statuses config.json changes */
-  onStatusConfigChange?: (workspaceId: string) => void;
-  /** Called when a status icon file changes */
-  onStatusIconChange?: (workspaceId: string, iconFilename: string) => void;
-
-  // Label callbacks
-  /** Called when labels config.json changes */
-  onLabelConfigChange?: (workspaceId: string) => void;
 
   // Automations callbacks
   /** Called when automations.json changes */
@@ -400,13 +386,6 @@ export class ConfigWatcher {
       return;
     }
 
-    // Workspace-level automations config file
-    if (relativePath === AUTOMATIONS_CONFIG_FILE) {
-      debug('[ConfigWatcher] automations config change detected:', relativePath);
-      this.debounce('automations-config', () => this.handleAutomationsConfigChange());
-      return;
-    }
-
     // Sources changes: sources/{slug}/...
     if (parts[0] === 'sources' && parts.length >= 2) {
       const slug = parts[1]!;  // Safe: checked parts.length >= 2
@@ -450,6 +429,13 @@ export class ConfigWatcher {
       return;
     }
 
+    // Workspace-level automations config file
+    if (relativePath === AUTOMATIONS_CONFIG_FILE) {
+      debug('[ConfigWatcher] automations config change detected:', relativePath);
+      this.debounce('automations-config', () => this.handleAutomationsConfigChange());
+      return;
+    }
+
     // Pages changes: pages/{slug}/page.json is the ONLY trigger — a refresh
     // run's last write is page.json, so reacting to it (and nothing else)
     // means observers never see a half-written data/ directory. Slug-dir
@@ -474,40 +460,6 @@ export class ConfigWatcher {
         this.debounce(`session-meta:${sessionId}`, () => this.handleSessionMetadataChange(sessionId), SESSION_META_DEBOUNCE_MS);
       }
       return;
-    }
-
-    // Statuses changes: statuses/...
-    if (parts[0] === 'statuses' && parts.length >= 2) {
-      const file = parts[1];
-
-      // config.json change
-      if (file === 'config.json') {
-        this.debounce('statuses-config', () => this.handleStatusConfigChange());
-        return;
-      }
-
-      // Icon file changes: statuses/icons/*.svg, *.png, etc.
-      if (file === 'icons' && parts.length >= 3) {
-        const iconFilename = parts[2];
-        if (iconFilename) {
-          this.debounce(`statuses-icon:${iconFilename}`, () => {
-            this.handleStatusIconChange(iconFilename);
-          });
-        }
-        return;
-      }
-    }
-
-    // Labels changes: labels/...
-    if (parts[0] === 'labels' && parts.length >= 2) {
-      const file = parts[1];
-
-      // config.json change
-      if (file === 'config.json') {
-        this.debounce('labels-config', () => this.handleLabelConfigChange());
-        return;
-      }
-
     }
   }
 
@@ -884,69 +836,17 @@ export class ConfigWatcher {
   }
 
   // ============================================================
-  // Statuses Handlers
-  // ============================================================
-
-  /**
-   * Handle statuses config.json change
-   * Downloads icons for any status with URL icon and no local file
-   */
-  private handleStatusConfigChange(): void {
-    debug('[ConfigWatcher] Statuses config.json changed:', this.workspaceId);
-
-    // Load config and check for icons that need downloading
-    const config = loadStatusConfig(this.workspaceDir);
-    for (const status of config.statuses) {
-      if (statusNeedsIconDownload(this.workspaceDir, status)) {
-        debug('[ConfigWatcher] Downloading status icon:', status.id);
-        downloadStatusIcon(this.workspaceDir, status.id, status.icon!)
-          .then((iconPath) => {
-            if (iconPath) {
-              debug('[ConfigWatcher] Status icon downloaded:', status.id, iconPath);
-              // Re-emit config change to update UI with new icon
-              this.callbacks.onStatusConfigChange?.(this.workspaceId);
-            }
-          })
-          .catch((err) => {
-            debug('[ConfigWatcher] Status icon download failed:', status.id, err);
-          });
-      }
-    }
-
-    this.callbacks.onStatusConfigChange?.(this.workspaceId);
-  }
-
-  /**
-   * Handle status icon file change
-   */
-  private handleStatusIconChange(iconFilename: string): void {
-    debug('[ConfigWatcher] Status icon changed:', this.workspaceId, iconFilename);
-    this.callbacks.onStatusIconChange?.(this.workspaceId, iconFilename);
-  }
-
-  // ============================================================
   // Labels Handlers
   // ============================================================
-
-  /**
-   * Handle labels config.json change.
-   */
-  private handleLabelConfigChange(): void {
-    debug('[ConfigWatcher] Labels config.json changed:', this.workspaceId);
-    this.callbacks.onLabelConfigChange?.(this.workspaceId);
-  }
-
-  /**
-   * Handle automations config change.
-   */
-  private handleAutomationsConfigChange(): void {
-    debug('[ConfigWatcher] automations config changed:', this.workspaceId);
-    this.callbacks.onAutomationsConfigChange?.(this.workspaceId);
-  }
 
   // ============================================================
   // Page Handlers
   // ============================================================
+
+  private handleAutomationsConfigChange(): void {
+    debug('[ConfigWatcher] automations config changed:', this.workspaceId);
+    this.callbacks.onAutomationsConfigChange?.(this.workspaceId);
+  }
 
   /**
    * Handle a pages change (any page.json touched, or a page folder

@@ -28,13 +28,5 @@ export {
 } from './validate.ts'
 
 export {
-  DEFAULT_STATUS_COLORS,
-  DEFAULT_STATUS_FALLBACK,
-  getDefaultStatusColor,
-} from './defaults.ts'
-
-export {
   migrateColorValue,
-  migrateStatusColors,
-  migrateLabelColors,
 } from './migrate.ts'

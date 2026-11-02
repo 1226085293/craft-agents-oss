@@ -76,9 +76,7 @@ const sampleSessions: (SessionMeta & { _status: MockSessionStatus })[] = [
     name: 'Fix authentication bug in login flow',
     workspaceId: 'ws-1',
     lastMessageAt: Date.now() - 1000 * 60 * 5,
-    sessionStatus: 'in-progress',
     hasUnread: true,
-    isFlagged: true,
     _status: mockStatuses[1],
   },
   {
@@ -86,8 +84,6 @@ const sampleSessions: (SessionMeta & { _status: MockSessionStatus })[] = [
     name: 'Implement search functionality across sessions',
     workspaceId: 'ws-1',
     lastMessageAt: Date.now() - 1000 * 60 * 30,
-    sessionStatus: 'todo',
-    labels: ['feature', 'priority::high'],
     _status: mockStatuses[0],
   },
   {
@@ -95,7 +91,6 @@ const sampleSessions: (SessionMeta & { _status: MockSessionStatus })[] = [
     name: 'Review pull request #42',
     workspaceId: 'ws-1',
     lastMessageAt: Date.now() - 1000 * 60 * 60,
-    sessionStatus: 'done',
     isProcessing: true,
     _status: mockStatuses[2],
   },
@@ -104,7 +99,6 @@ const sampleSessions: (SessionMeta & { _status: MockSessionStatus })[] = [
     name: 'Debug API response handling and error states',
     workspaceId: 'ws-1',
     lastMessageAt: Date.now() - 1000 * 60 * 60 * 2,
-    sessionStatus: 'todo',
     _status: mockStatuses[0],
   },
 ]
@@ -285,28 +279,6 @@ function SessionEntityListPreview({
                       New
                     </span>
                   )}
-                  <div
-                    className="flex-1 flex items-center gap-1 min-w-0 overflow-x-auto scrollbar-hide pr-4"
-                    style={{ maskImage: 'linear-gradient(to right, black calc(100% - 16px), transparent 100%)', WebkitMaskImage: 'linear-gradient(to right, black calc(100% - 16px), transparent 100%)' }}
-                  >
-                    {session.isFlagged && (
-                      <span className="shrink-0 h-[18px] w-[18px] flex items-center justify-center rounded bg-foreground/5">
-                        <Flag className="h-[10px] w-[10px] text-info fill-info" />
-                      </span>
-                    )}
-                    {session.labels?.map((label, i) => (
-                      <span
-                        key={i}
-                        className="shrink-0 h-[18px] max-w-[120px] px-1.5 text-[10px] font-medium rounded flex items-center whitespace-nowrap"
-                        style={{
-                          backgroundColor: 'rgba(var(--foreground-rgb), 0.05)',
-                          color: 'rgba(var(--foreground-rgb), 0.8)',
-                        }}
-                      >
-                        {label}
-                      </span>
-                    ))}
-                  </div>
                 </>
               }
               trailing={
@@ -501,11 +473,6 @@ function MixedEntityListPreview({
             badges={
               <>
                 {session.hasUnread && <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent text-white">New</span>}
-                {session.isFlagged && (
-                  <span className="shrink-0 h-[18px] w-[18px] flex items-center justify-center rounded bg-foreground/5">
-                    <Flag className="h-[10px] w-[10px] text-info fill-info" />
-                  </span>
-                )}
               </>
             }
             trailing={session.lastMessageAt ? <span className="text-[11px] text-foreground/40">{formatRelativeTime(session.lastMessageAt)}</span> : undefined}
@@ -598,7 +565,7 @@ function MixedEntityListPreview({
 // ============================================================================
 
 type AnyMockEntity =
-  | { kind: 'session'; id: string; name: string; status: MockSessionStatus; hasUnread?: boolean; isFlagged?: boolean; lastMessageAt?: number }
+  | { kind: 'session'; id: string; name: string; status: MockSessionStatus; hasUnread?: boolean; lastMessageAt?: number }
   | { kind: 'source'; id: string; name: string; type: string; tagline: string; status: string; icon: React.ComponentType<{ className?: string }> }
   | { kind: 'skill'; id: string; name: string; description: string; emoji?: string }
 
@@ -610,7 +577,6 @@ const interactiveItems: AnyMockEntity[] = [
     name: s.name || 'Untitled',
     status: s._status,
     hasUnread: s.hasUnread,
-    isFlagged: s.isFlagged,
     lastMessageAt: s.lastMessageAt,
   })),
   // Sources
@@ -681,11 +647,6 @@ function InteractiveEntityListPreview({
             badges={
               <>
                 {item.hasUnread && <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-medium rounded bg-accent text-white">New</span>}
-                {item.isFlagged && (
-                  <span className="shrink-0 h-[18px] w-[18px] flex items-center justify-center rounded bg-foreground/5">
-                    <Flag className="h-[10px] w-[10px] text-info fill-info" />
-                  </span>
-                )}
               </>
             }
             trailing={item.lastMessageAt ? <span className="text-[11px] text-foreground/40">{formatRelativeTime(item.lastMessageAt)}</span> : undefined}

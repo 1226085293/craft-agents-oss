@@ -2,8 +2,8 @@
  * Session-Scoped Tool Callback Registry
  *
  * Extracted from session-scoped-tools.ts to break the dependency between
- * the callback registry (shared by Claude + Pi paths) and the Claude SDK
- * adapter layer (only used by ClaudeAgent).
+ * the callback registry (shared by Pi paths) and the Pi SDK
+ * adapter layer (only used by PiAgent).
  *
  * The registry is a simple Map keyed by sessionId. Each backend registers
  * callbacks when a session starts and merges additional callbacks (e.g.
@@ -51,10 +51,6 @@ export interface SessionScopedToolCallbacks {
    */
   browserPaneFns?: BrowserPaneFns;
 
-  /** Set labels on a session (defaults to current). */
-  setSessionLabelsFn?: (sessionId: string | undefined, labels: string[]) => void | Promise<void>;
-  /** Set status on a session (defaults to current). */
-  setSessionStatusFn?: (sessionId: string | undefined, status: string) => void | Promise<void>;
   /** Archive (archived=true) or unarchive (archived=false) a session by ID. */
   archiveSessionFn?: (sessionId: string, archived: boolean) => void | Promise<void>;
   /** Get detailed info about a session (defaults to current). */
@@ -63,12 +59,25 @@ export interface SessionScopedToolCallbacks {
   listSessionsFn?: (options?: import('@craft-agent/session-tools-core').ListSessionsOptions) => import('@craft-agent/session-tools-core').ListSessionsResult;
   /** List background tasks (running + terminal) for a session from the main-process registry. */
   listBackgroundTasksFn?: (sessionId?: string) => import('@craft-agent/session-tools-core').BackgroundTaskInfo[];
+  /** Read the tail of a background task's output by task/shell ID. */
+  getBackgroundTaskOutputFn?: (taskId: string, tailLines?: number) => Promise<string | null>;
+  /** Stop a running background task and record who stopped it. */
+  stopBackgroundTaskFn?: (taskId: string, stoppedBy?: 'model' | 'user') => Promise<import('@craft-agent/session-tools-core').BackgroundTaskStopResult>;
   /** Resolve label display names to IDs. */
-  resolveLabelsFn?: (labels: string[]) => import('@craft-agent/session-tools-core').ResolvedLabelsResult;
   /** Resolve a status display name to its ID. */
-  resolveStatusFn?: (status: string) => import('@craft-agent/session-tools-core').ResolvedStatusResult;
   /** Send a message to another session (inter-session messaging). Resolves with delivery status. */
   sendAgentMessageFn?: (sessionId: string, message: string, attachments?: Array<{ path: string; name?: string }>) => Promise<import('@craft-agent/session-tools-core').SendAgentMessageResult>;
+  /**
+   * True when the text is a session-level slash command (`/stop`). Commands
+   * skip the sender envelope so the target can parse them as commands.
+   */
+  isSessionCommand?: (text: string) => boolean;
+  /** Follow another session: each finished turn is posted to it and wakes it. */
+  subscribeSessionFn?: (sessionId: string) => { subscribed: boolean; targetIds: string[] };
+  /** Stop following a session. Idempotent. */
+  unsubscribeSessionFn?: (sessionId: string) => { unsubscribed: boolean; targetIds: string[] };
+  /** Session ids this session currently follows. */
+  listSubscriptionsFn?: () => string[];
   /** Get messaging bindings for a session. */
   getMessagingBindingsFn?: (sessionId: string) => Array<{ platform: string; channelId: string; threadId?: number; channelName?: string; enabled: boolean }>;
   /** Unbind messaging channels from a session. Returns count of removed bindings. */
@@ -86,10 +95,6 @@ export interface SessionScopedToolCallbacks {
     failed: number;
     failures: Array<{ platform: string; channelId: string; error: string }>;
   }>;
-  /** Create a Craft Agents Task (board card + task.yaml + orchestrator session) without running it. */
-  createTaskFn?: (
-    input: import('@craft-agent/session-tools-core').CreateTaskInput
-  ) => Promise<import('@craft-agent/session-tools-core').CreateTaskResult>;
   /**
    * Pages tools (list/get/create/update/write data/delete) — grouped in one
    * object because the six operations always ship together. Wired by

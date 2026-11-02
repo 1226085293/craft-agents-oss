@@ -320,6 +320,20 @@ export function updateProject(
 }
 
 /**
+ * Set a project's archived flag. Archived projects disappear from the sidebar but
+ * stay on disk; sessions keep their `projectId` (D24).
+ */
+export function setProjectArchived(
+  workspaceRootPath: string,
+  projectSlug: string,
+  archived: boolean,
+): ProjectConfig {
+  return updateProject(workspaceRootPath, projectSlug, {
+    archivedAt: archived ? Date.now() : undefined,
+  });
+}
+
+/**
  * Delete a project (removes folder and all assets).
  * Caller is responsible for unsetting `projectId` on sessions that referenced it.
  */

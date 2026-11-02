@@ -16,7 +16,6 @@ import type { ModelRequestKind } from '@craft-agent/shared/config'
 import type { IMessagingGatewayRegistry } from './messaging-registry-interface'
 import type {
   Session,
-  SessionStatus,
   CreateSessionOptions,
   FileAttachment,
   SendMessageOptions,
@@ -26,7 +25,7 @@ import type {
   UnreadSummary,
   ShareResult,
 } from '@craft-agent/shared/protocol'
-import type { SessionBundle, DispatchMode } from '@craft-agent/shared/sessions'
+import type { SessionBundle, DispatchMode, FolderScope } from '@craft-agent/shared/sessions'
 import type { EventSink } from '../transport'
 
 export type BusyMessageDecisionAction = 'reply' | 'ignore' | 'queue' | 'abort'
@@ -95,8 +94,7 @@ export interface ISessionManager {
     options?: CreateSessionOptions,
     internal?: { emitCreatedEvent?: boolean },
   ): Promise<Session>
-  /** Resolved working directory of a live session (Tasks Conductor uses it so children inherit
-   *  the orchestrator's cwd). */
+  /** Resolved working directory of a live session (child sessions inherit the orchestrator's cwd). */
   getSessionWorkingDirectory(sessionId: string): string | undefined
   deleteSession(sessionId: string): Promise<void>
 
@@ -104,12 +102,9 @@ export interface ISessionManager {
   // Session state
   // ---------------------------------------------------------------------------
 
-  flagSession(sessionId: string): Promise<void>
-  unflagSession(sessionId: string): Promise<void>
   archiveSession(sessionId: string): Promise<void>
   unarchiveSession(sessionId: string): Promise<void>
   renameSession(sessionId: string, name: string): Promise<void>
-  setSessionStatus(sessionId: string, status: SessionStatus): Promise<void>
   markSessionRead(sessionId: string): Promise<void>
   /**
    * Record that the user is actively engaged on a bound mobile/chat channel
@@ -118,7 +113,7 @@ export interface ISessionManager {
    */
   noteMobileActivity(sessionId: string): Promise<void>
   markSessionUnread(sessionId: string): Promise<void>
-  markAllSessionsRead(workspaceId: string): Promise<void>
+  markAllSessionsRead(workspaceId: string, projectId?: string): Promise<void>
   setActiveViewingSession(sessionId: string | null, workspaceId: string): void
   clearActiveViewingSession(workspaceId: string): void
 
@@ -131,27 +126,37 @@ export interface ISessionManager {
   setSessionStrategy(sessionId: string, strategy: string): void
   updateWorkingDirectory(sessionId: string, path: string): void
   setSessionSources(sessionId: string, sourceSlugs: string[], sourceScope?: 'auto' | 'only' | 'exclude'): Promise<void>
-  setSessionLabels(sessionId: string, labels: string[]): void
-  /** Apply the reserved Task labeling (mint / inherit the per-task item label under the Task
-   *  root). Returns the resolved ITEM label id, or undefined if the session is unknown.
-   *  See SessionManager.applyTaskLabel. */
-  applyTaskLabel(
-    sessionId: string,
-    opts?: { parentSessionId?: string },
-  ): Promise<{ labelId: string } | undefined>
   setSessionProjectId(sessionId: string, projectId: string | null): Promise<void>
-  setKanbanColumn(sessionId: string, column: string | null): Promise<void>
-  setTaskNodeCount(sessionId: string, count: number): Promise<void>
-  adoptGeneratedTaskOrchestrator(
-    sessionId: string,
-    taskSlug: string,
-    reconcile?: { name?: string; projectId?: string; workingDirectory?: string; model?: string; llmConnection?: string; permissionMode?: PermissionMode },
-  ): Promise<boolean>
-  bindExistingSessionToTask(
-    sessionId: string,
-    taskSlug: string,
-    reconcile?: { name?: string; projectId?: string; workingDirectory?: string; model?: string; llmConnection?: string; permissionMode?: PermissionMode },
-  ): Promise<boolean>
+  /** Move a session into a folder of its current scope (null = root). */
+  setSessionFolder(sessionId: string, folderId: string | null): Promise<void>
+  /** Batch variant; reports per-session success so the UI can retry failures. */
+  setSessionFolderBulk(sessionIds: string[], folderId: string | null): Promise<{ updated: string[]; failed: string[] }>
+  /** Atomic cross-scope move (project + folder + optional archive flip). */
+  moveSessionToScope(sessionId: string, projectId: string | null, folderId: string | null, archived?: boolean): Promise<void>
+  /** Rebind sessions living in the given folders to the target scope (folder cross-scope move). */
+  rebindSessionsToFolders(workspaceId: string, fromScope: FolderScope, toScope: FolderScope, folderIdMap: Record<string, string>): Promise<void>
+  /** Manual sibling order (fractional index). */
+  setSessionSortOrder(sessionId: string, sortOrder: string): Promise<void>
+  /** Pin/unpin within the sibling group. */
+  setSessionPinned(sessionId: string, pinned: boolean): Promise<void>
+  archiveFolder(workspaceId: string, scope: FolderScope, folderId: string): Promise<{ folderIds: string[]; sessionIds: string[]; archived: string[] }>
+  unarchiveFolder(workspaceId: string, scope: FolderScope, folderId: string): Promise<{ restored: string[] }>
+  deleteFolder(workspaceId: string, scope: FolderScope, folderId: string): Promise<{ deletedFolders: string[]; deletedSessions: string[]; archivedSessions: string[] }>
+  /** Emit a SessionPathChange automation event (creation = empty oldPath, deletion = empty newPath). */
+  emitPathChange(
+    workspaceRootPath: string,
+    params: {
+      subject: 'session' | 'folder'
+      sessionId?: string
+      sessionName?: string
+      changeType: 'folder' | 'project' | 'workingDirectory'
+      oldPath: string | null
+      newPath: string | null
+      workingDirectory?: string
+    },
+  ): void
+  archiveProjectSessions(projectId: string, archived: boolean): Promise<{ affected: string[] }>
+  deleteProjectSessions(projectId: string): Promise<{ deleted: string[] }>
   setSessionConnection(sessionId: string, connectionSlug: string): Promise<void>
   updateSessionModel(sessionId: string, workspaceId: string, model: string | null, connection?: string): Promise<void>
   /** Hot connection switch (mid-session): live credential injection + model apply, context preserved. */
@@ -173,6 +178,20 @@ export interface ISessionManager {
     modelMessageOverride?: string,
     rpcContext?: { callerClientId?: string },
   ): Promise<void>
+
+  /**
+   * Run a session-level slash command (`/stop`).
+   *
+   * Shared by the desktop RPC path, the messaging gateway and the
+   * `send_agent_message` tool so all three act on the session the same way and
+   * can report a truthful outcome (`stopped` vs. an idle no-op). Optional so
+   * test doubles and alternate hosts are not forced to implement it; callers
+   * fall back to treating the text as a normal message when it is missing.
+   */
+  executeSessionCommand?(
+    sessionId: string,
+    command: { name: 'stop'; raw: string },
+  ): Promise<{ name: string; stopped: boolean; queueLength: number }>
   /** Return the in-memory processing flag without hydrating full messages. */
   isSessionProcessing?(sessionId: string): boolean
   /**
@@ -220,10 +239,34 @@ export interface ISessionManager {
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>
   cancelQueuedMessage(sessionId: string, messageId: string): Promise<void>
   guideQueuedMessage(sessionId: string, messageId: string): Promise<void>
+  editQueuedMessage(sessionId: string, messageId: string): Promise<import('@craft-agent/shared/protocol').QueuedMessageEditResult | null>
+  reorderQueuedMessages(sessionId: string, messageIds: string[]): Promise<void>
   killShell(sessionId: string, shellId: string): Promise<{ success: boolean; error?: string }>
   getTaskOutput(taskId: string): Promise<string | null>
+  listPersistedBackgroundTasks(sessionId: string): Promise<Array<{
+    id: string
+    externalId?: string
+    kind: 'bash' | 'tool' | 'subscription' | 'subagent'
+    status: string
+    intent?: string
+    toolUseId?: string
+    command?: string
+    startedAt: number
+    completedAt?: number
+    outputFile?: string
+    stopSource?: string
+  }>>
+  stopBackgroundTask(
+    sessionId: string,
+    taskId: string,
+    stoppedBy?: 'model' | 'user',
+  ): Promise<{
+    taskId: string
+    status: 'stopped'
+    stoppedBy: 'model' | 'user'
+    message: string
+  }>
 
-  // --- Tasks Conductor seams (in-process; not renderer events, not agent-facing) ---
   /**
    * Subscribe to the in-process session-completion signal. Fires once per turn
    * when the session's message queue drains (true completion), carrying the stop
@@ -232,7 +275,6 @@ export interface ISessionManager {
   onSessionComplete(
     listener: (evt: import('../sessions/SessionManager').SessionCompletionEvent) => void,
   ): () => void
-  /** Read a session's final assistant message text (Conductor output reader). */
   getSessionFinalText(sessionId: string): string | undefined
   addMessageAnnotation(sessionId: string, messageId: string, annotation: AnnotationV1): void
   removeMessageAnnotation(sessionId: string, messageId: string, annotationId: string): void
@@ -377,6 +419,12 @@ export interface ISessionManager {
    * `getOrCreateAgent`.
    */
   refreshConnectionRuntime(connectionSlug: string): Promise<void>
+  /**
+   * Push gateway config changes (per-model capabilities in `llm-config.json`)
+   * to every active gateway-routed session. Called from the `llmGateway.SAVE_CONFIG`
+   * handler so a context-window bump reaches live Pi subprocesses immediately.
+   */
+  refreshGatewayRuntime(): Promise<void>
   completeAuthRequest(sessionId: string, result: AuthResult): Promise<void>
   executePromptAutomation(input: ExecutePromptAutomationInput): Promise<{ sessionId: string }>
 
@@ -406,7 +454,6 @@ export interface ExecutePromptAutomationInput {
   workspaceId: string
   workspaceRootPath: string
   prompt: string
-  labels?: string[]
   permissionMode?: PermissionMode
   mentions?: string[]
   llmConnection?: string

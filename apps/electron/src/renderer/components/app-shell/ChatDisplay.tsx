@@ -10,6 +10,7 @@ import {
   CircleAlert,
   ExternalLink,
   Info,
+  Square,
   X,
 } from "lucide-react"
 import { motion, AnimatePresence } from "motion/react"
@@ -18,6 +19,9 @@ import { toast } from "sonner"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
 import { coerceInputText, appendRestoredInput } from "@/lib/input-text"
+import { restoreComposerAttachments } from "@/lib/queued-attachments"
+import { AttachmentHoverCard } from './input/AttachmentCapsule'
+import { ensureAttachmentTokens, findAttachmentForToken } from '@/lib/attachment-tokens'
 import { Markdown, CollapsibleMarkdownProvider, StreamingMarkdown, type RenderMode } from "@/components/markdown"
 import { AnimatedCollapsibleContent } from "@/components/ui/collapsible"
 import {
@@ -43,6 +47,7 @@ import {
   type DiffViewerSettings,
 } from "@craft-agent/ui"
 import { useFocusZone } from "@/hooks/keyboard"
+import { setCurrentZone } from "@/actions/keybinding-context"
 import { useTheme } from "@/hooks/useTheme"
 import type { Session, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, LoadedSource, LoadedSkill } from "../../../shared/types"
 import type { PermissionMode } from "@craft-agent/shared/agent/modes"
@@ -67,7 +72,7 @@ import {
 } from "@craft-agent/ui"
 import { MemoizedAuthRequestCard } from "@/components/chat/AuthRequestCard"
 import { ChatInputZone, type StructuredInputState, type StructuredResponse, type PermissionResponse, type AdminApprovalResponse } from "./input"
-import type { RichTextInputHandle } from "@/components/ui/rich-text-input"
+import { textToHTML, type RichTextInputHandle } from "@/components/ui/rich-text-input"
 import { useBackgroundTasks } from "@/hooks/useBackgroundTasks"
 import { useTurnCardExpansion } from "@/hooks/useTurnCardExpansion"
 import { useNavigation } from "@/contexts/NavigationContext"
@@ -77,6 +82,7 @@ import { CHAT_LAYOUT } from "@/config/layout"
 import { collectFileChangesFromActivities, getFirstFileChangeIdForActivity } from "@/lib/file-changes"
 import { resolveBranchNewPanelOption } from "./branching"
 import { handleErrorMessageAction } from "./error-message-actions"
+import { splitSearchHighlights } from "./search-highlights"
 
 // ============================================================================
 // CSS Custom Highlight API helper
@@ -146,6 +152,12 @@ interface ChatDisplayProps {
    */
   currentModel: string
   /**
+   * The session's own model, i.e. what the next request will ask the group for.
+   * The composer's label predicts from this, not from `currentModel` (which is
+   * history) — see StrategySelector.
+   */
+  sessionModel?: string
+  /**
    * Gateway strategy groups, as the composer offers them. Absent means the
    * gateway surface is not loaded (older main process) — the composer then
    * shows why it cannot pick rather than an empty list.
@@ -209,16 +221,8 @@ interface ChatDisplayProps {
   // Skill selection (for @mentions)
   /** Available skills for @mention autocomplete */
   skills?: LoadedSkill[]
-  // Label selection (for #labels)
-  /** Available label configs (tree) for label menu and badge display */
-  labels?: import('@craft-agent/shared/labels').LabelConfig[]
-  /** Callback when labels change */
-  onLabelsChange?: (labels: string[]) => void
   // State/status selection (for # menu and ActiveOptionBadges)
-  /** Available workflow states */
-  sessionStatuses?: import('@/config/session-status-config').SessionStatus[]
   /** Callback when session state changes */
-  onSessionStatusChange?: (stateId: string) => void
   /** Workspace ID for loading skill icons */
   workspaceId?: string
   // Working directory (per session)
@@ -525,6 +529,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   onOpenFile,
   onOpenUrl,
   currentModel,
+  sessionModel,
   gatewayStrategies,
   effectiveStrategyId,
   onStrategyChange,
@@ -555,12 +560,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   onSourcesChange,
   // Skills (for @mentions)
   skills,
-  // Labels (for #labels)
-  labels,
-  onLabelsChange,
   // States (for # menu and badge)
-  sessionStatuses,
-  onSessionStatusChange,
   workspaceId,
   // Working directory
   workingDirectory,
@@ -599,6 +599,17 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     (path: string) => onOpenFile(path, session?.id),
     [onOpenFile, session?.id]
   )
+
+  // Open an attachment capsule from a surface that has no file API of its own
+  // (queued rows): they dispatch the path, ChatDisplay owns the session scope.
+  React.useEffect(() => {
+    const handleOpenAttachment = (event: Event) => {
+      const path = (event as CustomEvent<{ path?: string }>).detail?.path
+      if (path) openFileInSession(path)
+    }
+    window.addEventListener('craft:open-attachment', handleOpenAttachment)
+    return () => window.removeEventListener('craft:open-attachment', handleOpenAttachment)
+  }, [openFileInSession])
 
   // Input is only disabled when explicitly disabled (e.g., agent needs activation)
   // User can type during streaming - submitting will stop the stream and send
@@ -765,15 +776,14 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     `
     document.head.appendChild(style)
   }, [])
-  // Flag to control when scrolling to matches should happen
-  // Only scroll when: session changes with search active, or user clicks navigation
+  // Scroll to matches when a query/session changes or the user navigates between matches.
   const shouldScrollToMatchRef = React.useRef(false)
   const prevSessionIdForScrollRef = React.useRef<string | null>(null)
 
   // Use the external search query from props
   const searchQuery = externalSearchQuery || ''
-  // Require 2+ characters to activate in-chat search (aligned with session list isSearchMode)
-  const isSearchActive = searchQuery.trim().length >= 2
+  // Activate in-chat search for any non-empty query, including single characters
+  const isSearchActive = searchQuery.trim().length > 0
 
   // Focus textarea when zone gains focus via keyboard (Tab, Cmd+3, ArrowRight)
   // Requires isFocused to be true - respects zone architecture
@@ -815,11 +825,10 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
   // Reset match state when session or search query changes
   useEffect(() => {
-    const isSessionSwitch = prevSessionIdForScrollRef.current !== null && prevSessionIdForScrollRef.current !== session?.id
     prevSessionIdForScrollRef.current = session?.id ?? null
 
-    // If session switched with search active, trigger scroll to first match
-    if (isSessionSwitch && isSearchActive) {
+    // A new session or query should reveal its first match automatically.
+    if (isSearchActive && searchQuery.trim()) {
       shouldScrollToMatchRef.current = true
     }
 
@@ -1082,15 +1091,20 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
       if (allRanges.length === 0) return
 
       try {
-        // Apply all ranges as passive initially — the active-match effect will restyle
-        cssHighlights.set('search-passive', new Highlight(...allRanges))
+        const { active, passive } = splitSearchHighlights(allRanges, currentMatchIndex)
+        cssHighlights.set('search-passive', new Highlight(...passive))
+        if (active) {
+          cssHighlights.set('search-active', new Highlight(active))
+        } else {
+          cssHighlights.delete('search-active')
+        }
       } catch {
         // Highlight API call failed — degrade gracefully
       }
     })
 
     return () => cancelAnimationFrame(rafId)
-  }, [searchQuery, isSearchActive, matchingTurnIds, session?.id, visibleTurnCount])
+  }, [searchQuery, isSearchActive, matchingTurnIds, session?.id, visibleTurnCount, currentMatchIndex])
 
   // Effect 2: Update active/passive highlight split when navigation index changes
   // Lightweight — just reshuffles existing Range objects between two Highlight instances
@@ -1100,13 +1114,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     if (!cssHighlights || allRanges.length === 0) return
 
     try {
-      const activeRange = allRanges[currentMatchIndex]
-      if (activeRange) {
-        const passiveRanges = allRanges.filter((_, i) => i !== currentMatchIndex)
-        cssHighlights.set('search-passive', new Highlight(...passiveRanges))
-        cssHighlights.set('search-active', new Highlight(activeRange))
+      const { active, passive } = splitSearchHighlights(allRanges, currentMatchIndex)
+      cssHighlights.set('search-passive', new Highlight(...passive))
+      if (active) {
+        cssHighlights.set('search-active', new Highlight(active))
       } else {
-        cssHighlights.set('search-passive', new Highlight(...allRanges))
         cssHighlights.delete('search-active')
       }
     } catch { /* graceful degradation */ }
@@ -1679,15 +1691,17 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     })
   }, [session?.id, messageCount, lastMessageId, lastMessageRole])
 
+  // Pending-queue actions (2026-10-22 queued-panel). The queue is rendered in
+  // a panel above the composer; these handlers are its only mutate path.
   const handleCancelQueuedMessage = useCallback(async (messageId: string) => {
     if (!session) return
     try {
       await window.electronAPI.sessionCommand(session.id, { type: 'cancelQueuedMessage', messageId })
     } catch (error) {
       console.error('[ChatDisplay] Failed to cancel queued message:', error)
-      toast.error('Failed to cancel queued message')
+      toast.error(t('chat.queuedPanel.cancelFailed'))
     }
-  }, [session?.id])
+  }, [session?.id, t])
 
   const handleGuideQueuedMessage = useCallback(async (messageId: string) => {
     if (!session) return
@@ -1695,9 +1709,63 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
       await window.electronAPI.sessionCommand(session.id, { type: 'guideQueuedMessage', messageId })
     } catch (error) {
       console.error('[ChatDisplay] Failed to guide queued message:', error)
-      toast.error('Failed to guide queued message')
+      toast.error(t('chat.queuedPanel.guideFailed'))
     }
-  }, [session?.id])
+  }, [session?.id, t])
+
+  const handleReorderQueuedMessages = useCallback(async (messageIds: string[]) => {
+    if (!session) return
+    try {
+      await window.electronAPI.sessionCommand(session.id, { type: 'reorderQueuedMessages', messageIds })
+    } catch (error) {
+      console.error('[ChatDisplay] Failed to reorder queued messages:', error)
+      toast.error(t('chat.queuedPanel.reorderFailed'))
+    }
+  }, [session?.id, t])
+
+  // Edit = pull the message out of the queue and put it back into the composer,
+  // text AND attachments. The backend hands back the persisted attachment
+  // metadata; image payloads are already inline (thumbnailBase64 /
+  // resizedBase64), and other types re-read their bytes from the session's
+  // attachment folder via readFileAttachment so a re-send is a real attachment
+  // rather than a dangling path.
+  const handleEditQueuedMessage = useCallback(async (messageId: string) => {
+    if (!session) return
+    try {
+      const result = await window.electronAPI.sessionCommand(session.id, { type: 'editQueuedMessage', messageId }) as unknown as
+        | { messageId: string; text: string; attachments?: StoredAttachment[] }
+        | null
+      if (!result) return
+
+      const restoredAttachments = await restoreComposerAttachments(result.attachments)
+      // Queued rows written by an older build carry no inline tokens; add them so
+      // the restored message renders each attachment as a chip again.
+      const restoredText = ensureAttachmentTokens(result.text, restoredAttachments)
+
+      // Append to whatever the user may already have typed instead of dropping it.
+      const existingText = coerceInputText(inputValue)
+      const nextText = existingText ? `${existingText}\n\n${restoredText}` : restoredText
+      const nextAttachments = [...(attachmentsValue ?? []), ...restoredAttachments]
+
+      onInputChange?.(nextText)
+      if (restoredAttachments.length > 0) {
+        onAttachmentsChange?.(nextAttachments)
+      }
+
+      // Hand the draft to the live composer in one piece. Restoring it through
+      // the `inputValue`/`attachmentsValue` props alone is not enough: the
+      // composer deliberately refuses a parent value while it has unsynced
+      // edits, which staged the attachments but dropped the text — the
+      // "editing a queued message leaves only the attachments" report.
+      window.dispatchEvent(new CustomEvent('craft:restore-draft', {
+        detail: { sessionId: session.id, text: nextText, attachments: nextAttachments },
+      }))
+      requestAnimationFrame(() => textareaRef?.current?.focus())
+    } catch (error) {
+      console.error('[ChatDisplay] Failed to edit queued message:', error)
+      toast.error(t('chat.queuedPanel.editFailed'))
+    }
+  }, [session?.id, t, inputValue, attachmentsValue, onInputChange, onAttachmentsChange, textareaRef])
 
   // Handle message submission from InputContainer
   // Backend handles interruption and queueing if currently processing
@@ -1782,8 +1850,9 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
 
     // Explicit Stop (not a redirect/new-message send): put the in-flight prompt
     // back in the input so the user can tweak and resend. Append to any draft.
-    // Exclude isQueued messages — those are restored separately by the backend
-    // `restore_input` effect (App.tsx) and would otherwise double up here.
+    // Pending queued messages are NOT restored here — they stay in the queue
+    // panel above the composer and the backend sends them next (2026-10-22
+    // queued-panel).
     if (!silent) {
       const lastUserMsg = [...session.messages].reverse().find(m => m.role === 'user' && !m.isQueued)
       const restoredText = coerceInputText(lastUserMsg?.content)
@@ -2034,7 +2103,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   }, [compactMode, messagesLoading, session?.id, allTurns.length, visibleTurnCount])
 
   return (
-    <div ref={zoneRef} className="flex h-full flex-col min-w-0" data-focus-zone="chat">
+    <div ref={zoneRef} className="flex h-full flex-col min-w-0" data-focus-zone="chat" onPointerDown={() => setCurrentZone('chat')}>
       {session ? (
         <div className="flex flex-1 flex-col min-h-0 min-w-0 relative">
           {/* Content layer */}
@@ -2195,8 +2264,6 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                               onOpenUrl={onOpenUrl}
                               sessionId={session?.id}
                               compactMode={compactMode}
-                              onCancelQueued={handleCancelQueuedMessage}
-                              onGuideQueued={handleGuideQueuedMessage}
                             />
                             {turn.guidanceMessages?.map((guidanceMessage) => (
                               <div key={guidanceMessage.id} className="pl-6 opacity-90">
@@ -2505,17 +2572,13 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
             compactMode={compactMode}
             permissionMode={permissionMode}
             onPermissionModeChange={onPermissionModeChange}
-            tasks={backgroundTasks}
             sessionId={session.id}
             sessionFolderPath={sessionFolderPath}
-            onKillTask={(taskId) => killTask(taskId, backgroundTasks.find(t => t.id === taskId)?.type === 'shell' ? 'shell' : 'agent')}
-            onInsertMessage={onInputChange}
-            sessionLabels={session.labels}
-            labels={labels}
-            onLabelsChange={onLabelsChange}
-            sessionStatuses={sessionStatuses}
-            currentSessionStatus={session.sessionStatus || 'todo'}
-            onSessionStatusChange={onSessionStatusChange}
+            queuedMessages={session.queuedMessages}
+            onReorderQueuedMessages={handleReorderQueuedMessages}
+            onGuideQueuedMessage={handleGuideQueuedMessage}
+            onEditQueuedMessage={handleEditQueuedMessage}
+            onCancelQueuedMessage={handleCancelQueuedMessage}
             inputProps={{
               placeholder,
               disabled: isInputDisabled,
@@ -2525,6 +2588,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
               onStop: handleStop,
               textareaRef,
               currentModel,
+              sessionModel,
               gatewayStrategies,
               effectiveStrategyId,
               onStrategyChange,
@@ -2752,10 +2816,6 @@ interface MessageBubbleProps {
   compactMode?: boolean
   /** Callback to resend the user message that preceded an error */
   onRetry?: () => void
-  /** Callback to cancel/remove a queued user message */
-  onCancelQueued?: (messageId: string) => void
-  /** Callback to promote a queued user message into immediate guidance */
-  onGuideQueued?: (messageId: string) => void
 }
 
 /**
@@ -2846,22 +2906,45 @@ function MessageBubble({
   onPopOut,
   compactMode,
   onRetry,
-  onCancelQueued,
-  onGuideQueued,
 }: MessageBubbleProps) {
   const { t } = useTranslation()
+
+  // Inline capsules for the user bubble: the attachment tokens stay in the stored
+  // text so the chip sits exactly where the file belonged (`1234[chip]56789`).
+  // Rendering the raw markdown instead dropped everything after a token behind a
+  // separate attachment row above the message.
+  const userContentHtml = React.useMemo(
+    () => (message.role === 'user'
+      ? textToHTML(message.content, [], [], undefined, message.attachments as unknown as Parameters<typeof textToHTML>[4])
+      : ''),
+    [message.role, message.content, message.attachments]
+  )
+  const [hoveredCapsule, setHoveredCapsule] = React.useState<{
+    token: string
+    rect: { top: number; right: number; bottom: number; left: number; width: number; height: number }
+  } | null>(null)
+  const hoveredAttachment = hoveredCapsule
+    ? findAttachmentForToken(message.attachments ?? [], hoveredCapsule.token)
+    : undefined
 
   // === USER MESSAGE: Right-aligned bubble with attachments above ===
   if (message.role === 'user') {
     return (
-      <UserMessageBubble
-        content={message.content}
-        attachments={message.attachments}
-        badges={message.badges}
+      <>
+        <UserMessageBubble
+          content={message.content}
+          contentHtml={userContentHtml}
+          onContentAttachmentHover={(token, rect) => setHoveredCapsule({ token, rect })}
+          onContentAttachmentLeave={() => setHoveredCapsule(null)}
+          // Double-click opens the attachment itself, same as a chip in the composer.
+          onContentAttachmentActivate={(token) => {
+            const attachment = findAttachmentForToken(message.attachments ?? [], token)
+            if (attachment?.storedPath) onOpenFile(attachment.storedPath)
+          }}
+          // No separate attachment row: the capsules are inline in the message.
+          attachments={undefined}
+          badges={message.badges}
         isPending={message.isPending}
-        isQueued={message.isQueued}
-        onGuideQueued={message.isQueued ? () => onGuideQueued?.(message.id) : undefined}
-        onCancelQueued={message.isQueued ? () => onCancelQueued?.(message.id) : undefined}
         onUrlClick={onOpenUrl}
         onFileClick={onOpenFile}
         compactMode={compactMode}
@@ -2870,7 +2953,11 @@ function MessageBubble({
         // not the earlier queue/send time; regular messages fall back to
         // timestamp.
         timestamp={message.startedAt ?? message.timestamp}
-      />
+        />
+        {hoveredAttachment && hoveredCapsule && (
+          <AttachmentHoverCard attachment={hoveredAttachment} rect={hoveredCapsule.rect} />
+        )}
+      </>
     )
   }
 
@@ -2952,6 +3039,27 @@ function MessageBubble({
       )
     }
 
+    // Background task completion notice — a plain, non-interactive title row
+    // (the command + result live in the process block below, so this row is a
+    // label only). Text is selectable/copyable.
+    if (message.statusType === 'background_wake') {
+      const p = message.statusParams ?? {}
+      const status = (p.status as string) ?? 'completed'
+      const isCompleted = status === 'completed'
+      const isStopped = status === 'stopped'
+      const isInterrupted = status === 'interrupted'
+      const Icon = isInterrupted ? AlertTriangle : isStopped ? Square : isCompleted ? CheckCircle2 : CircleAlert
+      const iconClass = isInterrupted ? 'text-info' : isStopped ? 'text-muted-foreground' : isCompleted ? 'text-success' : 'text-destructive'
+      return (
+        <div className={cn("flex items-center gap-2 mt-4 px-3 py-1.5 text-[13px] text-left", iconClass)}>
+          <div className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
+            <Icon className={cn("w-3.5 h-3.5", isCompleted && !isStopped && "text-success")} />
+          </div>
+          <span className="break-words">{message.content}</span>
+        </div>
+      )
+    }
+
     const level = message.infoLevel || 'info'
     const config = {
       info: { icon: Info, className: 'text-muted-foreground' },
@@ -3005,11 +3113,8 @@ const MemoizedMessageBubble = React.memo(MessageBubble, (prev, next) => {
     prev.message.id === next.message.id &&
     prev.message.content === next.message.content &&
     prev.message.role === next.message.role &&
-    prev.message.isQueued === next.message.isQueued &&
     prev.message.isPending === next.message.isPending &&
     prev.sessionId === next.sessionId &&
-    prev.compactMode === next.compactMode &&
-    prev.onCancelQueued === next.onCancelQueued &&
-    prev.onGuideQueued === next.onGuideQueued
+    prev.compactMode === next.compactMode
   )
 })

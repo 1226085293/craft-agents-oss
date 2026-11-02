@@ -5,48 +5,37 @@ import { ChevronRight } from "lucide-react"
 
 import { cn } from "@/lib/utils"
 import {
-  ContextMenu,
   ContextMenuTrigger,
   StyledContextMenuContent,
 } from '@/components/ui/styled-context-menu'
 import { ContextMenuProvider } from '@/components/ui/menu-context'
+import { ExclusiveContextMenu } from './ExclusiveContextMenu'
 import { SidebarMenu, type SidebarMenuType } from './SidebarMenu'
 import { SortableList, type SortableItemData } from '@/components/ui/sortable-list'
+import { dispatchSidebarClick, dispatchSidebarDoubleClick } from './sidebar-click-behavior'
 
 /** Context menu configuration for sidebar items */
 export interface SidebarContextMenuConfig {
   /** Type of sidebar item (determines available menu items) */
   type: SidebarMenuType
-  /** Status ID for status items (e.g., 'todo', 'done') - not currently used but kept for future */
-  statusId?: string
-  /** Label ID — when set, this is an individual label (enables Delete Label) */
-  labelId?: string
-  /** Handler for "Configure Statuses" action - for allSessions/status/flagged types */
-  onConfigureStatuses?: () => void
   /** Handler for "Mark All Read" action - for allSessions type */
   onMarkAllRead?: () => void
-  /** Handler for "Configure Labels" action - receives labelId when triggered from a specific label */
-  onConfigureLabels?: (labelId?: string) => void
-  /** Handler for "Add New Label" action - creates a label (parentId passed from labelId) */
-  onAddLabel?: (parentId?: string) => void
-  /** Handler for "Delete Label" action - deletes the label by labelId */
-  onDeleteLabel?: (labelId: string) => void
+  /** Handler for "New Folder" action - for allSessions type */
+  onNewFolder?: () => void
   /** Handler for "Add Source" action - for sources type */
   onAddSource?: () => void
   /** Handler for "Add Skill" action - for skills type */
   onAddSkill?: () => void
-  /** Handler for "Add Automation" action - for automations type */
-  onAddAutomation?: () => void
   /** Handler for "Add Project" action - for projects type */
   onAddProject?: () => void
+  /** Handler for "View Project Details" action - for project type */
+  onViewDetails?: () => void
+  /** Handler for "Rename" action - for project type */
+  onRename?: () => void
+  /** Handler for "Delete" action - for project type */
+  onDelete?: () => void
   /** Source type filter for "Learn More" link - determines which docs page to open */
   sourceType?: 'api' | 'mcp' | 'local'
-  /** Handler for "Edit Views" action - for views type */
-  onConfigureViews?: () => void
-  /** View ID — when set, this is an individual view (enables Delete) */
-  viewId?: string
-  /** Handler for "Delete View" action */
-  onDeleteView?: (id: string) => void
 }
 
 /**
@@ -79,10 +68,30 @@ export interface LinkItem {
   dataTutorial?: string // data-tutorial attribute for tutorial targeting
   // Context menu configuration (optional - if provided, right-click shows context menu)
   contextMenu?: SidebarContextMenuConfig
+  /**
+   * When set on an expandable item: a single click toggles expansion and only a
+   * double click navigates (same rule as the folder tree rows).
+   */
+  clickTogglesExpand?: boolean
+  /** When true, the title renders as an inline rename input (rename flow). */
+  editing?: boolean
+  /** Commit the inline rename (Enter / blur). Absent value = cancel. */
+  onRenameCommit?: (value: string) => void
+  /** Cancel the inline rename (Escape / empty blur). */
+  onRenameCancel?: () => void
   // Drag-and-drop: flat list reorder (e.g., statuses)
   sortable?: SortableConfig
   // Optional element rendered after the title (e.g., label type icon), revealed on hover
   afterTitle?: React.ReactNode
+  /**
+   * Accept a session dragged from the session list. Dropping on a nav row is how
+   * a session is moved back to that scope's root (e.g. out of a subfolder).
+   */
+  onDropSession?: (sessionId: string) => void
+  /** Drop a FOLDER here — used to move a nested folder back to the root. */
+  onDropFolder?: (folderId: string) => void
+  /** Double-click action for leaf items (fired in addition to the two onClicks). */
+  onDoubleClick?: () => void
 }
 
 export interface SeparatorItem {
@@ -90,10 +99,23 @@ export interface SeparatorItem {
   type: 'separator'
 }
 
-export type SidebarItem = LinkItem | SeparatorItem
+/**
+ * Custom content item — anything that is not nav-link shaped (e.g. the folder
+ * tree that lives under "All Sessions"). Rendered verbatim inside the listflow, so it inherits the nested indentation of its parent.
+ */
+export interface CustomItem {
+  id: string
+  type: 'custom'
+  render: React.ReactNode
+}
+
+export type SidebarItem = LinkItem | SeparatorItem | CustomItem
 
 export const isSeparatorItem = (item: SidebarItem): item is SeparatorItem =>
   'type' in item && item.type === 'separator'
+
+export const isCustomItem = (item: SidebarItem): item is CustomItem =>
+  'type' in item && item.type === 'custom'
 
 interface LeftSidebarProps {
   isCollapsed: boolean
@@ -182,7 +204,7 @@ export function LeftSidebar({ links, isCollapsed, getItemProps, focusedItemId, i
       <NavWrapper
         className={cn(
           "grid gap-0.5",
-          isNested ? "pl-5 pr-0 relative" : "px-2"
+          isNested ? "pl-5 pr-0 relative min-w-0" : "px-2"
         )}
         role="navigation"
         aria-label={isNested ? "Sub navigation" : "Main navigation"}
@@ -201,6 +223,15 @@ export function LeftSidebar({ links, isCollapsed, getItemProps, focusedItemId, i
             return (
               <div key={item.id} className="py-1 px-2" aria-hidden="true">
                 <div className="h-px bg-foreground/5" />
+              </div>
+            )
+          }
+
+          // Custom content (e.g. folder tree under "All Sessions")
+          if (isCustomItem(item)) {
+            return (
+              <div key={item.id} className="group/section min-w-0 max-w-full overflow-hidden">
+                {item.render}
               </div>
             )
           }
@@ -228,7 +259,7 @@ export function LeftSidebar({ links, isCollapsed, getItemProps, focusedItemId, i
           const content = (
             <div className="group/section">
               {link.contextMenu ? (
-                <ContextMenu modal={true}>
+                <ExclusiveContextMenu>
                   <ContextMenuTrigger asChild>
                     {buttonElement}
                   </ContextMenuTrigger>
@@ -236,25 +267,19 @@ export function LeftSidebar({ links, isCollapsed, getItemProps, focusedItemId, i
                     <ContextMenuProvider>
                       <SidebarMenu
                         type={link.contextMenu.type}
-                        statusId={link.contextMenu.statusId}
-                        labelId={link.contextMenu.labelId}
-                        onConfigureStatuses={link.contextMenu.onConfigureStatuses}
                         onMarkAllRead={link.contextMenu.onMarkAllRead}
-                        onConfigureLabels={link.contextMenu.onConfigureLabels}
-                        onAddLabel={link.contextMenu.onAddLabel}
-                        onDeleteLabel={link.contextMenu.onDeleteLabel}
+                        onNewFolder={link.contextMenu.onNewFolder}
                         onAddSource={link.contextMenu.onAddSource}
                         onAddSkill={link.contextMenu.onAddSkill}
-                        onAddAutomation={link.contextMenu.onAddAutomation}
                         onAddProject={link.contextMenu.onAddProject}
+                        onViewDetails={link.contextMenu.onViewDetails}
+                        onRename={link.contextMenu.onRename}
+                        onDelete={link.contextMenu.onDelete}
                         sourceType={link.contextMenu.sourceType}
-                        onConfigureViews={link.contextMenu.onConfigureViews}
-                        viewId={link.contextMenu.viewId}
-                        onDeleteView={link.contextMenu.onDeleteView}
                       />
                     </ContextMenuProvider>
                   </StyledContextMenuContent>
-                </ContextMenu>
+                </ExclusiveContextMenu>
               ) : (
                 buttonElement
               )}
@@ -311,7 +336,7 @@ function renderExpandedContent(
     const separatorIndex = link.items.findIndex(isSeparatorItem)
     const sortableItems = separatorIndex >= 0 ? link.items.slice(0, separatorIndex) : link.items
     const trailingItems = separatorIndex >= 0
-      ? link.items.slice(separatorIndex + 1).filter((item): item is LinkItem => !isSeparatorItem(item))
+      ? link.items.slice(separatorIndex + 1).filter((item): item is LinkItem => !isSeparatorItem(item) && !isCustomItem(item))
       : []
 
     return (
@@ -351,8 +376,8 @@ interface SortableStatusListProps {
 }
 
 function SortableStatusList({ items, onReorder, getItemProps, focusedItemId, trailingItems }: SortableStatusListProps) {
-  // Filter to LinkItems only (separators don't participate in DnD)
-  const linkItems = items.filter((item): item is LinkItem => !isSeparatorItem(item))
+  // Filter to LinkItems only (separators/custom blocks don't participate in DnD)
+  const linkItems = items.filter((item): item is LinkItem => !isSeparatorItem(item) && !isCustomItem(item))
 
   // Map to SortableItemData format (needs `id` field)
   const sortableItems: (LinkItem & SortableItemData)[] = linkItems.map(item => ({
@@ -385,7 +410,7 @@ function SortableStatusList({ items, onReorder, getItemProps, focusedItemId, tra
           renderItem={(item) => (
             <div className="group/section">
               {item.contextMenu ? (
-                <ContextMenu modal={true}>
+                <ExclusiveContextMenu>
                   <ContextMenuTrigger asChild>
                     <SidebarButton
                       link={item}
@@ -396,24 +421,15 @@ function SortableStatusList({ items, onReorder, getItemProps, focusedItemId, tra
                     <ContextMenuProvider>
                       <SidebarMenu
                         type={item.contextMenu.type}
-                        statusId={item.contextMenu.statusId}
-                        labelId={item.contextMenu.labelId}
-                        onConfigureStatuses={item.contextMenu.onConfigureStatuses}
                         onMarkAllRead={item.contextMenu.onMarkAllRead}
-                        onConfigureLabels={item.contextMenu.onConfigureLabels}
-                        onAddLabel={item.contextMenu.onAddLabel}
-                        onDeleteLabel={item.contextMenu.onDeleteLabel}
+                        onNewFolder={item.contextMenu.onNewFolder}
                         onAddSource={item.contextMenu.onAddSource}
                         onAddSkill={item.contextMenu.onAddSkill}
-                        onAddAutomation={item.contextMenu.onAddAutomation}
                         sourceType={item.contextMenu.sourceType}
-                        onConfigureViews={item.contextMenu.onConfigureViews}
-                        viewId={item.contextMenu.viewId}
-                        onDeleteView={item.contextMenu.onDeleteView}
                       />
                     </ContextMenuProvider>
                   </StyledContextMenuContent>
-                </ContextMenu>
+                </ExclusiveContextMenu>
               ) : (
                 <SidebarButton
                   link={item}
@@ -471,6 +487,24 @@ interface SidebarButtonProps {
 // and pass props like data-state="open" directly onto this button element.
 const SidebarButton = React.forwardRef<HTMLButtonElement, SidebarButtonProps & React.ButtonHTMLAttributes<HTMLButtonElement>>(
   ({ link, itemProps, isOverlay, className: extraClassName, ...radixProps }, forwardedRef) => {
+    // Pending single-click toggle for `clickTogglesExpand` rows. A double click
+    // cancels it, so "toggle" and "navigate" never both fire.
+    const clickTimer = React.useRef<number | null>(null)
+    // Drop highlight while a session is dragged over this row.
+    const [sessionDropHover, setSessionDropHover] = React.useState(false)
+    React.useEffect(() => () => {
+      if (clickTimer.current !== null) window.clearTimeout(clickTimer.current)
+    }, [])
+    React.useEffect(() => {
+      // dragend only fires on the source row; clear the target highlight here.
+      const clear = () => setSessionDropHover(false)
+      document.addEventListener('dragend', clear)
+      document.addEventListener('drop', clear)
+      return () => {
+        document.removeEventListener('dragend', clear)
+        document.removeEventListener('drop', clear)
+      }
+    }, [])
     return (
       <button
         {...(isOverlay ? {} : (() => {
@@ -486,7 +520,43 @@ const SidebarButton = React.forwardRef<HTMLButtonElement, SidebarButtonProps & R
           else if (forwardedRef) forwardedRef.current = el
           if (!isOverlay && itemProps?.ref) itemProps.ref(el)
         }}
-        onClick={isOverlay ? undefined : link.onClick}
+        onClick={isOverlay ? undefined : (event) => {
+          dispatchSidebarClick(link, clickTimer, event, window)
+        }}
+        onDoubleClick={isOverlay ? undefined : (event) => {
+          dispatchSidebarDoubleClick(link, clickTimer, event, window)
+        }}
+        onDragOver={isOverlay || (!link.onDropSession && !link.onDropFolder) ? undefined : (event) => {
+          // A dragOver only fires mid-gesture, so a row that owns a drop handler
+          // is a valid target by construction. Checking dataTransfer.types here
+          // was fragile (empty for programmatic drags), which left the row with
+          // no visible frame while hovering it.
+          event.preventDefault()
+          event.dataTransfer.dropEffect = 'move'
+          setSessionDropHover(true)
+        }}
+        onDragLeave={isOverlay ? undefined : (event) => {
+          // Crossing into a child fires dragleave on the row: keep the frame.
+          const next = event.relatedTarget as Node | null
+          if (next && event.currentTarget.contains(next)) return
+          setSessionDropHover(false)
+        }}
+        onDrop={isOverlay ? undefined : (event) => {
+          setSessionDropHover(false)
+          const sessionId = event.dataTransfer.getData('application/x-craft-session')
+          const folderId = event.dataTransfer.getData('application/x-craft-folder')
+          if (folderId && link.onDropFolder) {
+            event.preventDefault()
+            event.stopPropagation()
+            link.onDropFolder(folderId)
+            return
+          }
+          if (sessionId && link.onDropSession) {
+            event.preventDefault()
+            event.stopPropagation()
+            link.onDropSession(sessionId)
+          }
+        }}
         data-tutorial={link.dataTutorial}
         className={cn(
           "group flex w-full items-center gap-2 rounded-[6px] text-[13px] select-none outline-none",
@@ -498,6 +568,10 @@ const SidebarButton = React.forwardRef<HTMLButtonElement, SidebarButtonProps & R
             ? "bg-foreground/[0.07]"
             // Highlight on hover, context menu open (data-state), or EditPopover active (data-edit-active)
             : "hover:bg-sidebar-hover data-[state=open]:bg-sidebar-hover data-[edit-active=true]:bg-sidebar-hover",
+          // Last so tailwind-merge lets it win over the row's own background —
+          // an earlier bg-primary/* was silently dropped and the drop target
+          // showed only a hairline ring.
+          sessionDropHover ? "bg-foreground/[0.12] inset-ring-2 inset-ring-foreground/45" : "",
           extraClassName,
         )}
       >
@@ -531,7 +605,15 @@ const SidebarButton = React.forwardRef<HTMLButtonElement, SidebarButtonProps & R
             renderIcon(link)
           )}
         </span>
-        {link.title}
+        {link.editing && (link.onRenameCommit || link.onRenameCancel) ? (
+          <ProjectRenameInput
+            initialValue={link.title}
+            onCommit={(value) => link.onRenameCommit?.(value)}
+            onCancel={() => link.onRenameCancel?.()}
+          />
+        ) : (
+          link.title
+        )}
         {/* After-title element: type indicator icon, right-aligned before count badge, revealed on hover */}
         {link.afterTitle && (
           <span data-touch-reveal="true" className="ml-auto opacity-0 group-hover/section:opacity-100 group-data-[state=open]:opacity-100 group-data-[edit-active=true]:opacity-100 transition-opacity">
@@ -548,6 +630,54 @@ const SidebarButton = React.forwardRef<HTMLButtonElement, SidebarButtonProps & R
     )
   }
 )
+
+/**
+ * Inline rename input for a sidebar row (project entries). Enter and blur
+ * commit a non-empty trimmed value; Escape cancels. Clicks and keys are kept
+ * inside the input so the row's own click/navigation handlers never fire.
+ */
+function ProjectRenameInput({ initialValue, onCommit, onCancel }: {
+  initialValue: string
+  onCommit: (value: string) => void
+  onCancel: () => void
+}) {
+  const [value, setValue] = React.useState(initialValue)
+  const inputRef = React.useRef<HTMLInputElement>(null)
+
+  React.useEffect(() => {
+    inputRef.current?.focus()
+    inputRef.current?.select()
+  }, [])
+
+  const commit = () => {
+    const trimmed = value.trim()
+    if (trimmed && trimmed !== initialValue) onCommit(trimmed)
+    else onCancel()
+  }
+
+  return (
+    <input
+      ref={inputRef}
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        e.stopPropagation()
+        if (e.key === 'Enter') {
+          e.preventDefault()
+          commit()
+        } else if (e.key === 'Escape') {
+          e.preventDefault()
+          onCancel()
+        }
+      }}
+      onBlur={commit}
+      spellCheck={false}
+      aria-label={initialValue}
+      className="h-5 min-w-0 flex-1 rounded-sm bg-background px-1 text-[13px] outline-none ring-1 ring-ring"
+    />
+  )
+}
 
 /**
  * Helper to render icon - either component (function/forwardRef) or React element.

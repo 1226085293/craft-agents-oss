@@ -21,12 +21,8 @@ import {
   handleError,
   handleTypedError,
   handleSourcesChanged,
-  handleLabelsChanged,
   handleProjectIdChanged,
-  handleSessionStatusChanged,
   handleSessionMetadataChanged,
-  handleSessionFlagged,
-  handleSessionUnflagged,
   handleSessionArchived,
   handleSessionUnarchived,
   handleNameChanged,
@@ -45,6 +41,7 @@ import {
   handleConnectionChanged,
   handleUserMessage,
   handleMessageRemoved,
+  handleQueuedMessagesChanged,
   handleSessionCleared,
   handleMessageAnnotationsUpdated,
   handleSessionShared,
@@ -186,23 +183,11 @@ export function processEvent(
     case 'sources_changed':
       return handleSourcesChanged(state, event)
 
-    case 'labels_changed':
-      return handleLabelsChanged(state, event)
-
     case 'project_id_changed':
       return handleProjectIdChanged(state, event)
 
-    case 'session_status_changed':
-      return handleSessionStatusChanged(state, event)
-
     case 'session_metadata_changed':
       return handleSessionMetadataChanged(state, event)
-
-    case 'session_flagged':
-      return handleSessionFlagged(state, event)
-
-    case 'session_unflagged':
-      return handleSessionUnflagged(state, event)
 
     case 'session_archived':
       return handleSessionArchived(state, event)
@@ -234,6 +219,9 @@ export function processEvent(
 
     case 'message_removed':
       return handleMessageRemoved(state, event)
+
+    case 'queued_messages_changed':
+      return handleQueuedMessagesChanged(state, event)
 
     case 'session_cleared':
       return handleSessionCleared(state, event)

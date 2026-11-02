@@ -11,7 +11,6 @@ import type { StoredMessage, TokenUsage } from './message.ts';
  * Session status for workflow tracking
  * Agents can update this to reflect the current state of the conversation
  */
-export type SessionStatus = 'todo' | 'in_progress' | 'needs_review' | 'done' | 'cancelled';
 
 /**
  * Session represents a conversation scope (SDK session = our scope boundary)
@@ -25,8 +24,6 @@ export interface Session {
   lastUsedAt: number;
   // Inbox/Archive features
   isArchived?: boolean;          // Whether this session is archived
-  isFlagged?: boolean;           // Whether this session is flagged
-  status?: SessionStatus;        // Workflow status (todo, in_progress, needs_review, done, cancelled)
   // Read/unread tracking
   lastReadMessageId?: string;    // ID of the last message the user has read
 }
@@ -54,7 +51,5 @@ export interface SessionMetadata {
   sdkSessionId?: string;
   // Inbox/Archive features
   isArchived?: boolean;    // Whether this session is archived
-  isFlagged?: boolean;     // Whether this session is flagged
-  status?: SessionStatus;  // Workflow status
   hidden?: boolean;        // Whether this session is hidden from session list
 }

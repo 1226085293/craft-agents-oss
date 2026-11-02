@@ -2,13 +2,12 @@ import { useState, useCallback, useEffect, useRef, useMemo } from "react"
 import { isToday, isYesterday, format, startOfDay } from "date-fns"
 
 import { searchLog } from "@/lib/logger"
-import { parseLabelEntry, matchesLabelFilter } from "@craft-agent/shared/labels"
-import type { LabelConfig } from "@craft-agent/shared/labels"
-import { fuzzyScore } from "@craft-agent/shared/search"
-import { getSessionTitle, getSessionStatus } from "@/utils/session"
+import { getSessionTitle } from "@/utils/session"
+import { rankSessionSearchResults } from '@/components/app-shell/search-ranking'
 import type { SessionMeta } from "@/atoms/sessions"
-import type { ViewConfig } from "@craft-agent/shared/views"
+import { orderSessions } from '@/components/app-shell/folder-sort'
 import type { SessionFilter } from "@/contexts/NavigationContext"
+import { filterContentSearchResultsBySessionIds } from '@/components/app-shell/session-search-scope'
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -36,27 +35,14 @@ export interface ContentSearchResult {
   snippet: string
 }
 
-/** Metadata for a collapsed group — emitted by the data pipeline so the renderer can show header-only groups */
-export interface CollapsedGroupMeta {
-  key: string
-  count: number
-}
-
 export interface UseSessionSearchOptions {
   items: SessionMeta[]
   searchActive: boolean
   searchQuery: string
   workspaceId?: string
   currentFilter?: SessionFilter
-  evaluateViews?: (meta: SessionMeta) => ViewConfig[]
-  statusFilter?: Map<string, FilterMode>
-  labelFilterMap?: Map<string, FilterMode>
-  /** Workspace label tree — label filters match descendants through it (shared matchesLabelFilter). */
-  labelConfigs?: LabelConfig[]
   /** Collapsed group keys — collapsed items are excluded from pagination and flatItems */
-  collapsedGroups?: Set<string>
   /** Grouping mode — needed to compute group keys for collapse-aware pagination */
-  groupingMode?: 'date' | 'status' | 'unread' | 'project'
   /** Ref to the ScrollArea viewport element — used for scroll-based pagination */
   scrollViewportRef?: React.RefObject<HTMLDivElement>
 }
@@ -84,7 +70,6 @@ export interface UseSessionSearchResult {
   // Pagination
   hasMore: boolean
   /** Metadata for collapsed groups (key + item count) — used to build header-only placeholder groups */
-  collapsedGroupsMeta: CollapsedGroupMeta[]
 
   // Refs
   searchInputRef: React.RefObject<HTMLInputElement>
@@ -122,158 +107,21 @@ function groupSessionsByDate(sessions: SessionMeta[]): DateGroup[] {
     }))
 }
 
-function getCollapseGroupKey(item: SessionMeta, groupingMode?: 'date' | 'status' | 'unread' | 'project'): string {
-  if (groupingMode === 'status') return `status-${getSessionStatus(item)}`
-  if (groupingMode === 'unread') return item.hasUnread ? 'unread-yes' : 'unread-no'
-  if (groupingMode === 'project') return `project-${(item as { projectId?: string }).projectId ?? '__none__'}`
-  return startOfDay(new Date(item.lastMessageAt || 0)).toISOString()
-}
-
-export interface CollapsedPaginationResult {
-  paginatedItems: SessionMeta[]
-  hasMore: boolean
-  collapsedGroupsMeta: CollapsedGroupMeta[]
-}
-
-export function computeCollapsedPagination(
-  items: SessionMeta[],
-  displayLimit: number,
-  collapsedGroups?: Set<string>,
-  groupingMode?: 'date' | 'status' | 'unread' | 'project',
-): CollapsedPaginationResult {
-  // Fast path: no collapse state → original slice
-  if (!collapsedGroups || collapsedGroups.size === 0) {
-    return {
-      paginatedItems: items.slice(0, displayLimit),
-      hasMore: displayLimit < items.length,
-      collapsedGroupsMeta: [],
-    }
-  }
-
-  const groupKeysInView = new Set(items.map(item => getCollapseGroupKey(item, groupingMode)))
-
-  // Safety guard: don't allow collapse state to hide the entire list when only one
-  // group exists in the current filtered view (there would be no meaningful collapse UX).
-  if (groupKeysInView.size <= 1) {
-    return {
-      paginatedItems: items.slice(0, displayLimit),
-      hasMore: displayLimit < items.length,
-      collapsedGroupsMeta: [],
-    }
-  }
-
-  const effectiveCollapsedKeys = new Set(
-    Array.from(collapsedGroups).filter(key => groupKeysInView.has(key))
-  )
-
-  if (effectiveCollapsedKeys.size === 0) {
-    return {
-      paginatedItems: items.slice(0, displayLimit),
-      hasMore: displayLimit < items.length,
-      collapsedGroupsMeta: [],
-    }
-  }
-
-  const expandedItems: SessionMeta[] = []
-  const collapsedCounts = new Map<string, number>()
-
-  for (const item of items) {
-    const groupKey = getCollapseGroupKey(item, groupingMode)
-
-    if (effectiveCollapsedKeys.has(groupKey)) {
-      collapsedCounts.set(groupKey, (collapsedCounts.get(groupKey) || 0) + 1)
-    } else {
-      expandedItems.push(item)
-    }
-  }
-
-  const meta: CollapsedGroupMeta[] = Array.from(collapsedCounts.entries()).map(
-    ([key, count]) => ({ key, count })
-  )
-
-  return {
-    paginatedItems: expandedItems.slice(0, displayLimit),
-    hasMore: displayLimit < expandedItems.length,
-    collapsedGroupsMeta: meta,
-  }
-}
-
-interface FilterMatchOptions {
-  evaluateViews?: (meta: SessionMeta) => ViewConfig[]
-  statusFilter?: Map<string, 'include' | 'exclude'>
-  labelFilterMap?: Map<string, 'include' | 'exclude'>
-  labelConfigs?: LabelConfig[]
-}
+interface FilterMatchOptions {}
 
 export function sessionMatchesCurrentFilter(
   session: SessionMeta,
   currentFilter: SessionFilter | undefined,
   options: FilterMatchOptions = {}
 ): boolean {
-  const { evaluateViews, statusFilter, labelFilterMap, labelConfigs } = options
-
-  const passesStatusFilter = (): boolean => {
-    if (!statusFilter || statusFilter.size === 0) return true
-    const sessionState = (session.sessionStatus || 'todo') as string
-
-    let hasIncludes = false
-    let matchesInclude = false
-    for (const [stateId, mode] of statusFilter) {
-      if (mode === 'exclude' && sessionState === stateId) return false
-      if (mode === 'include') {
-        hasIncludes = true
-        if (sessionState === stateId) matchesInclude = true
-      }
-    }
-    return !hasIncludes || matchesInclude
-  }
-
-  const passesLabelFilter = (): boolean => {
-    if (!labelFilterMap || labelFilterMap.size === 0) return true
-    const sessionLabelIds = session.labels?.map(l => parseLabelEntry(l).id) || []
-
-    let hasIncludes = false
-    let matchesInclude = false
-    for (const [labelId, mode] of labelFilterMap) {
-      if (mode === 'exclude' && sessionLabelIds.includes(labelId)) return false
-      if (mode === 'include') {
-        hasIncludes = true
-        if (sessionLabelIds.includes(labelId)) matchesInclude = true
-      }
-    }
-    return !hasIncludes || matchesInclude
-  }
-
-  if (!passesStatusFilter() || !passesLabelFilter()) return false
-
   if (!currentFilter) return true
 
   switch (currentFilter.kind) {
     case 'allSessions':
       return session.isArchived !== true
 
-    case 'flagged':
-      return session.isFlagged === true && session.isArchived !== true
-
     case 'archived':
       return session.isArchived === true
-
-    case 'state':
-      return (session.sessionStatus || 'todo') === currentFilter.stateId && session.isArchived !== true
-
-    case 'label': {
-      if (session.isArchived === true) return false
-      // Shared predicate (descendant-aware + optional project scope) — keep in
-      // sync with AppShell's filtered set by construction, not by copy.
-      return matchesLabelFilter(session, currentFilter, labelConfigs ?? [])
-    }
-
-    case 'view':
-      if (session.isArchived === true) return false
-      if (!evaluateViews) return true
-      const matched = evaluateViews(session)
-      if (currentFilter.viewId === '__all__') return matched.length > 0
-      return matched.some(v => v.id === currentFilter.viewId)
 
     default:
       const _exhaustive: never = currentFilter
@@ -291,12 +139,6 @@ export function useSessionSearch({
   searchQuery,
   workspaceId,
   currentFilter,
-  evaluateViews,
-  statusFilter,
-  labelFilterMap,
-  labelConfigs,
-  collapsedGroups,
-  groupingMode,
   scrollViewportRef,
 }: UseSessionSearchOptions): UseSessionSearchResult {
 
@@ -305,16 +147,21 @@ export function useSessionSearch({
   const [isSearchUnavailable, setIsSearchUnavailable] = useState(false)
   const [displayLimit, setDisplayLimit] = useState(INITIAL_DISPLAY_LIMIT)
   const searchInputRef = useRef<HTMLInputElement>(null)
+  const contentSearchSessionIds = useMemo(
+    () => items.filter(item => !item.hidden).map(item => item.id),
+    [items],
+  )
 
-  // Search mode is active when search is open AND query has 2+ characters
-  const isSearchMode = searchActive && searchQuery.length >= 2
+  // Search mode is active when search is open AND the query is non-empty
+  const isSearchMode = searchActive && searchQuery.trim().length > 0
   const highlightQuery = isSearchMode ? searchQuery : undefined
 
   // --- Content search (ripgrep IPC with debounce + cancellation) ---
 
   useEffect(() => {
-    if (!workspaceId || !isSearchMode) {
+    if (!workspaceId || !isSearchMode || contentSearchSessionIds.length === 0) {
       setContentSearchResults(new Map())
+      setIsSearchingContent(false)
       return
     }
 
@@ -330,7 +177,7 @@ export function useSessionSearch({
         searchLog.info('ipc:call', { searchId })
         const ipcStart = performance.now()
 
-        const results = await window.electronAPI.searchSessionContent(workspaceId, searchQuery, searchId)
+        const results = await window.electronAPI.searchSessionContent(workspaceId, searchQuery, searchId, contentSearchSessionIds)
 
         if (cancelled) return
 
@@ -375,7 +222,7 @@ export function useSessionSearch({
       clearTimeout(timer)
       setIsSearchingContent(false)
     }
-  }, [workspaceId, isSearchMode, searchQuery])
+  }, [workspaceId, isSearchMode, searchQuery, contentSearchSessionIds])
 
   // --- Focus search input when search activates ---
 
@@ -389,52 +236,41 @@ export function useSessionSearch({
 
   // Filter out hidden sessions before any processing
   const visibleItems = useMemo(() => items.filter(item => !item.hidden), [items])
-
-  // Sort by most recent activity first
-  const sortedItems = useMemo(() =>
-    [...visibleItems].sort((a, b) => (b.lastMessageAt || 0) - (a.lastMessageAt || 0)),
-    [visibleItems]
+  const scopedContentSearchResults = useMemo(
+    () => filterContentSearchResultsBySessionIds(contentSearchResults, new Set(visibleItems.map(item => item.id))),
+    [contentSearchResults, visibleItems],
   )
+
+  // Ordering: pinned first, then unread, then most recent. Kept in one place so
+  // the list cannot be re-sorted by a later stage and lose that priority.
+  const sortedItems = useMemo(() => orderSessions(visibleItems), [visibleItems])
 
   // Filter items by search query or current filter
   const searchFilteredItems = useMemo(() => {
     if (!isSearchMode) {
       return sortedItems.filter(item =>
-        sessionMatchesCurrentFilter(item, currentFilter, { evaluateViews, statusFilter, labelFilterMap, labelConfigs })
+        sessionMatchesCurrentFilter(item, currentFilter)
       )
     }
 
-    return sortedItems
-      .filter(item => contentSearchResults.has(item.id))
-      .sort((a, b) => {
-        const aScore = fuzzyScore(getSessionTitle(a), searchQuery)
-        const bScore = fuzzyScore(getSessionTitle(b), searchQuery)
-
-        if (aScore > 0 && bScore === 0) return -1
-        if (aScore === 0 && bScore > 0) return 1
-        if (aScore !== bScore) return bScore - aScore
-
-        const countA = contentSearchResults.get(a.id)?.matchCount || 0
-        const countB = contentSearchResults.get(b.id)?.matchCount || 0
-        return countB - countA
-      })
-  }, [sortedItems, isSearchMode, searchQuery, contentSearchResults, currentFilter, evaluateViews, statusFilter, labelFilterMap, labelConfigs])
+    return rankSessionSearchResults(
+      sortedItems,
+      searchQuery,
+      new Map([...scopedContentSearchResults].map(([id, result]) => [id, result.matchCount])),
+      getSessionTitle,
+    ).map(result => result.item)
+  }, [sortedItems, isSearchMode, searchQuery, scopedContentSearchResults, currentFilter])
 
   // Split search results: matching current filter vs others
   const { matchingFilterItems, otherResultItems, exceededSearchLimit } = useMemo(() => {
     const hasActiveFilters =
-      (currentFilter && currentFilter.kind !== 'allSessions') ||
-      (statusFilter && statusFilter.size > 0) ||
-      (labelFilterMap && labelFilterMap.size > 0)
+      (currentFilter && currentFilter.kind !== 'allSessions')
 
     if (searchQuery.trim() && searchFilteredItems.length > 0) {
       searchLog.info('search:grouping', {
         searchQuery,
         currentFilterKind: currentFilter?.kind,
-        currentFilterStateId: currentFilter?.kind === 'state' ? currentFilter.stateId : undefined,
         hasActiveFilters,
-        statusFilterSize: statusFilter?.size ?? 0,
-        labelFilterSize: labelFilterMap?.size ?? 0,
         itemCount: searchFilteredItems.length,
       })
     }
@@ -453,7 +289,7 @@ export function useSessionSearch({
     for (const item of searchFilteredItems) {
       if (matching.length + others.length >= MAX_SEARCH_RESULTS) break
 
-      const matches = sessionMatchesCurrentFilter(item, currentFilter, { evaluateViews, statusFilter, labelFilterMap, labelConfigs })
+      const matches = sessionMatchesCurrentFilter(item, currentFilter)
       if (matches) {
         matching.push(item)
       } else {
@@ -470,7 +306,7 @@ export function useSessionSearch({
     }
 
     return { matchingFilterItems: matching, otherResultItems: others, exceededSearchLimit: exceeded }
-  }, [searchFilteredItems, currentFilter, evaluateViews, isSearchMode, statusFilter, labelFilterMap, labelConfigs, searchQuery])
+  }, [searchFilteredItems, currentFilter, isSearchMode, searchQuery])
 
   // --- Pagination ---
 
@@ -478,12 +314,11 @@ export function useSessionSearch({
     setDisplayLimit(INITIAL_DISPLAY_LIMIT)
   }, [searchQuery])
 
-  // Collapse-aware pagination: collapsed items are excluded entirely from
-  // paginatedItems (and therefore flatItems / keyboard nav). Their counts are
-  // returned as collapsedGroupsMeta so the renderer can show header-only groups.
-  const { paginatedItems, hasMore, collapsedGroupsMeta } = useMemo(() => {
-    return computeCollapsedPagination(searchFilteredItems, displayLimit, collapsedGroups, groupingMode)
-  }, [searchFilteredItems, displayLimit, collapsedGroups, groupingMode])
+  // Plain pagination: the list is one continuous run of sessions (no grouping).
+  const { paginatedItems, hasMore } = useMemo(() => ({
+    paginatedItems: searchFilteredItems.slice(0, displayLimit),
+    hasMore: displayLimit < searchFilteredItems.length,
+  }), [searchFilteredItems, displayLimit])
 
   const loadMore = useCallback(() => {
     setDisplayLimit(prev => Math.min(prev + BATCH_SIZE, searchFilteredItems.length))
@@ -516,8 +351,11 @@ export function useSessionSearch({
     if (isSearchMode) {
       return [...matchingFilterItems, ...otherResultItems]
     }
-    return dateGroups.flatMap(group => group.sessions)
-  }, [isSearchMode, matchingFilterItems, otherResultItems, dateGroups])
+    // Date buckets were only ever used for group headers, which the list no
+    // longer renders — rebuilding the order here would undo the pinned/unread
+    // priority that sortedItems established.
+    return paginatedItems
+  }, [isSearchMode, matchingFilterItems, otherResultItems, paginatedItems])
 
   const sessionIndexMap = useMemo(() => {
     const map = new Map<string, number>()
@@ -530,7 +368,7 @@ export function useSessionSearch({
     highlightQuery,
     isSearchingContent,
     isSearchUnavailable,
-    contentSearchResults,
+    contentSearchResults: scopedContentSearchResults,
     matchingFilterItems,
     otherResultItems,
     exceededSearchLimit,
@@ -538,7 +376,6 @@ export function useSessionSearch({
     dateGroups,
     sessionIndexMap,
     hasMore,
-    collapsedGroupsMeta,
     searchInputRef,
   }
 }

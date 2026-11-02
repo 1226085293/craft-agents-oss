@@ -2,7 +2,7 @@
  * Session Tools Core - Handlers
  *
  * Exports all handler functions for session-scoped tools.
- * These handlers are used by both Claude and Codex implementations.
+ * These handlers are used by the Pi agent.
  */
 
 // SubmitPlan
@@ -60,18 +60,16 @@ export { handleSendDeveloperFeedback } from './send-developer-feedback.ts';
 export type { SendDeveloperFeedbackArgs } from './send-developer-feedback.ts';
 
 // Session Self-Management
-export { handleSetSessionLabels } from './set-session-labels.ts';
-export type { SetSessionLabelsArgs } from './set-session-labels.ts';
-export { handleSetSessionStatus } from './set-session-status.ts';
-export type { SetSessionStatusArgs } from './set-session-status.ts';
 export { handleGetSessionInfo } from './get-session-info.ts';
 export type { GetSessionInfoArgs } from './get-session-info.ts';
 export { handleListSessions } from './list-sessions.ts';
 export type { ListSessionsArgs } from './list-sessions.ts';
 export { handleListBackgroundTasks } from './list-background-tasks.ts';
 export type { ListBackgroundTasksArgs } from './list-background-tasks.ts';
-export { handleCreateTask } from './create-task.ts';
-export type { CreateTaskArgs } from './create-task.ts';
+export { handleGetBackgroundTaskOutput } from './get-background-task-output.ts';
+export type { GetBackgroundTaskOutputArgs } from './get-background-task-output.ts';
+export { handleStopBackgroundTask } from './stop-background-task.ts';
+export type { StopBackgroundTaskArgs } from './stop-background-task.ts';
 export { handleArchiveSession } from './archive-session.ts';
 export type { ArchiveSessionArgs } from './archive-session.ts';
 
@@ -92,3 +90,10 @@ export type {
   WritePageDataArgs,
   DeletePageArgs,
 } from './pages.ts';
+
+export {
+  handleSubscribeSession,
+  handleUnsubscribeSession,
+  handleListSubscriptions,
+} from './subscriptions.ts';
+export type { SubscribeSessionArgs, UnsubscribeSessionArgs } from './subscriptions.ts';

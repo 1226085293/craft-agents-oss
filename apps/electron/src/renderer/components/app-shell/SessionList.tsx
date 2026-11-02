@@ -1,25 +1,25 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react"
+import { useState, useCallback, useEffect, useMemo, useRef, type DragEvent } from "react"
 import { useTranslation } from "react-i18next"
 import { useSetAtom } from "jotai"
 import { startOfDay } from "date-fns"
 import { useAction } from "@/actions"
 import { Inbox, Archive } from "lucide-react"
 
-import { getSessionStatus } from "@/utils/session"
 import * as storage from "@/lib/local-storage"
 import { KEYS } from "@/lib/local-storage"
-import type { LabelConfig } from "@craft-agent/shared/labels"
-import { flattenLabels } from "@craft-agent/shared/labels"
 import * as MultiSelect from "@/hooks/useMultiSelect"
 import { Spinner } from "@craft-agent/ui"
 import { EntityListEmptyScreen } from "@/components/ui/entity-list-empty"
 import { EntityList } from "@/components/ui/entity-list"
 import { RenameDialog } from "@/components/ui/rename-dialog"
-import { SessionSearchHeader } from "./SessionSearchHeader"
 import { SessionItem } from "./SessionItem"
 import { SessionListProvider, type SessionListContextValue } from "@/context/SessionListContext"
 import { useSessionSelection, useSessionSelectionStore } from "@/hooks/useSession"
-import { useSessionSearch, type FilterMode } from "@/hooks/useSessionSearch"
+import { useSessionSearch } from "@/hooks/useSessionSearch"
+import { NavigatorFolderList, type NavigatorFolderListHandle } from "./NavigatorFolderList"
+import { filterFolderSearchResults } from "./folder-search"
+import { getInChatSearchQuery } from "./chat-search-routing"
+import type { UseFoldersResult } from "../../hooks/useFolders"
 import { useSessionActions } from "@/hooks/useSessionActions"
 import { useEntityListInteractions } from "@/hooks/useEntityListInteractions"
 import { useFocusZone } from "@/hooks/keyboard"
@@ -27,38 +27,26 @@ import { useEscapeInterrupt } from "@/context/EscapeInterruptContext"
 import { useNavigation, useNavigationState, routes, isSessionsNavigation } from "@/contexts/NavigationContext"
 import { useFocusContext } from "@/context/FocusContext"
 import { sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
-import type { ViewConfig } from "@craft-agent/shared/views"
-import type { SessionStatusId, SessionStatus } from "@/config/session-status-config"
-import { buildCollapsedGroupsScopeSuffix } from "@/utils/session-list-collapse"
-import { groupSearchSessionRows, groupSessionRows, type ChatGroupingMode } from "@/utils/session-list-grouping"
 
 export interface SessionListRow {
   item: SessionMeta
 }
 
-/** Grouping mode for chat list */
-export type { ChatGroupingMode }
-
 interface SessionListProps {
   items: SessionMeta[]
   onDelete: (sessionId: string, skipConfirmation?: boolean) => Promise<boolean>
-  onFlag?: (sessionId: string) => void
-  onUnflag?: (sessionId: string) => void
   onArchive?: (sessionId: string) => void
   onUnarchive?: (sessionId: string) => void
   onMarkUnread: (sessionId: string) => void
-  onSessionStatusChange: (sessionId: string, state: SessionStatusId) => void
   onRename: (sessionId: string, name: string) => void
   /** Called when Enter is pressed to focus chat input for a specific session */
   onFocusChatInput?: (sessionId?: string) => void
   /** Called when a session is selected */
   onSessionSelect?: (session: SessionMeta) => void
+  /** Called when a session selected from active search results should search its chat. */
+  onSearchResultSelect?: (sessionId: string, query: string) => void
   /** Called when user wants to open a session in a new window */
   onOpenInNewWindow?: (session: SessionMeta) => void
-  /** Called to navigate to a specific view (e.g., 'allSessions', 'flagged') */
-  onNavigateToView?: (view: 'allSessions' | 'flagged') => void
-  /** Unified session options per session (real-time state) */
-  sessionOptions?: Map<string, import('../../hooks/useSessionOptions').SessionOptions>
   /** Whether search mode is active */
   searchActive?: boolean
   /** Current search query */
@@ -67,26 +55,32 @@ interface SessionListProps {
   onSearchChange?: (query: string) => void
   /** Called when search is closed */
   onSearchClose?: () => void
-  /** Dynamic todo states from workspace config */
-  sessionStatuses?: SessionStatus[]
-  /** View evaluator — evaluates a session and returns matching view configs */
-  evaluateViews?: (meta: SessionMeta) => ViewConfig[]
-  /** Label configs for resolving session label IDs to display info */
-  labels?: LabelConfig[]
-  /** Callback when session labels are toggled (for labels submenu in SessionMenu) */
-  onLabelsChange?: (sessionId: string, labels: string[]) => void
   /** Workspace projects (for the Projects submenu in SessionMenu) */
   projects?: Array<{ id: string; slug: string; name: string; color?: string }>
   /** Callback to bind/unbind a session to a project (null = unbind) */
   onSetProjectId?: (sessionId: string, projectId: string | null) => void
-  /** How to group sessions: 'date' (default) or 'status' */
-  groupingMode?: ChatGroupingMode
   /** Workspace ID for content search (optional - if not provided, content search is disabled) */
   workspaceId?: string
-  /** Secondary status filter (status chips in "All Sessions" view) - for search result grouping */
-  statusFilter?: Map<string, FilterMode>
-  /** Secondary label filter (label chips) - for search result grouping */
-  labelFilterMap?: Map<string, FilterMode>
+  /** True when the list is scoped to one project's jump view — project-bound rows already sit inside their project, so the hover project-name suffix is redundant. */
+  inProjectScope?: boolean
+  /**
+   * Folder list for the CURRENT scope, rendered as the first rows of this list.
+   * Living inside the list (not above it) is what keeps folder rows and session
+   * rows in one scroll flow with one row height.
+   */
+  foldersApi?: UseFoldersResult
+  /** Project scope of the active folder tree; null = All Sessions. */
+  folderScopeProjectId?: string | null
+  /** Current folder scope: null = root. Its direct children are listed. */
+  folderScopeId?: string | null
+  /** Enter a folder (scope this list to it). */
+  onEnterFolder?: (folderId: string) => void
+  /** Session count per folder id, for the trailing badge. */
+  folderSessionCounts?: ReadonlyMap<string, number>
+  /** Drop a session onto a folder row (re-file it). */
+  onDropSessionToFolder?: (sessionId: string, folderId: string) => void
+  /** Handle to the folder list, so the panel's context menu can start a create. */
+  folderListRef?: React.Ref<NavigatorFolderListHandle>
   /** Override which session is highlighted (for multi-panel focused panel tracking) */
   focusedSessionId?: string | null
   /** Override navigation target (for multi-panel: focuses existing panel or navigates focused panel) */
@@ -95,10 +89,10 @@ interface SessionListProps {
   hasPendingPrompt?: (sessionId: string) => boolean
   /** DOM-verified match info for the active session (from ChatDisplay) */
   activeChatMatchInfo?: { sessionId: string | null; count: number; isHighlighting?: boolean }
+  /** Create a session in the current scope (inherits project + folder). */
+  onNewSession?: () => void
 }
 
-// Re-export SessionStatusId for use by parent components
-export type { SessionStatusId }
 
 /**
  * SessionList - Scrollable list of session cards with keyboard navigation
@@ -112,34 +106,33 @@ export type { SessionStatusId }
 export function SessionList({
   items,
   onDelete,
-  onFlag,
-  onUnflag,
   onArchive,
   onUnarchive,
   onMarkUnread,
-  onSessionStatusChange,
   onRename,
   onFocusChatInput,
+  onSearchResultSelect,
   onOpenInNewWindow,
-  sessionOptions,
   searchActive,
   searchQuery = '',
   onSearchChange,
   onSearchClose,
-  sessionStatuses = [],
-  evaluateViews,
-  labels = [],
-  onLabelsChange,
   projects,
   onSetProjectId,
-  groupingMode = 'date',
   workspaceId,
-  statusFilter,
-  labelFilterMap,
+  inProjectScope,
+  foldersApi,
+  folderScopeProjectId = null,
+  folderScopeId = null,
+  onEnterFolder,
+  folderSessionCounts,
+  onDropSessionToFolder,
+  folderListRef,
   focusedSessionId,
   onNavigateToSession,
   hasPendingPrompt,
   activeChatMatchInfo,
+  onNewSession,
 }: SessionListProps) {
   const { t, i18n } = useTranslation()
   const setSendToWorkspace = useSetAtom(sendToWorkspaceAtom)
@@ -158,9 +151,6 @@ export function SessionList({
   const navState = useNavigationState()
   const { showEscapeOverlay } = useEscapeInterrupt()
 
-  // Pre-flatten label tree once for efficient ID lookups in each SessionItem
-  const flatLabels = useMemo(() => flattenLabels(labels), [labels])
-
   // Get current filter from navigation state (for preserving context in tab routes)
   const currentFilter = isSessionsNavigation(navState) ? navState.filter : undefined
 
@@ -168,64 +158,8 @@ export function SessionList({
   const [renameSessionId, setRenameSessionId] = useState<string | null>(null)
   const [renameName, setRenameName] = useState("")
   // Track if search input has actual DOM focus (for proper keyboard navigation gating)
-  const [isSearchInputFocused, setIsSearchInputFocused] = useState(false)
-
-  // Collapsed group keys (for collapsible group headers) — persisted per workspace/filter/grouping context
-  const collapseScopeSuffix = useMemo(() => {
-    return buildCollapsedGroupsScopeSuffix({
-      workspaceId,
-      currentFilter,
-      groupingMode,
-    })
-  }, [
-    workspaceId,
-    groupingMode,
-    currentFilter?.kind,
-    currentFilter && 'stateId' in currentFilter ? currentFilter.stateId : undefined,
-    currentFilter && 'labelId' in currentFilter ? currentFilter.labelId : undefined,
-    currentFilter && 'viewId' in currentFilter ? currentFilter.viewId : undefined,
-  ])
-
-  const readCollapsedGroupsForScope = useCallback((scopeSuffix: string): Set<string> => {
-    const scopedRaw = storage.getRaw(KEYS.collapsedSessionGroups, scopeSuffix)
-    if (scopedRaw !== null) {
-      try {
-        const parsed = JSON.parse(scopedRaw)
-        return new Set(Array.isArray(parsed) ? parsed : [])
-      } catch {
-        return new Set()
-      }
-    }
-
-    // Legacy fallback: previous versions used a single global key with no scope suffix.
-    // Use as migration source only when this scope has never been written.
-    const legacy = storage.get<string[]>(KEYS.collapsedSessionGroups, [])
-    return new Set(legacy)
-  }, [])
-
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => readCollapsedGroupsForScope(collapseScopeSuffix))
-  const collapseScopeRef = useRef(collapseScopeSuffix)
-
-  useEffect(() => {
-    if (collapseScopeRef.current === collapseScopeSuffix) return
-    setCollapsedGroups(readCollapsedGroupsForScope(collapseScopeSuffix))
-    collapseScopeRef.current = collapseScopeSuffix
-  }, [collapseScopeSuffix, readCollapsedGroupsForScope])
-
-  useEffect(() => {
-    // Avoid writing stale groups from a previous scope during context switches.
-    if (collapseScopeRef.current !== collapseScopeSuffix) return
-    storage.set(KEYS.collapsedSessionGroups, Array.from(collapsedGroups), collapseScopeSuffix)
-  }, [collapsedGroups, collapseScopeSuffix])
-
-  const toggleGroupCollapse = useCallback((groupKey: string) => {
-    setCollapsedGroups(prev => {
-      const next = new Set(prev)
-      if (next.has(groupKey)) next.delete(groupKey)
-      else next.add(groupKey)
-      return next
-    })
-  }, [])
+  // The search box lives in the panel header (outside this list), so keyboard
+  // navigation is enabled whenever search is active: opening the box focuses it.
 
   // --- Data pipeline (search, filtering, pagination, grouping) ---
   const scrollViewportRef = useRef<HTMLDivElement>(null)
@@ -241,7 +175,6 @@ export function SessionList({
     exceededSearchLimit,
     flatItems,
     hasMore,
-    collapsedGroupsMeta,
     searchInputRef,
   } = useSessionSearch({
     items,
@@ -249,72 +182,22 @@ export function SessionList({
     searchQuery,
     workspaceId,
     currentFilter,
-    evaluateViews,
-    statusFilter,
-    labelFilterMap,
-    labelConfigs: labels,
-    collapsedGroups,
-    groupingMode,
     scrollViewportRef,
   })
 
+  // One flat run of rows: the list has no grouping (date / unread / project),
+  // so there are no group headers to build or collapse.
   const rowData = useMemo(() => {
-    const groupingOptions = {
-      groupingMode,
-      sessionStatuses,
-      projects,
-      t,
-      language: i18n.resolvedLanguage ?? 'en',
+    const rows: SessionListRow[] = (isSearchMode ? matchingFilterItems : flatItems).map(item => ({ item }))
+    return {
+      rows,
+      groups: rows.length > 0 ? [{ key: 'all', label: '', items: rows, collapsible: false as const }] : [],
     }
-
-    if (isSearchMode) {
-      const matchingRows: SessionListRow[] = matchingFilterItems.map(item => ({ item }))
-      const otherRows: SessionListRow[] = otherResultItems.map(item => ({ item }))
-
-      // Search results honour the same grouping mode as the normal list. The
-      // two search buckets (in-view / other conversations) stay separated by
-      // a divider so grouping never hides that distinction.
-      return groupSearchSessionRows(matchingRows, otherRows, groupingOptions)
-    }
-
-    // flatItems only contains visible (expanded + paginated) items.
-    // collapsedGroupsMeta provides key + count for collapsed groups so we
-    // can insert header-only placeholder groups in the correct position.
-    const rows: SessionListRow[] = flatItems.map(item => ({ item }))
-
-    return groupSessionRows(rows, {
-      ...groupingOptions,
-      collapsedGroupsMeta,
-      collapsible: true,
-    })
-  }, [isSearchMode, matchingFilterItems, otherResultItems, flatItems, groupingMode, sessionStatuses, projects, collapsedGroupsMeta, t, i18n.resolvedLanguage])
+  }, [isSearchMode, matchingFilterItems, flatItems])
 
   const flatRows = rowData.rows
-
-  const collapseAllGroups = useCallback(() => {
-    if (groupingMode === 'status') {
-      const allKeys = new Set(items.map(item => `status-${getSessionStatus(item)}`))
-      setCollapsedGroups(allKeys)
-    } else if (groupingMode === 'unread') {
-      const allKeys = new Set(items.map(item => item.hasUnread ? 'unread-yes' : 'unread-no'))
-      setCollapsedGroups(allKeys)
-    } else if (groupingMode === 'project') {
-      const knownProjectIds = new Set((projects ?? []).map(p => p.id))
-      const allKeys = new Set(items.map(item => {
-        const pid = (item as { projectId?: string }).projectId
-        return pid && knownProjectIds.has(pid) ? `project-${pid}` : 'project-__none__'
-      }))
-      setCollapsedGroups(allKeys)
-    } else {
-      const allKeys = new Set(items.map(item =>
-        startOfDay(new Date(item.lastMessageAt || 0)).toISOString()
-      ))
-      setCollapsedGroups(allKeys)
-    }
-  }, [items, groupingMode, projects])
-  const expandAllGroups = useCallback(() => {
-    setCollapsedGroups(new Set())
-  }, [])
+  const hasMatchingSearchFolders = isSearchMode && !!foldersApi &&
+    filterFolderSearchResults(foldersApi.folders, folderScopeId, searchQuery).length > 0
 
   const rowIndexMap = useMemo(() => {
     const map = new Map<string, number>()
@@ -326,19 +209,17 @@ export function SessionList({
 
   // --- Action handlers with toast feedback ---
   const {
-    handleFlagWithToast,
-    handleUnflagWithToast,
     handleArchiveWithToast,
     handleUnarchiveWithToast,
     handleDeleteWithToast,
-  } = useSessionActions({ onFlag, onUnflag, onArchive, onUnarchive, onDelete })
+  } = useSessionActions({ onArchive, onUnarchive, onDelete })
 
   // --- Focus zone ---
   const { focusZone } = useFocusContext()
   const { zoneRef, isFocused, shouldMoveDOMFocus } = useFocusZone({ zoneId: 'navigator' })
 
   // Keyboard eligibility: zone-focused OR search input focused (for arrow navigation)
-  const isKeyboardEligible = isFocused || (searchActive && isSearchInputFocused)
+  const isKeyboardEligible = isFocused || !!searchActive
 
   // --- Interactions (keyboard navigation + selection via shared atom) ---
   const interactions = useEntityListInteractions<SessionListRow>({
@@ -351,10 +232,12 @@ export function SessionList({
       onActivate: useCallback((row: SessionListRow) => {
         // Only navigate when not in multi-select (matches original behavior)
         if (!MultiSelect.isMultiSelectActive(selectionStore.state)) {
+          const query = getInChatSearchQuery(isSearchMode, searchQuery)
+          if (query) onSearchResultSelect?.(row.item.id, query)
           navigateToSession(row.item.id)
+          if (!query) onFocusChatInput?.(row.item.id)
         }
-        onFocusChatInput?.(row.item.id)
-      }, [selectionStore.state, navigateToSession, onFocusChatInput]),
+      }, [selectionStore.state, navigateToSession, onFocusChatInput, isSearchMode, searchQuery, onSearchResultSelect]),
       enabled: isKeyboardEligible,
       virtualFocus: searchActive ?? false,
     },
@@ -398,13 +281,16 @@ export function SessionList({
   // --- Click handlers ---
   const handleSelectSession = useCallback((row: SessionListRow, index: number) => {
     selectSession(row.item.id, index)
+    const query = getInChatSearchQuery(isSearchMode, searchQuery)
+    if (query) onSearchResultSelect?.(row.item.id, query)
     navigateToSession(row.item.id)
     // Route focus through the queued mechanism (120ms delay in FreeFormInput)
     // so the session-switch re-render burst settles before focusing — immediate
     // focus mid-update races Windows TSF IME context registration and makes the
     // first keystroke miss the IME (duplicated plain chars, e.g. "nn").
-    onFocusChatInput?.(row.item.id)
-  }, [selectSession, navigateToSession, onFocusChatInput])
+    // Search result selection instead focuses the in-chat search field.
+    if (!query) onFocusChatInput?.(row.item.id)
+  }, [selectSession, navigateToSession, onFocusChatInput, isSearchMode, searchQuery, onSearchResultSelect])
 
   const handleSelectSessionById = useCallback((sessionId: string) => {
     const index = rowIndexMap.get(sessionId) ?? -1
@@ -459,22 +345,6 @@ export function SessionList({
     setRenameName("")
   }
 
-  // --- Search input key handler ---
-  const handleSearchKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Escape') {
-      e.preventDefault()
-      searchInputRef.current?.blur()
-      return
-    }
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      onFocusChatInput?.(selectionStore.state.selected ?? undefined)
-      return
-    }
-    // Forward arrow keys via interactions
-    interactions.searchInputProps.onKeyDown(e)
-  }, [searchInputRef, onFocusChatInput, interactions.searchInputProps, selectionStore.state.selected])
-
   // --- Context value (shared across all SessionItems) ---
   const handleFocusZone = useCallback(() => focusZone('navigator', { intent: 'click', moveFocus: false }), [focusZone])
   const handleOpenInNewWindow = useCallback((item: SessionMeta) => onOpenInNewWindow?.(item), [onOpenInNewWindow])
@@ -482,14 +352,10 @@ export function SessionList({
 
   const listContext = useMemo((): SessionListContextValue => ({
     onRenameClick: handleRenameClick,
-    onSessionStatusChange,
-    onFlag: onFlag ? handleFlagWithToast : undefined,
-    onUnflag: onUnflag ? handleUnflagWithToast : undefined,
     onArchive: onArchive ? handleArchiveWithToast : undefined,
     onUnarchive: onUnarchive ? handleUnarchiveWithToast : undefined,
     onMarkUnread,
     onDelete: handleDeleteWithToast,
-    onLabelsChange,
     projects,
     onSetProjectId,
     onSelectSessionById: handleSelectSessionById,
@@ -497,26 +363,23 @@ export function SessionList({
     onSendToWorkspace: (ids: string[]) => setSendToWorkspace(ids),
     onFocusZone: handleFocusZone,
     onKeyDown: handleKeyDown,
-    sessionStatuses,
-    flatLabels,
-    labels,
     searchQuery: resolvedSearchQuery,
     selectedSessionId: focusedSessionId !== undefined ? focusedSessionId : selectionStore.state.selected,
     isMultiSelectActive,
-    sessionOptions,
+    inProjectScope,
     contentSearchResults,
     activeChatMatchInfo,
+    onNewSession,
     hasPendingPrompt,
   }), [
-    handleRenameClick, onSessionStatusChange,
-    onFlag, handleFlagWithToast, onUnflag, handleUnflagWithToast,
+    handleRenameClick,
     onArchive, handleArchiveWithToast, onUnarchive, handleUnarchiveWithToast,
-    onMarkUnread, handleDeleteWithToast, onLabelsChange,
+    onMarkUnread, handleDeleteWithToast,
     projects, onSetProjectId,
     handleSelectSessionById, handleOpenInNewWindow, setSendToWorkspace, handleFocusZone, handleKeyDown,
-    sessionStatuses, flatLabels, labels, resolvedSearchQuery,
+    resolvedSearchQuery,
     focusedSessionId, selectionStore.state.selected, isMultiSelectActive,
-    sessionOptions, contentSearchResults, activeChatMatchInfo, hasPendingPrompt,
+    inProjectScope, contentSearchResults, activeChatMatchInfo, hasPendingPrompt, onNewSession,
   ])
 
   // --- Empty state (non-search) — render before EntityList ---
@@ -542,10 +405,11 @@ export function SessionList({
       >
         <button
           onClick={() => {
-            const params: { status?: string; label?: string } = {}
-            if (currentFilter?.kind === 'state') params.status = currentFilter.stateId
-            else if (currentFilter?.kind === 'label') params.label = currentFilter.labelId
-            navigate(routes.action.newSession(Object.keys(params).length > 0 ? params : undefined))
+            // An empty folder-scoped list must create INSIDE that folder, so the
+            // shared handler (which inherits project + folder) is used when the
+            // host provides one.
+            if (onNewSession) onNewSession()
+            else navigate(routes.action.newSession())
           }}
           className="inline-flex items-center h-7 px-3 text-xs font-medium rounded-[8px] bg-background shadow-minimal hover:bg-foreground/[0.03] transition-colors"
         >
@@ -566,34 +430,35 @@ export function SessionList({
           const flatIndex = rowIndexMap.get(row.item.id) ?? 0
           const rowProps = interactions.getRowProps(row, flatIndex)
           return (
-            <SessionItem
-              item={row.item}
-              index={flatIndex}
-              itemProps={rowProps.buttonProps as Record<string, unknown>}
-              isSelected={rowProps.isSelected}
-              isFirstInGroup={isFirstInGroup}
-              isInMultiSelect={rowProps.isInMultiSelect ?? false}
-              onSelect={() => handleSelectSession(row, flatIndex)}
-              onToggleSelect={() => handleToggleSelect(row, flatIndex)}
-              onRangeSelect={() => handleRangeSelect(flatIndex)}
-            />
+            <div className="relative">
+              <SessionItem
+                item={row.item}
+                index={flatIndex}
+                itemProps={rowProps.buttonProps as Record<string, unknown>}
+                isSelected={rowProps.isSelected}
+                isFirstInGroup={isFirstInGroup}
+                isInMultiSelect={rowProps.isInMultiSelect ?? false}
+                onSelect={() => handleSelectSession(row, flatIndex)}
+                onToggleSelect={() => handleToggleSelect(row, flatIndex)}
+                onRangeSelect={() => handleRangeSelect(flatIndex)}
+              />
+            </div>
           )
         }}
         header={
           <>
-            {searchActive && (
-              <SessionSearchHeader
-                searchQuery={searchQuery}
-                onSearchChange={onSearchChange}
-                onSearchClose={onSearchClose}
-                onKeyDown={handleSearchKeyDown}
-                onFocus={() => setIsSearchInputFocused(true)}
-                onBlur={() => setIsSearchInputFocused(false)}
-                isSearching={isSearchingContent}
-                isUnavailable={isSearchUnavailable}
-                resultCount={matchingFilterItems.length + otherResultItems.length}
-                exceededLimit={exceededSearchLimit}
-                inputRef={searchInputRef}
+            {/* Browse mode lists direct children; search mode lists matching folders
+                throughout the current directory tree. */}
+            {foldersApi && onEnterFolder && (
+              <NavigatorFolderList
+                ref={folderListRef}
+                foldersApi={foldersApi}
+                folderScopeProjectId={folderScopeProjectId}
+                scopeId={folderScopeId}
+                searchQuery={isSearchMode ? searchQuery : undefined}
+                onEnterFolder={onEnterFolder}
+                sessionCounts={folderSessionCounts}
+                onDropSession={onDropSessionToFolder}
               />
             )}
             {isSearchMode && matchingFilterItems.length === 0 && otherResultItems.length > 0 && (
@@ -604,7 +469,7 @@ export function SessionList({
           </>
         }
         emptyState={
-          isSearchMode && !isSearchingContent ? (
+          isSearchMode && !isSearchingContent && !hasMatchingSearchFolders ? (
             <div className="flex flex-col items-center justify-center py-12 px-4">
               <p className="text-sm text-muted-foreground">{t("session.noSessionsFound")}</p>
               <p className="text-xs text-muted-foreground/60 mt-0.5">
@@ -635,10 +500,6 @@ export function SessionList({
           'aria-label': 'Sessions',
         }}
         scrollAreaClassName="select-none mask-fade-top-short"
-        collapsedGroups={collapsedGroups}
-        onToggleCollapse={toggleGroupCollapse}
-        onCollapseAll={collapseAllGroups}
-        onExpandAll={expandAllGroups}
       />
       </SessionListProvider>
 

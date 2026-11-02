@@ -24,6 +24,24 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   RPC_CHANNELS.workspaces.CHECK_SLUG,
   RPC_CHANNELS.workspaces.UPDATE_REMOTE,
 
+  // folders — workspace folder trees (local filesystem configs)
+  RPC_CHANNELS.folders.LIST,
+  RPC_CHANNELS.folders.CREATE,
+  RPC_CHANNELS.folders.RENAME,
+  RPC_CHANNELS.folders.MOVE,
+  RPC_CHANNELS.folders.MOVE_TO_SCOPE,
+  RPC_CHANNELS.folders.ARCHIVE,
+  RPC_CHANNELS.folders.UNARCHIVE,
+  RPC_CHANNELS.folders.REORDER,
+  RPC_CHANNELS.folders.PIN,
+  RPC_CHANNELS.folders.DELETE,
+  RPC_CHANNELS.folders.CHANGED,
+
+  // projects — project configs live in local workspace storage
+  RPC_CHANNELS.projects.ARCHIVE,
+  RPC_CHANNELS.projects.UNARCHIVE,
+  RPC_CHANNELS.projects.ARCHIVED_CHANGED,
+
   // window — Electron window management
   RPC_CHANNELS.window.GET_WORKSPACE,
   RPC_CHANNELS.window.GET_MODE,
@@ -45,6 +63,9 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   // via webUtils.getPathForFile in the renderer, so they point at the user's local machine
   // — even when the workspace itself lives on a remote server. Routing this REMOTE_ELIGIBLE
   // would send the local path to a remote filesystem that can't resolve it.
+  RPC_CHANNELS.tasks.GET_OUTPUT,
+  RPC_CHANNELS.tasks.LIST,
+  RPC_CHANNELS.tasks.STOP,
   RPC_CHANNELS.file.READ_USER_ATTACHMENT,
 
   // dialog — native folder dialog
@@ -281,19 +302,6 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.transfer.COMMIT,
   RPC_CHANNELS.transfer.ABORT,
 
-  // tasks — workspace content (Conductor DAG runs on the workspace server)
-  RPC_CHANNELS.tasks.GET_OUTPUT,
-  RPC_CHANNELS.tasks.VALIDATE,
-  RPC_CHANNELS.tasks.CREATE,
-  RPC_CHANNELS.tasks.GENERATE,
-  RPC_CHANNELS.tasks.GENERATED,
-  RPC_CHANNELS.tasks.RUN,
-  RPC_CHANNELS.tasks.PAUSE,
-  RPC_CHANNELS.tasks.RESUME,
-  RPC_CHANNELS.tasks.STOP,
-  RPC_CHANNELS.tasks.GET,
-  RPC_CHANNELS.tasks.LIST,
-  RPC_CHANNELS.tasks.GET_RESULTS,
 
   // file — workspace files (not openDialog which is native)
   RPC_CHANNELS.file.READ,
@@ -398,21 +406,6 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.skills.GET_FILES,
   RPC_CHANNELS.skills.DELETE,
   RPC_CHANNELS.skills.CHANGED,
-
-  // statuses — workspace metadata
-  RPC_CHANNELS.statuses.LIST,
-  RPC_CHANNELS.statuses.REORDER,
-  RPC_CHANNELS.statuses.CHANGED,
-
-  // labels — workspace metadata
-  RPC_CHANNELS.labels.LIST,
-  RPC_CHANNELS.labels.CREATE,
-  RPC_CHANNELS.labels.DELETE,
-  RPC_CHANNELS.labels.CHANGED,
-
-  // views — workspace UI views
-  RPC_CHANNELS.views.LIST,
-  RPC_CHANNELS.views.SAVE,
 
   // toolIcons — workspace config
   RPC_CHANNELS.toolIcons.GET_MAPPINGS,

@@ -12,12 +12,8 @@ import type {
   ErrorEvent,
   TypedErrorEvent,
   SourcesChangedEvent,
-  LabelsChangedEvent,
   ProjectIdChangedEvent,
-  SessionStatusChangedEvent,
   SessionMetadataChangedEvent,
-  SessionFlaggedEvent,
-  SessionUnflaggedEvent,
   SessionArchivedEvent,
   SessionUnarchivedEvent,
   NameChangedEvent,
@@ -37,13 +33,13 @@ import type {
   LLMConnectionChangedEvent,
   UserMessageEvent,
   SessionClearedEvent,
+  QueuedMessagesChangedEvent,
   MessageAnnotationsUpdatedEvent,
   SessionSharedEvent,
   SessionUnsharedEvent,
   AuthRequestEvent,
   AuthCompletedEvent,
   UsageUpdateEvent,
-  Effect,
 } from '../types'
 import type { Message, Session } from '../../../shared/types'
 import { generateMessageId, appendMessage, updateMessageAt, dropCompactingStatus } from '../helpers'
@@ -85,12 +81,12 @@ export function handleComplete(
     })
   }
 
-  // Clear isQueued from any user messages once the turn completes. Pi's steer
-  // path never emits a 'processing' status update to clear it (the message is
-  // injected mid-stream and absorbed into the current response), so this is
-  // the natural place to drop the indicator. Claude's queued path has already
-  // cleared via the 'processing' status update before this fires; this is
-  // a safe no-op for that case.
+  // Clear isQueued from any user messages once the turn completes. The
+  // backend clears the flag when a queued row is drained into a real turn
+  // (processNextQueuedMessage) — this is the fail-safe for rows that never
+  // reached that path (e.g. a backend that cannot steer). With the queue
+  // rendered in the composer panel (2026-10-22 queued-panel), a stuck flag
+  // would hide the message from BOTH the panel and the transcript.
   const hasQueuedUserBubbles = updatedMessages.some(m => m.role === 'user' && m.isQueued)
   if (hasQueuedUserBubbles) {
     updatedMessages = updatedMessages.map(m =>
@@ -207,6 +203,8 @@ export function handleTypedError(
     })),
   }
 
+  // The error message is appended directly (the retry-ladder card logic was
+  // removed in the main merge).
   return {
     state: {
       session: {
@@ -225,7 +223,7 @@ export function handleTypedError(
  *
  * Compacting status is idempotent: repeated "Compacting context..." messages
  * (e.g. a second compaction_start for the same in-flight compaction, or the
- * Claude backend re-emitting its compacting status) update the existing row
+ * a replayed compacting status) update the existing row
  * in place instead of stacking duplicate lines in the process block.
  */
 export function handleStatus(
@@ -420,31 +418,28 @@ export function handleSystemStopNotice(
  *
  * Two distinct shapes:
  * - **User-initiated stop** (`event.message` present): user clicked the Stop
- *   button. We render the "Response interrupted" notice, drop queued user
- *   bubbles, and restore their text to the input field so the user can edit
- *   and re-send.
+ *   button. We render the "Response interrupted" notice and leave everything
+ *   else alone — the current message ended, the pending queue in the composer
+ *   panel continues and the backend drains it after this event.
  * - **Silent redirect** (`event.message` absent): the agent aborted internally
- *   so a new message could be processed. The backend's `processNextQueuedMessage`
- *   will auto-replay queued messages — we must NOT remove the queued bubbles
- *   nor restore them to the input, otherwise the user perceives a silent drop
- *   (#616).
+ *   so a new message could be processed.
  */
 export function handleInterrupted(
   state: SessionState,
   event: InterruptedEvent
 ): ProcessResult {
   const session = state.session
-  const effects: Effect[] = []
-  const isUserInitiated = !!event.message
 
   // Clear transient streaming state (isPending, isStreaming) and mark running tools as interrupted
   // These fields are not persisted, so this matches the state after a reload
   // Also filter out transient status messages (compacting etc.).
-  const keptMessages = session.messages
-    .filter(m => m.role !== 'status')
-    // Only drop queued bubbles when the user explicitly stopped — silent
-    // redirects auto-replay them so they must remain visible (#616).
-    .filter(m => !(isUserInitiated && m.isQueued))
+  //
+  // Queued rows are deliberately left alone (2026-10-22 queued-panel): they are
+  // pending-queue content, not transcript content. The turn grouper skips
+  // `isQueued` rows for display and the backend drains them right after the
+  // stop, so this handler must not mutate them — deleting them here picked a
+  // fight with the queue panel over who owns the row.
+  const keptMessages = session.messages.filter(m => m.role !== 'status')
 
   // Index of the assistant message to flag as aborted. Walks back to the last
   // assistant message unless that one already delivered a final response — a
@@ -497,16 +492,6 @@ export function handleInterrupted(
     ? [...updatedMessages, event.message]
     : updatedMessages
 
-  // Restore queued message text to the input field — only on user-initiated
-  // stops. Silent redirects keep the bubble in chat and rely on the backend's
-  // auto-replay (#616).
-  if (isUserInitiated && event.queuedMessages && event.queuedMessages.length > 0) {
-    effects.push({
-      type: 'restore_input',
-      text: event.queuedMessages.join('\n\n'),
-    })
-  }
-
   return {
     state: {
       session: {
@@ -521,7 +506,7 @@ export function handleInterrupted(
       },
       streaming: null,
     },
-    effects,
+    effects: [],
   }
 }
 
@@ -695,7 +680,10 @@ export function handleConnectionChanged(
  *
  * Three statuses:
  * - 'accepted': Message is being processed (confirms optimistic message)
- * - 'queued': Message was queued during ongoing response (adds if not present, marks as queued)
+ * - 'queued': Message was queued during ongoing response — 2026-10-22
+ *   queued-panel: it must NOT become a transcript bubble. The pending queue
+ *   renders above the composer (driven by `queued_messages_changed`); here we
+ *   only make sure the optimistic row (if any) leaves the message list.
  * - 'processing': Queued message is now being processed (updates status)
  */
 export function handleUserMessage(
@@ -704,6 +692,35 @@ export function handleUserMessage(
 ): ProcessResult {
   const { session, streaming } = state
   const { message, status } = event
+
+  if (status === 'queued') {
+    // Queued messages live in the composer panel, not the transcript. Remove
+    // the optimistic bubble the renderer added at send time (if it hasn't been
+    // removed already); the panel's data comes from the queue snapshot.
+    //
+    // Only a row that is still optimistic (pending / queued) may be dropped: a
+    // late 'queued' re-delivery for a message that already entered processing
+    // must not remove the live turn's user message. Match either id — after a
+    // reload the renderer row carries the backend id, not the optimistic one.
+    const candidateIds = new Set([event.optimisticMessageId, message.id].filter(Boolean) as string[])
+    const isOptimisticRow = (m: typeof session.messages[number]) =>
+      m.role === 'user' && candidateIds.has(m.id) && (m.isPending === true || m.isQueued === true)
+    const hasOptimisticRow = session.messages.some(isOptimisticRow)
+    if (!hasOptimisticRow) return { state, effects: [] }
+    return {
+      state: {
+        session: {
+          ...session,
+          messages: session.messages.filter(m => !isOptimisticRow(m)),
+          // The current turn is STILL running (the message was queued
+          // mid-stream while the agent continues) — preserve isProcessing.
+          isProcessing: session.isProcessing,
+        },
+        streaming,
+      },
+      effects: [],
+    }
+  }
 
   // Find existing message by ID match (backend ID, optimistic ID, or content+timestamp fallback)
   const existingIndex = session.messages.findIndex(m =>
@@ -719,18 +736,10 @@ export function handleUserMessage(
   if (existingIndex >= 0) {
     const existingMessage = session.messages[existingIndex]
 
-    // Event sequence protection: don't regress from 'processing' back to 'queued'
-    // This handles out-of-order events (e.g., 'processing' arrives before 'queued')
-    if (status === 'queued' && existingMessage.isQueued === false) {
-      // Already progressed past queued state, ignore this late 'queued' event
-      return { state, effects: [] }
-    }
-
-    // Update existing message — clear isPending, set isQueued based on status.
+    // Update existing message — clear isPending.
     //
-    // - 'queued'     → isQueued = true  (Claude path: backend queued for re-send)
-    // - 'processing' → isQueued = false (queued message is now actually running)
-    // - 'accepted'   → isQueued = false (Pi steer path: agent has the message)
+    // - 'processing' → queued message is now actually running
+    // - 'accepted'   → Pi steer path: agent has the message
     //
     // A queued message is re-stamped by SessionManager when replay starts so it
     // sorts after the prior turn's final assistant response. Apply that canonical
@@ -740,9 +749,8 @@ export function handleUserMessage(
     // We deliberately do NOT swap `m.id` to the backend's canonical id here.
     // ChatDisplay's `getTurnKey` keys user-message bubbles by id, and a swap
     // would unmount/remount the UserMessageBubble — wiping its local timer
-    // state and dropping the queued chip mid-flight. The canonical backend
-    // id is irrelevant to subsequent events: they all use
-    // `event.optimisticMessageId` for routing (see the findIndex above).
+    // state. The canonical backend id is irrelevant to subsequent events: they
+    // all use `event.optimisticMessageId` for routing (see the findIndex above).
     updatedMessages = session.messages.map((m, i) => {
       if (i === existingIndex) {
         return {
@@ -753,18 +761,18 @@ export function handleUserMessage(
           // backend fields (notably isGuidance) onto the existing UI message.
           id: m.id,
           isPending: false,
-          isQueued: status === 'queued',
+          isQueued: false,
           isGuidance: message.isGuidance ?? m.isGuidance,
         }
       }
       return m
     })
   } else {
-    // Message not found (e.g., queued message from backend) - add it
+    // Message not found (e.g., message replayed from the backend) - add it
     const newMessage: Message = {
       ...message,
       isPending: false,
-      isQueued: status === 'queued',
+      isQueued: false,
     }
     updatedMessages = [...session.messages, newMessage]
   }
@@ -806,6 +814,29 @@ export function handleMessageRemoved(
       session: {
         ...session,
         messages: session.messages.filter(m => m.id !== event.messageId),
+      },
+      streaming,
+    },
+    effects: [],
+  }
+}
+
+/**
+ * Handle queued_messages_changed — the backend's pending send queue mutated
+ * (enqueue / cancel / edit / reorder / drain). Store the authoritative ordered
+ * snapshot on the session; the composer panel renders from it (2026-10-22
+ * queued-panel).
+ */
+export function handleQueuedMessagesChanged(
+  state: SessionState,
+  event: QueuedMessagesChangedEvent
+): ProcessResult {
+  const { session, streaming } = state
+  return {
+    state: {
+      session: {
+        ...session,
+        queuedMessages: event.queuedMessages,
       },
       streaming,
     },
@@ -896,27 +927,6 @@ export function handleSourcesChanged(
 }
 
 /**
- * Handle labels_changed - update session's labels
- */
-export function handleLabelsChanged(
-  state: SessionState,
-  event: LabelsChangedEvent
-): ProcessResult {
-  const { session, streaming } = state
-
-  return {
-    state: {
-      session: {
-        ...session,
-        labels: event.labels,
-      },
-      streaming,
-    },
-    effects: [],
-  }
-}
-
-/**
  * Handle project_id_changed - update session's projectId binding
  */
 export function handleProjectIdChanged(
@@ -937,27 +947,9 @@ export function handleProjectIdChanged(
   }
 }
 
-/**
- * Handle session_status_changed - update session's sessionStatus (external metadata change or agent tool)
- */
-export function handleSessionStatusChanged(
-  state: SessionState,
-  event: SessionStatusChangedEvent
-): ProcessResult {
-  const { session, streaming } = state
-  return {
-    state: {
-      session: { ...session, sessionStatus: event.sessionStatus },
-      streaming,
-    },
-    effects: [],
-  }
-}
 
 /**
- * Handle session_metadata_changed - merge programmatic metadata changes (taskNodeCount,
- * kanbanColumn, and the taskDraft→taskSlug promotion on orchestrator adoption) that don't
- * propagate via the header-signature file watch.
+ * Handle session_metadata_changed - merge partial metadata updates
  */
 export function handleSessionMetadataChanged(
   state: SessionState,
@@ -967,40 +959,6 @@ export function handleSessionMetadataChanged(
   return {
     state: {
       session: { ...session, ...event.changes },
-      streaming,
-    },
-    effects: [],
-  }
-}
-
-/**
- * Handle session_flagged - mark session as flagged
- */
-export function handleSessionFlagged(
-  state: SessionState,
-  _event: SessionFlaggedEvent
-): ProcessResult {
-  const { session, streaming } = state
-  return {
-    state: {
-      session: { ...session, isFlagged: true },
-      streaming,
-    },
-    effects: [],
-  }
-}
-
-/**
- * Handle session_unflagged - mark session as unflagged
- */
-export function handleSessionUnflagged(
-  state: SessionState,
-  _event: SessionUnflaggedEvent
-): ProcessResult {
-  const { session, streaming } = state
-  return {
-    state: {
-      session: { ...session, isFlagged: false },
       streaming,
     },
     effects: [],

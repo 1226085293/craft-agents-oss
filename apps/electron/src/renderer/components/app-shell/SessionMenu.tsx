@@ -8,7 +8,7 @@
  *
  * Renders menu items via `useMenuComponents()` so the same content works
  * inside DropdownMenu or ContextMenu primitives. Side-effect handlers and
- * optimistic label state come from `useSessionMenuActions`, shared with
+ * optimistic state come from `useSessionMenuActions`, shared with
  * the compact-mode drawer to keep behaviour in one place.
  */
 
@@ -28,19 +28,15 @@ import {
   Columns2,
   CloudUpload,
   RefreshCw,
-  Tag,
   Send,
   FolderKanban,
   Check,
 } from 'lucide-react'
 import { useMenuComponents } from '@/components/ui/menu-context'
-import { getStateColor, getStateIcon, type SessionStatusId } from '@/config/session-status-config'
-import type { SessionStatus } from '@/config/session-status-config'
-import type { LabelConfig } from '@craft-agent/shared/labels'
-import { LabelMenuItems, StatusMenuItems, ShareMenuItems } from './SessionMenuParts'
+import { ShareMenuItems } from './SessionMenuParts'
 import { getFileManagerName } from '@/lib/platform'
 import type { SessionMeta } from '@/atoms/sessions'
-import { getSessionStatus, hasUnreadMeta, hasMessagesMeta } from '@/utils/session'
+import { hasUnreadMeta, hasMessagesMeta } from '@/utils/session'
 import { MessagingSessionMenuItem } from '@/components/messaging/MessagingSessionMenuItem'
 import { useSessionMenuActions } from '@/hooks/useSessionMenuActions'
 
@@ -53,12 +49,6 @@ export interface SessionMenuProjectOption {
 export interface SessionMenuProps {
   /** Session data — display state is derived from this */
   item: SessionMeta
-  /** Available todo states */
-  sessionStatuses: SessionStatus[]
-  /** All available label configs (tree structure) for the labels submenu */
-  labels?: LabelConfig[]
-  /** Callback when labels are toggled (receives full updated labels array) */
-  onLabelsChange?: (labels: string[]) => void
   /** Whether multiple workspaces exist (enables "Send to Workspace" item) */
   hasTransferTargets?: boolean
   /** Workspace projects (omit to hide the submenu) */
@@ -67,12 +57,9 @@ export interface SessionMenuProps {
   onSetProjectId?: (projectId: string | null) => void
   /** Callbacks */
   onRename: () => void
-  onFlag: () => void
-  onUnflag: () => void
   onArchive: () => void
   onUnarchive: () => void
   onMarkUnread: () => void
-  onSessionStatusChange: (state: SessionStatusId) => void
   onOpenInNewWindow: () => void
   onSendToWorkspace?: () => void
   onDelete: () => void
@@ -84,16 +71,10 @@ export interface SessionMenuProps {
  */
 export function SessionMenu({
   item,
-  sessionStatuses,
-  labels = [],
-  onLabelsChange,
   onRename,
-  onFlag,
-  onUnflag,
   onArchive,
   onUnarchive,
   onMarkUnread,
-  onSessionStatusChange,
   onOpenInNewWindow,
   onSendToWorkspace,
   onDelete,
@@ -104,15 +85,12 @@ export function SessionMenu({
   const { t } = useTranslation()
 
   const sessionId = item.id
-  const isFlagged = item.isFlagged ?? false
   const isArchived = item.isArchived ?? false
   const sharedUrl = item.sharedUrl
-  const currentSessionStatus = getSessionStatus(item)
-  const sessionLabels = item.labels ?? []
   const _hasMessages = hasMessagesMeta(item)
   const _hasUnread = hasUnreadMeta(item)
 
-  const actions = useSessionMenuActions({ item, onLabelsChange })
+  const actions = useSessionMenuActions({ item })
 
   // Get menu components from context (works with both DropdownMenu and ContextMenu)
   const { MenuItem, Separator, Sub, SubTrigger, SubContent } = useMenuComponents()
@@ -156,52 +134,6 @@ export function SessionMenu({
 
       <Separator />
 
-      {/* Status submenu - includes all statuses plus Flag/Unflag at the bottom */}
-      <Sub>
-        <SubTrigger className="pr-2">
-          <span style={{ color: getStateColor(currentSessionStatus, sessionStatuses) ?? 'var(--foreground)' }}>
-            {(() => {
-              const icon = getStateIcon(currentSessionStatus, sessionStatuses)
-              return React.isValidElement(icon)
-                ? React.cloneElement(icon as React.ReactElement<{ bare?: boolean }>, { bare: true })
-                : icon
-            })()}
-          </span>
-          <span className="flex-1">{t("sessionMenu.status")}</span>
-        </SubTrigger>
-        <SubContent>
-          <StatusMenuItems
-            sessionStatuses={sessionStatuses}
-            activeStateId={currentSessionStatus}
-            onSelect={onSessionStatusChange}
-            menu={{ MenuItem }}
-          />
-        </SubContent>
-      </Sub>
-
-      {/* Labels submenu - hierarchical label tree with nested sub-menus and toggle checkmarks */}
-      {labels.length > 0 && (
-        <Sub>
-          <SubTrigger className="pr-2">
-            <Tag className="h-3.5 w-3.5" />
-            <span className="flex-1">{t("sessionMenu.labels")}</span>
-            {sessionLabels.length > 0 && (
-              <span className="text-[10px] text-muted-foreground tabular-nums -mr-2.5">
-                {sessionLabels.length}
-              </span>
-            )}
-          </SubTrigger>
-          <SubContent>
-            <LabelMenuItems
-              labels={labels}
-              appliedLabelIds={actions.appliedLabelIds}
-              onToggle={actions.toggleLabel}
-              menu={{ MenuItem, Separator, Sub, SubTrigger, SubContent }}
-            />
-          </SubContent>
-        </Sub>
-      )}
-
       {/* Projects submenu - workspace projects + "No project" to clear binding */}
       {projects.length > 0 && onSetProjectId && (
         <Sub>
@@ -230,18 +162,6 @@ export function SessionMenu({
         </Sub>
       )}
 
-      {/* Flag/Unflag */}
-      {!isFlagged ? (
-        <MenuItem onClick={onFlag}>
-          <Flag className="h-3.5 w-3.5 text-info" />
-          <span className="flex-1">{t("sessionMenu.flag")}</span>
-        </MenuItem>
-      ) : (
-        <MenuItem onClick={onUnflag}>
-          <FlagOff className="h-3.5 w-3.5" />
-          <span className="flex-1">{t("sessionMenu.unflag")}</span>
-        </MenuItem>
-      )}
 
       {/* Archive/Unarchive */}
       {!isArchived ? (

@@ -27,12 +27,6 @@ export interface BaseEventPayload {
   sessionName?: string;
   workspaceId: string;
   timestamp: number;
-  labels?: string[];
-}
-
-/** Label events payload */
-export interface LabelEventPayload extends BaseEventPayload {
-  label: string;
 }
 
 /** Permission mode change payload */
@@ -41,26 +35,36 @@ export interface PermissionModeChangePayload extends BaseEventPayload {
   newMode: string;
 }
 
-/** Flag change payload */
-export interface FlagChangePayload extends BaseEventPayload {
-  isFlagged: boolean;
-}
-
-/** Session status change payload */
-export interface SessionStatusChangePayload extends BaseEventPayload {
-  oldState: string;
-  newState: string;
+/**
+ * Session path change payload.
+ *
+ * Fired when a session's location in the workspace changes — moved into or out
+ * of a folder, reassigned to another project, or pointed at a different working
+ * directory. Automations use it to react to "this session now lives here"
+ * (e.g. re-index a repo when a session's working directory changes).
+ */
+export interface SessionPathChangePayload extends BaseEventPayload {
+  /**
+   * What moved: a session's location, or the folder tree itself.
+   * Creation and deletion are encoded by the paths:
+   *   oldPath === null  -> created
+   *   newPath === null  -> deleted
+   */
+  subject: 'session' | 'folder';
+  /** Which kind of path moved */
+  changeType: 'folder' | 'project' | 'workingDirectory';
+  /** Previous value (null = created / workspace root / unassigned) */
+  oldPath: string | null;
+  /** New value (null = deleted / workspace root / unassigned) */
+  newPath: string | null;
+  /** Session's working directory after the change */
+  workingDirectory?: string;
 }
 
 /** Scheduler tick payload */
 export interface SchedulerTickPayload extends BaseEventPayload {
   localTime: string;
   utcTime: string;
-}
-
-/** Label config change payload */
-export interface LabelConfigChangePayload extends BaseEventPayload {
-  // No additional fields - just signals that config changed
 }
 
 /** Generic event payload for agent events */
@@ -77,12 +81,8 @@ export interface GenericEventPayload extends BaseEventPayload {
  */
 export interface EventPayloadMap {
   // App events
-  LabelAdd: LabelEventPayload;
-  LabelRemove: LabelEventPayload;
-  LabelConfigChange: LabelConfigChangePayload;
   PermissionModeChange: PermissionModeChangePayload;
-  FlagChange: FlagChangePayload;
-  SessionStatusChange: SessionStatusChangePayload;
+  SessionPathChange: SessionPathChangePayload;
   SchedulerTick: SchedulerTickPayload;
 
   // Agent events (generic payload)

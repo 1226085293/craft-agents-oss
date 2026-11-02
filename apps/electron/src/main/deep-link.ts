@@ -21,8 +21,6 @@
  *                               If send=true is provided with input, immediately sends the message
  *   resume-sdk-session/{id}   - Resume Claude Code session by SDK session ID
  *   delete-session/{id}       - Delete session
- *   flag-session/{id}         - Flag session
- *   unflag-session/{id}       - Unflag session
  *
  * Examples:
  *   craftagents://allSessions                               (all sessions view)

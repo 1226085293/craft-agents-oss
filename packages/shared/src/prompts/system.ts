@@ -311,7 +311,7 @@ export type SystemPromptPreset = 'default' | 'mini';
  */
 export function getMiniAgentSystemPrompt(workspaceRootPath?: string): string {
   const workspaceContext = workspaceRootPath
-    ? `\n## Workspace\nConfig files are in: \`${workspaceRootPath}\`\n- Statuses: \`statuses/config.json\`\n- Labels: \`labels/config.json\`\n- Permissions: \`permissions.json\`\n`
+    ? `\n## Workspace\nConfig files are in: \`${workspaceRootPath}\`\n- Permissions: \`permissions.json\`\n`
     : '';
 
   return `You are a focused assistant for quick configuration edits in Craft Agent.
@@ -643,8 +643,6 @@ Memory tools are always available in every session. **Persist proactively** — 
 | Automations | \`${DOC_REFS.hooks}\` | BEFORE creating/modifying automations |
 | Pages | \`${DOC_REFS.pages}\` | BEFORE creating Pages / authoring HTML |
 | Themes | \`${DOC_REFS.themes}\` | BEFORE customizing colors |
-| Statuses | \`${DOC_REFS.statuses}\` | When user mentions statuses/states |
-| Labels | \`${DOC_REFS.labels}\` | BEFORE creating/modifying labels |
 | Tool Icons | \`${DOC_REFS.toolIcons}\` | BEFORE modifying tool icon mappings |
 | Mermaid | \`${DOC_REFS.mermaid}\` | When creating diagrams |
 | Data Tables | \`${DOC_REFS.dataTables}\` | Datasets of 20+ rows |
@@ -660,9 +658,8 @@ ${FEATURE_FLAGS.craftAgentsCli ? `
 
 ## Craft Agent CLI
 
-Prefer \`craft-agent\` CLI over direct file edits for labels, sources, skills, and automations.
+Prefer \`craft-agent\` CLI over direct file edits for sources, skills, and automations.
 
-- Labels help: \`craft-agent label --help\`
 - Sources help: \`craft-agent source --help\`
 - Skills help: \`craft-agent skill --help\`
 - Automations help: \`craft-agent automation --help\`
@@ -842,15 +839,11 @@ Call a secondary LLM for a focused subtask: one completion, no tools, returns te
 
 Manage your own session metadata and query other sessions.
 
-- **Introspect:** \`get_session_info\` — labels, status, mode, projectId, workingDirectory.
-- **Labels:** \`set_session_labels\` replaces all labels (tag work / fire \`LabelAdd\`). Boolean = plain id (\`urgent\`); Valued = \`id::value\` for labels with \`valueType\` (number = decimals, date = YYYY-MM-DD[THH:mm], link = URL, string = anything). Errors are per-entry (unknown ID, value on boolean, mismatch).
-- **Status:** \`set_session_status\` fires \`SessionStatusChange\`. NEVER close tasks yourself (\`done\`/\`cancelled\` = rejected; that's the user's call). Set \`needs-review\` when ready.
+- **Introspect:** \`get_session_info\` — mode, projectId, workingDirectory.
 - **Archive:** \`archive_session\` hides (not deletes) another session; needs explicit \`sessionId\`; refused mid-turn.
-- **Query:** \`list_sessions\` (filter by status/label/search; default limit 20 — never scan with huge limits); \`get_session_info\` for detail.
-- **Create tasks:** \`create_task\` — title, description (→goal), criteria, sources/skills, model/connection, workingDirectory, projectId (default: inherited). Lands in \`todo\`, NOT run (user starts it). Returns slug + orchestrator id.
-- **Background tasks:** \`list_background_tasks\` = ONLY reliable "what's running?" (main-process registry; subprocess tools can't see prior turns). \`orphaned\` = killed with its turn.
+- **Query:** \`list_sessions\` (filter by search; default limit 20 — never scan with huge limits); \`get_session_info\` for detail.
+- **Background tasks:** \`list_background_tasks\` = ONLY reliable "what's running?" (main-process registry; subprocess tools can't see prior turns). \`orphaned\` = killed with its turn. Estimate first: commands expected to exceed 30s should use \`background: true\` / \`run_in_background\`; unmarked commands still running after 30s auto-background and return a \`backgroundTaskId\` (legacy \`shell_id\`). Continue with other work instead of polling. Use \`stop_background_task\` to stop one; \`stopped_by: user\` means the user stopped it — adjust the plan. Completion/stop arrives as a message: queued mid-turn, or wakes an idle session.
 - **Cross-session:** \`send_agent_message\` → \`delivered\` (idle/processing) or \`queued\` (mid-turn; unread). 
-- **Hand-off:** labels/status → \`LabelAdd\`/\`LabelRemove\`/\`SessionStatusChange\` events: schedule → session → \`needs-review\` → webhook → user closes.
 
 ## Pages
 

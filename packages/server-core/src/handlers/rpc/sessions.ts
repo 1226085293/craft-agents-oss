@@ -1,6 +1,7 @@
 import { readFile, writeFile, stat } from 'fs/promises'
 import { join } from 'path'
 import { RPC_CHANNELS, type FileAttachment, type SendMessageOptions, type SessionEvent } from '@craft-agent/shared/protocol'
+import { parseSessionCommand, type SessionCommandResult } from '@craft-agent/shared/sessions'
 import type { StoredAttachment } from '@craft-agent/core/types'
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config'
 import { perf } from '@craft-agent/shared/utils'
@@ -58,9 +59,10 @@ export function cleanupSessionFileWatchForClient(clientId: string): void {
 }
 
 // Recursive directory scanner for session files
-// Filters out internal files (session.jsonl) and hidden files (. prefix)
+// Filters out internal files (session.jsonl), hidden files (. prefix), and the
+// internal `turns/` archive at the session root.
 // Returns only non-empty directories
-async function scanSessionDirectory(dirPath: string): Promise<import('@craft-agent/shared/protocol').SessionFile[]> {
+async function scanSessionDirectory(dirPath: string, isRoot = false): Promise<import('@craft-agent/shared/protocol').SessionFile[]> {
   const { readdir, stat } = await import('fs/promises')
   const entries = await readdir(dirPath, { withFileTypes: true })
   const files: import('@craft-agent/shared/protocol').SessionFile[] = []
@@ -68,6 +70,8 @@ async function scanSessionDirectory(dirPath: string): Promise<import('@craft-age
   for (const entry of entries) {
     // Skip internal and hidden files
     if (entry.name === 'session.jsonl' || entry.name.startsWith('.')) continue
+    // Hide the session-root `turns/` archive (internal turn logs, not user files)
+    if (isRoot && entry.name === 'turns') continue
 
     const fullPath = join(dirPath, entry.name)
 
@@ -112,6 +116,7 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.sessions.CANCEL,
   RPC_CHANNELS.sessions.KILL_SHELL,
   RPC_CHANNELS.tasks.GET_OUTPUT,
+  RPC_CHANNELS.tasks.STOP,
   RPC_CHANNELS.sessions.RESPOND_TO_PERMISSION,
   RPC_CHANNELS.sessions.RESPOND_TO_CREDENTIAL,
   RPC_CHANNELS.sessions.COMMAND,
@@ -172,8 +177,8 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     return sessionManager.getUnreadSummary()
   })
 
-  server.handle(RPC_CHANNELS.sessions.MARK_ALL_READ, async (_ctx, workspaceId: string) => {
-    return sessionManager.markAllSessionsRead(workspaceId)
+  server.handle(RPC_CHANNELS.sessions.MARK_ALL_READ, async (_ctx, workspaceId: string, projectId?: string) => {
+    return sessionManager.markAllSessionsRead(workspaceId, projectId)
   })
 
   // Get a single session with messages (for lazy loading)
@@ -216,7 +221,17 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     // Capture the caller's clientId for error routing
     const callerClientId = ctx.clientId
 
-    return await new Promise<{ accepted: true; messageId: string }>((resolve, reject) => {
+    // Session-level slash commands (`/stop`) are handled before the message
+    // path: a command must not create a user bubble, must not queue behind a
+    // busy turn, and must resolve with a truthful receipt. Attachments and
+    // hidden system prompts are content, never commands.
+    const command = !attachments?.length && !options?.hidden ? parseSessionCommand(message) : null
+    if (command && sessionManager.executeSessionCommand) {
+      const result = await sessionManager.executeSessionCommand(sessionId, command)
+      return { accepted: true as const, messageId: '', command: result }
+    }
+
+    return await new Promise<{ accepted: true; messageId: string; command?: SessionCommandResult }>((resolve, reject) => {
       let acked = false
       const onAck = (messageId: string) => {
         if (!acked) {
@@ -268,16 +283,27 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     return sessionManager.killShell(sessionId, shellId)
   })
 
-  // Get background task output
+  // Read a background task's captured output
   server.handle(RPC_CHANNELS.tasks.GET_OUTPUT, async (_ctx, taskId: string) => {
-    try {
-      const output = await sessionManager.getTaskOutput(taskId)
-      return output
-    } catch (err) {
-      log.error('Failed to get task output:', err)
-      throw err
-    }
+    return sessionManager.getTaskOutput(taskId)
   })
+
+  // Persisted background tasks that have not been delivered to the model yet.
+  // The renderer's row state is memory-only, so without this a reload (or a
+  // session switch) dropped the rows while the work kept running.
+  server.handle(RPC_CHANNELS.tasks.LIST, async (_ctx, sessionId: string) => {
+    return sessionManager.listPersistedBackgroundTasks(sessionId)
+  })
+
+  // Stop a background task from the UI (shell, agent, or detached proxy tool).
+  // Waits for cooperative cancellation and the 5s force-stop fallback so the
+  // caller can keep its stop button in a loading state until the task settles.
+  server.handle(
+    RPC_CHANNELS.tasks.STOP,
+    async (_ctx, sessionId: string, taskId: string, stoppedBy: 'model' | 'user' = 'user') => {
+      return sessionManager.stopBackgroundTask(sessionId, taskId, stoppedBy)
+    },
+  )
 
   // Respond to a permission request (bash command approval)
   // Returns true if the response was delivered, false if agent/session is gone
@@ -302,18 +328,12 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     command: import('@craft-agent/shared/protocol').SessionCommand
   ) => {
     switch (command.type) {
-      case 'flag':
-        return sessionManager.flagSession(sessionId)
-      case 'unflag':
-        return sessionManager.unflagSession(sessionId)
       case 'archive':
         return sessionManager.archiveSession(sessionId)
       case 'unarchive':
         return sessionManager.unarchiveSession(sessionId)
       case 'rename':
         return sessionManager.renameSession(sessionId, command.name)
-      case 'setSessionStatus':
-        return sessionManager.setSessionStatus(sessionId, command.state)
       case 'markRead':
         return sessionManager.markSessionRead(sessionId)
       case 'markUnread':
@@ -337,12 +357,16 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
         return sessionManager.updateWorkingDirectory(sessionId, command.dir)
       case 'setSources':
         return sessionManager.setSessionSources(sessionId, command.sourceSlugs, command.sourceScope)
-      case 'setLabels':
-        return sessionManager.setSessionLabels(sessionId, command.labels)
       case 'setProjectId':
         return sessionManager.setSessionProjectId(sessionId, command.projectId)
-      case 'setKanbanColumn':
-        return sessionManager.setKanbanColumn(sessionId, command.column)
+      case 'setFolder':
+        return sessionManager.setSessionFolder(sessionId, command.folderId)
+      case 'moveToScope':
+        return sessionManager.moveSessionToScope(sessionId, command.projectId, command.folderId, command.archived)
+      case 'setSortOrder':
+        return sessionManager.setSessionSortOrder(sessionId, command.sortOrder)
+      case 'setPinned':
+        return sessionManager.setSessionPinned(sessionId, command.pinned)
       case 'showInFinder': {
         const sessionPath = sessionManager.getSessionPath(sessionId)
         if (sessionPath) {
@@ -384,6 +408,10 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
         return sessionManager.cancelQueuedMessage(sessionId, command.messageId)
       case 'guideQueuedMessage':
         return sessionManager.guideQueuedMessage(sessionId, command.messageId)
+      case 'editQueuedMessage':
+        return sessionManager.editQueuedMessage(sessionId, command.messageId)
+      case 'reorderQueuedMessages':
+        return sessionManager.reorderQueuedMessages(sessionId, command.messageIds)
       case 'addAnnotation':
         return sessionManager.addMessageAnnotation(sessionId, command.messageId, command.annotation)
       case 'removeAnnotation':
@@ -418,9 +446,15 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
   // ============================================================
 
   // Search session content using ripgrep
-  server.handle(RPC_CHANNELS.sessions.SEARCH_CONTENT, async (_ctx, workspaceId: string, query: string, searchId?: string) => {
+  server.handle(RPC_CHANNELS.sessions.SEARCH_CONTENT, async (
+    _ctx,
+    workspaceId: string,
+    query: string,
+    searchId?: string,
+    sessionIds?: string[],
+  ) => {
     const id = searchId || Date.now().toString(36)
-    log.info('[search]','ipc:request', { searchId: id, query })
+    log.info('[search]','ipc:request', { searchId: id, query, scopedSessionCount: sessionIds?.length })
 
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) {
@@ -428,7 +462,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
       return []
     }
 
-    const { searchSessions } = await import('@craft-agent/server-core/services')
+    const { filterSearchResultsBySessionIds, searchSessions } = await import('@craft-agent/server-core/services')
     const { getWorkspaceSessionsPath } = await import('@craft-agent/shared/workspaces')
 
     const sessionsDir = getWorkspaceSessionsPath(workspace.rootPath)
@@ -439,6 +473,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
       maxMatchesPerSession: 3,
       maxSessions: 50,
       searchId: id,
+      sessionIds,
     })
 
     // Filter out hidden sessions (e.g., mini edit sessions)
@@ -446,7 +481,8 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     const hiddenSessionIds = new Set(
       allSessions.filter(s => s.hidden).map(s => s.id)
     )
-    const filteredResults = results.filter(r => !hiddenSessionIds.has(r.sessionId))
+    const filteredResults = filterSearchResultsBySessionIds(results, sessionIds)
+      .filter(r => !hiddenSessionIds.has(r.sessionId))
 
     log.info('[search]','ipc:response', { searchId: id, resultCount: filteredResults.length, totalFound: results.length })
     return filteredResults
@@ -462,7 +498,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     if (!sessionPath) return []
 
     try {
-      return await scanSessionDirectory(sessionPath)
+      return await scanSessionDirectory(sessionPath, true)
     } catch (error) {
       log.error('Failed to get session files:', error)
       return []

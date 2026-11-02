@@ -382,7 +382,6 @@ export class AutomationSystem implements AutomationsConfigProvider {
 
     // Common fields for all events
     const sessionName = next.sessionName;
-    const labels = next.labels ?? [];
 
     // Permission mode change
     if (prev.permissionMode !== next.permissionMode) {
@@ -391,72 +390,10 @@ export class AutomationSystem implements AutomationsConfigProvider {
         sessionName,
         workspaceId: this.options.workspaceId,
         timestamp,
-        labels,
         oldMode: prev.permissionMode ?? '',
         newMode: next.permissionMode ?? '',
       });
       emittedEvents.push('PermissionModeChange');
-    }
-
-    // Labels (array diff)
-    const prevLabels = new Set(prev.labels ?? []);
-    const nextLabels = new Set(next.labels ?? []);
-
-    for (const label of nextLabels) {
-      if (!prevLabels.has(label)) {
-        await this.eventBus.emit('LabelAdd', {
-          sessionId,
-          sessionName,
-          workspaceId: this.options.workspaceId,
-          timestamp,
-          labels: [...nextLabels],
-          label,
-        });
-        emittedEvents.push('LabelAdd');
-      }
-    }
-
-    for (const label of prevLabels) {
-      if (!nextLabels.has(label)) {
-        await this.eventBus.emit('LabelRemove', {
-          sessionId,
-          sessionName,
-          workspaceId: this.options.workspaceId,
-          timestamp,
-          labels: [...nextLabels],
-          label,
-        });
-        emittedEvents.push('LabelRemove');
-      }
-    }
-
-    // Flag change
-    const wasFlagged = prev.isFlagged ?? false;
-    const isFlagged = next.isFlagged ?? false;
-    if (wasFlagged !== isFlagged) {
-      await this.eventBus.emit('FlagChange', {
-        sessionId,
-        sessionName,
-        workspaceId: this.options.workspaceId,
-        timestamp,
-        labels,
-        isFlagged,
-      });
-      emittedEvents.push('FlagChange');
-    }
-
-    // Session status change
-    if (prev.sessionStatus !== next.sessionStatus) {
-      await this.eventBus.emit('SessionStatusChange', {
-        sessionId,
-        sessionName,
-        workspaceId: this.options.workspaceId,
-        timestamp,
-        labels,
-        oldState: prev.sessionStatus ?? '',
-        newState: next.sessionStatus ?? '',
-      });
-      emittedEvents.push('SessionStatusChange');
     }
 
     // Update stored metadata
@@ -498,13 +435,23 @@ export class AutomationSystem implements AutomationsConfigProvider {
   // ============================================================================
 
   /**
-   * Emit a LabelConfigChange event.
-   * Call this when labels/config.json changes.
+   * Emit a SessionPathChange event.
+   * Call this when a session moves between folders/projects or its working
+   * directory changes, so automations can react to the new location.
    */
-  async emitLabelConfigChange(): Promise<void> {
-    await this.eventBus.emit('LabelConfigChange', {
+  async emitSessionPathChange(params: {
+    subject: 'session' | 'folder';
+    sessionId?: string;
+    sessionName?: string;
+    changeType: 'folder' | 'project' | 'workingDirectory';
+    oldPath: string | null;
+    newPath: string | null;
+    workingDirectory?: string;
+  }): Promise<void> {
+    await this.eventBus.emit('SessionPathChange', {
       workspaceId: this.options.workspaceId,
       timestamp: Date.now(),
+      ...params,
     });
   }
 

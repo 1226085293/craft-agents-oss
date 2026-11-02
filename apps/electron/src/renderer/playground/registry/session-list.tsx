@@ -1,7 +1,7 @@
 import * as React from 'react'
 import type { ComponentEntry } from './types'
 import type { SessionMeta } from '@/atoms/sessions'
-import type { SessionStatus } from '@/config/session-status-config'
+type SessionStatus = { id: string; label: string; color?: string; icon?: any; [key: string]: any }
 import type { ContentSearchResult } from '@/hooks/useSessionSearch'
 import { Circle } from 'lucide-react'
 import { SessionSearchHeader } from '@/components/app-shell/SessionSearchHeader'
@@ -50,26 +50,19 @@ const sampleSessions: SessionMeta[] = [
     name: 'Fix authentication bug in login flow',
     workspaceId: 'workspace-1',
     lastMessageAt: Date.now() - 1000 * 60 * 5, // 5 min ago
-    sessionStatus: 'in-progress',
     hasUnread: true,
-    isFlagged: true,
   },
   {
     id: 'session-2',
     name: 'Implement search functionality',
     workspaceId: 'workspace-1',
     lastMessageAt: Date.now() - 1000 * 60 * 30, // 30 min ago
-    sessionStatus: 'todo',
-    isFlagged: true,
-    labels: ['feature', 'priority::high'],
   },
   {
     id: 'session-3',
     name: 'Review pull request #42',
     workspaceId: 'workspace-1',
     lastMessageAt: Date.now() - 1000 * 60 * 60, // 1 hour ago
-    sessionStatus: 'done',
-    isFlagged: true,
     isProcessing: true,
   },
   {
@@ -77,24 +70,18 @@ const sampleSessions: SessionMeta[] = [
     name: 'Debug API response handling',
     workspaceId: 'workspace-1',
     lastMessageAt: Date.now() - 1000 * 60 * 60 * 2, // 2 hours ago
-    sessionStatus: 'todo',
-    isFlagged: true,
   },
 ]
 
 function createMockContext(overrides: Partial<SessionListContextValue> = {}): SessionListContextValue {
   return {
     onRenameClick: () => {},
-    onSessionStatusChange: () => {},
     onMarkUnread: () => {},
     onDelete: async () => true,
     onSelectSessionById: () => {},
     onOpenInNewWindow: () => {},
     onFocusZone: () => {},
     onKeyDown: () => {},
-    sessionStatuses: mockSessionStatuses,
-    flatLabels: [],
-    labels: [],
     isMultiSelectActive: false,
     contentSearchResults: new Map(),
     ...overrides,
@@ -222,7 +209,6 @@ interface SessionItemPreviewProps {
   searchQuery?: string
   chatMatchCount?: number
   state?: 'none' | 'loading' | 'plan' | 'new'
-  flagged?: boolean
 }
 
 function SessionItemPreview({
@@ -231,17 +217,16 @@ function SessionItemPreview({
   searchQuery = '',
   chatMatchCount,
   state = 'none',
-  flagged = false,
 }: SessionItemPreviewProps) {
   const resolvedItem = React.useMemo(() => {
-    const base: SessionMeta = { ...item, isProcessing: false, hasUnread: false, lastMessageRole: undefined, isFlagged: flagged }
+    const base: SessionMeta = { ...item, isProcessing: false, hasUnread: false, lastMessageRole: undefined }
     switch (state) {
       case 'loading': base.isProcessing = true; break
       case 'plan': base.lastMessageRole = 'plan'; break
       case 'new': base.hasUnread = true; break
     }
     return base
-  }, [item, state, flagged])
+  }, [item, state])
 
   const contentSearchResults = new Map<string, ContentSearchResult>()
   if (chatMatchCount && resolvedItem) {
@@ -425,12 +410,6 @@ export const sessionListComponents: ComponentEntry[] = [
         control: { type: 'number', min: 0, max: 50, step: 1 },
         defaultValue: 0,
       },
-      {
-        name: 'flagged',
-        description: 'Whether the session is flagged',
-        control: { type: 'boolean' },
-        defaultValue: false,
-      },
     ],
     variants: [
       {
@@ -463,14 +442,6 @@ export const sessionListComponents: ComponentEntry[] = [
         props: {
           item: sampleSessions[0],
           state: 'new',
-        },
-      },
-      {
-        name: 'Flagged',
-        description: 'Session is flagged',
-        props: {
-          item: sampleSessions[0],
-          flagged: true,
         },
       },
       {

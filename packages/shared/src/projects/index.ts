@@ -34,6 +34,7 @@ export {
   generateProjectSlug,
   createProject,
   updateProject,
+  setProjectArchived,
   deleteProject,
   projectExists,
   // Asset operations

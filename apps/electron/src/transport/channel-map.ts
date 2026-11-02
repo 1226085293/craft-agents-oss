@@ -28,19 +28,9 @@ export const CHANNEL_MAP = {
   cancelProcessing: invoke(RPC_CHANNELS.sessions.CANCEL),
   killShell: invoke(RPC_CHANNELS.sessions.KILL_SHELL),
   getTaskOutput: invoke(RPC_CHANNELS.tasks.GET_OUTPUT),
+  listBackgroundTasks: invoke(RPC_CHANNELS.tasks.LIST),
+  stopBackgroundTask: invoke(RPC_CHANNELS.tasks.STOP),
 
-  // Tasks (Conductor)
-  validateTask: invoke(RPC_CHANNELS.tasks.VALIDATE),
-  createTask: invoke(RPC_CHANNELS.tasks.CREATE),
-  generateTask: invoke(RPC_CHANNELS.tasks.GENERATE),
-  runTask: invoke(RPC_CHANNELS.tasks.RUN),
-  pauseTask: invoke(RPC_CHANNELS.tasks.PAUSE),
-  resumeTask: invoke(RPC_CHANNELS.tasks.RESUME),
-  stopTask: invoke(RPC_CHANNELS.tasks.STOP),
-  getTask: invoke(RPC_CHANNELS.tasks.GET),
-  listTasks: invoke(RPC_CHANNELS.tasks.LIST),
-  getTaskResults: invoke(RPC_CHANNELS.tasks.GET_RESULTS),
-  onTaskGenerated: listener(RPC_CHANNELS.tasks.GENERATED),
   respondToPermission: invoke(RPC_CHANNELS.sessions.RESPOND_TO_PERMISSION),
   respondToCredential: invoke(RPC_CHANNELS.sessions.RESPOND_TO_CREDENTIAL),
   sessionCommand: invoke(RPC_CHANNELS.sessions.COMMAND),
@@ -237,15 +227,19 @@ export const CHANNEL_MAP = {
   onMemoryChanged: listener(RPC_CHANNELS.memory.MEMORY_CHANGED),
 
   // Statuses
-  listStatuses: invoke(RPC_CHANNELS.statuses.LIST),
-  reorderStatuses: invoke(RPC_CHANNELS.statuses.REORDER),
-  onStatusesChanged: listener(RPC_CHANNELS.statuses.CHANGED),
 
-  // Labels
-  listLabels: invoke(RPC_CHANNELS.labels.LIST),
-  createLabel: invoke(RPC_CHANNELS.labels.CREATE),
-  deleteLabel: invoke(RPC_CHANNELS.labels.DELETE),
-  onLabelsChanged: listener(RPC_CHANNELS.labels.CHANGED),
+  // Folders
+  listFolders: invoke(RPC_CHANNELS.folders.LIST),
+  createFolder: invoke(RPC_CHANNELS.folders.CREATE),
+  renameFolder: invoke(RPC_CHANNELS.folders.RENAME),
+  moveFolder: invoke(RPC_CHANNELS.folders.MOVE),
+  moveFolderToScope: invoke(RPC_CHANNELS.folders.MOVE_TO_SCOPE),
+  archiveFolder: invoke(RPC_CHANNELS.folders.ARCHIVE),
+  unarchiveFolder: invoke(RPC_CHANNELS.folders.UNARCHIVE),
+  reorderFolder: invoke(RPC_CHANNELS.folders.REORDER),
+  pinFolder: invoke(RPC_CHANNELS.folders.PIN),
+  deleteFolder: invoke(RPC_CHANNELS.folders.DELETE),
+  onFoldersChanged: listener(RPC_CHANNELS.folders.CHANGED),
 
   // LLM connections change listener
   onLlmConnectionsChanged: listener(RPC_CHANNELS.llmConnections.CHANGED),
@@ -253,10 +247,6 @@ export const CHANNEL_MAP = {
   // In-process LLM gateway: live scheduling state is pushed, config and usage
   // are pulled on demand.
   onLlmGatewayStatus: listener(RPC_CHANNELS.llmGateway.STATUS),
-
-  // Views
-  listViews: invoke(RPC_CHANNELS.views.LIST),
-  saveViews: invoke(RPC_CHANNELS.views.SAVE),
 
   // Tool icon mappings
   getToolIconMappings: invoke(RPC_CHANNELS.toolIcons.GET_MAPPINGS),

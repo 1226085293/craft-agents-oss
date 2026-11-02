@@ -661,8 +661,9 @@ describe('extractToolResults', () => {
     })
   })
 
-  it('does NOT emit task_backgrounded for foreground Agent with agentId in result', () => {
-    // Foreground Agent tool (no run_in_background) — agentId in result should be ignored
+  it('auto-backgrounds an Agent with agentId even without run_in_background', () => {
+    // The pre-tool hook forces Agent/Task into background mode; the renderer
+    // must therefore surface a chip even when the model omitted the flag.
     toolIndex.register('toolu_agent', 'Agent', { _intent: 'Explore codebase', prompt: 'Find auth code' })
 
     const blocks: ContentBlock[] = [
@@ -671,9 +672,13 @@ describe('extractToolResults', () => {
 
     const events = extractToolResults(blocks, null, undefined, toolIndex)
 
-    // Should ONLY have tool_result — no task_backgrounded
-    expect(events).toHaveLength(1)
+    expect(events).toHaveLength(2)
     expect(events[0]).toMatchObject({ type: 'tool_result', toolUseId: 'toolu_agent' })
+    expect(events[1]).toMatchObject({
+      type: 'task_backgrounded',
+      toolUseId: 'toolu_agent',
+      taskId: 'fg_agent_xyz',
+    })
   })
 
   it('detects an async-by-default Agent launch (no run_in_background) via result signature', () => {

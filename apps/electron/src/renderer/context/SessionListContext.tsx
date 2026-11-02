@@ -1,21 +1,14 @@
 import { createContext, useContext } from "react"
-import type { LabelConfig } from "@craft-agent/shared/labels"
-import type { SessionStatusId, SessionStatus } from "@/config/session-status-config"
 import type { SessionMeta } from "@/atoms/sessions"
-import type { SessionOptions } from "@/hooks/useSessionOptions"
 import type { ContentSearchResult } from "@/hooks/useSessionSearch"
 
 export interface SessionListContextValue {
   // Session action callbacks (shared across all items)
   onRenameClick: (sessionId: string, currentName: string) => void
-  onSessionStatusChange: (sessionId: string, state: SessionStatusId) => void
-  onFlag?: (sessionId: string) => void
-  onUnflag?: (sessionId: string) => void
   onArchive?: (sessionId: string) => void
   onUnarchive?: (sessionId: string) => void
   onMarkUnread: (sessionId: string) => void
   onDelete: (sessionId: string, skipConfirmation?: boolean) => Promise<boolean>
-  onLabelsChange?: (sessionId: string, labels: string[]) => void
   /** Set or clear the project binding for a session (null = unbind) */
   onSetProjectId?: (sessionId: string, projectId: string | null) => void
   /** Available workspace projects for the context-menu submenu */
@@ -27,15 +20,13 @@ export interface SessionListContextValue {
   onKeyDown: (e: React.KeyboardEvent, item: SessionMeta) => void
 
   // Shared config
-  sessionStatuses: SessionStatus[]
-  flatLabels: LabelConfig[]
-  labels: LabelConfig[]
   searchQuery?: string
   selectedSessionId?: string | null
   isMultiSelectActive: boolean
+  /** True inside a project's jump view — project rows hide their hover name suffix. */
+  inProjectScope?: boolean
 
   // Per-session lookup maps
-  sessionOptions?: Map<string, SessionOptions>
   contentSearchResults: Map<string, ContentSearchResult>
   /** DOM-verified match info for the active session (count, highlighting state) */
   activeChatMatchInfo?: { sessionId: string | null; count: number; isHighlighting?: boolean }

@@ -29,7 +29,7 @@ export const SESSION_PERSISTENT_FIELDS = [
   // Timestamps
   'createdAt', 'lastUsedAt', 'lastMessageAt',
   // Display
-  'name', 'isFlagged', 'sessionStatus', 'labels', 'hidden',
+  'name', 'hidden',
   // Read tracking
   'lastReadMessageId', 'hasUnread',
   // Config
@@ -56,34 +56,12 @@ export const SESSION_PERSISTENT_FIELDS = [
   'triggeredBy',
   // Project binding (workspace-scoped grouping)
   'projectId',
-  // Kanban: task/subtask hierarchy + board column
   'parentSessionId',
-  'kanbanColumn',
-  // Tasks Conductor: link a session back to the task spec / run / DAG node that owns it
-  'taskSlug',
-  'taskRunId',
-  'taskNodeId',
-  'taskNodeCount',
-  'taskDraft',
+  // Folder tree membership (workspace/project scoped folders)
+  'folderId', 'archivedFolderId', 'archivedFolderPath', 'archivedProjectId', 'archivedByParent', 'sortOrder', 'pinnedAt',
 ] as const;
 
 export type SessionPersistentField = typeof SESSION_PERSISTENT_FIELDS[number];
-
-/**
- * Session status (user-controlled, never automatic)
- *
- * Dynamic status ID referencing workspace status config.
- * Validated at runtime via validateSessionStatus().
- * Falls back to 'todo' if status doesn't exist.
- */
-export type SessionStatus = string;
-
-/**
- * Built-in status IDs (for TypeScript consumers)
- * These are the default statuses but users can add/remove custom ones
- */
-export type BuiltInStatusId = 'todo' | 'in-progress' | 'needs-review' | 'done' | 'cancelled';
-
 /**
  * Session token usage tracking
  */
@@ -121,16 +99,10 @@ export interface SessionConfig {
   /** Timestamp of last meaningful message (user or final assistant). Used for date grouping in session list.
    *  Separate from lastUsedAt which tracks any session access (auto-save, open to read, etc.). */
   lastMessageAt?: number;
-  /** Whether this session is flagged */
-  isFlagged?: boolean;
   /** Permission mode for this session ('safe', 'ask', 'allow-all') */
   permissionMode?: PermissionMode;
   /** Previous permission mode (used to preserve modeTransition context across restarts) */
   previousPermissionMode?: PermissionMode;
-  /** User-controlled session status - determines inbox vs completed */
-  sessionStatus?: SessionStatus;
-  /** Labels applied to this session (bare IDs or "id::value" entries) */
-  labels?: string[];
   /** ID of last message user has read */
   lastReadMessageId?: string;
   /**
@@ -222,18 +194,20 @@ export interface SessionConfig {
   projectId?: string;
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task). */
   parentSessionId?: string;
-  /** Kanban board column id ('todo' | 'in-progress' | 'done'). Drag-to-move target; independent of sessionStatus. */
-  kanbanColumn?: string;
-  /** Tasks Conductor: slug of the task spec this session belongs to (orchestrator + child nodes). */
-  taskSlug?: string;
-  /** Tasks Conductor: id of the run that spawned this child session (child nodes only). */
-  taskRunId?: string;
-  /** Tasks Conductor: id of the DAG node this child session executes (child nodes only). */
-  taskNodeId?: string;
-  /** Tasks Conductor: total DAG node count (orchestrator only) — board progress denominator that stays stable while children spawn lazily. */
-  taskNodeCount?: number;
-  /** Tasks Conductor: generate-time draft orchestrator. Hidden from the board until adopted (promoted) by createTask. */
-  taskDraft?: boolean;
+  /** Folder id this session lives in (folder tree of its project scope). Undefined = root. */
+  folderId?: string | null;
+  /** Snapshot of folderId at archive time (restore hint, D8). */
+  archivedFolderId?: string | null;
+  /** Readable folder path at archive time, e.g. ['工程','Craft'] (D8). */
+  archivedFolderPath?: string[];
+  /** Project id snapshot at archive time — UI hint only (D11). */
+  archivedProjectId?: string;
+  /** Set when archived because an ancestor folder/project was archived (D23/D28). */
+  archivedByParent?: string;
+  /** Manual order among siblings of the same kind (D32). */
+  sortOrder?: string;
+  /** Non-null = pinned; pinned siblings sort first (D33). */
+  pinnedAt?: number;
 }
 
 /**
@@ -262,16 +236,10 @@ export interface SessionHeader {
   lastUsedAt: number;
   /** Timestamp of last meaningful message — persisted separately from lastUsedAt for stable date grouping across restarts. */
   lastMessageAt?: number;
-  /** Whether this session is flagged */
-  isFlagged?: boolean;
   /** Permission mode for this session ('safe', 'ask', 'allow-all') */
   permissionMode?: PermissionMode;
   /** Previous permission mode (used to preserve modeTransition context across restarts) */
   previousPermissionMode?: PermissionMode;
-  /** User-controlled session status - determines inbox vs completed */
-  sessionStatus?: SessionStatus;
-  /** Labels applied to this session (bare IDs or "id::value" entries) */
-  labels?: string[];
   /** ID of last message user has read */
   lastReadMessageId?: string;
   /**
@@ -338,18 +306,20 @@ export interface SessionHeader {
   projectId?: string;
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task). */
   parentSessionId?: string;
-  /** Kanban board column id ('todo' | 'in-progress' | 'done'). Drag-to-move target; independent of sessionStatus. */
-  kanbanColumn?: string;
-  /** Tasks Conductor: slug of the task spec this session belongs to (orchestrator + child nodes). */
-  taskSlug?: string;
-  /** Tasks Conductor: id of the run that spawned this child session (child nodes only). */
-  taskRunId?: string;
-  /** Tasks Conductor: id of the DAG node this child session executes (child nodes only). */
-  taskNodeId?: string;
-  /** Tasks Conductor: total DAG node count (orchestrator only) — board progress denominator that stays stable while children spawn lazily. */
-  taskNodeCount?: number;
-  /** Tasks Conductor: generate-time draft orchestrator. Hidden from the board until adopted (promoted) by createTask. */
-  taskDraft?: boolean;
+  /** Folder id this session lives in (folder tree of its project scope). Undefined = root. */
+  folderId?: string | null;
+  /** Snapshot of folderId at archive time (restore hint, D8). */
+  archivedFolderId?: string | null;
+  /** Readable folder path at archive time, e.g. ['工程','Craft'] (D8). */
+  archivedFolderPath?: string[];
+  /** Project id snapshot at archive time — UI hint only (D11). */
+  archivedProjectId?: string;
+  /** Set when archived because an ancestor folder/project was archived (D23/D28). */
+  archivedByParent?: string;
+  /** Manual order among siblings of the same kind (D32). */
+  sortOrder?: string;
+  /** Non-null = pinned; pinned siblings sort first (D33). */
+  pinnedAt?: number;
   // Pre-computed fields for fast list loading
   /** Number of messages in session */
   messageCount: number;
@@ -378,12 +348,6 @@ export interface SessionMetadata {
   /** Preview of first user message */
   preview?: string;
   sdkSessionId?: string;
-  /** Whether this session is flagged */
-  isFlagged?: boolean;
-  /** User-controlled session status */
-  sessionStatus?: SessionStatus;
-  /** Labels applied to this session (bare IDs or "id::value" entries) */
-  labels?: string[];
   /** Explicit per-session source selection (absent = follow workspace defaults) */
   enabledSourceSlugs?: string[];
   /** 数据源选择器模式：auto（默认）/ only（仅这些）/ exclude（排除这些） */
@@ -436,16 +400,18 @@ export interface SessionMetadata {
   projectId?: string;
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task). */
   parentSessionId?: string;
-  /** Kanban board column id ('todo' | 'in-progress' | 'done'). Drag-to-move target; independent of sessionStatus. */
-  kanbanColumn?: string;
-  /** Tasks Conductor: slug of the task spec this session belongs to (orchestrator + child nodes). */
-  taskSlug?: string;
-  /** Tasks Conductor: id of the run that spawned this child session (child nodes only). */
-  taskRunId?: string;
-  /** Tasks Conductor: id of the DAG node this child session executes (child nodes only). */
-  taskNodeId?: string;
-  /** Tasks Conductor: total DAG node count (orchestrator only) — board progress denominator that stays stable while children spawn lazily. */
-  taskNodeCount?: number;
-  /** Tasks Conductor: generate-time draft orchestrator. Hidden from the board until adopted (promoted) by createTask. */
-  taskDraft?: boolean;
+  /** Folder id this session lives in (folder tree of its project scope). Undefined = root. */
+  folderId?: string | null;
+  /** Snapshot of folderId at archive time (restore hint, D8). */
+  archivedFolderId?: string | null;
+  /** Readable folder path at archive time, e.g. ['工程','Craft'] (D8). */
+  archivedFolderPath?: string[];
+  /** Project id snapshot at archive time — UI hint only (D11). */
+  archivedProjectId?: string;
+  /** Set when archived because an ancestor folder/project was archived (D23/D28). */
+  archivedByParent?: string;
+  /** Manual order among siblings of the same kind (D32). */
+  sortOrder?: string;
+  /** Non-null = pinned; pinned siblings sort first (D33). */
+  pinnedAt?: number;
 }

@@ -12,6 +12,7 @@ import type {
   ContentBadge,
   ToolDisplayMeta,
   AnnotationV1,
+  StoredAttachment,
   PermissionRequest as BasePermissionRequest,
 } from '@craft-agent/core/types'
 import type { PermissionMode } from '../agent/mode-types'
@@ -26,20 +27,6 @@ import type { SdkMcpServerConfig } from '../agent/backend/types'
 
 // Re-export generateMessageId for handler convenience
 export { generateMessageId } from '@craft-agent/core/types'
-
-// ---------------------------------------------------------------------------
-// Session types
-// ---------------------------------------------------------------------------
-
-/**
- * Dynamic status ID referencing workspace status config.
- * Validated at runtime via validateSessionStatus().
- * Falls back to 'todo' if status doesn't exist.
- */
-export type SessionStatus = string
-
-export type BuiltInStatusId = 'todo' | 'in-progress' | 'needs-review' | 'done' | 'cancelled'
-
 /**
  * Electron-specific Session type (includes runtime state).
  * Extends core Session with messages array and processing state.
@@ -54,12 +41,8 @@ export interface Session {
   lastMessageAt: number
   messages: Message[]
   isProcessing: boolean
-  isFlagged?: boolean
   /** Permission mode for this session ('safe', 'ask', 'allow-all') */
   permissionMode?: PermissionMode
-  sessionStatus?: SessionStatus
-  /** Labels (additive tags, many-per-session — bare IDs or "id::value" entries) */
-  labels?: string[]
   lastReadMessageId?: string
   /**
    * Explicit unread flag - single source of truth for NEW badge.
@@ -115,18 +98,48 @@ export interface Session {
   projectId?: string
   /** Parent session id — when set, this session is a subtask of the parent (undefined = top-level task) */
   parentSessionId?: string
-  /** Kanban board column id ('todo' | 'in-progress' | 'done'); independent of sessionStatus */
-  kanbanColumn?: string
-  /** Tasks Conductor: slug of the task spec this session belongs to. */
-  taskSlug?: string
-  /** Tasks Conductor: id of the run that spawned this child session (child nodes only). */
-  taskRunId?: string
-  /** Tasks Conductor: id of the DAG node this child session executes (child nodes only). */
-  taskNodeId?: string
-  /** Tasks Conductor: total DAG node count (orchestrator only) — stable board progress denominator. */
-  taskNodeCount?: number
-  /** Tasks Conductor: generate-time draft orchestrator, hidden from the board until adopted by createTask. */
-  taskDraft?: boolean
+  /**
+   * Messages waiting for the current turn to finish, in send order. The
+   * renderer shows them in a panel ABOVE the composer (2026-10-22) instead of
+   * as transcript bubbles — they are not part of the conversation yet.
+   * `attachments` are the persisted metadata so the edit action can restore
+   * them into the composer without a round-trip to disk.
+   */
+  queuedMessages?: QueuedMessageSummary[]
+}
+
+/**
+ * Payload returned by the `editQueuedMessage` command: the message has already
+ * left the queue, and the composer rehydrates from this.
+ */
+export interface QueuedMessageEditResult {
+  /** Id the renderer used to address the queued row. */
+  messageId: string
+  /** Original user-visible text. */
+  text: string
+  /** Persisted attachments, re-read from disk by the renderer on edit. */
+  attachments?: StoredAttachment[]
+}
+
+/**
+ * One entry of a session's pending send queue. Mirrors the backend
+ * `messageQueue` rows that belong to a user message (synthetic restart-recovery
+ * rows have no `messageId` and are filtered out before reaching the renderer).
+ */
+export interface QueuedMessageSummary {
+  /** Stable identity for reorder/edit/remove — the message id, or the
+   * optimistic id before the backend ack lands. */
+  id: string
+  /** Canonical persisted message id (absent on transient optimistic rows). */
+  messageId?: string
+  /** Frontend's optimistic id, used to match the panel row before ack. */
+  optimisticMessageId?: string
+  /** User-visible text. */
+  message: string
+  /** Persisted attachments (includes thumbnailBase64 for previews). */
+  attachments?: StoredAttachment[]
+  /** Send time (epoch ms) — shown as a relative hint in the panel. */
+  timestamp?: number
 }
 
 export interface CreateSessionOptions {
@@ -157,9 +170,6 @@ export interface CreateSessionOptions {
   strategy?: string
   systemPromptPreset?: 'default' | 'mini' | string
   hidden?: boolean
-  sessionStatus?: SessionStatus
-  labels?: string[]
-  isFlagged?: boolean
   enabledSourceSlugs?: string[]
   /**
    * Message ID to branch from. This is a hard context cutoff:
@@ -170,22 +180,10 @@ export interface CreateSessionOptions {
   branchFromSessionId?: string
   /** Bind the new session to a workspace project (inherits project's workingDirectory). */
   projectId?: string
+  /** Folder id inside that project's tree (or the root tree when no project). Undefined = root. */
+  folderId?: string | null
   /** Mark the new session as a subtask of this parent session (undefined = top-level task). */
   parentSessionId?: string
-  /** Tasks Conductor: slug of the task spec this session belongs to (orchestrator + child nodes). */
-  taskSlug?: string
-  /** Tasks Conductor: id of the run that spawned this child session (child nodes only). */
-  taskRunId?: string
-  /** Tasks Conductor: id of the DAG node this child session executes (child nodes only). */
-  taskNodeId?: string
-  /** Tasks Conductor: mark the orchestrator as a generate-time draft (hidden until adopted by createTask). */
-  taskDraft?: boolean
-  /**
-   * Apply the reserved "Task" label (valueType 'number') after creation. Top-level sessions
-   * allocate the next task number; sessions with a `parentSessionId` inherit the parent's
-   * number (labeling a plain-chat parent in the same pass). Task flows opt in; plain chats don't.
-   */
-  applyTaskLabel?: boolean
   /**
    * Explicit MCP server configurations for this session.
    * When provided, the session uses an isolated MCP pool with only these servers,
@@ -197,8 +195,6 @@ export interface CreateSessionOptions {
 export interface RemoteSessionTransferPayload {
   sourceSessionId: string
   name?: string
-  sessionStatus?: SessionStatus
-  labels?: string[]
   permissionMode?: PermissionMode
   summary: string
 }
@@ -208,177 +204,7 @@ export interface ImportRemoteSessionTransferResult {
 }
 
 // ---------------------------------------------------------------------------
-// Tasks (Conductor) DTOs — wire contract for the tasks:* channels.
 // ---------------------------------------------------------------------------
-
-export interface TaskValidationIssueDto {
-  /** Dotted path into the spec, e.g. "nodes.design.depends_on". */
-  path: string
-  message: string
-  severity: 'error' | 'warning'
-  suggestion?: string
-}
-
-export interface TaskValidationResultDto {
-  valid: boolean
-  errors: TaskValidationIssueDto[]
-  warnings: TaskValidationIssueDto[]
-  /** Pre-flight estimate: total nodes and how many sessions a run would spawn. */
-  estimate?: { nodeCount: number; sessionNodeCount: number }
-}
-
-export interface TaskCreateRequest {
-  /** task.yaml source text (authoritative). */
-  yaml: string
-  /**
-   * When this YAML was authored by a `tasks:generate` orchestrator, the id of that hidden
-   * draft session. tasks:create promotes it in place (clears taskDraft, binds taskSlug)
-   * instead of minting a second top-level session — preventing duplicate board tiles (#bug1).
-   * Only honored when the draft is still unadopted and its slug matches; otherwise ignored.
-   */
-  orchestratorSessionId?: string
-  /**
-   * Edit-mode bind: the id of an existing, board-visible session (e.g. a quick-add tile) that the
-   * user is saving this spec onto. tasks:create calls `bindExistingSessionToTask` and HARD-ERRORS
-   * if the bind fails — it must never fall through to minting a fresh orchestrator (that would
-   * leave a duplicate tile). Distinct from `orchestratorSessionId`, which adopts a hidden draft.
-   */
-  attachToExistingSession?: string
-}
-
-export interface TaskCreateResult {
-  /** Empty string when validation failed — inspect `validation`. */
-  slug: string
-  /** The persistent parent/orchestrator session (author + final verifier). */
-  orchestratorSessionId: string
-  validation: TaskValidationResultDto
-  /**
-   * Resolved id of the reserved "Task" label applied to the orchestrator. May differ from the
-   * literal 'task' (a user-owned label with that name forces a fresh slug like 'task-2'), so
-   * navigation/filtering MUST use this id. Undefined when label application failed (fail-soft).
-   */
-  taskLabelId?: string
-}
-
-export interface TaskGenerateRequest {
-  /** Natural-language goal the orchestrator turns into a task.yaml DAG. */
-  goal: string
-  /** Optional working title for the task / orchestrator session. */
-  title?: string
-  /** Optional model for the orchestrator session (defaults to the session default). */
-  model?: string
-  /** Optional working directory for the orchestrator session (defaults to project/workspace cwd). */
-  cwd?: string
-  /** Project to bind the draft orchestrator to, so it authors against the project's `<project_context>`. */
-  projectId?: string
-  /**
-   * LLM connection slug that serves `model`. Required for non-default (e.g. pi/*) models — without it
-   * the authoring turn can't resolve a backend and completes instantly with no output (invalid spec).
-   */
-  llmConnection?: string
-  /** Task-level source slugs the draft orchestrator may author against (omitted → workspace default). */
-  enabledSourceSlugs?: string[]
-  /** Permission mode for the draft orchestrator, so its authoring turn matches the task's chosen
-   *  autonomy from the start instead of running at the workspace default until adoption. */
-  permissionMode?: PermissionMode
-}
-
-/**
- * Synchronous ack for `tasks:generate`. The orchestrator session is created immediately
- * (cheap) and returned right away; the authored spec arrives later via the `tasks:generated`
- * push event. This keeps the RPC well under the uniform client timeout even when authoring
- * takes longer than the request budget.
- */
-export interface TaskGenerateAck {
-  /** The persistent orchestrator session, reachable immediately so its work is never lost. */
-  orchestratorSessionId: string
-}
-
-export interface TaskGenerateResult {
-  /** The persistent orchestrator session that authored the spec (also handles revisions). */
-  orchestratorSessionId: string
-  /** Slug of the authored spec; empty when generation produced an invalid spec. */
-  slug: string
-  /** Parsed TaskSpec when valid (consumers cast to TaskSpec from @craft-agent/shared/tasks). */
-  spec?: unknown
-  /** The raw task.yaml the orchestrator produced — shown and editable in the editor. */
-  yaml: string
-  validation: TaskValidationResultDto
-  /** Set when generation failed before producing a spec (e.g. orchestrator turn errored/timed out). */
-  error?: string
-}
-
-export interface TaskRunRequest {
-  slug: string
-  runId?: string
-  orchestratorSessionId?: string
-  params?: Record<string, unknown>
-}
-
-export interface TaskNodeRunStateDto {
-  id: string
-  /** pending | running | done | failed | cancelled | skipped */
-  state: string
-  sessionId?: string
-  attempt: number
-}
-
-export interface TaskRunSnapshotDto {
-  slug: string
-  runId: string
-  taskId: string
-  /** running | paused | verifying | stopped | completed | failed */
-  status: string
-  orchestratorSessionId?: string
-  nodes: TaskNodeRunStateDto[]
-  /** Sum of each child's (input + output) tokens observed at completion. */
-  tokensUsed: number
-}
-
-export interface TaskGetResult {
-  slug: string
-  validation: TaskValidationResultDto
-  /** The parsed TaskSpec (from @craft-agent/shared/tasks) when valid; consumers cast. */
-  spec?: unknown
-  /** Active run snapshot when a runId was supplied and known; otherwise null. */
-  run?: TaskRunSnapshotDto | null
-}
-
-/** One subtask's outcome in a completed/persisted run, for the editor's Results tab. */
-export interface TaskResultNodeDto {
-  id: string
-  title: string
-  /** pending | running | done | failed | cancelled | skipped */
-  state: string
-  /** The child session that ran this node, recovered from the run log (drill-in link). */
-  sessionId?: string
-  /** The node's recorded final output text (from nodes/<id>.json), when present. */
-  output?: string
-}
-
-/**
- * Storage-backed read of a task run's outcome — verdict + per-node final output, recovered from
- * the persisted run artifacts (run-log.jsonl, nodes/<id>.json, per-run spec.json snapshot). Unlike
- * `TaskRunSnapshotDto` this survives restart and does not require an active in-memory run.
- */
-export interface TaskResultsDto {
-  slug: string
-  /** The run inspected; null when the task has never been run. */
-  runId: string | null
-  /** All run ids for this task (newest last), for a run picker. */
-  runIds: string[]
-  /** The most recent verdict (kept for back-compat with single-verdict consumers). */
-  verdict?: { result: 'pass' | 'fail' | 'unparsed'; reason?: string; nodes?: string[] }
-  /** Every verdict in order (a FAIL→repair loop produces several), for the Results history view. */
-  verdicts?: { result: 'pass' | 'fail' | 'unparsed'; reason?: string; nodes?: string[] }[]
-  /** Repair-loop accounting: attempts consumed (= count of FAIL verdicts) and the resolved cap. */
-  repair?: { used: number; max: number }
-  /** Terminal run status recovered from the run-log (completed | failed | stopped | …). */
-  runStatus?: string
-  /** The run's acceptance criteria (from the per-run spec snapshot), shown above the verdict. */
-  acceptanceCriteria?: string
-  nodes: TaskResultNodeDto[]
-}
 
 export interface PermissionModeState {
   permissionMode: PermissionMode
@@ -414,9 +240,12 @@ export type SessionEvent =
   | { type: 'error'; sessionId: string; error: string; timestamp?: number }
   | { type: 'typed_error'; sessionId: string; error: TypedError; timestamp?: number }
   | { type: 'complete'; sessionId: string; tokenUsage?: Session['tokenUsage']; hasUnread?: boolean; backgroundTasksAlive?: boolean }
-  | { type: 'interrupted'; sessionId: string; message?: Message; queuedMessages?: string[] }
+  | { type: 'interrupted'; sessionId: string; message?: Message }
+  // The pending send queue changed (enqueue / cancel / edit / reorder / drain).
+  // Carries the full ordered queue so every window converges on one order.
+  | { type: 'queued_messages_changed'; sessionId: string; queuedMessages: QueuedMessageSummary[] }
   | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed'; statusParams?: Record<string, string | number>; timestamp?: number }
-  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed' | 'system_stop'; statusParams?: Record<string, string | number>; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string }
+  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed' | 'system_stop' | 'background_wake'; statusParams?: Record<string, string | number>; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string }
   | { type: 'system_stop_notice'; sessionId: string; reason: string; message: string; timestamp?: number }
   | { type: 'title_generated'; sessionId: string; title: string }
   | { type: 'title_regenerating'; sessionId: string; isRegenerating: boolean }
@@ -428,26 +257,28 @@ export type SessionEvent =
   | { type: 'permission_mode_changed'; sessionId: string; permissionMode: PermissionMode; previousPermissionMode?: PermissionMode; transitionDisplay?: string; modeVersion?: number; changedAt?: string; changedBy?: PermissionModeState['changedBy'] }
   | { type: 'plan_submitted'; sessionId: string; message: Message }
   | { type: 'sources_changed'; sessionId: string; enabledSourceSlugs: string[]; sourceScope?: 'auto' | 'only' | 'exclude' }
-  | { type: 'labels_changed'; sessionId: string; labels: string[] }
   | { type: 'project_id_changed'; sessionId: string; projectId: string | null }
   | { type: 'connection_changed'; sessionId: string; connectionSlug: string; supportsBranching?: boolean }
-  | { type: 'task_backgrounded'; sessionId: string; toolUseId: string; taskId: string; intent?: string; turnId?: string; kind?: 'workflow'; workflowId?: string }
+  | { type: 'task_backgrounded'; sessionId: string; toolUseId: string; taskId: string; intent?: string; turnId?: string; kind?: 'workflow' | 'subscription' | 'tool'; workflowId?: string }
   | { type: 'shell_backgrounded'; sessionId: string; toolUseId: string; shellId: string; intent?: string; command?: string; turnId?: string }
   | { type: 'task_progress'; sessionId: string; toolUseId: string; elapsedSeconds: number; turnId?: string }
-  | { type: 'task_completed'; sessionId: string; taskId: string; status: 'completed' | 'failed' | 'stopped'; outputFile?: string; summary?: string; turnId?: string }
+  | { type: 'task_completed'; sessionId: string; taskId: string; status: 'completed' | 'failed' | 'stopped'; outputFile?: string; output?: string; summary?: string; turnId?: string; kind?: 'tool' }
   | { type: 'workflow_agent_completed'; sessionId: string; workflowId: string; agentId: string; turnId?: string }
   | { type: 'shell_killed'; sessionId: string; shellId: string }
+  | { type: 'background_task_started'; sessionId: string; taskId: string; kind: string; intent?: string; startedAt: number; backgroundedAt?: number }
+  | { type: 'background_task_updated'; sessionId: string; taskId: string; status: string; outputFile?: string; tail?: string; stopSource?: string }
+  | { type: 'background_task_stopping'; sessionId: string; taskId: string; stopSource?: string }
+  | { type: 'background_task_completed'; sessionId: string; taskId: string; status: string; exitCode?: number; outputFile?: string; tail?: string; stopSource?: string }
+  | { type: 'background_task_delivered'; sessionId: string; taskId: string; messageId?: string; deliveredAt: number }
+  | { type: 'background_task_deleted'; sessionId: string; taskId: string }
   | { type: 'user_message'; sessionId: string; message: Message; status: 'accepted' | 'queued' | 'processing'; optimisticMessageId?: string }
   | { type: 'message_removed'; sessionId: string; messageId: string }
   | { type: 'session_cleared'; sessionId: string }
-  | { type: 'session_flagged'; sessionId: string }
-  | { type: 'session_unflagged'; sessionId: string }
   | { type: 'session_archived'; sessionId: string }
   | { type: 'session_unarchived'; sessionId: string }
   | { type: 'name_changed'; sessionId: string; name?: string }
   | { type: 'session_model_changed'; sessionId: string; model: string | null }
-  | { type: 'session_status_changed'; sessionId: string; sessionStatus: SessionStatus }
-  | { type: 'session_metadata_changed'; sessionId: string; changes: Partial<Pick<Session, 'taskNodeCount' | 'kanbanColumn' | 'taskDraft' | 'taskSlug' | 'projectId' | 'hasUnread' | 'lastReadMessageId'>> }
+  | { type: 'session_metadata_changed'; sessionId: string; changes: Partial<Pick<Session, 'hasUnread' | 'lastReadMessageId'>> & { projectId?: string | null; folderId?: string | null; archivedFolderId?: string | null; archivedFolderPath?: string[]; archivedProjectId?: string; archivedByParent?: string; sortOrder?: string; pinnedAt?: number } }
   | { type: 'session_deleted'; sessionId: string }
   | { type: 'session_created'; sessionId: string }
   | { type: 'session_shared'; sessionId: string; sharedUrl: string }
@@ -505,12 +336,9 @@ export interface SendMessageOptions {
 // ---------------------------------------------------------------------------
 
 export type SessionCommand =
-  | { type: 'flag' }
-  | { type: 'unflag' }
   | { type: 'archive' }
   | { type: 'unarchive' }
   | { type: 'rename'; name: string }
-  | { type: 'setSessionStatus'; state: SessionStatus }
   | { type: 'markRead' }
   | { type: 'markUnread' }
   | { type: 'setActiveViewing'; workspaceId: string }
@@ -519,9 +347,15 @@ export type SessionCommand =
   | { type: 'setSessionStrategy'; strategy: string }
   | { type: 'updateWorkingDirectory'; dir: string }
   | { type: 'setSources'; sourceSlugs: string[]; sourceScope?: 'auto' | 'only' | 'exclude' }
-  | { type: 'setLabels'; labels: string[] }
   | { type: 'setProjectId'; projectId: string | null }
-  | { type: 'setKanbanColumn'; column: string | null }
+  /** Move the session into a folder of its current scope (null = root). */
+  | { type: 'setFolder'; folderId: string | null }
+  /** Atomic cross-scope move: project + folder + optional archive flip (D19/D31). */
+  | { type: 'moveToScope'; projectId: string | null; folderId: string | null; archived?: boolean }
+  /** Manual order among siblings of the same kind (D32). */
+  | { type: 'setSortOrder'; sortOrder: string }
+  /** Pin/unpin within the sibling group (D33). */
+  | { type: 'setPinned'; pinned: boolean }
   | { type: 'showInFinder' }
   | { type: 'copyPath' }
   | { type: 'shareToViewer' }
@@ -536,6 +370,12 @@ export type SessionCommand =
   | { type: 'clearPendingPlanExecution' }
   | { type: 'cancelQueuedMessage'; messageId: string }
   | { type: 'guideQueuedMessage'; messageId: string }
+  /** Reorder the pending queue. `messageIds` is the full new order; rows not
+   *  listed keep their relative position after the listed ones. */
+  | { type: 'reorderQueuedMessages'; messageIds: string[] }
+  /** Remove a queued message from the queue and hand its payload back so the
+   *  renderer can put text + attachments into the composer for editing. */
+  | { type: 'editQueuedMessage'; messageId: string }
   | { type: 'addAnnotation'; messageId: string; annotation: AnnotationV1 }
   | { type: 'removeAnnotation'; messageId: string; annotationId: string }
   | { type: 'updateAnnotation'; messageId: string; annotationId: string; patch: Partial<AnnotationV1> }
@@ -617,6 +457,12 @@ export interface FileAttachment {
   storedPath?: string
   /** Path to converted markdown version, when available */
   markdownPath?: string
+  /** Set once the attachment is persisted at attach time (storeAttachment). */
+  id?: string
+  wasResized?: boolean
+  /** Base64 of the resized image, when the original was auto-resized for API limits. */
+  resizedBase64?: string
+  originalSize?: number
 }
 
 export interface SessionFile {
@@ -827,7 +673,6 @@ export interface TestAutomationPayload {
   automationName?: string
   actions: TestAutomationAction[]
   permissionMode?: PermissionMode
-  labels?: string[]
   /** Forwarded from the matcher; routes test-run sessions into a Telegram topic when paired. */
   telegramTopic?: string
   /** QQ group channelIds to bind test-run sessions to. */
@@ -920,11 +765,29 @@ export interface LlmGatewayStatusPayload {
    * Optional for forward/backward compatibility.
    */
   generation?: number
-  strategies: Array<{ id: string; type: string; providers: number }>
+  strategies: Array<{
+    id: string
+    type: string
+    providers: number
+    /** Display name; the id is a slug and reads badly for non-ASCII names. */
+    name?: string
+    /** Public models the group declares, in declared order. */
+    models?: string[]
+    /**
+     * The subset of `models` usable right now (availability windows applied).
+     * Empty with a non-empty `models` means every window is closed — the
+     * composer shows that state instead of naming a model that will fail.
+     */
+    openModels?: string[]
+    enabled?: boolean
+    usable?: boolean
+    reason?: string
+  }>
   /**
    * Last upstream model each strategy routed to, `strategyId -> model`.
-   * Drives the composer's "策略组-当前模型" label. Optional so a renderer
-   * talking to an older main process still compiles.
+   * History, used to size the context ring. The composer's "next request"
+   * label predicts from `openModels` instead. Optional so a renderer talking to
+   * an older main process still compiles.
    */
   lastModels?: Record<string, string>
   coolingKeys: number

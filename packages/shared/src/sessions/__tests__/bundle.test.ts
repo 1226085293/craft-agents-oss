@@ -189,9 +189,7 @@ describe('serializeSession', () => {
 
   it('preserves session metadata in header', () => {
     const session = makeStoredSession({
-      isFlagged: true,
-      sessionStatus: 'in-progress',
-      labels: ['bug', 'priority::high'],
+      folderId: 'alpha',
       permissionMode: 'ask' as any,
     })
     setupSessionDir(tmpDir, session)
@@ -199,9 +197,7 @@ describe('serializeSession', () => {
     const bundle = serializeSession(tmpDir, session.id)
 
     expect(bundle).not.toBeNull()
-    expect(bundle!.session.header.isFlagged).toBe(true)
-    expect(bundle!.session.header.sessionStatus).toBe('in-progress')
-    expect(bundle!.session.header.labels).toEqual(['bug', 'priority::high'])
+    expect(bundle!.session.header.folderId).toBe('alpha')
   })
 })
 

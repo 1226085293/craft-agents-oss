@@ -34,12 +34,9 @@ import type {
   SessionMetadata,
   SessionTokenUsage,
   SessionHeader,
-  SessionStatus,
 } from './types.ts';
 import type { Plan } from '../agent/plan-types.ts';
-import { validateSessionStatus } from '../statuses/validation.ts';
 import { debug } from '../utils/debug.ts';
-import { getStatusCategory } from '../statuses/storage.ts';
 import { readSessionHeader, readSessionJsonl } from './jsonl.ts';
 import { sessionPersistenceQueue } from './persistence-queue.ts';
 
@@ -187,15 +184,10 @@ export async function createSession(
     /** Gateway strategy group; persisted so a session created outside the UI still routes. */
     strategy?: string;
     hidden?: boolean;
-    sessionStatus?: SessionConfig['sessionStatus'];
-    labels?: string[];
-    isFlagged?: boolean;
     projectId?: string;
     parentSessionId?: string;
-    taskSlug?: string;
-    taskRunId?: string;
-    taskNodeId?: string;
-    taskDraft?: boolean;
+    /** Folder this session belongs to (folder tree of its project scope). undefined = root. */
+    folderId?: string | null;
   }
 ): Promise<SessionConfig> {
   ensureSessionsDir(workspaceRootPath);
@@ -225,15 +217,9 @@ export async function createSession(
     llmConnection: options?.llmConnection,
     strategy: options?.strategy,
     hidden: options?.hidden,
-    sessionStatus: options?.sessionStatus,
-    labels: options?.labels,
-    isFlagged: options?.isFlagged,
     projectId: options?.projectId,
+    folderId: options?.folderId ?? undefined,
     parentSessionId: options?.parentSessionId,
-    taskSlug: options?.taskSlug,
-    taskRunId: options?.taskRunId,
-    taskNodeId: options?.taskNodeId,
-    taskDraft: options?.taskDraft,
   };
 
   // Save empty session
@@ -405,11 +391,6 @@ export function listSessions(workspaceRootPath: string): SessionMetadata[] {
  */
 function headerToMetadata(header: SessionHeader, workspaceRootPath: string): SessionMetadata | null {
   try {
-    // Migration: accept old 'todoState' field from pre-rename session files
-    const rawStatus = header.sessionStatus ?? (header as unknown as { todoState?: string }).todoState;
-    // Validate sessionStatus against workspace status config
-    const validatedStatus = validateSessionStatus(workspaceRootPath, rawStatus);
-
     // Count plan files for this session
     const planCount = listPlanFiles(workspaceRootPath, header.id).length;
 
@@ -420,14 +401,13 @@ function headerToMetadata(header: SessionHeader, workspaceRootPath: string): Ses
     // Destructure fields that don't exist on SessionMetadata or need overrides
     const {
       pendingPlanExecution: _pp,
-      sessionStatus: _ss, workingDirectory: _wd, sdkCwd: _sc,
+      workingDirectory: _wd, sdkCwd: _sc,
       workspaceRootPath: _wrp, ...headerFields
     } = header;
 
     return {
       ...headerFields,
       workspaceRootPath,
-      sessionStatus: validatedStatus,
       planCount: planCount > 0 ? planCount : undefined,
       workingDirectory: workingDir,
       sdkCwd,
@@ -541,10 +521,7 @@ export async function updateSessionMetadata(
   workspaceRootPath: string,
   sessionId: string,
   updates: Partial<Pick<SessionConfig,
-    | 'isFlagged'
     | 'name'
-    | 'sessionStatus'
-    | 'labels'
     | 'lastReadMessageId'
     | 'hasUnread'
     | 'enabledSourceSlugs'
@@ -558,15 +535,19 @@ export async function updateSessionMetadata(
     | 'isArchived'
     | 'archivedAt'
     | 'projectId'
+    | 'folderId'
+    | 'archivedFolderId'
+    | 'archivedFolderPath'
+    | 'archivedProjectId'
+    | 'archivedByParent'
+    | 'sortOrder'
+    | 'pinnedAt'
   >>
 ): Promise<void> {
   const session = loadSession(workspaceRootPath, sessionId);
   if (!session) return;
 
-  if (updates.isFlagged !== undefined) session.isFlagged = updates.isFlagged;
   if (updates.name !== undefined) session.name = updates.name;
-  if (updates.sessionStatus !== undefined) session.sessionStatus = updates.sessionStatus;
-  if (updates.labels !== undefined) session.labels = updates.labels;
   if (updates.enabledSourceSlugs !== undefined) session.enabledSourceSlugs = updates.enabledSourceSlugs;
   if (updates.workingDirectory !== undefined) session.workingDirectory = updates.workingDirectory;
   if (updates.sdkCwd !== undefined) session.sdkCwd = updates.sdkCwd;
@@ -580,45 +561,17 @@ export async function updateSessionMetadata(
   if (updates.isArchived !== undefined) session.isArchived = updates.isArchived;
   if ('archivedAt' in updates) session.archivedAt = updates.archivedAt;
   if ('projectId' in updates) session.projectId = updates.projectId;
+  if ('folderId' in updates) session.folderId = updates.folderId ?? undefined;
+  if ('archivedFolderId' in updates) session.archivedFolderId = updates.archivedFolderId ?? undefined;
+  if ('archivedFolderPath' in updates) session.archivedFolderPath = updates.archivedFolderPath;
+  if ('archivedProjectId' in updates) session.archivedProjectId = updates.archivedProjectId;
+  if ('archivedByParent' in updates) session.archivedByParent = updates.archivedByParent;
+  if ('sortOrder' in updates) session.sortOrder = updates.sortOrder;
+  if ('pinnedAt' in updates) session.pinnedAt = updates.pinnedAt;
 
   await saveSession(session);
 }
 
-/**
- * Flag a session
- */
-export async function flagSession(workspaceRootPath: string, sessionId: string): Promise<void> {
-  await updateSessionMetadata(workspaceRootPath, sessionId, { isFlagged: true });
-}
-
-/**
- * Unflag a session
- */
-export async function unflagSession(workspaceRootPath: string, sessionId: string): Promise<void> {
-  await updateSessionMetadata(workspaceRootPath, sessionId, { isFlagged: false });
-}
-
-/**
- * Set session status
- */
-export async function setSessionStatus(
-  workspaceRootPath: string,
-  sessionId: string,
-  sessionStatus: SessionStatus
-): Promise<void> {
-  await updateSessionMetadata(workspaceRootPath, sessionId, { sessionStatus });
-}
-
-/**
- * Set labels for a session
- */
-export async function setSessionLabels(
-  workspaceRootPath: string,
-  sessionId: string,
-  labels: string[]
-): Promise<void> {
-  await updateSessionMetadata(workspaceRootPath, sessionId, { labels });
-}
 
 /**
  * Set or clear the project binding for a session.
@@ -770,37 +723,6 @@ export function getPendingPlanExecution(
 // ============================================================
 // Session Filtering
 // ============================================================
-
-/**
- * List flagged sessions (excludes archived)
- */
-export function listFlaggedSessions(workspaceRootPath: string): SessionMetadata[] {
-  return listActiveSessions(workspaceRootPath).filter(s => s.isFlagged === true);
-}
-
-/**
- * List completed sessions (category: closed)
- * Includes done, cancelled, and any custom "closed" statuses
- * Excludes archived sessions
- */
-export function listCompletedSessions(workspaceRootPath: string): SessionMetadata[] {
-  return listActiveSessions(workspaceRootPath).filter(s => {
-    const category = getStatusCategory(workspaceRootPath, s.sessionStatus || 'todo');
-    return category === 'closed';
-  });
-}
-
-/**
- * List inbox sessions (category: open)
- * Includes todo, in-progress, needs-review, and any custom "open" statuses
- * Excludes archived sessions
- */
-export function listInboxSessions(workspaceRootPath: string): SessionMetadata[] {
-  return listActiveSessions(workspaceRootPath).filter(s => {
-    const category = getStatusCategory(workspaceRootPath, s.sessionStatus || 'todo');
-    return category === 'open';
-  });
-}
 
 /**
  * List archived sessions

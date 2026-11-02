@@ -7,6 +7,7 @@
 
 import { spawn, ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
+import { buildSessionSearchPaths } from './search-scope';
 import { resolveBackendHostTooling } from '@craft-agent/shared/agent/backend';
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '../runtime/platform';
 
@@ -76,6 +77,8 @@ export interface SearchOptions {
   ignoreCase?: boolean;
   /** Search ID for correlating logs across stages */
   searchId?: string;
+  /** Optional exact session IDs that confine content search to a current folder tree. */
+  sessionIds?: readonly string[];
 }
 
 /**
@@ -195,6 +198,7 @@ export async function searchSessions(
     maxSessions = 50,
     ignoreCase = true,
     searchId = Date.now().toString(36),
+    sessionIds,
   } = options;
 
   if (!query.trim()) {
@@ -217,6 +221,10 @@ export async function searchSessions(
     return [];
   }
 
+  const allowedPaths = buildSessionSearchPaths(sessionsDir, sessionIds);
+  const searchPaths = allowedPaths?.filter(existsSync);
+  if (searchPaths?.length === 0) return [];
+
   return new Promise((resolve) => {
     const results = new Map<string, SessionSearchResult>();
     let buffer = '';
@@ -225,8 +233,10 @@ export async function searchSessions(
     const args = [
       '--json',           // JSON output format (NDJSON)
       '--max-count', '10', // Limit matches per file to prevent huge results
-      '-g', '**/session.jsonl', // Only search session.jsonl files
     ];
+    if (searchPaths === undefined) {
+      args.push('-g', '**/session.jsonl'); // Only search session.jsonl files
+    }
 
     if (ignoreCase) {
       args.push('-i');
@@ -241,7 +251,7 @@ export async function searchSessions(
     // adding type, so "type" can appear anywhere in the JSON line, not just after "id".
     const escapedQuery = escapeRegex(query);
     args.push('-e', `"type":"(user|assistant)".*${escapedQuery}|${escapedQuery}.*"type":"(user|assistant)"`);
-    args.push(sessionsDir);
+    args.push(...(searchPaths ?? [sessionsDir]));
 
     // Cancel previous search if still running (user typed new query)
     if (currentSearchProcess) {

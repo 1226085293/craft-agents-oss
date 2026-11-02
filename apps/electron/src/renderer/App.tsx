@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useTheme } from '@/hooks/useTheme'
 import type { ThemeOverrides } from '@config/theme'
 import { useSetAtom, useStore, useAtomValue, useAtom } from 'jotai'
-import type { Session, Workspace, SessionEvent, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, SetupNeeds, SessionStatus, NewChatActionParams, ContentBadge, LlmConnectionWithStatus, PermissionModeState } from '../shared/types'
+import type { Session, Workspace, SessionEvent, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, SetupNeeds, NewChatActionParams, ContentBadge, LlmConnectionWithStatus, PermissionModeState } from '../shared/types'
 import type { SessionDraft, DraftAttachmentRef } from '@craft-agent/shared/config'
 import type { SessionOptions, SessionOptionUpdates } from './hooks/useSessionOptions'
 import { defaultSessionOptions, mergeSessionOptions, readDefaultStrategy } from './hooks/useSessionOptions'
@@ -35,7 +35,6 @@ import { attachmentFromContentRef, toDraftRef } from './lib/drafts'
 import { stripMarkdown } from './utils/text'
 import { coerceInputText } from './lib/input-text'
 import { getSessionsToRefreshAfterStaleReconnect } from './lib/reconnect-recovery'
-import { preserveQueuedFlags } from './lib/session-recovery-utils'
 import { formatSessionLoadFailure, shouldTreatSessionLoadFailureAsTransportFallback } from './lib/session-load'
 import { extractWorkspaceSlugFromPath } from '@craft-agent/shared/utils/workspace-slug'
 import { DEFAULT_THINKING_LEVEL } from '@craft-agent/shared/agent/thinking-levels'
@@ -46,6 +45,7 @@ import {
   addSessionAtom,
   removeSessionAtom,
   updateSessionAtom,
+  updateSessionMetaAtom,
   replaceLoadedSessionAtom,
   refreshSessionsMetadataAtom,
   sessionAtomFamily,
@@ -68,6 +68,8 @@ import {
 import { visibleSessionIdsAtom } from '@/atoms/panel-stack'
 import { getSessionTitle } from '@/utils/session'
 import { extractBadges } from '@/lib/mentions'
+import { buildAttachmentBadges, attachmentTokenKey } from '@/lib/attachment-tokens'
+import { rewriteAttachmentNameTokens } from '@craft-agent/shared/sessions/attachment-token'
 import { getDefaultStore } from 'jotai'
 import {
   ShikiThemeProvider,
@@ -85,7 +87,7 @@ import { TransportConnectionBanner, shouldShowTransportConnectionBanner } from '
 import {
   markBackgroundTaskSignal,
   markLiveBackgroundTasksOrphaned,
-} from '@/components/app-shell/background-task-chip-state'
+} from '@/atoms/sessions'
 import { getFileManagerName } from '@/lib/platform'
 import { rendererLog } from '@/lib/logger'
 import { ActionRegistryProvider } from '@/actions'
@@ -142,12 +144,13 @@ function handleBackgroundTaskEvent(
     const exists = currentTasks.some(t => t.toolUseId === evt.toolUseId)
     if (!exists) {
       const isWorkflow = evt.kind === 'workflow'
+      const isSubscription = evt.kind === 'subscription'
       const startTime = Date.now()
       store.set(backgroundTasksAtom, [
         ...currentTasks,
         {
           id: evt.taskId as string,
-          type: isWorkflow ? ('workflow' as const) : ('agent' as const),
+          type: isSubscription ? ('subscription' as const) : isWorkflow ? ('workflow' as const) : ('agent' as const),
           toolUseId: evt.toolUseId as string,
           startTime,
           elapsedSeconds: 0,
@@ -158,6 +161,11 @@ function handleBackgroundTaskEvent(
         },
       ])
     }
+  } else if (event.type === 'background_task_stopping' && 'taskId' in evt) {
+    const currentTasks = store.get(backgroundTasksAtom)
+    store.set(backgroundTasksAtom, currentTasks.map(t =>
+      t.id === evt.taskId ? { ...t, stopping: true } : t
+    ))
   } else if (event.type === 'workflow_agent_completed' && 'workflowId' in evt) {
     // One sub-agent of a running Workflow finished — bump the owning chip's count
     // and treat it as evidence that a stale workflow is still alive.
@@ -183,6 +191,7 @@ function handleBackgroundTaskEvent(
           elapsedSeconds: 0,
           lastSignalAt: startTime,
           intent: evt.intent as string | undefined,
+          command: evt.command as string | undefined,
           status: 'running' as const,
         },
       ])
@@ -202,6 +211,9 @@ function handleBackgroundTaskEvent(
     // user sees that the task finished rather than the chip just vanishing.
     const status = (evt.status as BackgroundTask['status']) ?? 'completed'
     const currentTasks = store.get(backgroundTasksAtom)
+    // Keep `stopping` as-is: for a natural completion it was already false; for
+    // a user/model stop the row must keep spinning until background_task_delivered
+    // removes it (the stop's delivery hasn't happened yet at this point).
     store.set(backgroundTasksAtom, currentTasks.map(t =>
       t.id === evt.taskId
         ? {
@@ -213,8 +225,31 @@ function handleBackgroundTaskEvent(
           }
         : t
     ))
+  } else if (event.type === 'background_task_delivered' && 'taskId' in evt) {
+    const currentTasks = store.get(backgroundTasksAtom)
+    store.set(backgroundTasksAtom, currentTasks.filter(t => t.id !== evt.taskId))
+  } else if (event.type === 'background_task_completed' && 'taskId' in evt) {
+    // A user/model STOP reached its terminal store state (stopped_pending) but
+    // is not yet delivered to the model. Mirror task_completed's terminal-status
+    // update while KEEPING `stopping` true — the spinner must persist until
+    // background_task_delivered removes the row.
+    const status = (evt.status as BackgroundTask['status']) ?? 'stopped'
+    const currentTasks = store.get(backgroundTasksAtom)
+    store.set(backgroundTasksAtom, currentTasks.map(t =>
+      t.id === evt.taskId
+        ? {
+            ...t,
+            status,
+            completedAt: Date.now(),
+            outputFile: (evt.outputFile as string | undefined) ?? t.outputFile,
+          }
+        : t
+    ))
   } else if (event.type === 'shell_killed' && 'shellId' in evt) {
     // Mark shell stopped (lingers briefly, then auto-expires) instead of vanishing.
+    // Do NOT clear `stopping` here: a user/model stop is still being DELIVERED to
+    // the model, so the row must keep spinning until background_task_delivered
+    // actually removes it (otherwise the spinner stops ~3s before the row does).
     const currentTasks = store.get(backgroundTasksAtom)
     store.set(backgroundTasksAtom, currentTasks.map(t =>
       t.id === evt.shellId
@@ -382,6 +417,14 @@ export default function App() {
   // during typing; attachments are stored as lightweight refs (path + name) and
   // hydrated via readFileAttachment() on session switch.
   const sessionDraftsRef = useRef<Map<string, SessionDraft>>(new Map())
+  /** False until the startup `getAllDrafts` read lands. The ref is empty before that,
+   *  so persisting a draft then would overwrite — and, for an empty draft, DELETE —
+   *  whatever is still on disk (text and inline image bytes alike). */
+  const draftsLoadedRef = useRef(false)
+  /** Sessions whose draft write was deferred because the startup read hadn't landed. */
+  const pendingDraftPersistRef = useRef<Set<string>>(new Set())
+  /** Bumped once the startup read lands, so consumers can re-run one-shot hydration. */
+  const [draftsLoadedVersion, setDraftsLoadedVersion] = useState(0)
   // Unified session options for all session-scoped settings
   const [sessionOptions, setSessionOptions] = useState<Map<string, SessionOptions>>(new Map())
 
@@ -526,14 +569,7 @@ export default function App() {
       const preservedStaleMessages = !!prevSession && prevSession.messages.length > 0 && (!fresh.messages || fresh.messages.length === 0)
       const nextSession = preservedStaleMessages
         ? { ...fresh, messages: prevSession.messages }
-        : {
-            ...fresh,
-            // The server snapshot carries no `isQueued` (renderer-only flag).
-            // Re-apply it so a queued bubble keeps its 排队中 badge and stays
-            // deferred to the end of the running turn instead of collapsing to
-            // a sent message between process blocks. (2026-10-08 sunny-pond.)
-            messages: preserveQueuedFlags(fresh.messages ?? [], prevSession?.messages),
-          }
+        : fresh
 
       clearStreamingState(sessionId)
       replaceLoadedSession(nextSession)
@@ -832,9 +868,37 @@ export default function App() {
     // is opened so app startup isn't delayed by reading potentially large files.
     if (!settingsWindowMode && !pageWindowMode) {
       window.electronAPI.getAllDrafts().then((drafts) => {
-        if (Object.keys(drafts).length > 0) {
-          sessionDraftsRef.current = new Map(Object.entries(drafts))
+        // Merge, don't clobber. Anything the user typed while this read was in
+        // flight lives only in the ref, so local text wins. But an empty local
+        // attachment list is not an answer — the composer had no way to see the
+        // staged chips yet, and treating it as "user removed them" is exactly how
+        // a draft came back as text-with-tokens only, image bytes gone.
+        const merged = new Map<string, SessionDraft>(Object.entries(drafts))
+        for (const [sid, localDraft] of sessionDraftsRef.current) {
+          const stored = merged.get(sid)
+          const localAttachments = localDraft.attachments ?? []
+          const attachments = localAttachments.length > 0
+            ? localAttachments
+            : (stored?.attachments ?? [])
+          merged.set(sid, {
+            text: localDraft.text,
+            ...(attachments.length > 0 ? { attachments } : {}),
+          })
         }
+        sessionDraftsRef.current = merged
+        draftsLoadedRef.current = true
+
+        // Flush the writes we refused to make while the ref was still empty.
+        const pending = [...pendingDraftPersistRef.current]
+        pendingDraftPersistRef.current.clear()
+        for (const sid of pending) {
+          void window.electronAPI.setDraft(sid, sessionDraftsRef.current.get(sid) ?? { text: '' })
+        }
+
+        // Composer attachment hydration is keyed on this: it may have run while
+        // the ref was still empty, and one-shot hydration would then leave the
+        // staged chips missing for the whole session.
+        setDraftsLoadedVersion((version) => version + 1)
       })
     }
     // Load app-level theme
@@ -896,7 +960,7 @@ export default function App() {
     // Handoff events signal end of streaming - need to sync back to React state
     // Also includes todo_state_changed so status updates immediately reflect in sidebar
     // async_operation included so shimmer effect on session titles updates in real-time
-    const handoffEventTypes = new Set(['complete', 'error', 'interrupted', 'typed_error', 'session_status_changed', 'session_metadata_changed', 'session_flagged', 'session_unflagged', 'name_changed', 'labels_changed', 'project_id_changed', 'title_generated', 'async_operation'])
+    const handoffEventTypes = new Set(['complete', 'error', 'interrupted', 'typed_error', 'session_metadata_changed', 'name_changed', 'project_id_changed', 'title_generated', 'async_operation'])
 
     // Helper to handle side effects (same logic for both paths)
     const handleEffects = (effects: Effect[], sessionId: string, eventType: string) => {
@@ -948,23 +1012,6 @@ export default function App() {
               next.set(sessionId, [...existingQueue, effect.request])
               return next
             })
-            break
-          }
-          case 'restore_input': {
-            // Queued messages were removed from chat on abort — restore their text to the input field.
-            // Append to existing draft (user may have started typing) rather than overwrite.
-            const existingDraft = sessionDraftsRef.current.get(sessionId)
-            const existingText = coerceInputText(existingDraft?.text)
-            const restoredText = coerceInputText(effect.text)
-            const restored = existingText
-              ? `${existingText}\n\n${restoredText}`
-              : restoredText
-            handleInputChange(sessionId, restored)
-            // handleInputChange updates the ref but ChatPage has local state.
-            // Dispatch a custom event so ChatPage re-reads the draft.
-            window.dispatchEvent(new CustomEvent('craft:restore-input', {
-              detail: { sessionId, text: restored },
-            }))
             break
           }
           case 'toast_error': {
@@ -1023,6 +1070,29 @@ export default function App() {
 
       if (event.type === 'session_deleted') {
         removeSession(sessionId)
+        return
+      }
+
+      // Metadata-only updates are common for cross-scope folder moves and
+      // mark-as-read actions. Keep list metadata current without synthesizing
+      // an empty full Session when this session has not been opened here.
+      if (event.type === 'session_metadata_changed') {
+        // The wire codec drops `undefined` (JSON.stringify), so the server sends
+        // `projectId: null` to mean "unbound". Map it back to `undefined` here so
+        // the meta map keeps the same semantic as the rest of the renderer.
+        const { projectId, ...otherChanges } = event.changes
+        const changes = {
+          ...otherChanges,
+          ...('projectId' in event.changes ? { projectId: projectId ?? undefined } : {}),
+        }
+        const currentSession = store.get(sessionAtomFamily(sessionId))
+        if (currentSession) {
+          updateSessionDirect(sessionId, prev => prev ? { ...prev, ...changes } : prev)
+        }
+        // The list renders from the metadata map, so it must be updated even
+        // when the full session atom exists — otherwise a moved session keeps
+        // its old folderId there and disappears from the folder it just entered.
+        store.set(updateSessionMetaAtom, sessionId, changes)
         return
       }
 
@@ -1301,16 +1371,6 @@ export default function App() {
     removeSession(sessionId)
   }, [removeSession])
 
-  const handleFlagSession = useCallback((sessionId: string) => {
-    updateSessionById(sessionId, { isFlagged: true })
-    window.electronAPI.sessionCommand(sessionId, { type: 'flag' })
-  }, [updateSessionById])
-
-  const handleUnflagSession = useCallback((sessionId: string) => {
-    updateSessionById(sessionId, { isFlagged: false })
-    window.electronAPI.sessionCommand(sessionId, { type: 'unflag' })
-  }, [updateSessionById])
-
   const handleArchiveSession = useCallback((sessionId: string) => {
     updateSessionById(sessionId, { isArchived: true, archivedAt: Date.now() })
     window.electronAPI.sessionCommand(sessionId, { type: 'archive' })
@@ -1354,11 +1414,6 @@ export default function App() {
     window.electronAPI.sessionCommand(sessionId, { type: 'markUnread' })
   }, [updateSessionById])
 
-  const handleSessionStatusChange = useCallback((sessionId: string, state: SessionStatus) => {
-    updateSessionById(sessionId, { sessionStatus: state })
-    window.electronAPI.sessionCommand(sessionId, { type: 'setSessionStatus', state })
-  }, [updateSessionById])
-
   const handleRenameSession = useCallback((sessionId: string, name: string) => {
     updateSessionById(sessionId, { name })
     window.electronAPI.sessionCommand(sessionId, { type: 'rename', name })
@@ -1381,72 +1436,85 @@ export default function App() {
         ? (sendOptions?.midStreamBehavior ?? 'queue')
         : sendOptions?.midStreamBehavior
 
-      // Step 1: Store attachments and get persistent metadata
+      // Step 1: Ensure attachments are persisted. Most are already stored at
+      // attach time (FreeFormInput), so we reuse their storedPath and only
+      // persist the transient ones (e.g. long-text paste) here.
       let storedAttachments: StoredAttachment[] | undefined
       let processedAttachments: FileAttachment[] | undefined
 
       if (attachments?.length) {
-        // Store each attachment to disk (generates thumbnails, converts Office→markdown)
-        // Use allSettled so one failure doesn't kill all attachments
-        const storeResults = await Promise.allSettled(
-          attachments.map(a => window.electronAPI.storeAttachment(sessionId, a))
-        )
+        const stored: StoredAttachment[] = []
+        const processed: FileAttachment[] = []
+        const failedNames: string[] = []
 
-        // Filter successful stores, warn about failures
-        storedAttachments = []
-        const successfulAttachments: FileAttachment[] = []
-        storeResults.forEach((result, i) => {
-          if (result.status === 'fulfilled') {
-            storedAttachments!.push(result.value)
-            successfulAttachments.push(attachments[i])
-          } else {
-            console.warn(`Failed to store attachment "${attachments[i].name}":`, result.reason)
+        for (const a of attachments) {
+          if (a.storedPath) {
+            // Already stored at attach time — reconstruct the StoredAttachment.
+            stored.push({
+              id: a.id ?? a.storedPath.split(/[\\/]/).pop() ?? a.name,
+              type: a.type,
+              name: a.name,
+              mimeType: a.mimeType,
+              size: a.size,
+              originalSize: a.originalSize,
+              storedPath: a.storedPath,
+              thumbnailBase64: a.thumbnailBase64,
+              markdownPath: a.markdownPath,
+              wasResized: a.wasResized,
+              resizedBase64: a.resizedBase64,
+            })
+            // Step 2: For Claude use the resized base64 when available.
+            processed.push({ ...a, base64: a.resizedBase64 ?? a.base64 })
+            continue
           }
-        })
 
-        // Notify user about failed attachments
-        const failedCount = storeResults.filter(r => r.status === 'rejected').length
-        if (failedCount > 0) {
-          console.warn(`${failedCount} attachment(s) failed to store`)
-          // Add warning message to session so user knows some attachments weren't included
-          const failedNames = attachments
-            .filter((_, i) => storeResults[i].status === 'rejected')
-            .map(a => a.name)
-            .join(', ')
+          // Transient — persist now (generates thumbnails, converts Office→markdown).
+          try {
+            const s = await window.electronAPI.storeAttachment(sessionId, a)
+            stored.push(s)
+            processed.push({
+              ...a,
+              storedPath: s.storedPath,
+              markdownPath: s.markdownPath,
+              base64: s.resizedBase64 ?? a.base64,
+            })
+          } catch (error) {
+            console.warn(`Failed to store attachment "${a.name}":`, error)
+            failedNames.push(a.name)
+          }
+        }
+
+        storedAttachments = stored.length > 0 ? stored : undefined
+        processedAttachments = processed.length > 0 ? processed : undefined
+
+        if (failedNames.length > 0) {
           updateSessionById(sessionId, (s) => ({
             messages: [...s.messages, {
               id: generateMessageId(),
               role: 'warning' as const,
-              content: `⚠️ ${failedCount} attachment(s) could not be stored and will not be sent: ${failedNames}`,
+              content: `⚠️ ${failedNames.length} attachment(s) could not be stored and will not be sent: ${failedNames.join(', ')}`,
               timestamp: Date.now()
             }]
           }))
         }
+      }
 
-        // Step 2: Create processed attachments for Claude
-        // - Office files: Convert to text with markdown content
-        // - Others: Use original FileAttachment
-        // - All: Include storedPath so agent knows where files are stored
-        // - Resized images: Use resizedBase64 instead of original large base64
-        processedAttachments = await Promise.all(
-          successfulAttachments.map(async (att, i) => {
-            const stored = storedAttachments?.[i]
-            if (!stored) {
-              console.error(`Missing stored attachment at index ${i}`)
-              return att // Fall back to original
-            }
-            // Include storedPath and markdownPath for all attachment types
-            // Agent will use Read tool to access text/office files via these paths
-            // If image was resized, use the resized base64 for Claude API
-            return {
-              ...att,
-              storedPath: stored.storedPath,
-              markdownPath: stored.markdownPath,
-              // Use resized base64 if available (for images that exceeded size limits)
-              base64: stored.resizedBase64 ?? att.base64,
-            }
-          })
-        )
+      // Rewrite inline `[attachment:…]` tokens to the stored filenames so the
+      // text (and the badge start/end positions computed from it below) use the
+      // same name the model can Read from `attachments/`. The display label
+      // (attachment.name) stays the original so the composer, queue and bubble
+      // chips all show one consistent name.
+      let finalMessage = message
+      if (storedAttachments?.length) {
+        const renames = new Map<string, string>()
+        for (const sa of storedAttachments) {
+          const storedFileName = sa.storedPath?.split(/[\\/]/).pop()
+          if (!storedFileName) continue
+          renames.set(attachmentTokenKey(sa.name), attachmentTokenKey(storedFileName))
+        }
+        if (renames.size > 0) {
+          finalMessage = rewriteAttachmentNameTokens(message, renames)
+        }
       }
 
       // Step 3: Extract badges from mentions (sources/skills) with embedded icons
@@ -1454,13 +1522,17 @@ export default function App() {
       // Merge with any externally provided badges (e.g., from EditPopover context badges)
       // Use workspace slug (not UUID) for skill qualification - SDK expects "workspaceSlug:skillSlug"
       const mentionBadges: ContentBadge[] = windowWorkspaceSlug
-        ? extractBadges(message, skills, sources, windowWorkspaceSlug)
+        ? extractBadges(finalMessage, skills, sources, windowWorkspaceSlug)
         : []
-      const badges: ContentBadge[] = [...(externalBadges || []), ...mentionBadges]
+      // Inline attachment chips are stored as tokens in the message text (that is
+      // how the model sees which segment they belong to). These badges hide the
+      // raw token and render a clickable file badge at its exact position.
+      const attachmentBadges = buildAttachmentBadges(finalMessage, storedAttachments ?? [])
+      const badges: ContentBadge[] = [...(externalBadges || []), ...mentionBadges, ...attachmentBadges]
 
       // Step 4.1: Detect SDK slash commands (e.g., /compact) and create command badges
       // This makes /compact render as an inline badge rather than raw text
-      const commandMatch = message.match(/^\/([a-z]+)(\s|$)/i)
+      const commandMatch = finalMessage.match(/^\/([a-z]+)(\s|$)/i)
       if (commandMatch && commandMatch[1].toLowerCase() === 'compact') {
         const commandText = commandMatch[0].trimEnd() // "/compact" without trailing space
         badges.unshift({
@@ -1476,7 +1548,7 @@ export default function App() {
       // Pattern: "Read the plan at <path> and execute it."
       // This is sent after compaction when accepting a plan, displays as clickable file badge
       // Only the file path is replaced with a badge - surrounding text remains visible
-      const planExecuteMatch = message.match(/^(Read the plan at )(.+?)( and execute it\.?)$/i)
+      const planExecuteMatch = finalMessage.match(/^(Read the plan at )(.+?)( and execute it\.?)$/i)
       if (planExecuteMatch) {
         const prefix = planExecuteMatch[1]      // "Read the plan at "
         const filePath = planExecuteMatch[2]    // the actual path
@@ -1493,26 +1565,24 @@ export default function App() {
 
       // Step 5: Create user message with StoredAttachments (for UI display)
       // Mark as isPending for optimistic UI — will be confirmed by user_message
-      // event. Flag mid-stream sends as queued so the bubble renders with the
-      // dashed-draft treatment immediately. Applies to both backends:
-      // Pi steers (server emits status: 'accepted' but the renderer preserves
-      // isQueued through that update) and Claude queues (server emits 'queued'
-      // which confirms it). Cleared by 'processing' status or when the current
-      // turn ends.
+      // event. Mid-stream QUEUED sends do not become transcript bubbles: they
+      // render in the pending-queue panel above the composer (fed by
+      // `queued_messages_changed`), so only the immediate paths (idle send /
+      // steer) insert an optimistic message here.
+      const isQueuedSend = sendingMidStream && midStreamBehavior !== 'steer'
       const userMessage: Message = {
         id: generateMessageId(),
         role: 'user',
-        content: message,
+        content: finalMessage,
         timestamp: Date.now(),
         attachments: storedAttachments,
         badges: badges.length > 0 ? badges : undefined,
         isPending: true,  // Optimistic - will be confirmed by backend
-        isQueued: sendingMidStream && midStreamBehavior !== 'steer',
       }
 
       // Optimistic UI update - add user message and set processing state
       updateSessionById(sessionId, (s) => ({
-        messages: [...s.messages, userMessage],
+        messages: isQueuedSend ? s.messages : [...s.messages, userMessage],
         isProcessing: true,
         lastMessageAt: Date.now()
       }))
@@ -1534,7 +1604,7 @@ export default function App() {
       }
 
       // Step 6: Send to Claude with processed attachments + stored attachments for persistence
-      await window.electronAPI.sendMessage(sessionId, message, processedAttachments, storedAttachments, {
+      await window.electronAPI.sendMessage(sessionId, finalMessage, processedAttachments, storedAttachments, {
         skillSlugs,
         badges: badges.length > 0 ? badges : undefined,
         optimisticMessageId: userMessage.id,
@@ -1649,9 +1719,16 @@ export default function App() {
       clearTimeout(existingTimeout)
     }
     const timeout = setTimeout(() => {
-      const draft = sessionDraftsRef.current.get(sessionId) ?? { text: '' }
-      window.electronAPI.setDraft(sessionId, draft)
       draftSaveTimeoutRef.current.delete(sessionId)
+      // Refuse to write before the startup read lands: the ref is empty, so the
+      // composer's mount-time "empty draft" would delete the persisted entry —
+      // that is how images staged in a draft vanished across a restart.
+      if (!draftsLoadedRef.current) {
+        pendingDraftPersistRef.current.add(sessionId)
+        return
+      }
+      const draft = sessionDraftsRef.current.get(sessionId) ?? { text: '' }
+      void window.electronAPI.setDraft(sessionId, draft)
     }, DRAFT_SAVE_DEBOUNCE_MS)
     draftSaveTimeoutRef.current.set(sessionId, timeout)
   }, [])
@@ -1985,19 +2062,17 @@ export default function App() {
     getDraft,
     getDraftAttachmentRefs,
     hydrateDraftAttachments,
+    draftsLoadedVersion,
     sessionOptions,
     // Session callbacks
     onCreateSession: handleCreateSession,
     onSendMessage: handleSendMessage,
     onRenameSession: handleRenameSession,
-    onFlagSession: handleFlagSession,
-    onUnflagSession: handleUnflagSession,
     onArchiveSession: handleArchiveSession,
     onUnarchiveSession: handleUnarchiveSession,
     onMarkSessionRead: handleMarkSessionRead,
     onMarkSessionUnread: handleMarkSessionUnread,
     onSetActiveViewingSession: handleSetActiveViewingSession,
-    onSessionStatusChange: handleSessionStatusChange,
     onDeleteSession: handleDeleteSession,
     onRespondToPermission: handleRespondToPermission,
     onRespondToCredential: handleRespondToCredential,
@@ -2031,18 +2106,16 @@ export default function App() {
     getDraft,
     getDraftAttachmentRefs,
     hydrateDraftAttachments,
+    draftsLoadedVersion,
     sessionOptions,
     handleCreateSession,
     handleSendMessage,
     handleRenameSession,
-    handleFlagSession,
-    handleUnflagSession,
     handleArchiveSession,
     handleUnarchiveSession,
     handleMarkSessionRead,
     handleMarkSessionUnread,
     handleSetActiveViewingSession,
-    handleSessionStatusChange,
     handleDeleteSession,
     handleRespondToPermission,
     handleRespondToCredential,

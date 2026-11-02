@@ -44,6 +44,10 @@ export function setCurrentZone(zone: FocusZoneId | null) {
   _currentZone = zone
 }
 
+export function getCurrentZone(): FocusZoneId | null {
+  return _currentZone
+}
+
 // Track zone from DOM focus events (clicks, programmatic focus).
 // Zone containers are stamped with data-focus-zone by useFocusZone.
 // This is a module-level variable assignment — zero React re-renders.

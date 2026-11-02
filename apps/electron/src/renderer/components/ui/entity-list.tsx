@@ -185,7 +185,9 @@ export function EntityList<T>({
           className="flex flex-col pb-2"
           {...containerProps}
         >
-          <div className="pt-1">
+          {/* No top padding: the panel above (folders) already owns its own
+              spacing, and these two lists must read as one continuous column. */}
+          <div>
             {hasGroups
               ? groups!.map((group) => {
                   const isCollapsed = group.collapsible && collapsedGroups?.has(group.key)
@@ -201,9 +203,9 @@ export function EntityList<T>({
                           onCollapseAll={onCollapseAll}
                           onExpandAll={onExpandAll}
                         />
-                      ) : (
+                      ) : group.label ? (
                         <SectionHeader label={group.label} />
-                      )}
+                      ) : null}
                       {group.items.map((item, indexInGroup) =>
                         <React.Fragment key={getKey(item)}>
                           {renderItem(item, indexInGroup, indexInGroup === 0)}

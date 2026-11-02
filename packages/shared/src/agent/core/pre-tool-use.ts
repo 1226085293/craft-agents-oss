@@ -431,7 +431,7 @@ export function validateConfigWrite(
 
 function buildCliDomainBlockMessage(namespace: CliDomainNamespace, context: string): string {
   const policy = CLI_DOMAIN_POLICIES[namespace]
-  const noun = namespace === 'automation' ? 'automation' : namespace
+  const noun = namespace
   const quickExamplesHeading = namespace === 'label' ? 'Quick examples:' : 'Examples:'
 
   return [
@@ -476,10 +476,9 @@ function matchesPathScope(relativePath: string, scope: string): boolean {
 }
 
 function detectCliNamespaceFromConfigDetection(detection: ConfigFileDetection): CliDomainNamespace | null {
-  if (detection.type === 'labels') return 'label'
-  if (detection.type === 'automations') return 'automation'
   if (detection.type === 'source') return 'source'
   if (detection.type === 'skill') return 'skill'
+  if (detection.type === 'automations') return 'automation'
   return null
 }
 
@@ -488,7 +487,6 @@ function detectCliNamespaceFromConfigDetection(detection: ConfigFileDetection): 
  * - labels/**: strict block on Read/Write/Edit
  * - sources/{slug}/config.json: redirect on Write/Edit
  * - skills/{slug}/SKILL.md: redirect on Write/Edit
- * - automations.json: redirect on Write/Edit
  */
 export function getConfigCliRedirect(
   toolName: string,

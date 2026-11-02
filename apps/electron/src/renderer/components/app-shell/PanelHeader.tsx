@@ -64,8 +64,8 @@ function compactTitleInset(controlCount: number): number {
 }
 
 export interface PanelHeaderProps {
-  /** Header title (undefined hides with animation) */
-  title?: string
+  /** Header title — plain text or a node (e.g. a folder breadcrumb). */
+  title?: React.ReactNode
   /** Optional badge element (e.g., agent badge) */
   badge?: React.ReactNode
   /** Optional dropdown menu content for interactive title (renders chevron when provided) */
@@ -145,10 +145,12 @@ export function PanelHeader({
       initial={false}
       animate={{ opacity: title ? 1 : 0 }}
       transition={{ duration: 0.15 }}
-      className="flex items-center gap-1"
+      className="flex w-full min-w-0 items-center gap-1"
     >
       <h1 className={cn(
-        "text-sm font-semibold truncate font-sans leading-tight",
+        // w-full so a breadcrumb ("current/full path") can use the whole
+        // remaining header width and ellipsize instead of collapsing to text width.
+        "w-full min-w-0 truncate text-sm font-semibold font-sans leading-tight",
         isRegeneratingTitle && "animate-shimmer-text"
       )}>{title}</h1>
       {badge}
@@ -240,13 +242,17 @@ export function PanelHeader({
         </div>
       )}
       <div className="flex-1 min-w-0 flex items-center select-none">
-        <div className={cn("max-w-full overflow-hidden", !leadingAction && "mx-auto")}>
+        {/* Title is left-aligned: it reads as the list heading, not a window title. */}
+        <div className="min-w-0 max-w-full flex-1 overflow-hidden">
           {titleNode}
         </div>
       </div>
       {centerButton && (
-        <div className="titlebar-no-drag shrink-0">
-          {centerButton}
+        // Optically centred in the whole header (not merely "after the title"),
+        // which is what a primary action like "New Session" wants: the same
+        // position regardless of how long the breadcrumb is.
+        <div className="titlebar-no-drag pointer-events-none absolute inset-y-0 left-1/2 z-[1] flex -translate-x-1/2 items-center">
+          <div className="pointer-events-auto">{centerButton}</div>
         </div>
       )}
       {actions && (

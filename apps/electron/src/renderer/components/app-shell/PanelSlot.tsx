@@ -7,10 +7,10 @@
  * When multiple panels exist, each uses flex-grow with its proportion as the weight,
  * combined with min-width to prevent shrinking below PANEL_MIN_WIDTH.
  *
- * Each PanelSlot overrides AppShellContext to inject a per-panel close button
- * into PanelHeader's rightSidebarButton slot. All panels are equal — closing
- * any panel removes it from the stack. A reactive effect handles window close
- * when the stack becomes empty.
+ * Multi-panel slots inject a per-panel close button into PanelHeader's
+ * rightSidebarButton slot. Single-panel layouts have no close button there.
+ * All panels are equal — closing any panel removes it from the stack. A reactive
+ * effect handles window close when the stack becomes empty.
  */
 
 import { useCallback, useMemo } from 'react'
@@ -24,6 +24,7 @@ import { useAppShellContext, AppShellProvider } from '@/context/AppShellContext'
 import { PanelHeaderCenterButton } from '@/components/ui/PanelHeaderCenterButton'
 import { MainContentPanel } from './MainContentPanel'
 import { PANEL_MIN_WIDTH, RADIUS_EDGE, RADIUS_INNER } from './panel-constants'
+import { shouldShowPanelCloseButton } from './panel-slot-controls'
 
 interface PanelSlotProps {
   entry: PanelStackEntry
@@ -92,10 +93,10 @@ export function PanelSlot({
   // back button (compact mode), and isFocusedPanel for input field appearance
   const contextOverride = useMemo(() => ({
     ...parentContext,
-    rightSidebarButton: closeButton,
+    rightSidebarButton: shouldShowPanelCloseButton(isOnly) ? closeButton : parentContext.rightSidebarButton,
     leadingAction: backButton,
     isFocusedPanel,
-  }), [parentContext, closeButton, backButton, isFocusedPanel])
+  }), [parentContext, closeButton, backButton, isFocusedPanel, isOnly])
 
   const handlePointerDown = useCallback(() => {
     if (!isFocusedPanel) {

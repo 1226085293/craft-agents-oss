@@ -321,7 +321,7 @@ describe('Fixture: Backgrounded Task', () => {
     })
   })
 
-  it('does NOT detect background for foreground Task with agentId in result', () => {
+  it('auto-detects background for a Task with agentId even without run_in_background', () => {
     const index = new ToolIndex()
     const emitted = new Set<string>()
 
@@ -340,11 +340,17 @@ describe('Fixture: Backgrounded Task', () => {
     ]
     const events = extractToolResults(taskResult, null, undefined, index)
 
-    // Should ONLY produce tool_result — no task_backgrounded
-    expect(events).toHaveLength(1)
+    // The pre-tool hook auto-backgrounds Agent/Task; a launch result with a
+    // line-start agentId is now a background task even without the model flag.
+    expect(events).toHaveLength(2)
     expect(events[0]).toMatchObject({
       type: 'tool_result',
       toolUseId: 'toolu_fg_task',
+    })
+    expect(events[1]).toMatchObject({
+      type: 'task_backgrounded',
+      toolUseId: 'toolu_fg_task',
+      taskId: 'fg_agent_abc',
     })
   })
 })

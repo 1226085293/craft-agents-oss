@@ -56,23 +56,12 @@ export const RPC_CHANNELS = {
     ABORT: 'transfer:abort',
   },
   tasks: {
-    // Legacy: background-task output (disabled-feature remnant). Kept for back-compat; retire later.
     GET_OUTPUT: 'tasks:getOutput',
-    // Conductor — the Tasks DAG runner.
-    VALIDATE: 'tasks:validate',
-    CREATE: 'tasks:create',
-    GENERATE: 'tasks:generate',
-    // Push: the authored spec (or an error) for an async tasks:generate, keyed by orchestratorSessionId.
-    GENERATED: 'tasks:generated',
-    RUN: 'tasks:run',
-    PAUSE: 'tasks:pause',
-    RESUME: 'tasks:resume',
     STOP: 'tasks:stop',
-    GET: 'tasks:get',
+    /** Persisted, not-yet-delivered tasks — hydrates the composer rows on load. */
     LIST: 'tasks:list',
-    // Storage-backed read of a run's outcome (verdict + per-node output). Survives restart.
-    GET_RESULTS: 'tasks:getResults',
   },
+
   workspaces: {
     GET: 'workspaces:get',
     CREATE: 'workspaces:create',
@@ -278,21 +267,6 @@ export const RPC_CHANNELS = {
     OPEN_FINDER: 'skills:openFinder',
     CHANGED: 'skills:changed',
   },
-  statuses: {
-    LIST: 'statuses:list',
-    REORDER: 'statuses:reorder',
-    CHANGED: 'statuses:changed',
-  },
-  labels: {
-    LIST: 'labels:list',
-    CREATE: 'labels:create',
-    DELETE: 'labels:delete',
-    CHANGED: 'labels:changed',
-  },
-  views: {
-    LIST: 'views:list',
-    SAVE: 'views:save',
-  },
   toolIcons: {
     GET_MAPPINGS: 'toolIcons:getMappings',
   },
@@ -415,10 +389,26 @@ export const RPC_CHANNELS = {
     CREATE: 'projects:create',
     UPDATE: 'projects:update',
     DELETE: 'projects:delete',
+    ARCHIVE: 'projects:archive',
+    UNARCHIVE: 'projects:unarchive',
+    ARCHIVED_CHANGED: 'projects:archivedChanged',
     LIST_ASSETS: 'projects:listAssets',
     UPLOAD_ASSET: 'projects:uploadAsset',
     DELETE_ASSET: 'projects:deleteAsset',
     CHANGED: 'projects:changed',
+  },
+  folders: {
+    LIST: 'folders:list',
+    CREATE: 'folders:create',
+    RENAME: 'folders:rename',
+    MOVE: 'folders:move',
+    MOVE_TO_SCOPE: 'folders:moveToScope',
+    ARCHIVE: 'folders:archive',
+    UNARCHIVE: 'folders:unarchive',
+    REORDER: 'folders:reorder',
+    PIN: 'folders:pin',
+    DELETE: 'folders:delete',
+    CHANGED: 'folders:changed',
   },
   pages: {
     GET: 'pages:get',

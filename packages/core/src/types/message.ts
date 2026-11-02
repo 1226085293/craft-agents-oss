@@ -244,7 +244,6 @@ export interface StoredAttachment {
   size: number;                  // Final size (after any resize)
   originalSize?: number;         // Original size before resize (if applicable)
   storedPath: string;            // Full path to copied file on disk
-  thumbnailPath?: string;        // Path to OS-generated thumbnail (images/PDFs/Office)
   thumbnailBase64?: string;      // Base64-encoded thumbnail PNG (for renderer display)
   markdownPath?: string;         // For Office files: converted markdown for Claude
   wasResized?: boolean;          // True if image was auto-resized for Claude API limits
@@ -322,7 +321,7 @@ export interface Message {
   // Turn ID: Correlation ID from the API's message.id, groups all messages in an assistant turn
   turnId?: string;
   // Status type for special status messages (compaction / verification / …).
-  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected';
+  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake';
   /** Structured interpolation values for the row's i18n key (e.g. attempt/total, tokens). The renderer resolves display text from `statusType`; these fill its placeholders. */
   statusParams?: Record<string, string | number>;
   // Info level for info messages (determines icon/color)
@@ -405,7 +404,7 @@ export interface StoredMessage {
   /** Streaming start time (first text_delta) for process-card ordering - persisted */
   startedAt?: number;
   // Status type for special status messages (compaction / verification / …).
-  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected';
+  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake';
   /** Structured interpolation values for the row's i18n key — see statusParams above. */
   statusParams?: Record<string, string | number>;
   // Info level for info messages (persisted for reload)
@@ -517,7 +516,6 @@ export type ErrorCode =
   | 'image_too_large'        // Image exceeds API dimension/size limits
   | 'provider_error'         // AI provider experiencing issues (overloaded, unavailable)
   | 'queued_message_replay_failed'  // A message queued during an active turn could not be auto-replayed (#616)
-  | 'sdk_binary_missing'     // SDK subprocess binary not present on disk (incomplete bundle)
   | 'sdk_cwd_missing'        // SDK subprocess cwd not present on disk (stale cross-machine import)
   | 'unknown_error';
 
@@ -676,10 +674,10 @@ export type AgentEvent =
   | { type: 'typed_error'; error: TypedError }
   | { type: 'complete'; usage?: AgentEventUsage }
   | { type: 'working_directory_changed'; workingDirectory: string }
-  | { type: 'task_backgrounded'; toolUseId: string; taskId: string; intent?: string; turnId?: string; kind?: 'workflow'; workflowId?: string }
+  | { type: 'task_backgrounded'; toolUseId: string; taskId: string; intent?: string; turnId?: string; kind?: 'workflow' | 'tool'; workflowId?: string }
   | { type: 'shell_backgrounded'; toolUseId: string; shellId: string; intent?: string; command?: string; turnId?: string }
   | { type: 'task_progress'; toolUseId: string; elapsedSeconds: number; turnId?: string }
-  | { type: 'task_completed'; taskId: string; status: 'completed' | 'failed' | 'stopped'; outputFile?: string; summary?: string; turnId?: string }
+  | { type: 'task_completed'; taskId: string; status: 'completed' | 'failed' | 'stopped'; outputFile?: string; output?: string; summary?: string; turnId?: string; kind?: 'tool' }
   | { type: 'workflow_agent_completed'; workflowId: string; agentId: string; turnId?: string }
   | { type: 'shell_killed'; shellId: string; turnId?: string }
   | { type: 'usage_update'; usage: Pick<AgentEventUsage, 'inputTokens' | 'contextWindow'> }

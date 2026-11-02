@@ -82,6 +82,9 @@ function createMockDeps(): HandlerDeps {
       dispose: () => {},
       size: 0,
     } as unknown as HandlerDeps['oauthFlowStore'],
+    // registerMessagingHandlers is a no-op without a registry; the app always
+    // supplies one, so mirror that here for channel-coverage assertions.
+    messagingRegistry: {} as any,
   }
 }
 
@@ -89,7 +92,8 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
   // Core handler channels (now in server-core)
   const [
     auth,
-    automations,
+    folders,
+    messaging,
     files,
     labels,
     llmConnections,
@@ -101,9 +105,7 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     settings,
     skills,
     sources,
-    statuses,
     system,
-    tasks,
     workspace,
     onboarding,
     resources,
@@ -112,7 +114,8 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     usage,
   ] = await Promise.all([
     import('@craft-agent/server-core/handlers/rpc/auth'),
-    import('@craft-agent/server-core/handlers/rpc/automations'),
+    import('@craft-agent/server-core/handlers/rpc/folders'),
+    import('@craft-agent/server-core/handlers/rpc/messaging'),
     import('@craft-agent/server-core/handlers/rpc/files'),
     import('@craft-agent/server-core/handlers/rpc/labels'),
     import('@craft-agent/server-core/handlers/rpc/llm-connections'),
@@ -124,9 +127,7 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     import('@craft-agent/server-core/handlers/rpc/settings'),
     import('@craft-agent/server-core/handlers/rpc/skills'),
     import('@craft-agent/server-core/handlers/rpc/sources'),
-    import('@craft-agent/server-core/handlers/rpc/statuses'),
     import('@craft-agent/server-core/handlers/rpc/system'),
-    import('@craft-agent/server-core/handlers/rpc/tasks'),
     import('@craft-agent/server-core/handlers/rpc/workspace'),
     import('@craft-agent/server-core/handlers/rpc/onboarding'),
     import('@craft-agent/server-core/handlers/rpc/resources'),
@@ -137,7 +138,8 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
 
   return new Set([
     ...auth.HANDLED_CHANNELS,
-    ...automations.HANDLED_CHANNELS,
+    ...folders.HANDLED_CHANNELS,
+    ...messaging.HANDLED_CHANNELS,
     ...files.HANDLED_CHANNELS,
     ...labels.HANDLED_CHANNELS,
     ...llmConnections.HANDLED_CHANNELS,
@@ -149,15 +151,15 @@ async function getExpectedCoreChannels(): Promise<Set<string>> {
     ...settings.HANDLED_CHANNELS,
     ...skills.HANDLED_CHANNELS,
     ...sources.HANDLED_CHANNELS,
-    ...statuses.HANDLED_CHANNELS,
     ...system.CORE_HANDLED_CHANNELS,
-    ...tasks.HANDLED_CHANNELS,
     ...workspace.CORE_HANDLED_CHANNELS,
     ...onboarding.HANDLED_CHANNELS,
     ...resources.HANDLED_CHANNELS,
     ...transfer.HANDLED_CHANNELS,
     ...memory.HANDLED_CHANNELS,
     ...usage.HANDLED_CHANNELS,
+    'tasks:getOutput',
+    'tasks:stop',
   ])
 }
 

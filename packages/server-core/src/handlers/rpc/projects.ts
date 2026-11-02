@@ -9,6 +9,8 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.projects.CREATE,
   RPC_CHANNELS.projects.UPDATE,
   RPC_CHANNELS.projects.DELETE,
+  RPC_CHANNELS.projects.ARCHIVE,
+  RPC_CHANNELS.projects.UNARCHIVE,
   RPC_CHANNELS.projects.LIST_ASSETS,
   RPC_CHANNELS.projects.UPLOAD_ASSET,
   RPC_CHANNELS.projects.DELETE_ASSET,
@@ -75,7 +77,29 @@ export function registerProjectsHandlers(server: RpcServer, deps: HandlerDeps): 
     return updated
   })
 
-  // Delete a project; unbinds projectId from any sessions that referenced it.
+  // Archive / unarchive a project. Archiving sweeps the whole project subtree and its
+  // sessions (they keep their projectId) so the archive tree can rebuild the structure (D24).
+  const setArchived = async (workspaceId: string, projectSlug: string, archived: boolean) => {
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`)
+
+    const { loadProject, setProjectArchived } = await import('@craft-agent/shared/projects')
+    const project = loadProject(workspace.rootPath, projectSlug)
+    if (!project) throw new Error(`Project not found: ${projectSlug}`)
+
+    const updated = setProjectArchived(workspace.rootPath, projectSlug, archived)
+    const sessions = await deps.sessionManager.archiveProjectSessions(project.config.id, archived)
+    await broadcastChanged(workspaceId, workspace.rootPath)
+    return { project: updated, ...sessions }
+  }
+
+  server.handle(RPC_CHANNELS.projects.ARCHIVE, async (_ctx, workspaceId: string, projectSlug: string) =>
+    setArchived(workspaceId, projectSlug, true))
+
+  server.handle(RPC_CHANNELS.projects.UNARCHIVE, async (_ctx, workspaceId: string, projectSlug: string) =>
+    setArchived(workspaceId, projectSlug, false))
+
+  // Delete a project. D30: its sessions are hard-deleted with it (same logic as folders).
   server.handle(RPC_CHANNELS.projects.DELETE, async (_ctx, workspaceId: string, projectSlug: string) => {
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) throw new Error(`Workspace not found: ${workspaceId}`)
@@ -87,13 +111,16 @@ export function registerProjectsHandlers(server: RpcServer, deps: HandlerDeps): 
       return
     }
 
+    const deleted = await deps.sessionManager.deleteProjectSessions(project.config.id)
+    // Fallback unbind: covers sessions that were not registered in memory (old data).
     const { unbindProjectFromSessions } = await import('@craft-agent/shared/sessions')
     const touched = await unbindProjectFromSessions(workspace.rootPath, project.config.id)
     const { unbindProjectFromPages } = await import('@craft-agent/shared/pages')
     const touchedPages = unbindProjectFromPages(workspace.rootPath, project.config.id)
     deleteProject(workspace.rootPath, projectSlug)
     await broadcastChanged(workspaceId, workspace.rootPath)
-    log.info(`Deleted project ${projectSlug} (unbound ${touched} sessions, ${touchedPages} pages)`)
+    log.info(`Deleted project ${projectSlug} (${deleted.deleted.length} sessions deleted, ${touched} unbound, ${touchedPages} pages)`)
+    return deleted
   })
 
   // List assets in a project

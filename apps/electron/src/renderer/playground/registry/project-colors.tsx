@@ -2,7 +2,7 @@ import * as React from 'react'
 import { ChevronRight, Circle, FolderKanban } from 'lucide-react'
 import type { ComponentEntry } from './types'
 import type { SessionMeta } from '@/atoms/sessions'
-import type { SessionStatus } from '@/config/session-status-config'
+type SessionStatus = { id: string; label: string; color?: string; icon?: any; [key: string]: any }
 import type { ContentSearchResult } from '@/hooks/useSessionSearch'
 import { SessionItem } from '@/components/app-shell/SessionItem'
 import { SessionListProvider, type SessionListContextValue } from '@/context/SessionListContext'
@@ -43,16 +43,12 @@ const mockSessionStatuses: SessionStatus[] = [
 function createMockContext(overrides: Partial<SessionListContextValue> = {}): SessionListContextValue {
   return {
     onRenameClick: () => {},
-    onSessionStatusChange: () => {},
     onMarkUnread: () => {},
     onDelete: async () => true,
     onSelectSessionById: () => {},
     onOpenInNewWindow: () => {},
     onFocusZone: () => {},
     onKeyDown: () => {},
-    sessionStatuses: mockSessionStatuses,
-    flatLabels: [],
-    labels: [],
     isMultiSelectActive: false,
     contentSearchResults: new Map(),
     ...overrides,
@@ -91,8 +87,6 @@ const sampleSessions: Array<SessionMeta & { projectId?: string }> = [
     name: 'Q3 Campaign Plan',
     workspaceId: 'ws',
     lastMessageAt: Date.now() - 1000 * 60 * 6,
-    sessionStatus: 'in-progress',
-    labels: ['Marketing · Strategy'],
     projectId: 'p-marketing',
   },
   {
@@ -100,7 +94,6 @@ const sampleSessions: Array<SessionMeta & { projectId?: string }> = [
     name: 'Pricing copy review',
     workspaceId: 'ws',
     lastMessageAt: Date.now() - 1000 * 60 * 25,
-    sessionStatus: 'todo',
     projectId: 'p-marketing',
   },
   {
@@ -108,8 +101,6 @@ const sampleSessions: Array<SessionMeta & { projectId?: string }> = [
     name: 'Fix login crash on mobile',
     workspaceId: 'ws',
     lastMessageAt: Date.now() - 1000 * 60 * 60,
-    sessionStatus: 'todo',
-    labels: ['Bug · bug'],
     projectId: 'p-engineering',
   },
   {
@@ -117,8 +108,6 @@ const sampleSessions: Array<SessionMeta & { projectId?: string }> = [
     name: 'API rate-limit retry logic',
     workspaceId: 'ws',
     lastMessageAt: Date.now() - 1000 * 60 * 90,
-    sessionStatus: 'in-progress',
-    labels: ['Code · Git'],
     projectId: 'p-engineering',
   },
   {
@@ -126,7 +115,6 @@ const sampleSessions: Array<SessionMeta & { projectId?: string }> = [
     name: 'User interview synthesis',
     workspaceId: 'ws',
     lastMessageAt: Date.now() - 1000 * 60 * 60 * 3,
-    sessionStatus: 'done',
     projectId: 'p-research',
   },
   {
@@ -134,14 +122,12 @@ const sampleSessions: Array<SessionMeta & { projectId?: string }> = [
     name: 'Gmail Account Reauthentication',
     workspaceId: 'ws',
     lastMessageAt: Date.now() - 1000 * 60 * 60 * 4,
-    sessionStatus: 'todo',
   },
   {
     id: 's7',
     name: 'Untagged scratchpad',
     workspaceId: 'ws',
     lastMessageAt: Date.now() - 1000 * 60 * 60 * 22,
-    sessionStatus: 'todo',
   },
 ]
 

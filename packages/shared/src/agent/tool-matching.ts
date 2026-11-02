@@ -415,47 +415,26 @@ function detectBackgroundEvents(
 ): AgentEvent[] {
   const events: AgentEvent[] = [];
 
-  // Background Task detection — Task/Agent tool with agentId in result.
-  //
-  // Two launch shapes both produce a real background agent:
-  //  1. Explicit `run_in_background: true` in the tool input.
-  //  2. Async-by-default: the SDK backgrounds the Agent/Task automatically and
-  //     returns a launch acknowledgement WITHOUT the caller ever setting
-  //     `run_in_background`. That result has a distinctive signature — an
-  //     `agentId:` plus "working in the background" / `output_file:` /
-  //     "Async agent launched" — which lets us detect it safely.
-  //
-  // The signature requirement is what prevents false positives: a *foreground*
-  // Agent whose result text merely mentions "agentId:" (e.g. quoting a value it
-  // found) has neither the background phrasing nor an output_file, so it is not
-  // marked backgrounded. This mirrors the renderer's signature check in
-  // App.tsx (`isBackgroundingResult`). For both shapes a real task_completed
-  // notification eventually arrives; the WS3 registry + turn-end orphan backstop
-  // cover the case where it does not.
-  const wasRunInBackground = entry.input?.run_in_background === true;
-  const looksAsyncLaunched =
-    /agentId:\s*[a-zA-Z0-9_-]+/.test(resultStr) &&
-    (/working in the background/i.test(resultStr) ||
-      /output_file:/i.test(resultStr) ||
-      /async agent launched/i.test(resultStr));
-  if (isParentTaskTool(entry.name) && (wasRunInBackground || looksAsyncLaunched) && !isError && resultStr) {
-    const agentIdMatch = resultStr.match(/agentId:\s*([a-zA-Z0-9_-]+)/);
-    if (agentIdMatch?.[1]) {
-      // Prefer explicit `_intent` metadata; the built-in Agent/Task tool doesn't
-      // set it, so fall back to its concise `description` param (the "3-5 word
-      // description of the task") — this is what the chip shows instead of the
-      // opaque agent ID. Mirrors the Bash background-shell path below.
-      const intentValue = (typeof entry.input._intent === 'string' && entry.input._intent)
-        || (typeof entry.input.description === 'string' && entry.input.description)
-        || undefined;
-      events.push({
-        type: 'task_backgrounded',
-        toolUseId,
-        taskId: agentIdMatch[1],
-        turnId,
-        ...(intentValue && { intent: intentValue }),
-      });
-    }
+  // Agent/Task subagents are auto-backgrounded by the pre-tool hook, so a
+  // successful launch result carrying a line-start `agentId:` is a background
+  // task even when the model never set run_in_background. Line-start matching
+  // avoids treating a quoted "agentId:" in a foreground result as a launch.
+  const agentIdMatch = resultStr.match(/(?:^|\n)agentId:\s*([a-zA-Z0-9_-]+)/);
+  if (isParentTaskTool(entry.name) && !isError && resultStr && agentIdMatch?.[1]) {
+    // Prefer explicit `_intent` metadata; the built-in Agent/Task tool doesn't
+    // set it, so fall back to its concise `description` param (the "3-5 word
+    // description of the task") — this is what the chip shows instead of the
+    // opaque agent ID. Mirrors the Bash background-shell path below.
+    const intentValue = (typeof entry.input._intent === 'string' && entry.input._intent)
+      || (typeof entry.input.description === 'string' && entry.input.description)
+      || undefined;
+    events.push({
+      type: 'task_backgrounded',
+      toolUseId,
+      taskId: agentIdMatch[1],
+      turnId,
+      ...(intentValue && { intent: intentValue }),
+    });
   }
 
   // Background Shell detection — Bash tool with shell_id or backgroundTaskId

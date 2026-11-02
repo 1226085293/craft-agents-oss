@@ -17,7 +17,7 @@ import { visit } from 'unist-util-visit'
 import type { Plugin } from 'unified'
 import type { Root, Content, Heading, Parent } from 'mdast'
 
-interface SectionNode extends Parent {
+interface SectionNode {
   type: 'section'
   depth: number
   data: {

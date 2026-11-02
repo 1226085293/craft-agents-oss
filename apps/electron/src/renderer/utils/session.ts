@@ -1,8 +1,8 @@
 import * as React from "react"
 import i18next from "i18next"
+import { matchText } from './text-matching'
 import type { Session, Message } from "../../shared/types"
 import type { SessionMeta } from "../atoms/sessions"
-import type { SessionStatusId } from "../config/session-status-config"
 
 /** Common session fields used by getSessionTitle */
 type SessionLike = Pick<Session, 'name' | 'preview'> & { messages?: Session['messages'] }
@@ -175,9 +175,6 @@ export function countUnreadMessages(session: Session): number {
 // SessionMeta helpers (lightweight, no full Session needed)
 // ---------------------------------------------------------------------------
 
-export function getSessionStatus(session: SessionMeta): SessionStatusId {
-  return (session.sessionStatus as SessionStatusId) || 'todo'
-}
 
 export function hasUnreadMeta(session: SessionMeta): boolean {
   return session.hasUnread === true
@@ -212,21 +209,23 @@ export const shortTimeLocale = {
 
 /** Highlight matching text in a string with yellow background spans. */
 export function highlightMatch(text: string, query: string): React.ReactNode {
-  if (!query.trim()) return text
+  const match = matchText(text, query)
+  if (!match || match.ranges.length === 0) return text
 
-  const lowerText = text.toLowerCase()
-  const lowerQuery = query.toLowerCase()
-  const index = lowerText.indexOf(lowerQuery)
-
-  if (index === -1) return text
-
-  const before = text.slice(0, index)
-  const match = text.slice(index, index + query.length)
-  const after = text.slice(index + query.length)
-
-  return React.createElement(React.Fragment, null,
-    before,
-    React.createElement('span', { className: 'bg-yellow-300/30 rounded-[2px]' }, match),
-    highlightMatch(after, query),
-  )
+  const parts: React.ReactNode[] = []
+  let cursor = 0
+  for (let index = 0; index < match.ranges.length; index += 2) {
+    const start = Math.max(cursor, match.ranges[index] ?? cursor)
+    const end = Math.min(text.length, match.ranges[index + 1] ?? start)
+    if (start > cursor) parts.push(text.slice(cursor, start))
+    if (end > start) {
+      parts.push(React.createElement('span', {
+        key: `match-${index}`,
+        className: 'bg-yellow-300/30 rounded-[2px]',
+      }, text.slice(start, end)))
+      cursor = end
+    }
+  }
+  if (cursor < text.length) parts.push(text.slice(cursor))
+  return React.createElement(React.Fragment, null, ...parts)
 }

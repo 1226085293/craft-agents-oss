@@ -15,6 +15,7 @@ let mockedProvider: 'anthropic' | 'pi' = 'anthropic'
 // Partial-mock baseline: import real modules via file paths (avoids recursive mock imports)
 const actualSharedAgentModule = await import('../../../../../packages/shared/src/agent/index.ts')
 const actualSharedAgentBackendModule = await import('../../../../../packages/shared/src/agent/backend/index.ts')
+const actualSharedConfigModule = await import('../../../../../packages/shared/src/config/index.ts')
 
 mock.module('electron', () => ({
   app: {
@@ -57,6 +58,7 @@ mock.module('../logger', () => {
 })
 
 mock.module('@craft-agent/shared/config', () => ({
+  ...actualSharedConfigModule,
   getWorkspaceByNameOrId: (id: string) => (id === workspace.id ? workspace : null),
   getWorkspaces: () => [workspace],
   loadConfigDefaults: () => ({
@@ -71,6 +73,7 @@ mock.module('@craft-agent/shared/config', () => ({
   getToolIconsDir: () => '/tmp/tool-icons',
   getMiniModel: () => 'claude-haiku-4-5-20251001',
   getDefaultThinkingLevel: () => 'medium',
+  defaultMidStreamBehavior: () => 'steer',
   ConfigWatcher: class ConfigWatcher {
     constructor(..._args: unknown[]) {}
     start() {}
@@ -169,8 +172,11 @@ mock.module('@craft-agent/shared/sources', () => ({
   getSourceCredentialManager: () => ({
     getCredentialStatus: async () => ({ status: 'ready' }),
   }),
-  getSourceServerBuilder: () => ({ buildServers: async () => ({ mcpServers: {}, apiServers: {} }) }),
   isApiOAuthProvider: () => false,
+  hasRenewEndpoint: () => false,
+  isMultiHeaderCredential: () => false,
+  buildApiConfig: () => ({}),
+  normalizeMcpUrl: (url: string) => url,
   SERVER_BUILD_ERRORS: {},
   TokenRefreshManager: class TokenRefreshManager {
     constructor(_mgr: unknown, _opts: unknown) {}
@@ -179,20 +185,6 @@ mock.module('@craft-agent/shared/sources', () => ({
   // Targeted stubs: prevent SyntaxError in tests that import these from the barrel
   loadSource: () => null,
   API_OAUTH_PROVIDERS: [],
-}))
-
-mock.module('@craft-agent/shared/automations', () => ({
-  AutomationSystem: class AutomationSystem {
-    constructor(..._args: unknown[]) {}
-    setInitialSessionMetadata() {}
-    reloadConfig() { return { errors: [], automationCount: 0 } }
-    emitLabelConfigChange = async () => {}
-  },
-  validateAutomationsConfig: () => ({ valid: true, errors: [], config: { automations: {} } }),
-  validateAutomationsContent: () => ({ valid: true, errors: [], warnings: [] }),
-  validateAutomations: () => ({ valid: true, errors: [], warnings: [] }),
-  AUTOMATIONS_CONFIG_FILE: 'automations.json',
-  AUTOMATIONS_HISTORY_FILE: 'automations.history.jsonl',
 }))
 
 mock.module('@craft-agent/shared/sessions', () => ({
@@ -212,8 +204,6 @@ mock.module('@craft-agent/shared/sessions', () => ({
       workingDirectory: opts?.workingDirectory,
       hidden: !!opts?.hidden,
       labels: [],
-      isFlagged: false,
-      sessionStatus: opts?.sessionStatus,
       createdAt: now,
       lastUsedAt: now,
       workspaceRootPath: workspaceRootPath,
@@ -240,13 +230,16 @@ mock.module('@craft-agent/shared/sessions', () => ({
     const fields = [
       'id','workspaceRootPath','sdkSessionId','sdkCwd',
       'createdAt','lastUsedAt','lastMessageAt',
-      'name','isFlagged','sessionStatus','labels','hidden',
+      'name','labels','hidden',
       'lastReadMessageId','hasUnread',
-      'enabledSourceSlugs','permissionMode','previousPermissionMode','workingDirectory',
-      'model','llmConnection','connectionLocked','thinkingLevel',
+      'enabledSourceSlugs','sourceScope','permissionMode','previousPermissionMode','workingDirectory',
+      'model','llmConnection','connectionLocked','thinkingLevel','strategy',
       'sharedUrl','sharedId','pendingPlanExecution',
       'isArchived','archivedAt',
-      'branchFromMessageId','branchFromSdkSessionId','branchFromSessionPath',
+      'branchFromMessageId','branchContextStrategy','branchFromSdkSessionId','branchFromSessionPath','branchFromSdkCwd','branchFromSdkTurnId',
+      'transferredSessionSummary','transferredSessionSummaryApplied','triggeredBy','projectId',
+      'parentSessionId',
+      'folderId','archivedFolderId','archivedFolderPath','archivedProjectId','archivedByParent','sortOrder','pinnedAt',
     ]
     const result: Record<string, unknown> = {}
     for (const f of fields) if (f in s) result[f] = (s as Record<string, unknown>)[f]
@@ -314,7 +307,7 @@ describe('session branch rollback on preflight failure', () => {
     expect(poolStopCalled).toBe(true)
   })
 
-  it('fails branch creation when parent claude sdk session id is missing', async () => {
+  it('fails branch creation when parent legacy SDK session id is missing', async () => {
     const source = storedById.get('source-1')
     source.sdkSessionId = undefined
     storedById.set('source-1', source)

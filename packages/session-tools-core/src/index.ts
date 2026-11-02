@@ -2,7 +2,7 @@
  * Session Tools Core
  *
  * Shared utilities for session-scoped tools used by both
- * Claude (in-process) and Codex (subprocess) implementations.
+ * the Pi agent implementation.
  *
  * @packageDocumentation
  */
@@ -131,11 +131,8 @@ export type {
   ListSessionsOptions,
   ListSessionsResult,
   BackgroundTaskInfo,
+  BackgroundTaskStopResult,
   SendAgentMessageResult,
-  ResolvedLabelsResult,
-  ResolvedStatusResult,
-  CreateTaskInput,
-  CreateTaskResult,
   // Pages types
   PagesToolCallbacks,
   PageToolRefreshSpec,
@@ -185,6 +182,10 @@ export {
   handleUpdatePage,
   handleWritePageData,
   handleDeletePage,
+  // Background tasks
+  handleListBackgroundTasks,
+  handleGetBackgroundTaskOutput,
+  handleStopBackgroundTask,
 } from './handlers/index.ts';
 
 export type {
@@ -208,6 +209,9 @@ export type {
   UpdatePageArgs,
   WritePageDataArgs,
   DeletePageArgs,
+  ListBackgroundTasksArgs,
+  GetBackgroundTaskOutputArgs,
+  StopBackgroundTaskArgs,
 } from './handlers/index.ts';
 
 // Tool definitions — single source of truth
@@ -235,6 +239,10 @@ export {
   UpdatePageSchema,
   WritePageDataSchema,
   DeletePageSchema,
+  // Background task schemas
+  ListBackgroundTasksSchema,
+  GetBackgroundTaskOutputSchema,
+  StopBackgroundTaskSchema,
   // Descriptions
   TOOL_DESCRIPTIONS,
   // Registry

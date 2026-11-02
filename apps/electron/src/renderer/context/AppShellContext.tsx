@@ -18,14 +18,11 @@ import type {
   CredentialRequest,
   CredentialResponse,
   PermissionMode,
-  SessionStatus,
   LoadedSource,
   LoadedSkill,
   NewChatActionParams,
   LlmConnectionWithStatus,
-  TestAutomationResult,
 } from '../../shared/types'
-import type { SessionStatus as SessionStatusConfig } from '@/config/session-status-config'
 import type { SessionOptions, SessionOptionUpdates } from '../hooks/useSessionOptions'
 import { defaultSessionOptions, readDefaultStrategy } from '../hooks/useSessionOptions'
 import { sessionAtomFamily } from '../atoms/sessions'
@@ -55,26 +52,16 @@ export interface AppShellContextType {
   getDraftAttachmentRefs: (sessionId: string) => import('@craft-agent/shared/config').DraftAttachmentRef[]
   /** Hydrate persisted attachment refs into full FileAttachment objects (async, reads files) */
   hydrateDraftAttachments: (sessionId: string) => Promise<FileAttachment[]>
+  /** Increments once the startup draft read lands — re-run one-shot attachment hydration on change */
+  draftsLoadedVersion: number
   /** All enabled sources for this workspace - provided by AppShell component */
   enabledSources?: LoadedSource[]
   /** All skills for this workspace - provided by AppShell component (for @mentions) */
   skills?: LoadedSkill[]
   /** Working directory of the active session — needed for project-level skill resolution */
   activeSessionWorkingDirectory?: string
-  /** All label configs (tree) for label menu and badge display */
-  labels?: import('@craft-agent/shared/labels').LabelConfig[]
-  /** Callback when session labels change */
-  onSessionLabelsChange?: (sessionId: string, labels: string[]) => void
-  /**
-   * Open All Sessions scoped to a task: replaces the view's label filter (and project
-   * filter when given) with the task's scope — the same user-clearable header-chip
-   * filters — and selects the session. Used by kanban tile/subtask clicks + post-create.
-   */
-  onJumpToTaskSessions?: (sessionId: string, scope: { labelId: string; projectId?: string }) => void
   /** Enabled permission modes for Shift+Tab cycling */
   enabledModes?: PermissionMode[]
-  /** Dynamic todo states from workspace config (provided by AppShell, defaults to empty) */
-  sessionStatuses?: SessionStatusConfig[]
 
   // Unified session options map
   /** All session-scoped options in one map. Use useSessionOptionsFor() hook for easy access. */
@@ -84,15 +71,12 @@ export interface AppShellContextType {
   onCreateSession: (workspaceId: string, options?: import('../../shared/types').CreateSessionOptions) => Promise<Session>
   onSendMessage: (sessionId: string, message: string, attachments?: FileAttachment[], skillSlugs?: string[], badges?: import('@craft-agent/core').ContentBadge[], options?: { midStreamBehavior?: 'steer' | 'queue' }) => void
   onRenameSession: (sessionId: string, name: string) => void
-  onFlagSession: (sessionId: string) => void
-  onUnflagSession: (sessionId: string) => void
   onArchiveSession: (sessionId: string) => void
   onUnarchiveSession: (sessionId: string) => void
   onMarkSessionRead: (sessionId: string) => void
   onMarkSessionUnread: (sessionId: string) => void
   /** Track which session user is viewing (for unread state machine) */
   onSetActiveViewingSession: (sessionId: string) => void
-  onSessionStatusChange: (sessionId: string, state: SessionStatus) => void
   onDeleteSession: (sessionId: string, skipConfirmation?: boolean) => Promise<boolean>
 
   // Permission handling
@@ -152,6 +136,12 @@ export interface AppShellContextType {
   /** Whether the shell is currently in compact/narrow mode */
   isCompactMode?: boolean
 
+  /** Whether focus mode is on (sidebar + navigator hidden) — drives the
+   *  zoom in/out button in the session header. */
+  isFocusMode?: boolean
+  /** Toggle focus mode (same handler as the View → Focus Mode menu action) */
+  onToggleFocusMode?: () => void
+
   // Session list search state (for ChatDisplay highlighting)
   /** Current search query from session list - used to highlight matches in ChatDisplay */
   sessionListSearchQuery?: string
@@ -159,26 +149,23 @@ export interface AppShellContextType {
   isSearchModeActive?: boolean
   /** Callback to update session list search query */
   setSessionListSearchQuery?: (query: string) => void
-  /** Ref to ChatDisplay for navigation between matches */
-  chatDisplayRef?: React.RefObject<ChatDisplayHandle>
+  /** Ref to the focused ChatDisplay for navigation between matches */
+  chatDisplayRef?: React.MutableRefObject<ChatDisplayHandle | null>
   /** Callback when ChatDisplay match info changes (for immediate UI updates) */
   onChatMatchInfoChange?: (info: { sessionId: string | null; count: number; index: number; isHighlighting: boolean }) => void
+  /** A selected session-list search result to open in conversation search. */
+  chatSearchHandoff?: { sessionId: string; query: string; requestId: number } | null
+  /** Acknowledge that the matching ChatPage consumed a search handoff. */
+  onChatSearchHandoffConsumed?: (requestId: number) => void
 
   // Automation management
   /** Test an automation by ID — executes its actions and returns results */
-  onTestAutomation?: (automationId: string) => void
   /** Toggle an automation's enabled state by ID */
-  onToggleAutomation?: (automationId: string) => void
   /** Duplicate an automation by ID — clones config with " Copy" suffix */
-  onDuplicateAutomation?: (automationId: string) => void
   /** Delete an automation by ID — removes from automations config */
-  onDeleteAutomation?: (automationId: string) => void
   /** Map of automationId → last test result */
-  automationTestResults?: Record<string, import('../components/automations/types').TestResult>
   /** Fetch execution history for an automation by ID */
-  getAutomationHistory?: (automationId: string) => Promise<import('../components/automations/types').ExecutionEntry[]>
   /** Replay (re-execute) webhook actions for a failed automation */
-  onReplayAutomation?: (automationId: string, event: string) => void
 }
 
 const AppShellContext = createContext<AppShellContextType | null>(null)

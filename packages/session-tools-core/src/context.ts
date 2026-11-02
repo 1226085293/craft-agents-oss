@@ -153,7 +153,7 @@ export interface ValidatorInterface {
   validateStatuses(workspaceRootPath: string): import('./types.js').ValidationResult;
   validateAppearance(): import('./types.js').ValidationResult;
   validatePermissions(workspaceRootPath: string, sourceSlug?: string): import('./types.js').ValidationResult;
-  validateAutomations(workspaceRootPath: string): import('./types.js').ValidationResult;
+  validateAutomations?(workspaceRootPath: string): import('./types.js').ValidationResult;
   validateToolIcons(): import('./types.js').ValidationResult;
   validateAll(workspaceRootPath: string): import('./types.js').ValidationResult;
   validateSkill(workspaceRootPath: string, skillSlug: string): import('./types.js').ValidationResult;
@@ -317,14 +317,8 @@ export interface SessionToolContext {
   submitFeedback?(feedback: import('./types.ts').DeveloperFeedback): void;
 
   // ============================================================
-  // Session Self-Management (for set_session_labels, etc.)
+  // Session Self-Management (for get_session_info, etc.)
   // ============================================================
-
-  /** Set labels on a session. Defaults to current session if no ID given. Injected by backend. */
-  setSessionLabels?(sessionId: string | undefined, labels: string[]): void | Promise<void>;
-
-  /** Set status on a session. Defaults to current session if no ID given. Injected by backend. */
-  setSessionStatus?(sessionId: string | undefined, status: string): void | Promise<void>;
 
   /** Archive (archived=true) or unarchive (archived=false) another session by ID. Injected by backend. */
   archiveSession?(sessionId: string, archived: boolean): void | Promise<void>;
@@ -343,20 +337,14 @@ export interface SessionToolContext {
    */
   listBackgroundTasks?(sessionId?: string): BackgroundTaskInfo[];
 
-  /** Resolve label display names to IDs against configured labels. Injected by backend. */
-  resolveLabels?(labels: string[]): ResolvedLabelsResult;
-
-  /** Resolve a status display name to its ID against configured statuses. Injected by backend. */
-  resolveStatus?(status: string): ResolvedStatusResult;
-
   /**
-   * Create a Craft Agents Task (board card + task.yaml + orchestrator session)
-   * WITHOUT running it. Slug derivation, node synthesis, and spec validation
-   * happen behind this callback where the task primitives live. Injected by
-   * backend (SessionManager); undefined in backends that don't run alongside
-   * it (e.g. the Codex MCP subprocess) — the handler degrades gracefully.
+   * Read the tail of a background task's output. Returns null when the task is
+   * unknown or has not produced an output file yet.
    */
-  createTask?(input: CreateTaskInput): Promise<CreateTaskResult>;
+  getBackgroundTaskOutput?(taskId: string, tailLines?: number): Promise<string | null>;
+
+  /** Stop a running background task and record who stopped it. */
+  stopBackgroundTask?(taskId: string, stoppedBy?: 'model' | 'user'): Promise<BackgroundTaskStopResult>;
 
   // ============================================================
   // Pages (list_pages / get_page / create_page / update_page /
@@ -383,6 +371,23 @@ export interface SessionToolContext {
    * of an unconditional "message sent".
    */
   sendAgentMessage?(sessionId: string, message: string, attachments?: Array<{ path: string; name?: string }>): Promise<SendAgentMessageResult>;
+
+  /**
+   * Returns true when `text` is a session-level slash command (`/stop`).
+   *
+   * Commands must travel WITHOUT the sender envelope: the command token has to
+   * stay at the start of the message, otherwise the target session parses it as
+   * ordinary chat text. Injected by the backend so this package can stay
+   * dependency-free of `@craft-agent/shared` (same reason as `SessionInfo`).
+   */
+  isSessionCommand?(text: string): boolean;
+
+  /** Follow another session: each finished turn is posted here and wakes it. */
+  subscribeSessionFn?(sessionId: string): Promise<{ subscribed: boolean; targetIds: string[] }>;
+  /** Stop following a session. Idempotent. */
+  unsubscribeSessionFn?(sessionId: string): Promise<{ unsubscribed: boolean; targetIds: string[] }>;
+  /** Session ids this session currently follows. */
+  listSubscriptionsFn?(): string[];
 
   // ============================================================
   // Messaging Gateway (for list/unbind messaging channels)
@@ -436,78 +441,16 @@ export interface SessionToolContext {
 // Session Self-Management Types — Resolution
 // ============================================================
 
-/** Result of resolving label names/IDs against configured labels. */
-export interface ResolvedLabelsResult {
-  /** Resolved label IDs (ready to store) */
-  resolved: string[];
-  /** Labels that couldn't be matched to any configured label */
-  unknown: string[];
-  /** All valid label IDs (for error messages) */
-  available: string[];
-  /**
-   * Optional per-input rejection reason, keyed by the original input string.
-   * Populated by `resolveSessionLabels()` from `@craft-agent/shared/labels`.
-   * Handlers use this to build clearer errors (e.g. "label X doesn't accept a value").
-   */
-  reasons?: Record<string, string>;
-}
-
-/** Result of resolving a status name/ID against configured statuses. */
-export interface ResolvedStatusResult {
-  /** Matched status ID, or null if unknown */
-  resolved: string | null;
-  /** All valid status IDs (for error messages) */
-  available: string[];
-  /**
-   * Category of the matched status ('open' | 'closed'), when resolved. Lets the
-   * status tool reject agent-driven *closed* transitions (the human owns closure)
-   * while still allowing open ones like `needs-review`.
-   */
-  category?: 'open' | 'closed';
-}
-
 // ============================================================
 // Session Self-Management Types
 // ============================================================
-
-/** Full metadata for a single session (returned by get_session_info). */
-/** Input for create_task — structured fields, mapped onto a TaskSpec by the backend. */
-export interface CreateTaskInput {
-  /** Short task title shown on the board (also drives the slug). */
-  title: string;
-  /** What the task should accomplish — becomes the task goal and the initial node prompt. */
-  description: string;
-  /** Freeform rubric the final result is verified against. */
-  acceptanceCriteria?: string;
-  /** Source slugs enabled on the task's sessions. */
-  sources?: string[];
-  /** Skill slugs applied to dispatched task prompts. */
-  skills?: string[];
-  /** LLM connection slug serving `model`. */
-  llmConnection?: string;
-  /** Model id for the task's sessions (workspace default when omitted). */
-  model?: string;
-  /** Working directory for the task's sessions. */
-  workingDirectory?: string;
-  /** Project to bind the task to. Defaults to the invoking session's project. */
-  projectId?: string;
-}
-
-/** Result of create_task. */
-export interface CreateTaskResult {
-  slug: string;
-  orchestratorSessionId: string;
-  taskLabelId?: string;
-  /** Fail-soft problems (unknown source/skill slugs, label failure, …). */
-  warnings: string[];
-}
 
 // ============================================================
 // Pages Types
 // ============================================================
 // Plain JSON shapes mirroring @craft-agent/core page types — duplicated here
 // on purpose so this package stays dependency-free (same rule as
-// CreateTaskInput). The backend maps real PageConfig/LoadedPage onto these.
+// SessionInfo). The backend maps real PageConfig/LoadedPage onto these.
 
 /** Scheduled refresh spec for a page (5-field cron → workspace-relative script). */
 export interface PageToolRefreshSpec {
@@ -653,8 +596,7 @@ export interface PagesToolCallbacks {
 export interface SessionInfo {
   id: string;
   name: string;
-  labels: string[];
-  status: string;
+  status?: string;
   permissionMode: string;
   createdAt: number;
   updatedAt?: number;
@@ -678,15 +620,13 @@ export interface SessionInfo {
 export interface SessionListItem {
   id: string;
   name: string;
-  labels: string[];
-  status: string;
+  status?: string;
   createdAt: number;
 }
 
 /** Options for list_sessions filtering and pagination. */
 export interface ListSessionsOptions {
   status?: string;
-  label?: string;
   search?: string;
   sortBy?: 'recent' | 'name' | 'status';
   limit?: number;
@@ -709,10 +649,18 @@ export interface SendAgentMessageResult {
    * - `delivered`: the target was idle, so it will start processing the message now.
    * - `queued`: the target was mid-turn; the message is enqueued and will be
    *   processed after the current turn finishes.
+   * - `stopped`: the message was a `/stop` command and a running turn was cancelled.
+   * - `idle`: the message was a `/stop` command but nothing was running.
    */
-  delivery: 'delivered' | 'queued';
+  delivery: 'delivered' | 'queued' | 'stopped' | 'idle';
   /** Whether the target session was processing a turn when the message arrived. */
   targetBusy: boolean;
+  /**
+   * Set for `stopped`: messages still queued behind the cancelled turn. They
+   * drain right after the stop, so the sender must not claim "everything is
+   * stopped" when this is non-zero.
+   */
+  queueLength?: number;
 }
 
 /**
@@ -733,6 +681,21 @@ export interface BackgroundTaskInfo {
   elapsedSeconds: number;
   /** ms timestamp when the task reached a terminal/orphaned status, if any */
   completedAt?: number;
+  /**
+   * Why a terminal task stopped, when the cause is known. `app_restart` means
+   * Craft Agent restarted while the task was still running, so the work was
+   * killed by the restart — not by the user and not by its own failure. Omitted
+   * for running tasks and for terminal states whose cause was not recorded.
+   */
+  stopReason?: 'app_restart' | 'user' | 'model' | 'session_end';
+}
+
+/** Result of stop_background_task. */
+export interface BackgroundTaskStopResult {
+  taskId: string;
+  status: 'stopped';
+  stoppedBy: 'model' | 'user';
+  message: string;
 }
 
 // ============================================================

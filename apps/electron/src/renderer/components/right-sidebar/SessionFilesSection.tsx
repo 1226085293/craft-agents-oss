@@ -87,23 +87,6 @@ function formatFileSize(bytes?: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-/** Collect all directory paths recursively so the tree can start fully expanded. */
-function collectDirectoryPaths(entries: SessionFile[]): string[] {
-  const directories: string[] = []
-  const visit = (items: SessionFile[]) => {
-    for (const item of items) {
-      if (item.type === 'directory') {
-        directories.push(item.path)
-        if (item.children && item.children.length > 0) {
-          visit(item.children)
-        }
-      }
-    }
-  }
-  visit(entries)
-  return directories
-}
-
 /**
  * Get icon for file based on name/type (14x14px matching sidebar)
  */
@@ -429,25 +412,21 @@ export function SessionFilesSection({ sessionId, className, sessionFolderPath, h
   const [files, setFiles] = useState<SessionFile[]>([])
   const [isLoading, setIsLoading] = useState(false)
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
-  const [hasSavedExpandedState, setHasSavedExpandedState] = useState(false)
   const mountedRef = useRef(true)
 
   // Load expanded paths from storage when session changes.
-  // If no value exists yet, we default to "expand all" after files load.
+  // Folders default to collapsed — only a previously-saved expansion is restored.
   useEffect(() => {
     if (sessionId) {
       const raw = storage.getRaw(storage.KEYS.sessionFilesExpandedFolders, sessionId)
       if (raw !== null) {
         const saved = storage.get<string[]>(storage.KEYS.sessionFilesExpandedFolders, [], sessionId)
         setExpandedPaths(new Set(saved))
-        setHasSavedExpandedState(true)
       } else {
         setExpandedPaths(new Set())
-        setHasSavedExpandedState(false)
       }
     } else {
       setExpandedPaths(new Set())
-      setHasSavedExpandedState(false)
     }
   }, [sessionId])
 
@@ -470,16 +449,6 @@ export function SessionFilesSection({ sessionId, className, sessionFolderPath, h
       const sessionFiles = await window.electronAPI.getSessionFiles(sessionId)
       if (mountedRef.current) {
         setFiles(sessionFiles)
-
-        // Default behavior: expand the entire folder tree when there's no saved state yet.
-        if (!hasSavedExpandedState) {
-          const allDirectoryPaths = new Set(collectDirectoryPaths(sessionFiles))
-          if (allDirectoryPaths.size > 0) {
-            setExpandedPaths(allDirectoryPaths)
-            saveExpandedPaths(allDirectoryPaths)
-            setHasSavedExpandedState(true)
-          }
-        }
       }
     } catch (error) {
       console.error('Failed to load session files:', error)
@@ -491,7 +460,7 @@ export function SessionFilesSection({ sessionId, className, sessionFolderPath, h
         setIsLoading(false)
       }
     }
-  }, [sessionId, hasSavedExpandedState, saveExpandedPaths])
+  }, [sessionId])
 
   // Initial load and file watcher setup
   useEffect(() => {

@@ -33,12 +33,16 @@ import { handleTransformData } from './handlers/transform-data.ts';
 import { handleScriptSandbox } from './handlers/script-sandbox.ts';
 import { handleRenderTemplate } from './handlers/render-template.ts';
 import { handleSendDeveloperFeedback } from './handlers/send-developer-feedback.ts';
-import { handleSetSessionLabels } from './handlers/set-session-labels.ts';
-import { handleSetSessionStatus } from './handlers/set-session-status.ts';
 import { handleGetSessionInfo } from './handlers/get-session-info.ts';
 import { handleListSessions } from './handlers/list-sessions.ts';
 import { handleListBackgroundTasks } from './handlers/list-background-tasks.ts';
-import { handleCreateTask } from './handlers/create-task.ts';
+import { handleGetBackgroundTaskOutput } from './handlers/get-background-task-output.ts';
+import { handleStopBackgroundTask } from './handlers/stop-background-task.ts';
+import {
+  handleSubscribeSession,
+  handleUnsubscribeSession,
+  handleListSubscriptions,
+} from './handlers/subscriptions.ts';
 import {
   handleListPages,
   handleGetPage,
@@ -166,25 +170,15 @@ export const SpawnSessionSchema = z.object({
   permissionMode: z.enum(['safe', 'ask', 'allow-all']).optional().describe('Permission mode for the new session'),
   thinkingLevel: z.enum(['off', 'low', 'medium', 'high', 'xhigh', 'max']).optional()
     .describe('Reasoning level for the new session. Silently ignored on non-reasoning models (e.g. gpt-4o, gemini-2.5-flash). Omit to inherit the workspace default.'),
-  labels: z.array(z.string()).optional().describe('Labels for the new session'),
   workingDirectory: z.string().optional().describe('Working directory for the new session'),
   attachments: z.array(z.object({
     path: z.string().describe('Absolute file path on disk'),
     name: z.string().optional().describe('Display name (defaults to file basename)'),
   })).optional().describe('Files to include with the prompt'),
+  subscribe: z.boolean().optional().default(true).describe('Follow this session and get woken on its finished turns (default true). Set false for fire-and-forget work you will poll yourself.'),
 });
 
 // Session self-management tools
-export const SetSessionLabelsSchema = z.object({
-  sessionId: z.string().optional().describe('Session ID to update. Omit to update the current session.'),
-  labels: z.array(z.string()).describe('Labels to set (replaces all existing labels)'),
-});
-
-export const SetSessionStatusSchema = z.object({
-  sessionId: z.string().optional().describe('Session ID to update. Omit to update the current session.'),
-  status: z.string().describe('Status to set (e.g., "todo", "in_progress", "done")'),
-});
-
 export const GetSessionInfoSchema = z.object({
   sessionId: z.string().optional().describe('Session ID to query. Omit to get info about the current session.'),
 });
@@ -192,18 +186,6 @@ export const GetSessionInfoSchema = z.object({
 export const ArchiveSessionSchema = z.object({
   sessionId: z.string().describe('Session ID to archive or unarchive. Required — you cannot archive your own session.'),
   archived: z.boolean().optional().describe('true to archive (default), false to unarchive.'),
-});
-
-export const CreateTaskSchema = z.object({
-  title: z.string().describe('Short task title shown on the board (also drives the slug)'),
-  description: z.string().describe('What the task should accomplish — becomes the task goal and the initial node prompt'),
-  acceptanceCriteria: z.string().optional().describe('Freeform rubric the final result is verified against'),
-  sources: z.array(z.string()).optional().describe('Source slugs to enable on the task sessions'),
-  skills: z.array(z.string()).optional().describe('Skill slugs applied to dispatched task prompts'),
-  llmConnection: z.string().optional().describe('LLM connection slug serving the model'),
-  model: z.string().optional().describe('Model ID for the task sessions (workspace default when omitted)'),
-  workingDirectory: z.string().optional().describe('Working directory for the task sessions'),
-  projectId: z.string().optional().describe("Project ID to bind the task to (defaults to the invoking session's project)"),
 });
 
 // Pages tools
@@ -263,7 +245,6 @@ export const DeletePageSchema = z.object({
 
 export const ListSessionsSchema = z.object({
   status: z.string().optional().describe('Filter by status'),
-  label: z.string().optional().describe('Filter by label'),
   search: z.string().optional().describe('Substring match on session name'),
   sortBy: z.enum(['recent', 'name', 'status']).optional().describe('Sort order (default: recent)'),
   limit: z.number().optional().describe('Max sessions to return (default 20, max 100)'),
@@ -273,6 +254,27 @@ export const ListSessionsSchema = z.object({
 export const ListBackgroundTasksSchema = z.object({
   sessionId: z.string().optional().describe('Session ID to query. Omit to list background tasks for the current session.'),
 });
+
+export const GetBackgroundTaskOutputSchema = z.object({
+  taskId: z.string().describe('Background task or shell ID to read output for.'),
+  tailLines: z.number().int().min(1).max(1000).optional().describe('Return only the last N lines (default 100, max 1000).'),
+});
+
+export const StopBackgroundTaskSchema = z.object({
+  taskId: z.string().describe('Background task or shell ID to stop.'),
+  stoppedBy: z.enum(['model', 'user']).optional().describe('Who stopped it; defaults to model.'),
+});
+
+// Session subscriptions
+export const SubscribeSessionSchema = z.object({
+  sessionId: z.string().describe('Session ID to follow. Every finished turn is posted here and wakes you.'),
+});
+
+export const UnsubscribeSessionSchema = z.object({
+  sessionId: z.string().describe('Session ID to stop following.'),
+});
+
+export const ListSubscriptionsSchema = z.object({});
 
 // Inter-session messaging
 export const SendAgentMessageSchema = z.object({
@@ -333,22 +335,24 @@ export const TOOL_DESCRIPTIONS = {
   render_template: `Render a source HTML template with a data payload (source guide.md lists templates under Templates). Returns a file path; use the path as 'src' in an html-preview block. Mustache syntax.`,
   browser_tool: `Drive a built-in browser via a CLI-like command (string or array; array keeps literal semicolons/tabs/newlines). Batching with ';' works but the batch stops after navigation commands (click/navigate/forward/back). Commands: open, navigate, snapshot, find, click, fill, type, wait, screenshot, evaluate, console, network, sign-in flows; window management. Run --help first when unsure.`,
   call_llm: `Get a secondary LLM for focused subtasks: parallel batch processing, efficiency gains, structured extraction (outputSchema), context isolation. Put text in the prompt param; use attachments only for file paths on disk (max 20 items; for files >2000 lines pass a startLine/endLine range).`,
-  spawn_session: `Create an independent session running with its own prompt, connection, model, and sources. Useful for delegating research/analysis/drafts to parallel sessions. Use help=true first to list connections/models/sources. The prompt param is required; optional overrides: model, llmConnection, permissionMode, thinkingLevel, enabledSourceSlugs, labels, workingDirectory. This call returns as soon as the session starts (status 'started'); when the sub-session finishes a turn its result is posted back into THIS session automatically, so end your turn instead of polling — you will be woken to summarize.`,
+  spawn_session: `Create an independent session running with its own prompt, connection, model, and sources. Useful for delegating research/analysis/drafts to parallel sessions. Use help=true first to list connections/models/sources. The prompt param is required; optional overrides: model, llmConnection, permissionMode, thinkingLevel, enabledSourceSlugs, workingDirectory. By default (subscribe=true) this session starts FOLLOWING the new session: every finished turn is posted back here as a message and you are woken. Pass subscribe=false for fire-and-forget work. This call returns as soon as the session starts (status 'started'); end your turn instead of polling.`,
   send_developer_feedback: `Send freeform feedback to the Craft Agent development team: issues, improvement ideas, patterns found. Write in markdown with as much detail as possible.`,
-  set_session_labels: `Set/replace labels on a session (pass ids; valued labels use 'id::value' when a valueType is declared; empty array clears all). Omit sessionId for the current session.`,
-  set_session_status: `Set the status of a session (e.g. 'in_progress'). NEVER move to closed statuses ('done'/'cancelled') — those are the user's decision and calls are rejected. Omit sessionId for the current session.`,
   archive_session: `Archive or purely unarchive ANOTHER session by ID: removes it from active list/unread counts (does not delete). Requires explicit sessionId; you cannot archive your own. Find ids via list_sessions.`,
-  create_task: `Create a new task (board card) — writes tasks/<slug>/task.yaml + creates its orchestrator session. Title + description required (description becomes goal + initial prompt). Optional: acceptanceCriteria, sources, skills, llmConnection, model, workingDirectory, projectId. Task is created as todo and NOT run — starting is the user's or an automation's decision.`,
   list_pages: `List the workspace's Pages (persistent HTML mini-apps shown in sidebar). Returns slug, name, kind (static/interactive/live), project, refresh schedule, last outcome, share state, folder. Use get_page for full details.`,
   get_page: `Get full details for one Page by slug: config, content path/digest, data summary (KV keys + per-series point counts/latest), grants, share state. Returns absolute paths (contentPath, data/ snapshot) to Read for full HTML/snapshot.`,
   create_page: `Create a new Page: self-contained HTML app living at pages/<slug>/ in the workspace, shown in the Pages sidebar. Read the pages doc (dev docs) BEFORE authoring: full standalone HTML, all CSS/JS inline, no external requests; receive data via the page data bridge; kind: static (no JS), interactive (JS + user-driven), live (interactive + data snapshot stream).`,
   update_page: `Update an existing Page: metadata (name/description/kind/project), refresh schedule, and/or full new HTML content. Only provided fields change; pass null to clear description/null-driven reset. Replacing content invalidates existing source grants (user must re-approve). Slug stays.`,
   write_page_data: `Write to a Page data store: set (kv upsert), delete (kv remove), appendSeries (numeric timeseries intances with timestamps), pruneSeries. The snapshot regenerates and pushes to open renders live. Idempotent writes: same series+timestamp overwrites.`,
   delete_page: `Permanently delete a Page — removes folder including content, data store, grants. DESTRUCTIVE: confirm deletion with the user first unless the user explicitly asked. Published copies are unpublished best-effort (publicCopyMayRemain possible).`,
-  get_session_info: `Get metadata about the current session (or by sessionId): labels, status, name, permission mode, projectId, workingDirectory. No args = introspect your own.`,
-  list_sessions: `List sessions (workspace-wide; total + paginated results, limit 20 default, sort/filters via status/label/search). Use get_session_info for details on a specific.`,
+  get_session_info: `Get metadata about the current session (or by sessionId): status, name, permission mode, projectId, workingDirectory. No args = introspect your own.`,
+  list_sessions: `List sessions (workspace-wide; total + paginated results, limit 20 default, sort/filters via status/search). Use get_session_info for details on a specific.`,
   list_background_tasks: `List background agents/tasks tracked for a session: running, finished, or orphaned (terminated when the turn launched them ended). Authoritative answer for 'what is running / what's the status?'. Omit sessionId for the current session.`,
-  send_agent_message: `Send a message to another session; the target receives it with your session ID so it can reply. Use to coordinate spawned sessions, follow-up instructions, or relay information. Find ids via list_sessions or use the sessionId from spawn_session.`,
+  get_background_task_output: `Read the tail of a background task's output by taskId. Use after list_background_tasks or a completion notice; tailLines defaults to 100 (max 1000).`,
+  stop_background_task: `Stop a running background shell/agent and record the source (model or user). The stop notice is delivered before its record is removed; use list_background_tasks to verify remaining work.`,
+  send_agent_message: `Send a message to another session; the target receives it with your session ID so it can reply. Use to coordinate spawned sessions, follow-up instructions, or relay information. Find ids via list_sessions or use the sessionId from spawn_session. Send exactly "/stop" (with no other text) to abort that session's running turn — the receipt reports whether a turn was actually stopped or the session was already idle.`,
+  subscribe_session: `Follow another session in this workspace: every finished turn is posted here as a message and wakes you. Spawned sessions are already followed by default (spawn_session subscribe=true). Use list_subscriptions to see what you follow.`,
+  unsubscribe_session: `Stop following a session (idempotent). You will stop receiving its finished turns.`,
+  list_subscriptions: `List the sessions this session currently follows.` ,
   add_memory: `Store information that should persist beyond this conversation. Use when the user wants something retained for later — a fact, preference, instruction, name or alias, or a rule — and write it down instead of only acknowledging it in your reply. Use session scope for temporary/task-specific facts about this conversation; use global scope for durable user preferences, rules, and reusable knowledge that should persist across sessions.`,
   query_memories: `Check what has been stored before answering. Call this proactively whenever the question may depend on information from earlier conversations (preferences, rules, facts, names) instead of guessing from current context alone. Performs semantic retrieval (embedding similarity) across this session's memories and workspace-global memories.`,
   deliver_file: `Deliver a local file as an attachment to the messaging channel(s) bound to this session (Telegram/WhatsApp/Lark/QQ). Use when the user asks to send/forward a generated/downloaded file to their phone or app. Prefer this over printing a link when a real attachment is wanted.`,
@@ -361,7 +365,12 @@ export const TOOL_DESCRIPTIONS = {
 // ============================================================
 
 /** Handler function signature for session tools. */
-export type SessionToolHandler = (ctx: SessionToolContext, args: any) => Promise<ToolResult>;
+export type SessionToolHandler = (
+  ctx: SessionToolContext,
+  args: any,
+  signal?: AbortSignal,
+  onKillResult?: (result: { ok: boolean; error?: string }) => void,
+) => Promise<ToolResult>;
 
 /** Where a session tool is executed. */
 export type SessionToolExecutionMode = 'registry' | 'backend';
@@ -419,10 +428,7 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   // Single CLI-like tool that handles all browser actions via command string.
   { name: 'browser_tool', description: TOOL_DESCRIPTIONS.browser_tool, inputSchema: BrowserToolSchema, executionMode: 'backend', safeMode: 'allow', handler: null },
   // Session self-management tools (registry — use context callbacks to reach SessionManager)
-  { name: 'set_session_labels', description: TOOL_DESCRIPTIONS.set_session_labels, inputSchema: SetSessionLabelsSchema, executionMode: 'registry', safeMode: 'block', handler: handleSetSessionLabels },
-  { name: 'set_session_status', description: TOOL_DESCRIPTIONS.set_session_status, inputSchema: SetSessionStatusSchema, executionMode: 'registry', safeMode: 'block', handler: handleSetSessionStatus },
   { name: 'archive_session', description: TOOL_DESCRIPTIONS.archive_session, inputSchema: ArchiveSessionSchema, executionMode: 'registry', safeMode: 'block', handler: handleArchiveSession },
-  { name: 'create_task', description: TOOL_DESCRIPTIONS.create_task, inputSchema: CreateTaskSchema, executionMode: 'registry', safeMode: 'block', handler: handleCreateTask },
   // Pages tools (registry — use the grouped ctx.pages callbacks from SessionManager)
   { name: 'list_pages', description: TOOL_DESCRIPTIONS.list_pages, inputSchema: ListPagesSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListPages },
   { name: 'get_page', description: TOOL_DESCRIPTIONS.get_page, inputSchema: GetPageSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleGetPage },
@@ -433,8 +439,14 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'get_session_info', description: TOOL_DESCRIPTIONS.get_session_info, inputSchema: GetSessionInfoSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleGetSessionInfo },
   { name: 'list_sessions', description: TOOL_DESCRIPTIONS.list_sessions, inputSchema: ListSessionsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListSessions },
   { name: 'list_background_tasks', description: TOOL_DESCRIPTIONS.list_background_tasks, inputSchema: ListBackgroundTasksSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListBackgroundTasks },
+  { name: 'get_background_task_output', description: TOOL_DESCRIPTIONS.get_background_task_output, inputSchema: GetBackgroundTaskOutputSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleGetBackgroundTaskOutput },
+  { name: 'stop_background_task', description: TOOL_DESCRIPTIONS.stop_background_task, inputSchema: StopBackgroundTaskSchema, executionMode: 'registry', safeMode: 'block', handler: handleStopBackgroundTask },
   // Inter-session messaging
   { name: 'send_agent_message', description: TOOL_DESCRIPTIONS.send_agent_message, inputSchema: SendAgentMessageSchema, executionMode: 'registry', safeMode: 'block', handler: handleSendAgentMessage },
+  // Session subscriptions
+  { name: 'subscribe_session', description: TOOL_DESCRIPTIONS.subscribe_session, inputSchema: SubscribeSessionSchema, executionMode: 'registry', safeMode: 'block', handler: handleSubscribeSession },
+  { name: 'unsubscribe_session', description: TOOL_DESCRIPTIONS.unsubscribe_session, inputSchema: UnsubscribeSessionSchema, executionMode: 'registry', safeMode: 'block', handler: handleUnsubscribeSession },
+  { name: 'list_subscriptions', description: TOOL_DESCRIPTIONS.list_subscriptions, inputSchema: ListSubscriptionsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListSubscriptions },
   { name: 'add_memory', description: TOOL_DESCRIPTIONS.add_memory, inputSchema: AddMemorySchema, executionMode: 'registry', safeMode: 'block', handler: handleAddMemory },
   { name: 'query_memories', description: TOOL_DESCRIPTIONS.query_memories, inputSchema: QueryMemoriesSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleQueryMemories },
   // Messaging gateway tools

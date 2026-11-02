@@ -10,8 +10,6 @@ import { EntityListBadge } from "@/components/ui/entity-list-badge"
 import { SessionMenu } from "./SessionMenu"
 import { BatchSessionMenu } from "./BatchSessionMenu"
 import { CompactSessionMenu } from "./CompactSessionMenu"
-import { SessionStatusIcon } from "./SessionStatusIcon"
-import { SessionBadges } from "./SessionBadges"
 import { SessionProjectColorWrapper } from "./SessionProjectColorWrapper"
 import { hasTransferTargets } from "./transfer-targets"
 import { useProjectColorTreatment } from "@/hooks/useProjectColorTreatment"
@@ -19,10 +17,10 @@ import { getSessionTitle, getSessionPreviewText, highlightMatch, hasUnreadMeta, 
 import { useSessionListContext } from "@/context/SessionListContext"
 import { useAppShellContext } from "@/context/AppShellContext"
 import { navigate, routes } from "@/lib/navigate"
+import { beginSessionDrag, endDrag } from './dragState'
 import type { SessionMeta } from "@/atoms/sessions"
 import { messagingBindingsBySessionAtom } from "@/atoms/messaging"
 import { useAtomValue } from "jotai"
-import { extractLabelId } from "@craft-agent/shared/labels"
 
 const PLATFORM_PILL: Record<'telegram' | 'whatsapp', { label: string; colorClass: string }> = {
   telegram: {
@@ -69,10 +67,6 @@ export function SessionItem({
   const ripgrepMatchCount = ctx.contentSearchResults.get(item.id)?.matchCount
   const chatMatchCount = isActiveSession ? activeMatch!.count : ripgrepMatchCount
   const hasMatch = chatMatchCount != null && chatMatchCount > 0
-  const hasLabels = !!(item.labels && item.labels.length > 0 && ctx.flatLabels.length > 0 && item.labels.some(entry => {
-    const labelId = extractLabelId(entry)
-    return ctx.flatLabels.some(l => l.id === labelId)
-  }))
   const hasPendingPrompt = ctx.hasPendingPrompt?.(item.id) ?? false
   const previewText = isCompactMode ? getSessionPreviewText(item) : null
   const messagingBindingsBySession = useAtomValue(messagingBindingsBySessionAtom)
@@ -132,6 +126,14 @@ export function SessionItem({
       onMouseDown={handleClick}
       buttonProps={{
         ...itemProps,
+        // D31: session rows are the drag source; dropping is handled by FolderTree / the list.
+        draggable: true,
+        onDragStart: (e: React.DragEvent) => {
+          e.dataTransfer.setData('application/x-craft-session', item.id)
+          e.dataTransfer.effectAllowed = 'move'
+          beginSessionDrag(item.id, (item as { folderId?: string | null }).folderId ?? null, item.projectId ?? null)
+        },
+        onDragEnd: endDrag,
         onKeyDown: (e: React.KeyboardEvent) => {
           ;(itemProps as { onKeyDown: (event: React.KeyboardEvent) => void }).onKeyDown(e)
           ctx.onKeyDown(e, item)
@@ -140,16 +142,10 @@ export function SessionItem({
       menuContent={
         <SessionMenu
           item={item}
-          sessionStatuses={ctx.sessionStatuses}
-          labels={ctx.labels}
-          onLabelsChange={ctx.onLabelsChange ? (ls) => ctx.onLabelsChange!(item.id, ls) : undefined}
           onRename={() => ctx.onRenameClick(item.id, title)}
-          onFlag={() => ctx.onFlag?.(item.id)}
-          onUnflag={() => ctx.onUnflag?.(item.id)}
           onArchive={() => ctx.onArchive?.(item.id)}
           onUnarchive={() => ctx.onUnarchive?.(item.id)}
           onMarkUnread={() => ctx.onMarkUnread(item.id)}
-          onSessionStatusChange={(s) => ctx.onSessionStatusChange(item.id, s)}
           onOpenInNewWindow={() => ctx.onOpenInNewWindow(item)}
           onSendToWorkspace={ctx.onSendToWorkspace ? () => ctx.onSendToWorkspace!([item.id]) : undefined}
           hasTransferTargets={canSendToWorkspace}
@@ -167,17 +163,11 @@ export function SessionItem({
           trigger={null}
           title={title}
           item={item}
-          sessionStatuses={ctx.sessionStatuses}
-          labels={ctx.labels}
           hasTransferTargets={canSendToWorkspace}
-          onLabelsChange={ctx.onLabelsChange ? (ls) => ctx.onLabelsChange!(item.id, ls) : undefined}
           onRename={() => ctx.onRenameClick(item.id, title)}
-          onFlag={() => ctx.onFlag?.(item.id)}
-          onUnflag={() => ctx.onUnflag?.(item.id)}
           onArchive={() => ctx.onArchive?.(item.id)}
           onUnarchive={() => ctx.onUnarchive?.(item.id)}
           onMarkUnread={() => ctx.onMarkUnread(item.id)}
-          onSessionStatusChange={(s) => ctx.onSessionStatusChange(item.id, s)}
           onOpenInNewWindow={() => ctx.onOpenInNewWindow(item)}
           onSendToWorkspace={ctx.onSendToWorkspace ? () => ctx.onSendToWorkspace!([item.id]) : undefined}
           onDelete={() => ctx.onDelete(item.id)}
@@ -185,7 +175,6 @@ export function SessionItem({
       )}
       icon={
         <>
-          <SessionStatusIcon item={item} />
           <div className={cn(
             "flex items-center justify-center overflow-hidden gap-1",
             "transition-all duration-200 ease-out",
@@ -216,7 +205,7 @@ export function SessionItem({
       titleSuffix={
         (projectName || hasMessagingBinding) ? (
           <div className="flex items-center gap-1">
-            {projectName && (
+            {projectName && !ctx.inProjectScope && (
               <span
                 className="text-[11px] text-foreground/40 whitespace-nowrap truncate max-w-[120px] opacity-0 group-hover:opacity-100 transition-opacity duration-150"
                 style={projectColor ? { color: projectColor } : undefined}
@@ -257,16 +246,11 @@ export function SessionItem({
         >
           {chatMatchCount}
         </span>
-      ) : item.isFlagged ? (
-        <div className="p-1 flex items-center justify-center">
-          <Flag className="h-3.5 w-3.5 text-info" />
-        </div>
       ) : item.lastMessageAt ? (
         <span className="text-[11px] text-foreground/40 whitespace-nowrap">
           {formatDistanceToNowStrict(new Date(item.lastMessageAt), { locale: shortTimeLocale as Locale, roundingMethod: 'floor' })}
         </span>
       ) : undefined}
-      badges={hasLabels ? <SessionBadges item={item} /> : undefined}
     />
     </SessionProjectColorWrapper>
   )

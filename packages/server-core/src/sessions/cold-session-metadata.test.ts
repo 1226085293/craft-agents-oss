@@ -53,8 +53,6 @@ describe('cold-session metadata persistence', () => {
     sessionId: string,
     opts: {
       name?: string
-      sessionStatus?: string
-      labels?: string[]
       messages?: StoredMessage[]
     } = {},
   ) {
@@ -64,8 +62,6 @@ describe('cold-session metadata persistence', () => {
       id: sessionId,
       workspaceRootPath: tmpRoot,
       name: opts.name ?? 'cold session',
-      sessionStatus: opts.sessionStatus ?? 'todo',
-      labels: opts.labels ?? [],
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
       messages: opts.messages ?? [],
@@ -76,8 +72,6 @@ describe('cold-session metadata persistence', () => {
       {
         id: sessionId,
         name: stored.name,
-        sessionStatus: stored.sessionStatus,
-        labels: stored.labels,
         createdAt: stored.createdAt,
       },
       buildWorkspace(),
@@ -103,32 +97,17 @@ describe('cold-session metadata persistence', () => {
     return { id, type: 'user', content, timestamp: Date.now() } as StoredMessage
   }
 
-  it('setSessionStatus on a cold session is on disk after flushSession resolves', async () => {
-    const sessionId = 'cold-status'
-    seedColdSession(sessionId, { sessionStatus: 'todo' })
+  it('setSessionProjectId on a cold session is on disk after flushSession resolves', async () => {
+    const sessionId = 'cold-project'
+    seedColdSession(sessionId)
 
-    await sm.setSessionStatus(sessionId, 'done')
-
-    const header = readDiskHeader(sessionId)
-    expect(header.sessionStatus).toBe('done')
-
-    // Independently re-load from disk via the production loader to confirm
-    // round-trip integrity.
-    const reloaded = loadSession(tmpRoot, sessionId)
-    expect(reloaded?.sessionStatus).toBe('done')
-  })
-
-  it('setSessionLabels on a cold session is on disk after flushSession resolves', async () => {
-    const sessionId = 'cold-labels'
-    seedColdSession(sessionId, { labels: [] })
-
-    await sm.setSessionLabels(sessionId, ['urgent', 'bug'])
+    await sm.setSessionProjectId(sessionId, 'proj-1')
 
     const header = readDiskHeader(sessionId)
-    expect(header.labels).toEqual(['urgent', 'bug'])
+    expect(header.projectId).toBe('proj-1')
 
     const reloaded = loadSession(tmpRoot, sessionId)
-    expect(reloaded?.labels).toEqual(['urgent', 'bug'])
+    expect(reloaded?.projectId).toBe('proj-1')
   })
 
   it('renameSession on a cold session persists (with explicit flushSession)', async () => {
@@ -157,28 +136,28 @@ describe('cold-session metadata persistence', () => {
     // Sanity: messages are on disk before mutation.
     expect(readDiskMessageIds(sessionId)).toEqual(['m1', 'm2', 'm3'])
 
-    await sm.setSessionStatus(sessionId, 'done')
+    await sm.setSessionProjectId(sessionId, 'proj-preserve')
 
-    // Header reflects the new status…
-    expect(readDiskHeader(sessionId).sessionStatus).toBe('done')
+    // Header reflects the new metadata…
+    expect(readDiskHeader(sessionId).projectId).toBe('proj-preserve')
     // …and the seeded messages survive (regression: original guard's intent).
     expect(readDiskMessageIds(sessionId)).toEqual(['m1', 'm2', 'm3'])
   })
 
-  it('concurrent cold-session status changes serialize to last-writer-wins on disk', async () => {
+  it('concurrent cold-session metadata changes serialize to last-writer-wins on disk', async () => {
     const sessionId = 'cold-concurrent'
-    seedColdSession(sessionId, { sessionStatus: 'todo' })
+    seedColdSession(sessionId)
 
     // Fire two mutations back-to-back without awaiting the first. Both flow
     // through the cold-persist path; ensureMessagesLoaded dedupes the load,
     // and the persistence queue debounces enqueues. Both calls must resolve
     // and disk must reflect the second value with no JSONL corruption.
-    const p1 = sm.setSessionStatus(sessionId, 'in-progress')
-    const p2 = sm.setSessionStatus(sessionId, 'done')
+    const p1 = sm.setSessionProjectId(sessionId, 'proj-a')
+    const p2 = sm.setSessionProjectId(sessionId, 'proj-b')
     await Promise.all([p1, p2])
 
     // Disk header has the last value.
-    expect(readDiskHeader(sessionId).sessionStatus).toBe('done')
+    expect(readDiskHeader(sessionId).projectId).toBe('proj-b')
 
     // JSONL is well-formed: every line parses, none is empty.
     const lines = readFileSync(getSessionFilePath(tmpRoot, sessionId), 'utf-8')
@@ -192,18 +171,18 @@ describe('cold-session metadata persistence', () => {
 
   it('flushSession on a cold session returns only after the disk write lands', async () => {
     const sessionId = 'cold-flush-ordering'
-    seedColdSession(sessionId, { sessionStatus: 'todo' })
+    seedColdSession(sessionId)
 
     // Mirror the production pattern where a caller mutates and immediately
-    // flushes (e.g. setSessionStatus, or any UI flow that quits the app
+    // flushes (e.g. a metadata write, or any UI flow that quits the app
     // right after a metadata change). The disk must reflect the new value
     // by the time flushSession resolves — no debounce window.
-    const managed = (sm as unknown as { sessions: Map<string, { sessionStatus?: string }> })
+    const managed = (sm as unknown as { sessions: Map<string, { projectId?: string }> })
       .sessions.get(sessionId)!
-    managed.sessionStatus = 'cancelled'
+    managed.projectId = 'proj-cancelled'
     ;(sm as unknown as { persistSession: (m: unknown) => void }).persistSession(managed)
     await sm.flushSession(sessionId)
 
-    expect(readDiskHeader(sessionId).sessionStatus).toBe('cancelled')
+    expect(readDiskHeader(sessionId).projectId).toBe('proj-cancelled')
   })
 })

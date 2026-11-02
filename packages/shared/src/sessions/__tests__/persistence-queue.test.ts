@@ -31,8 +31,8 @@ describe('session persistence header conflict helpers', () => {
   })
 
   it('metadata signature changes when metadata changes', () => {
-    const a = makeHeader({ name: 'A', labels: ['x'] })
-    const b = makeHeader({ name: 'B', labels: ['x'] })
+    const a = makeHeader({ name: 'A' })
+    const b = makeHeader({ name: 'B' })
 
     expect(getHeaderMetadataSignature(a)).not.toBe(getHeaderMetadataSignature(b))
   })
@@ -40,9 +40,6 @@ describe('session persistence header conflict helpers', () => {
   it('merge preserves external metadata while keeping local computed fields', () => {
     const local = makeHeader({
       name: 'Local Name',
-      labels: ['local'],
-      isFlagged: false,
-      sessionStatus: 'todo',
       permissionMode: 'allow-all',
       hasUnread: true,
       lastReadMessageId: 'm-local',
@@ -52,9 +49,6 @@ describe('session persistence header conflict helpers', () => {
 
     const disk = makeHeader({
       name: 'Disk Name',
-      labels: ['disk'],
-      isFlagged: true,
-      sessionStatus: 'needs-review',
       permissionMode: 'safe',
       hasUnread: false,
       lastReadMessageId: 'm-disk',
@@ -65,9 +59,6 @@ describe('session persistence header conflict helpers', () => {
     const merged = mergeHeaderWithExternalMetadata(local, disk)
 
     expect(merged.name).toBe('Disk Name')
-    expect(merged.labels).toEqual(['disk'])
-    expect(merged.isFlagged).toBe(true)
-    expect(merged.sessionStatus).toBe('needs-review')
     expect(merged.permissionMode).toBe('safe')
     expect(merged.hasUnread).toBe(false)
     expect(merged.lastReadMessageId).toBe('m-disk')
@@ -78,8 +69,8 @@ describe('session persistence header conflict helpers', () => {
   })
 
   it('startup scenario: external metadata differs from local signature', () => {
-    const local = makeHeader({ name: 'Local Name', labels: ['local'] })
-    const disk = makeHeader({ name: 'External Name', labels: ['external'] })
+    const local = makeHeader({ name: 'Local Name' })
+    const disk = makeHeader({ name: 'External Name' })
 
     const localSig = getHeaderMetadataSignature(local)
     const diskSig = getHeaderMetadataSignature(disk)
@@ -93,6 +84,5 @@ describe('session persistence header conflict helpers', () => {
 
     const merged = mergeHeaderWithExternalMetadata(local, disk)
     expect(merged.name).toBe('External Name')
-    expect(merged.labels).toEqual(['external'])
   })
 })

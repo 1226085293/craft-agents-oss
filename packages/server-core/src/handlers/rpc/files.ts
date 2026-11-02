@@ -1,8 +1,9 @@
 import { readFile, writeFile, unlink, mkdir, readdir, stat } from 'fs/promises'
+import { existsSync } from 'fs'
 import { isAbsolute, join, resolve, dirname, parse as parsePath } from 'path'
 import { homedir } from 'os'
 import { validatePathFormat } from '../../utils/path-validation'
-import { randomUUID } from 'crypto'
+import { generateShortId } from '@craft-agent/shared/automations/resolve-config-path'
 import { RPC_CHANNELS, type FileAttachment, type DirectoryListingResult } from '@craft-agent/shared/protocol'
 import type { StoredAttachment } from '@craft-agent/core/types'
 import { readFileAttachment, validateImageForClaudeAPI, IMAGE_LIMITS } from '@craft-agent/shared/utils'
@@ -55,7 +56,6 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
       return content
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
-      // ENOENT is expected for optional config files (e.g. automations.json)
       if (error instanceof Error && 'code' in error && (error as NodeJS.ErrnoException).code === 'ENOENT') {
         deps.platform.logger.debug('readFile: file not found:', path)
       } else {
@@ -255,11 +255,20 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
       const attachmentsDir = getSessionAttachmentsPath(workspaceRootPath, sessionId)
       await mkdir(attachmentsDir, { recursive: true })
 
-      // Generate unique ID for this attachment
-      const id = randomUUID()
+      // Short id, not a UUID: the stored name is echoed back to the model as
+      // the inline `[attachment:…]` token (and in the image-dropped placeholder),
+      // where 36 characters of UUID is pure per-request token cost. 24 bits of
+      // entropy is enough because the name is only ever looked up inside one
+      // session's attachments folder (collisions retry below).
       const safeName = sanitizeFilename(attachment.name)
-      const storedFileName = `${id}_${safeName}`
-      const storedPath = join(attachmentsDir, storedFileName)
+      let id = generateShortId()
+      let storedFileName = `${id}_${safeName}`
+      let storedPath = join(attachmentsDir, storedFileName)
+      for (let attempt = 0; attempt < 5 && existsSync(storedPath); attempt++) {
+        id = generateShortId()
+        storedFileName = `${id}_${safeName}`
+        storedPath = join(attachmentsDir, storedFileName)
+      }
 
       // Track if image was resized (for return value)
       let wasResized = false
@@ -378,19 +387,16 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
       }
 
       // 2. Generate thumbnail (images only — PDFs/Office get icon fallback)
-      let thumbnailPath: string | undefined
+      // Kept as an in-memory base64 for the UI; no on-disk `_thumb.png` is
+      // written anymore — the renderer only ever reads thumbnailBase64 and never
+      // opened the disk file, so it was pure disk waste.
       let thumbnailBase64: string | undefined
-      const thumbFileName = `${id}_thumb.png`
-      const thumbPath = join(attachmentsDir, thumbFileName)
       try {
         const pngBuffer = await deps.platform.imageProcessor.process(storedPath, {
           resize: { width: 200, height: 200 },
           format: 'png',
         })
-        await writeFile(thumbPath, pngBuffer)
-        thumbnailPath = thumbPath
         thumbnailBase64 = pngBuffer.toString('base64')
-        filesToCleanup.push(thumbPath)
       } catch (thumbError) {
         // Thumbnail generation failed (non-image or corrupt) — icon fallback
         deps.platform.logger.info('Thumbnail generation failed (using fallback):', thumbError instanceof Error ? thumbError.message : thumbError)
@@ -432,7 +438,6 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
         size: finalSize, // Use final size (may differ if resized)
         originalSize: wasResized ? attachment.size : undefined, // Track original if resized
         storedPath,
-        thumbnailPath,
         thumbnailBase64,
         markdownPath,
         wasResized,

@@ -5,7 +5,7 @@
  * All agent events flow through a single pure function for consistent state transitions.
  */
 
-import type { Session, SessionEvent, Message, PermissionRequest, CredentialRequest, TypedError, PermissionMode, SessionStatus, AuthRequest, ToolDisplayMeta } from '../../shared/types'
+import type { Session, SessionEvent, Message, PermissionRequest, CredentialRequest, TypedError, PermissionMode, AuthRequest, ToolDisplayMeta } from '../../shared/types'
 
 /** Explicit SDK retry boundaries; keep their transport shape authoritative. */
 export type TextDiscardEvent = Extract<SessionEvent, { type: 'text_discard' }>
@@ -201,15 +201,6 @@ export interface SourcesChangedEvent {
 }
 
 /**
- * Labels changed event
- */
-export interface LabelsChangedEvent {
-  type: 'labels_changed'
-  sessionId: string
-  labels: string[]
-}
-
-/**
  * Project id changed event (session bound/unbound to a workspace project)
  */
 export interface ProjectIdChangedEvent {
@@ -221,33 +212,24 @@ export interface ProjectIdChangedEvent {
 /**
  * Todo state changed event (external metadata change or agent tool)
  */
-export interface SessionStatusChangedEvent {
-  type: 'session_status_changed'
-  sessionId: string
-  sessionStatus?: string
-}
 
 /**
  * Session metadata changed event — generic live push for programmatic metadata writes
- * (taskNodeCount, kanbanColumn) that don't ride the header-signature file-watch path.
  */
 export interface SessionMetadataChangedEvent {
   type: 'session_metadata_changed'
   sessionId: string
-  changes: Partial<Pick<Session, 'taskNodeCount' | 'kanbanColumn' | 'taskDraft' | 'taskSlug' | 'projectId'>>
-}
-
-/**
- * Session flagged/unflagged events (external metadata change)
- */
-export interface SessionFlaggedEvent {
-  type: 'session_flagged'
-  sessionId: string
-}
-
-export interface SessionUnflaggedEvent {
-  type: 'session_unflagged'
-  sessionId: string
+  changes: Partial<Pick<Session, 'projectId'>> & {
+    folderId?: string | null
+    archivedFolderId?: string | null
+    archivedFolderPath?: string[]
+    archivedProjectId?: string
+    archivedByParent?: string
+    sortOrder?: string
+    pinnedAt?: number
+    hasUnread?: boolean
+    lastReadMessageId?: string
+  }
 }
 
 /**
@@ -345,8 +327,17 @@ export interface InterruptedEvent {
   type: 'interrupted'
   sessionId: string
   message?: Message
-  /** Messages that were queued but not processed — should be restored to input field */
-  queuedMessages?: string[]
+}
+
+/**
+ * Queued messages changed event (2026-10-22 queued-panel).
+ * Carries the full ordered pending queue; the renderer renders it in the panel
+ * ABOVE the composer instead of as transcript bubbles.
+ */
+export interface QueuedMessagesChangedEvent {
+  type: 'queued_messages_changed'
+  sessionId: string
+  queuedMessages: import('../../shared/types').QueuedMessageSummary[]
 }
 
 /**
@@ -501,6 +492,7 @@ export interface TaskCompletedEvent {
   taskId: string
   status: 'completed' | 'failed' | 'stopped'
   outputFile?: string
+  output?: string
   summary?: string
   turnId?: string
 }
@@ -622,12 +614,8 @@ export type AgentEvent =
   | PermissionResolvedEvent
   | CredentialRequestEvent
   | SourcesChangedEvent
-  | LabelsChangedEvent
   | ProjectIdChangedEvent
-  | SessionStatusChangedEvent
   | SessionMetadataChangedEvent
-  | SessionFlaggedEvent
-  | SessionUnflaggedEvent
   | SessionArchivedEvent
   | SessionUnarchivedEvent
   | NameChangedEvent
@@ -650,6 +638,7 @@ export type AgentEvent =
   | WorkflowAgentCompletedEvent
   | UserMessageEvent
   | MessageRemovedEvent
+  | QueuedMessagesChangedEvent
   | SessionClearedEvent
   | MessageAnnotationsUpdatedEvent
   | SessionSharedEvent
@@ -666,7 +655,6 @@ export type Effect =
   | { type: 'credential_request'; request: CredentialRequest }
   | { type: 'generate_title'; sessionId: string; userMessage: string }
   | { type: 'permission_mode_changed'; sessionId: string; permissionMode: PermissionMode; previousPermissionMode?: PermissionMode; transitionDisplay?: string; modeVersion?: number; changedAt?: string; changedBy?: 'user' | 'system' | 'restore' | 'automation' | 'unknown' }
-  | { type: 'restore_input'; text: string }
   | { type: 'toast_error'; message: string }
 
 /**

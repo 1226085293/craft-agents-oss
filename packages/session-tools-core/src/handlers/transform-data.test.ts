@@ -129,6 +129,27 @@ afterAll(() => {
     expect(existsSync(join(dataDir, 'out.json'))).toBe(true);
   });
 
+  it('aborts a running script through AbortSignal without hanging', async () => {
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    const running = handleTransformData(
+      ctx(),
+      {
+        language: 'node',
+        script: 'setInterval(() => {}, 1000)',
+        inputFiles: ['in.txt'],
+        outputFile: 'aborted.json',
+      },
+      controller.signal,
+    );
+
+    setTimeout(() => controller.abort(), 100);
+    const result = await running;
+
+    expect(Date.now() - startedAt).toBeLessThan(4_000);
+    expect(result.isError).toBe(true);
+  });
+
   it('allows input files from skills directory (absolute path)', async () => {
     const skillAsset = join(skillsDir, 'branding', 'assets', 'template.pptx');
     const result = await handleTransformData(ctx(), {

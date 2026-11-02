@@ -59,10 +59,10 @@ export function ProjectMultiSelectFilter({
 
   const label =
     value.length === 0
-      ? t('kanban.allProjects')
+      ? t('common.allProjects')
       : value.length === 1
-        ? selectionName(value[0]) ?? t('kanban.projectsSelected', { count: 1 })
-        : t('kanban.projectsSelected', { count: value.length })
+        ? selectionName(value[0]) ?? t('common.projectsSelected', { count: 1 })
+        : t('common.projectsSelected', { count: value.length })
 
   return (
     <DropdownMenu>
@@ -81,7 +81,7 @@ export function ProjectMultiSelectFilter({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="max-w-[260px]">
         <DropdownMenuItem className="text-xs" disabled={value.length === 0} onSelect={() => onChange([])}>
-          {t('kanban.allProjects')}
+          {t('common.allProjects')}
         </DropdownMenuItem>
         {(projects.length > 0 || unassignedId) && <DropdownMenuSeparator />}
         {unassignedId && (

@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { createScriptRuntimeEnv } from '../runtime/sandbox-env.ts';
 import { isPathWithinDirectory, isPathWithinDirectoryForCreation } from '../runtime/path-security.ts';
 import { resolveScriptRuntime } from '../runtime/resolve-script-runtime.ts';
+import { killProcessTree } from '../runtime/kill-process-tree.ts';
 
 export interface TransformDataArgs {
   language: 'python3' | 'node' | 'bun';
@@ -26,6 +27,7 @@ export interface TransformDataArgs {
 }
 
 const TRANSFORM_DATA_TIMEOUT_MS = 30_000;
+const ABORT_FORCE_KILL_MS = 5_000;
 
 /**
  * Handle the transform_data tool call.
@@ -37,7 +39,9 @@ const TRANSFORM_DATA_TIMEOUT_MS = 30_000;
  */
 export async function handleTransformData(
   ctx: SessionToolContext,
-  args: TransformDataArgs
+  args: TransformDataArgs,
+  signal?: AbortSignal,
+  onKillResult?: (result: { ok: boolean; error?: string }) => void,
 ): Promise<ToolResult> {
   if (!ctx.sessionPath || !ctx.dataPath) {
     return errorResponse('transform_data requires sessionPath and dataPath in context.');
@@ -112,17 +116,57 @@ export async function handleTransformData(
       let stdout = '';
       let stderr = '';
       let timedOut = false;
+      let abortKillTimer: ReturnType<typeof setTimeout> | null = null;
+      let killResultReported = false;
+      let killPromise: Promise<{ ok: boolean; error?: string }> | null = null;
+      const reportKill = (result: { ok: boolean; error?: string }) => {
+        if (killResultReported) return;
+        killResultReported = true;
+        onKillResult?.(result);
+      };
+      const killTree = () => {
+        if (!killPromise) killPromise = killProcessTree(child.pid);
+        return killPromise.then(reportKill).catch((error) => {
+          reportKill({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        });
+      };
+
+      const onAbort = () => {
+        // Give the script a chance to exit on SIGTERM; force the tree after 5s.
+        try {
+          child.kill('SIGTERM');
+        } catch {
+          // already gone
+        }
+        if (!abortKillTimer) {
+          abortKillTimer = setTimeout(() => {
+            void killTree();
+          }, ABORT_FORCE_KILL_MS);
+        }
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) onAbort();
 
       const killTimer = setTimeout(() => {
         timedOut = true;
-        child.kill('SIGKILL');
+        if (abortKillTimer) {
+          clearTimeout(abortKillTimer);
+          abortKillTimer = null;
+        }
+        void killTree();
       }, TRANSFORM_DATA_TIMEOUT_MS);
 
       child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
       child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
 
-      child.on('close', (code) => {
+      child.on('close', async (code) => {
         clearTimeout(killTimer);
+        if (abortKillTimer) {
+          clearTimeout(abortKillTimer);
+          abortKillTimer = null;
+        }
+        signal?.removeEventListener('abort', onAbort);
+        if (signal?.aborted || timedOut) await killTree();
         if (timedOut) {
           resolvePromise({ stdout, stderr: `Script timed out after ${TRANSFORM_DATA_TIMEOUT_MS / 1000}s and was killed`, code });
         } else {
@@ -132,6 +176,11 @@ export async function handleTransformData(
 
       child.on('error', (err) => {
         clearTimeout(killTimer);
+        if (abortKillTimer) {
+          clearTimeout(abortKillTimer);
+          abortKillTimer = null;
+        }
+        signal?.removeEventListener('abort', onAbort);
         reject(err);
       });
     });

@@ -8,8 +8,11 @@
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAtomValue, useSetAtom } from 'jotai'
-import { AlertCircle, Globe, Copy, RefreshCw, Link2Off, Info, Pencil } from 'lucide-react'
+import { AlertCircle, Globe, Copy, RefreshCw, Link2Off, Info, Pencil, Maximize2, Minimize2, Search } from 'lucide-react'
+import { useAction } from '@/actions'
+import { getCurrentZone, setCurrentZone } from '@/actions/keybinding-context'
 import { ChatDisplay, type ChatDisplayHandle } from '@/components/app-shell/ChatDisplay'
+import { ChatSearchControl } from '@/components/app-shell/ChatSearchControl'
 import { PanelHeader } from '@/components/app-shell/PanelHeader'
 import { SessionMenu } from '@/components/app-shell/SessionMenu'
 import { CompactSessionMenu } from '@/components/app-shell/CompactSessionMenu'
@@ -27,7 +30,6 @@ import { navigate, routes } from '@/lib/navigate'
 import { coerceInputText } from '@/lib/input-text'
 import { deriveSessionMessagesLoadState, formatSessionLoadFailure } from '@/lib/session-load'
 import { ensureSessionMessagesLoadedAtom, forceSessionMessagesReloadAtom, loadedSessionsAtom, sessionMetaMapAtom } from '@/atoms/sessions'
-import { kanbanEditorTargetAtom } from '@/atoms/kanban'
 import { getSessionTitle } from '@/utils/session'
 // Model resolution: connection.defaultModel (no hardcoded defaults)
 import { resolveEffectiveConnectionSlug, isSessionConnectionUnavailable } from '@config/llm-connections'
@@ -58,21 +60,16 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     onSetActiveViewingSession,
     getDraft,
     hydrateDraftAttachments,
+    draftsLoadedVersion,
     onInputChange,
     onAttachmentsChange,
     enabledSources,
     skills,
-    labels,
-    onSessionLabelsChange,
     enabledModes,
-    sessionStatuses,
     onSessionSourcesChange,
     onRenameSession,
-    onFlagSession,
-    onUnflagSession,
     onArchiveSession,
     onUnarchiveSession,
-    onSessionStatusChange,
     onDeleteSession,
     rightSidebarButton,
     leadingAction,
@@ -81,8 +78,107 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     isSearchModeActive,
     chatDisplayRef,
     onChatMatchInfoChange,
+    chatSearchHandoff,
+    onChatSearchHandoffConsumed,
     isFocusedPanel,
+    isFocusMode,
+    onToggleFocusMode,
   } = useAppShellContext()
+
+  const localChatDisplayRef = React.useRef<ChatDisplayHandle | null>(null)
+  const setChatDisplayRef = React.useCallback((instance: ChatDisplayHandle | null) => {
+    localChatDisplayRef.current = instance
+  }, [])
+  React.useEffect(() => {
+    if (!chatDisplayRef || isFocusedPanel === false) return
+    const focusedDisplay = localChatDisplayRef.current
+    chatDisplayRef.current = focusedDisplay
+    return () => {
+      if (chatDisplayRef.current === focusedDisplay) chatDisplayRef.current = null
+    }
+  }, [chatDisplayRef, isFocusedPanel])
+  const [isChatSearchOpen, setIsChatSearchOpen] = React.useState(false)
+  const [isChatSearchDismissed, setIsChatSearchDismissed] = React.useState(false)
+  const [chatSearchQuery, setChatSearchQuery] = React.useState('')
+  const [chatMatchInfo, setChatMatchInfo] = React.useState({ count: 0, index: 0 })
+
+  const previousChatSessionId = React.useRef(sessionId)
+  React.useEffect(() => {
+    if (chatSearchHandoff?.sessionId !== sessionId) return
+    setChatSearchQuery(chatSearchHandoff.query)
+    setIsChatSearchDismissed(false)
+    setIsChatSearchOpen(true)
+    onChatSearchHandoffConsumed?.(chatSearchHandoff.requestId)
+  }, [chatSearchHandoff?.sessionId, chatSearchHandoff?.query, chatSearchHandoff?.requestId, sessionId, onChatSearchHandoffConsumed])
+
+  React.useEffect(() => {
+    if (previousChatSessionId.current === sessionId) return
+    previousChatSessionId.current = sessionId
+    if (chatSearchHandoff?.sessionId === sessionId) return
+    setIsChatSearchOpen(false)
+    setIsChatSearchDismissed(false)
+    setChatSearchQuery('')
+  }, [sessionId, chatSearchHandoff?.sessionId])
+
+  const handleChatMatchInfoChange = React.useCallback((info: { count: number; index: number; isHighlighting: boolean; sessionId: string | null }) => {
+    setChatMatchInfo({ count: info.count, index: info.index })
+    const matchesSessionListQuery = !isChatSearchOpen || chatSearchQuery === sessionListSearchQuery
+    if (isFocusedPanel !== false) {
+      onChatMatchInfoChange?.(matchesSessionListQuery ? info : { ...info, count: 0, index: 0, sessionId: null })
+    }
+  }, [chatSearchQuery, isChatSearchOpen, isFocusedPanel, sessionListSearchQuery, onChatMatchInfoChange])
+
+  React.useEffect(() => {
+    setIsChatSearchDismissed(false)
+  }, [sessionListSearchQuery])
+
+  const effectiveSearchQuery = isChatSearchOpen
+    ? chatSearchQuery
+    : isChatSearchDismissed ? undefined : sessionListSearchQuery
+  const effectiveSearchModeActive = !isChatSearchDismissed && (!!isSearchModeActive || isChatSearchOpen)
+
+  useAction('app.search', () => {
+    setChatSearchQuery((current) => isChatSearchOpen ? current : sessionListSearchQuery ?? '')
+    setIsChatSearchDismissed(false)
+    setIsChatSearchOpen(true)
+  }, {
+    enabled: () => getCurrentZone() === 'chat' && isFocusedPanel !== false,
+  }, [sessionListSearchQuery, isChatSearchOpen, isFocusedPanel])
+
+  const closeChatSearch = React.useCallback(() => {
+    setIsChatSearchOpen(false)
+    setIsChatSearchDismissed(true)
+    setChatSearchQuery('')
+  }, [])
+  const openChatSearch = React.useCallback(() => {
+    setChatSearchQuery(sessionListSearchQuery ?? '')
+    setIsChatSearchDismissed(false)
+    setIsChatSearchOpen(true)
+  }, [sessionListSearchQuery])
+  useAction('chat.nextSearchMatch', () => localChatDisplayRef.current?.goToNextMatch(), {
+    enabled: () => isChatSearchOpen && chatMatchInfo.count > 0 && isFocusedPanel !== false && getCurrentZone() === 'chat',
+  }, [isChatSearchOpen, chatMatchInfo.count, isFocusedPanel])
+  useAction('chat.prevSearchMatch', () => localChatDisplayRef.current?.goToPrevMatch(), {
+    enabled: () => isChatSearchOpen && chatMatchInfo.count > 0 && isFocusedPanel !== false && getCurrentZone() === 'chat',
+  }, [isChatSearchOpen, chatMatchInfo.count, isFocusedPanel])
+
+  const chatSearchControl = isChatSearchOpen ? (
+    <ChatSearchControl
+      query={chatSearchQuery}
+      matchCount={chatSearchQuery.trim().length > 0 ? chatMatchInfo.count : 0}
+      currentMatchIndex={chatMatchInfo.index}
+      onQueryChange={setChatSearchQuery}
+      onPrevious={() => localChatDisplayRef.current?.goToPrevMatch()}
+      onNext={() => localChatDisplayRef.current?.goToNextMatch()}
+      onClose={closeChatSearch}
+    />
+  ) : (
+    <PanelHeaderCenterButton
+      icon={<Search className="h-4 w-4" />}
+      onClick={openChatSearch}
+      aria-label={t('session.search')}
+    />
+  )
 
   // Use the unified session options hook for clean access
   const {
@@ -247,20 +343,6 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     return () => clearInterval(interval)
   }, [sessionId, getDraft])
 
-  // Listen for restore-input events (queued messages restored to input on abort)
-  React.useEffect(() => {
-    const handler = (e: Event) => {
-      const { sessionId: targetId, text } = (e as CustomEvent).detail ?? {}
-      if (targetId === sessionId) {
-        const nextText = coerceInputText(text)
-        setInputValue(nextText)
-        inputValueRef.current = nextText
-      }
-    }
-    window.addEventListener('craft:restore-input', handler)
-    return () => window.removeEventListener('craft:restore-input', handler)
-  }, [sessionId])
-
   const handleInputChange = React.useCallback((value: string) => {
     const nextText = coerceInputText(value)
     setInputValue(nextText)
@@ -273,14 +355,24 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   // local state from this prop and swaps in the restored list when ready.
   const [attachmentsValue, setAttachmentsValue] = React.useState<import('../../shared/types').FileAttachment[]>([])
 
+  // Attachments staged into this session's draft are only readable once the
+  // startup draft read has landed. Reset on session switch, hydrate when the ref
+  // is ready — and re-hydrate when `draftsLoadedVersion` flips, because the first
+  // attempt may have run against an empty draft map (image chips then stayed
+  // invisible for the entire session). An empty hydration result never clears the
+  // live list: that would wipe chips the user staged a moment ago.
+  React.useEffect(() => {
+    setAttachmentsValue([])
+  }, [sessionId])
+
   React.useEffect(() => {
     let cancelled = false
-    setAttachmentsValue([])
     hydrateDraftAttachments(sessionId).then((atts) => {
-      if (!cancelled) setAttachmentsValue(atts)
+      if (cancelled || atts.length === 0) return
+      setAttachmentsValue(atts)
     })
     return () => { cancelled = true }
-  }, [sessionId, hydrateDraftAttachments])
+  }, [sessionId, hydrateDraftAttachments, draftsLoadedVersion])
 
   // A session that still points at a strategy which has since been disabled,
   // deleted, or made unusable cannot route: the label goes red and sending is
@@ -470,10 +562,8 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   // Get display title for header - use getSessionTitle for consistent fallback logic with SessionList
   // Priority: name > first user message > preview > "New chat"
   const displayTitle = session ? getSessionTitle(session) : (sessionMeta ? getSessionTitle(sessionMeta) : t('chat.session'))
-  const isFlagged = session?.isFlagged || sessionMeta?.isFlagged || false
   const isArchived = session?.isArchived || sessionMeta?.isArchived || false
   const sharedUrl = session?.sharedUrl || sessionMeta?.sharedUrl || null
-  const currentSessionStatus = session?.sessionStatus || sessionMeta?.sessionStatus || 'todo'
   const hasMessages = !!(session?.messages?.length || sessionMeta?.lastFinalMessageId)
   const hasUnreadMessages = sessionMeta
     ? !!(sessionMeta.lastFinalMessageId && sessionMeta.lastFinalMessageId !== sessionMeta.lastReadMessageId)
@@ -498,14 +588,6 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     setRenameDialogOpen(false)
   }, [sessionId, renameName, displayTitle, onRenameSession])
 
-  const handleFlag = React.useCallback(() => {
-    onFlagSession(sessionId)
-  }, [sessionId, onFlagSession])
-
-  const handleUnflag = React.useCallback(() => {
-    onUnflagSession(sessionId)
-  }, [sessionId, onUnflagSession])
-
   const handleArchive = React.useCallback(() => {
     onArchiveSession(sessionId)
   }, [sessionId, onArchiveSession])
@@ -518,31 +600,6 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     onMarkSessionUnread(sessionId)
   }, [sessionId, onMarkSessionUnread])
 
-  const handleSessionStatusChange = React.useCallback((state: string) => {
-    onSessionStatusChange(sessionId, state)
-  }, [sessionId, onSessionStatusChange])
-
-  const handleLabelsChange = React.useCallback((newLabels: string[]) => {
-    onSessionLabelsChange?.(sessionId, newLabels)
-  }, [sessionId, onSessionLabelsChange])
-
-  // Task orchestrator sessions (spec-backed, top-level) get an "Edit task" header action
-  // that opens the board's full-pane Task editor prefilled from task.yaml — the same
-  // surface as creation, so goal/acceptance criteria/subtasks can change and the whole
-  // task can be re-run (Save & Run mints a fresh Conductor run).
-  const taskSlug = sessionMeta?.taskSlug
-  const isTaskOrchestrator = !!taskSlug && !sessionMeta?.parentSessionId
-  const setKanbanEditorTarget = useSetAtom(kanbanEditorTargetAtom)
-  const handleEditTask = React.useCallback(() => {
-    if (!taskSlug) return
-    setKanbanEditorTarget({
-      mode: 'edit',
-      sessionId,
-      taskSlug,
-      initialTitle: sessionMeta ? getSessionTitle(sessionMeta) : undefined,
-    })
-    navigate(routes.view.board())
-  }, [taskSlug, sessionId, sessionMeta, setKanbanEditorTarget])
 
   const handleDelete = React.useCallback(async () => {
     await onDeleteSession(sessionId)
@@ -682,26 +739,33 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     )
   }, [isCompactMode, sessionId, session?.sessionFolderPath, sessionMeta])
 
-  // Pencil opens the Task editor for orchestrator sessions; rendered before the
-  // share/info action. The slot div has no gap of its own, so compose with one here.
-  const editTaskButton = React.useMemo(() => {
-    if (!isTaskOrchestrator) return undefined
+  // Focus mode toggle sitting to the left of the share button: "zoom in"
+  // while the sidebars are visible, "zoom out" once focus mode is on. Only
+  // the icon/label swap — both directions call the same toggle action as
+  // View → Focus Mode (⌘.), so state can never drift between the two.
+  const focusModeButton = React.useMemo(() => {
+    if (isCompactMode || !onToggleFocusMode) return null
+    const label = isFocusMode ? t('chat.focusModeExit') : t('chat.focusModeEnter')
     return (
       <PanelHeaderCenterButton
-        icon={<Pencil className="h-4 w-4" />}
-        tooltip={t('kanban.editTask')}
-        onClick={handleEditTask}
+        icon={isFocusMode ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+        onClick={onToggleFocusMode}
+        tooltip={label}
+        aria-label={label}
+        aria-pressed={!!isFocusMode}
       />
     )
-  }, [isTaskOrchestrator, handleEditTask, t])
+  }, [isCompactMode, isFocusMode, onToggleFocusMode, t])
 
   const primaryHeaderAction = isCompactMode ? compactInfoButton : shareButton
-  const headerActions = editTaskButton ? (
+  // Header action cluster: focus toggle, chat search, then the primary action.
+  const headerActions = (
     <div className="flex items-center gap-1.5">
-      {editTaskButton}
+      {focusModeButton}
+      {chatSearchControl}
       {primaryHeaderAction}
     </div>
-  ) : primaryHeaderAction
+  )
 
   // Build title menu content for chat sessions using shared SessionMenu.
   // Desktop uses Radix DropdownMenu via PanelHeader; compact mode uses a
@@ -710,32 +774,20 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   const titleMenu = React.useMemo(() => (sessionMeta && !isCompactMode) ? (
     <SessionMenu
       item={sessionMeta}
-      sessionStatuses={sessionStatuses ?? []}
-      labels={labels ?? []}
-      onLabelsChange={handleLabelsChange}
       onRename={handleRename}
-      onFlag={handleFlag}
-      onUnflag={handleUnflag}
       onArchive={handleArchive}
       onUnarchive={handleUnarchive}
       onMarkUnread={handleMarkUnread}
-      onSessionStatusChange={handleSessionStatusChange}
       onOpenInNewWindow={handleOpenInNewWindow}
       onDelete={handleDelete}
     />
   ) : null, [
     sessionMeta,
     isCompactMode,
-    sessionStatuses,
-    labels,
-    handleLabelsChange,
     handleRename,
-    handleFlag,
-    handleUnflag,
     handleArchive,
     handleUnarchive,
     handleMarkUnread,
-    handleSessionStatusChange,
     handleOpenInNewWindow,
     handleDelete,
   ])
@@ -745,16 +797,10 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
       title={displayTitle}
       isRegeneratingTitle={isAsyncOperationOngoing}
       item={sessionMeta}
-      sessionStatuses={sessionStatuses ?? []}
-      labels={labels ?? []}
-      onLabelsChange={handleLabelsChange}
       onRename={handleRename}
-      onFlag={handleFlag}
-      onUnflag={handleUnflag}
       onArchive={handleArchive}
       onUnarchive={handleUnarchive}
       onMarkUnread={handleMarkUnread}
-      onSessionStatusChange={handleSessionStatusChange}
       onOpenInNewWindow={handleOpenInNewWindow}
       onDelete={handleDelete}
     />
@@ -763,16 +809,10 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     isCompactMode,
     displayTitle,
     isAsyncOperationOngoing,
-    sessionStatuses,
-    labels,
-    handleLabelsChange,
     handleRename,
-    handleFlag,
-    handleUnflag,
     handleArchive,
     handleUnarchive,
     handleMarkUnread,
-    handleSessionStatusChange,
     handleOpenInNewWindow,
     handleDelete,
   ])
@@ -790,7 +830,6 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
         lastMessageAt: sessionMeta.lastMessageAt || 0,
         messages: [],
         isProcessing: sessionMeta.isProcessing || false,
-        isFlagged: sessionMeta.isFlagged,
         workingDirectory: sessionMeta.workingDirectory,
         enabledSourceSlugs: sessionMeta.enabledSourceSlugs,
         sourceScope: sessionMeta.sourceScope,
@@ -798,11 +837,11 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
 
       return (
         <>
-          <div className="h-full flex flex-col">
+          <div className="h-full flex flex-col" data-focus-zone="chat" onPointerDown={() => setCurrentZone('chat')}>
             <PanelHeader  title={displayTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
             <div className="flex-1 flex flex-col min-h-0">
               <ChatDisplay
-                ref={chatDisplayRef}
+                ref={setChatDisplayRef}
                 session={skeletonSession}
                 onSendMessage={() => {}}
                 onOpenFile={handleOpenFile}
@@ -829,8 +868,6 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
                 onAttachmentsChange={handleAttachmentsChange}
                 sources={enabledSources}
                 skills={skills}
-                sessionStatuses={sessionStatuses}
-                onSessionStatusChange={handleSessionStatusChange}
                 workspaceId={activeWorkspaceId || undefined}
                 onSourcesChange={(slugs, scope) => onSessionSourcesChange?.(sessionId, slugs, scope)}
                 sourceScope={sessionMeta.sourceScope}
@@ -840,9 +877,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
                 messagesLoadError={messageLoadState.error}
                 messagesRetrying={messagesRetrying}
                 onRetryMessagesLoad={handleRetryMessagesLoad}
-                searchQuery={sessionListSearchQuery}
-                isSearchModeActive={isSearchModeActive}
-                onMatchInfoChange={onChatMatchInfoChange}
+                searchQuery={effectiveSearchQuery}
+                isSearchModeActive={effectiveSearchModeActive}
+                onMatchInfoChange={handleChatMatchInfoChange}
                 connectionUnavailable={connectionUnavailable}
                 compactMode={!!isCompactMode}
                 enableCompactModelPicker={!!isCompactMode}
@@ -876,11 +913,11 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
 
   return (
     <>
-      <div className="h-full flex flex-col">
+      <div className="h-full flex flex-col" data-focus-zone="chat" onPointerDown={() => setCurrentZone('chat')}>
         <PanelHeader  title={displayTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
         <div className="flex-1 flex flex-col min-h-0">
           <ChatDisplay
-            ref={chatDisplayRef}
+            ref={setChatDisplayRef}
             session={session}
             onSendMessage={(message, attachments, skillSlugs, options) => {
               if (session) {
@@ -890,6 +927,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
             onOpenFile={handleOpenFile}
             onOpenUrl={handleOpenUrl}
             currentModel={effectiveModel}
+            sessionModel={session?.model}
             gatewayStrategies={gatewayStrategies.strategies}
             effectiveStrategyId={sessionOpts.strategy ?? ''}
             onStrategyChange={(id) => setOption('strategy', id)}
@@ -911,10 +949,6 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
             onAttachmentsChange={handleAttachmentsChange}
             sources={enabledSources}
             skills={skills}
-            labels={labels}
-            onLabelsChange={(newLabels) => onSessionLabelsChange?.(sessionId, newLabels)}
-            sessionStatuses={sessionStatuses}
-            onSessionStatusChange={handleSessionStatusChange}
             workspaceId={activeWorkspaceId || undefined}
             onSourcesChange={(slugs, scope) => onSessionSourcesChange?.(sessionId, slugs, scope)}
             sourceScope={session?.sourceScope ?? sessionMeta?.sourceScope}
@@ -925,9 +959,9 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
             messagesLoadError={messageLoadState.error}
             messagesRetrying={messagesRetrying}
             onRetryMessagesLoad={handleRetryMessagesLoad}
-            searchQuery={sessionListSearchQuery}
-            isSearchModeActive={isSearchModeActive}
-            onMatchInfoChange={onChatMatchInfoChange}
+            searchQuery={effectiveSearchQuery}
+            isSearchModeActive={effectiveSearchModeActive}
+            onMatchInfoChange={handleChatMatchInfoChange}
             connectionUnavailable={connectionUnavailable}
             compactMode={!!isCompactMode}
             enableCompactModelPicker={!!isCompactMode}

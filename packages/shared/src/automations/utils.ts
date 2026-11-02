@@ -87,17 +87,12 @@ export function parsePromptReferences(prompt: string): PromptReferences {
  */
 export function getMatchValue(event: AutomationEvent, data: Record<string, unknown>): string {
   switch (event) {
-    case 'LabelAdd':
-    case 'LabelRemove':
-      return String(data.label ?? '');
-    case 'LabelConfigChange':
-      return ''; // Always matches
     case 'PermissionModeChange':
       return String(data.newMode ?? '');
-    case 'FlagChange':
-      return String(data.isFlagged ?? false);
-    case 'SessionStatusChange':
-      return String(data.newStatus ?? data.newState ?? '');
+    case 'SessionPathChange':
+      // newPath is null on deletion, so fall back to oldPath — a matcher on a
+      // folder id then catches both "moved into it" and "removed from it".
+      return String(data.newPath ?? data.oldPath ?? '');
     case 'PreToolUse':
     case 'PostToolUse':
       return String(data.toolName ?? (data.data as Record<string, unknown>)?.tool_name ?? '');

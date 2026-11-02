@@ -1,6 +1,7 @@
 import * as React from "react"
 import { useTranslation, Trans } from "react-i18next"
 import { useRef, useState, useEffect, useCallback, useMemo } from "react"
+import { createPortal } from "react-dom"
 import { useAtomValue, useStore } from "jotai"
 import { motion, AnimatePresence } from "motion/react"
 import {
@@ -17,6 +18,7 @@ import {
   X,
   Search,
   Plus,
+  Settings2,
   Trash2,
   DatabaseZap,
   Zap,
@@ -35,8 +37,10 @@ import {
   FolderKanban,
   PanelsTopLeft,
   Brain,
+  FolderPlus,
+  ChevronLeft,
+  ArrowLeft,
 } from "lucide-react"
-// SessionStatusIcons no longer used - icons come from dynamic sessionStatuses
 import { SourceAvatar } from "@/components/ui/source-avatar"
 import { TopBar } from "./TopBar"
 import { SquarePenRounded } from "../icons/SquarePenRounded"
@@ -45,7 +49,10 @@ import { cn } from "@/lib/utils"
 import { isMac } from "@/lib/platform"
 import { Button } from "@/components/ui/button"
 import { HeaderIconButton } from "@/components/ui/HeaderIconButton"
-import { resolveInheritedFilterParams, resolveInheritedNavigatorFilter, type FilterMode } from "./inherited-filter-params"
+import { resolveInheritedFilterParams, type FilterMode } from "./inherited-filter-params"
+import { filterSessionsByFolderScope, filterSessionsByFolderSearchScope } from "./session-search-scope"
+import { getFolderSubtreeIds } from "./folder-search"
+import { resolveKeyboardSearchTarget } from "./chat-search-routing"
 import { Separator } from "@/components/ui/separator"
 import { Tooltip, TooltipTrigger, TooltipContent, DocumentFormattedMarkdownOverlay } from "@craft-agent/ui"
 import {
@@ -73,12 +80,14 @@ import {
   AnimatedCollapsibleContent,
   springTransition as collapsibleSpring,
 } from "@/components/ui/collapsible"
-import { SessionList, type ChatGroupingMode } from "./SessionList"
+import { SessionList } from "./SessionList"
+import { FolderSection, type FolderSectionHandle } from "./FolderSection"
+import type { NavigatorFolderListHandle } from "./NavigatorFolderList"
+import { HeaderSearchControl } from "./HeaderSearchControl"
+import { useFolders } from "@/hooks/useFolders"
 import { MainContentPanel } from "./MainContentPanel"
 import { shouldRefreshUsageStats } from "./usage-refresh"
-import { BoardListToggle } from "./kanban/BoardListToggle"
 import { PanelStackContainer } from "./PanelStackContainer"
-import { CompactSessionListFilter } from "./CompactSessionListFilter"
 import type { ChatDisplayHandle } from "./ChatDisplay"
 import { LeftSidebar } from "./LeftSidebar"
 import { useSession } from "@/hooks/useSession"
@@ -90,24 +99,20 @@ import { getResizeGradientStyle } from "@/hooks/useResizeGradient"
 import { useAction, useActionLabel } from "@/actions"
 import { useFocusZone } from "@/hooks/keyboard"
 import { useFocusContext } from "@/context/FocusContext"
+import { getCurrentZone } from "@/actions/keybinding-context"
 import { getSessionTitle } from "@/utils/session"
 import { useSetAtom } from "jotai"
-import type { Session, Workspace, FileAttachment, PermissionRequest, LoadedSource, LoadedSkill, PermissionMode, SourceFilter, AutomationFilter, UsageStats } from "../../../shared/types"
+import type { Session, Workspace, FileAttachment, PermissionRequest, LoadedSource, LoadedSkill, PermissionMode, SourceFilter, UsageStats } from "../../../shared/types"
 import { sessionMetaMapAtom, sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
 import { sourcesAtom } from "@/atoms/sources"
 import { skillsAtom } from "@/atoms/skills"
 import { panelStackAtom, panelCountAtom, focusedPanelIdAtom, focusedSessionIdAtom, focusNextPanelAtom, focusPrevPanelAtom, parseSessionIdFromRoute } from "@/atoms/panel-stack"
-import { type SessionStatusId, type SessionStatus, isDefaultStatusId, statusConfigsToSessionStatuses } from "@/config/session-status-config"
-import { useStatuses } from "@/hooks/useStatuses"
-import { useLabels } from "@/hooks/useLabels"
-import { useViews } from "@/hooks/useViews"
 import { useContainerWidth } from "@/hooks/useContainerWidth"
-import { LabelIcon, LabelValueTypeIcon } from "@/components/ui/label-icon"
-import { filterSessionStatuses as filterLabelMenuStates } from "@/components/ui/label-menu"
-import { createLabelMenuItems, filterItems as filterLabelMenuItems, type LabelMenuItem } from "@/components/ui/label-menu-utils"
-import { buildLabelTree, getDescendantIds, getLabelDisplayName, flattenLabels, extractLabelId, findLabelById, sortLabelsForDisplay, matchesLabelFilter } from "@craft-agent/shared/labels"
-import type { LabelConfig, LabelTreeNode } from "@craft-agent/shared/labels"
 import { resolveEntityColor } from "@craft-agent/shared/colors"
+import { getFolderIdsToCollapseOnAncestorNavigation, getFolderPathParts } from "./folder-path"
+import { getUniqueFolderName } from "@craft-agent/shared/sessions/folder-tree"
+import { dragState } from "./dragState"
+import { getEnteredProjectDetailScopeId } from "./project-navigation"
 import * as storage from "@/lib/local-storage"
 import { toast } from "sonner"
 import { navigate, routes } from "@/lib/navigate"
@@ -119,19 +124,19 @@ import {
   isSourcesNavigation,
   isSettingsNavigation,
   isSkillsNavigation,
-  isAutomationsNavigation,
   isProjectsNavigation,
   isPagesNavigation,
+  isAutomationsNavigation,
   type NavigationState,
 } from "@/contexts/NavigationContext"
 import type { SettingsSubpage } from "../../../shared/types"
 import { SourcesListPanel } from "./SourcesListPanel"
 import { SkillsListPanel } from "./SkillsListPanel"
-import { AutomationsListPanel } from "../automations/AutomationsListPanel"
 import { ProjectsListPanel } from "./ProjectsListPanel"
-import { APP_EVENTS, AGENT_EVENTS, type AutomationFilterKind, AUTOMATION_TYPE_TO_FILTER_KIND } from "../automations/types"
-import { useAutomations } from "@/hooks/useAutomations"
 import { useProjects } from "@/hooks/useProjects"
+import { useAutomations } from "@/hooks/useAutomations"
+import { APP_EVENTS, AGENT_EVENTS, AUTOMATION_TYPE_TO_FILTER_KIND } from "@/components/automations/types"
+import { AutomationsListPanel } from "@/components/automations/AutomationsListPanel"
 import { usePages } from "@/hooks/usePages"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { PanelHeader } from "./PanelHeader"
@@ -177,309 +182,6 @@ interface AppShellProps {
   isFocusedMode?: boolean
 }
 
-const altClickTooltipLabel = isMac ? '⌥ click to exclude' : 'Alt click to exclude'
-
-/** Wraps children in a Tooltip that shows instantly on hover — only rendered when `show` is true. */
-function AltExcludeTooltip({ show, children }: { show: boolean; children: React.ReactNode }) {
-  if (!show) return children
-  return (
-    <Tooltip delayDuration={0}>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent side="right" className="text-xs">{altClickTooltipLabel}</TooltipContent>
-    </Tooltip>
-  )
-}
-
-/**
- * FilterModeBadge - Display-only badge showing the current filter mode.
- * Shows a checkmark for 'include' and an X for 'exclude'. Used as a visual
- * indicator inside DropdownMenuSubTrigger rows (the actual mode switching
- * happens via the sub-menu content, not this badge).
- */
-function FilterModeBadge({ mode }: { mode: FilterMode }) {
-  return (
-    <span
-      className={cn(
-        "flex items-center justify-center h-5 w-5 rounded-[4px] -mr-1",
-        mode === 'include'
-          ? "bg-background text-foreground shadow-minimal"
-          : "bg-destructive/10 text-destructive shadow-tinted",
-      )}
-      style={mode === 'exclude' ? { '--shadow-color': 'var(--destructive-rgb)' } as React.CSSProperties : undefined}
-    >
-      {mode === 'include' ? <Check className="!h-2.5 !w-2.5" /> : <X className="!h-2.5 !w-2.5" />}
-    </span>
-  )
-}
-
-/**
- * FilterModeSubMenuItems - Shared sub-menu content for switching filter mode.
- * Renders Include / Exclude / Remove options using StyledDropdownMenuItem for
- * consistent styling. Used inside StyledDropdownMenuSubContent by both leaf
- * and group label items when they have an active filter mode.
- */
-function FilterModeSubMenuItems({
-  mode,
-  onChangeMode,
-  onRemove,
-}: {
-  mode: FilterMode
-  onChangeMode: (mode: FilterMode) => void
-  onRemove: () => void
-}) {
-  const { t } = useTranslation()
-  return (
-    <>
-      <StyledDropdownMenuItem
-        onClick={(e) => { e.preventDefault(); onChangeMode('include') }}
-        className={cn(mode === 'include' && "bg-foreground/[0.03]")}
-      >
-        <Check className="h-3.5 w-3.5 shrink-0" />
-        <span className="flex-1">{t("filter.include")}</span>
-      </StyledDropdownMenuItem>
-      <StyledDropdownMenuItem
-        onClick={(e) => { e.preventDefault(); onChangeMode('exclude') }}
-        className={cn(mode === 'exclude' && "bg-foreground/[0.03]")}
-      >
-        <X className="h-3.5 w-3.5 shrink-0" />
-        <span className="flex-1">{t("filter.exclude")}</span>
-      </StyledDropdownMenuItem>
-      <StyledDropdownMenuSeparator />
-      <StyledDropdownMenuItem
-        onClick={(e) => { e.preventDefault(); onRemove() }}
-      >
-        <Trash2 className="h-3.5 w-3.5 shrink-0" />
-        <span className="flex-1">{t("common.clear")}</span>
-      </StyledDropdownMenuItem>
-    </>
-  )
-}
-
-/**
- * FilterMenuRow - Consistent layout for filter menu items.
- * Enforces: [icon 14px box] [label flex] [accessory 12px box]
- */
-function FilterMenuRow({
-  icon,
-  label,
-  accessory,
-  iconClassName,
-  iconStyle,
-  noIconContainer,
-}: {
-  icon: React.ReactNode
-  label: React.ReactNode
-  accessory?: React.ReactNode
-  /** Additional classes for icon container (e.g., for status icon scaling) */
-  iconClassName?: string
-  /** Style for icon container (e.g., for status icon color) */
-  iconStyle?: React.CSSProperties
-  /** When true, skip the icon container (for icons that have their own container) */
-  noIconContainer?: boolean
-}) {
-  return (
-    <>
-      {noIconContainer ? (
-        // Wrapper for color inheritance. Clone icon to add bare prop (removes EntityIcon container).
-        <span style={iconStyle}>
-          {React.isValidElement(icon) ? React.cloneElement(icon as React.ReactElement<{ bare?: boolean }>, { bare: true }) : icon}
-        </span>
-      ) : (
-        <span
-          className={cn("h-3.5 w-3.5 flex items-center justify-center shrink-0", iconClassName)}
-          style={iconStyle}
-        >
-          {icon}
-        </span>
-      )}
-      <span className="flex-1">{label}</span>
-      <span className="shrink-0">{accessory}</span>
-    </>
-  )
-}
-
-/**
- * FilterLabelItems - Recursive component for rendering label tree in the filter dropdown.
- *
- * Rendering rules by label state:
- * - **Inactive leaf**: StyledDropdownMenuItem — click to add as 'include'
- * - **Active leaf**: DropdownMenuSub — SubTrigger shows label + mode badge, SubContent
- *   has Include/Exclude/Remove options (uses Radix's built-in safe-triangle hover)
- * - **Group (with children)**: Always a DropdownMenuSub. When active, SubContent shows
- *   mode options first, then separator, then children. When inactive, shows a self-toggle
- *   item, then separator, then children.
- * - **Pinned labels**: Shown with a check mark, non-interactive (no toggle/sub-menu).
- */
-function FilterLabelItems({
-  labels,
-  labelFilter,
-  setLabelFilter,
-  pinnedLabelId,
-  altHeld,
-}: {
-  labels: LabelConfig[]
-  labelFilter: Map<string, FilterMode>
-  setLabelFilter: (updater: Map<string, FilterMode> | ((prev: Map<string, FilterMode>) => Map<string, FilterMode>)) => void
-  /** Label ID pinned by the current route (non-removable, shown as checked+disabled) */
-  pinnedLabelId?: string | null
-  altHeld?: boolean
-}) {
-  /** Toggle a label filter: if active → remove, if inactive → add as 'include' (or 'exclude' with Alt) */
-  const toggleLabel = (id: string, altKey = false) => {
-    setLabelFilter(prev => {
-      const next = new Map(prev)
-      if (next.has(id)) next.delete(id)
-      else next.set(id, altKey ? 'exclude' : 'include')
-      return next
-    })
-  }
-
-  /** Build callbacks for changing/removing a label's filter mode */
-  const makeModeCallbacks = (id: string) => ({
-    onChangeMode: (newMode: FilterMode) => setLabelFilter(prev => {
-      const next = new Map(prev)
-      next.set(id, newMode)
-      return next
-    }),
-    onRemove: () => setLabelFilter(prev => {
-      const next = new Map(prev)
-      next.delete(id)
-      return next
-    }),
-  })
-
-  return (
-    <>
-      {labels.map(label => {
-        const hasChildren = label.children && label.children.length > 0
-        const isPinned = label.id === pinnedLabelId
-        const mode = labelFilter.get(label.id)
-        const isActive = !!mode && !isPinned
-
-        // --- Group labels (have children) → always DropdownMenuSub ---
-        if (hasChildren) {
-          // Check if any child has an active filter (to show indicator on parent)
-          const hasActiveChild = label.children!.some(child => {
-            const childMode = labelFilter.get(child.id)
-            return !!childMode && child.id !== pinnedLabelId
-          })
-          const showIndicator = isActive || hasActiveChild || isPinned
-
-          return (
-            <DropdownMenuSub key={label.id}>
-              <StyledDropdownMenuSubTrigger>
-                <FilterMenuRow
-                  icon={<LabelIcon label={label} size="lg" hasChildren />}
-                  label={label.name}
-                  accessory={
-                    showIndicator ? <Check className="h-3 w-3 text-muted-foreground" /> : undefined
-                  }
-                />
-              </StyledDropdownMenuSubTrigger>
-              <StyledDropdownMenuSubContent minWidth="min-w-[160px]">
-                {isActive ? (
-                  // Active group: group title as nested sub-trigger for mode options, then children
-                  <>
-                    <DropdownMenuSub>
-                      {/* Click the group title to clear, hover to open mode submenu */}
-                      <StyledDropdownMenuSubTrigger onClick={(e) => { e.preventDefault(); toggleLabel(label.id, e.altKey) }}>
-                        <FilterMenuRow
-                          icon={<LabelIcon label={label} size="lg" hasChildren />}
-                          label={label.name}
-                          accessory={<FilterModeBadge mode={mode} />}
-                        />
-                      </StyledDropdownMenuSubTrigger>
-                      <StyledDropdownMenuSubContent minWidth="min-w-[140px]">
-                        <FilterModeSubMenuItems mode={mode} {...makeModeCallbacks(label.id)} />
-                      </StyledDropdownMenuSubContent>
-                    </DropdownMenuSub>
-                    <StyledDropdownMenuSeparator />
-                    <FilterLabelItems
-                      labels={label.children!}
-                      labelFilter={labelFilter}
-                      setLabelFilter={setLabelFilter}
-                      pinnedLabelId={pinnedLabelId}
-                      altHeld={altHeld}
-                    />
-                  </>
-                ) : (
-                  // Inactive group: self-toggle item, then children
-                  <>
-                    <AltExcludeTooltip show={!!altHeld && !isPinned}>
-                      <StyledDropdownMenuItem
-                        disabled={isPinned}
-                        onClick={(e) => {
-                          if (isPinned) return
-                          e.preventDefault()
-                          toggleLabel(label.id, e.altKey)
-                        }}
-                      >
-                        <FilterMenuRow
-                          icon={<LabelIcon label={label} size="lg" hasChildren />}
-                          label={label.name}
-                          accessory={isPinned ? <Check className="h-3 w-3 text-muted-foreground" /> : undefined}
-                        />
-                      </StyledDropdownMenuItem>
-                    </AltExcludeTooltip>
-                    <StyledDropdownMenuSeparator />
-                    <FilterLabelItems
-                      labels={label.children!}
-                      labelFilter={labelFilter}
-                      setLabelFilter={setLabelFilter}
-                      pinnedLabelId={pinnedLabelId}
-                      altHeld={altHeld}
-                    />
-                  </>
-                )}
-              </StyledDropdownMenuSubContent>
-            </DropdownMenuSub>
-          )
-        }
-
-        // --- Active leaf label → DropdownMenuSub with mode options ---
-        if (isActive) {
-          return (
-            <DropdownMenuSub key={label.id}>
-              {/* Click the item itself to clear, hover to open mode submenu */}
-              <StyledDropdownMenuSubTrigger onClick={(e) => { e.preventDefault(); toggleLabel(label.id, e.altKey) }}>
-                <FilterMenuRow
-                  icon={<LabelIcon label={label} size="lg" />}
-                  label={label.name}
-                  accessory={<FilterModeBadge mode={mode} />}
-                />
-              </StyledDropdownMenuSubTrigger>
-              <StyledDropdownMenuSubContent minWidth="min-w-[140px]">
-                <FilterModeSubMenuItems mode={mode} {...makeModeCallbacks(label.id)} />
-              </StyledDropdownMenuSubContent>
-            </DropdownMenuSub>
-          )
-        }
-
-        // --- Inactive / pinned leaf label → simple toggleable item ---
-        return (
-          <AltExcludeTooltip key={label.id} show={!!altHeld && !isPinned}>
-            <StyledDropdownMenuItem
-              disabled={isPinned}
-              onClick={(e) => {
-                if (isPinned) return
-                e.preventDefault()
-                toggleLabel(label.id, e.altKey)
-              }}
-            >
-              <FilterMenuRow
-                icon={<LabelIcon label={label} size="lg" />}
-                label={label.name}
-                accessory={isPinned ? <Check className="h-3 w-3 text-muted-foreground" /> : undefined}
-              />
-            </StyledDropdownMenuItem>
-          </AltExcludeTooltip>
-        )
-      })}
-    </>
-  )
-}
-
-
 /**
  * AppShell - Main 3-panel layout container
  *
@@ -487,7 +189,6 @@ function FilterLabelItems({
  *
  * Session Filters:
  * - 'allSessions': Shows all sessions
- * - 'flagged': Shows flagged sessions
  * - 'state': Shows sessions with a specific todo state
  */
 export function AppShell(props: AppShellProps) {
@@ -520,13 +221,10 @@ function AppShellContent({
     onSelectWorkspace,
     onRefreshWorkspaces,
     onDeleteSession,
-    onFlagSession,
-    onUnflagSession,
     onArchiveSession,
     onUnarchiveSession,
     onMarkSessionRead,
     onMarkSessionUnread,
-    onSessionStatusChange,
     onRenameSession,
     onOpenSettings,
     onOpenKeyboardShortcuts,
@@ -541,9 +239,6 @@ function AppShellContent({
   // Get hotkey labels from centralized action registry
   const newChatHotkey = useActionLabel('app.newChat').hotkey
 
-  // Default statuses have i18n keys; custom statuses use their configured label
-  const statusLabel = (state: SessionStatus) =>
-    isDefaultStatusId(state.id) ? t(`status.${state.id}`, state.label) : state.label
 
   const [isSidebarVisible, setIsSidebarVisible] = React.useState(() => {
     return storage.get(storage.KEYS.sidebarVisible, !defaultCollapsed)
@@ -636,9 +331,8 @@ function AppShellContent({
 
   const sessionFilter = sessionsContext?.filter ?? null
 
-  // Board view replaces the session-list navigator with the full-width Kanban panel,
-  // so the navigator (and its resize handle) collapse to zero width while it's active.
-  const isBoardView = isSessionsNavigation(navState) && navState.viewMode === 'board'
+  // Automations type filter (scheduled / event / agentic), null when unfiltered.
+  const automationFilter = isAutomationsNavigation(navState) ? (navState.filter ?? null) : null
 
   // Pages behaves the same way: both the library grid and an open page render
   // full-width in the content area — there is no pages navigator list.
@@ -652,73 +346,26 @@ function AppShellContent({
   // Derive source filter from navigation state (only when in sources navigator)
   const sourceFilter: SourceFilter | null = isSourcesNavigation(navState) ? navState.filter ?? null : null
 
-  // Derive automation filter from navigation state (only when in automations navigator)
-  const automationFilter: AutomationFilter | null = isAutomationsNavigation(navState) ? navState.filter ?? null : null
-
-  // Per-view filter storage: each session list view (allSessions, flagged, state:X, label:X, view:X)
-  // has its own independent set of status and label filters.
-  // Each filter entry stores a mode ('include' or 'exclude') for tri-state filtering.
+  // Per-view filter storage: each session list view has its own independent project
+  // filter. Each filter entry stores a mode ('include' or 'exclude') for tri-state filtering.
   type FilterEntry = Record<string, FilterMode> // id → mode
-  type ViewFiltersMap = Record<string, { statuses: FilterEntry, labels: FilterEntry, projects?: FilterEntry, groupingMode?: ChatGroupingMode }>
+  type ViewFiltersMap = Record<string, { projects?: FilterEntry }>
 
   // Compute a stable key for the current chat filter view
   const sessionFilterKey = useMemo(() => {
     if (!sessionFilter) return null
     switch (sessionFilter.kind) {
       case 'allSessions': return 'allSessions'
-      case 'flagged': return 'flagged'
       case 'archived': return 'archived'
-      case 'state': return `state:${sessionFilter.stateId}`
-      case 'label': return `label:${sessionFilter.labelId}`
-      case 'view': return `view:${sessionFilter.viewId}`
       default: return 'allSessions'
     }
   }, [sessionFilter])
 
   const [viewFiltersMap, setViewFiltersMap] = React.useState<ViewFiltersMap>(() => {
     const saved = storage.get<ViewFiltersMap>(storage.KEYS.viewFilters, {})
-    // Backward compat: migrate old format (arrays) into new format (Record<string, FilterMode>)
-    if (saved.allSessions && Array.isArray((saved.allSessions as any).statuses)) {
-      // Old format: { statuses: string[], labels: string[] } → new: { statuses: Record, labels: Record }
-      for (const key of Object.keys(saved)) {
-        const entry = saved[key] as any
-        if (Array.isArray(entry.statuses)) {
-          const newStatuses: FilterEntry = {}
-          for (const id of entry.statuses) newStatuses[id] = 'include'
-          const newLabels: FilterEntry = {}
-          for (const id of entry.labels) newLabels[id] = 'include'
-          saved[key] = { statuses: newStatuses, labels: newLabels }
-        }
-      }
-    }
-    // Also migrate legacy global filters if no allSessions entry exists
-    if (!saved.allSessions) {
-      const oldStatuses = storage.get<SessionStatusId[]>(storage.KEYS.listFilter, [])
-      const oldLabels = storage.get<string[]>(storage.KEYS.labelFilter, [])
-      if (oldStatuses.length > 0 || oldLabels.length > 0) {
-        const statuses: FilterEntry = {}
-        for (const id of oldStatuses) statuses[id] = 'include'
-        const labels: FilterEntry = {}
-        for (const id of oldLabels) labels[id] = 'include'
-        saved.allSessions = { statuses, labels }
-      }
-    }
     return saved
   })
 
-  // Derive current view's status filter as a Map<SessionStatusId, FilterMode>
-  const listFilter = useMemo(() => {
-    if (!sessionFilterKey) return new Map<SessionStatusId, FilterMode>()
-    const entry = viewFiltersMap[sessionFilterKey]?.statuses ?? {}
-    return new Map<SessionStatusId, FilterMode>(Object.entries(entry) as [SessionStatusId, FilterMode][])
-  }, [viewFiltersMap, sessionFilterKey])
-
-  // Derive current view's label filter as a Map<string, FilterMode>
-  const labelFilter = useMemo(() => {
-    if (!sessionFilterKey) return new Map<string, FilterMode>()
-    const entry = viewFiltersMap[sessionFilterKey]?.labels ?? {}
-    return new Map<string, FilterMode>(Object.entries(entry) as [string, FilterMode][])
-  }, [viewFiltersMap, sessionFilterKey])
 
   // Derive current view's project filter as a Map<projectId, FilterMode>
   const projectFilter = useMemo(() => {
@@ -727,43 +374,15 @@ function AppShellContent({
     return new Map<string, FilterMode>(Object.entries(entry) as [string, FilterMode][])
   }, [viewFiltersMap, sessionFilterKey])
 
-  // Setter for status filter — updates only the current view's entry in the map
-  const setListFilter = useCallback((updater: Map<SessionStatusId, FilterMode> | ((prev: Map<SessionStatusId, FilterMode>) => Map<SessionStatusId, FilterMode>)) => {
-    setViewFiltersMap(prev => {
-      if (!sessionFilterKey) return prev
-      const current = new Map<SessionStatusId, FilterMode>(Object.entries(prev[sessionFilterKey]?.statuses ?? {}) as [SessionStatusId, FilterMode][])
-      const next = typeof updater === 'function' ? updater(current) : updater
-      const existing = prev[sessionFilterKey]
-      return {
-        ...prev,
-        [sessionFilterKey]: {
-          statuses: Object.fromEntries(next),
-          labels: existing?.labels ?? {},
-          projects: existing?.projects ?? {},
-          groupingMode: existing?.groupingMode,
-        }
-      }
-    })
-  }, [sessionFilterKey])
-
-  // Setter for label filter — updates only the current view's entry in the map
-  const setLabelFilter = useCallback((updater: Map<string, FilterMode> | ((prev: Map<string, FilterMode>) => Map<string, FilterMode>)) => {
-    setViewFiltersMap(prev => {
-      if (!sessionFilterKey) return prev
-      const current = new Map<string, FilterMode>(Object.entries(prev[sessionFilterKey]?.labels ?? {}) as [string, FilterMode][])
-      const next = typeof updater === 'function' ? updater(current) : updater
-      const existing = prev[sessionFilterKey]
-      return {
-        ...prev,
-        [sessionFilterKey]: {
-          statuses: existing?.statuses ?? {},
-          labels: Object.fromEntries(next),
-          projects: existing?.projects ?? {},
-          groupingMode: existing?.groupingMode,
-        }
-      }
-    })
-  }, [sessionFilterKey])
+  // An explicit project include (jump-to-project state) narrows the list to
+  // that project's sessions: it suspends D9 and the folder scope, and the rail
+  // highlights the project entry instead of "All Sessions".
+  const hasProjectInclude = useMemo(() => {
+    for (const mode of projectFilter.values()) {
+      if (mode === 'include') return true
+    }
+    return false
+  }, [projectFilter])
 
   // Setter for project filter — updates only the current view's entry in the map
   const setProjectFilter = useCallback((updater: Map<string, FilterMode> | ((prev: Map<string, FilterMode>) => Map<string, FilterMode>)) => {
@@ -775,10 +394,7 @@ function AppShellContent({
       return {
         ...prev,
         [sessionFilterKey]: {
-          statuses: existing?.statuses ?? {},
-          labels: existing?.labels ?? {},
           projects: Object.fromEntries(next),
-          groupingMode: existing?.groupingMode,
         }
       }
     })
@@ -788,66 +404,156 @@ function AppShellContent({
   // context menu — sets the allSessions view's project filter (preserving its
   // other filters), then navigates.
   const handleJumpToProjectSessions = useCallback((projectId: string) => {
+    // The project becomes the active scope: drop the folder scope so the two
+    // never stack — the rail highlights exactly one scope row.
+    setRootFolderBrowseId(undefined)
+    setFolderScopeId(null)
     setViewFiltersMap(prev => {
       const existing = prev['allSessions']
       return {
         ...prev,
         allSessions: {
-          statuses: existing?.statuses ?? {},
-          labels: existing?.labels ?? {},
           projects: { [projectId]: 'include' },
-          groupingMode: existing?.groupingMode,
         }
       }
     })
     navigate(routes.view.allSessions())
   }, [])
 
-  // Jump to All Sessions scoped to a task: replace the allSessions view's label filter
-  // (and project filter, when the task is bound to one) with the task's scope, then open
-  // the session. These are the SAME user-clearable filters the list-header chips edit —
-  // clearing them afterwards works exactly like any hand-set filter. Mirrors
-  // handleJumpToProjectSessions; used by kanban tile/subtask clicks and post-create.
-  const handleJumpToTaskSessions = useCallback(
-    (sessionId: string, scope: { labelId: string; projectId?: string }) => {
-      setViewFiltersMap(prev => {
-        const existing = prev['allSessions']
-        return {
-          ...prev,
-          allSessions: {
-            statuses: existing?.statuses ?? {},
-            labels: { [scope.labelId]: 'include' },
-            projects: scope.projectId ? { [scope.projectId]: 'include' } : {},
-            groupingMode: existing?.groupingMode,
-          }
-        }
-      })
-      navigate(routes.view.allSessions(sessionId))
-    },
-    []
-  )
+  // Picking a folder in the RAIL tree means browsing "All Sessions" (that tree
+  // is always the root tree): drop any project include so the list really is
+  // the root folder's sessions. The navigator list's project folders enter via
+  // plain setFolderScopeId — they narrow within the project instead. Root-tree
+  // navigation also exits the rail's project-tree mode (mode 2).
+  const handleSelectFolderScope = useCallback((folderId: string | null) => {
+    setEnteredProjectId(null)
+    setRootFolderBrowseId(undefined)
+    setFolderScopeId(folderId)
+    setViewFiltersMap(prev => {
+      const entry = prev['allSessions']
+      if (!entry || Object.keys(entry.projects ?? {}).length === 0) return prev
+      return { ...prev, allSessions: { projects: {} } }
+    })
+  }, [])
+
+  const handleBrowseRootFolderInProjectMode = useCallback((folderId: string | null) => {
+    setRootFolderBrowseId(folderId)
+    navigate(routes.view.allSessions())
+  }, [])
+
+  const handleSelectProjectFolder = useCallback((folderId: string | null) => {
+    setRootFolderBrowseId(undefined)
+    setFolderScopeId(folderId)
+  }, [])
+
+  // Drag a session across scopes (root ↔ project): the atomic moveToScope
+  // command rebinds project + folder in one step; the target folder must exist
+  // in the target scope, so cross-scope drops carry folderId: null.
+  // Session metadata is declared far below (it comes from a Jotai atom), so the
+  // drop handlers read it through a ref instead of closing over it directly —
+  // referencing the atom value here would hit the temporal dead zone and take
+  // the whole shell down.
+  const sessionMetaMapRef = React.useRef<ReadonlyMap<string, { projectId?: string; folderId?: string | null }>>(new Map())
+
+  const handleDropSessionToScope = useCallback(async (sessionId: string, targetProjectId: string | null, targetFolderId: string | null) => {
+    try {
+      // Compare against the session's REAL binding, not the drag state: a stale
+      // drag state made an already-filed session look movable, and the move then
+      // either did nothing or failed silently.
+      const meta = sessionMetaMapRef.current.get(sessionId) as { projectId?: string; folderId?: string | null } | undefined
+      const currentProject = meta?.projectId ?? null
+      const currentFolder = meta?.folderId ?? null
+      if (currentProject === (targetProjectId ?? null) && currentFolder === (targetFolderId ?? null)) {
+        toast.info(t('folders.alreadyInFolder'))
+        return
+      }
+      await window.electronAPI.sessionCommand(sessionId, { type: 'moveToScope', projectId: targetProjectId, folderId: targetFolderId })
+      // Filters stay untouched for the same reason: a drop must not re-scope the
+      // navigator under the user.
+    } catch (error) {
+      console.error('[AppShell] Failed to move session across scopes:', error)
+      const detail = error instanceof Error ? error.message : String(error)
+      toast.error(`${t('folders.moveFailed')}${detail ? `: ${detail}` : ''}`)
+    }
+  }, [t])
+
+  // Move a folder subtree between workspace/project trees, optionally into a
+  // folder. Ask before applying the deterministic sibling suffix on collision.
+  const handleDropFolderToScope = useCallback(async (
+    folderId: string,
+    fromProjectId: string | null,
+    toProjectId: string | null,
+    targetParentId: string | null = null,
+  ) => {
+    if (!activeWorkspaceId) return
+    try {
+      const [sourceFolders, targetFolders] = await Promise.all([
+        window.electronAPI.listFolders(activeWorkspaceId, { projectId: fromProjectId }),
+        window.electronAPI.listFolders(activeWorkspaceId, { projectId: toProjectId }),
+      ])
+      const sourceFolder = sourceFolders.find(folder => folder.id === folderId)
+      if (!sourceFolder) throw new Error('Dragged folder no longer exists')
+      const name = getUniqueFolderName(sourceFolder.name, targetFolders, targetParentId, fromProjectId === toProjectId ? folderId : undefined)
+      if (name !== sourceFolder.name && !window.confirm(t('folders.duplicateNameConfirm', { name: sourceFolder.name, suggestedName: name }))) return
+      if (fromProjectId === toProjectId) {
+        await window.electronAPI.moveFolder(activeWorkspaceId, { projectId: fromProjectId }, { id: folderId, parentId: targetParentId, name })
+      } else {
+        await window.electronAPI.moveFolderToScope(
+          activeWorkspaceId,
+          { projectId: fromProjectId },
+          { id: folderId, parentId: targetParentId, name },
+          { projectId: toProjectId },
+        )
+      }
+      // Deliberately do NOT touch the navigator scope here: moving a folder is a
+      // structural edit, and re-scoping left-2 made the drop look like it did
+      // nothing (the list switched away from the folder the user was watching).
+    } catch (error) {
+      console.error('[AppShell] Failed to move folder across scopes:', error)
+      toast.error(t('folders.moveFailed'))
+    }
+  }, [activeWorkspaceId, t])
 
   // Search state for session list
   const [searchActive, setSearchActive] = React.useState(false)
   const [searchQuery, setSearchQuery] = React.useState('')
+  const [chatSearchHandoff, setChatSearchHandoff] = React.useState<{
+    sessionId: string
+    query: string
+    requestId: number
+  } | null>(null)
+  const chatSearchHandoffSequence = React.useRef(0)
+  const handleSearchResultSelect = React.useCallback((sessionId: string, query: string) => {
+    setChatSearchHandoff({ sessionId, query, requestId: ++chatSearchHandoffSequence.current })
+  }, [])
+  const handleChatSearchHandoffConsumed = React.useCallback((requestId: number) => {
+    setChatSearchHandoff((current) => current?.requestId === requestId ? null : current)
+  }, [])
+  // Folder tree lives in the navigator (left-2) panel, so AppShell drives both
+  // its imperative "new folder" action and the panel's empty-space menu.
+  const folderSectionRef = React.useRef<FolderSectionHandle>(null)
+  const projectFolderSectionRef = React.useRef<FolderSectionHandle>(null)
+  // Left-2's own folder list (the panel where the user actually is).
+  const navigatorFolderListRef = React.useRef<NavigatorFolderListHandle>(null)
+  const [listMenu, setListMenu] = React.useState<{ x: number; y: number } | null>(null)
 
-  // Grouping mode for chat list: per-view (stored in viewFiltersMap), forced to 'date' for state sub-views
-  const isStateSubView = sessionFilter?.kind === 'state'
+  // Folder scope picked in the left tree (null = 「所有会话」 root).
+  // Kept local so folders become usable before the full folder routing lands (B4).
+  const [folderScopeId, setFolderScopeId] = React.useState<string | null>(null)
+  // Explicit root-tree browsing while the project rail remains in mode 2.
+  // undefined = follow the active project scope; null/string = root tree root/folder.
+  const [rootFolderBrowseId, setRootFolderBrowseId] = React.useState<string | null | undefined>(undefined)
+  // Mode 2 of the Projects rail section: the project whose folder tree is
+  // currently shown under 项目/xxx. Deliberately separate from the include
+  // filter — single-clicking an entry jumps to its sessions without flipping
+  // the rail into tree mode; only a double-click (or the explicit enter) does.
+  const [enteredProjectId, setEnteredProjectId] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    setFolderScopeId(null)
+    setRootFolderBrowseId(undefined)
+  }, [activeWorkspaceId])
 
-  const chatGroupingMode: ChatGroupingMode = isStateSubView
-    ? 'date'
-    : (viewFiltersMap[sessionFilterKey ?? '']?.groupingMode ?? 'date')
-
-  const setChatGroupingMode = useCallback((mode: ChatGroupingMode) => {
-    setViewFiltersMap(prev => {
-      if (!sessionFilterKey) return prev
-      const existing = prev[sessionFilterKey] ?? { statuses: {}, labels: {} }
-      return {
-        ...prev,
-        [sessionFilterKey]: { ...existing, groupingMode: mode }
-      }
-    })
-  }, [sessionFilterKey])
+  const isStateSubView = false
 
   // Ref for ChatDisplay navigation (exposed via forwardRef)
   const chatDisplayRef = React.useRef<ChatDisplayHandle>(null)
@@ -872,16 +578,11 @@ function AppShellContent({
     }
   }, [searchActive, searchQuery])
 
-  // Filter dropdown: inline search query for filtering statuses/labels in a flat list.
-  // When empty, the dropdown shows hierarchical submenus. When typing, shows a flat filtered list.
-  const [filterDropdownQuery, setFilterDropdownQuery] = React.useState('')
-  const [filterAltHeld, setFilterAltHeld] = React.useState(false)
-
   // Reset search only when navigator or filter changes (not when selecting sessions)
   const navFilterKey = React.useMemo(() => {
     if (isSessionsNavigation(navState)) {
       const filter = navState.filter
-      return `chats:${filter.kind}:${filter.kind === 'state' ? filter.stateId : ''}`
+      return `chats:${filter.kind}`
     }
     return navState.navigator
   }, [navState])
@@ -891,8 +592,14 @@ function AppShellContent({
     setSearchQuery('')
   }, [navFilterKey])
 
-  // Cmd+F to activate search
-  useAction('app.search', () => setSearchActive(true))
+  // Ctrl/Cmd+F opens the chat-local search when the conversation has focus;
+  // otherwise the existing session-list search remains the target.
+  useAction('app.search', () => setSearchActive(true), {
+    enabled: () => resolveKeyboardSearchTarget(
+      getCurrentZone(),
+      !!(focusedSessionId ?? sessionsContext?.sessionId),
+    ) === 'sessions',
+  }, [focusedSessionId, sessionsContext?.sessionId])
 
   // Unified sidebar keyboard navigation state
   // Load expanded folders from localStorage (default: all collapsed)
@@ -903,11 +610,10 @@ function AppShellContent({
   const [focusedSidebarItemId, setFocusedSidebarItemId] = React.useState<string | null>(null)
   const sidebarItemRefs = React.useRef<Map<string, HTMLElement>>(new Map())
   // Track which expandable sidebar items are collapsed
-  // Labels are collapsed by default; user preference is persisted once toggled
   const [collapsedItems, setCollapsedItems] = React.useState<Set<string>>(() => {
     const saved = storage.get<string[] | null>(storage.KEYS.collapsedSidebarItems, null)
     if (saved !== null) return new Set(saved)
-    return new Set(['nav:labels'])
+    return new Set()
   })
   const isExpanded = React.useCallback((id: string) => !collapsedItems.has(id), [collapsedItems])
   const toggleExpanded = React.useCallback((id: string) => {
@@ -937,7 +643,6 @@ function AppShellContent({
   // Usage stats (source & skill usage counts / last-used)
   const [usageStats, setUsageStats] = React.useState<UsageStats>({ sources: {}, skills: {} })
 
-  // Automations — state, handlers, loading, subscriptions
   const activeWorkspace = workspaces.find(w => w.id === activeWorkspaceId)
 
   // Global memory count (for the "记忆" sidebar badge — same style as
@@ -969,14 +674,132 @@ function AppShellContent({
   const handleTransferComplete = useCallback((targetWorkspaceId: string, _newSessionIds: string[]) => {
     onSelectWorkspace(targetWorkspaceId)
   }, [onSelectWorkspace])
+  const { projects } = useProjects(activeWorkspaceId)
+  const enteredProjectDetailScopeId = React.useMemo(() => {
+    const detailProjectSlug = isProjectsNavigation(navState) && navState.details?.type === 'project'
+      ? navState.details.projectSlug
+      : null
+    return getEnteredProjectDetailScopeId(
+      enteredProjectId,
+      detailProjectSlug,
+      projects.map(project => ({ id: project.config.id, slug: project.config.slug })),
+    )
+  }, [enteredProjectId, navState, projects])
+
+  // Navigating away from sessions clears local folder browsing, except when the
+  // mode-2 project settings/detail route is open for the same entered project.
+  React.useEffect(() => {
+    if (enteredProjectDetailScopeId) return
+    if (!isSessionsNavigation(navState)) {
+      setEnteredProjectId(null)
+      setFolderScopeId(null)
+      setRootFolderBrowseId(undefined)
+    }
+  }, [navState, enteredProjectDetailScopeId])
+
+  // Inline rename of a project entry in the nav rail (context menu → 重命名).
+  const [renamingProjectId, setRenamingProjectId] = React.useState<string | null>(null)
+  const handleRenameProject = useCallback(async (projectSlug: string, currentName: string, rawName: string) => {
+    setRenamingProjectId(null)
+    const name = rawName.trim()
+    if (!name || name === currentName || !activeWorkspace) return
+    try {
+      await window.electronAPI.updateProject(activeWorkspace.id, projectSlug, { name })
+      toast.success(t('projectInfo.saved'))
+    } catch (error) {
+      console.error('[AppShell] Failed to rename project:', error)
+      toast.error(t('projectInfo.saveFailed'))
+    }
+  }, [activeWorkspace, t])
+
+  // Delete a project from its nav-rail context menu (same confirm as ProjectInfoPage).
+  const handleDeleteProject = useCallback(async (projectSlug: string, projectName: string) => {
+    if (!activeWorkspace) return
+    if (!window.confirm(t('projectInfo.deleteConfirm', { name: projectName }))) return
+    try {
+      await window.electronAPI.deleteProject(activeWorkspace.id, projectSlug)
+      toast.success(t('projectsList.deleted', { name: projectName }))
+      // If we were looking at that project's page, fall back to the projects root.
+      if (isProjectsNavigation(navState) && navState.details?.type === 'project' && navState.details.projectSlug === projectSlug) {
+        navigate(routes.view.projects())
+      }
+    } catch (error) {
+      console.error('[AppShell] Failed to delete project:', error)
+      toast.error(t('projectsList.deleteFailed'))
+    }
+  }, [activeWorkspace, t, navState, navigate])
+
   const {
-    automations, automationTestResults,
-    automationPendingDelete, pendingDeleteAutomation, setAutomationPendingDelete,
-    handleTestAutomation, handleToggleAutomation, handleDuplicateAutomation, handleDeleteAutomation, confirmDeleteAutomation,
-    getAutomationHistory, handleReplayAutomation,
+    automations,
+    handleTestAutomation,
+    handleToggleAutomation,
+    handleDuplicateAutomation,
+    handleDeleteAutomation,
   } = useAutomations(activeWorkspaceId)
 
-  const { projects } = useProjects(activeWorkspaceId)
+  // Handler for selecting an automation (preserves the active type filter)
+  const handleAutomationSelect = React.useCallback((automationId: string) => {
+    const type = isAutomationsNavigation(navState) ? navState.filter?.automationType : undefined
+    navigate(routes.view.automations({ automationId, type }))
+  }, [navState])
+  const automationTypeCounts = React.useMemo(() => {
+    const counts = { scheduled: 0, event: 0, agentic: 0 }
+    for (const automation of automations) {
+      if (automation.event === 'SchedulerTick') counts.scheduled++
+      else if ((APP_EVENTS as string[]).includes(automation.event)) counts.event++
+      else if ((AGENT_EVENTS as string[]).includes(automation.event)) counts.agentic++
+    }
+    return counts
+  }, [automations])
+
+  // Folder tree follows the active scope: a project jump view or the same
+  // project's mode-2 detail route shows that project's own tree, backed by its
+  // independent storage file (projects/<slug>/folders.json); other views show
+  // the workspace root tree. The two scopes never mix because they are stored
+  // in different config files.
+  const projectScopeProjectId = useMemo(() => {
+    if (!hasProjectInclude) return enteredProjectDetailScopeId
+    const includeIds = [...projectFilter.entries()].filter(([, mode]) => mode === 'include').map(([id]) => id)
+    return includeIds.length === 1 ? includeIds[0] : null
+  }, [hasProjectInclude, projectFilter, enteredProjectDetailScopeId])
+  // Two folder scopes side by side: the rail tree under "All Sessions" is
+  // ALWAYS the workspace root tree — it belongs to that section. The project's
+  // own tree (independent file projects/<slug>/folders.json) only replaces the
+  // navigator-list scope while browsing that project's sessions, and can never
+  // leak into the root tree because the scopes are different config files.
+  const rootFolderApi = useFolders(activeWorkspaceId ?? null, { projectId: null })
+  const projectFolderApi = useFolders(activeWorkspaceId ?? null, { projectId: projectScopeProjectId })
+  const isProjectBrowsingMode = !!enteredProjectId && projectScopeProjectId === enteredProjectId
+  const isBrowsingRootTreeInProjectMode = isProjectBrowsingMode && rootFolderBrowseId !== undefined
+  // Scope-following API: the navigator normally follows the project include,
+  // but a folder explicitly opened from the root rail browses the root tree.
+  const activeFolderApi = isBrowsingRootTreeInProjectMode
+    ? rootFolderApi
+    : projectScopeProjectId ? projectFolderApi : rootFolderApi
+  const activeFolderIds = React.useMemo(
+    () => new Set(activeFolderApi.folders.map(folder => folder.id)),
+    [activeFolderApi.folders],
+  )
+
+  // A folder scope id only means something inside its own tree. Switching
+  // scopes (project ↔ root) or deleting the folder would otherwise keep
+  // filtering the new tree by an id it does not own, which hides every session
+  // and leaves the navigator showing an empty list. Drop the stale id instead.
+  const rootFolderIds = React.useMemo(() => new Set(rootFolderApi.folders.map(folder => folder.id)), [rootFolderApi.folders])
+  const projectFolderIds = React.useMemo(() => new Set(projectFolderApi.folders.map(folder => folder.id)), [projectFolderApi.folders])
+  const rawFolderScopeId = isBrowsingRootTreeInProjectMode ? rootFolderBrowseId! : folderScopeId
+  // A scope id that no longer exists in the active tree is treated as "root of
+  // this scope" for filtering purposes — without touching the state, so the
+  // navigator keeps showing exactly what the user selected.
+  const activeFolderScopeId = rawFolderScopeId && (rootFolderIds.has(rawFolderScopeId) || projectFolderIds.has(rawFolderScopeId))
+    ? rawFolderScopeId
+    : null
+  // NOTE: no effect may clear `folderScopeId` here. A moved/deleted folder used
+  // to be validated in an effect, but that re-scoped the navigator mid-gesture —
+  // dropping a folder into another tree made left-2 jump to a different list and
+  // the drag looked like it did nothing. Dangling ids are neutralised at render
+  // time instead (see `folderIdOf` / `activeFolderIdForList`).
+
   const { pages } = usePages(activeWorkspaceId)
   const projectMenuOptions = useMemo(
     () => projects.map(p => ({ id: p.config.id, slug: p.config.slug, name: p.config.name, color: p.config.color })),
@@ -1027,10 +850,6 @@ function AppShellContent({
       setSearchActive(false)
       setSearchQuery('')
 
-      // Clear filter dropdown state
-      setFilterDropdownQuery('')
-      setFilterDropdownSelectedIdx(0)
-
       // Clear focused sidebar item
       setFocusedSidebarItemId(null)
     }
@@ -1045,7 +864,7 @@ function AppShellContent({
       setExpandedFolders(new Set(newExpandedFolders))
 
       const newCollapsedItems = storage.get<string[] | null>(storage.KEYS.collapsedSidebarItems, null, activeWorkspaceId)
-      setCollapsedItems(newCollapsedItems !== null ? new Set(newCollapsedItems) : new Set(['nav:labels']))
+      setCollapsedItems(newCollapsedItems !== null ? new Set(newCollapsedItems) : new Set())
     }
 
     previousWorkspaceRef.current = activeWorkspaceId
@@ -1125,102 +944,6 @@ function AppShellContent({
     }
   }, [])
 
-  // Handle session label changes (add/remove via # menu or badge X)
-  const handleSessionLabelsChange = React.useCallback(async (sessionId: string, labels: string[]) => {
-    try {
-      await window.electronAPI.sessionCommand(sessionId, { type: 'setLabels', labels })
-      // Session will emit a 'labels_changed' event that updates the session state
-    } catch (err) {
-      console.error('[Chat] Failed to set session labels:', err)
-    }
-  }, [])
-
-
-  // Load dynamic statuses from workspace config
-  const { statuses: statusConfigs, isLoading: isLoadingStatuses } = useStatuses(activeWorkspace?.id || null)
-  const [sessionStatuses, setSessionStatuses] = React.useState<SessionStatus[]>([])
-
-  // Convert StatusConfig to SessionStatus with resolved icons
-  React.useEffect(() => {
-    if (!activeWorkspace?.id || statusConfigs.length === 0) {
-      setSessionStatuses([])
-      return
-    }
-
-    setSessionStatuses(statusConfigsToSessionStatuses(statusConfigs, activeWorkspace.id, isDark))
-  }, [statusConfigs, activeWorkspace?.id, isDark])
-
-  // Optimistic status order: immediately reflects drag-drop order while IPC propagates.
-  // Cleared when statusConfigs changes (config watcher is source of truth).
-  const [optimisticStatusOrder, setOptimisticStatusOrder] = React.useState<string[] | null>(null)
-
-  // Clear optimistic state when the config watcher fires (statusConfigs changes)
-  React.useEffect(() => {
-    setOptimisticStatusOrder(null)
-  }, [statusConfigs])
-
-  // Derive effective todo states: apply optimistic reorder if active, otherwise use canonical order
-  const effectiveSessionStatuses = React.useMemo(() => {
-    if (!optimisticStatusOrder) return sessionStatuses
-    // Reorder sessionStatuses array to match optimistic order
-    const stateMap = new Map(sessionStatuses.map(s => [s.id, s]))
-    const reordered: SessionStatus[] = []
-    for (const id of optimisticStatusOrder) {
-      const state = stateMap.get(id)
-      if (state) reordered.push(state)
-    }
-    // Append any states not in the optimistic order (shouldn't happen, but defensive)
-    for (const state of sessionStatuses) {
-      if (!optimisticStatusOrder.includes(state.id)) reordered.push(state)
-    }
-    return reordered
-  }, [sessionStatuses, optimisticStatusOrder])
-
-  // Load labels from workspace config
-  const { labels: labelConfigs } = useLabels(activeWorkspace?.id || null)
-  const displayLabelConfigs = useMemo(() => sortLabelsForDisplay(labelConfigs), [labelConfigs])
-
-  // Views: compiled once on config load, evaluated per session in list/chat
-  const { evaluateSession: evaluateViews, viewConfigs } = useViews(activeWorkspace?.id || null)
-
-  // Build hierarchical label tree from the display-sorted label config structure
-  const labelTree = useMemo(() => buildLabelTree(displayLabelConfigs), [displayLabelConfigs])
-
-  // Build flat LabelMenuItem[] from hierarchical labels for the filter dropdown's search mode.
-  // Uses the same structure as the # inline menu so the two search surfaces stay aligned.
-  const flatLabelMenuItems = useMemo(
-    (): LabelMenuItem[] => createLabelMenuItems(displayLabelConfigs),
-    [displayLabelConfigs],
-  )
-
-  // Filter dropdown keyboard navigation: tracks highlighted item index in flat search mode.
-  // Unified index: [0..matchedStates-1] = statuses, [matchedStates..total-1] = labels.
-  const [filterDropdownSelectedIdx, setFilterDropdownSelectedIdx] = React.useState(0)
-  const filterDropdownListRef = React.useRef<HTMLDivElement>(null)
-  const filterDropdownInputRef = React.useRef<HTMLInputElement>(null)
-
-  // Compute filtered results for the dropdown's search mode (memoized for use in both
-  // the keyboard handler and the JSX render).
-  const filterDropdownResults = useMemo(() => {
-    if (!filterDropdownQuery.trim()) return { states: [] as SessionStatus[], labels: [] as LabelMenuItem[] }
-    return {
-      states: filterLabelMenuStates(effectiveSessionStatuses, filterDropdownQuery),
-      labels: filterLabelMenuItems(flatLabelMenuItems, filterDropdownQuery),
-    }
-  }, [filterDropdownQuery, effectiveSessionStatuses, flatLabelMenuItems])
-
-  // Reset selected index when query changes
-  React.useEffect(() => {
-    setFilterDropdownSelectedIdx(0)
-  }, [filterDropdownQuery])
-
-  // Scroll keyboard-highlighted item into view
-  React.useEffect(() => {
-    if (!filterDropdownListRef.current) return
-    const el = filterDropdownListRef.current.querySelector('[data-filter-selected="true"]')
-    if (el) el.scrollIntoView({ block: 'nearest' })
-  }, [filterDropdownSelectedIdx])
-
   // Ensure session messages are loaded when selected
   const ensureMessagesLoaded = useSetAtom(ensureSessionMessagesLoadedAtom)
 
@@ -1235,13 +958,6 @@ function AppShellContent({
     if (!activeWorkspaceId) return
     navigate(routes.view.skills(skill.slug))
   }, [activeWorkspaceId, navigate])
-
-  // Handle selecting an automation from the list
-  const handleAutomationSelect = React.useCallback((automationId: string) => {
-    // Preserve current automation filter when selecting an automation
-    const type = isAutomationsNavigation(navState) ? navState.filter?.automationType : undefined
-    navigate(routes.view.automations({ automationId, type }))
-  }, [navState, navigate])
 
   // Focus zone management
   const { focusZone, focusNextZone, focusPreviousZone } = useFocusContext()
@@ -1298,7 +1014,10 @@ function AppShellContent({
   useAction('view.toggleSidebar', handleToggleSidebar)
 
   // Focus mode toggle (CMD+.) - hides both sidebars
-  useAction('view.toggleFocusMode', () => setIsSidebarAndNavigatorHidden(v => !v))
+  const handleToggleFocusMode = React.useCallback(() => {
+    setIsSidebarAndNavigatorHidden(v => !v)
+  }, [])
+  useAction('view.toggleFocusMode', handleToggleFocusMode)
 
   // Panel focus navigation (CMD+SHIFT+[ / ])
   const focusNextPanel = useSetAtom(focusNextPanelAtom)
@@ -1466,6 +1185,7 @@ function AppShellContent({
   // Use session metadata from Jotai atom (lightweight, no messages)
   // This prevents closures from retaining full message arrays
   const sessionMetaMap = useAtomValue(sessionMetaMapAtom)
+  sessionMetaMapRef.current = sessionMetaMap as ReadonlyMap<string, { projectId?: string; folderId?: string | null }>
   const setSessionMetaMap = useSetAtom(sessionMetaMapAtom)
 
   const hasPendingPrompt = React.useCallback((sessionId: string) => {
@@ -1548,52 +1268,7 @@ function AppShellContent({
   }, [workspaces])
 
   // Count sessions by todo state (scoped to workspace)
-  const isMetaDone = (s: SessionMeta) => s.sessionStatus === 'done' || s.sessionStatus === 'cancelled'
-  const flaggedCount = activeSessionMetas.filter(s => s.isFlagged).length
   const archivedCount = workspaceSessionMetas.filter(s => s.isArchived).length
-
-  // Compute session counts per label (cumulative: parent includes descendants).
-  // Flatten the tree for iteration, use the tree for descendant lookups.
-  // Uses activeSessionMetas to exclude archived sessions from counts.
-  const labelCounts = useMemo(() => {
-    const allLabels = flattenLabels(labelConfigs)
-    const counts: Record<string, number> = {}
-    for (const label of allLabels) {
-      // Direct count: sessions explicitly tagged with this label (handles valued entries like "priority::3")
-      const directCount = activeSessionMetas.filter(
-        s => s.labels?.some(l => extractLabelId(l) === label.id)
-      ).length
-      counts[label.id] = directCount
-    }
-    // Add descendant counts to parents (cumulative)
-    for (const label of allLabels) {
-      const descendants = getDescendantIds(labelConfigs, label.id)
-      if (descendants.length > 0) {
-        const descendantCount = activeSessionMetas.filter(
-          s => s.labels?.some(l => descendants.includes(extractLabelId(l)))
-        ).length
-        counts[label.id] = (counts[label.id] || 0) + descendantCount
-      }
-    }
-    return counts
-  }, [activeSessionMetas, labelConfigs])
-
-  // Count sessions by individual todo state (dynamic based on effectiveSessionStatuses)
-  // Uses activeSessionMetas to exclude archived sessions from counts.
-  const sessionStatusCounts = useMemo(() => {
-    const counts: Record<SessionStatusId, number> = {}
-    // Initialize counts for all dynamic statuses
-    for (const state of effectiveSessionStatuses) {
-      counts[state.id] = 0
-    }
-    // Count sessions
-    for (const s of activeSessionMetas) {
-      const state = (s.sessionStatus || 'todo') as SessionStatusId
-      // Increment count (initialize to 0 if status not in effectiveSessionStatuses yet)
-      counts[state] = (counts[state] || 0) + 1
-    }
-    return counts
-  }, [activeSessionMetas, effectiveSessionStatuses])
 
   // Count sources by type for the Sources dropdown subcategories
   const sourceTypeCounts = useMemo(() => {
@@ -1606,17 +1281,6 @@ function AppShellContent({
     }
     return counts
   }, [sources])
-
-  // Count automations by type for the Automations dropdown subcategories
-  const automationTypeCounts = useMemo(() => {
-    const counts = { scheduled: 0, event: 0, agentic: 0 }
-    for (const automation of automations) {
-      if (automation.event === 'SchedulerTick') counts.scheduled++
-      else if ((APP_EVENTS as string[]).includes(automation.event)) counts.event++
-      else if ((AGENT_EVENTS as string[]).includes(automation.event)) counts.agentic++
-    }
-    return counts
-  }, [automations])
 
   // Filter session metadata based on sidebar mode and chat filter
   const filteredSessionMetas = useMemo(() => {
@@ -1632,84 +1296,61 @@ function AppShellContent({
         // "All Sessions" - shows active (non-archived) sessions
         result = activeSessionMetas
         break
-      case 'flagged':
-        result = activeSessionMetas.filter(s => s.isFlagged)
-        break
       case 'archived':
         // Archived view shows only archived sessions
         result = workspaceSessionMetas.filter(s => s.isArchived)
         break
-      case 'state':
-        // Filter by specific todo state (excludes archived)
-        result = activeSessionMetas.filter(s => (s.sessionStatus || 'todo') === sessionFilter.stateId)
-        break
-      case 'label': {
-        // Shared predicate (handles '__all__', descendant labels, and the optional
-        // project scope) — the same implementation the session list filters with,
-        // so the two stay aligned by construction.
-        result = activeSessionMetas.filter(s => matchesLabelFilter(s, sessionFilter, labelConfigs))
-        break
-      }
-      case 'view': {
-        // Filter by view: __all__ shows any session matched by any view,
-        // otherwise filter to the specific view (excludes archived)
-        result = activeSessionMetas.filter(s => {
-          const matched = evaluateViews(s)
-          if (sessionFilter.viewId === '__all__') {
-            return matched.length > 0
-          }
-          return matched.some(v => v.id === sessionFilter.viewId)
-        })
-        break
-      }
       default:
         result = activeSessionMetas
     }
 
-    // Apply secondary filters (status + labels, AND-ed together) in ALL views.
+    if (isBrowsingRootTreeInProjectMode) {
+      // The root-tree action changes only the left-2 browsing scope. Keep the
+      // project rail in mode 2, while showing sessions filed in the root tree.
+      result = result.filter(s => !(s as { projectId?: string }).projectId)
+      const folderScopeId = rootFolderBrowseId ?? null
+      result = searchActive && searchQuery.trim().length > 0 && sessionFilter.kind !== 'archived'
+        ? filterSessionsByFolderSearchScope(
+            result,
+            folderScopeId,
+            getFolderSubtreeIds(activeFolderApi.folders, folderScopeId),
+            activeFolderIds,
+          )
+        : filterSessionsByFolderScope(result, folderScopeId, activeFolderIds)
+    } else {
+      // D9: the root domain never shows project-bound sessions. Two exceptions:
+      // the archive view stays global (D10), and an explicit project include —
+      // the jump-to-project state — is the user asking for exactly those
+      // sessions; applying D9 first would always leave that list empty.
+      if (sessionFilter.kind !== 'archived' && !hasProjectInclude) {
+        result = result.filter(s => !(s as { projectId?: string }).projectId)
+      }
+
+      // Folder scope narrows within the active tree — always, and with the same
+      // rule as the root tree: inside a folder only its own sessions, at the
+      // scope root only unfiled ones. Leaving the project branch unfiltered used
+      // to list every project session (including ones filed in a folder) at the
+      // project root, so the same session appeared twice — under its folder and
+      // at the root — and deleting it made both rows vanish.
+      const folderScopeId = activeFolderScopeId ?? null
+      result = searchActive && searchQuery.trim().length > 0 && sessionFilter.kind !== 'archived'
+        ? filterSessionsByFolderSearchScope(
+            result,
+            folderScopeId,
+            getFolderSubtreeIds(activeFolderApi.folders, folderScopeId),
+            activeFolderIds,
+          )
+        : filterSessionsByFolderScope(result, folderScopeId, activeFolderIds)
+    }
+
+    // Apply secondary filters (project, AND-ed) in ALL views.
     // These layer on top of the primary sessionFilter to allow further narrowing.
     // Each filter supports include/exclude modes:
     //   - Includes: if any exist, only matching items pass
     //   - Excludes: matching items are removed (applied after includes)
-    if (listFilter.size > 0) {
-      const statusIncludes = new Set<SessionStatusId>()
-      const statusExcludes = new Set<SessionStatusId>()
-      for (const [id, mode] of listFilter) {
-        if (mode === 'include') statusIncludes.add(id)
-        else statusExcludes.add(id)
-      }
-      if (statusIncludes.size > 0) {
-        result = result.filter(s => statusIncludes.has((s.sessionStatus || 'todo') as SessionStatusId))
-      }
-      if (statusExcludes.size > 0) {
-        result = result.filter(s => !statusExcludes.has((s.sessionStatus || 'todo') as SessionStatusId))
-      }
-    }
-    // Filter by labels — supports include/exclude with descendant expansion
-    if (labelFilter.size > 0) {
-      const labelIncludes = new Set<string>()
-      const labelExcludes = new Set<string>()
-      for (const [id, mode] of labelFilter) {
-        // Expand to include descendant label IDs
-        const ids = [id, ...getDescendantIds(labelConfigs, id)]
-        for (const expandedId of ids) {
-          if (mode === 'include') labelIncludes.add(expandedId)
-          else labelExcludes.add(expandedId)
-        }
-      }
-      if (labelIncludes.size > 0) {
-        result = result.filter(s =>
-          s.labels?.some(l => labelIncludes.has(extractLabelId(l)))
-        )
-      }
-      if (labelExcludes.size > 0) {
-        result = result.filter(s =>
-          !s.labels?.some(l => labelExcludes.has(extractLabelId(l)))
-        )
-      }
-    }
+
     // Filter by project — supports include/exclude on session.projectId
-    if (projectFilter.size > 0) {
+    if (!isBrowsingRootTreeInProjectMode && projectFilter.size > 0) {
       const projectIncludes = new Set<string>()
       const projectExcludes = new Set<string>()
       for (const [id, mode] of projectFilter) {
@@ -1731,25 +1372,7 @@ function AppShellContent({
     }
 
     return result
-  }, [workspaceSessionMetas, activeSessionMetas, sessionFilter, listFilter, labelFilter, projectFilter, labelConfigs])
-
-  // Derive "pinned" (non-removable) filters from the current sessionFilter path.
-  // These represent filters that are implicit in the current deeplink/route and
-  // should be displayed as fixed chips in the filter bar that users cannot remove.
-  const pinnedFilters = useMemo(() => {
-    if (!sessionFilter) return { pinnedStatusId: null as string | null, pinnedLabelId: null as string | null, pinnedFlagged: false }
-    switch (sessionFilter.kind) {
-      case 'state':
-        return { pinnedStatusId: sessionFilter.stateId, pinnedLabelId: null, pinnedFlagged: false }
-      case 'label':
-        // Don't pin the __all__ pseudo-label — that just means "any label"
-        return { pinnedStatusId: null, pinnedLabelId: sessionFilter.labelId !== '__all__' ? sessionFilter.labelId : null, pinnedFlagged: false }
-      case 'flagged':
-        return { pinnedStatusId: null, pinnedLabelId: null, pinnedFlagged: true }
-      default:
-        return { pinnedStatusId: null, pinnedLabelId: null, pinnedFlagged: false }
-    }
-  }, [sessionFilter])
+  }, [workspaceSessionMetas, activeSessionMetas, sessionFilter, projectFilter, hasProjectInclude, activeFolderScopeId, rootFolderBrowseId, isBrowsingRootTreeInProjectMode, projectScopeProjectId, activeFolderIds, searchActive, searchQuery, activeFolderApi.folders])
 
   // Ensure session messages are loaded when selected
   React.useEffect(() => {
@@ -1768,34 +1391,28 @@ function AppShellContent({
     return onDeleteSession(sessionId, skipConfirmation)
   }, [session.selected, setSession, onDeleteSession])
 
-  // Extend context value with local overrides (wrapped onDeleteSession, sources, skills, labels, enabledModes, rightSidebarOpenButton, effectiveSessionStatuses)
+  // Extend context value with local overrides (wrapped onDeleteSession, sources, skills, enabledModes, rightSidebarOpenButton)
   const appShellContextValue = React.useMemo<AppShellContextType>(() => ({
     ...contextValue,
     onDeleteSession: handleDeleteSession,
     enabledSources: sources,
     skills,
     activeSessionWorkingDirectory,
-    labels: displayLabelConfigs,
-    onSessionLabelsChange: handleSessionLabelsChange,
     enabledModes,
-    sessionStatuses: effectiveSessionStatuses,
     onSessionSourcesChange: handleSessionSourcesChange,
-    onJumpToTaskSessions: handleJumpToTaskSessions,
     rightSidebarButton: null,
     isCompactMode: isAutoCompact,
+    // Focus mode (drives the zoom in/out button in the session header)
+    isFocusMode: isSidebarAndNavigatorHidden,
+    onToggleFocusMode: handleToggleFocusMode,
     // Search state for ChatDisplay highlighting
     sessionListSearchQuery: searchActive ? searchQuery : undefined,
     isSearchModeActive: searchActive,
+    chatSearchHandoff,
+    onChatSearchHandoffConsumed: handleChatSearchHandoffConsumed,
     chatDisplayRef,
     onChatMatchInfoChange: handleChatMatchInfoChange,
-    onTestAutomation: handleTestAutomation,
-    onToggleAutomation: handleToggleAutomation,
-    onDuplicateAutomation: handleDuplicateAutomation,
-    onDeleteAutomation: handleDeleteAutomation,
-    automationTestResults,
-    getAutomationHistory,
-    onReplayAutomation: handleReplayAutomation,
-  }), [contextValue, handleDeleteSession, sources, skills, activeSessionWorkingDirectory, displayLabelConfigs, handleSessionLabelsChange, enabledModes, effectiveSessionStatuses, handleSessionSourcesChange, handleJumpToTaskSessions, isAutoCompact, searchActive, searchQuery, handleChatMatchInfoChange, handleTestAutomation, handleToggleAutomation, handleDuplicateAutomation, handleDeleteAutomation, automationTestResults, getAutomationHistory, handleReplayAutomation])
+  }), [contextValue, handleDeleteSession, sources, skills, activeSessionWorkingDirectory, enabledModes, handleSessionSourcesChange, isAutoCompact, isSidebarAndNavigatorHidden, handleToggleFocusMode, searchActive, searchQuery, chatSearchHandoff, handleChatSearchHandoffConsumed, handleChatMatchInfoChange])
 
   // Persist expanded folders to localStorage (workspace-scoped)
   React.useEffect(() => {
@@ -1816,7 +1433,7 @@ function AppShellContent({
   // Listen for focus mode toggle from menu (View → Focus Mode)
   React.useEffect(() => {
     const cleanup = window.electronAPI.onMenuToggleFocusMode?.(() => {
-      setIsSidebarAndNavigatorHidden(v => !v)
+      handleToggleFocusMode()
     })
     return cleanup
   }, [])
@@ -1842,38 +1459,43 @@ function AppShellContent({
   }, [collapsedItems, activeWorkspaceId])
 
   const handleAllSessionsClick = useCallback(() => {
+    // Explicit root navigation: drop any folder scope, otherwise the list would
+    // stay narrowed to the folder and the title would keep its path. A project
+    // include is dropped too — the root list is the unscoped session list; the
+    // project entry re-applies it on demand. The rail exits Mode 2 as well.
+    setEnteredProjectId(null)
+    setFolderScopeId(null)
+    setRootFolderBrowseId(undefined)
+    setViewFiltersMap(prev => {
+      const entry = prev['allSessions']
+      if (!entry || Object.keys(entry.projects ?? {}).length === 0) return prev
+      return { ...prev, allSessions: { projects: {} } }
+    })
     navigate(routes.view.allSessions())
   }, [])
 
-  const handleFlaggedClick = useCallback(() => {
-    navigate(routes.view.flagged())
-  }, [])
-
   const handleArchivedClick = useCallback(() => {
+    // The archive list is global (D10) — it must not inherit a folder filter.
+    setEnteredProjectId(null)
+    setFolderScopeId(null)
+    setRootFolderBrowseId(undefined)
     navigate(routes.view.archived())
   }, [])
 
-  // Handler for individual todo state views
-  const handleSessionStatusClick = useCallback((stateId: SessionStatusId) => {
-    navigate(routes.view.state(stateId))
-  }, [])
+  // Leave the project browsing state (rail Mode 2): back to the entries list
+  // and the root session list — the same navigation as "All Sessions".
+  const handleExitProjectBrowsing = useCallback(() => {
+    setRootFolderBrowseId(undefined)
+    handleAllSessionsClick()
+  }, [handleAllSessionsClick])
 
-  // Handler for label filter views (hierarchical — includes descendant labels)
-  const handleLabelClick = useCallback((labelId: string) => {
-    navigate(routes.view.label(labelId))
+  // Double-clicking the project header returns the navigator to this project's
+  // folder root without leaving mode 2 or dropping its project include filter.
+  const handleProjectRootDoubleClick = useCallback(() => {
+    setRootFolderBrowseId(undefined)
+    setFolderScopeId(null)
+    navigate(routes.view.allSessions())
   }, [])
-
-  const handleViewClick = useCallback((viewId: string) => {
-    navigate(routes.view.view(viewId))
-  }, [])
-
-  // DnD handler: reorder statuses (flat list drag-and-drop)
-  // Sets optimistic order immediately for instant UI feedback, then fires IPC.
-  const handleStatusReorder = useCallback((orderedIds: string[]) => {
-    if (!activeWorkspaceId) return
-    setOptimisticStatusOrder(orderedIds)
-    window.electronAPI.reorderStatuses(activeWorkspaceId, orderedIds)
-  }, [activeWorkspaceId])
 
   // Handler for sources view (all sources)
   const handleSourcesClick = useCallback(() => {
@@ -1898,31 +1520,28 @@ function AppShellContent({
     navigate(routes.view.skills())
   }, [])
 
-  // Handlers for automations view
-  const handleAutomationsClick = useCallback(() => {
-    navigate(routes.view.automations())
-  }, [])
-
   // Handler for projects view
   const handleProjectsClick = useCallback(() => {
     navigate(routes.view.projects())
   }, [])
 
-  // Handler for pages view
-  const handlePagesClick = useCallback(() => {
-    navigate(routes.view.pages())
+  // Handler for automations views (all / scheduled / event / agentic)
+  const handleAutomationsClick = useCallback(() => {
+    navigate(routes.view.automations())
   }, [])
-
   const handleAutomationsScheduledClick = useCallback(() => {
     navigate(routes.view.automationsScheduled())
   }, [])
-
   const handleAutomationsEventClick = useCallback(() => {
     navigate(routes.view.automationsEvent())
   }, [])
-
   const handleAutomationsAgenticClick = useCallback(() => {
     navigate(routes.view.automationsAgentic())
+  }, [])
+
+  // Handler for pages view
+  const handlePagesClick = useCallback(() => {
+    navigate(routes.view.pages())
   }, [])
 
   // Open settings in its dedicated window. A missing subpage keeps the
@@ -1951,15 +1570,12 @@ function AppShellContent({
   // We use controlled popovers instead of deep links so the user can type
   // their request in the popover UI before opening a new chat window.
   // add-source variants: add-source (generic), add-source-api, add-source-mcp, add-source-local
-  const [editPopoverOpen, setEditPopoverOpen] = useState<'statuses' | 'labels' | 'views' | 'add-source' | 'add-source-api' | 'add-source-mcp' | 'add-source-local' | 'add-skill' | 'add-label' | 'automation-config' | 'add-project' | null>(null)
+  const [editPopoverOpen, setEditPopoverOpen] = useState<'add-source' | 'add-source-api' | 'add-source-mcp' | 'add-source-local' | 'add-skill' | 'add-project' | null>(null)
 
   // Stores the Y position of the last right-clicked sidebar item so the EditPopover
   // appears near it rather than at a fixed location. Updated synchronously before
   // the setTimeout that opens the popover, ensuring the ref is set before render.
   const editPopoverAnchorY = useRef<number>(120)
-  // Tracks which label was right-clicked when opening label EditPopovers,
-  // so the agent knows the target for commands like "make this red" or "add below this"
-  const editLabelTargetId = useRef<string | undefined>(undefined)
 
   // Stores the trigger element (button) so we can keep it highlighted while the
   // EditPopover is open (after Radix removes data-state="open" on context menu close).
@@ -1991,62 +1607,6 @@ function AppShellContent({
     }
   }, [editPopoverOpen])
 
-  // Handler for "Configure Statuses" context menu action
-  // Opens the EditPopover for status configuration
-  // Uses setTimeout to delay opening until after context menu closes,
-  // preventing the popover from immediately closing due to focus shift
-  const openConfigureStatuses = useCallback(() => {
-    captureContextMenuPosition()
-    setTimeout(() => setEditPopoverOpen('statuses'), 50)
-  }, [captureContextMenuPosition])
-
-  // Handler for "Configure Labels" context menu action
-  // Opens the EditPopover for label configuration, storing which label was right-clicked
-  const openConfigureLabels = useCallback((labelId?: string) => {
-    editLabelTargetId.current = labelId
-    captureContextMenuPosition()
-    setTimeout(() => setEditPopoverOpen('labels'), 50)
-  }, [captureContextMenuPosition])
-
-  // Handler for "Edit Views" context menu action
-  // Opens the EditPopover for view configuration
-  const openConfigureViews = useCallback(() => {
-    captureContextMenuPosition()
-    setTimeout(() => setEditPopoverOpen('views'), 50)
-  }, [captureContextMenuPosition])
-
-  // Handler for "Delete View" context menu action
-  // Removes the view from config by filtering it out and saving
-  const handleDeleteView = useCallback(async (viewId: string) => {
-    if (!activeWorkspace?.id) return
-    try {
-      const updated = viewConfigs.filter(v => v.id !== viewId)
-      await window.electronAPI.saveViews(activeWorkspace.id, updated)
-    } catch (err) {
-      console.error('[AppShell] Failed to delete view:', err)
-    }
-  }, [activeWorkspace?.id, viewConfigs])
-
-  // Handler for "Add New Label" context menu action
-  // Opens the EditPopover with 'add-label' context, storing which label was right-clicked
-  // so the agent knows to add the new label relative to it
-  const handleAddLabel = useCallback((parentId?: string) => {
-    editLabelTargetId.current = parentId
-    captureContextMenuPosition()
-    setTimeout(() => setEditPopoverOpen('add-label'), 50)
-  }, [captureContextMenuPosition])
-
-  // Handler for "Delete Label" context menu action
-  // Deletes the label and all its descendants, stripping from sessions
-  const handleDeleteLabel = useCallback(async (labelId: string) => {
-    if (!activeWorkspace?.id) return
-    try {
-      await window.electronAPI.deleteLabel(activeWorkspace.id, labelId)
-    } catch (err) {
-      console.error('[AppShell] Failed to delete label:', err)
-    }
-  }, [activeWorkspace?.id])
-
   // Handler for "Add Source" context menu action
   // Opens the EditPopover for adding a new source
   // Optional sourceType param allows filter-aware context (from subcategory menus or filtered views)
@@ -2061,13 +1621,6 @@ function AppShellContent({
   const openAddSkill = useCallback(() => {
     captureContextMenuPosition()
     setTimeout(() => setEditPopoverOpen('add-skill'), 50)
-  }, [captureContextMenuPosition])
-
-  // Handler for "Add Automation" context menu action
-  // Opens the EditPopover for adding a new automation
-  const openAddAutomation = useCallback(() => {
-    captureContextMenuPosition()
-    setTimeout(() => setEditPopoverOpen('automation-config'), 50)
   }, [captureContextMenuPosition])
 
   // Handler for "Add Project" context menu action — creates a project directly
@@ -2092,21 +1645,25 @@ function AppShellContent({
   }, [activeWorkspace?.id, navigate, t])
 
   /**
-   * Resolve the "inherit sole active filter" rule for new sessions. Only
-   * include-mode filters are candidates — an excluded status/label/project must
-   * never be inherited (#970). See resolveInheritedFilterParams.
-   *
-   * When the navigator itself is a specific state/label view (e.g. "Backlog"),
-   * the new session inherits that state/label directly — creating a session
-   * from a status list must land in that same status list without jumping back
-   * to All Sessions. See resolveInheritedNavigatorFilter.
+   * Resolve the "inherit sole active filter" rule for new sessions: creating
+   * from a list narrowed to exactly one project include binds the new session
+   * to that project (#970: exclusions are never inherited).
    */
-  const resolveInheritedNewSessionParams = useCallback(
-    () =>
-      resolveInheritedNavigatorFilter(sessionFilter) ??
-      resolveInheritedFilterParams(listFilter, labelFilter, projectFilter),
-    [sessionFilter, listFilter, labelFilter, projectFilter]
-  )
+  const resolveInheritedNewSessionParams = useCallback(() => {
+    // The selected folder decides the scope, not the project include: a root-tree
+    // folder must NOT inherit the included project, or its id is foreign to that
+    // project's tree — the binding gets dropped and the new session lands at the
+    // project root, invisible in the list it was created from.
+    const folderId = activeFolderScopeId
+    if (folderId) {
+      if (projectScopeProjectId && projectFolderIds.has(folderId)) {
+        return { project: projectScopeProjectId, folder: folderId }
+      }
+      if (rootFolderIds.has(folderId)) return { folder: folderId }
+      // Unknown id (stale or deleted folder): fall through to the plain filter rule.
+    }
+    return resolveInheritedFilterParams(projectFilter)
+  }, [projectFilter, activeFolderScopeId, projectScopeProjectId, projectFolderIds, rootFolderIds])
 
   // Create a new chat and select it
   const handleNewChat = useCallback((newPanel: boolean = false) => {
@@ -2116,7 +1673,7 @@ function AppShellContent({
     setSearchActive(false)
     setSearchQuery('')
 
-    // Inherit the current view's status/label (e.g. creating from the Backlog list
+    // Inherit the current view's status (e.g. creating from the Backlog list
     // creates a Backlog session in-place) or, when unambiguous, a sole include filter.
     const inherited = resolveInheritedNewSessionParams()
 
@@ -2190,38 +1747,20 @@ function AppShellContent({
   const unifiedSidebarItems = React.useMemo((): SidebarItem[] => {
     const result: SidebarItem[] = []
 
-    // 1. Sessions section: All Sessions (expandable) with status items, Flagged, Archived as children
+    // 1. Sessions section: All Sessions (expandable) with the folder tree + Archived
     result.push({ id: 'nav:allSessions', type: 'nav', action: handleAllSessionsClick })
-    for (const state of effectiveSessionStatuses) {
-      result.push({ id: `nav:state:${state.id}`, type: 'nav', action: () => handleSessionStatusClick(state.id) })
-    }
-    result.push({ id: 'nav:flagged', type: 'nav', action: handleFlaggedClick })
     result.push({ id: 'nav:archived', type: 'nav', action: handleArchivedClick })
 
-    // 2. Labels section header + regular label tree for keyboard nav
-    result.push({ id: 'nav:labels', type: 'nav', action: () => handleLabelClick('__all__') })
-    // Flatten regular label tree for keyboard navigation (depth-first)
-    const flattenTree = (nodes: LabelTreeNode[]) => {
-      for (const node of nodes) {
-        if (node.label) {
-          result.push({ id: `nav:label:${node.fullId}`, type: 'nav', action: () => handleLabelClick(node.fullId) })
-        }
-        if (node.children.length > 0) flattenTree(node.children)
-      }
-    }
-    flattenTree(labelTree)
-
-    // 3. Sources, Skills, Projects, Pages, Automations, Settings (visual order)
+    // 2. Sources, Skills, Projects, Pages, Settings (visual order)
     result.push({ id: 'nav:sources', type: 'nav', action: handleSourcesClick })
     result.push({ id: 'nav:skills', type: 'nav', action: handleSkillsClick })
     result.push({ id: 'nav:projects', type: 'nav', action: handleProjectsClick })
     result.push({ id: 'nav:pages', type: 'nav', action: handlePagesClick })
-    result.push({ id: 'nav:automations', type: 'nav', action: handleAutomationsClick })
     result.push({ id: 'nav:settings', type: 'nav', action: () => handleSettingsClick() })
     result.push({ id: 'nav:whats-new', type: 'nav', action: handleWhatsNewClick })
 
     return result
-  }, [handleAllSessionsClick, handleFlaggedClick, handleArchivedClick, handleSessionStatusClick, effectiveSessionStatuses, handleLabelClick, labelConfigs, labelTree, viewConfigs, handleViewClick, handleSourcesClick, handleSkillsClick, handleProjectsClick, handlePagesClick, handleAutomationsClick, handleSettingsClick, handleWhatsNewClick])
+  }, [handleAllSessionsClick, handleArchivedClick, handleSourcesClick, handleSkillsClick, handleProjectsClick, handlePagesClick, handleSettingsClick, handleWhatsNewClick])
 
   // Toggle folder expanded state
   const handleToggleFolder = React.useCallback((path: string) => {
@@ -2328,8 +1867,75 @@ function AppShellContent({
     }
   }, [sidebarFocused, focusedSidebarItemId, unifiedSidebarItems])
 
+  /**
+   * Empty-space right-click inside the navigator (left-2) panel.
+   *
+   * Rows own their own menus (session menu, folder menu, toolbars), so anything
+   * inside an interactive row is left alone — only genuine background opens
+   * this one. This is the entry point for "New Folder" now that the folder tree
+   * lives in this panel instead of the nav rail.
+   */
+  const handleListBackgroundContextMenu = React.useCallback((event: React.MouseEvent) => {
+    if (!isSessionsNavigation(navState)) return
+    const target = event.target as HTMLElement | null
+    if (target?.closest('button, a, input, textarea, select, [role="menuitem"], [role="menu"], [data-session-id], [data-folder-id], [data-sidebar-item]')) {
+      return
+    }
+    event.preventDefault()
+    setListMenu({ x: event.clientX, y: event.clientY })
+  }, [navState])
+
+  // Dismiss the panel menu: any click outside it, Escape, or a scroll.
+  React.useEffect(() => {
+    if (!listMenu) return
+    const close = () => setListMenu(null)
+    const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') close() }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [listMenu])
+
   // Get title based on navigation state
+  /**
+   * Sessions per folder for the CURRENT scope, consumed by the navigator's folder
+   * rows (badge on the right). Counted over all workspace sessions, not the
+   * filtered set, so the number means "what is in there", not "what matches".
+   */
+  const folderSessionCounts = React.useMemo(() => {
+    const counts = new Map<string, number>()
+    const scopedSessions = projectScopeProjectId && !isBrowsingRootTreeInProjectMode
+      ? workspaceSessionMetas.filter(meta => (meta as { projectId?: string }).projectId === projectScopeProjectId)
+      : workspaceSessionMetas.filter(meta => !(meta as { projectId?: string }).projectId)
+    for (const meta of scopedSessions) {
+      const folderId = meta.folderId ?? null
+      // Same ownership rule as the list: an id this tree does not own cannot
+      // count toward a folder badge.
+      if (!folderId || !activeFolderIds.has(folderId)) continue
+      counts.set(folderId, (counts.get(folderId) ?? 0) + 1)
+    }
+    return counts
+  }, [workspaceSessionMetas, projectScopeProjectId, isBrowsingRootTreeInProjectMode, activeFolderIds])
+
   const listTitle = React.useMemo(() => {
+    // Folder path is shown from the selected leaf back toward its scope base.
+    const titleWithBase = (base: string): React.ReactNode => {
+      const pathParts = getFolderPathParts(activeFolderApi.folders, activeFolderScopeId, base)
+      if (pathParts.length <= 1) return base
+      const currentName = pathParts[0]
+      return (
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="shrink-0 font-semibold">{currentName}</span>
+          <span className="shrink-0 text-muted-foreground/50">/</span>
+          <span className="min-w-0 truncate text-muted-foreground">{pathParts.slice(1).join(' / ')}</span>
+        </span>
+      )
+    }
+
     // Sources navigator
     if (isSourcesNavigation(navState)) {
       return t("sidebar.sources")
@@ -2340,8 +1946,14 @@ function AppShellContent({
       return t("sidebar.allSkills")
     }
 
-    // Projects navigator
+    // Projects navigator — a specific project is its own base ("以独立项目为基"),
+    // not "所有项目". The base is the project's name; the folder path rides on
+    // top of it exactly like on "所有会话".
     if (isProjectsNavigation(navState)) {
+      if (navState.details?.type === 'project') {
+        const project = projects.find(p => p.config.slug === navState.details?.projectSlug)
+        if (project) return titleWithBase(project.config.name)
+      }
       return t("sidebar.allProjects")
     }
 
@@ -2367,77 +1979,38 @@ function AppShellContent({
     // Sessions navigator - use sessionFilter
     if (!sessionFilter) return t("sidebar.allSessions")
 
-    switch (sessionFilter.kind) {
-      case 'flagged':
-        return t("sidebar.flagged")
-      case 'state': {
-        const state = effectiveSessionStatuses.find(s => s.id === sessionFilter.stateId)
-        return state ? t(`status.${state.id}`, state.label) : t("sidebar.allSessions")
-      }
-      case 'label':
-        return sessionFilter.labelId === '__all__' ? t("sidebar.labels") : getLabelDisplayName(labelConfigs, sessionFilter.labelId)
-      case 'view':
-        return sessionFilter.viewId === '__all__' ? t("sidebar.views") : viewConfigs.find(v => v.id === sessionFilter.viewId)?.name || t("sidebar.views")
-      default:
-        return t("sidebar.allSessions")
+    // Project scope: the jumped-to project is the base, and its own tree
+    // supplies the folder path on top (same titleWithBase grammar).
+    if (projectScopeProjectId && !isBrowsingRootTreeInProjectMode) {
+      const project = projects.find(p => p.config.id === projectScopeProjectId)
+      if (project) return titleWithBase(project.config.name)
     }
-  }, [navState, t, sessionFilter, automationFilter, labelConfigs, viewConfigs, effectiveSessionStatuses])
 
-  // Build recursive sidebar items from the shared display-sorted label tree.
-  // Each node renders with condensed height (compact: true) since many labels expected.
-  // Clicking any label navigates to its filter view; the chevron toggles expand/collapse.
-  const buildLabelSidebarItems = useCallback((nodes: LabelTreeNode[]): any[] => {
-    return nodes.map(node => {
-      const hasChildren = node.children.length > 0
-      const isActive = sessionFilter?.kind === 'label' && sessionFilter.labelId === node.fullId
-      const count = labelCounts[node.fullId] || 0
+    return titleWithBase(t("sidebar.allSessions"))
+  }, [navState, t, sessionFilter, activeFolderScopeId, activeFolderApi.folders, projects, projectScopeProjectId, isBrowsingRootTreeInProjectMode])
 
-      const item: any = {
-        id: `nav:label:${node.fullId}`,
-        title: node.label?.name || node.segment.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' '),
-        label: count > 0 ? String(count) : undefined,
-        // Show label type icon (Hash/Calendar/Type) right-aligned before count, with tooltip explaining the type
-        afterTitle: node.label?.valueType ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span className="flex items-center"><LabelValueTypeIcon valueType={node.label.valueType} size={10} /></span>
-            </TooltipTrigger>
-            <TooltipContent side="top" className="text-xs">
-              {t("sidebar.labelValueTypeTooltip", { valueType: t(`sidebar.labelValueType.${node.label.valueType}`) })}
-            </TooltipContent>
-          </Tooltip>
-        ) : undefined,
-        icon: node.label && activeWorkspace?.id ? (
-          <LabelIcon
-            label={node.label}
-            size="sm"
-            hasChildren={hasChildren}
-          />
-        ) : <Tag className="h-3.5 w-3.5" />,
-        variant: isActive ? "default" : "ghost",
-        compact: true, // Reduced height for label items (many labels expected)
-        // All labels navigate on click — parent and leaf alike
-        onClick: () => handleLabelClick(node.fullId),
-        contextMenu: {
-          type: 'labels' as const,
-          labelId: node.fullId,
-          onConfigureLabels: openConfigureLabels,
-          onAddLabel: handleAddLabel,
-          onDeleteLabel: handleDeleteLabel,
-        },
-      }
+  /**
+   * Parent of the folder currently in scope (null at root). Drives the header's
+   * back button: the breadcrumb is the way "down", this is the way "up".
+   */
+  const parentFolderId = React.useMemo(() => {
+    if (!activeFolderScopeId) return null
+    const folder = activeFolderApi.folders.find(f => f.id === activeFolderScopeId)
+    return folder?.parentId ?? null
+  }, [activeFolderScopeId, activeFolderApi.folders])
 
-      if (hasChildren) {
-        item.expandable = true
-        item.expanded = isExpanded(`nav:label:${node.fullId}`)
-        // Chevron toggles expand/collapse independently of navigation
-        item.onToggle = () => toggleExpanded(`nav:label:${node.fullId}`)
-        item.items = buildLabelSidebarItems(node.children)
-      }
-
-      return item
-    })
-  }, [sessionFilter, labelCounts, activeWorkspace?.id, handleLabelClick, isExpanded, toggleExpanded, openConfigureLabels, handleAddLabel, handleDeleteLabel])
+  const handleGoToParentFolder = React.useCallback(() => {
+    if (isBrowsingRootTreeInProjectMode) {
+      setRootFolderBrowseId(parentFolderId)
+      return
+    }
+    if (isProjectBrowsingMode) {
+      projectFolderSectionRef.current?.collapseFolders(
+        getFolderIdsToCollapseOnAncestorNavigation(projectFolderApi.folders, folderScopeId, parentFolderId),
+      )
+    }
+    setFolderScopeId(parentFolderId)
+  }, [folderScopeId, isBrowsingRootTreeInProjectMode, isProjectBrowsingMode, parentFolderId, projectFolderApi.folders])
 
   return (
     <AppShellProvider value={appShellContextValue}>
@@ -2491,35 +2064,7 @@ function AppShellContent({
             <div className="flex h-full flex-col select-none">
               {/* Sidebar Top Section */}
               <div className="flex-1 flex flex-col min-h-0">
-                {/* New Session Button - Gmail-style, with context menu for "Open in New Window" */}
-                <div className="px-2 pb-2 shrink-0">
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <div>
-                        <ContextMenu modal={true}>
-                          <ContextMenuTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              onClick={(e) => handleNewChat(e.metaKey || e.ctrlKey)}
-                              className="w-full justify-start gap-2 py-[7px] px-2 text-[13px] font-normal rounded-[6px] shadow-minimal bg-background"
-                              data-tutorial="new-chat-button"
-                            >
-                              <SquarePenRounded className="h-3.5 w-3.5 shrink-0" />
-                              {t("session.newSession")}
-                            </Button>
-                          </ContextMenuTrigger>
-                          <StyledContextMenuContent>
-                            <ContextMenuProvider>
-                              <SidebarMenu type="newSession" />
-                            </ContextMenuProvider>
-                          </StyledContextMenuContent>
-                        </ContextMenu>
-                      </div>
-                    </TooltipTrigger>
-                    <TooltipContent side="right">{newChatHotkey}</TooltipContent>
-                  </Tooltip>
-                </div>
-                {/* Primary Nav: All Sessions (▸ Statuses, Flagged, Archived), Labels | Sources, Skills | Settings */}
+                {/* Primary Nav: Projects | All Sessions (▸ folders, Archived) | Sources, Skills, Pages, Settings */}
                 {/* pb-4 provides clearance so the last item scrolls above the mask-fade-bottom gradient */}
                 <div className="flex-1 overflow-y-auto min-h-0 mask-fade-bottom pb-4">
                 <LeftSidebar
@@ -2527,28 +2072,261 @@ function AppShellContent({
                   getItemProps={getSidebarItemProps}
                   focusedItemId={focusedSidebarItemId}
                   links={[
+                    // --- Projects (top: a project is the broadest scope a
+                    // session can belong to, so it reads first) ---
+                    // Two display modes: entries list (mode 1) and, once a
+                    // project is entered, its own folder tree under the
+                    // breadcrumb title with 设置/返回 on the right (mode 2).
+                    (() => {
+                      const entered = enteredProjectId
+                        ? projects.find(p => p.config.id === enteredProjectId)
+                        : undefined
+                      // Mode 2 is only valid while the include filter still
+                      // points at the entered project — otherwise the project
+                      // scope hook falls back to the root tree and the rail
+                      // would show root folders under 项目/xxx.
+                      const inMode2 = !!entered && projectScopeProjectId === entered.config.id
+                      return {
+                      id: "nav:projects",
+                      title: inMode2 && entered ? `${t("sidebar.projects")}/${entered.config.name}` : t("sidebar.projects"),
+                      label: inMode2 ? undefined : String(projects.length),
+                      icon: FolderKanban,
+                      // Mode 2 browses the project — the section itself is the
+                      // active scope; mode 1 highlights only on the Projects view.
+                      variant: (inMode2 || isProjectsNavigation(navState)) ? "default" : "ghost",
+                      // The project breadcrumb is inert in mode 2; only its
+                      // explicit back button returns to the project entries.
+                      onClick: inMode2 ? undefined : handleProjectsClick,
+                      expandable: inMode2 || projects.length > 0,
+                      // Mode 2 shows the entered project tree while the section is expanded.
+                      expanded: isExpanded('nav:projects'),
+                      onToggle: () => toggleExpanded('nav:projects'),
+                      // Use the same rule in both modes: a single click toggles
+                      // this section; a double click enters/returns to the project root.
+                      clickTogglesExpand: true,
+                      onDoubleClick: inMode2 ? handleProjectRootDoubleClick : undefined,
+                      // Mode 2 header actions: settings page + back to mode 1.
+                      afterTitle: inMode2 && entered ? (
+                        <span className="flex items-center gap-1">
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            aria-label={t("sidebarMenu.projectSettings")}
+                            data-no-dnd="true"
+                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-foreground/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              navigate(routes.view.projects(entered.config.slug))
+                            }}
+                            onDoubleClick={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                navigate(routes.view.projects(entered.config.slug))
+                              }
+                            }}
+                          >
+                            <Settings2 className="h-4 w-4 text-muted-foreground" />
+                          </span>
+                          <span
+                            role="button"
+                            tabIndex={0}
+                            aria-label={t("common.back")}
+                            data-no-dnd="true"
+                            className="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-foreground/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              handleExitProjectBrowsing()
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault()
+                                e.stopPropagation()
+                                handleExitProjectBrowsing()
+                              }
+                            }}
+                          >
+                            <ArrowLeft className="h-4 w-4 text-muted-foreground" />
+                          </span>
+                        </span>
+                      ) : undefined,
+                      contextMenu: inMode2 && entered ? {
+                        type: 'allSessions' as const,
+                        onNewFolder: () => {
+                          if (!isExpanded('nav:projects')) {
+                            setCollapsedItems(prev => {
+                              const next = new Set(prev)
+                              next.delete('nav:projects')
+                              return next
+                            })
+                            window.setTimeout(() => projectFolderSectionRef.current?.openCreate(null), 0)
+                          } else {
+                            projectFolderSectionRef.current?.openCreate(null)
+                          }
+                        },
+                        onMarkAllRead: () => {
+                          if (!activeWorkspaceId) return
+                          setSessionMetaMap(prev => {
+                            const next = new Map(prev)
+                            for (const [id, meta] of next) {
+                              if (meta.workspaceId === activeWorkspaceId && meta.projectId === entered.config.id && meta.hasUnread && !meta.isProcessing) {
+                                next.set(id, { ...meta, hasUnread: false })
+                              }
+                            }
+                            return next
+                          })
+                          void window.electronAPI.markAllSessionsRead(activeWorkspaceId, entered.config.id)
+                            .catch(error => {
+                              console.error('[AppShell] Failed to mark project sessions read:', error)
+                              toast.error(t('folders.markReadFailed'))
+                            })
+                        },
+                      } : {
+                        type: 'projects' as const,
+                        onAddProject: openAddProject,
+                      },
+                      onDropSession: inMode2 && entered
+                        ? (sessionId: string) => { void handleDropSessionToScope(sessionId, entered.config.id, null) }
+                        : undefined,
+                      onDropFolder: inMode2 && entered
+                        ? (folderId: string) => { void handleDropFolderToScope(folderId, dragState.projectId, entered.config.id) }
+                        : undefined,
+                      items: inMode2 && entered ? [
+                        // The project's own folder tree — same structure as the
+                        // tree under "All Sessions", backed by the project scope.
+                        {
+                          id: "project-folder-tree",
+                          type: "custom" as const,
+                          render: (
+                            <FolderSection
+                              ref={projectFolderSectionRef}
+                              foldersApi={projectFolderApi}
+                              folderScopeProjectId={entered.config.id}
+                              onDropFolderAcrossScopes={(folderId, fromProjectId, targetParentId) => {
+                                void handleDropFolderToScope(folderId, fromProjectId, entered.config.id, targetParentId)
+                              }}
+                              selectedFolderId={folderScopeId}
+                              highlightFolderId={folderScopeId}
+                              onSelectFolder={handleSelectProjectFolder}
+                              onDropSession={(sessionId, folderId) => {
+                                void handleDropSessionToScope(sessionId, entered.config.id, folderId)
+                              }}
+                            />
+                          ),
+                        },
+                      ] : projects.map(p => ({
+                        id: `nav:projects:${p.config.id}`,
+                        title: p.config.name,
+                        icon: FolderKanban,
+                        // Highlight when on the project's jump view AND this is
+                        // the included project; a selected folder row inside its
+                        // tree takes over the highlight (same grammar as root).
+                        variant: (sessionFilter?.kind === 'allSessions' && !folderScopeId && projectFilter.get(p.config.id) === 'include') ? "default" as const : "ghost" as const,
+                        onClick: () => handleJumpToProjectSessions(p.config.id),
+                        // Double click enters mode 2: the rail swaps the entry
+                        // list for the project's own folder tree.
+                        onDoubleClick: () => {
+                          setRootFolderBrowseId(undefined)
+                          setCollapsedItems(prev => {
+                            if (!prev.has('nav:projects')) return prev
+                            const next = new Set(prev)
+                            next.delete('nav:projects')
+                            return next
+                          })
+                          setEnteredProjectId(p.config.id)
+                        },
+                        // Cross-scope drop targets: root sessions/folders land in
+                        // this project (moveToScope rebinds project + folder).
+                        onDropSession: (sessionId: string) => {
+                          void handleDropSessionToScope(sessionId, p.config.id, null)
+                        },
+                        onDropFolder: (folderId: string) => {
+                          void handleDropFolderToScope(folderId, dragState.projectId, p.config.id)
+                        },
+                        // Settings affordance on the right: opens the project's
+                        // settings page (its detail view). Hover-revealed like
+                        // every other row action in this rail.
+                        afterTitle: (
+                          <span
+                            role="button"
+                            aria-label={t("sidebarMenu.projectSettings")}
+                            data-no-dnd="true"
+                            className="flex h-4 w-4 shrink-0 items-center justify-center rounded hover:bg-foreground/10"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              navigate(routes.view.projects(p.config.slug))
+                            }}
+                          >
+                            <Settings2 className="h-3.5 w-3.5 text-muted-foreground" />
+                          </span>
+                        ),
+                        // Same shape as the session menu: details / rename / delete.
+                        contextMenu: {
+                          type: 'project' as const,
+                          onViewDetails: () => navigate(routes.view.projects(p.config.slug)),
+                          onRename: () => setRenamingProjectId(p.config.id),
+                          onDelete: () => void handleDeleteProject(p.config.slug, p.config.name),
+                        },
+                        editing: renamingProjectId === p.config.id,
+                        onRenameCommit: (value: string) => void handleRenameProject(p.config.slug, p.config.name, value),
+                        onRenameCancel: () => setRenamingProjectId(null),
+                      })),
+                      }
+                    })(),
                     // --- Sessions Section ---
-                    // All Sessions: expandable with status children (sortable) + Flagged & Archived as trailing items
+                    // Folders are NOT here: the tree belongs to the "All Sessions"
+                    // view's own panel (navigator column), not to the nav rail.
                     {
                       id: "nav:allSessions",
                       title: t("sidebar.allSessions"),
                       label: String(workspaceSessionMetas.length),
                       icon: Inbox,
-                      variant: sessionFilter?.kind === 'allSessions' ? "default" : "ghost",
-                      onClick: handleAllSessionsClick,
+                      // Selected only for the plain root list: inside a folder
+                      // scope the folder row owns the selection, under a
+                      // project include the project entry does — the rail
+                      // highlights exactly one scope row at a time.
+                      variant: (sessionFilter?.kind === 'allSessions' && !folderScopeId && !hasProjectInclude) ? "default" : "ghost",
+                      onClick: isProjectBrowsingMode
+                        ? () => handleBrowseRootFolderInProjectMode(null)
+                        : handleAllSessionsClick,
                       expandable: true,
                       expanded: isExpanded('nav:allSessions'),
                       onToggle: () => toggleExpanded('nav:allSessions'),
+                      // Keep the same navigation rule in every scope: a single
+                      // click toggles the folder block; a double click enters the
+                      // workspace root list (or the root tree while in project mode).
+                      clickTogglesExpand: true,
+                      // Dropping a session here files it back to the root — the only
+                      // way out of a subfolder by drag. A session dragged out of a
+                      // project also loses its project binding (atomic cross-scope
+                      // move; the session lands at the all-sessions root).
+                      onDropSession: (sessionId) => {
+                        // Atomic move to the workspace root — see the note on the
+                        // folder-tree drop above: never branch on cached metadata.
+                        void handleDropSessionToScope(sessionId, null, null)
+                        // No navigator side effects: the drop only changes the
+                        // session's binding. Re-scoping left-2 here made the list
+                        // jump and hid the folder the user was looking at.
+                      },
+                      // Folders come back to the root the same way — a nested folder
+                      // dragged onto "All Sessions" is un-nested; one dragged out of
+                      // a project (Mode 2 tree) moves its whole subtree across scopes.
+                      onDropFolder: (folderId) => {
+                        void handleDropFolderToScope(folderId, dragState.projectId, null)
+                      },
                       contextMenu: {
                         type: 'allSessions',
-                        onConfigureStatuses: openConfigureStatuses,
+                        // Creating a folder is an "All Sessions" action: the tree under
+                        // this row is where the new node appears.
+                        onNewFolder: () => folderSectionRef.current?.openCreate(null),
                         onMarkAllRead: () => {
                           if (!activeWorkspaceId) return
                           // Optimistic: clear hasUnread on all workspace session metas
                           setSessionMetaMap(prev => {
                             const next = new Map(prev)
                             for (const [id, meta] of next) {
-                              if (meta.workspaceId === activeWorkspaceId && meta.hasUnread) {
+                              if (meta.workspaceId === activeWorkspaceId && meta.hasUnread && !meta.hidden && !meta.isArchived && !meta.isProcessing) {
                                 next.set(id, { ...meta, hasUnread: false })
                               }
                             }
@@ -2557,37 +2335,40 @@ function AppShellContent({
                           window.electronAPI.markAllSessionsRead(activeWorkspaceId)
                         },
                       },
-                      // Enable flat DnD reorder for status items
-                      sortable: { onReorder: handleStatusReorder },
                       items: [
-                        // Status items (sortable via SortableStatusList)
-                        ...effectiveSessionStatuses.map(state => ({
-                          id: `nav:state:${state.id}`,
-                          title: t(`status.${state.id}`, state.label),
-                          label: String(sessionStatusCounts[state.id] || 0),
-                          icon: state.icon,
-                          iconColor: state.resolvedColor,
-                          iconColorable: state.iconColorable,
-                          variant: (sessionFilter?.kind === 'state' && sessionFilter.stateId === state.id ? "default" : "ghost") as "default" | "ghost",
-                          onClick: () => handleSessionStatusClick(state.id),
-                          contextMenu: {
-                            type: 'status' as const,
-                            statusId: state.id,
-                            onConfigureStatuses: openConfigureStatuses,
-                          },
-                        })),
-                        // Separator: SortableStatusList splits here — items after become non-sortable trailingItems
-                        { id: 'separator:states-flagged', type: 'separator' as const },
-                        // Flagged (trailing, non-sortable)
+                        // Folder tree — lives INSIDE "All Sessions" (nested subitems) so
+                        // the rail reads: All Sessions → folders → Archived.
                         {
-                          id: "nav:flagged",
-                          title: t("sidebar.flagged"),
-                          label: String(flaggedCount),
-                          icon: <Flag className="h-3.5 w-3.5" />,
-                          variant: (sessionFilter?.kind === 'flagged' ? "default" : "ghost") as "default" | "ghost",
-                          onClick: handleFlaggedClick,
+                          id: "folder-tree",
+                          type: "custom" as const,
+                          render: (
+                            <FolderSection
+                              ref={folderSectionRef}
+                              foldersApi={rootFolderApi}
+                              folderScopeProjectId={null}
+                              onDropFolderAcrossScopes={(folderId, fromProjectId, targetParentId) => {
+                                void handleDropFolderToScope(folderId, fromProjectId, null, targetParentId)
+                              }}
+                              // Folder ids are unique per scope config, not
+                              // globally: while a project scope is active the
+                              // selected id may be a project folder, which must
+                              // not highlight same-id rows in the root tree.
+                              selectedFolderId={isProjectBrowsingMode && rootFolderBrowseId === undefined ? null : rootFolderBrowseId !== undefined ? rootFolderBrowseId : folderScopeId}
+                              onSelectFolder={isProjectBrowsingMode ? handleBrowseRootFolderInProjectMode : handleSelectFolderScope}
+                              highlightFolderId={isProjectBrowsingMode ? rootFolderBrowseId : projectScopeProjectId ? null : session.selected ? (sessionMetaMap.get(session.selected)?.folderId ?? null) : null}
+                              onDropSession={(sessionId, folderId) => {
+                                // Always the atomic cross-scope move: branching on the
+                                // cached meta (projectId?) silently failed whenever the
+                                // cache was stale — the plain setFolder command then
+                                // validated the folder against the session's real scope
+                                // and threw, with nothing caught, so the drop looked dead.
+                                void handleDropSessionToScope(sessionId, null, folderId)
+                              }}
+                            />
+                          ),
                         },
-                        // Archived (trailing, non-sortable)
+                        // Divider above the Archived tail (it is its own block).
+                        { id: "separator:folders-archived", type: "separator" as const },
                         {
                           id: "nav:archived",
                           title: t("sidebar.archived"),
@@ -2597,25 +2378,6 @@ function AppShellContent({
                           onClick: handleArchivedClick,
                         },
                       ],
-                    },
-                    // Labels: navigable header (shows all labeled sessions) + hierarchical tree (drag-and-drop reorder + re-parent)
-                    {
-                      id: "nav:labels",
-                      title: t("sidebar.labels"),
-                      icon: Tag,
-                      // Only highlighted when "Labels" itself is selected (not sub-labels)
-                      variant: (sessionFilter?.kind === 'label' && sessionFilter.labelId === '__all__') ? "default" as const : "ghost" as const,
-                      // Clicking navigates to "all labeled sessions" view
-                      onClick: () => handleLabelClick('__all__'),
-                      expandable: true,
-                      expanded: isExpanded('nav:labels'),
-                      onToggle: () => toggleExpanded('nav:labels'),
-                      contextMenu: {
-                        type: 'labels' as const,
-                        onConfigureLabels: openConfigureLabels,
-                        onAddLabel: handleAddLabel,
-                      },
-                      items: buildLabelSidebarItems(labelTree),
                     },
                     // --- Separator ---
                     { id: "separator:chats-sources", type: "separator" },
@@ -2698,30 +2460,6 @@ function AppShellContent({
                       },
                     },
                     {
-                      id: "nav:projects",
-                      title: t("sidebar.projects"),
-                      label: String(projects.length),
-                      icon: FolderKanban,
-                      // Highlight only when on Projects view itself, not when a child is "active" (jumped-to filter)
-                      variant: isProjectsNavigation(navState) ? "default" : "ghost",
-                      onClick: handleProjectsClick,
-                      expandable: projects.length > 0,
-                      expanded: isExpanded('nav:projects'),
-                      onToggle: () => toggleExpanded('nav:projects'),
-                      contextMenu: {
-                        type: 'projects' as const,
-                        onAddProject: openAddProject,
-                      },
-                      items: projects.map(p => ({
-                        id: `nav:projects:${p.config.id}`,
-                        title: p.config.name,
-                        icon: FolderKanban,
-                        // Highlight when on allSessions view AND filter includes this project (the jump-to state)
-                        variant: (sessionFilter?.kind === 'allSessions' && projectFilter.get(p.config.id) === 'include') ? "default" as const : "ghost" as const,
-                        onClick: () => handleJumpToProjectSessions(p.config.id),
-                      })),
-                    },
-                    {
                       id: "nav:pages",
                       title: t("sidebar.pages"),
                       label: String(pages.length),
@@ -2757,10 +2495,6 @@ function AppShellContent({
                       expandable: true,
                       expanded: isExpanded('nav:automations'),
                       onToggle: () => toggleExpanded('nav:automations'),
-                      contextMenu: {
-                        type: 'automations' as const,
-                        onAddAutomation: openAddAutomation,
-                      },
                       items: [
                         {
                           id: "nav:automations:scheduled",
@@ -2769,7 +2503,6 @@ function AppShellContent({
                           icon: Clock,
                           variant: (automationFilter?.kind === 'type' && automationFilter.automationType === 'scheduled') ? "default" : "ghost",
                           onClick: handleAutomationsScheduledClick,
-                          contextMenu: { type: 'automations' as const, onAddAutomation: openAddAutomation },
                         },
                         {
                           id: "nav:automations:event",
@@ -2778,7 +2511,6 @@ function AppShellContent({
                           icon: Radio,
                           variant: (automationFilter?.kind === 'type' && automationFilter.automationType === 'event') ? "default" : "ghost",
                           onClick: handleAutomationsEventClick,
-                          contextMenu: { type: 'automations' as const, onAddAutomation: openAddAutomation },
                         },
                         {
                           id: "nav:automations:agentic",
@@ -2787,37 +2519,48 @@ function AppShellContent({
                           icon: Bot,
                           variant: (automationFilter?.kind === 'type' && automationFilter.automationType === 'agentic') ? "default" : "ghost",
                           onClick: handleAutomationsAgenticClick,
-                          contextMenu: { type: 'automations' as const, onAddAutomation: openAddAutomation },
                         },
                       ],
-                    },
-                    // --- Separator ---
-                    { id: "separator:skills-settings", type: "separator" },
-                    // --- Settings ---
-                    {
-                      id: "nav:settings",
-                      title: t("sidebar.settings"),
-                      icon: Settings,
-                      variant: isSettingsNavigation(navState) ? "default" : "ghost",
-                      onClick: () => handleSettingsClick(),
-                    },
-                    // --- What's New ---
-                    {
-                      id: "nav:whats-new",
-                      title: t("sidebar.whatsNew"),
-                      icon: hasUnseenReleaseNotes ? (
-                        <span className="relative">
-                          <Cake className="h-3.5 w-3.5" />
-                          <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-accent" />
-                        </span>
-                      ) : Cake,
-                      variant: "ghost" as const,
-                      onClick: handleWhatsNewClick,
                     },
                   ]}
                 />
                 {/* Agent Tree: Hierarchical list of agents */}
                 {/* Agents section removed */}
+                </div>
+                {/* Rail footer: Settings and What's New (with their divider) are
+                  * pinned to the bottom of the rail instead of trailing the nav
+                  * list, so a long list can never scroll them out of reach. */}
+                <div className="flex-none">
+                  <LeftSidebar
+                    isCollapsed={false}
+                    getItemProps={getSidebarItemProps}
+                    focusedItemId={focusedSidebarItemId}
+                    links={[
+                      // --- Separator ---
+                      { id: "separator:skills-settings", type: "separator" },
+                      // --- Settings ---
+                      {
+                        id: "nav:settings",
+                        title: t("sidebar.settings"),
+                        icon: Settings,
+                        variant: isSettingsNavigation(navState) ? "default" : "ghost",
+                        onClick: () => handleSettingsClick(),
+                      },
+                      // --- What's New ---
+                      {
+                        id: "nav:whats-new",
+                        title: t("sidebar.whatsNew"),
+                        icon: hasUnseenReleaseNotes ? (
+                          <span className="relative">
+                            <Cake className="h-3.5 w-3.5" />
+                            <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-accent" />
+                          </span>
+                        ) : Cake,
+                        variant: "ghost" as const,
+                        onClick: handleWhatsNewClick,
+                      },
+                    ]}
+                  />
                 </div>
               </div>
 
@@ -2829,721 +2572,46 @@ function AppShellContent({
             <div
               style={{ width: isAutoCompact ? '100%' : sessionListWidth }}
               className="h-full flex flex-col min-w-0 relative z-panel"
+              onContextMenu={handleListBackgroundContextMenu}
             >
             <PanelHeader
-              title={isSidebarVisible ? listTitle : undefined}
-              compensateForStoplight={!isSidebarVisible}
-              badge={automationFilter?.automationType === 'scheduled' ? (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="text-muted-foreground/50 cursor-default flex items-center titlebar-no-drag">
-                      <Info className="h-3 w-3" />
-                    </span>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-[220px]">
-                    Scheduling requires your machine to be running. It can be locked, but must be powered on.
-                  </TooltipContent>
-                </Tooltip>
+              // The title stays visible even when the rail is collapsed: hiding
+              // it left the list panel with an empty header and no way to tell
+              // which view was open. Stoplight padding is macOS-only (Windows
+              // uses a native frame), so it must not indent the title there.
+              title={listTitle}
+              compensateForStoplight={!isSidebarVisible && isMac}
+              leadingAction={activeFolderScopeId ? (
+                <HeaderIconButton
+                  icon={<ChevronLeft className="h-4 w-4" />}
+                  tooltip={t("folders.back")}
+                  aria-label={t("folders.back")}
+                  onClick={handleGoToParentFolder}
+                />
               ) : undefined}
+
               actions={
                 <>
-                  {/* List ⇄ Board view switch (sessions mode, desktop widths only).
-                      In board view the navigator is collapsed, so the board hosts its own copy. */}
-                  {!isAutoCompact && isSessionsNavigation(navState) && (
-                    <BoardListToggle
-                      value="list"
-                      onChange={view => {
-                        if (view === 'board') navigate(routes.view.board())
+                  {/* Search — the header's own affordance (the old filter dropdown that
+                      used to host it was removed). Collapsed it is an icon; opened it
+                      grows leftwards over the title. */}
+                  {isSessionsNavigation(navState) && (
+                    <HeaderSearchControl
+                      active={searchActive}
+                      query={searchQuery}
+                      onOpen={() => setSearchActive(true)}
+                      onChange={setSearchQuery}
+                      onClose={() => {
+                        setSearchActive(false)
+                        setSearchQuery('')
                       }}
+                      // Blur collapse keeps the draft: only the search *state* is
+                      // dropped, the typed text survives in memory (never persisted).
+                      onCollapse={() => setSearchActive(false)}
                     />
                   )}
-                  {/* Filter dropdown - available in ALL chat views.
-                      Shows user-added filters (removable) and pinned filters (non-removable, derived from route).
-                      Pinned filters: state views pin a status, label views pin a label, flagged pins the flag. */}
-                  {isSessionsNavigation(navState) && (
-                    isAutoCompact ? (
-                      <CompactSessionListFilter
-                        listFilter={listFilter}
-                        setListFilter={setListFilter}
-                        labelFilter={labelFilter}
-                        setLabelFilter={setLabelFilter}
-                        pinnedFilters={pinnedFilters}
-                        effectiveSessionStatuses={effectiveSessionStatuses}
-                        displayLabelConfigs={displayLabelConfigs}
-                        labelConfigs={labelConfigs}
-                        chatGroupingMode={chatGroupingMode}
-                        setChatGroupingMode={setChatGroupingMode}
-                        isStateSubView={isStateSubView}
-                        onOpenSearch={() => setSearchActive(true)}
-                      />
-                    ) : (
-                    <DropdownMenu onOpenChange={(open) => { if (!open) { setFilterDropdownQuery(''); setFilterAltHeld(false) } }}>
-                      <DropdownMenuTrigger asChild>
-                        <HeaderIconButton
-                          icon={<ListFilter className="h-4 w-4" />}
-                          className={(listFilter.size > 0 || labelFilter.size > 0 || projectFilter.size > 0) ? "bg-accent/5 text-accent rounded-[8px] shadow-tinted" : "rounded-[8px]"}
-                          style={(listFilter.size > 0 || labelFilter.size > 0 || projectFilter.size > 0) ? { '--shadow-color': 'var(--accent-rgb)' } as React.CSSProperties : undefined}
-                        />
-                      </DropdownMenuTrigger>
-                      <StyledDropdownMenuContent
-                        align="end"
-                        light
-                        minWidth="min-w-[200px]"
-                        onKeyDown={(e: React.KeyboardEvent) => {
-                          if (e.key === 'Alt') setFilterAltHeld(true)
-                          // When on the first menu item and pressing Up, refocus the search input
-                          if (e.key === 'ArrowUp' && !filterDropdownQuery.trim()) {
-                            const menu = (e.target as HTMLElement).closest('[role="menu"]')
-                            const items = menu?.querySelectorAll('[role="menuitem"]')
-                            if (items && items.length > 0 && document.activeElement === items[0]) {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              filterDropdownInputRef.current?.focus()
-                            }
-                          }
-                        }}
-                        onKeyUp={(e: React.KeyboardEvent) => {
-                          if (e.key === 'Alt') setFilterAltHeld(false)
-                        }}
-                      >
-                        {/* Header with title and clear button (only clears user-added filters, never pinned) */}
-                        <div className="flex items-center justify-between px-2 py-1.5">
-                          <span className="text-xs font-medium text-muted-foreground">{t("sidebar.filterChats")}</span>
-                          {(listFilter.size > 0 || labelFilter.size > 0 || projectFilter.size > 0) && (
-                            <button
-                              onClick={(e) => {
-                                e.preventDefault()
-                                setListFilter(new Map())
-                                setLabelFilter(new Map())
-                                setProjectFilter(new Map())
-                              }}
-                              className="text-xs text-muted-foreground hover:text-foreground"
-                            >
-                              Clear
-                            </button>
-                          )}
-                        </div>
-
-                        {/* Search input — typing switches from hierarchical submenus to a flat filtered list.
-                            stopPropagation prevents Radix from intercepting keys. Arrow/Enter handled for navigation. */}
-                        <div className="px-1 pb-3 border-b border-foreground/5">
-                          <div className="bg-background rounded-[6px] shadow-minimal px-2 py-1.5">
-                            <input
-                              ref={filterDropdownInputRef}
-                              type="text"
-                              value={filterDropdownQuery}
-                              onChange={(e) => setFilterDropdownQuery(e.target.value)}
-                              onKeyDown={(e) => {
-                                // When input is empty, let ArrowDown/ArrowUp blur the input
-                                // so Radix's native menu keyboard navigation takes over
-                                if (!filterDropdownQuery.trim() && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
-                                  e.preventDefault()
-                                  ;(e.target as HTMLInputElement).blur()
-                                  // Focus the first menu item so Radix's keyboard navigation activates
-                                  const menu = (e.target as HTMLElement).closest('[role="menu"]')
-                                  const firstItem = menu?.querySelector('[role="menuitem"]') as HTMLElement | null
-                                  firstItem?.focus()
-                                  return
-                                }
-                                e.stopPropagation()
-                                const { states: ms, labels: ml } = filterDropdownResults
-                                const total = ms.length + ml.length
-                                if (total === 0) return
-                                switch (e.key) {
-                                  case 'ArrowDown':
-                                    e.preventDefault()
-                                    setFilterDropdownSelectedIdx(prev => (prev < total - 1 ? prev + 1 : 0))
-                                    break
-                                  case 'ArrowUp':
-                                    e.preventDefault()
-                                    setFilterDropdownSelectedIdx(prev => (prev > 0 ? prev - 1 : total - 1))
-                                    break
-                                  case 'Enter': {
-                                    e.preventDefault()
-                                    const mode: FilterMode = e.altKey ? 'exclude' : 'include'
-                                    const idx = filterDropdownSelectedIdx
-                                    if (idx < ms.length) {
-                                      // Toggle a status filter
-                                      const state = ms[idx]
-                                      if (state.id !== pinnedFilters.pinnedStatusId) {
-                                        setListFilter(prev => {
-                                          const next = new Map(prev)
-                                          if (next.has(state.id)) next.delete(state.id)
-                                          else next.set(state.id, mode)
-                                          return next
-                                        })
-                                      }
-                                    } else {
-                                      // Toggle a label filter
-                                      const item = ml[idx - ms.length]
-                                      if (item && item.id !== pinnedFilters.pinnedLabelId) {
-                                        setLabelFilter(prev => {
-                                          const next = new Map(prev)
-                                          if (next.has(item.id)) next.delete(item.id)
-                                          else next.set(item.id, mode)
-                                          return next
-                                        })
-                                      }
-                                    }
-                                    break
-                                  }
-                                }
-                              }}
-                              placeholder={t("sidebar.searchStatusesLabels")}
-                              className="w-full bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none"
-                              autoFocus
-                            />
-                          </div>
-                        </div>
-
-                        {/* ── Conditional body: hierarchical (no query) vs flat filtered list (has query) ── */}
-                        {filterDropdownQuery.trim() === '' ? (
-                          <>
-                            {/* === HIERARCHICAL MODE (default) === */}
-
-                            {/* Active filter chips: pinned (non-removable) + user-added (removable) */}
-                            {(pinnedFilters.pinnedFlagged || pinnedFilters.pinnedStatusId || pinnedFilters.pinnedLabelId || listFilter.size > 0 || labelFilter.size > 0 || projectFilter.size > 0) && (
-                              <>
-                                {/* Pinned: flagged */}
-                                {pinnedFilters.pinnedFlagged && (
-                                  <StyledDropdownMenuItem disabled>
-                                    <FilterMenuRow
-                                      icon={<Flag className="h-3.5 w-3.5" />}
-                                      label={t("sidebar.flagged")}
-                                      accessory={<Check className="h-3 w-3 text-muted-foreground" />}
-                                    />
-                                  </StyledDropdownMenuItem>
-                                )}
-                                {/* Pinned: status from state view */}
-                                {(() => {
-                                  if (!pinnedFilters.pinnedStatusId) return null
-                                  const state = effectiveSessionStatuses.find(s => s.id === pinnedFilters.pinnedStatusId)
-                                  if (!state) return null
-                                  return (
-                                    <StyledDropdownMenuItem disabled key={`pinned-status-${state.id}`}>
-                                      <FilterMenuRow
-                                        icon={state.icon}
-                                        label={statusLabel(state)}
-                                        accessory={<Check className="h-3 w-3 text-muted-foreground" />}
-                                        iconStyle={state.iconColorable ? { color: state.resolvedColor } : undefined}
-                                        noIconContainer
-                                      />
-                                    </StyledDropdownMenuItem>
-                                  )
-                                })()}
-                                {/* Pinned: label from label view */}
-                                {(() => {
-                                  if (!pinnedFilters.pinnedLabelId) return null
-                                  const label = findLabelById(labelConfigs, pinnedFilters.pinnedLabelId)
-                                  if (!label) return null
-                                  return (
-                                    <StyledDropdownMenuItem disabled key={`pinned-label-${label.id}`}>
-                                      <FilterMenuRow
-                                        icon={<LabelIcon label={label} size="lg" />}
-                                        label={label.name}
-                                        accessory={<Check className="h-3 w-3 text-muted-foreground" />}
-                                      />
-                                    </StyledDropdownMenuItem>
-                                  )
-                                })()}
-                                {/* User-added: selected statuses with mode pill (include/exclude) */}
-                                {effectiveSessionStatuses.filter(s => listFilter.has(s.id)).map(state => {
-                                  const applyColor = state.iconColorable
-                                  const mode = listFilter.get(state.id)!
-                                  return (
-                                    <DropdownMenuSub key={`sel-status-${state.id}`}>
-                                      <StyledDropdownMenuSubTrigger onClick={(e) => { e.preventDefault(); setListFilter(prev => { const next = new Map(prev); next.delete(state.id); return next }) }}>
-                                        <FilterMenuRow
-                                          icon={state.icon}
-                                          label={statusLabel(state)}
-                                          accessory={<FilterModeBadge mode={mode} />}
-                                          iconStyle={applyColor ? { color: state.resolvedColor } : undefined}
-                                          noIconContainer
-                                        />
-                                      </StyledDropdownMenuSubTrigger>
-                                      <StyledDropdownMenuSubContent minWidth="min-w-[140px]">
-                                        <FilterModeSubMenuItems
-                                          mode={mode}
-                                          onChangeMode={(newMode) => setListFilter(prev => {
-                                            const next = new Map(prev)
-                                            next.set(state.id, newMode)
-                                            return next
-                                          })}
-                                          onRemove={() => setListFilter(prev => {
-                                            const next = new Map(prev)
-                                            next.delete(state.id)
-                                            return next
-                                          })}
-                                        />
-                                      </StyledDropdownMenuSubContent>
-                                    </DropdownMenuSub>
-                                  )
-                                })}
-                                {/* User-added: selected labels with mode pill (include/exclude) */}
-                                {Array.from(labelFilter).map(([labelId, mode]) => {
-                                  const label = findLabelById(labelConfigs, labelId)
-                                  if (!label) return null
-                                  return (
-                                    <DropdownMenuSub key={`sel-label-${labelId}`}>
-                                      <StyledDropdownMenuSubTrigger onClick={(e) => { e.preventDefault(); setLabelFilter(prev => { const next = new Map(prev); next.delete(labelId); return next }) }}>
-                                        <FilterMenuRow
-                                          icon={<LabelIcon label={label} size="lg" />}
-                                          label={label.name}
-                                          accessory={<FilterModeBadge mode={mode} />}
-                                        />
-                                      </StyledDropdownMenuSubTrigger>
-                                      <StyledDropdownMenuSubContent minWidth="min-w-[140px]">
-                                        <FilterModeSubMenuItems
-                                          mode={mode}
-                                          onChangeMode={(newMode) => setLabelFilter(prev => {
-                                            const next = new Map(prev)
-                                            next.set(labelId, newMode)
-                                            return next
-                                          })}
-                                          onRemove={() => setLabelFilter(prev => {
-                                            const next = new Map(prev)
-                                            next.delete(labelId)
-                                            return next
-                                          })}
-                                        />
-                                      </StyledDropdownMenuSubContent>
-                                    </DropdownMenuSub>
-                                  )
-                                })}
-                                {/* User-added: selected projects with mode pill (include/exclude) */}
-                                {Array.from(projectFilter).map(([projectId, mode]) => {
-                                  const project = projectMenuOptions.find(p => p.id === projectId)
-                                  if (!project) return null
-                                  return (
-                                    <DropdownMenuSub key={`sel-project-${projectId}`}>
-                                      <StyledDropdownMenuSubTrigger onClick={(e) => { e.preventDefault(); setProjectFilter(prev => { const next = new Map(prev); next.delete(projectId); return next }) }}>
-                                        <FilterMenuRow
-                                          icon={<FolderKanban className="h-3.5 w-3.5" />}
-                                          label={project.name}
-                                          accessory={<FilterModeBadge mode={mode} />}
-                                        />
-                                      </StyledDropdownMenuSubTrigger>
-                                      <StyledDropdownMenuSubContent minWidth="min-w-[140px]">
-                                        <FilterModeSubMenuItems
-                                          mode={mode}
-                                          onChangeMode={(newMode) => setProjectFilter(prev => {
-                                            const next = new Map(prev)
-                                            next.set(projectId, newMode)
-                                            return next
-                                          })}
-                                          onRemove={() => setProjectFilter(prev => {
-                                            const next = new Map(prev)
-                                            next.delete(projectId)
-                                            return next
-                                          })}
-                                        />
-                                      </StyledDropdownMenuSubContent>
-                                    </DropdownMenuSub>
-                                  )
-                                })}
-                                <StyledDropdownMenuSeparator />
-                              </>
-                            )}
-
-                            {/* Statuses submenu - hierarchical with toggle selection */}
-                            <DropdownMenuSub>
-                              <StyledDropdownMenuSubTrigger>
-                                <Inbox className="h-3.5 w-3.5" />
-                                <span className="flex-1">{t("sidebar.statuses")}</span>
-                              </StyledDropdownMenuSubTrigger>
-                              <StyledDropdownMenuSubContent minWidth="min-w-[180px]">
-                                {effectiveSessionStatuses.map(state => {
-                                  const applyColor = state.iconColorable
-                                  const isPinned = state.id === pinnedFilters.pinnedStatusId
-                                  const currentMode = listFilter.get(state.id)
-                                  const isActive = !!currentMode && !isPinned
-                                  // Active status → DropdownMenuSub with mode options (Radix safe-triangle hover)
-                                  if (isActive) {
-                                    return (
-                                      <DropdownMenuSub key={state.id}>
-                                        <StyledDropdownMenuSubTrigger onClick={(e) => { e.preventDefault(); setListFilter(prev => { const next = new Map(prev); next.delete(state.id); return next }) }}>
-                                          <FilterMenuRow
-                                            icon={state.icon}
-                                            label={statusLabel(state)}
-                                            accessory={<FilterModeBadge mode={currentMode} />}
-                                            iconStyle={applyColor ? { color: state.resolvedColor } : undefined}
-                                            noIconContainer
-                                          />
-                                        </StyledDropdownMenuSubTrigger>
-                                        <StyledDropdownMenuSubContent minWidth="min-w-[140px]">
-                                          <FilterModeSubMenuItems
-                                            mode={currentMode}
-                                            onChangeMode={(newMode) => setListFilter(prev => {
-                                              const next = new Map(prev)
-                                              next.set(state.id, newMode)
-                                              return next
-                                            })}
-                                            onRemove={() => setListFilter(prev => {
-                                              const next = new Map(prev)
-                                              next.delete(state.id)
-                                              return next
-                                            })}
-                                          />
-                                        </StyledDropdownMenuSubContent>
-                                      </DropdownMenuSub>
-                                    )
-                                  }
-                                  // Inactive / pinned status → simple toggleable item
-                                  return (
-                                    <AltExcludeTooltip key={state.id} show={filterAltHeld && !isPinned}>
-                                      <StyledDropdownMenuItem
-                                        disabled={isPinned}
-                                        onClick={(e) => {
-                                          if (isPinned) return
-                                          e.preventDefault()
-                                          setListFilter(prev => {
-                                            const next = new Map(prev)
-                                            if (next.has(state.id)) next.delete(state.id)
-                                            else next.set(state.id, e.altKey ? 'exclude' : 'include')
-                                            return next
-                                          })
-                                        }}
-                                      >
-                                        <FilterMenuRow
-                                          icon={state.icon}
-                                          label={statusLabel(state)}
-                                          accessory={isPinned ? <Check className="h-3 w-3 text-muted-foreground" /> : null}
-                                          iconStyle={applyColor ? { color: state.resolvedColor } : undefined}
-                                          noIconContainer
-                                        />
-                                      </StyledDropdownMenuItem>
-                                    </AltExcludeTooltip>
-                                  )
-                                })}
-                              </StyledDropdownMenuSubContent>
-                            </DropdownMenuSub>
-
-                            {/* Labels submenu - hierarchical tree with recursive submenus */}
-                            <DropdownMenuSub>
-                              <StyledDropdownMenuSubTrigger>
-                                <Tag className="h-3.5 w-3.5" />
-                                <span className="flex-1">{t("sidebar.labels")}</span>
-                              </StyledDropdownMenuSubTrigger>
-                              <StyledDropdownMenuSubContent minWidth="min-w-[180px]">
-                                {labelConfigs.length === 0 ? (
-                                  <StyledDropdownMenuItem disabled>
-                                    <span className="text-muted-foreground">{t("table.noLabelsConfigured")}</span>
-                                  </StyledDropdownMenuItem>
-                                ) : (
-                                  <FilterLabelItems
-                                    labels={displayLabelConfigs}
-                                    labelFilter={labelFilter}
-                                    setLabelFilter={setLabelFilter}
-                                    pinnedLabelId={pinnedFilters.pinnedLabelId}
-                                    altHeld={filterAltHeld}
-                                  />
-                                )}
-                              </StyledDropdownMenuSubContent>
-                            </DropdownMenuSub>
-
-                            {/* Projects submenu - flat list of workspace projects */}
-                            {projectMenuOptions.length > 0 && (
-                              <DropdownMenuSub>
-                                <StyledDropdownMenuSubTrigger>
-                                  <FolderKanban className="h-3.5 w-3.5" />
-                                  <span className="flex-1">{t("sidebar.projects")}</span>
-                                </StyledDropdownMenuSubTrigger>
-                                <StyledDropdownMenuSubContent minWidth="min-w-[180px]">
-                                  {projectMenuOptions.map(project => {
-                                    const currentMode = projectFilter.get(project.id)
-                                    const isActive = !!currentMode
-                                    if (isActive) {
-                                      return (
-                                        <DropdownMenuSub key={project.id}>
-                                          <StyledDropdownMenuSubTrigger onClick={(e) => { e.preventDefault(); setProjectFilter(prev => { const next = new Map(prev); next.delete(project.id); return next }) }}>
-                                            <FilterMenuRow
-                                              icon={<FolderKanban className="h-3.5 w-3.5" />}
-                                              label={project.name}
-                                              accessory={<FilterModeBadge mode={currentMode} />}
-                                            />
-                                          </StyledDropdownMenuSubTrigger>
-                                          <StyledDropdownMenuSubContent minWidth="min-w-[140px]">
-                                            <FilterModeSubMenuItems
-                                              mode={currentMode}
-                                              onChangeMode={(newMode) => setProjectFilter(prev => {
-                                                const next = new Map(prev)
-                                                next.set(project.id, newMode)
-                                                return next
-                                              })}
-                                              onRemove={() => setProjectFilter(prev => {
-                                                const next = new Map(prev)
-                                                next.delete(project.id)
-                                                return next
-                                              })}
-                                            />
-                                          </StyledDropdownMenuSubContent>
-                                        </DropdownMenuSub>
-                                      )
-                                    }
-                                    return (
-                                      <AltExcludeTooltip key={project.id} show={filterAltHeld}>
-                                        <StyledDropdownMenuItem
-                                          onClick={(e) => {
-                                            e.preventDefault()
-                                            setProjectFilter(prev => {
-                                              const next = new Map(prev)
-                                              if (next.has(project.id)) next.delete(project.id)
-                                              else next.set(project.id, e.altKey ? 'exclude' : 'include')
-                                              return next
-                                            })
-                                          }}
-                                        >
-                                          <FilterMenuRow
-                                            icon={<FolderKanban className="h-3.5 w-3.5" />}
-                                            label={project.name}
-                                          />
-                                        </StyledDropdownMenuItem>
-                                      </AltExcludeTooltip>
-                                    )
-                                  })}
-                                </StyledDropdownMenuSubContent>
-                              </DropdownMenuSub>
-                            )}
-
-                            {/* Group by submenu - hidden in state sub-views (always date there) */}
-                            {!isStateSubView && (
-                              <>
-                                <StyledDropdownMenuSeparator />
-                                <DropdownMenuSub>
-                                  <StyledDropdownMenuSubTrigger>
-                                    <Layers className="h-3.5 w-3.5" />
-                                    <span className="flex-1">{t("sidebar.group")}</span>
-                                  </StyledDropdownMenuSubTrigger>
-                                  <StyledDropdownMenuSubContent minWidth="min-w-[140px]">
-                                    <StyledDropdownMenuItem onClick={() => setChatGroupingMode('date')}>
-                                      <Calendar className="h-3.5 w-3.5" />
-                                      <span className="flex-1">{t("sidebar.groupByDate")}</span>
-                                      {chatGroupingMode === 'date' && <Check className="h-3 w-3 text-muted-foreground" />}
-                                    </StyledDropdownMenuItem>
-                                    <StyledDropdownMenuItem onClick={() => setChatGroupingMode('status')}>
-                                      <Inbox className="h-3.5 w-3.5" />
-                                      <span className="flex-1">{t("sidebar.groupByStatus")}</span>
-                                      {chatGroupingMode === 'status' && <Check className="h-3 w-3 text-muted-foreground" />}
-                                    </StyledDropdownMenuItem>
-                                    <StyledDropdownMenuItem onClick={() => setChatGroupingMode('unread')}>
-                                      <MailOpen className="h-3.5 w-3.5" />
-                                      <span className="flex-1">{t("sidebar.groupByUnread")}</span>
-                                      {chatGroupingMode === 'unread' && <Check className="h-3 w-3 text-muted-foreground" />}
-                                    </StyledDropdownMenuItem>
-                                    {projectMenuOptions.length > 0 && (
-                                      <StyledDropdownMenuItem onClick={() => setChatGroupingMode('project')}>
-                                        <FolderKanban className="h-3.5 w-3.5" />
-                                        <span className="flex-1">{t("sidebar.groupByProject")}</span>
-                                        {chatGroupingMode === 'project' && <Check className="h-3 w-3 text-muted-foreground" />}
-                                      </StyledDropdownMenuItem>
-                                    )}
-                                  </StyledDropdownMenuSubContent>
-                                </DropdownMenuSub>
-                              </>
-                            )}
-
-                            <StyledDropdownMenuSeparator />
-                            <StyledDropdownMenuItem
-                              onClick={() => {
-                                setSearchActive(true)
-                              }}
-                            >
-                              <Search className="h-3.5 w-3.5" />
-                              <span className="flex-1">{t("sidebar.search")}</span>
-                            </StyledDropdownMenuItem>
-                          </>
-                        ) : (
-                          <>
-                            {/* === FLAT FILTERED MODE (has query) ===
-                                Uses the same filter/score logic as the # inline menu.
-                                Shows matching statuses and labels in a single flat list.
-                                Supports keyboard navigation (ArrowUp/Down/Enter in input). */}
-                            {filterDropdownResults.states.length === 0 && filterDropdownResults.labels.length === 0 ? (
-                              <div className="px-3 py-4 text-center text-xs text-muted-foreground">
-                                No matching statuses or labels
-                              </div>
-                            ) : (
-                              <div ref={filterDropdownListRef} className="max-h-[240px] overflow-y-auto py-1">
-                                {/* Matched statuses */}
-                                {filterDropdownResults.states.length > 0 && (
-                                  <>
-                                    <div className="px-3 pt-1.5 pb-1 text-[11px] font-medium text-muted-foreground/60 uppercase tracking-wider">
-                                      Statuses
-                                    </div>
-                                    {filterDropdownResults.states.map((state, index) => {
-                                      const applyColor = state.iconColorable
-                                      const isPinned = state.id === pinnedFilters.pinnedStatusId
-                                      const currentMode = listFilter.get(state.id)
-                                      const isHighlighted = index === filterDropdownSelectedIdx
-                                      const isActive = !!currentMode && !isPinned
-                                      // Active status → DropdownMenuSub with mode options
-                                      if (isActive) {
-                                        return (
-                                          <DropdownMenuSub key={`flat-status-${state.id}`}>
-                                            <StyledDropdownMenuSubTrigger
-                                              data-filter-selected={isHighlighted}
-                                              onMouseEnter={() => setFilterDropdownSelectedIdx(index)}
-                                              className={cn("mx-1", isHighlighted && "bg-foreground/5")}
-                                              onClick={(e) => { e.preventDefault(); setListFilter(prev => { const next = new Map(prev); next.delete(state.id); return next }) }}
-                                            >
-                                              <FilterMenuRow
-                                                icon={state.icon}
-                                                label={statusLabel(state)}
-                                                accessory={<FilterModeBadge mode={currentMode} />}
-                                                iconStyle={applyColor ? { color: state.resolvedColor } : undefined}
-                                                noIconContainer
-                                              />
-                                            </StyledDropdownMenuSubTrigger>
-                                            <StyledDropdownMenuSubContent minWidth="min-w-[140px]">
-                                              <FilterModeSubMenuItems
-                                                mode={currentMode}
-                                                onChangeMode={(newMode) => setListFilter(prev => {
-                                                  const next = new Map(prev)
-                                                  next.set(state.id, newMode)
-                                                  return next
-                                                })}
-                                                onRemove={() => setListFilter(prev => {
-                                                  const next = new Map(prev)
-                                                  next.delete(state.id)
-                                                  return next
-                                                })}
-                                              />
-                                            </StyledDropdownMenuSubContent>
-                                          </DropdownMenuSub>
-                                        )
-                                      }
-                                      // Inactive / pinned status → plain div with click-to-toggle
-                                      return (
-                                        <AltExcludeTooltip key={`flat-status-${state.id}`} show={filterAltHeld && !isPinned}>
-                                          <div
-                                            data-filter-selected={isHighlighted}
-                                            onMouseEnter={() => setFilterDropdownSelectedIdx(index)}
-                                            onClick={(e) => {
-                                              if (isPinned) return
-                                              e.preventDefault()
-                                              setListFilter(prev => {
-                                                const next = new Map(prev)
-                                                if (next.has(state.id)) next.delete(state.id)
-                                                else next.set(state.id, e.altKey ? 'exclude' : 'include')
-                                                return next
-                                              })
-                                            }}
-                                            className={cn(
-                                              // SVG sizing matches StyledDropdownMenuSubTrigger so icons render at the same size
-                                              "flex cursor-pointer select-none items-center gap-2 rounded-[4px] mx-1 px-2 py-1.5 text-sm [&_svg:not([class*='size-'])]:size-4 [&_svg]:shrink-0",
-                                              isHighlighted && "bg-foreground/5",
-                                              isPinned && "opacity-50 pointer-events-none",
-                                            )}
-                                          >
-                                            <FilterMenuRow
-                                              icon={state.icon}
-                                              label={statusLabel(state)}
-                                              accessory={isPinned ? <Check className="h-3 w-3 text-muted-foreground" /> : null}
-                                              iconStyle={applyColor ? { color: state.resolvedColor } : undefined}
-                                              noIconContainer
-                                            />
-                                          </div>
-                                        </AltExcludeTooltip>
-                                      )
-                                    })}
-                                  </>
-                                )}
-                                {/* Separator between sections */}
-                                {filterDropdownResults.states.length > 0 && filterDropdownResults.labels.length > 0 && (
-                                  <div className="my-1 mx-2 border-t border-border/40" />
-                                )}
-                                {/* Matched labels — flat list with parent breadcrumbs */}
-                                {filterDropdownResults.labels.length > 0 && (
-                                  <>
-                                    <div className="px-3 pt-1.5 pb-1 text-[11px] font-medium text-muted-foreground/60 uppercase tracking-wider">
-                                      Labels
-                                    </div>
-                                    {filterDropdownResults.labels.map((item, index) => {
-                                      // Offset by state count for unified index
-                                      const flatIndex = filterDropdownResults.states.length + index
-                                      const isPinned = item.id === pinnedFilters.pinnedLabelId
-                                      const currentMode = labelFilter.get(item.id)
-                                      const isHighlighted = flatIndex === filterDropdownSelectedIdx
-                                      const isActive = !!currentMode && !isPinned
-                                      const labelDisplay = item.parentPath
-                                        ? <><span className="text-muted-foreground">{item.parentPath}</span>{item.label}</>
-                                        : item.label
-                                      // Active label → DropdownMenuSub with mode options
-                                      if (isActive) {
-                                        return (
-                                          <DropdownMenuSub key={`flat-label-${item.id}`}>
-                                            <StyledDropdownMenuSubTrigger
-                                              data-filter-selected={isHighlighted}
-                                              onMouseEnter={() => setFilterDropdownSelectedIdx(flatIndex)}
-                                              className={cn("mx-1", isHighlighted && "bg-foreground/5")}
-                                              onClick={(e) => { e.preventDefault(); setLabelFilter(prev => { const next = new Map(prev); next.delete(item.id); return next }) }}
-                                            >
-                                              <FilterMenuRow
-                                                icon={<LabelIcon label={item.config} size="lg" />}
-                                                label={labelDisplay}
-                                                accessory={<FilterModeBadge mode={currentMode} />}
-                                              />
-                                            </StyledDropdownMenuSubTrigger>
-                                            <StyledDropdownMenuSubContent minWidth="min-w-[140px]">
-                                              <FilterModeSubMenuItems
-                                                mode={currentMode}
-                                                onChangeMode={(newMode) => setLabelFilter(prev => {
-                                                  const next = new Map(prev)
-                                                  next.set(item.id, newMode)
-                                                  return next
-                                                })}
-                                                onRemove={() => setLabelFilter(prev => {
-                                                  const next = new Map(prev)
-                                                  next.delete(item.id)
-                                                  return next
-                                                })}
-                                              />
-                                            </StyledDropdownMenuSubContent>
-                                          </DropdownMenuSub>
-                                        )
-                                      }
-                                      // Inactive / pinned label → plain div with click-to-toggle
-                                      return (
-                                        <AltExcludeTooltip key={`flat-label-${item.id}`} show={filterAltHeld && !isPinned}>
-                                          <div
-                                            data-filter-selected={isHighlighted}
-                                            onMouseEnter={() => setFilterDropdownSelectedIdx(flatIndex)}
-                                            onClick={(e) => {
-                                              if (isPinned) return
-                                              e.preventDefault()
-                                              setLabelFilter(prev => {
-                                                const next = new Map(prev)
-                                                if (next.has(item.id)) next.delete(item.id)
-                                                else next.set(item.id, e.altKey ? 'exclude' : 'include')
-                                                return next
-                                              })
-                                            }}
-                                            className={cn(
-                                              // SVG sizing matches StyledDropdownMenuSubTrigger so icons render at the same size
-                                              "flex cursor-pointer select-none items-center gap-2 rounded-[4px] mx-1 px-2 py-1.5 text-sm [&_svg:not([class*='size-'])]:size-4 [&_svg]:shrink-0",
-                                              isHighlighted && "bg-foreground/5",
-                                              isPinned && "opacity-50 pointer-events-none",
-                                            )}
-                                          >
-                                            <FilterMenuRow
-                                              icon={<LabelIcon label={item.config} size="lg" />}
-                                              label={labelDisplay}
-                                              accessory={isPinned ? <Check className="h-3 w-3 text-muted-foreground" /> : null}
-                                            />
-                                          </div>
-                                        </AltExcludeTooltip>
-                                      )
-                                    })}
-                                  </>
-                                )}
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </StyledDropdownMenuContent>
-                    </DropdownMenu>
-                    )
-                  )}
+                  {/* List ⇄ Board view switch (sessions mode, desktop widths only).
+                      In board view the navigator is collapsed, so the board hosts its own copy. */}
                   {/* Add Source button (only for sources mode) - uses filter-aware edit config */}
                   {isSourcesNavigation(navState) && activeWorkspace && (
                     <EditPopover
@@ -3573,18 +2641,6 @@ function AppShellContent({
                       {...getEditConfig('add-skill', activeWorkspace.rootPath)}
                     />
                   )}
-                  {/* Add Automation button (only for automations mode) */}
-                  {isAutomationsNavigation(navState) && activeWorkspace && (
-                    <EditPopover
-                      trigger={
-                        <HeaderIconButton
-                          icon={<Plus className="h-4 w-4" />}
-                          tooltip={t("sidebarMenu.addAutomation")}
-                        />
-                      }
-                      {...getEditConfig('automation-config', activeWorkspace.rootPath)}
-                    />
-                  )}
                   {/* Add Project button (only for projects mode) */}
                   {isProjectsNavigation(navState) && activeWorkspace && (
                     <HeaderIconButton
@@ -3596,6 +2652,37 @@ function AppShellContent({
                 </>
               }
             />
+            {/* New Session — first row of the navigator body (not the header):
+                icon + label centred as one group, full width. */}
+            {isSessionsNavigation(navState) && (
+              <div className="shrink-0 px-2 pt-1 pb-2">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <div>
+                      <ContextMenu modal={true}>
+                        <ContextMenuTrigger asChild>
+                          <Button
+                            variant="ghost"
+                            onClick={(e) => handleNewChat(e.metaKey || e.ctrlKey)}
+                            className="flex h-[30px] w-full items-center justify-center gap-2 rounded-[6px] border border-foreground/10 bg-foreground/[0.06] px-2 text-[13px] font-normal shadow-minimal transition-colors hover:bg-foreground/[0.10]"
+                            data-tutorial="new-chat-button"
+                          >
+                            <SquarePenRounded className="h-3.5 w-3.5 shrink-0" />
+                            <span className="truncate">{t("session.newSession")}</span>
+                          </Button>
+                        </ContextMenuTrigger>
+                        <StyledContextMenuContent>
+                          <ContextMenuProvider>
+                            <SidebarMenu type="newSession" />
+                          </ContextMenuProvider>
+                        </StyledContextMenuContent>
+                      </ContextMenu>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">{newChatHotkey}</TooltipContent>
+                </Tooltip>
+              </div>
+            )}
             {/* Content: SessionList, SourcesListPanel, or SettingsNavigator based on navigation state */}
             {/* Memory manager view replaces the sources list in the navigator */}
             {isSourcesNavigation(navState) && navState.details?.type !== 'memory' && (
@@ -3623,19 +2710,8 @@ function AppShellContent({
                 usageStats={usageStats}
               />
             )}
-            {isProjectsNavigation(navState) && activeWorkspaceId && (
-              /* Projects List */
-              <ProjectsListPanel
-                projects={projects}
-                workspaceId={activeWorkspaceId}
-                onProjectClick={(slug) => navigate(routes.view.projects(slug))}
-                onAddProject={openAddProject}
-                onJumpToSessions={handleJumpToProjectSessions}
-                selectedProjectSlug={isProjectsNavigation(navState) ? navState.details?.projectSlug ?? null : null}
-              />
-            )}
-            {isAutomationsNavigation(navState) && (
-              /* Automations List - filtered by type if automationFilter is active */
+            {isAutomationsNavigation(navState) && activeWorkspaceId && (
+              /* Automations List */
               <AutomationsListPanel
                 automations={automations}
                 automationFilter={automationFilter ? { kind: AUTOMATION_TYPE_TO_FILTER_KIND[automationFilter.automationType] ?? 'all' } : undefined}
@@ -3646,6 +2722,17 @@ function AppShellContent({
                 onDeleteAutomation={handleDeleteAutomation}
                 selectedAutomationId={isAutomationsNavigation(navState) && navState.details ? navState.details.automationId : null}
                 workspaceRootPath={activeWorkspace?.rootPath}
+              />
+            )}
+            {isProjectsNavigation(navState) && activeWorkspaceId && (
+              /* Projects List */
+              <ProjectsListPanel
+                projects={projects}
+                workspaceId={activeWorkspaceId}
+                onProjectClick={(slug) => navigate(routes.view.projects(slug))}
+                onAddProject={openAddProject}
+                onJumpToSessions={handleJumpToProjectSessions}
+                selectedProjectSlug={isProjectsNavigation(navState) ? navState.details?.projectSlug ?? null : null}
               />
             )}
             {isSettingsNavigation(navState) && (
@@ -3662,34 +2749,25 @@ function AppShellContent({
                 {/* Key on sidebarMode forces full remount when switching views, skipping animations */}
                 <SessionList
                   key={sessionFilter?.kind}
-                  items={searchActive ? workspaceSessionMetas : filteredSessionMetas}
+                  items={filteredSessionMetas}
                   onDelete={handleDeleteSession}
-                  onFlag={onFlagSession}
-                  onUnflag={onUnflagSession}
                   onArchive={onArchiveSession}
                   onUnarchive={onUnarchiveSession}
                   onMarkUnread={onMarkSessionUnread}
-                  onSessionStatusChange={onSessionStatusChange}
                   onRename={onRenameSession}
+                  onNewSession={() => handleNewChat()}
                   onFocusChatInput={(targetSessionId) => {
                     focusChatInputForSession(targetSessionId ?? focusedSessionId ?? session.selected)
                   }}
                   onSessionSelect={(selectedMeta) => {
                     navigateToSession(selectedMeta.id)
                   }}
+                  onSearchResultSelect={handleSearchResultSelect}
                   onOpenInNewWindow={(selectedMeta) => {
                     if (activeWorkspaceId) {
                       window.electronAPI.openSessionInNewWindow(activeWorkspaceId, selectedMeta.id)
                     }
                   }}
-                  onNavigateToView={(view) => {
-                    if (view === 'allSessions') {
-                      navigate(routes.view.allSessions())
-                    } else if (view === 'flagged') {
-                      navigate(routes.view.flagged())
-                    }
-                  }}
-                  sessionOptions={sessionOptions}
                   searchActive={searchActive}
                   searchQuery={searchQuery}
                   onSearchChange={setSearchQuery}
@@ -3697,16 +2775,19 @@ function AppShellContent({
                     setSearchActive(false)
                     setSearchQuery('')
                   }}
-                  sessionStatuses={effectiveSessionStatuses}
-                  evaluateViews={evaluateViews}
-                  labels={displayLabelConfigs}
-                  onLabelsChange={handleSessionLabelsChange}
                   projects={projectMenuOptions}
                   onSetProjectId={handleSessionProjectChange}
-                  groupingMode={chatGroupingMode}
                   workspaceId={activeWorkspaceId ?? undefined}
-                  statusFilter={listFilter}
-                  labelFilterMap={labelFilter}
+                  inProjectScope={!!projectScopeProjectId && !isBrowsingRootTreeInProjectMode}
+                  foldersApi={activeFolderApi}
+                  folderScopeId={activeFolderScopeId}
+                  onEnterFolder={isBrowsingRootTreeInProjectMode ? handleBrowseRootFolderInProjectMode : handleSelectProjectFolder}
+                  folderSessionCounts={folderSessionCounts}
+                  folderListRef={navigatorFolderListRef}
+                  folderScopeProjectId={isBrowsingRootTreeInProjectMode ? null : projectScopeProjectId}
+                  onDropSessionToFolder={(sessionId, folderId) => {
+                    void handleDropSessionToScope(sessionId, isBrowsingRootTreeInProjectMode ? null : projectScopeProjectId, folderId)
+                  }}
                   focusedSessionId={panelCount === 0 ? null : panelCount > 1 ? focusedSessionId : undefined}
                   onNavigateToSession={panelCount > 1 ? navigateToSessionInPanel : undefined}
                   hasPendingPrompt={hasPendingPrompt}
@@ -3722,7 +2803,7 @@ function AppShellContent({
             )}
             </div>
           }
-          navigatorWidth={isAutoCompact ? sessionListWidth : (effectiveSidebarAndNavigatorHidden || isBoardView || isPagesView || isMemoryView ? 0 : sessionListWidth)}
+          navigatorWidth={isAutoCompact ? sessionListWidth : (effectiveSidebarAndNavigatorHidden || isPagesView || isMemoryView ? 0 : sessionListWidth)}
           isSidebarAndNavigatorHidden={effectiveSidebarAndNavigatorHidden}
           isRightSidebarVisible={false}
           isCompact={isAutoCompact}
@@ -3763,7 +2844,7 @@ function AppShellContent({
         )}
 
         {/* Session List Resize Handle (absolute, hidden in focused mode, board view, pages, and memory) */}
-        {!effectiveSidebarAndNavigatorHidden && !isBoardView && !isPagesView && !isMemoryView && (
+        {!effectiveSidebarAndNavigatorHidden && !isPagesView && !isMemoryView && (
         <div
           ref={sessionListHandleRef}
           onMouseDown={(e) => { e.preventDefault(); setIsResizing('session-list') }}
@@ -3810,82 +2891,6 @@ function AppShellContent({
        */}
       {activeWorkspace && (
         <>
-          {/* Configure Statuses EditPopover - anchored near sidebar */}
-          <EditPopover
-            open={editPopoverOpen === 'statuses'}
-            onOpenChange={(isOpen) => setEditPopoverOpen(isOpen ? 'statuses' : null)}
-            modal={true}
-            trigger={
-              <div
-                className="fixed w-0 h-0 pointer-events-none"
-                style={{ left: sidebarWidth + 20, top: editPopoverAnchorY.current }}
-                aria-hidden="true"
-              />
-            }
-            side="bottom"
-            align="start"
-            secondaryAction={{
-              label: 'Edit File',
-              filePath: `${activeWorkspace.rootPath}/statuses/config.json`,
-            }}
-            {...getEditConfig('edit-statuses', activeWorkspace.rootPath)}
-          />
-          {/* Configure Labels EditPopover - anchored near sidebar */}
-          <EditPopover
-            open={editPopoverOpen === 'labels'}
-            onOpenChange={(isOpen) => setEditPopoverOpen(isOpen ? 'labels' : null)}
-            modal={true}
-            trigger={
-              <div
-                className="fixed w-0 h-0 pointer-events-none"
-                style={{ left: sidebarWidth + 20, top: editPopoverAnchorY.current }}
-                aria-hidden="true"
-              />
-            }
-            side="bottom"
-            align="start"
-            secondaryAction={{
-              label: 'Edit File',
-              filePath: `${activeWorkspace.rootPath}/labels/config.json`,
-            }}
-            {...(() => {
-              // Spread base config, override context to include which label was right-clicked
-              const config = getEditConfig('edit-labels', activeWorkspace.rootPath)
-              const targetLabel = editLabelTargetId.current
-                ? findLabelById(labelConfigs, editLabelTargetId.current)
-                : undefined
-              if (!targetLabel) return config
-              return {
-                ...config,
-                context: {
-                  ...config.context,
-                  context: (config.context.context || '') +
-                    ` The user right-clicked on the label "${targetLabel.name}" (id: "${targetLabel.id}"). ` +
-                    'If they refer to "this label" or "this", they mean this specific label.',
-                },
-              }
-            })()}
-          />
-          {/* Edit Views EditPopover - anchored near sidebar */}
-          <EditPopover
-            open={editPopoverOpen === 'views'}
-            onOpenChange={(isOpen) => setEditPopoverOpen(isOpen ? 'views' : null)}
-            modal={true}
-            trigger={
-              <div
-                className="fixed w-0 h-0 pointer-events-none"
-                style={{ left: sidebarWidth + 20, top: editPopoverAnchorY.current }}
-                aria-hidden="true"
-              />
-            }
-            side="bottom"
-            align="start"
-            secondaryAction={{
-              label: 'Edit File',
-              filePath: `${activeWorkspace.rootPath}/views.json`,
-            }}
-            {...getEditConfig('edit-views', activeWorkspace.rootPath)}
-          />
           {/* Add Source EditPopovers - one for each variant (generic + filter-specific)
            * editPopoverOpen can be: 'add-source', 'add-source-api', 'add-source-mcp', 'add-source-local'
            * Each variant uses its corresponding EditContextKey for filter-aware agent context */}
@@ -3923,58 +2928,6 @@ function AppShellContent({
             align="start"
             {...getEditConfig('add-skill', activeWorkspace.rootPath)}
           />
-          {/* Add Automation EditPopover - triggered from "Add Automation" context menu in automations */}
-          <EditPopover
-            open={editPopoverOpen === 'automation-config'}
-            onOpenChange={(isOpen) => setEditPopoverOpen(isOpen ? 'automation-config' : null)}
-            modal={true}
-            trigger={
-              <div
-                className="fixed w-0 h-0 pointer-events-none"
-                style={{ left: sidebarWidth + 20, top: editPopoverAnchorY.current }}
-                aria-hidden="true"
-              />
-            }
-            side="bottom"
-            align="start"
-            {...getEditConfig('automation-config', activeWorkspace.rootPath)}
-          />
-          {/* Add Label EditPopover - triggered from "Add New Label" context menu on labels */}
-          <EditPopover
-            open={editPopoverOpen === 'add-label'}
-            onOpenChange={(isOpen) => setEditPopoverOpen(isOpen ? 'add-label' : null)}
-            modal={true}
-            trigger={
-              <div
-                className="fixed w-0 h-0 pointer-events-none"
-                style={{ left: sidebarWidth + 20, top: editPopoverAnchorY.current }}
-                aria-hidden="true"
-              />
-            }
-            side="bottom"
-            align="start"
-            secondaryAction={{
-              label: 'Edit File',
-              filePath: `${activeWorkspace.rootPath}/labels/config.json`,
-            }}
-            {...(() => {
-              // Spread base config, override context to include which label was right-clicked
-              const config = getEditConfig('add-label', activeWorkspace.rootPath)
-              const targetLabel = editLabelTargetId.current
-                ? findLabelById(labelConfigs, editLabelTargetId.current)
-                : undefined
-              if (!targetLabel) return config
-              return {
-                ...config,
-                context: {
-                  ...config.context,
-                  context: (config.context.context || '') +
-                    ` The user right-clicked on the label "${targetLabel.name}" (id: "${targetLabel.id}"). ` +
-                    'The new label should be added as a sibling after this label, or as a child if the user specifies.',
-                },
-              }
-            })()}
-          />
         </>
       )}
 
@@ -3985,26 +2938,6 @@ function AppShellContent({
         content={releaseNotesContent}
         onOpenUrl={(url) => window.electronAPI.openUrl(url)}
       />
-
-      {/* Delete automation confirmation dialog */}
-      <Dialog open={!!automationPendingDelete} onOpenChange={(open) => { if (!open) setAutomationPendingDelete(null) }}>
-        <DialogContent showCloseButton={false}>
-          <DialogHeader>
-            <DialogTitle>{t("dialog.deleteAutomation.title")}</DialogTitle>
-            <DialogDescription>
-              <Trans
-                i18nKey="dialog.deleteAutomation.description"
-                values={{ name: pendingDeleteAutomation?.name }}
-                components={{ strong: <strong /> }}
-              />
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setAutomationPendingDelete(null)}>{t("common.cancel")}</Button>
-            <Button variant="destructive" onClick={confirmDeleteAutomation}>{t("common.delete")}</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       {/* Send to Workspace dialog (driven by sendToWorkspaceAtom) */}
       <SendToWorkspaceDialog
@@ -4026,6 +2959,41 @@ function AppShellContent({
       {/* Messaging dialogs (pairing-code + WA connect) — driven by messagingDialogAtom.
           Mounted here so they survive context-menu / dropdown close. */}
       <MessagingDialogHost />
+
+      {/* Navigator panel's empty-space menu (New Session / New Folder). Rendered
+          through a portal so the panel's overflow cannot clip it. */}
+      {listMenu && createPortal(
+        <div
+          className="fixed z-[100] min-w-[180px] overflow-hidden rounded-md border border-foreground/10 bg-popover p-1 text-sm text-popover-foreground shadow-2xl"
+          style={{ left: listMenu.x, top: listMenu.y }}
+          onMouseDown={(event) => event.stopPropagation()}
+          onContextMenu={(event) => { event.preventDefault(); setListMenu(null) }}
+        >
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-accent"
+            onClick={() => { setListMenu(null); handleNewChat() }}
+          >
+            <SquarePenRounded className="h-3.5 w-3.5 shrink-0" />
+            {t("session.newSession")}
+          </button>
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-accent"
+            onClick={() => {
+              setListMenu(null)
+              // Create where the user clicked: the navigator's own folder list.
+              // (Falling back to the tree would pop the editor into the wrong panel.)
+              setSearchActive(false)
+              navigatorFolderListRef.current?.openCreate()
+            }}
+          >
+            <FolderPlus className="h-3.5 w-3.5 shrink-0" />
+            {t("folders.new")}
+          </button>
+        </div>,
+        document.body
+      )}
 
     </AppShellProvider>
   )

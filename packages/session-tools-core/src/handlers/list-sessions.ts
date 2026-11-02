@@ -3,10 +3,9 @@ import type { ToolResult } from '../types.ts';
 import { successResponse, errorResponse } from '../response.ts';
 
 export interface ListSessionsArgs {
-  status?: string;
   label?: string;
   search?: string;
-  sortBy?: 'recent' | 'name' | 'status';
+  sortBy?: 'recent' | 'name';
   limit?: number;
   offset?: number;
 }
@@ -21,8 +20,6 @@ export async function handleListSessions(
 
   try {
     const result = ctx.listSessions({
-      status: args.status,
-      label: args.label,
       search: args.search,
       sortBy: args.sortBy,
       limit: args.limit,

@@ -186,16 +186,6 @@ import type {
   Session,
   UnreadSummary,
   CreateSessionOptions,
-  TaskValidationResultDto,
-  TaskCreateRequest,
-  TaskCreateResult,
-  TaskGenerateRequest,
-  TaskGenerateAck,
-  TaskGenerateResult,
-  TaskRunRequest,
-  TaskRunSnapshotDto,
-  TaskGetResult,
-  TaskResultsDto,
   FileAttachment,
   SendMessageOptions,
   SessionEvent,
@@ -232,7 +222,7 @@ export interface ElectronAPI {
   // Session management
   getSessions(): Promise<Session[]>
   getUnreadSummary(): Promise<UnreadSummary>
-  markAllSessionsRead(workspaceId: string): Promise<void>
+  markAllSessionsRead(workspaceId: string, projectId?: string): Promise<void>
   getSessionMessages(sessionId: string): Promise<Session | null>
   createSession(workspaceId: string, options?: CreateSessionOptions): Promise<Session>
   deleteSession(sessionId: string): Promise<void>
@@ -240,20 +230,30 @@ export interface ElectronAPI {
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>
   killShell(sessionId: string, shellId: string): Promise<{ success: boolean; error?: string }>
   getTaskOutput(taskId: string): Promise<string | null>
-
-  // Tasks (Conductor)
-  validateTask(workspaceId: string, yaml: string): Promise<TaskValidationResultDto>
-  createTask(workspaceId: string, req: TaskCreateRequest): Promise<TaskCreateResult>
-  generateTask(workspaceId: string, req: TaskGenerateRequest): Promise<TaskGenerateAck>
-  /** Async generate result (or error), keyed by orchestratorSessionId. Subscribe before/after generateTask. */
-  onTaskGenerated(callback: (workspaceId: string, result: TaskGenerateResult) => void): () => void
-  runTask(workspaceId: string, req: TaskRunRequest): Promise<TaskRunSnapshotDto>
-  pauseTask(workspaceId: string, slug: string, runId: string): Promise<void>
-  resumeTask(workspaceId: string, slug: string, runId: string): Promise<void>
-  stopTask(workspaceId: string, slug: string, runId: string): Promise<void>
-  getTask(workspaceId: string, slug: string, runId?: string): Promise<TaskGetResult>
-  listTasks(workspaceId: string): Promise<string[]>
-  getTaskResults(workspaceId: string, slug: string, runId?: string): Promise<TaskResultsDto>
+  /** Persisted, not-yet-delivered background tasks for a session. */
+  listBackgroundTasks(sessionId: string): Promise<Array<{
+    id: string
+    externalId?: string
+    kind: 'bash' | 'tool' | 'subscription' | 'subagent'
+    status: string
+    intent?: string
+    toolUseId?: string
+    command?: string
+    startedAt: number
+    completedAt?: number
+    outputFile?: string
+    stopSource?: string
+  }>>
+  stopBackgroundTask(
+    sessionId: string,
+    taskId: string,
+    stoppedBy?: 'model' | 'user',
+  ): Promise<{
+    taskId: string
+    status: string
+    stoppedBy: string
+    message: string
+  }>
 
   respondToPermission(sessionId: string, requestId: string, allowed: boolean, alwaysAllow: boolean, options?: PermissionResponseOptions): Promise<boolean>
   respondToCredential(sessionId: string, requestId: string, response: CredentialResponse): Promise<boolean>
@@ -485,7 +485,7 @@ export interface ElectronAPI {
   oauthRevoke(sourceSlug: string): Promise<{ success: boolean }>
 
   // Session content search (full-text search via ripgrep)
-  searchSessionContent(workspaceId: string, query: string, searchId?: string): Promise<SessionSearchResult[]>
+  searchSessionContent(workspaceId: string, query: string, searchId?: string, sessionIds?: string[]): Promise<SessionSearchResult[]>
 
   // Sources change listener (live updates when sources are added/removed)
   onSourcesChanged(callback: (workspaceId: string, sources: LoadedSource[]) => void): () => void
@@ -506,16 +506,19 @@ export interface ElectronAPI {
   /** Subscribe to global-memory write broadcasts (for live counts/badges). */
   onMemoryChanged(callback: (workspaceId: string) => void): () => void
 
-  // Statuses (workspace-scoped)
-  listStatuses(workspaceId: string): Promise<import('@craft-agent/shared/statuses').StatusConfig[]>
-  reorderStatuses(workspaceId: string, orderedIds: string[]): Promise<void>
-  onStatusesChanged(callback: (workspaceId: string) => void): () => void
 
-  // Labels (workspace-scoped)
-  listLabels(workspaceId: string): Promise<import('@craft-agent/shared/labels').LabelConfig[]>
-  createLabel(workspaceId: string, input: import('@craft-agent/shared/labels').CreateLabelInput): Promise<import('@craft-agent/shared/labels').LabelConfig>
-  deleteLabel(workspaceId: string, labelId: string): Promise<{ stripped: number }>
-  onLabelsChanged(callback: (workspaceId: string) => void): () => void
+  // Folders (workspace-scoped; one tree per project scope)
+  listFolders(workspaceId: string, scope: import('@craft-agent/shared/sessions').FolderScope): Promise<import('@craft-agent/shared/sessions').FolderConfig[]>
+  createFolder(workspaceId: string, scope: import('@craft-agent/shared/sessions').FolderScope, input: { name: string; parentId?: string | null }): Promise<import('@craft-agent/shared/sessions').FolderConfig>
+  renameFolder(workspaceId: string, scope: import('@craft-agent/shared/sessions').FolderScope, input: { id: string; name: string }): Promise<import('@craft-agent/shared/sessions').FolderConfig>
+  moveFolder(workspaceId: string, scope: import('@craft-agent/shared/sessions').FolderScope, input: { id: string; parentId: string | null; name?: string }): Promise<import('@craft-agent/shared/sessions').FolderConfig>
+  moveFolderToScope(workspaceId: string, fromScope: import('@craft-agent/shared/sessions').FolderScope, input: { id: string; parentId?: string | null; name?: string }, toScope: import('@craft-agent/shared/sessions').FolderScope): Promise<import('@craft-agent/shared/sessions').FolderConfig>
+  archiveFolder(workspaceId: string, scope: import('@craft-agent/shared/sessions').FolderScope, input: { id: string }): Promise<{ folder: import('@craft-agent/shared/sessions').FolderConfig; folderIds: string[]; path: string[]; sessionIds: string[]; archived: string[] }>
+  unarchiveFolder(workspaceId: string, scope: import('@craft-agent/shared/sessions').FolderScope, input: { id: string }): Promise<{ folder: import('@craft-agent/shared/sessions').FolderConfig; folderIds: string[]; restored: string[] }>
+  reorderFolder(workspaceId: string, scope: import('@craft-agent/shared/sessions').FolderScope, input: { id: string; sortOrder: string }): Promise<import('@craft-agent/shared/sessions').FolderConfig>
+  pinFolder(workspaceId: string, scope: import('@craft-agent/shared/sessions').FolderScope, input: { id: string; pinned: boolean }): Promise<import('@craft-agent/shared/sessions').FolderConfig>
+  deleteFolder(workspaceId: string, scope: import('@craft-agent/shared/sessions').FolderScope, input: { id: string }): Promise<{ deletedFolders: string[]; deletedSessions: string[]; archivedSessions: string[] }>
+  onFoldersChanged(callback: (workspaceId: string, scope: import('@craft-agent/shared/sessions').FolderScope) => void): () => void
 
   // LLM connections change listener
   onLlmConnectionsChanged(callback: () => void): () => void
@@ -535,10 +538,6 @@ export interface ElectronAPI {
   llmGatewayTestConnection(params: import('@craft-agent/shared/protocol').LlmGatewayTestConnectionParams): Promise<import('@craft-agent/shared/protocol').LlmGatewayTestConnectionResult>
   llmGatewayListModels(params: import('@craft-agent/shared/protocol').LlmGatewayListModelsParams): Promise<import('@craft-agent/shared/protocol').LlmGatewayListModelsResult>
   onLlmGatewayStatus(callback: (status: LlmGatewayStatusPayload) => void): () => void
-
-  // Views (workspace-scoped, stored in views.json)
-  listViews(workspaceId: string): Promise<import('@craft-agent/shared/views').ViewConfig[]>
-  saveViews(workspaceId: string, views: import('@craft-agent/shared/views').ViewConfig[]): Promise<void>
 
   // Generic workspace image loading/saving
   readWorkspaceImage(workspaceId: string, relativePath: string): Promise<string>
@@ -956,10 +955,6 @@ export type RightSidebarPanel =
  */
 export type SessionFilter =
   | { kind: 'allSessions' }
-  | { kind: 'flagged' }
-  | { kind: 'state'; stateId: string }
-  | { kind: 'label'; labelId: string }
-  | { kind: 'view'; viewId: string }
   | { kind: 'archived' }
 
 /**
@@ -977,9 +972,6 @@ export interface SessionsNavigationState {
   details: { type: 'session'; sessionId: string } | null
   rightSidebar?: RightSidebarPanel
   /**
-   * Presentation mode for the sessions navigator. `'board'` renders the Kanban
-   * board (all sessions, grouped into To Do / In Progress / Done columns) in the
-   * content area instead of the list + chat. Absent/`'list'` is the default.
    */
   viewMode?: 'list' | 'board'
 }
@@ -1148,11 +1140,7 @@ export const getNavigationStateKey = (state: NavigationState): string => {
   }
   // Chats
   const f = state.filter
-  let base: string
-  if (f.kind === 'state') base = `state:${f.stateId}`
-  else if (f.kind === 'label') base = `label:${f.labelId}`
-  else if (f.kind === 'view') base = `view:${f.viewId}`
-  else base = f.kind
+  const base: string = f.kind
   if (state.details) {
     return `${base}/chat/${state.details.sessionId}`
   }
@@ -1181,15 +1169,6 @@ export const parseNavigationStateKey = (key: string): NavigationState | null => 
     return { navigator: 'skills', details: null }
   }
 
-  // Handle automations
-  if (key === 'automations') return { navigator: 'automations', details: null }
-  if (key.startsWith('automations/automation/')) {
-    const automationId = key.slice(23)
-    if (automationId) {
-      return { navigator: 'automations', details: { type: 'automation', automationId } }
-    }
-    return { navigator: 'automations', details: null }
-  }
 
   // Handle projects
   if (key === 'projects') return { navigator: 'projects', details: null }
@@ -1224,20 +1203,14 @@ export const parseNavigationStateKey = (key: string): NavigationState | null => 
   const parseSessionsKey = (filterKey: string, sessionId?: string): NavigationState | null => {
     let filter: SessionFilter
     if (filterKey === 'allSessions') filter = { kind: 'allSessions' }
-    else if (filterKey === 'flagged') filter = { kind: 'flagged' }
+    else if (filterKey === 'flagged') filter = { kind: 'allSessions' }
     else if (filterKey === 'archived') filter = { kind: 'archived' }
     else if (filterKey.startsWith('state:')) {
-      const stateId = filterKey.slice(6)
-      if (!stateId) return null
-      filter = { kind: 'state', stateId }
-    } else if (filterKey.startsWith('label:')) {
-      const labelId = filterKey.slice(6)
-      if (!labelId) return null
-      filter = { kind: 'label', labelId }
+      // Status dimension removed — legacy keys resolve to the unfiltered list
+      filter = { kind: 'allSessions' }
     } else if (filterKey.startsWith('view:')) {
-      const viewId = filterKey.slice(5)
-      if (!viewId) return null
-      filter = { kind: 'view', viewId }
+      // View dimension removed — legacy keys resolve to the unfiltered list
+      filter = { kind: 'allSessions' }
     } else {
       return null
     }

@@ -7,10 +7,14 @@
  * upstreams, it should be choosing a routing policy.
  *
  * The label shows `策略组名 · 下一个请求将使用的模型`. The model half is a
- * prediction, not a record: the router keeps the session's model when the
- * strategy serves it and otherwise takes the strategy's first model, so the
- * label can be computed before the request is sent. The popover's rows still
- * show each group's `lastModel` — there, history is the useful thing.
+ * prediction, not a record: the router takes the session's own model when the
+ * group can serve it *right now* and otherwise the first model whose
+ * availability window is open, so the label can be computed before the request
+ * is sent. It used to read `lastModels` — the model the gateway called last —
+ * which is history: a finished title generation on `hy3` made the chip say
+ * `hy3` while the conversation request went to `hy4-preview` (2026-10-29).
+ * The popover's rows still show each group's `lastModel` — there, history is
+ * the useful thing.
  */
 
 import * as React from 'react'
@@ -34,6 +38,11 @@ export interface StrategyOption {
    * the label says so instead of silently showing a dash.
    */
   models?: string[]
+  /**
+   * The subset of `models` usable right now (availability windows applied).
+   * Absent means an older main process that does not compute it.
+   */
+  openModels?: string[]
   /** Disabled strategies are hidden from the picker entirely. */
   enabled?: boolean
   /** False when configured but unable to serve (no models / no providers). */
@@ -45,7 +54,16 @@ export interface StrategyOption {
 export interface StrategySelectorProps {
   strategies: StrategyOption[]
   value: string
-  /** The session's own model; the route keeps it when the strategy serves it. */
+  /**
+   * The session's own model, i.e. what a request would ask the group for.
+   * Deliberately *not* the gateway's last routed model: that is history and
+   * made the label disagree with the next request.
+   */
+  sessionModel?: string
+  /**
+   * The model the session is actually on right now, used by the callers that
+   * size things against live traffic (context ring). Only a fallback here.
+   */
   currentModel?: string
   onChange: (strategyId: string) => void
   /** Gateway not running / no strategies configured — disable and explain. */
@@ -65,6 +83,7 @@ export interface StrategySelectorProps {
 export function StrategySelector({
   strategies,
   value,
+  sessionModel,
   currentModel,
   onChange,
   unavailable = null,
@@ -109,7 +128,8 @@ export function StrategySelector({
     ? t('chat.strategy.disabled', '已禁用')
     : invalid
       ? t('chat.strategy.noModels', '无可用模型')
-      : nextStrategyModel(current?.models, currentModel)
+      : nextStrategyModel(current?.models, sessionModel ?? currentModel, current?.openModels) ??
+        t('chat.strategy.unavailableNow', '当前无可用模型')
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -254,15 +274,22 @@ export function StrategySelector({
 /**
  * The model the *next* request will use.
  *
- * Mirrors `resolveStrategyRoute`: the session's model wins when the strategy
- * serves it, otherwise the strategy's first model. The label used to read
- * `lastModels` — what the gateway called *last* — which is history, not a
- * prediction, and named the upstream id rather than the public model.
+ * Mirrors `pickStrategyModel` in `@craft-agent/shared/config` (strategy
+ * availability): the session's own model wins when it can be served *now*,
+ * otherwise the first model whose window is open, in declared order. Returns
+ * `null` when nothing in the group is open — the caller says so instead of
+ * naming a model that is guaranteed to fail.
+ *
+ * `openModels` is absent on older main processes; then availability is unknown
+ * and the whole list counts as open, which is the pre-window behaviour.
  */
 export function nextStrategyModel(
   models: readonly string[] | undefined,
-  currentModel: string | undefined,
-): string {
+  sessionModel: string | undefined,
+  openModels?: readonly string[],
+): string | null {
   if (!models?.length) return '—'
-  return currentModel && models.includes(currentModel) ? currentModel : models[0]!
+  const open = openModels ?? models
+  if (sessionModel && open.includes(sessionModel)) return sessionModel
+  return open[0] ?? null
 }

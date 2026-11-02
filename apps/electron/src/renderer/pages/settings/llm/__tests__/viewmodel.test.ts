@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { buildProviders } from '../proto/viewmodel'
+import { buildProviders, gatewaySetupSteps, keyAvailabilitySegments, shouldShowGatewaySetup } from '../proto/viewmodel'
 import type { GatewayStatus, LlmConfigShape, LlmKeyStateShape, ProviderDetailShape } from '../types'
 
 function makeConfig(overrides: Partial<LlmConfigShape['providers'][number]> = {}): LlmConfigShape {
@@ -39,6 +39,70 @@ const NO_STATUS: GatewayStatus | null = null
 const NO_KEY_STATES = new Map<string, LlmKeyStateShape>()
 const NO_DETAILS: Record<string, ProviderDetailShape> = {}
 
+describe('gatewaySetupSteps', () => {
+  const readyProvider = {
+    id: 'p1',
+    url: 'https://api.example.cn/v1',
+    state: 'ok',
+    lastTest: '10-31 12:00 测试成功',
+    lastTestOk: true,
+    keyRows: [{ enabled: true, key: 'sk-ready' }],
+    modelList: ['gpt-5'],
+  } as unknown as import('../proto/viewmodel').ProtoProvider
+  const readyStrategy = {
+    id: 's1',
+    enabled: true,
+    units: [{ provider: 'p1', model: 'gpt-5' }],
+  } as unknown as import('../proto/viewmodel').ProtoStrategy
+  const config = (): LlmConfigShape => ({
+    ...makeConfig({ keys: [{ id: 'k1', key: 'sk-k1' }], models: { 'gpt-5-up': 'gpt-5' } }),
+    strategies: [{ id: 's1', type: 'round_robin', members: [{ provider: 'p1' }] }],
+  })
+
+  test('requires an explicitly selected default strategy, not merely an existing strategy', () => {
+    expect(gatewaySetupSteps(config(), [readyProvider], [readyStrategy])).toEqual([true, true, false])
+  })
+
+  test('marks all steps complete when a tested provider and enabled default strategy exist', () => {
+    expect(gatewaySetupSteps({ ...config(), defaultStrategy: 's1' }, [readyProvider], [readyStrategy])).toEqual([true, true, true])
+  })
+
+  test('does not complete the default-group step for a disabled strategy', () => {
+    expect(gatewaySetupSteps(
+      { ...config(), defaultStrategy: 's1' },
+      [readyProvider],
+      [{ ...readyStrategy, enabled: false }],
+    )).toEqual([true, true, false])
+  })
+})
+
+describe('shouldShowGatewaySetup', () => {
+  test('hides the card after every step is complete', () => {
+    expect(shouldShowGatewaySetup([true, true, true], false)).toBe(false)
+  })
+
+  test('shows the card while a step remains and it was not dismissed', () => {
+    expect(shouldShowGatewaySetup([true, true, false], false)).toBe(true)
+  })
+
+  test('keeps a manually dismissed card hidden', () => {
+    expect(shouldShowGatewaySetup([false, false, false], true)).toBe(false)
+  })
+})
+
+describe('keyAvailabilitySegments', () => {
+  test('returns only non-zero status segments', () => {
+    expect(keyAvailabilitySegments({ avail: 2, cool: 0, unavailable: 1, dis: 0 })).toEqual([
+      { id: 'available', label: '可用', count: 2, color: 'var(--state-ok)' },
+      { id: 'unavailable', label: '暂不可用', count: 1, color: 'var(--state-bad)' },
+    ])
+  })
+
+  test('returns no segments when a provider has no keys', () => {
+    expect(keyAvailabilitySegments({ avail: 0, cool: 0, unavailable: 0, dis: 0 })).toEqual([])
+  })
+})
+
 describe('buildProviders — header fields', () => {
   test('carries baseUrl through as url', () => {
     const [p] = buildProviders(makeConfig(), NO_STATUS, NO_KEY_STATES, NO_DETAILS)
@@ -66,6 +130,45 @@ describe('buildProviders — header fields', () => {
 
   test('a missing config yields an empty list instead of throwing', () => {
     expect(buildProviders(null, NO_STATUS, NO_KEY_STATES, NO_DETAILS)).toEqual([])
+  })
+})
+
+describe('buildProviders — live Key availability', () => {
+  test('uses live availability and omits phantom available counts', () => {
+    const config = makeConfig({
+      keys: [
+        { id: 'ready', key: 'sk-ready' },
+        { id: 'cooling', key: 'sk-cooling' },
+        { id: 'blocked', key: 'sk-blocked' },
+        { id: 'disabled', key: 'sk-disabled', enabled: false },
+      ],
+    })
+    const state = (keyId: string, cooling: boolean, available: boolean): LlmKeyStateShape => ({
+      provider: 'p1', keyId, cooling, available, cooldownRemaining: cooling ? 30 : 0, inFlight: 0, weight: 1,
+    })
+    const liveStates = new Map([
+      ['p1/ready', state('ready', false, true)],
+      ['p1/cooling', state('cooling', true, false)],
+      ['p1/blocked', state('blocked', false, false)],
+      ['p1/disabled', state('disabled', false, true)],
+    ])
+    const status: GatewayStatus = {
+      running: true, port: 8000, baseUrl: 'http://127.0.0.1:8000', enabled: true,
+      strategies: [], coolingKeys: 1, inFlight: 0,
+    }
+
+    const [provider] = buildProviders(config, status, liveStates, NO_DETAILS)
+    expect(provider.keys).toEqual({ avail: 1, cool: 1, unavailable: 1, dis: 1 })
+  })
+
+  test('shows enabled keys as unavailable while the gateway is stopped', () => {
+    const config = makeConfig({ keys: [{ id: 'k1', key: 'sk-k1' }] })
+    const status: GatewayStatus = {
+      running: false, port: 0, baseUrl: '', enabled: true, strategies: [], coolingKeys: 0, inFlight: 0,
+    }
+
+    const [provider] = buildProviders(config, status, NO_KEY_STATES, NO_DETAILS)
+    expect(provider.keys).toEqual({ avail: 0, cool: 0, unavailable: 1, dis: 0 })
   })
 })
 

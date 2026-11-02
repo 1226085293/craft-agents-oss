@@ -62,7 +62,7 @@ export function ProvidersView(props: Props): React.JSX.Element {
     keys: (a, b) => b.keys.avail - a.keys.avail,
     tokens: (a, b) => b.keys.avail - a.keys.avail,
   }
-  const healthRank = { ok: 0, cool: 1, disabled: 2 }
+  const healthRank: Record<ProtoProvider['state'], number> = { ok: 0, cool: 1, unavailable: 2, disabled: 3 }
   const sorted =
     sort === 'health'
       ? [...list].sort((a, b) => healthRank[a.state] - healthRank[b.state])
@@ -158,8 +158,8 @@ export function ProvidersView(props: Props): React.JSX.Element {
       <div className="grid2" style={{ marginTop: 14 }}>
         {sorted.length ? (
           sorted.map((p) => {
-            const cls = p.state === 'cool' ? ' cool' : p.state === 'disabled' ? ' disabled' : ''
-            const dotc = p.state === 'ok' ? 'green' : p.state === 'cool' ? 'amber' : 'gray'
+            const cls = p.state === 'cool' ? ' cool' : p.state === 'disabled' ? ' disabled' : p.state === 'unavailable' ? ' unavailable' : ''
+            const dotc = p.state === 'ok' ? 'green' : p.state === 'cool' ? 'amber' : p.state === 'unavailable' ? 'red' : 'gray'
             const enabled = p.state !== 'disabled'
             const toggle = (e: React.MouseEvent): void => {
               e.stopPropagation()
@@ -179,7 +179,7 @@ export function ProvidersView(props: Props): React.JSX.Element {
                   </span>
                 ) : null}
                 <div className="name">
-                  {p.name} <Dot color={dotc as 'green' | 'amber' | 'gray'} />
+                  {p.name} <Dot color={dotc as 'green' | 'amber' | 'red' | 'gray'} />
                 </div>
                 {/* No note means no line: an em dash here reads as a value that
                     failed to load rather than as an unused optional field. */}
@@ -188,6 +188,7 @@ export function ProvidersView(props: Props): React.JSX.Element {
                 <div className="meta">
                   {p.keys.avail ? <Badge kind="green">{p.keys.avail + ' 可用'}</Badge> : null}
                   {p.keys.cool ? <Badge kind="amber">{p.keys.cool + ' 冷却'}</Badge> : null}
+                  {p.keys.unavailable ? <Badge kind="red">{p.keys.unavailable + ' 暂不可用'}</Badge> : null}
                   {p.keys.dis ? <Badge kind="gray">{p.keys.dis + ' 禁用'}</Badge> : null}
                 </div>
                 <div className="sub">

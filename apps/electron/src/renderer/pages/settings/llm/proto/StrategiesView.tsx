@@ -57,7 +57,15 @@ export function StrategiesView(props: Props): React.JSX.Element {
         {list.length ? (
           list.map((s) => {
             const unsupported = s.models.filter(
-              (m) => !s.members.some((id) => props.providers.find((p) => p.id === id)?.modelList.includes(m)),
+              // A unit with no model is the old "any model this provider
+              // declares" member; it covers every model the provider lists.
+              (m) =>
+                !s.units.some(
+                  (u) =>
+                    u.model === m ||
+                    (u.model === '' &&
+                      props.providers.find((p) => p.id === u.provider)?.modelList.includes(m)),
+                ),
             )
             const r1h = props.logs.filter((l) => l.tsMs >= now - 36e5 && l.strategy === s.id)
             const avg1h = r1h.length ? Math.round(r1h.reduce((a, l) => a + l.dur, 0) / r1h.length) : 0
@@ -65,6 +73,7 @@ export function StrategiesView(props: Props): React.JSX.Element {
             const healthy = members.filter((p) => p.state === 'ok').length
             const health = members.length ? Math.round((healthy / members.length) * 100) : 0
             const cool = members.reduce((a, p) => a + p.keys.cool, 0)
+            const unavailable = members.reduce((a, p) => a + p.keys.unavailable, 0)
             const shown = s.models.slice(0, 3)
             const extra = s.models.length - 3
             return (
@@ -102,8 +111,13 @@ export function StrategiesView(props: Props): React.JSX.Element {
                       <Badge kind="amber">{`冷却 ${cool}`}</Badge>
                     </span>
                   ) : null}
+                  {unavailable ? (
+                    <span style={{ marginRight: 6 }}>
+                      <Badge kind="red">{`暂不可用 ${unavailable}`}</Badge>
+                    </span>
+                  ) : null}
                   <span style={{ marginRight: 6 }}>
-                    <Badge kind="gray">{`${s.members.length} 个提供商`}</Badge>
+                    <Badge kind="gray">{`${s.units.length} 个切换单元`}</Badge>
                   </span>
                   {s.type === 'weighted' && s.members.length ? (
                     <Badge kind="gray">{`权重 ${s.members.map((id) => s.weights[id] ?? 1).join(':')}`}</Badge>
@@ -117,6 +131,14 @@ export function StrategiesView(props: Props): React.JSX.Element {
                 <div className="xs faint" style={{ marginTop: 8 }}>
                   {`最近 1h 请求 ${r1h.length}${r1h.length ? ` · 平均 ${(avg1h / 1000).toFixed(1)}s` : ''}`}
                 </div>
+                {s.units.length ? (
+                  <div className="xs muted" style={{ marginTop: 6 }} title="按此顺序依次尝试">
+                    {`切换顺序：${s.units
+                      .slice(0, 4)
+                      .map((u) => `${u.providerName}${u.model ? ` / ${u.model}` : ''}`)
+                      .join(' → ')}${s.units.length > 4 ? ` → +${s.units.length - 4}` : ''}`}
+                  </div>
+                ) : null}
                 <div className="hr" style={{ margin: '10px 0' }} />
                 <div className="row" style={{ justifyContent: 'flex-end', gap: 6 }}>
                   <button

@@ -22,6 +22,11 @@ import { BaseEventAdapter } from '../base-event-adapter.ts';
 import { PI_TOOL_NAME_MAP } from './constants.ts';
 import { toolMetadataStore } from '../../../interceptor-common.ts';
 import { createAgentError, parseError } from '../../errors.ts';
+import { buildCompactionSummaryParams } from '../../compaction-summary.ts';
+import {
+  GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER,
+  GATEWAY_STREAM_TRUNCATION_RETRY_MARKER,
+} from '../../../config/gateway-stream-retry.ts';
 
 /**
  * Pi SDK auto-compaction race signature — the AbortController crash described
@@ -193,6 +198,9 @@ export class PiEventAdapter extends BaseEventAdapter {
   //   recovering ──agent_end───────────► none          (normal complete)
   //   awaitingRetry|backoff ──auto_retry_end{success:false}──► none (release, complete)
   private retryState: 'none' | 'held' | 'awaitingRetry' | 'backoff' | 'recovering' = 'none';
+  private gatewayRetryState: 'none' | 'awaiting' | 'recovering' = 'none';
+  private gatewayRetryAttempt = 0;
+  private gatewayRetryTerminalError: CraftAgentEvent | null = null;
   private heldRetryError: CraftAgentEvent | null = null;
   private retryFallbackTimerId: ReturnType<typeof setTimeout> | null = null;
 
@@ -325,6 +333,7 @@ export class PiEventAdapter extends BaseEventAdapter {
       return true;
     }
     if (isAgentEnd) {
+      if (this.gatewayRetryState !== 'none') return false;
       if (defenseResumePending) {
         // A defense resume is in flight — hold the queue open for the
         // resumed turn's events (they arrive after this agent_end).
@@ -455,6 +464,9 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.heldOverflowError = null;
     this.cancelRetryFallbackTimer();
     this.retryState = 'none';
+    this.gatewayRetryState = 'none';
+    this.gatewayRetryAttempt = 0;
+    this.gatewayRetryTerminalError = null;
     this.heldRetryError = null;
     this.pendingQueueComplete = false;
     this.defenseResumeHeld = false;
@@ -480,7 +492,7 @@ export class PiEventAdapter extends BaseEventAdapter {
 
   /** Whether an overflow recovery or auto-retry currently holds the turn open. */
   get isHoldingTurn(): boolean {
-    return this.overflowState !== 'none' || this.retryState !== 'none';
+    return this.overflowState !== 'none' || this.retryState !== 'none' || this.gatewayRetryState !== 'none';
   }
 
   /**
@@ -668,6 +680,11 @@ export class PiEventAdapter extends BaseEventAdapter {
       // ============================================================
 
       case 'agent_start':
+        if (this.gatewayRetryState === 'awaiting') {
+          this.gatewayRetryState = 'recovering';
+          yield { type: 'retry', phase: 'active' };
+          break;
+        }
         // After an auto-retry backoff the SDK re-runs the turn via
         // agent.continue(); this agent_start is the retried run. Stop waiting
         // for it and let the run flow through normally.
@@ -680,6 +697,32 @@ export class PiEventAdapter extends BaseEventAdapter {
         break;
 
       case 'agent_end': {
+        if (
+          this.gatewayRetryState === 'awaiting' &&
+          !(event as { gatewayRetryPending?: boolean }).gatewayRetryPending
+        ) {
+          // The subprocess can fail to start the continuation (e.g. a
+          // continue() rejection) and emit only its synthetic terminal event.
+          // Release the host queue instead of waiting forever for agent_start.
+          this.gatewayRetryState = 'none';
+          const terminalError = this.gatewayRetryTerminalError;
+          this.gatewayRetryTerminalError = null;
+          yield {
+            type: 'retry',
+            phase: 'end',
+            recovered: false,
+            attempt: this.gatewayRetryAttempt,
+          };
+          if (terminalError) yield terminalError;
+        }
+        if ((event as { gatewayRetryPending?: boolean }).gatewayRetryPending) {
+          this.gatewayRetryState = 'awaiting';
+          this.gatewayRetryAttempt += 1;
+          yield { type: 'retry', phase: 'backoff', attempt: this.gatewayRetryAttempt,
+            message: `Stream interrupted. Retrying the same turn (attempt ${this.gatewayRetryAttempt})...` };
+          yield* this.demoteDraftReplyForHold();
+          break;
+        }
         // Overflow recovery: hold the queue open while the SDK runs
         // _runAutoCompaction("overflow") + agent.continue(). The recovered
         // turn will arrive as a fresh agent_start … agent_end pair.
@@ -817,6 +860,18 @@ export class PiEventAdapter extends BaseEventAdapter {
         } else if (this.retryState === 'recovering') {
           // The retried run finished cleanly.
           this.retryState = 'none';
+        }
+        if (this.gatewayRetryState === 'recovering') {
+          this.gatewayRetryState = 'none';
+          const terminalError = this.gatewayRetryTerminalError;
+          this.gatewayRetryTerminalError = null;
+          yield {
+            type: 'retry',
+            phase: 'end',
+            recovered: !terminalError,
+            attempt: this.gatewayRetryAttempt,
+          };
+          if (terminalError) yield terminalError;
         }
         if (this.lastUsage && this.lastContextTokens > 0) {
           // Report the last REAL context size. Using `lastUsage.input` here would
@@ -980,6 +1035,25 @@ export class PiEventAdapter extends BaseEventAdapter {
             this.thinkingBuffer = '';
             this.hasStreamedThinking = false;
           }
+          if (msg.errorMessage.includes(GATEWAY_STREAM_TRUNCATION_RETRY_MARKER)) {
+            // The server will annotate agent_end and continue the SAME model
+            // step after the failed SDK run has fully settled.
+            break;
+          }
+          if (msg.errorMessage.includes(GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER)) {
+            const terminalError: CraftAgentEvent = {
+              type: 'typed_error',
+              error: createAgentError('network_error', msg.errorMessage),
+            };
+            if (this.gatewayRetryState === 'recovering') {
+              this.gatewayRetryTerminalError = terminalError;
+            } else {
+              this.hasEmittedTerminalError = true;
+              yield terminalError;
+            }
+            break;
+          }
+
           // Context overflow: hand recovery to the SDK's _runAutoCompaction
           // and keep the UI quiet until we know the outcome (recovered turn
           // arrives, or compaction fails). Suppress the raw provider error.
@@ -1425,33 +1499,61 @@ export class PiEventAdapter extends BaseEventAdapter {
           // Use "Compacted" keyword so session handler detects statusType: 'compaction_complete'
           yield { type: 'info', message: 'Compacted context to fit within limits' };
           // Token accounting for the process block (user-confirmed 2026-10-17):
-          // "压缩完成：约 A → B（保留 R，压缩 S）". Present only when the
-          // extension produced stats (relief or LLM path — both report).
+          // "压缩完成：约 A → B（保留 R，压缩 S）".
+          //
+          // Primary source: the relief extension's exact stats, shipped in
+          // `details.reliefStats` when the no-LLM relief checkpoint was used
+          // (manual /compact and auto threshold/overflow both route through it).
+          // Fallback: when the SDK's own LLM summarizer produced the compaction
+          // (auto path — the SDK has no slot for extension stats in that case,
+          // so `details` is `{ readFiles, modifiedFiles }` and `reliefStats`
+          // is absent), synthesize the same shape from the REAL before/after
+          // the SDK just computed (matches synthCompactionStats in the
+          // subprocess's manual path, and PiAgent's own /compact fallback).
           const reliefStats = (compactionEvent.result as { details?: { reliefStats?: unknown } } | undefined)
             ?.details?.reliefStats as
             | { before: number; retained: number; compacted: number; checkpoint: number; viaRelief: boolean }
             | undefined;
+          const resultLike = compactionEvent.result as { tokensBefore?: number; estimatedTokensAfter?: number } | undefined;
+          const sdkBefore = typeof resultLike?.tokensBefore === 'number' ? resultLike.tokensBefore : 0;
+          const sdkAfterTokens = typeof resultLike?.estimatedTokensAfter === 'number' && resultLike.estimatedTokensAfter > 0
+            ? resultLike.estimatedTokensAfter
+            : 0;
+
           if (reliefStats && typeof reliefStats.before === 'number' && reliefStats.before > 0) {
             // Real post-compaction context straight from the SDK — this is
             // what the context ring shows, so the line and the ring agree.
-            const sdkAfter = (compactionEvent.result as { estimatedTokensAfter?: number } | undefined)
-              ?.estimatedTokensAfter;
-            const after = typeof sdkAfter === 'number' && sdkAfter > 0
-              ? sdkAfter
-              : reliefStats.retained + reliefStats.checkpoint;
-            yield {
-              type: 'status',
-              message: 'Compaction summary',
-              statusType: 'compaction_summary',
-              statusParams: {
-                before: reliefStats.before,
-                retained: reliefStats.retained,
-                compacted: reliefStats.compacted,
-                checkpoint: reliefStats.checkpoint,
-                after,
-                viaRelief: reliefStats.viaRelief ? 1 : 0,
-              },
-            };
+            const summaryParams = buildCompactionSummaryParams({
+              tokensBefore: reliefStats.before,
+              estimatedTokensAfter: sdkAfterTokens > 0 ? sdkAfterTokens : undefined,
+              retained: reliefStats.retained,
+              checkpoint: reliefStats.checkpoint,
+              viaRelief: reliefStats.viaRelief,
+            });
+            if (summaryParams) {
+              yield {
+                type: 'status',
+                message: 'Compaction summary',
+                statusType: 'compaction_summary',
+                statusParams: summaryParams,
+              };
+            }
+          } else if (sdkBefore > 0) {
+            // LLM-path auto compaction: no extension stats — the helper derives
+            // retained/compacted from the SDK's real before/after, so the line
+            // agrees with the context ring and `retained + compacted = before`.
+            const summaryParams = buildCompactionSummaryParams({
+              tokensBefore: sdkBefore,
+              estimatedTokensAfter: sdkAfterTokens > 0 ? sdkAfterTokens : undefined,
+            });
+            if (summaryParams) {
+              yield {
+                type: 'status',
+                message: 'Compaction summary',
+                statusType: 'compaction_summary',
+                statusParams: summaryParams,
+              };
+            }
           }
           // Refresh the context-usage ring immediately: the pre-compaction
           // reading is now stale, and the SDK reports the post-compaction

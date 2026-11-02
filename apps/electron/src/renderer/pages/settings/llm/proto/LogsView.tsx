@@ -5,9 +5,9 @@
  * after filtering) instead of merging per-provider snapshots: the store knows
  * about the session log and the persisted day files, the view only renders.
  *
- * Filters that cannot be expressed as tags (success / failed / retried) are
- * applied to the returned rows — they are a narrowing view over at most 5000
- * matches, not a second source of truth.
+ * Filters that cannot be expressed as tags (成功 / 失败) are applied to the
+ * returned rows — they are a narrowing view over at most 5000 matches, not a
+ * second source of truth.
  */
 
 import * as React from 'react'
@@ -22,37 +22,15 @@ import { Badge, fmt } from './atoms'
 import { useProtoShell } from './state'
 import { columnLimits, displayWidths, fillerWidth, HARD_MAX, HARD_MIN } from './logWidths'
 import type { ColumnMetrics, WidthLimits } from './logWidths'
-import { DEFAULT_FILTER, filterLogs, logLevel } from './logFilters'
+import { DEFAULT_FILTER, filterLogs, logLevel, normalizeLevel } from './logFilters'
 import type { LogsFilter } from './logFilters'
 import { maskKeyHead } from '../helpers'
+import { COLUMNS, normalizeColumns } from './logColumns'
+import type { ColumnId } from './logColumns'
 
 export { DEFAULT_FILTER }
 export type { LogsFilter }
 
-/**
- * Columns the user can show/hide; order is the render order. Widths are not
- * listed here — they are measured from the data, so a column is exactly as wide
- * as its content rather than some hardcoded guess.
- */
-const COLUMNS = [
-  { id: 'time', label: '时间', mono: true },
-  { id: 'provider', label: '提供商', mono: false },
-  { id: 'key', label: 'Key', mono: true },
-  { id: 'model', label: '模型', mono: false },
-  { id: 'strategy', label: '策略组', mono: false },
-  // What asked for this request (对话 / call_llm / 标题 …). Sits right after the
-  // strategy group because the two answer the same question from different
-  // ends: which group served it, and what wanted it.
-  { id: 'kind', label: '类型', mono: false },
-  { id: 'code', label: '状态码', mono: true },
-  { id: 'status', label: '状态', mono: false },
-  { id: 'tokens', label: 'Token', mono: true },
-  { id: 'firstByte', label: '首字节', mono: true },
-  { id: 'dur', label: '耗时', mono: true },
-  { id: 'session', label: '会话', mono: false },
-] as const
-
-type ColumnId = (typeof COLUMNS)[number]['id']
 const COLUMNS_KEY = 'llm-proto.log-columns'
 const TOUCHED_KEY = 'llm-proto.log-widths-touched'
 const WIDTHS_KEY = 'llm-proto.log-widths'
@@ -73,7 +51,25 @@ function isLocalRefusal(r: LlmUsageRecord): boolean {
 }
 
 /** One label per outcome, shared by the badge and the column measurement. */
-const STATUS_TEXT = { success: '成功', retried: '重试', failed: '失败' } as const
+const STATUS_TEXT = { success: '成功', failed: '失败' } as const
+
+/**
+ * What the 状态码 column shows for a row.
+ *
+ * A transport failure has no HTTP status at all, and a bare "—" in a column
+ * called 状态码 reads as "the gateway forgot to record it" rather than "the
+ * upstream never answered" — which is exactly the distinction an operator needs
+ * (2026-10-25: three rows, one blank, reported as "一个没错误码"). Name the
+ * failure instead of printing a dash.
+ */
+function codeText(r: LlmUsageRecord): string {
+  if (isLocalRefusal(r)) return '本地'
+  if (r.statusCode) return String(r.statusCode)
+  const err = r.error ?? ''
+  if (err.includes('first byte timeout')) return '超时'
+  if (err.includes('transport error')) return '连接失败'
+  return '—'
+}
 
 /**
  * Min = the column's shortest value (never below its header, or the title would
@@ -90,7 +86,7 @@ function measureLimits(
   const textFor = (c: (typeof COLUMNS)[number], r: LlmUsageRecord): string => {
     switch (c.id) {
       case 'time':
-        return stamp(r.ts)
+        return stamp(r.startedAt ?? r.ts)
       case 'provider':
         return providerName(r.provider)
       case 'key':
@@ -99,10 +95,8 @@ function measureLimits(
       case 'model':
         return r.upstreamModel || r.publicModel
       case 'code':
-        // 0 means "no HTTP response" — a transport-level probe failure. A bare
-        // "0" in the column reads like a status code rather than its absence.
-        if (isLocalRefusal(r)) return '本地'
-        return r.statusCode ? String(r.statusCode) : '—'
+        // 0 means "no HTTP response" — see `codeText`.
+        return codeText(r)
       case 'status':
         // The badge adds its own padding; 30px covers it.
         return `${STATUS_TEXT[logLevel(r)]}____`
@@ -166,20 +160,15 @@ function readWidths(): Record<ColumnId, number> {
   return out
 }
 
-/** Visible columns, persisted; unknown ids are dropped. */
+/** Visible columns, persisted; unknown ids (including the removed unit column) are dropped. */
 function readColumns(): ColumnId[] {
   try {
     const raw = localStorage.getItem(COLUMNS_KEY)
-    if (raw) {
-      const arr = JSON.parse(raw) as unknown
-      if (Array.isArray(arr)) {
-        return arr.filter((x): x is ColumnId => COLUMNS.some((c) => c.id === x))
-      }
-    }
+    if (raw) return normalizeColumns(JSON.parse(raw) as unknown)
   } catch {
     // Corrupt preference: all columns.
   }
-  return COLUMNS.map((c) => c.id)
+  return normalizeColumns(undefined)
 }
 
 /**
@@ -580,11 +569,10 @@ export function LogsView(props: Props): React.JSX.Element {
           </div>
 
           <div className="row" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-            <select className="sm" value={f.level} onChange={(e) => set({ level: e.target.value as LogsFilter['level'] })}>
+            <select className="sm" value={normalizeLevel(f.level)} onChange={(e) => set({ level: e.target.value as LogsFilter['level'] })}>
               <option value="all">全部状态</option>
               <option value="success">成功</option>
               <option value="failed">失败</option>
-              <option value="retried">重试</option>
             </select>
             <select className="sm" value={f.provider} onChange={(e) => set({ provider: e.target.value })}>
               <option value="all">全部提供商</option>
@@ -721,7 +709,7 @@ export function LogsView(props: Props): React.JSX.Element {
                   // The badge and the 状态 dropdown read the same classification.
                   const level = logLevel(l)
                   const st = (
-                    <Badge kind={level === 'failed' ? 'red' : level === 'retried' ? 'amber' : 'green'}>
+                    <Badge kind={level === 'failed' ? 'red' : 'green'}>
                       {STATUS_TEXT[level]}
                     </Badge>
                   )
@@ -731,7 +719,7 @@ export function LogsView(props: Props): React.JSX.Element {
                         {visible.map((c) => {
                           switch (c.id) {
                             case 'time':
-                              return <td key={c.id} data-cell className="mono xs">{stamp(l.ts)}</td>
+                              return <td key={c.id} data-cell className="mono xs">{stamp(l.startedAt ?? l.ts)}</td>
                             case 'provider':
                               // A local refusal names no provider: nothing was
                               // contacted. An empty cell reads as missing data,
@@ -768,7 +756,9 @@ export function LogsView(props: Props): React.JSX.Element {
                                   <span className="muted">本地</span>
                                 </td>
                               ) : (
-                                <td key={c.id} data-cell className="mono xs">{l.statusCode ? String(l.statusCode) : '—'}</td>
+                                <td key={c.id} data-cell className="mono xs" title={l.error ?? undefined}>
+                                  {l.statusCode ? String(l.statusCode) : <span className="muted">{codeText(l)}</span>}
+                                </td>
                               )
                             case 'status':
                               return <td key={c.id} data-cell>{st}</td>

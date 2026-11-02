@@ -13,6 +13,7 @@
  */
 
 import type { LlmUsageRecord } from './llm-usage-store.ts';
+import { isSupersededAttempt } from './llm-usage-store.ts';
 import { isProbeKind } from './model-request-kind.ts';
 
 /** Keep percentiles meaningful without unbounded growth. */
@@ -27,6 +28,7 @@ export interface ProviderBucket {
   failed: number;
   prompt: number;
   completion: number;
+  cached: number;
   firstByteSum: number;
   firstByteCount: number;
   lastTs: number;
@@ -95,9 +97,9 @@ export function bucketsFromRecords(records: ReadonlyArray<LlmUsageRecord>): Usag
     // wrong key would otherwise count as a provider failure and drag the
     // success rate down for a test that worked as intended. They stay in the
     // raw log; only the aggregates skip them.
-    if (isProbeKind(r.kind)) continue;
+    if (isProbeKind(r.kind) || isSupersededAttempt(r)) continue;
 
-    const day = localDay(r.ts);
+    const day = localDay(r.startedAt ?? r.ts);
     const b = (days[day] ??= emptyBucket(day));
     const prompt = Number(r.promptTokens ?? 0) || 0;
     const completion = Number(r.completionTokens ?? 0) || 0;
@@ -124,6 +126,7 @@ export function bucketsFromRecords(records: ReadonlyArray<LlmUsageRecord>): Usag
       failed: 0,
       prompt: 0,
       completion: 0,
+      cached: 0,
       firstByteSum: 0,
       firstByteCount: 0,
       lastTs: 0,
@@ -133,6 +136,7 @@ export function bucketsFromRecords(records: ReadonlyArray<LlmUsageRecord>): Usag
     p.requests += 1;
     p.prompt += prompt;
     p.completion += completion;
+    p.cached += Number(r.cachedTokens ?? 0) || 0;
     if (r.status === 'success') {
       p.success += 1;
       if (typeof r.firstByteMs === 'number' && Number.isFinite(r.firstByteMs)) {

@@ -18,33 +18,38 @@ import {
 describe('createCraftSettingsManager', () => {
   it('pins the agent-level auto-retry policy', () => {
     const settings = createCraftSettingsManager();
-    // Default env has CRAFT_PI_RETRY_ENABLED unset → SDK agent-level retry is
-    // OFF; the main-process unified retry ladder (pi-agent.ts) is the sole
-    // retry owner. Pin the configured value (not a hardcoded true) so this
-    // stays correct if the default is ever flipped.
+    // SDK agent-level retry is OFF and has no env switch: the gateway ladder
+    // and the main-process unified ladder (pi-agent.ts) are the retry owners.
+    // 261027-long-bronze: leaving this on for ephemeral sessions multiplied one
+    // message into nine locally-refused requests inside a single key cooldown.
     expect(settings.getRetryEnabled()).toBe(CRAFT_PI_RETRY_SETTINGS.enabled);
+    expect(CRAFT_PI_RETRY_SETTINGS.enabled).toBe(false);
     expect(settings.getRetrySettings()).toEqual({
       enabled: CRAFT_PI_RETRY_SETTINGS.enabled,
       maxRetries: CRAFT_PI_RETRY_SETTINGS.maxRetries,
       baseDelayMs: CRAFT_PI_RETRY_SETTINGS.baseDelayMs,
     });
+    expect(settings.getRetrySettings().maxRetries).toBe(0);
   });
 
-  it('enables provider-level (pre-stream) retries that the SDK leaves off by default', () => {
+  it('disables provider-level (pre-stream) retries instead of inheriting the SDK default', () => {
     const settings = createCraftSettingsManager();
     expect(settings.getProviderRetrySettings()).toMatchObject({
       maxRetries: CRAFT_PI_RETRY_SETTINGS.provider.maxRetries,
       maxRetryDelayMs: CRAFT_PI_RETRY_SETTINGS.provider.maxRetryDelayMs,
     });
-    // Documents the SDK default this policy overrides. If a future SDK turns
-    // provider retries on by itself, this assertion is the cue to revisit.
+    expect(settings.getProviderRetrySettings().maxRetries).toBe(0);
+    // Documents the SDK default this policy overrides: `undefined` here means
+    // "SDK default" at the provider client, and the Anthropic/OpenAI clients
+    // default to 2 retries per request. Pinning 0 is what keeps the gateway the
+    // only retry layer.
     expect(SettingsManager.inMemory().getProviderRetrySettings().maxRetries).toBeUndefined();
   });
 
-  it('uses a smaller retry policy for bounded ephemeral queries', () => {
+  it('disables the SDK retry budget for bounded ephemeral queries too', () => {
     const settings = createCraftSettingsManager('ephemeral');
     expect(settings.getRetrySettings()).toEqual({
-      enabled: true,
+      enabled: false,
       maxRetries: CRAFT_PI_EPHEMERAL_RETRY_SETTINGS.maxRetries,
       baseDelayMs: CRAFT_PI_EPHEMERAL_RETRY_SETTINGS.baseDelayMs,
     });
@@ -52,7 +57,11 @@ describe('createCraftSettingsManager', () => {
       maxRetries: CRAFT_PI_EPHEMERAL_RETRY_SETTINGS.provider.maxRetries,
       maxRetryDelayMs: CRAFT_PI_EPHEMERAL_RETRY_SETTINGS.provider.maxRetryDelayMs,
     });
-    expect(CRAFT_PI_EPHEMERAL_MAX_BACKOFF_MS).toBe(66_000);
+    expect(settings.getRetrySettings().maxRetries).toBe(0);
+    expect(settings.getProviderRetrySettings().maxRetries).toBe(0);
+    // No SDK retries → no SDK backoff. The invariant is kept so a future retry
+    // policy cannot silently blow the utility-call RPC budget.
+    expect(CRAFT_PI_EPHEMERAL_MAX_BACKOFF_MS).toBe(0);
     expect(CRAFT_PI_EPHEMERAL_QUERY_DEADLINE_MS).toBe(115_000);
     expect(CRAFT_PI_EPHEMERAL_MAX_BACKOFF_MS).toBeLessThan(
       CRAFT_PI_EPHEMERAL_QUERY_DEADLINE_MS,
@@ -74,12 +83,12 @@ describe('createCraftSettingsManager', () => {
       mkdirSync(join(cwd, '.pi'));
       writeFileSync(
         join(cwd, '.pi', 'settings.json'),
-        JSON.stringify({ retry: { enabled: false }, compaction: { enabled: false } }),
+        JSON.stringify({ retry: { enabled: true }, compaction: { enabled: false } }),
       );
 
       // Proves the default path would have honored the repo file…
       const fromDisk = SettingsManager.create(cwd, join(cwd, 'agent-dir'));
-      expect(fromDisk.getRetryEnabled()).toBe(false);
+      expect(fromDisk.getRetryEnabled()).toBe(true);
       expect(fromDisk.getCompactionEnabled()).toBe(false);
 
       // …and that Craft's manager does not.
@@ -95,9 +104,9 @@ describe('createCraftSettingsManager', () => {
     const a = createCraftSettingsManager('ephemeral');
     const b = createCraftSettingsManager('ephemeral');
     expect(a).not.toBe(b);
-    a.setRetryEnabled(false);
-    expect(a.getRetryEnabled()).toBe(false);
-    expect(b.getRetryEnabled()).toBe(true);
+    a.setRetryEnabled(true);
+    expect(a.getRetryEnabled()).toBe(true);
+    expect(b.getRetryEnabled()).toBe(false);
   });
 });
 

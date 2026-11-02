@@ -63,8 +63,8 @@ export function DetailView(props: Props): React.JSX.Element {
   // that type still exists, else the built-in default. A dangling provider
   // default must not be advertised as the inherited type.
   const inheritType = resolvePresetId(config, p.defaultType)
-  const dotc = p.state === 'ok' ? 'green' : p.state === 'cool' ? 'amber' : 'gray'
-  const stateLabel = p.state === 'ok' ? '正常' : p.state === 'cool' ? '全部冷却' : '禁用'
+  const dotc = p.state === 'ok' ? 'green' : p.state === 'cool' ? 'amber' : p.state === 'unavailable' ? 'red' : 'gray'
+  const stateLabel = p.state === 'ok' ? '正常' : p.state === 'cool' ? '全部冷却' : p.state === 'unavailable' ? '暂不可用' : '禁用'
 
   // Filtering lives in helpers so the 继承默认 rule is unit tested: it compares
   // the effective type, and a raw-preset compare hid every inheriting key.
@@ -249,6 +249,8 @@ export function DetailView(props: Props): React.JSX.Element {
               <Badge kind={k.coolReason === 'quota' ? 'red' : 'amber'}>
                 {`${k.coolReason === 'quota' ? '配额耗尽' : '限流冷却'} · ${fmtRemain(k.coolUntil ?? Date.now())}`}
               </Badge>
+            ) : k.enabled && !k.available ? (
+              <Badge kind="red">暂不可用</Badge>
             ) : null}
             {k.rpd ? (
               <>
@@ -338,7 +340,7 @@ export function DetailView(props: Props): React.JSX.Element {
             </button>
             <div>
               <div className="t">
-                {p.name} <Dot color={dotc as 'green' | 'amber' | 'gray'} />
+                {p.name} <Dot color={dotc as 'green' | 'amber' | 'red' | 'gray'} />
               </div>
               <div className="small muted">{p.note || '—'}</div>
             </div>
@@ -354,7 +356,7 @@ export function DetailView(props: Props): React.JSX.Element {
               <span className="lab">协议</span>
               <span className="val">{p.protocol === 'anthropic-messages' ? 'Anthropic Messages' : 'OpenAI 兼容'}</span>
               <span className="lab">Key</span>
-              <span className="val">{`${p.keys.avail} 可用 / ${p.keys.cool} 冷却${coolHint}`}</span>
+              <span className="val">{`${p.keys.avail} 可用 / ${p.keys.cool} 冷却 / ${p.keys.unavailable} 暂不可用 / ${p.keys.dis} 禁用${coolHint}`}</span>
               <span className="lab">状态</span>
               <span className="val">{stateLabel}</span>
               <span className="lab">模型</span>

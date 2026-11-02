@@ -1,9 +1,11 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "rootDir": "src",
-    "outDir": "dist",
-    "composite": true
+    "baseUrl": ".",
+    "paths": {
+      "@craft-agent/shared": ["../shared/src/index.ts"],
+      "@craft-agent/shared/*": ["../shared/src/*"]
+    }
   },
   "include": ["src"]
 }

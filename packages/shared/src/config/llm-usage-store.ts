@@ -26,13 +26,39 @@ import { CONFIG_DIR } from './paths.ts';
 
 /** One persisted gateway decision. Mirrors the gateway's UsageRecord. */
 export interface LlmUsageRecord {
-  /** Epoch milliseconds. */
+  /** Epoch milliseconds when the request finished — the day-file key. */
   ts: number;
+  /**
+   * Epoch milliseconds when the request was *sent*.
+   *
+   * `ts` is the completion stamp: a request that took 69s used to be listed at
+   * the second it failed, which reads as if it had been made then. The log
+   * shows this column when present and falls back to `ts` on rows written
+   * before the field existed.
+   */
+  startedAt?: number;
+  /**
+   * One upstream attempt inside a longer request, kept for the log only.
+   *
+   * A request that failed on provider A and died on B used to produce a single
+   * row (B's), so A's 60s first-byte timeout left no trace at all. Every
+   * attempt now gets its own row; this flag marks the ones that were followed
+   * by another attempt, so aggregates still count one outcome per request
+   * instead of one per try.
+   */
+  superseded?: boolean;
   strategy: string;
   provider: string;
   keyId: string;
   publicModel: string;
   upstreamModel: string;
+  /**
+   * Switching unit that served (or died on) the request: `provider::model`.
+   *
+   * Recorded since units exist; absent on rows written before that, which the
+   * log renders as an em dash rather than inventing a unit.
+   */
+  unitId?: string;
   /**
    * What the request was for — 对话 / call_llm / 忙碌决策 / 标题 / 记忆 …
    *
@@ -58,6 +84,17 @@ export interface LlmUsageRecord {
   totalMs?: number;
   retried?: boolean;
   trace?: string[];
+}
+
+/**
+ * True for an upstream attempt that was followed by another attempt.
+ *
+ * Those rows exist to show *what happened* in the log; they are not a request
+ * outcome, so aggregates skip them — otherwise "failed once, then succeeded"
+ * would count as one failure and one success instead of one retried success.
+ */
+export function isSupersededAttempt(record: LlmUsageRecord): boolean {
+  return record.superseded === true
 }
 
 export const LLM_USAGE_DIRNAME = 'llm-usage';
@@ -153,11 +190,14 @@ export function appendLlmUsage(records: LlmUsageRecord[]): void {
 
     // Persistence is per record, by that record's local day — not "whatever day
     // the process started", which would keep writing into yesterday's file
-    // across midnight.
+    // across midnight. The day follows `startedAt` when it exists: a request
+    // made at 23:59 belongs to that day even if it finishes after midnight, and
+    // bucketing by the completion stamp put it in a file whose rows read as
+    // yesterday's time.
     if (usagePersistEnabled()) {
       const byDay = new Map<string, string[]>();
       for (const r of records) {
-        const day = localDay(r.ts);
+        const day = localDay(r.startedAt ?? r.ts);
         const list = byDay.get(day) ?? [];
         list.push(JSON.stringify(r));
         byDay.set(day, list);
@@ -436,7 +476,12 @@ export function queryLlmUsage(query: UsageQuery = {}): UsageQueryResult {
 
   // Sources are already newest-first, but each file is only internally ordered;
   // sort so a batch appended out of order (or a clock skew) cannot misorder rows.
-  rows.sort((a, b) => b.ts - a.ts)
+  // The time column is the start stamp, so the sort follows it: a 69s request
+  // that ended last must not jump above a request sent after it began. Rows
+  // sharing a start (the attempts of one request) fall back to completion
+  // order, so the final outcome sits above the attempts it superseded.
+  const at = (r: LlmUsageRecord): number => r.startedAt ?? r.ts
+  rows.sort((a, b) => at(b) - at(a) || b.ts - a.ts)
   if (query.sort === 'asc') rows.reverse()
   return { rows, truncated }
 }

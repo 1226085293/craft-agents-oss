@@ -27,7 +27,50 @@ function overview(over: Partial<UsageOverview> = {}): UsageOverview {
   }
 }
 
+function providerUsage(provider: string, promptTokens: number, cachedTokens: number) {
+  return {
+    provider,
+    requests: 1,
+    success: 1,
+    failed: 0,
+    promptTokens,
+    cachedTokens,
+    completionTokens: 0,
+    totalTokens: promptTokens,
+    avgFirstByteMs: null,
+  }
+}
+
 describe('buildKpis — 缓存复用', () => {
+  test('uses OpenAI prompt tokens as already including cache reads', () => {
+    const k = buildKpis(
+      overview({
+        totals: { promptTokens: 1000, completionTokens: 50, cachedTokens: 900, totalTokens: 1050 },
+        byProvider: [providerUsage('openai', 1000, 900)],
+      }),
+      1,
+      7,
+      { openai: 'openai-completions' },
+    )
+
+    expect(k.cacheRate).toBe(90)
+  })
+
+  test('combines mixed protocols by their protocol-specific prompt denominators', () => {
+    const k = buildKpis(
+      overview({
+        totals: { promptTokens: 2000, completionTokens: 50, cachedTokens: 1800, totalTokens: 2050 },
+        byProvider: [providerUsage('openai', 1000, 900), providerUsage('anthropic', 1000, 900)],
+      }),
+      2,
+      7,
+      { openai: 'openai-completions', anthropic: 'anthropic-messages' },
+    )
+
+    // 1800 / (OpenAI prompt 1000 + Anthropic input 1000 + cached 900).
+    expect(k.cacheRate).toBe(62.1)
+  })
+
   test('reports the share of prompt tokens served from cache', () => {
     const k = buildKpis(
       overview({

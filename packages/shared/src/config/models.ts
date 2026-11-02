@@ -370,10 +370,9 @@ export function getModelContextWindow(modelId: string): number | undefined {
 }
 
 /**
- * Resolve a model's context window: built-in MODEL_REGISTRY first, then
- * connection-level custom model entries (pi_compat / custom-endpoint models
- * that are absent from the built-in registry). Returns undefined when neither
- * knows the model — callers fall back to their default / clear the window.
+ * Resolve a model's context window: an explicit connection-level model entry
+ * first, then the built-in MODEL_REGISTRY default. Returns undefined when
+ * neither knows the model — callers fall back to their default / clear the window.
  *
  * `connectionModels` is typed structurally (not as LlmConnection['models'])
  * to avoid the circular import: llm-connections imports models.
@@ -383,16 +382,16 @@ export function resolveModelContextWindow(
   connectionModels?: Array<string | { id: string; contextWindow?: number }> | null,
 ): number | undefined {
   if (!modelId) return undefined;
-  // Try the bare id and a pi/-stripped form (registry ids never carry the pi/
-  // prefix; pi sessions may store a pi/-prefixed model id).
-  const registry =
-    getModelContextWindow(modelId) ??
-    (modelId.startsWith('pi/') ? getModelContextWindow(modelId.slice(3)) : undefined);
-  if (registry !== undefined) return registry;
   const custom = connectionModels?.find(
     (m) => typeof m === 'object' && m.id === modelId,
   );
-  return typeof custom === 'object' ? custom.contextWindow : undefined;
+  if (typeof custom === 'object' && custom.contextWindow !== undefined) return custom.contextWindow;
+  // Try the bare id and a pi/-stripped form (registry ids never carry the pi/
+  // prefix; pi sessions may store a pi/-prefixed model id).
+  return (
+    getModelContextWindow(modelId) ??
+    (modelId.startsWith('pi/') ? getModelContextWindow(modelId.slice(3)) : undefined)
+  );
 }
 
 /**

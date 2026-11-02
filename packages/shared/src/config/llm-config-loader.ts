@@ -190,6 +190,10 @@ export function validateLlmConfig(input: unknown): string[] {
       if (!Array.isArray(st.members) || st.members.length === 0) {
         errors.push(`${id}: members 必须是非空数组`);
       } else {
+        // A unit is (provider, model). Two members naming the same pair are the
+        // same route, and the planner would silently drop the second one — so
+        // the config is rejected instead of quietly losing an entry.
+        const seenUnits = new Set<string>();
         (st.members as unknown[]).forEach((m, mi) => {
           if (!isPlainObject(m) || typeof (m as Record<string, unknown>).provider !== 'string') {
             errors.push(`${id}.members[${mi}].provider 必须是非空字符串`);
@@ -199,7 +203,44 @@ export function validateLlmConfig(input: unknown): string[] {
           if (providerIds.size > 0 && !providerIds.has(pid)) {
             errors.push(`${id}.members[${mi}] 引用了不存在的 provider: ${pid}`);
           }
+          for (const field of ['model', 'upstreamModel'] as const) {
+            const value = (m as Record<string, unknown>)[field];
+            if (value !== undefined && (typeof value !== 'string' || !value.trim())) {
+              errors.push(`${id}.members[${mi}].${field} 必须是非空字符串`);
+            }
+          }
+          const enabled = (m as Record<string, unknown>).enabled;
+          if (enabled !== undefined && typeof enabled !== 'boolean') {
+            errors.push(`${id}.members[${mi}].enabled 必须是布尔值`);
+          }
+          const model = (m as Record<string, unknown>).model;
+          if (typeof model === 'string' && model.trim()) {
+            const unit = `${pid}::${model}`;
+            if (seenUnits.has(unit)) {
+              errors.push(`${id}.members[${mi}] 与前面的成员重复: ${pid} / ${model}`);
+            }
+            seenUnits.add(unit);
+          }
         });
+      }
+
+      // Per-failure switching policy: only the documented actions are accepted,
+      // so a typo does not silently fall back to the default behaviour.
+      const policy = st.switchPolicy;
+      if (policy !== undefined) {
+        if (!isPlainObject(policy)) {
+          errors.push(`${id}: switchPolicy 必须是对象`);
+        } else {
+          const validActions = ['retry-same', 'next-key', 'next-unit', 'stop'];
+          for (const [failure, action] of Object.entries(policy as Record<string, unknown>)) {
+            if (!['rate_limit', 'quota', 'auth', 'model_not_found', 'transport', 'server_error'].includes(failure)) {
+              errors.push(`${id}: switchPolicy 含未知失败类型 ${failure}`);
+            }
+            if (typeof action !== 'string' || !validActions.includes(action)) {
+              errors.push(`${id}.switchPolicy.${failure} 需为 ${validActions.join(' / ')}`);
+            }
+          }
+        }
       }
     });
 
@@ -312,6 +353,15 @@ function validateModelOptions(label: string, opts: Record<string, unknown>): str
     const v = opts[f];
     if (v === undefined) continue;
     if (typeof v !== 'boolean') errors.push(`${label}.${f} 必须是布尔`);
+  }
+  // `reasoningEfforts` is a list of the strings the upstream accepts. Anything
+  // else would be sent upstream verbatim and 400 there, far from the typo.
+  if (opts.reasoningEfforts !== undefined) {
+    const v = opts.reasoningEfforts;
+    if (!Array.isArray(v)) errors.push(`${label}.reasoningEfforts 必须是数组`);
+    else if (v.some((item) => typeof item !== 'string' || !item.trim())) {
+      errors.push(`${label}.reasoningEfforts 的每项必须是非空字符串`);
+    }
   }
   return errors;
 }

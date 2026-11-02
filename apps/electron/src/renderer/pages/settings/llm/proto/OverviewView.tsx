@@ -10,6 +10,7 @@
 import * as React from 'react'
 
 import type { LlmConfigShape, UsageOverview } from '../types'
+import { gatewaySetupSteps, keyAvailabilitySegments, shouldShowGatewaySetup } from './viewmodel'
 import type { ProtoKpis, ProtoLogRow, ProtoProvider, ProtoRtk, ProtoStrategy } from './viewmodel'
 import { Badge, Dot, Minibar, Spark, fmt } from './atoms'
 import { useProtoShell } from './state'
@@ -203,7 +204,7 @@ const RANGE_NAMES: Array<[RangeKey, string]> = [
 ]
 
 interface Props {
-  config: LlmConfigShape
+  config: LlmConfigShape | null
   overview: UsageOverview | null
   kpis: ProtoKpis
   providers: ProtoProvider[]
@@ -228,12 +229,14 @@ export function OverviewView(props: Props): React.JSX.Element {
   const nowTs = Date.now()
   const inRange = (l: ProtoLogRow): boolean => nowTs - l.tsMs <= rangeMs
 
+  const stepStates = gatewaySetupSteps(props.config, providers, props.strategies)
   const steps: Array<{ t: string; done: boolean; go: () => void }> = [
-    { t: '添加提供商', done: providers.length > 0, go: () => shell.go('providers') },
-    { t: '探测模型并测试连接', done: providers.some((p) => p.lastTest.includes('测试成功')), go: () => shell.go('providers') },
-    { t: '设置默认策略组', done: props.strategies.length > 0, go: () => shell.go('strategies') },
+    { t: '添加提供商', done: stepStates[0], go: () => shell.go('providers') },
+    { t: '探测模型并测试连接', done: stepStates[1], go: () => shell.go('providers') },
+    { t: '设置默认策略组', done: stepStates[2], go: () => shell.go('strategies') },
   ]
   const doneCount = steps.filter((s) => s.done).length
+  const showOnboarding = shouldShowGatewaySetup(steps.map((step) => step.done), !onboardVisible)
 
   // Token chart. The axis is fixed by the range, not by the data: a range with
   // one busy day used to render one column, which reads as a broken chart
@@ -377,7 +380,7 @@ export function OverviewView(props: Props): React.JSX.Element {
       <div className="page-title">LLM 管理</div>
       <div className="page-desc">多上游路由、密钥池与用量</div>
 
-      {onboardVisible ? (
+      {showOnboarding ? (
         <div className="card" style={{ borderColor: 'var(--color-accent)' }}>
           <div className="spread">
             <div className="row" style={{ gap: 8 }}>
@@ -420,7 +423,7 @@ export function OverviewView(props: Props): React.JSX.Element {
         </div>
       ) : null}
 
-      <div className="spread" style={{ marginBottom: 14, marginTop: onboardVisible ? 14 : 0 }}>
+      <div className="spread" style={{ marginBottom: 14, marginTop: showOnboarding ? 14 : 0 }}>
         <div className="sec-title" style={{ margin: 0 }}>用量总览</div>
         <div className="seg">
           {RANGE_NAMES.map(([r, name]) => (
@@ -482,7 +485,7 @@ export function OverviewView(props: Props): React.JSX.Element {
             <div style={{ minWidth: 0 }}>
               <div className="xs muted">压缩率</div>
               <div className="num" style={{ fontSize: 20, fontWeight: 600 }}>
-                {props.rtk.commands ? `${props.rtk.savingsPct}%` : '—'}
+                {props.rtk.commands ? `${props.rtk.savingsPct.toFixed(1)}%` : '—'}
               </div>
             </div>
             <div style={{ minWidth: 0 }}>
@@ -626,23 +629,36 @@ export function OverviewView(props: Props): React.JSX.Element {
             <span className="xs muted">点击行进入详情</span>
           </div>
           <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 4 }}>
-            {providers.map((p) => (
-              <div
-                key={p.id}
-                className="availrow spread"
-                style={{ cursor: 'pointer' }}
-                title={`${p.keys.avail} 可用 · ${p.keys.cool} 冷却 · ${p.keys.dis} 禁用`}
-                onClick={() => shell.gotoDetail(p.id)}
-              >
-                <span style={{ width: 120 }}>{p.name}</span>
-                <span className="avail">
-                  <span style={{ flex: p.keys.avail || 0.1, background: 'var(--state-ok)' }} />
-                  <span style={{ flex: p.keys.cool || 0.1, background: 'var(--state-warn)' }} />
-                  <span style={{ flex: p.keys.dis || 0.1, background: 'var(--color-text-faint)' }} />
-                </span>
-                <span className="xs muted">{`${p.keys.avail} 可用 · ${p.keys.cool} 冷却 · ${p.keys.dis} 禁用`}</span>
-              </div>
-            ))}
+            {providers.map((p) => {
+              const segments = keyAvailabilitySegments(p.keys)
+              const summary = [
+                `${p.keys.avail} 可用`,
+                `${p.keys.cool} 冷却`,
+                `${p.keys.unavailable} 暂不可用`,
+                `${p.keys.dis} 禁用`,
+              ].join(' · ')
+              return (
+                <div
+                  key={p.id}
+                  className="availrow spread"
+                  style={{ cursor: 'pointer' }}
+                  title={summary}
+                  onClick={() => shell.gotoDetail(p.id)}
+                >
+                  <span style={{ width: 120 }}>{p.name}</span>
+                  <span className="avail" role="img" aria-label={segments.length ? segments.map((s) => `${s.count} ${s.label}`).join('、') : '无 Key'}>
+                    {segments.map((segment) => (
+                      <span
+                        key={segment.id}
+                        title={`${segment.count} ${segment.label}`}
+                        style={{ flex: segment.count, background: segment.color }}
+                      />
+                    ))}
+                  </span>
+                  <span className="xs muted">{summary}</span>
+                </div>
+              )
+            })}
           </div>
         </div>
 
@@ -662,13 +678,13 @@ export function OverviewView(props: Props): React.JSX.Element {
               </tr>
               {providers.map((p) => {
                 const usage = (overview?.byProvider ?? []).find((b) => b.provider === p.id)
-                const stateLabel = p.state === 'ok' ? '正常' : p.state === 'cool' ? '全部冷却' : '禁用'
-                const dotc = p.state === 'ok' ? 'green' : p.state === 'cool' ? 'amber' : 'gray'
+                const stateLabel = p.state === 'ok' ? '正常' : p.state === 'cool' ? '全部冷却' : p.state === 'unavailable' ? '暂不可用' : '禁用'
+                const dotc = p.state === 'ok' ? 'green' : p.state === 'cool' ? 'amber' : p.state === 'unavailable' ? 'red' : 'gray'
                 return (
                   <tr key={p.id} className="rowclick" onClick={() => shell.gotoDetail(p.id)}>
                     <td>{p.name}</td>
                     <td>
-                      <Dot color={dotc as 'green' | 'amber' | 'gray'} /> {stateLabel}
+                      <Dot color={dotc as 'green' | 'amber' | 'red' | 'gray'} /> {stateLabel}
                     </td>
                     <td>{usage?.requests ?? 0}</td>
                     <td>{fmt(usage?.totalTokens ?? 0)}</td>

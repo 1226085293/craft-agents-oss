@@ -1,7 +1,7 @@
 /**
  * BaseAgent Abstract Class
  *
- * Shared base class for all AI agent backends (ClaudeAgent, PiAgent).
+ * Shared base class for all AI agent backends (PiAgent).
  * Extracts common functionality including:
  * - Model/thinking configuration
  * - Permission mode management (via PermissionManager)
@@ -47,7 +47,7 @@ import type {
   RecoveryMessage,
 } from './backend/types.ts';
 import { AbortReason } from './backend/types.ts';
-import type { AuthRequest } from './session-scoped-tools.ts';
+import type { AuthRequest } from '@craft-agent/session-tools-core';
 import type { Workspace } from '../config/storage.ts';
 
 // Core modules
@@ -59,9 +59,6 @@ import { ConfigWatcherManager, type ConfigWatcherManagerCallbacks } from './core
 import { UsageTracker, type UsageUpdate } from './core/usage-tracker.ts';
 import { PrerequisiteManager } from './core/prerequisite-manager.ts';
 
-// Automation system for agent events
-import type { AutomationSystem } from '../automations/automation-system.ts';
-import type { AgentEvent as AutomationAgentEvent, SdkAutomationInput } from '../automations/types.ts';
 import { getSessionPlansPath, getSessionDataPath, getSessionPath } from '../sessions/storage.ts';
 import { readSessionJsonl } from '../sessions/jsonl.ts';
 import { getMiniAgentSystemPrompt } from '../prompts/system.ts';
@@ -137,6 +134,11 @@ export interface SpawnSessionRequest {
   attachments?: Array<{ path: string; name?: string }>;
   /** Explicit MCP server configs to activate (isolated from parent pool) */
   mcpServerConfigs?: Record<string, SdkMcpServerConfig>;
+  /**
+   * Follow the spawned session and receive each finished turn as a message
+   * (default true). The spawning session can unsubscribe later.
+   */
+  subscribe?: boolean;
 }
 
 export interface SpawnSessionResult {
@@ -234,7 +236,6 @@ export abstract class BaseAgent implements AgentBackend {
   protected configWatcherManager: ConfigWatcherManager | null = null;
   protected usageTracker: UsageTracker;
   protected prerequisiteManager: PrerequisiteManager;
-  protected automationSystem?: AutomationSystem;
 
   // ============================================================
   // Additional State (protected for subclass access)
@@ -424,8 +425,6 @@ export abstract class BaseAgent implements AgentBackend {
       onDebug: (msg) => this.debug(msg),
     });
 
-    // AutomationSystem: workspace-level automations from automations.json
-    this.automationSystem = config.automationSystem;
   }
 
   // ============================================================
@@ -495,21 +494,6 @@ export abstract class BaseAgent implements AgentBackend {
   }
 
   /**
-   * Fire an automation agent event (from automations.json) via AutomationSystem.
-   * Catches all errors — automations must never break the agent flow.
-   *
-   * Non-Claude backends call this directly. ClaudeAgent uses SDK's buildSdkHooks() instead.
-   *
-   * @param signal - Optional AbortSignal for cancelling automation execution on abort
-   */
-  protected async emitAutomationEvent(event: AutomationAgentEvent, input: SdkAutomationInput, signal?: AbortSignal): Promise<void> {
-    try {
-      await this.automationSystem?.executeAgentEvent(event, input, signal);
-    } catch (err) {
-      this.debug(`Automation event ${event} failed: ${err}`);
-    }
-  }
-
   // ============================================================
   // Session MCP Tool Completion Handling
   // ============================================================
@@ -527,8 +511,8 @@ export abstract class BaseAgent implements AgentBackend {
    * Instead, PiAgent detects session MCP tool completions from its own event
    * stream and calls THIS shared method to fire the appropriate callback.
    *
-   * ClaudeAgent doesn't need this — its session-scoped tools run in-process
-   * via Claude Agent SDK, so the callback registry works directly.
+   * This layer does not need this — its session-scoped tools run in-process
+   * via the Pi agent, so the callback registry works directly.
    *
    * CALLBACKS FIRED:
    * - SubmitPlan → this.onPlanSubmitted(planPath)
@@ -683,7 +667,7 @@ export abstract class BaseAgent implements AgentBackend {
    */
   updateWorkingDirectory(path: string): void {
     this.workingDirectory = path;
-    // Persist to session config for storage and consistency with ClaudeAgent
+    // Persist to session config for storage and consistency with PiAgent
     if (this.config.session) {
       this.config.session.workingDirectory = path;
     }
@@ -842,7 +826,7 @@ export abstract class BaseAgent implements AgentBackend {
   /**
    * Get mini agent configuration for provider-specific application.
    * Returns centralized config that each backend interprets appropriately:
-   * - ClaudeAgent: Uses tools array, mcpServers filter, maxThinkingTokens: 0
+   * - PiAgent: uses the subprocess tool registration
    * - PiAgent: Applies tool filter + minimizeThinking via runtime config
    */
   getMiniAgentConfig(): MiniAgentConfig {
@@ -1534,7 +1518,7 @@ ${formattedMessages}
   /**
    * Run a simple text completion using the agent's auth infrastructure.
    * No tools, no system prompt - just text in → text out.
-   * Each backend implements using its own SDK (Claude SDK query() or Codex app-server).
+   * Each backend implements using its own SDK (the Pi subprocess).
    *
    * @param prompt - The prompt to send
    * @param kind - Attribution for the gateway log (`memory`, `verification`, …).
@@ -1550,7 +1534,7 @@ ${formattedMessages}
    * Used by call_llm tool (via queryFn callback) and potentially by runMiniCompletion.
    *
    * Each backend implements this using its own SDK/session mechanism:
-   * - ClaudeAgent: SDK query() with OAuth
+   * - PiAgent: uses the Pi subprocess
    * - PiAgent: One-shot completion via Pi SDK in the subprocess
    *
    * @param request - The query request (prompt, model, systemPrompt, etc.)
@@ -1616,6 +1600,7 @@ ${formattedMessages}
       projectId: input.projectId as string | undefined,
       attachments: input.attachments as SpawnSessionRequest['attachments'],
       mcpServerConfigs: input.mcpServerConfigs as Record<string, SdkMcpServerConfig> | undefined,
+      subscribe: input.subscribe as boolean | undefined,
     };
 
     return this.onSpawnSession(request);
@@ -1677,7 +1662,10 @@ ${formattedMessages}
   async generateTitle(message: string, options?: { language?: string }): Promise<string | null> {
     try {
       const prompt = buildTitlePrompt(message, options);
-      const result = await this.runMiniCompletion(prompt);
+      // `title`: without it this call inherits the session's `chat` kind, and a
+      // ~100-token prompt that produces the session's name was logged (and
+      // charged) as conversation traffic (2026-10-29, `261029-airy-orbit`).
+      const result = await this.runMiniCompletion(prompt, 'title');
       return validateTitle(result);
     } catch (error) {
       this.debug(`[generateTitle] Failed: ${error}`);
@@ -1697,7 +1685,7 @@ ${formattedMessages}
   async regenerateTitle(recentUserMessages: string[], lastAssistantResponse: string, options?: { language?: string }): Promise<string | null> {
     try {
       const prompt = buildRegenerateTitlePrompt(recentUserMessages, lastAssistantResponse, options);
-      const result = await this.runMiniCompletion(prompt);
+      const result = await this.runMiniCompletion(prompt, 'title');
       return validateTitle(result);
     } catch (error) {
       this.debug(`[regenerateTitle] Failed: ${error}`);
@@ -1708,9 +1696,13 @@ ${formattedMessages}
   /**
    * Get a bound summarize callback for passing to API tool builders.
    * This allows MCP servers to summarize using the agent's auth infrastructure.
+   *
+   * Tagged `call_llm`: it is the same family of work the `call_llm` tool does
+   * (summarize an oversized result), so the log can tell it apart from the
+   * conversation it happens to run inside.
    */
   getSummarizeCallback(): (prompt: string) => Promise<string | null> {
-    return this.runMiniCompletion.bind(this);
+    return (prompt: string) => this.runMiniCompletion(prompt, 'call_llm');
   }
 }
 

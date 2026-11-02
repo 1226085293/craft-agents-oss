@@ -1,71 +1,52 @@
-/* Prototype stylesheet, ported verbatim from pages/llm/index.html (v28).
-   Scoped under .llm-proto so the gateway UI keeps the prototype's own visual
-   system without leaking tokens into the rest of the app. */
+/* Prototype stylesheet, ported from pages/llm/index.html (v28).
+   Scoped under .llm-proto so its `.card` / `.badge` / `.main` rules cannot leak
+   into the rest of the app.
+
+   The palette is *derived from the app's theme variables* — the prototype's own
+   hardcoded greys/indigo are gone. Two reasons:
+     1. 外观 can pick a themed preset (warm, scenic, a custom accent). A page
+        carrying its own grey scale stays cold blue-grey next to a warm shell,
+        which read as "this page is not part of the app".
+     2. Light/dark then needs no second token block at all: every value flips
+        with :root / .dark on its own.
+   Mixes use the same `--foreground-N` ramp the rest of the app uses, so a
+   border here is the same weight as a border anywhere else. */
 .llm-proto{
   --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,sans-serif;
   --font-mono:ui-monospace,"SF Mono",SFMono-Regular,Consolas,"Liberation Mono",monospace;
-  --prim-accent:#5b5cf4; --prim-accent-soft:#ececfd;
-  --prim-ok:#16a34a; --prim-ok-soft:#e8f7ee;
-  --prim-warn:#d97706; --prim-warn-soft:#fdf3e3;
-  --prim-bad:#dc2626; --prim-bad-soft:#fdeaea;
-  --prim-ink:#191920; --prim-white:#ffffff;
-  --prim-gray-50:#f6f6f8; --prim-gray-100:#f1f1f7; --prim-gray-200:#e4e4ea;
-  --prim-gray-300:#d4d4de; --prim-gray-400:#b9b9c4; --prim-gray-500:#8a8a96;
-  --prim-chart-a:#5b5cf4; --prim-chart-b:#8f8ff8; --prim-chart-c:#b9b9f8; --prim-chart-d:#dcdcfc;
-  --prim-dark-bg:#131318; --prim-dark-surface:#1c1c24; --prim-dark-hover:#242430;
-  --prim-dark-muted:#22222b; --prim-dark-disabled:#191920;
-  --prim-dark-border:#2c2c38; --prim-dark-border-strong:#3a3a48;
-  --prim-dark-text:#ededf4; --prim-dark-text-muted:#9a9aa8; --prim-dark-text-faint:#6c6c7a;
-  --prim-dark-chart-d:#3a3a55;
 }
 .llm-proto{
-  color-scheme: light dark;
-  --color-bg:var(--prim-gray-50);
-  --color-surface:var(--prim-white);
-  --color-surface-hover:var(--prim-gray-100);
-  --color-surface-muted:#f0f0f3;
-  --color-surface-disabled:#f4f4f6;
-  --color-border:var(--prim-gray-200);
-  --color-border-strong:var(--prim-gray-300);
-  --color-text:var(--prim-ink);
-  --color-text-muted:var(--prim-gray-500);
-  --color-text-faint:var(--prim-gray-400);
-  --color-accent:var(--prim-accent);
-  --color-accent-soft:var(--prim-accent-soft);
-  --color-input:#fafafa;
-  --color-seg:#ececf0;
-  --state-ok:var(--prim-ok); --state-ok-soft:var(--prim-ok-soft);
-  --state-warn:var(--prim-warn); --state-warn-soft:var(--prim-warn-soft);
-  --state-bad:var(--prim-bad); --state-bad-soft:var(--prim-bad-soft);
-  --state-unknown:var(--prim-gray-400);
-  --chart-prompt:var(--prim-chart-a); --chart-completion:var(--prim-chart-c);
-  --shadow-sm:0 1px 2px rgba(20,20,40,.05);
-  --shadow-md:0 4px 14px rgba(20,20,40,.09);
+  --color-bg:var(--background);
+  --color-surface:var(--background-elevated);
+  --color-surface-hover:var(--foreground-5);
+  --color-surface-muted:var(--foreground-3);
+  --color-surface-disabled:var(--foreground-2);
+  --color-border:var(--foreground-10);
+  --color-border-strong:var(--foreground-20);
+  --color-text:var(--foreground);
+  --color-text-muted:var(--muted-foreground);
+  --color-text-faint:var(--foreground-40);
+  --color-accent:var(--accent);
+  --color-accent-soft:oklch(from var(--accent) l c h / 0.12);
+  /* Text/glyph on an accent-filled surface: stays white in both modes, because
+     the accent keeps mid lightness in both. */
+  --color-on-accent:#ffffff;
+  --color-input:var(--foreground-3);
+  --color-seg:var(--foreground-5);
+  --state-ok:var(--success); --state-ok-soft:oklch(from var(--success) l c h / 0.14);
+  --state-warn:var(--info); --state-warn-soft:oklch(from var(--info) l c h / 0.14);
+  --state-bad:var(--destructive); --state-bad-soft:oklch(from var(--destructive) l c h / 0.14);
+  --state-unknown:var(--foreground-40);
+  --chart-prompt:var(--accent); --chart-completion:oklch(from var(--accent) l c h / 0.4);
+  --shadow-sm:0 1px 2px rgb(0 0 0 / var(--shadow-blur-opacity));
+  --shadow-md:0 4px 14px rgb(0 0 0 / calc(var(--shadow-blur-opacity) * 1.8));
   --radius-sm:6px; --radius-md:8px; --radius-lg:12px; --radius-full:999px;
   --text-xs:11px; --text-sm:12px; --text-md:13px; --text-base:14px; --text-xl:16px; --text-2xl:22px;
 }
-@media (prefers-color-scheme: dark){
-  .llm-proto{
-    --color-bg:var(--prim-dark-bg);
-    --color-surface:var(--prim-dark-surface);
-    --color-surface-hover:var(--prim-dark-hover);
-    --color-surface-muted:var(--prim-dark-muted);
-    --color-surface-disabled:var(--prim-dark-disabled);
-    --color-border:var(--prim-dark-border);
-    --color-border-strong:var(--prim-dark-border-strong);
-    --color-text:var(--prim-dark-text);
-    --color-text-muted:var(--prim-dark-text-muted);
-    --color-text-faint:var(--prim-dark-text-faint);
-    --color-accent-soft:rgba(91,92,244,.18);
-    --color-input:#262630;
-    --color-seg:#26262f;
-    --state-ok-soft:rgba(22,163,74,.18);
-    --state-warn-soft:rgba(217,119,6,.18);
-    --state-bad-soft:rgba(220,38,38,.18);
-    --shadow-sm:0 1px 2px rgba(0,0,0,.45);
-    --shadow-md:0 4px 14px rgba(0,0,0,.5);
-  }
-}
+/* Native controls (scrollbars, select popups) follow the app's mode. The
+   rendered colours above already flip via the theme variables. */
+.llm-proto{color-scheme:light}
+.dark .llm-proto{color-scheme:dark}
 .llm-proto, .llm-proto *{box-sizing:border-box;margin:0;padding:0}
 .llm-proto{font-family:var(--font-sans);background:var(--color-bg);color:var(--color-text);font-size:var(--text-base);line-height:1.6;-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale;text-rendering:optimizeLegibility;letter-spacing:.01em}
 .llm-proto button{font:inherit;cursor:pointer;border:none;background:none;color:inherit}
@@ -103,7 +84,7 @@
 .llm-proto .seg button.on{background:var(--color-surface);color:var(--color-text);box-shadow:var(--shadow-sm);font-weight:600}
 .llm-proto .btn{display:inline-flex;align-items:center;gap:6px;border-radius:var(--radius-md);padding:6px 12px;font-size:var(--text-md);border:1px solid var(--color-border);background:var(--color-surface);transition:.15s}
 .llm-proto .btn:hover{border-color:var(--color-border-strong)}
-.llm-proto .btn.primary{background:var(--color-accent);border-color:var(--color-accent);color:var(--prim-white)}
+.llm-proto .btn.primary{background:var(--color-accent);border-color:var(--color-accent);color:var(--color-on-accent)}
 .llm-proto .btn.primary:hover{filter:brightness(1.06)}
 .llm-proto .btn.danger{color:var(--state-bad);border-color:var(--state-bad-soft)}
 .llm-proto .btn.danger:hover{background:var(--state-bad-soft)}
@@ -129,7 +110,7 @@
 .llm-proto .checkbox{appearance:none;-webkit-appearance:none;width:16px;height:16px;border:1.5px solid var(--color-border-strong);border-radius:4px;background:var(--color-surface);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:.15s;flex-shrink:0}
 .llm-proto .checkbox:hover{border-color:var(--color-accent)}
 .llm-proto .checkbox:checked{background:var(--color-accent);border-color:var(--color-accent)}
-.llm-proto .checkbox:checked::after{content:"";width:9px;height:9px;background:var(--prim-white);clip-path:polygon(14% 44%,0 65%,50% 100%,100% 16%,80% 0%,43% 62%)}
+.llm-proto .checkbox:checked::after{content:"";width:9px;height:9px;background:var(--color-on-accent);clip-path:polygon(14% 44%,0 65%,50% 100%,100% 16%,80% 0%,43% 62%)}
 .llm-proto .switch{width:34px;height:20px;border-radius:var(--radius-full);background:var(--color-border-strong);position:relative;transition:.2s;flex-shrink:0}
 .llm-proto .switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--color-surface);transition:.2s}
 .llm-proto .switch.on{background:var(--state-ok)}
@@ -181,7 +162,7 @@
 .llm-proto .wrow input[type=text]{flex:1;min-width:0;max-width:160px}
 .llm-proto .wday{width:30px;height:30px;padding:0;border-radius:8px;border:1px solid var(--color-border);background:var(--color-input);font-size:var(--text-sm);color:var(--color-text-muted);transition:.12s;flex-shrink:0}
 .llm-proto .wday:hover{border-color:var(--color-accent);color:var(--color-accent)}
-.llm-proto .wday.on{background:var(--color-accent);border-color:var(--color-accent);color:var(--prim-white);font-weight:600}
+.llm-proto .wday.on{background:var(--color-accent);border-color:var(--color-accent);color:var(--color-on-accent);font-weight:600}
 .llm-proto .spanrow{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--color-border)}
 .llm-proto .spanrow:last-of-type{border-bottom:none}
 .llm-proto .spanrow .idx{width:18px;flex-shrink:0;font-size:var(--text-xs);color:var(--color-text-faint);font-variant-numeric:tabular-nums}
@@ -274,6 +255,7 @@
 .llm-proto .pcard .pact{margin-top:auto;padding-top:10px;justify-content:flex-end}
 .llm-proto .pcard:hover{box-shadow:var(--shadow-md);border-color:var(--color-border-strong)}
 .llm-proto .pcard.cool{background:var(--color-surface-muted)}
+.llm-proto .pcard.unavailable{background:var(--state-bad-soft)}
 .llm-proto .pcard.disabled{opacity:.62;border-style:dashed;background:var(--color-surface-disabled)}
 .llm-proto .pcard .name{font-weight:600;display:flex;align-items:center;gap:7px}
 .llm-proto .pcard .note{font-size:var(--text-sm);color:var(--color-text-muted);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -363,9 +345,9 @@
 .llm-proto .limseg button+button{border-left:1px solid var(--color-border)}
 .llm-proto .limseg button:hover{color:var(--color-text)}
 .llm-proto .limseg button.on{background:var(--color-accent-soft);color:var(--color-accent);font-weight:600}
-.llm-proto .overlay{position:fixed;inset:0;background:rgba(20,20,40,.45);display:grid;place-items:center;z-index:50;padding:24px;overflow:auto}
+.llm-proto .overlay{position:fixed;inset:0;background:rgb(0 0 0 / .45);display:grid;place-items:center;z-index:50;padding:24px;overflow:auto}
 /* 弹窗改 flex 列布局：头/尾固定，body 内滚动 —— 展开/折叠内容不会改变弹窗总高度 */
-.llm-proto .dialog{background:var(--color-surface);border-radius:14px;box-shadow:0 18px 60px rgba(20,20,40,.28);width:560px;max-width:100%;margin:auto;padding:20px;height:min(600px,88vh);overflow:hidden;display:flex;flex-direction:column;scrollbar-width:thin;scrollbar-color:var(--color-border-strong) transparent}
+.llm-proto .dialog{background:var(--color-surface);border-radius:14px;box-shadow:0 18px 60px rgb(0 0 0 / calc(var(--shadow-blur-opacity) * 3));width:560px;max-width:100%;margin:auto;padding:20px;height:min(600px,88vh);overflow:hidden;display:flex;flex-direction:column;scrollbar-width:thin;scrollbar-color:var(--color-border-strong) transparent}
 /* 编辑提供商弹窗：body 高度固定（视口比例），类型区 flex 吃剩余并内部滚动 → 折叠/展开时弹窗总高、footer 位置完全不变 */
 /* 弹窗内：中间内容区（.body）整体滚动，头部 .spread 与 .footer 固定不随滚动消失；
    类型卡列表不再单独内部滚动，否则出现「双滚动条/滚动条嵌在中部」的观感 */

@@ -116,6 +116,18 @@ export function buildCustomEndpointModelDef(
    * applies only when this is omitted or invalid (CI / standalone runs).
    */
   defaultContextWindow?: number,
+  /**
+   * The endpoint is the Craft gateway, which understands Anthropic's *adaptive*
+   * thinking shape and translates it into `reasoning_effort` for the actual
+   * upstream.
+   *
+   * It has to be adaptive to carry the level: the budget-based path runs the
+   * level through pi-ai's `clampReasoning()`, which folds `xhigh`/`max` into
+   * `high`, so `max` and `high` produced an identical `budget_tokens: 16384`
+   * and the relay ran at its own default (`high`) no matter what the composer
+   * said (2026-10-29).
+   */
+  adaptiveThinking?: boolean,
 ) {
   const supportsImages = overrides?.supportsImages ?? defaults?.supportsImages ?? false
   const input: CustomEndpointInput[] = supportsImages ? ['text', 'image'] : ['text']
@@ -142,6 +154,10 @@ export function buildCustomEndpointModelDef(
     name: id,
     reasoning: true,
     compat: {
+      // Only for the gateway: it converts adaptive thinking into the effort
+      // string the upstream takes. A user's own anthropic relay was never sent
+      // `output_config` and may reject it, so it keeps the budget shape.
+      ...(adaptiveThinking ? { forceAdaptiveThinking: true } : {}),
       supportsDeveloperRole: false,
       // maxTokensField: 'max_tokens' — pi-ai's detectCompat defaults to
       // max_completion_tokens (o1/o3 family) for unknown endpoints, but our

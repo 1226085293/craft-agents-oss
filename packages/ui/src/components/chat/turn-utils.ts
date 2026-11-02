@@ -83,11 +83,11 @@ function localizeStatusContent(
     key = 'chat.verificationSkippedLlmError'
   } else if (statusType === 'compaction_summary') {
     // Token accounting: `after` is the real post-compaction context reported by
-    // the SDK (estimatedTokensAfter), and `retained`/`compacted` are measured in
-    // the subprocess. Do NOT re-derive them here — `before - compacted` is not
-    // the kept region when the checkpoint text is folded into `after`, and
-    // re-deriving made the line disagree with the context-use ring
-    // (2026-10-19 first-crane: ring 22k vs line 23.9k).
+    // the SDK (estimatedTokensAfter), and `retained`/`compacted` are derived from
+    // it by buildCompactionSummaryParams on the emitting side. Do NOT re-derive
+    // them here — `before - compacted` is not the kept region when the checkpoint
+    // text is folded into `after`, and re-deriving made the line disagree with
+    // the context-use ring (2026-10-19 first-crane: ring 22k vs line 23.9k).
     // Values are pre-formatted ("39.6k") because i18next has no number
     // formatter wired here and the raw integers would be unreadable.
     const fmt = (n: number): string => `${(n / 1000).toFixed(1)}k`;
@@ -136,7 +136,7 @@ export function sortActivitiesForDisplay<T extends ActivityItem>(activities: T[]
 
 /**
  * Strip error wrapper tags and prefixes from tool error messages.
- * The Claude Agent SDK wraps errors in tags like <error><tool_use_error>...</tool_use_error></error>
+ * Anthropic-style errors may be wrapped in tags like <error><tool_use_error>...</tool_use_error></error>
  * which aren't user-friendly. Additionally, errorResponse() and blockWithReason() prefix
  * messages with "[ERROR] " so the Codex model can detect failures (the OpenAI API has no
  * error signaling field). We strip that prefix here for clean UI display.
@@ -502,15 +502,6 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
   const turns: Turn[] = []
   let currentTurn: AssistantTurn | null = null
   let lastUserTurn: UserTurn | null = null
-  let deferredQueuedUserTurns: UserTurn[] = []
-  const flushDeferredQueuedUserTurns = () => {
-    if (deferredQueuedUserTurns.length === 0) return
-    for (const userTurn of deferredQueuedUserTurns) {
-      turns.push(userTurn)
-      lastUserTurn = userTurn
-    }
-    deferredQueuedUserTurns = []
-  }
 
   const flushCurrentTurn = (interrupted = false) => {
     if (currentTurn) {
@@ -545,7 +536,6 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
 
       turns.push(currentTurn)
       currentTurn = null
-      flushDeferredQueuedUserTurns()
     }
   }
 
@@ -604,15 +594,9 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
         timestamp: message.timestamp,
       }
 
-      // Queued messages are not a new active turn yet. They should appear after
-      // the currently-running assistant process block, not between the original
-      // user message and its process block. Defer them until the active turn is
-      // flushed. This keeps the visible order as:
-      //   user → assistant process → queued user
-      // instead of:
-      //   user → queued user → assistant process
-      if (message.isQueued && lastUserTurn) {
-        deferredQueuedUserTurns.push(userTurn)
+      // Queued messages are not transcript content — they render in the
+      // pending-queue panel above the composer, so the grouper drops them.
+      if (message.isQueued) {
         continue
       }
 
@@ -681,15 +665,16 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
     // only sees persisted+forwarded rows, so normalize here — see SessionManager
     // dispatchEvent) create/update the same token-accounting row.
     //
-    // Event type is the authoritative manual/auto discriminator:
-    //   type 'info'    → manual /compact — its own turn, NO assistant reply.
-    //                    Standalone card (2026-10-19 first-crane: it used to be
-    //                    re-attached to the previous turn's process block).
-    //   type 'status'  → auto compaction, fired mid-turn. Belongs to the turn
-    //                    that triggered it, so it renders INSIDE that process
-    //                    block where the compaction actually happened.
-    // Prefer currentTurn over the event type only as a safety net: an in-flight
-    // turn means we are mid-turn regardless of which event carried the row.
+    // Event type alone is NOT the manual/auto discriminator — the same row can
+    // arrive as either depending on which pipeline delivered it:
+    //   no turn in flight → manual /compact. It gets its own card: the stats are
+    //                       the whole content of that turn and borrowing an
+    //                       unrelated block read as a stray line (2026-10-19).
+    //   turn in flight    → automatic compaction mid-turn. It belongs INSIDE
+    //                       that process block, where it actually happened.
+    // Using only the event type meant an in-flight row delivered as `info`
+    // forked the turn and surfaced the notice outside its own block
+    // (2026-10-25, "自动压缩的提示跑到了过程块外面").
     // NOTE: the statusType check is load-bearing. Without it every other info
     // row (verification verdicts, notices) would fork its own turn.
     const isManualCompactionSummary =
@@ -705,9 +690,30 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
         ...(message.statusParams ? { statusParams: message.statusParams } : {}),
         depth: 0,
       }
-      // A manual /compact is its own turn: never fold it into whatever process
-      // block happens to still be open, and never borrow the previous turn's
-      // block. Standalone card keeps the stats visible and honest.
+      // An automatic compaction summary can arrive as INFO while the active
+      // process block already contains tool/intermediate work. Keep the row in
+      // that block; flushing here splits one logical turn into two cards.
+      // A manual /compact has no such work (at most its compacting status row),
+      // so retain its standalone result card.
+      const hasActiveWork = currentTurn?.activities.some(
+        activity => activity.type === 'tool' || activity.type === 'intermediate' || activity.type === 'plan'
+      )
+      if (currentTurn && hasActiveWork) {
+        const existingIdx = currentTurn.activities.findIndex(
+          activity => activity.type === 'status' && activity.statusType === 'compaction_summary'
+        )
+        if (existingIdx !== -1) {
+          currentTurn.activities[existingIdx] = row
+        } else {
+          currentTurn.activities.push(row)
+        }
+        continue
+      }
+
+      // An automatic compaction can also land on a turn boundary (relief ends
+      // the SDK turn, so the summary is emitted with nothing open). That case
+      // produces the same one-row card, which then sits *between* two blocks of
+      // one piece of work — see the merge pass at the end of this function.
       flushCurrentTurn()
       turns.push({
         type: 'assistant',
@@ -735,6 +741,29 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
             status: 'completed',
             content: localizeStatusContent(message.statusType, message.content, message.statusParams),
           }
+        } else {
+          // Auto compaction can land mid-turn AFTER the compacting status row
+          // was already consumed (renderer's handleInfo converts compacting →
+          // compaction_complete in-place on the live session before
+          // groupMessagesByTurn runs, so the compacting activity no longer
+          // exists in this turn's activity list). Without this fallback the
+          // row is silently dropped from the grouping while ChatDisplay still
+          // renders it as a standalone "Conversation Compacted" divider in the
+          // middle of the tool sequence — splitting one process block into two
+          // (2026-10-26 crisp-tiger).
+          // Absorb it as a completed fact row INSIDE the current turn so the
+          // block stays whole; a compaction between two turns keeps currentTurn
+          // null and still renders as the divider (manual /compact card).
+          currentTurn.activities.push({
+            id: message.id,
+            type: 'status',
+            status: 'completed',
+            content: localizeStatusContent(message.statusType, message.content, message.statusParams),
+            timestamp: message.timestamp,
+            statusType: 'compaction_complete',
+            depth: 0,
+            ...(message.statusParams ? { statusParams: message.statusParams } : {}),
+          })
         }
       }
       continue  // Don't create a separate system turn
@@ -1051,12 +1080,46 @@ export function groupMessagesByTurn(messages: Message[], options: GroupTurnsOpti
     (currentTurn as AssistantTurn).isComplete = true
   }
 
-  // Flush any remaining turn, then any queued user messages that were deferred
-  // before the assistant turn produced visible activity.
+  // Flush any remaining turn before returning.
   flushCurrentTurn()
-  flushDeferredQueuedUserTurns()
+
+  mergeOrphanedCompactionCards(turns)
 
   return turns
+}
+
+/**
+ * Fold a one-row compaction card into the block it sits in front of.
+ *
+ * Automatic compaction can land on a turn boundary — the relief pass ends the
+ * SDK turn, so the summary is emitted with no assistant turn open. It then
+ * becomes its own card sandwiched between two blocks of the SAME piece of work,
+ * and the token line reads as a notice that escaped the process block
+ * (2026-10-25). When another block follows, the row belongs at the top of it:
+ * that block is the one the compaction made room for.
+ *
+ * A manual /compact has no following block (nothing is running), so it keeps
+ * its own card — which is what lets the two paths tell themselves apart
+ * without relying on which event type delivered the row.
+ */
+function mergeOrphanedCompactionCards(turns: Turn[]): void {
+  const isCompactionOnlyTurn = (t: Turn): boolean =>
+    t.type === 'assistant'
+    && t.activities.length === 1
+    && t.activities[0]?.statusType === 'compaction_summary'
+    && !t.response
+
+  for (let i = 0; i < turns.length - 1; i++) {
+    const turn = turns[i]!
+    const next = turns[i + 1]!
+    if (!isCompactionOnlyTurn(turn) || turn.type !== 'assistant') continue
+    // Only absorb it into a block that actually carries work; a following user
+    // turn means the compaction ended the exchange and the card stays put.
+    if (next.type !== 'assistant' || next.activities.length === 0) continue
+    next.activities.unshift(...turn.activities)
+    turns.splice(i, 1)
+    i--
+  }
 }
 
 /**

@@ -6,7 +6,7 @@ import { hasBranchForkMetadata, retireBranchForkMetadata } from './branch-fork-m
 import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@craft-agent/server-core/handlers'
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
 import { basename, dirname, isAbsolute, join } from 'path'
-import { existsSync } from 'fs'
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs'
 import { copyFile, readFile, writeFile, mkdir, stat, rm, readdir } from 'fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { type AgentEvent, setPermissionMode, setTransientPermissionMode, clearTransientPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
@@ -22,7 +22,9 @@ import {
 } from '@craft-agent/shared/agent/backend'
 import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, resolveMidStreamBehavior, getPersistedUiLanguage, resolveTitleLanguageName } from '@craft-agent/shared/config'
 import type { LlmConnection } from '@craft-agent/shared/config'
-import { kindRouting, type ModelRequestKind } from '@craft-agent/shared/config'
+import type { AutomationSystem } from '@craft-agent/shared/automations'
+import { kindRouting, registerAttachmentName, pickStrategyModel, type ModelRequestKind, type ModelWindow } from '@craft-agent/shared/config'
+import { generateShortId } from '@craft-agent/shared/automations/resolve-config-path'
 import type { MidStreamBehavior } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
@@ -73,15 +75,22 @@ import {
   type StoredSession,
   type StoredMessage,
   type SessionMetadata,
-  type SessionStatus,
   type SessionHeader,
   pickSessionFields,
   copySessionAssetsForBranch,
+  parseSessionCommand,
+  type SessionCommand,
+  type SessionCommandResult,
+  loadFolderConfig,
+  deleteFolderConfig,
+  getDescendantFolderIds,
+  getFolderPath,
+  resolveDeepestExistingAncestor,
+  type FolderConfig,
+  type FolderScope,
 } from '@craft-agent/shared/sessions'
-import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, TokenRefreshManager, loadSourceConfig, saveSourceConfig } from '@craft-agent/shared/sources'
-import { listTaskSlugs, parseTaskSpec, uniqueTaskSlug } from '@craft-agent/shared/tasks'
+import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, getSourcesNeedingAuth, getSourceCredentialManager, TokenRefreshManager, loadSourceConfig, saveSourceConfig } from '@craft-agent/shared/sources'
 import { resolveUsageTarget, resolveSkillReadUsageTarget, resolveSkillCommandUsageTarget, appendUsage } from '@craft-agent/shared/usage'
-import { createTaskFromSpec, resolveCreateTaskProjectId } from '../tasks'
 import { buildPagesToolCallbacks } from '../pages/tool-callbacks'
 import { buildServersFromSources as buildServersFromSourcesShared } from '../sources/build-servers'
 import { ConfigWatcher, type ConfigWatcherCallbacks } from '@craft-agent/shared/config'
@@ -89,14 +98,15 @@ import { resolveAuthEnvVars } from '@craft-agent/shared/config'
 
 import { getGatewayRuntime, loadLlmConfig } from '@craft-agent/shared/config'
 import { schedulePostSwitchCompaction } from './post-switch-compaction'
-import { buildSpawnCompletionNotice, shouldNotifyParent } from './spawn-completion-notice'
+import { buildSubscriptionNotice } from './subscription-notice'
+import { BackgroundTaskStore, readTextFileTail, type BackgroundTaskRecord, type BackgroundTaskStopSource } from './background-tasks'
 
 import { toolMetadataStore, getLastApiError, getLastErrorFromHistory, peekStoredError, readErrorHistory } from '@craft-agent/shared/interceptor'
 import { isParentTaskTool } from '@craft-agent/shared/utils/toolNames'
 import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/shared/mcp'
-import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
+import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, type QueuedMessageSummary, type QueuedMessageEditResult, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
 import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta, type TokenUsage } from '@craft-agent/core/types'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages } from '@craft-agent/shared/utils'
 import { loadAllSkills, invalidateSkillsCache } from '@craft-agent/shared/skills'
@@ -109,12 +119,6 @@ import type { SummarizeCallback } from '@craft-agent/shared/sources'
 import { type ThinkingLevel, DEFAULT_THINKING_LEVEL, normalizeThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import { parseError } from '@craft-agent/shared/agent/errors'
 import { copyTurnLogsForBranch } from '@craft-agent/shared/agent/turn-log'
-import { evaluateAutoLabels } from '@craft-agent/shared/labels/auto'
-import { listLabels, loadLabelConfig } from '@craft-agent/shared/labels/storage'
-import { extractLabelId, resolveSessionLabels, findTaskItemLabelId } from '@craft-agent/shared/labels'
-import { ensureLabelsExist, ensureTaskItemLabel } from '@craft-agent/shared/labels/crud'
-import { loadStatusConfig } from '@craft-agent/shared/statuses/storage'
-import { AutomationSystem, createPromptHistoryEntry, appendAutomationHistoryEntry, type AutomationSystemMetadataSnapshot } from '@craft-agent/shared/automations'
 import type { IMessagingGatewayRegistry } from '@craft-agent/server-core/handlers'
 import { buildBackendRuntimeSignature, buildRestartRequiredSignature, filterAttachmentsForModelInput } from './runtime-config'
 import { validateArchiveTarget } from './archive-guards'
@@ -211,6 +215,12 @@ export function readInheritedContextTokens(
  *    Appending the api-error fallback on top produced a second box saying the
  *    same thing in different words; the user spec is "one error box, content =
  *    the last error".
+ *
+ * 4. ALREADY SURFACED (2026-10-19) — the turn already shows an error card
+ *    (the retry ladder's terminal verdict rewrites its pending card in
+ *    place). Appending the api-error fallback on top produced a second box
+ *    saying the same thing in different words; the user spec is "one error
+ *    box, content = the last error".
  *
  * Pure so the guard is unit-testable in isolation.
  */
@@ -389,17 +399,25 @@ function routeRefusalMessage(reason: string): string {
  */
 export function sessionRoutingInfo(
   session: { strategy?: string; model?: string; llmConnection?: string },
-  strategies: ReadonlyArray<{ id: string; name?: string; modelAliases?: Record<string, unknown> }>,
+  strategies: ReadonlyArray<{
+    id: string
+    name?: string
+    modelAliases?: Record<string, unknown>
+    members?: ReadonlyArray<{ provider: string; model?: string; enabled?: boolean }>
+    modelProviders?: Record<string, string[]>
+  }>,
+  providers?: ReadonlyArray<{ id: string; enabled?: boolean; timeWindows?: Record<string, ModelWindow> }>,
 ): { llmStrategy?: string; strategyName?: string; llmConnection?: string; model?: string } {
   const strategyId = session.strategy
   if (!strategyId) return { llmConnection: session.llmConnection, model: session.model }
   const strategy = strategies.find((s) => s.id === strategyId)
   const models = Object.keys(strategy?.modelAliases ?? {})
-  // Same rule the router uses, so the answer matches the next request.
+  // Same rule the router uses, so the answer matches the next request — a
+  // model that is outside its window is not the model this session is on.
   const model = models.length
-    ? session.model && models.includes(session.model)
-      ? session.model
-      : models[0]
+    ? strategy
+      ? pickStrategyModel(strategy, models, providers, session.model, Date.now())
+      : session.model
     : session.model
   return {
     llmStrategy: strategyId,
@@ -421,11 +439,24 @@ export function resolveStrategyRoute(params: {
     id: string
     enabled?: boolean
     modelAliases?: Record<string, unknown>
+    members?: ReadonlyArray<{ provider: string; model?: string; enabled?: boolean }>
+    modelProviders?: Record<string, string[]>
   }>
+  /**
+   * Providers from the same config. Needed to evaluate each model's
+   * availability window; without them the router keeps the declared order.
+   */
+  providers?: ReadonlyArray<{
+    id: string
+    enabled?: boolean
+    timeWindows?: Record<string, ModelWindow>
+  }>
+  /** Clock for the window check, injected so tests need not wait for one. */
+  now?: number
   /**
    * The session's model, when it has one. Absent is normal — a session that
    * only ever routed through a group has no model of its own, and the router
-   * then takes the group's first model.
+   * then takes the first model that is actually open right now.
    */
   resolvedModel?: string
 }):
@@ -447,7 +478,13 @@ export function resolveStrategyRoute(params: {
   if (strategy.enabled === false) return { ok: false, reason: `strategy_disabled:${strategyId}` }
   const models = Object.keys(strategy.modelAliases ?? {})
   if (models.length === 0) return { ok: false, reason: `strategy_has_no_models:${strategyId}` }
-  const model = resolvedModel && models.includes(resolvedModel) ? resolvedModel : models[0]!
+  const model = pickStrategyModel(
+    strategy,
+    models,
+    params.providers,
+    resolvedModel,
+    params.now ?? Date.now(),
+  )
   return {
     ok: true,
     baseUrl: `${gatewayBaseUrl}/s/${encodeURIComponent(strategyId)}`,
@@ -480,13 +517,16 @@ export function applyGatewayStrategy(
   // how traffic used to escape the logs, the usage totals and the group's
   // limits — silently, while still appearing to work. A refusal is visible; a
   // bypass is not. Callers treat null as "do not proceed".
+  const config = gatewayRouteDeps.config ?? loadLlmConfig()
   const route = resolveStrategyRoute({
     gatewayEnabled: runtime.enabled,
     gatewayRunning: runtime.running,
     gatewayBaseUrl: runtime.baseUrl,
     strategyId,
-    strategies: (gatewayRouteDeps.config ?? loadLlmConfig())?.strategies ?? [],
+    strategies: config?.strategies ?? [],
+    providers: config?.providers ?? [],
     resolvedModel: ctx.resolvedModel,
+    now: Date.now(),
   })
   if (!route.ok) {
     runtime.noteRouteRefusal(route.reason);
@@ -496,6 +536,7 @@ export function applyGatewayStrategy(
   // nothing to point at the gateway, which is a configuration problem rather
   // than a routing one.
   if (!ctx.connection) return null;
+  const strategy = config?.strategies.find((s) => s.id === strategyId)
   return {
     ...ctx,
     resolvedModel: route.model,
@@ -506,9 +547,86 @@ export function applyGatewayStrategy(
       piAuthProvider: 'anthropic',
       customEndpoint: { ...(ctx.connection.customEndpoint ?? {}), api: 'anthropic-messages' },
       baseUrl: route.baseUrl,
-      models: route.models,
+      // The declared type wants full display metadata (`name`, `shortName`, …)
+      // that custom-endpoint entries never carry — the same partial shape the
+      // settings form already writes into `models`. The consumer that matters
+      // (`buildCustomEndpointModelDef`) reads only id + capabilities.
+      models: routedConnectionModels(
+        route.models,
+        strategy,
+        config?.providers,
+        ctx.connection.models,
+      ) as typeof ctx.connection.models,
     },
   };
+}
+
+/** The subset of a connection model entry that survives the gateway rewrite. */
+export interface RoutedModelEntry {
+  id: string
+  contextWindow?: number
+  supportsImages?: boolean
+  maxTokens?: number
+}
+
+/**
+ * The model list a gateway-routed connection should carry.
+ *
+ * Names alone are not enough. The subprocess builds each model's capability
+ * record from this list, and a window it cannot see falls back to
+ * `config.json → defaultContextWindow` (512k). The gateway's group declares
+ * `modelOptions.contextWindow` per public model — a 1M model then reported 512k,
+ * so a 310k conversation showed as 60% of the context and compaction fired at
+ * half the real budget (2026-10-29, reported against `deepseek-v4.1-flash`).
+ *
+ * Sources, in order:
+ * 1. the strategy member's provider `modelOptions` for that public model,
+ * 2. the connection entry that was already there for the same id (a direct
+ *    connection that the gateway is now standing in front of),
+ * 3. the bare id, for models nobody declared anything about.
+ */
+export function routedConnectionModels(
+  publicModels: readonly string[],
+  strategy: { members?: ReadonlyArray<{ provider: string; model?: string; enabled?: boolean }> } | undefined,
+  providers:
+    | ReadonlyArray<{
+        id: string
+        enabled?: boolean
+        modelOptions?: Record<
+          string,
+          { contextWindow?: number; maxOutputTokens?: number; supportsImages?: boolean }
+        >
+      }>
+    | undefined,
+  previous: ReadonlyArray<unknown> | undefined,
+): Array<string | RoutedModelEntry> {
+  const previousEntries = (previous ?? []).filter(
+    (entry): entry is RoutedModelEntry =>
+      typeof entry === 'object' && entry !== null && typeof (entry as { id?: unknown }).id === 'string',
+  )
+  return publicModels.map((model) => {
+    const memberProviders = (strategy?.members ?? [])
+      .filter((member) => !member.model || member.model === model)
+      .filter((member) => member.enabled !== false)
+      .map((member) => providers?.find((p) => p.id === member.provider && p.enabled !== false))
+      .filter((provider): provider is NonNullable<typeof provider> => Boolean(provider))
+
+    const declared = memberProviders
+      .map((provider) => provider.modelOptions?.[model])
+      .find((options): options is NonNullable<typeof options> => Boolean(options))
+    if (declared) {
+      return {
+        id: model,
+        ...(declared.contextWindow !== undefined ? { contextWindow: declared.contextWindow } : {}),
+        ...(declared.maxOutputTokens !== undefined ? { maxTokens: declared.maxOutputTokens } : {}),
+        ...(declared.supportsImages !== undefined ? { supportsImages: declared.supportsImages } : {}),
+      }
+    }
+
+    const carried = previousEntries.find((entry) => entry.id === model)
+    if (carried) return carried
+    return model
+  })
 }
 
 function buildBackendHostRuntimeContext(): BackendHostRuntimeContext {
@@ -813,6 +931,8 @@ export async function copyPiTurnAnchorsForBranch(
   )
 }
 
+// Legacy turn anchors from the previous backend, kept for branching sessions
+// created before the Pi-only migration. New Pi sessions do not write this index.
 const CLAUDE_TURN_ANCHORS_VERSION = 1
 const CLAUDE_TURN_ANCHORS_FILE = 'claude-turn-anchors.json'
 
@@ -1238,6 +1358,11 @@ interface RunningBackgroundTask {
   workflowId?: string
   /** Count of workflow sub-agents completed so far (Workflow tasks only). */
   agentsCompleted?: number
+  /**
+   * Why a terminal task ended, when the caller needs to tell the causes apart.
+   * `app_restart` = killed by a Craft Agent restart (abnormal, not a user stop).
+   */
+  stopReason?: 'app_restart' | 'user' | 'model' | 'session_end'
 }
 
 export interface ManagedSession {
@@ -1289,11 +1414,24 @@ export interface ManagedSession {
   // See: packages/shared/src/agent/tool-matching.ts
   // Session name (user-defined or AI-generated)
   name?: string
-  isFlagged: boolean
   /** Whether this session is archived */
   isArchived?: boolean
   /** Timestamp when session was archived (for retention policy) */
   archivedAt?: number
+  /** Folder id this session lives in (folder tree of its project scope). */
+  folderId?: string | null
+  /** Snapshot of folderId at archive time (D8 restore hint). */
+  archivedFolderId?: string | null
+  /** Readable folder path at archive time (D8). */
+  archivedFolderPath?: string[]
+  /** Project snapshot at archive time (D11 UI hint). */
+  archivedProjectId?: string
+  /** Set when archived because an ancestor folder/project was archived (D23/D28). */
+  archivedByParent?: string
+  /** Manual order among siblings of the same kind (D32). */
+  sortOrder?: string
+  /** Non-null = pinned (D33). */
+  pinnedAt?: number
   /** Permission mode for this session ('safe', 'ask', 'allow-all') */
   permissionMode?: PermissionMode
   /** Previous permission mode (preserved across restarts for session_state modeTransition context) */
@@ -1317,8 +1455,6 @@ export interface ManagedSession {
     contextWindow?: number
   }
   // Session status (user-controlled) - determines open vs closed
-  // Dynamic status ID referencing workspace status config
-  sessionStatus?: string
   // Read/unread tracking - ID of last message user has read
   lastReadMessageId?: string
   /**
@@ -1351,24 +1487,10 @@ export interface ManagedSession {
    * instead of building from enabledSourceSlugs. Spawned sessions set this for isolation.
    */
   mcpServerConfigs?: Record<string, import('@craft-agent/shared/agent/backend').SdkMcpServerConfig>
-  // Labels applied to this session (additive tags, many-per-session)
-  labels?: string[]
-  // Workspace-scoped project binding (undefined = unbound)
+    // Workspace-scoped project binding (undefined = unbound)
   projectId?: string
   // Parent session id — when set, this session is a subtask of the parent (undefined = top-level task)
   parentSessionId?: string
-  // Kanban board column id ('todo' | 'in-progress' | 'done'); independent of sessionStatus
-  kanbanColumn?: string
-  // Tasks Conductor: slug of the task spec this session belongs to (orchestrator + child nodes)
-  taskSlug?: string
-  // Tasks Conductor: id of the run that spawned this child session (child nodes only)
-  taskRunId?: string
-  // Tasks Conductor: id of the DAG node this child session executes (child nodes only)
-  taskNodeId?: string
-  // Tasks Conductor: total DAG node count (orchestrator only) — stable board progress denominator
-  taskNodeCount?: number
-  // Tasks Conductor: hidden generate-time orchestrator awaiting validated adoption (off the board)
-  taskDraft?: boolean
   // Working directory for this session (used by agent for bash commands)
   workingDirectory?: string
   // SDK cwd for session storage - set once at creation, never changes.
@@ -1406,7 +1528,6 @@ export interface ManagedSession {
   activeModeOverride?: { mode: PermissionMode; messageId: string }
   // External session metadata updates seen while processing (applied after turn stop)
   pendingExternalMetadata?: SessionHeader
-  // Guard: suppress external metadata revert after programmatic writes (setSessionStatus/setSessionLabels).
   // fs.watch fires during atomic write (unlink+rename) and can read stale data, reverting in-memory state.
   _metadataWriteGuardUntil?: number
   // Whether an async operation is ongoing (sharing, updating share, revoking, title regeneration)
@@ -1443,6 +1564,14 @@ export interface ManagedSession {
   }
   // Map of shellId -> command for killing background shells
   backgroundShellCommands: Map<string, string>
+  /**
+   * Shells the user (or model) explicitly stopped.
+   *
+   * The process still exits on its own after a kill, so `shell_completed`
+   * arrives either way. Without this set every stop would be reported to the
+   * model as a normal completion, and it would describe cut-short work as done.
+   */
+  stoppedShellIds: Set<string>
   // Map of taskId -> output info for background task results
   backgroundTaskOutputs: Map<string, { outputFile: string; summary: string; status: string; completedAt: number }>
   // Registry of background tasks (running + recently-terminal) for this session.
@@ -1578,9 +1707,9 @@ export function createManagedSession(
     lastMessageAt: (s.lastMessageAt ?? s.lastUsedAt ?? Date.now()) as number,
     streamingText: '',
     processingGeneration: 0,
-    isFlagged: (s.isFlagged ?? false) as boolean,
     messageQueue: [],
     backgroundShellCommands: new Map(),
+    stoppedShellIds: new Set(),
     backgroundTaskOutputs: new Map(),
     backgroundTaskRegistry: new Map(),
     messagesLoaded: false,
@@ -1609,6 +1738,19 @@ export function createManagedSession(
  * Resolve supportsBranching for a managed session.
  * Prefers the live agent instance; falls back to true for all backends.
  */
+/**
+ * Human-readable scope path for automation payloads.
+ *
+ * `project:<projectId>` when the session lives in a project, `folder:<folderId>`
+ * for a plain folder, and `root` for the workspace root — so an automation
+ * matcher can regex-match on where a session landed.
+ */
+function describeSessionScope(projectId: string | null, folderId: string | null): string {
+  if (projectId) return folderId ? `project:${projectId}/folder:${folderId}` : `project:${projectId}`
+  if (folderId) return `folder:${folderId}`
+  return 'root'
+}
+
 function resolveSupportsBranching(managed: ManagedSession): boolean {
   // If agent is live, use its instance property (authoritative)
   if (managed.agent) {
@@ -1643,8 +1785,35 @@ function managedToSession(m: ManagedSession, overrides?: Partial<Session>): Sess
     isProcessing: m.isProcessing,
     sessionFolderPath: getSessionStoragePath(m.workspace.rootPath, m.id),
     supportsBranching: resolveSupportsBranching(m),
+    queuedMessages: summarizeQueuedMessages(m),
     ...overrides,
   } as Session
+}
+
+/**
+ * Project the pending send queue onto the wire shape.
+ *
+ * Rows without a user message id are synthetic restart-recovery turns (resume
+ * a dangling tool loop); they belong to the agent, not to the user, and must
+ * never show up as editable queue entries.
+ */
+function summarizeQueuedMessages(m: ManagedSession): QueuedMessageSummary[] {
+  const summaries: QueuedMessageSummary[] = []
+  for (const row of m.messageQueue) {
+    if (!row.messageId) continue
+    const persisted = m.messages.find(msg => msg.id === row.messageId)
+    const id = row.messageId ?? row.optimisticMessageId
+    if (!id) continue
+    summaries.push({
+      id,
+      messageId: row.messageId,
+      optimisticMessageId: row.optimisticMessageId,
+      message: row.message,
+      attachments: row.storedAttachments ?? persisted?.attachments,
+      timestamp: persisted?.timestamp,
+    })
+  }
+  return summaries
 }
 
 // Performance: Batch IPC delta events to reduce renderer load
@@ -1656,12 +1825,10 @@ interface PendingDelta {
 }
 
 /**
- * In-process session-completion signal for the Tasks Conductor.
  *
  * Emitted once per turn from `onProcessingStopped` when the session's message
  * queue is empty (i.e. true completion, not a hand-off between queued turns),
  * carrying the stop `reason`. This is an internal, side-effect-free seam — it is
- * NOT a renderer event and NOT exposed to agents. The Conductor maps the reason
  * onto a node run-state: complete→done, error/timeout→failed, interrupted→cancelled.
  */
 export interface SessionCompletionEvent {
@@ -1672,7 +1839,6 @@ export interface SessionCompletionEvent {
   finalMessageId?: string
   /** Convenience copy of the final assistant message text (same as getSessionFinalText). */
   finalText?: string
-  /** The session's cumulative token usage, so the Conductor can meter token_budget without re-fetching. */
   tokenUsage?: TokenUsage
 }
 
@@ -1696,6 +1862,13 @@ export function resolveMidStreamDeliveryOutcome(
 }
 
 export class SessionManager implements ISessionManager {
+  /**
+   * How long a cooperative stop gets before it is escalated to a forced kill.
+   * Kept at 5s because the composer's stop button spins for exactly this window
+   * (2026-10-30 UI contract): shorter would flash, longer would look stuck.
+   */
+  static readonly STOP_GRACE_MS = 5_000
+
   private sessions: Map<string, ManagedSession> = new Map()
   // Delta batching for performance - reduces IPC events from 50+/sec to ~20/sec
   private pendingDeltas: Map<string, PendingDelta> = new Map()
@@ -1706,6 +1879,7 @@ export class SessionManager implements ISessionManager {
   private lastSourceReloadAt: Map<string, number> = new Map()
   // Automation systems for workspace event automations - one per workspace (includes scheduler, diffing, and handlers)
   private automationSystems: Map<string, AutomationSystem> = new Map()
+  // Automation systems for workspace event automations - one per workspace (includes scheduler, diffing, and handlers)
   // Periodic flush of buffered LLM gateway usage records to disk (llm-usage.jsonl)
   private usageFlushTimer?: NodeJS.Timeout
   // Pending credential request resolvers (keyed by requestId)
@@ -1745,10 +1919,12 @@ export class SessionManager implements ISessionManager {
    * false (kill-switch), sub-agents are bound to a single turn's subprocess and
    * die at turn end, so markOrphanedBackgroundTasks() flips still-running registry
    * entries to `orphaned` on turn completion. Resolved via the shared
-   * `resolveKeepBackgroundTasksAlive` so the main process and the Claude backend
+   * `resolveKeepBackgroundTasksAlive` so the main process and the agent backend
    * can never disagree about whether keep-alive is on.
    */
   private readonly keepBackgroundTasksAlive: boolean = resolveKeepBackgroundTasksAlive()
+  /** Persistent background-task stores, one per live session (lazy). */
+  private readonly backgroundTaskStores = new Map<string, BackgroundTaskStore>()
   /**
    * Per-session in-flight runtime-refresh promise. Ensures `updateRuntimeConfig`
    * (or a dispose) cannot overlap with another refresh OR with a send-path
@@ -1765,20 +1941,6 @@ export class SessionManager implements ISessionManager {
   private postSwitchCompactions: Map<string, Promise<void>> = new Map()
   /** Monotonic clock to ensure strictly increasing message timestamps */
   private lastTimestamp = 0
-
-  /**
-   * Optional binder installed by the messaging-gateway bootstrap. When set,
-   * `executePromptAutomation` calls it after creating a session whose matcher
-   * declared `telegramTopic`, so the new session is bound to a Telegram forum
-   * topic in the workspace's paired supergroup. Best-effort — failures must
-   * not block the session.
-   */
-  private automationBinder?: (input: {
-    workspaceId: string
-    sessionId: string
-    topicName: string
-    qqChannels?: string[]
-  }) => Promise<void>
 
   /** Messaging gateway registry, injected by the host after bootstrap. */
   private messagingRegistry: IMessagingGatewayRegistry | null = null
@@ -1802,17 +1964,6 @@ export class SessionManager implements ISessionManager {
    *  Resolves immediately if already initialized. */
   waitForInit(): Promise<void> {
     return this.initGate.wait()
-  }
-
-  /**
-   * Install the automation→topic binder. Wired by the messaging-gateway
-   * bootstrap so SessionManager doesn't need to import the messaging
-   * package (avoids a package-level circular dependency).
-   */
-  setAutomationBinder(
-    fn: (input: { workspaceId: string; sessionId: string; topicName: string; qqChannels?: string[] }) => Promise<void>,
-  ): void {
-    this.automationBinder = fn
   }
 
   setMessagingRegistry(registry: IMessagingGatewayRegistry): void {
@@ -2027,31 +2178,6 @@ export class SessionManager implements ISessionManager {
     const sessionId = managed.id
     let changed = false
 
-    // Labels
-    const oldLabels = JSON.stringify(managed.labels ?? [])
-    const newLabels = JSON.stringify(header.labels ?? [])
-    if (oldLabels !== newLabels) {
-      managed.labels = header.labels
-      this.sendEvent({ type: 'labels_changed', sessionId, labels: header.labels ?? [] }, managed.workspace.id)
-      changed = true
-    }
-
-    // Flagged
-    if ((managed.isFlagged ?? false) !== (header.isFlagged ?? false)) {
-      managed.isFlagged = header.isFlagged ?? false
-      this.sendEvent(
-        { type: header.isFlagged ? 'session_flagged' : 'session_unflagged', sessionId },
-        managed.workspace.id
-      )
-      changed = true
-    }
-
-    // Session status
-    if (managed.sessionStatus !== header.sessionStatus) {
-      managed.sessionStatus = header.sessionStatus
-      this.sendEvent({ type: 'session_status_changed', sessionId, sessionStatus: header.sessionStatus ?? '' }, managed.workspace.id)
-      changed = true
-    }
 
     // Name
     if (managed.name !== header.name) {
@@ -2063,12 +2189,6 @@ export class SessionManager implements ISessionManager {
     // Project binding (no dedicated event today — handled via metaChanged broadcast)
     if (managed.projectId !== header.projectId) {
       managed.projectId = header.projectId
-      changed = true
-    }
-
-    // Kanban column (mutable via drag; reconcile external/multi-window changes)
-    if (managed.kanbanColumn !== header.kanbanColumn) {
-      managed.kanbanColumn = header.kanbanColumn
       changed = true
     }
 
@@ -2118,28 +2238,9 @@ export class SessionManager implements ISessionManager {
         const sources = loadWorkspaceSources(workspaceRootPath)
         this.broadcastSourcesChanged(workspaceId, sources)
       },
-      onStatusConfigChange: () => {
-        sessionLog.info(`Status config changed in ${workspaceId}`)
-        this.broadcastStatusesChanged(workspaceId)
-      },
-      onStatusIconChange: (_workspaceId: string, iconFilename: string) => {
-        sessionLog.info(`Status icon changed: ${iconFilename} in ${workspaceId}`)
-        this.broadcastStatusesChanged(workspaceId)
-      },
       onAppearanceChange: () => {
         sessionLog.info(`Appearance changed in ${workspaceId}`)
         this.broadcastAppearanceChanged()
-      },
-      onLabelConfigChange: () => {
-        sessionLog.info(`Label config changed in ${workspaceId}`)
-        this.broadcastLabelsChanged(workspaceId)
-        // Emit LabelConfigChange event via AutomationSystem
-        const automationSystem = this.automationSystems.get(workspaceRootPath)
-        if (automationSystem) {
-          automationSystem.emitLabelConfigChange().catch((error) => {
-            sessionLog.error(`[Automations] Failed to emit LabelConfigChange:`, error)
-          })
-        }
       },
       onAutomationsConfigChange: () => {
         sessionLog.info(`Automations config changed in ${workspaceId}`)
@@ -2160,7 +2261,6 @@ export class SessionManager implements ISessionManager {
         sessionLog.info(`Pages changed in ${workspaceId} (${pages.length} pages)`)
         // Rebuild the synthetic page-refresh cron matchers (page.json is the
         // completion marker, so this also fires after every refresh run)
-        this.automationSystems.get(workspaceRootPath)?.reloadPageRefreshMatchers()
         this.broadcastPagesChanged(workspaceId, pages)
       },
       onLlmConnectionsChange: () => {
@@ -2207,7 +2307,6 @@ export class SessionManager implements ISessionManager {
         if (!isSelfWrite) {
           // Defer external metadata application when:
           // 1. Session is actively processing (agent running), OR
-          // 2. Session was just written programmatically (set_session_status/labels tool)
           //    — fs.watch fires during atomic write (unlink+rename) and can read stale data
           const hasWriteGuard = managed._metadataWriteGuardUntil && Date.now() < managed._metadataWriteGuardUntil
           if (managed.isProcessing || hasWriteGuard) {
@@ -2222,20 +2321,6 @@ export class SessionManager implements ISessionManager {
           }
         }
 
-        // Always notify automation system — it does its own diffing and needs
-        // to see both self-writes and external changes for event matching.
-        const automationSystem = this.automationSystems.get(managed.workspace.rootPath)
-        if (automationSystem) {
-          automationSystem.updateSessionMetadata(sessionId, {
-            permissionMode: header.permissionMode,
-            labels: header.labels,
-            isFlagged: header.isFlagged,
-            sessionStatus: header.sessionStatus,
-            sessionName: header.name,
-          }).catch((error) => {
-            sessionLog.error(`[Automations] Failed to update session metadata:`, error)
-          })
-        }
       },
     }
 
@@ -2243,62 +2328,6 @@ export class SessionManager implements ISessionManager {
     watcher.start()
     this.configWatchers.set(workspaceRootPath, watcher)
 
-    // Initialize AutomationSystem for this workspace (includes scheduler, handlers, and event logging)
-    if (!this.automationSystems.has(workspaceRootPath)) {
-      const automationSystem = new AutomationSystem({
-        workspaceRootPath,
-        workspaceId,
-        enableScheduler: true,
-        onPromptsReady: async (prompts) => {
-          // Execute prompt automations by creating new sessions
-          const settled = await Promise.allSettled(
-            prompts.map((pending) =>
-              this.executePromptAutomation({
-                workspaceId,
-                workspaceRootPath,
-                prompt: pending.prompt,
-                labels: pending.labels,
-                permissionMode: pending.permissionMode,
-                mentions: pending.mentions,
-                llmConnection: pending.llmConnection,
-                model: pending.model,
-                thinkingLevel: pending.thinkingLevel,
-                automationName: pending.automationName,
-                telegramTopic: pending.telegramTopic,
-                qqChannels: pending.qqChannels,
-              })
-            )
-          )
-
-          // Write enriched history entries (with session IDs and prompt summaries)
-          for (const [idx, result] of settled.entries()) {
-            const pending = prompts[idx]
-            if (!pending.matcherId) continue
-
-            const entry = createPromptHistoryEntry({
-              matcherId: pending.matcherId,
-              ok: result.status === 'fulfilled',
-              sessionId: result.status === 'fulfilled' ? result.value.sessionId : undefined,
-              prompt: pending.prompt,
-              error: result.status === 'rejected' ? String(result.reason) : undefined,
-            })
-
-            appendAutomationHistoryEntry(workspaceRootPath, entry).catch(e => sessionLog.warn('[Automations] Failed to write history:', e))
-
-            if (result.status === 'rejected') {
-              sessionLog.error(`[Automations] Failed to execute prompt action ${idx + 1}:`, result.reason)
-            } else {
-              sessionLog.info(`[Automations] Created session ${result.value.sessionId} from prompt action`)
-            }
-          }
-        },
-        onError: (event, error) => {
-          sessionLog.error(`Automation failed for ${event}:`, error.message)
-        },
-      })
-      this.automationSystems.set(workspaceRootPath, automationSystem)
-      sessionLog.info(`Initialized AutomationSystem for workspace ${workspaceId}`)
-    }
   }
 
   /**
@@ -2340,18 +2369,6 @@ export class SessionManager implements ISessionManager {
   private broadcastSourcesChanged(workspaceId: string, sources: LoadedSource[]): void {
     if (!this.eventSink) return
     this.eventSink(RPC_CHANNELS.sources.CHANGED, { to: 'workspace', workspaceId }, workspaceId, sources)
-  }
-
-  private broadcastStatusesChanged(workspaceId: string): void {
-    if (!this.eventSink) return
-    sessionLog.info(`Broadcasting statuses changed for ${workspaceId}`)
-    this.eventSink(RPC_CHANNELS.statuses.CHANGED, { to: 'workspace', workspaceId }, workspaceId)
-  }
-
-  private broadcastLabelsChanged(workspaceId: string): void {
-    if (!this.eventSink) return
-    sessionLog.info(`Broadcasting labels changed for ${workspaceId}`)
-    this.eventSink(RPC_CHANNELS.labels.CHANGED, { to: 'workspace', workspaceId }, workspaceId)
   }
 
   private broadcastAutomationsChanged(workspaceId: string): void {
@@ -2512,8 +2529,41 @@ export class SessionManager implements ISessionManager {
    * the session and its agent, so it is the only layer that can wait for the
    * turn to finish and then call the agent's existing compact path.
    */
+  /**
+   * Adopt the public model the gateway actually served after a model-level
+   * route switch. Fired from the gateway's route-change handler; a same-model
+   * switch (upstream alias moved under the same public name) is a no-op.
+   *
+   * `updateSessionModel` drives the whole propagation: session record,
+   * `agent.setModel` (which re-derives the subprocess compaction reserve from
+   * the new window), the token-usage context window and the
+   * `session_model_changed` broadcast the composer label listens to.
+   */
+  private adoptGatewayServedModel(sessionId: string, publicModel: string): void {
+    const managed = this.sessions.get(sessionId)
+    if (!managed || managed.model === publicModel) return
+    sessionLog.info(
+      `Gateway switched session ${sessionId} to ${publicModel}; adopting the served model`,
+    )
+    void this.updateSessionModel(sessionId, managed.workspace.id, publicModel).catch((error) => {
+      sessionLog.warn(
+        `Failed to adopt gateway model ${publicModel} for ${sessionId}: ${error instanceof Error ? error.message : error}`,
+      )
+    })
+  }
+
   private attachGatewayRouteHandler(): void {
     getGatewayRuntime().setRouteChangeHandler((event) => {
+      // A model-level switch means the conversation is now served by a
+      // different public model than the session believes. Adopt it so the
+      // label, the context ring and the next request's routing hint all follow
+      // the reality (2026-10-30: failover to hy4-preview kept reporting the
+      // old model with its larger window). setModel re-derives the compaction
+      // reserve in the subprocess, so a smaller window auto-compacts on the
+      // next turn without further wiring.
+      if (event.reason !== 'key' && event.publicModel) {
+        this.adoptGatewayServedModel(event.sessionId, event.publicModel)
+      }
       schedulePostSwitchCompaction(
         {
           getSession: (id) => this.sessions.get(id),
@@ -2583,10 +2633,9 @@ export class SessionManager implements ISessionManager {
       // Set up authentication environment variables (critical for SDK to work)
       await this.reinitializeAuth()
 
-      // Eagerly activate ConfigWatcher + AutomationSystem for every workspace so
-      // the scheduler and event handlers start at boot — not lazily on first
-      // client connect. This is critical for headless servers where no UI may
-      // ever connect, yet scheduled/event-driven automations must still fire.
+      // Eagerly activate ConfigWatcher for every workspace so config changes
+      // are picked up at boot - not lazily on first client connect. This is
+      // critical for headless servers where no UI may ever connect.
       const workspaces = getWorkspaces()
       for (const workspace of workspaces) {
         this.setupConfigWatcher(workspace.rootPath, workspace.id)
@@ -2700,18 +2749,6 @@ export class SessionManager implements ISessionManager {
 
           this.sessions.set(meta.id, managed)
 
-          // Initialize session metadata in AutomationSystem for diffing
-          const automationSystem = this.automationSystems.get(workspaceRootPath)
-          if (automationSystem) {
-            automationSystem.setInitialSessionMetadata(meta.id, {
-              permissionMode: meta.permissionMode,
-              labels: meta.labels,
-              isFlagged: meta.isFlagged,
-              sessionStatus: meta.sessionStatus,
-              sessionName: managed.name,
-            })
-          }
-
           totalSessions++
         }
       }
@@ -2735,7 +2772,7 @@ export class SessionManager implements ISessionManager {
    * synchronously from the JSONL first — otherwise the snapshot we enqueue
    * would write `messages: []` over the real messages on disk. Hydration
    * deliberately does NOT touch persistent metadata fields (name, labels,
-   * sessionStatus, llmConnection, ...) because the caller may have just
+   * llmConnection, ...) because the caller may have just
    * mutated them; the in-memory mutation must win over what's on disk.
    * `loadStoredSession` is synchronous (sync fs reads), so the entire path
    * stays sync — no microtask race window between the load and the enqueue.
@@ -3002,15 +3039,10 @@ export class SessionManager implements ISessionManager {
     })
 
     const resumeTool = this.findRecoverableToolAnchor(managed.messages, recoverOwner)
-    // Do NOT mark the owner `isQueued`: the UI treats that flag as a
-    // LIVE mid-stream queue item — it defers the bubble below the running
-    // process block and shows the queued/guide/cancel chip (turn-utils
-    // deferral + UserMessageBubble). A recovered message is already part of
-    // the transcript history: the no-re-stamp replay below keeps its
-    // original timestamp, so it must stay in chronological place without
-    // the queued styling (2026-10-01: after a restart, previously-sent
-    // messages rendered below the process cards with a "queued" badge).
-    // Clear any stale persisted flag instead — replay is driven by the
+    // Do NOT mark the owner `isQueued`: that flag now means "live row in the
+    // pending-queue panel above the composer", and a recovered message is
+    // already part of the transcript history — it must render in place, not as
+    // a queue entry. Clear any stale persisted flag: replay is driven by the
     // queue entry, not by the message flag.
     recoverOwner.isQueued = false
     managed.messageQueue.push({
@@ -3370,26 +3402,10 @@ export class SessionManager implements ISessionManager {
     return count
   }
 
-  getWorkspaceAutomationSummary(workspaceId: string): { automationCount: number; schedulerRunning: boolean } {
-    const workspace = getWorkspaceByNameOrId(workspaceId)
-    if (!workspace) return { automationCount: 0, schedulerRunning: false }
-
-    const automationSystem = this.automationSystems.get(workspace.rootPath)
-    if (!automationSystem) return { automationCount: 0, schedulerRunning: false }
-
-    const config = automationSystem.getConfig()
-    let automationCount = 0
-    if (config) {
-      for (const matchers of Object.values(config.automations)) {
-        automationCount += matchers?.length ?? 0
-      }
-    }
-
-    return {
-      automationCount,
-      // SchedulerService is running if the system was created with enableScheduler
-      schedulerRunning: !automationSystem.isDisposed(),
-    }
+  getWorkspaceAutomationSummary(_workspaceId: string): { automationCount: number; schedulerRunning: boolean } {
+    // Automations were removed; the status payload keeps these fields for protocol
+    // compatibility and always reports zero.
+    return { automationCount: 0, schedulerRunning: false }
   }
 
   getActiveSessionsInfo(): ActiveSessionInfo[] {
@@ -3421,6 +3437,51 @@ export class SessionManager implements ISessionManager {
    */
   reloadSessions(): void {
     this.loadSessionsFromDisk()
+    // After a restart any still-running background task was interrupted.
+    // Surface it as orphaned so list_background_tasks / stop_background_task
+    // can act on it; the record is deleted only when the user/model clears it.
+    for (const managed of this.sessions.values()) {
+      void this.reconcileBackgroundTasks(managed.id).then((orphans) => {
+        for (const record of orphans) {
+          const taskId = record.externalId ?? record.id
+          if (managed.backgroundTaskRegistry.has(taskId)) continue
+          // A restart killed the work, so it did NOT finish and the model must be
+          // told why. Reported as `stopped` (not `orphaned`): from the model's
+          // side this is a stop with an abnormal cause, and `orphaned` reads as
+          // "unknown state" — which invites it to re-run the command.
+          managed.backgroundTaskRegistry.set(taskId, {
+            taskId,
+            intent: record.intent,
+            startTime: record.startedAt,
+            status: 'stopped',
+            completedAt: record.completedAt ?? Date.now(),
+            stopReason: 'app_restart',
+          })
+        }
+        if (orphans.length === 0) return
+        // Surface it once, when the session is next looked at: the rows are back
+        // in the composer, and the model learns the interruption was not a user
+        // stop and not a crash of the command itself.
+        const list = orphans
+          .map((r) => `- ${r.intent ?? r.externalId ?? r.id}${r.command ? ` (\`${r.command.slice(0, 80)}\`)` : ''}`)
+          .join('\n')
+        const nudge = [
+          '[background-task-interrupted] Craft Agent restarted while these background tasks were still running, so they were killed by the restart — not by the user and not by their own failure:',
+          list,
+          'Report them to the user as interrupted by the app restart. Their partial output (if any) is still on disk. Do not claim they completed, and do not silently re-run them.',
+        ].join('\n')
+        this.insertBackgroundWakeNotice(
+          managed,
+          `后台任务因应用重启而中断 — ${orphans.length} 个`,
+          { status: 'interrupted' },
+        )
+        void this.sendMessage(managed.id, nudge, [], [], { hidden: true }).catch((err) => {
+          sessionLog.error('[bg-lifecycle] failed to report restart-interrupted tasks', err)
+        })
+      }).catch((err) => {
+        sessionLog.error('[bg-lifecycle] failed to reconcile persisted background tasks', err)
+      })
+    }
   }
 
   getSessions(workspaceId?: string): Session[] {
@@ -3630,8 +3691,11 @@ export class SessionManager implements ISessionManager {
     if (!agent) return { action: 'queue' }
 
     try {
+      // The temporary agent above already carries `busy_decision`, but the
+      // common path reuses the session's own agent, whose process-wide kind is
+      // `chat` — so the decision call was logged as conversation traffic.
       const raw = await Promise.race([
-        agent.runMiniCompletion(prompt),
+        agent.runMiniCompletion(prompt, 'busy_decision'),
         new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
       ])
       const decision = this.parseBusyMessageDecision(raw)
@@ -3739,8 +3803,10 @@ export class SessionManager implements ISessionManager {
     if (!agent) return { action: 'ignore' }
 
     try {
+      // Same reasoning as the busy-message decision: the session's own agent
+      // reports `chat` unless the call names its kind.
       const raw = await Promise.race([
-        agent.runMiniCompletion(prompt),
+        agent.runMiniCompletion(prompt, 'group_decision'),
         new Promise<null>((resolve) => setTimeout(() => resolve(null), 15_000)),
       ])
       const action = this.parseGroupChatDecision(raw)
@@ -4185,6 +4251,22 @@ export class SessionManager implements ISessionManager {
       })
     }
 
+    // Folder binding: folder ids are local to one tree (the resolved project's
+    // tree, or the workspace root tree). A folder the target tree does not own is
+    // dropped instead of failing the create — a dangling id would otherwise make
+    // the new session invisible in every list.
+    let resolvedFolderId: string | undefined
+    if (options?.folderId) {
+      try {
+        const targetFolders = loadFolderConfig(workspaceRootPath, { projectId: resolvedProjectId ?? null }).folders
+        if (targetFolders.some((folder) => folder.id === options.folderId)) {
+          resolvedFolderId = options.folderId
+        }
+      } catch {
+        resolvedFolderId = undefined
+      }
+    }
+
     // Use storage layer to create and persist the session
     const storedSession = await createStoredSession(workspaceRootPath, {
       name: options?.name,
@@ -4193,15 +4275,9 @@ export class SessionManager implements ISessionManager {
       ...(defaultStrategy ? { strategy: defaultStrategy } : {}),
       enabledSourceSlugs: options?.enabledSourceSlugs ?? defaultEnabledSourceSlugs,
       hidden: options?.hidden,
-      sessionStatus: options?.sessionStatus,
-      labels: options?.labels,
-      isFlagged: options?.isFlagged,
       projectId: resolvedProjectId,
+      folderId: resolvedFolderId,
       parentSessionId: options?.parentSessionId,
-      taskSlug: options?.taskSlug,
-      taskRunId: options?.taskRunId,
-      taskNodeId: options?.taskNodeId,
-      taskDraft: options?.taskDraft,
     })
 
     // Branch: copy messages from source session up to and including the branch point
@@ -4311,6 +4387,27 @@ export class SessionManager implements ISessionManager {
       } catch (err) {
         // Turn-log inheritance is best-effort — never fail the branch for it.
         sessionLog.warn('Failed to copy turn logs to branch', {
+          err,
+          sourceSessionId: validatedBranch.sourceSessionId,
+          branchSessionId: storedSession.id,
+        })
+      }
+
+      // Branch inherits the context-relief compaction boundary sidecar so a
+      // downstream compaction does not re-index turns the parent already
+      // folded into a checkpoint (loss of the marker = redundant re-index, and
+      // for a branch-of-branch the boundary must survive every hop). The value
+      // is a monotonic turnIndex; the parent's boundary is always ≤ the branch
+      // point, so it stays valid in the branch as-is.
+      try {
+        const srcBoundary = join(sourceDir, 'meta', 'context-relief-boundary.json')
+        if (existsSync(srcBoundary)) {
+          await mkdir(join(branchDir, 'meta'), { recursive: true })
+          await copyFile(srcBoundary, join(branchDir, 'meta', 'context-relief-boundary.json'))
+        }
+      } catch (err) {
+        // Best-effort — never fail the branch for a missing/uncopiable marker.
+        sessionLog.warn('Failed to copy compaction boundary to branch', {
           err,
           sourceSessionId: validatedBranch.sourceSessionId,
           branchSessionId: storedSession.id,
@@ -4473,39 +4570,27 @@ export class SessionManager implements ISessionManager {
 
     this.sessions.set(storedSession.id, managed)
 
-    // Initialize session metadata in AutomationSystem for diffing
-    const automationSystem = this.automationSystems.get(workspaceRootPath)
-    if (automationSystem) {
-      automationSystem.setInitialSessionMetadata(storedSession.id, {
-        permissionMode: storedSession.permissionMode,
-        labels: storedSession.labels,
-        isFlagged: storedSession.isFlagged,
-        sessionStatus: storedSession.sessionStatus,
-        sessionName: managed.name,
-      })
-    }
-
     // Reserved "Task" label: task flows opt in so the tile (and its subtasks, which inherit the
     // parent's number) are filterable as tasks from the moment they exist. Applied before the
     // created-event so the renderer hydrates the label with the rest of the metadata. Fail-soft:
     // a label problem must never abort session creation.
-    if (options?.applyTaskLabel) {
-      try {
-        await this.applyTaskLabel(storedSession.id, { parentSessionId: options?.parentSessionId })
-      } catch (error) {
-        sessionLog.warn('Failed to apply Task label to new session', {
-          sessionId: storedSession.id,
-          error: error instanceof Error ? error.message : String(error),
-        })
-      }
-    }
-
     // Announce by default so the renderer hydrates full metadata (name, parentSessionId, …)
     // instead of fabricating a titleless "New Chat" from the first streamed event. Emitted at
     // the very end so a thrown branch-preflight failure above never announces an orphan.
     if (internal?.emitCreatedEvent !== false) {
       this.notifySessionCreated(workspaceId, storedSession.id)
     }
+
+    // Automations: a brand-new session is a path change with an empty oldPath.
+    this.emitPathChange(managed.workspace.rootPath, {
+      subject: 'session',
+      sessionId: managed.id,
+      sessionName: managed.name,
+      changeType: managed.projectId ? 'project' : 'folder',
+      oldPath: null,
+      newPath: describeSessionScope(managed.projectId ?? null, managed.folderId ?? null),
+      workingDirectory: managed.workingDirectory,
+    })
 
     return managedToSession(managed, isBranch ? { messages: managed.messages } : undefined)
   }
@@ -4522,8 +4607,7 @@ export class SessionManager implements ISessionManager {
     this.sendEvent({ type: 'session_created', sessionId }, workspaceId)
   }
 
-  /** Resolved working directory of a live session (used by the Tasks Conductor so child
-   *  sessions inherit the orchestrator's cwd). Undefined if the session has none or is unknown. */
+  /** Resolved working directory of a live session. Undefined if the session has none or is unknown. */
   getSessionWorkingDirectory(sessionId: string): string | undefined {
     return this.sessions.get(sessionId)?.workingDirectory
   }
@@ -4780,6 +4864,53 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Push gateway config changes (e.g. a model's `contextWindow` / capabilities
+   * edited in the provider settings) to every active gateway-routed session.
+   *
+   * `refreshConnectionRuntime` is keyed on the connection slug, but a group's
+   * per-model capabilities live in `llm-config.json` (the gateway), not in any
+   * connection. The `llmGateway.SAVE_CONFIG` handler calls this so a context
+   * window bump reaches live Pi subprocesses immediately instead of waiting for
+   * the next send's lazy backstop (2026-10-30, deepseek-v4-pro 512k → 1M still
+   * read 82%).
+   */
+  async refreshGatewayRuntime(): Promise<void> {
+    for (const managed of this.sessions.values()) {
+      if (!managed.strategy) continue
+      try {
+        await this.tryRefreshAgentRuntime(managed, 'gateway config update')
+        // A busy agent defers its runtime update; don't show a new budget until
+        // it can actually use that configuration. Idle/cold sessions can update
+        // the context ring immediately, without waiting for another model turn.
+        if (managed.agent?.isProcessing()) continue
+        const workspaceConfig = loadWorkspaceConfig(managed.workspace.rootPath)
+        const backendContext = applyGatewayStrategy(
+          resolveBackendContext({
+            sessionConnectionSlug: managed.llmConnection,
+            workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
+            managedModel: managed.model,
+          }),
+          managed.strategy,
+        )
+        if (!backendContext || !managed.tokenUsage) continue
+        const contextWindow = resolveModelContextWindow(
+          backendContext.resolvedModel,
+          backendContext.connection?.models,
+        )
+        if (contextWindow === undefined || managed.tokenUsage.contextWindow === contextWindow) continue
+        managed.tokenUsage.contextWindow = contextWindow
+        this.sendEvent({
+          type: 'usage_update',
+          sessionId: managed.id,
+          tokenUsage: { inputTokens: managed.tokenUsage.inputTokens, contextWindow },
+        }, managed.workspace.id)
+      } catch (error) {
+        sessionLog.warn(`refreshGatewayRuntime failed for ${managed.id}: ${error instanceof Error ? error.message : error}`)
+      }
+    }
+  }
+
+  /**
    * Get or create agent for a session (lazy loading)
    * Creates the appropriate backend agent based on LLM connection.
    *
@@ -4822,6 +4953,7 @@ export class SessionManager implements ISessionManager {
         gatewayBaseUrl: (gatewayRouteDeps.runtime ?? getGatewayRuntime()).baseUrl,
         strategyId: managed.strategy,
         strategies: (gatewayRouteDeps.config ?? loadLlmConfig())?.strategies ?? [],
+        providers: (gatewayRouteDeps.config ?? loadLlmConfig())?.providers ?? [],
         resolvedModel: managed.model,
       })
       throw new SessionRoutingError(refused.ok ? 'gateway_not_running' : refused.reason)
@@ -4884,7 +5016,7 @@ export class SessionManager implements ISessionManager {
       // Build server configs for enabled sources
       // If mcpServerConfigs is explicitly set (spawned session with isolation), use those directly
       let mcpServers: Record<string, import('@craft-agent/shared/agent/backend').SdkMcpServerConfig>
-      let apiServers: Record<string, import('@craft-agent/shared/mcp').ApiServerConfig>
+      let apiServers: Record<string, unknown>
       let enabledSlugs = this.resolveSessionSourceSlugs(managed)
       let enabledSources: import('@craft-agent/shared/sources').LoadedSource[] = []
 
@@ -5073,7 +5205,6 @@ export class SessionManager implements ISessionManager {
         // Claude-specific
         isHeadless: !AGENT_FLAGS.defaultModesEnabled,
         skipConfigWatcher: true, // Server owns workspace-level ConfigWatcher — don't duplicate in agents
-        automationSystem: this.automationSystems.get(managed.workspace.rootPath),
         systemPromptPreset: managed.systemPromptPreset,
         debugMode: _platform?.isDebugMode ? { enabled: true, logFilePath: _platform.getLogFilePath?.() } : undefined,
         enable1MContext: await (async () => { const { getEnable1MContext } = await import('@craft-agent/shared/config/storage'); return getEnable1MContext(); })(),
@@ -5668,6 +5799,28 @@ export class SessionManager implements ISessionManager {
 
             // Persist session state
             this.persistSession(managed)
+            this.queueTurnLogArchive(managed)
+
+            // Plan handoff bypasses onProcessingStopped, so it never reaches the
+            // notifySpawnParent / emitSessionComplete calls that live in the
+            // queue-empty completion branch. Emit them here so spawned
+            // sub-sessions that end on SubmitPlan still report back to their
+            // seam advances. The backend's trailing {type:'complete'} is
+            // already skipped by the !isProcessing guard in the chat loop, so
+            // there is no double fire. shouldNotifyParent still excludes
+            // unaffected.
+            const planFinalMsgId = this.getLastFinalAssistantMessageId(managed.messages)
+            this.emitSessionComplete({
+              sessionId: managed.id,
+              workspaceId: managed.workspace.id,
+              reason: 'complete',
+              finalMessageId: planFinalMsgId,
+              finalText: planFinalMsgId
+                ? managed.messages.find(m => m.id === planFinalMsgId)?.content
+                : undefined,
+              tokenUsage: managed.tokenUsage,
+            })
+            this.notifySubscribers(managed, 'complete', planFinalMsgId)
           }
         } catch (error) {
           sessionLog.error(`Failed to read plan file:`, error)
@@ -5736,6 +5889,27 @@ export class SessionManager implements ISessionManager {
         // Persist session state
         this.persistSession(managed)
 
+        // Auth handoff has the same gap as plan handoff: it sets isProcessing
+        // false and skips onProcessingStopped, so spawned sub-sessions that
+        // pause on an auth request never report back to their parent. Emit the
+        // auth pause is not a normal completion); the backend's trailing
+        // {type:'complete'} is skipped by the !isProcessing guard, so no
+        // parentless children. Emit only when this request actually interrupted
+        // a running turn (a stale auth event arriving after the turn already
+        // ended must not re-emit completion).
+        const authFinalMsgId = this.getLastFinalAssistantMessageId(managed.messages)
+        this.emitSessionComplete({
+          sessionId: managed.id,
+          workspaceId: managed.workspace.id,
+          reason: 'interrupted',
+          finalMessageId: authFinalMsgId,
+          finalText: authFinalMsgId
+            ? managed.messages.find(m => m.id === authFinalMsgId)?.content
+            : undefined,
+          tokenUsage: managed.tokenUsage,
+        })
+        this.notifySubscribers(managed, 'interrupted', authFinalMsgId)
+
         // OAuth flow is client-driven via performOAuth() (preload).
         // The UI calls window.electronAPI.performOAuth() when user clicks "Sign in".
       }
@@ -5751,7 +5925,6 @@ export class SessionManager implements ISessionManager {
           enabledSourceSlugs: request.enabledSourceSlugs ?? managed.enabledSourceSlugs,
           permissionMode: request.permissionMode ?? managed.permissionMode,
           thinkingLevel: request.thinkingLevel ?? managed.thinkingLevel,
-          labels: request.labels ?? managed.labels,
           workingDirectory: request.workingDirectory,
           projectId: request.projectId ?? managed.projectId,
           // Spawned sessions become subtasks of the spawning session.
@@ -5759,6 +5932,17 @@ export class SessionManager implements ISessionManager {
           // Pass isolated MCP configs if provided
           mcpServerConfigs: request.mcpServerConfigs,
         })
+
+        // Follow the child's finished turns unless the caller opted out. This
+        // replaces the old implicit parent notice: notification is now an
+        // explicit subscription the spawning session can drop at any time.
+        if (request.subscribe !== false) {
+          try {
+            this.subscribeSession(managed.id, session.id)
+          } catch (err) {
+            sessionLog.warn(`Spawn session: failed to subscribe ${managed.id} to ${session.id}: ${err}`)
+          }
+        }
 
         // Build FileAttachment[] from paths (if any)
         let fileAttachments: FileAttachment[] | undefined
@@ -5818,14 +6002,7 @@ ${request.prompt}`;
         }
       }
 
-      // Wire up session self-management tools (set_session_labels, set_session_status, etc.)
       mergeSessionScopedToolCallbacks(managed.id, {
-        setSessionLabelsFn: async (sessionId: string | undefined, labels: string[]) => {
-          await this.setSessionLabels(sessionId ?? managed.id, labels)
-        },
-        setSessionStatusFn: async (sessionId: string | undefined, status: string) => {
-          await this.setSessionStatus(sessionId ?? managed.id, status as SessionStatus)
-        },
         // archive_session — archive/unarchive ANOTHER session by ID. Scoped to the
         // invoking session's workspace and blocked mid-turn (guard logic lives in
         // archive-guards.ts so it is unit-testable); delegates to the existing
@@ -5845,57 +6022,8 @@ ${request.prompt}`;
             await this.unarchiveSession(sessionId)
           }
         },
-        // create_task — create a Task (board card + task.yaml + orchestrator session)
         // WITHOUT running it. Spec building happens here (not in session-tools-core,
         // which must stay dependency-free of @craft-agent/shared); the creation flow
-        // itself is createTaskFromSpec, shared verbatim with the tasks:create RPC.
-        createTaskFn: async (input) => {
-          const ws = managed.workspace
-          // Match spawn_session: an explicit project wins, otherwise keep newly
-          // captured work in the project that owns the invoking session.
-          const projectId = resolveCreateTaskProjectId(input.projectId, managed.projectId)
-          // Slug is derived from the title and must never overwrite an existing task
-          // (unlike the TaskEditor, where re-saving the same slug is the edit flow).
-          const slug = uniqueTaskSlug(input.title, new Set(listTaskSlugs(ws.rootPath)))
-
-          // Fail-soft reference checks: unknown slugs warn, they don't block creation
-          // (matching the finish() philosophy in the tasks:create handler).
-          const warnings: string[] = []
-          if (input.sources?.length) {
-            const available = new Set(loadWorkspaceSources(ws.rootPath).map(s => s.config.slug))
-            const missing = input.sources.filter(s => !available.has(s))
-            if (missing.length) warnings.push(`Unknown sources (kept in the spec, but they don't exist in this workspace): ${missing.join(', ')}`)
-          }
-          if (input.skills?.length) {
-            // loadAllSkills matches dispatch-time [skill:slug] resolution (global + workspace).
-            const available = new Set(loadAllSkills(ws.rootPath).map(s => s.slug))
-            const missing = input.skills.filter(s => !available.has(s))
-            if (missing.length) warnings.push(`Unknown skills (kept in the spec, but they don't exist in this workspace): ${missing.join(', ')}`)
-          }
-
-          // A spec requires ≥1 node; synthesize the single executable node from the
-          // description. Multi-node DAG authoring stays with the TaskEditor/generate flow.
-          const parsed = parseTaskSpec({
-            id: slug,
-            title: input.title,
-            goal: input.description,
-            ...(input.acceptanceCriteria ? { acceptance_criteria: input.acceptanceCriteria } : {}),
-            ...(projectId ? { project: projectId } : {}),
-            ...(input.workingDirectory ? { cwd: input.workingDirectory } : {}),
-            ...(input.sources?.length ? { sources: input.sources } : {}),
-            ...(input.skills?.length ? { skills: input.skills } : {}),
-            ...(input.model || input.llmConnection
-              ? { defaults: { ...(input.model ? { model: input.model } : {}), ...(input.llmConnection ? { llmConnection: input.llmConnection } : {}) } }
-              : {}),
-            nodes: [{ id: 'main', title: input.title, prompt: input.description }],
-          })
-          if (!parsed.success) {
-            throw new Error(`Invalid task spec: ${parsed.error.issues.map(i => i.message).join('; ')}`)
-          }
-
-          const created = await createTaskFromSpec(this, ws.id, ws.rootPath, parsed.data)
-          return { ...created, warnings: [...warnings, ...created.warnings] }
-        },
         // Pages tools (list_pages/get_page/create_page/update_page/
         // write_page_data/delete_page) — grouped callbacks bound to the
         // invoking session's workspace. Storage flows are shared with the
@@ -5922,12 +6050,15 @@ ${request.prompt}`;
           // A gateway session's stored connection is the one it was *created*
           // with; traffic goes to the strategy endpoint and the model is chosen
           // per request. See `sessionRoutingInfo`.
-          const routing = sessionRoutingInfo(session, loadLlmConfig()?.strategies ?? [])
+          const routingConfig = loadLlmConfig()
+          const routing = sessionRoutingInfo(
+            session,
+            routingConfig?.strategies ?? [],
+            routingConfig?.providers ?? [],
+          )
           return {
             id: session.id,
             name: session.name ?? session.id,
-            labels: session.labels ?? [],
-            status: session.sessionStatus ?? 'todo',
             permissionMode: session.permissionMode ?? 'ask',
             createdAt: session.createdAt ?? 0,
             workingDirectory: session.workingDirectory,
@@ -5945,12 +6076,6 @@ ${request.prompt}`;
           let sessions = this.getSessions(managed.workspace.id)
 
           // Filter
-          if (options?.status) {
-            sessions = sessions.filter(s => s.sessionStatus === options.status)
-          }
-          if (options?.label) {
-            sessions = sessions.filter(s => s.labels?.includes(options.label!))
-          }
           if (options?.search) {
             const needle = options.search.toLowerCase()
             sessions = sessions.filter(s => s.name?.toLowerCase().includes(needle))
@@ -5962,8 +6087,6 @@ ${request.prompt}`;
             sessions.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
           } else if (sortBy === 'name') {
             sessions.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''))
-          } else if (sortBy === 'status') {
-            sessions.sort((a, b) => (a.sessionStatus ?? '').localeCompare(b.sessionStatus ?? ''))
           }
 
           const total = sessions.length
@@ -5977,8 +6100,6 @@ ${request.prompt}`;
             sessions: page.map(s => ({
               id: s.id,
               name: s.name ?? s.id,
-              labels: s.labels ?? [],
-              status: s.sessionStatus ?? 'todo',
               createdAt: s.createdAt ?? 0,
               projectId: s.projectId,
             })),
@@ -5999,28 +6120,36 @@ ${request.prompt}`;
               startTime: t.startTime,
               elapsedSeconds: t.elapsedSeconds ?? wallElapsed,
               completedAt: t.completedAt,
+              ...(t.stopReason ? { stopReason: t.stopReason } : {}),
             }
           })
         },
-        resolveLabelsFn: (labels: string[]) => {
-          const labelConfig = loadLabelConfig(managed.workspace.rootPath)
-          return resolveSessionLabels(labels, labelConfig.labels)
+        getBackgroundTaskOutputFn: (taskId: string, tailLines?: number) =>
+          this.getBackgroundTaskOutput(managed.id, taskId, tailLines ?? 100),
+        stopBackgroundTaskFn: async (taskId: string, stoppedBy?: 'model' | 'user') => {
+          return this.stopBackgroundTask(managed.id, taskId, stoppedBy ?? 'model')
         },
-        resolveStatusFn: (status: string) => {
-          const statusConfig = loadStatusConfig(managed.workspace.rootPath)
-          const allStatuses = statusConfig.statuses
-          const available = allStatuses.map(s => s.id)
-
-          // Exact ID match
-          const byId = allStatuses.find(s => s.id === status)
-          if (byId) return { resolved: byId.id, available, category: byId.category }
-          // Case-insensitive label → ID
-          const byLabel = allStatuses.find(s => s.label.toLowerCase() === status.toLowerCase())
-          if (byLabel) return { resolved: byLabel.id, available, category: byLabel.category }
-
-          return { resolved: null, available }
-        },
+        // Commands must skip the sender envelope, otherwise the target sees the
+        // token mid-message and treats it as ordinary chat text.
+        isSessionCommand: (text: string) => parseSessionCommand(text) !== null,
+        subscribeSessionFn: (sessionId: string) => this.subscribeSession(managed.id, sessionId),
+        unsubscribeSessionFn: (sessionId: string) => this.unsubscribeSession(managed.id, sessionId),
+        listSubscriptionsFn: () => this.listSubscriptions(managed.id),
         sendAgentMessageFn: async (sessionId: string, message: string, attachments?: Array<{ path: string; name?: string }>) => {
+          // `/stop` acts on the target session instead of holding a turn for it.
+          // The tool handler strips the sender envelope for commands, so this
+          // sees the raw command text ("[Message from ...]" would hide it).
+          const command = parseSessionCommand(message)
+          if (command) {
+            const targetBusy = this.sessions.get(sessionId)?.isProcessing === true
+            const result = await this.executeSessionCommand(sessionId, command)
+            return {
+              delivery: result.stopped ? ('stopped' as const) : ('idle' as const),
+              targetBusy,
+              queueLength: result.queueLength,
+            }
+          }
+
           // Build FileAttachment[] from paths (same pattern as spawn_session)
           let fileAttachments: FileAttachment[] | undefined
           if (attachments?.length) {
@@ -6154,93 +6283,353 @@ ${request.prompt}`;
     return managed.agent
   }
 
-  async flagSession(sessionId: string): Promise<void> {
-    const managed = this.sessions.get(sessionId)
-    if (managed) {
-      managed.isFlagged = true
-      // Persist in-memory state directly to avoid race with pending queue writes
-      this.persistSession(managed)
-      await this.flushSession(managed.id)
-      // Notify all windows for this workspace
-      this.sendEvent({ type: 'session_flagged', sessionId }, managed.workspace.id)
-      // Workaround: Bun's fs.watch({ recursive: true }) on Linux doesn't track
-      // directories created after the watcher started.
-      // https://github.com/oven-sh/bun/issues/15939
-      const watcher = this.configWatchers.get(managed.workspace.rootPath)
-      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
-    }
-  }
-
-  async unflagSession(sessionId: string): Promise<void> {
-    const managed = this.sessions.get(sessionId)
-    if (managed) {
-      managed.isFlagged = false
-      // Persist in-memory state directly to avoid race with pending queue writes
-      this.persistSession(managed)
-      await this.flushSession(managed.id)
-      // Notify all windows for this workspace
-      this.sendEvent({ type: 'session_unflagged', sessionId }, managed.workspace.id)
-      // Workaround: Bun's fs.watch({ recursive: true }) on Linux doesn't track
-      // directories created after the watcher started.
-      // https://github.com/oven-sh/bun/issues/15939
-      const watcher = this.configWatchers.get(managed.workspace.rootPath)
-      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
-    }
-  }
-
   async archiveSession(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
       sessionLog.warn(`archiveSession: unknown session ${sessionId} — no-op`)
+      return
     }
-    if (managed) {
-      managed.isArchived = true
-      managed.archivedAt = Date.now()
-      // Persist in-memory state directly to avoid race with pending queue writes
-      this.persistSession(managed)
-      await this.flushSession(managed.id)
-      // Notify all windows for this workspace
-      this.sendEvent({ type: 'session_archived', sessionId }, managed.workspace.id)
-      this.emitUnreadSummaryChanged()
-    }
+    await this.archiveManagedSession(managed, undefined)
   }
 
   async unarchiveSession(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
       sessionLog.warn(`unarchiveSession: unknown session ${sessionId} — no-op`)
+      return
     }
-    if (managed) {
-      managed.isArchived = false
-      managed.archivedAt = undefined
-      // Persist in-memory state directly to avoid race with pending queue writes
-      this.persistSession(managed)
-      await this.flushSession(managed.id)
-      // Notify all windows for this workspace
-      this.sendEvent({ type: 'session_unarchived', sessionId }, managed.workspace.id)
-      this.emitUnreadSummaryChanged()
+    const folders = this.loadFoldersFor(managed)
+    const snapshotId = managed.archivedFolderId ?? null
+    const snapshotExists = snapshotId ? folders.some((folder) => folder.id === snapshotId) : false
+    const restored = snapshotId && snapshotExists
+      ? snapshotId
+      : (managed.archivedFolderPath?.length
+          ? resolveDeepestExistingAncestor(folders, managed.archivedFolderPath)
+          : null)
+
+    managed.isArchived = false
+    managed.archivedAt = undefined
+    managed.folderId = restored
+    managed.archivedFolderId = undefined
+    managed.archivedFolderPath = undefined
+    managed.archivedProjectId = undefined
+    managed.archivedByParent = undefined
+    // Persist in-memory state directly to avoid race with pending queue writes
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+    // Notify all windows for this workspace
+    this.sendEvent({ type: 'session_unarchived', sessionId }, managed.workspace.id)
+    this.emitUnreadSummaryChanged()
+  }
+
+  /** Shared archive path so folder/project sweeps can tag `archivedByParent` (D22/D23). */
+  private async archiveManagedSession(managed: ManagedSession, archivedByParent: string | undefined): Promise<void> {
+    const folders = this.loadFoldersFor(managed)
+    managed.isArchived = true
+    managed.archivedAt = Date.now()
+    managed.archivedFolderId = managed.folderId ?? null
+    managed.archivedFolderPath = getFolderPath(folders, managed.folderId ?? null)
+    managed.archivedProjectId = managed.projectId
+    managed.archivedByParent = archivedByParent
+    // Persist in-memory state directly to avoid race with pending queue writes
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+    // Notify all windows for this workspace
+    this.sendEvent({ type: 'session_archived', sessionId: managed.id }, managed.workspace.id)
+    this.emitUnreadSummaryChanged()
+  }
+
+  // ============================================
+  // Session folders (D2 / D13 / D31 / D32)
+  // ============================================
+
+  private folderScopeFor(managed: ManagedSession): FolderScope {
+    return { projectId: managed.projectId ?? null }
+  }
+
+  private loadFoldersFor(managed: ManagedSession): FolderConfig[] {
+    try {
+      return loadFolderConfig(managed.workspace.rootPath, this.folderScopeFor(managed)).folders
+    } catch (error) {
+      sessionLog.warn(`loadFoldersFor: failed to load folder config for session ${managed.id}:`, error)
+      return []
     }
   }
 
-  async setSessionStatus(sessionId: string, sessionStatus: SessionStatus): Promise<void> {
+  async setSessionFolder(sessionId: string, folderId: string | null): Promise<void> {
     const managed = this.sessions.get(sessionId)
-    if (managed) {
-      managed.sessionStatus = sessionStatus
-      this.setMetadataWriteGuard(managed)
-      // Persist in-memory state directly to avoid race with pending queue writes
-      this.persistSession(managed)
-      await this.flushSession(managed.id)
-      // Notify all windows for this workspace
-      this.sendEvent({ type: 'session_status_changed', sessionId, sessionStatus }, managed.workspace.id)
-      // Workaround: Bun's fs.watch({ recursive: true }) on Linux doesn't track
-      // directories created after the watcher started.
-      // https://github.com/oven-sh/bun/issues/15939
-      const watcher = this.configWatchers.get(managed.workspace.rootPath)
-      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
+    if (!managed) throw new Error(`Session ${sessionId} not found`)
+    const folders = this.loadFoldersFor(managed)
+    if (folderId && !folders.some((folder) => folder.id === folderId)) {
+      throw new Error(`Folder ${folderId} not found in this scope`)
+    }
+    managed.folderId = folderId ?? undefined
+    // Moving into a folder always lands at the end of that group (D36).
+    managed.sortOrder = undefined
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+    this.sendEvent({ type: 'session_metadata_changed', sessionId, changes: { folderId: folderId ?? null, sortOrder: undefined } }, managed.workspace.id)
+  }
+
+  async setSessionFolderBulk(sessionIds: string[], folderId: string | null): Promise<{ updated: string[]; failed: string[] }> {
+    const updated: string[] = []
+    const failed: string[] = []
+    for (const sessionId of sessionIds) {
+      try {
+        await this.setSessionFolder(sessionId, folderId)
+        updated.push(sessionId)
+      } catch (error) {
+        sessionLog.warn(`setSessionFolderBulk: failed for ${sessionId}:`, error)
+        failed.push(sessionId)
+      }
+    }
+    return { updated, failed }
+  }
+
+  async setSessionSortOrder(sessionId: string, sortOrder: string): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new Error(`Session ${sessionId} not found`)
+    managed.sortOrder = sortOrder
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+    this.sendEvent({ type: 'session_metadata_changed', sessionId, changes: { sortOrder } }, managed.workspace.id)
+  }
+
+  async setSessionPinned(sessionId: string, pinned: boolean): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new Error(`Session ${sessionId} not found`)
+    managed.pinnedAt = pinned ? Date.now() : undefined
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+    this.sendEvent({ type: 'session_metadata_changed', sessionId, changes: { pinnedAt: managed.pinnedAt } }, managed.workspace.id)
+  }
+
+  /**
+   * Atomic cross-scope move (D19/D31): project + folder + optional archive flip in one persist.
+   * Validates the target folder against the *destination* tree, never the source one.
+   */
+  async moveSessionToScope(
+    sessionId: string,
+    projectId: string | null,
+    folderId: string | null,
+    archived?: boolean,
+  ): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new Error(`Session ${sessionId} not found`)
+
+    // Capture the previous scope before mutating, so automations can be told
+    // what actually changed (and stay silent when nothing did).
+    const prevProjectId = managed.projectId ?? null
+    const prevFolderId = managed.folderId ?? null
+
+    const nextProjectId = projectId ?? undefined
+    let folders: FolderConfig[] = []
+    try {
+      folders = loadFolderConfig(managed.workspace.rootPath, { projectId: nextProjectId ?? null }).folders
+    } catch {
+      folders = []
+    }
+    if (folderId && !folders.some((folder) => folder.id === folderId)) {
+      throw new Error(`Folder ${folderId} not found in target scope`)
+    }
+
+    managed.projectId = nextProjectId
+    managed.folderId = folderId ?? undefined
+    managed.sortOrder = undefined
+
+    if (archived === true && !managed.isArchived) {
+      await this.archiveManagedSession(managed, undefined)
+    } else if (archived === false && managed.isArchived) {
+      managed.isArchived = false
+      managed.archivedAt = undefined
+      managed.archivedFolderId = undefined
+      managed.archivedFolderPath = undefined
+      managed.archivedProjectId = undefined
+      managed.archivedByParent = undefined
+    }
+
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+    this.sendEvent({
+      type: 'session_metadata_changed',
+      sessionId,
+      // `projectId: undefined` means "unbind from the project", but the wire
+      // codec serializes with JSON.stringify, which drops `undefined` values —
+      // the renderer then could not tell "cleared" apart from "unchanged" and
+      // the session got stuck as project-bound after a cross-scope move (the
+      // list neither removed it from the old scope nor showed it in the new).
+      // Use null on the wire for the clear signal; the renderer maps it back.
+      changes: { projectId: projectId ?? null, folderId: folderId, sortOrder: undefined },
+    }, managed.workspace.id)
+
+    // Automations: a session moving between folders/projects is a path change.
+    const changeType = prevProjectId !== (nextProjectId ?? null) ? 'project' : 'folder'
+    const oldPath = changeType === 'project' ? prevProjectId : prevFolderId
+    const newPath = changeType === 'project' ? (nextProjectId ?? null) : (folderId ?? null)
+    if (oldPath !== newPath) {
+      this.emitPathChange(managed.workspace.rootPath, {
+        subject: 'session',
+        sessionId,
+        sessionName: managed.name,
+        changeType,
+        oldPath: oldPath ?? null,
+        newPath: newPath ?? null,
+        workingDirectory: managed.workingDirectory,
+      })
     }
   }
 
   /**
+   * Emit a SessionPathChange automation event for the workspace that owns
+   * `workspaceRootPath`. No-op when the workspace has no automation system yet
+   * (nothing could be subscribed).
+   *
+   * Creation and deletion are carried by the paths: `oldPath === null` means
+   * something was created, `newPath === null` means it was deleted.
+   */
+  emitPathChange(
+    workspaceRootPath: string,
+    params: {
+      subject: 'session' | 'folder'
+      sessionId?: string
+      sessionName?: string
+      changeType: 'folder' | 'project' | 'workingDirectory'
+      oldPath: string | null
+      newPath: string | null
+      workingDirectory?: string
+    },
+  ): void {
+    const automationSystem = this.automationSystems.get(workspaceRootPath)
+    if (!automationSystem) return
+    automationSystem.emitSessionPathChange(params).catch((error) => {
+      sessionLog.error(`[Automations] Failed to emit SessionPathChange:`, error)
+    })
+  }
+
+  /** Sessions living in the given folders (used by archive/delete sweeps). */
+  private sessionsInFolders(scope: FolderScope, folderIds: string[]): ManagedSession[] {
+    const wanted = new Set(folderIds)
+    const result: ManagedSession[] = []
+    for (const managed of this.sessions.values()) {
+      const folderId = managed.folderId
+      if (!folderId) continue
+      if ((managed.projectId ?? null) !== scope.projectId) continue
+      if (!wanted.has(folderId)) continue
+      result.push(managed)
+    }
+    return result
+  }
+
+  /** Archive a folder subtree: folder config first, then every session inside it (D22). */
+  async archiveFolder(workspaceId: string, scope: FolderScope, folderId: string): Promise<{ folderIds: string[]; sessionIds: string[]; archived: string[] }> {
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) throw new Error(`Workspace ${workspaceId} not found`)
+
+    const before = loadFolderConfig(workspace.rootPath, scope)
+    const folderIds = [folderId, ...getDescendantFolderIds(before.folders, folderId)]
+    const targets = this.sessionsInFolders(scope, folderIds)
+    const archived: string[] = []
+    for (const managed of targets) {
+      if (managed.isArchived) continue
+      await this.archiveManagedSession(managed, folderId)
+      archived.push(managed.id)
+    }
+
+    // Folder config is written by the RPC handler via the shared folder store so this
+    // method stays focused on the session side effects.
+    return { folderIds, sessionIds: targets.map((managed) => managed.id), archived }
+  }
+
+  /** Un-archive a folder subtree: only sessions swept up by this folder come back (D23). */
+  async unarchiveFolder(workspaceId: string, scope: FolderScope, folderId: string): Promise<{ restored: string[] }> {
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) throw new Error(`Workspace ${workspaceId} not found`)
+
+    const before = loadFolderConfig(workspace.rootPath, scope)
+    const folderIds = [folderId, ...getDescendantFolderIds(before.folders, folderId)]
+    const restored: string[] = []
+    for (const managed of this.sessionsInFolders(scope, folderIds)) {
+      if (!managed.isArchived) continue
+      if (managed.archivedByParent !== folderId) continue
+      managed.isArchived = false
+      managed.archivedAt = undefined
+      managed.archivedByParent = undefined
+      managed.archivedFolderId = undefined
+      managed.archivedFolderPath = undefined
+      managed.archivedProjectId = undefined
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+      this.sendEvent({ type: 'session_unarchived', sessionId: managed.id }, managed.workspace.id)
+      restored.push(managed.id)
+    }
+    if (restored.length > 0) this.emitUnreadSummaryChanged()
+    return { restored }
+  }
+
+  /** Archive every session bound to a project (D24). */
+  async archiveProjectSessions(projectId: string, archived: boolean): Promise<{ affected: string[] }> {
+    const affected: string[] = []
+    for (const managed of this.sessions.values()) {
+      if (managed.projectId !== projectId) continue
+      if (archived && !managed.isArchived) {
+        await this.archiveManagedSession(managed, `project:${projectId}`)
+        affected.push(managed.id)
+      } else if (!archived && managed.isArchived && managed.archivedByParent === `project:${projectId}`) {
+        managed.isArchived = false
+        managed.archivedAt = undefined
+        managed.archivedByParent = undefined
+        managed.archivedFolderId = undefined
+        managed.archivedFolderPath = undefined
+        managed.archivedProjectId = undefined
+        this.persistSession(managed)
+        await this.flushSession(managed.id)
+        this.sendEvent({ type: 'session_unarchived', sessionId: managed.id }, managed.workspace.id)
+        affected.push(managed.id)
+      }
+    }
+    if (affected.length > 0) this.emitUnreadSummaryChanged()
+    return { affected }
+  }
+
+  /** Hard-delete every session bound to a project (D30). */
+  async deleteProjectSessions(projectId: string): Promise<{ deleted: string[] }> {
+    const targets = [...this.sessions.values()].filter((managed) => managed.projectId === projectId)
+    for (const managed of targets) {
+      await this.deleteSession(managed.id)
+    }
+    return { deleted: targets.map((managed) => managed.id) }
+  }
+
+  /** Hard-delete a folder subtree, including archived sessions inside it (D2). */
+  async deleteFolder(workspaceId: string, scope: FolderScope, folderId: string): Promise<{ deletedFolders: string[]; deletedSessions: string[]; archivedSessions: string[] }> {
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) throw new Error(`Workspace ${workspaceId} not found`)
+
+    const before = loadFolderConfig(workspace.rootPath, scope)
+    const folderIds = [folderId, ...getDescendantFolderIds(before.folders, folderId)]
+    const targets = this.sessionsInFolders(scope, folderIds)
+    const archivedSessions = targets.filter((managed) => managed.isArchived).map((managed) => managed.id)
+
+    // Sessions first: a crash mid-way must not leave sessions pointing at a deleted folder.
+    for (const managed of targets) {
+      await this.deleteSession(managed.id)
+    }
+
+    const config = deleteFolderConfig(workspace.rootPath, scope, folderId)
+
+    // Automations: a removed folder subtree is a folder path change with an
+    // empty newPath. Emitted once for the root of the deleted subtree.
+    this.emitPathChange(workspace.rootPath, {
+      subject: 'folder',
+      changeType: 'folder',
+      oldPath: `folder:${folderId}`,
+      newPath: null,
+    })
+
+    return { deletedFolders: config.deletedFolderIds, deletedSessions: targets.map((m) => m.id), archivedSessions }
+  }
+
+    /**
    * Set the LLM connection for a session.
    * Can only be changed before the first message is sent (connection is locked after).
    * This determines which LLM provider/backend will be used for this session.
@@ -6764,7 +7153,6 @@ ${request.prompt}`;
 
   /**
    * Read a session's final assistant message TEXT (in-process output reader for
-   * the Tasks Conductor). `getLastFinalAssistantMessageId` is private and returns
    * an id; this wraps it to return the message content. Never exposed to agents —
    * child node output is read here, not via any tool/RPC.
    */
@@ -6913,20 +7301,22 @@ ${request.prompt}`;
   }
 
   /**
-   * Mark all non-hidden, non-archived sessions in a workspace as read.
-   * Called from "Mark All Read" context menu on "All Sessions".
+   * Mark all non-hidden, non-archived sessions in a workspace or project as read.
+   * Called from the "Mark All Read" context menu on All Sessions or a project.
    */
-  async markAllSessionsRead(workspaceId: string): Promise<void> {
+  async markAllSessionsRead(workspaceId: string, projectId?: string): Promise<void> {
     const updates: Promise<void>[] = []
     for (const managed of this.sessions.values()) {
       if (managed.workspace.id !== workspaceId) continue
+      if (projectId && managed.projectId !== projectId) continue
       if (managed.hidden || managed.isArchived) continue
       if (managed.isProcessing) continue
       if (!managed.hasUnread) continue
       managed.hasUnread = false
       updates.push(
-        updateSessionMetadata(managed.workspace.rootPath, managed.id, { hasUnread: false })
+        updateSessionMetadata(managed.workspace.rootPath, managed.id, { hasUnread: false }),
       )
+      this.sendEvent({ type: 'session_metadata_changed', sessionId: managed.id, changes: { hasUnread: false } }, workspaceId)
     }
     if (updates.length > 0) {
       await Promise.all(updates)
@@ -7473,6 +7863,12 @@ ${request.prompt}`;
     this.clearAdminRememberApprovalsForSession(sessionId)
     this.clearPendingPermissionRequestsForSession(sessionId)
 
+    const backgroundStore = this.backgroundTaskStores.get(sessionId)
+    if (backgroundStore) {
+      this.backgroundTaskStores.delete(sessionId)
+      void backgroundStore.destroy()
+    }
+
     // Cancel any pending persistence write (session is being deleted, no need to save)
     sessionPersistenceQueue.cancel(sessionId)
 
@@ -7502,11 +7898,24 @@ ${request.prompt}`;
 
     this.sessions.delete(sessionId)
 
-    // Clean up session metadata in AutomationSystem (prevents memory leak)
-    const automationSystem = this.automationSystems.get(workspaceRootPath)
-    if (automationSystem) {
-      automationSystem.removeSessionMetadata(sessionId)
+    // Drop this session from every subscription list — both as a subscriber
+    // (its own followed targets) and as a target others are following.
+    const subscriptions = this.loadSubscriptionRegistry(workspaceRootPath)
+    let subscriptionsChanged = false
+    for (const [subscriberId, targets] of Object.entries(subscriptions)) {
+      if (subscriberId === sessionId) {
+        delete subscriptions[sessionId]
+        subscriptionsChanged = true
+        continue
+      }
+      if (targets.includes(sessionId)) {
+        const next = targets.filter(id => id !== sessionId)
+        if (next.length > 0) subscriptions[subscriberId] = next
+        else delete subscriptions[subscriberId]
+        subscriptionsChanged = true
+      }
     }
+    if (subscriptionsChanged) this.persistSubscriptionRegistry(workspaceRootPath)
 
     // Delete from disk too
     deleteStoredSession(workspaceRootPath, sessionId)
@@ -7514,6 +7923,17 @@ ${request.prompt}`;
     // Notify all windows for this workspace that the session was deleted
     this.sendEvent({ type: 'session_deleted', sessionId }, managed.workspace.id)
     this.emitUnreadSummaryChanged()
+
+    // Automations: a deleted session is a path change with an empty newPath.
+    this.emitPathChange(workspaceRootPath, {
+      subject: 'session',
+      sessionId,
+      sessionName: managed.name,
+      changeType: managed.projectId ? 'project' : 'folder',
+      oldPath: describeSessionScope(managed.projectId ?? null, managed.folderId ?? null),
+      newPath: null,
+      workingDirectory: managed.workingDirectory,
+    })
 
     // Clean up attachments directory (handled by deleteStoredSession for workspace-scoped storage)
     sessionLog.info(`Deleted session ${sessionId}`)
@@ -7610,6 +8030,7 @@ ${request.prompt}`;
     managed.messages = []
     managed.streamingText = ''
     managed.messageQueue = []
+    this.emitQueuedMessagesChanged(managed)
     managed.pendingRecoveryTool = undefined
     managed.sdkSessionId = undefined
     managed.tokenUsage = { ...DEFAULT_TOKEN_USAGE }
@@ -7669,13 +8090,29 @@ ${request.prompt}`;
 
         await mkdir(attachmentsDir, { recursive: true })
 
-        const id = randomUUID()
+        // Short id, not a UUID: this name is echoed back to the model in the
+        // "image dropped" placeholder, where 36 characters of UUID is pure cost.
+        // 24 bits of entropy is enough because the name is only ever looked up
+        // inside one session's attachments folder (collisions retry below).
         const safeName = sanitizeFilename(attachment.name || basename(sourcePath))
-        const storedFileName = `${id}_${safeName}`
-        const storedPath = join(attachmentsDir, storedFileName)
+        let id = generateShortId()
+        let storedFileName = `${id}_${safeName}`
+        let storedPath = join(attachmentsDir, storedFileName)
+        for (let attempt = 0; attempt < 5 && existsSync(storedPath); attempt++) {
+          id = generateShortId()
+          storedFileName = `${id}_${safeName}`
+          storedPath = join(attachmentsDir, storedFileName)
+        }
 
         if (sourcePath !== storedPath) {
           await copyFile(sourcePath, storedPath)
+        }
+
+        // Side channel for the transcoder: if this image has to be dropped for
+        // exceeding the upstream's image cap, the placeholder names this file
+        // (the SDK strips the name before the request leaves the process).
+        if (attachment.base64) {
+          registerAttachmentName(attachment.base64, storedFileName)
         }
 
         const hydrated: FileAttachment = {
@@ -7908,6 +8345,12 @@ ${request.prompt}`;
       }, managed.workspace.id)
 
       if (delivery.shouldQueue) {
+        // Persist the queued flag on the user message so a reload (or another
+        // window) keeps it out of the transcript: the turn grouper skips
+        // `isQueued` rows and the queue panel owns their display. The flag is
+        // cleared by processNextQueuedMessage when the row is drained into a
+        // real turn.
+        userMessage.isQueued = true
         // Push for FIFO replay on next onProcessingStopped tick. Same shape
         // for both queue-direct (current turn still running) and
         // queue-after-abort (backend already aborted) — the replay path in
@@ -7919,6 +8362,7 @@ ${request.prompt}`;
         // was interrupted" reminder (it would falsely tell the model its own
         // complete answer was cut off → confusion).
         if (delivery.wasInterrupted) managed.wasInterrupted = true
+        this.emitQueuedMessagesChanged(managed)
       }
 
       this.persistSession(managed)
@@ -8008,33 +8452,6 @@ ${request.prompt}`;
         // (waits briefly for agent creation if needed)
         this.generateTitle(managed, visibleMessage)
       }
-    }
-
-    // Evaluate auto-label rules against the user message (common path for both
-    // fresh and queued messages). Scans regex patterns configured on labels,
-    // then merges any new matches into the session's label array.
-    try {
-      const labelTree = listLabels(managed.workspace.rootPath)
-      const autoMatches = evaluateAutoLabels(visibleMessage, labelTree)
-
-      if (autoMatches.length > 0) {
-        const existingLabels = managed.labels ?? []
-        const newEntries = autoMatches
-          .map(m => `${m.labelId}::${m.value}`)
-          .filter(entry => !existingLabels.includes(entry))
-
-        if (newEntries.length > 0) {
-          managed.labels = [...existingLabels, ...newEntries]
-          this.persistSession(managed)
-          this.sendEvent({
-            type: 'labels_changed',
-            sessionId,
-            labels: managed.labels,
-          }, managed.workspace.id)
-        }
-      }
-    } catch (e) {
-      sessionLog.warn(`Auto-label evaluation failed for session ${sessionId}:`, e)
     }
 
     managed.lastMessageAt = Date.now()
@@ -8219,7 +8636,8 @@ ${request.prompt}`;
       // disk is not a running gateway: refusing every send on a machine that
       // never started it would punish a setting that was never turned on.
       const gwRuntime = getGatewayRuntime()
-      const configuredStrategies = loadLlmConfig()?.strategies ?? []
+      const configuredConfig = loadLlmConfig()
+      const configuredStrategies = configuredConfig?.strategies ?? []
       if (configuredStrategies.length > 0 && gwRuntime.running) {
         const route = resolveStrategyRoute({
           gatewayEnabled: gwRuntime.enabled,
@@ -8227,6 +8645,7 @@ ${request.prompt}`;
           gatewayBaseUrl: gwRuntime.baseUrl,
           strategyId: managed.strategy,
           strategies: configuredStrategies,
+          providers: configuredConfig?.providers ?? [],
           resolvedModel: managed.model,
         })
         if (!route.ok && route.reason !== 'gateway_unconfigured') {
@@ -8654,6 +9073,92 @@ ${request.prompt}`;
         messageId: canonicalMessageId,
       }, managed.workspace.id)
     }
+    this.emitQueuedMessagesChanged(managed)
+  }
+
+  /**
+   * Remove a queued message from the pending queue and hand its payload back
+   * so the composer can be refilled for editing (2026-10-22 queued-panel).
+   * The message leaves the transcript entirely — it never reached the model.
+   */
+  async editQueuedMessage(sessionId: string, messageId: string): Promise<QueuedMessageEditResult | null> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return null
+
+    const queueIndex = managed.messageQueue.findIndex(q =>
+      q.messageId === messageId || q.optimisticMessageId === messageId
+    )
+    if (queueIndex === -1) {
+      sessionLog.warn('Cannot edit queued message: message not found in queue', { sessionId, messageId })
+      return null
+    }
+
+    const [queued] = managed.messageQueue.splice(queueIndex, 1)
+    if (!queued) return null
+    const canonicalMessageId = queued.messageId ?? messageId
+    // Same fallback summarizeQueuedMessages uses to COUNT attachments for the
+    // panel: a queue row without stored metadata still carries them on the
+    // persisted message. Read it BEFORE the filter below drops that row.
+    const persisted = managed.messages.find(m => m.id === canonicalMessageId || m.id === messageId)
+    managed.messages = managed.messages.filter(m => m.id !== canonicalMessageId && m.id !== messageId)
+
+    this.persistSession(managed)
+    await this.flushSession(managed.id)
+
+    this.sendEvent({
+      type: 'message_removed',
+      sessionId,
+      messageId,
+    }, managed.workspace.id)
+    if (canonicalMessageId !== messageId) {
+      this.sendEvent({
+        type: 'message_removed',
+        sessionId,
+        messageId: canonicalMessageId,
+      }, managed.workspace.id)
+    }
+    this.emitQueuedMessagesChanged(managed)
+
+    return {
+      messageId,
+      text: queued.message,
+      attachments: queued.storedAttachments ?? persisted?.attachments,
+    }
+  }
+
+  /**
+   * Reorder the pending send queue (composer-panel drag & drop). `messageIds`
+   * is the desired order for the listed rows; rows not listed (synthetic
+   * restart-recovery turns) keep their relative position after them.
+   */
+  async reorderQueuedMessages(sessionId: string, messageIds: string[]): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed || managed.messageQueue.length < 2) return
+
+    const rank = new Map<string, number>()
+    messageIds.forEach((id, i) => rank.set(id, i))
+    const keyOf = (row: ManagedSession['messageQueue'][number]) =>
+      row.messageId ?? row.optimisticMessageId ?? null
+
+    const listed: typeof managed.messageQueue = []
+    const rest: typeof managed.messageQueue = []
+    for (const row of managed.messageQueue) {
+      const key = keyOf(row)
+      if (key !== null && rank.has(key)) {
+        listed.push(row)
+      } else {
+        rest.push(row)
+      }
+    }
+    listed.sort((a, b) => rank.get(keyOf(a)!)! - rank.get(keyOf(b)!)!)
+
+    const next = [...listed, ...rest]
+    const changed = next.some((row, i) => row !== managed.messageQueue[i])
+    if (!changed) return
+
+    managed.messageQueue = next
+    this.persistSession(managed)
+    this.emitQueuedMessagesChanged(managed)
   }
 
   async guideQueuedMessage(sessionId: string, messageId: string): Promise<void> {
@@ -8713,6 +9218,7 @@ ${request.prompt}`;
       }, managed.workspace.id)
       this.persistSession(managed)
       await this.flushSession(managed.id)
+      this.emitQueuedMessagesChanged(managed)
       return
     }
 
@@ -8729,11 +9235,68 @@ ${request.prompt}`;
 
     this.persistSession(managed)
     await this.flushSession(managed.id)
+    this.emitQueuedMessagesChanged(managed)
 
     if (!managed.isProcessing) {
       setImmediate(() => this.processNextQueuedMessage(sessionId))
     } else if (!managed.agent) {
       sessionLog.warn('Queued guide requested while processing but no agent is attached', { sessionId, messageId })
+    }
+  }
+
+  /**
+   * Broadcast the pending send queue after any mutation (enqueue, cancel,
+   * edit, reorder, drain). The renderer keeps ONE ordered list above the
+   * composer; every window converges on this payload instead of patching its
+   * own copy (2026-10-22 queued-panel).
+   */
+  private emitQueuedMessagesChanged(managed: ManagedSession): void {
+    this.sendEvent({
+      type: 'queued_messages_changed',
+      sessionId: managed.id,
+      queuedMessages: summarizeQueuedMessages(managed),
+    }, managed.workspace.id)
+  }
+
+  /**
+   * Run a session-level slash command (`/stop`).
+   *
+   * One executor for every entry point — desktop RPC, the messaging gateway
+   * and the `send_agent_message` tool — so "did it actually stop?" has a single
+   * answer instead of three drifting copies. The result is truthful on purpose:
+   * `cancelProcessing` returns silently when the session is idle, and a no-op
+   * that reads as success is exactly what made the gateway's `/stop` look
+   * broken before.
+   */
+  async executeSessionCommand(sessionId: string, command: SessionCommand): Promise<SessionCommandResult> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) {
+      throw new Error(`Session ${sessionId} not found`)
+    }
+
+    // cancelProcessing mutates managed.messages (abort marker + "Response
+    // interrupted" row), so the transcript must be fully loaded first. Writing
+    // the abort marker on a partially loaded array would truncate history on
+    // the next persist.
+    await this.ensureMessagesLoaded(managed)
+
+    switch (command.name) {
+      case 'stop': {
+        // Stopping must also invalidate a pending "Accept & Compact" plan;
+        // otherwise the plan auto-executes right after the user asked to stop.
+        await clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
+
+        // Capture the flag before cancelling: cancelProcessing no-ops when idle,
+        // so this is the only way to tell a real stop from a silent no-op.
+        const stopped = managed.isProcessing === true
+        await this.cancelProcessing(sessionId)
+        return { name: command.name, stopped, queueLength: managed.messageQueue.length }
+      }
+      default: {
+        // Exhaustiveness guard: a new command name must add a handler here.
+        const unreachable: never = command.name
+        throw new Error(`Unhandled session command: ${String(unreachable)}`)
+      }
     }
   }
 
@@ -8745,22 +9308,10 @@ ${request.prompt}`;
 
     sessionLog.info('Cancelling processing for session:', sessionId, silent ? '(silent)' : '')
 
-    // Collect queued message text for input restoration before clearing
-    const queuedTexts = managed.messageQueue.map(q => q.message)
-
-    // Collect queued message IDs so we can remove them from the messages array
-    // (they were added when sendMessage was called during processing)
-    const queuedMessageIds = new Set(
-      managed.messageQueue.map(q => q.messageId).filter((id): id is string => !!id)
-    )
-
-    // Clear queue - user explicitly stopped, don't process queued messages
-    managed.messageQueue = []
-
-    // Remove queued user messages from the persisted messages array
-    if (queuedMessageIds.size > 0) {
-      managed.messages = managed.messages.filter(m => !queuedMessageIds.has(m.id))
-    }
+    // The pending send queue survives an explicit stop. Stopping ends the
+    // CURRENT message only; the queued messages are still wanted and drain
+    // right after via onProcessingStopped → processNextQueuedMessage. The
+    // queue lives in the composer panel, so there is nothing to restore.
 
     // Signal intent to stop - let the event loop drain remaining events before clearing isProcessing
     // This prevents losing in-flight messages after soft interrupt
@@ -8813,16 +9364,12 @@ ${request.prompt}`;
         type: 'interrupted',
         sessionId,
         message: interruptedMessage,
-        // Include queued texts so the UI can restore them to the input field
-        ...(queuedTexts.length > 0 ? { queuedMessages: queuedTexts } : {}),
       }, managed.workspace.id)
     } else {
       // Still send interrupted event but without the message (for UI state update)
       this.sendEvent({
         type: 'interrupted',
         sessionId,
-        // Include queued texts so the UI can restore them to the input field
-        ...(queuedTexts.length > 0 ? { queuedMessages: queuedTexts } : {}),
       }, managed.workspace.id)
     }
 
@@ -8944,12 +9491,10 @@ ${request.prompt}`;
 
   /**
    * Listeners for the in-process session-completion seam (see SessionCompletionEvent).
-   * Used by the Tasks Conductor; empty until something subscribes, so zero overhead otherwise.
    */
   private sessionCompletionListeners = new Set<(evt: SessionCompletionEvent) => void>()
 
   /**
-   * Subscribe to in-process session completion (Tasks Conductor seam).
    * Returns an unsubscribe function. Not a renderer event; not agent-facing.
    */
   onSessionComplete(listener: (evt: SessionCompletionEvent) => void): () => void {
@@ -9060,6 +9605,11 @@ ${request.prompt}`;
         // bound mobile/chat channel (they sent a message or a read receipt
         // arrived) — mark as read immediately.
         await this.markSessionRead(sessionId)
+      } else if (this.listSubscribersOf(sessionId, managed.workspace.rootPath).length > 0) {
+        // A parent session subscribes to this one and consumes its finished
+        // turns, so the content is already being read by the subscriber — clear
+        // the badge instead of marking it unread.
+        await this.markSessionRead(sessionId)
       } else {
         // User is not watching - mark as unread for NEW badge
         if (!managed.hasUnread) {
@@ -9073,9 +9623,8 @@ ${request.prompt}`;
     // 3. Auto-complete mini agent sessions to avoid session list clutter
     //    Mini agents are spawned from EditPopovers for quick config edits
     //    and should automatically move to 'done' when finished
-    if (reason === 'complete' && managed.systemPromptPreset === 'mini' && managed.sessionStatus !== 'done') {
+    if (reason === 'complete' && managed.systemPromptPreset === 'mini') {
       sessionLog.info(`Auto-completing mini agent session ${sessionId}`)
-      await this.setSessionStatus(sessionId, 'done')
     }
 
     // 4. Apply deferred external metadata updates captured while processing.
@@ -9099,7 +9648,6 @@ ${request.prompt}`;
         // Teardown must never block completion. On a headless/WebUI server the BPM is
         // remote and these calls throw (BROWSER_NO_CAPABLE_CLIENT) when no desktop
         // browser client is connected — which previously aborted onProcessingStopped
-        // before emitSessionComplete, hanging the Tasks Conductor completion seam.
         try {
           await doneBpm.clearVisualsForSession(sessionId)
           doneBpm.unbindAllForSession(sessionId)
@@ -9121,8 +9669,6 @@ ${request.prompt}`;
         backgroundTasksAlive: this.keepBackgroundTasksAlive,
       }, managed.workspace.id)
 
-      // Tasks Conductor seam: signal true completion (queue empty) with the stop
-      // reason + this turn's final assistant message, so the Conductor can advance
       // the corresponding node. In-process only; never sent to the renderer/agents.
       this.emitSessionComplete({
         sessionId,
@@ -9139,11 +9685,17 @@ ${request.prompt}`;
       // this the parent's turn has already ended by the time the child answers,
       // so the result is stranded in a session nobody opened (spawn_session is
       // fire-and-forget by design — see SpawnSessionResult).
-      this.notifySpawnParent(managed, reason, currentFinalMessageId)
+      this.notifySubscribers(managed, reason, currentFinalMessageId)
     }
 
     // 6. Always persist
     this.persistSession(managed)
+
+    // 6b. Turn log: the archiver reads session.jsonl from disk, so flush the
+    // debounced persist first and then stamp the finished turn. A single-turn
+    // session otherwise never writes `turns/` (it was only archived when the
+    // NEXT user message arrived).
+    this.queueTurnLogArchive(managed)
   }
 
   /**
@@ -9153,27 +9705,187 @@ ${request.prompt}`;
    * the same shape as the background-task-completion nudge: an idle parent wakes
    * up and summarizes, a busy one queues it behind the turn in flight. Never
    * throws: the child's completion must not depend on the parent accepting the
-   * notice. Conductor children are excluded (see shouldNotifyParent).
    */
-  private notifySpawnParent(
-    child: ManagedSession,
+  private notifySubscribers(
+    target: ManagedSession,
     reason: 'complete' | 'interrupted' | 'error' | 'timeout',
     finalMessageId: string | undefined,
   ): void {
-    const parent = child.parentSessionId ? this.sessions.get(child.parentSessionId) : undefined
-    if (!shouldNotifyParent(child, Boolean(parent))) return
-    if (!parent) return
-    if (parent.isArchived || child.isArchived) return
+    if (target.isArchived) return
+    const subscribers = this.listSubscribersOf(target.id, target.workspace.rootPath)
+    if (subscribers.length === 0) return
 
     const finalText = finalMessageId
-      ? child.messages.find(m => m.id === finalMessageId)?.content
+      ? target.messages.find(m => m.id === finalMessageId)?.content
       : undefined
-    const notice = buildSpawnCompletionNotice(child, reason, finalText)
+    const notice = buildSubscriptionNotice(target, reason, finalText)
 
-    sessionLog.info(`[spawn] reporting sub-session ${child.id} (${reason}) to parent ${parent.id}`)
-    void this.sendMessage(parent.id, notice, undefined, undefined, { hidden: true }).catch((err) => {
-      sessionLog.error(`[spawn] failed to report ${child.id} to parent ${parent.id}:`, err)
+    for (const subscriberId of subscribers) {
+      const subscriber = this.sessions.get(subscriberId)
+      if (!subscriber || subscriber.isArchived) continue
+      sessionLog.info(`[subscription] reporting ${target.id} (${reason}) to ${subscriberId}`)
+      // `queue` is deliberate: a notice must never steer a turn that is already
+      // reasoning. An idle subscriber wakes up; a busy one handles it next turn.
+      void this.sendMessage(subscriberId, notice, undefined, undefined, {
+        hidden: true,
+        midStreamBehavior: 'queue',
+      }).catch((err) => {
+        sessionLog.error(`[subscription] failed to report ${target.id} to ${subscriberId}:`, err)
+      })
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session subscriptions
+  // ---------------------------------------------------------------------------
+
+  /** subscriber session id → target session ids, per workspace root. */
+  private subscriptionRegistry = new Map<string, Record<string, string[]>>()
+
+  private subscriptionRegistryPath(workspaceRootPath: string): string {
+    return join(workspaceRootPath, 'config', 'session-subscriptions.json')
+  }
+
+  private loadSubscriptionRegistry(workspaceRootPath: string): Record<string, string[]> {
+    const cached = this.subscriptionRegistry.get(workspaceRootPath)
+    if (cached) return cached
+    let loaded: Record<string, string[]> = {}
+    try {
+      const raw = readFileSync(this.subscriptionRegistryPath(workspaceRootPath), 'utf-8')
+      const parsed = JSON.parse(raw) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        loaded = parsed as Record<string, string[]>
+      }
+    } catch {
+      // Missing or unreadable file → empty registry (first run).
+    }
+    this.subscriptionRegistry.set(workspaceRootPath, loaded)
+    return loaded
+  }
+
+  private persistSubscriptionRegistry(workspaceRootPath: string): void {
+    try {
+      mkdirSync(join(workspaceRootPath, 'config'), { recursive: true })
+      writeFileSync(
+        this.subscriptionRegistryPath(workspaceRootPath),
+        JSON.stringify(this.loadSubscriptionRegistry(workspaceRootPath), null, 2),
+        'utf-8',
+      )
+    } catch (err) {
+      sessionLog.warn(`[subscription] failed to persist registry for ${workspaceRootPath}: ${err}`)
+    }
+  }
+
+  /** Subscribe `subscriberId` to `targetId`'s finished turns. Idempotent. */
+  subscribeSession(subscriberId: string, targetId: string): { subscribed: boolean; targetIds: string[] } {
+    const subscriber = this.sessions.get(subscriberId)
+    if (!subscriber) throw new Error(`Session ${subscriberId} not found`)
+    const target = this.sessions.get(targetId)
+    if (!target) throw new Error(`Session ${targetId} not found`)
+    if (subscriberId === targetId) throw new Error('A session cannot subscribe to itself')
+    if (subscriber.workspace.rootPath !== target.workspace.rootPath) {
+      throw new Error('Cross-workspace subscriptions are not supported')
+    }
+
+    const registry = this.loadSubscriptionRegistry(subscriber.workspace.rootPath)
+    const list = registry[subscriberId] ?? []
+    if (!list.includes(targetId)) {
+      registry[subscriberId] = [...list, targetId]
+      this.persistSubscriptionRegistry(subscriber.workspace.rootPath)
+      sessionLog.info(`[subscription] ${subscriberId} subscribed to ${targetId}`)
+
+      const store = this.backgroundTaskStoreFor(subscriber)
+      void (async () => {
+        await store.load()
+        const existing = store.list().find((record) =>
+          record.kind === 'subscription'
+          && record.externalId === targetId
+          && (record.status === 'running' || record.status === 'backgrounded'),
+        )
+        if (!existing) {
+          await store.create({
+            sessionId: subscriberId,
+            kind: 'subscription',
+            backgrounded: true,
+            externalId: targetId,
+            intent: targetId,
+          })
+        }
+        this.sendEvent({
+          type: 'task_backgrounded',
+          sessionId: subscriberId,
+          toolUseId: `subscription:${targetId}`,
+          taskId: targetId,
+          intent: targetId,
+          kind: 'subscription',
+        }, subscriber.workspace.id)
+      })().catch((err) => {
+        sessionLog.warn(`[subscription] failed to create background chip for ${targetId}: ${err}`)
+      })
+    }
+    return { subscribed: true, targetIds: registry[subscriberId] ?? [] }
+  }
+
+  /** Remove the subscription. Idempotent. */
+  unsubscribeSession(subscriberId: string, targetId: string): { unsubscribed: boolean; targetIds: string[] } {
+    const subscriber = this.sessions.get(subscriberId)
+    if (!subscriber) throw new Error(`Session ${subscriberId} not found`)
+    const registry = this.loadSubscriptionRegistry(subscriber.workspace.rootPath)
+    const list = registry[subscriberId] ?? []
+    if (!list.includes(targetId)) {
+      return { unsubscribed: false, targetIds: list }
+    }
+    const next = list.filter(id => id !== targetId)
+    if (next.length > 0) registry[subscriberId] = next
+    else delete registry[subscriberId]
+    this.persistSubscriptionRegistry(subscriber.workspace.rootPath)
+    sessionLog.info(`[subscription] ${subscriberId} unsubscribed from ${targetId}`)
+
+    const store = this.backgroundTaskStoreFor(subscriber)
+    void (async () => {
+      await store.load()
+      const record = store.list().find((entry) =>
+        entry.kind === 'subscription'
+        && entry.externalId === targetId
+        && (entry.status === 'running' || entry.status === 'backgrounded'),
+      )
+      if (!record) return
+      await store.stop(record.id, 'user')
+      await this.markBackgroundTaskDelivered(subscriberId, record.id)
+    })().catch((err) => {
+      sessionLog.warn(`[subscription] failed to remove background chip for ${targetId}: ${err}`)
     })
+    return { unsubscribed: true, targetIds: next }
+  }
+
+  /** Target session ids this session currently subscribes to. */
+  listSubscriptions(subscriberId: string): string[] {
+    const subscriber = this.sessions.get(subscriberId)
+    if (!subscriber) return []
+    return [...(this.loadSubscriptionRegistry(subscriber.workspace.rootPath)[subscriberId] ?? [])]
+  }
+
+  /** Session ids that subscribe to `targetId`'s finished turns. */
+  listSubscribersOf(targetId: string, workspaceRootPath: string): string[] {
+    const registry = this.loadSubscriptionRegistry(workspaceRootPath)
+    return Object.entries(registry)
+      .filter(([subscriberId, targets]) => subscriberId !== targetId && targets.includes(targetId))
+      .map(([subscriberId]) => subscriberId)
+  }
+
+  /**
+   * Best-effort per-turn archive. Turn logs are rebuilt from session.jsonl, so
+   * the debounced persist has to land first; then the backend writes the
+   * finished turn to `sessions/{id}/turns/`. Never blocks or fails the turn.
+   */
+  private queueTurnLogArchive(managed: ManagedSession): void {
+    const agent = managed.agent
+    if (!agent?.flushTurnLogs) return
+    void this.flushSession(managed.id)
+      .then(() => agent.flushTurnLogs?.())
+      .catch((err) => {
+        sessionLog.warn(`[TurnLog] archive after turn failed for ${managed.id}:`, err)
+      })
   }
 
   /**
@@ -9192,6 +9904,7 @@ ${request.prompt}`;
     }
 
     const next = managed.messageQueue.shift()!
+    this.emitQueuedMessagesChanged(managed)
     managed.pendingRecoveryTool = next.resumeToolMessageId && next.resumeToolName
       ? {
         messageId: next.resumeToolMessageId,
@@ -9299,7 +10012,312 @@ ${request.prompt}`;
     })
   }
 
-  async killShell(sessionId: string, shellId: string): Promise<{ success: boolean; error?: string }> {
+  /**
+   * Push a visible "why did this session start talking?" row.
+   *
+   * The wake-up nudge itself is `hidden` (it must reach the model but must not
+   * render as a user bubble). That leaves the transcript with a turn that
+   * began on its own and no explanation, which reads like a bug.
+   *
+   * Two messages, in order:
+   *   1. A `role: 'info'` title row (statusType `background_wake`) — the green
+   *      "后台任务已完成 — xxx" line.
+   *   2. A real `role: 'tool'` process block (Bash) with the command
+   *      (`toolInput`) and the captured result (`toolResult`), so it expands
+   *      through the SAME pipeline as any tool entry.
+   */
+  private insertBackgroundWakeNotice(
+    managed: ManagedSession,
+    text: string,
+    params?: { taskId?: string; command?: string; outputFile?: string; status?: string },
+  ): void {
+    const { taskId, command, outputFile, status } = params ?? {}
+    const terminal = status === 'completed'
+    const toolStatus = terminal ? 'completed' : 'error'
+    const outputPreview = outputFile ? readTextFileTail(outputFile) : undefined
+
+    // 1. Title row. The command deliberately lives in the process block below,
+    //    not here, so it renders once (as a tool entry) rather than twice.
+    const statusParams: Record<string, string> = {}
+    if (taskId) statusParams.taskId = taskId
+    if (outputFile) statusParams.outputFile = outputFile
+    if (status) statusParams.status = status
+    const infoMessage: Message = {
+      id: generateMessageId(),
+      role: 'info',
+      content: text,
+      timestamp: this.monotonic(),
+      statusType: 'background_wake',
+      ...(Object.keys(statusParams).length > 0 ? { statusParams } : {}),
+    }
+    managed.messages.push(infoMessage)
+    this.sendEvent({
+      type: 'info',
+      sessionId: managed.id,
+      message: text,
+      statusType: 'background_wake',
+      timestamp: infoMessage.timestamp,
+      ...(Object.keys(statusParams).length > 0 ? { statusParams } : {}),
+    }, managed.workspace.id)
+
+    // 2. Process block.
+    const toolUseId = taskId ? `bg-wake-${taskId}` : `bg-wake-${generateMessageId()}`
+    const toolName = 'Bash'
+    const message: Message = {
+      id: generateMessageId(),
+      role: 'tool',
+      content: '',
+      timestamp: this.monotonic(),
+      toolName,
+      toolUseId,
+      toolInput: command ? { command } : undefined,
+      toolResult: outputPreview ?? '',
+      toolStatus,
+      toolIntent: text,
+      isError: !terminal,
+      isBackground: true,
+      ...(taskId
+        ? (taskId.startsWith('shell_') ? { shellId: taskId } : { taskId })
+        : {}),
+    }
+    managed.messages.push(message)
+    this.persistSession(managed)
+
+    // Emit the same tool_start + tool_result pair a real tool emits, so the
+    // renderer builds the block live (command from tool_start, result from
+    // tool_result) instead of waiting for a reload.
+    this.sendEvent({
+      type: 'tool_start',
+      sessionId: managed.id,
+      toolName,
+      toolUseId,
+      toolInput: message.toolInput ?? {},
+      toolIntent: text,
+      timestamp: message.timestamp,
+    }, managed.workspace.id)
+    this.sendEvent({
+      type: 'tool_result',
+      sessionId: managed.id,
+      toolUseId,
+      toolName,
+      result: message.toolResult ?? '',
+      isError: !terminal,
+      timestamp: message.timestamp,
+    }, managed.workspace.id)
+  }
+
+  /**
+   * Surface a terminal background task to the model and mark it delivered.
+   *
+   * This is the single delivery path shared by the shell's natural `task_completed`
+   * event AND a manual `stopBackgroundTask` call. Both must wake the session the
+   * same way: steer the result into a running turn, or start a hidden turn that
+   * reads the output and reports it — otherwise a task stopped while the session
+   * is idle would sit in `stopped_pending` forever (the shell-exit event never
+   * fires after the owning subprocess is torn down at turn end).
+   */
+  private surfaceTerminalBackgroundTask(
+    managed: ManagedSession,
+    params: { taskId: string; status: string; outputFile?: string; taskIntent?: string; command?: string; stopSource?: BackgroundTaskStopSource },
+  ): void {
+    const sessionId = managed.id
+    const { taskId, status, outputFile, taskIntent, stopSource } = params
+    const command = params.command ?? managed.backgroundShellCommands.get(taskId)
+    const wakeParams = {
+      taskId,
+      ...(command ? { command } : {}),
+      ...(outputFile ? { outputFile } : {}),
+      status,
+    }
+    const label = taskIntent ? `"${taskIntent}"` : `task ${taskId}`
+    // The three terminal statuses must be distinguishable to the model, so
+    // it never reports a user stop as if the work finished on its own. When a
+    // task is stopped, the stopSource tells the model WHO stopped it (user vs
+    // the model itself vs the system/app) — a hand-written "stopped by the user
+    // or by the system" left the model guessing.
+    const stopPhrase = stopSource === 'user'
+      ? 'was stopped by the user'
+      : stopSource === 'model'
+        ? 'was stopped by you (you called stop on it yourself)'
+        : stopSource === 'session_end'
+          ? 'was stopped because the session/turn ended'
+          : stopSource === 'app_quit'
+            ? 'was interrupted when the app closed'
+            : 'was stopped (by the user or by the system)'
+    const nudge = status === 'completed'
+      ? [
+          `[background-task-completed] The background task you launched (${label}) has finished.`,
+          outputFile ? `Its full output is saved at: ${outputFile}` : '',
+          `Read that output file and present the results to the user now. Present the results inline and Do NOT spawn another background task — just read the file and summarize the findings.`,
+        ].filter(Boolean).join('\n')
+      : status === 'stopped'
+        ? [
+            `[background-task-stopped] The background task you launched (${label}) ${stopPhrase}, so it did NOT finish on its own.`,
+            outputFile ? `Whatever it produced before the stop is at: ${outputFile}` : '',
+            `Report the partial output as work that was cut short. Do NOT describe it as completed.`,
+          ].filter(Boolean).join('\n')
+        : [
+            `[background-task-${status}] The background task you launched (${label}) ended with status "${status}".`,
+            outputFile ? `Any partial output is at: ${outputFile}.` : '',
+            `Briefly let the user know it did not complete successfully. Do NOT spawn another background task.`,
+          ].filter(Boolean).join('\n')
+    const wakeRow = `${status === 'completed' ? '后台任务已完成' : '后台任务已结束'} — ${taskIntent ?? taskId}`
+
+    if (managed.isProcessing) {
+      // Mid-turn: a handed-off shell's tool call already returned at the 30s
+      // threshold, so its result is NOT in the live stream and would otherwise
+      // never reach the running turn at all. Steer it in instead of queueing.
+      const steered = managed.agent?.redirect(nudge) === true
+      if (steered) {
+        sessionLog.info(`[bg-lifecycle] steered completed background task into running turn`, {
+          sessionId,
+          taskId,
+          status,
+        })
+        this.insertBackgroundWakeNotice(managed, wakeRow, wakeParams)
+        // Steered text goes into the in-flight turn, so there is nothing left
+        // to deliver later — the row can clear now.
+        void this.markBackgroundTaskDelivered(sessionId, taskId).catch((err) => {
+          sessionLog.error(`[bg-lifecycle] failed to mark steered task delivered ${taskId}:`, err)
+        })
+      } else {
+        sessionLog.info(`[bg-lifecycle] backend cannot steer; queueing background completion`, {
+          sessionId,
+          taskId,
+        })
+        this.insertBackgroundWakeNotice(managed, wakeRow, wakeParams)
+        void this.sendMessage(sessionId, nudge, [], [], { hidden: true }).then(() => {
+          return this.markBackgroundTaskDelivered(sessionId, taskId)
+        }).catch((err) => {
+          sessionLog.error(`[bg-lifecycle] failed to surface completed task ${taskId}:`, err)
+        })
+      }
+    } else {
+      sessionLog.info(`[bg-lifecycle] surfacing completed background task to idle session`, {
+        sessionId,
+        taskId,
+        status,
+      })
+      // Make the wake-up VISIBLE. The nudge below is `hidden`, so without this
+      // row the conversation would appear to start talking on its own.
+      this.insertBackgroundWakeNotice(managed, wakeRow, wakeParams)
+      // Ride the normal turn machinery (resume + persistence). `hidden: true`
+      // keeps the nudge out of the transcript — the agent's response (the
+      // presented result) renders as a normal assistant turn.
+      void this.sendMessage(sessionId, nudge, [], [], { hidden: true }).then(() => {
+        return this.markBackgroundTaskDelivered(sessionId, taskId)
+      }).catch((err) => {
+        sessionLog.error(`[bg-lifecycle] failed to surface completed task ${taskId}:`, err)
+      })
+    }
+  }
+
+  /**
+   * Is the process behind this shell still alive?
+   *
+   * The stop path must not assume a signal worked: SIGTERM is advisory, and a
+   * shell that ignores it keeps burning CPU while the UI claims it stopped.
+   * Matching is by the recorded command string (the same way killShell finds
+   * it), because the child was spawned by the pi subprocess, not by us.
+   */
+  /**
+   * Find PIDs whose command line CONTAINS the given command.
+   *
+   * The command is passed to PowerShell through the environment rather than
+   * interpolated into the script: a real Bash command can contain single and
+   * double quotes, and `-like` additionally treats `[` `]` as wildcards. The
+   * inline form therefore failed to match commands like
+   * `bash -c 'trap "" TERM; sleep 200'` — the shell was reported as
+   * "No matching processes found", survived the forced kill, and kept running
+   * while the UI showed the task as finished.
+   */
+  /**
+   * Pick the longest quoting-insensitive fragment of a command to match against
+   * a live process command line.
+   *
+   * Why not the whole command: the shell rewrites quoting around `bash -c`
+   * arguments (`'…'` becomes `"…"` with escaped inner quotes), so the model's
+   * text and the spawned command line never match literally. Splitting on
+   * quotes/shell metacharacters and keeping the longest run of plain words
+   * survives that rewrite, and still uniquely identifies the command in
+   * practice because real commands carry their distinctive arguments.
+   *
+   * Returns null when nothing distinctive is left (e.g. the command is only
+   * quotes), in which case the caller must NOT match anything rather than kill
+   * every shell on the machine.
+   */
+  private static shellMatchProbe(command: string): string | null {
+    const MIN_PROBE = 6
+    // Split on characters that any layer may add, drop, or escape.
+    const parts = command
+      .split(/['"`\\;|&<>$(){}[\]\n\r]+/)
+      .map((p) => p.trim())
+      .filter((p) => p.length >= MIN_PROBE)
+    if (parts.length === 0) return null
+    return parts.reduce((a, b) => (b.length > a.length ? b : a))
+  }
+
+  private async findShellPids(command: string): Promise<string[]> {
+    // The recorded command is what the MODEL wrote; the process command line is
+    // what the shell actually spawned. They are not byte-identical: quoting is
+    // rewritten (`bash -c 'trap "" TERM'` becomes `bash -c "trap \"\" TERM"`),
+    // and the harness may prefix its own wrapper. Matching the whole command
+    // therefore failed for any command containing quotes.
+    //
+    // Match on the longest distinctive token instead: the command's own text
+    // with quotes/backslashes stripped, which survives requoting.
+    const probe = SessionManager.shellMatchProbe(command)
+    if (!probe) return []
+    const { exec } = await import('child_process')
+    const { promisify } = await import('util')
+    const execAsync = promisify(exec)
+
+    if (process.platform === 'win32') {
+      // `Contains` is a literal (non-wildcard) comparison; `$env:` keeps the
+      // command out of PowerShell source entirely.
+      const psCmd =
+        'Get-CimInstance Win32_Process | ' +
+        'Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:CRAFT_KILL_MATCH) } | ' +
+        'Select-Object -ExpandProperty ProcessId'
+      try {
+        const { stdout } = await execAsync(`powershell -NoProfile -Command "${psCmd}"`, {
+          env: { ...process.env, CRAFT_KILL_MATCH: probe },
+        })
+        return stdout.trim().split('\n').map(s => s.trim()).filter(Boolean)
+      } catch (err) {
+        sessionLog.info(`Process lookup failed on Windows: ${err}`)
+        return []
+      }
+    }
+
+    // Unix: pgrep -f matches the full command line; the pattern goes through the
+    // environment so quoting in the command cannot break the invocation.
+    try {
+      const { stdout } = await execAsync(`pgrep -f "$CRAFT_KILL_MATCH"`, {
+        env: { ...process.env, CRAFT_KILL_MATCH: probe },
+        shell: '/bin/bash',
+      })
+      return stdout.trim().split('\n').filter(Boolean)
+    } catch {
+      // pgrep exits 1 when nothing matches — not an error.
+      return []
+    }
+  }
+
+  private async isShellStillRunning(shellId: string): Promise<boolean> {
+    for (const managed of this.sessions.values()) {
+      const command = managed.backgroundShellCommands.get(shellId)
+      if (!command) continue
+      const pids = await this.findShellPids(command)
+      return pids.length > 0
+    }
+    return false
+  }
+  async killShell(
+    sessionId: string,
+    shellId: string,
+    options: { force?: boolean } = {},
+  ): Promise<{ success: boolean; error?: string }> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
       return { success: false, error: 'Session not found' }
@@ -9317,51 +10335,25 @@ ${request.prompt}`;
         const { promisify } = await import('util')
         const execAsync = promisify(exec)
 
-        // Escape the command for use in pkill pattern
-        // We search for the unique command string in process args
-        const escapedCommand = command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+        // Match is done by findShellPids (literal substring, env-passed).
+        const isWin = process.platform === 'win32'
 
         sessionLog.info(`Attempting to kill process with command: ${command.slice(0, 100)}...`)
 
-        // Platform-aware process killing: Windows uses PowerShell, Unix uses pgrep/kill
-        const isWin = process.platform === 'win32'
-        let pids: string[] = []
-
-        if (isWin) {
-          // On Windows, use PowerShell to find processes by command line
-          // Escape single quotes for PowerShell string literals and double quotes
-          // so they don't break the outer bash/PowerShell command wrapping.
-          try {
-            const safeCmd = escapedCommand
-              .replace(/'/g, "''")       // escape ' for PowerShell single-quote strings
-              .replace(/"/g, '\\"')    // escape " for the outer bash double-quoted argument
-            const psCmd = `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${safeCmd}*'} | Select-Object -ExpandProperty ProcessId`
-            const { stdout } = await execAsync(`powershell -NoProfile -Command "${psCmd}"`)
-            pids = stdout.trim().split('\n').map(s => s.trim()).filter(Boolean)
-          } catch (winPgrepErr) {
-            sessionLog.info(`No matching processes found (Windows process lookup failed: ${winPgrepErr})`)
-          }
-        } else {
-          // Unix: use pgrep -f to match against full command line
-          try {
-            const { stdout } = await execAsync(`pgrep -f "${escapedCommand}"`)
-            pids = stdout.trim().split('\n').filter(Boolean)
-          } catch (pgrepErr) {
-            // pgrep returns exit code 1 when no processes found, which is fine
-            sessionLog.info(`No matching processes found (pgrep returned no results)`)
-          }
-        }
+        const pids = await this.findShellPids(command)
 
         if (pids.length > 0) {
           sessionLog.info(`Found ${pids.length} process(es) to kill: ${pids.join(', ')}`)
           for (const pid of pids) {
             try {
               if (isWin) {
+                // Windows has no graceful equivalent that reliably reaches a
+                // backgrounded shell, so /F is used in both phases.
                 await execAsync(`taskkill /F /PID ${pid}`)
                 sessionLog.info(`Killed Windows PID ${pid}`)
               } else {
-                await execAsync(`kill -TERM ${pid}`)
-                sessionLog.info(`Sent SIGTERM to process ${pid}`)
+                await execAsync(`kill -${options.force ? 'KILL' : 'TERM'} ${pid}`)
+                sessionLog.info(`Sent SIG${options.force ? 'KILL' : 'TERM'} to process ${pid}`)
               }
             } catch (killErr) {
               sessionLog.warn(`Failed to kill process ${pid}: ${killErr}`)
@@ -9443,6 +10435,10 @@ ${request.prompt}`;
         sessionId,
       })
     }
+    const store = this.backgroundTaskStoreFor(managed)
+    void store.markOrphaned().catch((err) => {
+      sessionLog.error('[bg-lifecycle] failed to persist orphaned background tasks', err)
+    })
   }
 
   /**
@@ -9459,6 +10455,251 @@ ${request.prompt}`;
       .sort((a, b) => b.startTime - a.startTime)
   }
 
+  /** Stop a running background task and record who stopped it. */
+  async stopBackgroundTask(
+    sessionId: string,
+    taskId: string,
+    stoppedBy: 'model' | 'user' = 'model',
+  ): Promise<{ taskId: string; status: 'stopped'; stoppedBy: 'model' | 'user'; message: string }> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new Error(`session not found: ${sessionId}`)
+    const store = this.backgroundTaskStoreFor(managed)
+    await store.load()
+    const record = store.list().find(r => r.id === taskId || r.externalId === taskId)
+    if (!record) throw new Error(`background task not found: ${taskId}`)
+    if (record.kind === 'subscription' && record.externalId) {
+      const childId = record.externalId
+      // Stop BEFORE unsubscribing. If we unsubscribed first, a child that is
+      // mid-turn would keep running with nobody listening: its next finished turn
+      // would have nowhere to go, and the user would have "stopped" something
+      // that is still burning tokens. Unsubscribing first also risks the child's
+      // completion racing in between the two actions.
+      //
+      // `silent: false` on purpose: the user asked to stop it, so the child's
+      // transcript should record the interruption rather than quietly truncating.
+      const childManaged = this.sessions.get(childId)
+      if (childManaged?.isProcessing) {
+        try {
+          await this.cancelProcessing(childId)
+        } catch (err) {
+          // A child that refuses to stop must not block removal of the row; the
+          // subscription is dropped either way and the row is cleared below.
+          sessionLog.warn(`[bg-lifecycle] failed to stop child session ${childId}: ${err}`)
+        }
+      }
+      this.unsubscribeSession(sessionId, childId)
+      if (record.status === 'running' || record.status === 'backgrounded') {
+        await store.stop(record.id, stoppedBy)
+      }
+      await this.markBackgroundTaskDelivered(sessionId, record.id)
+      return {
+        taskId: childId,
+        status: 'stopped',
+        stoppedBy,
+        message: childManaged?.isProcessing
+          ? 'Child session stopped and subscription removed.'
+          : 'Subscription removed.',
+      }
+    }
+    if (record.status === 'orphaned_pending') {
+      // A restart-interrupted task has no process left to kill; clearing it is
+      // the whole stop operation (record removed, UI row can disappear).
+      await this.markBackgroundTaskDelivered(sessionId, record.id)
+      return {
+        taskId: record.externalId ?? record.id,
+        status: 'stopped',
+        stoppedBy,
+        message: `Background task ${record.externalId ?? record.id} was already interrupted; cleared.`,
+      }
+    }
+    const targetId = record.externalId ?? record.id
+    // Tell the renderer the kill is starting BEFORE the kill, so the row spins
+    // for the whole stop window (cooperative + grace + forced) instead of only
+    // after the process is already gone.
+    this.sendEvent({
+      type: 'background_task_stopping',
+      sessionId,
+      taskId: targetId,
+      stopSource: stoppedBy,
+    }, managed.workspace.id)
+    // Mark the in-memory registry terminal up front so a later natural-exit
+    // `task_completed` (if the owning subprocess is still alive) does NOT surface
+    // the stop a second time — `wasAlreadyTerminal` then short-circuits it.
+    const registryEntry = managed.backgroundTaskRegistry.get(targetId)
+      ?? managed.backgroundTaskRegistry.get(record.id)
+    if (registryEntry) {
+      registryEntry.status = 'stopped'
+      registryEntry.completedAt = Date.now()
+    }
+
+    if (record.kind === 'bash' && record.externalId) {
+      // Two-phase stop, per the 2026-10-30 UI contract: try a cooperative stop
+      // first and give it STOP_GRACE_MS to land; if the process is still alive
+      // after that, escalate to a forced kill. The renderer shows a spinner for
+      // exactly this window, so the grace period must stay in sync with it.
+      const shellId = record.externalId
+      // Record the stop BEFORE killing: the exit event can land within a few
+      // milliseconds of the signal, and it must already know this was a stop.
+      managed.stoppedShellIds.add(shellId)
+      const graceful = await this.killShell(sessionId, shellId, { force: false })
+      if (!graceful.success) {
+        sessionLog.warn(`Graceful stop failed for ${shellId}, escalating to forced kill`)
+        await this.killShell(sessionId, shellId, { force: true })
+      } else if (await this.isShellStillRunning(shellId)) {
+        await new Promise((resolve) => setTimeout(resolve, SessionManager.STOP_GRACE_MS))
+        if (await this.isShellStillRunning(shellId)) {
+          sessionLog.warn(
+            `Shell ${shellId} survived the ${SessionManager.STOP_GRACE_MS}ms grace period; forcing kill`,
+          )
+          await this.killShell(sessionId, shellId, { force: true })
+        }
+      }
+    }
+    // Capture whatever the task produced before we kill it. For agent/tool tasks
+    // the owning agent is the only one that can stop the in-flight run AND hand
+    // back its partial output — without this the model is told "stopped" with no
+    // way to report what had already been done.
+    let captured: { content?: string; outputFile?: string } | null = null
+    if (record.kind !== 'bash' && record.kind !== 'subscription') {
+      const ownedAgent = (managed as unknown as {
+        agent?: { cancelBackgroundTask?: (id: string) => Promise<{ content?: string; outputFile?: string }> }
+      }).agent
+      if (ownedAgent?.cancelBackgroundTask) {
+        try {
+          captured = await ownedAgent.cancelBackgroundTask(targetId)
+        } catch (err) {
+          sessionLog.warn(`[bg-lifecycle] cancelBackgroundTask failed for ${targetId}:`, err)
+        }
+      }
+    }
+    if (record.status === 'running' || record.status === 'backgrounded') {
+      await store.stop(record.id, stoppedBy)
+    }
+    this.sendEvent({
+      type: 'background_task_completed',
+      sessionId,
+      taskId: record.externalId ?? record.id,
+      status: 'stopped',
+      ...(record.outputFile ? { outputFile: record.outputFile } : {}),
+      ...(record.tail ? { tail: record.tail } : {}),
+      stopSource: stoppedBy,
+    }, managed.workspace.id)
+    // A model-initiated stop already returns the captured output as the tool
+    // result; a user-initiated one has no caller to hand it to, so surface it
+    // AND mark it delivered. This mirrors the natural-completion path: without
+    // it, a task stopped while the session is idle sits in `stopped_pending`
+    // forever (its shell-exit event never fires after turn end).
+    if (stoppedBy === 'user') {
+      if (captured?.content) {
+        // Agent/tool with inline partial output: include it directly.
+        const nudge = [
+          `[background-task-stopped] The background task (${targetId}) was stopped by the user.`,
+          ['Captured output so far:', captured.content].join('\n'),
+          'Report what was captured so far. Do NOT spawn another background agent.',
+        ].join('\n\n')
+        this.insertBackgroundWakeNotice(managed, `后台任务已结束 — ${record.intent ?? targetId}`, {
+          taskId: targetId,
+          status: 'stopped',
+          ...(captured.outputFile ? { outputFile: captured.outputFile } : {}),
+        })
+        void this.sendMessage(sessionId, nudge, [], [], { hidden: true }).then(() => {
+          return this.markBackgroundTaskDelivered(sessionId, targetId)
+        }).catch((err) => {
+          sessionLog.error(`[bg-lifecycle] failed to surface stopped task ${targetId}:`, err)
+        })
+      } else {
+        this.surfaceTerminalBackgroundTask(managed, {
+          taskId: targetId,
+          status: 'stopped',
+          stopSource: stoppedBy,
+          ...(record.outputFile || captured?.outputFile
+            ? { outputFile: record.outputFile ?? captured?.outputFile }
+            : {}),
+          ...(record.command ? { command: record.command } : {}),
+          ...(record.intent ? { taskIntent: record.intent } : {}),
+        })
+      }
+    }
+    return {
+      taskId: targetId,
+      status: 'stopped',
+      stoppedBy,
+      message: [
+        `Background task stopped by ${stoppedBy}.`,
+        captured?.content ? ['Captured output:', captured.content].join('\n') : '',
+      ].filter(Boolean).join('\n\n'),
+    }
+  }
+
+  /** Lazily resolve the persistent background-task store for a live session. */
+  private backgroundTaskStoreFor(managed: ManagedSession): BackgroundTaskStore {
+    let store = this.backgroundTaskStores.get(managed.id)
+    if (!store) {
+      store = new BackgroundTaskStore(getSessionStoragePath(managed.workspace.rootPath, managed.id))
+      this.backgroundTaskStores.set(managed.id, store)
+    }
+    return store
+  }
+
+  /** Public store accessor for executors (Phase 2) and delivery wiring. */
+  getBackgroundTaskStore(sessionId: string): BackgroundTaskStore | null {
+    const managed = this.sessions.get(sessionId)
+    return managed ? this.backgroundTaskStoreFor(managed) : null
+  }
+
+  /** Persistent records (survive restarts until delivered/deleted). */
+  async listPersistedBackgroundTasks(sessionId: string): Promise<BackgroundTaskRecord[]> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return []
+    const store = this.backgroundTaskStoreFor(managed)
+    await store.load()
+    return store.list()
+  }
+
+  /**
+   * Reconcile after a restart: anything still running/backgrounded was
+   * interrupted. Returns affected records so the caller can schedule delivery.
+   */
+  async reconcileBackgroundTasks(sessionId: string): Promise<BackgroundTaskRecord[]> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return []
+    const store = this.backgroundTaskStoreFor(managed)
+    await store.load()
+    return store.markOrphaned()
+  }
+
+  /** Mark every pending background task as delivered at turn end. */
+  async deliverPendingBackgroundTasks(sessionId: string): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return
+    const store = this.backgroundTaskStoreFor(managed)
+    await store.load()
+    for (const record of store.pendingDelivery()) {
+      await this.markBackgroundTaskDelivered(sessionId, record.id)
+    }
+  }
+
+  /** Delivery confirmed → delete the persistent record and notify the renderer. */
+  async markBackgroundTaskDelivered(sessionId: string, taskId: string, messageId?: string): Promise<boolean> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return false
+    const store = this.backgroundTaskStoreFor(managed)
+    await store.load()
+    const record = store.list().find(r => r.id === taskId || r.externalId === taskId)
+    if (!record) return false
+    const removed = await store.markDelivered(record.id, messageId)
+    if (removed) {
+      this.sendEvent({
+        type: 'background_task_delivered',
+        sessionId,
+        taskId: record.externalId ?? record.id,
+        ...(messageId ? { messageId } : {}),
+        deliveredAt: Date.now(),
+      }, managed.workspace.id)
+    }
+    return removed
+  }
+
   /**
    * Get output from a background task
    *
@@ -9470,33 +10711,99 @@ ${request.prompt}`;
    * @returns Task output content, or null if task not found
    */
   async getTaskOutput(taskId: string): Promise<string | null> {
-    // O(1) lookup via taskOutputIndex
+    // Terminal path: the completion event stored where the output lives.
     const sessionId = this.taskOutputIndex.get(taskId)
-    if (!sessionId) {
-      sessionLog.info(`No output found for task: ${taskId} (task may still be running)`)
-      return null
-    }
-
-    const managed = this.sessions.get(sessionId)
+    const managed = sessionId ? this.sessions.get(sessionId) : undefined
     const info = managed?.backgroundTaskOutputs.get(taskId)
-    if (!info) {
-      // Index out of sync — clean up stale entry
-      this.taskOutputIndex.delete(taskId)
-      return null
+
+    // NOTE: this deliberately does NOT delete the entry after reading. The
+    // composer's task row opens output whenever the user clicks the name, so a
+    // destructive read meant the second click showed nothing. Eviction is
+    // handled by evictStaleBackgroundTasks (1h) instead, which is also what the
+    // UI lifetime wants.
+    if (info?.outputFile) {
+      sessionLog.info(`Found output for task ${taskId}: file=${info.outputFile}, status=${info.status}`)
+      try {
+        return await readFile(info.outputFile, 'utf-8')
+      } catch (err) {
+        sessionLog.error(`Failed to read task output file: ${info.outputFile}`, err)
+        return info.summary || null
+      }
     }
 
-    sessionLog.info(`Found output for task ${taskId}: file=${info.outputFile}, status=${info.status}`)
-    try {
-      const content = await readFile(info.outputFile, 'utf-8')
-      // Delete after successful read to prevent memory leak
-      managed!.backgroundTaskOutputs.delete(taskId)
-      this.taskOutputIndex.delete(taskId)
-      return content
-    } catch (err) {
-      sessionLog.error(`Failed to read task output file: ${info.outputFile}`, err)
-      // Fall back to SDK-provided summary
-      return info.summary || null
+    // Live path: the task is still running, so no completion record exists yet.
+    // A handed-off Bash shell writes straight to
+    // `<sessionDir>/background-shells/<shellId>.log`; without this the row's
+    // "view output" did nothing until the command finished.
+    const livePath = await this.findLiveShellLog(taskId)
+    if (livePath) {
+      try {
+        return await readFile(livePath, 'utf-8')
+      } catch {
+        // The file exists only once the wrapper creates it; an empty read is
+        // the honest answer, not an error.
+        return ''
+      }
     }
+
+    sessionLog.info(`No output found for task: ${taskId}`)
+    return null
+  }
+
+  /**
+   * Read the tail of a background task's output (model-facing).
+   *
+   * Same sources as `getTaskOutput` (completed task file + live shell log),
+   * plus the agent/proxy convention path `<sessionDir>/background-tasks/<id>.output`
+   * for a task whose result has not been delivered yet (it may be empty while
+   * the tool is still running). `tailLines` caps the returned text to the last
+   * N lines; 0 disables tailing.
+   */
+  async getBackgroundTaskOutput(
+    sessionId: string,
+    taskId: string,
+    tailLines = 100,
+  ): Promise<string | null> {
+    let text = await this.getTaskOutput(taskId)
+    if (text === null) {
+      const managed = this.sessions.get(sessionId)
+      if (managed) {
+        const sessionDir = getSessionStoragePath(managed.workspace.rootPath, managed.id)
+        const candidate = join(sessionDir, 'background-tasks', `${taskId}.output`)
+        if (existsSync(candidate)) {
+          try {
+            text = await readFile(candidate, 'utf8')
+          } catch {
+            text = null
+          }
+        }
+      }
+    }
+    if (text === null) return null
+    const max = Number.isFinite(tailLines) && tailLines > 0 ? Math.floor(tailLines) : 100
+    const lines = text.split('\n')
+    if (lines.length <= max) return text
+    return lines.slice(lines.length - max).join('\n')
+  }
+
+  /**
+   * Locate the log file of a still-running background shell.
+   *
+   * The path is a convention shared with the pi wrapper rather than stored data,
+   * so it works for shells backgrounded before this existed. Returns null for
+   * task ids that are not shells (agent/tool tasks have no such file).
+   */
+  private async findLiveShellLog(shellId: string): Promise<string | null> {
+    if (!shellId.startsWith('shell_')) return null
+    const { existsSync } = await import('node:fs')
+    const { join } = await import('node:path')
+    for (const managed of this.sessions.values()) {
+      if (!managed.backgroundShellCommands.has(shellId)) continue
+      const sessionDir = getSessionStoragePath(managed.workspace.rootPath, managed.id)
+      const candidate = join(sessionDir, 'background-shells', `${shellId}.log`)
+      return existsSync(candidate) ? candidate : null
+    }
+    return null
   }
 
   /**
@@ -9724,88 +11031,29 @@ ${request.prompt}`;
     }
   }
 
-  /**
-   * Set labels for a session (additive tags, many-per-session).
-   * Labels are IDs referencing workspace labels/config.json.
-   */
-  async setSessionLabels(sessionId: string, labels: string[]): Promise<void> {
-    const managed = this.sessions.get(sessionId)
-    if (managed) {
-      managed.labels = labels
-      this.setMetadataWriteGuard(managed)
-
-      this.sendEvent({
-        type: 'labels_changed',
-        sessionId: managed.id,
-        labels: managed.labels,
-      }, managed.workspace.id)
-      // Persist in-memory state directly to avoid race with pending queue writes
-      this.persistSession(managed)
-      await this.flushSession(managed.id)
-      // Workaround: Bun's fs.watch({ recursive: true }) on Linux doesn't track
-      // directories created after the watcher started.
-      // https://github.com/oven-sh/bun/issues/15939
-      const watcher = this.configWatchers.get(managed.workspace.rootPath)
-      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
-    }
-  }
-
-  /**
-   * Apply the reserved Task labeling to a session. Every task gets its own ITEM label —
-   * a child of the root "Task" label named `TASK-<slug>-<N>` (plain boolean, no value) —
-   * and the task's whole family carries that same item label, so one label filters one
-   * task. Top-level sessions mint a fresh item label from their name; a session with
-   * `parentSessionId` inherits the parent's item label — and a parent that lacks one (a
-   * plain chat gaining its first subtask) is labeled in the same pass, so "becoming a
-   * task" holds by construction. Idempotent: a session already carrying an item label
-   * keeps it. Returns the resolved ITEM label id — slugs can collide-shift, so callers
-   * MUST use it rather than deriving ids themselves.
-   */
-  async applyTaskLabel(
-    sessionId: string,
-    opts?: { parentSessionId?: string },
-  ): Promise<{ labelId: string } | undefined> {
-    const managed = this.sessions.get(sessionId)
-    if (!managed) return undefined
-    const rootPath = managed.workspace.rootPath
-
-    const itemOf = (labels: string[] | undefined): string | undefined =>
-      findTaskItemLabelId(labels, loadLabelConfig(rootPath).labels)
-    const withItemEntry = (labels: string[] | undefined, itemId: string): string[] => [
-      ...(labels ?? []).filter(entry => extractLabelId(entry) !== itemId),
-      itemId,
-    ]
-
-    const existing = itemOf(managed.labels)
-    if (existing) return { labelId: existing }
-
-    let itemId: string
-    const parent = opts?.parentSessionId ? this.sessions.get(opts.parentSessionId) : undefined
-    if (parent) {
-      const parentItem = itemOf(parent.labels)
-      if (parentItem) {
-        itemId = parentItem
-      } else {
-        itemId = ensureTaskItemLabel(rootPath, parent.name || 'task').itemId
-        await this.setSessionLabels(parent.id, withItemEntry(parent.labels, itemId))
-      }
-    } else {
-      itemId = ensureTaskItemLabel(rootPath, managed.name || 'task').itemId
-    }
-
-    await this.setSessionLabels(sessionId, withItemEntry(managed.labels, itemId))
-    return { labelId: itemId }
-  }
-
-  /**
-   * Bind or unbind a session to/from a workspace project.
-   * Pass `null` to unbind. The session's working directory is NOT changed retroactively —
-   * the project binding is only used as a default for newly created sessions.
-   */
   async setSessionProjectId(sessionId: string, projectId: string | null): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (managed) {
-      managed.projectId = projectId ?? undefined
+      const prevProjectId = managed.projectId ?? null
+      const nextProjectId = projectId ?? undefined
+      let nextFolderId = managed.folderId
+      if (prevProjectId !== (nextProjectId ?? null) && nextFolderId) {
+        // Folder ids are local to one scope tree. Keeping the source tree's id
+        // after the scope changes makes the session invisible in both lists:
+        // the root view hides project sessions, and the project view only
+        // accepts ids from its own tree. Keep the id only when the target scope
+        // happens to own the same slug.
+        let targetFolders: readonly { id: string }[] = []
+        try {
+          targetFolders = loadFolderConfig(managed.workspace.rootPath, { projectId: nextProjectId ?? null }).folders
+        } catch {
+          targetFolders = []
+        }
+        if (!targetFolders.some((folder) => folder.id === nextFolderId)) nextFolderId = undefined
+      }
+
+      managed.projectId = nextProjectId
+      managed.folderId = nextFolderId
       this.setMetadataWriteGuard(managed)
 
       this.sendEvent({
@@ -9813,227 +11061,74 @@ ${request.prompt}`;
         sessionId: managed.id,
         projectId: managed.projectId ?? null,
       }, managed.workspace.id)
-
-      this.persistSession(managed)
-      await this.flushSession(managed.id)
-      const watcher = this.configWatchers.get(managed.workspace.rootPath)
-      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
-    }
-  }
-
-  /**
-   * Set the kanban board column for a session ('todo' | 'in-progress' | 'done').
-   * Pass `null` to clear (board falls back to the default column). Independent of sessionStatus.
-   */
-  async setKanbanColumn(sessionId: string, column: string | null): Promise<void> {
-    const managed = this.sessions.get(sessionId)
-    if (managed) {
-      managed.kanbanColumn = column ?? undefined
-      this.setMetadataWriteGuard(managed)
-
-      this.persistSession(managed)
-      await this.flushSession(managed.id)
-      // Self-writes don't re-emit through the file watcher (kanbanColumn isn't in the header
-      // signature), so push a live metadata event for the board to consume.
-      this.sendEvent({ type: 'session_metadata_changed', sessionId, changes: { kanbanColumn: column ?? undefined } }, managed.workspace.id)
-      const watcher = this.configWatchers.get(managed.workspace.rootPath)
-      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
-    }
-  }
-
-  /**
-   * Record the total DAG node count on a Conductor orchestrator session. The board uses this as a
-   * stable progress denominator so it doesn't grow as child sessions are spawned lazily at dispatch.
-   */
-  async setTaskNodeCount(sessionId: string, count: number): Promise<void> {
-    const managed = this.sessions.get(sessionId)
-    if (managed) {
-      managed.taskNodeCount = count
-      this.setMetadataWriteGuard(managed)
-
-      this.persistSession(managed)
-      await this.flushSession(managed.id)
-      // Self-writes don't re-emit through the file watcher (taskNodeCount isn't in the header
-      // signature), so push a live metadata event so the progress denominator updates immediately.
-      this.sendEvent({ type: 'session_metadata_changed', sessionId, changes: { taskNodeCount: count } }, managed.workspace.id)
-      const watcher = this.configWatchers.get(managed.workspace.rootPath)
-      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
-    }
-  }
-
-  /**
-   * Promote a hidden generate-time orchestrator (`taskDraft`) into the real, board-visible
-   * orchestrator for `taskSlug`. This is the single narrow path that lets "Generate → Create & Run"
-   * reuse the draft session instead of minting a second top-level tile (#bug1).
-   *
-   * Returns `true` on success (including an idempotent re-adopt of the same slug). Returns `false`
-   * — leaving the session untouched — when the session is missing, isn't a draft, or is already
-   * bound to a *different* slug. Callers fall back to `createSession` on `false`.
-   *
-   * Deliberately does NOT touch tools/sources/capabilities: the orchestrator keeps everything it
-   * was created with so it can still author/verify the run.
-   */
-  async adoptGeneratedTaskOrchestrator(
-    sessionId: string,
-    taskSlug: string,
-    reconcile?: { name?: string; projectId?: string; workingDirectory?: string; model?: string; llmConnection?: string; permissionMode?: PermissionMode },
-  ): Promise<boolean> {
-    const managed = this.sessions.get(sessionId)
-    if (!managed) {
-      sessionLog.warn('adoptGeneratedTaskOrchestrator: session not found', { sessionId, taskSlug })
-      return false
-    }
-    // Idempotency: already bound to this slug → no-op success. Bound to a different slug → refuse,
-    // so a stale draft ref can't hijack an unrelated orchestrator.
-    if (managed.taskSlug) {
-      if (managed.taskSlug === taskSlug) return true
-      sessionLog.warn('adoptGeneratedTaskOrchestrator: slug mismatch, refusing to rebind', {
-        sessionId, existing: managed.taskSlug, requested: taskSlug,
-      })
-      return false
-    }
-    // Only hidden generate-time drafts are eligible. A non-draft session without a slug isn't a
-    // generate orchestrator and must not be silently captured.
-    if (!managed.taskDraft) {
-      sessionLog.warn('adoptGeneratedTaskOrchestrator: session is not a task draft', { sessionId, taskSlug })
-      return false
-    }
-
-    // What actually changes — so we fire canonical live-updates (agent + caches + per-field events)
-    // only when needed. With generate now seeding model/connection/mode, these are usually all false.
-    const modelChanged = Boolean(reconcile?.model && reconcile.model !== managed.model)
-    const connectionChanged = Boolean(
-      reconcile?.llmConnection && !managed.connectionLocked && reconcile.llmConnection !== managed.llmConnection,
-    )
-    const cwdChanged = Boolean(reconcile?.workingDirectory && reconcile.workingDirectory !== managed.workingDirectory)
-    const modeChanged = Boolean(reconcile?.permissionMode && reconcile.permissionMode !== managed.permissionMode)
-
-    // Promote task metadata (no canonical mutator for these). Connection is set directly because
-    // setSessionConnection() refuses a session that has already sent messages (a generate draft has);
-    // the connection_changed event below keeps the renderer in sync.
-    managed.taskSlug = taskSlug
-    managed.taskDraft = false
-    if (reconcile?.projectId !== undefined) managed.projectId = reconcile.projectId
-    if (connectionChanged) managed.llmConnection = reconcile!.llmConnection
-    const renamed = Boolean(reconcile?.name && reconcile.name !== managed.name)
-    if (renamed) managed.name = reconcile!.name!
-
-    // Route model / cwd / permission mode through the canonical mutators so the LIVE agent, caches,
-    // and per-field events stay consistent — not just the on-disk metadata (the split-brain the
-    // follow-up review flagged). Each targets only the changed field; persist below captures the mode.
-    if (modelChanged) await this.updateSessionModel(sessionId, managed.workspace.id, reconcile!.model!)
-    if (cwdChanged) this.updateWorkingDirectory(sessionId, reconcile!.workingDirectory!)
-    if (modeChanged) this.setSessionPermissionMode(sessionId, reconcile!.permissionMode!)
-
-    this.setMetadataWriteGuard(managed)
-    this.persistSession(managed)
-    await this.flushSession(managed.id)
-
-    // One-shot board promotion: clearing taskDraft (sent as `false`, never `undefined` — undefined
-    // is dropped over the JSON wire) reveals the already-announced tile; taskSlug/projectId
-    // reconcile its metadata. `false` is falsy for the board's `if (meta.taskDraft)` skip.
-    const changes: { taskDraft: boolean; taskSlug: string; projectId?: string } = { taskDraft: false, taskSlug }
-    if (reconcile?.projectId !== undefined) changes.projectId = reconcile.projectId
-    this.sendEvent({ type: 'session_metadata_changed', sessionId, changes }, managed.workspace.id)
-    if (renamed) {
-      this.sendEvent({ type: 'name_changed', sessionId, name: managed.name }, managed.workspace.id)
-    }
-    if (connectionChanged) {
       this.sendEvent({
-        type: 'connection_changed',
-        sessionId,
-        connectionSlug: managed.llmConnection!,
-        supportsBranching: resolveSupportsBranching(managed),
+        type: 'session_metadata_changed',
+        sessionId: managed.id,
+        changes: { projectId: managed.projectId ?? null, folderId: managed.folderId ?? null },
       }, managed.workspace.id)
+
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+      const watcher = this.configWatchers.get(managed.workspace.rootPath)
+      watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
     }
-    const watcher = this.configWatchers.get(managed.workspace.rootPath)
-    watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
-    sessionLog.info('adoptGeneratedTaskOrchestrator: promoted draft', { sessionId, taskSlug, renamed, modelChanged, connectionChanged, cwdChanged, modeChanged })
-    return true
   }
 
   /**
-   * User-initiated bind of an *existing, visible* session (e.g. a quick-add tile) to a task slug.
-   *
-   * This is distinct from {@link adoptGeneratedTaskOrchestrator}, which is the narrow draft-only
-   * promotion path. A quick-add tile is a normal non-draft session with no `taskSlug`; the draft
-   * guard there correctly refuses it, so the editor's "save this spec onto this tile" flow needs
-   * its own path. The guard in the adopt method stays untouched.
-   *
-   * Returns `true` on success (including an idempotent re-bind of the same slug). Returns `false`
-   * — leaving the session untouched — when the session is missing or already bound to a *different*
-   * slug. Callers MUST treat `false` as a hard error and must NOT fall back to creating a fresh
-   * orchestrator (that would mint a duplicate tile).
-   *
-   * Unlike adopt, this reconciles `llmConnection` too (a fresh create sets it; adopt skips it) so
-   * the bound tile doesn't render a stale backend.
+   * Rebind every session living in the given folders to the target scope
+   * (D31 at folder granularity): a folder moved across scopes carries its
+   * sessions with it — they become project sessions when the target is a
+   * project, root sessions when the target is "All Sessions". folderId is
+   * kept: the folder itself moved into the target tree.
    */
-  async bindExistingSessionToTask(
-    sessionId: string,
-    taskSlug: string,
-    reconcile?: { name?: string; projectId?: string; workingDirectory?: string; model?: string; llmConnection?: string; permissionMode?: PermissionMode },
-  ): Promise<boolean> {
-    const managed = this.sessions.get(sessionId)
-    if (!managed) {
-      sessionLog.warn('bindExistingSessionToTask: session not found', { sessionId, taskSlug })
-      return false
-    }
-    if (managed.taskSlug) {
-      if (managed.taskSlug === taskSlug) return true
-      sessionLog.warn('bindExistingSessionToTask: slug mismatch, refusing to rebind', {
-        sessionId, existing: managed.taskSlug, requested: taskSlug,
-      })
-      return false
-    }
-
-    // What actually changes — so we fire canonical live-updates (agent + caches + per-field events)
-    // only when needed. A quick-add tile is already live, so these keep its running agent in step.
-    const modelChanged = Boolean(reconcile?.model && reconcile.model !== managed.model)
-    const connectionChanged = Boolean(
-      reconcile?.llmConnection && !managed.connectionLocked && reconcile.llmConnection !== managed.llmConnection,
-    )
-    const cwdChanged = Boolean(reconcile?.workingDirectory && reconcile.workingDirectory !== managed.workingDirectory)
-    const modeChanged = Boolean(reconcile?.permissionMode && reconcile.permissionMode !== managed.permissionMode)
-
-    // Promote task metadata (no canonical mutator for these). Connection is set directly because
-    // setSessionConnection() refuses a session that has already sent messages (a quick-add tile has);
-    // the connection_changed event below keeps the renderer in sync.
-    managed.taskSlug = taskSlug
-    managed.taskDraft = false
-    if (reconcile?.projectId !== undefined) managed.projectId = reconcile.projectId
-    if (connectionChanged) managed.llmConnection = reconcile!.llmConnection
-    const renamed = Boolean(reconcile?.name && reconcile.name !== managed.name)
-    if (renamed) managed.name = reconcile!.name!
-
-    // Route model / cwd / permission mode through the canonical mutators so the LIVE agent, caches,
-    // and per-field events stay consistent — not just the on-disk metadata (the split-brain the
-    // follow-up review flagged). updateSessionModel emits session_model_changed itself.
-    if (modelChanged) await this.updateSessionModel(sessionId, managed.workspace.id, reconcile!.model!)
-    if (cwdChanged) this.updateWorkingDirectory(sessionId, reconcile!.workingDirectory!)
-    if (modeChanged) this.setSessionPermissionMode(sessionId, reconcile!.permissionMode!)
-
-    this.setMetadataWriteGuard(managed)
-    this.persistSession(managed)
-    await this.flushSession(managed.id)
-
-    const changes: { taskDraft: boolean; taskSlug: string; projectId?: string } = { taskDraft: false, taskSlug }
-    if (reconcile?.projectId !== undefined) changes.projectId = reconcile.projectId
-    this.sendEvent({ type: 'session_metadata_changed', sessionId, changes }, managed.workspace.id)
-    if (renamed) {
-      this.sendEvent({ type: 'name_changed', sessionId, name: managed.name }, managed.workspace.id)
-    }
-    if (connectionChanged) {
+  async rebindSessionsToFolders(
+    workspaceId: string,
+    fromScope: FolderScope,
+    toScope: FolderScope,
+    folderIdMap: Record<string, string>,
+  ): Promise<void> {
+    const workspace = [...this.sessions.values()].find((managed) => managed.workspace.id === workspaceId)?.workspace
+      ?? getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) throw new Error(`Workspace ${workspaceId} not found`)
+    const sourceIds = new Set(Object.keys(folderIdMap))
+    const targetFolders = loadFolderConfig(workspace.rootPath, toScope).folders
+    const targets = [...this.sessions.values()].filter((managed) => {
+      if (managed.workspace.id !== workspaceId) return false
+      if ((managed.projectId ?? null) !== fromScope.projectId) return false
+      return !!managed.folderId && sourceIds.has(managed.folderId)
+    })
+    for (const managed of targets) {
+      const oldFolderId = managed.folderId!
+      const nextFolderId = folderIdMap[oldFolderId]!
+      const nextProjectId = toScope.projectId ?? undefined
+      managed.projectId = nextProjectId
+      managed.folderId = nextFolderId
+      if (managed.archivedFolderId) managed.archivedFolderId = folderIdMap[managed.archivedFolderId] ?? managed.archivedFolderId
+      if (managed.archivedByParent) managed.archivedByParent = folderIdMap[managed.archivedByParent] ?? managed.archivedByParent
+      if (managed.archivedFolderId) managed.archivedFolderPath = getFolderPath(targetFolders, managed.archivedFolderId)
+      if (managed.archivedProjectId && managed.archivedProjectId === fromScope.projectId) {
+        managed.archivedProjectId = toScope.projectId ?? undefined
+      }
+      managed.sortOrder = undefined
+      this.setMetadataWriteGuard(managed)
       this.sendEvent({
-        type: 'connection_changed',
-        sessionId,
-        connectionSlug: managed.llmConnection!,
-        supportsBranching: resolveSupportsBranching(managed),
+        type: 'session_metadata_changed',
+        sessionId: managed.id,
+        changes: {
+          projectId: managed.projectId ?? null,
+          folderId: managed.folderId ?? null,
+          archivedFolderId: managed.archivedFolderId,
+          archivedFolderPath: managed.archivedFolderPath,
+          archivedProjectId: managed.archivedProjectId,
+          archivedByParent: managed.archivedByParent,
+          sortOrder: undefined,
+        },
       }, managed.workspace.id)
+      this.persistSession(managed)
+      await this.flushSession(managed.id)
+      const watcher = this.configWatchers.get(managed.workspace.rootPath)
+      watcher?.notifyFileChange(`sessions/${managed.id}/session.jsonl`)
     }
-    const watcher = this.configWatchers.get(managed.workspace.rootPath)
-    watcher?.notifyFileChange(`sessions/${sessionId}/session.jsonl`)
-    sessionLog.info('bindExistingSessionToTask: bound existing session', { sessionId, taskSlug, renamed, modelChanged, connectionChanged, cwdChanged, modeChanged })
-    return true
   }
 
   /**
@@ -10846,7 +11941,7 @@ ${request.prompt}`;
           // tokenUsage — that would pin the context-usage ring to the stale
           // (pre-compaction) size. The Pi adapter emits a fresh `usage_update`
           // (post-compaction estimatedTokensAfter) right after this event; the
-          // Claude backend's ring refreshes on the next real usage event.
+          // agent backend's ring refreshes on the next real usage event.
         }
 
         // System-initiated stop (guardrail kill: busy-limit cap / no-progress
@@ -11009,6 +12104,7 @@ ${request.prompt}`;
           errorOriginal: event.error.originalError,
           errorCanRetry: event.error.canRetry,
         }
+        // Push the error message directly (retry-ladder card logic removed in main merge).
         managed.messages.push(typedErrorMessage)
         // Send typed_error event with full structure for renderer to handle
         this.sendEvent({
@@ -11048,6 +12144,22 @@ ${request.prompt}`;
             taskId: event.taskId,
             intent: event.intent,
             turnId: event.turnId,
+          })
+          const store = this.backgroundTaskStoreFor(managed)
+          void store.load().then(() => {
+            if (!store.list().some(r => r.externalId === event.taskId)) {
+              return store.create({
+                sessionId,
+                kind: event.kind === 'workflow' ? 'subagent' : 'tool',
+                externalId: event.taskId,
+                intent: event.intent,
+                toolUseId: event.toolUseId,
+                startedAt: Date.now(),
+                backgrounded: true,
+              })
+            }
+          }).catch((err) => {
+            sessionLog.error('[bg-lifecycle] failed to persist background task', err)
           })
         }
         // Forward background task event directly to renderer
@@ -11098,6 +12210,17 @@ ${request.prompt}`;
         break
 
       case 'task_completed': {
+        // A shell that the user explicitly stopped still exits on its own, so the
+        // completion event arrives with whatever exit code the kill produced.
+        // Reporting that as 'completed' (or 'failed') would tell the model the
+        // work ran to its natural end — or crashed — when the truth is "the user
+        // cut it short". Override before anything downstream reads the status.
+        // Mutating `event` in place (rather than reassigning) keeps the union's
+        // narrowing intact for the rest of this case.
+        if (managed?.stoppedShellIds.has(event.taskId)) {
+          managed.stoppedShellIds.delete(event.taskId)
+          ;(event as { status: string }).status = 'stopped'
+        }
         // Capture whether we'd already recorded a terminal result for this task
         // BEFORE mutating state below, so the idle auto-surface (further down)
         // fires at most once even if a duplicate terminal notification arrives.
@@ -11149,6 +12272,29 @@ ${request.prompt}`;
             status: event.status,
           })
 
+          const store = this.backgroundTaskStoreFor(managed)
+          void (async () => {
+            await store.load()
+            const record = store.list().find(r => r.externalId === event.taskId)
+            // Only tasks that actually became background tasks are persisted;
+            // a task that finished inside the 30s window never entered the list.
+            if (!record) return
+            if (event.status === 'stopped') {
+              await store.stop(record.id, 'model')
+            } else {
+              await store.complete(record.id, {
+                outputFile: event.outputFile,
+                tail: event.summary,
+                ...(event.status === 'failed' ? { error: 'task failed' } : {}),
+              })
+            }
+            // The terminal notification reached the model through the live
+            // stream; deletion waits for the turn-end `complete` so the UI has
+            // inserted its process-block row before the record disappears.
+          })().catch((err) => {
+            sessionLog.error('[bg-lifecycle] failed to persist task completion', err)
+          })
+
           this.evictStaleBackgroundTasks(managed)
         }
         // Forward to renderer for UI update
@@ -11166,31 +12312,19 @@ ${request.prompt}`;
         // the terminal notification reaches the agent through the live stream, so
         // we skip then. Gated on keep-alive because only that mode delivers this
         // event between turns; guarded against duplicate notifications.
-        if (managed && this.keepBackgroundTasksAlive && !managed.isProcessing && !wasAlreadyTerminal) {
+        if (managed && this.keepBackgroundTasksAlive && !wasAlreadyTerminal) {
           const taskIntent = managed.backgroundTaskRegistry.get(event.taskId)?.intent
           const outputFile = event.outputFile || managed.backgroundTaskOutputs.get(event.taskId)?.outputFile
-          const label = taskIntent ? `"${taskIntent}"` : `task ${event.taskId}`
-          const nudge = event.status === 'completed'
-            ? [
-                `[background-task-completed] The background agent you launched (${label}) has finished.`,
-                outputFile ? `Its full output is saved at: ${outputFile}` : '',
-                `Read that output file and present the results to the user now. Do NOT spawn another background agent — just read the file and summarize the findings inline.`,
-              ].filter(Boolean).join('\n')
-            : [
-                `[background-task-${event.status}] The background agent you launched (${label}) ended with status "${event.status}".`,
-                outputFile ? `Any partial output is at: ${outputFile}.` : '',
-                `Briefly let the user know it did not complete successfully. Do NOT spawn another background agent.`,
-              ].filter(Boolean).join('\n')
-          sessionLog.info(`[bg-lifecycle] surfacing completed background task to idle session`, {
-            sessionId,
+          this.surfaceTerminalBackgroundTask(managed, {
             taskId: event.taskId,
             status: event.status,
-          })
-          // Ride the normal turn machinery (resume + persistence). `hidden: true`
-          // keeps the nudge out of the transcript — the agent's response (the
-          // presented result) renders as a normal assistant turn.
-          void this.sendMessage(sessionId, nudge, [], [], { hidden: true }).catch((err) => {
-            sessionLog.error(`[bg-lifecycle] failed to surface completed task ${event.taskId}:`, err)
+            // A 'stopped' status here means the shell was killed and its natural
+            // exit event arrived before the stop path could short-circuit it —
+            // the stop source is the user (only stopBackgroundTask records a
+            // shell as stopped).
+            ...(event.status === 'stopped' ? { stopSource: 'user' as const } : {}),
+            ...(outputFile ? { outputFile } : {}),
+            ...(taskIntent ? { taskIntent } : {}),
           })
         }
         break
@@ -11201,6 +12335,44 @@ ${request.prompt}`;
         if (event.command && managed) {
           managed.backgroundShellCommands.set(event.shellId, event.command)
           sessionLog.info(`Stored command for shell ${event.shellId}: ${event.command.slice(0, 50)}...`)
+          // Register in the running-task registry too. The persisted store alone is
+          // not enough: list_background_tasks reads THIS map, so a handoff that
+          // only touched the store left the tool answering "no background tasks"
+          // even though a shell was demonstrably still running. The synthetic
+          // tool result explicitly tells the model to query list_background_tasks,
+          // so the registry has to agree with it.
+          if (!managed.backgroundTaskRegistry.has(event.shellId)) {
+            managed.backgroundTaskRegistry.set(event.shellId, {
+              taskId: event.shellId,
+              toolUseId: event.toolUseId,
+              intent: event.intent,
+              startTime: Date.now(),
+              status: 'running',
+              ...(event.turnId ? { turnId: event.turnId } : {}),
+            })
+            sessionLog.info(`[bg-lifecycle] shell backgrounded`, {
+              sessionId,
+              taskId: event.shellId,
+              intent: event.intent,
+              turnId: event.turnId,
+            })
+          }
+          const store = this.backgroundTaskStoreFor(managed)
+          void store.load().then(() => {
+            if (!store.list().some(r => r.externalId === event.shellId)) {
+              return store.create({
+                sessionId,
+                kind: 'bash',
+                externalId: event.shellId,
+                intent: event.intent,
+                command: event.command,
+                startedAt: Date.now(),
+                backgrounded: true,
+              })
+            }
+          }).catch((err) => {
+            sessionLog.error('[bg-lifecycle] failed to persist background shell', err)
+          })
         }
         // Forward to renderer
         this.sendEvent({
@@ -11214,6 +12386,8 @@ ${request.prompt}`;
         // without a text_complete would otherwise linger in the map).
         managed.streamStartAtByTurn?.clear()
         managed.steerDrainPendingFor = undefined
+        // Turn is over: results already handed to the model are delivered.
+        void this.deliverPendingBackgroundTasks(sessionId)
         // 2026-10-07 clever-marble: the drain re-stamp (steer_injected) lands
         // a guidance row where the agent READ it — but with the ordered-mandate
         // wrap, the drain round spends its reply COMPLETING THE ORIGINAL TASK
@@ -11432,7 +12606,6 @@ ${request.prompt}`;
       workspaceId,
       workspaceRootPath,
       prompt,
-      labels,
       permissionMode,
       mentions,
       llmConnection,
@@ -11455,11 +12628,6 @@ ${request.prompt}`;
     // Resolve @mentions to source/skill slugs
     const resolved = mentions ? this.resolveAutomationMentions(workspaceRootPath, mentions) : undefined
 
-    // Ensure labels exist in workspace config before assigning to session
-    const resolvedLabels = labels?.length
-      ? ensureLabelsExist(workspaceRootPath, labels)
-      : labels
-
     // Use automation name if provided, otherwise fall back to prompt snippet
     const fallback = `Automation: ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}`
     const sessionName = automationName || fallback
@@ -11467,7 +12635,6 @@ ${request.prompt}`;
     // Create a new session for this automation
     const session = await this.createSession(workspaceId, {
       name: sessionName,
-      labels: resolvedLabels,
       permissionMode: permissionMode || 'safe',
       enabledSourceSlugs: resolved?.sourceSlugs,
       llmConnection,
@@ -11490,25 +12657,6 @@ ${request.prompt}`;
     // declared `telegramTopic`. Done before `sendMessage` so the first
     // assistant tokens already route through the bound topic. Failure
     // is logged inside the binder; the session continues unbound.
-    const hasQqChannels = qqChannels && qqChannels.length > 0
-    if (this.automationBinder && (telegramTopic || hasQqChannels)) {
-      try {
-        await this.automationBinder({
-          workspaceId,
-          sessionId: session.id,
-          topicName: (telegramTopic && telegramTopic.trim().length > 0) ? telegramTopic.trim() : '',
-          qqChannels: hasQqChannels ? qqChannels : undefined,
-        })
-      } catch (err) {
-        sessionLog.warn('[Automations] automation binder threw', {
-          sessionId: session.id,
-          telegramTopic,
-          qqChannels,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      }
-    }
-
     // Send the prompt.
     // Test runs pass `waitForCompletion: false` so we return as soon as the
     // session exists and the prompt is dispatched — otherwise the RPC blocks
@@ -11643,8 +12791,6 @@ ${request.prompt}`;
     return {
       sourceSessionId: managed.id,
       name: managed.name,
-      sessionStatus: managed.sessionStatus,
-      labels: managed.labels,
       permissionMode: managed.permissionMode,
       summary,
     }
@@ -11661,8 +12807,6 @@ ${request.prompt}`;
     const session = await this.createSession(workspaceId, {
       name: payload.name,
       permissionMode: payload.permissionMode,
-      sessionStatus: payload.sessionStatus,
-      labels: payload.labels,
     })
 
     const managed = this.sessions.get(session.id)
@@ -11776,11 +12920,8 @@ ${request.prompt}`;
       createdAt: header.createdAt,
       lastUsedAt: Date.now(),
       lastMessageAt: header.lastMessageAt,
-      isFlagged: header.isFlagged,
       permissionMode: header.permissionMode,
       previousPermissionMode: header.previousPermissionMode,
-      sessionStatus: header.sessionStatus,
-      labels: header.labels,
       enabledSourceSlugs: header.enabledSourceSlugs,
       workingDirectory: header.workingDirectory,
       model: header.model,
@@ -11889,18 +13030,6 @@ ${request.prompt}`;
 
     this.sessions.set(sessionId, managed)
 
-    // Initialize automation metadata
-    const automationSystem = this.automationSystems.get(workspaceRootPath)
-    if (automationSystem) {
-      automationSystem.setInitialSessionMetadata(sessionId, {
-        permissionMode: storedSession.permissionMode,
-        labels: storedSession.labels,
-        isFlagged: storedSession.isFlagged,
-        sessionStatus: storedSession.sessionStatus,
-        sessionName: managed.name,
-      })
-    }
-
     // Built by hand (not via createSession), so announce it explicitly.
     this.notifySessionCreated(workspaceId, sessionId)
 
@@ -11949,17 +13078,6 @@ ${request.prompt}`;
       sessionLog.info(`Stopped config watcher for ${path}`)
     }
     this.configWatchers.clear()
-
-    // Dispose all AutomationSystems (includes scheduler, handlers, and event loggers)
-    for (const [workspacePath, automationSystem] of this.automationSystems) {
-      try {
-        automationSystem.dispose()
-        sessionLog.info(`Disposed AutomationSystem for ${workspacePath}`)
-      } catch (error) {
-        sessionLog.error(`Failed to dispose AutomationSystem for ${workspacePath}:`, error)
-      }
-    }
-    this.automationSystems.clear()
 
     // Clear all pending delta flush timers
     for (const [sessionId, timer] of this.deltaFlushTimers) {

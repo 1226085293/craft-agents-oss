@@ -91,6 +91,7 @@ export interface UsageOverview {
     failed: number
     promptTokens: number
     completionTokens: number
+    cachedTokens?: number
     totalTokens: number
     avgFirstByteMs: number | null
     lastStatus?: 'success' | 'error'
@@ -166,6 +167,12 @@ export interface LlmModelOptionsShape {
   maxOutputTokens?: number
   supportsImages?: boolean
   supportsThinking?: boolean
+  /**
+   * Levels the upstream accepts. Optional: the gateway sends whatever the
+   * session picked and steps down on a refusal, so this is a shortcut for an
+   * unusual relay, not a requirement (2026-10-30).
+   */
+  reasoningEfforts?: string[]
 }
 
 export interface LlmKeyShape {
@@ -220,7 +227,15 @@ export interface LlmStrategyShape {
   /** Display name; the id is a slug and reads badly for non-ASCII names. */
   name?: string
   type: LlmStrategyType
-  members: Array<{ provider: string; weight?: number }>
+  members: Array<{
+    provider: string
+    /** Public model this member serves; absent = any model the provider lists. */
+    model?: string
+    /** Per-member upstream id, overriding the strategy alias. */
+    upstreamModel?: string
+    weight?: number
+    enabled?: boolean
+  }>
   enabled?: boolean
   stickySession?: {
     enabled?: boolean
@@ -301,6 +316,8 @@ export interface ProviderDetailShape {
   }>
   recent: Array<{
     ts: number
+    /** When the request was sent; the log shows this instead of `ts`. */
+    startedAt?: number
     model: string
     keyId: string
     /** Group that actually routed the request; '' for a connection probe. */

@@ -1,7 +1,7 @@
 /**
  * Response transcoding: OpenAI Chat Completions -> Anthropic Messages.
  *
- * The gateway's client is the Claude Agent SDK, which parses Anthropic's SSE
+ * The gateway's client parses Anthropic's SSE
  * event names. An OpenAI-shaped upstream emits a different vocabulary
  * (`message_start` vs `response.created`, `content_block_delta` vs
  * `response.output_text.delta`), so the stream is rewritten event by event
@@ -20,8 +20,10 @@
  *
  * - `reasoning_content` must survive the round trip; it is forwarded as a
  *   `thinking` block so it reaches the agent rather than being dropped.
- * - A mid-stream cut is reported as a retryable `network_error`, because the
- *   client cannot tell it apart from a completed stream otherwise.
+ * - A mid-stream cut on a Craft chat request carries a supported `refusal`
+ *   stop reason and a private retry marker in `stop_details`; Pi exposes the
+ *   marker to the session layer, which discards the partial and resumes the
+ *   same model step while leaving successful streams fully incremental.
  * - Truncated tool-call arguments are marked instead of being silently
  *   accepted (see `llm-transcode-request.ts` for the request half).
  */
@@ -90,11 +92,10 @@ export interface OpenAIStreamChunk {
     prompt_tokens?: number
     completion_tokens?: number
     /**
-     * OpenAI reports the cache hit inside the prompt count, not beside it
-     * (`prompt_tokens` already includes these). Anthropic exposes the same
-     * number as a sibling field (`cache_read_input_tokens`), so it is mapped
-     * across — without it the overview's 缓存复用 is always 0% on every
-     * OpenAI-protocol provider (2026-10-25).
+     * OpenAI reports cache hits inside `prompt_tokens`; Anthropic exposes the
+     * same count separately as `cache_read_input_tokens`. Subtract it from
+     * Anthropic `input_tokens` while keeping the full prompt count in gateway
+     * usage stats, so the Pi adapter can add both fields without double-counting.
      */
     prompt_tokens_details?: { cached_tokens?: number }
   }
@@ -267,7 +268,7 @@ export class ResponseTranscoder {
    * drop connections mid-turn, and reporting both as `end_turn` would hide a
    * failed turn from the agent's retry logic.
    */
-  finish(options: { truncated?: boolean } = {}): string {
+  finish(options: { truncated?: boolean; retryMarker?: string } = {}): string {
     const out: string[] = [...this.ensureStarted()]
     this.truncated = options.truncated === true
 
@@ -282,7 +283,7 @@ export class ResponseTranscoder {
     }
 
     const stopReason = this.truncated
-      ? 'network_error'
+      ? options.retryMarker ? 'refusal' : 'network_error'
       : this.finishReason === 'tool_calls' || this.finishReason === 'function_call'
         ? 'tool_use'
         : this.finishReason === 'length'
@@ -292,9 +293,15 @@ export class ResponseTranscoder {
     out.push(
       sse(EV.messageDelta, {
         type: EV.messageDelta,
-        delta: { stop_reason: stopReason, stop_sequence: null },
+        delta: {
+          stop_reason: stopReason,
+          stop_sequence: null,
+          ...(this.truncated && options.retryMarker
+            ? { stop_details: { explanation: `${options.retryMarker}: upstream stream ended without a finish_reason` } }
+            : {}),
+        },
         usage: {
-          input_tokens: this.inputTokens,
+          input_tokens: Math.max(0, this.inputTokens - this.cachedTokens),
           output_tokens: this.outputTokens,
           cache_read_input_tokens: this.cachedTokens,
         },
@@ -302,7 +309,7 @@ export class ResponseTranscoder {
     )
     out.push(sse(EV.messageStop, { type: EV.messageStop }))
 
-    if (this.truncated) {
+    if (this.truncated && !options.retryMarker) {
       out.push(
         sse(EV.error, {
           type: 'error',
@@ -382,7 +389,7 @@ export function transcodeResponseToAnthropic(
     stop_reason: stopReason,
     stop_sequence: null,
     usage: {
-      input_tokens: body.usage?.prompt_tokens ?? 0,
+      input_tokens: Math.max(0, (body.usage?.prompt_tokens ?? 0) - (body.usage?.prompt_tokens_details?.cached_tokens ?? 0)),
       output_tokens: body.usage?.completion_tokens ?? 0,
       cache_read_input_tokens: body.usage?.prompt_tokens_details?.cached_tokens ?? 0,
     },

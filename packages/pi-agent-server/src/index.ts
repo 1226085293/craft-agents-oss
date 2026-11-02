@@ -92,6 +92,8 @@ import {
   type EphemeralQueryContext,
   type EphemeralQueryResource,
 } from './ephemeral-query-lifecycle.ts';
+import { isCraftGatewayEndpoint } from './gateway-endpoint.ts';
+import { GATEWAY_STREAM_TRUNCATION_RETRY_MARKER } from '../../shared/src/config/gateway-stream-retry.ts';
 import {
   buildCustomEndpointModelDef,
   normalizeCustomEndpointModelEntry,
@@ -135,6 +137,7 @@ import { installDsmlReceiver } from './dsml-receiver.ts';
 import { drainQueuedFollowUp } from './defense/resume-followup.ts';
 import { runVerificationJudge } from './defense/verification-judge.ts';
 import { buildVerificationJudgePrompt } from './defense/judge-prompt.ts';
+import { loadJudgeTurnContext } from './defense/turn-intent.ts';
 import { parseJudgeVerdict } from './defense/judge-verdict.ts';
 import { ToolLoopDetector, fingerprintToolCall, digestResult, shouldRejectEmptyArgs, emptyArgsMessage, type ToolLoopIntervention } from './defense/tool-loop-detector.ts';
 import {
@@ -144,6 +147,7 @@ import {
 } from './defense/streaming-degeneracy.ts';
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
 import { normalizeShellTimeout } from './shell-timeout.ts';
+import { withAutoBackground } from './background-shell.ts';
 import {
   TOOL_PAYLOAD_WARN_TOKENS,
   buildPromptSnippet,
@@ -297,7 +301,7 @@ interface OutboundPreToolUseReq {
   toolCallId?: string;
   input: Record<string, unknown>;
 }
-interface OutboundToolExecReq { type: 'tool_execute_request'; requestId: string; toolName: string; args: Record<string, unknown> }
+interface OutboundToolExecReq { type: 'tool_execute_request'; requestId: string; toolName: string; toolUseId?: string; args: Record<string, unknown> }
 interface OutboundSessionToolCompleted { type: 'session_tool_completed'; toolName: string; args: Record<string, unknown>; isError: boolean }
 interface OutboundMiniResult { type: 'mini_completion_result'; id: string; text: string | null }
 interface OutboundLlmQueryResult {
@@ -370,6 +374,24 @@ interface OutboundDefenseResumeStatus { type: 'defense_resume_status'; resumed: 
 interface OutboundSystemStopNotice { type: 'system_stop_notice'; reason: string; message: string }
 
 /**
+ * A Bash command that had been handed off to the background has now exited.
+ *
+ * The handoff made the tool call return early, so this is the only signal that
+ * the work finished. The main process turns it into a `task_completed` event,
+ * which drives the wake-up nudge — that is what lets the model STOP polling.
+ */
+interface OutboundShellCompleted {
+  type: 'shell_completed'
+  shellId: string
+  command?: string
+  logFile?: string
+  exitCode?: number | null
+  error?: string
+  /** True only when the process ended before the handoff threshold. */
+  fast?: boolean
+}
+
+/**
  * Defense layer feedback (2026-10-02 user-approved redesign): the result of
  * the program-side verification check on a verification-class turn.
  * - passed=true, skipped=false → the captured final text was judged a valid
@@ -437,6 +459,7 @@ type OutboundMessage =
   | OutboundDefenseResumeStatus
   | OutboundVerificationSkip
   | OutboundSystemStopNotice
+  | OutboundShellCompleted
   | OutboundVerificationResult
   | OutboundError;
 
@@ -484,6 +507,7 @@ let defenseEvaluator: DefenseEvaluator | null = null;
 
 // Mutable state
 let currentUserMessage = '';
+let gatewayStreamRetryRequested = false;
 
 // --- Verification bookkeeping -----------------------------------------------
 // 1-based attempt counter for the CURRENT verification cycle (a cycle is one
@@ -1030,18 +1054,31 @@ async function doVerificationCheck(
     return;
   }
 
-  // Slice the candidate: verification only needs enough context to judge
-  // correspondence, not the whole reply. 6K chars is generous for a
-  // delivery check while keeping the ephemeral query cheap.
-  const candidate = finalText.slice(0, 6000);
-  // Judge against the CURRENT turn's full intent: the user message plus every
-  // mid-turn steer (loadLatestUserRequest accumulates all guidance for the
-  // current turn only — never other turns'). 4K covers a long original
-  // request with several steers without bloating the judge query.
-  const turnIntent = (initConfig?.sessionPath ? loadLatestUserRequest(initConfig.sessionPath) : undefined)
-    || currentUserMessage || '';
-  const userMsg = turnIntent.slice(0, 4000);
-  const prompt = buildVerificationJudgePrompt(userMsg, candidate);
+  // Judge on the FULL reply, not a head slice (2026-10-26 fix, vital-crane
+  // incident): a head-only candidate (slice(0, 6000)) made the judge see a
+  // reply that "stops mid-sentence" at the cut point and verdict it
+  // FAIL|truncated for every complete reply over 6K chars, forcing 2-3
+  // pointless follow-up rewrites. The judge's RULE 4 (truncated) is meant
+  // for replies that the MODEL cut off mid-sentence — it must be able to
+  // see the tail to tell a genuine truncation from a complete answer.
+  // A one-shot judge query is cheap enough to carry the full text.
+  // Judge against THIS turn only, plus a bounded reference window of the
+  // previous turns (2026-11-01 quiet-jasmine). Source of truth is the
+  // append-only transcript (session.jsonl), grouped into turns exactly like
+  // the `turns/*.md` archives; `currentUserMessage` (the prompt this
+  // subprocess received) wins whenever the transcript lags. The progress
+  // ledger is consulted only as a last resort: it is a rolling window, and a
+  // rotated-out `user_request` used to make the judge silently grade this
+  // turn's reply against the PREVIOUS turn's message.
+  const turnContext = loadJudgeTurnContext({
+    sessionDir: initConfig?.sessionPath,
+    fallbackUserMessage: currentUserMessage,
+  });
+  if (turnContext.current.length === 0 && initConfig?.sessionPath) {
+    const ledgerIntent = loadLatestUserRequest(initConfig.sessionPath);
+    if (ledgerIntent?.trim()) turnContext.current = [{ text: ledgerIntent }];
+  }
+  const prompt = buildVerificationJudgePrompt(turnContext, finalText, new Date().toISOString());
 
   // Judge invocation with retry (2026-10-13 spec): an unavailable judge
   // (upstream timeout / quota / transport error / empty response) MUST NOT
@@ -1413,6 +1450,14 @@ function registerCustomEndpointModels(
       customModelOverrides.get(id),
       api,
       resolveConfiguredDefaultContextWindow(),
+      // The Craft gateway is the one endpoint that understands the adaptive
+      // shape, and it is the only way the session's thinking level survives to
+      // the upstream: the budget-based path collapses `max` into `high`
+      // (pi-ai's `clampReasoning`), so both levels leave as `budget_tokens:
+      // 16384` and the relay falls back to its own default. With adaptive, the
+      // level travels as `output_config.effort` and the gateway turns it into
+      // `reasoning_effort` (2026-10-29).
+      isCraftGatewayEndpoint(baseUrl),
     )),
   });
   debugLog(`Registered custom endpoint: ${baseUrl} with ${allIds.length} model(s) [${allIds.join(', ')}], api: ${api}`);
@@ -1532,9 +1577,9 @@ async function createAuthenticatedRuntime(): Promise<{
  * default; the unified retry ladder (pi-agent.ts) owns recovery now.
  *
  * The retry policy is deliberately NOT overridden here: `createCraftSettingsManager`
- * already injects the upstream-tuned policy from `session-settings.ts`.
- * (With the unified ladder active, CRAFT_PI_RETRY_ENABLED=0 disables the SDK's
- * own retries so the ladder is the single retry owner.)
+ * already pins the SDK's agent- and provider-level retries off (see
+ * `session-settings.ts`), so the gateway ladder and the main-process ladder
+ * stay the only retry owners. There is no env switch for that on purpose.
  *
  * The compaction reserve is applied here rather than in `session-settings.ts`
  * because it is sized from the model's context window, which is only known
@@ -1664,9 +1709,26 @@ async function createPiSession(): Promise<AgentSession> {
         : {}),
       operations: (() => {
         const local = createLocalBashOperations({ shellPath: initConfig.shellPath });
+        const backgroundable = withAutoBackground(local, {
+          sessionDir: process.env.CRAFT_SESSION_DIR ?? cwd,
+          onBackgroundExit: ({ shellId, logFile, command, exitCode, error }) => {
+            // Only reached for shells that were actually handed off. Reporting
+            // it here (rather than polling in the main process) means the exit
+            // is observed exactly once, by the process that owns it.
+            debugLog(`[background-shell] ${shellId} exited (code=${exitCode ?? 'null'})`);
+            send({
+              type: 'shell_completed',
+              shellId,
+              command,
+              logFile,
+              exitCode,
+              ...(error ? { error } : {}),
+            });
+          },
+        });
         return {
           exec: (command, dir, opts) =>
-            local.exec(command, dir, { ...opts, timeout: normalizeShellTimeout(opts.timeout) }),
+            backgroundable.exec(command, dir, { ...opts, timeout: normalizeShellTimeout(opts.timeout) }),
         };
       })(),
     }),
@@ -2242,6 +2304,7 @@ function buildProxyTools(): ToolDefinition<any, any>[] {
         type: 'tool_execute_request',
         requestId,
         toolName: def.name,
+        toolUseId: toolCallId,
         args: approvedInput,
       });
 
@@ -2376,8 +2439,14 @@ async function queryLlm(
     // Same resilience overrides as the main session (retry + capped idle timeout),
     // applied AFTER setModel below so the reserve is derived from the mini model's
     // context window. If setModel throws we fall back to session defaults.
+    //
+    // `wireModel`, not `piModel`: the per-call kind header lives only on the
+    // copy, so re-setting the bare model here silently dropped it and every
+    // mini completion was logged as 对话 — a memory pass looked like
+    // conversation traffic in the gateway log and was charged to the session's
+    // quota.
     try {
-      await ephemeralSession.setModel(piModel);
+      await ephemeralSession.setModel(wireModel);
     } catch {
       debugLog(`[queryLlm] Failed to set model on ephemeral session, proceeding with default`);
     }
@@ -2692,6 +2761,10 @@ function handleSessionEvent(event: AgentSessionEvent): void {
   // Log API errors for debugging and attach provider-native turn anchor for branch cutoffs.
   if (event.type === 'message_end') {
     const msg = event.message as { role?: string; stopReason?: string; errorMessage?: string } | undefined;
+    if (msg?.role === 'assistant' && msg.stopReason === 'error' && msg.errorMessage?.includes(GATEWAY_STREAM_TRUNCATION_RETRY_MARKER)) {
+      gatewayStreamRetryRequested = true;
+      debugLog('[gateway-retry] truncated stream marked retryable by strategy gateway');
+    }
     if (msg?.stopReason === 'error') {
       debugLog(`API error in message_end: ${msg.errorMessage || 'unknown'}`);
     }
@@ -2924,7 +2997,8 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     event.type === 'agent_end' &&
     piSession &&
     defenseEvaluator?.canEvaluate() &&
-    !(event as { willRetry?: boolean }).willRetry
+    !(event as { willRetry?: boolean }).willRetry &&
+    !gatewayStreamRetryRequested
   ) {
     const defenseResult = evaluateDefensePostStop((event as { messages?: unknown[] }).messages);
     if (defenseResult) {
@@ -3043,6 +3117,7 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     event.type === 'agent_end' &&
     piSession &&
     !(event as { willRetry?: boolean }).willRetry &&
+    !gatewayStreamRetryRequested &&
     !(forwardedEvent as { defenseResumePending?: boolean }).defenseResumePending &&
     !(forwardedEvent as { defenseVerificationPending?: boolean }).defenseVerificationPending &&
     typeof (piSession as unknown as { pendingMessageCount?: number }).pendingMessageCount === 'number' &&
@@ -3067,6 +3142,17 @@ function handleSessionEvent(event: AgentSessionEvent): void {
         },
       },
     );
+  }
+
+  if (
+    event.type === 'agent_end' &&
+    gatewayStreamRetryRequested &&
+    !(event as { willRetry?: boolean }).willRetry &&
+    !(forwardedEvent as { defenseResumePending?: boolean }).defenseResumePending &&
+    !(forwardedEvent as { defenseVerificationPending?: boolean }).defenseVerificationPending &&
+    !(forwardedEvent as { queuedFollowUpPending?: boolean }).queuedFollowUpPending
+  ) {
+    forwardedEvent = { ...(forwardedEvent as Record<string, unknown>), gatewayRetryPending: true } as unknown as OutboundAgentEvent;
   }
 
   // Forward all events to main process
@@ -3207,6 +3293,7 @@ function disposeSessionForToolChanges(where: string): void {
 
 async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): Promise<void> {
 
+  gatewayStreamRetryRequested = false;
   currentUserMessage = msg.message;
   // A NEW user request starts a fresh verification cycle. Clear the attempt
   // counter and the content-stability baseline here so BOTH are scoped to
@@ -3295,6 +3382,11 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     };
     try {
       await awaitTurnWithStallDetection(promptPromise, activeToolDeadline);
+      while (gatewayStreamRetryRequested && !userAbortRequested) {
+        gatewayStreamRetryRequested = false;
+        debugLog('[gateway-retry] retrying the same model step through AgentSession.continue()');
+        await handleRetry();
+      }
     } catch (stallErr) {
       debugLog(`[prompt] stalled or failed: ${stallErr instanceof Error ? stallErr.message : stallErr}; aborting session to reset state`);
       // SYSTEM-initiated abort, NOT a user stop: set the flag BEFORE abort()
@@ -3851,10 +3943,14 @@ async function handleCompact(msg: Extract<InboundMessage, { type: 'compact' }>):
       ).keepRecentTokens;
       // The relief hook measured the kept region from the real branch entries
       // during session_before_compact, on BOTH paths. Reuse it so the SDK's
-      // own compaction reports the same exact `retained` instead of a floor.
+      // own compaction reports the same exact `retained` instead of a floor —
+      // but ONLY when it was taken during THIS compaction: a leftover from an
+      // earlier pass describes a different branch, and trusting it would put a
+      // number from another compaction on this row.
       const measured = contextReliefDeps?.lastRetainedMeasurement;
+      const freshRetained = measured && measured.measuredAt >= requestedAt ? measured.retained : undefined;
       const reliefStats = (result.details as { reliefStats?: unknown } | undefined)?.reliefStats
-        ?? synthCompactionStats(result, keepRecent, measured?.retained);
+        ?? synthCompactionStats(result, keepRecent, freshRetained);
       sendResult({
         success: true,
         result: {

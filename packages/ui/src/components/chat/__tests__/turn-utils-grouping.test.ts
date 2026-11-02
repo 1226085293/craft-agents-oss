@@ -195,7 +195,7 @@ describe('groupActivitiesByParent', () => {
     })
   })
 
-  // Regression guard: Claude Agent SDK v0.2.72 renamed the subagent launcher
+  // Regression guard: A legacy agent SDK version renamed the subagent launcher
   // from 'Task' to 'Agent'. Both names must group identically. If this test
   // fails, a callsite has narrowed back to `=== 'Task'` instead of using
   // `isParentTaskTool` — fix the callsite, don't loosen this test.
@@ -763,5 +763,135 @@ describe('compaction_summary row placement', () => {
     const rows = turns[0].activities.filter(a => a.statusType === 'compaction_summary')
     expect(rows).toHaveLength(1)
     expect(rows[0].statusParams!.retained).toBe(20099)
+  })
+
+  it('auto compaction_complete mid-turn without a compacting row is absorbed into the turn, not dropped', () => {
+    // Regression (2026-10-26 crisp-tiger): the renderer's handleInfo converts
+    // the compacting status row to a compaction_complete INFO row in-place
+    // before groupMessagesByTurn runs. With no compacting activity left,
+    // the old code silently `continue`d the row out of the grouping while
+    // ChatDisplay still rendered it as a standalone "Conversation
+    // Compacted" divider — splitting one process block into two.
+    resetCounters()
+    const turns = groupMessagesByTurn([
+      { id: 'u-1', role: 'user', content: 'go', timestamp: 1000 },
+      { id: 't-1', role: 'tool', content: 'tool 1', timestamp: 1100, turnId: 'pi-turn-1' },
+      { id: 'info-cc', role: 'info', content: 'Compacted context to fit within limits', timestamp: 1200, statusType: 'compaction_complete', statusParams: { tokens: '479325' } },
+      { id: 't-2', role: 'tool', content: 'tool 2', timestamp: 1300, turnId: 'pi-turn-1' },
+      { id: 'a-1', role: 'assistant', content: 'done', timestamp: 1400 },
+    ] as never[])
+    // One assistant process block holds BOTH tools; the complete row sits
+    // inside it as a completed fact row instead of escaping as a divider.
+    const assistantTurn = turns.find(t => t.type === 'assistant')
+    expect(assistantTurn).toBeDefined()
+    const toolRows = assistantTurn!.activities.filter(a => a.type === 'tool')
+    expect(toolRows).toHaveLength(2)
+    const cc = assistantTurn!.activities.find(a => a.statusType === 'compaction_complete')
+    expect(cc).toBeDefined()
+    expect(cc!.status).toBe('completed')
+    // No orphan turn was created for the row.
+    expect(turns.filter(t => t.type === 'assistant')).toHaveLength(1)
+  })
+})
+
+// ============================================================================
+// Compaction summary row placement (2026-10-19, first-crane)
+// ============================================================================
+
+describe('compaction_summary row placement', () => {
+  const reliefParams = {
+    before: 189720,
+    retained: 20099,
+    compacted: 167757,
+    checkpoint: 1963,
+    after: 22062,
+    viaRelief: 1,
+  }
+
+  /** A finishing assistant message closes the currently open turn. */
+  const assistantMsg = (ts: number) => ({ id: `a-${ts}`, role: 'assistant', content: 'done', timestamp: ts })
+
+  it('manual /compact (info) renders as its OWN card, not inside the previous turn', () => {
+    resetCounters()
+    const turns = groupMessagesByTurn([
+      assistantMsg(1000),
+      { id: 'u-1', role: 'user', content: '/compact', timestamp: 2000 },
+      { id: 'info-1', role: 'info', content: 'Compaction summary', timestamp: 3000, statusType: 'compaction_summary', statusParams: reliefParams },
+    ] as never[])
+    // user turn + assistant turn + standalone compaction turn.
+    expect(turns).toHaveLength(3)
+    expect(turns.map(t => t.type)).toEqual(['assistant', 'user', 'assistant'])
+    expect(turns[2].activities.some(a => a.statusType === 'compaction_summary')).toBe(true)
+    // The previous assistant turn must NOT have borrowed the row.
+    expect(turns[0].activities).toHaveLength(0)
+  })
+
+  it('manual /compact does not fold into an open process block', () => {
+    resetCounters()
+    const turns = groupMessagesByTurn([
+      { id: 'st-1', role: 'status', content: 'Compacting', timestamp: 1000, statusType: 'compacting' },
+      { id: 'info-1', role: 'info', content: 'Compaction summary', timestamp: 2000, statusType: 'compaction_summary', statusParams: reliefParams },
+    ] as never[])
+    // The open status turn is flushed and the summary starts its own card.
+    expect(turns).toHaveLength(2)
+    expect(turns[0].activities[0].statusType).toBe('compacting')
+    expect(turns[1].activities[0].statusType).toBe('compaction_summary')
+  })
+
+  it('manual /compact keeps the MEASURED retained/after the backend sent', () => {
+    resetCounters()
+    const turns = groupMessagesByTurn([
+      assistantMsg(1000),
+      { id: 'info-1', role: 'info', content: 'Compaction summary', timestamp: 2000, statusType: 'compaction_summary', statusParams: reliefParams },
+    ] as never[])
+    const row = turns[1].activities[0]
+    expect(row.statusParams).toMatchObject({
+      retained: 20099,
+      after: 22062,
+      compacted: 167757,
+    })
+    // 189.7 - 167.8 = 22.0k must NOT replace the measured 20.1k.
+    expect(row.statusParams!.retained).not.toBe(189720 - 167757)
+  })
+
+  it('auto compaction (status) stays INSIDE the turn that triggered it', () => {
+    resetCounters()
+    const turns = groupMessagesByTurn([
+      { id: 'st-1', role: 'status', content: 'Compacting', timestamp: 1000, statusType: 'compacting' },
+      { id: 'st-2', role: 'status', content: 'Compaction summary', timestamp: 2000, statusType: 'compaction_summary', statusParams: reliefParams },
+      assistantMsg(3000),
+    ] as never[])
+    expect(turns).toHaveLength(1)
+    expect(turns[0].activities.map(a => a.statusType)).toEqual(['compacting', 'compaction_summary'])
+  })
+
+  it('a pre-existing summary row in the same turn is updated, not duplicated', () => {
+    resetCounters()
+    const turns = groupMessagesByTurn([
+      { id: 'st-1', role: 'status', content: 'Compacting', timestamp: 1000, statusType: 'compacting' },
+      { id: 'st-2', role: 'status', content: 'Compaction summary', timestamp: 1500, statusType: 'compaction_summary', statusParams: { ...reliefParams, retained: 1 } },
+      { id: 'st-3', role: 'status', content: 'Compaction summary', timestamp: 2000, statusType: 'compaction_summary', statusParams: reliefParams },
+    ] as never[])
+    // Auto path: one running turn holds all rows.
+    expect(turns).toHaveLength(1)
+    const rows = turns[0].activities.filter(a => a.statusType === 'compaction_summary')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].statusParams!.retained).toBe(20099)
+  })
+
+  it('keeps an automatic info compaction summary inside the continuing process block', () => {
+    resetCounters()
+    const turns = groupMessagesByTurn([
+      { id: 'u-1', role: 'user', content: 'Finish the task', timestamp: 1000 },
+      { id: 't-1', role: 'tool', content: 'before compaction', timestamp: 1100, turnId: 'pi-turn-1' },
+      { id: 'info-1', role: 'info', content: 'Compaction summary', timestamp: 1200, statusType: 'compaction_summary', statusParams: reliefParams },
+      { id: 't-2', role: 'tool', content: 'after compaction', timestamp: 1300, turnId: 'pi-turn-1' },
+      { id: 'a-1', role: 'assistant', content: 'Done', timestamp: 1400, turnId: 'pi-turn-1' },
+    ] as never[])
+
+    const assistantTurns = turns.filter(t => t.type === 'assistant')
+    expect(assistantTurns).toHaveLength(1)
+    expect(assistantTurns[0].activities.filter(a => a.type === 'tool')).toHaveLength(2)
+    expect(assistantTurns[0].activities.some(a => a.statusType === 'compaction_summary')).toBe(true)
   })
 })

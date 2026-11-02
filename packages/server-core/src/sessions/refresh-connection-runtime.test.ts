@@ -6,6 +6,7 @@ import { resolveBackendContext } from '@craft-agent/shared/agent/backend'
 import { loadWorkspaceConfig } from '@craft-agent/shared/workspaces'
 import { SessionManager, createManagedSession, gatewayRouteDeps, applyGatewayStrategy } from './SessionManager.ts'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
+import * as llmStorage from '@craft-agent/shared/config/storage'
 import { buildRestartRequiredSignature } from './runtime-config.ts'
 
 // Regression coverage for the stale-Pi-subprocess bug where toggling
@@ -113,6 +114,7 @@ describe('refreshConnectionRuntime', () => {
   let tmpRoot: string
   let sm: SessionManager
   let keySpy: ReturnType<typeof jest.spyOn>
+  let connSpy: ReturnType<typeof jest.spyOn>
 
   beforeEach(() => {
     tmpRoot = mkdtempSync(join(tmpdir(), 'sm-refresh-'))
@@ -133,10 +135,23 @@ describe('refreshConnectionRuntime', () => {
     // fingerprint source to "no key" so injected pre-rotation signatures stay
     // comparable; individual tests opt in with a key via `keySpy`.
     keySpy = jest.spyOn(getCredentialManager(), 'getLlmApiKey').mockResolvedValue(null)
+    // `resolveSessionConnection` falls back to the global default connection,
+    // which reads the developer's real ~/.craft-agent config. Pin a synthetic
+    // connection so the route guard can resolve one regardless of host config.
+    connSpy = jest.spyOn(llmStorage, 'getLlmConnection').mockImplementation((slug) => ({
+      slug: slug || 'default',
+      name: 'test',
+      providerType: 'pi_compat',
+      authType: 'api_key',
+      defaultModel: 'pub-a',
+      models: [],
+      createdAt: 0,
+    }))
   })
 
   afterEach(() => {
     keySpy.mockRestore()
+    connSpy.mockRestore()
     delete gatewayRouteDeps.runtime
     delete gatewayRouteDeps.config
     rmSync(tmpRoot, { recursive: true, force: true })
@@ -278,5 +293,70 @@ describe('refreshConnectionRuntime', () => {
         }
       }
     }
+  })
+
+  it('refreshGatewayRuntime applies the configured window and pushes it to the active session UI', async () => {
+    const agent = createAgentStub()
+    const managed = injectSession(sm, 'gw-context', tmpRoot, 'slug-A', agent) as unknown as {
+      tokenUsage?: { inputTokens: number; outputTokens: number; totalTokens: number; contextWindow?: number }
+    }
+    managed.tokenUsage = { inputTokens: 40_000, outputTokens: 0, totalTokens: 40_000, contextWindow: 1_000_000 }
+    gatewayRouteDeps.config = {
+      strategies: [{
+        id: STRATEGY_ID,
+        type: 'round_robin',
+        modelAliases: { 'claude-sonnet-5': 'claude-sonnet-5' },
+        members: [{ provider: 'provider', model: 'claude-sonnet-5' }],
+      }],
+      providers: [{
+        id: 'provider',
+        modelOptions: { 'claude-sonnet-5': { contextWindow: 256_000 } },
+      }],
+    } as never
+    const events: any[] = []
+    sm.setEventSink((_channel, _target, event) => events.push(event))
+
+    await sm.refreshGatewayRuntime()
+
+    expect(agent.updateRuntimeConfig).toHaveBeenCalledTimes(1)
+    expect(agent.updateRuntimeConfig.mock.calls[0]?.[0].runtime?.customModels).toContainEqual({
+      id: 'claude-sonnet-5',
+      contextWindow: 256_000,
+    })
+    expect(managed.tokenUsage?.contextWindow).toBe(256_000)
+    expect(events).toContainEqual({
+      type: 'usage_update',
+      sessionId: 'gw-context',
+      tokenUsage: { inputTokens: 40_000, contextWindow: 256_000 },
+    })
+  })
+
+  it('refreshGatewayRuntime pushes to every strategy-routed session regardless of connection slug', async () => {
+    // A group's per-model capabilities live in llm-config.json, not in any
+    // connection, so the gateway refresh must not be keyed on a slug.
+    const sessionA = createAgentStub()
+    const sessionB = createAgentStub()
+    injectSession(sm, 'gw-a', tmpRoot, 'slug-A', sessionA)
+    injectSession(sm, 'gw-b', tmpRoot, 'slug-B', sessionB)
+
+    await sm.refreshGatewayRuntime()
+
+    expect(sessionA.updateRuntimeConfig).toHaveBeenCalledTimes(1)
+    expect(sessionB.updateRuntimeConfig).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshGatewayRuntime skips sessions that are not strategy-routed', async () => {
+    const routed = createAgentStub()
+    const direct = createAgentStub()
+    const directManaged = injectSession(sm, 'gw-direct', tmpRoot, 'slug-A', direct)
+    injectSession(sm, 'gw-routed', tmpRoot, 'slug-A', routed)
+    // A session without a strategy routes through a direct connection, not the
+    // gateway — its capabilities are governed by llmConnections, not llm-config.
+    ;(directManaged as { strategy?: string }).strategy = undefined
+
+    await sm.refreshGatewayRuntime()
+
+    expect(routed.updateRuntimeConfig).toHaveBeenCalledTimes(1)
+    expect(direct.updateRuntimeConfig).not.toHaveBeenCalled()
   })
 })

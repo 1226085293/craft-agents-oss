@@ -38,17 +38,30 @@ export const DEFAULT_FILTER: LogsFilter = {
   q: '',
 }
 
-/** How a row's outcome reads on screen. */
-export type LogLevel = 'success' | 'retried' | 'failed'
+/**
+ * How a row's outcome reads on screen. Two values, not three.
+ *
+ * A request whose first attempt got a 429 and whose second succeeded *succeeded*:
+ * the column used to paint it an amber "重试", which sits next to a real failure
+ * looking like something still needs attention, and buries the only answer the
+ * column is asked for — did it work. The tries are not lost: the expanded row
+ * prints 尝试 N 次 and the trace, and the 总览 counters still report retries.
+ */
+export type LogLevel = 'success' | 'failed'
+
+export function logLevel(r: LlmUsageRecord): LogLevel {
+  return r.status === 'success' ? 'success' : 'failed'
+}
 
 /**
- * "重试" describes a SUCCESS that needed another attempt. A failed request that
- * was retried is still a failure — retrying successfully and then failing is the
- * outcome that matters, not the number of tries.
+ * Coerce a level that came from outside this render into one the table can
+ * honour: a restored filter, an older dialog, a hand-built tag.
+ *
+ * `retried` used to be a selectable level. A filter still set to it would match
+ * no row and read as "the log lost my requests".
  */
-export function logLevel(r: LlmUsageRecord): LogLevel {
-  if (r.status !== 'success') return 'failed'
-  return r.retried || (r.attempts ?? 0) > 1 ? 'retried' : 'success'
+export function normalizeLevel(level: string): LogLevel | 'all' {
+  return level === 'success' || level === 'failed' ? level : 'all'
 }
 
 /**
@@ -60,8 +73,9 @@ export function logLevel(r: LlmUsageRecord): LogLevel {
  * keeps "提供商 = X" from listing any other provider.
  */
 export function filterLogs(rows: readonly LlmUsageRecord[], f: LogsFilter): LlmUsageRecord[] {
+  const level = normalizeLevel(f.level)
   return rows.filter((r) => {
-    if (f.level !== 'all' && logLevel(r) !== f.level) return false
+    if (level !== 'all' && logLevel(r) !== level) return false
     if (f.provider !== 'all' && r.provider !== f.provider) return false
     if (f.strategy !== 'all' && r.strategy !== f.strategy) return false
     // `?? 'all'`: a filter object restored from an older shape would otherwise

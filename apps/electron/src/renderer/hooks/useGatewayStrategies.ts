@@ -49,6 +49,12 @@ export interface GatewayStatusPayload {
     /** Display name; absent in older main processes. */
     name?: string
     models?: string[]
+    /**
+     * The subset of `models` a request made now could actually land on. Empty
+     * with a non-empty `models` means every availability window is closed.
+     * Absent means an older main process (`models` is the whole truth there).
+     */
+    openModels?: string[]
     enabled?: boolean
     usable?: boolean
     reason?: string
@@ -71,6 +77,7 @@ export function projectGatewayStrategies(status: GatewayStatusPayload | null): {
     name: s.name,
     lastModel: status?.lastModels?.[s.id],
     models: s.models,
+    openModels: s.openModels,
     enabled: s.enabled,
     usable: s.usable,
     reason: s.reason,

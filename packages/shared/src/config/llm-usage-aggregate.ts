@@ -15,8 +15,30 @@
  */
 
 import type { LlmUsageRecord } from './llm-usage-store.ts';
+import { isSupersededAttempt } from './llm-usage-store.ts';
 import { isProbeKind } from './model-request-kind.ts';
 import type { UsageDayBucket } from './llm-usage-buckets.ts';
+
+/**
+ * Rows that describe something other than a request's outcome.
+ *
+ * A connection probe is a test that is allowed to fail; an attempt superseded by
+ * a retry is one leg of a request whose outcome is recorded on a later row.
+ * Counting either would make "failed once, then succeeded" read as one failure
+ * plus one success instead of one retried success.
+ */
+function isNotOutcome(r: LlmUsageRecord): boolean {
+  return isProbeKind(r.kind) || isSupersededAttempt(r);
+}
+
+/**
+ * When the request was made. Day and hour buckets follow this rather than `ts`:
+ * a request sent at 23:59 belongs to that day even when it finishes after
+ * midnight, and the log's 时间 column already reads the same field.
+ */
+function startOf(r: LlmUsageRecord): number {
+  return r.startedAt ?? r.ts;
+}
 
 export interface TokenTotals {
   promptTokens: number;
@@ -51,6 +73,7 @@ export interface ProviderBreakdown {
   failed: number;
   promptTokens: number;
   completionTokens: number;
+  cachedTokens?: number;
   totalTokens: number;
   avgFirstByteMs: number | null;
   /** Share of all requests, 0..1. */
@@ -203,7 +226,10 @@ export function filterUsageByRange(
   now = Date.now(),
 ): LlmUsageRecord[] {
   const { fromTs, toTs } = resolveUsageRange(range, now);
-  return records.filter((r) => r.ts >= fromTs && r.ts < toTs);
+  return records.filter((r) => {
+    const at = startOf(r);
+    return at >= fromTs && at < toTs;
+  });
 }
 
 // ============================================================================
@@ -274,6 +300,7 @@ export function aggregateFromBuckets(
         failed: 0,
         promptTokens: 0,
         completionTokens: 0,
+        cachedTokens: 0,
         totalTokens: 0,
         avgFirstByteMs: null,
         requestShare: 0,
@@ -290,6 +317,7 @@ export function aggregateFromBuckets(
       acc.failed += p.failed
       acc.promptTokens += p.prompt
       acc.completionTokens += p.completion
+      acc.cachedTokens = (acc.cachedTokens ?? 0) + (p.cached ?? 0)
       acc.totalTokens += p.prompt + p.completion
       const extra = acc as unknown as { firstByteSum: number; firstByteCount: number }
       extra.firstByteSum += p.firstByteSum
@@ -327,6 +355,7 @@ export function aggregateFromBuckets(
         failed: p.failed,
         promptTokens: p.promptTokens,
         completionTokens: p.completionTokens,
+        cachedTokens: p.cachedTokens,
         totalTokens: p.totalTokens,
         avgFirstByteMs: extra.firstByteCount > 0 ? Math.round(extra.firstByteSum / extra.firstByteCount) : null,
         requestShare: totalRequests > 0 ? p.requests / totalRequests : 0,
@@ -367,7 +396,7 @@ export function aggregateOverview(records: LlmUsageRecord[], now = Date.now()): 
   const sessions = new Set<string>();
 
   for (const r of records) {
-    if (isProbeKind(r.kind)) continue;
+    if (isNotOutcome(r)) continue;
     const prompt = num(r.promptTokens);
     const completion = num(r.completionTokens);
     totals.promptTokens += prompt;
@@ -386,7 +415,7 @@ export function aggregateOverview(records: LlmUsageRecord[], now = Date.now()): 
       outcomes.failed += 1;
     }
 
-    const day = localDay(r.ts);
+    const day = localDay(startOf(r));
     let dayPoint = daily.get(day);
     if (!dayPoint) {
       dayPoint = {
@@ -419,6 +448,7 @@ export function aggregateOverview(records: LlmUsageRecord[], now = Date.now()): 
         failed: 0,
         promptTokens: 0,
         completionTokens: 0,
+        cachedTokens: 0,
         totalTokens: 0,
         avgFirstByteMs: null,
         requestShare: 0,
@@ -446,6 +476,7 @@ export function aggregateOverview(records: LlmUsageRecord[], now = Date.now()): 
     }
     provider.promptTokens += prompt;
     provider.completionTokens += completion;
+    provider.cachedTokens = (provider.cachedTokens ?? 0) + num(r.cachedTokens);
     provider.totalTokens += prompt + completion;
 
     const strat = strategies.get(r.strategy) ?? { requests: 0, totalTokens: 0 };
@@ -506,7 +537,7 @@ export function aggregateProvider(
   //            not a provider failure.
   const all = records.filter((r) => r.provider === providerId);
   if (all.length === 0) return null;
-  const mine = all.filter((r) => !isProbeKind(r.kind));
+  const mine = all.filter((r) => !isNotOutcome(r));
 
   const totals = emptyTotals();
   const outcomes: OutcomeCounts = { success: 0, retried: 0, failed: 0 };
@@ -567,7 +598,7 @@ export function aggregateProvider(
     key.completionTokens += completion;
     key.totalTokens += prompt + completion;
 
-    const hour = new Date(r.ts).getHours();
+    const hour = new Date(startOf(r)).getHours();
     if (isSuccess) {
       hourly[hour]!.success += 1;
       key.hourly[hour]!.success += 1;
@@ -576,7 +607,7 @@ export function aggregateProvider(
       key.hourly[hour]!.failed += 1;
     }
 
-    const day = localDay(r.ts);
+    const day = localDay(startOf(r));
     let dayPoint = daily.get(day);
     if (!dayPoint) {
       dayPoint = { day, success: 0, retried: 0, failed: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
@@ -635,8 +666,8 @@ export function hourlyTokens(
   }))
   const hourNow = new Date(now).getHours()
   for (const r of records) {
-    if (isProbeKind(r.kind)) continue;
-    const ageHours = Math.floor((now - r.ts) / 3_600_000)
+    if (isNotOutcome(r)) continue;
+    const ageHours = Math.floor((now - startOf(r)) / 3_600_000)
     if (ageHours < 0 || ageHours > 23) continue
     // Oldest slot is 23 hours ago; index from there.
     const slot = slots[23 - ageHours]
@@ -661,7 +692,7 @@ export function hourlyTokens(
 export function statusHistogram(records: LlmUsageRecord[]): Array<{ statusCode: number; count: number }> {
   const counts = new Map<number, number>();
   for (const r of records) {
-    if (isProbeKind(r.kind)) continue;
+    if (isNotOutcome(r)) continue;
     if (r.status === 'success') continue;
     // A refusal the gateway made itself carries its own 503 but says nothing
     // about the upstream — grouping it under 503 would read as "the provider
@@ -747,6 +778,8 @@ export function aggregateProviderDetail(
     .slice(0, recentLimit)
     .map((r) => ({
       ts: r.ts,
+      // The 时间 column reads the send time; see `LlmUsageRecord.startedAt`.
+      startedAt: r.startedAt,
       model: r.publicModel,
       keyId: r.keyId,
       // Carried through the projection: the log renders the group that actually

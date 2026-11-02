@@ -48,9 +48,9 @@ describe('resolveModelContextWindow', () => {
     expect(resolveModelContextWindow('gpt-5.1', connectionModels)).toBeUndefined();
   });
 
-  it('prefers the registry over connection entries', () => {
-    const connectionModels = [{ id: 'claude-sonnet-5', contextWindow: 123 }];
-    expect(resolveModelContextWindow('claude-sonnet-5', connectionModels)).toBe(1_000_000);
+  it('prefers an explicit connection context window over the registry default', () => {
+    const connectionModels = [{ id: 'claude-sonnet-5', contextWindow: 256_000 }];
+    expect(resolveModelContextWindow('claude-sonnet-5', connectionModels)).toBe(256_000);
   });
 
   it('returns undefined for unknown models and empty input', () => {

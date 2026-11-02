@@ -25,6 +25,7 @@ function record(ts: number, provider = 'p1', status: 'success' | 'error' = 'succ
     promptTokens: 10,
     completionTokens: 5,
     attempts: 1,
+    cachedTokens: 0,
   } as Parameters<typeof aggregateOverview>[0][number];
 }
 
@@ -104,6 +105,16 @@ describe('aggregateOverview provider fields', () => {
     expect(p2.sessionCount).toBe(1);
     expect(p2.lastStatus).toBe('success');
   });
+
+  it('aggregates cached tokens per provider from raw records', () => {
+    const overview = aggregateOverview([
+      { ...record(NOW, 'openai'), promptTokens: 1000, cachedTokens: 900 },
+      { ...record(NOW, 'anthropic'), promptTokens: 100, cachedTokens: 90 },
+    ], NOW)
+
+    expect(overview.byProvider.find((p) => p.provider === 'openai')?.cachedTokens).toBe(900)
+    expect(overview.byProvider.find((p) => p.provider === 'anthropic')?.cachedTokens).toBe(90)
+  })
 
   it('reports no last status for a provider with no records', () => {
     const overview = aggregateOverview([other], NOW);

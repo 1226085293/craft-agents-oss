@@ -28,6 +28,8 @@
 /** Image part cap before placeholder substitution kicks in. */
 const DEFAULT_MAX_IMAGE_PARTS = 4;
 
+import { lookupAttachmentName } from './attachment-name-registry.ts';
+
 export interface AnthropicContentPart {
   type: string;
   text?: string;
@@ -101,6 +103,8 @@ export interface OpenAIRequestBody {
   }>;
   tool_choice?: unknown;
   metadata?: Record<string, unknown>;
+  /** Reasoning effort for thinking models; see `TranscodeOptions.reasoningEffort`. */
+  reasoning_effort?: string;
 }
 
 export interface TranscodeOptions {
@@ -110,9 +114,24 @@ export interface TranscodeOptions {
   maxImageParts?: number;
   /** Text substituted for images beyond `maxImageParts`. */
   imagePlaceholder?: string;
+  /**
+   * `reasoning_effort` to send, already resolved from the client's thinking
+   * level and clamped to what the model declares.
+   *
+   * Resolved by the caller rather than read from the body here: clamping needs
+   * the provider's `modelOptions`, and the Anthropic body only carries a budget
+   * — where `max` and `high` are the same number.
+   */
+  reasoningEffort?: string;
 }
 
-export const DEFAULT_IMAGE_PLACEHOLDER = '[image omitted: exceeded the upstream image limit]';
+/**
+ * Fallback marker when an image is dropped and its file name is unknown.
+ * The long "exceeded the upstream image limit" sentence used to live here; the
+ * name (or this marker) is all the model needs, and the sentence cost tokens on
+ * every dropped image in every request.
+ */
+export const DEFAULT_IMAGE_PLACEHOLDER = '[img]';
 
 function isTextPart(part: AnthropicContentPart): part is AnthropicContentPart & { type: 'text' } {
   return part.type === 'text' && typeof part.text === 'string';
@@ -153,7 +172,13 @@ function convertContent(
       if (state.seenImages >= opts.maxImageParts) {
         // Placeholder, never a rejection: the rest of the message is still
         // useful and failing the whole turn is worse than losing an image.
-        parts.push({ type: 'text', text: opts.imagePlaceholder });
+        //
+        // Prefer the file name: the registry is filled in by the process that
+        // stored the attachment, and a name lets the model read the image from
+        // disk. Without it we fall back to the configured marker (never the old
+        // 41-character sentence — that cost tokens on every dropped image).
+        const fileName = lookupAttachmentName(data);
+        parts.push({ type: 'text', text: fileName ? `[${fileName}]` : opts.imagePlaceholder });
         continue;
       }
       state.seenImages += 1;
@@ -221,6 +246,16 @@ export function transcodeRequestToOpenAI(
   const out: OpenAIMessage[] = [];
 
   const push = (message: OpenAIMessage): void => {
+    // `tool` messages are never merged: each one carries its own
+    // tool_call_id, and OpenAI pairs every tool_call with exactly ONE tool
+    // message. Collapsing two tool outputs (parallel tool_use, or one user
+    // message with two tool_result blocks) drops the second id and the relay
+    // rejects the request with "No tool output found for function call ..."
+    // (2026-11-01 session 261101-lean-comet).
+    if (message.role === 'tool') {
+      out.push(message);
+      return;
+    }
     const prev = out[out.length - 1];
     // Merge runs of the same role. Anthropic allows user->user; OpenAI does
     // not, and merging preserves the ordering the agent expects.
@@ -307,6 +342,10 @@ export function transcodeRequestToOpenAI(
   if (tools) request.tools = tools;
   if (body.tool_choice !== undefined) request.tool_choice = body.tool_choice;
   if (body.metadata !== undefined) request.metadata = body.metadata;
+  // An Anthropic request has no equivalent field: `thinking.budget_tokens` is
+  // the only trace of the level, and the relay ignores it. Without this the
+  // session's 思考等级 never reached the upstream at all.
+  if (opts.reasoningEffort) request.reasoning_effort = opts.reasoningEffort;
 
   return request;
 }

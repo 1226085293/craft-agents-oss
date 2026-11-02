@@ -326,6 +326,13 @@ export function registerLlmGatewayHandlers(server: RpcServer, deps: HandlerDeps)
         // and cause a redundant rebuild of every pool.
         access?.markSelfWrite()
         runtime?.refresh()
+        // A model capability change (contextWindow / supportsImages / …) must
+        // reach live gateway-routed sessions now, not on the next send.
+        deps.sessionManager.refreshGatewayRuntime().catch(error => {
+          deps.platform.logger?.warn?.(
+            `[llmGateway.SAVE_CONFIG] refreshGatewayRuntime failed: ${error instanceof Error ? error.message : String(error)}`,
+          )
+        })
       }
       return result
     },

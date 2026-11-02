@@ -123,6 +123,13 @@ export interface LlmPreset {
   quotaExhaustedSeconds?: number;
   /** Cooldown after any other failure. */
   defaultSeconds?: number;
+  /**
+   * Cooldown for one (provider, model) route after the provider says it does
+   * not serve that model (404 / model-not-found). The key stays healthy — only
+   * the route is parked — so this is deliberately much shorter than a quota
+   * cooldown. Default 300s.
+   */
+  routeSeconds?: number;
 }
 
 // ============================================================================
@@ -173,6 +180,19 @@ export interface LlmModelOptions {
   supportsImages?: boolean;
   /** Model emits a reasoning/thinking trace. Absent = unknown, not "no". */
   supportsThinking?: boolean;
+  /**
+   * Reasoning effort levels this model actually accepts, e.g.
+   * `["low", "high", "max"]`.
+   *
+   * Declaring them is what lets the composer's thinking level reach an
+   * OpenAI-shaped upstream: the gateway sends `reasoning_effort` clamped into
+   * this set, and sends nothing when it is absent (guessing an effort the relay
+   * does not know would turn a cosmetic mismatch into a 400).
+   *
+   * Aliases are not translated: write the strings the upstream accepts
+   * (`low` / `medium` / `high` / `max`, occasionally `minimal`).
+   */
+  reasoningEfforts?: string[];
 }
 
 export interface LlmProvider {
@@ -234,12 +254,53 @@ export type LlmStrategyType =
 
 export interface LlmStrategyMember {
   provider: string;
+  /**
+   * Public model this member serves. Absent means "any model the provider
+   * declares", which is what every member meant before this existed.
+   *
+   * With `model` set, a member is a switching unit of its own: three models on
+   * one provider become three ordered units instead of one, and a failure on
+   * the first can fall through to the second. `modelProviders` is the older,
+   * request-time way to pin a model to providers; when both exist the member
+   * wins (see `planRequest`).
+   */
+  model?: string;
+  /**
+   * Upstream model id for this member, overriding `modelAliases`.
+   *
+   * Needed because one public name may be a different upstream id per provider
+   * (A 家的 A1 vs B 家的 A1), which a strategy-wide alias cannot express.
+   */
+  upstreamModel?: string;
   /** Weight for `weighted`. */
   weight?: number;
+  /** Absent means enabled. Lets one unit be parked without deleting it. */
+  enabled?: boolean;
 }
 
 /** Scope a sticky-session binding is keyed on. */
 export type LlmStickyScope = 'session' | 'session+model';
+
+/**
+ * What to do after one classified upstream failure.
+ *
+ * The switch unit is a `(provider, model)` route; inside it the pool rotates
+ * keys. `retry-same` spends the same-key budget, `next-key` cools the key and
+ * hands back the provider's next account, `next-unit` abandons the route for
+ * the next one, `stop` ends the request.
+ */
+export type LlmSwitchAction = 'retry-same' | 'next-key' | 'next-unit' | 'stop';
+
+/** The failure classes a strategy can route around. */
+export type LlmSwitchFailure =
+  | 'rate_limit'
+  | 'quota'
+  | 'auth'
+  | 'model_not_found'
+  | 'transport'
+  | 'server_error';
+
+export type LlmSwitchPolicy = Partial<Record<LlmSwitchFailure, LlmSwitchAction>>;
 
 export interface LlmStrategy {
   id: string;
@@ -322,6 +383,17 @@ export interface LlmStrategy {
    * a member that merely happens to speak the same upstream name.
    */
   modelProviders?: Record<string, string[]>;
+
+  /**
+   * Per-failure switching policy. Absent entries keep the built-in defaults
+   * (`DEFAULT_SWITCH_POLICY` in `llm-gateway.ts`), which are the behaviour the
+   * gateway shipped with:
+   *
+   *   rate_limit → next-key   quota → next-key   auth → next-key
+   *   model_not_found → next-unit   transport → next-unit
+   *   server_error → retry-same
+   */
+  switchPolicy?: LlmSwitchPolicy;
 }
 
 // ============================================================================
@@ -435,6 +507,7 @@ export const DEFAULT_PRESET: LlmPreset = {
   defaultSeconds: 60,
   rateLimitSeconds: 60,
   quotaExhaustedSeconds: 2592000,
+  routeSeconds: 300,
 };
 
 /** Defaults mirroring uni-api's current `api.yaml` values. */

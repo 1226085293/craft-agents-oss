@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { LlmGateway, parseRateLimitSignal } from '../llm-gateway.ts';
+import { SESSION_HEADER } from '../model-request-kind.ts';
 import type { LlmConfig, LlmProvider } from '../llm-config.ts';
 
 function provider(id: string, over: Partial<LlmProvider> = {}): LlmProvider {
@@ -63,6 +64,21 @@ function stubUpstream(responses: StubResponse[]) {
   const calls: Array<{ url: string; init: RequestInit | undefined }> = [];
   let i = 0;
   const impl = (async (input: string | URL, init?: RequestInit) => {
+    // Catalog discovery (`GET /models`) is a separate concern from the queued
+    // chat responses; answer it with an empty catalog and do not consume a
+    // queued response or record a chat call.
+    let pathname = String(input);
+    try {
+      pathname = new URL(String(input)).pathname;
+    } catch {
+      /* not a URL; fall through to the queued path */
+    }
+    if (pathname.endsWith('/models')) {
+      return new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
     calls.push({ url: String(input), init });
     const spec = responses[Math.min(i, responses.length - 1)]!;
     i += 1;
@@ -553,6 +569,52 @@ describe('LlmGateway', () => {
     }
   });
 
+  it('names the public model a model-level switch landed on', async () => {
+    // A model-level switch must name the PUBLIC model the serving unit
+    // represents — the id a session adopts so its label, ring and routing
+    // hint follow the reality. The upstream alias alone is not adoptable
+    // (2026-10-30: failover kept the session reporting the old model).
+    const events: Array<{ reason: string; publicModel?: string; upstreamModel: string }> = [];
+    const cfg = config({
+      strategies: [
+        {
+          id: 'auto',
+          type: 'round_robin',
+          modelAliases: { m1: 'up-m1', m2: 'up-m2' },
+          members: [{ provider: 'p1' }, { provider: 'p2' }],
+          retry: { maxAttempts: 3, onStatusCodes: [500], backoffMs: 0 },
+        },
+      ],
+    });
+    const stub = stubUpstream([{}, {}]);
+    const gw = new LlmGateway({
+      getConfig: () => cfg,
+      fetchImpl: stub.impl,
+      log: () => {},
+      onRouteChanged: (e) => events.push(e),
+    });
+    await gw.start();
+    try {
+      const send = (model: string) =>
+        fetch(`${gw.baseUrl}/v1/messages`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client', 'x-craft-session-id': 'session-fb' },
+          body: JSON.stringify({ model }),
+        });
+      expect((await send('m1')).status).toBe(200);
+      expect((await send('m2')).status).toBe(200);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        sessionId: 'session-fb',
+        reason: 'model',
+        upstreamModel: 'up-m2',
+        publicModel: 'm2',
+      });
+    } finally {
+      await gw.stop();
+    }
+  });
+
   it('honours compactAfterSwitch=false', async () => {
     const events: unknown[] = [];
     const cfg = config({
@@ -613,7 +675,7 @@ describe('LlmGateway', () => {
   });
 
   it('names the provider and key on the row a failed request leaves behind', async () => {
-    // The 502 summary row used to carry an empty provider and keyId, so a
+    // The summary row used to carry an empty provider and keyId, so a
     // failure could not be traced to the account it died on — the log showed
     // "—" in both columns for a request that had certainly used one.
     const cfg = config();
@@ -624,14 +686,72 @@ describe('LlmGateway', () => {
     await start(cfg, [broken, broken]);
 
     const res = await post(gateway, {});
-    expect(res.status).toBe(502);
+    // Transport failures are route failures now: the endpoint is unreachable,
+    // which is "no healthy account" (503), not a malformed upstream answer (502).
+    expect(res.status).toBe(503);
     const usage = gateway.drainUsage();
-    expect(usage).toHaveLength(1);
-    expect(usage[0]!.status).toBe('error');
-    expect(usage[0]!.attempts).toBe(2);
-    expect(usage[0]!.provider).toBe('p2');
-    expect(usage[0]!.keyId).toBeTruthy();
-    expect(usage[0]!.upstreamModel).toBeTruthy();
+    // One row per upstream attempt: p1's failure gets its own line (it used to
+    // be invisible), and p2's is the request's terminal row.
+    expect(usage).toHaveLength(2);
+    const [first, last] = usage;
+    expect(first!.provider).toBe('p1');
+    expect(first!.superseded).toBe(true);
+    expect(last!.superseded).toBeUndefined();
+    expect(last!.status).toBe('error');
+    expect(last!.attempts).toBe(2);
+    expect(last!.provider).toBe('p2');
+    expect(last!.keyId).toBeTruthy();
+    expect(last!.upstreamModel).toBeTruthy();
+  });
+
+  it('logs the status the client actually received, not a constant 502', async () => {
+    // Every key cooling is answered 429, but the terminal row was written with
+    // a hardcoded 502 before the status was decided: the log said "bad
+    // gateway" for a rate wall. 2026-10-25, reported as "三个日志请求…但是会话
+    // 报错 429".
+    const cfg = config();
+    cfg.providers = [provider('p1')];
+    cfg.strategies[0]!.members = [{ provider: 'p1' }];
+    cfg.strategies[0]!.retry = { maxAttempts: 1, onStatusCodes: [500], backoffMs: 0 };
+    await start(cfg, [{ status: 429, body: JSON.stringify({ error: 'rate limited' }) }]);
+
+    const res = await post(gateway, {});
+    expect(res.status).toBe(429);
+
+    const terminal = gateway.drainUsage().filter((r) => !r.superseded);
+    expect(terminal).toHaveLength(1);
+    expect(terminal[0]!.statusCode).toBe(429);
+  });
+
+  it('gives a failure the same timing columns a success has', async () => {
+    // 耗时 / 会话 / 时间 used to be empty on a failed row, so the one row an
+    // operator opens after a failure was the one with nothing to read.
+    const cfg = config();
+    cfg.providers = [provider('p1')];
+    cfg.strategies[0]!.members = [{ provider: 'p1' }];
+    await start(cfg, [
+      () => {
+        throw new TypeError('fetch failed');
+      },
+    ]);
+
+    const res = await fetch(`${gateway.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': 'sk-client',
+        [SESSION_HEADER]: 'sess-1',
+      },
+      body: JSON.stringify({ model: 'auto' }),
+    });
+    // A transport failure is a route failure → 503 (see the naming test above).
+    expect(res.status).toBe(503);
+    const row = gateway.drainUsage()[0]!;
+    expect(row.sessionId).toBe('sess-1');
+    expect(typeof row.totalMs).toBe('number');
+    expect(row.startedAt).toBeGreaterThan(0);
+    // The row is stamped when it finished, but it reads as when it was sent.
+    expect(row.startedAt!).toBeLessThanOrEqual(row.ts);
   });
 
   // -------------------------------------------------------------------------
@@ -680,6 +800,165 @@ describe('LlmGateway', () => {
     const target = gateway.keyStates().find((k) => k.cooling)!;
     expect(await gateway.clearKeyCooldown(target.provider, target.keyId)).toBe(true);
     expect(gateway.status().coolingKeys).toBe(0);
+  });
+
+  it('releases a cooled route when the cooldown is cleared', async () => {
+    // A keyless relay is one account: its 429 cools the *route*, and a long
+    // reset hint (60124s) parks the model for hours. The clear-cooldown path
+    // must be able to release it, or the group loses a member until the hint
+    // expires with nothing in the UI able to undo it (2026-10-30).
+    const cfg = config({
+      providers: [provider('solo', { keys: [] })],
+      strategies: [
+        {
+          id: 'auto',
+          type: 'round_robin',
+          modelAliases: { m1: 'up-m1' },
+          members: [{ provider: 'solo' }],
+          retry: { maxAttempts: 1, onStatusCodes: [429], backoffMs: 0 },
+        },
+      ],
+    });
+    const stub = stubUpstream([{ status: 429, body: JSON.stringify({ error: 'slow down' }) }, {}]);
+    const gw = new LlmGateway({ getConfig: () => cfg, fetchImpl: stub.impl, log: () => {} });
+    await gw.start();
+    try {
+      const limited = await fetch(`${gw.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+        body: JSON.stringify({ model: 'm1' }),
+      });
+      expect(limited.status).toBe(429);
+      await limited.text();
+
+      // Parked: the same request now has nothing to route to.
+      const refused = await fetch(`${gw.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+        body: JSON.stringify({ model: 'm1' }),
+      });
+      expect(refused.status).toBe(503);
+      await refused.text();
+
+      expect(await gw.clearKeyCooldown('solo')).toBe(true);
+
+      // Released: the route serves again instead of answering 503.
+      const ok = await fetch(`${gw.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+        body: JSON.stringify({ model: 'm1' }),
+      });
+      expect(ok.status).toBe(200);
+      await ok.text();
+    } finally {
+      await gw.stop();
+    }
+  });
+
+  it('spends the retry budget on a transport failure before leaving the model', async () => {
+    // An aborted connection or a first-byte timeout is the failure a retry can
+    // actually fix, and it is what the user sees as a 503. Defaulting it to
+    // `retry-same` means "retry 3 times" costs three tries on this route
+    // before the group falls through — previously one blip dropped the model
+    // with the whole budget unspent (2026-10-30).
+    const cfg = config({
+      providers: [provider('solo', { keys: [] })],
+      strategies: [
+        {
+          id: 'auto',
+          type: 'round_robin',
+          modelAliases: { m1: 'up-m1', m2: 'up-m2' },
+          members: [{ provider: 'solo', model: 'm1' }, { provider: 'solo', model: 'm2' }],
+          retry: { maxAttempts: 3, backoffMs: 0 },
+        },
+      ],
+    });
+    let calls = 0;
+    const impl = (async () => {
+      calls += 1;
+      throw new TypeError('fetch failed');
+    }) as unknown as typeof fetch;
+    const gw = new LlmGateway({ getConfig: () => cfg, fetchImpl: impl, log: () => {} });
+    await gw.start();
+    try {
+      const res = await fetch(`${gw.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+        body: JSON.stringify({ model: 'm1' }),
+      });
+      expect(res.status).toBe(503);
+      await res.text().catch(() => {});
+      // Three tries on m1, then the budget resets for the group's next route.
+      expect(calls).toBe(6);
+    } finally {
+      await gw.stop();
+    }
+  });
+
+  it('cools only the failing route on a transport failure, not the whole endpoint', async () => {
+    // One relay, two models behind the same baseUrl. A timeout must park the
+    // route it happened on, not the provider: cooling the endpoint used to
+    // take every other model of that relay down too, which on a
+    // single-endpoint relay leaves the group with nothing to fall back to
+    // (2026-10-30).
+    const cfg = config({
+      providers: [provider('solo', { keys: [] })],
+      strategies: [
+        {
+          id: 'auto',
+          type: 'round_robin',
+          modelAliases: { m1: 'up-m1', m2: 'up-m2' },
+          members: [{ provider: 'solo', model: 'm1' }, { provider: 'solo', model: 'm2' }],
+          retry: { maxAttempts: 1, backoffMs: 0 },
+        },
+      ],
+    });
+    let calls = 0;
+    const seen: string[] = [];
+    const impl = (async (_input: string | URL, init?: RequestInit) => {
+      calls += 1;
+      seen.push(String(JSON.parse(String(init?.body)).model));
+      if (calls <= 1) throw new TypeError('fetch failed');
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    const gw = new LlmGateway({ getConfig: () => cfg, fetchImpl: impl, log: () => {} });
+    await gw.start();
+    try {
+      const res = await fetch(`${gw.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+        body: JSON.stringify({ model: 'm1' }),
+      });
+      // The group's second model still serves the request in the same turn.
+      expect(res.status).toBe(200);
+      await res.text();
+      // m1's own route is now parked: a second request for it is served by the
+      // sibling model, never by m1 again.
+      const second = await fetch(`${gw.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+        body: JSON.stringify({ model: 'm1' }),
+      });
+      expect(second.status).toBe(200);
+      await second.text();
+      // …and the sibling on the SAME baseUrl is still reachable on its own.
+      const ok = await fetch(`${gw.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+        body: JSON.stringify({ model: 'm2' }),
+      });
+      expect(ok.status).toBe(200);
+      await ok.text();
+      // up-m1 was tried once (and parked); every later attempt went to up-m2,
+      // including the fallback that served the first request. Had the endpoint
+      // been cooled instead, up-m2 would have been refused from then on.
+      expect(seen).toEqual(['up-m1', 'up-m2', 'up-m2', 'up-m2']);
+    } finally {
+      await gw.stop();
+    }
   });
 
   it('clears every cooldown when no key is named', async () => {

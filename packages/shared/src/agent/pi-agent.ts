@@ -29,6 +29,7 @@ import type {
   BackendConfig,
   BackendRuntimeUpdate,
   ChatOptions,
+  PostInitResult,
   SdkMcpServerConfig,
 } from './backend/types.ts';
 import { AbortReason } from './backend/types.ts';
@@ -38,11 +39,12 @@ import type { PermissionMode } from './mode-manager.ts';
 import type { ThinkingLevel } from './thinking-levels.ts';
 
 // Import models from centralized registry
-import { getModelById } from '../config/models.ts';
+import { resolveModelContextWindow } from '../config/models.ts';
 
 // BaseAgent provides common functionality
 import { BaseAgent } from './base-agent.ts';
-import { getGitBashPath, type Workspace } from '../config/storage.ts';
+import { getGitBashPath, getLlmConnection, type Workspace } from '../config/storage.ts';
+import { resolveAuthEnvVars, environmentSnapshotKeys } from '../config/llm-connections.ts';
 
 // Event adapter
 import { PiEventAdapter } from './backend/pi/event-adapter.ts';
@@ -69,9 +71,9 @@ import {
   registerSessionScopedToolCallbacks,
   mergeSessionScopedToolCallbacks,
   unregisterSessionScopedToolCallbacks,
-  setLastPlanFilePath,
   getSessionScopedToolCallbacks,
-} from './session-scoped-tools.ts';
+} from './session-scoped-tool-callback-registry.ts';
+import { setLastPlanFilePath } from './session-plan-state.ts';
 import { attachSessionSelfManagementBindings } from './session-self-management-bindings.ts';
 
 // Session tool proxy definitions (for registering with subprocess)
@@ -83,7 +85,7 @@ import {
   SESSION_TOOL_REGISTRY,
   type ToolResult as SessionToolResult,
 } from '@craft-agent/session-tools-core';
-import { createClaudeContext, type SessionToolContext } from './claude-context.ts';
+import { createSessionToolContext, type SessionToolContext } from './session-tool-context.ts';
 import { getPermissionModeDiagnostics } from './mode-manager.ts';
 
 // call_llm pre-execution pipeline
@@ -101,6 +103,7 @@ import { homedir } from 'os';
 // Session storage (plans folder path)
 import { getSessionDataPath, getSessionPath, getSessionPlansPath } from '../sessions/storage.ts';
 import { ProgressJournal, buildHistoryRecoveryPointer, loadRawProgressRecords } from './progress-journal.ts';
+import { buildCompactionSummaryParams } from './compaction-summary.ts';
 import { readSessionMessages } from '../sessions/jsonl.ts';
 import { buildTurnLogs, isRealUserMessage, writeTurnLogs } from './turn-log.ts';
 
@@ -131,6 +134,7 @@ import { recordToolLayeringTelemetry } from '../tool-layering/telemetry.ts';
 
 // Workspace slug extraction for skill qualification
 import { extractWorkspaceSlug } from '../utils/workspace.ts';
+import { isParentTaskTool } from '../utils/toolNames.ts';
 
 // LLM tool types
 import { LLM_QUERY_TIMEOUT_MS, type LLMQueryRequest, type LLMQueryResult } from './llm-tool.ts';
@@ -214,33 +218,35 @@ function parseReliefStats(raw: unknown): ReliefStats | undefined {
 }
 
 /**
- * Resolve a model's context window: built-in MODEL_REGISTRY first, then
- * connection-level custom models (the pi driver mirrors connection.models into
- * runtime.customModels for pi_compat / custom-endpoint connections). Custom
- * connections can register models absent from the built-in registry, so that
- * list is the authoritative source for their windows (e.g. a user-configured
- * 1M window) instead of a hardcoded fallback. Returns undefined when neither
- * knows the model — callers clear/keep the window accordingly.
- */
-function resolveContextWindow(
-  model: string,
-  customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>,
-): number | undefined {
-  const modelDef = model ? getModelById(model) : undefined;
-  const customDef = model
-    ? customModels?.find((m) => typeof m !== 'string' && m.id === model)
-    : undefined;
-  return modelDef?.contextWindow
-    ?? (typeof customDef === 'object' ? customDef.contextWindow : undefined);
-}
-
-/**
  * Backend implementation using the Pi coding agent SDK via subprocess.
  *
  * Spawns a pi-agent-server subprocess and communicates via JSONL protocol.
  * Extends BaseAgent for common functionality (permission mode, source management,
  * planning heuristics, config watching, usage tracking).
  */
+type BackgroundProxyTaskState = {
+  cancelled: boolean;
+  settled: boolean;
+  outputFile: string;
+  abortController?: AbortController;
+  killStatusRef?: { current?: { ok: boolean; error?: string } };
+  cancelPromise?: Promise<{
+    content: string;
+    outputFile: string;
+    forced: boolean;
+    isError: boolean;
+    killStatus: 'killed' | 'failed' | 'unverified';
+  }>;
+  resolveCancel?: (result: {
+    content: string;
+    outputFile: string;
+    forced: boolean;
+    isError: boolean;
+    killStatus: 'killed' | 'failed' | 'unverified';
+  }) => void;
+  forceTimer?: ReturnType<typeof setTimeout>;
+};
+
 export class PiAgent extends BaseAgent {
   protected backendName = 'Craft Agents Backend';
 
@@ -373,7 +379,7 @@ export class PiAgent extends BaseAgent {
 
   /**
    * Look up the bound project (if any) and return a snapshot for system-prompt injection.
-   * Mirrors ClaudeAgent.resolveProjectContext — safe to call on every turn since the
+   * Mirrors the previous backend's resolveProjectContext — safe to call on every turn since the
    * project config file is small.
    */
   private resolveProjectContext(): ProjectPromptContext | null {
@@ -441,6 +447,22 @@ export class PiAgent extends BaseAgent {
    * the conversation.
    */
   private idleSubprocessReaper: ReturnType<typeof setTimeout> | null = null;
+  /** Between-turns background event sink (SessionManager forwards to registry/renderer). */
+  private onBackgroundEvent: ((event: AgentEvent) => void) | null = null;
+  /** True while a background task is pending; keeps the idle reaper from reclaiming. */
+  private backgroundTasksPending = false;
+  /** Main-process proxy-tool runs that can be cancelled or eagerly backgrounded. */
+  private backgroundProxyTasks = new Map<string, BackgroundProxyTaskState>();
+  /**
+   * toolUseId → Bash command, captured at `tool_start`.
+   *
+   * A `tool_result` event carries no `input`, so when a Bash call is handed off
+   * to the background the command is already gone. The main process needs it to
+   * (a) label the background-task row and (b) find the process to kill via
+   * `killShell` — without it `if (event.command && managed)` skips the whole
+   * `shell_backgrounded` branch and the shell is never registered at all.
+   */
+  private bashCommandByToolUseId = new Map<string, string>();
   /** Epoch ms of the last received compaction_progress heartbeat; null = none yet. */
   private lastCompactionProgressAt: number | null = null;
   /** Consecutive deferrals of idle reclaim for an active compaction (bounded). */
@@ -459,10 +481,43 @@ export class PiAgent extends BaseAgent {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : PiAgent.IDLE_SUBPROCESS_RECLAIM_MS;
   }
 
+  /** Wire the between-turns background-event sink. */
+  setBackgroundEventSink(sink: ((event: AgentEvent) => void) | null): void {
+    this.onBackgroundEvent = sink;
+  }
+
+  /** Resolve this session's LLM auth into config.envOverrides before the subprocess spawns. */
+  override async postInit(): Promise<PostInitResult> {
+    const slug = this.config.connectionSlug;
+    if (!slug) {
+      return { authInjected: false, authWarning: 'No connection slug available', authWarningLevel: 'error' };
+    }
+    const connection = getLlmConnection(slug);
+    if (!connection) {
+      return { authInjected: false, authWarning: `Connection not found: ${slug}`, authWarningLevel: 'error' };
+    }
+    const manager = getCredentialManager();
+    const result = await resolveAuthEnvVars(connection, slug, manager, null);
+    if (!result.success) {
+      return { authInjected: false, authWarning: result.warning, authWarningLevel: 'error' };
+    }
+    const envOverrides: Record<string, string> = { ...(this.config.envOverrides ?? {}) };
+    if (connection.authType === 'environment') {
+      for (const key of environmentSnapshotKeys(false)) {
+        const value = process.env[key];
+        if (value) envOverrides[key] = value;
+      }
+    }
+    Object.assign(envOverrides, result.envVars);
+    if (this.config.miniModel) envOverrides.ANTHROPIC_DEFAULT_HAIKU_MODEL = this.config.miniModel;
+    this.config.envOverrides = envOverrides;
+    return { authInjected: true };
+  }
+
   private scheduleIdleSubprocessReaper(): void {
     // Never reclaim while a turn is in flight or while the queue holds events
     // (mini completions / title gen may still run after the main turn).
-    if (!this.subprocess || this._isProcessing || !this.eventQueue.isComplete) {
+    if (!this.subprocess || this._isProcessing || !this.eventQueue.isComplete || this.backgroundTasksPending) {
       return;
     }
     this.cancelIdleSubprocessReaper();
@@ -478,7 +533,7 @@ export class PiAgent extends BaseAgent {
 
   private idleReaperFire(): void {
     this.idleSubprocessReaper = null;
-    if (this._isProcessing || !this.eventQueue.isComplete) {
+    if (this._isProcessing || !this.eventQueue.isComplete || this.backgroundTasksPending) {
       // A turn restarted (or the event stream reopened) right as the timer
       // fired. Re-arm for a fresh window instead of dying: the turn-end
       // finally replaces it via scheduleIdleSubprocessReaper() anyway, and a
@@ -954,7 +1009,7 @@ export class PiAgent extends BaseAgent {
 
   constructor(config: BackendConfig) {
     const resolvedModel = config.model || '';
-    const contextWindow = resolveContextWindow(
+    const contextWindow = resolveModelContextWindow(
       resolvedModel,
       getBackendRuntime(config).customModels,
     );
@@ -1068,7 +1123,19 @@ export class PiAgent extends BaseAgent {
       throw new Error('piServerPath not configured. Cannot spawn Pi subprocess.');
     }
 
-    const nodePath = runtime.paths?.node || process.execPath;
+    const nodePath = runtime.paths?.node;
+    if (!nodePath) {
+      // Deliberately fatal. Falling back to `process.execPath` here spawned a
+      // second Electron instance that exited immediately: the turn stayed in
+      // "processing", no request reached the gateway, and the log showed
+      // nothing at all — the hardest possible failure to diagnose
+      // (2026-10-25). Say what is missing instead.
+      const expected = process.platform === 'win32' ? 'vendor/bun/bun.exe' : 'vendor/bun/bun';
+      throw new Error(
+        `Agent backend runtime missing: ${expected} was not found in the app's resources, ` +
+        'so the Pi subprocess cannot be started. Reinstall Craft Agents (or restore that file) and retry.',
+      );
+    }
     const cwd = this.resolvedCwd();
 
     this.debug(`Spawning Pi subprocess: ${nodePath} ${piServerPath}`);
@@ -1238,10 +1305,8 @@ export class PiAgent extends BaseAgent {
     this.assertBackendSessionToolParity();
     let sessionToolDefs = getSessionToolProxyDefs();
 
-    // Mirror Claude's gate: hide `browser_tool` when the user has disabled
-    // the built-in browser tool. Without this filter, Pi would still advertise
-    // `mcp__session__browser_tool` while Claude doesn't — sessions would behave
-    // inconsistently depending on backend.
+    // Hide `browser_tool` when the user has disabled the built-in browser
+    // tool, so the advertised tool set matches the configured capability.
     if (!getBrowserToolEnabled()) {
       sessionToolDefs = sessionToolDefs.filter(d => d.name !== 'mcp__session__browser_tool');
     }
@@ -1807,6 +1872,31 @@ export class PiAgent extends BaseAgent {
         break;
       }
 
+      case 'shell_completed': {
+        // A backgrounded Bash command finally exited. This is the wake-up
+        // source for handed-off shells: emit `task_completed` so SessionManager
+        // updates the registry and (when idle) nudges the model with the
+        // result. Without it the model had no completion signal at all and
+        // resorted to `sleep N; cat <log>` polling.
+        const shellId = typeof msg.shellId === 'string' ? msg.shellId : ''
+        if (shellId) {
+          // A non-zero exit is NOT a success. Reporting every exit as
+          // 'completed' made a killed or crashed command look like it finished
+          // normally — including one the user had just stopped.
+          const exitCode = typeof msg.exitCode === 'number' ? msg.exitCode : null
+          const failed = Boolean(msg.error) || (exitCode !== null && exitCode !== 0)
+          this.debug(`Background shell ${shellId} exited (code=${exitCode ?? 'null'})`)
+          this.onBackgroundEvent?.({
+            type: 'task_completed',
+            taskId: shellId,
+            status: failed ? 'failed' : 'completed',
+            ...(typeof msg.logFile === 'string' ? { outputFile: msg.logFile } : {}),
+            kind: 'tool',
+          } as AgentEvent)
+        }
+        break
+      }
+
       case 'defense_resume_status':
         // Defense layer feedback from the subprocess: whether the queued
         // followUp() resume actually materialized. The adapter holds the
@@ -1987,6 +2077,49 @@ export class PiAgent extends BaseAgent {
       // parallel same-name tool results attached to the correct invocation.
       if (agentEvent.type === 'tool_start') {
         this.noteRecentToolEvent('tool_start', agentEvent.toolUseId, agentEvent.toolName, agentEvent.input);
+        // Remember the Bash command: tool_result has no input field.
+        if (agentEvent.toolName === 'Bash' && typeof agentEvent.input?.command === 'string') {
+          this.bashCommandByToolUseId.set(agentEvent.toolUseId, agentEvent.input.command as string)
+        }
+      }
+      if (agentEvent.type === 'tool_result') {
+        const rawContent = (agentEvent as any).content ?? (agentEvent as any).result ?? (agentEvent as any).output ?? '';
+        const content = typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent);
+        if (/shell_id:\s*\S+/.test(content) && /moved to the background/i.test(content)) {
+          this.backgroundTasksPending = true;
+          // Emit a real `shell_backgrounded` event, not the raw tool_result.
+          // The main process only registers a shell (backgroundTaskRegistry →
+          // list_background_tasks, backgroundShellCommands → killShell) from
+          // THIS event. Forwarding the tool_result left both maps empty, so the
+          // synthetic "use list_background_tasks to check status" advice pointed
+          // at a registry that never learned the shell existed, and
+          // stop_background_task could not kill it.
+          const shellIdMatch = content.match(/shell_id:\s*([A-Za-z0-9_-]+)/);
+          const shellId = shellIdMatch?.[1];
+          if (shellId) {
+            const input = (agentEvent as any).input as Record<string, unknown> | undefined;
+            const commandValue = (typeof input?.command === 'string' ? input.command : undefined)
+              ?? this.bashCommandByToolUseId.get(agentEvent.toolUseId);
+            this.bashCommandByToolUseId.delete(agentEvent.toolUseId);
+            const intentValue = typeof input?._intent === 'string' && input._intent
+              ? input._intent
+              : (typeof input?.description === 'string' ? input.description : undefined);
+            this.onBackgroundEvent?.({
+              type: 'shell_backgrounded',
+              toolUseId: agentEvent.toolUseId,
+              shellId,
+              ...(intentValue ? { intent: intentValue } : {}),
+              ...(commandValue ? { command: commandValue } : {}),
+              ...(agentEvent.turnId ? { turnId: agentEvent.turnId } : {}),
+            } as AgentEvent);
+          }
+          // Still surface the result itself so the chip/transcript can attach it.
+          this.onBackgroundEvent?.(agentEvent);
+        }
+        if (agentEvent.toolName === 'list_background_tasks') {
+          this.backgroundTasksPending = !/no background tasks|0 background tasks/i.test(content);
+          this.onBackgroundEvent?.(agentEvent);
+        }
       }
       // Reset prerequisite state on compaction (LLM loses guide content)
       if (agentEvent.type === 'info' && typeof agentEvent.message === 'string' && agentEvent.message.startsWith('Compacted')) {
@@ -2023,14 +2156,6 @@ export class PiAgent extends BaseAgent {
       if (agentEvent.type === 'tool_result') {
         this.noteRecentToolEvent('tool_result', agentEvent.toolUseId, agentEvent.toolName ?? (event.toolName as string) ?? 'unknown', agentEvent.input, agentEvent.result, agentEvent.isError);
         const hookEvent = agentEvent.isError ? 'PostToolUseFailure' : 'PostToolUse';
-        this.emitAutomationEvent(hookEvent, {
-          hook_event_name: hookEvent,
-          tool_name: agentEvent.toolName ?? (event.toolName as string) ?? 'unknown',
-          tool_input: agentEvent.input,
-          ...(agentEvent.isError
-            ? { error: typeof agentEvent.result === 'string' ? agentEvent.result : undefined }
-            : { tool_response: typeof agentEvent.result === 'string' ? agentEvent.result : undefined }),
-        });
       }
 
       this.eventQueue.enqueue(agentEvent);
@@ -2065,6 +2190,21 @@ export class PiAgent extends BaseAgent {
   }
 
   /**
+   * Agent/Task subagents are almost always long-running (often >1 minute).
+   * Force the SDK's background mode at the pre-tool boundary so the parent
+   * turn does not depend on the model remembering `run_in_background`.
+   */
+  private forceParentTaskBackground(
+    toolName: string,
+    input: Record<string, unknown>,
+  ): Record<string, unknown> | null {
+    const bareName = toolName.replace(/^mcp__session__/, '');
+    if (!isParentTaskTool(bareName)) return null;
+    if (input.run_in_background === true) return null;
+    return { ...input, run_in_background: true };
+  }
+
+  /**
    * Handle a pre_tool_use_request from the subprocess.
    * Runs the centralized permission pipeline and sends the decision back.
    */
@@ -2090,13 +2230,6 @@ export class PiAgent extends BaseAgent {
       });
       this.debug(`Captured pre-tool metadata for ${toolName} (${toolCallId}, sessionId=${debugSessionId}): intent=${!!preIntent}, displayName=${!!preDisplayName}`);
     }
-
-    // Fire PreToolUse automation event — await so automations run before tool executes
-    await this.emitAutomationEvent('PreToolUse', {
-      hook_event_name: 'PreToolUse',
-      tool_name: toolName,
-      tool_input: input,
-    });
 
     const rootPath = this.config.workspace.rootPath ?? this.workingDirectory;
     const workspaceSlug = extractWorkspaceSlug(rootPath, this.config.workspace.id);
@@ -2147,13 +2280,26 @@ export class PiAgent extends BaseAgent {
     });
 
     switch (checkResult.type) {
-      case 'allow':
-        this.send({ type: 'pre_tool_use_response', requestId, action: 'allow' });
+      case 'allow': {
+        const forcedInput = this.forceParentTaskBackground(toolName, input);
+        if (forcedInput) {
+          this.send({ type: 'pre_tool_use_response', requestId, action: 'modify', input: forcedInput });
+        } else {
+          this.send({ type: 'pre_tool_use_response', requestId, action: 'allow' });
+        }
         return;
+      }
 
-      case 'modify':
-        this.send({ type: 'pre_tool_use_response', requestId, action: 'modify', input: checkResult.input });
+      case 'modify': {
+        const forcedInput = this.forceParentTaskBackground(toolName, checkResult.input);
+        this.send({
+          type: 'pre_tool_use_response',
+          requestId,
+          action: 'modify',
+          input: forcedInput ?? checkResult.input,
+        });
         return;
+      }
 
       case 'block': {
         const diagnostics = getPermissionModeDiagnostics(sessionId);
@@ -2179,8 +2325,10 @@ export class PiAgent extends BaseAgent {
       case 'prompt': {
         if (!this.onPermissionRequest) {
           // No permission handler — allow
-          if (checkResult.modifiedInput) {
-            this.send({ type: 'pre_tool_use_response', requestId, action: 'modify', input: checkResult.modifiedInput });
+          const modifiedInput = checkResult.modifiedInput ?? input;
+          const forcedInput = this.forceParentTaskBackground(toolName, modifiedInput);
+          if (forcedInput || checkResult.modifiedInput) {
+            this.send({ type: 'pre_tool_use_response', requestId, action: 'modify', input: forcedInput ?? modifiedInput });
           } else {
             this.send({ type: 'pre_tool_use_response', requestId, action: 'allow' });
           }
@@ -2228,9 +2376,23 @@ export class PiAgent extends BaseAgent {
         }
 
         if (checkResult.modifiedInput) {
-          this.send({ type: 'pre_tool_use_response', requestId, action: 'modify', input: checkResult.modifiedInput });
+          const forcedInput = this.forceParentTaskBackground(
+            toolName,
+            checkResult.modifiedInput,
+          );
+          this.send({
+            type: 'pre_tool_use_response',
+            requestId,
+            action: 'modify',
+            input: forcedInput ?? checkResult.modifiedInput,
+          });
         } else {
-          this.send({ type: 'pre_tool_use_response', requestId, action: 'allow' });
+          const forcedInput = this.forceParentTaskBackground(toolName, input);
+          if (forcedInput) {
+            this.send({ type: 'pre_tool_use_response', requestId, action: 'modify', input: forcedInput });
+          } else {
+            this.send({ type: 'pre_tool_use_response', requestId, action: 'allow' });
+          }
         }
         return;
       }
@@ -2247,6 +2409,7 @@ export class PiAgent extends BaseAgent {
   private async handleToolExecuteRequest(request: {
     requestId: string;
     toolName: string;
+    toolUseId?: string;
     args: Record<string, unknown>;
   }): Promise<void> {
     // Prerequisite check: block source tools until guide.md is read
@@ -2260,22 +2423,45 @@ export class PiAgent extends BaseAgent {
       return;
     }
 
+    const toolUseId = request.toolUseId ?? request.requestId;
+    const backgroundable = this.isBackgroundableProxyTool(request.toolName);
+    const abortController = new AbortController();
+    const killStatusRef: { current?: { ok: boolean; error?: string } } = {};
+    const run = () => this.withToolTimeout(
+      request.toolName,
+      request.args,
+      () => this.routeToolCall(request.toolName, request.args, abortController.signal, (result) => {
+        killStatusRef.current = result;
+      }),
+    );
+
     try {
-      // 2026-10-18: never await a proxy tool unbounded. A hung host-side tool
-      // (browser CDP screenshot) used to keep the subprocess's tool promise
-      // pending forever → the SDK's activeRun never cleared → every later
-      // prompt died with "already processing". The timeout turns that into a
-      // normal error toolResult the model can react to.
-      const result = await this.withToolTimeout(
-        request.toolName,
-        request.args,
-        () => this.routeToolCall(request.toolName, request.args),
-      );
-      this.send({
-        type: 'tool_execute_response',
-        requestId: request.requestId,
-        result,
-      });
+      // mode 2: the model explicitly asks to detach before execution starts.
+      if (backgroundable && request.args.background === true) {
+        const result = this.startBackgroundProxyTool(request, toolUseId, undefined, abortController, killStatusRef);
+        this.send({ type: 'tool_execute_response', requestId: request.requestId, result });
+        return;
+      }
+
+      const execution = run();
+      if (backgroundable && this.getBackgroundProxyThresholdMs() > 0) {
+        const outcome = await this.raceProxyToolThreshold(
+          execution,
+          this.getBackgroundProxyThresholdMs(),
+        );
+        if (outcome.timedOut) {
+          // mode 1: the original run is still alive; hand it to the background
+          // owner instead of discarding a late result.
+          const result = this.startBackgroundProxyTool(request, toolUseId, execution, abortController, killStatusRef);
+          this.send({ type: 'tool_execute_response', requestId: request.requestId, result });
+          return;
+        }
+        this.send({ type: 'tool_execute_response', requestId: request.requestId, result: outcome.result });
+        return;
+      }
+
+      const result = await execution;
+      this.send({ type: 'tool_execute_response', requestId: request.requestId, result });
     } catch (error) {
       this.send({
         type: 'tool_execute_response',
@@ -2286,6 +2472,230 @@ export class PiAgent extends BaseAgent {
         },
       });
     }
+  }
+
+  private isBackgroundableProxyTool(toolName: string): boolean {
+    const stripped = toolName.replace(/^mcp__session__/, '');
+    // Background tasks are limited to script/command runners with a dedicated
+    // child process. LLM/browser/memory/session tools stay foreground.
+    return stripped === 'script_sandbox' || stripped === 'transform_data';
+  }
+
+  private getBackgroundProxyThresholdMs(): number {
+    const raw = process.env.CRAFT_BACKGROUND_TOOL_THRESHOLD_MS;
+    if (!raw) return 30_000;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : 30_000;
+  }
+
+  private async raceProxyToolThreshold(
+    run: Promise<{ content: string; isError: boolean }>,
+    timeoutMs: number,
+  ): Promise<{ timedOut: true } | { timedOut: false; result: { content: string; isError: boolean } }> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const timeout = new Promise<{ timedOut: true }>((resolve) => {
+        timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
+      });
+      return await Promise.race([
+        run.then((result) => ({ timedOut: false as const, result })),
+        timeout,
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Detach a proxy tool run and return its synthetic tool result immediately.
+   * The run's eventual result is persisted to an output file and emitted as a
+   * normal task_completed event (SessionManager owns delivery/UI).
+   */
+  private startBackgroundProxyTool(
+    request: { requestId: string; toolName: string; args: Record<string, unknown> },
+    toolUseId: string,
+    existingRun?: Promise<{ content: string; isError: boolean }>,
+    abortController?: AbortController,
+    killStatusRef?: { current?: { ok: boolean; error?: string } },
+  ): { content: string; isError: boolean } {
+    const taskId = `bg_tool_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const sessionId = this.config.session?.id ?? '';
+    const sessionPath = getSessionPath(this.config.workspace.rootPath, sessionId);
+    const outputDir = join(sessionPath, 'background-tasks');
+    const outputFile = join(outputDir, `${taskId}.output`);
+    try {
+      mkdirSync(outputDir, { recursive: true });
+    } catch (error) {
+      this.debug(`[bg-tool] failed to create output dir: ${error instanceof Error ? error.message : error}`);
+    }
+
+    const state: BackgroundProxyTaskState = {
+      cancelled: false,
+      settled: false,
+      outputFile,
+      abortController,
+      killStatusRef,
+    };
+    this.backgroundProxyTasks.set(taskId, state);
+    this.backgroundTasksPending = true;
+
+    const intent = typeof request.args._intent === 'string' && request.args._intent
+      ? request.args._intent
+      : request.toolName.replace(/^mcp__session__/, '');
+    this.onBackgroundEvent?.({
+      type: 'task_backgrounded',
+      toolUseId,
+      taskId,
+      intent,
+      kind: 'tool',
+    });
+
+    const run = existingRun ?? this.withToolTimeout(
+      request.toolName,
+      request.args,
+      () => this.routeToolCall(request.toolName, request.args, abortController?.signal, (result) => {
+        if (killStatusRef) killStatusRef.current = result;
+      }),
+    );
+
+    const finish = (result: { content: string; isError: boolean }) => {
+      if (state.settled) return;
+      state.settled = true;
+      if (state.forceTimer) {
+        clearTimeout(state.forceTimer);
+        state.forceTimer = undefined;
+      }
+      try {
+        writeFileSync(outputFile, result.content, 'utf8');
+      } catch (error) {
+        this.debug(`[bg-tool] failed to write output: ${error instanceof Error ? error.message : error}`);
+      }
+      this.backgroundProxyTasks.delete(taskId);
+      if (this.backgroundProxyTasks.size === 0) this.backgroundTasksPending = false;
+      if (state.cancelled) {
+        const reported = state.killStatusRef?.current;
+        state.resolveCancel?.({
+          content: result.content,
+          outputFile,
+          forced: false,
+          isError: result.isError,
+          killStatus: reported ? (reported.ok ? 'killed' : 'failed') : 'unverified',
+        });
+        return;
+      }
+      this.onBackgroundEvent?.({
+        type: 'task_completed',
+        taskId,
+        status: result.isError ? 'failed' : 'completed',
+        outputFile,
+        output: result.content.slice(0, 4_000),
+        summary: result.content.slice(0, 500),
+        kind: 'tool',
+      });
+    };
+
+    void run.then(finish).catch((error) => {
+      finish({
+        content: error instanceof Error ? error.message : String(error),
+        isError: true,
+      });
+    });
+
+    return {
+      content: [
+        `Tool "${request.toolName}" is running in the background.`,
+        `backgroundTaskId: ${taskId}`,
+        `output_file: ${outputFile}`,
+        'Continue with other work; use get_background_task_output or list_background_tasks to check status. Do not poll.',
+      ].join('\n'),
+      isError: false,
+    };
+  }
+
+  private getBackgroundForceStopMs(): number {
+    const raw = process.env.CRAFT_BACKGROUND_FORCE_STOP_MS;
+    if (!raw) return 5_000;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 5_000;
+  }
+
+  /**
+   * Stop a detached proxy-tool run.
+   *
+   * Cancellation is cooperative first: the run is given 5s to settle and the
+   * result (or its error) is returned to the stop path so the model still gets
+   * the output. If it does not settle, the lifecycle is force-settled with a
+   * status message and the late result is ignored. Arbitrary tool handlers do
+   * not accept an AbortSignal, so this is the strongest cancellation boundary
+   * available in the main process.
+   */
+  cancelBackgroundTask(taskId: string): Promise<{
+    content: string;
+    outputFile: string;
+    forced: boolean;
+    isError: boolean;
+    killStatus: 'killed' | 'failed' | 'unverified';
+  } | null> {
+    const state = this.backgroundProxyTasks.get(taskId);
+    if (!state) return Promise.resolve(null);
+    if (state.cancelPromise) return state.cancelPromise;
+
+    state.cancelled = true;
+    state.abortController?.abort();
+    state.cancelPromise = new Promise((resolve) => {
+      state.resolveCancel = resolve;
+    });
+
+    const finalizeForceStop = () => {
+      if (state.settled) return;
+      state.settled = true;
+      state.forceTimer = undefined;
+      const reported = state.killStatusRef?.current;
+      const killStatus = reported ? (reported.ok ? 'killed' : 'failed') : 'unverified';
+      const killDetail = reported
+        ? (reported.ok ? 'killed' : `failed (${reported.error ?? 'unknown error'})`)
+        : 'unverified (the handler did not confirm process-tree termination)';
+      const status =
+        '[background-task-force-stopped] The task did not return within 5 seconds after the stop request. ' +
+        `It was force-stopped; killStatus: ${killDetail}.`;
+      let existing = '';
+      try {
+        existing = readFileSync(state.outputFile, 'utf8');
+      } catch {
+        // No prior output file.
+      }
+      const content = existing.trim() ? `${existing.trimEnd()}\n\n${status}` : status;
+      try {
+        writeFileSync(state.outputFile, content, 'utf8');
+      } catch (error) {
+        this.debug(`[bg-tool] failed to write forced-stop output: ${error instanceof Error ? error.message : error}`);
+      }
+      this.backgroundProxyTasks.delete(taskId);
+      if (this.backgroundProxyTasks.size === 0) this.backgroundTasksPending = false;
+      state.resolveCancel?.({
+        content,
+        outputFile: state.outputFile,
+        forced: true,
+        isError: true,
+        killStatus,
+      });
+    };
+
+    state.forceTimer = setTimeout(() => {
+      if (state.settled) return;
+      if (state.killStatusRef?.current) {
+        finalizeForceStop();
+        return;
+      }
+      // The handler's own force-kill fires at the same 5s deadline. Give its
+      // process-tree result a short grace window so a failed kill is reported
+      // as `failed` instead of being mislabeled `unverified`.
+      const grace = setTimeout(finalizeForceStop, 300);
+      grace.unref?.();
+    }, this.getBackgroundForceStopMs());
+    state.forceTimer.unref?.();
+
+    return state.cancelPromise;
   }
 
   /**
@@ -2314,12 +2724,14 @@ export class PiAgent extends BaseAgent {
    */
   private async routeToolCall(
     toolName: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    onKillResult?: (result: { ok: boolean; error?: string }) => void,
   ): Promise<{ content: string; isError: boolean }> {
     // Tool layering dispatch first (spec §6): meta tools (tools_<cat>) expand,
     // call_tool routes to any foldable tool in the registry.
     if (this.toolLayering?.mode === 'layered') {
-      const layered = await this.routeLayeredToolCall(toolName, args);
+      const layered = await this.routeLayeredToolCall(toolName, args, signal, onKillResult);
       if (layered) return layered;
     }
 
@@ -2330,12 +2742,12 @@ export class PiAgent extends BaseAgent {
       : toolName;
 
     if (SESSION_TOOL_NAMES.has(strippedName)) {
-      return this.executeSessionTool(strippedName, args);
+      return this.executeSessionTool(strippedName, args, signal, onKillResult);
     }
 
     // MCP source tools — route through centralized pool
     if (this.mcpPool?.isProxyTool(toolName)) {
-      return this.mcpPool.callTool(toolName, args);
+      return this.mcpPool.callTool(toolName, args, signal ? { signal } : undefined);
     }
 
     // Unknown tool
@@ -2353,6 +2765,8 @@ export class PiAgent extends BaseAgent {
   private async routeLayeredToolCall(
     toolName: string,
     args: Record<string, unknown>,
+    signal?: AbortSignal,
+    onKillResult?: (result: { ok: boolean; error?: string }) => void,
   ): Promise<{ content: string; isError: boolean } | null> {
     const tl = this.toolLayering!;
     const stripped = toolName.startsWith(SESSION_PREFIX)
@@ -2452,10 +2866,10 @@ export class PiAgent extends BaseAgent {
       });
       if (entry.callName !== entry.fullName) {
         // session tool (mcp__session__ stripped in callName)
-        return this.executeSessionTool(entry.callName, callArgs);
+        return this.executeSessionTool(entry.callName, callArgs, signal, onKillResult);
       }
       if (this.mcpPool?.isProxyTool(entry.fullName)) {
-        return this.mcpPool.callTool(entry.fullName, callArgs);
+        return this.mcpPool.callTool(entry.fullName, callArgs, signal ? { signal } : undefined);
       }
       return {
         content: `工具 ${entry.callName} 无可用处理器`,
@@ -2478,7 +2892,7 @@ export class PiAgent extends BaseAgent {
     const workspacePath = this.config.workspace.rootPath;
     const workspaceId = this.config.workspace.id;
 
-    this._sessionToolContext = createClaudeContext({
+    this._sessionToolContext = createSessionToolContext({
       sessionId,
       workspacePath,
       workspaceId,
@@ -2522,6 +2936,8 @@ export class PiAgent extends BaseAgent {
   private async executeSessionTool(
     toolName: string,
     args: Record<string, unknown>,
+    signal?: AbortSignal,
+    onKillResult?: (result: { ok: boolean; error?: string }) => void,
   ): Promise<{ content: string; isError: boolean }> {
     try {
       // call_llm uses the shared pre-execution pipeline from BaseAgent
@@ -2610,7 +3026,7 @@ export class PiAgent extends BaseAgent {
       }
 
       const ctx = this.getSessionToolContext();
-      const result: SessionToolResult = await def.handler(ctx, args);
+      const result: SessionToolResult = await def.handler(ctx, args, signal, onKillResult);
 
       // Track query_memories usage: existence-hint suppression (anti-nagging)
       // keys off this — once the model actually queries, we stop hinting for
@@ -3171,11 +3587,6 @@ export class PiAgent extends BaseAgent {
     this.adapter.startTurn();
 
     // Fire UserPromptSubmit hook event (fire-and-forget)
-    this.emitAutomationEvent('UserPromptSubmit', {
-      hook_event_name: 'UserPromptSubmit',
-      prompt: message,
-    });
-
     // Refresh session-scoped tool callbacks (for SubmitPlan, source auth, etc.)
     // IMPORTANT: merge (don't replace) so SessionManager-provided browserPaneFns
     // survives across turns.
@@ -3230,36 +3641,26 @@ export class PiAgent extends BaseAgent {
           // "压缩完成：约 A → B（保留 R，压缩 S）". Rendered by the same
           // i18n branch as the auto path's process-block row.
           //
-          // Relief reports exact accounting; the LLM path only knows
-          // before/after. Synthesize the same shape (checkpoint 0) so the
-          // token row still appears — a branch compaction used to show only
-          // "Compacted context..." with no numbers (2026-10-18).
-          const stats = compactResult.stats ?? (compactResult.tokensBefore > 0
-            ? {
-                before: compactResult.tokensBefore,
-                retained: compactResult.estimatedTokensAfter ?? 0,
-                compacted: Math.max(0, compactResult.tokensBefore - (compactResult.estimatedTokensAfter ?? 0)),
-                checkpoint: 0,
-                viaRelief: false,
-              }
-            : undefined);
-          if (stats && stats.before > 0) {
+          // Relief reports exact accounting; the LLM path ships only the
+          // SDK's before/after. `buildCompactionSummaryParams` turns both into
+          // the same shape and always anchors the arrow target on the SDK's
+          // real post-compaction size — using the measured kept region there
+          // rendered "约 453.4k → 20.0k（保留 20.0k，压缩 427.5k）", i.e. the
+          // keepRecent floor instead of the ring's 25.9k (2026-11-01
+          // eager-fountain).
+          const summaryParams = buildCompactionSummaryParams({
+            tokensBefore: compactResult.tokensBefore,
+            estimatedTokensAfter: compactResult.estimatedTokensAfter,
+            retained: compactResult.stats?.retained,
+            checkpoint: compactResult.stats?.checkpoint,
+            viaRelief: compactResult.stats?.viaRelief,
+          });
+          if (summaryParams) {
             yield {
               type: 'info',
               message: 'Compaction summary',
               statusType: 'compaction_summary',
-              statusParams: {
-                before: stats.before,
-                retained: stats.retained,
-                compacted: stats.compacted,
-                checkpoint: stats.checkpoint,
-                // Real post-compaction context = kept region + checkpoint text.
-                // The UI prefers this so its line matches the context ring
-                // instead of re-deriving it from before/compacted (which
-                // disagreed by ~2k whenever a checkpoint was folded in).
-                after: stats.retained + stats.checkpoint,
-                viaRelief: stats.viaRelief ? 1 : 0,
-              },
+              statusParams: summaryParams,
             };
           }
           // Refresh the context-usage ring immediately (mirrors the auto
@@ -3348,7 +3749,7 @@ export class PiAgent extends BaseAgent {
       // System prompt carries only stable context (issue #862): the system block
       // is pi-ai's cache prefix before all history, so anything volatile here
       // re-stamps the prefix every turn and drops cacheRead to 0. Volatile blocks
-      // ride the user-message tail instead — exactly as the Claude path already
+      // ride the user-message tail instead — exactly as the previous backend path already
       // does (buildTextPrompt / buildSDKUserMessage append context to the tail).
       const fullSystemPrompt = [
         systemPrompt,
@@ -3434,7 +3835,7 @@ export class PiAgent extends BaseAgent {
       this.scheduleIdleSubprocessReaper();
 
       // Extract memories at turn end (session-end semantics), matching
-      // ClaudeAgent behavior. The per-session already-extracted guard in
+      // previous backend behavior. The per-session already-extracted guard in
       // extractMemories() makes this effectively one-shot per session.
       if (this.memoryConfig.extractionStrategy !== 'compaction') {
         this.extractSessionMemories({ strategy: 'session_end' }).catch(err =>
@@ -3480,6 +3881,12 @@ export class PiAgent extends BaseAgent {
     };
     this._model = update.model;
 
+    // Re-sync the event adapter's context window so subsequent usage events
+    // report the new ceiling (mirrors setModel). Without this, a model whose
+    // contextWindow changed via update_runtime_config keeps reporting the old
+    // window in the context-usage ring (2026-10-30).
+    this.syncAdapterContextWindow(update.model, getBackendRuntime(this.config).customModels);
+
     if (!this.subprocess) {
       this.debug(`Runtime config updated locally (no subprocess): ${previousModel} → ${update.model}`);
       return true;
@@ -3512,15 +3919,14 @@ export class PiAgent extends BaseAgent {
   }
 
   /**
-   * Point the event adapter at the model's context window (registry → the
-   * connection's custom models). Passing a model whose window is unknown clears
-   * the adapter's window so stale values stop flowing into usage events.
+   * Point the event adapter at the model's configured context window (explicit
+   * connection override → registry fallback). Unknown windows clear stale usage.
    */
   private syncAdapterContextWindow(
     model: string,
     customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>,
   ): void {
-    this.adapter.setContextWindow(resolveContextWindow(model, customModels));
+    this.adapter.setContextWindow(resolveModelContextWindow(model, customModels));
   }
 
   /**
@@ -3709,8 +4115,6 @@ n   * connection can be adopted mid-session.
 
   async abort(reason?: string): Promise<void> {
     // Fire Stop hook event (fire-and-forget)
-    this.emitAutomationEvent('Stop', { hook_event_name: 'Stop' });
-
     // Deny all pending permissions
     for (const [, pending] of this.pendingPermissions) {
       pending.resolve(false);
@@ -3734,8 +4138,6 @@ n   * connection can be adopted mid-session.
     this.adapter.resetRecoveryState();
 
     // Fire Stop hook event (fire-and-forget)
-    this.emitAutomationEvent('Stop', { hook_event_name: 'Stop' });
-
     this.abortReason = reason;
     this._isProcessing = false;
     this.clearTurnIdleWatchdog();
@@ -3976,13 +4378,31 @@ n   * connection can be adopted mid-session.
       const progress = loadRawProgressRecords(sessionDir);
       if (progress.length === 0) return;
       const messages = readSessionMessages(join(sessionDir, 'session.jsonl'));
-      const turns = buildTurnLogs(progress, messages);
+      const turns = buildTurnLogs(progress, messages, {
+        // When the caller includes the open turn (turn end / destroy / clear),
+        // stamp its end so the file reads as a closed record. The "next user
+        // message" path excludes it and closes the previous turn with that
+        // message's timestamp instead.
+        closeOpenTurnAt: opts.excludeLast ? undefined : new Date().toISOString(),
+      });
       const toWrite = opts.excludeLast && turns.length > 0 ? turns.slice(0, -1) : turns;
       const written = writeTurnLogs(sessionDir, toWrite);
       if (written > 0) this.debug(`[TurnLog] archived ${written} turn file(s)`);
     } catch (err) {
       this.debug(`[TurnLog] archive failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+  }
+
+  /**
+   * Archive the turn that just finished.
+   *
+   * The archiver used to run only when the NEXT real user message arrived, so a
+   * single-turn session (2026-10-27 261027-noble-coast: one turn, archived,
+   * `turns/` never created) lost its record. SessionManager calls this once the
+   * turn's messages are on disk.
+   */
+  flushTurnLogs(): void {
+    this.archiveTurnLogs({ excludeLast: false });
   }
 
   destroy(): void {
@@ -4009,6 +4429,9 @@ n   * connection can be adopted mid-session.
     }
 
     this._sessionToolContext = null;
+    // A runtime restart is a teardown path that never reaches destroy(); skip
+    // archiving here and a finished turn has no file to survive the restart.
+    this.archiveTurnLogs({ excludeLast: false });
     await this.killSubprocessGracefully();
     this.debug('PiAgent disposed for restart');
   }

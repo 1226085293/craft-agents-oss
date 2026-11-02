@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { DEFAULT_FILTER, filterLogs, logLevel } from '../logFilters'
+import { DEFAULT_FILTER, filterLogs, logLevel, normalizeLevel } from '../logFilters'
 import type { LogsFilter } from '../logFilters'
 
 const row = (over: Record<string, unknown> = {}) =>
@@ -36,9 +36,12 @@ describe('logLevel', () => {
     expect(logLevel(row({ status: 'no_healthy_account', statusCode: 503 }))).toBe('failed')
   })
 
-  it('calls a success that needed another attempt a retry', () => {
-    expect(logLevel(row({ attempts: 2 }))).toBe('retried')
-    expect(logLevel(row({ retried: true }))).toBe('retried')
+  it('a success that needed another attempt is a success, not a third state', () => {
+    // The column used to paint this row amber "重试", which reads as "something
+    // still needs attention" beside a genuine failure. The attempts stay in the
+    // expanded row (尝试 N 次), not in the outcome.
+    expect(logLevel(row({ attempts: 2 }))).toBe('success')
+    expect(logLevel(row({ retried: true }))).toBe('success')
   })
 
   it('a failed request that was retried is still a failure', () => {
@@ -58,16 +61,17 @@ describe('filterLogs', () => {
     expect(filterLogs(rows, DEFAULT_FILTER)).toHaveLength(4)
   })
 
-  it('失败 lists only failures — never a success or a retry', () => {
+  it('失败 lists only failures — never a success, retried or not', () => {
     expect(filterLogs(rows, filter({ level: 'failed' })).map((r) => r.ts)).toEqual([3, 4])
   })
 
-  it('成功 lists only clean successes', () => {
-    expect(filterLogs(rows, filter({ level: 'success' })).map((r) => r.ts)).toEqual([1])
+  it('成功 lists every request that worked, including ones that needed a retry', () => {
+    expect(filterLogs(rows, filter({ level: 'success' })).map((r) => r.ts)).toEqual([1, 2])
   })
 
-  it('重试 lists successes that needed another attempt', () => {
-    expect(filterLogs(rows, filter({ level: 'retried' })).map((r) => r.ts)).toEqual([2])
+  it('a filter still set to the removed 重试 level shows everything, not nothing', () => {
+    expect(normalizeLevel('retried')).toBe('all')
+    expect(filterLogs(rows, filter({ level: 'retried' as never })).map((r) => r.ts)).toEqual([1, 2, 3, 4])
   })
 
   it('provider is matched exactly, not by substring', () => {

@@ -1,16 +1,14 @@
 /**
  * Agent Factory
  *
- * Creates the appropriate AI agent based on configuration.
- * Supports two agents:
- * - ClaudeAgent (Anthropic) - Default, using @anthropic-ai/claude-agent-sdk
- * - PiAgent (Pi) - Using @earendil-works/pi-ai SDK
+ * Creates the agent backend for a session.
+ * Pi is the only agent backend (using @earendil-works/pi-ai SDK).
  *
  * All agents implement AgentBackend directly.
  *
  * LLM Connections:
  * - Backends can be created from LLM connection configs
- * - providerType determines SDK selection and credential routing
+ * - providerType determines credential routing
  * - authType determines how credentials are retrieved
  */
 
@@ -23,7 +21,6 @@ import type {
   CoreBackendConfig,
   BackendHostRuntimeContext,
 } from './types.ts';
-import { ClaudeAgent } from '../claude-agent.ts';
 import { PiAgent } from '../pi-agent.ts';
 import {
   getLlmConnection,
@@ -128,8 +125,8 @@ export function detectProvider(authType: string): AgentProvider {
 export function createBackend(config: BackendConfig): AgentBackend {
   switch (config.provider) {
     case 'anthropic':
-      // ClaudeAgent implements AgentBackend directly
-      return new ClaudeAgent(config);
+      // PiAgent handles Anthropic-compatible endpoints via the Pi backend.
+      return new PiAgent(config);
 
     case 'pi':
       // PiAgent implements AgentBackend directly
@@ -186,7 +183,7 @@ export function createBackendFromResolvedContext(args: {
 
 /**
  * Initialize backend host runtime wiring once at app startup.
- * Keeps runtime/bootstrap details (Claude SDK executable, Pi interceptor bundle)
+ * Keeps runtime/bootstrap details (Pi interceptor bundle, bundled runtime)
  * behind backend internals.
  */
 export function initializeBackendHostRuntime(args: {
@@ -238,7 +235,7 @@ export function isProviderAvailable(provider: AgentProvider): boolean {
  * Map LlmProviderType to AgentProvider (SDK selection).
  *
  * AgentProvider determines which backend class to instantiate:
- * - 'anthropic' → ClaudeAgent
+ * - 'anthropic' → PiAgent
  * - 'pi' → PiAgent
  *
  * @param providerType - The full provider type from LLM connection
@@ -717,8 +714,11 @@ export async function testBackendConnection(args: {
 
     try {
       const timeoutMs = args.timeoutMs ?? 20000;
+      // `connection_test`: the probe normally bypasses the gateway (it must test
+      // the key itself), but when the pasted base URL *is* a gateway endpoint
+      // the row would otherwise be filed as conversation traffic.
       const text = await Promise.race([
-        agent.runMiniCompletion('Say ok'),
+        agent.runMiniCompletion('Say ok', 'connection_test'),
         new Promise<never>((_, reject) =>
           setTimeout(
             () => reject(new Error(withStderrContext(`Connection test timed out after ${timeoutMs}ms`))),
@@ -755,7 +755,7 @@ export async function testBackendConnection(args: {
 /**
  * Validate an LLM connection by dispatching to provider-specific validation.
  *
- * - Anthropic/compat/Bedrock/Vertex: validates via Claude Agent SDK (query with maxTurns:1)
+ * - Anthropic/compat/Bedrock/Vertex: validates via the Anthropic API (query with maxTurns:1)
  * - OpenAI/Copilot/Pi: returns success (these providers validate on connect, no pre-flight check available)
  *
  * For more thorough provider-specific validation (model list checks, OAuth refresh, etc.),
@@ -773,7 +773,7 @@ export async function validateConnection(
 
   switch (provider) {
     case 'anthropic': {
-      // Anthropic-based providers can be validated via the Claude Agent SDK
+      // Anthropic-based providers can be validated via the Anthropic API
       const { validateAnthropicConnection } = await import('../../config/llm-validation.ts');
       return validateAnthropicConnection({
         model: connection.defaultModel || DEFAULT_MODEL,

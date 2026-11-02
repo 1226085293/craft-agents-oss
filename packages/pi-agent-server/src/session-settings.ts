@@ -54,60 +54,65 @@ export type CraftPiSessionPurpose = 'main' | 'ephemeral';
 export const CRAFT_PI_EPHEMERAL_QUERY_DEADLINE_MS = LLM_QUERY_TIMEOUT_MS - 5_000;
 
 /**
- * Main-chat retry policy for transient provider/transport errors.
+ * Retry policy for every Pi session Craft spawns — deliberately OFF at both
+ * SDK layers, with no environment switch to turn them back on.
  *
- * Default: DISABLED (2026-10-05). Model-level retry/switch is owned by the
- * built-in LLM gateway (`packages/shared/src/config/llm-gateway.ts`), which
- * cools and switches keys transparently inside one request. The SDK's own
- * agent/provider retries ran silently inside streamFn and emitted no forwarded
- * events, which made the main-process turn-idle watchdog fire mid-retry
- * ("stream stalled") — see 261005-fresh-tulip. Restore the SDK policy with
- * CRAFT_PI_RETRY_ENABLED=1.
+ * Craft owns retrying, in two places above this one:
  *
- * When enabled: Agent-level (`AgentSession._prepareRetry`, classifier
- * `isRetryableAssistantError` in pi-ai) re-runs a failed assistant turn with
- * exponential backoff `baseDelayMs * 2^(attempt-1)` — 2s/4s/8s/16s ≈ 30s.
- * Provider-level (`retryProviderRequest` in pi-ai): pre-stream retries for
- * 408/409/429/5xx honoring `retry-after` up to `maxRetryDelayMs`, mirroring
- * the OpenAI/Anthropic SDK default of 2. (Pi SDK default: 0.)
+ *  - `packages/shared/src/config/llm-gateway.ts` routes one client request:
+ *    it rotates keys (per-account failures), hops providers, cools what failed
+ *    and answers a per-attempt usage row for each hop;
+ *  - the main-process retry ladder (`packages/shared/src/agent/pi-agent.ts`)
+ *    re-issues a turn after the gateway has given up, with the UI aware of it.
+ *
+ * The two SDK layers used to run underneath both:
+ *
+ *  - agent level (`AgentSession._handleRetryableError`): `maxRetries` ×
+ *    exponential backoff (2s/4s/8s…), re-running the whole assistant turn;
+ *  - provider level (`maxRetries` forwarded to the Anthropic/OpenAI SDK
+ *    client): 2 pre-stream retries per attempt, ~0.5s/1s apart.
+ *
+ * Multiplied, they turn one message into many upstream requests, and every
+ * extra request re-enters the same cooling key. 261027-long-bronze is the
+ * case in point: a single 「你好」 became 10 gateway requests (3 provider
+ * attempts + 3 + 3 + the real prompt); only the first reached an upstream,
+ * the other nine were refused locally because the key was already cooling —
+ * the log showed "9 failed requests" for a message the user sent once.
+ * (261005-fresh-tulip was the earlier symptom on the main session: silent
+ * in-stream retries made the turn-idle watchdog fire mid-retry.)
+ *
+ * Retrying is a routing decision, so it belongs to the router. The settings are
+ * still written explicitly rather than left undefined: `undefined` means "SDK
+ * default", and the SDK default is 2 provider retries.
  */
-export const CRAFT_PI_SDK_RETRY_ENABLED = readEnvBool('CRAFT_PI_RETRY_ENABLED', false);
-
 export const CRAFT_PI_RETRY_SETTINGS = {
-  enabled: CRAFT_PI_SDK_RETRY_ENABLED,
-  maxRetries: CRAFT_PI_SDK_RETRY_ENABLED ? 4 : 0,
+  enabled: false,
+  maxRetries: 0,
   baseDelayMs: 2_000,
   provider: {
-    maxRetries: CRAFT_PI_SDK_RETRY_ENABLED ? 2 : 0,
-    maxRetryDelayMs: CRAFT_PI_SDK_RETRY_ENABLED ? 60_000 : 0,
+    maxRetries: 0,
+    maxRetryDelayMs: 0,
   },
 } as const;
-
-function readEnvBool(name: string, fallback: boolean): boolean {
-  const raw = process.env[name];
-  if (raw == null || raw.trim() === '') return fallback;
-  return !['0', 'false', 'no', 'off'].includes(raw.trim().toLowerCase());
-}
 
 /**
- * Smaller retry budget for utility sessions (`call_llm`, titles, summaries).
+ * Same policy for utility sessions (`call_llm`, titles, summaries).
  *
- * These calls have an end-to-end 120-second RPC budget and a 115-second child
- * deadline. In the worst configured case, provider-directed sleeps consume at
- * most 60 seconds (two 10-second sleeps in each of three agent attempts) and
- * agent backoff consumes another 6 seconds, leaving headroom for request and
- * cleanup latency.
+ * These used to carry a smaller budget of their own (2 agent retries × 2
+ * provider retries). They now fail fast like the main session: a utility call
+ * that cannot be served is a routing problem, and the gateway already spent its
+ * own key/provider ladder on it before the error surfaced.
  */
-export const CRAFT_PI_EPHEMERAL_RETRY_SETTINGS = {
-  enabled: true,
-  maxRetries: 2,
-  baseDelayMs: 2_000,
-  provider: {
-    maxRetries: 2,
-    maxRetryDelayMs: 10_000,
-  },
-} as const;
+export const CRAFT_PI_EPHEMERAL_RETRY_SETTINGS = CRAFT_PI_RETRY_SETTINGS;
 
+/**
+ * Worst-case SDK-side backoff before an ephemeral query gives up.
+ *
+ * Zero by construction now that the SDK retry budget is disabled. The constant
+ * (and the deadline assertion in the tests) stays: it is the invariant that
+ * keeps utility calls inside their RPC budget, and it must keep holding if a
+ * retry policy is ever reintroduced here.
+ */
 export const CRAFT_PI_EPHEMERAL_MAX_BACKOFF_MS =
   CRAFT_PI_EPHEMERAL_RETRY_SETTINGS.provider.maxRetries *
     CRAFT_PI_EPHEMERAL_RETRY_SETTINGS.provider.maxRetryDelayMs *

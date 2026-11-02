@@ -17,6 +17,7 @@ import {
   ResponseTranscoder,
   transcodeResponseToAnthropic,
 } from '../llm-transcode-response.ts';
+import { registerAttachmentName, clearAttachmentNames } from '../attachment-name-registry.ts';
 
 const OPTS = { upstreamModel: 'deepseek-v4-flash-0731' };
 
@@ -113,6 +114,77 @@ describe('transcodeRequestToOpenAI — messages', () => {
     expect(out.messages[0]).toEqual({ role: 'tool', tool_call_id: 'toolu_1', content: 'output here' });
   });
 
+  it('keeps parallel tool_results as separate tool messages (never merges across tool_call ids)', () => {
+    // 2026-11-01 session 261101-lean-comet: an assistant message carrying two
+    // parallel tool_use blocks, followed by two separate user messages each
+    // holding one tool_result. The same-role merge in push() collapsed the two
+    // tool messages into one and kept the FIRST tool_call_id, so the relay
+    // rejected the whole request with "No tool output found for function
+    // call <second id>". OpenAI pairs every tool_call with exactly one tool
+    // message; tool messages must therefore never be merged.
+    const out = transcodeRequestToOpenAI(
+      {
+        model: 'auto',
+        messages: [
+          { role: 'user', content: 'hi' },
+          {
+            role: 'assistant',
+            content: [
+              { type: 'tool_use', id: 'toolu_a', name: 'Read', input: { path: 'a' } },
+              { type: 'tool_use', id: 'toolu_b', name: 'Read', input: { path: 'b' } },
+            ],
+          },
+          { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_a', content: 'out A' }] },
+          { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_b', content: 'out B' }] },
+        ],
+      },
+      OPTS,
+    );
+    expect(out.messages).toEqual([
+      { role: 'user', content: 'hi' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [
+          { id: 'toolu_a', type: 'function', function: { name: 'Read', arguments: '{"path":"a"}' } },
+          { id: 'toolu_b', type: 'function', function: { name: 'Read', arguments: '{"path":"b"}' } },
+        ],
+      },
+      { role: 'tool', tool_call_id: 'toolu_a', content: 'out A' },
+      { role: 'tool', tool_call_id: 'toolu_b', content: 'out B' },
+    ]);
+  });
+
+  it('splits one user message with two tool_result blocks into two tool messages', () => {
+    const out = transcodeRequestToOpenAI(
+      {
+        model: 'auto',
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              { type: 'tool_use', id: 'toolu_a', name: 'Bash', input: { command: 'a' } },
+              { type: 'tool_use', id: 'toolu_b', name: 'Bash', input: { command: 'b' } },
+            ],
+          },
+          {
+            role: 'user',
+            content: [
+              { type: 'tool_result', tool_use_id: 'toolu_a', content: 'out A' },
+              { type: 'tool_result', tool_use_id: 'toolu_b', content: 'out B', is_error: true },
+            ],
+          },
+        ],
+      },
+      OPTS,
+    );
+    const toolMsgs = out.messages.filter((m) => m.role === 'tool');
+    expect(toolMsgs).toEqual([
+      { role: 'tool', tool_call_id: 'toolu_a', content: 'out A' },
+      { role: 'tool', tool_call_id: 'toolu_b', content: 'out B' },
+    ]);
+  });
+
   it('drops unknown roles rather than forwarding a 400', () => {
     const out = transcodeRequestToOpenAI(
       { model: 'auto', messages: [{ role: 'weird', content: 'x' }] },
@@ -178,11 +250,10 @@ describe('transcodeRequestToOpenAI — image cap', () => {
     );
 
     const parts = out.messages[0]!.content as Array<{ type: string; text?: string }>;
-    const imageParts = parts.filter((p) => p.type !== 'text' || !String(p.text ?? '').startsWith('[image omitted'));
-    // 4 images forwarded, 2 replaced.
+    // 4 images forwarded, 2 replaced by the short marker (no file name is
+    // registered for these fixtures, so the fallback applies).
     expect(parts.filter((p) => p.type === 'image_url')).toHaveLength(4);
-    expect(parts.filter((p) => p.text === '[image omitted: exceeded the upstream image limit]')).toHaveLength(2);
-    expect(imageParts).toBeDefined();
+    expect(parts.filter((p) => p.text === '[img]')).toHaveLength(2);
   });
 
   it('keeps every image when under the cap', () => {
@@ -197,6 +268,55 @@ describe('transcodeRequestToOpenAI — image cap', () => {
     );
     const parts = out.messages[0]!.content as Array<{ type: string }>;
     expect(parts.filter((p) => p.type === 'image_url')).toHaveLength(1);
+  });
+
+  it('names the dropped image when the file name is registered', () => {
+    // The sender registers the stored name; a dropped image then tells the model
+    // exactly which file to read instead of a bare marker.
+    clearAttachmentNames();
+    registerAttachmentName('b64-dropped', 'a1b2c3_pasted-image-1.png');
+
+    const out = transcodeRequestToOpenAI(
+      {
+        model: 'auto',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image', source: { media_type: 'image/png', data: 'b64-kept' } },
+              { type: 'image', source: { media_type: 'image/png', data: 'b64-dropped' } },
+            ] as never,
+          },
+        ],
+      },
+      { ...OPTS, maxImageParts: 1 },
+    );
+
+    const parts = out.messages[0]!.content as Array<{ type: string; text?: string }>;
+    expect(parts.filter((p) => p.type === 'image_url')).toHaveLength(1);
+    expect(parts.some((p) => p.text === '[a1b2c3_pasted-image-1.png]')).toBe(true);
+    clearAttachmentNames();
+  });
+
+  it('falls back to the short marker when no name is registered', () => {
+    clearAttachmentNames();
+    const out = transcodeRequestToOpenAI(
+      {
+        model: 'auto',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image', source: { media_type: 'image/png', data: 'b64-kept' } },
+              { type: 'image', source: { media_type: 'image/png', data: 'b64-unknown' } },
+            ] as never,
+          },
+        ],
+      },
+      { ...OPTS, maxImageParts: 1 },
+    );
+    const parts = out.messages[0]!.content as Array<{ type: string; text?: string }>;
+    expect(parts.some((p) => p.text === '[img]')).toBe(true);
   });
 
   it('honours a custom placeholder', () => {
@@ -280,6 +400,12 @@ describe('ResponseTranscoder — text', () => {
       usage: { prompt_tokens: 500, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 384 } },
     });
     expect(t.usage()).toEqual({ promptTokens: 500, completionTokens: 4, cachedTokens: 384 });
+
+    const messageDelta = t.finish().split('\n')
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice(6)) as { type: string; usage?: unknown })
+      .find((event) => event.type === 'message_delta');
+    expect(messageDelta?.usage).toEqual({ input_tokens: 116, output_tokens: 4, cache_read_input_tokens: 384 });
   });
 });
 
@@ -328,14 +454,15 @@ describe('ResponseTranscoder — known traps', () => {
     expect(out).toContain('"thinking_delta"')
   })
 
-  it('marks a cut stream as a retryable network_error', () => {
+  it('marks a cut stream with a supported refusal stop reason and retry explanation', () => {
     const t = new ResponseTranscoder(ctx)
     t.push({ choices: [{ delta: { content: 'partial' } }] })
-    const out = t.finish({ truncated: true })
+    const out = t.finish({ truncated: true, retryMarker: 'CRAFT_GATEWAY_STREAM_TRUNCATION_RETRY' })
 
-    expect(out).toContain('"stop_reason":"network_error"')
-    expect(out).toContain('"type":"error"')
-    expect(out).toContain('network_error')
+    expect(out).toContain('"stop_reason":"refusal"')
+    expect(out).toContain('CRAFT_GATEWAY_STREAM_TRUNCATION_RETRY')
+    expect(out).not.toContain('"stop_reason":"network_error"')
+    expect(out).not.toContain('event: error')
   })
 
   it('does not report network_error on a clean finish', () => {
@@ -356,6 +483,18 @@ describe('transcodeResponseToAnthropic — non-streaming', () => {
     expect(out.content[0]).toEqual({ type: 'text', text: 'hi' })
     expect(out.stop_reason).toBe('end_turn')
     expect(out.usage.input_tokens).toBe(5)
+  })
+
+  it('excludes cached prompt tokens from input_tokens', () => {
+    const out = transcodeResponseToAnthropic(
+      {
+        choices: [{ message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 500, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 384 } },
+      },
+      ctx,
+    ) as { usage: { input_tokens: number; output_tokens: number; cache_read_input_tokens: number } }
+
+    expect(out.usage).toEqual({ input_tokens: 116, output_tokens: 4, cache_read_input_tokens: 384 })
   })
 
   it('converts tool calls', () => {

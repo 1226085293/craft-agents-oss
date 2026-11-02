@@ -14,7 +14,7 @@
 
 import type { GatewayStatus, LlmConfigShape, LlmKeyStateShape, LlmModelOptionsShape, ModelWindow, ProviderDetailShape, UsageOverview } from '../types'
 import type { LlmUsageRecord } from '@craft-agent/shared/config'
-import { providerTone, resolvePresetId } from '../helpers'
+import { resolvePresetId } from '../helpers'
 
 export interface ProtoKeyRow {
   provider: string
@@ -25,6 +25,7 @@ export interface ProtoKeyRow {
   type: string
   enabled: boolean
   cool: boolean
+  available: boolean
   coolReason?: 'rate' | 'quota'
   coolUntil?: number
   /** Daily request usage bar; undefined hides the minibar. */
@@ -42,8 +43,9 @@ export interface ProtoProvider {
    * belongs where the user can see it.
    */
   protocol: string
-  state: 'ok' | 'cool' | 'disabled'
+  state: 'ok' | 'cool' | 'unavailable' | 'disabled'
   lastTest: string
+  lastTestOk: boolean
   lastError: string
   defaultType: string
   quota: number
@@ -51,7 +53,7 @@ export interface ProtoProvider {
   /** Per-model capability declarations, keyed by public model name. */
   modelOptions: Record<string, LlmModelOptionsShape>
   modelList: string[]
-  keys: { avail: number; cool: number; dis: number }
+  keys: { avail: number; cool: number; unavailable: number; dis: number }
   keyRows: ProtoKeyRow[]
 }
 
@@ -67,6 +69,18 @@ export interface ProtoStrategy {
   health: number
   cool: number
   weights: Record<string, number>
+  /**
+   * Switching units in evaluation order: the provider plus the model it
+   * serves. A member without a model is a placeholder for "any model this
+   * provider declares" and is shown with an empty `model`.
+   */
+  units: Array<{
+    id: string
+    provider: string
+    providerName: string
+    model: string
+    upstreamModel: string
+  }>
 }
 
 export interface ProtoLogRow {
@@ -76,7 +90,8 @@ export interface ProtoLogRow {
   provider: string
   key: string
   model: string
-  status: 'success' | 'retried' | 'failed'
+  /** Two outcomes only: a request that needed a retry still succeeded. */
+  status: 'success' | 'failed'
   code: string | number
   /**
    * The gateway refused before contacting an upstream (no healthy account, no
@@ -124,6 +139,32 @@ function publicModels(models: Record<string, string> | undefined): string[] {
   return Object.values(models).filter(Boolean)
 }
 
+export function gatewaySetupSteps(
+  config: LlmConfigShape | null,
+  providers: ProtoProvider[],
+  strategies: ProtoStrategy[],
+): [boolean, boolean, boolean] {
+  const configuredProvider = providers.some((provider) =>
+    provider.state !== 'disabled' &&
+    provider.url.trim().length > 0 &&
+    provider.keyRows.some((key) => key.enabled && key.key.trim().length > 0),
+  )
+  const providerTested = providers.some((provider) => provider.state !== 'disabled' && provider.lastTestOk)
+  const defaultId = config?.defaultStrategy
+  const defaultConfig = config?.strategies.find((strategy) => strategy.id === defaultId && strategy.enabled !== false)
+  const defaultView = strategies.find((strategy) => strategy.id === defaultId && strategy.enabled)
+  const defaultHasRoute = Boolean(defaultConfig && defaultView && defaultConfig.members.some((member) => {
+    if (member.enabled === false) return false
+    const providerConfig = config!.providers.find((provider) => provider.id === member.provider)
+    const providerView = providers.find((provider) => provider.id === member.provider)
+    if (!providerConfig || providerConfig.enabled === false || !providerView || providerView.state === 'disabled') return false
+    if (!providerConfig.keys.some((key) => key.enabled !== false && key.key.trim().length > 0)) return false
+    return Boolean(member.model || member.upstreamModel || providerView.modelList.length > 0 || Object.keys(defaultConfig.modelAliases ?? {}).length > 0)
+  }))
+
+  return [configuredProvider, providerTested, defaultHasRoute]
+}
+
 export function buildProviders(
   config: LlmConfigShape | null,
   status: GatewayStatus | null,
@@ -136,6 +177,8 @@ export function buildProviders(
     const keyRows: ProtoKeyRow[] = p.keys.map((k) => {
       const live = keyStates.get(`${p.id}/${k.id}`)
       const cooling = live?.cooling ?? false
+      const gatewayReady = status?.running === true && status.enabled === true
+      const available = p.enabled !== false && k.enabled !== false && gatewayReady && live?.available === true && !cooling
       const remainingMs = (live?.cooldownRemaining ?? 0) * 1000
       // Same chain the gateway uses, so the RPD bar reflects the limits that
       // actually apply when the key inherits or its own type was deleted.
@@ -154,22 +197,30 @@ export function buildProviders(
         // to the provider default anyway.
         type: k.preset && config.presets[k.preset] ? k.preset : '',
         enabled: k.enabled !== false,
-        cool: cooling,
-        ...(cooling ? { coolReason: 'rate' as const, coolUntil: Date.now() + remainingMs } : {}),
+        cool: p.enabled !== false && k.enabled !== false && gatewayReady && cooling,
+        available,
+        ...(p.enabled !== false && k.enabled !== false && gatewayReady && cooling
+          ? { coolReason: 'rate' as const, coolUntil: Date.now() + remainingMs }
+          : {}),
         ...(rpdMax && detailKey
           ? { rpd: { used: detailKey.requests, max: rpdMax } }
           : {}),
       }
     })
-    const avail = keyRows.filter((k) => k.enabled && !k.cool).length
-    const coolN = keyRows.filter((k) => k.enabled && k.cool).length
+    const avail = keyRows.filter((k) => k.available).length
+    const coolN = keyRows.filter((k) => k.cool).length
     const dis = keyRows.filter((k) => !k.enabled).length
-    const tone = providerTone({ provider: p, status })
-    // The prototype's "全部冷却" means no usable key is left. A provider with
-    // one cooling key and one live key is still healthy, so prefer the bucket
-    // counts over `providerTone`'s coarser "any cooling" signal.
-    const state: ProtoProvider['state'] =
-      p.enabled === false ? 'disabled' : avail > 0 ? 'ok' : coolN > 0 ? 'cool' : tone === 'down' ? 'cool' : 'ok'
+    const unavailable = keyRows.filter((k) => k.enabled && !k.available && !k.cool).length
+    // Only call the provider "all cooling" when every enabled, usable key is
+    // actually cooling. A stopped gateway, rate-limited key, or missing live
+    // status is unavailable — never counted as available or mislabeled cooling.
+    const state: ProtoProvider['state'] = p.enabled === false
+      ? 'disabled'
+      : avail > 0
+        ? 'ok'
+        : coolN > 0 && unavailable === 0
+          ? 'cool'
+          : 'unavailable'
     const lastVerified = p.lastVerifiedAt ? new Date(p.lastVerifiedAt) : null
     const lastTest = lastVerified
       ? `${lastVerified.getMonth() + 1}-${lastVerified.getDate()} ${pad2(lastVerified.getHours())}:${pad2(lastVerified.getMinutes())} ${p.lastTestOk ? '测试成功' : '测试失败'}`
@@ -187,22 +238,22 @@ export function buildProviders(
     Object.entries(p.modelOptions ?? {}).forEach(([m, o]) => {
       modelOptions[m] = o
     })
-    void status
     return {
       id: p.id,
       name: p.name,
       note: p.note ?? '',
       url: p.baseUrl,
       protocol: p.protocol,
-      state: p.enabled === false ? 'disabled' : state,
+      state,
       lastTest,
+      lastTestOk: p.lastTestOk === true,
       lastError,
       defaultType: p.defaultPreset ?? '',
       quota: 0,
       windows,
       modelOptions,
       modelList,
-      keys: { avail, cool: coolN, dis },
+      keys: { avail, cool: coolN, unavailable, dis },
       keyRows,
     }
   })
@@ -210,7 +261,7 @@ export function buildProviders(
 
 export function buildStrategies(
   config: LlmConfigShape | null,
-  _providers: ProtoProvider[],
+  providers: ProtoProvider[],
 ): ProtoStrategy[] {
   if (!config) return []
   return config.strategies.map((s) => {
@@ -233,6 +284,18 @@ export function buildStrategies(
       health: 0,
       cool: 0,
       weights,
+      units: (s.members ?? []).map((m) => {
+        const provider = providers.find((p) => p.id === m.provider)
+        const model = m.model ?? ''
+        const upstreamModel = m.upstreamModel ?? model
+        return {
+          id: `${m.provider}::${upstreamModel || model}`,
+          provider: m.provider,
+          providerName: provider?.name ?? m.provider,
+          model,
+          upstreamModel,
+        }
+      }),
     }
   })
 }
@@ -246,14 +309,10 @@ export function buildLogs(
   let id = 0
   details.forEach(({ provider, detail }) => {
     detail.recent.forEach((r) => {
-      const status: ProtoLogRow['status'] = r.retried
-        ? 'retried'
-        : r.status === 'success'
-          ? 'success'
-          : 'failed'
+      const status: ProtoLogRow['status'] = r.status === 'success' ? 'success' : 'failed'
       rows.push({
         id: id++,
-        ts: fmtTs(r.ts),
+        ts: fmtTs(r.startedAt ?? r.ts),
         tsMs: r.ts,
         provider,
         key: keyLabel(provider, r.keyId),
@@ -291,7 +350,7 @@ export function buildOrphanLogs(records: ReadonlyArray<LlmUsageRecord>): ProtoLo
     .filter((r) => !r.provider)
     .map((r, i) => ({
       id: -1 - i,
-      ts: fmtTs(r.ts),
+      ts: fmtTs(r.startedAt ?? r.ts),
       tsMs: r.ts,
       provider: '—',
       key: r.keyId || '—',
@@ -454,7 +513,30 @@ export function buildSparks(
   return series
 }
 
-export function buildKpis(overview: UsageOverview | null, _providerCount: number, rangeDays: number = Infinity): ProtoKpis {
+export function shouldShowGatewaySetup(steps: readonly boolean[], dismissed: boolean): boolean {
+  return !dismissed && steps.some((done) => !done)
+}
+
+export function keyAvailabilitySegments(keys: ProtoProvider['keys']): Array<{
+  id: 'available' | 'cooling' | 'unavailable' | 'disabled'
+  label: string
+  count: number
+  color: string
+}> {
+  return ([
+    { id: 'available', label: '可用', count: keys.avail, color: 'var(--state-ok)' },
+    { id: 'cooling', label: '冷却', count: keys.cool, color: 'var(--state-warn)' },
+    { id: 'unavailable', label: '暂不可用', count: keys.unavailable, color: 'var(--state-bad)' },
+    { id: 'disabled', label: '禁用', count: keys.dis, color: 'var(--state-unknown)' },
+  ] as const).filter((segment) => segment.count > 0)
+}
+
+export function buildKpis(
+  overview: UsageOverview | null,
+  _providerCount: number,
+  rangeDays: number = Infinity,
+  providerProtocols: Record<string, string> = {},
+): ProtoKpis {
   const daily = overview?.daily ?? []
   const tok = overview?.totals.totalTokens ?? 0
   // `retried` counts successes that needed a retry, so it is already inside
@@ -464,12 +546,18 @@ export function buildKpis(overview: UsageOverview | null, _providerCount: number
   const sessions = overview?.sessionCount ?? 0
   const rate = overview?.successRate ?? null
   const cacheTokens = overview?.totals.cachedTokens ?? 0
-  // Cache reads sit *beside* `promptTokens` on Anthropic providers (the two are
-  // billed differently), so the denominator has to add them back — otherwise a
-  // fully cached turn reads as several hundred percent. OpenAI folds the hit
-  // into `prompt_tokens` instead, where this formula under-reports; staying
-  // below 100% is the honest direction for the two to disagree in.
-  const cacheBase = (overview?.totals.promptTokens ?? 0) + cacheTokens
+  // OpenAI's promptTokens already include cached tokens, whereas Anthropic's
+  // promptTokens exclude them. Aggregate provider-specific denominators so the
+  // cache-hit rate is accurate for mixed-protocol gateways too. Old overview
+  // payloads without provider cache totals retain the legacy bounded fallback.
+  const providerRows = overview?.byProvider ?? []
+  const hasProviderCacheTotals = providerRows.length > 0 && providerRows.every((p) => typeof p.cachedTokens === 'number')
+  const cacheBase = hasProviderCacheTotals
+    ? providerRows.reduce((sum, p) => {
+        const cached = p.cachedTokens ?? 0
+        return sum + p.promptTokens + (providerProtocols[p.provider] === 'openai-completions' ? 0 : cached)
+      }, 0)
+    : (overview?.totals.promptTokens ?? 0) + cacheTokens
   const sparks = buildSparks(overview, rangeDays)
   return {
     tok,

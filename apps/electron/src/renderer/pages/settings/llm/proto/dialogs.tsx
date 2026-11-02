@@ -30,6 +30,7 @@ import {
   STRATEGY_TYPE_LABEL,
   modelOptionsDraft,
   applyModelOptionsDraft,
+  mergeModelOptions,
   presetOptionIds,
   presetUsage,
   resolvePresetId,
@@ -663,38 +664,45 @@ function ModelSettingsDialog(props: {
    */
   const save = async (): Promise<void> => {
     const clean = spans.filter((s) => s.start && s.end)
-    // A date-only window is a real configuration, so empty spans are allowed
-    // as long as a bound exists. With no span and no date the window would
-    // restrict nothing — refuse instead of writing a dead entry.
-    if (!clean.length && !from && !to) {
-      props.toast('请至少填写一个每日时段，或设置生效期')
-      return
-    }
-    if (!days.length) {
-      props.toast('未选任何周几，该窗口不会生效')
-      return
-    }
     const applied = applyModelOptionsDraft(optDraft)
     if (!applied.ok) {
       setOptError(applied.error)
       return
     }
     setOptError('')
-    const cfg: ModelWindow = {
-      tz,
-      ...(clean.length ? { spans: clean } : {}),
-      ...(from ? { from: `${from} 00:00` } : {}),
-      ...(to ? { to: `${to} 23:59` } : {}),
-      ...(days.length < 7 ? { days } : {}),
-    }
+    // Every time-window field is optional. A window with no span, no date
+    // bound and no weekday restriction restricts nothing, so it means "no
+    // time window": drop the entry (the model is always available) instead of
+    // refusing the save or writing a dead window. Empty `days` also reads as
+    // "every day" — see `windowAllows`.
+    const hasSpans = clean.length > 0
+    const hasDates = Boolean(from || to)
+    const partialDays = days.length > 0 && days.length < 7
+    const cfg: ModelWindow | null = hasSpans || hasDates || partialDays
+      ? {
+          tz,
+          ...(hasSpans ? { spans: clean } : {}),
+          ...(from ? { from: `${from} 00:00` } : {}),
+          ...(to ? { to: `${to} 23:59` } : {}),
+          ...(partialDays ? { days } : {}),
+        }
+      : null
     const ok = await props.onSave({
       ...props.config,
       providers: props.config.providers.map((p) => {
         if (p.id !== props.provider.id) return p
-        const timeWindows = { ...(p.timeWindows ?? {}), [props.model]: cfg }
+        const timeWindows = { ...(p.timeWindows ?? {}) }
+        if (cfg) timeWindows[props.model] = cfg
+        else delete timeWindows[props.model]
         const nextOptions = { ...(p.modelOptions ?? {}) }
-        if (Object.keys(applied.options).length) nextOptions[props.model] = applied.options
-        else delete nextOptions[props.model]
+        // Merge, never replace: the dialog only edits the four fields it shows,
+        // and everything else on the record (`reasoningEfforts` today, whatever
+        // is added next) must survive a save. Replacing the whole object here is
+        // what dropped a model's effort ladder and made 最大 silently run at the
+        // upstream default (2026-10-30).
+        if (Object.keys(applied.options).length) {
+          nextOptions[props.model] = mergeModelOptions(nextOptions[props.model], applied.options)
+        } else delete nextOptions[props.model]
         const next: LlmProviderShape = { ...p, timeWindows, modelOptions: nextOptions }
         if (!Object.keys(nextOptions).length) delete next.modelOptions
         return next
@@ -866,12 +874,10 @@ function ModelSettingsDialog(props: {
                     {allDays ? '清空' : '全选'}
                   </button>
                 </div>
-                <div className={`xs ${days.length ? 'faint' : 'warn-text'}`} style={{ marginTop: 6 }}>
-                  {allDays
+                <div className="xs faint" style={{ marginTop: 6 }}>
+                  {allDays || days.length === 0
                     ? '每天'
-                    : days.length
-                      ? `仅 周${days.map((d) => WEEK_CN[isoToProtoDay(d)]).join('、')}`
-                      : '未选任何周几 → 不会生效'}
+                    : `仅 周${days.map((d) => WEEK_CN[isoToProtoDay(d)]).join('、')}`}
                 </div>
               </div>
             </div>
@@ -996,6 +1002,29 @@ function StrategyEditDialog(props: {
   const models = pickedModels(effective)
   const isPicked = (provider: string, model: string): boolean =>
     picked.some((p) => p.provider === provider && p.model === model)
+
+  /**
+   * Reorder the units the user will actually save.
+   *
+   * `picked` also holds picks of providers that are no longer members; moving
+   * raw indices would swap the wrong entries. Map to the effective indices
+   * first, then swap those positions inside `picked`.
+   */
+  const moveEffective = (from: number, to: number): void => {
+    setPicked((prev) => {
+      const indices = prev
+        .map((p, i) => (members.includes(p.provider) ? i : -1))
+        .filter((i) => i >= 0)
+      const a = indices[from]
+      const b = indices[to]
+      if (a === undefined || b === undefined) return prev
+      const next = [...prev]
+      const tmp = next[a]!
+      next[a] = next[b]!
+      next[b] = tmp
+      return next
+    })
+  }
   const now = new Date()
   const canSave = Boolean(name.trim()) && members.length > 0 && models.length > 0
 
@@ -1026,7 +1055,15 @@ function StrategyEditDialog(props: {
       id,
       name: name.trim(),
       type: type as LlmConfigShape['strategies'][number]['type'],
-      members: members.map((p) => ({ provider: p, ...(type === 'weighted' ? { weight: weights[p] || 1 } : {}) })),
+      // One member per picked (provider, model), in the order the user
+      // arranged: that order *is* the failover ladder the gateway walks.
+      // `modelProviders` is still written below so an older build (which
+      // ignores member.model) keeps pinning models the way it used to.
+      members: effective.map((p) => ({
+        provider: p.provider,
+        model: p.model,
+        ...(type === 'weighted' ? { weight: weights[p.provider] || 1 } : {}),
+      })),
       stickySession: { ...(existing?.stickySession ?? {}), enabled: sticky },
       compactAfterSwitch,
       retry: { ...(existing?.retry ?? {}), maxAttempts: Number(maxAttempts) || 3, backoffMs: Number(backoffMs) || 500 },
@@ -1155,6 +1192,51 @@ function StrategyEditDialog(props: {
                   {members.length ? '选中的提供商还没有启用模型' : '请先选择成员提供商'}
                 </span>
               )}
+            </div>
+          </div>
+          <div className="field">
+            <label>切换顺序（从上到下依次尝试）</label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {effective.length ? (
+                effective.map((p, i) => {
+                  const providerName = props.providers.find((x) => x.id === p.provider)?.name ?? p.provider
+                  return (
+                    <div
+                      key={`${p.provider}\u0000${p.model}`}
+                      className="row"
+                      style={{ alignItems: 'center', gap: 6 }}
+                    >
+                      <span className="mono xs muted" style={{ width: 16, textAlign: 'right' }}>
+                        {i + 1}
+                      </span>
+                      <span className="small">{`${providerName} / ${p.model}`}</span>
+                      <button
+                        type="button"
+                        className="btn sm"
+                        style={{ padding: '0 6px', fontSize: 11 }}
+                        disabled={i === 0}
+                        onClick={() => moveEffective(i, i - 1)}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        className="btn sm"
+                        style={{ padding: '0 6px', fontSize: 11 }}
+                        disabled={i === effective.length - 1}
+                        onClick={() => moveEffective(i, i + 1)}
+                      >
+                        ↓
+                      </button>
+                    </div>
+                  )
+                })
+              ) : (
+                <span className="xs muted">请先选择模型</span>
+              )}
+            </div>
+            <div className="xs muted" style={{ marginTop: 4 }}>
+              顺序即故障切换顺序：前一个单元失败（模型不存在 / 限流 / 余额）才会尝试下一个。
             </div>
           </div>
           <div className="field">
@@ -1346,7 +1428,6 @@ function SessionDialog(props: {
 }): React.JSX.Element {
   const rows = props.logs.filter((l) => l.session === props.sessionId).sort((a, b) => b.tsMs - a.tsMs)
   const okN = rows.filter((l) => l.status === 'success').length
-  const retryN = rows.filter((l) => l.status === 'retried').length
   const failN = rows.filter((l) => l.status === 'failed').length
   const sumP = rows.reduce((a, l) => a + l.p, 0)
   const sumC = rows.reduce((a, l) => a + l.c, 0)
@@ -1370,7 +1451,6 @@ function SessionDialog(props: {
         </div>
         <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
           <Badge kind="green">{`成功 ${okN}`}</Badge>
-          <Badge kind="amber">{`重试 ${retryN}`}</Badge>
           <Badge kind="red">{`失败 ${failN}`}</Badge>
           <Badge kind="gray">{`平均耗时 ${(avg / 1000).toFixed(1)}s`}</Badge>
           <Badge kind="accent">{`Token ${fmt(sumP)} / ${fmt(sumC)}`}</Badge>
@@ -1391,13 +1471,7 @@ function SessionDialog(props: {
               </tr>
               {rows.map((l) => {
                 const st =
-                  l.status === 'success' ? (
-                    <Badge kind="green">成功</Badge>
-                  ) : l.status === 'retried' ? (
-                    <Badge kind="amber">重试</Badge>
-                  ) : (
-                    <Badge kind="red">失败</Badge>
-                  )
+                  l.status === 'success' ? <Badge kind="green">成功</Badge> : <Badge kind="red">失败</Badge>
                 return (
                   <tr key={l.id}>
                     <td className="mono xs">{l.ts}</td>
@@ -1470,7 +1544,7 @@ function ErrorAggDialog(props: {
             关闭
           </button>
         </div>
-        <div className="xs muted">{`按「状态码 + 模型 + 归一化错误」分组（共 ${bad.length} 条失败/重试）`}</div>
+        <div className="xs muted">{`按「状态码 + 模型 + 归一化错误」分组（共 ${bad.length} 条失败）`}</div>
         <table className="tbl" style={{ marginTop: 10 }}>
           <tbody>
             <tr>
@@ -1509,11 +1583,8 @@ function ErrorAggDialog(props: {
                         style={{ padding: '2px 8px', fontSize: 12, whiteSpace: 'nowrap' }}
                         onClick={() => {
                           // This group is made of failures, so the log must open
-                          // on failures. It used to ask for "重试" when the code
-                          // was 429 — "重试" means a *successful* request that
-                          // needed another attempt, so clicking a failure group
-                          // landed on successful rows. The code tag keeps the
-                          // result narrowed to this group instead.
+                          // on failures. The code tag keeps the result narrowed to
+                          // this group.
                           const code = Number(g.code)
                           props.onFilterLogs(
                             g.model,
@@ -1532,7 +1603,7 @@ function ErrorAggDialog(props: {
             ) : (
               <tr>
                 <td colSpan={5} className="muted" style={{ padding: 16, textAlign: 'center' }}>
-                  没有失败或重试请求
+                  没有失败请求
                 </td>
               </tr>
             )}

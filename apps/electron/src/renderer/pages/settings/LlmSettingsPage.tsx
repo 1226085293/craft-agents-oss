@@ -197,9 +197,13 @@ export default function LlmGatewayPage(): React.JSX.Element {
     )
     return [...fromProviders, ...orphanRows].sort((a, b) => b.tsMs - a.tsMs)
   }, [details, config, orphanRows])
+  const providerProtocols = React.useMemo(
+    () => Object.fromEntries((config?.providers ?? []).map((provider) => [provider.id, provider.protocol])),
+    [config?.providers],
+  )
   const kpis = React.useMemo(
-    () => buildKpis(overview, providers.length, range === 'day' ? 1 : range === 'week' ? 7 : range === 'month' ? 30 : Infinity),
-    [overview, providers.length, range],
+    () => buildKpis(overview, providers.length, range === 'day' ? 1 : range === 'week' ? 7 : range === 'month' ? 30 : Infinity, providerProtocols),
+    [overview, providers.length, range, providerProtocols],
   )
 
   // RTK's savings live in rtk's own ledger, not in the gateway's usage log, so

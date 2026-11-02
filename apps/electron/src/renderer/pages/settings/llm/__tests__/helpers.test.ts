@@ -25,6 +25,7 @@ import {
   DEFAULT_MODEL_CONTEXT_WINDOW,
   modelOptionsDraft,
   applyModelOptionsDraft,
+  mergeModelOptions,
   modelOptionsSummary,
   presetIds,
   presetOptionIds,
@@ -872,6 +873,33 @@ describe('modelOptionsDraft', () => {
   it('defaults to a context that reads back as 512k', () => {
     expect(DEFAULT_MODEL_CONTEXT_WINDOW).toBe(512_000)
     expect(compactTokens(DEFAULT_MODEL_CONTEXT_WINDOW)).toBe('512.0k')
+  })
+})
+
+describe('mergeModelOptions', () => {
+  it('keeps fields the capability form does not edit', () => {
+    // The exact regression: a model declared its effort ladder, the dialog was
+    // opened to change the context window, and saving replaced the record —
+    // so 最大 silently became the upstream default (2026-10-30).
+    const merged = mergeModelOptions(
+      { contextWindow: 1_000_000, reasoningEfforts: ['low', 'high', 'max'] },
+      { contextWindow: 2_000_000, supportsImages: true, supportsThinking: true },
+    )
+    expect(merged.reasoningEfforts).toEqual(['low', 'high', 'max'])
+    expect(merged.contextWindow).toBe(2_000_000)
+  })
+
+  it('lets the form override what it does edit', () => {
+    const merged = mergeModelOptions(
+      { supportsImages: true, supportsThinking: true },
+      { supportsThinking: false },
+    )
+    expect(merged.supportsImages).toBe(true)
+    expect(merged.supportsThinking).toBe(false)
+  })
+
+  it('works with nothing stored yet', () => {
+    expect(mergeModelOptions(undefined, { supportsThinking: true })).toEqual({ supportsThinking: true })
   })
 })
 

@@ -10,6 +10,10 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PiEventAdapter } from '../backend/pi/event-adapter.ts';
 import { toolMetadataStore } from '../../interceptor-common.ts';
+import {
+  GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER,
+  GATEWAY_STREAM_TRUNCATION_RETRY_MARKER,
+} from '../../config/gateway-stream-retry.ts';
 
 // Helper: collect all events from a generator
 function collect(gen: Generator<any>): any[] {
@@ -47,6 +51,88 @@ describe('PiEventAdapter', () => {
       const events = collect(adapter.adaptEvent({ type: 'agent_end' } as any));
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ type: 'complete' });
+    });
+
+    it('discards a gateway-truncated partial, holds completion, and completes after the same-turn retry', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_start',
+        message: { role: 'assistant', id: 'partial' },
+      } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'text_delta', delta: 'partial answer' },
+      } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'partial thought' },
+      } as any));
+      const failed = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: `${GATEWAY_STREAM_TRUNCATION_RETRY_MARKER}: upstream stream ended without a finish_reason`,
+        },
+      } as any));
+      const discarded = failed.filter((event) => event.type === 'text_discard');
+      expect(discarded).toHaveLength(2);
+      expect(discarded.some((event) => String(event.turnId).includes('__t'))).toBe(true);
+      expect(failed.some((event) => event.type === 'typed_error' || event.type === 'error')).toBe(false);
+
+      const pending = collect(adapter.adaptEvent({ type: 'agent_end', gatewayRetryPending: true } as any));
+      expect(pending).toMatchObject([{ type: 'retry', phase: 'backoff' }]);
+      expect(adapter.isHoldingTurn).toBe(true);
+
+      expect(collect(adapter.adaptEvent({ type: 'agent_start' } as any))).toEqual([
+        { type: 'retry', phase: 'active' },
+      ]);
+      const recovered = collect(adapter.adaptEvent({ type: 'agent_end' } as any));
+      expect(recovered[0]).toMatchObject({ type: 'retry', phase: 'end', recovered: true });
+      expect(recovered.at(-1)).toMatchObject({ type: 'complete' });
+      expect(adapter.isHoldingTurn).toBe(false);
+    });
+
+    it('releases the gateway retry hold when continuation fails before agent_start', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: `${GATEWAY_STREAM_TRUNCATION_RETRY_MARKER}: upstream stream ended without a finish_reason`,
+        },
+      } as any));
+      collect(adapter.adaptEvent({ type: 'agent_end', gatewayRetryPending: true } as any));
+
+      const retryFailed = collect(adapter.adaptEvent({ type: 'agent_end', messages: [], willRetry: false } as any));
+      expect(retryFailed).toContainEqual(expect.objectContaining({
+        type: 'retry',
+        phase: 'end',
+        recovered: false,
+      }));
+      expect(retryFailed.at(-1)).toMatchObject({ type: 'complete' });
+      expect(adapter.isHoldingTurn).toBe(false);
+    });
+
+    it('surfaces gateway retry exhaustion as a typed network error without another retry', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      collect(adapter.adaptEvent({ type: 'agent_start' } as any));
+      const exhausted = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: `${GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER}: no configured route remains`,
+        },
+      } as any));
+      expect(exhausted).toContainEqual(expect.objectContaining({
+        type: 'typed_error',
+        error: expect.objectContaining({ code: 'network_error' }),
+      }));
+      const ended = collect(adapter.adaptEvent({ type: 'agent_end' } as any));
+      expect(ended).toContainEqual(expect.objectContaining({ type: 'complete' }));
+      expect(ended.some((event) => event.type === 'retry' && event.phase !== 'end')).toBe(false);
     });
   });
 
@@ -1262,6 +1348,69 @@ describe('PiEventAdapter', () => {
       expect(events[0]).toMatchObject({
         type: 'info',
         message: 'Compacted context to fit within limits',
+      });
+    });
+
+    it('synthesizes a compaction_summary row for auto LLM compaction (no extension stats)', () => {
+      // Regression guard: the SDK\u2019s own LLM summarizer (auto threshold/overflow
+      // path) ships `details = { readFiles, modifiedFiles }` with NO reliefStats,
+      // so before this fix the auto path never emitted the
+      // "压缩完成：约 A → B"数字行 (manual /compact did, via the RPC stats).
+      // The adapter now synthesizes the same shape from the SDK\u2019s real
+      // before/after when reliefStats is absent.
+      const events = collect(adapter.adaptEvent({
+        type: 'compaction_end',
+        result: {
+          tokensBefore: 366_600,
+          estimatedTokensAfter: 20_200,
+          details: { readFiles: [], modifiedFiles: [] },
+        },
+        aborted: false,
+      } as any));
+
+      const summary = events.find((e) => e.statusType === 'compaction_summary');
+      expect(summary).toBeDefined();
+      expect(summary).toMatchObject({
+        type: 'status',
+        statusParams: {
+          before: 366_600,
+          retained: 20_200,
+          compacted: 346_400,
+          checkpoint: 0,
+          after: 20_200,
+          viaRelief: 0,
+        },
+      });
+    });
+
+    it('still prefers extension reliefStats over synthesized numbers', () => {
+      const events = collect(adapter.adaptEvent({
+        type: 'compaction_end',
+        result: {
+          tokensBefore: 366_600,
+          estimatedTokensAfter: 20_200,
+          details: {
+            reliefStats: {
+              before: 366_600,
+              retained: 20_000,
+              compacted: 346_400,
+              checkpoint: 200,
+              viaRelief: true,
+            },
+          },
+        },
+        aborted: false,
+      } as any));
+
+      const summary = events.find((e) => e.statusType === 'compaction_summary');
+      expect(summary).toMatchObject({
+        statusParams: {
+          before: 366_600,
+          retained: 20_000,
+          compacted: 346_400,
+          checkpoint: 200,
+          viaRelief: 1,
+        },
       });
     });
 

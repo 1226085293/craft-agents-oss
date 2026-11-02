@@ -161,3 +161,17 @@ describe('buildCustomEndpointModelDef', () => {
     }
   })
 })
+
+describe('adaptive thinking — only for the Craft gateway', () => {
+  it('declares forceAdaptiveThinking when the endpoint is the gateway', () => {
+    // The gateway is the one endpoint that understands the adaptive shape, and
+    // the only way the level survives: the budget path folds max into high.
+    const model = buildCustomEndpointModelDef('deepseek-v4.1-flash', undefined, undefined, 'anthropic-messages', undefined, true)
+    expect(model.compat?.forceAdaptiveThinking).toBe(true)
+  })
+
+  it('keeps the budget shape for any other endpoint', () => {
+    const model = buildCustomEndpointModelDef('deepseek-v4.1-flash', undefined, undefined, 'anthropic-messages', undefined, false)
+    expect(model.compat?.forceAdaptiveThinking).toBeUndefined()
+  })
+})

@@ -650,6 +650,22 @@ export function applyModelOptionsDraft(draft: ModelOptionsDraft): ModelOptionsDr
 }
 
 /**
+ * Merge the form's four fields onto the stored capability record.
+ *
+ * The dialog edits `contextWindow`, `maxOutputTokens` and the two flags — and
+ * nothing else on the record. Replacing the whole object made every save delete
+ * fields the form does not show, which is how a model's `reasoningEfforts`
+ * vanished and 最大 fell back to the upstream default (2026-10-30). Merging
+ * keeps the dialog honest about what it owns.
+ */
+export function mergeModelOptions(
+  existing: LlmModelOptionsShape | undefined,
+  applied: LlmModelOptionsShape,
+): LlmModelOptionsShape {
+  return { ...(existing ?? {}), ...applied }
+}
+
+/**
  * One-line capability summary for a model pill and its tooltip.
  *
  * Empty when nothing is declared, so a pill that carries no options looks

@@ -193,6 +193,7 @@ describe('daily buckets', () => {
     const overview = aggregate.aggregateFromBuckets(buckets.bucketsFromRecords(records), 'all')
     expect(overview.totals.cachedTokens).toBe(900)
     expect(overview.daily[0]!.cachedTokens).toBe(900)
+    expect(overview.byProvider.find((p) => p.provider === 'p1')!.cachedTokens).toBe(900)
 
     // `hourlyTokens` is the last 24 hours only, so it needs a recent row.
     const recent = [record({ ts: Date.now() - 3_600_000, cachedTokens: 900 })]
@@ -269,5 +270,27 @@ describe('connection probes', () => {
     expect(overview.totals.promptTokens).toBe(100)
     expect(aggregate.statusHistogram([record({ kind: 'connection_test', status: 'error', statusCode: 0 })]))
       .toEqual([])
+  })
+
+  it('logs a superseded attempt without counting it as a second outcome', () => {
+    // "Failed on A, then succeeded on B" is ONE retried success. The failed
+    // attempt still gets a row — that is the whole point — but it must not turn
+    // the pair into one failure plus one success.
+    const withAttempt = buckets.bucketsFromRecords([
+      record({ status: 'error', statusCode: 0, superseded: true, promptTokens: 0, completionTokens: 0 }),
+      record({ status: 'success', retried: true, attempts: 2 }),
+    ])
+
+    const overview = aggregate.aggregateFromBuckets(withAttempt, 'all')
+    expect(overview.outcomes).toEqual({ success: 1, retried: 1, failed: 0 })
+    expect(overview.successRate).toBe(1)
+    // The failed attempt contributed no tokens, so the total is the success's.
+    expect(overview.totals.promptTokens).toBe(100)
+    expect(
+      aggregate.statusHistogram([
+        record({ status: 'error', statusCode: 0, superseded: true }),
+        record({ status: 'success' }),
+      ]),
+    ).toEqual([])
   })
 })

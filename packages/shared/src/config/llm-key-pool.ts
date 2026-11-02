@@ -470,6 +470,25 @@ export class KeyPool {
   }
 
   /**
+   * Compute (and record the 429 streak for) the rate-limit cooldown for `keyId`
+   * without applying it.
+   *
+   * A keyless provider's synthetic `''` key is shared by every model on the
+   * relay, so a 429 for one model must not cool that shared key — cooling it
+   * would take every other model down with it and defeat the model-level
+   * switch. The gateway calls this to learn the escalation duration and then
+   * scopes the cooldown to the *route* instead of the key.
+   */
+  async rateLimitSeconds(keyId: string, signal: RateLimitSignal = {}): Promise<number> {
+    const release = await this.acquire();
+    try {
+      return this.computeRateLimitSeconds(keyId, signal, this.clock());
+    } finally {
+      release();
+    }
+  }
+
+  /**
    * Cool a key after a 429, escalating when the same key keeps failing.
    *
    * The unit is the key itself — or the provider when it has no keys (the
@@ -490,32 +509,43 @@ export class KeyPool {
   async setRateLimited(keyId: string, signal: RateLimitSignal = {}): Promise<number> {
     const release = await this.acquire();
     try {
-      const now = this.clock();
-      const durations = this.cooldowns.get(keyId) ?? DEFAULT_COOLDOWNS;
-      const prev = this.rateLimitStreak.get(keyId);
-      const count = prev && now - prev.at <= RATE_LIMIT_STREAK_WINDOW ? prev.count + 1 : 1;
-      this.rateLimitStreak.set(keyId, { count, at: now });
-
-      let seconds: number;
-      if (typeof signal.retryAfterSeconds === 'number' && signal.retryAfterSeconds > 0) {
-        seconds = signal.retryAfterSeconds;
-      } else if (signal.dayLevel) {
-        seconds = secondsUntilNextUtcDay(now);
-      } else if (count === 1) {
-        seconds = secondsUntilNextMinute(now);
-      } else if (count === 2) {
-        seconds = durations.rateLimitSeconds;
-      } else if (count === 3) {
-        seconds = Math.max(durations.rateLimitSeconds * 5, 300);
-      } else {
-        seconds = secondsUntilNextUtcDay(now);
-      }
-      seconds = Math.max(1, Math.min(Math.floor(seconds), durations.quotaSeconds));
+      const seconds = this.computeRateLimitSeconds(keyId, signal, this.clock());
       this.applyCooling(keyId, seconds);
       return seconds;
     } finally {
       release();
     }
+  }
+
+  /**
+   * The escalation ladder shared by {@link rateLimitSeconds} and
+   * {@link setRateLimited}. Caller must hold the pool lock.
+   */
+  private computeRateLimitSeconds(
+    keyId: string,
+    signal: RateLimitSignal,
+    now: number,
+  ): number {
+    const durations = this.cooldowns.get(keyId) ?? DEFAULT_COOLDOWNS;
+    const prev = this.rateLimitStreak.get(keyId);
+    const count = prev && now - prev.at <= RATE_LIMIT_STREAK_WINDOW ? prev.count + 1 : 1;
+    this.rateLimitStreak.set(keyId, { count, at: now });
+
+    let seconds: number;
+    if (typeof signal.retryAfterSeconds === 'number' && signal.retryAfterSeconds > 0) {
+      seconds = signal.retryAfterSeconds;
+    } else if (signal.dayLevel) {
+      seconds = secondsUntilNextUtcDay(now);
+    } else if (count === 1) {
+      seconds = secondsUntilNextMinute(now);
+    } else if (count === 2) {
+      seconds = durations.rateLimitSeconds;
+    } else if (count === 3) {
+      seconds = Math.max(durations.rateLimitSeconds * 5, 300);
+    } else {
+      seconds = secondsUntilNextUtcDay(now);
+    }
+    return Math.max(1, Math.min(Math.floor(seconds), durations.quotaSeconds));
   }
 
   /** Reset a key's 429 escalation after a successful response. */

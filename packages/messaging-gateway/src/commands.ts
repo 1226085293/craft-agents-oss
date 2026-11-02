@@ -928,6 +928,29 @@ export class Commands {
     }
 
     try {
+      // One executor, shared with the desktop RPC path and `send_agent_message`,
+      // so "did it actually stop?" cannot drift between entry points. Hosts
+      // without it (older ISessionManager implementations, test doubles) fall
+      // back to the legacy probe + cancel pair below.
+      if (this.sessionManager.executeSessionCommand) {
+        const result = await this.sessionManager.executeSessionCommand(binding.sessionId, {
+          name: 'stop',
+          raw: '/stop',
+        })
+        if (!result.stopped) {
+          await adapter.sendText(msg.channelId, 'Nothing to stop — the session is idle.', replyOpts)
+          return
+        }
+        await adapter.sendText(
+          msg.channelId,
+          result.queueLength > 0
+            ? `Stopped. ${result.queueLength} queued message(s) will still run — an explicit stop ends the current turn only.`
+            : 'Stopped.',
+          replyOpts,
+        )
+        return
+      }
+
       // Report what actually happened. `cancelProcessing` returns silently when
       // nothing is running, so replying "Stopped." unconditionally made a no-op
       // look like a success — exactly what made /stop look broken here.

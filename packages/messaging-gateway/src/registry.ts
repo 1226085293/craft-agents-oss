@@ -118,6 +118,13 @@ interface WorkspaceState {
   telegramRetryTimer?: ReturnType<typeof setTimeout>
   telegramRetryAttempt: number
   telegramConnectInFlight?: Promise<void>
+  /**
+   * 单调递增的连接代际号。超时 / 换 token 时 +1，在途链在每个 await 检查点自废，
+   * 避免「超时之后旧链继续 startPolling / registerAdapter」长出第二个 poller。
+   */
+  telegramAttemptId: number
+  /** 本轮 attempt 已创建、但尚未注册到 gateway 的 adapter（超时分支靠它掐掉孤儿 poller）。 */
+  telegramAttemptAdapter?: TelegramAdapter
   telegramBlockedNotices: Map<string, TelegramBlockedNotice>
   runtime: Record<PlatformType, MessagingPlatformRuntimeInfo>
 }
@@ -132,6 +139,36 @@ function telegramRetryDelay(attempt: number): number {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * 整条 Telegram 连接链的总期限。链上每一步都可能挂：凭证读取、
+ * unregisterAdapter(→ destroy → 确认 getUpdates)、initialize、getBotInfo。
+ * 注意：它不覆盖 bot.start() 内部的 setup（那一步由 adapter 的启动期限兜）。
+ */
+const TELEGRAM_CONNECT_DEADLINE_MS = 45_000
+
+/** token 测试超时：fetchTelegramBotInfo 的 fetch 本身没有超时，必须由调用方兜住。 */
+const TELEGRAM_TOKEN_TEST_TIMEOUT_MS = 10_000
+
+/** 给任意 promise 套一个硬性期限；超时 reject 并带上标签，便于日志定位。 */
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`[registry] ${label} timed out after ${ms}ms`)),
+      ms,
+    )
+    p.then(
+      (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      (e) => {
+        clearTimeout(timer)
+        reject(e)
+      },
+    )
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -743,9 +780,10 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     const trimmed = args.topicName?.trim() ?? ''
     const qqChannels = args.qqChannels && args.qqChannels.length > 0 ? args.qqChannels : undefined
 
-    // Nothing to bind (no topicName, no qqChannels) — treat as a no-op success.
+    // A bind request with neither a topic nor QQ channels has nothing to
+    // bind. Report it as invalid instead of silently succeeding.
     if (trimmed.length === 0 && !qqChannels) {
-      return { ok: true, reused: false }
+      return { ok: false, reason: 'invalid-name' }
     }
 
     const state = this.workspaces.get(args.workspaceId) ?? this.bootstrapWorkspace(args.workspaceId)
@@ -913,7 +951,13 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     const trimmed = token.trim()
     if (!trimmed) throw new Error('Token is empty')
 
-    const test = await this.testTelegramToken(trimmed)
+    // 先验证 token、再动线上连接：填错 token 时不应该把仍在工作的 bot 停掉。
+    // 必须带超时——fetchTelegramBotInfo 的 fetch 自己不设超时，凭证管理器也可能挂住。
+    const test = await withTimeout(
+      this.testTelegramToken(trimmed),
+      TELEGRAM_TOKEN_TEST_TIMEOUT_MS,
+      'testTelegramToken',
+    )
     if (!test.success) throw new Error(test.error ?? 'Invalid token')
 
     await this.opts.credentialManager.set(
@@ -938,11 +982,55 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       lastError: undefined,
     })
 
+    // 换了新 token：先作废在途 attempt（旧链会在各检查点自废），再等它落地（最多 3s），
+    // 最后才用新 token 起一条链。这里不能走 runTelegramConnectAttempt：
+    // 那个函数开头的 if (inFlight) return 会把新 token 静默吞掉。
+    // 注意 race 里必须 .catch：state.telegramConnectInFlight 在旧链失败时是 reject 状态。
+    const retiredAttemptId = this.telegramRetireAttempt(state)
+    await Promise.race([
+      state.telegramConnectInFlight?.catch(() => {}) ?? Promise.resolve(),
+      delay(3_000),
+    ])
+    // 旧链已作废：清掉跟踪位，否则本轮新链建立不起来（startTrackedTelegramAttempt 不看这个位，
+    // 但 runTelegramConnectAttempt 开头会看，留着会让用户接下来点「连接」被静默忽略）
+    state.telegramConnectInFlight = undefined
+
+    // 沿用作废时领出的代际号：一次换 token 只推进一代。
+    // 但若等待期间旧链的 45s 总期限刚好到点、又作废了一轮，pinned 号已失效，必须重新分配。
+    const pinnedAttemptId = this.isCurrentTelegramAttempt(state, retiredAttemptId)
+      ? retiredAttemptId
+      : ++state.telegramAttemptId
+
+    // 走带总期限的路径：initialize 里的 bot.init / 删除 webhook 都可能永久挂住，
+    // 这里必须能在 45s 后把错误抛给 UI，而不是让 RPC 永远等。
+    const { inFlight, attemptId } = this.startTrackedTelegramAttempt(
+      workspaceId,
+      state,
+      'user_connect',
+      pinnedAttemptId,
+    )
+    let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<never>((_, reject) => {
+      deadlineTimer = setTimeout(
+        () =>
+          reject(
+            new Error(`Telegram connect timed out after ${TELEGRAM_CONNECT_DEADLINE_MS}ms`),
+          ),
+        TELEGRAM_CONNECT_DEADLINE_MS,
+      )
+    })
+
     try {
-      await this.tryConnectTelegram(workspaceId, state)
+      await Promise.race([inFlight, deadline])
     } catch (err) {
-      this.scheduleTelegramReconnect(workspaceId, state, err, 'user_connect')
+      // 期限到点时 startTrackedTelegramAttempt 的总期限回调已经作废本轮并排了重试，
+      // 这里只在「本轮仍是当前代际」时补一次重试，避免重复计时。
+      if (this.isCurrentTelegramAttempt(state, attemptId)) {
+        this.scheduleTelegramReconnect(workspaceId, state, err, 'user_connect')
+      }
       throw err
+    } finally {
+      if (deadlineTimer) clearTimeout(deadlineTimer)
     }
     await state.gateway.start()
   }
@@ -1632,7 +1720,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       }),
     })
 
-    state.gateway.registerAdapter(adapter)
+    await state.gateway.registerAdapter(adapter)
     if (options.persistConfig) {
       state.configStore.update({
         enabled: true,
@@ -1799,6 +1887,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       botUsernames: {},
       whatsapp: null,
       telegramRetryAttempt: 0,
+      telegramAttemptId: 0,
       telegramBlockedNotices: new Map(),
       runtime: {
         telegram: createRuntime('telegram', isPlatformConfigured(cfg, 'telegram')),
@@ -1866,7 +1955,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         // non-fatal
       }
 
-      state.gateway.registerAdapter(adapter)
+      await state.gateway.registerAdapter(adapter)
       this.setPlatformRuntime(workspaceId, state, 'lark', {
         configured: true,
         connected: true,
@@ -1942,7 +2031,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       })
 
       state.botUsernames.qq = creds.appId
-      state.gateway.registerAdapter(adapter)
+      await state.gateway.registerAdapter(adapter)
       this.setPlatformRuntime(workspaceId, state, 'qq', {
         configured: true,
         connected: true,
@@ -2015,7 +2104,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       })
 
       state.botUsernames.wechat = creds.botId ?? creds.userId ?? 'wechat'
-      state.gateway.registerAdapter(adapter)
+      await state.gateway.registerAdapter(adapter)
       this.setPlatformRuntime(workspaceId, state, 'wechat', {
         configured: true,
         connected: true,
@@ -2039,10 +2128,17 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     }
   }
 
-  private async tryConnectTelegram(workspaceId: string, state: WorkspaceState): Promise<void> {
+  private async tryConnectTelegram(
+    workspaceId: string,
+    state: WorkspaceState,
+    attemptId: number,
+  ): Promise<void> {
     const cred = await this.opts.credentialManager
       .get({ type: 'messaging_bearer', workspaceId, name: 'telegram' })
       .catch(() => null)
+
+    // ① 本轮已被作废（超时 / 换了新 token）：不碰任何运行时状态
+    if (!this.isCurrentTelegramAttempt(state, attemptId)) return
 
     if (!cred?.value) {
       this.setPlatformRuntime(workspaceId, state, 'telegram', {
@@ -2062,8 +2158,14 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       })
     })
 
+    // ② 旧 adapter 的 destroy 已把 destroyed 同步置位（poll 当拍即停），本轮还没 new，直接退
+    if (!this.isCurrentTelegramAttempt(state, attemptId)) return
+
+    let adapter: TelegramAdapter | null = null
     try {
-      const adapter = new TelegramAdapter()
+      adapter = new TelegramAdapter()
+      // 记录「已创建但未注册」的句柄：超时/换 token 时靠它掐掉孤儿 poller
+      state.telegramAttemptAdapter = adapter
       const supergroupChatId = state.configStore.get().platforms.telegram?.supergroup?.chatId
       await adapter.initialize({
         token: cred.value,
@@ -2075,6 +2177,13 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         }),
       })
 
+      // ③ initialize() 内部已 startPolling()：越过它之前必须判断是否被作废
+      if (!this.isCurrentTelegramAttempt(state, attemptId)) {
+        if (state.telegramAttemptAdapter === adapter) state.telegramAttemptAdapter = undefined
+        void adapter.destroy().catch(() => {})
+        return
+      }
+
       try {
         const info = await adapter.getBotInfo()
         state.botUsernames.telegram = info?.username
@@ -2082,7 +2191,23 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         // non-fatal
       }
 
-      state.gateway.registerAdapter(adapter)
+      // ④ 注册前最后一道：作废則销毁，禁止覆盖 map / 清重试
+      if (state.telegramAttemptAdapter === adapter) state.telegramAttemptAdapter = undefined
+      if (!this.isCurrentTelegramAttempt(state, attemptId)) {
+        void adapter.destroy().catch(() => {})
+        return
+      }
+
+      await state.gateway.registerAdapter(adapter)
+
+      // 注册期间被作废：只在 map 仍指向本 adapter 时摘掉，避免误伤新一轮
+      if (!this.isCurrentTelegramAttempt(state, attemptId)) {
+        if (state.gateway.getAdapter('telegram') === adapter) {
+          await state.gateway.unregisterAdapter('telegram').catch(() => {})
+        }
+        return
+      }
+
       this.clearTelegramRetry(state)
       this.setPlatformRuntime(workspaceId, state, 'telegram', {
         configured: true,
@@ -2093,6 +2218,21 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       })
       void this.flushTelegramBlockedNotices(workspaceId, state, adapter)
     } catch (err) {
+      if (adapter && state.telegramAttemptAdapter === adapter) {
+        state.telegramAttemptAdapter = undefined
+      }
+      // 本链已被作废（超时 / 换了新 token）：它的失败属于上一个所有权，
+      // 不能写运行时状态、也不该再排重试，否则会盖掉新一轮的 connecting/connected。
+      if (!this.isCurrentTelegramAttempt(state, attemptId)) {
+        this.log.warn('retired Telegram attempt failed (state untouched)', {
+          event: 'telegram_retired_attempt_failed',
+          workspaceId,
+          attemptId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        if (adapter) void adapter.destroy().catch(() => {})
+        return
+      }
       this.log.error('failed to connect Telegram', {
         event: 'telegram_connect_failed',
         workspaceId,
@@ -2119,6 +2259,67 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     this.runTelegramConnectAttempt(workspaceId, state, reason)
   }
 
+  /**
+   * 起一轮连接并给它套上总期限，返回这轮 promise 和代际号。
+   * 失败怎么处理交给调用方：runTelegramConnectAttempt 排重试，saveTelegramToken 抛给 UI。
+   */
+  private startTrackedTelegramAttempt(
+    workspaceId: string,
+    state: WorkspaceState,
+    reason: 'restore' | 'retry' | 'user_connect',
+    // 由 telegramRetireAttempt 领出的代际号。调用方刚作废完在途链、紧接着起新链时
+    // 沿用它；不传则现场分配（retry / restore 路径）。
+    pinnedAttemptId?: number,
+  ): { inFlight: Promise<void>; attemptId: number } {
+    const attempt = state.telegramRetryAttempt + 1
+    const attemptId = pinnedAttemptId ?? ++state.telegramAttemptId
+    this.log.info('connecting Telegram', {
+      event: 'telegram_connect_attempt',
+      workspaceId,
+      attempt,
+      attemptId,
+      reason,
+    })
+
+    const inFlight = this.tryConnectTelegram(workspaceId, state, attemptId)
+    state.telegramConnectInFlight = inFlight
+
+    // 外层总期限：整条链（凭证 / unregisterAdapter(destroy) / initialize / getBotInfo）
+    // 任一环都可能挂，只有这里能兜住。到点后：作废本轮（在途链在各检查点自废）
+    // + 掐掉它已创建但未注册的 adapter + 排下一次重试。
+    const deadlineTimer = setTimeout(() => {
+      if (state.telegramConnectInFlight !== inFlight) return
+      this.log.error('Telegram connect attempt timed out', {
+        event: 'telegram_connect_timeout',
+        workspaceId,
+        attempt,
+        attemptId,
+        reason,
+        timeoutMs: TELEGRAM_CONNECT_DEADLINE_MS,
+      })
+      this.telegramRetireAttempt(state)
+      state.telegramConnectInFlight = undefined
+      this.scheduleTelegramReconnect(
+        workspaceId,
+        state,
+        new Error(`Telegram connect timed out after ${TELEGRAM_CONNECT_DEADLINE_MS}ms`),
+        'connect_timeout',
+      )
+    }, TELEGRAM_CONNECT_DEADLINE_MS)
+
+    // 先 .catch 再 .finally：直接 .finally 会派生出一条无人处理的 rejected 链
+    void inFlight
+      .catch(() => {})
+      .finally(() => {
+        clearTimeout(deadlineTimer)
+        if (state.telegramConnectInFlight === inFlight) {
+          state.telegramConnectInFlight = undefined
+        }
+      })
+
+    return { inFlight, attemptId }
+  }
+
   private runTelegramConnectAttempt(
     workspaceId: string,
     state: WorkspaceState,
@@ -2134,32 +2335,41 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       lastError: undefined,
     })
 
-    const attempt = state.telegramRetryAttempt + 1
-    this.log.info('connecting Telegram', {
-      event: 'telegram_connect_attempt',
-      workspaceId,
-      attempt,
-      reason,
+    const { inFlight } = this.startTrackedTelegramAttempt(workspaceId, state, reason)
+    void inFlight.catch((err) => {
+      this.scheduleTelegramReconnect(workspaceId, state, err, reason)
     })
+  }
 
-    const inFlight = this.tryConnectTelegram(workspaceId, state)
-    state.telegramConnectInFlight = inFlight
-    void inFlight
-      .catch((err) => {
-        this.scheduleTelegramReconnect(workspaceId, state, err, reason)
-      })
-      .finally(() => {
-        if (state.telegramConnectInFlight === inFlight) {
-          state.telegramConnectInFlight = undefined
-        }
-      })
+  private isCurrentTelegramAttempt(state: WorkspaceState, attemptId: number): boolean {
+    return state.telegramAttemptId === attemptId
+  }
+
+  /**
+   * 作废在途的 Telegram 连接 attempt：递增代际号（让它在下一个检查点自废）
+   * 并掐掉它已创建但尚未注册的 adapter。
+   *
+   * 返回刚领出的新代际号：紧接着起新链的调用方（saveTelegramToken）沿用它，
+   * 保证「一次用户操作只推进一个代际号」，不留没有对应 attempt 的空号。
+   *
+   * destroy() 在 await 之前就同步置 destroyed / 停 poll，所以这里不需要 await。
+   */
+  private telegramRetireAttempt(state: WorkspaceState): number {
+    const nextAttemptId = state.telegramAttemptId + 1
+    state.telegramAttemptId = nextAttemptId
+    const pending = state.telegramAttemptAdapter
+    state.telegramAttemptAdapter = undefined
+    if (pending) {
+      void pending.destroy().catch(() => {})
+    }
+    return nextAttemptId
   }
 
   private scheduleTelegramReconnect(
     workspaceId: string,
     state: WorkspaceState,
     err: unknown,
-    reason: 'restore' | 'retry' | 'user_connect',
+    reason: 'restore' | 'retry' | 'user_connect' | 'connect_timeout',
   ): void {
     if (!isPlatformConfigured(state.configStore.get(), 'telegram')) return
     if (state.telegramRetryTimer) return
@@ -2891,7 +3101,10 @@ function cloneRuntime(runtime: MessagingPlatformRuntimeInfo): MessagingPlatformR
 async function fetchTelegramBotInfo(
   token: string,
 ): Promise<{ ok: boolean; result: { username?: string; first_name?: string }; description?: string }> {
-  const res = await fetch(`https://api.telegram.org/bot${token}/getMe`)
+  // 裸 fetch 没有超时：网络半死时它会一直挂着，把 saveTelegramToken 一起拖死。
+  const res = await fetch(`https://api.telegram.org/bot${token}/getMe`, {
+    signal: AbortSignal.timeout(TELEGRAM_TOKEN_TEST_TIMEOUT_MS),
+  })
   return (await res.json()) as {
     ok: boolean
     result: { username?: string; first_name?: string }

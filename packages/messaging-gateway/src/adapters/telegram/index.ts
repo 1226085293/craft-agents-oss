@@ -41,6 +41,19 @@ export type TelegramChatInfo =
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
 
 /**
+ * 轮询启动期限。initialize() 在 startPolling() 之后就返回，而 grammY 的
+ * bot.start() 进入轮询前要先跑 setup（withRetries(deleteWebhook)，无次数上限），
+ * 这期间 onStart 不会触发。所以「initialize 成功」≠「轮询已起」，必须自己判死。
+ */
+const TELEGRAM_START_DEADLINE_MS = 30_000
+
+/** 连续重建上限；超过后退避一段时间再来，避免启动失败时形成重建风暴。 */
+const MAX_REBUILD_ATTEMPTS = 3
+const REBUILD_COOLDOWN_MS = 5 * 60_000
+/** 重建时等待旧实例 stop() 的上限：它可能正卡在 setup 里，不能无限等。 */
+const REBUILD_STOP_TIMEOUT_MS = 5_000
+
+/**
  * Minimal mime → extension fallback used when Telegram's `file_path` is
  * missing or extension-less. Kept intentionally small — anything unknown
  * becomes `.bin` and `readFileAttachment` will classify it as 'unknown'.
@@ -222,6 +235,10 @@ export class TelegramAdapter implements PlatformAdapter {
   private destroyed = false
   private reconnectAttempts = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private startDeadlineTimer: ReturnType<typeof setTimeout> | null = null
+  private lastConfig: PlatformConfig | null = null
+  private rebuilding = false
+  private rebuildAttempts = 0
   private log: MessagingLogger = NOOP_LOGGER
   /**
    * The supergroup chatId this adapter accepts non-DM messages from.
@@ -339,7 +356,10 @@ export class TelegramAdapter implements PlatformAdapter {
     }
 
     this.log = config.logger ?? NOOP_LOGGER
+    // 保存一份配置：rebuildAndRestart() 靠它重跑 initialize()
+    this.lastConfig = config
     this.destroyed = false
+    this.clearStartDeadline()
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
@@ -807,10 +827,26 @@ export class TelegramAdapter implements PlatformAdapter {
   private startPolling(): void {
     if (this.destroyed || !this.bot) return
 
+    // 启动期限：bot.start() 要先跑 setup，这期间 onStart 不会触发、connected 仍是 false。
+    // 30s 没等到 onStart 就判定「轮询没起来」并重建。
+    // 注意先清旧定时器：startPolling 会被 initialize(665) / scheduleReconnect(856) / rebuild 三处重入。
+    this.clearStartDeadline()
+    this.startDeadlineTimer = setTimeout(() => {
+      this.startDeadlineTimer = null
+      if (this.destroyed || this.connected) return
+      this.log.error('[telegram] polling did not start in time', {
+        event: 'telegram_start_timeout',
+        timeoutMs: TELEGRAM_START_DEADLINE_MS,
+      })
+      void this.rebuildAndRestart('start-timeout')
+    }, TELEGRAM_START_DEADLINE_MS)
+
     this.bot.start({
       onStart: () => {
         this.connected = true
         this.reconnectAttempts = 0
+        this.rebuildAttempts = 0
+        this.clearStartDeadline()
         this.log.info('[telegram] polling started')
         this.bot?.api.getWebhookInfo().then(
           (info) => this.log.info('[telegram] webhook state after start:', {
@@ -860,6 +896,7 @@ export class TelegramAdapter implements PlatformAdapter {
   async destroy(): Promise<void> {
     this.destroyed = true
     this.connected = false
+    this.clearStartDeadline()
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = null
@@ -868,6 +905,105 @@ export class TelegramAdapter implements PlatformAdapter {
       await this.bot.stop()
       this.bot = null
     }
+  }
+
+  private clearStartDeadline(): void {
+    if (this.startDeadlineTimer) {
+      clearTimeout(this.startDeadlineTimer)
+      this.startDeadlineTimer = null
+    }
+  }
+
+  /**
+   * 彻底重建 Bot：停掉旧实例 → 用同一份配置重跑 initialize()。
+   * 复用 initialize() 是为了保证 handler/middleware 的接线只有一处。
+   *
+   * 为什么需要重建：grammY 的 bot.start() 一旦在 setup（withRetries(deleteWebhook)）
+   * 阶段卡住，onStart 永远不会触发，这个 Bot 实例就再也不可能恢复轮询；
+   * 只有换一个新 Bot 才能重新拿到网络状态。
+   */
+  private async rebuildAndRestart(reason: string): Promise<void> {
+    if (this.rebuilding) return
+    const config = this.lastConfig
+    if (!config) {
+      this.log.warn('[telegram] rebuild skipped: no saved config', {
+        event: 'telegram_rebuild_skipped',
+        reason,
+      })
+      return
+    }
+
+    if (this.rebuildAttempts >= MAX_REBUILD_ATTEMPTS) {
+      // 连续重建失败：退避一段长时间，不把 CPU / API 撞在限流上
+      this.rebuildAttempts = 0
+      this.log.error('[telegram] rebuild limit reached', {
+        event: 'telegram_rebuild_abandoned',
+        reason,
+        cooldownMs: REBUILD_COOLDOWN_MS,
+      })
+      this.scheduleNextRebuild(reason, REBUILD_COOLDOWN_MS)
+      return
+    }
+
+    this.rebuilding = true
+    this.rebuildAttempts += 1
+    this.log.warn('[telegram] rebuilding bot', {
+      event: 'telegram_rebuild_started',
+      reason,
+      attempt: this.rebuildAttempts,
+    })
+    try {
+      this.destroyed = true
+      this.connected = false
+      this.clearStartDeadline()
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer)
+        this.reconnectTimer = null
+      }
+      if (this.bot) {
+        // stop() 失败不应该阻止重建——旧实例已经不可用。
+        // 必须带超时：bot.start() 卡在 setup 时 stop() 会等它，无限挂住会让
+        // this.rebuilding 永远为 true，之后所有重建请求都会被入口 guard 丢掉。
+        await withTimeout(this.bot.stop(), REBUILD_STOP_TIMEOUT_MS, 'bot.stop').catch(() => {})
+        this.bot = null
+      }
+      // initialize() 会复位 destroyed / reconnectAttempts，重建 Bot 并重新 startPolling()
+      await this.initialize(config)
+      this.log.info('[telegram] rebuild succeeded', {
+        event: 'telegram_rebuild_succeeded',
+        reason,
+        attempt: this.rebuildAttempts,
+      })
+    } catch (err) {
+      this.log.error('[telegram] rebuild failed', {
+        event: 'telegram_rebuild_failed',
+        reason,
+        attempt: this.rebuildAttempts,
+        error: describeError(err),
+      })
+      this.scheduleNextRebuild(reason, null)
+    } finally {
+      this.rebuilding = false
+    }
+  }
+
+  private scheduleNextRebuild(reason: string, fixedDelayMs: number | null): void {
+    if (this.destroyed) return
+    const delayMs =
+      fixedDelayMs ??
+      Math.min(5_000 * Math.pow(2, Math.max(0, this.rebuildAttempts - 1)), REBUILD_COOLDOWN_MS)
+    this.log.warn('[telegram] scheduling rebuild retry', {
+      event: 'telegram_rebuild_retry_scheduled',
+      reason,
+      delayMs,
+      attempt: this.rebuildAttempts,
+    })
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      if (this.destroyed) return
+      void this.rebuildAndRestart(`${reason}-retry`)
+    }, delayMs)
   }
 
   isConnected(): boolean {

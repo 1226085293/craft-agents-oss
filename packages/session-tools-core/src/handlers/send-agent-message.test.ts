@@ -50,3 +50,49 @@ describe('handleSendAgentMessage delivery ack', () => {
     expect(res.isError).toBe(true);
   });
 });
+
+describe('handleSendAgentMessage session commands', () => {
+  /** Mirrors the backend injection: `/stop` is a session command. */
+  function asCommandAware(ctx: SessionToolContext): SessionToolContext {
+    (ctx as { isSessionCommand?: (text: string) => boolean }).isSessionCommand =
+      (text: string) => text.trim().toLowerCase() === '/stop';
+    return ctx;
+  }
+
+  it('sends a command without the sender envelope', async () => {
+    const { ctx, calls } = createCtx({ delivery: 'stopped', targetBusy: true, queueLength: 0 }, { name: 'Monitor' });
+    const res = await handleSendAgentMessage(asCommandAware(ctx), { sessionId: 'target-9', message: '/stop' });
+
+    expect(res.isError).toBeFalsy();
+    // The token must stay at position 0 or the target parses it as chat text.
+    expect(calls[0]!.message).toBe('/stop');
+    expect(JSON.stringify(res)).toContain('Stopped');
+  });
+
+  it('reports an idle /stop as a no-op instead of claiming success', async () => {
+    const { ctx } = createCtx({ delivery: 'idle', targetBusy: false }, { name: 'Monitor' });
+    const res = await handleSendAgentMessage(asCommandAware(ctx), { sessionId: 'target-9', message: '/stop' });
+
+    const text = JSON.stringify(res);
+    expect(text).toContain('idle');
+    expect(text).toContain('nothing was stopped');
+  });
+
+  it('warns that queued messages still run after a stop', async () => {
+    const { ctx } = createCtx({ delivery: 'stopped', targetBusy: true, queueLength: 2 });
+    const res = await handleSendAgentMessage(asCommandAware(ctx), { sessionId: 'target-9', message: '/stop' });
+
+    expect(JSON.stringify(res)).toContain('2 queued message');
+  });
+
+  it('keeps the envelope for text that only looks like a command', async () => {
+    const { ctx, calls } = createCtx({ delivery: 'delivered', targetBusy: false });
+    const res = await handleSendAgentMessage(asCommandAware(ctx), {
+      sessionId: 'target-9',
+      message: '/stop the old build and restart',
+    });
+
+    expect(res.isError).toBeFalsy();
+    expect(calls[0]!.message).toContain('Message from session');
+  });
+});

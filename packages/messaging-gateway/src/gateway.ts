@@ -366,16 +366,20 @@ export class MessagingGateway {
   // Adapter registration
   // -------------------------------------------------------------------------
 
-  registerAdapter(adapter: PlatformAdapter): void {
+  async registerAdapter(adapter: PlatformAdapter): Promise<void> {
     const existing = this.adapters.get(adapter.platform)
-    if (existing) {
-      existing.destroy().catch((err) => {
+    if (existing && existing !== adapter) {
+      // 必须 await：否则新 adapter 会与「destroy 尚未跑完」的旧 adapter 共存，
+      // 而旧实例可能还持有一条确认 getUpdates / worker teardown 在路上。
+      try {
+        await existing.destroy()
+      } catch (err) {
         this.log.warn('failed to destroy existing adapter during replacement', {
           event: 'adapter_replace_destroy_failed',
           platform: adapter.platform,
           error: err,
         })
-      })
+      }
     }
     this.adapters.set(adapter.platform, adapter)
     if (this.started) {
@@ -386,8 +390,9 @@ export class MessagingGateway {
   async unregisterAdapter(platform: PlatformType): Promise<void> {
     const adapter = this.adapters.get(platform)
     if (!adapter) return
-    this.adapters.delete(platform)
     try {
+      // 先 destroy 再 delete：并发调用方仍能拿到「正在被销毁」的句柄，
+      // 而不是看到一个已摘除、却还有确认 getUpdates 在飞的 adapter。
       await adapter.destroy()
       this.log.info('adapter unregistered', {
         event: 'adapter_unregistered',
@@ -399,6 +404,11 @@ export class MessagingGateway {
         platform,
         error: err,
       })
+    } finally {
+      // 只在 map 仍指向本 adapter 时摘除，避免误删并发注册进来的新实例。
+      if (this.adapters.get(platform) === adapter) {
+        this.adapters.delete(platform)
+      }
     }
   }
 

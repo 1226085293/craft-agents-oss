@@ -30,18 +30,45 @@ export async function handleSendAgentMessage(
   }
 
   try {
+    // Session commands (`/stop`) must keep the command token at the start of
+    // the message: the target parses commands before the message path, and the
+    // sender envelope would bury it mid-text. Attribution is unnecessary here —
+    // the command carries no content the target has to interpret.
+    const isCommand = ctx.isSessionCommand?.(args.message) === true;
+
     // Build sender envelope so the target session knows who sent the message
     const senderName = ctx.getSessionInfo?.()?.name ?? ctx.sessionId;
-    const wrappedMessage = [
-      `[Message from session "${ctx.sessionId}" (${senderName})]`,
-      `Use send_agent_message with sessionId "${ctx.sessionId}" to reply.`,
-      '',
-      '---',
-      '',
-      args.message,
-    ].join('\n');
+    const wrappedMessage = isCommand
+      ? args.message.trim()
+      : [
+          `[Message from session "${ctx.sessionId}" (${senderName})]`,
+          `Use send_agent_message with sessionId "${ctx.sessionId}" to reply.`,
+          '',
+          '---',
+          '',
+          args.message,
+        ].join('\n');
 
     const result = await ctx.sendAgentMessage(args.sessionId, wrappedMessage, args.attachments);
+
+    // A command receipt must state what actually happened. An idle `/stop` is a
+    // no-op and saying "stopped" would be a lie — the same failure mode that
+    // made the gateway's `/stop` look broken.
+    if (result.delivery === 'stopped') {
+      const queued = result.queueLength ?? 0;
+      return successResponse(
+        `Stopped session ${args.sessionId}: its running turn was cancelled.` +
+          (queued > 0
+            ? ` ${queued} queued message(s) will still run after the stop — an explicit stop ends the current turn only.`
+            : '')
+      );
+    }
+
+    if (result.delivery === 'idle') {
+      return successResponse(
+        `Session ${args.sessionId} was idle — nothing was running, so nothing was stopped.`
+      );
+    }
 
     // Report the real delivery status instead of an unconditional "sent". A busy
     // target queues the message behind its current turn; an idle target starts

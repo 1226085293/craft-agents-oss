@@ -14,6 +14,7 @@ export type {
   ApiOAuthConfig,
   McpSourceConfig,
   ApiSourceConfig,
+  ApiConfig,
   LocalSourceConfig,
   SourceConnectionStatus,
   FolderSourceConfig,
@@ -70,6 +71,7 @@ export {
   SourceCredentialManager,
   getSourceCredentialManager,
   getSourcesNeedingAuth,
+  isMultiHeaderCredential,
 } from './credential-manager.ts';
 export type {
   AuthResult,
@@ -77,18 +79,8 @@ export type {
   BasicAuthCredential,
 } from './credential-manager.ts';
 
-// Server Builder (builds MCP/API servers from sources)
-export {
-  SourceServerBuilder,
-  getSourceServerBuilder,
-  normalizeMcpUrl,
-  SERVER_BUILD_ERRORS,
-} from './server-builder.ts';
-export type {
-  McpServerConfig,
-  SourceWithCredential,
-  BuiltServers,
-} from './server-builder.ts';
+// Server Builder (shared MCP URL normalization)
+export { SERVER_BUILD_ERRORS, buildApiConfig, normalizeMcpUrl } from './server-builder.ts';
 
 // API Tools (types)
 export type { SummarizeCallback } from './api-tools.ts';

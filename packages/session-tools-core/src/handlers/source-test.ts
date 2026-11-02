@@ -872,7 +872,7 @@ async function checkAuthStatus(
   let hasWarning = false;
 
   if (source.isAuthenticated) {
-    // In Codex context (no validateMcpConnection), MCP source credentials are delivered
+    // In a context without validateMcpConnection, MCP source credentials are delivered
     // via config.toml headers, not the credential cache. Skip token verification to avoid
     // false "token missing" warnings from the file-based cache.
     if (source.type === 'mcp' && !ctx.validateMcpConnection) {

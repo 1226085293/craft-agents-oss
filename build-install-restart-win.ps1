@@ -3,6 +3,24 @@
 # Usage from repository root:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File .\build-install-restart-win.ps1
 #
+# Common switches (all optional; every switch is forwarded to
+# apps/electron/scripts/build-win.ps1 where one exists):
+#   -SkipBuild              reuse the existing installer in apps/electron/release
+#   -SkipDependencyInstall  skip `bun install`
+#   -SkipProcessKill        do NOT kill node/npm/electron wholesale (required when
+#                           running inside a Craft Agents agent session, which would
+#                           otherwise kill its own host)
+#   -Fast                   -c.compression=store: skips 7z entirely, ~3-5 min
+#                           instead of ~13. Installer ~1.4GB. Precondition: the
+#                           app archive must stay under 2GB (32-bit makensis, no
+#                           LARGEADDRESSAWARE), which is why electron-builder.yml
+#                           excludes stale build output dirs (`!release/**`).
+#                           Fine for a local install, wrong for anything you upload.
+#   -NoInstall              build only; leave the installer on disk
+#
+# Typical local loop:
+#   .\build-install-restart-win.ps1 -SkipProcessKill -SkipDependencyInstall -Fast
+#
 # Notes:
 # - This script intentionally starts a detached helper for the install/restart
 #   step because installing the app can close the currently running Craft Agents
@@ -24,8 +42,17 @@ $ErrorActionPreference = "Stop"
 $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ElectronDir = Join-Path $RootDir "apps\electron"
 $BuildScript = Join-Path $ElectronDir "scripts\build-win.ps1"
-$ReleaseDir = Join-Path $ElectronDir "release"
-$InstalledExe = Join-Path $env:LOCALAPPDATA "Programs\@craft-agentelectron\Craft Agents.exe"
+# Must mirror build-win.ps1's $OutDir: it honours $env:CRAFT_BUILD_OUT_DIR (useful
+# for pointing a build at a drive with more free space). Hard-coding "release"
+# here would make this script look for the installer in the wrong place and fail
+# with "Installer not found" right after a successful build.
+$ReleaseDir = if ($env:CRAFT_BUILD_OUT_DIR) {
+    if ([System.IO.Path]::IsPathRooted($env:CRAFT_BUILD_OUT_DIR)) { $env:CRAFT_BUILD_OUT_DIR }
+    else { Join-Path $ElectronDir $env:CRAFT_BUILD_OUT_DIR }
+} else {
+    Join-Path $ElectronDir "release"
+}
+$InstalledExe = Join-Path $env:LOCALAPPDATA "Programs\Craft Agents\Craft Agents.exe"
 
 if (-not (Test-Path $BuildScript)) {
     throw "Windows build script not found: $BuildScript"

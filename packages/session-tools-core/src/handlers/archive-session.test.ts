@@ -65,7 +65,7 @@ describe('handleArchiveSession (archive_session)', () => {
     expect(JSON.stringify(res)).toContain('not found in this workspace');
   });
 
-  it('reports "not available" when the callback is not wired (e.g. Codex context)', async () => {
+  it('reports "not available" when the callback is not wired (e.g. partial context)', async () => {
     const { ctx } = createCtx({ wired: false });
     const res = await handleArchiveSession(ctx, { sessionId: 'other-2' });
     expect(res.isError).toBe(true);

@@ -1,20 +1,15 @@
 import type { ProviderDriver } from '../driver-types.ts';
-import { applyAnthropicRuntimeBootstrap } from '../runtime-resolver.ts';
 import { validateAnthropicConnection } from '../../../../config/llm-validation.ts';
 import { DEFAULT_MODEL, getModelById, getModelContextWindow, normalizeDeprecatedModelId } from '../../../../config/models.ts';
 import { getDefaultContextWindow } from '../../../../config/storage.ts';
+import { buildPiRuntimePayload } from './runtime-payload.ts';
 
 export const anthropicDriver: ProviderDriver = {
   provider: 'anthropic',
-  initializeHostRuntime: ({ hostRuntime, resolvedPaths }) => {
-    // Set paths opportunistically — don't throw on missing.
-    // Missing paths will be caught at session start (prepareRuntime).
-    applyAnthropicRuntimeBootstrap(hostRuntime, resolvedPaths, { strict: false });
-  },
-  prepareRuntime: ({ hostRuntime, resolvedPaths }) => {
-    applyAnthropicRuntimeBootstrap(hostRuntime, resolvedPaths);
-  },
-  buildRuntime: () => ({}),
+  // Direct Anthropic connections also terminate in the Pi subprocess. The
+  // driver must provide the same spawn paths and pin the Pi auth provider so
+  // PiAgent can resolve the connection-scoped Anthropic credential.
+  buildRuntime: (args) => buildPiRuntimePayload(args, 'anthropic'),
   fetchModels: async ({ connection, credentials }) => {
     // After legacy migration, only direct 'anthropic' connections reach this driver.
     // iam_credentials and service_account_file are no longer valid auth types for anthropic.

@@ -122,15 +122,6 @@ describe('createBuiltInConnection', () => {
     expect(conn.createdAt).toBeGreaterThan(0)
   })
 
-  it('sets piAuthProvider for chatgpt-plus', () => {
-    const conn = createBuiltInConnection('chatgpt-plus')
-    expect(conn.piAuthProvider).toBe('openai-codex')
-  })
-
-  it('sets piAuthProvider for github-copilot', () => {
-    const conn = createBuiltInConnection('github-copilot')
-    expect(conn.piAuthProvider).toBe('github-copilot')
-  })
 })
 
 // ============================================================

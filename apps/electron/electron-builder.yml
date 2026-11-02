@@ -95,27 +95,32 @@ files:
   - "!components.json"
   - "!eslint.config.mjs"
   - "!README.md"
-  # SDK ships a thin core + per-platform binary pkg. On Windows only the
-  # target arch (x64) is needed; drop the other platform packages (~208 MB
-  # of duplicate claude.exe). The runtime resolver checks the stable
-  # claude-agent-sdk-binary alias first (runtime-resolver.ts), which is
-  # staged by build-win.ps1, so these are pure duplicates.
-  - "!node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**"
-  - "!node_modules/@anthropic-ai/claude-agent-sdk-darwin*/**"
-  - "!node_modules/@anthropic-ai/claude-agent-sdk-linux*/**"
+  # NOTE: always build with the default output dir (release/), or delete stale
+  # output dirs before packaging. electron-builder only auto-excludes the
+  # *effective* output directory; when CRAFT_BUILD_OUT_DIR points somewhere else,
+  # an old release/ inside the app dir counts as normal content and gets swept
+  # into app.asar (2026-10-27: +1030MB, payload 1.4GB -> 2.7GB, store archive
+  # 2.2GB > the 2GB makensis mmap limit, so -Fast packaging failed).
+  # NOTE: patterns like "!release/**" were tried here and had NO effect, so keep
+  # the tree clean instead of relying on globs.
+  # ------------------------------------------------------------------
+  # Payload de-duplication (2026-10-27). These MUST live in the ROOT list:
+  # platform-level `files` are merged BEFORE the root list, so the root includes
+  # above (vendor/bun/**/*, dist/**/*, resources/bin/win32-x64/**/*) re-added
+  # everything the `win:` section excluded. Verified on the packaged tree: the
+  # win-section exclusions for bun.exe (112 MB), uv.exe (57 MB x2) and
+  # onnxruntime win32-arm64 (69 MB) were all ignored and still shipped.
+  # Only the Windows binary is named here, so mac/linux keep vendor/bun/bun.
+  - "!vendor/bun/bun.exe"
+  - "!resources/bin/win32-x64/**"
+  - "!dist/resources/bin/win32-x64/**"
+  # onnxruntime-node lays binaries out as bin/napi-v6/<os>/<arch> - note the double
+  # split. The old "win32-arm64" pattern matched nothing and 69 MB still shipped.
+  - "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**"
+  # Build logs written into apps/electron must never ship inside app.asar.
+  - "!*.log"
 
-# Since SDK 0.2.113 the SDK ships a thin core (`@anthropic-ai/claude-agent-sdk`)
-# and a per-platform optional dependency (`-darwin-arm64`, `-darwin-x64`, etc.)
-# containing the ~210 MB native `claude` binary. We bundle both as extraResources
-# below — only the binary matching the build target is shipped per artifact, so
-# the platform `files` rules below also exclude the wrong-platform binaries.
-#
-# Why extraResources instead of `files`: since electron-builder v20.15.2,
-# `node_modules` directories are auto-excluded from `files`. extraResources
-# bypasses that. See: https://github.com/electron-userland/electron-builder/issues/3104
-#
-# Ripgrep is sourced from `@vscode/ripgrep` (was previously bundled inside the
-# SDK as `vendor/ripgrep/<platform>/rg`; removed in 0.2.113).
+# Ripgrep is sourced from `@vscode/ripgrep`.
 
 extraMetadata:
   main: dist/main.cjs
@@ -134,8 +139,6 @@ publish:
 asar: true
 # Files that MUST be real paths at runtime are unpacked out of app.asar.
 asarUnpack:
-  # Native Anthropic SDK binary (claude.exe) — spawned as a subprocess.
-  - "**/node_modules/@anthropic-ai/**"
   # onnxruntime native bindings + bundled embedding model.
   - "**/node_modules/onnxruntime-node/**"
   - "**/node_modules/onnxruntime-web/**"
@@ -155,6 +158,9 @@ asarUnpack:
   - "**/dist/resources/session-mcp-server/**"
   - "**/dist/resources/bridge-mcp-server/**"
   - "**/dist/interceptor.cjs"
+  # The vendored Bun runtime is spawned as an external process and cannot
+  # execute from inside app.asar. Keep the real binary in app.asar.unpacked.
+  - "**/vendor/bun/**"
   # CLI tool wrappers + Python scripts are exposed to agent Bash sessions via
   # PATH prepend and CRAFT_SCRIPTS (apps/electron/src/main/index.ts:144-178),
   # then executed by an EXTERNAL shell / `uv run` — they cannot live in asar.
@@ -189,15 +195,6 @@ mac:
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
   extraResources:
-    # Thin core SDK (sdk.mjs + types). ~4 MB — present on every platform.
-    - from: node_modules/@anthropic-ai/claude-agent-sdk
-      to: app/node_modules/@anthropic-ai/claude-agent-sdk
-    # Stable alias pointing at the target-arch native binary package.
-    # Populated by build-dmg.sh / build-linux.sh / build-win.ps1 before
-    # electron-builder runs (`apps/electron/node_modules/@anthropic-ai/claude-agent-sdk-binary/`).
-    # The runtime resolver (runtime-resolver.ts) looks here first.
-    - from: node_modules/@anthropic-ai/claude-agent-sdk-binary
-      to: app/node_modules/@anthropic-ai/claude-agent-sdk-binary
     # ripgrep (used by packages/server-core/src/services/search.ts).
     - from: node_modules/@vscode/ripgrep
       to: app/node_modules/@vscode/ripgrep
@@ -290,16 +287,12 @@ win:
     # The Electron main process only loads win32/x64. Exclude the rest.
     - "!node_modules/onnxruntime-node/bin/napi-v6/darwin*/**"
     - "!node_modules/onnxruntime-node/bin/napi-v6/linux*/**"
-    - "!node_modules/onnxruntime-node/bin/napi-v6/win32-arm64/**"
+    - "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**"
     # Re-assert source-map exclusion for the win target (parity with root `files`;
     # platform-specific `files` are merged, so keep it last to win).
     - "!**/*.map"
   # Copy executables as extraResources to avoid EBUSY file locking (see comment above)
   extraResources:
-    - from: node_modules/@anthropic-ai/claude-agent-sdk
-      to: app/node_modules/@anthropic-ai/claude-agent-sdk
-    - from: node_modules/@anthropic-ai/claude-agent-sdk-binary
-      to: app/node_modules/@anthropic-ai/claude-agent-sdk-binary
     - from: node_modules/@vscode/ripgrep
       to: app/node_modules/@vscode/ripgrep
     - from: vendor/bun/bun.exe
@@ -320,7 +313,16 @@ win:
       to: messaging-whatsapp-worker/worker.cjs
 
 nsis:
-  oneClick: true
+  # 自定义脚上入口。必须显式写：不写时 electron-builder 只会在
+  # directories.buildResources（本项目 = resources/）里找默认的 installer.nsh，
+  # 找不到就静默跳过，于是 customUnWelcomePage 不存在、卸载勾选页根本不会被插入。
+  # 相对路径先相对 resources/ 解析，找不到再相对项目目录（apps/electron）解析。
+  include: build/installer.nsh
+  # assisted 安装器（标准向导）。注意：oneClick: true 时 electron-builder 的
+  # oneClick.nsh 只插入 MUI_UNPAGE_INSTFILES，而且 un.onInit 里会 SetSilent silent，
+  # 卸载器不会显示 installer.nsh 里的自定义勾选页。要保留卸载勾选页就必须走
+  # assisted 路线（customUnWelcomePage 由 assistedInstaller.nsh 插入）。
+  oneClick: false
   # Per-user install to %LOCALAPPDATA%\Programs\ (not Program Files).
   # Bun subprocess cannot read/write files in Program Files due to Windows permissions.
   perMachine: false
@@ -351,10 +353,6 @@ linux:
         - x64
   artifactName: "Craft-Agents-${arch}.${ext}"
   extraResources:
-    - from: node_modules/@anthropic-ai/claude-agent-sdk
-      to: app/node_modules/@anthropic-ai/claude-agent-sdk
-    - from: node_modules/@anthropic-ai/claude-agent-sdk-binary
-      to: app/node_modules/@anthropic-ai/claude-agent-sdk-binary
     - from: node_modules/@vscode/ripgrep
       to: app/node_modules/@vscode/ripgrep
     # WhatsApp worker subprocess (self-contained; Baileys bundled in).

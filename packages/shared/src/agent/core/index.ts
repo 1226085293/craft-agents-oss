@@ -1,7 +1,7 @@
 /**
  * Core Agent Module
  *
- * Provides shared functionality for all agent backends (ClaudeAgent, PiAgent).
+ * Provides shared functionality for all agent backends (PiAgent).
  * These modules are provider-agnostic and can be composed into any agent implementation.
  *
  * Modules:

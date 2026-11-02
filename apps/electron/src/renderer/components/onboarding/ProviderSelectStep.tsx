@@ -39,7 +39,7 @@ interface ProviderSelectStepProps {
 /**
  * ProviderSelectStep — First screen after install.
  *
- * Welcomes the user and asks them to pick their subscription / auth method.
+ * Welcomes the user and asks them to pick their provider / auth method.
  * Selecting a card immediately advances to the next step.
  */
 export function ProviderSelectStep({ onSelect, onSkip }: ProviderSelectStepProps) {

@@ -138,10 +138,33 @@ export class ProgressJournal {
 
     const targetBytes = Math.floor(this.maxBytes * RETENTION_HYSTERESIS_RATIO);
     const targetRecords = Math.max(1, Math.floor(this.maxRecords * RETENTION_HYSTERESIS_RATIO));
-    const latestRequest = [...this.records].reverse().find((record) => record.kind === 'user_request');
-    const latestRequestIndex = latestRequest ? this.records.lastIndexOf(latestRequest) : -1;
-    const latestGuidance = latestRequestIndex >= 0
-      ? this.records.slice(latestRequestIndex + 1).reverse().find((record) => record.kind === 'guidance')
+    // Protect the newest request (and the mid-turn guidance that follows it)
+    // BY TIMESTAMP, never by array position (2026-11-01 quiet-jasmine).
+    // trimToLimits rewrites the ledger as
+    //   [latestRequest, ...recentRecords, latestGuidance]
+    // so after ONE rotation the newest request sits at position 0 and a
+    // positional scan resolves an OLDER request that is still inside the
+    // recent window as "latest". The real newest request then becomes the
+    // oldest removable entry and the NEXT rotation drops it. Observed: a
+    // 36-minute turn appended ~490 records, the second rotation evicted that
+    // turn's user_request, and the verification judge ended up judging the
+    // reply against the PREVIOUS turn's request (two bogus "incomplete"
+    // rejections). The reader (latestRequestFromRecords) has ordered by
+    // timestamp since 2026-10-20 tidy-willow; the protection side must agree
+    // with it, otherwise a rotated-out record is unrecoverable.
+    const tsOf = (record: ProgressRecord): number => {
+      const parsed = typeof record.timestamp === 'string' ? Date.parse(record.timestamp) : NaN;
+      return Number.isNaN(parsed) ? 0 : parsed;
+    };
+    const chrono = this.records
+      .map((record, index) => ({ record, index }))
+      .sort((a, b) => tsOf(a.record) - tsOf(b.record) || a.index - b.index);
+    const latestRequest = [...chrono].reverse().find((entry) => entry.record.kind === 'user_request')?.record;
+    const latestRequestAt = latestRequest ? tsOf(latestRequest) : Number.NEGATIVE_INFINITY;
+    const latestGuidance = latestRequest
+      ? [...chrono]
+          .reverse()
+          .find((entry) => entry.record.kind === 'guidance' && tsOf(entry.record) >= latestRequestAt)?.record
       : undefined;
     const protectedRecords = new Set([latestRequest, latestGuidance].filter((record): record is ProgressRecord => !!record));
     const recentRecords = this.records.filter((record) => !protectedRecords.has(record)).slice(-targetRecords);

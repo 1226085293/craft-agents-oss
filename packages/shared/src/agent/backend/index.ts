@@ -1,12 +1,10 @@
 /**
  * Agent Backend Abstraction Layer
  *
- * This module provides a unified interface for AI agents (Claude, Pi)
- * allowing seamless provider switching.
+ * This module provides the unified interface for the Pi agent.
  *
  * Naming convention:
- * - ClaudeAgent: Claude SDK implementation (implements AgentBackend directly)
- * - PiAgent: Pi unified API implementation
+ * - PiAgent: Pi implementation
  * - AgentBackend: Interface that all agents implement
  * - createAgent: Factory function to create agents
  *
@@ -83,7 +81,6 @@ export { BaseEventAdapter } from './base-event-adapter.ts';
 export { EventQueue } from './event-queue.ts';
 
 // Provider-specific event adapters
-export { ClaudeEventAdapter } from './claude/event-adapter.ts';
 export { PiEventAdapter } from './pi/event-adapter.ts';
 
 // Agent implementations are imported directly by factory.ts

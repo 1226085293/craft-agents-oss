@@ -260,7 +260,7 @@ const FAST_MODE_BETA = 'fast-mode-2026-02-01';
 /**
  * Strip cache_control from empty text blocks in API request bodies.
  *
- * The Claude Agent SDK's auto-mode classifier can assign cache_control to
+ * Anthropic's auto-mode classifier can assign cache_control to
  * content blocks without checking whether their text is empty. The Anthropic
  * API rejects this with "cache_control cannot be set for empty text blocks".
  *

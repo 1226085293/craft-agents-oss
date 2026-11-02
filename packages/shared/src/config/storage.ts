@@ -342,6 +342,44 @@ export function saveConfig(config: StoredConfig): void {
   };
 
   writeFileSync(CONFIG_FILE, JSON.stringify(storageConfig, null, 2), 'utf-8');
+  writeUninstallerWorkspaceList(config.workspaces);
+}
+
+/**
+ * Mirror the workspace list into two flat, line-oriented files next to
+ * config.json so the NSIS uninstaller can build its per-workspace checkboxes
+ * without a JS runtime and without parsing JSON:
+ *
+ *   workspaces.list   one display label per line  ("名称    D:\path")
+ *   workspaces.paths  one absolute path per line, same order
+ *
+ * Two files instead of one tab-separated file on purpose: splitting on a tab
+ * inside NSIS needs StrFunc (fragile, and a path may legitimately contain a
+ * comma), while reading two files in lockstep is three lines of code. Same
+ * order is the only contract.
+ *
+ * Written on every config save, so it cannot drift from the real list. The
+ * uninstaller treats a missing file as "no workspaces to offer".
+ */
+export function writeUninstallerWorkspaceList(
+  workspaces: Array<{ name?: string; rootPath: string }>,
+): void {
+  try {
+    const labels: string[] = [];
+    const paths: string[] = [];
+    for (const ws of workspaces ?? []) {
+      if (!ws?.rootPath) continue;
+      const abs = expandPath(ws.rootPath);
+      labels.push(`${ws.name || abs}    ${abs}`);
+      paths.push(abs);
+    }
+    const lines = (xs: string[]) => (xs.length > 0 ? `${xs.join('\r\n')}\r\n` : '');
+    writeFileSync(join(CONFIG_DIR, 'workspaces.list'), lines(labels), 'utf-8');
+    writeFileSync(join(CONFIG_DIR, 'workspaces.paths'), lines(paths), 'utf-8');
+  } catch (err) {
+    // Never fail a config save because a hint file could not be written.
+    debug('[config] failed to write uninstaller workspace list:', err);
+  }
 }
 
 // Legacy updateApiKey() removed - use setupLlmConnection IPC handler instead.
@@ -491,7 +529,7 @@ export function setBrowserToolEnabled(enabled: boolean): void {
 
   // Clear session tool caches so all sessions pick up the change immediately.
   // Lazy import to avoid circular dependency (storage ← session-scoped-tools ← storage).
-  import('../agent/session-scoped-tools.ts').then(m => m.invalidateAllSessionToolsCaches()).catch(() => {});
+  // Session tool caches are owned by the Pi backend.
 }
 
 /**

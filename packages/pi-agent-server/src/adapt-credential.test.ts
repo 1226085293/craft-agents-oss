@@ -43,7 +43,7 @@ describe('adaptCredentialForPiSdk', () => {
     }
   });
 
-  it('passes anthropic api_key credentials through unchanged (Claude Max bearer resolves via envApiKeyAuth)', () => {
+  it('passes anthropic api_key credentials through unchanged (Anthropic bearer resolves via envApiKeyAuth)', () => {
     const credential = { type: 'api_key' as const, key: 'sk-ant-oat-token' };
     expect(adaptCredentialForPiSdk('anthropic', credential)).toEqual(credential);
   });

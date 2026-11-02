@@ -5,12 +5,9 @@
  * Each tool accepts { path, method, params } and auto-injects authentication.
  */
 
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod';
 import type { ApiConfig } from './types.ts';
 import { debug } from '../utils/debug.ts';
 import { redactUrlForLog } from '../utils/redaction.ts';
-import { guardLargeResult } from '../utils/large-response.ts';
 import { MAX_DOWNLOAD_SIZE, formatBytes } from '../utils/binary-detection.ts';
 import type { ApiCredential, BasicAuthCredential } from './credential-manager.ts';
 import { isMultiHeaderCredential } from './credential-manager.ts';
@@ -345,100 +342,3 @@ export function buildToolDescription(config: ApiConfig): string {
  * @param sessionPath - Optional path to session folder for saving large responses
  * @returns SDK tool that can be included in an MCP server
  */
-export function createApiTool(
-  config: ApiConfig,
-  credential: ApiCredentialSource,
-  sessionPath?: string,
-  summarize?: SummarizeCallback
-) {
-  const toolName = `api_${config.name}`;
-  debug(`[api-tools] Creating flexible tool: ${toolName}`);
-
-  const description = buildToolDescription(config);
-
-  return tool(
-    toolName,
-    description,
-    {
-      path: z.string().describe('API endpoint path, e.g., "/search" or "/v1/completions"'),
-      method: z.enum(['GET', 'POST', 'PUT', 'DELETE', 'PATCH']).describe('HTTP method - check documentation for correct method per endpoint'),
-      params: z.record(z.string(), z.unknown()).optional().describe('Request body (POST/PUT/PATCH) or query parameters (GET). For non-JSON bodies, pass { _rawBody: "raw string content", _contentType: "text/plain" } — _rawBody is sent as-is without JSON encoding, _contentType defaults to text/plain if omitted'),
-      _intent: z.string().optional().describe('REQUIRED: Describe what you are trying to accomplish with this API call (1-2 sentences)'),
-    },
-    async (args) => {
-      const { path, method, params, _intent } = args;
-
-      try {
-        const outcome = await executeApiRequest(config, credential, { path, method, params });
-
-        // Check for error responses first (errors are always text)
-        if (!outcome.ok) {
-          const text = outcome.buffer.toString('utf-8');
-          debug(`[api-tools] ${config.name} error ${outcome.status}: ${text.substring(0, 200)}`);
-          return {
-            content: [{
-              type: 'text' as const,
-              text: `API Error ${outcome.status}: ${text}`,
-            }],
-            isError: true,
-          };
-        }
-
-        // Centralized binary detection + large response handling
-        if (sessionPath) {
-          const guarded = await guardLargeResult(outcome.buffer, {
-            sessionPath,
-            toolName: `api_${config.name}`,
-            input: params,
-            intent: _intent,
-            summarize,
-          });
-          if (guarded) {
-            return { content: [{ type: 'text' as const, text: guarded }] };
-          }
-        }
-
-        return { content: [{ type: 'text' as const, text: outcome.buffer.toString('utf-8') }] };
-      } catch (error) {
-        if (error instanceof ApiResponseTooLargeError) {
-          return {
-            content: [{ type: 'text' as const, text: error.message }],
-            isError: true,
-          };
-        }
-        const message = error instanceof Error ? error.message : 'Unknown error';
-        debug(`[api-tools] ${config.name} request failed: ${message}`);
-        return {
-          content: [{ type: 'text' as const, text: `Request failed: ${message}` }],
-          isError: true,
-        };
-      }
-    }
-  );
-}
-
-/**
- * Create an in-process MCP server with a single flexible API tool.
- *
- * @param config - API configuration
- * @param credential - API credential source (string for API key/token, BasicAuthCredential for basic auth,
- *                     empty string for public APIs, or async function for OAuth token refresh)
- * @param sessionPath - Optional path to session folder for saving large responses
- * @returns SDK MCP server that can be passed to query()
- */
-export function createApiServer(
-  config: ApiConfig,
-  credential: ApiCredentialSource,
-  sessionPath?: string,
-  summarize?: SummarizeCallback
-): ReturnType<typeof createSdkMcpServer> {
-  debug(`[api-tools] Creating server for ${config.name}${sessionPath ? ` (session: ${sessionPath})` : ''}`);
-
-  const apiTool = createApiTool(config, credential, sessionPath, summarize);
-
-  return createSdkMcpServer({
-    name: `api_${config.name}`,
-    version: '1.0.0',
-    tools: [apiTool],
-  });
-}

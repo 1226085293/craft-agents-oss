@@ -192,10 +192,6 @@ export default [
           message: 'Do not call provider APIs directly in Electron model fetchers. Delegate to fetchBackendModels() from @craft-agent/shared/agent/backend.',
         },
         {
-          selector: "ImportDeclaration[source.value='@anthropic-ai/claude-agent-sdk']",
-          message: 'Provider SDK usage must stay in backend drivers under packages/shared/src/agent/backend/internal/drivers.',
-        },
-        {
           selector: "ImportDeclaration[source.value='@earendil-works/pi-ai']",
           message: 'Provider SDK usage must stay in backend drivers under packages/shared/src/agent/backend/internal/drivers.',
         },

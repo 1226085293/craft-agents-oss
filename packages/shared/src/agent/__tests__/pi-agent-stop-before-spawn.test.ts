@@ -2,6 +2,12 @@ import { describe, expect, it } from 'bun:test'
 import { PiAgent } from '../pi-agent.ts'
 import type { BackendConfig } from '../backend/types.ts'
 import { AbortReason } from '../core/session-lifecycle.ts'
+import { ensureConfigDir } from '../../config/storage.ts'
+
+// chatImpl builds the system prompt before consuming the stop latch. The Bun
+// test process uses a throwaway CONFIG_DIR, so seed config-defaults first;
+// otherwise the prompt build throws and the catch path emits two error events.
+ensureConfigDir()
 
 /**
  * Regression tests for the 2026-10-16 261016-deft-tide incident: a user stop

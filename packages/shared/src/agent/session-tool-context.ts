@@ -1,11 +1,11 @@
 /**
- * Claude Context Factory
+ * Session Tool Context Factory
  *
- * Creates a SessionToolContext implementation for Claude with full access
+ * Creates a SessionToolContext implementation for the Pi agent with full access
  * to Electron internals, credential managers, MCP validation, etc.
  *
  * This enables the shared handlers in session-tools-core to work with
- * Claude's full feature set.
+ * the Pi agent's full feature set.
  */
 
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync, mkdirSync } from 'fs';
@@ -39,7 +39,6 @@ import {
   validateAllPermissions,
   validateToolIcons,
 } from '../config/validators.ts';
-import { validateAutomations } from '../automations/index.ts';
 import {
   validateMcpConnection as validateMcpConnectionImpl,
   validateStdioMcpConnection as validateStdioMcpConnectionImpl,
@@ -67,9 +66,9 @@ import { getSessionPlansPath, getSessionPath, getSessionDataPath } from '../sess
 export type { SessionToolContext, SessionToolCallbacks } from '@craft-agent/session-tools-core';
 
 /**
- * Options for creating a Claude context
+ * Options for creating a session tool context
  */
-export interface ClaudeContextOptions {
+export interface SessionToolContextOptions {
   sessionId: string;
   workspacePath: string;
   workspaceId: string;
@@ -78,7 +77,7 @@ export interface ClaudeContextOptions {
 }
 
 /**
- * Create a SessionToolContext for Claude with full capabilities.
+ * Create a SessionToolContext for the Pi agent with full capabilities.
  *
  * This provides:
  * - Full file system access
@@ -87,7 +86,7 @@ export interface ClaudeContextOptions {
  * - MCP connection validation
  * - Icon management
  */
-export function createClaudeContext(options: ClaudeContextOptions): SessionToolContext {
+export function createSessionToolContext(options: SessionToolContextOptions): SessionToolContext {
   const { sessionId, workspacePath, workspaceId, onPlanSubmitted, onAuthRequest } = options;
 
   // File system implementation
@@ -126,7 +125,6 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
       }
       return validateAllPermissions(wsPath);
     },
-    validateAutomations: (wsPath: string) => validateAutomations(wsPath),
     validateToolIcons: () => validateToolIcons(),
     validateAll: (wsPath: string) => validateAll(wsPath),
     validateSkill: (wsPath: string, slug: string) => validateSkill(wsPath, slug),
@@ -228,7 +226,7 @@ export function createClaudeContext(options: ClaudeContextOptions): SessionToolC
       mkdirSync(feedbackDir, { recursive: true });
       const filePath = join(feedbackDir, `${feedback.id}.json`);
       writeFileSync(filePath, JSON.stringify(feedback, null, 2), 'utf-8');
-      debug('claude-context', `Developer feedback written to ${filePath}`);
+      debug('session-tool-context', `Developer feedback written to ${filePath}`);
     },
     // Source management
     loadSourceConfig: (sourceSlug: string): SourceConfig | null => {

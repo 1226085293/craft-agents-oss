@@ -50,16 +50,14 @@ const POLICIES: Record<CliDomainNamespace, CliDomainPolicy> = {
   automation: {
     namespace: 'automation',
     helpCommand: 'craft-agent automation --help',
-    workspacePathScopes: ['automations.json', 'automations-history.jsonl'],
-    readActions: ['list', 'get', 'validate', 'history', 'last-executed', 'test', 'lint'],
+    workspacePathScopes: ['automations.json'],
+    readActions: ['list', 'get', 'validate'],
     quickExamples: [
       'craft-agent automation list',
-      'craft-agent automation create --event UserPromptSubmit --prompt "Summarize this prompt"',
-      'craft-agent automation update <id> --json "{\"enabled\":false}"',
-      'craft-agent automation history <id> --limit 20',
+      'craft-agent automation get <id>',
       'craft-agent automation validate',
     ],
-    bashGuardPaths: ['automations.json', 'automations-history.jsonl'],
+    bashGuardPaths: ['automations.json'],
   },
   permission: {
     namespace: 'permission',

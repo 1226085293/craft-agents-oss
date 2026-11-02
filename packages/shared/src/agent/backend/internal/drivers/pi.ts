@@ -3,6 +3,7 @@ import type { ModelDefinition } from '../../../../config/models.ts';
 import { getDefaultContextWindow } from '../../../../config/storage.ts';
 import { getAllPiModels, getPiModelsForAuthProvider } from '../../../../config/models-pi.ts';
 import { getPiProviderBaseUrl } from '../../../../config/models-pi.ts';
+import { buildPiRuntimePayload } from './runtime-payload.ts';
 
 // ── Copilot model types ────────────────────────────────────────────────
 type RawCopilotModel = {
@@ -109,30 +110,7 @@ async function testAnthropicCompatible(
 
 export const piDriver: ProviderDriver = {
   provider: 'pi',
-  buildRuntime: ({ context, providerOptions, resolvedPaths }) => ({
-    paths: {
-      piServer: resolvedPaths.piServerPath,
-      interceptor: resolvedPaths.interceptorBundlePath,
-      node: resolvedPaths.nodeRuntimePath,
-    },
-    piAuthProvider: providerOptions?.piAuthProvider || context.connection?.piAuthProvider,
-    baseUrl: context.connection?.baseUrl,
-    customEndpoint: context.connection?.customEndpoint,
-    customModels: context.connection?.models?.map(m => {
-      if (typeof m === 'string') return m;
-      const supportsImages = typeof m.supportsImages === 'boolean'
-        ? m.supportsImages
-        : undefined;
-      if (m.contextWindow || supportsImages !== undefined) {
-        return {
-          id: m.id,
-          ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
-          ...(supportsImages !== undefined ? { supportsImages } : {}),
-        };
-      }
-      return m.id;
-    }),
-  }),
+  buildRuntime: (args) => buildPiRuntimePayload(args),
   fetchModels: async ({ connection, credentials, timeoutMs }) => {
     // Copilot OAuth: fetch models directly from the Copilot API via HTTP.
     // Uses the GitHub OAuth token (our refreshToken) to exchange for a

@@ -132,7 +132,7 @@ const OPENAI_COMPAT_CUSTOM_URL_PRESETS: ReadonlySet<string> = new Set(['manifest
 
 // OpenAI provider presets - for Codex backend
 // Only direct OpenAI is supported; 3PP providers (OpenRouter, Vercel, Ollama) should be
-// configured via the Anthropic/Claude connection which routes through the Claude Agent SDK.
+// configured via the Anthropic/Claude connection which routes through the Pi agent.
 const OPENAI_PRESETS: Preset[] = [
   { key: 'openai', label: 'OpenAI', url: '' },
 ]

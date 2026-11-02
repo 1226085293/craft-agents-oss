@@ -2,13 +2,13 @@
  * Tests for SourceServerBuilder → API Tools credential flow
  *
  * Verifies that credentials flow correctly from:
- * 1. SourceServerBuilder.buildApiConfig() - creates correct auth config
+ * 1. buildApiConfig() - creates correct auth config
  * 2. SourceServerBuilder.buildApiServer() - passes credential to createApiServer
  * 3. buildHeaders() - applies credentials to HTTP request headers
  */
 
 import { describe, test, expect } from 'bun:test';
-import { SourceServerBuilder } from '../server-builder.ts';
+import { buildApiConfig } from '../server-builder.ts';
 import { buildHeaders } from '../api-tools.ts';
 import { isMultiHeaderCredential, type MultiHeaderCredential } from '../credential-manager.ts';
 import type { LoadedSource, FolderSourceConfig, ApiConfig } from '../types.ts';
@@ -35,8 +35,7 @@ function createMockSource(overrides: Partial<FolderSourceConfig> = {}): LoadedSo
   };
 }
 
-describe('SourceServerBuilder.buildApiConfig', () => {
-  const builder = new SourceServerBuilder();
+describe('buildApiConfig', () => {
 
   test('should build correct ApiConfig.auth for header type', () => {
     const source = createMockSource({
@@ -47,7 +46,7 @@ describe('SourceServerBuilder.buildApiConfig', () => {
       },
     });
 
-    const config = builder.buildApiConfig(source);
+    const config = buildApiConfig(source);
 
     expect(config.auth?.type).toBe('header');
     expect(config.auth?.headerName).toBe('X-API-Key');
@@ -61,7 +60,7 @@ describe('SourceServerBuilder.buildApiConfig', () => {
       },
     });
 
-    const config = builder.buildApiConfig(source);
+    const config = buildApiConfig(source);
 
     expect(config.auth?.type).toBe('bearer');
   });
@@ -74,7 +73,7 @@ describe('SourceServerBuilder.buildApiConfig', () => {
       },
     });
 
-    const config = builder.buildApiConfig(source);
+    const config = buildApiConfig(source);
 
     expect(config.auth?.type).toBe('none');
   });
@@ -88,7 +87,7 @@ describe('SourceServerBuilder.buildApiConfig', () => {
       },
     });
 
-    const config = builder.buildApiConfig(source);
+    const config = buildApiConfig(source);
 
     expect(config.auth?.type).toBe('header');
     expect(config.auth?.headerName).toBe('x-api-key');
@@ -102,7 +101,7 @@ describe('SourceServerBuilder.buildApiConfig', () => {
       },
     });
 
-    const config = builder.buildApiConfig(source);
+    const config = buildApiConfig(source);
 
     expect(config.baseUrl).toBe('https://api.datadoghq.com/');
   });
@@ -118,7 +117,7 @@ describe('SourceServerBuilder.buildApiConfig', () => {
       },
     });
 
-    const config = builder.buildApiConfig(source);
+    const config = buildApiConfig(source);
 
     expect(config.defaultHeaders).toEqual({
       'X-Custom-Header': 'custom-value',
@@ -174,7 +173,6 @@ describe('buildHeaders with MultiHeaderCredential', () => {
 });
 
 describe('Full flow: Source config → ApiConfig → Headers', () => {
-  const builder = new SourceServerBuilder();
 
   test('Datadog-like source produces correct headers', () => {
     // 1. Create source config
@@ -188,7 +186,7 @@ describe('Full flow: Source config → ApiConfig → Headers', () => {
     });
 
     // 2. Build API config
-    const apiConfig = builder.buildApiConfig(source);
+    const apiConfig = buildApiConfig(source);
     expect(apiConfig.auth?.type).toBe('header');
 
     // 3. Simulate credential that would come from SourceCredentialManager
@@ -217,7 +215,7 @@ describe('Full flow: Source config → ApiConfig → Headers', () => {
     });
 
     // Build API config
-    const apiConfig = builder.buildApiConfig(brokenSource);
+    const apiConfig = buildApiConfig(brokenSource);
     expect(apiConfig.auth?.type).toBe('none'); // This is the problem
 
     // Even with valid credentials...
@@ -242,7 +240,7 @@ describe('Full flow: Source config → ApiConfig → Headers', () => {
       },
     });
 
-    const apiConfig = builder.buildApiConfig(source);
+    const apiConfig = buildApiConfig(source);
     const headers = buildHeaders(apiConfig.auth, 'my-simple-key');
 
     expect(headers['X-API-Key']).toBe('my-simple-key');

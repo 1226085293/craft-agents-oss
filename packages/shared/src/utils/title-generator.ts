@@ -3,7 +3,7 @@
  *
  * Shared helpers for building title prompts and validating results.
  * Actual title generation is handled by agent classes using their respective SDKs:
- * - ClaudeAgent: Uses Claude SDK query()
+ * - PiAgent: uses the Pi subprocess
  * - PiAgent: Uses Pi SDK queryLlm()
  */
 

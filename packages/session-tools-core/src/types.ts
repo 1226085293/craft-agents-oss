@@ -2,7 +2,7 @@
  * Session Tools Core - Types
  *
  * Shared type definitions for session-scoped tools used by both
- * Claude (in-process) and Codex (subprocess) implementations.
+ * the Pi agent implementation.
  */
 
 // ============================================================
@@ -156,7 +156,7 @@ export interface DeveloperFeedback {
 
 /**
  * Callback message for IPC with main process.
- * Used by Codex subprocess to communicate via stderr.
+ * Used by the legacy subprocess protocol to communicate via stderr.
  */
 export interface CallbackMessage {
   __callback__: string;

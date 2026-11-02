@@ -18,7 +18,7 @@ To understand what Craft Agents does and how it works watch this video.
 ## Why Craft Agents was built
 Craft Agents is a tool we built so that we (at craft.do) can work effectively with agents. It enables intuitive multitasking, no-fluff connection to any API or Service, sharing sessions, and a more document (vs code) centric workflow - in a beautiful and fluid UI.
 
-It uses the Claude Agent SDK and the Pi SDK side by side—building on what we found great and improving areas where we've desired improvements.
+It uses the Pi SDK as its agent runtime—building on what we found great and improving areas where we've desired improvements.
 
 It's built with Agent Native software principles in mind, and is highly customisable out of the box. One of the first of its kind.
 
@@ -105,10 +105,10 @@ bun run electron:start
 ## Quick Start
 
 1. **Launch the app** after installation
-2. **Choose API Connection**: Use Anthropic (API key or Claude Max), Google AI Studio, ChatGPT Plus (Codex OAuth), or GitHub Copilot OAuth
+2. **Choose API Connection**: Use Anthropic (API key), Google AI Studio, ChatGPT Plus (Codex OAuth), or GitHub Copilot OAuth
 3. **Create a workspace**: Set up a workspace to organize your sessions
 4. **Connect sources** (optional): Add MCP servers, REST APIs, or local filesystems
-5. **Start chatting**: Create sessions and interact with Claude
+5. **Start chatting**: Create sessions and interact with your agent
 
 ## Desktop App Features
 
@@ -465,7 +465,7 @@ Craft Agents supports multiple ways to connect to LLM providers:
 
 | Provider | Auth | Notes |
 |----------|------|-------|
-| **Anthropic** | API key or Claude Max/Pro OAuth | Direct Claude connection via the Claude Agent SDK |
+| **Anthropic** | API key | Direct Claude connection through the Pi agent |
 | **Google AI Studio** | API key | Gemini models with native Google Search grounding built in |
 | **ChatGPT Plus / Pro** | Codex OAuth | Sign in with your ChatGPT subscription — uses OpenAI's Codex models |
 | **GitHub Copilot** | OAuth (device code) | One-click authentication with your Copilot subscription |
@@ -483,10 +483,9 @@ Additional providers are supported through the **Claude / Anthropic API Key** co
 
 ### Architecture
 
-Craft Agents uses two agent backends:
+Craft Agents uses the Pi SDK as its single agent backend:
 
-- **Claude** — powered by the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk), which natively supports custom base URLs and provider routing. Anthropic API key, Claude Max/Pro OAuth, and all third-party endpoints use this backend.
-- **Pi** — powered by the Pi SDK, which handles Google AI Studio, ChatGPT Plus (Codex OAuth), GitHub Copilot OAuth, and OpenAI API key connections. Pi connections route through their own provider infrastructure.
+- **Pi** — powered by the Pi SDK, which handles Anthropic API keys, Google AI Studio, ChatGPT Plus (Codex OAuth), GitHub Copilot OAuth, OpenAI API keys, and third-party endpoints through their provider infrastructure.
 
 ## Configuration
 
@@ -576,8 +575,7 @@ craftagents://action/new-chat                  # Create new session
 | Layer | Technology |
 |-------|------------|
 | Runtime | [Bun](https://bun.sh/) |
-| AI | [@anthropic-ai/claude-agent-sdk](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk) |
-| AI (Pi) | Pi SDK agent server |
+| AI | Pi SDK agent server |
 | Desktop | [Electron](https://www.electronjs.org/) + React |
 | UI | [shadcn/ui](https://ui.shadcn.com/) + Tailwind CSS v4 |
 | Build | esbuild (main) + Vite (renderer) |
@@ -615,7 +613,7 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ### Third-Party Licenses
 
-This project uses the [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk), which is subject to [Anthropic's Commercial Terms of Service](https://www.anthropic.com/legal/commercial-terms).
+Third-party dependencies are listed in `package.json` and are subject to their respective licenses.
 
 ### Trademark
 

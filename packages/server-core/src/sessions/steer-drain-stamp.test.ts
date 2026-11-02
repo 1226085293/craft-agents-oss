@@ -12,6 +12,11 @@ type EventHarness = {
   // harness skips class-field initializers, so these must be set up manually).
   pendingThinkingDeltas: Map<string, { delta: string; turnId?: string }>
   thinkingFlushTimers: Map<string, ReturnType<typeof setTimeout>>
+  sessions: Map<string, ManagedSession>
+  backgroundTaskStoreFor(managed: ManagedSession): {
+    load(): Promise<void>
+    pendingDelivery(): Array<{ id: string }>
+  }
   sendEvent(event: SessionEvent, workspaceId?: string): void
   persistSession(managed: ManagedSession): void
   monotonic(): number
@@ -25,12 +30,21 @@ function harness() {
   manager.deltaFlushTimers = new Map()
   manager.pendingThinkingDeltas = new Map()
   manager.thinkingFlushTimers = new Map()
+  manager.sessions = new Map()
+  // The complete path now delivers pending background tasks. This harness is
+  // about guidance pairing, so provide an empty store rather than touching
+  // the real session directory.
+  manager.backgroundTaskStoreFor = () => ({
+    load: async () => {},
+    pendingDelivery: () => [],
+  })
   manager.sendEvent = event => { events.push(event) }
   manager.persistSession = () => {}
   manager.monotonic = () => Date.now()
   const managed = createManagedSession({ id: 'steer-drain-stamp' }, {
     id: 'workspace', slug: 'workspace', name: 'Test', rootPath: '/unused-steer-drain', createdAt: Date.now(),
   })
+  manager.sessions.set(managed.id, managed)
   return { manager, managed, events, fire: (event: AgentEvent) => manager.processEvent(managed, event) }
 }
 

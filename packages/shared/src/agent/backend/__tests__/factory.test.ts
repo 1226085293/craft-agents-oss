@@ -28,7 +28,6 @@ import {
 import type { BackendConfig } from '../types.ts';
 import type { Workspace, LlmConnection } from '../../../config/storage.ts';
 import type { SessionConfig as Session } from '../../../sessions/storage.ts';
-import { ClaudeAgent } from '../../claude-agent.ts';
 import { PiAgent } from '../../pi-agent.ts';
 import { isValidProviderAuthCombination } from '../../../config/llm-connections.ts';
 
@@ -85,11 +84,11 @@ describe('detectProvider', () => {
 
 describe('createBackend / createAgent', () => {
   describe('Anthropic provider', () => {
-    it('should create ClaudeAgent for anthropic provider', () => {
+    it('should create PiAgent for anthropic provider', () => {
       const config = createTestConfig({ provider: 'anthropic' });
       const agent = createBackend(config);
 
-      expect(agent).toBeInstanceOf(ClaudeAgent);
+      expect(agent).toBeInstanceOf(PiAgent);
     });
   });
 
@@ -248,17 +247,6 @@ describe('phase4 backend abstraction APIs', () => {
     })).not.toThrow();
   });
 
-  // Skip: resolveClaudeCliPath finds the CLI via node_modules traversal even from dist/, so this
-  // only fails in a truly isolated packaged environment, not in the dev monorepo.
-  it.skip('initializeBackendHostRuntime throws for dist-style host root in dev', () => {
-    expect(() => initializeBackendHostRuntime({
-      hostRuntime: {
-        appRootPath: join(process.cwd(), 'apps', 'electron', 'dist'),
-        isPackaged: false,
-      },
-    })).toThrow('Claude Code SDK not found');
-  });
-
   it('resolveSetupTestConnectionHint maps provider/baseUrl/piAuthProvider correctly', () => {
     expect(resolveSetupTestConnectionHint({
       provider: 'anthropic',
@@ -350,7 +338,7 @@ describe('resolveModelForProvider', () => {
   });
 });
 
-describe('ClaudeAgent model switching', () => {
+describe('Backend model switching', () => {
   it('setModel updates getModel (regression: setModel used to write config.model but getModel reads _model)', () => {
     const agent = createBackend(createTestConfig({ provider: 'anthropic', model: 'claude-opus-4-7' }));
 

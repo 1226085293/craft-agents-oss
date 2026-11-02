@@ -1,10 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { PiAgent } from '../pi-agent.ts'
 import type { BackendConfig } from '../backend/types.ts'
+import { ensureConfigDir } from '../../config/storage.ts'
 
 let origFlag: string | undefined
 
 beforeAll(() => {
+  // Pre-tool checks read config defaults (browser tool, etc.). The Bun test
+  // process uses a throwaway CONFIG_DIR, so seed it before the first check.
+  ensureConfigDir()
   origFlag = process.env.CRAFT_FEATURE_CRAFT_AGENTS_CLI
   process.env.CRAFT_FEATURE_CRAFT_AGENTS_CLI = '1'
 })
@@ -52,7 +56,6 @@ describe('PiAgent pre-tool labels guard', () => {
     ;(agent as any).send = (message: Record<string, unknown>) => {
       sent.push(message)
     }
-    ;(agent as any).emitAutomationEvent = async () => {}
 
     await (agent as any).handlePreToolUseRequest({
       requestId: 'req-1',

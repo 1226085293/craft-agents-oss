@@ -65,7 +65,7 @@ export function registerPagesHandlers(server: RpcServer, deps: HandlerDeps): voi
       const {
         loadSource,
         getSourceCredentialManager,
-        getSourceServerBuilder,
+        buildApiConfig,
         isApiOAuthProvider,
         hasRenewEndpoint,
         TokenRefreshManager,
@@ -82,7 +82,7 @@ export function registerPagesHandlers(server: RpcServer, deps: HandlerDeps): voi
       assertPageSourceUsable(source)
 
       const credManager = getSourceCredentialManager()
-      const apiConfig = getSourceServerBuilder().buildApiConfig(source)
+      const apiConfig = buildApiConfig(source)
 
       // Credential resolution mirrors SessionManager.buildServersFromSources:
       // refreshable sources get a TokenRefreshManager-backed getter, plain

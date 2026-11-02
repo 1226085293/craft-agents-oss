@@ -114,7 +114,7 @@
       "comment": "craft-agent skill read-only operations"
     },
     {
-      "pattern": "^craft-agent\\s+automation\\s+(list|get|validate|history|last-executed|test|lint)\\b",
+      "pattern": "^craft-agent\\s+automation\\s+(list|get|validate)\\b",
       "comment": "craft-agent automation read-only operations"
     },
     {

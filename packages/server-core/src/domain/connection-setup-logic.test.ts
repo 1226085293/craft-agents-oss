@@ -121,18 +121,6 @@ describe('createBuiltInConnection seeds midStreamBehavior', () => {
     expect(conn.midStreamBehavior).toBe('steer')
   })
 
-  it("Claude Max OAuth → 'steer' (busy follow-ups default to guidance)", () => {
-    const conn = createBuiltInConnection('claude-max')
-    expect(conn.providerType).toBe('anthropic')
-    expect(conn.midStreamBehavior).toBe('steer')
-  })
-
-  it("ChatGPT Plus → 'steer' (Pi backend, native polite steer)", () => {
-    const conn = createBuiltInConnection('chatgpt-plus')
-    expect(conn.providerType).toBe('pi')
-    expect(conn.midStreamBehavior).toBe('steer')
-  })
-
   it("Pi API key (Craft Agents Backend) → 'steer'", () => {
     const conn = createBuiltInConnection('pi-api-key')
     expect(conn.providerType).toBe('pi')

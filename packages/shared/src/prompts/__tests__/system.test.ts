@@ -11,6 +11,12 @@ mock.module('../../config/appearance.ts', () => ({
 
 import { getSystemPrompt, formatProjectContextForPrompt } from '../system'
 import type { ProjectPromptContext } from '../../projects/types.ts'
+import { ensureConfigDir } from '../../config/storage.ts'
+
+// The prompt reads config defaults (e.g. browser-tool enabled). Bun's test
+// process uses a throwaway CONFIG_DIR, so seed the fallback before any prompt
+// is built instead of relying on the app's startup seeding.
+ensureConfigDir()
 
 const GIT_CONVENTIONS_HEADING = '## Git Conventions'
 const CO_AUTHOR_TRAILER = 'Co-Authored-By: Craft Agent <agents-noreply@craft.do>'

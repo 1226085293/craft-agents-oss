@@ -2,13 +2,12 @@
  * Config Validate Handler
  *
  * Validates Craft Agent configuration files.
- * Uses full validators if available (Claude), otherwise basic validation (Codex).
+ * Uses full validators if available (Pi), otherwise basic validation.
  */
 
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 
-const AUTOMATIONS_CONFIG_FILE = 'automations.json';
 import type { SessionToolContext } from '../context.ts';
 import type { ToolResult } from '../types.ts';
 import { successResponse, errorResponse } from '../response.ts';
@@ -20,7 +19,7 @@ import {
 import { getSourceConfigPath } from '../source-helpers.ts';
 
 export interface ConfigValidateArgs {
-  target: 'config' | 'sources' | 'statuses' | 'appearance' | 'permissions' | 'automations' | 'tool-icons' | 'all';
+  target: 'config' | 'sources' | 'statuses' | 'appearance' | 'permissions' | 'tool-icons' | 'all';
   sourceSlug?: string;
 }
 
@@ -37,7 +36,7 @@ export async function handleConfigValidate(
   const { target, sourceSlug } = args;
   const craftAgentRoot = join(homedir(), '.craft-agent');
 
-  // If full validators available (Claude), use them
+  // If full validators available (Pi), use them
   if (ctx.validators) {
     try {
       let result;
@@ -62,9 +61,6 @@ export async function handleConfigValidate(
         case 'permissions':
           result = ctx.validators.validatePermissions(ctx.workspacePath, sourceSlug);
           break;
-        case 'automations':
-          result = ctx.validators.validateAutomations(ctx.workspacePath);
-          break;
         case 'tool-icons':
           result = ctx.validators.validateToolIcons();
           break;
@@ -81,7 +77,7 @@ export async function handleConfigValidate(
     }
   }
 
-  // Fallback: basic validation (Codex path)
+  // Fallback: basic validation
   switch (target) {
     case 'config': {
       const result = validateJsonFileHasFields(
@@ -154,15 +150,6 @@ export async function handleConfigValidate(
       return successResponse(formatValidationResult(result));
     }
 
-    case 'automations': {
-      const automationsPath = join(ctx.workspacePath, AUTOMATIONS_CONFIG_FILE);
-      if (ctx.fs.exists(automationsPath)) {
-        const result = validateJsonFileHasFields(automationsPath, []);
-        return successResponse(formatValidationResult(result));
-      }
-      return successResponse(`✓ No ${AUTOMATIONS_CONFIG_FILE} (no automations configured)`);
-    }
-
     case 'tool-icons': {
       const result = validateJsonFileHasFields(
         join(craftAgentRoot, 'appearance.json'),
@@ -186,7 +173,7 @@ export async function handleConfigValidate(
 
     default:
       return errorResponse(
-        `Unknown validation target: ${target}. Valid targets: config, sources, statuses, appearance, permissions, automations, tool-icons, all`
+        `Unknown validation target: ${target}. Valid targets: config, sources, statuses, appearance, permissions, tool-icons, all`
       );
   }
 }

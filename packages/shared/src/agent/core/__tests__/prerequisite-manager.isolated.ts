@@ -5,19 +5,28 @@
  * until required files (like guide.md) have been read.
  */
 import { describe, it, expect, beforeEach, mock } from 'bun:test';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { PrerequisiteManager } from '../prerequisite-manager.ts';
+import { ensureConfigDir } from '../../../config/storage.ts';
 
-// Mock existsSync to control guide.md existence
+// Seed config-defaults before replacing node:fs. The prerequisite matcher now
+// reads the browser-tool default, so a bare existsSync mock would turn that
+// read into a missing-config exception.
+ensureConfigDir();
+
+// Mock existsSync to control guide.md existence, while letting real config
+// files (and every other fs operation) pass through.
 const originalExistsSync = existsSync;
+const originalReadFileSync = readFileSync;
 let mockExistsPaths: Set<string> = new Set();
 
 mock.module('node:fs', () => ({
-  existsSync: (path: string) => mockExistsPaths.has(path),
-  // Re-export anything else the module needs
-  readFileSync: originalExistsSync,
+  existsSync: (path: string) => mockExistsPaths.has(path) || originalExistsSync(path),
+  // Use captured functions: the imported module namespace is live, so calling
+  // realFs.readFileSync here would recurse into this mock.
+  readFileSync: originalReadFileSync,
 }));
 
 const WORKSPACE_ROOT = '/test/workspace';
@@ -92,7 +101,7 @@ describe('PrerequisiteManager', () => {
       const docsPath = browserDocPath();
       mockExistsPaths.add(docsPath);
 
-      const result = manager.checkPrerequisites('browser_snapshot');
+      const result = manager.checkPrerequisites('browser_tool');
       expect(result.allowed).toBe(false);
       expect(result.blockReason).toContain(docsPath);
     });
@@ -292,11 +301,11 @@ describe('PrerequisiteManager', () => {
       const docsPath = browserDocPath();
       mockExistsPaths.add(docsPath);
 
-      expect(manager.checkPrerequisites('browser_open').allowed).toBe(false);
-      expect(manager.checkPrerequisites('browser_open').allowed).toBe(false);
+      expect(manager.checkPrerequisites('browser_tool').allowed).toBe(false);
+      expect(manager.checkPrerequisites('browser_tool').allowed).toBe(false);
 
       manager.trackReadTool({ file_path: docsPath });
-      expect(manager.checkPrerequisites('browser_open').allowed).toBe(true);
+      expect(manager.checkPrerequisites('browser_tool').allowed).toBe(true);
     });
   });
 
@@ -306,7 +315,7 @@ describe('PrerequisiteManager', () => {
 
   describe('trackBashSkillRead', () => {
     it('clears skill prerequisite when Bash command contains the skill path', () => {
-      const skillPath = '/test/workspace/skills/my-skill/SKILL.md';
+      const skillPath = resolve(WORKSPACE_ROOT, 'skills/my-skill/SKILL.md');
       manager.registerSkillPrerequisites([skillPath]);
 
       // WebSearch should be blocked (skill prerequisite pending)
@@ -325,7 +334,7 @@ describe('PrerequisiteManager', () => {
     });
 
     it('returns false when Bash command does not contain a pending skill path', () => {
-      const skillPath = '/test/workspace/skills/my-skill/SKILL.md';
+      const skillPath = resolve(WORKSPACE_ROOT, 'skills/my-skill/SKILL.md');
       manager.registerSkillPrerequisites([skillPath]);
 
       const result = manager.trackBashSkillRead({ command: 'ls -la /some/other/path' });
@@ -344,8 +353,8 @@ describe('PrerequisiteManager', () => {
     });
 
     it('clears multiple skill prerequisites from a single command', () => {
-      const skill1 = '/test/workspace/skills/alpha/SKILL.md';
-      const skill2 = '/test/workspace/skills/beta/SKILL.md';
+      const skill1 = resolve(WORKSPACE_ROOT, 'skills/alpha/SKILL.md');
+      const skill2 = resolve(WORKSPACE_ROOT, 'skills/beta/SKILL.md');
       manager.registerSkillPrerequisites([skill1, skill2]);
 
       // Command that contains both paths
@@ -359,7 +368,7 @@ describe('PrerequisiteManager', () => {
     });
 
     it('logs debug message when clearing via Bash', () => {
-      const skillPath = '/test/workspace/skills/my-skill/SKILL.md';
+      const skillPath = resolve(WORKSPACE_ROOT, 'skills/my-skill/SKILL.md');
       manager.registerSkillPrerequisites([skillPath]);
 
       manager.trackBashSkillRead({ command: `cat ${skillPath}` });

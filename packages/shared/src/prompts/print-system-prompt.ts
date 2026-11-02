@@ -94,7 +94,7 @@ printAnnotation('');
 printAnnotation('Volatile vs stable (issue #862): blocks 1-3 (date/time, session_state, sources)');
 printAnnotation('change per turn and are VOLATILE; blocks 4-5 (workspace capabilities, working');
 printAnnotation('directory) are STABLE for the session.');
-printAnnotation('  - Claude path: all blocks ride the user-message tail (system prompt stays cacheable).');
+printAnnotation('  - Pi path: all blocks ride the user-message tail (system prompt stays cacheable).');
 printAnnotation('  - Pi path: STABLE blocks fold into the system prefix, VOLATILE blocks ride the');
 printAnnotation('    user tail — so the cached prefix is not re-stamped every turn.');
 

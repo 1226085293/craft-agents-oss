@@ -533,7 +533,7 @@ export interface HandleLargeResponseResult {
  * Accepts string | Buffer:
  * - Buffer: binary detection on raw bytes (preserves data integrity for file saving).
  *   Used by api-tools which has raw HTTP response buffers.
- * - string: binary detection via Buffer conversion. Used by MCP pool and Claude SDK
+ * - string: binary detection via Buffer conversion. Used by MCP pool and the Pi subprocess
  *   where data is already a string.
  *
  * Pipeline: binary check → (if text) size check → save + summarize.

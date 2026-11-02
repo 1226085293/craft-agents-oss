@@ -1,7 +1,7 @@
 /**
  * Core Agent Types
  *
- * Shared types used by both ClaudeAgent and PiAgent.
+ * Shared types used by PiAgent.
  * These types define the interfaces for core functionality that is
  * provider-agnostic and shared across all agent implementations.
  */

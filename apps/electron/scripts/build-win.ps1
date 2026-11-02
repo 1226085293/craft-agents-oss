@@ -5,10 +5,13 @@
 param(
     [switch]$SkipDependencyInstall,
     [switch]$SkipProcessKill,
-    # Local rebuilds: skip compression entirely (`compression: store`). The
-    # release default is `maximum`, which costs minutes of 7z time for no
-    # meaningful size win; `store` trades a ~1.5GB installer for the fastest
-    # possible packaging. Irrelevant for a local install, wrong for uploads.
+    # Local rebuilds: `compression: store` (no 7z at all) — the 3-5 min path.
+    # Hard precondition: the app archive must stay under 2GB, because makensis is
+    # 32-bit without /LARGEADDRESSAWARE and cannot mmap a bigger one
+    # (`File: failed creating mmap of "…nsis.7z"`). That is why
+    # electron-builder.yml has to keep excluding stale output dirs
+    # (`!release/**`): on 2026-10-27 a swept-in release/ pushed the archive to
+    # 2.2GB and this mode started failing outright.
     [switch]$Fast
 )
 
@@ -22,6 +25,32 @@ function Write-Step {
     param([string]$Name)
     $elapsed = [int]((Get-Date) - $ScriptStart).TotalSeconds
     Write-Host ("[+{0,4}s] {1}" -f $elapsed, $Name) -ForegroundColor Magenta
+}
+
+# Shared diagnostic for a packaging output dir that cannot be freed.
+# electron-builder reports the same condition as a Go stack trace
+# ("EnsureEmptyDir -> The process cannot access the file ... app.asar") and never
+# says who holds it, which is how a whole build gets wasted guessing.
+function Write-OutDirLockedDiagnostic {
+    param([string]$BlockedPath, [string]$DirToScan)
+    Write-Host "  ERROR: the build output directory is in use:" -ForegroundColor Red
+    Write-Host "    $BlockedPath" -ForegroundColor Red
+
+    # Most likely a dev build of the app itself, running out of win-unpacked.
+    $holders = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ProcessId -ne $PID -and $_.ExecutablePath -and $_.ExecutablePath.StartsWith($DirToScan, 'OrdinalIgnoreCase')
+    }
+    if ($holders) {
+        Write-Host "  Held by:" -ForegroundColor Yellow
+        $holders | ForEach-Object {
+            Write-Host ("    PID {0}  {1}" -f $_.ProcessId, $_.ExecutablePath) -ForegroundColor Yellow
+        }
+        Write-Host "  Close those processes, then re-run." -ForegroundColor Yellow
+    } else {
+        Write-Host "  No process runs from that folder, so the handle belongs to an editor, an" -ForegroundColor Yellow
+        Write-Host "  antivirus scan or another build. Close it, or delete this by hand:" -ForegroundColor Yellow
+        Write-Host "    $BlockedPath" -ForegroundColor Yellow
+    }
 }
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -114,8 +143,24 @@ if (-not $SkipProcessKill) {
     # yields an empty pattern here and would then match every process.
     $releaseDir = Join-Path $ElectronDir $OutDir
     $releaseDirFwd = $releaseDir.Replace('\', '/')
+    # Exclude ourselves AND the whole parent chain. Excluding only $PID is not
+    # enough: the shell / agent that launched this script usually has the output
+    # dir in its own command line (e.g. CRAFT_BUILD_OUT_DIR=release-xxx), so it
+    # matched as a "stale build process" and got killed - which SIGKILLed the
+    # build itself with exit code 0xffffffff (2026-10-27).
+    $ancestors = @{}
+    $ancestors[[int]$PID] = $true
+    $cursor = $PID
+    for ($depth = 0; $depth -lt 8; $depth++) {
+        $procInfo = Get-CimInstance Win32_Process -Filter "ProcessId=$cursor" -ErrorAction SilentlyContinue
+        if (-not $procInfo -or -not $procInfo.ParentProcessId) { break }
+        $parentId = [int]$procInfo.ParentProcessId
+        if ($parentId -le 0 -or $ancestors.ContainsKey($parentId)) { break }
+        $ancestors[$parentId] = $true
+        $cursor = $parentId
+    }
     $stale = Get-CimInstance Win32_Process -Filter "Name='node.exe' or Name='powershell.exe' or Name='pwsh.exe'" |
-        Where-Object { $_.CommandLine -and ($_.CommandLine.Contains($releaseDir) -or $_.CommandLine.Contains($releaseDirFwd)) -and $_.ProcessId -ne $PID }
+        Where-Object { $_.CommandLine -and ($_.CommandLine.Contains($releaseDir) -or $_.CommandLine.Contains($releaseDirFwd)) -and -not $ancestors.ContainsKey([int]$_.ProcessId) }
     if ($stale) {
         foreach ($proc in $stale) {
             Write-Host "  Killing stale build process $($proc.ProcessId) (holds lock on release dir)" -ForegroundColor Yellow
@@ -133,6 +178,23 @@ if (-not $SkipProcessKill) {
                 Write-Host "  release dir lock cleared" -ForegroundColor Green
             }
         }
+    }
+}
+
+# Preflight (early, before the ~2 minute app build): if the packaging output dir
+# is already held open, stop here instead of letting electron-builder discover it
+# after assembling win-unpacked. Only win-unpacked (build scratch, recreated by
+# the packer anyway) is removed - a previous run's installer survives a failed
+# build. Delete is the reliable lock test: any open handle without FILE_SHARE_DELETE
+# makes it fail, whatever the holder's share mode.
+$EarlyOutDirAbs = Join-Path $ElectronDir $OutDir
+$EarlyWinUnpacked = Join-Path $EarlyOutDirAbs 'win-unpacked'
+if (Test-Path $EarlyWinUnpacked) {
+    Write-Host "  Preflight: clearing stale $EarlyWinUnpacked"
+    Remove-Item -Recurse -Force $EarlyWinUnpacked -ErrorAction SilentlyContinue
+    if (Test-Path $EarlyWinUnpacked) {
+        Write-OutDirLockedDiagnostic -BlockedPath $EarlyWinUnpacked -DirToScan $EarlyOutDirAbs
+        throw "Build output directory is locked: $EarlyWinUnpacked"
     }
 }
 
@@ -247,65 +309,7 @@ if ($LocalBun -and (Test-Path $LocalBun)) {
 Write-Host "Waiting for file handles to release..."
 Start-Sleep -Seconds 3
 
-# 4. Copy SDK from root node_modules (monorepo hoisting).
-# Since SDK 0.2.113: thin core + per-platform binary package.
-# See apps/electron/scripts/build-dmg.sh for the full rationale.
-$SdkSource = "$RootDir\node_modules\@anthropic-ai\claude-agent-sdk"
-if (-not (Test-Path $SdkSource)) {
-    Write-Host "ERROR: SDK core not found at $SdkSource" -ForegroundColor Red
-    Write-Host "Run 'bun install' from the repository root first."
-    exit 1
-}
-Write-Host "Copying SDK core..."
-New-Item -ItemType Directory -Force -Path "$ElectronDir\node_modules\@anthropic-ai" | Out-Null
-Remove-Item -Recurse -Force "$ElectronDir\node_modules\@anthropic-ai\claude-agent-sdk" -ErrorAction SilentlyContinue
-Copy-Item -Recurse -Force $SdkSource "$ElectronDir\node_modules\@anthropic-ai\"
-
-# 4a. Resolve the target arch's binary package (cross-fetch from npm if absent).
-# Target arch is hard-coded x64 — Windows arm64 is not currently shipped.
-$SdkBinPkg = "claude-agent-sdk-win32-x64"
-$SdkBinSource = "$RootDir\node_modules\@anthropic-ai\$SdkBinPkg"
-if (-not (Test-Path $SdkBinSource)) {
-    Write-Host "Cross-arch build: $SdkBinPkg not in node_modules — fetching from npm..."
-    $SdkVersion = (node -p "require('$RootDir/package.json'.replace(/\\/g, '/')).dependencies['@anthropic-ai/claude-agent-sdk']").Trim('"')
-    $PkgTmp = New-Item -ItemType Directory -Path ([System.IO.Path]::Combine($env:TEMP, [System.Guid]::NewGuid().ToString()))
-    try {
-        Push-Location $PkgTmp
-        npm pack "@anthropic-ai/$SdkBinPkg@$SdkVersion" | Out-Null
-        $Tarball = Get-ChildItem -Filter "anthropic-ai-*.tgz" | Select-Object -First 1
-        tar -xzf $Tarball.Name
-        Pop-Location
-        New-Item -ItemType Directory -Force -Path $SdkBinSource | Out-Null
-        Copy-Item -Recurse -Force "$PkgTmp\package\*" $SdkBinSource
-    } finally {
-        Remove-Item -Recurse -Force $PkgTmp -ErrorAction SilentlyContinue
-    }
-}
-
-if (-not (Test-Path $SdkBinSource)) {
-    Write-Host "ERROR: SDK native binary package ($SdkBinPkg) not found at $SdkBinSource" -ForegroundColor Red
-    exit 1
-}
-
-Write-Host "Staging SDK native binary as claude-agent-sdk-binary alias..."
-$AliasDest = "$ElectronDir\node_modules\@anthropic-ai\claude-agent-sdk-binary"
-Remove-Item -Recurse -Force $AliasDest -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $AliasDest | Out-Null
-Copy-Item -Recurse -Force "$SdkBinSource\*" $AliasDest
-
-$BinPath = "$AliasDest\claude.exe"
-if (-not (Test-Path $BinPath)) {
-    Write-Host "ERROR: Native binary not found at $BinPath" -ForegroundColor Red
-    exit 1
-}
-$BinSize = (Get-Item $BinPath).Length
-if ($BinSize -lt 50000000) {
-    Write-Host "ERROR: claude.exe is only $BinSize bytes (expected ~210 MB)" -ForegroundColor Red
-    exit 1
-}
-Write-Host "  Native binary: $([math]::Round($BinSize / 1MB)) MB"
-
-# 5. Copy ripgrep (sourced from @vscode/ripgrep since 0.2.113).
+# 5. Copy ripgrep.
 $RgSource = "$RootDir\node_modules\@vscode\ripgrep"
 $RgBinary = "$RgSource\bin\rg.exe"
 if ((Test-Path $RgSource) -and -not (Test-Path $RgBinary)) {
@@ -325,8 +329,7 @@ New-Item -ItemType Directory -Force -Path "$ElectronDir\node_modules\@vscode" | 
 Remove-Item -Recurse -Force "$ElectronDir\node_modules\@vscode\ripgrep" -ErrorAction SilentlyContinue
 Copy-Item -Recurse -Force $RgSource "$ElectronDir\node_modules\@vscode\"
 
-# 6. Copy network interceptor sources (for Pi subprocess; Claude no longer
-#    uses --preload — Phase 2 will move that to SDK hooks or a local proxy).
+# 6. Copy network interceptor sources (for the Pi subprocess).
 $InterceptorSource = "$RootDir\packages\shared\src\unified-network-interceptor.ts"
 if (-not (Test-Path $InterceptorSource)) {
     Write-Host "ERROR: Interceptor not found at $InterceptorSource" -ForegroundColor Red
@@ -386,12 +389,6 @@ $MainArgs = @(
     # fail before polling or file download starts.
     "--alias:node-fetch=./apps/electron/src/main/shims/node-fetch.cjs",
     "--alias:abort-controller=./apps/electron/src/main/shims/abort-controller.cjs",
-    # SDK 0.3.x is pure ESM and calls createRequire(import.meta.url) at module init.
-    # esbuild's CJS bundling leaves import.meta.url undefined for inlined ESM, crashing
-    # the app on load (ERR_INVALID_ARG_VALUE). Externalize it so Node loads it natively
-    # as ESM — the SDK core is staged into the app's node_modules above (step 4).
-    # Must stay in sync with package.json build:main and scripts/electron-dev.ts.
-    "--external:@anthropic-ai/claude-agent-sdk",
     # Embedding engine (bge-small-zh-v1.5): transformers.js + onnxruntime must
     # NOT be inlined — esbuild dead-code-eliminates the onnxruntime-node native
     # binding loader when it bundles them, breaking embedding in the Electron
@@ -512,6 +509,45 @@ try {
 Write-Step "step 7: electron-builder packaging"
 Write-Host "Packaging app with electron-builder..."
 
+# Preflight: NSIS writes the installer in one pass, so a full disk only shows up
+# minutes later as `Error: can't write N bytes to output` from makensis, which
+# reads like an NSIS bug rather than "you ran out of disk" (2026-10-26: E: filled
+# up mid-write and the build died after packing ~1.7GB for nothing).
+# Peak usage = win-unpacked (~1.7GB) + the 7z archive + the installer itself.
+# -Fast (compression=store) writes a ~1.4GB archive AND a ~1.4GB installer.
+# Payload ~1.4GB + archive + installer ≈ 4.2GB, hence the higher reserve.
+$OutDriveLetter = (Split-Path -Qualifier (Join-Path $ElectronDir $OutDir)).TrimEnd(':')
+# Drop the previous run's artifacts BEFORE measuring: a stale release dir can hold
+# several GB (win-unpacked + 7z + installer), so measuring first would report
+# "not enough space" for a build that actually fits once it is cleared.
+$OutDirAbs = Join-Path $ElectronDir $OutDir
+if (Test-Path $OutDirAbs) {
+    Write-Host "  Clearing previous output directory ($OutDir) before the space check..."
+    Remove-Item -Recurse -Force $OutDirAbs -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+}
+# Authoritative lock check. The early preflight above catches a dir that was
+# already in use at startup; this one verifies the dir really became empty (a
+# handle could have been taken during the app build).
+if (Test-Path $OutDirAbs) {
+    Write-OutDirLockedDiagnostic -BlockedPath $OutDirAbs -DirToScan $OutDirAbs
+    throw "Build output directory is locked: $OutDirAbs"
+}
+New-Item -ItemType Directory -Force -Path $OutDirAbs | Out-Null
+
+# NOTE: "$OutDriveLetter:" would parse as a SCOPED variable ($x: is scope
+# syntax), so the drive letter must be interpolated as $($x) or ${x}.
+$OutDrive = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($OutDriveLetter):'" -ErrorAction SilentlyContinue
+if ($OutDrive) {
+    $freeGB = [math]::Round($OutDrive.FreeSpace / 1GB, 1)
+    $neededGB = if ($Fast) { 6 } else { 4 }
+    $color = if ($freeGB -lt $neededGB) { 'Red' } else { 'Green' }
+    Write-Host "  Disk $($OutDrive.DeviceID) free: $freeGB GB (packaging needs ~$neededGB GB)" -ForegroundColor $color
+    if ($freeGB -lt $neededGB) {
+        throw "Not enough free space on $($OutDrive.DeviceID) to package: $freeGB GB free, ~$neededGB GB needed. Free space, drop -Fast, or point `$env:CRAFT_BUILD_OUT_DIR at another drive."
+    }
+}
+
 # Debug: Show bun.exe file info
 Write-Host ""
 Write-Host "=== Debug: bun.exe File Info ===" -ForegroundColor Magenta
@@ -592,78 +628,60 @@ while ($retryCount -lt $maxRetries) {
 [System.GC]::Collect()
 [System.GC]::WaitForPendingFinalizers()
 
-# Run electron-builder with retry logic for EBUSY errors
+# Preflight already ran before the app build (see step 7 header), so the output
+# dir is known to be free. Single attempt: a failed packaging run is
+# deterministic here (NSIS script error, missing dependency, full disk), so
+# retrying only multiplied the wall clock - on 2026-10-26 three attempts turned
+# a 5-minute build into 20 while the real cause (a makensis warning promoted by
+# -WX) sat unread in the captured output.
 Push-Location $ElectronDir
-$maxBuilderRetries = 3
-$builderRetry = 0
-$builderSuccess = $false
+Write-Host "  Running electron-builder..." -ForegroundColor Cyan
+New-Item -ItemType Directory -Force -Path $OutDirAbs | Out-Null
 
-while (-not $builderSuccess -and $builderRetry -lt $maxBuilderRetries) {
-    $builderRetry++
-    Write-Host "  electron-builder attempt $builderRetry of $maxBuilderRetries..." -ForegroundColor Cyan
+# Prefer the bun-generated .bin shim (bun install creates no .cmd shims, so
+# plain `npx` fails with "not recognized"); fall back to npx like the
+# esbuild/vite call sites above.
+$ElectronBuilderExe = Join-Path $RootDir "node_modules\.bin\electron-builder.exe"
+# These are all positional arguments to an external exe (not PowerShell
+# named parameters), so array splatting is safe here.
+$builderArgs = @('--win', '--x64', "-c.directories.output=$OutDir")
+if ($Fast) {
+    # 'store' skips 7z entirely. Measured on this repo: ~6-7 min end to end vs
+    # ~13 min at 'maximum'. Precondition: archive < 2GB (see param docs).
+    $builderArgs += '-c.compression=store'
+    Write-Host "  -Fast: compression=store (no 7z, installer ~1.7GB)" -ForegroundColor Cyan
+}
+if (Test-Path $ElectronBuilderExe) {
+    & $ElectronBuilderExe @builderArgs 2>&1 | Tee-Object -Variable builderOutput
+} else {
+    npx electron-builder @builderArgs 2>&1 | Tee-Object -Variable builderOutput
+}
 
-    # Clean the output directory before each attempt to avoid stale files
-    $OutDirAbs = Join-Path $ElectronDir $OutDir
-    if (Test-Path $OutDirAbs) {
-        Write-Host "  Cleaning output directory ($OutDir) before attempt..."
-        Remove-Item -Recurse -Force $OutDirAbs -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 1
-    }
-    New-Item -ItemType Directory -Force -Path $OutDirAbs | Out-Null
+$builderExitCode = $LASTEXITCODE
+if ($builderExitCode -ne 0) {
+    Write-Host "  electron-builder failed with exit code $builderExitCode" -ForegroundColor Red
+    $builderText = if ($builderOutput) { ($builderOutput | Out-String) } else { '' }
 
-    # Prefer the bun-generated .bin shim (bun install creates no .cmd shims, so
-    # plain `npx` fails with "not recognized"); fall back to npx like the
-    # esbuild/vite call sites above.
-    $ElectronBuilderExe = Join-Path $RootDir "node_modules\.bin\electron-builder.exe"
-    # These are all positional arguments to an external exe (not PowerShell
-    # named parameters), so array splatting is safe here.
-    $builderArgs = @('--win', '--x64', "-c.directories.output=$OutDir")
-    if ($Fast) {
-        # 'store' skips 7z compression entirely. Measured on this repo: NSIS
-        # went from 219s (maximum) to a fraction of that, at the cost of a
-        # ~1.5GB installer instead of 357MB — the right trade for a local
-        # install, wrong for a release upload.
-        $builderArgs += '-c.compression=store'
-        Write-Host "  -Fast: compression=store (much larger installer, fastest packaging)" -ForegroundColor Cyan
-    }
-    if (Test-Path $ElectronBuilderExe) {
-        & $ElectronBuilderExe @builderArgs 2>&1 | Tee-Object -Variable builderOutput
-    } else {
-        npx electron-builder @builderArgs 2>&1 | Tee-Object -Variable builderOutput
+    # `can't write N bytes to output` is makensis' ENOSPC: it reads like an NSIS
+    # bug but means the output drive filled up mid-write.
+    if ($builderText -match "can't write \d+ bytes to output") {
+        Write-Host "  HINT: makensis could not write the installer - the output drive is full." -ForegroundColor Yellow
+        Write-Host "        Free space on $($OutDriveLetter):, or build with the output dir on" -ForegroundColor Yellow
+        Write-Host "        another drive (CRAFT_BUILD_OUT_DIR, but keep it OUTSIDE apps\electron)." -ForegroundColor Yellow
     }
 
-    if ($LASTEXITCODE -eq 0) {
-        $builderSuccess = $true
-        Write-Host "  electron-builder succeeded on attempt $builderRetry" -ForegroundColor Green
-    } else {
-        Write-Host "  electron-builder failed with exit code $LASTEXITCODE" -ForegroundColor Yellow
-
-        if ($builderRetry -lt $maxBuilderRetries) {
-            Write-Host "  Waiting 10 seconds before retry..." -ForegroundColor Yellow
-
-            if ($SkipProcessKill) {
-                # Agent sessions must NOT kill node/npm on retry either — that can
-                # terminate the caller's own pipeline/host (see -SkipProcessKill doc
-                # above). Wait for file handles to release and retry as-is.
-                Write-Host "    -SkipProcessKill: skipping retry process kill, waiting for file handles..." -ForegroundColor Yellow
-            } else {
-                # Kill any processes that might be holding file locks
-                Get-Process -Name 'node', 'npm' -ErrorAction SilentlyContinue | ForEach-Object {
-                    Write-Host "    Killing $($_.ProcessName) (PID: $($_.Id))..." -ForegroundColor Yellow
-                    Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue
-                }
-            }
-
-            Start-Sleep -Seconds 10
-        }
+    $salient = $builderText -split "`r?`n" |
+        Select-String -Pattern 'Error|error in script|!include|warning \d+|ERR_[A-Z_]+|failedTask|being used by another process' |
+        Select-Object -First 10
+    if ($salient) {
+        Write-Host "  --- root cause lines ---" -ForegroundColor Red
+        $salient | ForEach-Object { Write-Host ("  " + $_.Line.Trim()) -ForegroundColor DarkGray }
     }
+    throw "electron-builder failed (exit code $builderExitCode). See the 'root cause lines' above."
 }
 
 Pop-Location
-
-if (-not $builderSuccess) {
-    throw "electron-builder failed after $maxBuilderRetries attempts"
-}
+Write-Host "  electron-builder succeeded" -ForegroundColor Green
 
 # 8. Verify the installer was built
 Write-Step "step 8: verify installer"

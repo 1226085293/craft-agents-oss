@@ -130,14 +130,16 @@ describe('PiAgent compaction-aware turn-idle watchdog', () => {
     const agent = new PiAgent(createConfig())
     await withTimers(100, async () => {
       const { enqueued } = startTurn(agent)
+      const resendCalls: number[] = []
+      ;(agent as any).resendModelStep = () => { resendCalls.push(Date.now()) }
       ;(agent as any).handleSubprocessEvent({ type: 'compaction_start' })
       ;(agent as any).handleSubprocessEvent({ type: 'compaction_end', result: { estimatedTokensAfter: 1000 } })
 
-      // Back to the plain ceiling: 20ms of idle after all activity → stall.
+      // Back to the plain ceiling: 20ms of idle after all activity → the
+      // watchdog re-issues the model step. Stall recovery is silent now, so
+      // assert the recovery call rather than an obsolete 'stream stalled' event.
       await sleep(100)
-
-      const error = enqueued.find((e) => e.type === 'error')
-      expect(error?.message).toContain('stream stalled')
+      expect(resendCalls).toHaveLength(1)
       expect(enqueued.some((e) => e.type === 'error' && e.message.includes('did not finish'))).toBe(false)
     })
     agent.destroy()
@@ -147,6 +149,8 @@ describe('PiAgent compaction-aware turn-idle watchdog', () => {
     const agent = new PiAgent(createConfig())
     await withTimers(100, async () => {
       const { enqueued } = startTurn(agent)
+      const resendCalls: number[] = []
+      ;(agent as any).resendModelStep = () => { resendCalls.push(Date.now()) }
       // compaction_start without a matching end (missed event), then agent_end.
       ;(agent as any).handleSubprocessEvent({ type: 'compaction_start' })
       await sleep(50)
@@ -157,10 +161,10 @@ describe('PiAgent compaction-aware turn-idle watchdog', () => {
       // capped 'did not finish' error immediately; with the fix, the plain
       // 20ms ceiling governs instead.
       ;(agent as any).refreshTurnIdleWatchdog()
+      // The watchdog re-arms as the plain 20ms timer; assert the silent
+      // recovery call, not the removed error event.
       await sleep(120)
-
-      const error = enqueued.find((e) => e.type === 'error')
-      expect(error?.message).toContain('stream stalled')
+      expect(resendCalls).toHaveLength(1)
       expect(enqueued.some((e) => e.type === 'error' && e.message.includes('did not finish'))).toBe(false)
     })
     agent.destroy()

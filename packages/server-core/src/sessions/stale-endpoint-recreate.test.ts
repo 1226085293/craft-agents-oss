@@ -101,6 +101,8 @@ function runInIsolatedConfig(baseUrl: string, script: string): { ok: boolean; ou
     ].join('\n')
 
     const run = Bun.spawnSync([process.execPath, '--eval', `${prelude}\n${script}`], {
+      // The eval script uses paths relative to the server-core package root.
+      cwd: join(import.meta.dir, '..', '..'),
       env: {
         ...process.env,
         CRAFT_CONFIG_DIR: configDir,

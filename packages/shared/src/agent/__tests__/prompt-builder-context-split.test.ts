@@ -6,10 +6,10 @@
  * prompt-cache reuse. The fix splits PromptBuilder.buildContextParts() into
  * buildVolatileContextParts() + buildStableContextParts() so the Pi path can
  * keep stable blocks in the system prompt and route volatile blocks to the user
- * tail (where the Claude path already puts everything).
+ * tail (where the Pi path already puts everything).
  *
  * These tests pin three invariants:
- *  1. buildContextParts === [...volatile, ...stable] — the Claude path output is
+ *  1. buildContextParts === [...volatile, ...stable] — the Pi path output is
  *     unchanged (same blocks, same order).
  *  2. Blocks are routed correctly: session_state + sources are volatile;
  *     workspace capabilities is stable.
@@ -32,7 +32,7 @@ function makeBuilder() {
 describe('PromptBuilder volatile/stable context split (issue #862)', () => {
   afterEach(() => cleanupModeState(SESSION_ID))
 
-  it('buildContextParts equals [...volatile, ...stable] (Claude path stays byte-identical)', () => {
+  it('buildContextParts equals [...volatile, ...stable] (Pi path stays byte-identical)', () => {
     // No pending one-shot signal → consume is a no-op → repeated calls are stable.
     cleanupModeState(SESSION_ID)
     const builder = makeBuilder()

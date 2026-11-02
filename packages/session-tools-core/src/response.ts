@@ -2,7 +2,7 @@
  * Session Tools Core - Response Helpers
  *
  * Helper functions for creating standardized tool responses.
- * Used by both Claude and Codex implementations.
+ * Used by the Pi agent.
  */
 
 import type { ToolResult, TextContent } from './types.ts';

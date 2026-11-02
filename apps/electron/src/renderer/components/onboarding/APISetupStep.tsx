@@ -162,7 +162,7 @@ function ProviderSegmentedControl({
  * APISetupStep - Choose how to connect your AI agents
  *
  * Features a segmented control to filter by provider:
- * - Anthropic - Claude Pro/Max or API Key
+ * - Anthropic - API Key
  * - OpenAI - ChatGPT Plus/Pro or API Key
  * - GitHub Copilot - Copilot subscription
  */

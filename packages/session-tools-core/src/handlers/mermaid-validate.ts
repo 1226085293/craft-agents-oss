@@ -2,7 +2,7 @@
  * Mermaid Validate Handler
  *
  * Validates Mermaid diagram syntax using beautiful-mermaid renderer.
- * No DOM required - works identically in Claude and Codex.
+ * No DOM required - works in the Pi agent.
  */
 
 import type { SessionToolContext } from '../context.ts';

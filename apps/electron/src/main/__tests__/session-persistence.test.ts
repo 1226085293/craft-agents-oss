@@ -45,7 +45,7 @@ describe('createdAt preservation', () => {
 // ============================================================================
 
 describe('model resolution with null connection', () => {
-  describe('Claude backend', () => {
+  describe('legacy session persistence', () => {
     it('falls back to DEFAULT_MODEL when connection is null and session has no model', () => {
       const managed = { model: undefined as string | undefined }
       const connection = null as { defaultModel: string } | null

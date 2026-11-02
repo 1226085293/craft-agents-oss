@@ -2,7 +2,6 @@ import { existsSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join, resolve, sep } from 'node:path';
 import type { BackendHostRuntimeContext } from '../types.ts';
-import { setPathToClaudeCodeExecutable } from '../../options.ts';
 
 /**
  * When set, the resolver walks further up from the .app bundle to find SDK,
@@ -13,17 +12,8 @@ const IS_DEV_RUNTIME = !!process.env.CRAFT_DEV_RUNTIME;
 
 export interface ResolvedBackendRuntimePaths {
   /**
-   * Absolute path to the native `claude` binary (since SDK 0.2.113).
-   * In packaged builds this is the per-platform binary copied out of
-   * `node_modules/@anthropic-ai/claude-agent-sdk-{platform}-{arch}/`.
-   * Field is named `claudeCliPath` for back-compat — semantically it is
-   * the SDK executable, JS or native.
-   */
-  claudeCliPath?: string;
-  /**
    * Source/bundle path for the network interceptor preloaded into the **Pi**
-   * subprocess. Not used for Claude anymore — the new native SDK binary
-   * doesn't accept `--preload`.
+   * subprocess.
    */
   interceptorBundlePath?: string;
   sessionServerPath?: string;
@@ -53,7 +43,7 @@ const APP_ASAR_UNPACKED = 'app.asar.unpacked';
  * Why this is required: Electron patches the main process's `fs` module, so
  * `existsSync('.../resources/app.asar/dist/x.js')` happily returns true. That
  * patch does NOT extend to *external* processes. Every path we hand to
- * bun.exe / node.exe / rg.exe / claude.exe is a literal filesystem path, and
+ * bun.exe / node.exe / rg.exe is a literal filesystem path, and
  * `app.asar/...` does not exist on disk — bun exits with
  * `error: Module not found "…/app.asar/dist/resources/pi-agent-server/index.js"`
  * and each session dies before any upstream request is made.
@@ -109,6 +99,13 @@ function resolveBundledRuntimePath(hostRuntime: BackendHostRuntimeContext): stri
     ? (hostRuntime.resourcesPath || hostRuntime.appRootPath)
     : hostRuntime.appRootPath;
   const bunPath = join(bunBasePath, 'vendor', 'bun', bunBinary);
+  // A packaged app may expose the vendored Bun path through app.asar. Bun is
+  // spawned as an external process, so an in-archive path is not executable.
+  // Prefer the asarUnpack sibling and fail clearly if it was not unpacked.
+  const unpackedBunPath = toUnpackedPath(bunPath);
+  if (unpackedBunPath !== bunPath) {
+    return unpackedBunPath && existsSync(unpackedBunPath) ? unpackedBunPath : undefined;
+  }
   if (existsSync(bunPath)) return bunPath;
 
   // Non-packaged (headless server, dev mode): fall back to system bun via PATH.
@@ -120,88 +117,6 @@ function resolveBundledRuntimePath(hostRuntime: BackendHostRuntimeContext): stri
       const systemBun = execFileSync(whichCmd, ['bun'], { encoding: 'utf-8' }).trim();
       if (systemBun && existsSync(systemBun)) return systemBun;
     } catch { /* system bun not found */ }
-  }
-  return undefined;
-}
-
-/**
- * Compute the per-platform optional-dependency package name shipped by the
- * Claude Agent SDK (since 0.2.113), e.g. `claude-agent-sdk-darwin-arm64`.
- *
- * NOTE on Linux musl: this returns the glibc variant. AppImage targets glibc
- * and that is the only Linux flavour we ship for the desktop app. The headless
- * server in Docker (which may run on Alpine/musl) is a separate concern —
- * track in Phase 2 when we look at server packaging.
- */
-function platformBinaryPkg(): string | undefined {
-  const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
-  if (process.platform === 'darwin') return `claude-agent-sdk-darwin-${arch}`;
-  if (process.platform === 'win32') return `claude-agent-sdk-win32-${arch}`;
-  if (process.platform === 'linux') return `claude-agent-sdk-linux-${arch}`;
-  return undefined;
-}
-
-function nativeBinaryName(): string {
-  return process.platform === 'win32' ? 'claude.exe' : 'claude';
-}
-
-/**
- * Resolve the per-platform native `claude` binary shipped by the SDK as an
- * optional dependency. Replaces the old `cli.js` lookup (SDK ≥ 0.2.113).
- *
- * Search order:
- *   1. Stable build alias `@anthropic-ai/claude-agent-sdk-binary` — this is
- *      what the platform build scripts (build-dmg.sh etc.) populate before
- *      electron-builder runs, so packaged builds always find the binary at a
- *      single, arch-agnostic path regardless of how it was sourced.
- *   2. Per-platform optional-dep package name (`-darwin-arm64`, etc.) —
- *      what plain `bun install` produces in dev / monorepo / CI.
- *   3. Dev-runtime walk-up across both lookups for ad-hoc local builds
- *      (`electron:dist:dev:mac`).
- */
-function resolveClaudeBinaryPath(hostRuntime: BackendHostRuntimeContext): string | undefined {
-  const binaryName = nativeBinaryName();
-  const aliasRel = join('node_modules', '@anthropic-ai', 'claude-agent-sdk-binary', binaryName);
-  const pkg = platformBinaryPkg();
-  const platformRel = pkg
-    ? join('node_modules', '@anthropic-ai', pkg, binaryName)
-    : undefined;
-
-  // The binary is spawned as a subprocess, so the real on-disk copy wins:
-  // either the `extraResources` copy under <resources>/app/node_modules (all
-  // platforms ship it) or the asarUnpack sibling of the in-archive path.
-  const unpackedRoot = toUnpackedRoot(hostRuntime.appRootPath);
-  const candidates: string[] = [];
-  if (hostRuntime.resourcesPath) {
-    candidates.push(join(hostRuntime.resourcesPath, 'app', aliasRel));
-  }
-  if (unpackedRoot !== hostRuntime.appRootPath) {
-    candidates.push(join(unpackedRoot, aliasRel));
-  }
-  candidates.push(
-    join(hostRuntime.appRootPath, aliasRel),
-    join(hostRuntime.appRootPath, '..', '..', aliasRel),
-  );
-  if (platformRel) {
-    if (hostRuntime.resourcesPath) {
-      candidates.push(join(hostRuntime.resourcesPath, 'app', platformRel));
-    }
-    if (unpackedRoot !== hostRuntime.appRootPath) {
-      candidates.push(join(unpackedRoot, platformRel));
-    }
-    candidates.push(
-      join(hostRuntime.appRootPath, platformRel),
-      join(hostRuntime.appRootPath, '..', '..', platformRel),
-    );
-  }
-
-  const result = firstExistingPath(candidates);
-  if (result) return result;
-
-  // Dev runtime: walk further up from .app bundle to reach monorepo root
-  if (IS_DEV_RUNTIME) {
-    return resolveUpwards(hostRuntime.appRootPath, aliasRel, 10)
-      ?? (platformRel ? resolveUpwards(hostRuntime.appRootPath, platformRel, 10) : undefined);
   }
   return undefined;
 }
@@ -256,10 +171,8 @@ function resolveServerPath(hostRuntime: BackendHostRuntimeContext, serverName: s
 }
 
 /**
- * Locate ripgrep. Sourced from `@vscode/ripgrep` since SDK 0.2.113 stopped
- * shipping `vendor/ripgrep/<platform>/rg` (the binary is now compiled into
- * the native `claude` executable, but our search service in
- * `packages/server-core/src/services/search.ts` still calls it directly).
+ * Locate ripgrep. Sourced from `@vscode/ripgrep`; the search service in
+ * `packages/server-core/src/services/search.ts` calls it directly.
  */
 function resolveRipgrepPath(hostRuntime: BackendHostRuntimeContext): string | undefined {
   const binaryName = process.platform === 'win32' ? 'rg.exe' : 'rg';
@@ -301,12 +214,18 @@ export function resolveBackendRuntimePaths(hostRuntime: BackendHostRuntimeContex
   const bundledRuntimePath = hostRuntime.nodeRuntimePath || resolveBundledRuntimePath(hostRuntime);
 
   return {
-    claudeCliPath: resolveClaudeBinaryPath(hostRuntime),
     interceptorBundlePath: resolveInterceptorBundlePath(hostRuntime),
     sessionServerPath: resolveServerPath(hostRuntime, 'session-mcp-server'),
     bridgeServerPath: resolveServerPath(hostRuntime, 'bridge-mcp-server'),
     piServerPath: resolveServerPath(hostRuntime, 'pi-agent-server'),
-    nodeRuntimePath: hostRuntime.nodeRuntimePath || bundledRuntimePath || process.execPath,
+    // NOT `|| process.execPath`. That fallback looked harmless and was the
+    // opposite: in a packaged app it spawns a *second* Electron instance as the
+    // interpreter, which exits 0 immediately. The session then sits in
+    // "processing" with no LLM request ever made and nothing in the gateway
+    // log — 2026-10-25, after an install that silently dropped
+    // resources/vendor/bun. Leaving it undefined lets the spawn site fail with
+    // a message that names the missing file.
+    nodeRuntimePath: hostRuntime.nodeRuntimePath || bundledRuntimePath,
     bundledRuntimePath,
   };
 }
@@ -315,30 +234,4 @@ export function resolveBackendHostTooling(hostRuntime: BackendHostRuntimeContext
   return {
     ripgrepPath: resolveRipgrepPath(hostRuntime),
   };
-}
-
-/**
- * Configure SDK globals from host runtime context.
- *
- * Since SDK 0.2.113 the SDK spawns a native binary; the only override we
- * need is `pathToClaudeCodeExecutable`. The Bun executable / `--preload`
- * interceptor mechanism that used to live here no longer applies — the
- * binary doesn't accept Bun-specific flags.
- *
- * When `strict` is true (default), throws if the SDK binary can't be found.
- * When `strict` is false, missing paths are silently skipped (the SDK will
- * try its own auto-discovery via optional-dep node_modules resolution).
- */
-export function applyAnthropicRuntimeBootstrap(
-  hostRuntime: BackendHostRuntimeContext,
-  paths: ResolvedBackendRuntimePaths,
-  options?: { strict?: boolean },
-): void {
-  const strict = options?.strict ?? true;
-
-  if (paths.claudeCliPath) {
-    setPathToClaudeCodeExecutable(paths.claudeCliPath);
-  } else if (strict) {
-    throw new Error('Claude Agent SDK native binary not found. The app package may be corrupted.');
-  }
 }

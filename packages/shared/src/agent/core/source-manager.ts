@@ -2,7 +2,7 @@
  * SourceManager - Centralized Source State Management
  *
  * Provides a unified interface for managing external data source state that
- * both ClaudeAgent and PiAgent can use. Handles source tracking, formatting
+ * PiAgent can use. Handles source tracking, formatting
  * for context injection, and auto-activation detection.
  *
  * Key responsibilities:

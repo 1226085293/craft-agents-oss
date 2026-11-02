@@ -145,6 +145,29 @@ describe('ProgressJournal', () => {
     expect(restored.recentSnapshot()).toContain('conclusion-39');
   });
 
+  it('keeps the CURRENT turn request across REPEATED ledger rotations (2026-11-01 quiet-jasmine)', () => {
+    // Two requests are required to reproduce: with a single request the
+    // positional scan always resolves it, which is why the rotation test above
+    // stayed green while production lost the current turn's request.
+    const dir = makeDir();
+    const journal = new ProgressJournal(dir, { maxBytes: 1_048_576, maxRecords: 20 });
+    for (let i = 0; i < 6; i++) journal.recordConclusion(`older-${i}`);
+    journal.recordUserRequest('上一轮的请求——把项目放在所有会话上面');
+    for (let i = 0; i < 6; i++) journal.recordConclusion(`mid-${i}`);
+    journal.recordUserRequest('本轮的请求——做B，还有会话路径改变事件触发器');
+    journal.recordGuidance('本轮的引导——恢复自动化功能');
+
+    // Enough appends to cross the cap at least twice (each rotation rewrites
+    // the ledger, and the SECOND one used to evict the current request).
+    for (let i = 0; i < 120; i++) journal.recordConclusion(`current-${i}`);
+
+    const restored = new ProgressJournal(dir, { maxBytes: 1_048_576, maxRecords: 20 });
+    const text = restored.latestUserRequest()!;
+    expect(text).toContain('本轮的请求——做B');
+    expect(text).toContain('本轮的引导——恢复自动化功能');
+    expect(text).not.toContain('上一轮的请求');
+  });
+
   it('preserves the latest guidance across ledger rotation', () => {
     const dir = makeDir();
     const journal = new ProgressJournal(dir, { maxBytes: 8_192, maxRecords: 10 });

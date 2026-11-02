@@ -114,8 +114,6 @@ Test-Path "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\node_mo
   整个 `-Command` 参数必须用**单引号**包裹（或写入 .ps1 文件执行）。
 - **快捷路径 staging 核对清单**（B 路径适用）：
   - `apps/electron/vendor/bun/bun.exe` 存在且可独占打开
-  - `apps/electron/node_modules/@anthropic-ai/claude-agent-sdk` 与
-    `claude-agent-sdk-binary`（含 ~210MB `claude.exe`）时间戳 ≥ 依赖更新后最近一次构建
   - `apps/electron/node_modules/@vscode/ripgrep/bin/rg.exe` 与
     `node_modules/@vscode/ripgrep-win32-x64/bin/rg.exe` 内容一致（`cmp` 核对）
   - `apps/electron/dist/interceptor.cjs`、`packages/messaging-whatsapp-worker/dist/worker.cjs`、
@@ -145,20 +143,20 @@ Test-Path "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app\node_mo
   `createRequire(import.meta.url)`。主进程 bundle 由 esbuild 以
   `--format=cjs` 打包（`scripts/electron-build-main.ts`），esbuild 会把 bundle 内
   ESM 模块的 `import.meta` 替换为空对象 `{}`，`import.meta.url` 即 `undefined`，
-  `createRequire(undefined)` 在加载时直接抛错。这与脚本里为 Claude Agent SDK
-  加 `--external:@anthropic-ai/claude-agent-sdk` 绕开的是**同一类坑**（SDK 的
-  `createRequire(import.meta.url)`），只是这次是自己的代码。
+  `createRequire(undefined)` 在加载时直接抛错。这与主进程 CJS bundle 中
+  第三方 ESM 包遇到的 `createRequire(import.meta.url)` 是**同一类坑**，
+  只是这次是自己的代码。
 - **修复**：删掉未使用的 `createRequire(import.meta.url)`（该 `require` 在本模块
   从未被使用），并在文件头注释说明原因，防止后来者再加回来。
 - **预防**：
   - 凡是被主进程 CJS bundle 收录的模块——注意 `packages/shared/src/config/index.ts`
     这类 barrel 会把整个目录 re-export 进主进程图——**禁止模块初始化时调用
     `createRequire(import.meta.url)` 或依赖 `import.meta.*`**。
-  - 确实需要 CJS `require` 的第三方包，照 SDK 先例用 esbuild `--external` 让其
+  - 确实需要 CJS `require` 的第三方包，用 esbuild `--external` 让其
     以原生 ESM 加载；自有逻辑需要 `import.meta` 的下沉到 ESM 子进程
     （pi-agent-server / session-mcp-server）。
   - 改完可在仓库根快速自检：
-    `bun x esbuild packages/shared/src/config/index.ts --bundle --platform=node --format=cjs --outfile=/tmp/x.cjs --external:electron --external:@anthropic-ai/claude-agent-sdk && grep -n createRequire /tmp/x.cjs`
+    `bun x esbuild packages/shared/src/config/index.ts --bundle --platform=node --format=cjs --outfile=/tmp/x.cjs --external:electron && grep -n createRequire /tmp/x.cjs`
     （无输出即安全）。
 
 ## ❌ 错误的做法（会导致更新失败）
@@ -310,6 +308,48 @@ tail -f /tmp/craft-server.log
 ```
 
 ## 故障排除
+
+### 问题：electron-builder 报 `app.asar: The process cannot access the file`（重试 3 次全失败）
+**症状**：编译、资产校验都通过，打包阶段连续 3 次失败：
+`remove ...\release\win-unpacked\resources\app.asar: The process cannot access the file
+because it is being used by another process`。
+**诊断**：旧安装包产物被外部进程以「允许读写、禁止删除」的方式持有——此时该文件
+可以正常读取，但删除/改名连父目录 `win-unpacked` 都一并失败；`Get-CimInstance` 里
+找不到 `ExecutablePath` 在 `win-unpacked` 下的进程（常见持有者：杀软实时扫描、索引服务），
+`Remove-Item` 还会被 safe-delete 钩子拦成 trash 操作再失败。
+**解决**（无需重启、无需找持有者）：把打包输出换到新目录，绕开被锁的旧树，再复用脚本的
+安装/重启步骤：
+
+```powershell
+cd E:\craft-agents-oss\apps\electron
+& 'E:\craft-agents-oss\node_modules\.bin\electron-builder.exe' --win --x64 '--config.directories.output=release-b'
+# 校验 release-b\Craft-Agents-x64.exe 时间戳晚于本次构建开始，再放回脚本预期的位置
+Copy-Item 'release-b\Craft-Agents-x64.exe' 'release\Craft-Agents-x64.exe' -Force
+cd E:\craft-agents-oss
+.\build-install-restart-win.ps1 -SkipBuild
+```
+
+注意 `-c.directories.output=...` 会被解析成配置文件路径（报 `ENOENT ...\.directories.output=release-b`），
+必须用长参数 `--config.directories.output=...`。（2026-10-25 实测）
+
+### 问题：装完启动后「发消息没反应、网关日志一条请求都没有」
+**症状**：`session.jsonl` 里有 `user ...` 却没有 assistant 记录，`llm-usage` 最新一行停在安装前，UI 提示 `stuck in processing Ns`。
+**定位**：看 `$env:APPDATA\@craft-agent\electron\logs\main.log` 里的 `Spawning Pi subprocess` 行——
+正常应以 `...\resources\vendor\bun\bun.exe` 开头；若变成 `...\Craft Agents.exe`，说明 bun 运行时缺失，应用把自己当解释器又拉起一个实例（4 秒后退出 0），请求根本没发出。
+**根因**：NSIS 安装会**静默跳过被占用的文件**（杀软/索引服务持有大文件句柄）。实测两次：一次丢了 `resources\vendor\bun\bun.exe`，一次 `app.asar` 仍是旧版；安装器退出码却正常。
+**解决**：确认无 `Craft Agents` 进程后**再跑一次安装器**，然后用这两条核对：
+
+```powershell
+Test-Path "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\vendor\bun\bun.exe"
+(Get-Item "$env:LOCALAPPDATA\Programs\@craft-agentelectron\resources\app.asar").Length / 1MB
+```
+
+`app.asar` 的体积要和 `release\win-unpacked\resources\app.asar` 一致（约 550 MB）。
+
+### 问题：app.asar 越打越大（577 MB → 1.1 GB → 3.2 GB），最终 7z 报 `Can't allocate required memory!`
+**根因**：打包输出目录（`release/`、临时用的 `release-b/` 等）就在 `apps/electron` 下，未被 `files` 排除，于是**上一次的安装包被打进了这一次的 app.asar**。
+**修复**：`electron-builder.yml` 的 win `files` 排除段已加 `!release/**/*` 与 `!release-*/**/*`（2026-10-25）。加完后 asar 回到 551 MB、安装包 388 MB。
+**另**：`dist/renderer` 不会被 vite 清空（outDir 在项目根之外），旧 hash 产物会一直累积；`build:renderer` 已加 `--emptyOutDir`。
 
 ### 问题：安装器退出码 2（Installer exited with code 2）
 **原因**：`build-install-restart-win.ps1` 的 helper 只杀 `Craft Agents` 主进程，

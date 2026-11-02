@@ -17,7 +17,7 @@ import type { FileAttachment } from '../../utils/files.ts';
 import type { ThinkingLevel } from '../thinking-levels.ts';
 import type { PermissionMode } from '../mode-manager.ts';
 import type { LoadedSource } from '../../sources/types.ts';
-import type { AuthRequest } from '../session-scoped-tools.ts';
+import type { AuthRequest } from '@craft-agent/session-tools-core';
 import type { McpClientPool } from '../../mcp/mcp-pool.ts';
 import type { Workspace } from '../../config/storage.ts';
 import type { SessionConfig as Session } from '../../sessions/storage.ts';
@@ -41,11 +41,10 @@ export interface BackendRuntimeUpdate {
     baseUrl?: string;
     piAuthProvider?: string;
     customEndpoint?: { api: string; supportsImages?: boolean };
-    customModels?: Array<string | { id: string; contextWindow?: number; supportsImages?: boolean }>;
+    customModels?: Array<string | { id: string; contextWindow?: number; maxTokens?: number; supportsImages?: boolean }>;
     [key: string]: unknown;
   };
 }
-import type { AutomationSystem } from '../../automations/index.ts';
 
 /**
  * Provider identifier for AI backends.
@@ -207,9 +206,6 @@ export interface CoreBackendConfig {
   /** System prompt preset ('default' | 'mini' | custom string) */
   systemPromptPreset?: 'default' | 'mini' | string;
 
-  /** Workspace-level automation system for user-defined automations (automations.json) */
-  automationSystem?: AutomationSystem;
-
   /**
    * Per-session environment variable overrides for the SDK subprocess.
    * Spread after process.env in backend-specific option builders.
@@ -345,7 +341,7 @@ export type SdkMcpServerConfig =
  * Core backend interface - all AI providers must implement this.
  *
  * The interface is designed to:
- * 1. Abstract provider differences (Claude SDK vs OpenAI Responses API)
+ * 1. Abstract provider differences (Anthropic Messages API vs OpenAI Responses API)
  * 2. Enable the facade pattern in CraftAgent
  * 3. Support streaming via AsyncGenerator
  * 4. Allow capability-based UI adaptation
@@ -391,6 +387,15 @@ export interface AgentBackend {
    * without a persistent cross-turn query may leave this unimplemented.
    */
   setBackgroundEventSink?(sink: ((event: AgentEvent) => void) | null): void;
+
+  /**
+   * Flush this backend's per-turn archives (e.g. `sessions/{id}/turns/`).
+   *
+   * Called after a turn's messages have been persisted. Backends without turn
+   * logs leave it unimplemented; callers treat it as best-effort and never let
+   * a failure affect the finished turn.
+   */
+  flushTurnLogs?(): void;
 
   /**
    * Interrupt the current turn because control is being handed to the UI.
@@ -690,7 +695,7 @@ export interface BackendConfig extends CoreBackendConfig {
   /**
    * Provider/SDK to use for this backend.
    * Determines which agent class is instantiated:
-   * - 'anthropic' → ClaudeAgent (Anthropic SDK)
+   * - 'anthropic' → PiAgent (Anthropic provider)
    * - 'pi' → PiAgent (Pi via @earendil-works/pi-coding-agent)
    */
   provider: AgentProvider;
@@ -722,9 +727,6 @@ export interface BackendConfig extends CoreBackendConfig {
    * Used to read/write credentials under the correct key.
    */
   connectionSlug?: string;
-
-  /** Workspace-level automation system for user-defined SDK hooks (automations.json) */
-  automationSystem?: AutomationSystem;
 
   /**
    * Opaque runtime payload resolved by backend drivers.

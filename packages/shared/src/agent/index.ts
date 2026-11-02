@@ -1,40 +1,44 @@
-// Export ClaudeAgent (renamed from CraftAgent) and backward-compatible aliases
-export * from './claude-agent.ts';
+// Pi is the only agent backend.
+export * from './pi-agent.ts';
 export * from './conversation-summary.ts';
 
 // Export PiAgent for direct use
 export { PiAgent, PiBackend } from './pi-agent.ts';
 export * from './errors.ts';
-export * from './options.ts';
 
-// Export session-scoped-tools - tools scoped to a specific session
+export type { AgentEvent } from '@craft-agent/core/types';
+export { resolveKeepBackgroundTasksAlive } from './keep-alive.ts';
+
+// Plan state (shared by Pi and legacy tools)
 export {
-  // Session-scoped tools provider
-  getSessionScopedTools,
-  cleanupSessionScopedTools,
-  // Plan file management
   getSessionPlansDir,
   getLastPlanFilePath,
   clearPlanFileState,
   isPathInPlansDir,
-  // Callback registry for session-scoped tool notifications
+} from './session-plan-state.ts';
+
+// Session-scoped tool callbacks
+export {
   registerSessionScopedToolCallbacks,
   unregisterSessionScopedToolCallbacks,
   mergeSessionScopedToolCallbacks,
-  // Types
   type SessionScopedToolCallbacks,
-  type BrowserPaneFns,
-  // Auth request types (unified auth flow)
-  type AuthRequest,
-  type AuthRequestType,
-  type AuthResult,
-  type CredentialAuthRequest,
-  type McpOAuthAuthRequest,
-  type GoogleOAuthAuthRequest,
-  type SlackOAuthAuthRequest,
-  type MicrosoftOAuthAuthRequest,
-  type CredentialInputMode,
-} from './session-scoped-tools.ts';
+} from './session-scoped-tool-callback-registry.ts';
+
+export type { BrowserPaneFns } from './browser-tools.ts';
+
+// Auth request types (unified auth flow)
+export type {
+  AuthRequest,
+  AuthRequestType,
+  AuthResult,
+  CredentialAuthRequest,
+  McpOAuthAuthRequest,
+  GoogleOAuthAuthRequest,
+  SlackOAuthAuthRequest,
+  MicrosoftOAuthAuthRequest,
+  CredentialInputMode,
+} from '@craft-agent/session-tools-core';
 
 // Export mode-manager - Centralized mode management
 export {
@@ -165,10 +169,3 @@ export {
 
 // Export PowerShell validator root setter (for Electron startup on Windows)
 export { setPowerShellValidatorRoot } from './powershell-validator.ts';
-
-// WS2 keep-alive: shared flag resolver + pushable streaming-input utility.
-export {
-  resolveKeepBackgroundTasksAlive,
-  createPushableInputStream,
-  type PushableInputStream,
-} from './backend/claude/persistent-input.ts';

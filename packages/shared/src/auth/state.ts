@@ -60,7 +60,7 @@ export interface AuthState {
     hasCredentials: boolean;
     /** Anthropic API key (if using api_key auth type) */
     apiKey: string | null;
-    /** Claude Max OAuth token (if using oauth_token auth type) */
+    /** @deprecated Legacy Claude Max OAuth token; retained for old auth-state consumers. */
     claudeOAuthToken: string | null;
     /** Migration info if user needs to re-authenticate */
     migrationRequired?: MigrationInfo;

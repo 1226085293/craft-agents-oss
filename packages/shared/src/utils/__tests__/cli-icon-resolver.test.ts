@@ -503,26 +503,39 @@ describe('resolveToolIcon (end-to-end: mapping from appearance.json, icon files 
   });
 
   test('resolves with real bundled assets', () => {
-    // Icon files resolve against the bundled tool-icons dir. Unlike the seeded
-    // mapping above, this one deliberately runs WITHOUT the isolated
-    // CRAFT_CONFIG_DIR: the real appearance.json maps git → git.ico, which is
-    // the file actually shipped in the bundled directory.
+    // Icon files resolve against the real bundled tool-icons dir. Keep the
+    // appearance mapping isolated so this does not depend on the developer's
+    // ~/.craft-agent/appearance.json.
     const assetsDir = join(import.meta.dir, '../../../../../apps/electron/resources/tool-icons');
-    const { CRAFT_CONFIG_DIR: _ignored, ...env } = process.env;
-    const r = Bun.spawnSync(
-      [process.execPath, '--eval', `
-        import { resolveToolIcon } from '${ICON_RESOLVER_MODULE}';
-        const m = resolveToolIcon('git status', ${JSON.stringify(assetsDir)});
-        console.log(JSON.stringify(m ? { id: m.id, displayName: m.displayName, prefix: m.iconDataUrl.slice(0, 30) } : null));
-      `],
-      { env, stdout: 'pipe', stderr: 'pipe' },
-    );
-    expect(r.exitCode).toBe(0);
-    const result = JSON.parse(r.stdout.toString()) as { id: string; displayName: string; prefix: string } | null;
-    expect(result).not.toBeNull();
-    expect(result!.id).toBe('git');
-    expect(result!.displayName).toBe('Git');
-    expect(result!.prefix.startsWith('data:image/x-icon;base64,')).toBe(true);
+    const configDir = mkdtempSync(join(tmpdir(), 'cli-icon-real-assets-'));
+    try {
+      writeFileSync(
+        join(configDir, 'appearance.json'),
+        JSON.stringify({
+          icons: {
+            version: 1,
+            tools: [{ id: 'git', displayName: 'Git', icon: 'git.ico', commands: ['git'] }],
+          },
+        }),
+        'utf-8',
+      );
+      const r = Bun.spawnSync(
+        [process.execPath, '--eval', `
+          import { resolveToolIcon } from '${ICON_RESOLVER_MODULE}';
+          const m = resolveToolIcon('git status', ${JSON.stringify(assetsDir)});
+          console.log(JSON.stringify(m ? { id: m.id, displayName: m.displayName, prefix: m.iconDataUrl.slice(0, 30) } : null));
+        `],
+        { env: { ...process.env, CRAFT_CONFIG_DIR: configDir }, stdout: 'pipe', stderr: 'pipe' },
+      );
+      expect(r.exitCode).toBe(0);
+      const result = JSON.parse(r.stdout.toString()) as { id: string; displayName: string; prefix: string } | null;
+      expect(result).not.toBeNull();
+      expect(result!.id).toBe('git');
+      expect(result!.displayName).toBe('Git');
+      expect(result!.prefix.startsWith('data:image/x-icon;base64,')).toBe(true);
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
   });
 
   test('resolves git from zsh -lc wrapper', () => {

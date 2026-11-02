@@ -42,7 +42,7 @@ export function registerPiModelResolver(resolver: PiModelResolver): void {
  * Provider type determines which backend/SDK implementation to use.
  * This is separate from auth mechanism - a provider may support multiple auth types.
  *
- * - 'anthropic': Direct Anthropic API (api.anthropic.com) — uses Claude Agent SDK
+ * - 'anthropic': Direct Anthropic API (api.anthropic.com) — uses the Anthropic API
  * - 'pi': Pi unified LLM API (20+ providers via @earendil-works/pi-ai)
  * - 'pi_compat': Pi with custom endpoint (Ollama, self-hosted models, Anthropic-compat endpoints)
  *
@@ -434,8 +434,8 @@ export function isCompatProvider(providerType: LlmProviderType): boolean {
 }
 
 /**
- * Check if a provider type uses the Anthropic Claude Agent SDK.
- * Only direct Anthropic API connections use the Claude SDK.
+ * Check if a provider type uses the Anthropic API.
+ * Only direct Anthropic API connections use the Anthropic provider.
  * @param providerType - Provider type to check
  * @returns true if this provider uses the Anthropic SDK
  */
@@ -1031,7 +1031,7 @@ export function environmentSnapshotKeys(underGateway: boolean): string[] {
  * Provider-agnostic: switches on providerType to determine which env vars
  * to set and how to retrieve credentials. Shared by:
  * - `SessionManager.reinitializeAuth()` (applies to process.env)
- * - `ClaudeAgent.postInit()` (applies to process.env + envOverrides)
+ * - `PiAgent.postInit()` (applies to process.env + envOverrides)
  *
  * Providers that handle auth internally (openai, copilot, pi) return
  * empty envVars — their auth is managed in postInit() via native mechanisms.

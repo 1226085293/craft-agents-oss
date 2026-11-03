@@ -97,3 +97,18 @@ export {
   handleListSubscriptions,
 } from './subscriptions.ts';
 export type { SubscribeSessionArgs, UnsubscribeSessionArgs } from './subscriptions.ts';
+
+// Event Center
+export {
+  handleSubscribeEvent,
+  handleUnsubscribeEvent,
+  handleListEventSubscriptions,
+  handleListEvents,
+  handleGetEvent,
+} from './events.ts';
+export type {
+  SubscribeEventArgs,
+  UnsubscribeEventArgs,
+  ListEventsArgs,
+  GetEventArgs,
+} from './events.ts';

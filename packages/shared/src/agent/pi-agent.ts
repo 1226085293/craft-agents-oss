@@ -61,6 +61,7 @@ import { resolveToolTimeoutMs, withToolExecutionTimeout } from './tool-timeouts.
 
 // System prompt for Craft Agent context
 import { getSystemPrompt } from '../prompts/system.ts';
+import { buildEventsBlock } from '../events/prompt.ts';
 import { getCoAuthorPreference } from '../config/appearance.ts';
 import { loadProjectById, getProjectAssetsPath, listProjectAssets, getProjectMemoryPath, loadProjectMemory } from '../projects/storage.ts';
 import type { ProjectPromptContext } from '../projects/types.ts';
@@ -3731,6 +3732,9 @@ export class PiAgent extends BaseAgent {
         'Craft Agents Backend', // backendName
         getCoAuthorPreference(), // respect user's includeCoAuthoredBy preference (#576)
         projectContext ?? undefined,
+        // Event Center: enabled listeners, so the agent knows what it can
+        // subscribe to. '' when nothing is enabled.
+        buildEventsBlock(this.config.workspace.rootPath),
       );
 
       // Build context from sources

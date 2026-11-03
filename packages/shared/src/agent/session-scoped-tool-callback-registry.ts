@@ -20,6 +20,59 @@ import { debug } from '../utils/debug.ts';
  * Callbacks that can be registered per-session
  */
 export interface SessionScopedToolCallbacks {
+  // --- Event Center -------------------------------------------------------
+  // Declared here (not imported from the events package) so this interface
+  // stays free of runtime imports.
+
+  /** Subscribe the invoking session to events. */
+  subscribeEventFn?: (filter: {
+    sources?: string[];
+    types?: string[];
+    tags?: string[];
+  }) => Promise<{ subscriptionId: string; total: number }>;
+
+  /** Drop a subscription by id or by source name. */
+  unsubscribeEventFn?: (selector: {
+    subscriptionId?: string;
+    source?: string;
+  }) => Promise<{ removed: number; remaining: number }>;
+
+  /** Subscriptions owned by the invoking session. */
+  listEventSubscriptionsFn?: () => Array<{
+    subscriptionId: string;
+    filter: { sources?: string[]; types?: string[]; tags?: string[] };
+  }>;
+
+  /** Metadata-only event list. */
+  listEventsFn?: (filter: {
+    source?: string;
+    type?: string;
+    search?: string;
+    limit?: number;
+  }) => Array<{
+    id: string;
+    type: string;
+    source: string;
+    receivedAt: number;
+    title: string;
+    summary?: string;
+  }>;
+
+  /** One event with its body (capped by the caller). */
+  getEventFn?: (id: string) => {
+    id: string;
+    type: string;
+    source: string;
+    receivedAt: number;
+    occurredAt?: number;
+    title: string;
+    summary?: string;
+    recipients: string[];
+    tags: string[];
+    body?: string;
+    payloadPath?: string;
+  } | null;
+
   /**
    * Called when a plan is submitted via SubmitPlan tool.
    * Receives the path to the plan markdown file.

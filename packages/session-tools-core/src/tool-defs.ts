@@ -44,6 +44,13 @@ import {
   handleListSubscriptions,
 } from './handlers/subscriptions.ts';
 import {
+  handleSubscribeEvent,
+  handleUnsubscribeEvent,
+  handleListEventSubscriptions,
+  handleListEvents,
+  handleGetEvent,
+} from './handlers/events.ts';
+import {
   handleListPages,
   handleGetPage,
   handleCreatePage,
@@ -276,6 +283,30 @@ export const UnsubscribeSessionSchema = z.object({
 
 export const ListSubscriptionsSchema = z.object({});
 
+export const SubscribeEventSchema = z.object({
+  sources: z.array(z.string()).optional().describe('Listener ids, e.g. ["qqmail-idle"].'),
+  types: z.array(z.string()).optional().describe('Event types; "mail.*" matches a namespace.'),
+  tags: z.array(z.string()).optional().describe('Any-of tag match.'),
+});
+
+export const UnsubscribeEventSchema = z.object({
+  subscriptionId: z.string().optional().describe('Exact subscription to drop (from list_event_subscriptions).'),
+  source: z.string().optional().describe('Drop subscriptions that name this source.'),
+});
+
+export const ListEventSubscriptionsSchema = z.object({});
+
+export const ListEventsSchema = z.object({
+  source: z.string().optional(),
+  type: z.string().optional().describe('Exact type or "mail.*" prefix.'),
+  search: z.string().optional().describe('Full-text query over title/summary/body head.'),
+  limit: z.number().int().min(1).max(100).optional(),
+});
+
+export const GetEventSchema = z.object({
+  id: z.string().describe('Event id from a [event] message or list_events.'),
+});
+
 // Inter-session messaging
 export const SendAgentMessageSchema = z.object({
   sessionId: z.string().describe('Target session ID to send the message to'),
@@ -353,6 +384,11 @@ export const TOOL_DESCRIPTIONS = {
   subscribe_session: `Follow another session in this workspace: every finished turn is posted here as a message and wakes you. Spawned sessions are already followed by default (spawn_session subscribe=true). Use list_subscriptions to see what you follow.`,
   unsubscribe_session: `Stop following a session (idempotent). You will stop receiving its finished turns.`,
   list_subscriptions: `List the sessions this session currently follows.` ,
+  subscribe_event: `Subscribe to external events (mail, GitHub, pages…) collected by the Event Center. Events arrive as "[event]" messages and wake you. You receive NOTHING until you subscribe. Filter by source (listener id), type (e.g. "mail.received" or "mail.*") or tag; an empty filter subscribes to everything, which is rarely what you want.`,
+  unsubscribe_event: `Stop receiving events. Pass subscriptionId (preferred) or source to drop the matching subscription; with neither it refuses, so a typo cannot silently unsubscribe everything.`,
+  list_event_subscriptions: `List this session's event subscriptions.`,
+  list_events: `List received events (metadata only, newest first). Use it to catch up on what arrived, then get_event for the body.`,
+  get_event: `Read one event in full by id: headers plus up to 64KB of body. Larger payloads are referenced by a file path returned in the header.`,
   add_memory: `Store information that should persist beyond this conversation. Use when the user wants something retained for later — a fact, preference, instruction, name or alias, or a rule — and write it down instead of only acknowledging it in your reply. Use session scope for temporary/task-specific facts about this conversation; use global scope for durable user preferences, rules, and reusable knowledge that should persist across sessions.`,
   query_memories: `Check what has been stored before answering. Call this proactively whenever the question may depend on information from earlier conversations (preferences, rules, facts, names) instead of guessing from current context alone. Performs semantic retrieval (embedding similarity) across this session's memories and workspace-global memories.`,
   deliver_file: `Deliver a local file as an attachment to the messaging channel(s) bound to this session (Telegram/WhatsApp/Lark/QQ). Use when the user asks to send/forward a generated/downloaded file to their phone or app. Prefer this over printing a link when a real attachment is wanted.`,
@@ -447,6 +483,12 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'subscribe_session', description: TOOL_DESCRIPTIONS.subscribe_session, inputSchema: SubscribeSessionSchema, executionMode: 'registry', safeMode: 'block', handler: handleSubscribeSession },
   { name: 'unsubscribe_session', description: TOOL_DESCRIPTIONS.unsubscribe_session, inputSchema: UnsubscribeSessionSchema, executionMode: 'registry', safeMode: 'block', handler: handleUnsubscribeSession },
   { name: 'list_subscriptions', description: TOOL_DESCRIPTIONS.list_subscriptions, inputSchema: ListSubscriptionsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListSubscriptions },
+  // Event Center
+  { name: 'subscribe_event', description: TOOL_DESCRIPTIONS.subscribe_event, inputSchema: SubscribeEventSchema, executionMode: 'registry', safeMode: 'block', handler: handleSubscribeEvent },
+  { name: 'unsubscribe_event', description: TOOL_DESCRIPTIONS.unsubscribe_event, inputSchema: UnsubscribeEventSchema, executionMode: 'registry', safeMode: 'block', handler: handleUnsubscribeEvent },
+  { name: 'list_event_subscriptions', description: TOOL_DESCRIPTIONS.list_event_subscriptions, inputSchema: ListEventSubscriptionsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListEventSubscriptions },
+  { name: 'list_events', description: TOOL_DESCRIPTIONS.list_events, inputSchema: ListEventsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListEvents },
+  { name: 'get_event', description: TOOL_DESCRIPTIONS.get_event, inputSchema: GetEventSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleGetEvent },
   { name: 'add_memory', description: TOOL_DESCRIPTIONS.add_memory, inputSchema: AddMemorySchema, executionMode: 'registry', safeMode: 'block', handler: handleAddMemory },
   { name: 'query_memories', description: TOOL_DESCRIPTIONS.query_memories, inputSchema: QueryMemoriesSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleQueryMemories },
   // Messaging gateway tools

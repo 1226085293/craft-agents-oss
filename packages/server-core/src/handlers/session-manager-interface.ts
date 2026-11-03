@@ -194,6 +194,35 @@ export interface ISessionManager {
   ): Promise<{ name: string; stopped: boolean; queueLength: number }>
   /** Return the in-memory processing flag without hydrating full messages. */
   isSessionProcessing?(sessionId: string): boolean
+  /** Event Center: deliver an event as a process row + wake nudge. */
+  surfaceEventToSession?(
+    sessionId: string,
+    params: {
+      eventId: string
+      source: string
+      type: string
+      title: string
+      summary?: string
+      receivedAt: number
+      nudge: string
+    },
+  ): Promise<boolean>
+  /** Event Center: true when the user has messages waiting for this session. */
+  hasQueuedUserMessage?(sessionId: string): boolean
+  /** Event Center: the delivery target handed to the dispatcher. */
+  createEventDispatchTarget?(): {
+    deliver: (sessionId: string, params: {
+      eventId: string
+      source: string
+      type: string
+      title: string
+      summary?: string
+      receivedAt: number
+      nudge: string
+    }) => Promise<boolean>
+    isBusy: (sessionId: string) => boolean
+    hasQueuedUserMessage: (sessionId: string) => boolean
+  }
   /**
    * Live agent instance backing a session, or null when it hasn't been
    * initialized yet. Used by handlers that invoke agent-owned operations.

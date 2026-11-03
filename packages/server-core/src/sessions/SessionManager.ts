@@ -3607,6 +3607,36 @@ export class SessionManager implements ISessionManager {
     return managedToSession(m, { messages: m.messages })
   }
 
+  /** True when the user has messages waiting — events yield to those. */
+  hasQueuedUserMessage(sessionId: string): boolean {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return false
+    return managed.messageQueue.some((row) => Boolean(row.messageId))
+  }
+
+  /**
+   * Delivery target handed to the Event Center. Kept as a method so the event
+   * service never imports SessionManager (no cycle) and tests can stub it.
+   */
+  createEventDispatchTarget() {
+    return {
+      deliver: (
+        sessionId: string,
+        params: {
+          eventId: string
+          source: string
+          type: string
+          title: string
+          summary?: string
+          receivedAt: number
+          nudge: string
+        },
+      ) => this.surfaceEventToSession(sessionId, params),
+      isBusy: (sessionId: string) => this.isSessionProcessing(sessionId),
+      hasQueuedUserMessage: (sessionId: string) => this.hasQueuedUserMessage(sessionId),
+    }
+  }
+
   isSessionProcessing(sessionId: string): boolean {
     return this.sessions.get(sessionId)?.isProcessing === true
   }
@@ -6162,6 +6192,88 @@ ${request.prompt}`;
         // token mid-message and treats it as ordinary chat text.
         isSessionCommand: (text: string) => parseSessionCommand(text) !== null,
         subscribeSessionFn: (sessionId: string) => this.subscribeSession(managed.id, sessionId),
+        // --- Event Center -------------------------------------------------
+        subscribeEventFn: async (filter) => {
+          const { loadSubscriptions, saveSubscriptions } = await import(
+            '@craft-agent/shared/events/subscriptions.ts'
+          )
+          const root = managed.workspace.rootPath
+          const subscriptions = loadSubscriptions(root)
+          const subscription = {
+            subscriptionId: `sub_${randomUUID().slice(0, 8)}`,
+            sessionId: managed.id,
+            filter,
+            createdAt: Date.now(),
+          }
+          subscriptions.push(subscription)
+          saveSubscriptions(root, subscriptions)
+          return {
+            subscriptionId: subscription.subscriptionId,
+            total: subscriptions.filter((sub) => sub.sessionId === managed.id).length,
+          }
+        },
+        unsubscribeEventFn: async (selector) => {
+          const { loadSubscriptions, saveSubscriptions } = await import(
+            '@craft-agent/shared/events/subscriptions.ts'
+          )
+          const root = managed.workspace.rootPath
+          const subscriptions = loadSubscriptions(root)
+          const before = subscriptions.filter((sub) => sub.sessionId === managed.id).length
+          const remaining = subscriptions.filter((sub) => {
+            if (sub.sessionId !== managed.id) return true
+            if (selector.subscriptionId) return sub.subscriptionId !== selector.subscriptionId
+            return !(sub.filter.sources ?? []).includes(selector.source!)
+          })
+          saveSubscriptions(root, remaining)
+          return {
+            removed: before - remaining.filter((sub) => sub.sessionId === managed.id).length,
+            remaining: remaining.filter((sub) => sub.sessionId === managed.id).length,
+          }
+        },
+        listEventSubscriptionsFn: () => {
+          const { loadSubscriptions } = require('@craft-agent/shared/events/subscriptions.ts') as typeof import('@craft-agent/shared/events/subscriptions.ts')
+          return loadSubscriptions(managed.workspace.rootPath)
+            .filter((sub) => sub.sessionId === managed.id)
+            .map((sub) => ({ subscriptionId: sub.subscriptionId, filter: sub.filter }))
+        },
+        listEventsFn: (filter) => {
+          const { EventStore } = require('@craft-agent/shared/events/event-store.ts') as typeof import('@craft-agent/shared/events/event-store.ts')
+          const { existsSync } = require('node:fs') as typeof import('node:fs')
+          const path = join(managed.workspace.rootPath, 'config', 'events.sqlite')
+          if (!existsSync(path)) return []
+          const store = new EventStore({ dbPath: path })
+          try {
+            return store.list({ ...filter, limit: filter.limit ?? 20 })
+          } finally {
+            store.close()
+          }
+        },
+        getEventFn: (id) => {
+          const { EventStore } = require('@craft-agent/shared/events/event-store.ts') as typeof import('@craft-agent/shared/events/event-store.ts')
+          const { existsSync } = require('node:fs') as typeof import('node:fs')
+          const path = join(managed.workspace.rootPath, 'config', 'events.sqlite')
+          if (!existsSync(path)) return null
+          const store = new EventStore({ dbPath: path })
+          try {
+            const event = store.get(id)
+            if (!event) return null
+            return {
+              id: event.id,
+              type: event.type,
+              source: event.source,
+              receivedAt: event.receivedAt,
+              ...(event.occurredAt !== undefined ? { occurredAt: event.occurredAt } : {}),
+              title: event.title,
+              ...(event.summary ? { summary: event.summary } : {}),
+              recipients: event.recipients,
+              tags: event.tags,
+              ...(event.body !== undefined ? { body: event.body } : {}),
+              ...(event.payloadRef ? { payloadPath: event.payloadRef.path } : {}),
+            }
+          } finally {
+            store.close()
+          }
+        },
         unsubscribeSessionFn: (sessionId: string) => this.unsubscribeSession(managed.id, sessionId),
         listSubscriptionsFn: () => this.listSubscriptions(managed.id),
         sendAgentMessageFn: async (sessionId: string, message: string, attachments?: Array<{ path: string; name?: string }>) => {
@@ -9738,6 +9850,24 @@ ${request.prompt}`;
     // just dispatched — that turn owns the session next, and this re-runs when
     // it ends.
     if (!queuedTurnDispatched) this.flushUndeliveredBackgroundSteers(managed)
+
+    // 8. Event Center: release anything the dispatcher held back while this
+    // session was busy. Skipped when a queued user message just took the
+    // session — user input always wins, and the flush re-runs when that turn
+    // ends (same rule as background steers above).
+    if (!queuedTurnDispatched) {
+      try {
+        const workspaceRoot = managed.workspace.rootPath
+        const { getExistingEventService } = require('../events/event-service.ts') as typeof import('../events/event-service.ts')
+        const service = getExistingEventService(managed.workspace.id)
+        if (service) service.flushDeferredEvents(managed.id)
+        else if (workspaceRoot) {
+          // Service not started for this workspace yet: nothing can be queued.
+        }
+      } catch (error) {
+        sessionLog.warn(`[events] deferred flush failed for ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
   }
 
   /**
@@ -10109,6 +10239,120 @@ ${request.prompt}`;
    *           the live process card (`groupMessagesByTurn` flushes the running
    *           turn as interrupted for every info row).
    */
+  /**
+   * Push an event's wake TITLE row.
+   *
+   * Same shape as `pushBackgroundWakeTitle` and for the same reason: a
+   * `role:'info'` row terminates the in-flight process card in the renderer
+   * (`groupMessagesByTurn` flushes the running turn as INTERRUPTED), so this is
+   * only ever written when the session is idle.
+   */
+  private pushEventWakeTitle(managed: ManagedSession, params: { eventId: string; source: string; type: string; title: string }): void {
+    const infoMessage: Message = {
+      id: generateMessageId(),
+      role: 'info',
+      content: params.title,
+      timestamp: this.monotonic(),
+      statusType: 'event_wake',
+      statusParams: {
+        eventId: params.eventId,
+        source: params.source,
+        type: params.type,
+      },
+    }
+    managed.messages.push(infoMessage)
+    this.sendEvent({
+      type: 'info',
+      sessionId: managed.id,
+      message: params.title,
+      statusType: 'event_wake',
+      timestamp: infoMessage.timestamp,
+      statusParams: infoMessage.statusParams,
+    }, managed.workspace.id)
+  }
+
+  /**
+   * Push an event as a PROCESS-BLOCK row (a real `role:'tool'` message), so it
+   * folds into the running card exactly like a tool entry does.
+   */
+  private insertEventProcessRow(
+    managed: ManagedSession,
+    params: { eventId: string; source: string; type: string; title: string; summary?: string; receivedAt: number },
+  ): void {
+    let toolUseId = `evt-wake-${params.eventId}`
+    // The renderer resolves tool events by the FIRST match on toolUseId; a
+    // re-delivered event must not reuse an id already sitting in an older card.
+    if (managed.messages.some((m) => m.toolUseId === toolUseId)) {
+      toolUseId = `${toolUseId}-${generateMessageId()}`
+    }
+
+    const message: Message = {
+      id: generateMessageId(),
+      role: 'tool',
+      content: '',
+      timestamp: this.monotonic(),
+      toolName: 'Event',
+      toolUseId,
+      toolInput: {
+        source: params.source,
+        type: params.type,
+        title: params.title,
+        receivedAt: params.receivedAt,
+        eventId: params.eventId,
+      },
+      toolResult: params.summary ?? params.title,
+      toolStatus: 'completed',
+      toolIntent: params.title,
+      isBackground: true,
+      isEvent: true,
+    }
+    managed.messages.push(message)
+    this.persistSession(managed)
+
+    this.sendEvent({
+      type: 'tool_start',
+      sessionId: managed.id,
+      toolName: 'Event',
+      toolUseId,
+      toolInput: message.toolInput ?? {},
+      toolIntent: params.title,
+      timestamp: message.timestamp,
+    }, managed.workspace.id)
+    this.sendEvent({
+      type: 'tool_result',
+      sessionId: managed.id,
+      toolUseId,
+      toolName: 'Event',
+      result: message.toolResult ?? '',
+      isError: false,
+      timestamp: message.timestamp,
+    }, managed.workspace.id)
+  }
+
+  /**
+   * Surface an event to a session, mirroring `insertBackgroundTaskSurface`:
+   * idle → wake title + process row + hidden nudge; busy → process row only,
+   * with the text steered into the running turn instead.
+   */
+  async surfaceEventToSession(
+    sessionId: string,
+    params: { eventId: string; source: string; type: string; title: string; summary?: string; receivedAt: number; nudge: string },
+  ): Promise<boolean> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed || managed.isArchived) return false
+
+    if (!managed.isProcessing) this.pushEventWakeTitle(managed, params)
+    this.insertEventProcessRow(managed, params)
+
+    try {
+      await this.sendMessage(managed.id, params.nudge, [], [], { hidden: true })
+      return true
+    } catch (error) {
+      sessionLog.warn(`[events] failed to wake ${sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      return false
+    }
+  }
+
   private insertBackgroundTaskSurface(
     managed: ManagedSession,
     text: string,

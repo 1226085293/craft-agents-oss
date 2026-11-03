@@ -1996,6 +1996,12 @@ function AppShellContent({
     // Settings navigator
     if (isSettingsNavigation(navState)) return t("sidebar.settings")
 
+    // Events navigator — the second-left panel lists events/listeners, not
+    // sessions, so the sessions fallback below would mislabel it "所有会话".
+    if (isEventsNavigation(navState)) {
+      return navState.section === 'listeners' ? t("sidebar.eventListeners") : t("sidebar.eventList")
+    }
+
     // Sessions navigator - use sessionFilter
     if (!sessionFilter) return t("sidebar.allSessions")
 

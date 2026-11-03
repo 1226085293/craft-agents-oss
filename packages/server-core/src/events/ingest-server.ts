@@ -204,6 +204,19 @@ export class EventIngestServer {
         return;
       }
 
+      // `Buffer.toString('utf8')` replaces malformed bytes with U+FFFD instead
+      // of throwing, so a GBK-encoded client would otherwise store a title full
+      // of replacement characters and look like a rendering bug. Reject it and
+      // say why: a wrong charset must fail loudly, not land as mojibake.
+      if (body.includes('\uFFFD')) {
+        sendJson(res, 400, {
+          error: 'invalid_encoding',
+          path: '$',
+          message: 'Body must be UTF-8; some bytes could not be decoded.',
+        });
+        return;
+      }
+
       let parsed: unknown;
       try {
         parsed = JSON.parse(body);

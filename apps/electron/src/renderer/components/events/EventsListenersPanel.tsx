@@ -6,10 +6,13 @@
  * (manifest, config, dependencies, setup). The ingest endpoint used to live
  * here; it moved to the detail page of any listener so the header stays about
  * listeners.
+ *
+ * Selection follows the EntityRow grammar (faint wash + left accent rule) so
+ * the three event pages read like the rest of the app.
  */
 
 import * as React from 'react'
-import { AlertTriangle, CircleDot, Plus, Radio, RefreshCw } from 'lucide-react'
+import { AlertTriangle, Plus, Radio, RefreshCw } from 'lucide-react'
 import type { ListenerDto } from '@craft-agent/shared/protocol/dto'
 
 export interface EventsListenersPanelProps {
@@ -22,16 +25,16 @@ export interface EventsListenersPanelProps {
 function StateDot({ listener }: { listener: ListenerDto }): React.ReactElement {
   const state = listener.status.state
   if (listener.errors.length > 0) {
-    return <AlertTriangle className="h-3 w-3 text-destructive shrink-0" aria-label="配置错误" />
+    return <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0" aria-label="配置错误" />
   }
   if (!listener.enabled) {
-    return <CircleDot className="h-3 w-3 text-muted-foreground/40 shrink-0" aria-label="已停用" />
+    return <Radio className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" aria-label="已停用" />
   }
-  if (state === 'running') return <CircleDot className="h-3 w-3 text-primary shrink-0" aria-label="运行中" />
-  if (state === 'starting') return <CircleDot className="h-3 w-3 text-amber-500 shrink-0" aria-label="启动中" />
-  if (state === 'degraded') return <CircleDot className="h-3 w-3 text-amber-500 shrink-0" aria-label="无响应" />
-  if (state === 'failed') return <CircleDot className="h-3 w-3 text-destructive shrink-0" aria-label="异常" />
-  return <CircleDot className="h-3 w-3 text-muted-foreground/40 shrink-0" aria-label="已停止" />
+  if (state === 'running') return <Radio className="h-3.5 w-3.5 text-primary shrink-0" aria-label="运行中" />
+  if (state === 'starting') return <Radio className="h-3.5 w-3.5 text-amber-500 shrink-0" aria-label="启动中" />
+  if (state === 'degraded') return <Radio className="h-3.5 w-3.5 text-amber-500 shrink-0" aria-label="无响应" />
+  if (state === 'failed') return <Radio className="h-3.5 w-3.5 text-destructive shrink-0" aria-label="异常" />
+  return <Radio className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" aria-label="已停止" />
 }
 
 export function EventsListenersPanel({
@@ -81,17 +84,17 @@ export function EventsListenersPanel({
 
   return (
     <div className={className ? `flex flex-col h-full ${className}` : 'flex flex-col h-full'}>
-      <div className="px-3 py-2 border-b border-border flex items-center gap-1.5">
-        <Radio className="h-3.5 w-3.5 text-muted-foreground" />
-        <span className="text-xs font-medium">监听器</span>
-        <span className="text-[11px] text-muted-foreground">{listeners.length}</span>
+      <div className="px-3 py-2.5 border-b border-border flex items-center gap-2">
+        <Radio className="h-4 w-4 text-muted-foreground" />
+        <span className="text-sm font-medium">监听器</span>
+        <span className="text-xs text-muted-foreground tabular-nums">{listeners.length}</span>
         <button
           type="button"
           onClick={() => void load()}
-          className="ml-auto h-6 w-6 inline-flex items-center justify-center rounded hover:bg-accent text-muted-foreground"
+          className="ml-auto h-7 w-7 inline-flex items-center justify-center rounded-md hover:bg-foreground/5 text-muted-foreground hover:text-foreground"
           title="刷新"
         >
-          <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
@@ -100,9 +103,9 @@ export function EventsListenersPanel({
 
         {!error && listeners.length === 0 && (
           <div className="flex flex-col items-center justify-center gap-2 py-8 text-muted-foreground text-center px-3">
-            <Plus className="h-6 w-6" />
-            <p className="text-xs">还没有监听器</p>
-            <p className="text-[11px] opacity-70 leading-relaxed">
+            <Plus className="h-7 w-7 opacity-70" />
+            <p className="text-sm">还没有监听器</p>
+            <p className="text-xs opacity-70 leading-relaxed">
               在 <code className="font-mono">&lt;workspace&gt;/events/&lt;id&gt;/manifest.json</code> 放一个清单，
               这里就会出现卡片
             </p>
@@ -116,30 +119,43 @@ export function EventsListenersPanel({
               key={listener.id}
               type="button"
               onClick={() => onSelectListener(listener.id)}
-              className={`w-full text-left rounded-md border p-2 transition-colors ${
-                selected ? 'border-primary/40 bg-accent' : 'border-border hover:bg-accent/50'
+              className={`relative w-full text-left rounded-[8px] border p-2.5 transition-colors ${
+                // EntityRow grammar: wash + left rule; accent stays an accent.
+                selected
+                  ? 'border-transparent bg-foreground/3 shadow-[inset_2px_0_0_0_hsl(var(--accent))]'
+                  : 'border-border/60 hover:bg-foreground/2 hover:border-border'
               }`}
             >
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-2">
                 <StateDot listener={listener} />
-                <span className="text-xs font-medium truncate flex-1">{listener.name}</span>
-                <span className="text-[10px] text-muted-foreground shrink-0">v{listener.version}</span>
+                <span className="text-sm font-medium truncate flex-1">{listener.name}</span>
+                <span className="text-[11px] text-muted-foreground shrink-0 tabular-nums">
+                  v{listener.version}
+                </span>
               </div>
               {listener.description && (
-                <p className="text-[11px] text-muted-foreground line-clamp-2 mt-1">{listener.description}</p>
+                <p className="text-[12px] leading-4 text-foreground/55 line-clamp-2 mt-1">
+                  {listener.description}
+                </p>
               )}
-              <div className="flex items-center gap-1 mt-1">
-                <span className="text-[10px] px-1 py-px rounded bg-muted text-muted-foreground">
+              <div className="flex items-center gap-1.5 mt-1.5">
+                <span
+                  className={`text-[11px] leading-4 px-1.5 rounded ${
+                    listener.enabled ? 'bg-primary/10 text-primary' : 'bg-muted text-muted-foreground'
+                  }`}
+                >
                   {listener.enabled ? '已启用' : '已停用'}
                 </span>
                 {listener.eventTypes.slice(0, 2).map((type) => (
-                  <span key={type} className="text-[10px] text-muted-foreground truncate">
+                  <span key={type} className="text-[11px] leading-4 text-muted-foreground truncate">
                     {type}
                   </span>
                 ))}
               </div>
               {listener.errors.length > 0 && (
-                <p className="text-[10px] text-destructive mt-1 line-clamp-1">{listener.errors[0]}</p>
+                <p className="text-[11px] leading-4 text-destructive mt-1.5 line-clamp-1">
+                  {listener.errors[0]}
+                </p>
               )}
             </button>
           )

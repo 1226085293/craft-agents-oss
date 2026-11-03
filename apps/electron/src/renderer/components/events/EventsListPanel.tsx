@@ -3,10 +3,18 @@
  *
  * Rows carry metadata only — the body is fetched when a row is opened, so a
  * mailbox full of 300KB emails still scrolls at list speed.
+ *
+ * Visual conventions follow EntityRow (the app-wide session/source rows):
+ * `bg-foreground/3` + left accent rule for selection, `hover:bg-foreground/2`,
+ * `text-sm` title, `text-[12px]` metadata. The filters use `SimpleDropdown`
+ * rather than native `<select>`: a native select renders its popup with the OS
+ * light theme regardless of the app theme, which shows up as a white slab in
+ * dark mode.
  */
 
 import * as React from 'react'
-import { Search, Inbox, CircleDot, Circle } from 'lucide-react'
+import { Search, Inbox, ChevronDown, Check } from 'lucide-react'
+import { SimpleDropdown, SimpleDropdownItem } from '@craft-agent/ui'
 import type { EventMetaDto } from '@craft-agent/shared/protocol/dto'
 
 export interface EventsListPanelProps {
@@ -16,23 +24,79 @@ export interface EventsListPanelProps {
   className?: string
 }
 
+/**
+ * Reception status is one dropdown, not two independent toggles: "有接收方"
+ * (has configured recipients) and "未被接收" (not delivered yet) are the two
+ * non-default choices of the same question the user asks about a row.
+ */
+type ReceptionFilter = '' | 'has-recipients' | 'undelivered'
+
 interface FilterState {
   source: string
   type: string
-  hasRecipients: boolean
-  undeliveredOnly: boolean
+  reception: ReceptionFilter
 }
 
-const EMPTY_FILTERS: FilterState = { source: '', type: '', hasRecipients: false, undeliveredOnly: false }
+const EMPTY_FILTERS: FilterState = { source: '', type: '', reception: '' }
 
 function formatTime(epochMs: number): string {
   const date = new Date(epochMs)
   const now = new Date()
-  const sameDay = date.toDateString() === now.toDateString()
-  if (sameDay) {
+  if (date.toDateString() === now.toDateString()) {
     return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
   }
   return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+}
+
+/** Dropdown filter styled like the rest of the filter row. */
+function FilterMenu({
+  value,
+  placeholder,
+  allLabel,
+  options,
+  onChange,
+}: {
+  value: string
+  placeholder: string
+  /** Text of the "clear" option; defaults to the placeholder (e.g. 全部来源). */
+  allLabel?: string
+  options: string[]
+  onChange: (next: string) => void
+}): React.ReactElement {
+  const active = Boolean(value)
+  return (
+    <SimpleDropdown
+      align="start"
+      trigger={
+        <button
+          type="button"
+          className={`h-8 px-2.5 inline-flex items-center gap-1.5 text-xs rounded-md border transition-colors ${
+            active
+              ? 'bg-foreground/10 text-foreground border-foreground/20'
+              : 'bg-muted/40 text-muted-foreground border-transparent hover:text-foreground hover:bg-foreground/5'
+          }`}
+        >
+          <span className="truncate max-w-[8.5rem]">{value || placeholder}</span>
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
+        </button>
+      }
+    >
+      <SimpleDropdownItem onClick={() => onChange('')}>
+        <span className="flex items-center gap-1.5">
+          <Check className={`h-3 w-3 ${value ? 'opacity-0' : 'opacity-100'}`} />
+          {allLabel ?? placeholder}
+        </span>
+      </SimpleDropdownItem>
+      {options.map((option) => (
+        <SimpleDropdownItem key={option} onClick={() => onChange(option)}>
+          <span className="flex items-center gap-1.5">
+            <Check className={`h-3 w-3 ${value === option ? 'opacity-100' : 'opacity-0'}`} />
+            <span className="truncate">{option}</span>
+          </span>
+        </SimpleDropdownItem>
+      ))}
+    </SimpleDropdown>
+  )
 }
 
 export function EventsListPanel({
@@ -63,8 +127,8 @@ export function EventsListPanel({
         ...(debouncedSearch ? { search: debouncedSearch } : {}),
         ...(filters.source ? { source: filters.source } : {}),
         ...(filters.type ? { type: filters.type } : {}),
-        ...(filters.hasRecipients ? { hasRecipients: true } : {}),
-        ...(filters.undeliveredOnly ? { delivered: false } : {}),
+        ...(filters.reception === 'has-recipients' ? { hasRecipients: true } : {}),
+        ...(filters.reception === 'undelivered' ? { delivered: false } : {}),
         limit: 200,
       })
       setEvents(Array.isArray(rows) ? rows : [])
@@ -95,93 +159,63 @@ export function EventsListPanel({
     }
   }, [workspaceId, filters.source])
 
-  // Derived filter options from what is actually stored.
-  const sources = React.useMemo(
-    () => Array.from(new Set(events.map((e) => e.source))).sort(),
-    [events],
-  )
-  const types = React.useMemo(
-    () => Array.from(new Set(events.map((e) => e.type))).sort(),
-    [events],
-  )
+  const sources = React.useMemo(() => Array.from(new Set(events.map((e) => e.source))).sort(), [events])
+  const types = React.useMemo(() => Array.from(new Set(events.map((e) => e.type))).sort(), [events])
 
-  const toggle = (key: 'hasRecipients' | 'undeliveredOnly') =>
-    setFilters((prev) => ({ ...prev, [key]: !prev[key] }))
+  const RECEPTION_OPTIONS: { value: ReceptionFilter; label: string }[] = [
+    { value: 'has-recipients', label: '有接收方' },
+    { value: 'undelivered', label: '未被接收' },
+  ]
 
   return (
     <div className={className ? `flex flex-col h-full ${className}` : 'flex flex-col h-full'}>
-      <div className="px-3 py-2 space-y-2 border-b border-border">
+      <div className="px-3 py-2.5 space-y-2 border-b border-border">
         <div className="relative">
-          <Search className="absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索事件…"
-            className="w-full h-8 pl-7 pr-2 text-sm bg-muted/50 rounded-md border border-transparent focus:border-border focus:outline-none"
+            className="w-full h-8 pl-8 pr-2 text-sm bg-muted/40 rounded-md border border-transparent focus:border-foreground/20 focus:outline-none placeholder:text-muted-foreground/60"
           />
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
-          <select
+          <FilterMenu
             value={filters.source}
-            onChange={(e) => setFilters((prev) => ({ ...prev, source: e.target.value }))}
-            className="h-7 text-xs bg-muted/50 rounded-md border border-transparent px-1.5 focus:outline-none"
-          >
-            <option value="">全部来源</option>
-            {sources.map((source) => (
-              <option key={source} value={source}>
-                {source}
-              </option>
-            ))}
-          </select>
-
-          <select
+            placeholder="全部来源"
+            options={sources}
+            onChange={(next) => setFilters((prev) => ({ ...prev, source: next }))}
+          />
+          <FilterMenu
             value={filters.type}
-            onChange={(e) => setFilters((prev) => ({ ...prev, type: e.target.value }))}
-            className="h-7 text-xs bg-muted/50 rounded-md border border-transparent px-1.5 focus:outline-none"
-          >
-            <option value="">全部类型</option>
-            {types.map((type) => (
-              <option key={type} value={type}>
-                {type}
-              </option>
-            ))}
-          </select>
-
-          <button
-            type="button"
-            onClick={() => toggle('hasRecipients')}
-            className={`h-7 px-2 text-xs rounded-md border transition-colors ${
-              filters.hasRecipients
-                ? 'bg-primary text-primary-foreground border-primary'
-                : 'bg-muted/50 text-muted-foreground border-transparent hover:text-foreground'
-            }`}
-          >
-            有接收方
-          </button>
-
-          <button
-            type="button"
-            onClick={() => toggle('undeliveredOnly')}
-            className={`h-7 px-2 text-xs rounded-md border transition-colors ${
-              filters.undeliveredOnly
-                ? 'bg-primary text-primary-foreground border-primary'
-                : 'bg-muted/50 text-muted-foreground border-transparent hover:text-foreground'
-            }`}
-          >
-            未被接收
-          </button>
+            placeholder="全部类型"
+            options={types}
+            onChange={(next) => setFilters((prev) => ({ ...prev, type: next }))}
+          />
+          <FilterMenu
+            value={RECEPTION_OPTIONS.find((o) => o.value === filters.reception)?.label ?? ''}
+            placeholder="接收状态"
+            allLabel="全部"
+            options={RECEPTION_OPTIONS.map((o) => o.label)}
+            onChange={(next) =>
+              setFilters((prev) => ({
+                ...prev,
+                reception: (RECEPTION_OPTIONS.find((o) => o.label === next)?.value ?? '') as ReceptionFilter,
+              }))
+            }
+          />
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto py-1">
         {error && <div className="px-3 py-2 text-xs text-destructive">{error}</div>}
 
         {!error && events.length === 0 && !loading && (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-muted-foreground">
-            <Inbox className="h-6 w-6" />
-            <p className="text-xs">还没有事件</p>
-            <p className="text-[11px] opacity-70">在「事件监听」里把接收地址交给你的脚本</p>
+            <Inbox className="h-7 w-7 opacity-70" />
+            <p className="text-sm">还没有事件</p>
+            <p className="text-xs opacity-70">在「事件监听」里把接收地址交给你的脚本</p>
           </div>
         )}
 
@@ -192,27 +226,36 @@ export function EventsListPanel({
               key={event.id}
               type="button"
               onClick={() => onSelectEvent(event.id)}
-              className={`w-full text-left px-3 py-2 border-b border-border/50 transition-colors ${
-                selected ? 'bg-accent' : 'hover:bg-accent/50'
+              className={`relative w-full text-left px-3 pr-4 py-2.5 mx-1 rounded-[8px] transition-colors ${
+                // Same grammar as EntityRow: faint foreground wash + a left
+                // accent rule; the accent never fills the whole row.
+                selected
+                  ? 'bg-foreground/3 shadow-[inset_2px_0_0_0_hsl(var(--accent))]'
+                  : 'hover:bg-foreground/2'
               }`}
+              style={{ width: 'calc(100% - 8px)' }}
             >
-              <div className="flex items-center gap-1.5 mb-0.5">
-                <span className="text-[10px] px-1 py-px rounded bg-muted text-muted-foreground shrink-0">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-[11px] leading-4 px-1.5 rounded bg-muted text-muted-foreground shrink-0">
                   {event.type}
                 </span>
-                <span className="text-[10px] text-muted-foreground truncate">{event.source}</span>
-                <span className="ml-auto text-[10px] text-muted-foreground shrink-0">
+                <span className="text-[12px] text-muted-foreground truncate">{event.source}</span>
+                <span className="ml-auto text-[12px] text-muted-foreground/80 shrink-0 tabular-nums">
                   {formatTime(event.receivedAt)}
                 </span>
-                {event.delivered ? (
-                  <CircleDot className="h-2.5 w-2.5 text-primary shrink-0" aria-label="已接收" />
-                ) : (
-                  <Circle className="h-2.5 w-2.5 text-muted-foreground/40 shrink-0" aria-label="未接收" />
-                )}
+                <span
+                  className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                    event.delivered ? 'bg-accent' : 'bg-foreground/20'
+                  }`}
+                  aria-label={event.delivered ? '已接收' : '未接收'}
+                  title={event.delivered ? '已接收' : '未被接收'}
+                />
               </div>
-              <div className="text-sm truncate">{event.title}</div>
+              <div className="text-sm leading-5 truncate">{event.title}</div>
               {event.summary && (
-                <div className="text-xs text-muted-foreground truncate">{event.summary}</div>
+                <div className="text-[12px] leading-4 text-foreground/55 truncate mt-0.5">
+                  {event.summary}
+                </div>
               )}
             </button>
           )

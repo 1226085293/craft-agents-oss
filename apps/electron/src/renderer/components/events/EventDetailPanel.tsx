@@ -13,9 +13,17 @@ export interface EventDetailPanelProps {
   className?: string
 }
 
+/**
+ * Metadata row.
+ *
+ * The label column is `w-20` (80px): metadata text is `text-[13px]`, so a
+ * 4-character Chinese label needs ~56px and 80px leaves a comfortable gap.
+ * Labels sit on the same left edge as the content above; values share one
+ * column so the block reads as a table, not an indented fragment.
+ */
 function Row({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
   return (
-    <div className="flex gap-2 text-xs">
+    <div className="flex gap-3 text-[13px] leading-6">
       <span className="w-20 shrink-0 text-muted-foreground">{label}</span>
       <span className="min-w-0 flex-1 break-words">{children}</span>
     </div>
@@ -65,14 +73,14 @@ export function EventDetailPanel({
 
   return (
     <div className={`flex flex-col h-full ${className ?? ''}`}>
-      <div className="px-4 py-3 border-b border-border space-y-1.5">
+      <div className="px-4 py-3 border-b border-border space-y-2">
         <div className="flex items-start gap-2">
-          <h2 className="text-base font-medium min-w-0 flex-1 break-words">{event.title}</h2>
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground shrink-0">
+          <h2 className="text-[15px] font-medium leading-6 min-w-0 flex-1 break-words">{event.title}</h2>
+          <span className="text-[11px] leading-5 px-1.5 rounded bg-muted text-muted-foreground shrink-0">
             {event.type}
           </span>
         </div>
-        {event.summary && <p className="text-sm text-muted-foreground">{event.summary}</p>}
+        {event.summary && <p className="text-[13px] leading-5 text-muted-foreground">{event.summary}</p>}
 
         <div className="pt-1 space-y-1">
           <Row label="来源">{event.source}</Row>
@@ -81,25 +89,24 @@ export function EventDetailPanel({
             <Row label="发生时间">{new Date(event.occurredAt).toLocaleString()}</Row>
           )}
           <Row label="接收状态">
-            {event.delivered ? '已投递给订阅会话' : '尚未投递'}
+            {event.delivered ? (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+                已投递给订阅会话
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-foreground/20" />
+                尚未投递
+              </span>
+            )}
           </Row>
           {event.recipients.length > 0 && (
             <Row label="接收方">
               <span className="flex flex-wrap gap-1">
                 {event.recipients.map((recipient) => (
-                  <span key={recipient} className="px-1 py-px rounded bg-muted text-[11px]">
+                  <span key={recipient} className="px-1.5 rounded bg-muted text-[12px] leading-5">
                     {recipient}
-                  </span>
-                ))}
-              </span>
-            </Row>
-          )}
-          {event.tags.length > 0 && (
-            <Row label="标签">
-              <span className="flex flex-wrap gap-1">
-                {event.tags.map((tag) => (
-                  <span key={tag} className="px-1 py-px rounded bg-muted text-[11px]">
-                    {tag}
                   </span>
                 ))}
               </span>
@@ -115,8 +122,7 @@ export function EventDetailPanel({
                     href={link.url}
                     className="text-primary hover:underline inline-flex items-center gap-1 break-all"
                   >
-                    {link.rel ? `${link.rel} · ` : ''}
-                    {link.url}
+                    {link.rel ? `${link.rel} · ` : ''}{link.url}
                     <ExternalLink className="h-3 w-3 shrink-0" />
                   </a>
                 ))}
@@ -135,11 +141,11 @@ export function EventDetailPanel({
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-3">
+      <div className="flex-1 overflow-auto px-4 py-3">
         {event.body === undefined ? (
-          <p className="text-xs text-muted-foreground">该事件没有正文。</p>
+          <p className="text-sm text-muted-foreground">该事件没有正文。</p>
         ) : (
-          <pre className="text-xs whitespace-pre-wrap break-words font-mono bg-muted/40 rounded-md p-3">
+          <pre className="text-[13px] leading-6 whitespace-pre-wrap break-words font-mono bg-muted/30 rounded-md p-3">
             {event.body}
           </pre>
         )}

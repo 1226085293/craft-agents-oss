@@ -13,7 +13,7 @@ export type { EventIngestAddress, EventIngestOptions, EventSink } from './ingest
 export { ListenerSupervisor } from './listener-supervisor.ts'
 export type { ListenerProcessState, ListenerRuntimeStatus, SupervisorOptions } from './listener-supervisor.ts'
 export { loadListeners, setListenerEnabled, setListenerConfig, missingConfigKeys, clearProbeCache } from './listener-registry.ts'
-export type { DependencyStatus, LoadedListener, LoadState } from './listener-registry.ts'
+export type { DependencyStatus, DependencyState, LoadedListener } from './listener-registry.ts'
 export { EventDispatcher } from './event-dispatcher.ts'
 export type { DispatchTarget, EventDispatcherOptions } from './event-dispatcher.ts'
 export { buildInstallCommand, formatInstallCommand, runInstallCommand } from './dependency-installer.ts'

@@ -17,7 +17,7 @@ function call(
     path?: string;
     method?: string;
     headers?: Record<string, string>;
-    body?: string;
+    body?: string | Buffer;
   } = {},
 ): Promise<Captured> {
   return new Promise((resolve, reject) => {
@@ -114,6 +114,22 @@ describe('EventIngestServer content handling', () => {
   it('rejects non-JSON content types with 415', async () => {
     const res = await call(port, { body: validPayload, headers: { 'content-type': 'text/plain' } });
     expect(res.status).toBe(415);
+  });
+
+  it('rejects a body with invalid UTF-8 bytes instead of storing mojibake', async () => {
+    // GBK bytes for 中文: `Buffer.toString('utf8')` would silently yield U+FFFD
+    // replacement chars and we would persist a title of garbage diamonds.
+    const gbk = Buffer.from([0xd6, 0xd0, 0xce, 0xc4]);
+    const body = Buffer.concat([
+      Buffer.from('{"type":"mail.received","title":"'),
+      gbk,
+      Buffer.from('"}'),
+    ]);
+    const res = await call(port, { body });
+
+    expect(res.status).toBe(400);
+    expect(JSON.parse(res.body).error).toBe('invalid_encoding');
+    expect(inserted).toHaveLength(0);
   });
 
   it('rejects malformed JSON with 400', async () => {

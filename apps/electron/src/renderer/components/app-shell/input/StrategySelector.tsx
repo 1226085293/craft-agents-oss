@@ -13,8 +13,13 @@
  * is sent. It used to read `lastModels` — the model the gateway called last —
  * which is history: a finished title generation on `hy3` made the chip say
  * `hy3` while the conversation request went to `hy4-preview` (2026-10-29).
- * The popover's rows still show each group's `lastModel` — there, history is
- * the useful thing.
+ *
+ * The popover's rows used to show `策略组名` and `lastModel` as two columns, so a
+ * long name and a long model competed for the same 192px and neither could be
+ * read. They are one line now — `策略组名:请求的模型名` — truncated with an
+ * ellipsis, and hovering an overflowing row scrolls it to its end, rests 1s and
+ * restarts (2026-11-03, user-specified). The model half uses the same
+ * prediction as the chip, so a row answers "what would this group call?".
  */
 
 import * as React from 'react'
@@ -22,6 +27,7 @@ import { useTranslation } from 'react-i18next'
 import { AlertTriangle, Check, ChevronRight, ChevronsUpDown, Cpu } from 'lucide-react'
 
 import { THINKING_LEVELS, type ThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
+import { MarqueeText } from '@/components/ui/marquee-text'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { cn } from '@/lib/utils'
 
@@ -156,7 +162,7 @@ export function StrategySelector({
           <ChevronsUpDown className="h-3 w-3 shrink-0 opacity-50" />
         </button>
       </PopoverTrigger>
-      <PopoverContent align="end" className="w-48 p-1">
+      <PopoverContent align="end" className="w-64 p-1">
         {/* The strategy list scrolls on its own so the thinking submenu can
             escape the popover without being clipped. */}
         <div className="max-h-[min(45vh,300px)] overflow-y-auto">
@@ -168,12 +174,21 @@ export function StrategySelector({
           <div className="flex flex-col">
             {visible.map((s) => {
               const usable = s.usable !== false
+              // `策略组名 - 请求的模型名`, with the model half dimmed — the same
+              // shape as the composer chip (`text-muted-foreground` on the
+              // model). One line so truncation and the hover marquee act on the
+              // pair together instead of clipping one column.
+              const rowModel = usable
+                ? nextStrategyModel(s.models, sessionModel ?? currentModel, s.openModels) ??
+                  t('chat.strategy.unavailableNow', '当前无可用模型')
+                : (s.reason ?? t('chat.strategy.noModels', '无可用模型'))
+              const rowLabel = `${s.name ?? s.id} - ${rowModel}`
               return (
                 <button
                   key={s.id}
                   type="button"
                   disabled={!usable}
-                  title={usable ? undefined : (s.reason ?? t('chat.strategy.noModels', '不可用'))}
+                  title={rowLabel}
                   className={cn(
                     'flex items-center gap-1.5 rounded-[6px] px-2 py-1.5 text-left text-[13px] transition-colors',
                     usable && 'hover:bg-foreground/5',
@@ -188,13 +203,12 @@ export function StrategySelector({
                 >
                   {/* The name sits at the row's left edge: no reserved slot for
                       the check, which used to indent every unselected group. */}
-                  <span className="min-w-0 flex-1 truncate">{s.name ?? s.id}</span>
+                  <MarqueeText
+                    parts={[{ text: s.name ?? s.id }, { text: ` - ${rowModel}`, muted: true }]}
+                    className="min-w-0 flex-1"
+                  />
                   {!usable ? (
                     <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-label={s.reason} />
-                  ) : s.lastModel ? (
-                    <span className="shrink-0 text-[11px] text-muted-foreground">
-                      {s.lastModel}
-                    </span>
                   ) : null}
                   {s.id === value && usable ? <Check className="h-3.5 w-3.5 shrink-0" /> : null}
                 </button>

@@ -19,6 +19,25 @@
 
 import { spawnSync } from 'node:child_process';
 
+/**
+ * Environment every rtk invocation made by Craft runs under.
+ *
+ * Craft drives rtk as a plain CLI — `rtk rewrite` here, then the rewritten
+ * command executed by the Bash tool — and never installs rtk's own agent
+ * hooks (`rtk init -g`), which target Claude Code and friends rather than us.
+ * rtk cannot tell the difference: with no hook on disk it prints
+ * "No hook installed — run `rtk init -g`" on stderr for *every* invocation,
+ * and the Bash tool merges a child's stderr into the output the model reads,
+ * so that banner became the first line of nearly every command result.
+ * `RTK_SUPPRESS_HOOK_WARNING` is rtk's switch for exactly this case — an
+ * embedder that calls the CLI directly — so the advice a user cannot act on
+ * stays out of the transcript.
+ */
+export const RTK_ENV: Readonly<Record<string, string>> = {
+  RTK_TELEMETRY_DISABLED: '1',
+  RTK_SUPPRESS_HOOK_WARNING: '1',
+};
+
 const SPAWN_TIMEOUT_MS = 200;
 
 const REWRITE_EXIT_OK = 0;
@@ -95,7 +114,7 @@ export function rewriteBashWithRtk(
     const result = spawnSync(rtkPath, ['rewrite', command], {
       encoding: 'utf-8',
       timeout: SPAWN_TIMEOUT_MS,
-      env: { ...process.env, RTK_TELEMETRY_DISABLED: '1' },
+      env: { ...process.env, ...RTK_ENV },
     });
 
     if (result.error) {

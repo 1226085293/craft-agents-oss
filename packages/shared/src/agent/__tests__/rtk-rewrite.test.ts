@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from 'bun:test'
 
-import { qualifyRtkCommand } from '../core/rtk-rewrite'
+import { qualifyRtkCommand, RTK_ENV } from '../core/rtk-rewrite'
 
 const POSIX = '/home/u/.craft-agent/rtk/linux-x64/rtk'
 const WINDOWS = 'C:\\Users\\u\\.craft-agent\\rtk\\win32-x64\\rtk.exe'
@@ -50,5 +50,21 @@ describe('qualifyRtkCommand', () => {
 
   it('is a no-op without a resolved binary', () => {
     expect(qualifyRtkCommand('rtk git status', '')).toBe('rtk git status')
+  })
+})
+
+/**
+ * The Bash tool merges a child's stderr into the text the model reads, so any
+ * banner rtk prints lands in the transcript. Craft calls rtk directly and never
+ * installs its agent hook, which makes "No hook installed — run `rtk init -g`"
+ * both permanent (rtk warns on every invocation) and unactionable.
+ */
+describe('RTK_ENV', () => {
+  it('suppresses the hook banner', () => {
+    expect(RTK_ENV.RTK_SUPPRESS_HOOK_WARNING).toBe('1')
+  })
+
+  it('keeps telemetry off', () => {
+    expect(RTK_ENV.RTK_TELEMETRY_DISABLED).toBe('1')
   })
 })

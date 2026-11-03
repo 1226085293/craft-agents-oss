@@ -117,7 +117,7 @@ import { runPreToolUseChecks, type PreToolUseCheckResult } from './core/pre-tool
 import { shouldAllowToolInMode } from './mode-manager.ts';
 import { getRtkPath } from './core/rtk-detector.ts';
 import { getRtkEnabled, getBrowserToolEnabled, getDefenseEnabled, getDefenseGuardrails, getDefaultContextWindow } from '../config/storage.ts';
-import type { RtkContext } from './core/rtk-rewrite.ts';
+import { RTK_ENV, type RtkContext } from './core/rtk-rewrite.ts';
 
 // Tool layering (foldable tools behind category meta tools + call_tool)
 import {
@@ -1196,6 +1196,10 @@ export class PiAgent extends BaseAgent {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
+        // rtk's "no hook installed" banner is about a hook Craft never
+        // installs; the Bash tool merges child stderr into the model's output,
+        // so it has to be switched off in the executor that runs `rtk <cmd>`.
+        ...RTK_ENV,
         ...getProxyEnvVars(),
         ...this.config.envOverrides,
         // Pass session dir for cross-process toolMetadataStore

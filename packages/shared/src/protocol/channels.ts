@@ -410,6 +410,18 @@ export const RPC_CHANNELS = {
     DELETE: 'folders:delete',
     CHANGED: 'folders:changed',
   },
+  events: {
+    /** Paginated metadata list (never includes bodies). */
+    LIST: 'events:list',
+    /** Single event including its body. */
+    GET: 'events:get',
+    /** Per-source totals for the listener cards. */
+    COUNTS: 'events:counts',
+    /** Ingest server address + whether it is listening. */
+    STATUS: 'events:status',
+    /** Pushed when a new event lands (workspace-scoped). */
+    CHANGED: 'events:changed',
+  },
   pages: {
     GET: 'pages:get',
     GET_ONE: 'pages:getOne',

@@ -926,3 +926,33 @@ export interface LlmGatewayListModelsResult {
   /** Round-trip time, ms. Always present, success or failure. */
   elapsedMs: number
 }
+
+// ---------------------------------------------------------------------------
+// Event Center
+// ---------------------------------------------------------------------------
+
+/**
+ * Event metadata as pushed to renderers and returned by `events:list`.
+ * Deliberately excludes `body`: list rows must never carry whole mail bodies.
+ */
+export interface EventMetaDto {
+  spec: 'craft-event/1'
+  id: string
+  source: string
+  type: string
+  receivedAt: number
+  occurredAt?: number
+  dedupeKey?: string
+  title: string
+  summary?: string
+  tags: string[]
+  recipients: string[]
+  links: Array<{ rel?: string; url: string }>
+  payloadRef?: { kind: string; path: string; size?: number }
+  delivered: boolean
+}
+
+/** `events:get` result: metadata plus the stored body. */
+export interface EventRecordDto extends EventMetaDto {
+  body?: string
+}

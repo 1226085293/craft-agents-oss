@@ -27,6 +27,7 @@ import { registerMessagingHandlers } from './messaging'
 import { registerMemoryHandlers } from './memory'
 import { registerUsageHandlers } from './usage'
 import { registerAutomationsHandlers } from './automations'
+import { registerEventsHandlers } from './events'
 
 export function registerCoreRpcHandlers(
   server: RpcServer,
@@ -55,4 +56,5 @@ registerLlmConnectionsHandlers(server, deps)
   registerMemoryHandlers(server, deps)
   registerUsageHandlers(server, deps)
   registerAutomationsHandlers(server, deps)
+  registerEventsHandlers(server, deps)
 }

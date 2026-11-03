@@ -737,6 +737,40 @@ export interface ElectronAPI {
   deleteProjectAsset(workspaceId: string, projectSlug: string, filename: string): Promise<void>
   onProjectsChanged(callback: (workspaceId: string, projects: unknown) => void): () => void
 
+  // Events (workspace-scoped event center)
+  listEvents(
+    workspaceId: string,
+    filter?: {
+      source?: string
+      type?: string
+      tag?: string
+      hasRecipients?: boolean
+      delivered?: boolean
+      since?: number
+      until?: number
+      search?: string
+      limit?: number
+      offset?: number
+    }
+  ): Promise<import('@craft-agent/shared/protocol/dto').EventMetaDto[]>
+  getEvent(
+    workspaceId: string,
+    eventId: string
+  ): Promise<import('@craft-agent/shared/protocol/dto').EventRecordDto | null>
+  getEventCounts(workspaceId: string): Promise<{
+    counts: Record<string, number>
+    status: { listening: boolean; host: string | null; port: number | null; baseUrl: string | null }
+  }>
+  getEventsStatus(workspaceId: string): Promise<{
+    listening: boolean
+    host: string | null
+    port: number | null
+    baseUrl: string | null
+  }>
+  onEventsChanged(
+    callback: (workspaceId: string, event: import('@craft-agent/shared/protocol/dto').EventMetaDto) => void
+  ): () => void
+
   // Pages (workspace-scoped mini dashboards)
   getPages(workspaceId: string): Promise<import('@craft-agent/shared/pages/types').LoadedPage[]>
   getPage(workspaceId: string, pageIdOrSlug: string): Promise<import('@craft-agent/shared/pages/types').LoadedPage | null>
@@ -1057,6 +1091,21 @@ export interface PagesNavigationState {
 }
 
 /**
+ * Events navigation state
+ *
+ * Two sections share one navigator:
+ * - `list`      → the received-event log (default)
+ * - `listeners` → installed listener cards
+ */
+export interface EventsNavigationState {
+  navigator: 'events'
+  section: 'list' | 'listeners'
+  /** Selected event id, or null. */
+  details: { type: 'event'; eventId: string } | { type: 'listener'; listenerId: string } | null
+  rightSidebar?: RightSidebarPanel
+}
+
+/**
  * Unified navigation state
  */
 export type NavigationState =
@@ -1067,6 +1116,7 @@ export type NavigationState =
   | AutomationsNavigationState
   | ProjectsNavigationState
   | PagesNavigationState
+  | EventsNavigationState
 
 export const isSessionsNavigation = (
   state: NavigationState
@@ -1095,6 +1145,10 @@ export const isProjectsNavigation = (
 export const isPagesNavigation = (
   state: NavigationState
 ): state is PagesNavigationState => state.navigator === 'pages'
+
+export const isEventsNavigation = (
+  state: NavigationState
+): state is EventsNavigationState => state.navigator === 'events'
 
 export const DEFAULT_NAVIGATION_STATE: NavigationState = {
   navigator: 'sessions',
@@ -1134,6 +1188,11 @@ export const getNavigationStateKey = (state: NavigationState): string => {
     }
     return 'pages'
   }
+  if (state.navigator === 'events') {
+    if (state.details?.type === 'event') return `events/list/event/${state.details.eventId}`
+    if (state.details?.type === 'listener') return `events/listeners/listener/${state.details.listenerId}`
+    return state.section === 'listeners' ? 'events/listeners' : 'events/list'
+  }
   if (state.navigator === 'settings') {
     if (state.subpage === null) return 'settings'
     return `settings:${state.subpage}`
@@ -1157,6 +1216,28 @@ export const parseNavigationStateKey = (key: string): NavigationState | null => 
       return { navigator: 'sources', details: { type: 'source', sourceSlug } }
     }
     return { navigator: 'sources', details: null }
+  }
+
+  // Handle events
+  if (key === 'events' || key === 'events/list') {
+    return { navigator: 'events', section: 'list', details: null }
+  }
+  if (key === 'events/listeners') {
+    return { navigator: 'events', section: 'listeners', details: null }
+  }
+  if (key.startsWith('events/list/event/')) {
+    const eventId = key.slice('events/list/event/'.length)
+    if (eventId) {
+      return { navigator: 'events', section: 'list', details: { type: 'event', eventId } }
+    }
+    return { navigator: 'events', section: 'list', details: null }
+  }
+  if (key.startsWith('events/listeners/listener/')) {
+    const listenerId = key.slice('events/listeners/listener/'.length)
+    if (listenerId) {
+      return { navigator: 'events', section: 'listeners', details: { type: 'listener', listenerId } }
+    }
+    return { navigator: 'events', section: 'listeners', details: null }
   }
 
   // Handle skills

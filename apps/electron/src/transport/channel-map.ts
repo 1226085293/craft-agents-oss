@@ -430,6 +430,13 @@ export const CHANNEL_MAP = {
   deleteProjectAsset: invoke(RPC_CHANNELS.projects.DELETE_ASSET),
   onProjectsChanged: listener(RPC_CHANNELS.projects.CHANGED),
 
+  // Events
+  listEvents: invoke(RPC_CHANNELS.events.LIST),
+  getEvent: invoke(RPC_CHANNELS.events.GET),
+  getEventCounts: invoke(RPC_CHANNELS.events.COUNTS),
+  getEventsStatus: invoke(RPC_CHANNELS.events.STATUS),
+  onEventsChanged: listener(RPC_CHANNELS.events.CHANGED),
+
   // Pages
   getPages: invoke(RPC_CHANNELS.pages.GET),
   getPage: invoke(RPC_CHANNELS.pages.GET_ONE),

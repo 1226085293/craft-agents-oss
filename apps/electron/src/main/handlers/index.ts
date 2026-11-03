@@ -30,7 +30,7 @@ function warmUpEventCenter(deps: HandlerDeps): void {
   void (async () => {
     try {
       const { getWorkspaces } = await import('@craft-agent/shared/config')
-      const { getEventService } = await import('@craft-agent/server-core/events/event-service')
+      const { getEventService } = await import('@craft-agent/server-core/events')
       for (const workspace of getWorkspaces()) {
         const service = await getEventService(
           workspace.id,

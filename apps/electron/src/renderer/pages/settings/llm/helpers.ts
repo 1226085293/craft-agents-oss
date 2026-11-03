@@ -161,6 +161,7 @@ export function coolingKeyIdsFor(
  *   "follow the session");
  * - `compactionStrategy` is dropped the same way, and for the same reason: it
  *   means "compact on the session's group" when unset;
+ * - a strategy's fallback is dropped when it names a missing group;
  * - a client key left with nothing to route through adopts the first remaining
  *   group: the app's own sessions use that key, and an empty list is a hard 401
  *   with no UI to repair it.
@@ -181,7 +182,13 @@ export function reconcileStrategyRefs(config: LlmConfigShape): LlmConfigShape {
   // session with a group that no longer exists, and the validator would then
   // reject every later save.
   const defaultStrategy = config.defaultStrategy && known.has(config.defaultStrategy) ? config.defaultStrategy : undefined
-  return { ...config, clientKeys, miniStrategy, compactionStrategy, defaultStrategy }
+  const strategies = config.strategies.map((strategy) => {
+    if (!strategy.fallbackStrategyId || known.has(strategy.fallbackStrategyId)) return strategy
+    const repaired = { ...strategy }
+    delete repaired.fallbackStrategyId
+    return repaired
+  })
+  return { ...config, clientKeys, miniStrategy, compactionStrategy, defaultStrategy, strategies }
 }
 
 /**

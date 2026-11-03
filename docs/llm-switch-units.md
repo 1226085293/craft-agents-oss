@@ -5,13 +5,13 @@
 > 现状源于 261027-long-bronze：策略组里配了 3 个模型（`deepseek-v4.1-flash` / `hy4-preview` / `hy3`），
 > 实际只有 1 个可尝试单元，第一次 404 就把唯一 key 冷却 60s，之后 9 次请求在网关本地全部被拒。
 
-## 0. 实现状态（已落地）
+## 0. 实现状态
 
-P1–P4 已全部实现并通过类型检查与测试：
+以下为切换单位功能现状；LLM 网关重试与冷却语义见本文件第 10 节。
 
 | 项 | 落地内容 |
 |---|---|
-| 配置 | `members[].model` / `upstreamModel` / `enabled`；`strategy.switchPolicy`；`preset.routeSeconds`（默认 300） |
+| 配置 | `members[].model` / `upstreamModel` / `enabled`；`strategy.retry`；`preset.routeSeconds`（默认 300）；错误切换由网关内置规则决定 |
 | 规划 | `candidateUnits()` + `plan.units`：一个公开名可展开为多个 `(provider, upstreamModel)` 单元，按声明顺序 |
 | 执行 | `execute()` 按单元迭代；单元内仍是 key 阶梯；每次尝试记录 `unitId` |
 | 冷却 | key / route（`provider::upstreamModel`）/ endpoint 三层；404 只冷路由，不再冻住整个账户 |
@@ -51,19 +51,21 @@ P1–P4 已全部实现并通过类型检查与测试：
 └── 单元 3  workbuddycn / hy3                   keys: k1, k2, k3
 ```
 
-一次请求的升级顺序（保持现有语义，只把「provider」换成「unit」）：
+一次请求的升级顺序：
 
 ```
-同一 key 重试 (retry.maxAttempts)
-  → 换本单元下一个 key (最多 MAX_KEY_TRIES_PER_PROVIDER)
-    → 换下一个单元
+同一模型 + 提供商 + Key 按尝试次数/时限重试
+  → 换本单元下一个 Key
+    → 换下一个模型/提供商单元
       → 换 fallbackStrategyId 指向的下一个策略
 ```
+
+次数包含首次请求；选择“无限（时限）”时仅对可重试错误生效，并受单目标时限限制。重试间隔可选固定间隔或指数退避；指数退避基数为 1、2、4、8、16、30… 秒（基数最高 30 秒），再加入 0–10% 随机抖动。固定间隔默认 0.5 秒。
 
 用户例子 `A-A1 → B-A1 → B-B1` 对应 3 个单元，其中前两个 `publicModel` 相同（A1）、provider 不同，
 第三个 `publicModel` 不同（B1）。
 
-## 3. 配置变更（加法式，version 仍为 1）
+## 3. 配置变更（version 仍为 1）
 
 ```jsonc
 {
@@ -75,13 +77,9 @@ P1–P4 已全部实现并通过类型检查与测试：
     { "provider": "workbuddycn", "model": "hy3" }
   ],
   "modelAliases": { "deepseek-v4.1-flash": "deepseek-v4.1-flash" },
-  "switchPolicy": {
-    "rate_limit": "next-key",
-    "quota": "next-key",
-    "auth": "next-key",
-    "model_not_found": "next-unit",
-    "transport": "next-unit",
-    "server_error": "retry-same"
+  "retry": {
+    "maxAttempts": 3,
+    "intervalMode": "exponential"
   }
 }
 ```
@@ -150,12 +148,13 @@ export interface Plan {
 
 | 上游失败 | 判定 | 冷却范围 | 时长 |
 |---|---|---|---|
-| 429 | `rate_limit` | key | `preset.rateLimitSeconds` |
-| 402 / 余额关键词 | `quota` | key | `preset.quotaExhaustedSeconds` |
-| 401 / 403 | `auth` | key | 同 quota（换 key 有意义） |
+| 429 且 `rateLimitSeconds > 0` | `rate_limit` | Key；无 Key 时仅该模型路由 | 立即转下一个单元；冷却取本地限流递增阶梯计算值与上游 `Retry-After` 中较长者 |
+| 429 且 `rateLimitSeconds = 0` | `rate_limit` | 不应用本地冷却；有 `Retry-After` 时临时遵守上游等待 | 同目标按尝试预算和间隔策略重试；`Retry-After` 是最短等待时间 |
+| 402 / 余额关键词 | `quota` | key | `preset.quotaExhaustedSeconds`；0 表示不执行本地冷却 |
+| 401 / 403 | `auth` | key | 按配额冷却设置处理；0 表示不执行本地冷却 |
 | 400 / 404 / 422（模型不存在、参数不合法） | `route` | **unit（provider+model）** | 新增 `preset.routeSeconds`，默认 300 |
-| 连接失败 / 首字节超时 | `transport` | provider（baseUrl） | `preset.defaultSeconds` |
-| 5xx | `server` | key → 换 key 后仍失败则 unit | `preset.defaultSeconds` |
+| 连接失败 / 首字节超时 | `transport` | 当前模型路由 | `preset.defaultSeconds`；同目标尝试预算耗尽后切换 |
+| 5xx | `server` | 当前目标（模型 + 提供商 + Key） | 按 `retry.onStatusCodes` 和尝试预算重试；其他失败按内置分类切换 |
 
 关键点：**404 不再冷却 key**。当前实现里 404 会把 key 冷却 60s，导致该 provider 的其它模型也一起不可用——
 这正是 9 条本地 503 的直接原因。route 冷却让「hy4 不可用」不影响「deepseek-v4.1-flash」。
@@ -174,21 +173,24 @@ export interface Plan {
 
 ### 4.5 状态码与可观测性
 
-当前 `classifyUpstreamFailure` 把 400/403/404 一律当 `deterministic`，`402` 当 `quota` 并最终答 429。
-建议：
+当前按以下内置分类决定错误处理：
 
 | 场景 | 客户端状态 |
 |---|---|
-| 余额/配额耗尽 | **402** `insufficient_balance`（带上游摘要） |
-| 全部单元限流 | 429 `rate_limit_error` + `Retry-After` |
-| 模型无任何单元可服务 | 400 `invalid_request_error`（配置/模型错） |
-| 单元全部因 route/transport 冷却 | 503 `no_healthy_account` |
-| 其它未分类上游失败 | 502（保留，但 `error` 里带上游状态码 + body 前 200 字符） |
+| 余额/配额耗尽 | 402 `insufficient_balance`（带上游摘要） |
+| 全部候选单元限流 | 429 `rate_limit_error` + `Retry-After` |
+| 模型无任何单元可服务 | 400 `invalid_request_error`（配置/模型错误） |
+| 单元因 route/transport 冷却 | 503 `no_healthy_account` |
+| 其它未分类上游失败 | 502，错误中带上游状态码 + body 摘要 |
 
 日志 `error` 字段必须带上游状态码与 body 摘要（当前只有 `upstream workbuddycn returned 404`，
 排查时看不到 relay 的真实原因）。
 
 ## 5. 兼容与迁移
+
+- 用户可配置的错误切换策略已删除。配置中的旧字段会被校验拒绝；不提供兼容或自动迁移。
+- 冷却字段 `rateLimitSeconds`、`quotaExhaustedSeconds`、`defaultSeconds` 为 `0` 时表示不执行该类本地冷却；不会改变错误是否可重试。
+- 策略重试默认最多 3 次（含首次），默认固定间隔 0.5 秒。可配置 1–5 次，或使用“无限（时限）”并设置 1–86400 秒的单目标时限。
 
 - `members[].model` 缺省 = 旧行为，`llm-config-loader.ts` 无需迁移，只加校验：
   - `model` 必须是非空字符串；
@@ -210,7 +212,7 @@ export interface Plan {
 | 阶段 | 内容 | 状态 | 验收 |
 |---|---|---|---|
 | P1 | `members[].model` + planner 单元化 + execute 单元循环 | ✅ 已完成 | planner 38 条 + gateway 46 条测试全绿 |
-| P2 | route 冷却 + 错误分类拆分 + 状态码映射 | ✅ 已完成 | `llm-switch-units.test.ts` 7 条：单元回退、路由冷却隔离、402、body 摘要、policy stop |
+| P2 | route 冷却 + 错误分类拆分 + 状态码映射 | ✅ 已完成 | `llm-switch-units.test.ts` 覆盖单元回退、路由冷却隔离、402 与 body 摘要 |
 | P3 | UI 单元列表 + 顺序编辑 + 配置校验 | ✅ 已完成 | 策略卡显示「N 个切换单元」与顺序；弹窗 ↑/↓ 即试错顺序；加载器拒绝重复单元 |
 | P4 | 文档 + 使用记录新增 `unitId` 列 | ✅ 已完成 | 日志新增「单元」列，旧行显示 — |
 
@@ -239,4 +241,13 @@ export interface Plan {
 
 请求 `A1` 时只走前两个单元（第三个只服务 `B1`）；`upstreamModel` 用来表达「同一个公开名在 B 家是不同的上游 id」。
 
-旧配置不需要迁移：没有 `model` 的成员仍然表示「该提供商的任意模型」，行为与改造前一致。
+没有 `model` 的成员仍表示「该提供商的任意模型」。错误切换由网关内置规则决定，旧配置不再兼容已删除的用户自定义错误策略。
+
+## 10. 网关重试与冷却语义
+
+- **尝试目标**是模型 + 提供商 + Key；无 Key 时是模型 + 提供商。次数包含首次请求。有限次数为 1–5；“无限（时限）”只对可重试错误生效，时限范围 1–86400 秒，默认 300 秒。
+- **间隔**支持固定间隔和指数退避。固定间隔默认 0.5 秒；指数退避基数为 1、2、4、8、16、30… 秒（基数最高 30 秒），再加入 0–10% 随机抖动。上游 `Retry-After` 不受本地退避基数上限限制，必须至少等待上游要求的时间。
+- **429 且本地限流冷却大于 0**：立即切换到策略中的下一个路由单元，不再尝试当前提供商的其它 Key；冷却当前 Key（无 Key 时仅冷却当前模型路由）。冷却期至少为本地限流递增阶梯计算值和 `Retry-After` 中较长者。
+- **429 且本地限流冷却为 0**：不执行本地冷却；若上游提供 `Retry-After`，当前重试遵守该最短等待时间，然后按尝试预算重试同一 Key。预算耗尽后换 Key 或下一个路由单元。
+- 传输失败、首字节超时、配置允许的 5xx 和流式截断可在同一目标重试；认证/配额失败改走其他 Key；模型不存在时冷却当前路由并切换；无效请求终止。
+- `rateLimitSeconds`、`quotaExhaustedSeconds`、`defaultSeconds` 为 0 时分别表示不执行该类本地冷却；0 不改变错误本身能否重试。

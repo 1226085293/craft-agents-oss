@@ -211,7 +211,12 @@ export class KeyPool {
    * token estimate — and returns the reservation so the caller can reconcile it
    * with the response's real usage. The caller does not need to record it.
    */
-  async next(model: string | null, sessionKey?: string, tokens = 0): Promise<KeySelection> {
+  async next(
+    model: string | null,
+    sessionKey?: string,
+    tokens = 0,
+    excludedKeys: ReadonlySet<string> = new Set(),
+  ): Promise<KeySelection> {
     const release = await this.acquire();
     try {
       if (this.items.length === 0) throw new AllKeysUnavailableError(model);
@@ -220,7 +225,7 @@ export class KeyPool {
       let hadBinding = false;
       if (sessionKey && this.stickyTtlSeconds > 0) {
         hadBinding = this.sticky.has(sessionKey);
-        const hit = this.stickyHit(sessionKey, model, tokens);
+        const hit = this.stickyHit(sessionKey, model, tokens, excludedKeys);
         if (hit) {
           // Selection is the reservation: counting in-flight here (instead of
           // in the caller's dispatch step) closes the race where two requests
@@ -240,7 +245,7 @@ export class KeyPool {
         }
       }
 
-      const picked = this.nextLocked(model, tokens);
+      const picked = this.nextLocked(model, tokens, excludedKeys);
       const migrated = hadBinding;
 
       if (sessionKey && this.stickyTtlSeconds > 0) {
@@ -264,7 +269,36 @@ export class KeyPool {
     }
   }
 
-  private nextLocked(model: string | null, tokens: number): { keyId: string; reservation: WindowEntry } {
+  /** Reserve the same key for the current request's retry, bypassing cooling only. */
+  async retrySameKey(keyId: string, model: string | null, tokens = 0): Promise<KeySelection> {
+    const release = await this.acquire();
+    try {
+      if (!this.items.includes(keyId)) throw new AllKeysUnavailableError(model);
+      if (this.atCapacity(keyId)) throw new AllKeysUnavailableError(model, 'concurrency');
+      const rules = this.rulesFor(keyId);
+      if (this.state.isTprExceeded(model, tokens, rules)) throw new AllKeysUnavailableError(model, 'tpr');
+      if (this.state.isRateLimited(keyId, model, rules, this.windows, { commit: false, ignoreCooling: true })) {
+        throw new AllKeysUnavailableError(model, 'cooling');
+      }
+      const reservation = this.state.commitRequest(keyId, model, rules, this.windows, tokens);
+      this.reserve(keyId);
+      return {
+        keyId,
+        sticky: false,
+        migrated: false,
+        model: model ?? 'default',
+        reservation,
+      };
+    } finally {
+      release();
+    }
+  }
+
+  private nextLocked(
+    model: string | null,
+    tokens: number,
+    excludedKeys: ReadonlySet<string>,
+  ): { keyId: string; reservation: WindowEntry } {
     if (this.items.length === 0) throw new AllKeysUnavailableError(model);
 
     const startCursor = this.cursor;
@@ -275,7 +309,7 @@ export class KeyPool {
 
     // Bound the scan: each key is visited at most once.
     while (tried.size < this.items.length) {
-      const keyId = this.pickCandidate(model, tried);
+      const keyId = this.pickCandidate(model, tried, excludedKeys);
       // `''` is the synthetic key of a keyless provider — a valid selection, so
       // only a genuine "no candidate" (null) ends the scan.
       if (keyId === null) break;
@@ -362,9 +396,13 @@ export class KeyPool {
     }
   }
 
-  private pickCandidate(model: string | null, alreadyTried: Set<string>): string | null {
+  private pickCandidate(
+    model: string | null,
+    alreadyTried: Set<string>,
+    excludedKeys: ReadonlySet<string>,
+  ): string | null {
     for (const id of this.candidateOrder()) {
-      if (alreadyTried.has(id)) continue;
+      if (alreadyTried.has(id) || excludedKeys.has(id)) continue;
       if (this.state.isCooling(id)) continue;
       return id;
     }
@@ -389,11 +427,12 @@ export class KeyPool {
     sessionKey: string,
     model: string | null,
     tokens: number,
+    excludedKeys: ReadonlySet<string>,
   ): { keyId: string; reservation: WindowEntry } | null {
     const bound = this.sticky.get(sessionKey);
     if (!bound) return null;
     const [item, ts] = bound;
-    if (!this.items.includes(item)) {
+    if (!this.items.includes(item) || excludedKeys.has(item)) {
       this.sticky.delete(sessionKey);
       return null;
     }
@@ -459,11 +498,11 @@ export class KeyPool {
     const release = await this.acquire();
     try {
       const durations = this.cooldowns.get(keyId) ?? DEFAULT_COOLDOWNS;
-      const seconds = secondsOverride ?? (
+      const seconds = Math.max(0, Math.floor(secondsOverride ?? (
         reason === 'quota' ? durations.quotaSeconds : durations.defaultSeconds
-      );
-      this.applyCooling(keyId, seconds);
-      return Math.max(1, Math.floor(seconds));
+      )));
+      if (seconds > 0) this.applyCooling(keyId, seconds);
+      return seconds;
     } finally {
       release();
     }
@@ -510,7 +549,7 @@ export class KeyPool {
     const release = await this.acquire();
     try {
       const seconds = this.computeRateLimitSeconds(keyId, signal, this.clock());
-      this.applyCooling(keyId, seconds);
+      if (seconds > 0) this.applyCooling(keyId, seconds);
       return seconds;
     } finally {
       release();
@@ -527,25 +566,37 @@ export class KeyPool {
     now: number,
   ): number {
     const durations = this.cooldowns.get(keyId) ?? DEFAULT_COOLDOWNS;
+    const retryAfter = typeof signal.retryAfterSeconds === 'number' && signal.retryAfterSeconds > 0
+      ? Math.max(1, Math.ceil(signal.retryAfterSeconds))
+      : 0;
+
+    // Explicit zero disables the local 429 escalation ladder. Provider hints
+    // are still honored as external retry/cooldown requirements.
+    if (durations.rateLimitSeconds === 0) {
+      this.rateLimitStreak.delete(keyId);
+      if (retryAfter > 0) return retryAfter;
+      return signal.dayLevel ? secondsUntilNextUtcDay(now) : 0;
+    }
+
     const prev = this.rateLimitStreak.get(keyId);
     const count = prev && now - prev.at <= RATE_LIMIT_STREAK_WINDOW ? prev.count + 1 : 1;
     this.rateLimitStreak.set(keyId, { count, at: now });
 
-    let seconds: number;
-    if (typeof signal.retryAfterSeconds === 'number' && signal.retryAfterSeconds > 0) {
-      seconds = signal.retryAfterSeconds;
-    } else if (signal.dayLevel) {
-      seconds = secondsUntilNextUtcDay(now);
+    let localSeconds: number;
+    if (signal.dayLevel) {
+      localSeconds = secondsUntilNextUtcDay(now);
     } else if (count === 1) {
-      seconds = secondsUntilNextMinute(now);
+      localSeconds = secondsUntilNextMinute(now);
     } else if (count === 2) {
-      seconds = durations.rateLimitSeconds;
+      localSeconds = durations.rateLimitSeconds;
     } else if (count === 3) {
-      seconds = Math.max(durations.rateLimitSeconds * 5, 300);
+      localSeconds = Math.max(durations.rateLimitSeconds * 5, 300);
     } else {
-      seconds = secondsUntilNextUtcDay(now);
+      localSeconds = secondsUntilNextUtcDay(now);
     }
-    return Math.max(1, Math.min(Math.floor(seconds), durations.quotaSeconds));
+    // Preserve the escalation ladder, extending its wait to at least
+    // Retry-After; quota cooldown is not a rate-limit ceiling.
+    return Math.max(1, Math.floor(localSeconds), retryAfter);
   }
 
   /** Reset a key's 429 escalation after a successful response. */
@@ -599,14 +650,18 @@ export class KeyPool {
    * upstream failures" stays 503. The reported cause/recovery belongs to the
    * soonest-recovering key — a client retrying then has a live key to hit.
    */
-  async availability(model: string | null): Promise<KeyAvailability> {
+  async availability(
+    model: string | null,
+    excludedKeys: ReadonlySet<string> = new Set(),
+  ): Promise<KeyAvailability> {
     const release = await this.acquire();
     try {
-      if (this.items.length === 0) {
+      if (this.items.length === 0 || this.items.every((id) => excludedKeys.has(id))) {
         return { available: false, reason: 'cooling', retryAfterSeconds: 0 };
       }
       let best: KeyAvailability | null = null;
       for (const id of this.items) {
+        if (excludedKeys.has(id)) continue;
         if (this.state.isCooling(id)) {
           best = soonest(best, {
             available: false,

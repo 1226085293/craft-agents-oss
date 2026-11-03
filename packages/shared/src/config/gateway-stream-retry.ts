@@ -4,8 +4,12 @@ export const GATEWAY_STREAM_TRUNCATION_RETRY_MARKER = 'CRAFT_GATEWAY_STREAM_TRUN
 export const GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER = 'CRAFT_GATEWAY_STREAM_TRUNCATION_EXHAUSTED'
 
 export interface GatewayStreamRetryState {
-  /** Number of stream attempts already made for each `unitId::keyId` route. */
+  /** Number of stream attempts already made for each `unitId::keyId` target. */
   attemptsByRoute: Map<string, number>
+  /** First-attempt timestamp per target, retained across same-turn continuations. */
+  startedAtByRoute: Map<string, number>
+  /** Targets whose finite or time budget has been exhausted. */
+  exhaustedRoutes: Set<string>
   /** Total upstream attempts across route/key changes for this logical request. */
   totalAttempts: number
   lastUsedAt: number
@@ -66,6 +70,8 @@ export class GatewayStreamRetryStateStore {
 
     const state: GatewayStreamRetryState = {
       attemptsByRoute: new Map(),
+      startedAtByRoute: new Map(),
+      exhaustedRoutes: new Set(),
       totalAttempts: 0,
       lastUsedAt: now,
     }

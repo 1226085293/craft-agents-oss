@@ -238,20 +238,18 @@ describe('LlmGateway — switching units', () => {
     expect(row.error).toContain('no such model: flash');
   });
 
-  it('honours switchPolicy stop: no second unit is attempted', async () => {
+  it('uses built-in model-not-found routing and advances to the next unit', async () => {
     const { impl, calls } = stubUpstream([
       { status: 404, body: JSON.stringify({ error: { message: 'model not found' } }) },
+      { status: 200, body: SSE_OK },
     ]);
-    gateway = new LlmGateway({
-      getConfig: () => sharedModelConfig({ switchPolicy: { model_not_found: 'stop' } }),
-      fetchImpl: impl,
-    });
+    gateway = new LlmGateway({ getConfig: () => sharedModelConfig(), fetchImpl: impl });
     await gateway.start();
 
     const res = await post(gateway, 'shared');
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
     await res.text();
-    expect(calls).toHaveLength(1);
+    expect(calls.map((call) => call.body.model)).toEqual(['flash', 'hy4']);
   });
 
   it('cools the route, not the shared key, when a keyless relay rate-limits one model', async () => {

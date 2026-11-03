@@ -243,7 +243,13 @@ export interface LlmStrategyShape {
     maxEntries?: number
     scope?: 'session' | 'session+model'
   }
-  retry?: { maxAttempts?: number; backoffMs?: number }
+  retry?: {
+    maxAttempts?: number | 'unlimited'
+    maxDurationSeconds?: number
+    intervalMode?: 'fixed' | 'exponential'
+    backoffMs?: number
+    onStatusCodes?: number[]
+  }
   /** Compact the session after the gateway switches its key/model. Default on. */
   compactAfterSwitch?: boolean
   cooldown?: {

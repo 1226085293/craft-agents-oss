@@ -260,10 +260,10 @@ export class RateLimitState {
     model: string | null,
     rules: RateLimitRule[],
     windows: WindowIndex,
-    { commit, tokens = 0 }: { commit: boolean; tokens?: number },
+    { commit, tokens = 0, ignoreCooling = false }: { commit: boolean; tokens?: number; ignoreCooling?: boolean },
   ): boolean {
     const now = this.now();
-    if (this.isCooling(item)) return true;
+    if (!ignoreCooling && this.isCooling(item)) return true;
 
     const modelKey = model || 'default';
     const byModel = windows.get(item) ?? new Map<string, Map<string, WindowEntry[]>>();

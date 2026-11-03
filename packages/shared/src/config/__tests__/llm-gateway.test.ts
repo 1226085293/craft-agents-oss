@@ -125,12 +125,17 @@ describe('LlmGateway', () => {
     if (sandboxDir) process.env.CRAFT_CONFIG_DIR = sandboxDir;
   });
 
-  async function start(cfg: LlmConfig, responses: StubResponse[]) {
+  async function start(
+    cfg: LlmConfig,
+    responses: StubResponse[],
+    waitForRetry?: (ms: number) => Promise<void>,
+  ) {
     const stub = stubUpstream(responses);
     gateway = new LlmGateway({
       getConfig: () => cfg,
       fetchImpl: stub.impl,
       log: (m) => logs.push(m),
+      ...(waitForRetry ? { waitForRetry } : {}),
     });
     await gateway.start();
     return stub;
@@ -278,29 +283,89 @@ describe('LlmGateway', () => {
     expect(keys).toEqual(['sk-solo-SECRET-1', 'sk-solo-SECRET-2']);
   });
 
-  it('retries on another key of the same provider after a 429', async () => {
-    const cfg = config();
+  it('advances immediately after a 429 when local rate-limit cooldown is positive', async () => {
+    const cfg = config({
+      presets: { limited: { rateLimitSeconds: 30, quotaExhaustedSeconds: 60 } },
+      providers: [
+        provider('p1', { defaultPreset: 'limited', keys: [{ id: 'p1-k1', key: 'sk-p1-1' }] }),
+        provider('p2', { defaultPreset: 'limited', keys: [{ id: 'p2-k1', key: 'sk-p2-1' }] }),
+      ],
+    });
+    cfg.strategies[0]!.members = [{ provider: 'p1' }, { provider: 'p2' }];
     const stub = await start(cfg, [
-      { status: 429, body: JSON.stringify({ error: 'rate limited' }) },
-      { status: 200, body: JSON.stringify({ id: 'ok-after-retry' }) },
+      { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '90' }, body: JSON.stringify({ error: 'rate limited' }) },
+      { status: 200, body: JSON.stringify({ id: 'next-unit' }) },
     ]);
 
     const res = await post(gateway, {});
     expect(res.status).toBe(200);
-    expect((await readJson(res)).id).toBe('ok-after-retry');
-    // A 429 belongs to the account, not the provider: the next key is the
-    // cheapest retry, so both calls stay on p1.
-    expect(stub.calls.length).toBe(2);
-    const hosts = stub.calls.map((c) => new URL(c.url).hostname);
-    expect(new Set(hosts)).toEqual(new Set(['p1.example.com']));
-    const keys = stub.calls.map((c) => (c.init?.headers as Record<string, string>)['x-api-key']);
-    expect(new Set(keys).size).toBe(2);
+    expect((await readJson(res)).id).toBe('next-unit');
+    expect(stub.calls.map((call) => new URL(call.url).hostname)).toEqual(['p1.example.com', 'p2.example.com']);
+    expect(gateway.keyStates().find((key) => key.provider === 'p1' && key.keyId === 'p1-k1')?.cooldownRemaining).toBeGreaterThanOrEqual(90);
   });
 
-  it('moves to the next provider once every key of the first is limited', async () => {
-    const cfg = config();
+  it('skips sibling keys and advances to the next unit after a positive-cooldown 429', async () => {
+    const cfg = config({
+      presets: { limited: { rateLimitSeconds: 3600 } },
+      providers: [
+        provider('p1', { defaultPreset: 'limited' }),
+        provider('p2', { defaultPreset: 'limited', keys: [{ id: 'p2-k1', key: 'sk-p2-1' }] }),
+      ],
+    });
+    cfg.strategies[0]!.members = [{ provider: 'p1' }, { provider: 'p2' }];
     const stub = await start(cfg, [
       { status: 429, body: JSON.stringify({ error: 'rate limited' }) },
+      { status: 200, body: JSON.stringify({ id: 'next-unit-not-next-key' }) },
+    ]);
+
+    const res = await post(gateway, {});
+    expect(res.status).toBe(200);
+    expect((await readJson(res)).id).toBe('next-unit-not-next-key');
+    expect(stub.calls.map((call) => new URL(call.url).hostname)).toEqual(['p1.example.com', 'p2.example.com']);
+    expect(stub.calls.map((call) => (call.init?.headers as Record<string, string>)['x-api-key']))
+      .toEqual(['sk-p1-SECRET-1', 'sk-p2-1']);
+    expect(gateway.keyStates().find((key) => key.provider === 'p1' && key.keyId === 'p1-k1')?.cooldownRemaining)
+      .toBeGreaterThan(0);
+    expect(gateway.keyStates().find((key) => key.provider === 'p1' && key.keyId === 'p1-k1')?.cooldownRemaining)
+      .toBeLessThanOrEqual(60);
+  });
+
+  it('retries the same key after a 429 when local rate-limit cooldown is zero', async () => {
+    const cfg = config({
+      presets: { noCooldown: { rateLimitSeconds: 0, quotaExhaustedSeconds: 0, defaultSeconds: 0 } },
+      providers: [provider('p1', {
+        defaultPreset: 'noCooldown',
+        keys: [{ id: 'p1-k1', key: 'sk-p1-1' }],
+      })],
+      strategies: [{
+        id: 'auto',
+        type: 'round_robin',
+        members: [{ provider: 'p1' }],
+        retry: { maxAttempts: 2, backoffMs: 0 },
+      }],
+      clientKeys: [{ key: 'sk-client', strategies: ['auto'] }],
+    });
+    const waits: number[] = [];
+    const stub = await start(cfg, [
+      { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '1' }, body: JSON.stringify({ error: 'rate limited' }) },
+      { status: 200, body: JSON.stringify({ id: 'same-key-retry' }) },
+    ], async (ms) => { waits.push(ms); });
+
+    const res = await post(gateway, {});
+    expect(res.status).toBe(200);
+    expect((await readJson(res)).id).toBe('same-key-retry');
+    expect(stub.calls).toHaveLength(2);
+    expect(stub.calls.map((call) => (call.init?.headers as Record<string, string>)['x-api-key']))
+      .toEqual(['sk-p1-1', 'sk-p1-1']);
+    expect(waits).toEqual([1000]);
+    expect(gateway.status().coolingKeys).toBe(1);
+    expect(gateway.keyStates().find((key) => key.provider === 'p1' && key.keyId === 'p1-k1')?.cooldownRemaining)
+      .toBeGreaterThan(0);
+  });
+
+  it('moves to the next provider on positive-cooldown 429 without retrying another key', async () => {
+    const cfg = config();
+    const stub = await start(cfg, [
       { status: 429, body: JSON.stringify({ error: 'rate limited' }) },
       { status: 200, body: JSON.stringify({ id: 'ok-on-p2' }) },
     ]);
@@ -308,10 +373,11 @@ describe('LlmGateway', () => {
     const res = await post(gateway, {});
     expect(res.status).toBe(200);
     expect((await readJson(res)).id).toBe('ok-on-p2');
-    expect(stub.calls.length).toBe(3);
-    expect(new Set(stub.calls.map((c) => new URL(c.url).hostname))).toEqual(
-      new Set(['p1.example.com', 'p2.example.com']),
-    );
+    expect(stub.calls.length).toBe(2);
+    expect(stub.calls.map((call) => new URL(call.url).hostname)).toEqual([
+      'p1.example.com',
+      'p2.example.com',
+    ]);
   });
 
   it('moves to the next provider when one key fails at the transport level', async () => {

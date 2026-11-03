@@ -32,9 +32,6 @@ import type {
   LlmProvider,
   LlmStrategy,
   LlmPreset,
-  LlmSwitchAction,
-  LlmSwitchFailure,
-  LlmSwitchPolicy,
 } from './llm-config.ts';
 import { maskKey } from './llm-config.ts';
 import { rulesForModel, type RateLimitRule, type WindowEntry } from './llm-rate-limiter.ts';
@@ -60,14 +57,17 @@ import { loadCooldowns, saveCooldowns, cooldownKey } from './llm-cooldown-store.
 import {
   candidateUnits,
   planRequest,
+  resolveRetryPolicy,
   resolveStrategyForClientKey,
   type Plan,
   type PlannedUnit,
+  type RetryPolicy,
 } from './llm-planner.ts';
 import { transcodeRequestToOpenAI, openAIHeaders } from './llm-transcode-request.ts';
 import { ResponseTranscoder, transcodeResponseToAnthropic } from './llm-transcode-response.ts';
 import { DEFAULT_PRESET, resolvePreset, resolvePresetId } from './llm-config.ts';
 import { chatEndpointFor, modelsEndpointFor } from './llm-endpoint.ts';
+import { retryDelayMs, targetBudgetAllowsRetry } from './llm-retry.ts';
 import {
   GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER,
   GATEWAY_STREAM_TRUNCATION_RETRY_MARKER,
@@ -87,6 +87,8 @@ export interface LlmGatewayOptions {
   getConfig: () => LlmConfig;
   /** Injectable transport, so tests never touch the network. */
   fetchImpl?: typeof fetch;
+  /** Injectable retry wait; production defaults to a real timer. */
+  waitForRetry?: (ms: number) => Promise<void>;
   /** Log sink. Must tolerate being called with masked values only. */
   log?: (message: string) => void;
   /**
@@ -335,32 +337,6 @@ const ENDPOINT_COOLDOWN_PREFIX = 'endpoint|';
 /** A model that cannot be served is retried after this, not before. */
 const DEFAULT_ROUTE_COOLDOWN_SECONDS = 300;
 
-/**
- * See `LlmStrategy.switchPolicy`; these are the shipped defaults.
- *
- * `transport` is `retry-same` for the same reason `server_error` is: an
- * aborted connection or a first-byte timeout is the *one* failure a retry can
- * plausibly fix, and both surface to the user as the same 503 ("no healthy
- * account"). Giving up after a single one dropped a whole model out of a
- * group on a transient blip while the retry budget the user configured sat
- * unspent (2026-10-30, deepseek-v4.1-flash → hy4-preview after one aborted
- * request). The budget is `retry.maxAttempts`, so "retry 3 times" now means
- * three tries on the route before the group moves on.
- *
- * The account-level kinds stay on `next-*` on purpose: a 429 that names its
- * own reset (60124s), an empty balance or a revoked key is not going to
- * answer differently on the second identical request — the account has to
- * change, which is exactly what those actions do.
- */
-const DEFAULT_SWITCH_POLICY: Required<LlmSwitchPolicy> = {
-  rate_limit: 'next-key',
-  quota: 'next-key',
-  auth: 'next-key',
-  model_not_found: 'next-unit',
-  transport: 'retry-same',
-  server_error: 'retry-same',
-};
-
 /** See `LlmGateway.execute`: an attempt waiting for its log row. */
 interface PendingAttempt {
   unitId: string;
@@ -378,6 +354,7 @@ interface PendingAttempt {
 export class LlmGateway {
   private readonly getConfig: LlmGatewayOptions['getConfig'];
   private readonly fetchImpl: typeof fetch;
+  private readonly waitForRetry: (ms: number) => Promise<void>;
   private readonly log: (message: string) => void;
   private readonly onRouteChanged?: LlmGatewayOptions['onRouteChanged'];
 
@@ -452,6 +429,7 @@ export class LlmGateway {
   constructor(options: LlmGatewayOptions) {
     this.getConfig = options.getConfig;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.waitForRetry = options.waitForRetry ?? sleep;
     this.log = options.log ?? (() => {});
     this.onRouteChanged = options.onRouteChanged;
     this.rebuild();
@@ -954,7 +932,15 @@ export class LlmGateway {
         // route/endpoint is cooling, so the planner never picks a unit that
         // cannot serve the request. When that leaves nothing, the planner
         // throws and we fall through below.
-        const availability = await this.unavailableUnitsFor(current, publicModel);
+        const streamExhaustedUnits = streamRetryState
+          ? this.exhaustedStreamUnits(config, current, publicModel, streamRetryState)
+          : new Set<string>();
+        const availability = await this.unavailableUnitsFor(
+          current,
+          publicModel,
+          streamExhaustedUnits,
+          streamRetryState,
+        );
 
         let plan: ReturnType<typeof planRequest>;
         try {
@@ -1120,8 +1106,8 @@ export class LlmGateway {
     const markStage = (stage: string): void => {
       if (stageMs[stage] === undefined) stageMs[stage] = Date.now() - requestStartedAt;
     };
-    // Same-key transient retry budget, from the strategy's "失败重试上限".
-    const maxAttempts = plan.retry.maxAttempts;
+    // Same-target attempt policy for one provider/model/key selection.
+    const retryPolicy = plan.retry;
     let attempt = 0;
     let logicalAttempt = streamRetryState?.totalAttempts ?? 0;
     let lastError = '';
@@ -1200,13 +1186,6 @@ export class LlmGateway {
       });
     };
 
-    // Strategy-level policy, with the shipped defaults for anything unset.
-    const policy: Required<LlmSwitchPolicy> = {
-      ...DEFAULT_SWITCH_POLICY,
-      ...(plan.strategy.switchPolicy ?? {}),
-    };
-    const switchAction = (failure: LlmSwitchFailure): LlmSwitchAction => policy[failure];
-
     // One pass per switching unit. A unit is a (provider, model) route: the
     // key ladder runs inside it, and only when it is spent does the request
     // move to the next model/provider the strategy declares.
@@ -1271,6 +1250,7 @@ export class LlmGateway {
       const keyBudget = Math.min(Math.max(1, enabledKeys), MAX_KEY_TRIES_PER_PROVIDER);
       let keyTries = 0;
       let keyAttempts = 0;
+      let targetStartedAtMs = Date.now();
       // Placeholder until the first successful `pickKey()`; every read of it
       // below happens after that, and `pooled: false` keeps the placeholder
       // inert for release/cool if it ever were not.
@@ -1279,6 +1259,7 @@ export class LlmGateway {
         pooled: boolean;
         reservation?: WindowEntry;
       } = { keyId: '', pooled: false };
+      let reservationHeld = false;
 
       /**
        * Take this provider's next usable key (skipping cooling / rate-limited
@@ -1288,10 +1269,17 @@ export class LlmGateway {
        */
       const pickKey = async (): Promise<boolean> => {
         try {
-          const picked = await pool.next(upstreamModel, sessionKey, estimatedTokens);
+          const excludedStreamKeys = streamRetryState
+            ? this.exhaustedStreamKeys(streamRetryState, unit.id, retryPolicy)
+            : new Set<string>();
+          const picked = await pool.next(upstreamModel, sessionKey, estimatedTokens, excludedStreamKeys);
           selection = { keyId: picked.keyId, pooled: true, reservation: picked.reservation };
+          reservationHeld = true;
           keyTries += 1;
-          keyAttempts = 0;
+          const routeKey = `${unit.id}::${selection.keyId}`;
+          keyAttempts = streamRetryState?.attemptsByRoute.get(routeKey) ?? 0;
+          targetStartedAtMs = streamRetryState?.startedAtByRoute.get(routeKey) ?? Date.now();
+          if (streamRetryState) streamRetryState.startedAtByRoute.set(routeKey, targetStartedAtMs);
           return true;
         } catch (err) {
           const reason = err instanceof AllKeysUnavailableError ? err.reason : 'cooling';
@@ -1306,7 +1294,28 @@ export class LlmGateway {
       if (!(await pickKey())) continue;
 
       const releaseKey = (): void => {
-        if (selection.pooled) pool.finishRequest(selection.keyId);
+        if (!selection.pooled || !reservationHeld) return;
+        pool.finishRequest(selection.keyId);
+        reservationHeld = false;
+      };
+      const retrySameTarget = async (
+        retryAfterSeconds = 0,
+        precomputedDelayMs?: number,
+      ): Promise<boolean> => {
+        const delayMs = precomputedDelayMs ?? retryDelayMs(retryPolicy, keyAttempts, retryAfterSeconds);
+        if (!targetBudgetAllowsRetry(retryPolicy, keyAttempts, targetStartedAtMs, Date.now(), delayMs)) return false;
+        const retryKeyId = selection.keyId;
+        releaseKey();
+        if (delayMs > 0) await this.waitForRetry(delayMs);
+        if (!targetBudgetAllowsRetry(retryPolicy, keyAttempts, targetStartedAtMs, Date.now())) return false;
+        try {
+          const picked = await pool.retrySameKey(retryKeyId, upstreamModel, estimatedTokens);
+          selection = { keyId: picked.keyId, pooled: true, reservation: picked.reservation };
+          reservationHeld = true;
+          return true;
+        } catch {
+          return false;
+        }
       };
       const coolKey = async (kind: 'default' | 'rate_limit' | 'quota', signal?: RateLimitSignal): Promise<number> => {
         if (!selection.pooled) return 0;
@@ -1343,10 +1352,9 @@ export class LlmGateway {
         return keyTries < keyBudget && (await pickKey());
       };
 
-      // Same-key retry: a transient failure retries THIS key up to
-      // `maxAttempts`; when the key is done it is cooled and the next key of the
-      // provider is tried, then the next provider.
-      // Rate-limit / quota / deterministic failures cool + rotate immediately.
+      // Same-target retry: transient failures retry this model/provider/key up
+      // to its configured attempt or time budget. Rate-limit, quota and
+      // deterministic failures follow their built-in switching rules.
       for (;;) {
         // Leaving an attempt behind: give it its own row before the next one
         // starts. Runs on the same-key retry, the key rotation and the
@@ -1355,7 +1363,18 @@ export class LlmGateway {
         flushPendingAttempt();
         attempt += 1;
         logicalAttempt = streamRetryState ? ++streamRetryState.totalAttempts : attempt;
-        keyAttempts += 1;
+        if (streamRetryState) {
+          const routeKey = `${unit.id}::${selection.keyId}`;
+          const attempts = (streamRetryState.attemptsByRoute.get(routeKey) ?? 0) + 1;
+          streamRetryState.attemptsByRoute.set(routeKey, attempts);
+          streamRetryState.startedAtByRoute.set(
+            routeKey,
+            streamRetryState.startedAtByRoute.get(routeKey) ?? targetStartedAtMs,
+          );
+          keyAttempts = attempts;
+        } else {
+          keyAttempts += 1;
+        }
         // Stamp the target before the call so the failure row can name it even
         // when the attempt itself throws.
         lastProvider = provider.id;
@@ -1376,10 +1395,9 @@ export class LlmGateway {
           // Connection-level: the endpoint is unreachable, not the account, so
           // another key of the same baseUrl pays the same cost. Cool the
           // route and move to the next unit (2026-10-25 first-byte incident).
-          if (switchAction('transport') === 'retry-same' && keyAttempts < maxAttempts) {
-            releaseKey();
-            if (plan.retry.backoffMs > 0) await sleep(plan.retry.backoffMs);
-            continue;
+          const transportDelayMs = retryDelayMs(retryPolicy, keyAttempts, 0);
+          if (targetBudgetAllowsRetry(retryPolicy, keyAttempts, targetStartedAtMs, Date.now(), transportDelayMs)) {
+            if (await retrySameTarget(0, transportDelayMs)) continue;
           }
           markStage('cooldown_provider');
           this.coolRouteAfterTransport(unit.id, provider, selection.keyId);
@@ -1425,7 +1443,8 @@ export class LlmGateway {
                   publicModel: String(payload.model ?? ''),
                   unitId: unit.id,
                   keyId: selection.keyId,
-                  maxAttempts,
+                  retryPolicy,
+                  targetStartedAtMs,
                   state: streamRetryState,
                   coolKey,
                 })
@@ -1440,10 +1459,9 @@ export class LlmGateway {
             // there is no HTTP status to record — the timeout itself is.
             failAttempt(0, lastError, firstByteMs);
             routeFailure = true;
-            if (switchAction('transport') === 'retry-same' && keyAttempts < maxAttempts) {
-              releaseKey();
-              if (plan.retry.backoffMs > 0) await sleep(plan.retry.backoffMs);
-              continue;
+            const timeoutDelayMs = retryDelayMs(retryPolicy, keyAttempts, 0);
+            if (targetBudgetAllowsRetry(retryPolicy, keyAttempts, targetStartedAtMs, Date.now(), timeoutDelayMs)) {
+              if (await retrySameTarget(0, timeoutDelayMs)) continue;
             }
             markStage('cooldown_provider');
             // The relay was too slow to answer at all: the provider's other
@@ -1527,20 +1545,40 @@ export class LlmGateway {
           rateLimited = true;
           markStage('cooldown_provider');
           const signal = parseRateLimitSignal(response.headers, errorBody);
-          const action = switchAction('rate_limit');
-          if (action === 'stop') break units;
-          if (action === 'next-unit') {
+          const localCooldown = this.rateLimitCooldownSeconds(provider, selection.keyId);
+          if (localCooldown > 0) {
             await coolKey('rate_limit', signal);
             releaseKey();
+            // A positive configured 429 cooldown advances the route unit
+            // immediately; do not spend more keys of this provider on the same
+            // model before the next planned unit.
             break;
           }
-          if (action === 'retry-same' && keyAttempts < maxAttempts) {
-            releaseKey();
-            if (plan.retry.backoffMs > 0) await sleep(plan.retry.backoffMs);
-            continue;
+
+          const upstreamHoldSeconds = (signal.retryAfterSeconds ?? 0) > 0 || signal.dayLevel
+            ? await coolKey('rate_limit', signal)
+            : 0;
+          const retryAfterSeconds = Math.max(signal.retryAfterSeconds ?? 0, upstreamHoldSeconds);
+          const delayMs = retryDelayMs(retryPolicy, keyAttempts, retryAfterSeconds);
+          const retryTarget = targetBudgetAllowsRetry(
+            retryPolicy,
+            keyAttempts,
+            targetStartedAtMs,
+            Date.now(),
+            delayMs,
+          );
+          if (retryTarget) {
+            // When cooldown is explicitly zero, `upstreamHoldSeconds` above
+            // has persisted only the upstream reset hold; the current request
+            // may still retry its reserved target after the requested delay.
+            if (await retrySameTarget(retryAfterSeconds, delayMs)) continue;
           }
-          if (!(await rotateKey('rate_limit', signal))) break;
-          continue;
+
+          // No local cooldown and no retry budget left: move to another key
+          // without applying a local rate-limit cooldown.
+          releaseKey();
+          if (keyTries < keyBudget && await pickKey()) continue;
+          break;
         }
 
         if (failure.kind === 'quota') {
@@ -1549,31 +1587,12 @@ export class LlmGateway {
           // 402 rather than a rate limit.
           quotaExhausted = true;
           markStage('cooldown_provider');
-          const action = switchAction('quota');
-          if (action === 'stop') break units;
-          if (action === 'next-unit') {
-            await coolKey('quota');
-            releaseKey();
-            break;
-          }
-          if (action === 'retry-same' && keyAttempts < maxAttempts) {
-            releaseKey();
-            if (plan.retry.backoffMs > 0) await sleep(plan.retry.backoffMs);
-            continue;
-          }
           if (!(await rotateKey('quota'))) break;
           continue;
         }
 
         if (failure.kind === 'auth') {
           markStage('cooldown_provider');
-          const action = switchAction('auth');
-          if (action === 'stop') break units;
-          if (action === 'next-unit') {
-            await coolKey('quota');
-            releaseKey();
-            break;
-          }
           // A revoked/forbidden key stays that way for a while; cooling it as a
           // quota failure keeps it out of the rotation without hiding the model.
           if (!(await rotateKey('quota'))) break;
@@ -1586,8 +1605,6 @@ export class LlmGateway {
           // account down with it (261027-long-bronze).
           routeFailure = true;
           markStage('cooldown_provider');
-          const action = switchAction('model_not_found');
-          if (action === 'stop') break units;
           this.coolUnit(unit.id, this.routeCooldownSeconds(provider, selection.keyId));
           releaseKey();
           break;
@@ -1602,21 +1619,14 @@ export class LlmGateway {
 
         // 5xx / timeout-ish: retry the same key while the budget allows, then
         // rotate the account as a last resort before leaving the unit.
-        const action = switchAction('server_error');
-        if (action === 'stop') break units;
-        if (action === 'next-unit') {
-          markStage('cooldown_provider');
-          await coolKey('default');
-          releaseKey();
-          break;
-        }
-        if (!plan.retry.onStatusCodes.includes(code) || keyAttempts >= maxAttempts) {
+        const nextDelay = retryDelayMs(retryPolicy, keyAttempts, 0);
+        const canRetrySameTarget = plan.retry.onStatusCodes.includes(code) &&
+          targetBudgetAllowsRetry(retryPolicy, keyAttempts, targetStartedAtMs, Date.now(), nextDelay);
+        if (!canRetrySameTarget || !(await retrySameTarget(0, nextDelay))) {
           markStage('cooldown_provider');
           if (!(await rotateKey('default'))) break;
           continue;
         }
-        releaseKey();
-        if (plan.retry.backoffMs > 0) await sleep(plan.retry.backoffMs);
         continue;
         } finally {
           call.settle();
@@ -2494,25 +2504,45 @@ export class LlmGateway {
     publicModel: string;
     unitId: string;
     keyId: string;
-    maxAttempts: number;
+    retryPolicy: RetryPolicy;
+    targetStartedAtMs: number;
     state: GatewayStreamRetryState;
     coolKey: (kind: 'default' | 'rate_limit' | 'quota') => Promise<number>;
   }): Promise<string> {
     const routeKey = `${args.unitId}::${args.keyId}`;
-    const attempts = (args.state.attemptsByRoute.get(routeKey) ?? 0) + 1;
-    args.state.attemptsByRoute.set(routeKey, attempts);
-    if (attempts < args.maxAttempts) return GATEWAY_STREAM_TRUNCATION_RETRY_MARKER;
+    const startedAt = args.state.startedAtByRoute.get(routeKey) ?? args.targetStartedAtMs;
+    args.state.startedAtByRoute.set(routeKey, startedAt);
+    const attempts = args.state.attemptsByRoute.get(routeKey) ?? 1;
+    const delayMs = retryDelayMs(args.retryPolicy, attempts, 0);
+    if (targetBudgetAllowsRetry(args.retryPolicy, attempts, startedAt, Date.now(), delayMs)) {
+      if (delayMs > 0) await this.waitForRetry(delayMs);
+      if (targetBudgetAllowsRetry(args.retryPolicy, attempts, startedAt, Date.now())) {
+        return GATEWAY_STREAM_TRUNCATION_RETRY_MARKER;
+      }
+    }
 
-    // This key has spent its configured stream-attempt budget. Cool only the
-    // account that failed, then let the normal planner choose another key,
-    // route or configured fallback on the client's same-turn continuation.
+    // This target has spent its stream retry budget. Cool only its key, then
+    // exclude the exhausted target so the next continuation selects another
+    // key/model/route or the configured fallback.
     await args.coolKey('default');
+    args.state.exhaustedRoutes.add(routeKey);
 
     const visited = new Set<string>();
     let strategy: LlmStrategy | null = args.strategy;
     while (strategy && !visited.has(strategy.id)) {
       visited.add(strategy.id);
-      const availability = await this.unavailableUnitsFor(strategy, args.publicModel);
+      const exhaustedUnits = this.exhaustedStreamUnits(
+        args.config,
+        strategy,
+        args.publicModel,
+        args.state,
+      );
+      const availability = await this.unavailableUnitsFor(
+        strategy,
+        args.publicModel,
+        exhaustedUnits,
+        args.state,
+      );
       try {
         const plan = planRequest({
           config: args.config,
@@ -2529,11 +2559,49 @@ export class LlmGateway {
     return GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER;
   }
 
+  private exhaustedStreamKeys(
+    state: GatewayStreamRetryState,
+    unitId: string,
+    retryPolicy: RetryPolicy,
+  ): Set<string> {
+    const prefix = `${unitId}::`;
+    const keys = new Set<string>();
+    for (const route of state.exhaustedRoutes) {
+      if (route.startsWith(prefix)) keys.add(route.slice(prefix.length));
+    }
+    for (const [route, startedAt] of state.startedAtByRoute) {
+      if (!route.startsWith(prefix)) continue;
+      const keyId = route.slice(prefix.length);
+      const attempts = state.attemptsByRoute.get(route) ?? 0;
+      if (!targetBudgetAllowsRetry(retryPolicy, attempts, startedAt, Date.now())) keys.add(keyId);
+    }
+    return keys;
+  }
+
+  private exhaustedStreamUnits(
+    config: LlmConfig,
+    strategy: LlmStrategy,
+    publicModel: string,
+    state: GatewayStreamRetryState,
+  ): Set<string> {
+    const exhausted = new Set<string>();
+    for (const unit of candidateUnits(config, strategy, publicModel).units) {
+      const providerKeys = unit.provider.keys.filter((key) => key.enabled !== false);
+      const keyIds = providerKeys.length ? providerKeys.map((key) => key.id) : [''];
+      if (keyIds.every((keyId) => state.exhaustedRoutes.has(`${unit.id}::${keyId}`))) {
+        exhausted.add(unit.id);
+      }
+    }
+    return exhausted;
+  }
+
   private async unavailableUnitsFor(
     strategy: LlmStrategy,
     publicModel: string,
+    additionalExcluded: ReadonlySet<string> = new Set(),
+    streamRetryState?: GatewayStreamRetryState,
   ): Promise<{ excluded: Set<string>; allLimited: boolean; retryAfterSeconds: number }> {
-    const excluded = new Set<string>();
+    const excluded = new Set<string>(additionalExcluded);
     const config = this.getConfig();
     // `allLimited` means "every candidate unit was excluded because its keys are
     // merely rate-limited / busy". It is what separates a 429 from a 503 when
@@ -2552,6 +2620,10 @@ export class LlmGateway {
     const now = Date.now() / 1000;
     for (const unit of candidates.units) {
       sawUnit = true;
+      if (additionalExcluded.has(unit.id)) {
+        allLimited = false;
+        continue;
+      }
       // Route and endpoint cooling are exclusions too — and neither is a rate
       // wall, so they must keep the answer at 503 rather than 429.
       const routeWait = Math.max(
@@ -2570,7 +2642,10 @@ export class LlmGateway {
         allLimited = false;
         continue;
       }
-      const availability = await pool.availability(unit.upstreamModel);
+      const excludedStreamKeys = streamRetryState
+        ? this.exhaustedStreamKeys(streamRetryState, unit.id, resolveRetryPolicy(strategy))
+        : new Set<string>();
+      const availability = await pool.availability(unit.upstreamModel, excludedStreamKeys);
       if (availability.available) {
         allLimited = false;
         continue;
@@ -2595,7 +2670,9 @@ export class LlmGateway {
 
   /** Cool one route: the model is not served here, the account may still be. */
   private coolUnit(unitKey: string, seconds: number): void {
-    const until = Math.floor(Date.now() / 1000) + Math.max(1, Math.floor(seconds));
+    const duration = Math.floor(seconds);
+    if (duration <= 0) return;
+    const until = Math.floor(Date.now() / 1000) + duration;
     this.unitCooling.set(unitKey, until);
     this.persistCooldowns();
   }
@@ -2631,6 +2708,15 @@ export class LlmGateway {
     const until = Math.floor(Date.now() / 1000) + Math.max(1, Math.floor(seconds));
     this.endpointCooling.set(providerId, until);
     this.persistCooldowns();
+  }
+
+  /** Effective local 429 cooldown for a key, or the provider default for a keyless route. */
+  private rateLimitCooldownSeconds(provider: LlmProvider, keyId: string): number {
+    const config = this.getConfig();
+    const preset = keyId
+      ? presetFor(config, provider, keyId)
+      : (config.presets[resolvePresetId(config, provider)] ?? DEFAULT_PRESET);
+    return preset.rateLimitSeconds ?? DEFAULT_PRESET.rateLimitSeconds ?? 60;
   }
 
   /**

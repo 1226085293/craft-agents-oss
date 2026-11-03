@@ -224,21 +224,38 @@ export function validateLlmConfig(input: unknown): string[] {
         });
       }
 
-      // Per-failure switching policy: only the documented actions are accepted,
-      // so a typo does not silently fall back to the default behaviour.
-      const policy = st.switchPolicy;
-      if (policy !== undefined) {
-        if (!isPlainObject(policy)) {
-          errors.push(`${id}: switchPolicy 必须是对象`);
+      if (st.switchPolicy !== undefined) {
+        errors.push(`${id}: switchPolicy 已移除，请删除该字段`);
+      }
+
+      if (st.retry !== undefined) {
+        if (!isPlainObject(st.retry)) {
+          errors.push(`${id}.retry 必须是对象`);
         } else {
-          const validActions = ['retry-same', 'next-key', 'next-unit', 'stop'];
-          for (const [failure, action] of Object.entries(policy as Record<string, unknown>)) {
-            if (!['rate_limit', 'quota', 'auth', 'model_not_found', 'transport', 'server_error'].includes(failure)) {
-              errors.push(`${id}: switchPolicy 含未知失败类型 ${failure}`);
-            }
-            if (typeof action !== 'string' || !validActions.includes(action)) {
-              errors.push(`${id}.switchPolicy.${failure} 需为 ${validActions.join(' / ')}`);
-            }
+          const retry = st.retry as Record<string, unknown>;
+          const attempts = retry.maxAttempts;
+          if (attempts !== undefined && attempts !== 'unlimited' &&
+              (typeof attempts !== 'number' || !Number.isInteger(attempts) || attempts < 1 || attempts > 5)) {
+            errors.push(`${id}.retry.maxAttempts 必须是 1 到 5 的整数或 unlimited`);
+          }
+          const duration = retry.maxDurationSeconds;
+          if (attempts === 'unlimited' &&
+              (typeof duration !== 'number' || !Number.isInteger(duration) || duration < 1 || duration > 86400)) {
+            errors.push(`${id}.retry.maxDurationSeconds 在无限重试时必须是 1 到 86400 的整数`);
+          } else if (duration !== undefined &&
+              (typeof duration !== 'number' || !Number.isInteger(duration) || duration < 1 || duration > 86400)) {
+            errors.push(`${id}.retry.maxDurationSeconds 必须是 1 到 86400 的整数`);
+          }
+          if (retry.intervalMode !== undefined && retry.intervalMode !== 'fixed' && retry.intervalMode !== 'exponential') {
+            errors.push(`${id}.retry.intervalMode 必须是 fixed 或 exponential`);
+          }
+          if (retry.backoffMs !== undefined &&
+              (typeof retry.backoffMs !== 'number' || !Number.isFinite(retry.backoffMs) || retry.backoffMs < 0 || retry.backoffMs > 300000)) {
+            errors.push(`${id}.retry.backoffMs 必须是 0 到 300000 之间的毫秒数`);
+          }
+          if (retry.onStatusCodes !== undefined &&
+              (!Array.isArray(retry.onStatusCodes) || retry.onStatusCodes.some((code) => !Number.isInteger(code) || code < 100 || code > 599))) {
+            errors.push(`${id}.retry.onStatusCodes 必须是 HTTP 状态码数组`);
           }
         }
       }

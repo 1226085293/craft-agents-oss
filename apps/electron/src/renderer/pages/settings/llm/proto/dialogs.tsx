@@ -38,6 +38,8 @@ import {
 } from '../helpers'
 import type { StrategyModelPick } from '../helpers'
 import { parseKeyBlock } from './keyParser'
+import { isRetryDraftValid, retryDraftFromConfig, serializeRetryDraft } from './retrySettings'
+import { RetrySettingsFields } from './RetrySettingsFields'
 
 const WEEK_CN = ['日', '一', '二', '三', '四', '五', '六']
 
@@ -990,8 +992,7 @@ function StrategyEditDialog(props: {
   const [weights, setWeights] = React.useState<Record<string, number>>(view?.weights ?? {})
   const [sticky, setSticky] = React.useState(existing?.stickySession?.enabled !== false)
   const [compactAfterSwitch, setCompactAfterSwitch] = React.useState(existing?.compactAfterSwitch !== false)
-  const [maxAttempts, setMaxAttempts] = React.useState(existing?.retry?.maxAttempts ?? 3)
-  const [backoffMs, setBackoffMs] = React.useState(existing?.retry?.backoffMs ?? 500)
+  const [retryDraft, setRetryDraft] = React.useState(() => retryDraftFromConfig(existing?.retry))
   const [fallbackId, setFallbackId] = React.useState(existing?.fallbackStrategyId ?? '')
 
   // Only the selected members' models — see `strategyModels`.
@@ -1029,6 +1030,12 @@ function StrategyEditDialog(props: {
   const canSave = Boolean(name.trim()) && members.length > 0 && models.length > 0
 
   const save = async (): Promise<void> => {
+    if (!isRetryDraftValid(retryDraft)) {
+      props.toast(retryDraft.maxAttempts === 'unlimited'
+        ? '无限重试时限必须为 1 到 86400 秒的整数'
+        : '固定重试间隔必须为 0 到 300 秒')
+      return
+    }
     if (!name.trim()) {
       props.toast('请填写策略组名称')
       return
@@ -1066,7 +1073,7 @@ function StrategyEditDialog(props: {
       })),
       stickySession: { ...(existing?.stickySession ?? {}), enabled: sticky },
       compactAfterSwitch,
-      retry: { ...(existing?.retry ?? {}), maxAttempts: Number(maxAttempts) || 3, backoffMs: Number(backoffMs) || 500 },
+      retry: serializeRetryDraft(retryDraft),
       ...(fallbackId ? { fallbackStrategyId: fallbackId } : {}),
       modelAliases: aliases,
       modelProviders,
@@ -1287,22 +1294,11 @@ function StrategyEditDialog(props: {
               )}
             </div>
           </div>
-          <div className="field">
-            <label>单 Key 尝试次数</label>
-            <ProtoSelect
-              value={String(maxAttempts)}
-              options={[1, 2, 3, 4, 5].map((n) => ({ value: String(n), label: `${n} 次` }))}
-              onChange={(v) => setMaxAttempts(Number(v))}
-            />
-            <div className="xs muted" style={{ marginTop: 4 }}>
-              同一个 key 最多尝试几次（1 = 不重试）。key 失败后自动换同提供商的其它 key，再换其它提供商
-            </div>
-          </div>
-          <div className="field">
-            <label>瞬时重试退避 · 毫秒</label>
-            <input type="number" min={0} step={50} value={backoffMs} onChange={(e) => setBackoffMs(Number(e.target.value))} />
-            <div className="xs muted" style={{ marginTop: 4 }}>同一 key 遇到瞬时错误（5xx / 网络）重试的间隔</div>
-          </div>
+          <RetrySettingsFields
+            draft={retryDraft}
+            onChange={setRetryDraft}
+            invalid={retryDraft.maxAttempts === 'unlimited' && !isRetryDraftValid(retryDraft)}
+          />
           <div className="field">
             <label>粘性会话</label>
             <div className="row" style={{ justifyContent: 'space-between' }}>

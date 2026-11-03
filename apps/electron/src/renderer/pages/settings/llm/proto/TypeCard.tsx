@@ -104,9 +104,10 @@ export const TYPE_META: Array<[string, string, string]> = [
   ['concurrency', '并发', '同时进行的请求数'],
   ['firstByteSeconds', '首字节超时 · 秒', '等待响应首字节的最长时间'],
   ['totalSeconds', '总超时 · 秒', '整个请求（含流式 body）的最长时间'],
-  ['rateLimitSeconds', '限流冷却 · 秒', '首次 429 冷却到本分钟结束；连续第 2 次用此值，第 3 次 5×，第 4 次起冷却到次日'],
-  ['quotaExhaustedSeconds', '配额冷却 · 秒', '配额耗尽后的冷却时长'],
-  ['defaultSeconds', '其他失败冷却 · 秒', '瞬时错误重试耗尽 / 确定性错误（400/403/404）后的冷却时长'],
+  ['rateLimitSeconds', '限流冷却 · 秒', '0 = 不执行本地冷却；大于 0 时 429 冷却当前目标并切换，连续限流会按策略延长冷却'],
+  ['quotaExhaustedSeconds', '配额冷却 · 秒', '0 = 不执行本地冷却；大于 0 时冷却配额耗尽的 Key'],
+  ['defaultSeconds', '其他失败冷却 · 秒', '0 = 不执行本地冷却；大于 0 时用于其他失败的冷却时长'],
+
 ]
 
 /**

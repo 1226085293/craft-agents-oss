@@ -45,6 +45,12 @@ function draftNamed(drafts: TypeDraft[], name: string): TypeDraft {
 }
 
 describe('draftFromConfig — unset fields', () => {
+  test('cooldown fields explain that zero disables local cooldown', () => {
+    for (const field of ['rateLimitSeconds', 'quotaExhaustedSeconds', 'defaultSeconds']) {
+      const meta = TYPE_META.find(([key]) => key === field)
+      expect(meta?.[2]).toContain('0 = 不执行本地冷却')
+    }
+  })
   test('mandatory fields get a value, quota limits stay unset', () => {
     const [draft] = draftFromConfig(configWithPreset('default', {}))
     for (const field of CONFIG_FIELDS) {
@@ -198,5 +204,11 @@ describe('applyTypeDrafts — writing back', () => {
     const preset = next.presets.p as unknown as Record<string, unknown>
     expect('firstByteSeconds' in preset).toBe(false)
     expect(preset.totalSeconds).toBe(600)
+  })
+
+  test('rate-limit cooldown zero survives editing as an explicit no-cooldown value', () => {
+    const config = configWithPreset('p', { rateLimitSeconds: 0 })
+    const next = applyTypeDrafts(config, draftFromConfig(config))
+    expect(next.presets.p.rateLimitSeconds).toBe(0)
   })
 })

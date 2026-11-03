@@ -47,11 +47,14 @@ export interface PlannedUnit {
 }
 
 export interface RetryPolicy {
-  /** Max transient retries on the SAME key before it is cooled and switched. */
-  maxAttempts: number;
-  /** Status codes eligible for a retry. */
+  /** Total upstream attempts per provider/model/key target, including the first. */
+  maxAttempts: number | 'unlimited';
+  /** Per-target wall-clock budget for unlimited retries. */
+  maxDurationSeconds?: number;
+  intervalMode: 'fixed' | 'exponential';
+  /** Status codes eligible for same-target server-error retries. */
   onStatusCodes: number[];
-  /** Backoff between same-key transient retries (ms). */
+  /** Fixed interval between attempts in milliseconds. */
   backoffMs: number;
 }
 
@@ -128,10 +131,16 @@ export function resolveUpstreamModel(
 
 export function resolveRetryPolicy(strategy: LlmStrategy): RetryPolicy {
   const retry = strategy.retry ?? {};
-  const requested = Math.max(1, Math.floor(retry.maxAttempts ?? 3));
+  const requested = retry.maxAttempts ?? 3;
+  const maxAttempts = requested === 'unlimited'
+    ? 'unlimited'
+    : Math.min(MAX_ATTEMPTS_CEILING, Math.max(1, Math.floor(requested)));
   return {
-    // Clamp: an unbounded maxAttempts turns a config typo into a hang.
-    maxAttempts: Math.min(requested, MAX_ATTEMPTS_CEILING),
+    maxAttempts,
+    ...(maxAttempts === 'unlimited'
+      ? { maxDurationSeconds: Math.max(1, Math.floor(retry.maxDurationSeconds ?? 300)) }
+      : {}),
+    intervalMode: retry.intervalMode ?? 'fixed',
     onStatusCodes: retry.onStatusCodes?.length
       ? [...retry.onStatusCodes]
       : [...DEFAULT_RETRY_STATUS_CODES],

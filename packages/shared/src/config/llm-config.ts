@@ -281,27 +281,6 @@ export interface LlmStrategyMember {
 /** Scope a sticky-session binding is keyed on. */
 export type LlmStickyScope = 'session' | 'session+model';
 
-/**
- * What to do after one classified upstream failure.
- *
- * The switch unit is a `(provider, model)` route; inside it the pool rotates
- * keys. `retry-same` spends the same-key budget, `next-key` cools the key and
- * hands back the provider's next account, `next-unit` abandons the route for
- * the next one, `stop` ends the request.
- */
-export type LlmSwitchAction = 'retry-same' | 'next-key' | 'next-unit' | 'stop';
-
-/** The failure classes a strategy can route around. */
-export type LlmSwitchFailure =
-  | 'rate_limit'
-  | 'quota'
-  | 'auth'
-  | 'model_not_found'
-  | 'transport'
-  | 'server_error';
-
-export type LlmSwitchPolicy = Partial<Record<LlmSwitchFailure, LlmSwitchAction>>;
-
 export interface LlmStrategy {
   id: string;
 
@@ -341,10 +320,15 @@ export interface LlmStrategy {
   compactAfterSwitch?: boolean;
 
   retry?: {
-    /** Max transient retries on the SAME key before it is cooled and switched. */
-    maxAttempts?: number;
+    /** Total upstream attempts for one provider/model/key target, including the first call. */
+    maxAttempts?: number | 'unlimited';
+    /** Required with `maxAttempts: 'unlimited'`; per-target duration in seconds. */
+    maxDurationSeconds?: number;
+    /** Fixed delay or capped exponential retry delay. */
+    intervalMode?: 'fixed' | 'exponential';
+    /** Existing allowlist for retryable server-error statuses. */
     onStatusCodes?: number[];
-    /** Backoff between same-key transient retries (ms). */
+    /** Fixed retry delay in milliseconds; used only when intervalMode is fixed. */
     backoffMs?: number;
   };
 
@@ -384,16 +368,6 @@ export interface LlmStrategy {
    */
   modelProviders?: Record<string, string[]>;
 
-  /**
-   * Per-failure switching policy. Absent entries keep the built-in defaults
-   * (`DEFAULT_SWITCH_POLICY` in `llm-gateway.ts`), which are the behaviour the
-   * gateway shipped with:
-   *
-   *   rate_limit → next-key   quota → next-key   auth → next-key
-   *   model_not_found → next-unit   transport → next-unit
-   *   server_error → retry-same
-   */
-  switchPolicy?: LlmSwitchPolicy;
 }
 
 // ============================================================================

@@ -403,31 +403,44 @@ describe('planRequest — cross-model fallback', () => {
 })
 
 describe('resolveRetryPolicy', () => {
-  it('uses the strategy values', () => {
+  it('uses finite retry values and preserves the retryable status allowlist', () => {
     const policy = resolveRetryPolicy(
       strategy('auto', {
-        retry: { maxAttempts: 5, onStatusCodes: [429], backoffMs: 250 },
+        retry: { maxAttempts: 5, onStatusCodes: [500, 503], intervalMode: 'fixed', backoffMs: 250 },
       }),
     );
     expect(policy).toEqual({
       maxAttempts: 5,
-      onStatusCodes: [429],
+      maxDurationSeconds: undefined,
+      intervalMode: 'fixed',
+      onStatusCodes: [500, 503],
       backoffMs: 250,
     });
   });
 
-  it('clamps a hostile maxAttempts to the ceiling', () => {
-    const policy = resolveRetryPolicy(strategy('auto', { retry: { maxAttempts: 9999 } }));
+  it('defaults to three attempts, fixed 500ms, and the built-in status list', () => {
+    expect(resolveRetryPolicy(strategy('a'))).toEqual({
+      maxAttempts: 3,
+      maxDurationSeconds: undefined,
+      intervalMode: 'fixed',
+      onStatusCodes: [429, 500, 502, 503, 504],
+      backoffMs: 500,
+    });
+  });
+
+  it('represents unlimited attempts with a per-target time limit', () => {
+    expect(resolveRetryPolicy(strategy('a', {
+      retry: { maxAttempts: 'unlimited', maxDurationSeconds: 75, intervalMode: 'exponential' },
+    }))).toMatchObject({
+      maxAttempts: 'unlimited',
+      maxDurationSeconds: 75,
+      intervalMode: 'exponential',
+    });
+  });
+
+  it('keeps a defensive ceiling for an invalid finite value passed directly to the planner', () => {
+    const policy = resolveRetryPolicy(strategy('auto', { retry: { maxAttempts: 9999 as 5 } }));
     expect(policy.maxAttempts).toBe(MAX_ATTEMPTS_CEILING);
-  });
-
-  it('clamps a zero or negative maxAttempts to at least one attempt', () => {
-    expect(resolveRetryPolicy(strategy('a', { retry: { maxAttempts: 0 } })).maxAttempts).toBe(1);
-    expect(resolveRetryPolicy(strategy('a', { retry: { maxAttempts: -5 } })).maxAttempts).toBe(1);
-  });
-
-  it('falls back to the transient status set when none is configured', () => {
-    expect(resolveRetryPolicy(strategy('a')).onStatusCodes).toEqual([429, 500, 502, 503, 504]);
   });
 });
 

@@ -55,6 +55,39 @@ describe('validateLlmConfig', () => {
     expect(validateLlmConfig(makeConfig())).toEqual([]);
   });
 
+  it('accepts finite retry settings and unlimited retries with a target deadline', () => {
+    const finite = makeConfig({
+      strategies: [{ id: 's1', type: 'round_robin', members: [{ provider: 'p1' }], retry: { maxAttempts: 5, intervalMode: 'fixed', backoffMs: 250, onStatusCodes: [500, 503] } }],
+    })
+    const unlimited = makeConfig({
+      strategies: [{ id: 's1', type: 'round_robin', members: [{ provider: 'p1' }], retry: { maxAttempts: 'unlimited', maxDurationSeconds: 300, intervalMode: 'exponential' } as unknown as LlmConfig['strategies'][number]['retry'] }],
+    })
+    expect(validateLlmConfig(finite)).toEqual([])
+    expect(validateLlmConfig(unlimited)).toEqual([])
+  })
+
+  it('rejects invalid retry counts, missing unlimited deadline, and an out-of-range deadline', () => {
+    const badCount = makeConfig({
+      strategies: [{ id: 's1', type: 'round_robin', members: [{ provider: 'p1' }], retry: { maxAttempts: 6 } }],
+    })
+    const missingDuration = makeConfig({
+      strategies: [{ id: 's1', type: 'round_robin', members: [{ provider: 'p1' }], retry: { maxAttempts: 'unlimited' } as unknown as LlmConfig['strategies'][number]['retry'] }],
+    })
+    const longDuration = makeConfig({
+      strategies: [{ id: 's1', type: 'round_robin', members: [{ provider: 'p1' }], retry: { maxAttempts: 'unlimited', maxDurationSeconds: 86401 } as unknown as LlmConfig['strategies'][number]['retry'] }],
+    })
+    expect(validateLlmConfig(badCount).join(' ')).toContain('retry.maxAttempts')
+    expect(validateLlmConfig(missingDuration).join(' ')).toContain('maxDurationSeconds')
+    expect(validateLlmConfig(longDuration).join(' ')).toContain('maxDurationSeconds')
+  })
+
+  it('rejects removed switchPolicy instead of silently ignoring it', () => {
+    const config = makeConfig({
+      strategies: [{ id: 's1', type: 'round_robin', members: [{ provider: 'p1' }], switchPolicy: {} } as unknown as LlmConfig['strategies'][number]],
+    })
+    expect(validateLlmConfig(config).join(' ')).toContain('switchPolicy')
+  })
+
   it('rejects a non-object root', () => {
     expect(validateLlmConfig([])).toEqual(['顶层必须是对象']);
     expect(validateLlmConfig('x')).toEqual(['顶层必须是对象']);

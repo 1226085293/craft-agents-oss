@@ -343,9 +343,11 @@ describe('gateway transcoding — inbound', () => {
     const provider = openAIProvider('oai');
     provider.keys.push({ id: 'oai-k2', key: 'sk-oai-SECRET-2' });
     const cfg = configWith(provider);
-    cfg.strategies[0]!.retry = { maxAttempts: 2, onStatusCodes: [429, 500, 502, 503, 504], backoffMs: 0 };
+    cfg.strategies[0]!.retry = { maxAttempts: 2, onStatusCodes: [429, 500, 502, 503, 504], backoffMs: 250 };
+    const retryWaits: number[] = [];
     gateway = new LlmGateway({
       getConfig: () => cfg,
+      waitForRetry: async (ms) => { retryWaits.push(ms); },
       fetchImpl: (async (_input: never, init: RequestInit) => {
         calls.push({
           auth: (init.headers as Record<string, string>).authorization ?? null,
@@ -385,11 +387,47 @@ describe('gateway transcoding — inbound', () => {
       'Bearer sk-oai-SECRET-1',
       'Bearer sk-oai-SECRET-2',
     ]);
+    expect(retryWaits).toEqual([250]);
     expect(calls.every((call) => !JSON.stringify(call.body).includes('sessionKey'))).toBe(true);
     const usage = gateway.drainUsage();
     expect(usage.filter((row) => row.status === 'error').map((row) => row.attempts)).toEqual([1, 2]);
     expect(usage.filter((row) => row.status === 'error').every((row) => row.superseded)).toBe(true);
     expect(usage.at(-1)).toMatchObject({ status: 'success', retried: true });
+  });
+
+  it('counts same-turn server retries against the truncated-stream target budget', async () => {
+    const cut = `data: ${JSON.stringify(textChunk('partial'))}\n\n`;
+    const complete = openAISSE([textChunk('recovered'), finishChunk('stop')]);
+    const calls: string[] = [];
+    const provider = openAIProvider('oai');
+    provider.keys.push({ id: 'oai-k2', key: 'sk-oai-SECRET-2' });
+    const cfg = configWith(provider);
+    cfg.strategies[0]!.retry = { maxAttempts: 2, onStatusCodes: [500], backoffMs: 0 };
+    gateway = new LlmGateway({
+      getConfig: () => cfg,
+      fetchImpl: (async (_input: never, init: RequestInit) => {
+        calls.push((init.headers as Record<string, string>).authorization ?? '');
+        if (calls.length === 1) return new Response('{"error":"temporary"}', { status: 500 });
+        return new Response(calls.length === 2 ? cut : complete, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        });
+      }) as never,
+      log: () => {},
+    });
+    await gateway.start();
+
+    const requestBody = { model: 'auto', stream: true, messages: [{ role: 'user', content: 'go' }] };
+    const makeRequest = () => fetch(`${gateway.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client', [SESSION_HEADER]: 'budget-session' },
+      body: JSON.stringify(requestBody),
+    });
+    const first = await makeRequest();
+    expect(await first.text()).toContain('CRAFT_GATEWAY_STREAM_TRUNCATION_RETRY');
+    const second = await makeRequest();
+    expect(await second.text()).toContain('"text":"recovered"');
+    expect(calls).toEqual(['Bearer sk-oai-SECRET-1', 'Bearer sk-oai-SECRET-1', 'Bearer sk-oai-SECRET-2']);
   });
 
   it('closes cleanly when [DONE] arrives', async () => {

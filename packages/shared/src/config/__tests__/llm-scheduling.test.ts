@@ -323,6 +323,25 @@ describe('KeyPool — round robin', () => {
     await expect(pool.next('m')).rejects.toThrow(AllKeysUnavailableError);
   });
 
+  it('can reserve the same target for an in-flight retry while keeping cooldown for new requests', async () => {
+    const pool = makePool({
+      keys: [{ id: 'k1', enabled: true, weight: 1 }],
+      now: () => 1000,
+      cooldowns: new Map([['k1', { defaultSeconds: 0, rateLimitSeconds: 0, quotaSeconds: 0 }]]),
+    })
+    const first = await pool.next('m')
+    await pool.setRateLimited('k1', { retryAfterSeconds: 10 })
+    pool.finishRequest('k1')
+
+    await expect(pool.next('m')).rejects.toThrow(AllKeysUnavailableError)
+    const retry = await pool.retrySameKey('k1', 'm')
+    expect(retry.keyId).toBe('k1')
+    expect(pool.snapshot()[0]?.cooldownRemaining).toBe(10)
+    expect(pool.snapshot()[0]?.inFlight).toBe(1)
+    pool.finishRequest(retry.keyId)
+    pool.finishRequest(first.keyId)
+  })
+
   it('never selects a disabled key', async () => {
     const pool = makePool({
       keys: [
@@ -521,6 +540,25 @@ describe('KeyPool — algorithms', () => {
 });
 
 describe('KeyPool — cooldown reasons', () => {
+  it('skips an explicitly exhausted stream-retry key while keeping sibling keys eligible', async () => {
+    const pool = makePool({ algorithm: 'sequential' })
+    const selection = await pool.next('m', undefined, 0, new Set(['k1']))
+    expect(selection.keyId).toBe('k2')
+    pool.finishRequest(selection.keyId)
+  })
+
+  it('does not locally cool a key when the quota or default cooldown is zero', async () => {
+    const pool = makePool({
+      now: () => 1000,
+      cooldowns: new Map([['k1', { defaultSeconds: 0, rateLimitSeconds: 0, quotaSeconds: 0 }]]),
+    })
+
+    expect(await pool.setCooling('k1', 'quota')).toBe(0)
+    expect(pool.snapshot().find((key) => key.keyId === 'k1')?.cooling).toBe(false)
+    expect(await pool.setCooling('k1', 'default')).toBe(0)
+    expect(pool.snapshot().find((key) => key.keyId === 'k1')?.cooling).toBe(false)
+  })
+
   it('uses the quota duration for a quota-exhausted key', async () => {
     const pool = makePool({
       now: () => 1000,
@@ -565,6 +603,27 @@ describe('KeyPool — 429 escalation', () => {
     const pool = makePool({ now: () => AT_58 });
     expect(await pool.setRateLimited('k1', { retryAfterSeconds: 42 })).toBe(42);
   });
+
+  it('does not invent a local cooldown or escalation when rateLimitSeconds is zero', async () => {
+    let now = AT_58
+    const pool = makePool({
+      now: () => now,
+      cooldowns: new Map([['k1', { defaultSeconds: 60, rateLimitSeconds: 0, quotaSeconds: 0 }]]),
+    })
+    expect(await pool.setRateLimited('k1')).toBe(0)
+    expect(pool.snapshot().find((key) => key.keyId === 'k1')?.cooling).toBe(false)
+    now += 1
+    expect(await pool.setRateLimited('k1')).toBe(0)
+    expect(pool.snapshot().find((key) => key.keyId === 'k1')?.cooling).toBe(false)
+  })
+
+  it('keeps Retry-After even when quotaExhaustedSeconds is shorter', async () => {
+    const pool = makePool({
+      now: () => AT_58,
+      cooldowns: new Map([['k1', { defaultSeconds: 60, rateLimitSeconds: 60, quotaSeconds: 5 }]]),
+    })
+    expect(await pool.setRateLimited('k1', { retryAfterSeconds: 42 })).toBe(42)
+  })
 
   it('skips straight to a day-level cooldown for a daily/quota signal', async () => {
     let now = AT_58;

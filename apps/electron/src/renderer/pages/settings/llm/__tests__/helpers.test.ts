@@ -472,6 +472,24 @@ describe('reconcileStrategyRefs', () => {
     ])
   })
 
+  it('clears fallback links to deleted strategies and keeps valid fallback links', () => {
+    const config = baseConfig()
+    config.strategies = [
+      { id: 'workbuddy', type: 'round_robin', members: [{ provider: 'p1' }], fallbackStrategyId: 'workbuddycn' },
+      { id: 'workbuddycn', type: 'sequential', members: [{ provider: 'p2' }] },
+      { id: 'other', type: 'sequential', members: [{ provider: 'p1' }], fallbackStrategyId: 'workbuddy' },
+    ]
+
+    const afterDelete = {
+      ...config,
+      strategies: config.strategies.filter((strategy) => strategy.id !== 'workbuddycn'),
+    }
+    const repaired = reconcileStrategyRefs(afterDelete)
+
+    expect(repaired.strategies.find((strategy) => strategy.id === 'workbuddy')?.fallbackStrategyId).toBeUndefined()
+    expect(repaired.strategies.find((strategy) => strategy.id === 'other')?.fallbackStrategyId).toBe('workbuddy')
+  })
+
   it('attaches a strategy to a key that has an empty list', () => {
     const config = baseConfig()
     config.clientKeys = [{ key: 'sk-client-1', strategies: [] }]

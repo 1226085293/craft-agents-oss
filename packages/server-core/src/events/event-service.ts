@@ -13,8 +13,18 @@
 
 import { join } from 'node:path';
 import { createLogger } from '@craft-agent/shared/utils';
-import { EventStore, type EventFilter, type EventMeta, type EventRecord } from './event-store.ts';
+import { EventStore, type EventFilter, type EventMeta, type EventRecord } from '@craft-agent/shared/events/event-store.ts';
 import { EventIngestServer, type EventIngestAddress } from './ingest-server.ts';
+import {
+  loadListeners,
+  missingConfigKeys,
+  setListenerConfig,
+  setListenerEnabled,
+  type LoadedListener,
+} from './listener-registry.ts';
+import { ListenerSupervisor, type ListenerRuntimeStatus } from './listener-supervisor.ts';
+import { EventDispatcher, type DispatchTarget } from './event-dispatcher.ts';
+import { loadSubscriptions } from '@craft-agent/shared/events/subscriptions.ts';
 
 const eventLog = createLogger('events');
 
@@ -23,6 +33,13 @@ export interface EventServiceOptions {
   workspaceRoot: string;
   /** Called after a non-duplicate insert so the host can push to renderers. */
   onChanged?: (event: EventRecord) => void;
+  /** Called when a supervised listener changes state. */
+  onListenerStatus?: (status: ListenerRuntimeStatus) => void;
+  /**
+   * Session delivery target. Absent in headless contexts that only collect
+   * events (tests, ingest-only hosts), which leaves dispatching inert.
+   */
+  dispatchTarget?: DispatchTarget;
   /** Override for tests. */
   dbPath?: string;
   /** Override for tests; 0 disables. */
@@ -42,6 +59,8 @@ export class EventService {
   private readonly options: EventServiceOptions;
   private readonly store: EventStore;
   private readonly ingest: EventIngestServer;
+  private readonly supervisor: ListenerSupervisor;
+  private readonly dispatcher: EventDispatcher | null;
   private started = false;
 
   constructor(options: EventServiceOptions) {
@@ -58,7 +77,22 @@ export class EventService {
       sink: this.store,
       onInserted: (event) => {
         this.options.onChanged?.(event);
+        // Strip the body: the dispatcher only formats a nudge.
+        const { body: _body, ...meta } = event;
+        this.dispatcher?.dispatch(meta);
       },
+    });
+
+    this.dispatcher = options.dispatchTarget
+      ? new EventDispatcher({
+          getSubscriptions: () => loadSubscriptions(options.workspaceRoot),
+          target: options.dispatchTarget,
+        })
+      : null;
+
+    this.supervisor = new ListenerSupervisor({
+      envFor: (listenerId) => this.ingest.listenerEnv(listenerId),
+      onStatus: (status) => this.options.onListenerStatus?.(status),
     });
   }
 
@@ -82,6 +116,7 @@ export class EventService {
   }
 
   async stop(): Promise<void> {
+    await this.supervisor.stopAll();
     await this.ingest.stop();
     this.started = false;
   }
@@ -117,15 +152,128 @@ export class EventService {
     };
   }
 
-  /** Env a supervised listener receives (P2 uses this). */
+  /** Env a supervised listener receives. */
   listenerEnv(listenerId: string): Record<string, string> {
     return this.ingest.listenerEnv(listenerId);
+  }
+
+  supervisorStatus(id: string): ListenerRuntimeStatus {
+    return this.supervisor.getStatus(id);
+  }
+
+  allSupervisorStatuses(): ListenerRuntimeStatus[] {
+    return this.supervisor.listStatuses();
+  }
+
+  /** Spawn (or no-op when already running) after checking readiness. */
+  startListener(listener: LoadedListener): ListenerRuntimeStatus {
+    const blocking = listener.dependencies.filter(
+      (dep) => dep.state === 'missing' || dep.state === 'mismatch',
+    );
+    if (blocking.length > 0) {
+      return {
+        ...this.supervisor.getStatus(listener.id),
+        state: 'failed',
+        lastError: `dependencies not satisfied: ${blocking.map((d) => d.label).join(', ')}`,
+      };
+    }
+    if (missingConfigKeys(listener).length > 0) {
+      return {
+        ...this.supervisor.getStatus(listener.id),
+        state: 'failed',
+        lastError: 'required config is missing',
+      };
+    }
+    return this.supervisor.start(listener);
+  }
+
+  async stopListener(id: string): Promise<void> {
+    await this.supervisor.stop(id);
+  }
+
+  markListenerHealthy(id: string): void {
+    this.supervisor.markHealthy(id);
+  }
+
+  tailListenerLog(id: string, dataDir: string): string {
+    return this.supervisor.tailLog(id, dataDir);
+  }
+
+  /** Enable/disable + start/stop in one step, the way the UI toggle behaves. */
+  async setListenerEnabled(workspaceRoot: string, id: string, enabled: boolean): Promise<ListenerRuntimeStatus> {
+    setListenerEnabled(workspaceRoot, id, enabled);
+    if (!enabled) {
+      await this.supervisor.stop(id);
+      return this.supervisor.getStatus(id);
+    }
+    const listener = loadListeners({ workspaceRoot }).find((entry) => entry.id === id);
+    if (!listener) {
+      return { ...this.supervisor.getStatus(id), state: 'failed', lastError: 'listener not found' };
+    }
+    return this.startListener(listener);
+  }
+
+  saveListenerConfig(workspaceRoot: string, id: string, config: Record<string, unknown>): void {
+    setListenerConfig(workspaceRoot, id, config);
+  }
+
+  /** Boot every enabled listener (app start, workspace switch). */
+  async startAllEnabled(workspaceRoot: string): Promise<ListenerRuntimeStatus[]> {
+    const listeners = loadListeners({ workspaceRoot }).filter((listener) => listener.enabled);
+    return listeners.map((listener) => this.startListener(listener));
+  }
+
+  /** A session stopped processing: release events deferred for it. */
+  flushDeferredEvents(sessionId: string): void {
+    this.dispatcher?.flushDeferred(sessionId);
+  }
+
+  flushAllDeferredEvents(): void {
+    this.dispatcher?.flushAll();
+  }
+
+  pendingEventCounts(): Record<string, number> {
+    return this.dispatcher?.pendingCounts() ?? {};
   }
 
   /** Exposed for tests and the retention job. */
   prune(now?: number): number {
     return this.store.prune(now);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Listeners
+// ---------------------------------------------------------------------------
+
+export interface ListenerView extends LoadedListener {
+  status: ListenerRuntimeStatus
+  missingConfig: string[]
+  logTail: string
+}
+
+export function listListenersFor(service: EventService, workspaceRoot: string, skipProbes = false): ListenerView[] {
+  return loadListeners({ workspaceRoot, skipProbes }).map((listener) => ({
+    ...listener,
+    status: service.supervisorStatus(listener.id),
+    missingConfig: missingConfigKeys(listener),
+    logTail: '',
+  }))
+}
+
+export function getListenerFor(
+  service: EventService,
+  workspaceRoot: string,
+  id: string,
+): ListenerView | null {
+  const listener = loadListeners({ workspaceRoot }).find((entry) => entry.id === id);
+  if (!listener) return null;
+  return {
+    ...listener,
+    status: service.supervisorStatus(id),
+    missingConfig: missingConfigKeys(listener),
+    logTail: service.tailListenerLog(id, listener.dataDir),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -144,10 +292,16 @@ export async function getEventService(
   workspaceId: string,
   workspaceRoot: string,
   onChanged?: (event: EventRecord) => void,
+  dispatchTarget?: DispatchTarget,
 ): Promise<EventService> {
   let service = services.get(workspaceId);
   if (!service) {
-    service = new EventService({ workspaceId, workspaceRoot, ...(onChanged ? { onChanged } : {}) });
+    service = new EventService({
+      workspaceId,
+      workspaceRoot,
+      ...(onChanged ? { onChanged } : {}),
+      ...(dispatchTarget ? { dispatchTarget } : {}),
+    });
     services.set(workspaceId, service);
   }
   await service.start();

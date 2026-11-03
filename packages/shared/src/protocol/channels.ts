@@ -421,6 +421,24 @@ export const RPC_CHANNELS = {
     STATUS: 'events:status',
     /** Pushed when a new event lands (workspace-scoped). */
     CHANGED: 'events:changed',
+
+    /** Installed listener cards. */
+    LIST_LISTENERS: 'events:listListeners',
+    /** One listener with dependencies, config and log tail. */
+    GET_LISTENER: 'events:getListener',
+    /** Enable/disable (also starts/stops the process). */
+    SET_LISTENER_ENABLED: 'events:setListenerEnabled',
+    /** Persist user config values. */
+    SET_LISTENER_CONFIG: 'events:setListenerConfig',
+    /** Run the manifest's install command for one package dependency. */
+    INSTALL_DEPENDENCY: 'events:installDependency',
+    /** Pushed when a listener process changes state. */
+    LISTENER_STATUS: 'events:listenerStatus',
+
+    /** This session's subscriptions. */
+    LIST_SUBSCRIPTIONS: 'events:listSubscriptions',
+    SUBSCRIBE: 'events:subscribe',
+    UNSUBSCRIBE: 'events:unsubscribe',
   },
   pages: {
     GET: 'pages:get',

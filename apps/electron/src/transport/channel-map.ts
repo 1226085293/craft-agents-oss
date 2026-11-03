@@ -436,6 +436,15 @@ export const CHANNEL_MAP = {
   getEventCounts: invoke(RPC_CHANNELS.events.COUNTS),
   getEventsStatus: invoke(RPC_CHANNELS.events.STATUS),
   onEventsChanged: listener(RPC_CHANNELS.events.CHANGED),
+  listEventListeners: invoke(RPC_CHANNELS.events.LIST_LISTENERS),
+  getEventListener: invoke(RPC_CHANNELS.events.GET_LISTENER),
+  setEventListenerEnabled: invoke(RPC_CHANNELS.events.SET_LISTENER_ENABLED),
+  setEventListenerConfig: invoke(RPC_CHANNELS.events.SET_LISTENER_CONFIG),
+  installEventListenerDependency: invoke(RPC_CHANNELS.events.INSTALL_DEPENDENCY),
+  onEventListenerStatus: listener(RPC_CHANNELS.events.LISTENER_STATUS),
+  listEventSubscriptions: invoke(RPC_CHANNELS.events.LIST_SUBSCRIPTIONS),
+  subscribeEvent: invoke(RPC_CHANNELS.events.SUBSCRIBE),
+  unsubscribeEvent: invoke(RPC_CHANNELS.events.UNSUBSCRIBE),
 
   // Pages
   getPages: invoke(RPC_CHANNELS.pages.GET),

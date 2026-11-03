@@ -770,6 +770,44 @@ export interface ElectronAPI {
   onEventsChanged(
     callback: (workspaceId: string, event: import('@craft-agent/shared/protocol/dto').EventMetaDto) => void
   ): () => void
+  listEventListeners(
+    workspaceId: string,
+    skipProbes?: boolean
+  ): Promise<import('@craft-agent/shared/protocol/dto').ListenerDto[]>
+  getEventListener(workspaceId: string, listenerId: string): Promise<import('@craft-agent/shared/protocol/dto').ListenerDto | null>
+  setEventListenerEnabled(
+    workspaceId: string,
+    listenerId: string,
+    enabled: boolean
+  ): Promise<import('@craft-agent/shared/protocol/dto').ListenerStatusDto>
+  setEventListenerConfig(
+    workspaceId: string,
+    listenerId: string,
+    config: Record<string, unknown>
+  ): Promise<{ ok: boolean }>
+  installEventListenerDependency(
+    workspaceId: string,
+    listenerId: string,
+    dependency: { manager: 'pip' | 'npm'; name: string; range: string }
+  ): Promise<{ ok: boolean; command: string; exitCode: number | null; output: string; error?: string }>
+  onEventListenerStatus(
+    callback: (workspaceId: string, status: import('@craft-agent/shared/protocol/dto').ListenerStatusDto) => void
+  ): () => void
+  listEventSubscriptions(
+    workspaceId: string,
+    sessionId: string
+  ): Promise<Array<{ subscriptionId: string; sessionId: string; filter: { sources?: string[]; types?: string[]; tags?: string[] }; createdAt: number }>>
+  subscribeEvent(
+    workspaceId: string,
+    sessionId: string,
+    filter: { sources?: string[]; types?: string[]; tags?: string[] }
+  ): Promise<{ subscriptionId: string; sessionId: string; createdAt: number }>
+  unsubscribeEvent(
+    workspaceId: string,
+    sessionId: string,
+    subscriptionId?: string,
+    source?: string
+  ): Promise<{ removed: number; remaining: Array<{ subscriptionId: string }> }>
 
   // Pages (workspace-scoped mini dashboards)
   getPages(workspaceId: string): Promise<import('@craft-agent/shared/pages/types').LoadedPage[]>

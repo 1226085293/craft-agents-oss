@@ -47,6 +47,7 @@ import { automationsAtom } from '@/atoms/automations'
 import { useAutomations } from '@/hooks/useAutomations'
 import { PagesHome } from '../pages/PagesHome'
 import { EventDetailPanel } from '../events/EventDetailPanel'
+import { ListenerDetailPanel } from '../events/ListenerDetailPanel'
 import { MemoryPanel } from './MemoryPanel'
 import { PageView } from '../pages/PageView'
 import { SendResourceToWorkspaceDialog, type SendResourceType } from './SendResourceToWorkspaceDialog'
@@ -205,11 +206,17 @@ export function MainContentPanel({
   // Events navigator - one event's full content, or an empty state
   if (isEventsNavigation(navState)) {
     if (navState.section === 'listeners') {
+      if (navState.details?.type === 'listener' && activeWorkspaceId) {
+        return wrapWithStoplight(
+          <Panel variant="grow" className={className}>
+            <ListenerDetailPanel workspaceId={activeWorkspaceId} listenerId={navState.details.listenerId} />
+          </Panel>
+        )
+      }
       return wrapWithStoplight(
         <Panel variant="grow" className={className}>
           <div className="flex flex-col items-center justify-center h-full gap-1.5 text-muted-foreground">
-            <p className="text-sm">监听器安装与依赖管理将在下一阶段提供</p>
-            <p className="text-xs opacity-70">当前可在左侧查看接收地址，用自己的脚本接入</p>
+            <p className="text-sm">选择一个监听器查看版本、配置与依赖</p>
           </div>
         </Panel>
       )

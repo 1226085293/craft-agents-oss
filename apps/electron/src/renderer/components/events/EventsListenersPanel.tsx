@@ -1,135 +1,149 @@
 /**
  * Events navigator column, "listeners" section.
  *
- * P1 shows the live ingest endpoint and a copy-paste example: that is exactly
- * what a hand-written listener needs. The listener catalog (manifest parsing,
- * dependency checks, enable switches) lands in P2, so this panel deliberately
- * does not pretend to install anything yet.
+ * Cards list every listener package found under `<workspace>/events/`, its
+ * state, and how many events it produced. Picking one opens the detail page
+ * (manifest, config, dependencies, setup). The ingest endpoint used to live
+ * here; it moved to the detail page of any listener so the header stays about
+ * listeners.
  */
 
 import * as React from 'react'
-import { Check, Copy, Radio, ShieldCheck } from 'lucide-react'
+import { AlertTriangle, CircleDot, Plus, Radio, RefreshCw } from 'lucide-react'
+import type { ListenerDto } from '@craft-agent/shared/protocol/dto'
 
 export interface EventsListenersPanelProps {
   workspaceId: string
+  selectedListenerId: string | null
+  onSelectListener: (listenerId: string) => void
   className?: string
 }
 
-interface Status {
-  listening: boolean
-  host: string | null
-  port: number | null
-  baseUrl: string | null
-}
-
-function CopyButton({ value, label }: { value: string; label: string }): React.ReactElement {
-  const [copied, setCopied] = React.useState(false)
-  return (
-    <button
-      type="button"
-      onClick={() => {
-        void navigator.clipboard.writeText(value).then(() => {
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1500)
-        })
-      }}
-      className="h-6 px-1.5 inline-flex items-center gap-1 text-[11px] rounded border border-border text-muted-foreground hover:text-foreground transition-colors"
-    >
-      {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-      {copied ? '已复制' : label}
-    </button>
-  )
+function StateDot({ listener }: { listener: ListenerDto }): React.ReactElement {
+  const state = listener.status.state
+  if (listener.errors.length > 0) {
+    return <AlertTriangle className="h-3 w-3 text-destructive shrink-0" aria-label="配置错误" />
+  }
+  if (!listener.enabled) {
+    return <CircleDot className="h-3 w-3 text-muted-foreground/40 shrink-0" aria-label="已停用" />
+  }
+  if (state === 'running') return <CircleDot className="h-3 w-3 text-primary shrink-0" aria-label="运行中" />
+  if (state === 'starting') return <CircleDot className="h-3 w-3 text-amber-500 shrink-0" aria-label="启动中" />
+  if (state === 'degraded') return <CircleDot className="h-3 w-3 text-amber-500 shrink-0" aria-label="无响应" />
+  if (state === 'failed') return <CircleDot className="h-3 w-3 text-destructive shrink-0" aria-label="异常" />
+  return <CircleDot className="h-3 w-3 text-muted-foreground/40 shrink-0" aria-label="已停止" />
 }
 
 export function EventsListenersPanel({
   workspaceId,
+  selectedListenerId,
+  onSelectListener,
   className,
 }: EventsListenersPanelProps): React.ReactElement {
-  const [status, setStatus] = React.useState<Status | null>(null)
-  const [counts, setCounts] = React.useState<Record<string, number>>({})
+  const [listeners, setListeners] = React.useState<ListenerDto[]>([])
+  const [loading, setLoading] = React.useState(false)
+  const [error, setError] = React.useState<string | null>(null)
 
-  React.useEffect(() => {
+  const load = React.useCallback(async () => {
     if (!workspaceId) return
-    window.electronAPI
-      .getEventCounts(workspaceId)
-      .then((result) => {
-        setStatus(result.status)
-        setCounts(result.counts ?? {})
-      })
-      .catch((err: unknown) => console.error('[EventsListenersPanel] status failed:', err))
+    setLoading(true)
+    setError(null)
+    try {
+      // skipProbes=true: cards must render instantly; the detail page pays for
+      // the python/pip subprocess checks.
+      const rows = await window.electronAPI.listEventListeners(workspaceId, true)
+      setListeners(Array.isArray(rows) ? rows : [])
+    } catch (err) {
+      console.error('[EventsListenersPanel] load failed:', err)
+      setError(err instanceof Error ? err.message : String(err))
+      setListeners([])
+    } finally {
+      setLoading(false)
+    }
   }, [workspaceId])
 
-  // Keep the counts fresh as events land.
+  React.useEffect(() => {
+    void load()
+  }, [load])
+
   React.useEffect(() => {
     if (!workspaceId) return
-    const off = window.electronAPI.onEventsChanged((wsId, event) => {
+    const off = window.electronAPI.onEventListenerStatus((wsId, status) => {
       if (wsId !== workspaceId) return
-      setCounts((prev) => ({ ...prev, [event.source]: (prev[event.source] ?? 0) + 1 }))
+      setListeners((prev) =>
+        prev.map((listener) => (listener.id === status.id ? { ...listener, status, enabled: status.state !== 'stopped' || listener.enabled } : listener)),
+      )
     })
     return () => {
       if (typeof off === 'function') off()
     }
   }, [workspaceId])
 
-  const sources = Object.entries(counts).sort((a, b) => b[1] - a[1])
-  const exampleUrl = status?.baseUrl ? `${status.baseUrl}/events/my-listener` : 'http://127.0.0.1:<port>/events/my-listener'
-
-  const curl = [
-    `curl -X POST "${exampleUrl}" \\`,
-    `  -H "Authorization: Bearer $CRAFT_EVENTS_TOKEN" \\`,
-    `  -H "Content-Type: application/json" \\`,
-    `  -d '{"type":"mail.received","title":"张三 · 合同确认","summary":"请确认付款条款"}'`,
-  ].join('\n')
-
   return (
-    <div className={className ? `flex flex-col h-full overflow-y-auto ${className}` : 'flex flex-col h-full overflow-y-auto'}>
-      <div className="px-3 py-3 border-b border-border space-y-2">
-        <div className="flex items-center gap-1.5 text-xs">
-          <Radio className={`h-3.5 w-3.5 ${status?.listening ? 'text-primary' : 'text-muted-foreground'}`} />
-          <span className="text-muted-foreground">接收地址</span>
-          <span className="ml-auto font-mono text-[11px]">
-            {status?.listening ? `${status.host}:${status.port}` : '未监听'}
-          </span>
-        </div>
-        <p className="text-[11px] text-muted-foreground">
-          本地监听器把事件 POST 到这个地址即可。地址与本机端口绑定，不对外网开放。
-        </p>
+    <div className={className ? `flex flex-col h-full ${className}` : 'flex flex-col h-full'}>
+      <div className="px-3 py-2 border-b border-border flex items-center gap-1.5">
+        <Radio className="h-3.5 w-3.5 text-muted-foreground" />
+        <span className="text-xs font-medium">监听器</span>
+        <span className="text-[11px] text-muted-foreground">{listeners.length}</span>
+        <button
+          type="button"
+          onClick={() => void load()}
+          className="ml-auto h-6 w-6 inline-flex items-center justify-center rounded hover:bg-accent text-muted-foreground"
+          title="刷新"
+        >
+          <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+        </button>
       </div>
 
-      <div className="px-3 py-3 space-y-2 border-b border-border">
-        <div className="flex items-center gap-1.5">
-          <ShieldCheck className="h-3.5 w-3.5 text-muted-foreground" />
-          <span className="text-xs font-medium">接入示例</span>
-          <span className="ml-auto" />
-          <CopyButton value={curl} label="复制 curl" />
-        </div>
-        <pre className="text-[11px] font-mono whitespace-pre-wrap break-all bg-muted/40 rounded-md p-2">
-          {curl}
-        </pre>
-        <p className="text-[11px] text-muted-foreground">
-          请求必须带 <code className="font-mono">Authorization: Bearer</code>（启动监听器时由 Craft 注入
-          <code className="font-mono"> CRAFT_EVENTS_TOKEN</code>）与
-          <code className="font-mono"> Content-Type: application/json</code>。
-        </p>
-      </div>
+      <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
+        {error && <div className="px-1 py-2 text-xs text-destructive">{error}</div>}
 
-      <div className="px-3 py-3 space-y-2">
-        <span className="text-xs font-medium">已接入的来源</span>
-        {sources.length === 0 ? (
-          <p className="text-[11px] text-muted-foreground">还没有任何来源发过事件。</p>
-        ) : (
-          <div className="grid grid-cols-2 gap-2">
-            {sources.map(([source, count]) => (
-              <div key={source} className="rounded-md border border-border p-2 space-y-0.5">
-                <div className="text-xs font-medium truncate">{source}</div>
-                <div className="text-[11px] text-muted-foreground">{count} 条事件</div>
-              </div>
-            ))}
+        {!error && listeners.length === 0 && (
+          <div className="flex flex-col items-center justify-center gap-2 py-8 text-muted-foreground text-center px-3">
+            <Plus className="h-6 w-6" />
+            <p className="text-xs">还没有监听器</p>
+            <p className="text-[11px] opacity-70 leading-relaxed">
+              在 <code className="font-mono">&lt;workspace&gt;/events/&lt;id&gt;/manifest.json</code> 放一个清单，
+              这里就会出现卡片
+            </p>
           </div>
         )}
-        <p className="text-[11px] text-muted-foreground pt-1">
-          监听器目录、manifest 与依赖安装在 P2 提供；当前版本可直接用自己的脚本接入。
-        </p>
+
+        {listeners.map((listener) => {
+          const selected = listener.id === selectedListenerId
+          return (
+            <button
+              key={listener.id}
+              type="button"
+              onClick={() => onSelectListener(listener.id)}
+              className={`w-full text-left rounded-md border p-2 transition-colors ${
+                selected ? 'border-primary/40 bg-accent' : 'border-border hover:bg-accent/50'
+              }`}
+            >
+              <div className="flex items-center gap-1.5">
+                <StateDot listener={listener} />
+                <span className="text-xs font-medium truncate flex-1">{listener.name}</span>
+                <span className="text-[10px] text-muted-foreground shrink-0">v{listener.version}</span>
+              </div>
+              {listener.description && (
+                <p className="text-[11px] text-muted-foreground line-clamp-2 mt-1">{listener.description}</p>
+              )}
+              <div className="flex items-center gap-1 mt-1">
+                <span className="text-[10px] px-1 py-px rounded bg-muted text-muted-foreground">
+                  {listener.enabled ? '已启用' : '已停用'}
+                </span>
+                {listener.eventTypes.slice(0, 2).map((type) => (
+                  <span key={type} className="text-[10px] text-muted-foreground truncate">
+                    {type}
+                  </span>
+                ))}
+              </div>
+              {listener.errors.length > 0 && (
+                <p className="text-[10px] text-destructive mt-1 line-clamp-1">{listener.errors[0]}</p>
+              )}
+            </button>
+          )
+        })}
       </div>
     </div>
   )

@@ -1560,6 +1560,10 @@ function AppShellContent({
     navigate(routes.view.events(eventId))
   }, [])
 
+  const handleListenerSelect = useCallback((listenerId: string) => {
+    navigate(routes.view.eventListeners(listenerId))
+  }, [])
+
   // Open settings in its dedicated window. A missing subpage keeps the
   // navigator-only `settings` entry and resolves to the app page in the window.
   const handleSettingsClick = useCallback((subpage?: SettingsSubpage) => {
@@ -2728,7 +2732,11 @@ function AppShellContent({
             {/* Events navigator: the log or the listener section */}
             {isEventsNavigation(navState) && activeWorkspaceId && (
               navState.section === 'listeners' ? (
-                <EventsListenersPanel workspaceId={activeWorkspaceId} />
+                <EventsListenersPanel
+                  workspaceId={activeWorkspaceId}
+                  selectedListenerId={navState.details?.type === 'listener' ? navState.details.listenerId : null}
+                  onSelectListener={handleListenerSelect}
+                />
               ) : (
                 <EventsListPanel
                   workspaceId={activeWorkspaceId}

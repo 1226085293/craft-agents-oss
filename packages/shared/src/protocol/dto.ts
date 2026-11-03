@@ -245,7 +245,7 @@ export type SessionEvent =
   // Carries the full ordered queue so every window converges on one order.
   | { type: 'queued_messages_changed'; sessionId: string; queuedMessages: QueuedMessageSummary[] }
   | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed'; statusParams?: Record<string, string | number>; timestamp?: number }
-  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed' | 'system_stop' | 'background_wake'; statusParams?: Record<string, string | number>; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string }
+  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed' | 'system_stop' | 'background_wake' | 'event_wake'; statusParams?: Record<string, string | number>; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string }
   | { type: 'system_stop_notice'; sessionId: string; reason: string; message: string; timestamp?: number }
   | { type: 'title_generated'; sessionId: string; title: string }
   | { type: 'title_regenerating'; sessionId: string; isRegenerating: boolean }
@@ -955,4 +955,57 @@ export interface EventMetaDto {
 /** `events:get` result: metadata plus the stored body. */
 export interface EventRecordDto extends EventMetaDto {
   body?: string
+}
+
+/** Listener process state, mirrored to the renderer. */
+export interface ListenerStatusDto {
+  id: string
+  state: 'stopped' | 'starting' | 'running' | 'degraded' | 'failed'
+  pid: number | null
+  startedAt: number | null
+  attempts: number
+  lastExitCode: number | null
+  lastError: string | null
+}
+
+/** One dependency row in the listener detail page. */
+export interface ListenerDependencyDto {
+  kind: 'runtime' | 'package' | 'system'
+  label: string
+  requirement: string
+  state: 'ok' | 'missing' | 'mismatch' | 'unknown' | 'not_required'
+  found?: string
+  installHint?: string
+}
+
+/** A listener card / detail payload. */
+export interface ListenerDto {
+  id: string
+  name: string
+  version: string
+  description?: string
+  icon?: string
+  homepage?: string
+  eventTypes: string[]
+  enabled: boolean
+  ready: boolean
+  missingConfig: string[]
+  config: Record<string, unknown>
+  dependencies: ListenerDependencyDto[]
+  errors: string[]
+  warnings: string[]
+  status: ListenerStatusDto
+  configSchema?: {
+    properties: Record<string, {
+      type?: 'string' | 'number' | 'boolean'
+      title?: string
+      description?: string
+      default?: string | number | boolean
+      secret?: boolean
+      enum?: Array<string | number>
+    }>
+    required?: string[]
+  }
+  setup: Array<{ text: string; link?: string }>
+  logTail?: string
 }

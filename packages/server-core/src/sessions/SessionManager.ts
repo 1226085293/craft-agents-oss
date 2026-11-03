@@ -841,6 +841,14 @@ const USAGE_FLUSH_INTERVAL_MS = 30_000
  */
 const PLAN_APPROVAL_MESSAGE = 'Plan approved, please execute.'
 
+/**
+ * Every background-task nudge starts with this marker — `[background-task-`
+ * followed by `completed]`, `failed]`, `stopped]`, … The injected steer text is
+ * matched on this prefix to prove a task's result actually reached the model;
+ * the `steer` queue ack alone does not (see pendingBackgroundSteers).
+ */
+const BACKGROUND_TASK_NUDGE_PREFIX = '[background-task-'
+
 // validateSpawnAttachmentPath removed — use shared validateFilePath from @craft-agent/server-core/handlers
 
 const PI_TURN_ANCHORS_VERSION = 1
@@ -1408,6 +1416,27 @@ export interface ManagedSession {
    * time = "actual handling time") and this is cleared.
    */
   steerDrainPendingFor?: string
+  /**
+   * Terminal background tasks whose result was handed to the running turn as
+   * a steer, but which have NOT yet been confirmed as delivered.
+   *
+   * `agent.redirect() === true` only means the backend ACCEPTED the guidance
+   * into its queue; the SDK drains that queue into the model at the next round
+   * boundary, and a turn aborted in between drops it. Deleting the task record
+   * on the queue ack made such a result vanish from the background-task list
+   * without ever reaching the model. So the record stays pending until the
+   * `steer_injected` event proves the message entered the model's context
+   * (matched by the `[background-task-` marker prefix), and anything left here
+   * when the session goes idle is re-surfaced as a wake turn instead of being
+   * silently dropped.
+   */
+  pendingBackgroundSteers?: Array<{
+    taskId: string
+    status: string
+    outputFile?: string
+    taskIntent?: string
+    command?: string
+  }>
   // NOTE: Parent-child tracking state (pendingTools, parentToolStack, toolToParentMap,
   // pendingTextParent) has been removed. CraftAgent now provides parentToolUseId
   // directly on all events using the SDK's authoritative parent_tool_use_id field.
@@ -3470,7 +3499,7 @@ export class SessionManager implements ISessionManager {
           list,
           'Report them to the user as interrupted by the app restart. Their partial output (if any) is still on disk. Do not claim they completed, and do not silently re-run them.',
         ].join('\n')
-        this.insertBackgroundWakeNotice(
+        this.insertBackgroundTaskSurface(
           managed,
           `后台任务因应用重启而中断 — ${orphans.length} 个`,
           { status: 'interrupted' },
@@ -9636,7 +9665,8 @@ ${request.prompt}`;
     }
 
     // 5. Check queue and process or complete
-    if (managed.messageQueue.length > 0) {
+    const queuedTurnDispatched = managed.messageQueue.length > 0
+    if (queuedTurnDispatched) {
       // Has queued messages - process next
       this.processNextQueuedMessage(sessionId)
     } else {
@@ -9696,6 +9726,18 @@ ${request.prompt}`;
     // session otherwise never writes `turns/` (it was only archived when the
     // NEXT user message arrived).
     this.queueTurnLogArchive(managed)
+
+    // 7. Background-task delivery backstop. A result steered into the turn that
+    // just ended is only "delivered" once `steer_injected` proved the SDK
+    // drained it into the model's context; if the turn ended first, the steer
+    // was dropped with it. Re-surface those through the idle wake path now —
+    // otherwise the task either sat pending forever or (worse, before this
+    // check existed) got bulk-deleted as if the model had seen it.
+    // Runs last: the ending turn's complete event and teardown must not be
+    // interleaved with a fresh wake turn. Skipped when a queued message was
+    // just dispatched — that turn owns the session next, and this re-runs when
+    // it ends.
+    if (!queuedTurnDispatched) this.flushUndeliveredBackgroundSteers(managed)
   }
 
   /**
@@ -10013,31 +10055,27 @@ ${request.prompt}`;
   }
 
   /**
-   * Push a visible "why did this session start talking?" row.
+   * Push the "why did this session start talking?" title row.
    *
-   * The wake-up nudge itself is `hidden` (it must reach the model but must not
-   * render as a user bubble). That leaves the transcript with a turn that
-   * began on its own and no explanation, which reads like a bug.
+   * This row marks a turn that STARTED ON ITS OWN: the session was idle and a
+   * terminal background task woke it (the nudge itself is `hidden`, so without
+   * this the transcript would show a turn that began for no reason).
    *
-   * Two messages, in order:
-   *   1. A `role: 'info'` title row (statusType `background_wake`) — the green
-   *      "后台任务已完成 — xxx" line.
-   *   2. A real `role: 'tool'` process block (Bash) with the command
-   *      (`toolInput`) and the captured result (`toolResult`), so it expands
-   *      through the SAME pipeline as any tool entry.
+   * It must therefore ONLY be pushed on the idle path. Mid-turn the nudge is
+   * steered into a turn the user is already watching: nothing was "woken", and
+   * every `role: 'info'` row terminates the in-flight process card in the
+   * renderer (`groupMessagesByTurn` flushes the current turn as INTERRUPTED and
+   * pushes a standalone system turn) — the banner would split one process block
+   * into two cards and mark live activities as "Interrupted".
    */
-  private insertBackgroundWakeNotice(
+  private pushBackgroundWakeTitle(
     managed: ManagedSession,
     text: string,
     params?: { taskId?: string; command?: string; outputFile?: string; status?: string },
   ): void {
-    const { taskId, command, outputFile, status } = params ?? {}
-    const terminal = status === 'completed'
-    const toolStatus = terminal ? 'completed' : 'error'
-    const outputPreview = outputFile ? readTextFileTail(outputFile) : undefined
-
-    // 1. Title row. The command deliberately lives in the process block below,
-    //    not here, so it renders once (as a tool entry) rather than twice.
+    const { taskId, outputFile, status } = params ?? {}
+    // The command deliberately lives in the process block below, not here, so
+    // it renders once (as a tool entry) rather than twice.
     const statusParams: Record<string, string> = {}
     if (taskId) statusParams.taskId = taskId
     if (outputFile) statusParams.outputFile = outputFile
@@ -10059,9 +10097,54 @@ ${request.prompt}`;
       timestamp: infoMessage.timestamp,
       ...(Object.keys(statusParams).length > 0 ? { statusParams } : {}),
     }, managed.workspace.id)
+  }
 
-    // 2. Process block.
-    const toolUseId = taskId ? `bg-wake-${taskId}` : `bg-wake-${generateMessageId()}`
+  /**
+   * Push the terminal background task's transcript rows, choosing the correct
+   * shape for the session's state:
+   *
+   * - idle  → wake TITLE row + process row. This is what explains a turn that
+   *           starts on its own; the nudge itself is hidden.
+   * - busy  → process row ONLY. Nothing was woken, and an info row would split
+   *           the live process card (`groupMessagesByTurn` flushes the running
+   *           turn as interrupted for every info row).
+   */
+  private insertBackgroundTaskSurface(
+    managed: ManagedSession,
+    text: string,
+    params?: { taskId?: string; command?: string; outputFile?: string; status?: string },
+  ): void {
+    if (!managed.isProcessing) this.pushBackgroundWakeTitle(managed, text, params)
+    this.insertBackgroundTaskProcessRow(managed, text, params)
+  }
+
+  /**
+   * Push the terminal background task as a normal PROCESS-BLOCK row.
+   *
+   * A real `role: 'tool'` message (Bash) carrying the command (`toolInput`) and
+   * the captured result (`toolResult`), so it expands through the SAME pipeline
+   * as any tool entry — correct both mid-turn (folded into the running card)
+   * and on the idle wake path (the card the wake turn produces).
+   */
+  private insertBackgroundTaskProcessRow(
+    managed: ManagedSession,
+    text: string,
+    params?: { taskId?: string; command?: string; outputFile?: string; status?: string },
+  ): void {
+    const { taskId, command, outputFile, status } = params ?? {}
+    const terminal = status === 'completed'
+    const toolStatus = terminal ? 'completed' : 'error'
+    const outputPreview = outputFile ? readTextFileTail(outputFile) : undefined
+
+    let toolUseId = taskId ? `bg-wake-${taskId}` : `bg-wake-${generateMessageId()}`
+    // A re-surfaced result (its steer was dropped with the turn that ended) must
+    // not reuse the id of the row already sitting in that earlier card: the
+    // renderer resolves tool events by the FIRST match on toolUseId, so the new
+    // row would silently update the old one instead of appearing in the wake
+    // turn's card.
+    if (taskId && managed.messages.some(m => m.toolUseId === toolUseId)) {
+      toolUseId = `${toolUseId}-${generateMessageId()}`
+    }
     const toolName = 'Bash'
     const message: Message = {
       id: generateMessageId(),
@@ -10104,6 +10187,73 @@ ${request.prompt}`;
       isError: !terminal,
       timestamp: message.timestamp,
     }, managed.workspace.id)
+  }
+
+  /**
+   * Record that a task's result was handed to the backend as a mid-turn steer.
+   *
+   * Deliberately NOT "delivered": the SDK drains its steer queue at the next
+   * model round, so only `steer_injected` proves the text reached the model.
+   */
+  private trackPendingBackgroundSteer(
+    managed: ManagedSession,
+    entry: { taskId: string; status: string; outputFile?: string; taskIntent?: string; command?: string },
+  ): void {
+    const list = managed.pendingBackgroundSteers ?? (managed.pendingBackgroundSteers = [])
+    if (!list.some(e => e.taskId === entry.taskId)) list.push({ ...entry })
+  }
+
+  /**
+   * A steer user message just entered the model's context. If it was a
+   * background-task result, that task is now genuinely delivered.
+   *
+   * Matching is by the nudge's marker prefix, never by queue position: defense
+   * resume messages are injected as user messages through the same channel.
+   */
+  private resolvePendingBackgroundSteer(
+    managed: ManagedSession,
+    injectedText: string | undefined,
+  ): string | undefined {
+    if (!injectedText || !injectedText.startsWith(BACKGROUND_TASK_NUDGE_PREFIX)) return undefined
+    const pending = managed.pendingBackgroundSteers
+    if (!pending || pending.length === 0) return undefined
+    // Prefer an exact hit: the nudge names its task (`task shell_123`) whenever
+    // no human intent was recorded. Only fall back to queue order (the SDK
+    // drains steers FIFO) when the text cannot identify the task — e.g. the
+    // nudge quoted the task's intent instead of its id.
+    const exact = pending.findIndex(entry => injectedText.includes(entry.taskId))
+    const [entry] = pending.splice(exact === -1 ? 0 : exact, 1)
+    return entry?.taskId
+  }
+
+  /**
+   * Re-surface steers that never made it into the model's context.
+   *
+   * A steer can be accepted (`redirect() === true`) and still be dropped when
+   * the turn ends before the SDK drains its queue. Called once the session is
+   * genuinely idle: re-running these through the idle wake path is the only way
+   * the result is not lost, and it keeps the "the turn has ended → this is what
+   * woke it" banner truthful.
+   */
+  private flushUndeliveredBackgroundSteers(managed: ManagedSession): void {
+    const pending = managed.pendingBackgroundSteers
+    if (!pending || pending.length === 0) return
+    // A queued user message owns the next turn; this re-runs when that ends.
+    if (managed.isProcessing || managed.messageQueue.length > 0) return
+    managed.pendingBackgroundSteers = []
+    for (const entry of pending) {
+      sessionLog.info('[bg-lifecycle] re-surfacing background task whose steer never reached the model', {
+        sessionId: managed.id,
+        taskId: entry.taskId,
+      })
+      this.surfaceTerminalBackgroundTask(managed, {
+        taskId: entry.taskId,
+        status: entry.status,
+        ...(entry.outputFile ? { outputFile: entry.outputFile } : {}),
+        ...(entry.taskIntent ? { taskIntent: entry.taskIntent } : {}),
+        ...(entry.command ? { command: entry.command } : {}),
+      })
+    }
   }
 
   /**
@@ -10174,18 +10324,24 @@ ${request.prompt}`;
           taskId,
           status,
         })
-        this.insertBackgroundWakeNotice(managed, wakeRow, wakeParams)
-        // Steered text goes into the in-flight turn, so there is nothing left
-        // to deliver later — the row can clear now.
-        void this.markBackgroundTaskDelivered(sessionId, taskId).catch((err) => {
-          sessionLog.error(`[bg-lifecycle] failed to mark steered task delivered ${taskId}:`, err)
-        })
+        // Process-block row ONLY: the turn is already running, so nothing was
+        // "woken" — a background_wake title row here is a false claim AND it
+        // splits the live process card (see pushBackgroundWakeTitle).
+        this.insertBackgroundTaskProcessRow(managed, wakeRow, wakeParams)
+        // `redirect() === true` only means the guidance was QUEUED. The record
+        // must stay in the background-task list until `steer_injected` proves
+        // the message reached the model — otherwise a turn aborted before the
+        // SDK drains its queue deletes a result nobody ever saw.
+        this.trackPendingBackgroundSteer(managed, { taskId, status, outputFile, taskIntent, command })
       } else {
         sessionLog.info(`[bg-lifecycle] backend cannot steer; queueing background completion`, {
           sessionId,
           taskId,
         })
-        this.insertBackgroundWakeNotice(managed, wakeRow, wakeParams)
+        // Same rule: the queued turn has not started yet, so this is not a
+        // wake-up. The row rides the process block; the wake turn that the
+        // queued nudge starts will show its own reply.
+        this.insertBackgroundTaskProcessRow(managed, wakeRow, wakeParams)
         void this.sendMessage(sessionId, nudge, [], [], { hidden: true }).then(() => {
           return this.markBackgroundTaskDelivered(sessionId, taskId)
         }).catch((err) => {
@@ -10199,8 +10355,10 @@ ${request.prompt}`;
         status,
       })
       // Make the wake-up VISIBLE. The nudge below is `hidden`, so without this
-      // row the conversation would appear to start talking on its own.
-      this.insertBackgroundWakeNotice(managed, wakeRow, wakeParams)
+      // row the conversation would appear to start talking on its own. This is
+      // the ONLY state in which the banner is true: the session was idle and
+      // this task is what woke it (the helper picks title + row here).
+      this.insertBackgroundTaskSurface(managed, wakeRow, wakeParams)
       // Ride the normal turn machinery (resume + persistence). `hidden: true`
       // keeps the nudge out of the transcript — the agent's response (the
       // presented result) renders as a normal assistant turn.
@@ -10597,7 +10755,7 @@ ${request.prompt}`;
           ['Captured output so far:', captured.content].join('\n'),
           'Report what was captured so far. Do NOT spawn another background agent.',
         ].join('\n\n')
-        this.insertBackgroundWakeNotice(managed, `后台任务已结束 — ${record.intent ?? targetId}`, {
+        this.insertBackgroundTaskSurface(managed, `后台任务已结束 — ${record.intent ?? targetId}`, {
           taskId: targetId,
           status: 'stopped',
           ...(captured.outputFile ? { outputFile: captured.outputFile } : {}),
@@ -10668,13 +10826,23 @@ ${request.prompt}`;
     return store.markOrphaned()
   }
 
-  /** Mark every pending background task as delivered at turn end. */
+  /**
+   * Mark every pending background task as delivered at turn end.
+   *
+   * Tasks still listed in `managed.pendingBackgroundSteers` are EXCLUDED: their
+   * result was only accepted into the backend's steer queue and the turn ended
+   * before the SDK drained it. Deleting those here is what made a task vanish
+   * from the background-task list without the model ever seeing the output —
+   * flushUndeliveredBackgroundSteers() re-surfaces them instead.
+   */
   async deliverPendingBackgroundTasks(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) return
     const store = this.backgroundTaskStoreFor(managed)
     await store.load()
+    const awaitingSteer = new Set((managed.pendingBackgroundSteers ?? []).map(e => e.taskId))
     for (const record of store.pendingDelivery()) {
+      if (awaitingSteer.has(record.externalId ?? record.id) || awaitingSteer.has(record.id)) continue
       await this.markBackgroundTaskDelivered(sessionId, record.id)
     }
   }
@@ -11364,6 +11532,23 @@ ${request.prompt}`;
             }, workspaceId)
           }
           managed.steerDrainPendingFor = undefined
+        }
+        // Delivery proof for a background task steered into this turn: the
+        // result is only now truly in front of the model, so the task may
+        // leave the background-task list. Anything not confirmed here is
+        // re-surfaced by flushUndeliveredBackgroundSteers() at turn end.
+        const deliveredTaskId = this.resolvePendingBackgroundSteer(
+          managed,
+          (event as { text?: string }).text,
+        )
+        if (deliveredTaskId) {
+          sessionLog.info('[bg-lifecycle] background task steer confirmed in model context', {
+            sessionId,
+            taskId: deliveredTaskId,
+          })
+          void this.markBackgroundTaskDelivered(sessionId, deliveredTaskId).catch((err) => {
+            sessionLog.error(`[bg-lifecycle] failed to mark steered task delivered ${deliveredTaskId}:`, err)
+          })
         }
         break
       }

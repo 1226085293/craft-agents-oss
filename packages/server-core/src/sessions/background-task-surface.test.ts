@@ -125,6 +125,144 @@ describe('background task completion surfacing (idle keep-alive)', () => {
     expect(steered[0]).toContain('Long build')
     expect(steered[0]).toContain('/tmp/tasks/task_2.output')
     expect(calls).toEqual([])
+
+    // 2026-11-03: mid-turn means NOTHING was woken, so the `background_wake`
+    // title row must not be written. Every `info` row terminates the in-flight
+    // process card in the renderer (groupMessagesByTurn flushes it as
+    // interrupted), which split one process block into two cards.
+    expect(managed.messages.some(m => m.role === 'info' && m.statusType === 'background_wake')).toBe(false)
+    // The result still shows up as an ordinary process-block entry.
+    const processRow = managed.messages.find(m => m.role === 'tool' && m.toolUseId === 'bg-wake-task_2')
+    expect(processRow).toBeDefined()
+    expect(processRow!.isBackground).toBe(true)
+
+    // A queue ack is NOT delivery: the record must stay pending until the
+    // injected message is confirmed (`steer_injected`).
+    expect(managed.pendingBackgroundSteers?.map(e => e.taskId)).toEqual(['task_2'])
+  })
+
+  it('marks a steered task delivered only when steer_injected proves it reached the model', async () => {
+    const sessionId = 'in-turn-confirm'
+    const managed = buildSession(sessionId, { keepAlive: true, processing: true })
+    registerRunningTask(sessionId, 'shell_abc', 'Long build')
+    spyOnSendMessage()
+    ;(managed as unknown as { agent: unknown }).agent = { redirect: () => true }
+    const delivered: string[] = []
+    ;(sm as unknown as { markBackgroundTaskDelivered: (s: string, t: string) => Promise<boolean> })
+      .markBackgroundTaskDelivered = async (_s, taskId) => {
+        delivered.push(taskId)
+        return true
+      }
+
+    await fireTaskCompleted(sessionId, {
+      type: 'task_completed',
+      taskId: 'shell_abc',
+      status: 'completed',
+      outputFile: '/tmp/tasks/shell_abc.output',
+    })
+    expect(delivered).toEqual([])
+
+    // A user guidance / defense resume drains through the same channel and must
+    // NOT clear a background-task delivery.
+    await (sm as unknown as { processEvent: (m: unknown, e: unknown) => Promise<void> })
+      .processEvent(managed, { type: 'steer_injected', text: '帮我看看这个报错' })
+    expect(delivered).toEqual([])
+
+    await (sm as unknown as { processEvent: (m: unknown, e: unknown) => Promise<void> })
+      .processEvent(managed, {
+        type: 'steer_injected',
+        text: '[background-task-completed] The background task you launched ("Long build") has finished.',
+      })
+    expect(delivered).toEqual(['shell_abc'])
+    expect(managed.pendingBackgroundSteers).toEqual([])
+  })
+
+  it('matches the confirmed steer by task id when several tasks are pending', async () => {
+    const sessionId = 'in-turn-multi'
+    const managed = buildSession(sessionId, { keepAlive: true, processing: true })
+    registerRunningTask(sessionId, 'shell_a')
+    registerRunningTask(sessionId, 'shell_b')
+    spyOnSendMessage()
+    ;(managed as unknown as { agent: unknown }).agent = { redirect: () => true }
+    const delivered: string[] = []
+    ;(sm as unknown as { markBackgroundTaskDelivered: (s: string, t: string) => Promise<boolean> })
+      .markBackgroundTaskDelivered = async (_s, taskId) => {
+        delivered.push(taskId)
+        return true
+      }
+
+    await fireTaskCompleted(sessionId, { type: 'task_completed', taskId: 'shell_a', status: 'completed' })
+    await fireTaskCompleted(sessionId, { type: 'task_completed', taskId: 'shell_b', status: 'completed' })
+    expect(managed.pendingBackgroundSteers?.map(e => e.taskId)).toEqual(['shell_a', 'shell_b'])
+
+    // shell_b's nudge drains first (not queue order): identifying it by id must
+    // clear shell_b, not the older shell_a.
+    await (sm as unknown as { processEvent: (m: unknown, e: unknown) => Promise<void> })
+      .processEvent(managed, {
+        type: 'steer_injected',
+        text: '[background-task-completed] The background task you launched (task shell_b) has finished.',
+      })
+    expect(delivered).toEqual(['shell_b'])
+    expect(managed.pendingBackgroundSteers?.map(e => e.taskId)).toEqual(['shell_a'])
+  })
+
+  it('re-surfaces a steer that never reached the model instead of dropping it', async () => {
+    const sessionId = 'in-turn-lost'
+    const managed = buildSession(sessionId, { keepAlive: true, processing: true })
+    registerRunningTask(sessionId, 'shell_lost', 'Long build')
+    const calls = spyOnSendMessage()
+    ;(managed as unknown as { agent: unknown }).agent = { redirect: () => true }
+
+    await fireTaskCompleted(sessionId, {
+      type: 'task_completed',
+      taskId: 'shell_lost',
+      status: 'completed',
+      outputFile: '/tmp/tasks/shell_lost.output',
+    })
+    expect(managed.pendingBackgroundSteers?.length).toBe(1)
+
+    // The turn ends without the steer ever being injected (aborted / settled).
+    managed.isProcessing = false
+    await (sm as unknown as { onProcessingStopped: (s: string, r: string) => Promise<void> })
+      .onProcessingStopped(sessionId, 'interrupted')
+
+    // Re-surfaced through the idle wake path: a fresh hidden nudge, and the
+    // banner is now truthful (the turn had ended).
+    expect(calls.length).toBe(1)
+    expect(calls[0]!.msg).toContain('background-task-completed')
+    expect(managed.pendingBackgroundSteers).toEqual([])
+    const titles = managed.messages.filter(m => m.role === 'info' && m.statusType === 'background_wake')
+    expect(titles.length).toBe(1)
+    // The replayed row must own a NEW toolUseId: the renderer resolves tool
+    // events by the first match, so reusing `bg-wake-shell_lost` would rewrite
+    // the row already shown in the previous (ended) card.
+    const rows = managed.messages.filter(m => m.role === 'tool' && m.shellId === 'shell_lost')
+    expect(rows.length).toBe(2)
+    expect(new Set(rows.map(r => r.toolUseId)).size).toBe(2)
+  })
+
+  it('does not bulk-delete a pending task whose steer was never confirmed', async () => {
+    const sessionId = 'in-turn-skip-bulk'
+    const managed = buildSession(sessionId, { keepAlive: true, processing: true })
+    managed.pendingBackgroundSteers = [{ taskId: 'shell_pending', status: 'completed' }]
+    const store = (sm as unknown as { backgroundTaskStoreFor: (m: unknown) => unknown })
+      .backgroundTaskStoreFor(managed) as {
+        load: () => Promise<void>
+        pendingDelivery: () => Array<{ id: string; status: string }>
+      }
+    await store.load()
+    const removed: string[] = []
+    ;(store as unknown as { pendingDelivery: () => Array<{ id: string; status: string }> }).pendingDelivery = () => [
+      { id: 'shell_pending', status: 'completed_pending' },
+    ]
+    ;(sm as unknown as { markBackgroundTaskDelivered: (s: string, t: string) => Promise<boolean> })
+      .markBackgroundTaskDelivered = async (_s, taskId) => {
+        removed.push(taskId)
+        return true
+      }
+
+    await sm.deliverPendingBackgroundTasks(sessionId)
+    expect(removed).toEqual([])
   })
 
   it('falls back to the hidden-nudge path when the backend cannot steer', async () => {
@@ -263,9 +401,10 @@ describe('background task completion surfacing (idle keep-alive)', () => {
     const events: Array<{ type: string }> = []
     ;(sm as unknown as { sendEvent: (event: { type: string }) => void }).sendEvent = (event) => events.push(event)
 
+    // Idle session (isProcessing=false): the wake title row IS correct here.
     await (sm as unknown as {
-      insertBackgroundWakeNotice: (m: unknown, text: string, params?: Record<string, string>) => void
-    }).insertBackgroundWakeNotice(managed, '后台任务已完成 — shell_x', {
+      insertBackgroundTaskSurface: (m: unknown, text: string, params?: Record<string, string>) => void
+    }).insertBackgroundTaskSurface(managed, '后台任务已完成 — shell_x', {
       taskId: 'shell_x',
       command: 'sleep 60 && echo done',
       outputFile,

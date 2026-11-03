@@ -70,6 +70,26 @@ const RETRYABLE_PROVIDER_SIDE_PATTERN =
 type PiEvent = PiAgentEvent | AgentSessionEvent;
 
 /**
+ * Flatten an injected user message's content to plain text.
+ *
+ * Used only to identify WHICH queued message the SDK just drained (see the
+ * `steer_injected` case): the SDK's user messages carry either a string or an
+ * array of content blocks. Unknown shapes yield undefined rather than a
+ * best-effort string so a caller can never match on garbage.
+ */
+function extractUserMessageText(content: unknown): string | undefined {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return undefined
+  const parts: string[] = []
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    const { type, text } = block as { type?: unknown; text?: unknown }
+    if (type === 'text' && typeof text === 'string') parts.push(text)
+  }
+  return parts.length > 0 ? parts.join('\n') : undefined
+}
+
+/**
  * Maps Pi SDK events to Craft AgentEvents for UI compatibility.
  *
  * Event mapping:
@@ -924,7 +944,7 @@ export class PiEventAdapter extends BaseEventAdapter {
 
       case 'message_start': {
         // Pi SDK emits message_start for user messages too.
-        const startMsg = event.message as { role?: string; id?: string } | undefined
+        const startMsg = event.message as { role?: string; id?: string; content?: unknown } | undefined
         if (startMsg?.role === 'assistant') {
           this.messageStartAt = Date.now()
         } else if (startMsg?.role === 'user') {
@@ -932,7 +952,13 @@ export class PiEventAdapter extends BaseEventAdapter {
           // steer/follow-up message actually enters the agent's context
           // (drain time). The main process re-stamps the pending guidance
           // row to this moment.
-          yield { type: 'steer_injected', messageId: startMsg.id }
+          //
+          // The injected text rides along: accepting a steer only means it was
+          // QUEUED, and a turn aborted before the SDK drains its queue means it
+          // never reached the model. Callers that delete the underlying record
+          // on delivery (background tasks) must key on this event, not on the
+          // earlier `redirect() === true` ack.
+          yield { type: 'steer_injected', messageId: startMsg.id, text: extractUserMessageText(startMsg.content) }
         }
         break
       };

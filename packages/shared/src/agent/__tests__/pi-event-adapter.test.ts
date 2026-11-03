@@ -2200,9 +2200,37 @@ describe('PiEventAdapter', () => {
       message: { role: 'user', id: 'u-steer', content: [{ type: 'text', text: '还有你' }] },
     } as any));
     expect(events.find((e: any) => e.type === 'steer_injected')).toMatchObject({ messageId: 'u-steer' });
+    // The injected text rides along: it is the only proof a queued steer actually
+    // reached the model, so callers that delete a record on delivery key on it.
+    expect(events.find((e: any) => e.type === 'steer_injected')).toMatchObject({ text: '还有你' });
     // assistant message_start is unaffected (no steer_injected)
     const a = collect(adapter.adaptEvent({ type: 'message_start', message: { role: 'assistant', id: 'a1' } } as any));
     expect(a.find((e: any) => e.type === 'steer_injected')).toBeUndefined();
+  });
+
+  it('flattens only text blocks of an injected user message and ignores unknown shapes', () => {
+    const multi = collect(adapter.adaptEvent({
+      type: 'message_start',
+      message: {
+        role: 'user',
+        id: 'u-multi',
+        content: [
+          { type: 'text', text: '[background-task-completed] done' },
+          { type: 'image', source: { data: 'x' } },
+          { type: 'text', text: 'tail' },
+        ],
+      },
+    } as any));
+    expect(multi.find((e: any) => e.type === 'steer_injected')).toMatchObject({
+      text: '[background-task-completed] done\ntail',
+    });
+    // Opaque content must yield no text at all (never a best-effort string that
+    // a marker prefix could match by accident).
+    const opaque = collect(adapter.adaptEvent({
+      type: 'message_start',
+      message: { role: 'user', id: 'u-opaque', content: { weird: true } },
+    } as any));
+    expect(opaque.find((e: any) => e.type === 'steer_injected')).toMatchObject({ text: undefined });
   });
 
   // Fix: defer retryable errors until the terminal agent_end (willRetry: false

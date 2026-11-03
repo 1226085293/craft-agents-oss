@@ -131,6 +131,7 @@ import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
 import { createSearchTool } from './tools/search/create-search-tool.ts';
 import { allowCraftMetadataProperties, normalizeUnderscorePrefixedArgs, stripCraftMetadata } from './craft-metadata-schema.ts';
 import { wrapMidTurnGuidance } from './steer-guidance.ts';
+import { settleStreamingSessionBeforePrompt } from './prompt-settle.ts';
 import { scheduleQueuedFollowUpDrain, type DrainableSession } from './queued-followup-drain.ts';
 import { applySystemPromptOverride, applySystemPromptOverrideWithDefense } from './system-prompt-override.ts';
 import { adaptCredentialForPiSdk, type PiCredential } from './adapt-credential.ts';
@@ -3370,8 +3371,15 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     // Wait for any in-flight auto-compaction to avoid race (craft-agents-oss#464)
     await waitForCompaction(session, 300_000, debugLog);
 
-    // Fire prompt — use followUp when session is already streaming so the
-    // message is queued instead of throwing "Agent is already processing".
+    // A FRESH turn must start from an idle session — `prompt()` with a
+    // streamingBehavior would only QUEUE the message behind the current run, so
+    // the model would answer the PREVIOUS message and the user's text would be
+    // injected minutes later, mid-turn (2026-11-03 261103-early-carbon).
+    // Mid-turn delivery has its own channel (`steer`), so reaching here while
+    // streaming always means the previous run had not settled yet.
+    // See prompt-settle.ts for the full incident notes.
+    await settleStreamingSessionBeforePrompt(session, { log: debugLog });
+
     // Stall protection: wait on the prompt promise, but poll for SILENCE.
     // If no SDK event (stream delta / tool progress / message_end) arrives
     // within TURN_STALL_TIMEOUT_MS, the turn is presumed dead: abort() to
@@ -3392,7 +3400,6 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
 
     const promptPromise = session.prompt(msg.message, {
       images: msg.images && msg.images.length > 0 ? msg.images : undefined,
-      streamingBehavior: 'followUp',
     });
     lastTurnActivityAt = Date.now();
     const activeToolDeadline = (): number | null => {

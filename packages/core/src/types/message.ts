@@ -630,8 +630,15 @@ export type AgentEvent =
    * ACTUALLY processed (drain time). The main process re-stamps the
    * guidance row to this moment so its card position and display time
    * read "actual handling time", not the earlier queue/guide-click time.
+   *
+   * `text` is the injected message's own text. A steer can be accepted by the
+   * backend and still never reach the model (the turn is aborted before the
+   * SDK drains its queue), so the ONLY proof of delivery is this event. The
+   * main process matches its marker prefix (`[background-task-`) to clear a
+   * pending background-task delivery — never by queue position: defense
+   * resumes are injected as user messages too.
    */
-  | { type: 'steer_injected'; messageId?: string }
+  | { type: 'steer_injected'; messageId?: string; text?: string }
   | { type: 'retry'; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number; /** Ladder-start epoch ms — anchors the row on the ladder's real start (2026-10-10), so a later `end` re-finds the same row by startedAt. */ startedAt?: number }
   | { type: 'retry'; phase: 'active' | 'end'; recovered?: boolean; attempt?: number; startedAt?: number; elapsedMs?: number }
   | { type: 'status'; message: string; statusType?: string; statusParams?: Record<string, string | number> }

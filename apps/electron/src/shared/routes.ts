@@ -178,6 +178,18 @@ export const routes = {
         ? `pages/page/${pageSlug}` as const
         : 'pages' as const,
 
+    /** Events: received-event log (default section of the events navigator) */
+    events: (eventId?: string) =>
+      eventId
+        ? `events/list/event/${eventId}` as const
+        : 'events/list' as const,
+
+    /** Events: installed listener cards */
+    eventListeners: (listenerId?: string) =>
+      listenerId
+        ? `events/listeners/listener/${listenerId}` as const
+        : 'events/listeners' as const,
+
   },
 } as const
 

@@ -33,6 +33,7 @@ import {
   isProjectsNavigation,
   isPagesNavigation,
   isAutomationsNavigation,
+  isEventsNavigation,
 } from '@/contexts/NavigationContext'
 import { useSessionSelection, useIsMultiSelectActive, useSelectedIds, useSelectionCount } from '@/hooks/useSession'
 import { sourceSelection, skillSelection, automationSelection } from '@/hooks/useEntitySelection'
@@ -45,6 +46,7 @@ import type { ExecutionEntry } from '../automations/types'
 import { automationsAtom } from '@/atoms/automations'
 import { useAutomations } from '@/hooks/useAutomations'
 import { PagesHome } from '../pages/PagesHome'
+import { EventDetailPanel } from '../events/EventDetailPanel'
 import { MemoryPanel } from './MemoryPanel'
 import { PageView } from '../pages/PageView'
 import { SendResourceToWorkspaceDialog, type SendResourceType } from './SendResourceToWorkspaceDialog'
@@ -196,6 +198,34 @@ export function MainContentPanel({
     return wrapWithStoplight(
       <Panel variant="grow" className={className}>
         <SettingsPageComponent />
+      </Panel>
+    )
+  }
+
+  // Events navigator - one event's full content, or an empty state
+  if (isEventsNavigation(navState)) {
+    if (navState.section === 'listeners') {
+      return wrapWithStoplight(
+        <Panel variant="grow" className={className}>
+          <div className="flex flex-col items-center justify-center h-full gap-1.5 text-muted-foreground">
+            <p className="text-sm">监听器安装与依赖管理将在下一阶段提供</p>
+            <p className="text-xs opacity-70">当前可在左侧查看接收地址，用自己的脚本接入</p>
+          </div>
+        </Panel>
+      )
+    }
+    if (navState.details?.type === 'event' && activeWorkspaceId) {
+      return wrapWithStoplight(
+        <Panel variant="grow" className={className}>
+          <EventDetailPanel workspaceId={activeWorkspaceId} eventId={navState.details.eventId} />
+        </Panel>
+      )
+    }
+    return wrapWithStoplight(
+      <Panel variant="grow" className={className}>
+        <div className="flex items-center justify-center h-full text-muted-foreground">
+          <p className="text-sm">选择一条事件查看详情</p>
+        </div>
       </Panel>
     )
   }

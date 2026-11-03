@@ -1619,6 +1619,10 @@
   "sidebar.settings": "Beállítások",
   "sidebar.skills": "Készségek",
   "sidebar.sources": "Források",
+  "sidebar.events": "Események",
+  "sidebar.eventList": "Eseménynapló",
+  "sidebar.eventListeners": "Figyelők",
+
   "sidebar.unknownProject": "Ismeretlen projekt",
   "sidebar.whatsNew": "Újdonságok",
   "sidebarMenu.addAutomation": "Automatizáció hozzáadása",

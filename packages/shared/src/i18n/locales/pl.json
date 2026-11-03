@@ -1619,6 +1619,10 @@
   "sidebar.settings": "Ustawienia",
   "sidebar.skills": "Umiejętności",
   "sidebar.sources": "Źródła",
+  "sidebar.events": "Zdarzenia",
+  "sidebar.eventList": "Dziennik zdarzeń",
+  "sidebar.eventListeners": "Nasłuchiwacze",
+
   "sidebar.unknownProject": "Nieznany projekt",
   "sidebar.whatsNew": "Co nowego",
   "sidebarMenu.addAutomation": "Dodaj automatyzację",

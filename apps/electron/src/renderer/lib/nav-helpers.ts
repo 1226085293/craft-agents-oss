@@ -34,6 +34,10 @@ export function isDetailNavState(navState: NavigationState | null): boolean {
     case 'automations':
     case 'projects':
       return navState.details !== null
+    case 'events':
+      // Both sections keep their own navigator list, so a detail selection is
+      // what flips the layout.
+      return navState.details !== null
     case 'pages':
       return true
   }

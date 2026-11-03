@@ -1619,6 +1619,10 @@
   "sidebar.settings": "设置",
   "sidebar.skills": "技能",
   "sidebar.sources": "数据源",
+  "sidebar.events": "事件",
+  "sidebar.eventList": "事件列表",
+  "sidebar.eventListeners": "事件监听",
+
   "sidebar.unknownProject": "未知项目",
   "sidebar.whatsNew": "最新动态",
   "sidebarMenu.addAutomation": "添加自动化",

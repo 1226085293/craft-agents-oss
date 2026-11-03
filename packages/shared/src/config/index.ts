@@ -9,6 +9,7 @@ export * from './llm-cooldown-store.ts';
 export * from './llm-planner.ts';
 export * from './model-window.ts';
 export * from './strategy-availability.ts';
+export * from './compaction-route.ts';
 export * from './reasoning-effort.ts';
 export * from './attachment-name-registry.ts';
 export * from './llm-transcode-request.ts';

@@ -493,6 +493,16 @@ describe('reconcileStrategyRefs', () => {
     expect(reconcileStrategyRefs(config).miniStrategy).toBe('preview')
   })
 
+  it('clears a compactionStrategy that names a deleted group and keeps a valid one', () => {
+    // 「会话压缩」 — unset means "compact on the session's group", so dropping a
+    // dangling id restores the old behaviour instead of failing every save.
+    const config = baseConfig()
+    config.compactionStrategy = 'gone'
+    expect(reconcileStrategyRefs(config).compactionStrategy).toBeUndefined()
+    config.compactionStrategy = 'preview'
+    expect(reconcileStrategyRefs(config).compactionStrategy).toBe('preview')
+  })
+
   it('clears a defaultStrategy that names a deleted group and keeps a valid one', () => {
     // New sessions inherit this, so a dangling id would both mis-route them and
     // make the validator reject every subsequent save.

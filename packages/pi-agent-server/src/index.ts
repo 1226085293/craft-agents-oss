@@ -120,6 +120,11 @@ import {
   waitForCompaction,
 } from './compaction-policy.ts';
 import { getDefaultSummarizationModel } from '../../shared/src/config/models.ts';
+import {
+  installCompactionRoute,
+  type CompactionRoute,
+  type SummarizationCapableSession,
+} from './compaction-auth.ts';
 import { MODEL_KIND_HEADER, MODEL_KIND_OVERRIDE_HEADER, SESSION_HEADER } from '../../shared/src/config/model-request-kind.ts';
 import { createWebFetchTool } from './tools/web-fetch.ts';
 import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
@@ -178,6 +183,13 @@ interface InitMessage {
    * a request header so its usage log can attribute the call to a feature.
    */
   requestKind?: string;
+  /**
+   * 「会话压缩」策略组 — resolved in the main process into a ready-made
+   * {endpoint, model}, because the group only exists as a gateway path and the
+   * subprocess has no gateway config of its own. Absent: compaction uses the
+   * session's group.
+   */
+  compactionRoute?: CompactionRoute;
   agentDir?: string;
   providerType?: string;
   authType?: string;
@@ -1891,7 +1903,17 @@ async function createPiSession(): Promise<AgentSession> {
   const { session } = await createAgentSession(sessionOptions);
   piSession = session;
 
-  // LLM resilience: apply retry + capped HTTP idle timeout in memory so every
+  // 「会话压缩」: pin the SDK's summarization call to its own strategy group
+  // when the user configured one. Installed per session (a re-init swaps the
+  // session object), and a no-op when `compactionRoute` is absent — compaction
+  // then stays on the session's group, which is what an unset setting means.
+  // Cast: the pin only needs one private method, and typing it structurally
+  // keeps this module independent of the SDK's class shape.
+  installCompactionRoute(
+    session as unknown as SummarizationCapableSession,
+    initConfig.compactionRoute,
+    (m) => debugLog(m),
+  );
   // Craft session inherits the same client-side fallback against upstream
   // gateway failures (LiteLLM connection resets / request timeouts).
   applyPiResilienceSettings(session);

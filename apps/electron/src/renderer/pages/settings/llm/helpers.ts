@@ -159,6 +159,8 @@ export function coolingKeyIdsFor(
  * - references to strategies that no longer exist are dropped;
  * - `miniStrategy` is dropped when it names a missing group (it then means
  *   "follow the session");
+ * - `compactionStrategy` is dropped the same way, and for the same reason: it
+ *   means "compact on the session's group" when unset;
  * - a client key left with nothing to route through adopts the first remaining
  *   group: the app's own sessions use that key, and an empty list is a hard 401
  *   with no UI to repair it.
@@ -172,11 +174,14 @@ export function reconcileStrategyRefs(config: LlmConfigShape): LlmConfigShape {
     return { ...ck, strategies: kept.length === 0 && fallback ? [fallback] : kept }
   })
   const miniStrategy = config.miniStrategy && known.has(config.miniStrategy) ? config.miniStrategy : undefined
+  const compactionStrategy = config.compactionStrategy && known.has(config.compactionStrategy)
+    ? config.compactionStrategy
+    : undefined
   // Same repair for the new-session default: a dangling id would seed every new
   // session with a group that no longer exists, and the validator would then
   // reject every later save.
   const defaultStrategy = config.defaultStrategy && known.has(config.defaultStrategy) ? config.defaultStrategy : undefined
-  return { ...config, clientKeys, miniStrategy, defaultStrategy }
+  return { ...config, clientKeys, miniStrategy, compactionStrategy, defaultStrategy }
 }
 
 /**

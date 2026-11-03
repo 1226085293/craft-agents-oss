@@ -139,13 +139,16 @@ export function SettingsView(props: Props): React.JSX.Element {
       </div>
       <div className="card">
         <div className="row spread" style={{ padding: '8px 0' }}>
-          <div>
+          {/* `minWidth: 0`: the hint wraps instead of pushing the select
+              narrower — a longer hint used to shrink the 200px cell and the
+              two selects ended up different widths. */}
+          <div style={{ minWidth: 0 }}>
             <span className="small">策略组</span>
             <div className="xs muted">
               记忆抽取、整合与仲裁走这个策略组；留空则使用会话的策略组。其余辅助调用（标题、忙碌/群聊决策、摘要）始终跟随会话自己的策略组。
             </div>
           </div>
-          <div style={{ width: 200 }}>
+          <div style={{ flex: '0 0 200px', width: 200 }}>
             <ProtoSelect
               value={props.config.miniStrategy ?? ''}
               options={[{ value: '', label: '使用会话策略组' }, ...strategyOptions]}
@@ -159,6 +162,37 @@ export function SettingsView(props: Props): React.JSX.Element {
               }}
             />
           </div>
+        </div>
+      </div>
+
+      <div className="sec-title" style={{ marginTop: 20 }}>
+        会话压缩
+      </div>
+      <div className="card">
+        <div className="row spread" style={{ padding: '8px 0' }}>
+          <div style={{ minWidth: 0 }}>
+            <span className="small">策略组</span>
+            <div className="xs muted">
+              会话上下文压缩时，负责生成摘要的那次调用走这个策略组；留空则使用会话自己的策略组（与以前一致）。摘要要读完整个对话却只产出几百字，单独放到一个便宜的组里，可以不占对话的配额与冷却。
+            </div>
+          </div>
+          <div style={{ flex: '0 0 200px', width: 200 }}>
+            <ProtoSelect
+              value={props.config.compactionStrategy ?? ''}
+              options={[{ value: '', label: '使用会话策略组' }, ...strategyOptions]}
+              onChange={(v) => {
+                void props.onSave({
+                  ...props.config,
+                  compactionStrategy: v || undefined,
+                }).then((ok) => {
+                  if (ok) shell.toast(v ? `会话压缩将使用「${strategyOptions.find((s) => s.value === v)?.label ?? v}」` : '会话压缩已改为使用会话策略组')
+                })
+              }}
+            />
+          </div>
+        </div>
+        <div className="xs muted" style={{ paddingBottom: 8 }}>
+          切换后对之后新建的会话生效；正在进行的会话仍用启动时选定的策略组。
         </div>
       </div>
 

@@ -29,6 +29,7 @@ export type ModelRequestKind =
   | 'verification'      // defense read-back judge
   | 'steer_check'       // does new guidance conflict with a running tool
   | 'memory'            // memory extraction / consolidation / adjudication
+  | 'compaction'        // session compaction (summarizing the transcript)
   | 'connection_test'   // settings-page key probe; logged, but never routed
 
 /** How a kind picks its strategy group. */
@@ -42,8 +43,10 @@ export interface KindSpec {
   /**
    * `session`  — follows the session's own strategy group. The default and the
    *              right answer for anything that reads session context.
-   * `dedicated`— needs a group of its own (`miniStrategy`), for work that has
-   *              no session to inherit from.
+   * `dedicated`— needs a group of its own, for work that either has no session
+   *              to inherit from (`miniStrategy`: memory consolidation) or is
+   *              deliberately routed away from the conversation
+   *              (`compactionStrategy`: session compaction).
    * `none`     — recorded in the log but never routed through a group at all.
    *              The settings-page key probe is the only member: it must reach
    *              the upstream directly to test the key, so there is no group to
@@ -64,6 +67,15 @@ const SPECS: readonly KindSpec[] = [
   { kind: 'transfer_summary', label: '传输摘要', routing: 'session' },
   { kind: 'verification', label: '校验', routing: 'session' },
   { kind: 'steer_check', label: '转向判断', routing: 'session' },
+  // Session compaction. Emitted per call by the subprocess
+  // (`_getSummarizationRequestAuth`) so a summary request is not logged as
+  // conversation traffic: it usually runs on a different group's key, and
+  // attributing it to `chat` made the group look busy for no reason.
+  //
+  // `dedicated` because it prefers its own group (`compactionStrategy`); when
+  // that is unset it falls back to the session's, which is the same group a
+  // `session` kind would have picked.
+  { kind: 'compaction', label: '会话压缩', routing: 'dedicated' },
   // Memory consolidation used to borrow a session's agent; it now has its own
   // backend and emits this kind.
   { kind: 'memory', label: '记忆', routing: 'dedicated' },

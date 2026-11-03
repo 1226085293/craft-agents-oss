@@ -19,6 +19,8 @@ import { createInterface, type Interface as ReadlineInterface } from 'node:readl
 import type { AgentEvent } from '@craft-agent/core/types';
 import type { FileAttachment } from '../utils/files.ts';
 import { getProxyEnvVars } from '../config/proxy-env.ts';
+import { resolveCompactionRoute } from '../config/compaction-route.ts';
+import { loadLlmConfig } from '../config/llm-config-loader.ts';
 
 function isMaskedCredential(value: string | null | undefined): boolean {
   if (!value) return false;
@@ -1247,6 +1249,30 @@ export class PiAgent extends BaseAgent {
     const workingDirectory = this.config.session?.workingDirectory || cwd;
     this.subprocessShellPath = shellPath;
 
+    // 「会话压缩」pin. Resolved here, in the process that holds the gateway
+    // config and knows this session's `/s/<id>` endpoint, and handed to the
+    // subprocess as a ready-made {endpoint, model}. The subprocess has no
+    // gateway config of its own and no way to express "route via group X" —
+    // the group IS an endpoint path.
+    //
+    // Absent means "follow the session's group", which is what every config
+    // written before this setting existed must keep doing. A config that has
+    // been deleted/disabled/unbound resolves to undefined for the same reason:
+    // compaction must still work, just where it always did.
+    // Only the session's own backend compacts. Auxiliary backends (title,
+    // memory, …) never summarize a transcript, and pinning one would just log
+    // a route it never uses.
+    const isChatBackend = !this.config.requestKind || this.config.requestKind === 'chat';
+    let compactionRoute: ReturnType<typeof resolveCompactionRoute>;
+    try {
+      compactionRoute = isChatBackend
+        ? resolveCompactionRoute(loadLlmConfig(), runtime.baseUrl)
+        : undefined;
+    } catch (error) {
+      this.debug(`compaction route resolution failed: ${error instanceof Error ? error.message : String(error)}`);
+      compactionRoute = undefined;
+    }
+
     // Send init command (flat structure matching subprocess InboundMessage type)
     this.send({
       type: 'init',
@@ -1261,6 +1287,8 @@ export class PiAgent extends BaseAgent {
       plansFolderPath,
       shellPath,
       miniModel: this.config.miniModel,
+      // Empty/undefined: compaction uses the session's own group.
+      compactionRoute,
       // What this backend is for; the subprocess forwards it to the gateway.
       requestKind: this.config.requestKind,
       providerType: this.config.providerType,

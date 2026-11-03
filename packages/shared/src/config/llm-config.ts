@@ -442,6 +442,23 @@ export interface LlmConfig {
    */
   miniStrategy?: string;
   /**
+   * Strategy group used for session compaction — the LLM call that summarizes a
+   * conversation so it fits its context window.
+   *
+   * Compaction is the one call whose input is the *whole* transcript and whose
+   * output is a few hundred tokens: the worst possible use of an expensive or
+   * rate-limited group, and a direct competitor with the conversation for the
+   * same quota. Pinning it to its own group keeps that spend separate.
+   *
+   * Empty (absent) means "follow the session's group" — the behaviour before
+   * this setting existed, and what an unset field has to keep meaning. The pin
+   * is resolved once per backend (`resolveCompactionRoute`) into an endpoint +
+   * model and handed to the subprocess, which uses it only for summarization;
+   * if it cannot be resolved, compaction silently stays on the session's group
+   * rather than failing the turn.
+   */
+  compactionStrategy?: string;
+  /**
    * Strategy group new sessions route through when the caller does not name one.
    *
    * This lives in the gateway config — not in the renderer's localStorage and not

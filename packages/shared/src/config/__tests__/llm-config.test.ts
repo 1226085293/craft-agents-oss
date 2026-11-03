@@ -239,6 +239,27 @@ describe('validateLlmConfig', () => {
     expect(validateLlmConfig(makeConfig({}))).toEqual([]);
   });
 
+  it('accepts a compactionStrategy that names a real strategy', () => {
+    expect(validateLlmConfig(makeConfig({ compactionStrategy: 's1' }))).toEqual([]);
+  });
+
+  it('rejects a compactionStrategy naming a strategy that does not exist', () => {
+    // The pin is resolved per backend, and a dangling id would silently drop
+    // back to the session's group — visible only as "compaction ignored my
+    // setting". Reject the write instead.
+    const errors = validateLlmConfig(makeConfig({ compactionStrategy: 'nope' }));
+    expect(errors.join(' ')).toContain('compactionStrategy 引用了不存在的 strategy: nope');
+  });
+
+  it('rejects a non-string compactionStrategy', () => {
+    const errors = validateLlmConfig(makeConfig({ compactionStrategy: 7 as unknown as string }));
+    expect(errors.join(' ')).toContain('compactionStrategy 必须是非空字符串');
+  });
+
+  it('leaves compactionStrategy optional — an unset one keeps compaction on the session group', () => {
+    expect(validateLlmConfig(makeConfig({}))).toEqual([]);
+  });
+
   it('accepts a defaultStrategy that names a real strategy', () => {
     const errors = validateLlmConfig(makeConfig({ defaultStrategy: 's1' }));
     expect(errors).toEqual([]);

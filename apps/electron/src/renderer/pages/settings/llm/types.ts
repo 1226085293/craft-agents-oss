@@ -272,6 +272,12 @@ export interface LlmConfigShape {
   clientKeys: LlmClientKeyShape[]
   /** Strategy group for auxiliary model calls; see the shared `LlmConfig`. */
   miniStrategy?: string
+  /**
+   * Strategy group used to summarize a session during compaction. Absent means
+   * "follow the session's group"; see `resolveCompactionRoute` in the shared
+   * config package.
+   */
+  compactionStrategy?: string
   /** Strategy group new sessions inherit when the caller names none. */
   defaultStrategy?: string
   usage?: {

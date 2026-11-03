@@ -280,6 +280,24 @@ export function validateLlmConfig(input: unknown): string[] {
     }
   }
 
+  // compactionStrategy — same rule as miniStrategy: a dangling id would either
+  // be ignored (silent fallback) or, worse, hold the save hostage once the UI
+  // starts writing it back. Naming a missing group is a config error.
+  if (cfg.compactionStrategy !== undefined) {
+    if (typeof cfg.compactionStrategy !== 'string' || !cfg.compactionStrategy) {
+      errors.push('compactionStrategy 必须是非空字符串');
+    } else {
+      const ids = new Set(
+        Array.isArray(cfg.strategies)
+          ? (cfg.strategies as Record<string, unknown>[]).filter(isPlainObject).map(s => String(s.id))
+          : [],
+      );
+      if (ids.size > 0 && !ids.has(cfg.compactionStrategy)) {
+        errors.push(`compactionStrategy 引用了不存在的 strategy: ${cfg.compactionStrategy}`);
+      }
+    }
+  }
+
   // defaultStrategy — a new session inherits it, so a dangling id would route
   // every session created outside the UI straight into `strategy_not_found`.
   if (cfg.defaultStrategy !== undefined) {

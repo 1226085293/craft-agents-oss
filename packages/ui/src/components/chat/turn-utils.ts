@@ -66,6 +66,22 @@ function localizeStatusContent(
     key = 'chat.verificationSkippedDelivering'
   } else if (statusType === 'verification_passed' && params?.stabilized != null) {
     key = 'chat.verificationStabilizedDelivering'
+  } else if (statusType === 'verification_failed' && (params?.exhausted != null || params?.stabilized != null)) {
+    // Delivered anyway because the retry lane ran out of ideas (2026-11-03).
+    // This row is a FAILURE that happens to carry a reply, never a pass — the
+    // old 'content stabilized -> verification_passed' mapping is what made a
+    // failed verification look like a successful one.
+    if (params?.failType != null) {
+      key = 'chat.verificationFailedExhaustedTyped'
+      params = {
+        ...params,
+        failType: i18n.t(`chat.verificationFailType.${String(params.failType)}`, {
+          defaultValue: i18n.t('chat.verificationFailType.other'),
+        }),
+      }
+    } else {
+      key = 'chat.verificationFailedExhausted'
+    }
   } else if (statusType === 'verification_failed' && params?.failType != null) {
     // 校验失败（<类型>）— 继续执行  — the judge's machine-readable type is
     // translated through the failType table (never shown as a raw slug);

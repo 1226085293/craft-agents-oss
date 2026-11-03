@@ -232,12 +232,17 @@ describe('verification rendering regressions (2026-10-19 tidy-willow)', () => {
     expect(steps[1].statusParams?.failType).toBe('incomplete')
   })
 
-  it('7. appends the stabilized pass instead of overwriting the failed row', () => {
-    // 261018-noble-shoal (2026-10-20) real regression: the stop-loss pass
-    // ("内容已稳定，重试无法改变结果—按现状交付") carries
-    // statusParams={stabilized:1} and NO attempt. The no-attempt fallback
-    // used to match the FIRST verification row, so the failed row became a
-    // pass line the moment the final bubble landed.
+  it('7. appends the stop-loss delivery instead of overwriting the failed row', () => {
+    // 261018-noble-shoal (2026-10-20) real regression: the stop-loss row
+    // carries statusParams={stabilized:1}. The no-attempt fallback used to
+    // match the FIRST verification row, so the failed row became a pass line
+    // the moment the final bubble landed.
+    //
+    // 2026-11-03 (261103-ivory-current): that row is no longer a PASS at all.
+    // A stop-loss delivery means the judge REJECTED the text and the retry
+    // lane gave up — it must render as a failure, right above the delivered
+    // reply, or the user reads "verification failed" and then sees a green
+    // line implying it passed.
     const turns = groupMessagesByTurn([
       msg({ role: 'user', content: '修 API 地址' }),
       msg({
@@ -253,9 +258,9 @@ describe('verification rendering regressions (2026-10-19 tidy-willow)', () => {
       msg({ role: 'assistant', content: '补充', isIntermediate: true, turnId: 'pi-turn-1__m11' }),
       msg({
         role: 'info',
-        content: 'Verification passed — delivering final reply',
-        statusType: 'verification_passed',
-        statusParams: { stabilized: 1 },
+        content: 'Verification failed — retry limit reached, delivering current reply',
+        statusType: 'verification_failed',
+        statusParams: { stabilized: 1, attempt: 2 },
       }),
       msg({ role: 'assistant', content: '最终交付', isIntermediate: false, turnId: 'pi-turn-1__m12' }),
     ])
@@ -264,9 +269,51 @@ describe('verification rendering regressions (2026-10-19 tidy-willow)', () => {
     expect(steps).toHaveLength(2)
     expect(steps[0].status).toBe('error')
     expect(steps[0].statusParams?.failType).toBe('off-topic')
-    expect(steps[1].status).toBe('completed')
+    // The delivery row is still a FAILURE, and it lands after the earlier one.
+    expect(steps[1].status).toBe('error')
     expect(steps[1].statusParams?.stabilized).toBe(1)
+    expect(steps[1].statusParams?.attempt).toBe(2)
     expect(assistantTurn.response?.text).toBe('最终交付')
+  })
+
+  it('7b. renders an exhausted delivery as its own failed row (2026-11-03)', () => {
+    // 261103-ivory-current: judge FAILed twice (incomplete), the model re-sent
+    // the same 1584 chars, and the retry lane delivered it. Both rounds must
+    // stay visible as failures — the final reply is NOT a verified answer.
+    const turns = groupMessagesByTurn([
+      msg({ role: 'user', content: 'P1→P4 全部做完再让我验证' }),
+      msg({
+        role: 'info',
+        content: 'Verification failed — continuing',
+        statusType: 'verification_failed',
+        statusParams: {
+          failType: 'incomplete',
+          reasonPath: 'C:/s/verification/attempt-001-incomplete.txt',
+          attempt: 1,
+        },
+      }),
+      msg({ role: 'assistant', content: 'P1 全部完成，要我做吗？', isIntermediate: true, turnId: 'pi-turn-17__m12' }),
+      msg({
+        role: 'info',
+        content: 'Verification failed — retry limit reached, delivering current reply',
+        statusType: 'verification_failed',
+        statusParams: {
+          failType: 'incomplete',
+          reasonPath: 'C:/s/verification/attempt-002-incomplete.txt',
+          attempt: 2,
+          exhausted: 1,
+        },
+      }),
+      msg({ role: 'assistant', content: 'P1 全部完成，要我做吗？', isIntermediate: false, turnId: 'pi-turn-17__m13' }),
+    ])
+    const assistantTurn = turns[turns.length - 1] as AssistantTurn
+    const steps = verificationSteps(assistantTurn)
+    expect(steps).toHaveLength(2)
+    expect(steps.map(s => s.status)).toEqual(['error', 'error'])
+    expect(steps.map(s => s.statusParams?.attempt)).toEqual([1, 2])
+    expect(steps[1].statusParams?.exhausted).toBe(1)
+    expect(steps[1].statusParams?.failType).toBe('incomplete')
+    expect(assistantTurn.response?.text).toBe('P1 全部完成，要我做吗？')
   })
 
   it('8. still settles the open live row when a verdict matches it', () => {

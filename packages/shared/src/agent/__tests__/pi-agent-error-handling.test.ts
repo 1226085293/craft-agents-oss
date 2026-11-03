@@ -304,6 +304,82 @@ describe('PiAgent verification delivery lifecycle', () => {
     expect(enqueued[4].text).not.toContain('parameter')
     agent.destroy()
   })
+
+  it('delivers an exhausted rejected reply AS A FAILURE, never as a pass (2026-11-03)', () => {
+    // 261103-ivory-current: the judge FAILed twice, the resume re-sent the same
+    // 1584 chars, and the content-stability stop-loss reported it as
+    // `passed: true` → the UI showed a green "content stabilized" line and the
+    // user received the rejected "P1 done, want me to…?" reply. The retry lane
+    // now gives up HONESTLY: deliver the text, keep the failure visible.
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    startVerificationHold(agent, enqueued)
+
+    ;(agent as any).handleLine(JSON.stringify({
+      type: 'verification_result',
+      passed: false,
+      delivered: true,
+      exhausted: true,
+      finalText: 'P1 全部完成，要我做吗？',
+      failReason: 'Only P1 completed; P2 is left',
+      failType: 'incomplete',
+      reasonPath: 'C:/s/verification/attempt-002-incomplete.txt',
+      attempt: 2,
+    }))
+
+    expect(enqueued.map(event => event.statusType ?? event.type)).toEqual([
+      'text_complete',
+      'text_demote',
+      'verification',
+      'verification_failed',
+      'text_complete',
+      'complete',
+      'queue_complete',
+    ])
+    const verdict = enqueued[3]
+    expect(verdict.status).toBeUndefined()
+    expect(verdict.statusParams).toMatchObject({
+      failType: 'incomplete',
+      reasonPath: 'C:/s/verification/attempt-002-incomplete.txt',
+      attempt: 2,
+      exhausted: 1,
+    })
+    expect(verdict.message).toContain('retry limit reached')
+    // The text still reaches the user — giving up must not drop the reply.
+    expect(enqueued[4]).toMatchObject({ type: 'text_complete', text: 'P1 全部完成，要我做吗？' })
+    expect(enqueued[4].turnId).toBe(enqueued[0].turnId)
+    agent.destroy()
+  })
+
+  it('legacy content-stabilized stop-loss is also delivered as a failure', () => {
+    // Protocol compatibility for pre-2026-11-03 subprocesses: they still send
+    // `passed: true` + the stabilized failReason. Rendering that green is what
+    // hid the real FAILs, so the row is re-labelled as a failure here.
+    const agent = new PiAgent(createConfig())
+    const enqueued: any[] = []
+    startVerificationHold(agent, enqueued)
+
+    ;(agent as any).handleLine(JSON.stringify({
+      type: 'verification_result',
+      passed: true,
+      finalText: '重复的回复',
+      failReason: 'content stabilized — retrying cannot change the outcome',
+      attempt: 2,
+    }))
+
+    expect(enqueued.map(event => event.statusType ?? event.type)).toEqual([
+      'text_complete',
+      'text_demote',
+      'verification',
+      'verification_failed',
+      'text_complete',
+      'complete',
+      'queue_complete',
+    ])
+    expect(enqueued[3].statusParams).toMatchObject({ stabilized: 1, attempt: 2 })
+    expect(enqueued[4]).toMatchObject({ type: 'text_complete', text: '重复的回复' })
+    agent.destroy()
+  })
 })
 
 describe('PiAgent recovery state on abort', () => {

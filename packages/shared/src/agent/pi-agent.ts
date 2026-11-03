@@ -1805,6 +1805,39 @@ export class PiAgent extends BaseAgent {
           this.debug('verification_result dropped — no verification hold active (stale/late result)');
           break;
         }
+        // Exhausted retry lane (2026-11-03, 261103-ivory-current): the model
+        // kept re-sending the rejected text, so the subprocess stopped asking
+        // and delivered it anyway — but the VERDICT IS STILL A FAILURE.
+        // Deliver the text with an explicit failed row. The old
+        // content-stability stop-loss reported this as `passed: true` and the
+        // UI showed a green "content stabilized" line, hiding two real FAILs
+        // and making "verification failed" look like "gave up silently".
+        if (msg.passed !== true && msg.delivered === true && typeof msg.finalText === 'string') {
+          const cleanFinal = stripDsmlResidue(msg.finalText);
+          const failType = typeof msg.failType === 'string' ? msg.failType : undefined;
+          const reasonPath = typeof msg.reasonPath === 'string' ? msg.reasonPath : undefined;
+          const attempt = typeof msg.attempt === 'number' ? msg.attempt : undefined;
+          this.debug(
+            `Verification EXHAUSTED${failType ? ` [${failType}]` : ''} — delivering the rejected reply as a FAILURE (${cleanFinal.length} chars)`,
+          );
+          this.adapter.finalizeVerificationHeld(true);
+          this.eventQueue.enqueue({
+            type: 'info',
+            message: 'Verification failed — retry limit reached, delivering current reply',
+            statusType: 'verification_failed',
+            statusParams: {
+              ...(failType ? { failType } : {}),
+              ...(reasonPath ? { reasonPath } : {}),
+              ...(attempt != null ? { attempt } : {}),
+              exhausted: 1,
+            },
+          });
+          this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(cleanFinal));
+          this.eventQueue.enqueue({ type: 'complete' });
+          this.eventQueue.complete();
+          break;
+        }
+
         if (msg.passed === true && typeof msg.finalText === 'string') {
           // Last-mile scrub (2026-10-13): the captured final text may carry
           // residual DSML leak markup (malformed variants defeat the subprocess
@@ -1828,17 +1861,18 @@ export class PiAgent extends BaseAgent {
             this.eventQueue.enqueue({ type: 'complete' });
             this.eventQueue.complete();
           } else if (stabilized) {
-            // Content-stability stop-loss (2026-10-17): a follow-up resume
-            // re-emitted BYTE-IDENTICAL text, so further judging cannot change
-            // the outcome. Deliver it, but say plainly that this was a
-            // stop-loss and NOT an endorsement of the verdict.
-            this.debug(`Verification PASSED (content stabilized, ${cleanFinal.length} chars) — stop-loss delivery`);
+            // Legacy content-stability stop-loss (pre-2026-11-03 subprocess).
+            // Kept for protocol compatibility, but the delivery is a FAILURE:
+            // the text only repeated because the old resume told the model to
+            // re-send it verbatim. A newer subprocess never reaches this path
+            // (it sends `delivered: true, passed: false` instead).
+            this.debug(`Verification STABILIZED (legacy) — delivering the rejected reply as a FAILURE (${cleanFinal.length} chars)`);
             this.adapter.finalizeVerificationHeld(true);
             this.eventQueue.enqueue({
               type: 'info',
-              message: 'Verification passed — delivering final reply',
-              statusType: 'verification_passed',
-              statusParams: { stabilized: 1 },
+              message: 'Verification failed — retry limit reached, delivering current reply',
+              statusType: 'verification_failed',
+              statusParams: { stabilized: 1, ...(typeof msg.attempt === 'number' ? { attempt: msg.attempt } : {}) },
             });
             this.eventQueue.enqueue(this.adapter.createVerifiedReplyEvent(cleanFinal));
             this.eventQueue.enqueue({ type: 'complete' });

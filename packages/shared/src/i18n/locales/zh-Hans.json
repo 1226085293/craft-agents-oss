@@ -300,6 +300,8 @@
   "chat.verificationFailType.other": "其他",
   "chat.verificationFailType.truncated": "回复中断",
   "chat.verificationFailedContinuing": "校验失败 — 继续执行",
+  "chat.verificationFailedExhausted": "校验失败 — 已达续跑上限，交付当前回复",
+  "chat.verificationFailedExhaustedTyped": "校验失败（{{failType}}）— 已达续跑上限，交付当前回复",
   "chat.verificationFailedTypedContinuing": "校验失败（{{failType}}）— 继续执行",
   "chat.verificationPassed": "校验通过 — 正在交付最终回复",
   "chat.verificationSkippedDelivering": "校验已跳过（judge 不可用）— 正在交付最终回复",

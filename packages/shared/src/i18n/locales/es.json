@@ -300,6 +300,8 @@
   "chat.verificationFailType.other": "otro",
   "chat.verificationFailType.truncated": "respuesta interrumpida",
   "chat.verificationFailedContinuing": "Verificacion fallida - continuando",
+  "chat.verificationFailedExhausted": "Verificacion fallida - limite de reintentos alcanzado, entregando la respuesta actual",
+  "chat.verificationFailedExhaustedTyped": "Verificacion fallida ({{failType}}) - limite de reintentos alcanzado, entregando la respuesta actual",
   "chat.verificationFailedTypedContinuing": "Verificacion fallida ({{failType}}) - continuando",
   "chat.verificationPassed": "Verificacion aprobada - entregando la respuesta final",
   "chat.verificationSkippedDelivering": "Verificacion omitida (juez no disponible) - entregando la respuesta final",

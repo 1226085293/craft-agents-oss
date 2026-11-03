@@ -300,6 +300,8 @@
   "chat.verificationFailType.other": "egyeb",
   "chat.verificationFailType.truncated": "valasz megszakadt",
   "chat.verificationFailedContinuing": "Ellenorzes sikertelen - folytatas",
+  "chat.verificationFailedExhausted": "Ellenorzes sikertelen - ujraprobalkozasi limit elerve, a jelenlegi valasz kikuldese",
+  "chat.verificationFailedExhaustedTyped": "Ellenorzes sikertelen ({{failType}}) - ujraprobalkozasi limit elerve, a jelenlegi valasz kikuldese",
   "chat.verificationFailedTypedContinuing": "Ellenorzes sikertelen ({{failType}}) - folytatas",
   "chat.verificationPassed": "Ellenorzes sikeres - a vegso valasz kiszolgaltasa",
   "chat.verificationSkippedDelivering": "Ellenorzes kihagyva (biro nem erheto el) - a vegso valasz kiszolgaltasa",

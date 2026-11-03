@@ -300,6 +300,8 @@
   "chat.verificationFailType.other": "その他",
   "chat.verificationFailType.truncated": "返答が中断",
   "chat.verificationFailedContinuing": "検証に失敗しました - 継続します",
+  "chat.verificationFailedExhausted": "検証に失敗しました - 再試行の上限に達したため、現在の回答を配信します",
+  "chat.verificationFailedExhaustedTyped": "検証に失敗しました（{{failType}}）- 再試行の上限に達したため、現在の回答を配信します",
   "chat.verificationFailedTypedContinuing": "検証に失敗しました（{{failType}}）- 継続します",
   "chat.verificationPassed": "検証に合格しました - 最終返答を配信します",
   "chat.verificationSkippedDelivering": "検証をスキップしました（ジャッジ不可用） - 最終返答を配信します",

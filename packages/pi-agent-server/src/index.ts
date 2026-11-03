@@ -142,6 +142,11 @@ import { createContextReliefExtension, type ContextReliefDeps } from './defense/
 import { installDsmlReceiver } from './dsml-receiver.ts';
 import { drainQueuedFollowUp } from './defense/resume-followup.ts';
 import { runVerificationJudge } from './defense/verification-judge.ts';
+import {
+  buildVerificationResumeMessage,
+  decideVerificationRetry,
+  laneForFailType,
+} from './defense/verification-resume.ts';
 import { buildVerificationJudgePrompt } from './defense/judge-prompt.ts';
 import { loadJudgeTurnContext } from './defense/turn-intent.ts';
 import { parseJudgeVerdict } from './defense/judge-verdict.ts';
@@ -440,6 +445,16 @@ interface OutboundVerificationResult {
   reasonPath?: string;
   /** Attempt index within this verification (1-based) — de-dupes the UI row. */
   attempt?: number;
+  /**
+   * Set with `passed=false` + `finalText` when the retry lane gave up (the
+   * model kept re-sending the rejected text). The main process must DELIVER
+   * `finalText` while keeping the verdict a FAILURE in the transcript — never
+   * render it as a pass (2026-11-03, 261103-ivory-current: the old
+   * content-stability stop-loss reported exactly this as PASS).
+   */
+  delivered?: boolean;
+  /** Why the turn delivered a rejected reply: the no-progress budget ran out. */
+  exhausted?: boolean;
 }
 
 /**
@@ -538,6 +553,14 @@ let lastVerifiedFinalText: string | null = null;
 // answer (2026-10-20 tidy-willow). Cleared on a new user prompt and on PASS,
 // so a stale rejection is never attributed to the wrong round.
 let lastVerificationFailure: { failType?: string; reason?: string } | null = null;
+// Bounded no-progress breaker for the verification lane (2026-11-03).
+// `identicalRounds` counts CONSECUTIVE byte-identical candidates in this cycle
+// (reset as soon as a round produces new text); `escalations` counts the
+// firmer continuation messages sent after the model re-sent a rejected reply
+// without running a single tool. Both are scoped to one USER turn (reset in
+// handlePrompt) and feed `decideVerificationRetry`.
+let verificationIdenticalRounds = 0;
+let verificationEscalations = 0;
 
 // Pending promises for async handshakes
 const pendingPreToolUse = new Map<string, { resolve: (response: { action: string; input?: Record<string, unknown>; reason?: string }) => void }>();
@@ -756,8 +779,26 @@ const AUTH_HANDOFF_TOOLS = new Set([
 // ignore it") must not displace the real answer emitted earlier in the turn.
 const VERIFICATION_CANDIDATE_MIN_CHARS = 120;
 
+/**
+ * Did this run execute at least one tool?
+ *
+ * The verification retry lane needs to tell "the model worked and happened to
+ * repeat its summary" from "the model ignored the continuation and re-sent the
+ * rejected text". Only the second one justifies an escalation, and only the
+ * second one proves the resume was a no-op (2026-11-03, 261103-ivory-current:
+ * the resumed run produced the same 1584 chars in 6s with zero tool calls).
+ */
+function runExecutedTools(endMessages?: unknown[]): boolean {
+  if (!Array.isArray(endMessages)) return false;
+  return endMessages.some((raw) => {
+    const content = (raw as { content?: unknown } | null)?.content;
+    return Array.isArray(content)
+      && content.some((block) => (block as { type?: string })?.type === 'toolCall');
+  });
+}
+
 function evaluateDefensePostStop(endMessages?: unknown[]):
-  | { shouldResume: boolean; resumeMessage?: string; verifyRequired?: boolean; verifyReason?: string; finalText?: string; stopNotice?: { reason: string; message: string }; emptyResponseOwned?: boolean; defenseError?: string }
+  | { shouldResume: boolean; resumeMessage?: string; verifyRequired?: boolean; verifyReason?: string; finalText?: string; ranTools?: boolean; stopNotice?: { reason: string; message: string }; emptyResponseOwned?: boolean; defenseError?: string }
   | null {
   if (!defenseEvaluator) return null;
 
@@ -970,6 +1011,7 @@ function evaluateDefensePostStop(endMessages?: unknown[]):
         verifyReason: result.verifyReason,
         resumeMessage: result.resumeMessage,
         finalText: selectVerificationCandidateText(endMessages, VERIFICATION_CANDIDATE_MIN_CHARS) || undefined,
+        ranTools: runExecutedTools(endMessages),
       };
     }
     return { shouldResume: false, stopNotice: buildDefenseStopNotice(result) ?? undefined };
@@ -1055,7 +1097,7 @@ function queueDefenseResume(session: AgentSession, resumeMessage: string): void 
  */
 async function doVerificationCheck(
   session: AgentSession,
-  opts: { finalText: string; verifyReason?: string; resumeMessage?: string },
+  opts: { finalText: string; verifyReason?: string; resumeMessage?: string; ranTools?: boolean },
 ): Promise<void> {
   const { finalText, verifyReason } = opts;
   verifyAttemptCount += 1;
@@ -1128,62 +1170,116 @@ async function doVerificationCheck(
   // the caller labels distinctly from a typed rejection.
   const parsed = parseJudgeVerdict(verdict);
 
-  // Content-stability stop-loss (user-confirmed 2026-10-17): a follow-up resume
-  // that re-emits BYTE-IDENTICAL final text cannot change any further judging.
-  // Deliver it, but leave an explicit row so the user knows this was a
-  // stop-loss, not an endorsement of the verdict.
-  if (lastVerifiedFinalText !== null && lastVerifiedFinalText === finalText) {
-    debugLog(`[defense] verification PASSED (content stabilized, ${finalText.length} chars, attempt ${verifyAttemptCount}) — stop-loss delivery`);
-    send({
-      type: 'verification_result',
-      passed: true,
-      finalText,
-      failReason: 'content stabilized — retrying cannot change the outcome',
-      // Carry the attempt so the UI can place the stop-loss row as its own
-      // verdict instead of overwriting the latest failed row (2026-10-20
-      // tidy-willow: this pass used to carry no attempt and the UI's
-      // no-attempt fallback matched the FIRST verification row).
-      attempt: verifyAttemptCount,
-    });
-    return;
-  }
-  lastVerifiedFinalText = finalText;
-
   if (parsed.pass) {
     debugLog(`[defense] verification PASSED (${verifyReason ?? 'none'}): replaying ${finalText.length} chars`);
     // The reply was accepted — a pending rejection must not leak into a
     // later round's resume message (2026-10-20 tidy-willow).
     lastVerificationFailure = null;
+    lastVerifiedFinalText = finalText;
+    verificationIdenticalRounds = 0;
     send({ type: 'verification_result', passed: true, finalText, attempt: verifyAttemptCount });
     return;
   }
 
-  // Typed rejection: persist the FULL reason for the click-to-open file, and
+  // Typed rejection. Persist the FULL reason for the click-to-open file, and
   // carry the type + path back so the process block renders
   //   `校验失败（<类型>）— 继续执行`
   // with the file openable like any other txt.
   const reasonPath = persistVerificationReason({
-    failType: parsed.pass ? '' : parsed.type,
-    reason: parsed.pass ? '' : parsed.reason,
+    failType: parsed.type,
+    reason: parsed.reason,
     rawVerdict: verdict,
     verifyReason,
     finalText,
     attempt: verifyAttemptCount,
   });
-  debugLog(`[defense] verification FAILED (type=${parsed.pass ? '-' : parsed.type}, reason=${parsed.pass ? '-' : parsed.reason.slice(0, 120)}) (attempt ${verifyAttemptCount}) — following up`);
-  // Remember the rejection so the follow-up resume carries it (2026-10-20
-  // tidy-willow): the model must see what the judge objected to, otherwise it
-  // re-emits the same answer and the cycle repeats.
-  lastVerificationFailure = { failType: parsed.pass ? undefined : parsed.type, reason: parsed.pass ? '' : parsed.reason };
-  send({
-    type: 'verification_result',
-    passed: false,
-    failReason: parsed.pass ? '' : parsed.reason,
-    failType: parsed.pass ? undefined : parsed.type,
-    reasonPath: reasonPath ?? undefined,
-    attempt: verifyAttemptCount,
-  });
-  if (opts.resumeMessage) queueDefenseResume(session, opts.resumeMessage);
+  // Remember the rejection so the NEXT round can quote it (2026-10-20
+  // tidy-willow). The resume message below is built from this verdict directly;
+  // the field also feeds the fault-lane messages built by the evaluator.
+  lastVerificationFailure = { failType: parsed.type, reason: parsed.reason };
+
+  const lane = laneForFailType(parsed.type);
+  const identical = lastVerifiedFinalText !== null && lastVerifiedFinalText === finalText;
+  if (identical) verificationIdenticalRounds += 1;
+
+  const sendFailureRow = (): void => {
+    send({
+      type: 'verification_result',
+      passed: false,
+      failReason: parsed.reason,
+      failType: parsed.type,
+      reasonPath: reasonPath ?? undefined,
+      attempt: verifyAttemptCount,
+    });
+  };
+
+  if (identical) {
+    // 2026-11-03 (261103-ivory-current): the old content-stability stop-loss
+    // delivered a repeated reply as `passed: true`, which hid two real FAILs
+    // behind a green "content stabilized" row. Repetition is not evidence that
+    // the verdict changed — it is evidence that the RESUME was a no-op. Decide
+    // between escalating once and giving up HONESTLY (delivered, still failed).
+    const action = decideVerificationRetry({
+      identical,
+      lane,
+      ranTools: opts.ranTools === true,
+      escalationsUsed: verificationEscalations,
+      identicalRounds: verificationIdenticalRounds,
+    });
+    debugLog(
+      `[defense] verification: byte-identical candidate (round ${verificationIdenticalRounds}, lane=${lane}, ` +
+        `ranTools=${opts.ranTools === true}, escalations=${verificationEscalations}) → ${action}`,
+    );
+
+    if (action === 'deliver-exhausted') {
+      debugLog(`[defense] verification EXHAUSTED (attempt ${verifyAttemptCount}) — delivering the rejected text AS A FAILURE`);
+      send({
+        type: 'verification_result',
+        passed: false,
+        delivered: true,
+        exhausted: true,
+        finalText,
+        failReason: parsed.reason,
+        failType: parsed.type,
+        reasonPath: reasonPath ?? undefined,
+        attempt: verifyAttemptCount,
+      });
+      return;
+    }
+
+    if (action === 'escalate') verificationEscalations += 1;
+    sendFailureRow();
+    queueDefenseResume(
+      session,
+      buildVerificationResumeMessage({
+        failType: parsed.type,
+        reason: parsed.reason,
+        attempt: verifyAttemptCount,
+        escalated: action === 'escalate',
+      }),
+    );
+    return;
+  }
+
+  // New content — reset the repeat budget, then keep repairing.
+  lastVerifiedFinalText = finalText;
+  verificationIdenticalRounds = 0;
+
+  debugLog(`[defense] verification FAILED (type=${parsed.type}, reason=${parsed.reason.slice(0, 120)}) (attempt ${verifyAttemptCount}) — following up (lane=${lane})`);
+  sendFailureRow();
+  // The resume is built from THIS verdict, not from the message the evaluator
+  // produced before the judge ran. That stale message was the delivery prompt
+  // ("deliver, do NOT re-run the task … output that reply verbatim"), which
+  // made a rejection self-confirming: the model obeyed it and re-emitted the
+  // exact text the judge had just rejected (2026-11-03, 261103-ivory-current).
+  queueDefenseResume(
+    session,
+    buildVerificationResumeMessage({
+      failType: parsed.type,
+      reason: parsed.reason,
+      attempt: verifyAttemptCount,
+    }),
+  );
 }
 
 /**
@@ -3070,6 +3166,10 @@ function handleSessionEvent(event: AgentSessionEvent): void {
           finalText: defenseResult.finalText ?? '',
           verifyReason: defenseResult.verifyReason,
           resumeMessage: defenseResult.resumeMessage,
+          // Did the run behind this candidate touch any tool? The retry lane
+          // uses it to tell "worked, then repeated its summary" apart from
+          // "ignored the continuation and re-sent the rejected text".
+          ranTools: defenseResult.ranTools === true,
         });
         debugLog(`[defense] agent_end: verification-class triggered (${defenseResult.verifyReason ?? 'unknown'}, finalText=${(defenseResult.finalText ?? '').length} chars)`);
       } else {
@@ -3328,6 +3428,10 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
   // the same turn-scoped counter.
   verifyAttemptCount = 0;
   lastVerifiedFinalText = null;
+  // No-progress breaker state is also per USER turn (2026-11-03): a new
+  // request must not inherit the previous turn's escalation budget.
+  verificationIdenticalRounds = 0;
+  verificationEscalations = 0;
   // A new request invalidates any pending rejection: the next resume belongs
   // to this request, not the previous one (2026-10-20 tidy-willow).
   lastVerificationFailure = null;

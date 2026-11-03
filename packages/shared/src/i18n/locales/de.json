@@ -300,6 +300,8 @@
   "chat.verificationFailType.other": "Sonstiges",
   "chat.verificationFailType.truncated": "Antwort abgebrochen",
   "chat.verificationFailedContinuing": "Verifizierung fehlgeschlagen - fortfahren",
+  "chat.verificationFailedExhausted": "Verifizierung fehlgeschlagen - Wiederholungslimit erreicht, aktuelle Antwort wird geliefert",
+  "chat.verificationFailedExhaustedTyped": "Verifizierung fehlgeschlagen ({{failType}}) - Wiederholungslimit erreicht, aktuelle Antwort wird geliefert",
   "chat.verificationFailedTypedContinuing": "Verifizierung fehlgeschlagen ({{failType}}) - fortfahren",
   "chat.verificationPassed": "Verifizierung bestanden - endgültige Antwort wird geliefert",
   "chat.verificationSkippedDelivering": "Verifizierung übersprungen (Prüfer nicht verfügbar) - endgültige Antwort wird geliefert",

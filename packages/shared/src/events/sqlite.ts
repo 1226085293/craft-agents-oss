@@ -30,7 +30,24 @@ export interface SqliteDatabase {
   close(): void;
 }
 
-const nodeRequire = createRequire(import.meta.url);
+/**
+ * Base for `createRequire`. The Electron main bundle is CJS, where
+ * `import.meta.url` is empty ("empty-import-meta" warning at build time and a
+ * broken require at runtime), so fall back to __filename and finally cwd.
+ */
+function requireBase(): string {
+  try {
+    const metaUrl = (import.meta as { url?: string }).url;
+    if (metaUrl) return metaUrl;
+  } catch {
+    // `import.meta` is not available in CJS builds.
+  }
+  const filename = (globalThis as { __filename?: string }).__filename;
+  if (filename) return filename;
+  return `${process.cwd()}/`;
+}
+
+const nodeRequire = createRequire(requireBase());
 
 function runningUnderBun(): boolean {
   return typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined';

@@ -96,6 +96,39 @@ export class EventService {
     });
   }
 
+  /**
+   * Publish the endpoint to `<workspace>/config/events.json`.
+   *
+   * The token has to be readable by the user's own scripts, otherwise nobody
+   * can hand-write a listener or curl the endpoint. Written owner-only.
+   */
+  private publishEndpoint(address: EventIngestAddress): void {
+    try {
+      const { mkdirSync, writeFileSync } = require('node:fs') as typeof import('node:fs')
+      const { dirname } = require('node:path') as typeof import('node:path')
+      const path = join(this.options.workspaceRoot, 'config', 'events.json');
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(
+        path,
+        `${JSON.stringify(
+          {
+            baseUrl: `http://${address.host}:${address.port}`,
+            host: address.host,
+            port: address.port,
+            token: address.token,
+            updatedAt: new Date().toISOString(),
+          },
+          null,
+          2,
+        )}
+`,
+        { encoding: 'utf8', mode: 0o600 },
+      );
+    } catch (error) {
+      eventLog.warn(`[events] cannot publish endpoint: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   async start(): Promise<EventIngestAddress> {
     if (this.started) {
       const address = this.ingest.currentAddress;
@@ -103,6 +136,7 @@ export class EventService {
     }
     const address = await this.ingest.start();
     this.started = true;
+    this.publishEndpoint(address);
     eventLog.info(
       `[events] ingest listening on ${address.host}:${address.port} for workspace ${this.options.workspaceId}`,
     );

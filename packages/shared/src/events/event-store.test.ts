@@ -62,8 +62,9 @@ describe('EventStore.list', () => {
   it('omits bodies from the list projection', () => {
     store.insert(makeEvent({ id: 'evt_a' }));
     const [meta] = store.list();
-    expect(meta).not.toHaveProperty('body');
-    expect(meta.title).toBe('张三 · 合同确认');
+    expect(meta).toBeDefined();
+    expect(meta!).not.toHaveProperty('body');
+    expect(meta!.title).toBe('张三 · 合同确认');
   });
 
   it('orders newest first and honours limit/offset', () => {

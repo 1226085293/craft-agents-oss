@@ -21,7 +21,7 @@ import {
   type CraftEventEnvelope,
   type CraftEventLink,
   type CraftEventPayloadRef,
-} from '@craft-agent/shared/events/types.ts';
+} from './types.ts';
 
 /** Body bytes kept for search. Matches the design doc. */
 const BODY_HEAD_CHARS = 4096;

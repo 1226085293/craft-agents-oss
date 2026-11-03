@@ -11,7 +11,6 @@ function makeEvent(overrides: Partial<CraftEventEnvelope> = {}): CraftEventEnvel
     receivedAt: 1_800_000_000_000,
     title: '张三 · 合同确认',
     summary: '请确认附件里的付款条款',
-    tags: ['mail'],
     recipients: ['me@qq.com'],
     links: [],
     body: '请确认附件里的付款条款，谢谢。',
@@ -85,12 +84,11 @@ describe('EventStore.list', () => {
     expect(store.list({ type: 'github.*' }).map((e) => e.id)).toEqual(['b']);
   });
 
-  it('filters by source, tag and recipient presence', () => {
-    store.insert(makeEvent({ id: 'a', source: 'qqmail', tags: ['mail'] }));
-    store.insert(makeEvent({ id: 'b', source: 'github', tags: ['code'], recipients: [] }));
+  it('filters by source and recipient presence', () => {
+    store.insert(makeEvent({ id: 'a', source: 'qqmail' }));
+    store.insert(makeEvent({ id: 'b', source: 'github', recipients: [] }));
 
     expect(store.list({ source: 'qqmail' }).map((e) => e.id)).toEqual(['a']);
-    expect(store.list({ tag: 'code' }).map((e) => e.id)).toEqual(['b']);
     expect(store.list({ hasRecipients: true }).map((e) => e.id)).toEqual(['a']);
   });
 

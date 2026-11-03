@@ -18,7 +18,6 @@ export interface SubscriptionFilter {
   sources?: string[];
   /** Supports a `mail.*` prefix form. */
   types?: string[];
-  tags?: string[];
 }
 
 export interface EventSubscription {
@@ -69,7 +68,6 @@ function matchesType(type: string, patterns: string[]): boolean {
 export function matchesFilter(event: EventMeta, filter: SubscriptionFilter): boolean {
   if (filter.sources?.length && !filter.sources.includes(event.source)) return false;
   if (filter.types?.length && !matchesType(event.type, filter.types)) return false;
-  if (filter.tags?.length && !filter.tags.some((tag) => event.tags.includes(tag))) return false;
   return true;
 }
 

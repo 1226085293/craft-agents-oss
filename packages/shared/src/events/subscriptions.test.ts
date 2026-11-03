@@ -27,7 +27,6 @@ function event(overrides: Partial<EventMeta> = {}): EventMeta {
     receivedAt: 1_800_000_000_000,
     title: '张三 · 合同确认',
     summary: '请确认付款条款',
-    tags: ['mail'],
     recipients: ['me@qq.com'],
     links: [],
     delivered: false,
@@ -48,13 +47,8 @@ describe('matchesFilter', () => {
     expect(matchesFilter(event(), { types: ['github.*'] })).toBe(false)
   })
 
-  it('requires at least one tag to overlap', () => {
-    expect(matchesFilter(event(), { tags: ['mail'] })).toBe(true)
-    expect(matchesFilter(event(), { tags: ['code'] })).toBe(false)
-  })
-
   it('ANDs across filter fields', () => {
-    expect(matchesFilter(event(), { sources: ['qqmail'], types: ['mail.*'], tags: ['mail'] })).toBe(true)
+    expect(matchesFilter(event(), { sources: ['qqmail'], types: ['mail.*'] })).toBe(true)
     expect(matchesFilter(event(), { sources: ['qqmail'], types: ['github.*'] })).toBe(false)
   })
 })

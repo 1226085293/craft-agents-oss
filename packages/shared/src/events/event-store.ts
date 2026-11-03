@@ -44,7 +44,6 @@ export interface EventFilter {
   source?: string;
   /** `mail.received` or a prefix such as `mail.*`. */
   type?: string;
-  tag?: string;
   /** Only events that carry at least one recipient. */
   hasRecipients?: boolean;
   delivered?: boolean;
@@ -68,7 +67,6 @@ interface EventRow {
   occurred_at: number | null;
   title: string;
   summary: string | null;
-  tags: string | null;
   recipients: string | null;
   links: string | null;
   body: string | null;
@@ -108,7 +106,6 @@ function toEvent(row: EventRow, includeBody: boolean): EventRecord {
     ...(row.dedupe_key ? { dedupeKey: row.dedupe_key } : {}),
     title: row.title,
     ...(row.summary ? { summary: row.summary } : {}),
-    tags: parseJsonArray<string>(row.tags),
     recipients: parseJsonArray<string>(row.recipients),
     links: parseJsonArray<CraftEventLink>(row.links),
     ...(includeBody && row.body !== null ? { body: row.body } : {}),
@@ -118,7 +115,7 @@ function toEvent(row: EventRow, includeBody: boolean): EventRecord {
 }
 
 const META_COLUMNS = `e.id, e.source, e.type, e.received_at, e.occurred_at, e.title, e.summary,
-  e.tags, e.recipients, e.links, e.payload_kind, e.payload_path, e.payload_size,
+  e.recipients, e.links, e.payload_kind, e.payload_path, e.payload_size,
   e.dedupe_key, e.delivered`;
 
 export class EventStore {
@@ -150,7 +147,6 @@ export class EventStore {
         occurred_at  INTEGER,
         title        TEXT NOT NULL,
         summary      TEXT,
-        tags         TEXT,
         recipients   TEXT,
         links        TEXT,
         body         TEXT,
@@ -197,9 +193,9 @@ export class EventStore {
 
     const insert = this.db.prepare(`
       INSERT INTO events (
-        id, source, type, received_at, occurred_at, title, summary, tags, recipients,
+        id, source, type, received_at, occurred_at, title, summary, recipients,
         links, body, search_text, payload_kind, payload_path, payload_size, dedupe_key, delivered
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     `);
 
     this.db.exec('BEGIN');
@@ -212,7 +208,6 @@ export class EventStore {
         event.occurredAt ?? null,
         event.title,
         event.summary ?? null,
-        event.tags.length ? JSON.stringify(event.tags) : null,
         event.recipients.length ? JSON.stringify(event.recipients) : null,
         event.links.length ? JSON.stringify(event.links) : null,
         event.body ?? null,
@@ -251,12 +246,6 @@ export class EventStore {
         where.push('e.type = ?');
         params.push(filter.type);
       }
-    }
-    if (filter.tag) {
-      // tags are a JSON array of short strings; the quoted form avoids
-      // matching "inbox" against a hypothetical "inboxy".
-      where.push('e.tags LIKE ?');
-      params.push(`%"${filter.tag}"%`);
     }
     if (filter.hasRecipients) {
       where.push("e.recipients IS NOT NULL AND e.recipients != '[]'");

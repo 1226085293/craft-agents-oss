@@ -87,7 +87,6 @@ curl -X POST "$CRAFT_EVENTS_URL" \
         "title": "张三 · 合同确认",
         "summary": "请确认付款条款",
         "dedupeKey": "imap:INBOX:8842",
-        "tags": ["mail"],
         "recipients": ["me@qq.com"],
         "body": "正文…"
       }'

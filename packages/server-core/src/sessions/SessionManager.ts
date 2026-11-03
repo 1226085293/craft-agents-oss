@@ -6266,7 +6266,6 @@ ${request.prompt}`;
               title: event.title,
               ...(event.summary ? { summary: event.summary } : {}),
               recipients: event.recipients,
-              tags: event.tags,
               ...(event.body !== undefined ? { body: event.body } : {}),
               ...(event.payloadRef ? { payloadPath: event.payloadRef.path } : {}),
             }

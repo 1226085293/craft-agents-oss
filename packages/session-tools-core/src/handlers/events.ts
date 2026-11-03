@@ -15,7 +15,6 @@ import type { ToolResult } from '../types.ts';
 export interface SubscribeEventArgs {
   sources?: string[];
   types?: string[];
-  tags?: string[];
 }
 
 export interface UnsubscribeEventArgs {
@@ -42,11 +41,10 @@ function fail(text: string): ToolResult {
   return { content: [{ type: 'text', text: `Error: ${text}` }], isError: true };
 }
 
-function describeFilter(filter: { sources?: string[]; types?: string[]; tags?: string[] }): string {
+function describeFilter(filter: { sources?: string[]; types?: string[] }): string {
   const parts: string[] = [];
   if (filter.sources?.length) parts.push(`sources=${filter.sources.join('|')}`);
   if (filter.types?.length) parts.push(`types=${filter.types.join('|')}`);
-  if (filter.tags?.length) parts.push(`tags=${filter.tags.join('|')}`);
   return parts.length ? parts.join(', ') : 'everything';
 }
 
@@ -59,7 +57,6 @@ export async function handleSubscribeEvent(
   const filter = {
     ...(args.sources?.length ? { sources: args.sources } : {}),
     ...(args.types?.length ? { types: args.types } : {}),
-    ...(args.tags?.length ? { tags: args.tags } : {}),
   };
 
   try {
@@ -142,7 +139,6 @@ export async function handleGetEvent(ctx: SessionToolContext, args: GetEventArgs
     `title: ${event.title}`,
     ...(event.summary ? [`summary: ${event.summary}`] : []),
     ...(event.recipients.length ? [`recipients: ${event.recipients.join(', ')}`] : []),
-    ...(event.tags.length ? [`tags: ${event.tags.join(', ')}`] : []),
     ...(event.payloadPath ? [`payload: ${event.payloadPath}`] : []),
   ].join('\n');
 

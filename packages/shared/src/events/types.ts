@@ -19,8 +19,6 @@ export const EVENT_LIMITS = {
   bodyBytes: 256 * 1024,
   dedupeKey: 200,
   /** Per-array caps. */
-  tags: 20,
-  tagLength: 64,
   recipients: 20,
   recipientLength: 64,
   links: 10,
@@ -56,7 +54,6 @@ export interface CraftEventEnvelope {
   dedupeKey?: string;
   title: string;
   summary?: string;
-  tags: string[];
   recipients: string[];
   links: CraftEventLink[];
   body?: string;
@@ -72,7 +69,6 @@ export interface EventInput {
   summary?: string;
   occurredAt?: number | string;
   dedupeKey?: string;
-  tags?: string[];
   recipients?: string[];
   links?: CraftEventLink[];
   body?: unknown;
@@ -145,9 +141,6 @@ export function normalizeEventInput(
   if (summaryRaw && summaryRaw.length > EVENT_LIMITS.summary) {
     return fail('summary', `at most ${EVENT_LIMITS.summary} characters`);
   }
-
-  const tags = stringArray(input.tags, EVENT_LIMITS.tags, EVENT_LIMITS.tagLength, 'tags');
-  if (!Array.isArray(tags)) return tags;
 
   const recipients = stringArray(
     input.recipients,
@@ -222,7 +215,6 @@ export function normalizeEventInput(
       ...(dedupeKeyRaw ? { dedupeKey: dedupeKeyRaw } : {}),
       title,
       ...(summaryRaw ? { summary: summaryRaw } : {}),
-      tags,
       recipients,
       links,
       ...(body !== undefined ? { body } : {}),

@@ -945,7 +945,6 @@ export interface EventMetaDto {
   dedupeKey?: string
   title: string
   summary?: string
-  tags: string[]
   recipients: string[]
   links: Array<{ rel?: string; url: string }>
   payloadRef?: { kind: string; path: string; size?: number }

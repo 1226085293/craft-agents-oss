@@ -66,12 +66,7 @@ describe('normalizeEventInput', () => {
     expect(ok(normalizeEventInput({ type: 'a.b', title: 't', body: 'raw' }, identity)).body).toBe('raw');
   });
 
-  it('caps tags, recipients and links', () => {
-    const tags = Array.from({ length: EVENT_LIMITS.tags + 1 }, (_, i) => `t${i}`);
-    const r1 = normalizeEventInput({ type: 'a.b', title: 't', tags }, identity);
-    expect(r1.ok).toBe(false);
-    if (!r1.ok) expect(r1.path).toBe('tags');
-
+  it('caps recipients and links', () => {
     const recipients = Array.from({ length: EVENT_LIMITS.recipients + 1 }, (_, i) => `u${i}@x.com`);
     expect(normalizeEventInput({ type: 'a.b', title: 't', recipients }, identity).ok).toBe(false);
 
@@ -81,14 +76,14 @@ describe('normalizeEventInput', () => {
     if (!r3.ok) expect(r3.path).toBe('links');
   });
 
-  it('drops empty tag entries and keeps rel only when present', () => {
+  it('drops empty recipient entries and keeps rel only when present', () => {
     const event = ok(
       normalizeEventInput(
-        { type: 'a.b', title: 't', tags: [' mail ', '', '  '], links: [{ url: 'https://x' }] },
+        { type: 'a.b', title: 't', recipients: [' me@qq.com ', '', '  '], links: [{ url: 'https://x' }] },
         identity,
       ),
     );
-    expect(event.tags).toEqual(['mail']);
+    expect(event.recipients).toEqual(['me@qq.com']);
     expect(event.links).toEqual([{ url: 'https://x' }]);
   });
 

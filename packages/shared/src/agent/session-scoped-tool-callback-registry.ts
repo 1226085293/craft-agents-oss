@@ -28,7 +28,6 @@ export interface SessionScopedToolCallbacks {
   subscribeEventFn?: (filter: {
     sources?: string[];
     types?: string[];
-    tags?: string[];
   }) => Promise<{ subscriptionId: string; total: number }>;
 
   /** Drop a subscription by id or by source name. */
@@ -40,7 +39,7 @@ export interface SessionScopedToolCallbacks {
   /** Subscriptions owned by the invoking session. */
   listEventSubscriptionsFn?: () => Array<{
     subscriptionId: string;
-    filter: { sources?: string[]; types?: string[]; tags?: string[] };
+    filter: { sources?: string[]; types?: string[] };
   }>;
 
   /** Metadata-only event list. */
@@ -68,7 +67,6 @@ export interface SessionScopedToolCallbacks {
     title: string;
     summary?: string;
     recipients: string[];
-    tags: string[];
     body?: string;
     payloadPath?: string;
   } | null;

@@ -396,7 +396,6 @@ export interface SessionToolContext {
   subscribeEventFn?(filter: {
     sources?: string[];
     types?: string[];
-    tags?: string[];
   }): Promise<{ subscriptionId: string; total: number }>;
   unsubscribeEventFn?(selector: {
     subscriptionId?: string;
@@ -404,7 +403,7 @@ export interface SessionToolContext {
   }): Promise<{ removed: number; remaining: number }>;
   listEventSubscriptionsFn?(): Array<{
     subscriptionId: string;
-    filter: { sources?: string[]; types?: string[]; tags?: string[] };
+    filter: { sources?: string[]; types?: string[] };
   }>;
   listEventsFn?(filter: {
     source?: string;
@@ -428,7 +427,6 @@ export interface SessionToolContext {
     title: string;
     summary?: string;
     recipients: string[];
-    tags: string[];
     body?: string;
     payloadPath?: string;
   } | null;

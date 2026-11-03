@@ -286,7 +286,6 @@ export const ListSubscriptionsSchema = z.object({});
 export const SubscribeEventSchema = z.object({
   sources: z.array(z.string()).optional().describe('Listener ids, e.g. ["qqmail-idle"].'),
   types: z.array(z.string()).optional().describe('Event types; "mail.*" matches a namespace.'),
-  tags: z.array(z.string()).optional().describe('Any-of tag match.'),
 });
 
 export const UnsubscribeEventSchema = z.object({
@@ -384,7 +383,7 @@ export const TOOL_DESCRIPTIONS = {
   subscribe_session: `Follow another session in this workspace: every finished turn is posted here as a message and wakes you. Spawned sessions are already followed by default (spawn_session subscribe=true). Use list_subscriptions to see what you follow.`,
   unsubscribe_session: `Stop following a session (idempotent). You will stop receiving its finished turns.`,
   list_subscriptions: `List the sessions this session currently follows.` ,
-  subscribe_event: `Subscribe to external events (mail, GitHub, pages…) collected by the Event Center. Events arrive as "[event]" messages and wake you. You receive NOTHING until you subscribe. Filter by source (listener id), type (e.g. "mail.received" or "mail.*") or tag; an empty filter subscribes to everything, which is rarely what you want.`,
+  subscribe_event: `Subscribe to external events (mail, GitHub, pages…) collected by the Event Center. Events arrive as "[event]" messages and wake you. You receive NOTHING until you subscribe. Filter by source (listener id) or type (e.g. "mail.received" or "mail.*"); an empty filter subscribes to everything, which is rarely what you want.`,
   unsubscribe_event: `Stop receiving events. Pass subscriptionId (preferred) or source to drop the matching subscription; with neither it refuses, so a typo cannot silently unsubscribe everything.`,
   list_event_subscriptions: `List this session's event subscriptions.`,
   list_events: `List received events (metadata only, newest first). Use it to catch up on what arrived, then get_event for the body.`,

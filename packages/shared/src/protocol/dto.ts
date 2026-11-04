@@ -985,7 +985,8 @@ export interface ListenerDto {
   description?: string
   icon?: string
   homepage?: string
-  eventTypes: string[]
+  /** Declared event types. Rides the session prompt, not the listener cards. */
+  eventTypes?: string[]
   enabled: boolean
   ready: boolean
   missingConfig: string[]

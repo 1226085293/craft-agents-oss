@@ -146,11 +146,6 @@ export function EventsListenersPanel({
                 >
                   {listener.enabled ? '已启用' : '已停用'}
                 </span>
-                {listener.eventTypes.slice(0, 2).map((type) => (
-                  <span key={type} className="text-[11px] leading-4 text-muted-foreground truncate">
-                    {type}
-                  </span>
-                ))}
               </div>
               {listener.errors.length > 0 && (
                 <p className="text-[11px] leading-4 text-destructive mt-1.5 line-clamp-1">

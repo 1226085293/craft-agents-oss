@@ -25,6 +25,7 @@ import {
 import { ListenerSupervisor, type ListenerRuntimeStatus } from './listener-supervisor.ts';
 import { EventDispatcher, type DispatchTarget } from './event-dispatcher.ts';
 import { loadSubscriptions } from '@craft-agent/shared/events/subscriptions.ts';
+import type { ListenerConfigSchema } from '@craft-agent/shared/events/manifest.ts';
 
 const eventLog = createLogger('events');
 
@@ -289,15 +290,42 @@ export interface ListenerView extends LoadedListener {
   status: ListenerRuntimeStatus
   missingConfig: string[]
   logTail: string
+  /** Flattened from manifest so the renderer can read them at the top level. */
+  name: string
+  version: string
+  description?: string
+  icon?: string
+  homepage?: string
+  configSchema?: ListenerConfigSchema
+  setup: Array<{ text: string; link?: string }>
+}
+
+/** Map a LoadedListener (fields nested under `manifest`) onto the ListenerView shape. */
+function toListenerView(
+  listener: LoadedListener,
+  service: EventService,
+  logTail: string,
+): ListenerView {
+  const m = listener.manifest
+  return {
+    ...listener,
+    name: m.name,
+    version: m.version,
+    description: m.description,
+    icon: m.icon,
+    homepage: m.homepage,
+    configSchema: m.config,
+    setup: m.setup ?? [],
+    status: service.supervisorStatus(listener.id),
+    missingConfig: missingConfigKeys(listener),
+    logTail,
+  }
 }
 
 export function listListenersFor(service: EventService, workspaceRoot: string, skipProbes = false): ListenerView[] {
-  return loadListeners({ workspaceRoot, skipProbes }).map((listener) => ({
-    ...listener,
-    status: service.supervisorStatus(listener.id),
-    missingConfig: missingConfigKeys(listener),
-    logTail: '',
-  }))
+  return loadListeners({ workspaceRoot, skipProbes }).map((listener) =>
+    toListenerView(listener, service, ''),
+  )
 }
 
 export function getListenerFor(
@@ -307,12 +335,7 @@ export function getListenerFor(
 ): ListenerView | null {
   const listener = loadListeners({ workspaceRoot }).find((entry) => entry.id === id);
   if (!listener) return null;
-  return {
-    ...listener,
-    status: service.supervisorStatus(id),
-    missingConfig: missingConfigKeys(listener),
-    logTail: service.tailListenerLog(id, listener.dataDir),
-  };
+  return toListenerView(listener, service, service.tailListenerLog(id, listener.dataDir));
 }
 
 // ---------------------------------------------------------------------------

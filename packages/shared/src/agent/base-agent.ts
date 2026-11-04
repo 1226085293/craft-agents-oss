@@ -265,6 +265,36 @@ export abstract class BaseAgent implements AgentBackend {
    * so UI badges/counts refresh live. Optional — hosts may leave it null.
    */
   onMemoryChanged: (() => void) | null = null;
+
+  /**
+   * Multi-agent bindings (report_result / dispatch / report_to_user / ask_user).
+   *
+   * Injected by SessionManager. `null` in a session with no role, which is what
+   * makes the tools refuse themselves instead of silently no-opping.
+   */
+  agentTools: {
+    reportResult(payload: {
+      outcome: 'delivered' | 'handoff' | 'needs_decision';
+      summary: string;
+      keyFindings?: string[];
+      nextAction?: string;
+      artifacts?: { path: string; note?: string }[];
+      verify?: { ran: string[]; passed: boolean; note?: string };
+    }): Promise<{ message: string }>;
+    dispatch(payload: {
+      target:
+        | { kind: 'session'; sessionId: string }
+        | { kind: 'task'; taskId: string }
+        | { kind: 'new'; agentId?: string };
+      name?: string;
+      scope: string;
+      instruction: string;
+      attachTaskId?: string;
+      parallel: boolean;
+    }): Promise<{ message: string }>;
+    reportToUser(payload: { text: string; sessionId?: string }): Promise<void>;
+    askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;
+  } | null = null;
   onSourceChange: SourceChangeCallback | null = null;
   onSourcesListChange: ((sources: LoadedSource[]) => void) | null = null;
   onConfigValidationError: ((file: string, errors: string[]) => void) | null = null;

@@ -247,6 +247,8 @@ export const CHANNEL_MAP = {
   // In-process LLM gateway: live scheduling state is pushed, config and usage
   // are pulled on demand.
   onLlmGatewayStatus: listener(RPC_CHANNELS.llmGateway.STATUS),
+  onAgentsChanged: listener(RPC_CHANNELS.agents.CHANGED),
+  onTasksChanged: listener(RPC_CHANNELS.taskboard.CHANGED),
 
   // Tool icon mappings
   getToolIconMappings: invoke(RPC_CHANNELS.toolIcons.GET_MAPPINGS),
@@ -383,6 +385,14 @@ export const CHANNEL_MAP = {
   toggleModel: invoke(RPC_CHANNELS.llmConnections.TOGGLE_MODEL),
   addCustomModel: invoke(RPC_CHANNELS.llmConnections.ADD_CUSTOM_MODEL),
   updateModelEnabled: invoke(RPC_CHANNELS.llmConnections.UPDATE_MODEL_ENABLED),
+  // Multi-agent: role profiles + task board
+  agentsList: invoke(RPC_CHANNELS.agents.LIST),
+  agentsSave: invoke(RPC_CHANNELS.agents.SAVE),
+  agentsDelete: invoke(RPC_CHANNELS.agents.DELETE),
+  tasksList: invoke(RPC_CHANNELS.taskboard.LIST),
+  tasksGet: invoke(RPC_CHANNELS.taskboard.GET),
+  tasksUpdate: invoke(RPC_CHANNELS.taskboard.UPDATE),
+  tasksHandoff: invoke(RPC_CHANNELS.taskboard.HANDOFF),
   llmGatewayGetStatus: invoke(RPC_CHANNELS.llmGateway.GET_STATUS),
   llmGatewayGetConfig: invoke(RPC_CHANNELS.llmGateway.GET_CONFIG),
   llmGatewayGetUsage: invoke(RPC_CHANNELS.llmGateway.GET_USAGE),

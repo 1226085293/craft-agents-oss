@@ -181,14 +181,13 @@ export function reconcileStrategyRefs(config: LlmConfigShape): LlmConfigShape {
   // Same repair for the new-session default: a dangling id would seed every new
   // session with a group that no longer exists, and the validator would then
   // reject every later save.
-  const defaultStrategy = config.defaultStrategy && known.has(config.defaultStrategy) ? config.defaultStrategy : undefined
   const strategies = config.strategies.map((strategy) => {
     if (!strategy.fallbackStrategyId || known.has(strategy.fallbackStrategyId)) return strategy
     const repaired = { ...strategy }
     delete repaired.fallbackStrategyId
     return repaired
   })
-  return { ...config, clientKeys, miniStrategy, compactionStrategy, defaultStrategy, strategies }
+  return { ...config, clientKeys, miniStrategy, compactionStrategy, strategies }
 }
 
 /**

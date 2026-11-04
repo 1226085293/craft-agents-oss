@@ -59,17 +59,13 @@ describe('gatewaySetupSteps', () => {
     strategies: [{ id: 's1', type: 'round_robin', members: [{ provider: 'p1' }] }],
   })
 
-  test('requires an explicitly selected default strategy, not merely an existing strategy', () => {
-    expect(gatewaySetupSteps(config(), [readyProvider], [readyStrategy])).toEqual([true, true, false])
+  test('completes the group step when any strategy is enabled (the first one becomes the default)', () => {
+    expect(gatewaySetupSteps(config(), [readyProvider], [readyStrategy])).toEqual([true, true, true])
   })
 
-  test('marks all steps complete when a tested provider and enabled default strategy exist', () => {
-    expect(gatewaySetupSteps({ ...config(), defaultStrategy: 's1' }, [readyProvider], [readyStrategy])).toEqual([true, true, true])
-  })
-
-  test('does not complete the default-group step for a disabled strategy', () => {
+  test('does not complete the group step when every strategy is disabled', () => {
     expect(gatewaySetupSteps(
-      { ...config(), defaultStrategy: 's1' },
+      config(),
       [readyProvider],
       [{ ...readyStrategy, enabled: false }],
     )).toEqual([true, true, false])

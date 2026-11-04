@@ -323,6 +323,39 @@ export interface SessionToolContext {
   /** Archive (archived=true) or unarchive (archived=false) another session by ID. Injected by backend. */
   archiveSession?(sessionId: string, archived: boolean): void | Promise<void>;
 
+  /**
+   * Multi-agent surface. Wired by SessionManager; `undefined` in a plain
+   * session, which is what makes the tools refuse themselves when the wrong
+   * role somehow got them.
+   */
+  agentTools?: {
+    /** Worker: record the handoff (task journal + supervisor wake). */
+    reportResult(payload: {
+      outcome: 'delivered' | 'handoff' | 'needs_decision';
+      summary: string;
+      keyFindings?: string[];
+      nextAction?: string;
+      artifacts?: { path: string; note?: string }[];
+      verify?: { ran: string[]; passed: boolean; note?: string };
+    }): Promise<{ message: string }>;
+    /** Supervisor: hand work to a session/task/new session. */
+    dispatch(payload: {
+      target:
+        | { kind: 'session'; sessionId: string }
+        | { kind: 'task'; taskId: string }
+        | { kind: 'new'; agentId?: string };
+      name?: string;
+      scope: string;
+      instruction: string;
+      attachTaskId?: string;
+      parallel: boolean;
+    }): Promise<{ message: string }>;
+    /** Supervisor: the only channel to the user. */
+    reportToUser(payload: { text: string; sessionId?: string }): Promise<void>;
+    /** Supervisor: ask a question when no decision can be made alone. */
+    askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;
+  };
+
   /** Get detailed info about a session. Defaults to current session if no ID given. Injected by backend. */
   getSessionInfo?(sessionId?: string): SessionInfo | null;
 

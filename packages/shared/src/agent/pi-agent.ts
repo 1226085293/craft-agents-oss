@@ -2990,6 +2990,12 @@ export class PiAgent extends BaseAgent {
       return encodeText(content);
     };
 
+    // Multi-agent surface: only wired when the host supplied it, which is what
+    // makes the tools refuse themselves in a session that has no role.
+    if (this.agentTools) {
+      this._sessionToolContext.agentTools = this.agentTools;
+    }
+
     // Attach session self-management bindings (lazy getters from callback registry)
     attachSessionSelfManagementBindings(this._sessionToolContext, sessionId);
 

@@ -212,8 +212,15 @@ export function invalidateSkillsCache(): void {
  *
  * @param workspaceRoot - Absolute path to workspace root
  * @param projectRoot - Optional project root (working directory) for project-level skills
+ * @param allowedSlugs - Optional agent scope ceiling. Filtering happens *after*
+ *   the (unfiltered) result is computed and cached, so a narrow agent never
+ *   poisons the cache for the rest of the workspace.
  */
-export function loadAllSkills(workspaceRoot: string, projectRoot?: string): LoadedSkill[] {
+export function loadAllSkills(
+  workspaceRoot: string,
+  projectRoot?: string,
+  allowedSlugs?: string[],
+): LoadedSkill[] {
   const cacheKey = `${workspaceRoot}::${projectRoot ?? ''}`;
   const now = Date.now();
   const cached = skillsCache.get(cacheKey);
@@ -243,7 +250,20 @@ export function loadAllSkills(workspaceRoot: string, projectRoot?: string): Load
 
   const result = Array.from(skillsBySlug.values());
   skillsCache.set(cacheKey, { skills: result, ts: now });
-  return result;
+  return applySkillScope(result, allowedSlugs);
+}
+
+/**
+ * Narrow a loaded list to an agent's allowlist.
+ *
+ * Kept separate from the cache write on purpose: the cache stores the full set,
+ * so switching between agents never rebuilds it (and never leaks one agent's
+ * ceiling into another's prompt).
+ */
+export function applySkillScope(skills: LoadedSkill[], allowedSlugs?: string[]): LoadedSkill[] {
+  if (!allowedSlugs) return skills;
+  const allowed = new Set(allowedSlugs);
+  return skills.filter((skill) => allowed.has(skill.slug));
 }
 
 /**

@@ -74,7 +74,10 @@
     "./utils/workspace-slug": "./src/utils/workspace-slug.ts",
     "./validation": "./src/validation/index.ts",
     "./version": "./src/version/index.ts",
-    "./workspaces": "./src/workspaces/index.ts"
+    "./workspaces": "./src/workspaces/index.ts",
+    "./agents": "./src/agents/index.ts",
+    "./tasks": "./src/tasks/index.ts",
+    "./routing": "./src/routing/index.ts"
   },
   "dependencies": {
     "@craft-agent/core": "workspace:*",

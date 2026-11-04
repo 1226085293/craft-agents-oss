@@ -171,6 +171,17 @@ export interface CreateSessionOptions {
   systemPromptPreset?: 'default' | 'mini' | string
   hidden?: boolean
   enabledSourceSlugs?: string[]
+  /** Agent (role profile) this session runs as. Omitted → workspace default agent. */
+  agentId?: string
+  /**
+   * Delegate vs coordinate. A 'supervisor' session gets a pruned tool table and
+   * never executes work itself; 'worker' (default) is an ordinary session.
+   */
+  role?: 'supervisor' | 'worker'
+  /** Task this session works on, when created by the supervisor. */
+  taskId?: string
+  /** Delegation depth, to stop unbounded supervisor→worker→worker chains. */
+  spawnDepth?: number
   /**
    * Message ID to branch from. This is a hard context cutoff:
    * the new session must not include model context from later parent messages.

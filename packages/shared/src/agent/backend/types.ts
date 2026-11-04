@@ -347,6 +347,37 @@ export type SdkMcpServerConfig =
  * 4. Allow capability-based UI adaptation
  */
 export interface AgentBackend {
+  /**
+   * Multi-agent tool bindings.
+   *
+   * Optional on the interface and set by SessionManager after construction:
+   * a backend that does not support them simply leaves the tools refusing
+   * themselves, which is the safe default.
+   */
+  agentTools?: {
+    reportResult(payload: {
+      outcome: 'delivered' | 'handoff' | 'needs_decision';
+      summary: string;
+      keyFindings?: string[];
+      nextAction?: string;
+      artifacts?: { path: string; note?: string }[];
+      verify?: { ran: string[]; passed: boolean; note?: string };
+    }): Promise<{ message: string }>;
+    dispatch(payload: {
+      target:
+        | { kind: 'session'; sessionId: string }
+        | { kind: 'task'; taskId: string }
+        | { kind: 'new'; agentId?: string };
+      name?: string;
+      scope: string;
+      instruction: string;
+      attachTaskId?: string;
+      parallel: boolean;
+    }): Promise<{ message: string }>;
+    reportToUser(payload: { text: string; sessionId?: string }): Promise<void>;
+    askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;
+  } | null;
+
   // ============================================================
   // Chat & Lifecycle
   // ============================================================

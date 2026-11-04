@@ -80,7 +80,34 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
         workspaceId,
         toMeta(event),
       );
-    }, _deps.sessionManager?.createEventDispatchTarget?.());
+    }, _deps.sessionManager?.createEventDispatchTarget?.(), (event: EventMeta) => {
+      // Tier 3: nobody subscribed. Rules run first inside the runtime; only what
+      // the rules cannot decide reaches the supervisor.
+      const manager = _deps.sessionManager as unknown as {
+        getSupervisorRuntime?: (id: string) => {
+          routeUnclaimed: (event: {
+            id: string;
+            source: string;
+            type: string;
+            title: string;
+            summary?: string;
+          }) => Promise<'routed' | 'queued' | 'ignored'>;
+        };
+      } | undefined;
+      const runtime = manager?.getSupervisorRuntime?.(workspaceId);
+      if (!runtime) return;
+      void runtime
+        .routeUnclaimed({
+          id: event.id,
+          source: event.source,
+          type: event.type,
+          title: event.title,
+          summary: event.summary,
+        })
+        .catch(() => {
+          // Routing an event must never take the ingest path down.
+        });
+    });
   };
 
   const broadcastStatus = (workspaceId: string, status: import('../../events/listener-supervisor').ListenerRuntimeStatus) => {

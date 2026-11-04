@@ -523,6 +523,39 @@ export interface ElectronAPI {
   // LLM connections change listener
   onLlmConnectionsChanged(callback: () => void): () => void
 
+  // Multi-agent: role profiles + task board
+  agentsList(workspaceId: string): Promise<Array<{
+    id: string
+    name: string
+    icon?: string
+    description?: string
+    builtin?: boolean
+  }>>
+  agentsSave(workspaceId: string, agent: Record<string, unknown>): Promise<{ id: string }>
+  agentsDelete(workspaceId: string, id: string): Promise<{ ok: boolean }>
+  onAgentsChanged(callback: (payload: { workspaceId: string }) => void): () => void
+
+  tasksList(workspaceId: string, status?: string): Promise<Array<{
+    id: string
+    name: string
+    status: string
+    priority: number
+    updatedAt: number
+    currentSessionId?: string
+    sessionCount: number
+    lastHandoff?: string
+    pauseReason?: string | null
+  }>>
+  tasksGet(workspaceId: string, id: string, includeJournal?: boolean): Promise<unknown>
+  tasksUpdate(workspaceId: string, id: string, status: string): Promise<unknown>
+  tasksHandoff(
+    workspaceId: string,
+    id: string,
+    fromSessionId: string,
+    handoff: unknown,
+  ): Promise<{ passed: boolean; reasons: string[]; status: string }>
+  onTasksChanged(callback: (payload: { workspaceId: string }) => void): () => void
+
   // In-process LLM gateway — status is pushed, the rest are pulled on demand.
   llmGatewayGetStatus(): Promise<LlmGatewayStatusPayload>
   llmGatewayGetConfig(): Promise<LlmConfigDto | null>

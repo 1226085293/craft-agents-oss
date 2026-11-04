@@ -63,6 +63,9 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   // via webUtils.getPathForFile in the renderer, so they point at the user's local machine
   // — even when the workspace itself lives on a remote server. Routing this REMOTE_ELIGIBLE
   // would send the local path to a remote filesystem that can't resolve it.
+  RPC_CHANNELS.agents.LIST,
+  RPC_CHANNELS.agents.SAVE,
+  RPC_CHANNELS.agents.DELETE,
   RPC_CHANNELS.tasks.GET_OUTPUT,
   RPC_CHANNELS.tasks.LIST,
   RPC_CHANNELS.tasks.STOP,

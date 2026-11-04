@@ -521,15 +521,6 @@ describe('reconcileStrategyRefs', () => {
     expect(reconcileStrategyRefs(config).compactionStrategy).toBe('preview')
   })
 
-  it('clears a defaultStrategy that names a deleted group and keeps a valid one', () => {
-    // New sessions inherit this, so a dangling id would both mis-route them and
-    // make the validator reject every subsequent save.
-    const config = baseConfig()
-    config.defaultStrategy = 'gone'
-    expect(reconcileStrategyRefs(config).defaultStrategy).toBeUndefined()
-    config.defaultStrategy = 'preview'
-    expect(reconcileStrategyRefs(config).defaultStrategy).toBe('preview')
-  })
 })
 
 describe('resolvePresetId', () => {

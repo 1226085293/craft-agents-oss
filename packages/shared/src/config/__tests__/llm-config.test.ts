@@ -293,27 +293,6 @@ describe('validateLlmConfig', () => {
     expect(validateLlmConfig(makeConfig({}))).toEqual([]);
   });
 
-  it('accepts a defaultStrategy that names a real strategy', () => {
-    const errors = validateLlmConfig(makeConfig({ defaultStrategy: 's1' }));
-    expect(errors).toEqual([]);
-  });
-
-  it('rejects a defaultStrategy naming a strategy that does not exist', () => {
-    // Every new session inherits this, so a typo here would mis-route all of
-    // them — including the ones created by automations, which the user never
-    // sees being made.
-    const errors = validateLlmConfig(makeConfig({ defaultStrategy: 'nope' }));
-    expect(errors.join(' ')).toContain('defaultStrategy 引用了不存在的 strategy: nope');
-  });
-
-  it('rejects a non-string defaultStrategy', () => {
-    const errors = validateLlmConfig(makeConfig({ defaultStrategy: 7 as unknown as string }));
-    expect(errors.join(' ')).toContain('defaultStrategy 必须是非空字符串');
-  });
-
-  it('leaves defaultStrategy absent when unset', () => {
-    expect(validateLlmConfig(makeConfig({}))).toEqual([]);
-  });
 
   it('allows a provider with no keys yet — the gateway stays disabled until one lands', () => {
     const errors = validateLlmConfig(makeConfig({

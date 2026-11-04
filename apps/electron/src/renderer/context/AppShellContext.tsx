@@ -24,7 +24,7 @@ import type {
   LlmConnectionWithStatus,
 } from '../../shared/types'
 import type { SessionOptions, SessionOptionUpdates } from '../hooks/useSessionOptions'
-import { defaultSessionOptions, readDefaultStrategy } from '../hooks/useSessionOptions'
+import { defaultSessionOptions } from '../hooks/useSessionOptions'
 import { sessionAtomFamily } from '../atoms/sessions'
 
 export interface AppShellContextType {
@@ -247,12 +247,11 @@ export function useSessionOptionsFor(sessionId: string): {
 
   const options = React.useMemo<SessionOptions>(() => {
     // A brand-new session has no entry yet; the workspace defaults carry only
-    // permission/thinking, so the routing policy falls through to the user's
-    // default preference. Resolve it here (not at module load) or a default set
-    // in Settings would not reach any session created without a reload.
     const base = sessionOptions.get(sessionId) ?? workspaceDefaultSessionOptions
+    // No strategy fallback here: the record written by createSession already
+    // carries the resolved group (agent → first enabled). A renderer-side
+    // default would be a second source of truth for the same decision.
     const merged: SessionOptions = { ...defaultSessionOptions, ...(base ?? {}) }
-    if (merged.strategy === undefined) merged.strategy = readDefaultStrategy()
     return merged
   }, [sessionId, sessionOptions, workspaceDefaultSessionOptions])
 

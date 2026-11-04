@@ -113,6 +113,31 @@ export interface SessionConfig {
   hasUnread?: boolean;
   /** Per-session source selection (source slugs) */
   enabledSourceSlugs?: string[];
+  /**
+   * Agent (role profile) this session runs as.
+   *
+   * `agentSnapshot` is the frozen copy taken at creation: the persona and the
+   * two scope ceilings are read from here, so editing the agent later cannot
+   * silently change an existing session (and cannot invalidate its prompt cache).
+   */
+  agentId?: string;
+  agentSnapshot?: {
+    agentId: string;
+    name: string;
+    persona: string;
+    sources: { mode: 'all' | 'allowlist'; slugs: string[] };
+    skills: { mode: 'all' | 'allowlist'; slugs: string[] };
+    pinnedAt: number;
+  };
+  /**
+   * 'supervisor' sessions coordinate (dispatch/handoff) and have no execution
+   * tools; 'worker' is an ordinary session.
+   */
+  role?: 'supervisor' | 'worker';
+  /** Task this session works on (set when the supervisor delegated it). */
+  taskId?: string;
+  /** Delegation depth: supervisor 0 → worker 1 → sub-worker 2 (hard cap). */
+  spawnDepth?: number;
   /** 数据源选择器模式：auto（默认）/ only（仅这些）/ exclude（排除这些） */
   sourceScope?: 'auto' | 'only' | 'exclude';
   /** Working directory for this session (used by agent for bash commands and context) */

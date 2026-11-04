@@ -43,6 +43,13 @@ export interface EventServiceOptions {
    * events (tests, ingest-only hosts), which leaves dispatching inert.
    */
   dispatchTarget?: DispatchTarget;
+  /**
+   * Called for an event no session subscribed to.
+   *
+   * The host wires this to the workspace supervisor runtime (rules first, then
+   * the supervisor). Absent = unclaimed events are dropped, exactly as before.
+   */
+  onUnclaimed?: (event: EventMeta) => void;
   /** Override for tests. */
   dbPath?: string;
   /** Override for tests; 0 disables. */
@@ -106,6 +113,7 @@ export class EventService {
     return new EventDispatcher({
       getSubscriptions: () => loadSubscriptions(this.options.workspaceRoot),
       target,
+      ...(this.options.onUnclaimed ? { onUnclaimed: this.options.onUnclaimed } : {}),
       onDelivered: (eventId, sessionId) => {
         try {
           this.store.recordDelivery(eventId, sessionId, Date.now());
@@ -408,6 +416,7 @@ export async function getEventService(
   workspaceRoot: string,
   onChanged?: (event: EventRecord) => void,
   dispatchTarget?: DispatchTarget,
+  onUnclaimed?: (event: EventMeta) => void,
 ): Promise<EventService> {
   let service = services.get(workspaceId);
   if (!service) {
@@ -416,6 +425,7 @@ export async function getEventService(
       workspaceRoot,
       ...(onChanged ? { onChanged } : {}),
       ...(dispatchTarget ? { dispatchTarget } : {}),
+      ...(onUnclaimed ? { onUnclaimed } : {}),
     });
     services.set(workspaceId, service);
   }

@@ -86,6 +86,7 @@ import {
 import { WorkingDirectorySelector, formatPathForDisplay } from './WorkingDirectorySelector'
 import { CompactPermissionModeSelector } from './CompactPermissionModeSelector'
 import { StrategySelector, type StrategyOption } from './StrategySelector'
+import { AgentSelector, type AgentOption } from './AgentSelector'
 
 import { ContextUsageRing } from './ContextUsageRing'
 import {
@@ -192,6 +193,18 @@ export interface FreeFormInputProps {
   sessionModel?: string
   /** Gateway strategy groups, as the composer should offer them. */
   gatewayStrategies?: StrategyOption[]
+  /**
+   * Role profiles this workspace offers.
+   *
+   * Omitted = no picker at all (headless surfaces, panels without workspace
+   * context). A supervisor session hides it regardless: its role is fixed.
+   */
+  agentOptions?: AgentOption[]
+  /** Selected agent id. Empty string shows the built-in default. */
+  agentId?: string
+  onAgentChange?: (agentId: string) => void
+  /** 'supervisor' hides the picker and the strategy control stays. */
+  sessionRole?: 'supervisor' | 'worker'
   /** Selected strategy id; empty means "none chosen yet". */
   effectiveStrategyId?: string
   /** Callback when the user picks a different strategy group. */
@@ -318,6 +331,10 @@ export function FreeFormInput({
   currentModel,
   sessionModel,
   gatewayStrategies,
+  agentOptions,
+  agentId,
+  onAgentChange,
+  sessionRole,
   effectiveStrategyId,
   onStrategyChange,
   strategyUnavailable,
@@ -2142,6 +2159,15 @@ export function FreeFormInput({
           {sessionId && <BackgroundTaskToolbar sessionId={sessionId} />}
           {/* Strategy + next model: the gateway picks the upstream, so this is
               the only model-shaped control the composer offers. */}
+          {/* Role first: it decides the persona and the tool/scope ceilings the
+              rest of this composer inherits. Hidden on a supervisor session,
+              whose role is fixed at creation. */}
+          <AgentSelector
+            agents={agentOptions ?? []}
+            value={agentId ?? ''}
+            onChange={(id) => onAgentChange?.(id)}
+            hidden={!agentOptions?.length || sessionRole === 'supervisor'}
+          />
           {enableCompactModelPicker && (
             <StrategySelector
               strategies={gatewayStrategies ?? []}
@@ -2422,6 +2448,14 @@ export function FreeFormInput({
               and model. The model half of the label is a prediction: the
               strategy keeps this session's model when it can serve it, else
               falls back to the group's first model. */}
+          {!compactMode && (
+            <AgentSelector
+              agents={agentOptions ?? []}
+              value={agentId ?? ''}
+              onChange={(id) => onAgentChange?.(id)}
+              hidden={!agentOptions?.length || sessionRole === 'supervisor'}
+            />
+          )}
           {!compactMode && (
             <StrategySelector
               strategies={gatewayStrategies ?? []}

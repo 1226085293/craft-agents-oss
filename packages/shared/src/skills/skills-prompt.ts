@@ -106,10 +106,15 @@ export function formatSkillsBlock(
   workspaceRoot?: string,
   projectRoot?: string,
   budgetTokens = DEFAULT_SKILLS_BUDGET_TOKENS,
+  /**
+   * Agent scope ceiling: when provided, only these slugs reach the prompt.
+   * `undefined` means "no ceiling" so existing callers keep their behaviour.
+   */
+  allowedSlugs?: string[],
 ): string {
   if (!workspaceRoot) {
     return '';
   }
-  const skills = loadAllSkills(workspaceRoot, projectRoot);
+  const skills = loadAllSkills(workspaceRoot, projectRoot, allowedSlugs);
   return renderSkillsBlock(skills, budgetTokens);
 }

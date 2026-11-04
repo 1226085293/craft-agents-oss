@@ -7,7 +7,6 @@ function base(overrides: Record<string, unknown> = {}) {
     id: 'qqmail-idle',
     name: 'QQ 邮箱',
     version: '1.2.0',
-    eventTypes: ['mail.received'],
     ...overrides,
   }
 }
@@ -64,7 +63,6 @@ describe('parseManifest', () => {
     expect(parseManifest(base({ id: 'Bad_Id' })).ok).toBe(false)
     expect(parseManifest(base({ name: '' })).ok).toBe(false)
     expect(parseManifest(base({ version: '1.2' })).ok).toBe(false)
-    expect(parseManifest(base({ eventTypes: ['Mail'] })).ok).toBe(false)
   })
 
   it('checks the id against the directory name', () => {

@@ -229,8 +229,7 @@ export function loadListeners(options: LoadListenersOptions): LoadedListener[] {
           id,
           name: id,
           version: '0.0.0',
-          eventTypes: [],
-        },
+                  },
         dir,
         dataDir: join(workspaceRoot, 'events-data', id),
         enabled: false,
@@ -249,7 +248,7 @@ export function loadListeners(options: LoadListenersOptions): LoadedListener[] {
     } catch (error) {
       listeners.push({
         id,
-        manifest: { spec: 'craft-listener/1', id, name: id, version: '0.0.0', eventTypes: [] },
+        manifest: { spec: 'craft-listener/1', id, name: id, version: '0.0.0' },
         dir,
         dataDir: join(workspaceRoot, 'events-data', id),
         enabled: false,
@@ -266,7 +265,7 @@ export function loadListeners(options: LoadListenersOptions): LoadedListener[] {
     if (!parsed.ok || !parsed.manifest) {
       listeners.push({
         id,
-        manifest: { spec: 'craft-listener/1', id, name: id, version: '0.0.0', eventTypes: [] },
+        manifest: { spec: 'craft-listener/1', id, name: id, version: '0.0.0' },
         dir,
         dataDir: join(workspaceRoot, 'events-data', id),
         enabled: false,

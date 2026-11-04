@@ -21,7 +21,6 @@ function listener(id: string, program: string[], overrides: Partial<LoadedListen
       id,
       name: id,
       version: '1.0.0',
-      eventTypes: ['test.ping'],
       runtime: { program, readyTimeoutMs: 500, restart: { policy: 'on-failure', maxAttempts: 2, backoffMs: [10, 20] } },
     },
     dir,
@@ -89,7 +88,7 @@ describe('ListenerSupervisor', () => {
   })
 
   it('refuses to start a listener without a runtime program', () => {
-    const entry = listener('no-runtime', [], { manifest: { spec: 'craft-listener/1', id: 'no-runtime', name: 'x', version: '1.0.0', eventTypes: [] } })
+    const entry = listener('no-runtime', [], { manifest: { spec: 'craft-listener/1', id: 'no-runtime', name: 'x', version: '1.0.0' } })
     const status = supervisor.start(entry)
     expect(status.state).toBe('failed')
     expect(status.lastError).toContain('no runtime.program')

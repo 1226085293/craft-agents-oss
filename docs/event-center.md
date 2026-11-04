@@ -30,7 +30,6 @@ git-friendly.
   "name": "QQ 邮箱",
   "version": "1.2.0",
   "description": "监听 QQ 邮箱新邮件",
-  "eventTypes": ["mail.received"],
 
   "runtime": {
     "program": ["python", "-u", "${dir}/listener.py"],

@@ -13,9 +13,8 @@ import { parseManifest } from './manifest.ts';
 export interface EventPromptEntry {
   id: string;
   name: string;
-  /** One-line description from the manifest; falls back to event types when absent. */
+  /** One-line description from the manifest, when the manifest has one. */
   description?: string;
-  eventTypes: string[];
 }
 
 /** The block rides every session prompt, so a description must stay one line. */
@@ -54,7 +53,6 @@ export function readEnabledListeners(workspaceRootPath: string): EventPromptEntr
         id: parsed.manifest.id,
         name: parsed.manifest.name,
         ...(parsed.manifest.description ? { description: parsed.manifest.description } : {}),
-        eventTypes: parsed.manifest.eventTypes,
       });
     } catch {
       // A broken manifest is the registry's problem to report, not the prompt's.
@@ -70,18 +68,13 @@ export function readEnabledListeners(workspaceRootPath: string): EventPromptEntr
 export function formatEventsBlock(entries: EventPromptEntry[]): string {
   if (entries.length === 0) return '';
 
-  // The id leads: it is what `subscribe_event` takes. Name and description are
-  // there so the model can tell which listener is worth subscribing to. When the
-  // description already names the listener, printing both reads like a stutter.
+  // The id is the unique handle `subscribe_event` takes, so it leads. The name is
+  // only a human alias — several listeners may share one — so it is printed
+  // verbatim rather than deduplicated against the blurb.
   const lines = entries.map((entry) => {
-    const types = entry.eventTypes.length ? entry.eventTypes.join(', ') : '(any)';
     const blurb = entry.description?.trim().replace(/\s+/g, ' ').slice(0, MAX_DESCRIPTION_CHARS);
-    const label = !blurb
-      ? entry.name
-      : blurb.includes(entry.name)
-        ? blurb
-        : `${entry.name}：${blurb}`;
-    return `- \`${entry.id}\`（${label}）→ ${types}`;
+    const label = blurb ? `${entry.name}：${blurb}` : entry.name;
+    return `- \`${entry.id}\`（${label}）`;
   });
 
   return [

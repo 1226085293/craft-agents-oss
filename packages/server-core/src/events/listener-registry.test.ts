@@ -24,7 +24,6 @@ function manifestFor(id: string, overrides: Record<string, unknown> = {}) {
     id,
     name: `Listener ${id}`,
     version: '1.0.0',
-    eventTypes: ['mail.received'],
     ...overrides,
   }
 }

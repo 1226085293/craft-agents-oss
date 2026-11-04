@@ -68,7 +68,6 @@ export interface ListenerManifest {
   icon?: string;
   author?: string;
   homepage?: string;
-  eventTypes: string[];
   runtime?: ListenerRuntime;
   dependencies?: ListenerDependencies;
   config?: ListenerConfigSchema;
@@ -172,7 +171,6 @@ export function satisfiesRange(version: string, range: string): boolean {
 }
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const EVENT_TYPE_PATTERN = /^[a-z][a-z0-9]*\.[a-z][a-z0-9_]*$/;
 
 /** Validate an unknown JSON value into a manifest. */
 export function parseManifest(raw: unknown, expectedId?: string): ManifestParseResult {
@@ -203,20 +201,6 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
   const version = str(input.version);
   if (!version) errors.push('version is required');
   else if (!parseVersion(version)) errors.push('version must be semver (e.g. 1.2.0)');
-
-  const eventTypesRaw = input.eventTypes;
-  const eventTypes: string[] = [];
-  if (!Array.isArray(eventTypesRaw) || eventTypesRaw.length === 0) {
-    warnings.push('eventTypes is empty — the listener may post types the UI cannot label');
-  } else {
-    for (const entry of eventTypesRaw) {
-      if (typeof entry !== 'string' || !EVENT_TYPE_PATTERN.test(entry)) {
-        errors.push(`eventTypes entry "${String(entry)}" must look like "namespace.action"`);
-      } else {
-        eventTypes.push(entry);
-      }
-    }
-  }
 
   let runtime: ListenerRuntime | undefined;
   if (input.runtime !== undefined) {
@@ -348,7 +332,6 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
     id: id!,
     name: name!,
     version: version!,
-    eventTypes,
     ...(str(input.description) ? { description: str(input.description)! } : {}),
     ...(str(input.icon) ? { icon: str(input.icon)! } : {}),
     ...(str(input.author) ? { author: str(input.author)! } : {}),

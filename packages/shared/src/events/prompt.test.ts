@@ -6,7 +6,7 @@ import { buildEventsBlock, formatEventsBlock, readEnabledListeners } from './pro
 
 let root: string
 
-function writeListener(id: string, name: string, types: string[], description?: string): void {
+function writeListener(id: string, name: string, description?: string): void {
   const dir = join(root, 'events', id)
   mkdirSync(dir, { recursive: true })
   writeFileSync(
@@ -16,7 +16,6 @@ function writeListener(id: string, name: string, types: string[], description?: 
       id,
       name,
       version: '1.0.0',
-      eventTypes: types,
       ...(description ? { description } : {}),
     }),
     'utf8',
@@ -39,19 +38,18 @@ afterEach(() => {
 
 describe('event prompt block', () => {
   it('is empty when no listener is enabled', () => {
-    writeListener('qqmail', 'QQ 邮箱', ['mail.received'])
+    writeListener('qqmail', 'QQ 邮箱')
     expect(buildEventsBlock(root)).toBe('')
     expect(buildEventsBlock(undefined)).toBe('')
   })
 
-  it('lists only enabled listeners with their event types', () => {
-    writeListener('qqmail', 'QQ 邮箱', ['mail.received'])
-    writeListener('github', 'GitHub', ['github.push', 'github.issue'])
+  it('lists only enabled listeners', () => {
+    writeListener('qqmail', 'QQ 邮箱')
+    writeListener('github', 'GitHub')
     setEnabled(['qqmail'])
 
     const block = buildEventsBlock(root)
     expect(block).toContain('QQ 邮箱')
-    expect(block).toContain('mail.received')
     expect(block).toContain('subscribe_event')
     expect(block).not.toContain('GitHub')
   })
@@ -65,39 +63,39 @@ describe('event prompt block', () => {
   })
 
   it('reads entries independently of the formatter', () => {
-    writeListener('a', 'A', ['x.y'])
+    writeListener('a', 'A')
     setEnabled(['a'])
-    expect(readEnabledListeners(root)).toEqual([{ id: 'a', name: 'A', eventTypes: ['x.y'] }])
+    expect(readEnabledListeners(root)).toEqual([{ id: 'a', name: 'A' }])
   })
 
-  it('leads each line with the id and avoids repeating it in the blurb', () => {
-    writeListener('qqmail-idle', 'QQ 邮箱', ['mail.received'], '监听 QQ 邮箱新邮件')
+  it('leads each line with the id, then the name and description', () => {
+    writeListener('qqmail-idle', 'QQ 邮箱', '监听 QQ 邮箱新邮件')
     setEnabled(['qqmail-idle'])
 
     const line = formatEventsBlock(readEnabledListeners(root))
       .split('\n')
       .find((row) => row.startsWith('- '))
-    expect(line).toBe('- `qqmail-idle`（监听 QQ 邮箱新邮件）→ mail.received')
+    expect(line).toBe('- `qqmail-idle`（QQ 邮箱：监听 QQ 邮箱新邮件）')
   })
 
   it('carries the manifest description into the block', () => {
-    writeListener('qqmail-idle', 'QQ 邮箱', ['mail.received'], '监听 QQ 邮箱新邮件')
+    writeListener('qqmail-idle', 'QQ 邮箱', '监听 QQ 邮箱新邮件')
     setEnabled(['qqmail-idle'])
     expect(readEnabledListeners(root)[0]?.description).toBe('监听 QQ 邮箱新邮件')
   })
 
   it('falls back to the bare name when the manifest has no description', () => {
-    writeListener('plain', 'Plain', ['p.q'])
+    writeListener('plain', 'Plain')
     setEnabled(['plain'])
     const line = formatEventsBlock(readEnabledListeners(root)).split('\n').find((row) => row.startsWith('- '))
-    expect(line).toBe('- `plain`（Plain）→ p.q')
+    expect(line).toBe('- `plain`（Plain）')
   })
 
   it('keeps a chatty description on one line and bounded', () => {
     var long =
       '\u76d1\u542c QQ \u90ae\u7bb1\u65b0\u90ae\u4ef6\u3002\n\u8fd9\u662f\u4e00\u6bb5\u6362\u884c\u540e\u7684\u5185\u5bb9\uff0c\u4e0d\u5e94\u8be5\u628a\u6b63\u6587\u6491\u6210\u591a\u884c\u3002\n\n\u8fd8\u6709\u7b2c\u4e09\u6bb5 '
       + 'x'.repeat(200)
-    writeListener('noisy', 'Noisy', ['n.q'], long)
+    writeListener('noisy', 'Noisy', long)
     setEnabled(['noisy'])
     const line = formatEventsBlock(readEnabledListeners(root)).split('\n').find((row) => row.startsWith('- '))!
     expect(line).not.toContain('\n')
@@ -108,6 +106,6 @@ describe('event prompt block', () => {
 
   it('formats an explicit entry list', () => {
     expect(formatEventsBlock([])).toBe('')
-    expect(formatEventsBlock([{ id: 'x', name: 'X', eventTypes: [] }])).toContain('(any)')
+    expect(formatEventsBlock([{ id: 'x', name: 'X' }])).toContain('X')
   })
 })

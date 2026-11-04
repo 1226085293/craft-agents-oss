@@ -1621,6 +1621,10 @@
   "sidebar.settings": "設定",
   "sidebar.skills": "スキル",
   "sidebar.sources": "ソース",
+  "sidebar.events": "イベント",
+  "sidebar.eventList": "イベント一覧",
+  "sidebar.eventListeners": "リスナー",
+
   "sidebar.unknownProject": "不明なプロジェクト",
   "sidebar.whatsNew": "新着情報",
   "sidebarMenu.addAutomation": "自動化を追加",

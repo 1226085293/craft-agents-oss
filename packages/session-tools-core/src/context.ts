@@ -390,6 +390,48 @@ export interface SessionToolContext {
   listSubscriptionsFn?(): string[];
 
   // ============================================================
+  // Event Center (injected; this package stays dependency-free)
+  // ============================================================
+
+  subscribeEventFn?(filter: {
+    sources?: string[];
+    types?: string[];
+  }): Promise<{ subscriptionId: string; total: number }>;
+  unsubscribeEventFn?(selector: {
+    subscriptionId?: string;
+    source?: string;
+  }): Promise<{ removed: number; remaining: number }>;
+  listEventSubscriptionsFn?(): Array<{
+    subscriptionId: string;
+    filter: { sources?: string[]; types?: string[] };
+  }>;
+  listEventsFn?(filter: {
+    source?: string;
+    type?: string;
+    search?: string;
+    limit?: number;
+  }): Array<{
+    id: string;
+    type: string;
+    source: string;
+    receivedAt: number;
+    title: string;
+    summary?: string;
+  }>;
+  getEventFn?(id: string): {
+    id: string;
+    type: string;
+    source: string;
+    receivedAt: number;
+    occurredAt?: number;
+    title: string;
+    summary?: string;
+    recipients: string[];
+    body?: string;
+    payloadPath?: string;
+  } | null;
+
+  // ============================================================
   // Messaging Gateway (for list/unbind messaging channels)
   // ============================================================
 

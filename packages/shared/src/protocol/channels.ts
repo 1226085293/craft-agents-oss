@@ -410,6 +410,46 @@ export const RPC_CHANNELS = {
     DELETE: 'folders:delete',
     CHANGED: 'folders:changed',
   },
+  events: {
+    /** Paginated metadata list (never includes bodies). */
+    LIST: 'events:list',
+    /** Single event including its body. */
+    GET: 'events:get',
+    /** Per-source totals for the listener cards. */
+    COUNTS: 'events:counts',
+    /** Ingest server address + whether it is listening. */
+    STATUS: 'events:status',
+    /** Pushed when a new event lands (workspace-scoped). */
+    CHANGED: 'events:changed',
+    /** Content of one attachment: text, image data URL, or PDF bytes. */
+    READ_ATTACHMENT: 'events:readAttachment',
+    /** Hand one attachment to the OS default application. */
+    OPEN_ATTACHMENT: 'events:openAttachment',
+
+    /** Installed listener cards. */
+    LIST_LISTENERS: 'events:listListeners',
+    /** One listener with dependencies, config and log tail. */
+    GET_LISTENER: 'events:getListener',
+    /** Enable/disable (also starts/stops the process). */
+    SET_LISTENER_ENABLED: 'events:setListenerEnabled',
+    /** Persist user config values. */
+    SET_LISTENER_CONFIG: 'events:setListenerConfig',
+    /** Run the manifest's install command for one package dependency. */
+    INSTALL_DEPENDENCY: 'events:installDependency',
+    /** Install a managed MCP server from dependencies.mcp. */
+    INSTALL_MCP: 'events:installMcp',
+    /** Dependency state the listener itself reports (control service). */
+    LISTENER_DEPS: 'events:listenerDeps',
+    /** Trigger one reported dependency's action (the install button). */
+    LISTENER_DEPS_ACTION: 'events:listenerDepsAction',
+    /** Pushed when a listener process changes state. */
+    LISTENER_STATUS: 'events:listenerStatus',
+
+    /** This session's subscriptions. */
+    LIST_SUBSCRIPTIONS: 'events:listSubscriptions',
+    SUBSCRIBE: 'events:subscribe',
+    UNSUBSCRIBE: 'events:unsubscribe',
+  },
   pages: {
     GET: 'pages:get',
     GET_ONE: 'pages:getOne',

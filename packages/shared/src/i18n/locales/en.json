@@ -1621,6 +1621,10 @@
   "sidebar.settings": "Settings",
   "sidebar.skills": "Skills",
   "sidebar.sources": "Sources",
+  "sidebar.events": "Events",
+  "sidebar.eventList": "Event Log",
+  "sidebar.eventListeners": "Listeners",
+
   "sidebar.unknownProject": "Unknown project",
   "sidebar.whatsNew": "What's New",
   "sidebarMenu.addAutomation": "Add Automation",

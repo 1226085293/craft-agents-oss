@@ -127,10 +127,13 @@ import {
   isProjectsNavigation,
   isPagesNavigation,
   isAutomationsNavigation,
+  isEventsNavigation,
   type NavigationState,
 } from "@/contexts/NavigationContext"
 import type { SettingsSubpage } from "../../../shared/types"
 import { SourcesListPanel } from "./SourcesListPanel"
+import { EventsListPanel } from "../events/EventsListPanel"
+import { EventsListenersPanel } from "../events/EventsListenersPanel"
 import { SkillsListPanel } from "./SkillsListPanel"
 import { ProjectsListPanel } from "./ProjectsListPanel"
 import { useProjects } from "@/hooks/useProjects"
@@ -1544,6 +1547,23 @@ function AppShellContent({
     navigate(routes.view.pages())
   }, [])
 
+  // Events navigator: two sections sharing one entry.
+  const handleEventsClick = useCallback(() => {
+    navigate(routes.view.events())
+  }, [])
+
+  const handleEventListenersClick = useCallback(() => {
+    navigate(routes.view.eventListeners())
+  }, [])
+
+  const handleEventSelect = useCallback((eventId: string) => {
+    navigate(routes.view.events(eventId))
+  }, [])
+
+  const handleListenerSelect = useCallback((listenerId: string) => {
+    navigate(routes.view.eventListeners(listenerId))
+  }, [])
+
   // Open settings in its dedicated window. A missing subpage keeps the
   // navigator-only `settings` entry and resolves to the app page in the window.
   const handleSettingsClick = useCallback((subpage?: SettingsSubpage) => {
@@ -1975,6 +1995,12 @@ function AppShellContent({
 
     // Settings navigator
     if (isSettingsNavigation(navState)) return t("sidebar.settings")
+
+    // Events navigator — the second-left panel lists events/listeners, not
+    // sessions, so the sessions fallback below would mislabel it "所有会话".
+    if (isEventsNavigation(navState)) {
+      return navState.section === 'listeners' ? t("sidebar.eventListeners") : t("sidebar.eventList")
+    }
 
     // Sessions navigator - use sessionFilter
     if (!sessionFilter) return t("sidebar.allSessions")
@@ -2448,6 +2474,32 @@ function AppShellContent({
                       ],
                     },
                     {
+                      id: "nav:events",
+                      title: t("sidebar.events"),
+                      icon: Radio,
+                      variant: isEventsNavigation(navState) ? "default" : "ghost",
+                      onClick: handleEventsClick,
+                      expandable: true,
+                      expanded: isExpanded('nav:events'),
+                      onToggle: () => toggleExpanded('nav:events'),
+                      items: [
+                        {
+                          id: "nav:events:list",
+                          title: t("sidebar.eventList"),
+                          icon: Inbox,
+                          variant: (isEventsNavigation(navState) && navState.section === 'list') ? "default" : "ghost",
+                          onClick: handleEventsClick,
+                        },
+                        {
+                          id: "nav:events:listeners",
+                          title: t("sidebar.eventListeners"),
+                          icon: Radio,
+                          variant: (isEventsNavigation(navState) && navState.section === 'listeners') ? "default" : "ghost",
+                          onClick: handleEventListenersClick,
+                        },
+                      ],
+                    },
+                    {
                       id: "nav:skills",
                       title: t("sidebar.skills"),
                       label: String(skills.length),
@@ -2682,6 +2734,22 @@ function AppShellContent({
                   <TooltipContent side="bottom">{newChatHotkey}</TooltipContent>
                 </Tooltip>
               </div>
+            )}
+            {/* Events navigator: the log or the listener section */}
+            {isEventsNavigation(navState) && activeWorkspaceId && (
+              navState.section === 'listeners' ? (
+                <EventsListenersPanel
+                  workspaceId={activeWorkspaceId}
+                  selectedListenerId={navState.details?.type === 'listener' ? navState.details.listenerId : null}
+                  onSelectListener={handleListenerSelect}
+                />
+              ) : (
+                <EventsListPanel
+                  workspaceId={activeWorkspaceId}
+                  selectedEventId={navState.details?.type === 'event' ? navState.details.eventId : null}
+                  onSelectEvent={handleEventSelect}
+                />
+              )
             )}
             {/* Content: SessionList, SourcesListPanel, or SettingsNavigator based on navigation state */}
             {/* Memory manager view replaces the sources list in the navigator */}

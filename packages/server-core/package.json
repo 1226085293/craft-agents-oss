@@ -19,7 +19,15 @@
     "./handlers/rpc/*": "./src/handlers/rpc/*.ts",
     "./sessions": "./src/sessions/index.ts",
     "./tasks": "./src/tasks/index.ts",
-    "./webui": "./src/webui/index.ts"
+    "./webui": "./src/webui/index.ts",
+    "./events": {
+      "types": "./src/events/index.ts",
+      "default": "./src/events/index.ts"
+    },
+    "./events/*": {
+      "types": "./src/events/*.ts",
+      "default": "./src/events/*.ts"
+    }
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

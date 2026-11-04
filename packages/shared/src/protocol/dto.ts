@@ -245,7 +245,7 @@ export type SessionEvent =
   // Carries the full ordered queue so every window converges on one order.
   | { type: 'queued_messages_changed'; sessionId: string; queuedMessages: QueuedMessageSummary[] }
   | { type: 'status'; sessionId: string; message: string; statusType?: 'compacting' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed'; statusParams?: Record<string, string | number>; timestamp?: number }
-  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed' | 'system_stop' | 'background_wake'; statusParams?: Record<string, string | number>; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string }
+  | { type: 'info'; sessionId: string; message: string; statusType?: 'compaction_complete' | 'compaction_summary' | 'verification' | 'verification_passed' | 'verification_failed' | 'system_stop' | 'background_wake' | 'event_wake'; statusParams?: Record<string, string | number>; level?: 'info' | 'warning' | 'error' | 'success'; timestamp?: number; finalText?: string; stopReason?: string }
   | { type: 'system_stop_notice'; sessionId: string; reason: string; message: string; timestamp?: number }
   | { type: 'title_generated'; sessionId: string; title: string }
   | { type: 'title_regenerating'; sessionId: string; isRegenerating: boolean }
@@ -925,4 +925,141 @@ export interface LlmGatewayListModelsResult {
   models: string[]
   /** Round-trip time, ms. Always present, success or failure. */
   elapsedMs: number
+}
+
+// ---------------------------------------------------------------------------
+// Event Center
+// ---------------------------------------------------------------------------
+
+/**
+ * Event metadata as pushed to renderers and returned by `events:list`.
+ * Deliberately excludes `body`: list rows must never carry whole mail bodies.
+ */
+/** Per-session delivery record on an event. */
+export interface EventDeliveryDto {
+  sessionId: string
+  at: number
+}
+
+export interface EventMetaDto {
+  spec: 'craft-event/1'
+  id: string
+  source: string
+  type: string
+  receivedAt: number
+  occurredAt?: number
+  dedupeKey?: string
+  title: string
+  summary?: string
+  recipients: string[]
+  links: Array<{ rel?: string; url: string }>
+  attachments: EventAttachmentDto[]
+  payloadRef?: { kind: string; path: string; size?: number }
+  delivered: boolean
+  /** Which sessions received this event, and when. Latest per session. */
+  deliveries: EventDeliveryDto[]
+}
+
+/** One file that arrived with the event. Content is read on demand. */
+export interface EventAttachmentDto {
+  name: string
+  mime: string
+  /** Absolute path on the host, inside the workspace's `events-data`. */
+  path: string
+  size?: number
+  /** Embedded in the body (Content-ID); drawn in place, not listed as a file. */
+  inline?: boolean
+}
+
+/**
+ * Attachment content, shaped to reuse the session preview overlays:
+ * text goes through the code/markdown/JSON viewers, images through the image
+ * overlay as a data URL, PDFs through the PDF overlay as raw bytes.
+ */
+export type EventAttachmentContentDto =
+  | { kind: 'text'; text: string; truncated: boolean; bytes: number }
+  | { kind: 'image'; dataUrl: string; bytes: number }
+  | { kind: 'pdf'; data: Uint8Array; bytes: number }
+  | { kind: 'unsupported'; reason: string; bytes: number }
+
+/** `events:get` result: metadata plus the stored body. */
+export interface EventRecordDto extends EventMetaDto {
+  body?: string
+}
+
+/** Listener process state, mirrored to the renderer. */
+export interface ListenerStatusDto {
+  id: string
+  state: 'stopped' | 'starting' | 'running' | 'degraded' | 'failed'
+  pid: number | null
+  startedAt: number | null
+  attempts: number
+  lastExitCode: number | null
+  lastError: string | null
+}
+
+/** One dependency row in the listener detail page. */
+export interface ListenerDependencyDto {
+  kind: 'package' | 'mcp' | 'system'
+  label: string
+  requirement: string
+  state: 'ok' | 'missing' | 'mismatch' | 'unknown' | 'not_required'
+  found?: string
+  installHint?: string
+}
+
+/** One dependency row reported by the listener's own control service. */
+export interface ListenerReportedDepDto {
+  id: string
+  name: string
+  installed: boolean
+  version?: string
+  detail?: string
+  /** Why the last action failed; absent when fine. */
+  error?: string
+  /** Present = the row renders an action button (label). running = disabled. */
+  action?: { label: string; running: boolean }
+}
+
+/** Result of asking a listener's control service for its dependency state. */
+export interface ListenerReportedDepsDto {
+  control: boolean
+  deps?: ListenerReportedDepDto[]
+  /** Why no status is available (no service, bad payload, timeout). */
+  reason?: string
+}
+
+/** A listener card / detail payload. */
+export interface ListenerDto {
+  id: string
+  name: string
+  version: string
+  description?: string
+  icon?: string
+  homepage?: string
+  enabled: boolean
+  ready: boolean
+  missingConfig: string[]
+  config: Record<string, unknown>
+  dependencies: ListenerDependencyDto[]
+  /** Dependency state the listener itself reports via its control service. */
+  controlDeps?: ListenerReportedDepsDto
+  /** Tail of the last failed startup, when the process gave up non-zero. */
+  startupErrorTail?: string
+  errors: string[]
+  warnings: string[]
+  status: ListenerStatusDto
+  configSchema?: {
+    properties: Record<string, {
+      type?: 'string' | 'number' | 'boolean'
+      title?: string
+      description?: string
+      default?: string | number | boolean
+      secret?: boolean
+      enum?: Array<string | number>
+    }>
+    required?: string[]
+  }
+  setup: Array<{ text: string; link?: string }>
+  logTail?: string
 }

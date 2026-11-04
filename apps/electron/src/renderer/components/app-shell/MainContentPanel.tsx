@@ -33,6 +33,7 @@ import {
   isProjectsNavigation,
   isPagesNavigation,
   isAutomationsNavigation,
+  isEventsNavigation,
 } from '@/contexts/NavigationContext'
 import { useSessionSelection, useIsMultiSelectActive, useSelectedIds, useSelectionCount } from '@/hooks/useSession'
 import { sourceSelection, skillSelection, automationSelection } from '@/hooks/useEntitySelection'
@@ -45,6 +46,8 @@ import type { ExecutionEntry } from '../automations/types'
 import { automationsAtom } from '@/atoms/automations'
 import { useAutomations } from '@/hooks/useAutomations'
 import { PagesHome } from '../pages/PagesHome'
+import { EventDetailPanel } from '../events/EventDetailPanel'
+import { ListenerDetailPanel } from '../events/ListenerDetailPanel'
 import { MemoryPanel } from './MemoryPanel'
 import { PageView } from '../pages/PageView'
 import { SendResourceToWorkspaceDialog, type SendResourceType } from './SendResourceToWorkspaceDialog'
@@ -196,6 +199,40 @@ export function MainContentPanel({
     return wrapWithStoplight(
       <Panel variant="grow" className={className}>
         <SettingsPageComponent />
+      </Panel>
+    )
+  }
+
+  // Events navigator - one event's full content, or an empty state
+  if (isEventsNavigation(navState)) {
+    if (navState.section === 'listeners') {
+      if (navState.details?.type === 'listener' && activeWorkspaceId) {
+        return wrapWithStoplight(
+          <Panel variant="grow" className={className}>
+            <ListenerDetailPanel workspaceId={activeWorkspaceId} listenerId={navState.details.listenerId} />
+          </Panel>
+        )
+      }
+      return wrapWithStoplight(
+        <Panel variant="grow" className={className}>
+          <div className="flex flex-col items-center justify-center h-full gap-1.5 text-muted-foreground">
+            <p className="text-sm">选择一个监听器查看版本、配置与依赖</p>
+          </div>
+        </Panel>
+      )
+    }
+    if (navState.details?.type === 'event' && activeWorkspaceId) {
+      return wrapWithStoplight(
+        <Panel variant="grow" className={className}>
+          <EventDetailPanel workspaceId={activeWorkspaceId} eventId={navState.details.eventId} />
+        </Panel>
+      )
+    }
+    return wrapWithStoplight(
+      <Panel variant="grow" className={className}>
+        <div className="flex items-center justify-center h-full text-muted-foreground">
+          <p className="text-sm">选择一条事件查看详情</p>
+        </div>
       </Panel>
     )
   }

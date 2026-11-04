@@ -356,6 +356,12 @@ export function getSystemPrompt(
   backendName?: string,
   includeCoAuthoredBy?: boolean,
   projectContext?: ProjectPromptContext,
+  /**
+   * Event Center block: the enabled listeners and their event types.
+   * Empty string when nothing is enabled, so sessions in a workspace without
+   * listeners pay zero tokens for it.
+   */
+  eventsBlock?: string,
 ): string {
   // Use mini agent prompt for quick edits (pass workspace root for config paths)
   if (preset === 'mini') {
@@ -385,7 +391,7 @@ export function getSystemPrompt(
   // can match a task against skill descriptions and auto-trigger the relevant
   // SKILL.md without waiting for an explicit [skill:slug] mention.
   const skillsBlock = formatSkillsBlock(workspaceRootPath, workingDirectory);
-  const fullPrompt = `${basePrompt}${skillsBlock}${preferences}${projectBlock}${debugContext}${projectContextFiles}`;
+  const fullPrompt = `${basePrompt}${skillsBlock}${preferences}${projectBlock}${debugContext}${projectContextFiles}${eventsBlock ?? ''}`;
 
   debug('[getSystemPrompt] full prompt length:', fullPrompt.length);
 

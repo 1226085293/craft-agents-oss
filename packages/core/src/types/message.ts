@@ -284,6 +284,7 @@ export interface Message {
   shellId?: string;         // For Bash with run_in_background
   elapsedSeconds?: number;  // Live progress updates
   isBackground?: boolean;   // Flag for UI differentiation
+  isEvent?: boolean;        // Event Center row (see SessionManager.insertEventProcessRow)
   // Stored attachments for user messages (persistent, no base64)
   attachments?: StoredAttachment[];
   // Content badges for inline display (sources, skills)
@@ -321,7 +322,7 @@ export interface Message {
   // Turn ID: Correlation ID from the API's message.id, groups all messages in an assistant turn
   turnId?: string;
   // Status type for special status messages (compaction / verification / …).
-  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake';
+  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake' | 'event_wake';
   /** Structured interpolation values for the row's i18n key (e.g. attempt/total, tokens). The renderer resolves display text from `statusType`; these fill its placeholders. */
   statusParams?: Record<string, string | number>;
   // Info level for info messages (determines icon/color)
@@ -391,6 +392,7 @@ export interface StoredMessage {
   shellId?: string;
   elapsedSeconds?: number;
   isBackground?: boolean;
+  isEvent?: boolean;
   isError?: boolean;
   /** Stored attachments for user messages (persisted to disk) */
   attachments?: StoredAttachment[];
@@ -404,7 +406,7 @@ export interface StoredMessage {
   /** Streaming start time (first text_delta) for process-card ordering - persisted */
   startedAt?: number;
   // Status type for special status messages (compaction / verification / …).
-  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake';
+  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake' | 'event_wake';
   /** Structured interpolation values for the row's i18n key — see statusParams above. */
   statusParams?: Record<string, string | number>;
   // Info level for info messages (persisted for reload)

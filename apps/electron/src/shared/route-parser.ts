@@ -35,7 +35,15 @@ export interface ParsedRoute {
 // Compound Route Types (new format)
 // =============================================================================
 
-export type NavigatorType = 'sessions' | 'sources' | 'skills' | 'automations' | 'projects' | 'pages' | 'settings'
+export type NavigatorType =
+  | 'sessions'
+  | 'sources'
+  | 'skills'
+  | 'automations'
+  | 'projects'
+  | 'pages'
+  | 'events'
+  | 'settings'
 
 export interface ParsedCompoundRoute {
   /** The navigator type */
@@ -46,6 +54,8 @@ export interface ParsedCompoundRoute {
   sourceFilter?: SourceFilter
   /** Automation filter (only for automations navigator) */
   automationFilter?: AutomationFilter
+  /** Which section of the events navigator: the log or the listener cards. */
+  eventsSection?: 'list' | 'listeners'
   /** Details page info (null for empty state) */
   details: {
     type: string
@@ -61,7 +71,7 @@ export interface ParsedCompoundRoute {
  * Known prefixes that indicate a compound route
  */
 const COMPOUND_ROUTE_PREFIXES = [
-  'allSessions', 'archived', 'state', 'view', 'sources', 'skills', 'automations', 'projects', 'pages', 'settings'
+  'allSessions', 'archived', 'state', 'view', 'sources', 'skills', 'automations', 'projects', 'pages', 'events', 'settings'
 ]
 
 /**
@@ -228,6 +238,29 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
     return null
   }
 
+  // Events navigator: events/list[/event/:id] and events/listeners[/listener/:id]
+  if (first === 'events') {
+    const section = segments[1] === 'listeners' ? 'listeners' : 'list'
+    const detailsType = section === 'listeners' ? 'listener' : 'event'
+    if (segments.length === 1) {
+      return { navigator: 'events', eventsSection: 'list', details: null }
+    }
+    if (segments[1] === 'list' && segments.length === 2) {
+      return { navigator: 'events', eventsSection: 'list', details: null }
+    }
+    if (segments[1] === 'listeners' && segments.length === 2) {
+      return { navigator: 'events', eventsSection: 'listeners', details: null }
+    }
+    if (segments[2] === detailsType && segments[3]) {
+      return {
+        navigator: 'events',
+        eventsSection: section,
+        details: { type: detailsType, id: segments[3] },
+      }
+    }
+    return null
+  }
+
   // Sessions navigator (allSessions, archived, state)
   let sessionFilter: SessionFilter
   let detailsStartIndex: number
@@ -312,6 +345,12 @@ export function buildCompoundRoute(parsed: ParsedCompoundRoute): string {
   if (parsed.navigator === 'pages') {
     if (!parsed.details) return 'pages'
     return `pages/page/${parsed.details.id}`
+  }
+
+  if (parsed.navigator === 'events') {
+    const section = parsed.eventsSection ?? 'list'
+    if (!parsed.details) return section === 'listeners' ? 'events/listeners' : 'events/list'
+    return `events/${section}/${parsed.details.type}/${parsed.details.id}`
   }
 
   // Sessions navigator
@@ -441,6 +480,15 @@ function convertCompoundToViewRoute(compound: ParsedCompoundRoute): ParsedRoute 
       return { type: 'view', name: 'pages', params: {} }
     }
     return { type: 'view', name: 'page-info', id: compound.details.id, params: {} }
+  }
+
+  // Events
+  if (compound.navigator === 'events') {
+    const section = compound.eventsSection ?? 'list'
+    if (!compound.details) {
+      return { type: 'view', name: section === 'listeners' ? 'event-listeners' : 'event-list', params: {} }
+    }
+    return { type: 'view', name: 'event-info', id: compound.details.id, params: {} }
   }
 
   // Sessions
@@ -592,6 +640,22 @@ function convertCompoundToNavigationState(compound: ParsedCompoundRoute): Naviga
     return {
       navigator: 'pages',
       details: { type: 'page', pageSlug: compound.details.id },
+    }
+  }
+
+  // Events
+  if (compound.navigator === 'events') {
+    const section = compound.eventsSection ?? 'list'
+    if (!compound.details) {
+      return { navigator: 'events', section, details: null }
+    }
+    return {
+      navigator: 'events',
+      section,
+      details:
+        compound.details.type === 'listener'
+          ? { type: 'listener', listenerId: compound.details.id }
+          : { type: 'event', eventId: compound.details.id },
     }
   }
 
@@ -765,6 +829,19 @@ function navigationStateToCompoundRoute(state: NavigationState): ParsedCompoundR
     return {
       navigator: 'pages',
       details: state.details ? { type: 'page', id: state.details.pageSlug } : null,
+    }
+  }
+
+  if (state.navigator === 'events') {
+    return {
+      navigator: 'events',
+      eventsSection: state.section,
+      details:
+        state.details?.type === 'event'
+          ? { type: 'event', id: state.details.eventId }
+          : state.details?.type === 'listener'
+            ? { type: 'listener', id: state.details.listenerId }
+            : null,
     }
   }
 

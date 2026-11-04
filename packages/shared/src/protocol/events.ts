@@ -17,6 +17,8 @@ import type {
   PageWindowInfo,
   DeepLinkNavigation,
   LlmGatewayStatusPayload,
+  EventMetaDto,
+  ListenerStatusDto,
 } from './dto'
 
 export interface BroadcastEventMap {
@@ -32,6 +34,8 @@ export interface BroadcastEventMap {
   [RPC_CHANNELS.skills.CHANGED]: [workspaceId: string, skills: LoadedSkill[]]
   [RPC_CHANNELS.projects.CHANGED]: [workspaceId: string, projects: LoadedProject[]]
   [RPC_CHANNELS.pages.CHANGED]: [workspaceId: string, pages: LoadedPage[]]
+  [RPC_CHANNELS.events.CHANGED]: [workspaceId: string, event: EventMetaDto]
+  [RPC_CHANNELS.events.LISTENER_STATUS]: [workspaceId: string, status: ListenerStatusDto]
   [RPC_CHANNELS.llmConnections.CHANGED]: []
   [RPC_CHANNELS.llmGateway.STATUS]: [status: LlmGatewayStatusPayload]
   [RPC_CHANNELS.permissions.DEFAULTS_CHANGED]: [value: null]

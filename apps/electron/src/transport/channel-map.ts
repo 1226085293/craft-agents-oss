@@ -430,6 +430,27 @@ export const CHANNEL_MAP = {
   deleteProjectAsset: invoke(RPC_CHANNELS.projects.DELETE_ASSET),
   onProjectsChanged: listener(RPC_CHANNELS.projects.CHANGED),
 
+  // Events
+  listEvents: invoke(RPC_CHANNELS.events.LIST),
+  getEvent: invoke(RPC_CHANNELS.events.GET),
+  readEventAttachment: invoke(RPC_CHANNELS.events.READ_ATTACHMENT),
+  openEventAttachment: invoke(RPC_CHANNELS.events.OPEN_ATTACHMENT),
+  getEventCounts: invoke(RPC_CHANNELS.events.COUNTS),
+  getEventsStatus: invoke(RPC_CHANNELS.events.STATUS),
+  onEventsChanged: listener(RPC_CHANNELS.events.CHANGED),
+  listEventListeners: invoke(RPC_CHANNELS.events.LIST_LISTENERS),
+  getEventListener: invoke(RPC_CHANNELS.events.GET_LISTENER),
+  setEventListenerEnabled: invoke(RPC_CHANNELS.events.SET_LISTENER_ENABLED),
+  setEventListenerConfig: invoke(RPC_CHANNELS.events.SET_LISTENER_CONFIG),
+  installEventListenerDependency: invoke(RPC_CHANNELS.events.INSTALL_DEPENDENCY),
+  installListenerMcp: invoke(RPC_CHANNELS.events.INSTALL_MCP),
+  getListenerReportedDeps: invoke(RPC_CHANNELS.events.LISTENER_DEPS),
+  listenerDepAction: invoke(RPC_CHANNELS.events.LISTENER_DEPS_ACTION),
+  onEventListenerStatus: listener(RPC_CHANNELS.events.LISTENER_STATUS),
+  listEventSubscriptions: invoke(RPC_CHANNELS.events.LIST_SUBSCRIPTIONS),
+  subscribeEvent: invoke(RPC_CHANNELS.events.SUBSCRIBE),
+  unsubscribeEvent: invoke(RPC_CHANNELS.events.UNSUBSCRIBE),
+
   // Pages
   getPages: invoke(RPC_CHANNELS.pages.GET),
   getPage: invoke(RPC_CHANNELS.pages.GET_ONE),

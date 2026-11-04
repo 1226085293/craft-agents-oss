@@ -63,7 +63,7 @@ export class EventService {
   private readonly store: EventStore;
   private readonly ingest: EventIngestServer;
   private readonly supervisor: ListenerSupervisor;
-  private readonly dispatcher: EventDispatcher | null;
+  private dispatcher: EventDispatcher | null;
   private started = false;
 
   constructor(options: EventServiceOptions) {
@@ -94,26 +94,53 @@ export class EventService {
       },
     });
 
-    this.dispatcher = options.dispatchTarget
-      ? new EventDispatcher({
-          getSubscriptions: () => loadSubscriptions(options.workspaceRoot),
-          target: options.dispatchTarget,
-          onDelivered: (eventId, sessionId) => {
-            try {
-              this.store.recordDelivery(eventId, sessionId, Date.now());
-            } catch (error) {
-              eventLog.warn(
-                `[events] cannot record delivery for ${eventId}: ${error instanceof Error ? error.message : String(error)}`,
-              );
-            }
-          },
-        })
-      : null;
+    this.dispatcher = options.dispatchTarget ? this.createDispatcher(options.dispatchTarget) : null;
 
     this.supervisor = new ListenerSupervisor({
       envFor: (listenerId) => this.ingest.listenerEnv(listenerId),
       onStatus: (status) => this.options.onListenerStatus?.(status),
     });
+  }
+
+  private createDispatcher(target: DispatchTarget): EventDispatcher {
+    return new EventDispatcher({
+      getSubscriptions: () => loadSubscriptions(this.options.workspaceRoot),
+      target,
+      onDelivered: (eventId, sessionId) => {
+        try {
+          this.store.recordDelivery(eventId, sessionId, Date.now());
+        } catch (error) {
+          eventLog.warn(
+            `[events] cannot record delivery for ${eventId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      },
+    });
+  }
+
+  /**
+   * Rebind host callbacks after construction.
+   *
+   * Binding only in the constructor is a trap: the boot warm-up starts the
+   * service before any renderer exists and therefore passes no `onChanged`, and
+   * every later RPC call would silently keep that callback-less instance — so
+   * inserts never reach the UI and the list only updates on reload. Callers
+   * pass `undefined` when they have nothing new to say; absent values must not
+   * clear an already-live callback.
+   */
+  updateCallbacks(callbacks: {
+    onChanged?: (event: EventRecord) => void;
+    onListenerStatus?: (status: ListenerRuntimeStatus) => void;
+    dispatchTarget?: DispatchTarget;
+  }): void {
+    if (callbacks.onChanged) this.options.onChanged = callbacks.onChanged;
+    if (callbacks.onListenerStatus) this.options.onListenerStatus = callbacks.onListenerStatus;
+    // A host that only learns the delivery target after boot (Electron builds it
+    // with the session manager) must still get a dispatcher.
+    if (callbacks.dispatchTarget && !this.dispatcher) {
+      this.options.dispatchTarget = callbacks.dispatchTarget;
+      this.dispatcher = this.createDispatcher(callbacks.dispatchTarget);
+    }
   }
 
   /**
@@ -392,6 +419,13 @@ export async function getEventService(
     });
     services.set(workspaceId, service);
   }
+  // Rebind on every access, not just at creation: the boot warm-up runs before
+  // any renderer is connected and passes no `onChanged`, so a create-only bind
+  // would leave the instance permanently silent to the UI.
+  service.updateCallbacks({
+    ...(onChanged ? { onChanged } : {}),
+    ...(dispatchTarget ? { dispatchTarget } : {}),
+  });
   await service.start();
   return service;
 }

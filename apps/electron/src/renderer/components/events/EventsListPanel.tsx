@@ -304,9 +304,22 @@ export function EventsListPanel({
               }`}
               style={{ width: 'calc(100% - 8px)' }}
             >
-              {/* Primary: title + summary carry the row; metadata sinks to the
-                  bottom line so scanning matches reading order. */}
-              <div className="text-sm leading-5 truncate">{event.title}</div>
+              {/* Title line: title left; time + delivery dot right — the
+                  right cluster answers "when / did it land", the bottom line
+                  answers "from where / what kind". */}
+              <div className="flex items-center gap-2">
+                <div className="text-sm leading-5 truncate min-w-0 flex-1">{event.title}</div>
+                <span className="shrink-0 text-[11px] leading-4 tabular-nums text-muted-foreground/80">
+                  {formatTime(event.receivedAt)}
+                </span>
+                <span
+                  className={`h-1.5 w-1.5 rounded-full shrink-0 ${
+                    event.delivered ? 'bg-accent' : 'bg-foreground/20'
+                  }`}
+                  aria-label={(event.deliveries ?? []).length > 0 ? `已投递给 ${(event.deliveries ?? []).length} 个会话` : '尚未投递'}
+                  title={(event.deliveries ?? []).length > 0 ? `已投递给 ${(event.deliveries ?? []).length} 个会话` : '尚未投递给任何会话'}
+                />
+              </div>
               {event.summary && (
                 <div className="text-[12px] leading-4 text-foreground/55 truncate mt-0.5">
                   {event.summary}
@@ -320,16 +333,6 @@ export function EventsListPanel({
                 <span className="truncate text-muted-foreground" title={event.type}>
                   {event.type}
                 </span>
-                <span className="ml-auto shrink-0 tabular-nums text-muted-foreground/80">
-                  {formatTime(event.receivedAt)}
-                </span>
-                <span
-                  className={`h-1.5 w-1.5 rounded-full shrink-0 ${
-                    event.delivered ? 'bg-accent' : 'bg-foreground/20'
-                  }`}
-                  aria-label={event.delivered ? '已接收' : '未接收'}
-                  title={event.delivered ? '已接收' : '未被接收'}
-                />
               </div>
             </button>
           )

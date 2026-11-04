@@ -967,6 +967,8 @@ export interface EventAttachmentDto {
   /** Absolute path on the host, inside the workspace's `events-data`. */
   path: string
   size?: number
+  /** Embedded in the body (Content-ID); drawn in place, not listed as a file. */
+  inline?: boolean
 }
 
 /**

@@ -59,6 +59,12 @@ export interface CraftEventAttachment {
   /** Absolute path on this machine, inside the workspace's `events-data`. */
   path: string;
   size?: number;
+  /**
+   * True for an image the mail body embeds (Content-ID) rather than a separate
+   * file. The renderer draws these where the body references them, and they are
+   * not listed as attachments.
+   */
+  inline?: boolean;
 }
 
 /**
@@ -242,7 +248,14 @@ export function normalizeEventInput(
       if (path.length > EVENT_LIMITS.attachmentPath) return fail(`attachments[${i}].path`, 'too long');
       const mime = asString(item.mime)?.trim() || 'application/octet-stream';
       const size = typeof item.size === 'number' && Number.isFinite(item.size) ? item.size : undefined;
-      attachments.push(size === undefined ? { name, mime, path } : { name, mime, path, size });
+      const inline = item.inline === true;
+      attachments.push({
+        name,
+        mime,
+        path,
+        ...(size === undefined ? {} : { size }),
+        ...(inline ? { inline: true } : {}),
+      });
     }
   }
 

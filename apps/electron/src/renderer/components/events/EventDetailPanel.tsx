@@ -18,6 +18,7 @@ import * as React from 'react'
 import { ExternalLink, Paperclip, Inbox, Send } from 'lucide-react'
 import type { EventRecordDto } from '@craft-agent/shared/protocol/dto'
 import { EventAttachments } from './EventAttachments'
+import { EventBody } from './EventBody'
 
 export interface EventDetailPanelProps {
   workspaceId: string
@@ -239,9 +240,12 @@ export function EventDetailPanel({
             该事件没有正文
           </p>
         ) : (
-          <pre className="max-w-prose text-[13.5px] leading-7 whitespace-pre-wrap break-words font-mono bg-muted/30 rounded-md p-4">
-            {event.body}
-          </pre>
+          <EventBody
+            workspaceId={workspaceId}
+            eventId={eventId}
+            body={event.body}
+            attachments={event.attachments ?? []}
+          />
         )}
 
         <EventAttachments

@@ -6,6 +6,9 @@
  * `getFileTypeLabel` render the row, and the same image/PDF overlays show the
  * content. Anything a session cannot preview (Office documents, archives)
  * falls back to opening with the OS default app — exactly like a session does.
+ *
+ * Images the mail embeds (`inline`) are excluded here: they belong to the body
+ * and are drawn in place by `EventBody`.
  */
 
 import * as React from 'react'
@@ -62,11 +65,6 @@ function formatSize(bytes: number | undefined): string {
   return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`
 }
 
-function extensionOf(name: string): string {
-  const dot = name.lastIndexOf('.')
-  return dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
-}
-
 export interface EventAttachmentsProps {
   workspaceId: string
   eventId: string
@@ -86,7 +84,14 @@ export function EventAttachments({
   const [imageIndex, setImageIndex] = React.useState<number | null>(null)
   const [pdfIndex, setPdfIndex] = React.useState<number | null>(null)
 
-  if (attachments.length === 0) return null
+  /** Keep the original array index: the RPC addresses attachments by position. */
+  const items = React.useMemo(
+    () =>
+      attachments
+        .map((attachment, index) => ({ attachment, index }))
+        .filter((entry) => entry.attachment.inline !== true),
+    [attachments],
+  )
 
   const load = React.useCallback(
     async (index: number, mode: 'text' | 'dataUrl' | 'bytes') => {
@@ -106,6 +111,8 @@ export function EventAttachments({
     [workspaceId, eventId],
   )
 
+  if (items.length === 0) return null
+
   const toggle = (index: number) => {
     if (expanded === index) {
       setExpanded(null)
@@ -115,7 +122,7 @@ export function EventAttachments({
     const attachment = attachments[index]
     if (!attachment) return
     const preview = classifyFile(attachment.path).type
-    // PDFs open in their own overlay, images inline; everything else reads text.
+    // PDFs open in their own overlay; everything else reads bytes/text inline.
     if (preview === 'pdf') {
       setPdfIndex(index)
       return
@@ -128,11 +135,11 @@ export function EventAttachments({
       <div className="flex items-center gap-2 mb-2">
         <Paperclip className="h-4 w-4 text-muted-foreground" />
         <span className="text-[13px] font-medium text-foreground">附件</span>
-        <span className="text-[12px] text-muted-foreground">{attachments.length}</span>
+        <span className="text-[12px] text-muted-foreground">{items.length}</span>
       </div>
 
       <div className="rounded-lg border border-border/70 divide-y divide-border/60 overflow-hidden">
-        {attachments.map((attachment, index) => {
+        {items.map(({ attachment, index }) => {
           const preview = classifyFile(attachment.path).type
           const iconType = preview ? ICON_TYPE[preview] : 'unknown'
           const isOpen = expanded === index
@@ -168,9 +175,7 @@ export function EventAttachments({
 
               {isOpen && (
                 <div className="px-3 pb-3">
-                  {loading === index && (
-                    <p className="text-[12.5px] text-muted-foreground">正在读取…</p>
-                  )}
+                  {loading === index && <p className="text-[12.5px] text-muted-foreground">正在读取…</p>}
 
                   {item && 'error' in item && (
                     <p className="text-[12.5px] text-destructive">读取失败：{item.error}</p>
@@ -254,5 +259,3 @@ export function EventAttachments({
     </div>
   )
 }
-
-export { formatSize as formatAttachmentSize, extensionOf as attachmentExtension }

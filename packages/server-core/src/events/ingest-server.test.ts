@@ -157,6 +157,26 @@ describe('EventIngestServer content handling', () => {
     expect((await call(port, { path: '/events/qqmail', method: 'DELETE' })).status).toBe(405);
     expect((await call(port, { path: '/events/qqmail/health', method: 'POST' })).status).toBe(405);
   });
+
+  it('answers GET /health with ok:true and reports the listener to onHealth', async () => {
+    const healthy: string[] = [];
+    const probe = new EventIngestServer({
+      sink,
+      token: TOKEN,
+      onHealth: (id) => healthy.push(id),
+      now: () => 1_800_000_000_000,
+      newId: () => 'evt_fixed',
+    });
+    const address = await probe.start();
+    try {
+      const res = await call(address.port, { path: '/events/qqmail/health', method: 'GET' });
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({ ok: true, listenerId: 'qqmail' });
+      expect(healthy).toEqual(['qqmail']);
+    } finally {
+      await probe.stop();
+    }
+  });
 });
 
 describe('EventIngestServer normalisation', () => {

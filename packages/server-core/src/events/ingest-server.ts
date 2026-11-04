@@ -39,6 +39,8 @@ export interface EventIngestOptions {
   sink: EventSink;
   /** Called after a successful insert so the host can push to renderers. */
   onInserted?: (event: CraftEventEnvelope) => void;
+  /** A listener proved it can reach us via GET /health — mark it running. */
+  onHealth?: (listenerId: string) => void;
   /** Bearer token. Generated when omitted (production path). */
   token?: string;
   /** Bind address. Defaults to loopback. */
@@ -182,6 +184,7 @@ export class EventIngestServer {
           sendJson(res, 405, { error: 'method_not_allowed' });
           return;
         }
+        this.options.onHealth?.(listenerId);
         sendJson(res, 200, { ok: true, listenerId });
         return;
       }

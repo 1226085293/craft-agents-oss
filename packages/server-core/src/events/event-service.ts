@@ -75,6 +75,11 @@ export class EventService {
 
     this.ingest = new EventIngestServer({
       sink: this.store,
+      onHealth: (listenerId) => {
+        // A listener that can reach /health is proven working: flip it out of
+        // 'starting' (and clear the ready-timeout) on the supervisor side.
+        this.supervisor.markHealthy(listenerId);
+      },
       onInserted: (event) => {
         this.options.onChanged?.(event);
         // Strip the body: the dispatcher only formats a nudge.

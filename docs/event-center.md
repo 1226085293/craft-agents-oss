@@ -98,7 +98,7 @@ ignored, so one listener cannot forge another's events.
 | Response | When |
 |---|---|
 | 200 `{id, duplicate}` | accepted (or already seen via `dedupeKey`) |
-| 400 | validation failed; the body names the field |
+| 400 | validation failed; the body names the field. Non-UTF-8 bytes are also rejected here (`invalid_encoding`) instead of being stored as mojibake |
 | 401 | bad/missing token |
 | 403 | `Host` was not loopback (DNS rebinding) |
 | 413 | body > 256KB — use `payloadRef` for large payloads |
@@ -107,9 +107,12 @@ ignored, so one listener cannot forge another's events.
 
 ### Health
 
-`GET $CRAFT_EVENTS_URL/health` returns `{ok:true}`. Answer it within
-`readyTimeoutMs` or the card shows "started but not responding" (Craft does
-**not** restart you for that — slow imports are legitimate).
+`GET $CRAFT_EVENTS_URL/health` returns `{ok:true}` — it is served by Craft, and
+your listener can call it to prove it started and can reach the endpoint (the
+token works there too). The first successful health call flips the card from
+"starting" to running; answer nothing within `readyTimeoutMs` (no health call,
+no event) and the card shows "started but not responding" instead. Craft does
+**not** restart you for that — slow imports are legitimate.
 
 ## Subscribing from a session
 
@@ -140,3 +143,7 @@ searchable text is `title + summary + first 4KB of body`; the rest is stored
 but not indexed.
 
 List queries never select the body — only `get_event` / `events:get` reads it.
+
+Rows are pruned when the event service starts (per app launch / workspace
+switch): 90 days of age, at most 50 000 rows. Between restarts nothing is
+deleted — long uptimes can exceed the caps until the next start.

@@ -343,7 +343,14 @@ export class Commands {
     const replyOpts = msg.threadId !== undefined ? { threadId: msg.threadId } : {}
 
     try {
-      const session = await this.sessionManager.createSession(this.workspaceId, { name })
+        // Mobile is a channel into the same brain, not a separate worker: a new
+      // chat thread starts on the supervisor, so every inbound message there is
+      // routed (and answered) by the single coordinator. `taskboard` still
+      // records what it delegates, and workers stay invisible to the user.
+      const session = await this.sessionManager.createSession(this.workspaceId, {
+        name,
+        role: 'supervisor',
+      })
 
       this.access.onBeforeChannelBind?.({
         platform: adapter.platform,

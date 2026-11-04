@@ -969,12 +969,33 @@ export interface ListenerStatusDto {
 
 /** One dependency row in the listener detail page. */
 export interface ListenerDependencyDto {
-  kind: 'runtime' | 'package' | 'system'
+  kind: 'package' | 'mcp' | 'system'
   label: string
   requirement: string
   state: 'ok' | 'missing' | 'mismatch' | 'unknown' | 'not_required'
   found?: string
   installHint?: string
+}
+
+/** One dependency row reported by the listener's own control service. */
+export interface ListenerReportedDepDto {
+  id: string
+  name: string
+  installed: boolean
+  version?: string
+  detail?: string
+  /** Why the last action failed; absent when fine. */
+  error?: string
+  /** Present = the row renders an action button (label). running = disabled. */
+  action?: { label: string; running: boolean }
+}
+
+/** Result of asking a listener's control service for its dependency state. */
+export interface ListenerReportedDepsDto {
+  control: boolean
+  deps?: ListenerReportedDepDto[]
+  /** Why no status is available (no service, bad payload, timeout). */
+  reason?: string
 }
 
 /** A listener card / detail payload. */
@@ -990,6 +1011,10 @@ export interface ListenerDto {
   missingConfig: string[]
   config: Record<string, unknown>
   dependencies: ListenerDependencyDto[]
+  /** Dependency state the listener itself reports via its control service. */
+  controlDeps?: ListenerReportedDepsDto
+  /** Tail of the last failed startup, when the process gave up non-zero. */
+  startupErrorTail?: string
   errors: string[]
   warnings: string[]
   status: ListenerStatusDto

@@ -41,6 +41,8 @@ export interface ListenerRuntimeStatus {
   /** Last exit code, when known. */
   lastExitCode: number | null
   lastError: string | null
+  /** Tail of proc.log when the process gave up with a non-zero exit. */
+  startupErrorTail?: string
 }
 
 interface RunningListener {
@@ -70,6 +72,14 @@ function rotateIfNeeded(logPath: string): void {
 
 function substitute(value: string, listener: LoadedListener): string {
   return value.replace(/\$\{dir\}/g, listener.dir).replace(/\$\{data\}/g, listener.dataDir);
+}
+
+/** Keep the last N lines — startup errors live at the end of the log. */
+function lastLogLines(text: string, max = 30): string {
+  const trimmed = text.replace(/\s+$/, '');
+  if (!trimmed) return '';
+  const lines = trimmed.split('\n');
+  return (lines.length > max ? lines.slice(-max).join('\n') : trimmed).slice(0, 8000);
 }
 
 export class ListenerSupervisor {
@@ -281,9 +291,15 @@ export class ListenerSupervisor {
 
     const cleanExit = code === 0 && !signal;
     if (policy === 'never' || (policy === 'on-failure' && cleanExit) || attempts >= maxAttempts) {
+      const finalState = policy === 'never' || cleanExit ? 'stopped' : 'failed';
       this.setStatus({
         ...failed,
-        state: policy === 'never' || cleanExit ? 'stopped' : 'failed',
+        state: finalState,
+        // Only a real failure gets a log snapshot; the field is absent (not
+        // empty) otherwise, so a fresh start clears it naturally.
+        ...(finalState === 'failed'
+          ? { startupErrorTail: lastLogLines(this.tailLog(listener.id, listener.dataDir, 4096)) }
+          : {}),
       });
       if (attempts >= maxAttempts) {
         log.warn(`[events] listener ${listener.id} failed ${attempts} times, giving up`);

@@ -96,15 +96,83 @@ describe('parseManifest', () => {
     const result = parseManifest(
       base({
         dependencies: {
-          runtime: { python: '>=3.9 <4' },
-          packages: [{ manager: 'pip', name: 'requests' }, { manager: 'npm', name: 'ws', range: '^8' }],
+          packages: [{ manager: 'pip', name: 'requests' }, { manager: 'npm', name: '@scope/ws', range: '^8' }],
+          mcp: [
+            { id: 'mail-mcp', mode: 'managed', source: 'npm', package: 'mail-mcp', version: '^1.2.0' },
+            { id: 'corp-remote', mode: 'remote', url: 'https://mcp.example.com/sse', auth: 'oauth' },
+          ],
           system: ['curl'],
         },
       }),
     )
     expect(result.ok).toBe(true)
     expect(result.manifest?.dependencies?.packages?.[0]?.range).toBe('*')
-    expect(result.manifest?.dependencies?.runtime?.python).toBe('>=3.9 <4')
+    expect(result.manifest?.dependencies?.mcp).toHaveLength(2)
+    expect(result.manifest?.dependencies?.mcp?.[0]).toMatchObject({
+      id: 'mail-mcp', mode: 'managed', source: 'npm', package: 'mail-mcp', version: '^1.2.0',
+    })
+    expect(result.manifest?.dependencies?.mcp?.[1]).toMatchObject({
+      id: 'corp-remote', mode: 'remote', url: 'https://mcp.example.com/sse', auth: 'oauth',
+    })
+  })
+
+  it('drops dependencies.runtime with a deprecation warning', () => {
+    const result = parseManifest(
+      base({ dependencies: { runtime: { python: '>=3.9' } } }),
+    )
+    expect(result.ok).toBe(true)
+    expect(result.warnings.join()).toContain('dependencies.runtime is deprecated')
+    expect((result.manifest?.dependencies as Record<string, unknown> | undefined)?.runtime).toBeUndefined()
+  })
+
+  it('validates package names and ranges against CLI-safe charsets', () => {
+    const bad = parseManifest(
+      base({
+        dependencies: {
+          packages: [
+            { manager: 'pip', name: '-r /etc/passwd' },
+            { manager: 'npm', name: 'ok', range: '>=1 --unsafe' },
+          ],
+        },
+      }),
+    )
+    expect(bad.ok).toBe(false)
+    expect(bad.errors.join()).toContain('forbidden characters')
+
+    const good = parseManifest(
+      base({
+        dependencies: {
+          packages: [
+            { manager: 'pip', name: 'requests', range: '>=2.0, <3' },
+            { manager: 'npm', name: '@scope/ws', range: '^8 || ^9' },
+          ],
+        },
+      }),
+    )
+    expect(good.ok).toBe(true)
+  })
+
+  it('validates mcp dependency fields', () => {
+    const base_mcp = { id: 'mail-mcp', mode: 'managed', source: 'npm', package: 'mail-mcp' }
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ ...base_mcp, id: 'BAD ID' }, 'id'],
+      [{ ...base_mcp, mode: 'sideload' }, 'mode'],
+      [{ ...base_mcp, source: 'apt' }, 'source'],
+      [{ ...base_mcp, package: '--target /tmp' }, 'package'],
+      [{ ...base_mcp, version: '1.0; rm' }, 'version'],
+      [{ id: 'x1', mode: 'remote', url: 'ftp://nope' }, 'url'],
+      [{ id: 'mail-mcp', mode: 'managed', source: 'npm' }, 'package'],
+    ]
+    for (const [dep, needle] of cases) {
+      const result = parseManifest(base({ dependencies: { mcp: [dep] } }))
+      expect(result.ok, JSON.stringify(dep)).toBe(false)
+      expect(result.errors.join(), JSON.stringify(dep)).toContain(needle)
+    }
+    // Duplicate ids are rejected too.
+    const dup = parseManifest(
+      base({ dependencies: { mcp: [base_mcp, { ...base_mcp, mode: 'remote', url: 'https://a.b/c' }] } }),
+    )
+    expect(dup.errors.join()).toContain('duplicated')
   })
 
   it('rejects an unknown package manager', () => {

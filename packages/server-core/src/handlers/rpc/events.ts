@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol';
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config';
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport';
@@ -17,7 +18,10 @@ import {
   getListenerFor,
   type EventService,
 } from '../../events/event-service';
+import { loadListeners } from '../../events/listener-registry';
 import { runInstallCommand, type InstallResult } from '../../events/dependency-installer';
+import { installMcp, type McpInstallResult } from '../../events/mcp-registry';
+import { fetchReportedDeps, postDepAction } from '../../events/listener-control';
 import {
   loadSubscriptions,
   saveSubscriptions,
@@ -37,6 +41,9 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.events.SET_LISTENER_ENABLED,
   RPC_CHANNELS.events.SET_LISTENER_CONFIG,
   RPC_CHANNELS.events.INSTALL_DEPENDENCY,
+  RPC_CHANNELS.events.INSTALL_MCP,
+  RPC_CHANNELS.events.LISTENER_DEPS,
+  RPC_CHANNELS.events.LISTENER_DEPS_ACTION,
   RPC_CHANNELS.events.LIST_SUBSCRIPTIONS,
   RPC_CHANNELS.events.SUBSCRIBE,
   RPC_CHANNELS.events.UNSUBSCRIBE,
@@ -147,6 +154,34 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
     ): Promise<InstallResult> => {
       requireWorkspace(workspaceId);
       return runInstallCommand(dependency);
+    },
+  );
+
+  server.handle(RPC_CHANNELS.events.INSTALL_MCP, async (_ctx, workspaceId: string, id: string, mcpId: string) => {
+    if (!id || !mcpId) throw new Error('id and mcpId are required');
+    const workspace = requireWorkspace(workspaceId);
+    // Resolve the mcp dependency from the manifest on the server side — the
+    // renderer only names it, never supplies install parameters.
+    const listener = loadListeners({ workspaceRoot: workspace.rootPath, skipProbes: true }).find(
+      (entry) => entry.id === id,
+    );
+    const dep = listener?.manifest.dependencies?.mcp?.find((m) => m.id === mcpId);
+    if (!dep) throw new Error(`listener ${id} declares no mcp dependency "${mcpId}"`);
+    return installMcp(workspace.rootPath, dep);
+  });
+
+  server.handle(RPC_CHANNELS.events.LISTENER_DEPS, async (_ctx, workspaceId: string, id: string) => {
+    if (!id) throw new Error('id is required');
+    const workspace = requireWorkspace(workspaceId);
+    return fetchReportedDeps(join(workspace.rootPath, 'events-data', id));
+  });
+
+  server.handle(
+    RPC_CHANNELS.events.LISTENER_DEPS_ACTION,
+    async (_ctx, workspaceId: string, id: string, depId: string) => {
+      if (!id || !depId) throw new Error('id and depId are required');
+      const workspace = requireWorkspace(workspaceId);
+      return postDepAction(join(workspace.rootPath, 'events-data', id), depId);
     },
   );
 

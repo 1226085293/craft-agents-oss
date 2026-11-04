@@ -11,7 +11,7 @@
  * fifteen processes on every repaint.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createLogger } from '@craft-agent/shared/utils';
 import {
@@ -21,13 +21,14 @@ import {
   type ListenerPackageDep,
 } from '@craft-agent/shared/events/manifest.ts';
 import { runProbe } from './probe-runner.ts';
+import { isMcpInstalled } from './mcp-registry.ts';
 
 const log = createLogger('events');
 
 export type DependencyState = 'ok' | 'missing' | 'mismatch' | 'unknown' | 'not_required';
 
 export interface DependencyStatus {
-  kind: 'runtime' | 'package' | 'system';
+  kind: 'package' | 'mcp' | 'system';
   /** Display label, e.g. `python` or `pip:requests`. */
   label: string;
   requirement: string;
@@ -61,21 +62,7 @@ interface PersistedListenerState {
   listeners: Record<string, { enabled?: boolean; config?: Record<string, unknown> }>
 }
 
-const PROBE_TTL_MS = 60_000;
-const probeCache = new Map<string, { at: number; value: string | null }>();
-
-/** Runtime command candidates, most specific first. */
-const RUNTIME_COMMANDS: Record<string, string[]> = {
-  python: ['python', 'python3', 'py'],
-  node: ['node'],
-  bun: ['bun'],
-  deno: ['deno'],
-  go: ['go'],
-};
-
-function statePath(workspaceRoot: string): string {
-  return join(workspaceRoot, 'events-data', 'listeners.json');
-}
+const statePath = (workspaceRoot: string): string => join(workspaceRoot, 'events-data', 'listeners.json');
 
 function readState(workspaceRoot: string): PersistedListenerState {
   const path = statePath(workspaceRoot);
@@ -99,31 +86,6 @@ function writeState(workspaceRoot: string, state: PersistedListenerState): void 
   writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
 }
 
-/** Read a runtime's version, e.g. `3.11.4`. Cached per binary mtime. */
-function probeVersion(command: string, args: string[]): string | null {
-  const cacheKey = `${command} ${args.join(' ')}`;
-  const cached = probeCache.get(cacheKey);
-  if (cached && Date.now() - cached.at < PROBE_TTL_MS) return cached.value;
-
-  const output = runProbe(command, args, 4000);
-  let value: string | null = null;
-  if (output !== null) {
-    const match = /(\d+\.\d+(?:\.\d+)?)/.exec(output);
-    if (match) value = match[1]!;
-  }
-  probeCache.set(cacheKey, { at: Date.now(), value });
-  return value;
-}
-
-function resolveRuntime(name: string): { command: string; version: string } | null {
-  const candidates = RUNTIME_COMMANDS[name] ?? [name];
-  for (const candidate of candidates) {
-    const version = probeVersion(candidate, candidate === 'py' ? ['-3', '--version'] : ['--version']);
-    if (version) return { command: candidate, version };
-  }
-  return null;
-}
-
 function probePackage(dep: ListenerPackageDep): { found?: string; installHint: string } {
   if (dep.manager === 'pip') {
     const output = runProbe('python', ['-m', 'pip', 'show', dep.name], 6000);
@@ -141,30 +103,9 @@ function probePackage(dep: ListenerPackageDep): { found?: string; installHint: s
   };
 }
 
-function evaluateDependencies(manifest: ListenerManifest): DependencyStatus[] {
+function evaluateDependencies(manifest: ListenerManifest, workspaceRoot: string): DependencyStatus[] {
   const statuses: DependencyStatus[] = [];
   const deps = manifest.dependencies;
-
-  for (const [runtimeName, range] of Object.entries(deps?.runtime ?? {})) {
-    const resolved = resolveRuntime(runtimeName);
-    if (!resolved) {
-      statuses.push({
-        kind: 'runtime',
-        label: runtimeName,
-        requirement: range,
-        state: 'missing',
-        installHint: undefined,
-      });
-      continue;
-    }
-    statuses.push({
-      kind: 'runtime',
-      label: runtimeName,
-      requirement: range,
-      state: satisfiesRange(resolved.version, range) ? 'ok' : 'mismatch',
-      found: resolved.version,
-    });
-  }
 
   for (const dep of deps?.packages ?? []) {
     const { found, installHint } = probePackage(dep);
@@ -185,6 +126,29 @@ function evaluateDependencies(manifest: ListenerManifest): DependencyStatus[] {
       state: satisfiesRange(found, dep.range) ? 'ok' : 'mismatch',
       found,
       installHint,
+    });
+  }
+
+  for (const dep of deps?.mcp ?? []) {
+    if (dep.mode === 'remote') {
+      // Remote servers are configured, not installed — nothing to probe.
+      statuses.push({
+        kind: 'mcp',
+        label: `mcp:${dep.id}`,
+        requirement: `remote · ${dep.url ?? ''}`,
+        state: 'not_required',
+      });
+      continue;
+    }
+    const probe = isMcpInstalled(workspaceRoot, dep);
+    statuses.push({
+      kind: 'mcp',
+      label: `mcp:${dep.id}`,
+      requirement: dep.package
+        ? `${dep.source}:${dep.package}${dep.version && dep.version !== '*' ? `@${dep.version}` : ''}`
+        : (dep.source ?? 'managed'),
+      state: probe.installed ? 'ok' : 'missing',
+      ...(probe.version ? { found: probe.version } : {}),
     });
   }
 
@@ -280,7 +244,7 @@ export function loadListeners(options: LoadListenersOptions): LoadedListener[] {
 
     const manifest = parsed.manifest;
     const persisted = state.listeners[id] ?? {};
-    const dependencies = options.skipProbes ? [] : evaluateDependencies(manifest);
+    const dependencies = options.skipProbes ? [] : evaluateDependencies(manifest, workspaceRoot);
     const blocking = dependencies.filter((dep) => dep.state === 'missing' || dep.state === 'mismatch');
 
     listeners.push({
@@ -326,9 +290,4 @@ export function missingConfigKeys(listener: LoadedListener): string[] {
     const value = listener.config[key];
     return value === undefined || value === null || value === '';
   });
-}
-
-/** Test seam. */
-export function clearProbeCache(): void {
-  probeCache.clear();
 }

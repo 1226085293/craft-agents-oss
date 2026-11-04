@@ -3,12 +3,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
-  clearProbeCache,
   loadListeners,
   missingConfigKeys,
   setListenerConfig,
   setListenerEnabled,
 } from './listener-registry.ts'
+import { mcpInstallDir } from './mcp-registry.ts'
 
 let root: string
 
@@ -30,7 +30,6 @@ function manifestFor(id: string, overrides: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'craft-listeners-'))
-  clearProbeCache()
 })
 
 afterEach(() => {
@@ -72,33 +71,53 @@ describe('loadListeners', () => {
     expect(listener?.errors.join()).toContain('does not match directory name')
   })
 
-  it('marks a listener ready when its runtime is present', () => {
+  it('marks a managed mcp dependency installed only when its marker exists', () => {
     writeListener(
-      'with-runtime',
-      manifestFor('with-runtime', {
-        runtime: { program: ['python', '-u', '${dir}/listener.py'] },
+      'with-mcp',
+      manifestFor('with-mcp', {
+        runtime: { program: ['python'] },
+        dependencies: {
+          mcp: [
+            { id: 'mail-mcp', mode: 'managed', source: 'npm', package: 'mail-mcp', version: '^1.2.0' },
+            { id: 'corp-remote', mode: 'remote', url: 'https://mcp.example.com/sse' },
+          ],
+        },
+      }),
+    )
+    const [before] = loadListeners({ workspaceRoot: root })
+    const managedBefore = before?.dependencies.find((d) => d.label === 'mcp:mail-mcp')
+    expect(managedBefore?.state).toBe('missing')
+    // Remote servers are configured, not installed.
+    const remote = before?.dependencies.find((d) => d.label === 'mcp:corp-remote')
+    expect(remote?.state).toBe('not_required')
+    expect(before?.ready).toBe(false)
+
+    // Simulate a completed managed install: marker + package directory.
+    const installDir = mcpInstallDir(root, 'mail-mcp')
+    mkdirSync(join(installDir, 'node_modules', 'mail-mcp'), { recursive: true })
+    writeFileSync(
+      join(installDir, '.craft-mcp.json'),
+      JSON.stringify({ id: 'mail-mcp', package: 'mail-mcp', version: '1.2.3' }),
+      'utf8',
+    )
+    const [after] = loadListeners({ workspaceRoot: root })
+    const managedAfter = after?.dependencies.find((d) => d.label === 'mcp:mail-mcp')
+    expect(managedAfter?.state).toBe('ok')
+    expect(managedAfter?.found).toBe('1.2.3')
+    expect(after?.ready).toBe(true)
+  })
+
+  it('drops dependencies.runtime with a deprecation warning', () => {
+    writeListener(
+      'old-style',
+      manifestFor('old-style', {
+        runtime: { program: ['python'] },
         dependencies: { runtime: { python: '>=3.8' } },
       }),
     )
     const [listener] = loadListeners({ workspaceRoot: root })
-    const python = listener?.dependencies.find((dep) => dep.kind === 'runtime')
-    // The probe shells out to the real python on this machine.
-    expect(python?.state).toBe('ok')
-    expect(python?.found).toBeTruthy()
-    expect(listener?.ready).toBe(true)
-  })
-
-  it('flags a runtime that cannot satisfy the range', () => {
-    writeListener(
-      'old-python',
-      manifestFor('old-python', {
-        runtime: { program: ['python'] },
-        dependencies: { runtime: { python: '>=99.0' } },
-      }),
-    )
-    const [listener] = loadListeners({ workspaceRoot: root })
-    expect(listener?.dependencies[0]?.state).toBe('mismatch')
-    expect(listener?.ready).toBe(false)
+    expect(listener?.warnings.join()).toContain('dependencies.runtime is deprecated')
+    expect(listener?.dependencies.every((d) => (d.kind as string) !== 'runtime')).toBe(true)
   })
 
   it('flags a missing package with an install hint', () => {

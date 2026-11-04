@@ -109,6 +109,39 @@ describe('ListenerSupervisor', () => {
     expect(tail).toContain('line-2')
   })
 
+  it('snapshots the log tail into startupErrorTail when giving up failed', async () => {
+    const entry = listener('crasher', [])
+    const script = join(entry.dir, 'crash.js')
+    writeFileSync(script, 'console.error("fatal: dependency gone"); process.exit(3);', 'utf8')
+    entry.manifest.runtime = {
+      program: [process.execPath, script],
+      readyTimeoutMs: 500,
+      restart: { policy: 'on-failure', maxAttempts: 2, backoffMs: [10, 10] },
+    }
+    supervisor.start(entry)
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    const status = supervisor.getStatus('crasher')
+    expect(status.state).toBe('failed')
+    expect(status.startupErrorTail).toBeTruthy()
+    expect(status.startupErrorTail).toContain('fatal: dependency gone')
+  })
+
+  it('keeps startupErrorTail off a clean exit', async () => {
+    const entry = listener('clean', [])
+    const script = join(entry.dir, 'clean.js')
+    writeFileSync(script, 'process.exit(0);', 'utf8')
+    entry.manifest.runtime = {
+      program: [process.execPath, script],
+      readyTimeoutMs: 500,
+      restart: { policy: 'on-failure', maxAttempts: 2, backoffMs: [10, 10] },
+    }
+    supervisor.start(entry)
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const status = supervisor.getStatus('clean')
+    expect(status.state).toBe('stopped')
+    expect(status.startupErrorTail).toBeUndefined()
+  })
+
   it('writes user config to config.json and hands its path via CRAFT_LISTENER_CONFIG', async () => {
     const entry = listener('withcfg', [])
     entry.config = { email: 'me@qq.com', authCode: 'secret-123' }

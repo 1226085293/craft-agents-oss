@@ -9,7 +9,11 @@
  */
 
 import { execFile } from 'node:child_process';
-import type { ListenerPackageDep } from '@craft-agent/shared/events/manifest.ts';
+import {
+  isValidPackageName,
+  isValidRange,
+  type ListenerPackageDep,
+} from '@craft-agent/shared/events/manifest.ts';
 
 const INSTALL_TIMEOUT_MS = 180_000;
 const MAX_OUTPUT_CHARS = 16_000;
@@ -38,6 +42,15 @@ export function formatInstallCommand(dep: ListenerPackageDep): string {
 }
 
 export async function runInstallCommand(dep: ListenerPackageDep): Promise<InstallResult> {
+  // Defense in depth: the renderer sends {manager, name, range}. The manifest
+  // already validated the same fields, but this RPC accepts arbitrary JSON.
+  if (
+    (dep?.manager !== 'pip' && dep?.manager !== 'npm') ||
+    !isValidPackageName(dep.manager, dep.name ?? '') ||
+    !isValidRange(dep.range ?? '')
+  ) {
+    return { ok: false, command: '', exitCode: null, output: '', error: 'invalid dependency spec' };
+  }
   const { command, args } = buildInstallCommand(dep);
   const display = [command, ...args].join(' ');
 

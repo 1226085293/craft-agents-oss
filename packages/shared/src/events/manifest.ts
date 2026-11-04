@@ -35,10 +35,26 @@ export interface ListenerPackageDep {
   range: string;
 }
 
+/** MCP server dependency. Managed installs are owned by Craft, never the listener. */
+export interface ListenerMcpDep {
+  /** Stable identifier; also the managed install directory name. */
+  id: string;
+  mode: 'managed' | 'remote';
+  /** managed: where the server comes from. `manual` = user installs, Craft only probes. */
+  source?: 'npm' | 'pypi' | 'manual';
+  package?: string;
+  /** npm-style range for the managed install. */
+  version?: string;
+  /** remote: connect-only endpoint — nothing to install. */
+  url?: string;
+  /** remote auth hint, e.g. `oauth` or `bearer`. Display-only. */
+  auth?: string;
+}
+
 export interface ListenerDependencies {
-  /** Runtime versions, e.g. `{ python: ">=3.9 <4" }`. */
-  runtime?: Record<string, string>;
   packages?: ListenerPackageDep[];
+  /** MCP servers the listener talks to. Managed ones Craft installs into `<workspace>/mcp/<id>/`. */
+  mcp?: ListenerMcpDep[];
   /** Human-only notes for things Craft cannot install. */
   system?: string[];
 }
@@ -172,6 +188,24 @@ export function satisfiesRange(version: string, range: string): boolean {
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
+/** Package names: pip is plain; npm additionally allows `@scope/name`. */
+const PIP_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const NPM_NAME = /^(@[A-Za-z0-9][A-Za-z0-9._-]*\/)?[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/** npm-style range charset. Anything that could smuggle CLI options is rejected. */
+const RANGE_PATTERN = /^[0-9A-Za-z.^~<>=|*,\s-]+$/;
+
+/** Names land inside one argv element of a fixed install command — keep them inert. */
+export function isValidPackageName(manager: 'pip' | 'npm' | 'pypi', name: string): boolean {
+  return (manager === 'npm' ? NPM_NAME : PIP_NAME).test(name);
+}
+
+export function isValidRange(range: string): boolean {
+  if (typeof range !== 'string') return false;
+  if (range.includes('--')) return false;
+  return range.trim() === '' || RANGE_PATTERN.test(range);
+}
+
 /** Validate an unknown JSON value into a manifest. */
 export function parseManifest(raw: unknown, expectedId?: string): ManifestParseResult {
   const errors: string[] = [];
@@ -243,16 +277,12 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
       errors.push('dependencies must be an object');
     } else {
       const deps = input.dependencies as Record<string, unknown>;
-      const runtimeDeps: Record<string, string> = {};
+      // Runtime probing moved to the listener itself (control service) — the
+      // field is dropped with a warning so old manifests keep loading.
       if (deps.runtime !== undefined) {
-        if (typeof deps.runtime !== 'object' || deps.runtime === null) {
-          errors.push('dependencies.runtime must be an object');
-        } else {
-          for (const [key, value] of Object.entries(deps.runtime as Record<string, unknown>)) {
-            if (typeof value !== 'string') errors.push(`dependencies.runtime.${key} must be a string range`);
-            else runtimeDeps[key] = value;
-          }
-        }
+        warnings.push(
+          'dependencies.runtime is deprecated — verify dependencies in the listener itself (control service), or declare packages/mcp',
+        );
       }
 
       const packages: ListenerPackageDep[] = [];
@@ -267,11 +297,101 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
             const range = typeof pkg?.range === 'string' ? pkg.range : undefined;
             if (manager !== 'pip' && manager !== 'npm') {
               errors.push(`dependencies.packages[${index}].manager must be "pip" or "npm"`);
-            } else if (!pkgName) {
-              errors.push(`dependencies.packages[${index}].name is required`);
-            } else {
-              packages.push({ manager, name: pkgName, range: range ?? '*' });
+              continue;
             }
+            if (!pkgName) {
+              errors.push(`dependencies.packages[${index}].name is required`);
+              continue;
+            }
+            if (!isValidPackageName(manager, pkgName)) {
+              errors.push(`dependencies.packages[${index}].name has forbidden characters`);
+              continue;
+            }
+            const finalRange = range ?? '*';
+            if (!isValidRange(finalRange)) {
+              errors.push(`dependencies.packages[${index}].range has forbidden characters`);
+              continue;
+            }
+            packages.push({ manager, name: pkgName, range: finalRange });
+          }
+        }
+      }
+
+      const mcp: ListenerMcpDep[] = [];
+      if (deps.mcp !== undefined) {
+        if (!Array.isArray(deps.mcp)) {
+          errors.push('dependencies.mcp must be an array');
+        } else {
+          const seenIds = new Set<string>();
+          for (const [index, entry] of deps.mcp.entries()) {
+            const raw = entry as Record<string, unknown>;
+            const mcpId = typeof raw?.id === 'string' ? raw.id.trim() : '';
+            const mode = raw?.mode;
+            if (!mcpId || !ID_PATTERN.test(mcpId)) {
+              errors.push(`dependencies.mcp[${index}].id must be lowercase [a-z0-9._-], at most 64 chars`);
+              continue;
+            }
+            if (seenIds.has(mcpId)) {
+              errors.push(`dependencies.mcp[${index}].id "${mcpId}" is duplicated`);
+              continue;
+            }
+            seenIds.add(mcpId);
+
+            if (mode === 'remote') {
+              const url = typeof raw?.url === 'string' ? raw.url.trim() : '';
+              let urlOk = false;
+              if (url) {
+                try {
+                  const parsed = new URL(url);
+                  urlOk = parsed.protocol === 'https:' || parsed.protocol === 'http:';
+                } catch {
+                  urlOk = false;
+                }
+              }
+              if (!urlOk) {
+                errors.push(`dependencies.mcp[${index}].url must be an http(s) URL`);
+                continue;
+              }
+              mcp.push({
+                id: mcpId,
+                mode: 'remote',
+                url,
+                ...(typeof raw?.auth === 'string' && raw.auth.trim()
+                  ? { auth: raw.auth.trim().slice(0, 64) }
+                  : {}),
+              });
+              continue;
+            }
+
+            if (mode !== 'managed') {
+              errors.push(`dependencies.mcp[${index}].mode must be "managed" or "remote"`);
+              continue;
+            }
+            const source = raw?.source;
+            if (source !== 'npm' && source !== 'pypi' && source !== 'manual') {
+              errors.push(`dependencies.mcp[${index}].source must be "npm", "pypi" or "manual"`);
+              continue;
+            }
+            let pkgName: string | undefined;
+            if (source !== 'manual') {
+              pkgName = typeof raw?.package === 'string' ? raw.package.trim() : '';
+              if (!pkgName || !isValidPackageName(source, pkgName)) {
+                errors.push(`dependencies.mcp[${index}].package is required and must be a plain package name`);
+                continue;
+              }
+            }
+            const version = typeof raw?.version === 'string' ? raw.version : undefined;
+            if (version !== undefined && !isValidRange(version)) {
+              errors.push(`dependencies.mcp[${index}].version has forbidden characters`);
+              continue;
+            }
+            mcp.push({
+              id: mcpId,
+              mode: 'managed',
+              source,
+              ...(pkgName ? { package: pkgName } : {}),
+              ...(version && version.trim() ? { version: version.trim() } : {}),
+            });
           }
         }
       }
@@ -283,8 +403,8 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
       }
 
       dependencies = {
-        ...(Object.keys(runtimeDeps).length ? { runtime: runtimeDeps } : {}),
         ...(packages.length ? { packages } : {}),
+        ...(mcp.length ? { mcp } : {}),
         ...(system.length ? { system } : {}),
       };
     }

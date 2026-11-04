@@ -38,8 +38,11 @@ git-friendly.
   },
 
   "dependencies": {
-    "runtime": { "python": ">=3.9 <4" },
-    "packages": [{ "manager": "pip", "name": "imapclient", "range": "^3.0" }]
+    "packages": [{ "manager": "pip", "name": "imapclient", "range": "^3.0" }],
+    "mcp": [
+      { "id": "mail-tools", "mode": "managed", "source": "npm", "package": "mail-mcp", "version": "^1.2.0" },
+      { "id": "corp-remote", "mode": "remote", "url": "https://mcp.example.com/sse", "auth": "oauth" }
+    ]
   },
 
   "config": {
@@ -60,7 +63,50 @@ rejected on purpose: it would reintroduce shell semantics.
 Placeholders: `${dir}` (listener dir), `${data}` (its data dir).
 
 Version ranges use an npm subset: `*`, `2.*`, `^1.2.3`, `~1.2.3`,
-`>=3.9 <4`, `1.2.3`, and `||` for alternatives.
+`>=3.9 <4`, `1.2.3`, and `||` for alternatives. Names and ranges are
+validated against CLI-safe charsets (they land inside fixed install
+commands), so values like `"-r /etc/passwd"` are rejected at parse time.
+
+### Dependencies
+
+Three kinds, split by "who can verify it":
+
+- **`packages`** (pip/npm) — Craft probes and installs them (detail page
+  button).
+- **`mcp`** — MCP servers the listener talks to. `mode: "managed"` servers
+  are installed **by Craft** into `<workspace>/mcp/<id>/` (never by the
+  listener — the install location must stay visible and uninstallable);
+  install runs before the listener can be considered ready, with a button on
+  the detail page when missing. `mode: "remote"` servers are URLs only —
+  nothing to install. Handing the MCP *connection* to the listener process is
+  a separate, future piece.
+- **reported dependencies** — everything Craft cannot verify reliably (arbitrary
+  executables, system components, licenses). The listener may run a loopback
+  HTTP **control service** and report its own dependency state; Craft only
+  renders it and forwards button presses. Contract (`craft-deps/1`):
+
+  - bind `127.0.0.1` on an ephemeral port, generate a random token, and write
+    `<dataDir>/control.json` as `{ "port", "token", "pid" }` (mode 600);
+  - `GET /deps` → `{ "deps": [...] }` where each entry is
+    `{ "id", "name", "installed", "version?", "detail?", "error?",
+    "action?": { "label", "running" } }`;
+  - `POST /deps/<id>/action` → `202 {"running":true}` (409 while busy). The
+    listener performs the action itself — Craft never executes listener
+    strings; a missing `action` renders no button; `running: true` disables
+    it while Craft polls `/deps` every 2 s.
+
+  No `control.json` within 5 s of start simply renders "no dependency info"
+  — the service is optional and never blocks startup.
+
+`dependencies.runtime` is **deprecated** (Craft no longer probes a hardcoded
+interpreter table): verify your runtime in the listener itself and report via
+the control service, or declare `packages`/`mcp` instead.
+
+### Startup failure display
+
+When the process gives up with a non-zero exit, Craft snapshots the last
+30 lines of `proc.log` and shows them in a collapsible block under the
+description on the detail page.
 
 ### Environment handed to your program
 

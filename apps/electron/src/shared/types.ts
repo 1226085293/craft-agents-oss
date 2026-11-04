@@ -790,6 +790,20 @@ export interface ElectronAPI {
     listenerId: string,
     dependency: { manager: 'pip' | 'npm'; name: string; range: string }
   ): Promise<{ ok: boolean; command: string; exitCode: number | null; output: string; error?: string }>
+  installListenerMcp(
+    workspaceId: string,
+    listenerId: string,
+    mcpId: string
+  ): Promise<{ ok: boolean; command: string; exitCode: number | null; output: string; error?: string }>
+  getListenerReportedDeps(
+    workspaceId: string,
+    listenerId: string
+  ): Promise<import('@craft-agent/shared/protocol/dto').ListenerReportedDepsDto>
+  listenerDepAction(
+    workspaceId: string,
+    listenerId: string,
+    depId: string
+  ): Promise<{ ok: boolean; conflict?: boolean; error?: string }>
   onEventListenerStatus(
     callback: (workspaceId: string, status: import('@craft-agent/shared/protocol/dto').ListenerStatusDto) => void
   ): () => void

@@ -24,8 +24,10 @@ import {
 } from './listener-registry.ts';
 import { ListenerSupervisor, type ListenerRuntimeStatus } from './listener-supervisor.ts';
 import { EventDispatcher, type DispatchTarget } from './event-dispatcher.ts';
+import { fetchReportedDeps } from './listener-control.ts';
 import { loadSubscriptions } from '@craft-agent/shared/events/subscriptions.ts';
 import type { ListenerConfigSchema } from '@craft-agent/shared/events/manifest.ts';
+import type { ListenerReportedDepsDto } from '@craft-agent/shared/protocol/dto';
 
 const eventLog = createLogger('events');
 
@@ -298,15 +300,22 @@ export interface ListenerView extends LoadedListener {
   homepage?: string
   configSchema?: ListenerConfigSchema
   setup: Array<{ text: string; link?: string }>
+  /** Dependency state the listener itself reports (control service). */
+  controlDeps?: ListenerReportedDepsDto
+  /** Tail of the last failed startup, when the process gave up non-zero. */
+  startupErrorTail?: string
 }
 
+/** Map a LoadedListener (fields nested under `manifest`) onto the ListenerView shape. */
 /** Map a LoadedListener (fields nested under `manifest`) onto the ListenerView shape. */
 function toListenerView(
   listener: LoadedListener,
   service: EventService,
   logTail: string,
+  controlDeps?: ListenerReportedDepsDto,
 ): ListenerView {
   const m = listener.manifest
+  const status = service.supervisorStatus(listener.id)
   return {
     ...listener,
     name: m.name,
@@ -316,9 +325,11 @@ function toListenerView(
     homepage: m.homepage,
     configSchema: m.config,
     setup: m.setup ?? [],
-    status: service.supervisorStatus(listener.id),
+    status,
     missingConfig: missingConfigKeys(listener),
     logTail,
+    ...(controlDeps ? { controlDeps } : {}),
+    ...(status.startupErrorTail ? { startupErrorTail: status.startupErrorTail } : {}),
   }
 }
 
@@ -328,14 +339,17 @@ export function listListenersFor(service: EventService, workspaceRoot: string, s
   )
 }
 
-export function getListenerFor(
+export async function getListenerFor(
   service: EventService,
   workspaceRoot: string,
   id: string,
-): ListenerView | null {
+): Promise<ListenerView | null> {
   const listener = loadListeners({ workspaceRoot }).find((entry) => entry.id === id);
   if (!listener) return null;
-  return toListenerView(listener, service, service.tailListenerLog(id, listener.dataDir));
+  // The control service is listener-provided and optional; a missing or slow
+  // answer just renders as "no dependency info".
+  const controlDeps = await fetchReportedDeps(listener.dataDir);
+  return toListenerView(listener, service, service.tailListenerLog(id, listener.dataDir), controlDeps);
 }
 
 // ---------------------------------------------------------------------------

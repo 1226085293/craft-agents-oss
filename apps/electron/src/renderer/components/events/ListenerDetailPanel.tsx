@@ -8,8 +8,13 @@
  */
 
 import * as React from 'react'
-import { AlertTriangle, Check, ChevronDown, ChevronRight, Copy, Download, Play, Square } from 'lucide-react'
-import type { ListenerDto, ListenerDependencyDto } from '@craft-agent/shared/protocol/dto'
+import { AlertTriangle, Check, ChevronDown, ChevronRight, Copy, Download, Play, RefreshCw, Square } from 'lucide-react'
+import type {
+  ListenerDto,
+  ListenerDependencyDto,
+  ListenerReportedDepDto,
+  ListenerReportedDepsDto,
+} from '@craft-agent/shared/protocol/dto'
 
 export interface ListenerDetailPanelProps {
   workspaceId: string
@@ -39,11 +44,15 @@ function CopyButton({ value, label }: { value: string; label: string }): React.R
 function DependencyRow({
   dep,
   onInstall,
+  onInstallMcp,
   installing,
+  installingMcp,
 }: {
   dep: ListenerDependencyDto
   onInstall: (dep: ListenerDependencyDto) => void
+  onInstallMcp: (dep: ListenerDependencyDto) => void
   installing: boolean
+  installingMcp: boolean
 }): React.ReactElement {
   const ok = dep.state === 'ok'
   const informational = dep.state === 'not_required'
@@ -61,9 +70,20 @@ function DependencyRow({
         {dep.state === 'missing' && '❌ 未安装'}
         {dep.state === 'mismatch' && `⚠️ 版本不满足${dep.found ? `（当前 ${dep.found}）` : ''}`}
         {dep.state === 'unknown' && '⚠️ 无法检测'}
-        {informational && '➖ 需手动安装'}
+        {informational && '➖ 已配置'}
       </span>
-      {dep.installHint && (dep.state === 'missing' || dep.state === 'mismatch') && (
+      {dep.kind === 'mcp' && dep.state === 'missing' && (
+        <button
+          type="button"
+          disabled={installingMcp}
+          onClick={() => onInstallMcp(dep)}
+          className="h-6 px-2 inline-flex items-center gap-1 rounded border border-border text-[11px] hover:bg-accent disabled:opacity-50 shrink-0"
+        >
+          <Download className="h-3 w-3" />
+          {installingMcp ? '安装中…' : '安装'}
+        </button>
+      )}
+      {dep.kind === 'package' && dep.installHint && (dep.state === 'missing' || dep.state === 'mismatch') && (
         <button
           type="button"
           disabled={installing}
@@ -73,6 +93,115 @@ function DependencyRow({
           <Download className="h-3 w-3" />
           {installing ? '安装中…' : '安装'}
         </button>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Listener-reported dependencies — the optional control service. Polls while
+ * an action is running; a listener without completion semantics just stays
+ * clickable and the user re-checks via the refresh button.
+ */
+function ReportedDepsSection({
+  workspaceId,
+  listenerId,
+  initial,
+}: {
+  workspaceId: string
+  listenerId: string
+  initial: ListenerReportedDepsDto
+}): React.ReactElement {
+  const [state, setState] = React.useState<ListenerReportedDepsDto>(initial)
+  const [busyId, setBusyId] = React.useState<string | null>(null)
+  const [refreshing, setRefreshing] = React.useState(false)
+  const pollRef = React.useRef(0)
+
+  const refresh = React.useCallback(async (): Promise<ListenerReportedDepsDto | null> => {
+    try {
+      const next = await window.electronAPI.getListenerReportedDeps(workspaceId, listenerId)
+      setState(next)
+      return next
+    } catch {
+      return null
+    }
+  }, [workspaceId, listenerId])
+
+  const trigger = async (dep: ListenerReportedDepDto) => {
+    if (busyId) return
+    setBusyId(dep.id)
+    try {
+      await window.electronAPI.listenerDepAction(workspaceId, listenerId, dep.id)
+    } catch {
+      // The next refresh surfaces the failure state.
+    }
+    // Poll while any action is running (cap ~5 min). Actions without a
+    // completion callback never set running → the loop exits after one poll.
+    const poll = pollRef.current + 1
+    pollRef.current = poll
+    for (let round = 0; round < 150; round += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      if (pollRef.current !== poll) return // superseded by a newer action
+      const next = await refresh()
+      const running = next?.control === true && (next.deps ?? []).some((d) => d.action?.running === true)
+      if (!running) break
+    }
+    setBusyId(null)
+  }
+
+  const deps = state.control === true ? state.deps ?? [] : null
+
+  return (
+    <div className="px-4 py-3 border-b border-border">
+      <div className="flex items-center gap-1.5">
+        <span className="text-xs font-medium">依赖状态（监听器提供）</span>
+        <button
+          type="button"
+          disabled={refreshing}
+          onClick={() => {
+            setRefreshing(true)
+            void refresh().finally(() => setRefreshing(false))
+          }}
+          className="h-5 px-1 inline-flex items-center rounded border border-border text-muted-foreground hover:text-foreground disabled:opacity-50"
+          title="刷新"
+        >
+          <RefreshCw className={`h-3 w-3 ${refreshing ? 'animate-spin' : ''}`} />
+        </button>
+        {state.control === false && state.reason && (
+          <span className="text-[11px] text-muted-foreground truncate">未提供（{state.reason}）</span>
+        )}
+      </div>
+      {deps && deps.length > 0 && (
+        <div className="mt-2 divide-y divide-border/50">
+          {deps.map((dep) => (
+            <div key={dep.id} className="flex items-center gap-2 py-1 text-[11px]">
+              <span className="w-40 shrink-0 font-mono truncate" title={dep.name}>
+                {dep.name}
+              </span>
+              <span className={`flex-1 min-w-0 truncate ${dep.installed ? 'text-primary' : 'text-destructive'}`}>
+                {dep.installed
+                  ? `✅ 已安装${dep.version ? ` ${dep.version}` : ''}`
+                  : dep.error
+                    ? `❌ ${dep.error}`
+                    : '❌ 未安装'}
+                {dep.detail && <span className="text-muted-foreground"> · {dep.detail}</span>}
+              </span>
+              {dep.action && (
+                <button
+                  type="button"
+                  disabled={Boolean(busyId) || dep.action.running === true}
+                  onClick={() => void trigger(dep)}
+                  className="h-6 px-2 inline-flex items-center gap-1 rounded border border-border text-[11px] hover:bg-accent disabled:opacity-50 shrink-0"
+                >
+                  {dep.action.running === true || busyId === dep.id ? '执行中…' : dep.action.label}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {deps && deps.length === 0 && (
+        <p className="text-[11px] text-muted-foreground mt-1">监听器未报告任何依赖。</p>
       )}
     </div>
   )
@@ -88,6 +217,7 @@ export function ListenerDetailPanel({
   const [busy, setBusy] = React.useState(false)
   const [installLog, setInstallLog] = React.useState<string | null>(null)
   const [installingDep, setInstallingDep] = React.useState<string | null>(null)
+  const [installingMcp, setInstallingMcp] = React.useState<string | null>(null)
   const [depsOpen, setDepsOpen] = React.useState(false)
   const [draft, setDraft] = React.useState<Record<string, string>>({})
   const [dirty, setDirty] = React.useState(false)
@@ -156,7 +286,7 @@ export function ListenerDetailPanel({
 
   const install = async (dep: ListenerDependencyDto) => {
     if (!listener) return
-    const manager = dep.label.startsWith('pip:') ? 'pip' : 'npm'
+    const manager = dep.label.startsWith('npm:') ? 'npm' : 'pip'
     const name = dep.label.slice(dep.label.indexOf(':') + 1)
     setInstallingDep(dep.label)
     setInstallLog(null)
@@ -172,6 +302,22 @@ export function ListenerDetailPanel({
       setInstallLog(`❌ ${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setInstallingDep(null)
+    }
+  }
+
+  const installMcp = async (dep: ListenerDependencyDto) => {
+    if (!listener) return
+    const mcpId = dep.label.startsWith('mcp:') ? dep.label.slice(4) : dep.label
+    setInstallingMcp(dep.label)
+    setInstallLog(null)
+    try {
+      const result = await window.electronAPI.installListenerMcp(workspaceId, listener.id, mcpId)
+      setInstallLog(`${result.ok ? '✅' : '❌'} ${result.command || result.error || ''}\n\n${result.output}`)
+      await load()
+    } catch (err) {
+      setInstallLog(`❌ ${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setInstallingMcp(null)
     }
   }
 
@@ -227,6 +373,17 @@ export function ListenerDetailPanel({
               </div>
             ))}
           </div>
+        )}
+
+        {listener.status.state === 'failed' && listener.startupErrorTail && (
+          <details className="mt-2">
+            <summary className="text-[11px] text-destructive cursor-pointer">
+              启动失败日志（尾部 30 行）
+            </summary>
+            <pre className="mt-1 text-[11px] font-mono whitespace-pre-wrap break-all bg-muted/40 rounded p-2 max-h-48 overflow-auto">
+              {listener.startupErrorTail}
+            </pre>
+          </details>
         )}
       </div>
 
@@ -287,7 +444,9 @@ export function ListenerDetailPanel({
                   key={dep.label}
                   dep={dep}
                   installing={installingDep === dep.label}
+                  installingMcp={installingMcp === dep.label}
                   onInstall={(target) => void install(target)}
+                  onInstallMcp={(target) => void installMcp(target)}
                 />
               ))}
             </div>
@@ -298,6 +457,11 @@ export function ListenerDetailPanel({
             </pre>
           )}
         </div>
+      )}
+
+      {/* Listener-reported dependencies (optional control service) */}
+      {listener.controlDeps && (
+        <ReportedDepsSection workspaceId={workspaceId} listenerId={listener.id} initial={listener.controlDeps} />
       )}
 
       {/* Setup steps */}

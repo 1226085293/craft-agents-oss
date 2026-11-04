@@ -259,6 +259,21 @@ export function validateLlmConfig(input: unknown): string[] {
           }
         }
       }
+
+      if (st.waitForCooldown !== undefined) {
+        if (!isPlainObject(st.waitForCooldown)) {
+          errors.push(`${id}.waitForCooldown 必须是对象`);
+        } else {
+          const wc = st.waitForCooldown as Record<string, unknown>;
+          if (wc.enabled !== undefined && typeof wc.enabled !== 'boolean') {
+            errors.push(`${id}.waitForCooldown.enabled 必须是布尔值`);
+          }
+          if (wc.maxWaitSeconds !== undefined &&
+              (typeof wc.maxWaitSeconds !== 'number' || !Number.isInteger(wc.maxWaitSeconds) || wc.maxWaitSeconds < 1 || wc.maxWaitSeconds > 3600)) {
+            errors.push(`${id}.waitForCooldown.maxWaitSeconds 必须是 1 到 540 的整数`);
+          }
+        }
+      }
     });
 
     // fallbackStrategyId must name an existing strategy. Cycle detection is

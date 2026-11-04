@@ -250,6 +250,11 @@ export interface LlmStrategyShape {
     backoffMs?: number
     onStatusCodes?: number[]
   }
+  /** Wait out the soonest cooldown and retry this strategy before transferring. */
+  waitForCooldown?: {
+    enabled: boolean
+    maxWaitSeconds?: number
+  }
   /** Compact the session after the gateway switches its key/model. Default on. */
   compactAfterSwitch?: boolean
   cooldown?: {

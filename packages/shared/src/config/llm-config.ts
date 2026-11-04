@@ -346,6 +346,28 @@ export interface LlmStrategy {
   };
 
   /**
+   * When every unit of this strategy is unavailable and the request is about
+   * to transfer to `fallbackStrategyId` (or fail), wait for the soonest
+   * cooldown and retry THIS strategy instead — but only when that wait is
+   * short.
+   *
+   * Scope: streaming chat requests only. Quota-scale cooldowns never pass the
+   * `maxWaitSeconds` gate, so an all-quota strategy always transfers
+   * immediately — that is the documented split (429 walls wait, quota walls
+   * transfer). Waiting happens before the transfer because recovering this
+   * strategy beats switching: the switch orphans the upstream prompt cache.
+   */
+  waitForCooldown?: {
+    enabled: boolean;
+    /**
+     * Longest single wait in seconds; also the wait-vs-transfer gate. Default
+     * 540 (the request-wide budget caps a single wait at 540s anyway), clamped
+     * to 1..540. A cooldown beyond this transfers immediately.
+     */
+    maxWaitSeconds?: number;
+  };
+
+  /**
    * Fallback strategy: when every provider in this strategy is unavailable
    * (all keys cooling / rate-limited / failed), the request transfers to this
    * strategy instead of failing. Cycle detection runs at request time — a

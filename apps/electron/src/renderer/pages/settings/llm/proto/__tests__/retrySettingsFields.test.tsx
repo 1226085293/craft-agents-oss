@@ -19,6 +19,13 @@ describe('retry settings field visibility and order', () => {
     expect(html.match(/type="number"/g)).toHaveLength(1)
   })
 
+  it('hides the whole interval field when attempts is 1 (no retry, no interval)', () => {
+    const html = renderFields(1)
+    expect(html).not.toContain('尝试间隔')
+    expect(html).not.toContain('固定间隔')
+    expect(html).not.toContain('重试间隔 · 秒')
+  })
+
   it('shows exactly one duration box directly after attempts and before interval', () => {
     const html = renderFields('unlimited')
     expect(html.match(/aria-label="单目标时限 · 秒"/g)).toHaveLength(1)

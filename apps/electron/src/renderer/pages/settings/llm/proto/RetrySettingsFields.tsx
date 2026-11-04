@@ -49,6 +49,8 @@ export function RetrySettingsFields(props: {
           </div>
         ) : null}
       </div>
+      {/* 尝试次数为 1 = 不重试，间隔没有语义，整块隐藏。 */}
+      {draft.maxAttempts !== 1 ? (
       <div className="field">
         <label>尝试间隔</label>
         <ProtoSelect
@@ -83,6 +85,7 @@ export function RetrySettingsFields(props: {
           </div>
         )}
       </div>
+      ) : null}
     </>
   )
 }

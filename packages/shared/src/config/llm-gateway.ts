@@ -366,6 +366,19 @@ export class LlmGateway {
   private pools = new Map<string, KeyPool>();
   private generation = 0;
 
+  /** waitForCooldown: max wait→retry rounds per strategy within one request. */
+  private static readonly WAIT_COOLDOWN_ROUNDS = 3;
+  /** waitForCooldown: request-wide total wait budget, shared across the fallback chain.
+   *
+   * The session client (Anthropic SDK, default timeout) aborts a request whose
+   * response headers have not arrived within 10 minutes — and that window
+   * covers the wait AND the retried upstream call. Waiting longer than ~9
+   * minutes inside one request is dead time: the client has already hung up.
+   * (Source-confirmed 2026-11-04: pi-agent-core passes no timeoutMs; the
+   * SDK's fetchWithTimeout covers time-to-headers only.)
+   */
+  private static readonly WAIT_COOLDOWN_BUDGET_SECONDS = 540;
+
   /**
    * Route-scoped cooldown: `provider::publicModel` -> epoch-seconds.
    *
@@ -924,9 +937,25 @@ export class LlmGateway {
       // The last thing that went wrong, so the final status can say "no healthy
       // account" (503) instead of pretending the upstreams failed (502).
       let lastOutcome: 'plan_failed' | 'exhausted' | null = null;
+      // waitForCooldown (per-strategy): request-wide wait budget shared across
+      // the chain, and per-strategy wait→retry rounds that reset only when the
+      // chain advances to a different strategy (a wait-retry re-enters the
+      // same strategy and must keep its remaining rounds).
+      let waitBudgetLeft = LlmGateway.WAIT_COOLDOWN_BUDGET_SECONDS;
+      let waitRoundsLeft = 0;
+      let waitRoundsStrategyId = '';
+      // waitForCooldown v1 scope: streaming chat requests only. Non-stream
+      // responses cannot keep the client patient through a silent wait, and
+      // auxiliary calls (title / judge / compaction) have their own fallback
+      // paths.
+      const waitEligible = payload.stream === true && (!requestKind || requestKind === 'chat');
 
       while (current && !visited.has(current.id)) {
         visited.add(current.id);
+        if (waitRoundsStrategyId !== current.id) {
+          waitRoundsStrategyId = current.id;
+          waitRoundsLeft = LlmGateway.WAIT_COOLDOWN_ROUNDS;
+        }
 
         // Exclude units whose keys are all cooling / rate-limited, or whose
         // route/endpoint is cooling, so the planner never picks a unit that
@@ -981,6 +1010,34 @@ export class LlmGateway {
             rateLimited = true;
             retryAfterSeconds = Math.max(retryAfterSeconds, availability.retryAfterSeconds);
           }
+          // waitForCooldown (plan path): nothing routable right now — wait out
+          // the soonest cooldown when the strategy opts in and the wait is
+          // short, instead of transferring immediately.
+          const plannedWait = await this.maybeWaitForStrategyCooldown(current, publicModel, streamRetryState, {
+            waitEligible,
+            generation,
+            req,
+            res,
+            budgetLeft: waitBudgetLeft,
+            roundsLeft: waitRoundsLeft,
+            hardBlocked: false,
+          });
+          if (plannedWait.action === 'waited') {
+            waitBudgetLeft -= plannedWait.seconds;
+            waitRoundsLeft -= 1;
+            // Retry the SAME strategy: a wait-retry re-enters the loop body
+            // with fresh availability, so drop the visited-guard entry.
+            visited.delete(current.id);
+            continue;
+          }
+          if (plannedWait.action === 'reloaded') {
+            res.writeHead(503, { 'content-type': 'application/json' });
+            res.end(
+              JSON.stringify({ error: { type: 'overloaded_error', message: 'gateway reloaded, retry' } }),
+            );
+            return;
+          }
+          if (plannedWait.action === 'disconnected') return;
           current = this.resolveFallback(config, current.id);
           continue;
         }
@@ -1011,6 +1068,33 @@ export class LlmGateway {
         tprRejected = tprRejected || outcome.tprRejected;
         retryAfterSeconds = Math.max(retryAfterSeconds, outcome.retryAfterSeconds);
         lastOutcome = 'exhausted';
+        // waitForCooldown (execute path): before transferring, give this
+        // strategy a bounded wait when its units are merely cooling.
+        // requestError / tprRejected never wait — retrying cannot help — and
+        // quota walls are excluded by magnitude inside the gate.
+        const executedWait = await this.maybeWaitForStrategyCooldown(current, publicModel, streamRetryState, {
+          waitEligible,
+          generation,
+          req,
+          res,
+          budgetLeft: waitBudgetLeft,
+          roundsLeft: waitRoundsLeft,
+          hardBlocked: outcome.requestError || outcome.tprRejected,
+        });
+        if (executedWait.action === 'waited') {
+          waitBudgetLeft -= executedWait.seconds;
+          waitRoundsLeft -= 1;
+          visited.delete(current.id);
+          continue;
+        }
+        if (executedWait.action === 'reloaded') {
+          res.writeHead(503, { 'content-type': 'application/json' });
+          res.end(
+            JSON.stringify({ error: { type: 'overloaded_error', message: 'gateway reloaded, retry' } }),
+          );
+          return;
+        }
+        if (executedWait.action === 'disconnected') return;
         // Exhausted — transfer to the fallback strategy, if one is configured.
         current = this.resolveFallback(config, current.id);
       }
@@ -1705,6 +1789,143 @@ export class LlmGateway {
       if (remaining > 0) min = Math.min(min, remaining);
     }
     return Number.isFinite(min) ? Math.ceil(min) : 0;
+  }
+
+  /**
+   * waitForCooldown: soonest seconds until some candidate unit of `strategy`
+   * can serve `publicModel` again.
+   *
+   * Combines route/endpoint cooldowns and the key pool's soonest wait. A unit
+   * that is merely blocked by this stream's exhausted-key set contributes
+   * nothing — waiting does not clear those. Returns 0 when something can serve
+   * right now, or when nothing cooldown-based is pending (the caller then
+   * transfers instead of waiting).
+   *
+   * Cooldown entries carry no quota/rate-limit class (`RateLimitState` stores
+   * only an expiry), and none is needed: a day-scale quota wall never passes
+   * the caller's `maxWaitSeconds` gate, so all-quota strategies are excluded
+   * by magnitude — while a genuinely soon quota cooldown (an operator-configured
+   * short `quotaExhaustedSeconds`) is as waitable as any rate limit.
+   */
+  private async strategySoonestUnfreezeSeconds(
+    strategy: LlmStrategy,
+    publicModel: string,
+    streamRetryState?: GatewayStreamRetryState,
+  ): Promise<number> {
+    const config = this.getConfig();
+    let candidates: ReturnType<typeof candidateUnits>;
+    try {
+      candidates = candidateUnits(config, strategy, publicModel);
+    } catch {
+      // Same posture as {@link unavailableUnitsFor}: a dangling provider
+      // reference is the planner's error to report, not a cooldown to wait out.
+      return 0;
+    }
+    const now = Date.now() / 1000;
+    let soonest = Number.POSITIVE_INFINITY;
+    for (const unit of candidates.units) {
+      const routeWait = Math.max(
+        0,
+        (this.unitCooling.get(unit.id) ?? 0) - now,
+        (this.endpointCooling.get(unit.provider.id) ?? 0) - now,
+      );
+      if (routeWait > 0) {
+        soonest = Math.min(soonest, routeWait);
+        continue;
+      }
+      const pool = this.pools.get(unit.provider.id);
+      if (!pool) return 0;
+      const excludedStreamKeys = streamRetryState
+        ? this.exhaustedStreamKeys(streamRetryState, unit.id, resolveRetryPolicy(strategy))
+        : new Set<string>();
+      const availability = await pool.availability(unit.upstreamModel, excludedStreamKeys);
+      if (availability.available) return 0;
+      // retryAfterSeconds > 0 = a cooldown/window that waiting can clear
+      // (key cooldown, rate-limit window, concurrency drain). === 0 with
+      // !available = stream-exhausted keys or an empty pool — waiting does
+      // not clear those, so the unit contributes nothing.
+      if (availability.retryAfterSeconds > 0) {
+        soonest = Math.min(soonest, availability.retryAfterSeconds);
+      }
+    }
+    return Number.isFinite(soonest) ? soonest : 0;
+  }
+
+  /**
+   * Interruptible wait for a cooldown. Polls in small chunks so a config
+   * reload or a client disconnect cuts the wait short instead of leaving a
+   * zombie request hanging on a connection nobody reads.
+   *
+   * Heartbeat insertion point: if the client-side silence-timeout experiment
+   * shows the session client aborts silent waits, SSE keepalive comments go
+   * here (writeHead(200) before the first chunk, `: keepalive` per chunk).
+   */
+  private async cooldownSleep(
+    seconds: number,
+    generation: number,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): Promise<'done' | 'reloaded' | 'disconnected'> {
+    const deadline = Date.now() + Math.max(0, Math.ceil(seconds * 1000));
+    for (;;) {
+      if (generation !== this.generation) return 'reloaded';
+      // Client-gone detection uses the response side only: Bun marks the
+      // REQUEST stream destroyed as soon as its body is consumed (which
+      // always happened before the wait), so req.destroyed says nothing.
+      // A disconnected client tears down the socket, which surfaces here as
+      // res.destroyed.
+      if (res.destroyed) return 'disconnected';
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) return 'done';
+      // Real sleep, deliberately not the injectable waitForRetry: the deadline
+      // is wall-clock, so a fake that resolves instantly would spin the loop.
+      await sleep(Math.min(250, remainingMs));
+    }
+  }
+
+  /**
+   * waitForCooldown gate: decide whether the request should wait for this
+   * strategy's soonest cooldown and, when so, sleep it out.
+   *
+   * Waiting happens BEFORE the fallback transfer — recovering this strategy
+   * beats switching — and is bounded four ways: streaming-chat scope
+   * (`waitEligible`), per-strategy rounds, a request-wide wait budget, and
+   * `maxWaitSeconds` itself. `requestError`/`tprRejected` never wait, and
+   * quota-scale cooldowns are excluded by magnitude inside
+   * {@link strategySoonestUnfreezeSeconds}.
+   */
+  private async maybeWaitForStrategyCooldown(
+    strategy: LlmStrategy,
+    publicModel: string,
+    streamRetryState: GatewayStreamRetryState | undefined,
+    opts: {
+      waitEligible: boolean;
+      generation: number;
+      req: IncomingMessage;
+      res: ServerResponse;
+      budgetLeft: number;
+      roundsLeft: number;
+      hardBlocked: boolean;
+    },
+  ): Promise<
+    | { action: 'skip' }
+    | { action: 'waited'; seconds: number }
+    | { action: 'reloaded' }
+    | { action: 'disconnected' }
+  > {
+    const cfg = strategy.waitForCooldown;
+    if (!opts.waitEligible || !cfg?.enabled || opts.hardBlocked) return { action: 'skip' };
+    if (opts.roundsLeft <= 0) return { action: 'skip' };
+    const maxWaitSeconds = clampWaitSeconds(cfg.maxWaitSeconds);
+    const soonest = await this.strategySoonestUnfreezeSeconds(strategy, publicModel, streamRetryState);
+    if (soonest <= 0 || soonest > maxWaitSeconds || soonest > opts.budgetLeft) return { action: 'skip' };
+    this.log(
+      `strategy ${strategy.id}: all units cooling, waiting ${Math.ceil(soonest)}s before retry ` +
+        `(waitForCooldown, rounds left ${opts.roundsLeft - 1}, budget left ${Math.round(opts.budgetLeft - soonest)}s)`,
+    );
+    const end = await this.cooldownSleep(soonest, opts.generation, opts.req, opts.res);
+    if (end === 'done') return { action: 'waited', seconds: soonest };
+    return { action: end };
   }
 
   /**
@@ -3013,4 +3234,12 @@ function cooldownDurationsFromPreset(preset: LlmPreset): CooldownDurations {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Default `waitForCooldown.maxWaitSeconds` (also the wait-vs-transfer gate). */
+const WAIT_COOLDOWN_DEFAULT_MAX_SECONDS = 540;
+
+function clampWaitSeconds(value: number | undefined): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return WAIT_COOLDOWN_DEFAULT_MAX_SECONDS;
+  return Math.min(3600, Math.max(1, Math.floor(value)));
 }

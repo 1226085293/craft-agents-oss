@@ -39,6 +39,8 @@ import {
 import type { StrategyModelPick } from '../helpers'
 import { parseKeyBlock } from './keyParser'
 import { isRetryDraftValid, retryDraftFromConfig, serializeRetryDraft } from './retrySettings'
+import { isWaitForCooldownDraftValid, serializeWaitForCooldownDraft, waitForCooldownDraftFromConfig } from './waitForCooldownSettings'
+import { WaitForCooldownFields } from './WaitForCooldownFields'
 import { RetrySettingsFields } from './RetrySettingsFields'
 
 const WEEK_CN = ['日', '一', '二', '三', '四', '五', '六']
@@ -993,6 +995,7 @@ function StrategyEditDialog(props: {
   const [sticky, setSticky] = React.useState(existing?.stickySession?.enabled !== false)
   const [compactAfterSwitch, setCompactAfterSwitch] = React.useState(existing?.compactAfterSwitch !== false)
   const [retryDraft, setRetryDraft] = React.useState(() => retryDraftFromConfig(existing?.retry))
+  const [waitCooldownDraft, setWaitCooldownDraft] = React.useState(() => waitForCooldownDraftFromConfig(existing?.waitForCooldown))
   const [fallbackId, setFallbackId] = React.useState(existing?.fallbackStrategyId ?? '')
 
   // Only the selected members' models — see `strategyModels`.
@@ -1036,6 +1039,10 @@ function StrategyEditDialog(props: {
         : '固定重试间隔必须为 0 到 300 秒')
       return
     }
+    if (!isWaitForCooldownDraftValid(waitCooldownDraft)) {
+      props.toast('最长等待必须为 1 到 3600 秒的整数')
+      return
+    }
     if (!name.trim()) {
       props.toast('请填写策略组名称')
       return
@@ -1074,6 +1081,9 @@ function StrategyEditDialog(props: {
       stickySession: { ...(existing?.stickySession ?? {}), enabled: sticky },
       compactAfterSwitch,
       retry: serializeRetryDraft(retryDraft),
+      ...(serializeWaitForCooldownDraft(waitCooldownDraft)
+        ? { waitForCooldown: serializeWaitForCooldownDraft(waitCooldownDraft) }
+        : { waitForCooldown: undefined }),
       ...(fallbackId ? { fallbackStrategyId: fallbackId } : {}),
       modelAliases: aliases,
       modelProviders,
@@ -1298,6 +1308,11 @@ function StrategyEditDialog(props: {
             draft={retryDraft}
             onChange={setRetryDraft}
             invalid={retryDraft.maxAttempts === 'unlimited' && !isRetryDraftValid(retryDraft)}
+          />
+          <WaitForCooldownFields
+            draft={waitCooldownDraft}
+            onChange={setWaitCooldownDraft}
+            invalid={!isWaitForCooldownDraftValid(waitCooldownDraft)}
           />
           <div className="field">
             <label>粘性会话</label>

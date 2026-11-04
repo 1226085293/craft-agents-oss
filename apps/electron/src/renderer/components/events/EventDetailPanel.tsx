@@ -15,7 +15,7 @@
  */
 
 import * as React from 'react'
-import { ExternalLink, Paperclip, Inbox } from 'lucide-react'
+import { ExternalLink, Paperclip, Inbox, Send } from 'lucide-react'
 import type { EventRecordDto } from '@craft-agent/shared/protocol/dto'
 
 export interface EventDetailPanelProps {
@@ -112,6 +112,24 @@ export function EventDetailPanel({
     event.occurredAt !== undefined
       ? { label: '发生时间', node: new Date(event.occurredAt).toLocaleString() }
       : null,
+    event.deliveries.length > 0
+      ? {
+          label: '投递记录',
+          node: (
+            <span className="flex flex-col gap-0.5">
+              {event.deliveries.map((delivery) => (
+                <span key={delivery.sessionId} className="inline-flex items-center gap-1.5">
+                  <Send className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  <span className="font-mono text-[12px] break-all">{delivery.sessionId}</span>
+                  <span className="text-muted-foreground shrink-0 tabular-nums">
+                    {new Date(delivery.at).toLocaleString()}
+                  </span>
+                </span>
+              ))}
+            </span>
+          ),
+        }
+      : null,
     event.recipients.length > 0
       ? {
           label: '接收方',
@@ -171,23 +189,29 @@ export function EventDetailPanel({
           <p className="text-[13px] leading-5 text-muted-foreground mt-1">{event.summary}</p>
         )}
 
-        {/* Metadata strip: source · type · time · delivery in one quiet line */}
+        {/* Metadata strip: delivery · source · type · time in one quiet line.
+            Same label:value grammar throughout (labels in muted, values in
+            foreground/75) so the line reads as one table row. */}
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2.5 text-[11px]">
           <DeliveryState delivered={event.delivered} />
+          {event.deliveries.length > 0 && (
+            <span className="text-muted-foreground">{event.deliveries.length} 个会话</span>
+          )}
           <span className="h-3 w-px bg-border" aria-hidden />
           <Chip label="来源" value={event.source} />
           <span className="h-3 w-px bg-border" aria-hidden />
           <Chip label="类型" value={event.type} />
           <span className="h-3 w-px bg-border" aria-hidden />
-          <span className="text-muted-foreground tabular-nums" title={new Date(event.receivedAt).toLocaleString()}>
-            {new Date(event.receivedAt).toLocaleString()}
-          </span>
+          <Chip
+            label="时间"
+            value={new Date(event.receivedAt).toLocaleString()}
+          />
         </div>
 
         {/* Secondary metadata stays available without shouting: behind a
             disclosure unless links/attachments demand visibility. */}
         {details.length > 0 && (
-          <details className="mt-2 group" open={Boolean(event.links.length || event.payloadRef)}>
+          <details className="mt-2 group" open={Boolean(event.links.length || event.payloadRef || event.deliveries.length)}>
             <summary className="text-[11px] text-muted-foreground cursor-pointer hover:text-foreground transition-colors select-none">
               详细信息（{details.length}）
             </summary>

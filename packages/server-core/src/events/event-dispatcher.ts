@@ -52,6 +52,8 @@ export interface EventDispatcherOptions {
   target: DispatchTarget;
   mergeWindowMs?: number;
   dailyLimit?: number;
+  /** Called after a session actually received the event (surface written). */
+  onDelivered?: (eventId: string, sessionId: string) => void;
 }
 
 interface DeferredBatch {
@@ -127,6 +129,7 @@ export class EventDispatcher {
       const delivered = await this.deliverOne(sessionId, event, nudge, events.length > 1);
       if (!delivered) break;
       recordDelivery(sessionId, Date.now());
+      this.options.onDelivered?.(event.id, sessionId);
     }
   }
 

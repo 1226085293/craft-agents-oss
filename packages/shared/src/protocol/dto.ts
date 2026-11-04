@@ -935,6 +935,12 @@ export interface LlmGatewayListModelsResult {
  * Event metadata as pushed to renderers and returned by `events:list`.
  * Deliberately excludes `body`: list rows must never carry whole mail bodies.
  */
+/** Per-session delivery record on an event. */
+export interface EventDeliveryDto {
+  sessionId: string
+  at: number
+}
+
 export interface EventMetaDto {
   spec: 'craft-event/1'
   id: string
@@ -949,6 +955,8 @@ export interface EventMetaDto {
   links: Array<{ rel?: string; url: string }>
   payloadRef?: { kind: string; path: string; size?: number }
   delivered: boolean
+  /** Which sessions received this event, and when. Latest per session. */
+  deliveries: EventDeliveryDto[]
 }
 
 /** `events:get` result: metadata plus the stored body. */

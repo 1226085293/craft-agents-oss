@@ -312,12 +312,12 @@ export function EventsListPanel({
                   {event.summary}
                 </div>
               )}
-              <div className="flex items-center gap-1.5 mt-1 text-[11px] leading-4 text-muted-foreground">
-                <span className="truncate" title={`${event.source} · ${event.type}`}>
+              <div className="flex items-center gap-1.5 mt-1 text-[11px] leading-4">
+                <span className="truncate text-foreground/55" title={`${event.source} · ${event.type}`}>
                   {event.source}
                 </span>
                 <span className="opacity-50 shrink-0">·</span>
-                <span className="truncate" title={event.type}>
+                <span className="truncate text-muted-foreground" title={event.type}>
                   {event.type}
                 </span>
                 <span className="ml-auto shrink-0 tabular-nums text-muted-foreground/80">

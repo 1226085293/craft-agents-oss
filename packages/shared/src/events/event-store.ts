@@ -35,7 +35,17 @@ export interface EventStoreOptions {
   retentionRows?: number;
 }
 
-export interface EventRecord extends CraftEventEnvelope {}
+export interface EventDelivery {
+  /** Receiving session id. */
+  sessionId: string;
+  /** When the delivery surfaced into that session, epoch ms. */
+  at: number;
+}
+
+export interface EventRecord extends CraftEventEnvelope {
+  /** Per-session delivery records, latest entry per session. */
+  deliveries: EventDelivery[];
+}
 
 /** List projection: everything except `body`. */
 export type EventMeta = Omit<EventRecord, 'body'>;
@@ -75,6 +85,7 @@ interface EventRow {
   payload_size: number | null;
   dedupe_key: string | null;
   delivered: number;
+  deliveries: string | null;
 }
 
 function parseJsonArray<T>(value: string | null): T[] {
@@ -108,6 +119,7 @@ function toEvent(row: EventRow, includeBody: boolean): EventRecord {
     ...(row.summary ? { summary: row.summary } : {}),
     recipients: parseJsonArray<string>(row.recipients),
     links: parseJsonArray<CraftEventLink>(row.links),
+    deliveries: parseJsonArray<EventDelivery>(row.deliveries),
     ...(includeBody && row.body !== null ? { body: row.body } : {}),
     ...(payloadRef ? { payloadRef } : {}),
     delivered: row.delivered === 1,
@@ -116,7 +128,7 @@ function toEvent(row: EventRow, includeBody: boolean): EventRecord {
 
 const META_COLUMNS = `e.id, e.source, e.type, e.received_at, e.occurred_at, e.title, e.summary,
   e.recipients, e.links, e.payload_kind, e.payload_path, e.payload_size,
-  e.dedupe_key, e.delivered`;
+  e.dedupe_key, e.delivered, e.deliveries`;
 
 export class EventStore {
   private readonly db: SqliteDatabase;
@@ -171,6 +183,13 @@ export class EventStore {
         tokenize='unicode61'
       );
     `);
+
+    // Per-session delivery records (who received the event, when). Older
+    // databases predate the column — added in place, nullable, no default.
+    const columns = this.db.prepare('PRAGMA table_info(events)').all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === 'deliveries')) {
+      this.db.exec('ALTER TABLE events ADD COLUMN deliveries TEXT');
+    }
   }
 
   /**
@@ -194,8 +213,8 @@ export class EventStore {
     const insert = this.db.prepare(`
       INSERT INTO events (
         id, source, type, received_at, occurred_at, title, summary, recipients,
-        links, body, search_text, payload_kind, payload_path, payload_size, dedupe_key, delivered
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        links, body, search_text, payload_kind, payload_path, payload_size, dedupe_key, delivered, deliveries
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
     `);
 
     this.db.exec('BEGIN');
@@ -309,6 +328,26 @@ export class EventStore {
       throw error;
     }
     return changed;
+  }
+
+  /**
+   * Record that a session received this event, and mark it delivered. The
+   * latest delivery per session wins (re-delivery after a deferral replaces
+   * the older entry, so the list answers "who has it now").
+   */
+  recordDelivery(id: string, sessionId: string, at: number): void {
+    const row = this.db
+      .prepare('SELECT deliveries, delivered FROM events WHERE id = ?')
+      .get(id) as { deliveries: string | null; delivered: number } | undefined;
+    if (!row) return;
+
+    const deliveries = parseJsonArray<EventDelivery>(row.deliveries).filter(
+      (entry) => entry.sessionId !== sessionId,
+    );
+    deliveries.push({ sessionId, at });
+    this.db
+      .prepare('UPDATE events SET deliveries = ?, delivered = 1 WHERE id = ?')
+      .run(JSON.stringify(deliveries), id);
   }
 
   count(): number {

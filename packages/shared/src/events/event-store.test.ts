@@ -117,6 +117,91 @@ describe('EventStore.markDelivered', () => {
   });
 });
 
+describe('EventStore.recordDelivery', () => {
+  it('records per-session deliveries and flips delivered', () => {
+    store.insert(makeEvent({ id: 'evt_d1' }));
+    store.recordDelivery('evt_d1', 'sess_a', 1_800_000_100_000);
+    store.recordDelivery('evt_d1', 'sess_b', 1_800_000_200_000);
+
+    const meta = store.list({})[0]!;
+    expect(meta.delivered).toBe(true);
+    expect(meta.deliveries).toHaveLength(2);
+    expect(meta.deliveries.map((d) => d.sessionId).sort()).toEqual(['sess_a', 'sess_b']);
+    expect(meta.deliveries[0]!.at).toBeTypeOf('number');
+  });
+
+  it('replaces an older entry for the same session (latest wins)', () => {
+    store.insert(makeEvent({ id: 'evt_d2' }));
+    store.recordDelivery('evt_d2', 'sess_a', 1);
+    store.recordDelivery('evt_d2', 'sess_a', 2);
+
+    const meta = store.list({})[0]!;
+    expect(meta.deliveries).toEqual([{ sessionId: 'sess_a', at: 2 }]);
+  });
+
+  it('is a no-op for an unknown event id', () => {
+    expect(() => store.recordDelivery('evt_nope', 'sess_x', 1)).not.toThrow();
+  });
+});
+
+describe('EventStore legacy migration', () => {
+  it('adds the deliveries column to a database created before it existed', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const { openSqlite } = await import('./sqlite.ts');
+
+    const dir = mkdtempSync(join(tmpdir(), 'craft-store-mig-'));
+    const dbPath = join(dir, 'events.sqlite');
+    // Create the pre-deliveries schema exactly as it shipped.
+    const legacy = openSqlite(dbPath);
+    legacy.exec(`
+      CREATE TABLE events (
+        id           TEXT PRIMARY KEY,
+        source       TEXT NOT NULL,
+        type         TEXT NOT NULL,
+        received_at  INTEGER NOT NULL,
+        occurred_at  INTEGER,
+        title        TEXT NOT NULL,
+        summary      TEXT,
+        recipients   TEXT,
+        links        TEXT,
+        body         TEXT,
+        search_text  TEXT,
+        payload_kind TEXT,
+        payload_path TEXT,
+        payload_size INTEGER,
+        dedupe_key   TEXT,
+        delivered    INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE VIRTUAL TABLE events_fts USING fts5(event_id UNINDEXED, search_text, tokenize='unicode61');
+    `);
+    legacy.exec(
+      "INSERT INTO events (id, source, type, received_at, title, recipients, delivered) VALUES ('old_1', 'qqmail', 'mail.received', 123, '旧事件', '[]', 0)",
+    );
+    legacy.close();
+
+    const migrated = new EventStore({ dbPath });
+    try {
+      migrated.insert(makeEvent({ id: 'new_1' }));
+      migrated.recordDelivery('new_1', 'sess_a', 5);
+      migrated.recordDelivery('old_1', 'sess_b', 6);
+      expect(migrated.get('new_1')?.deliveries).toEqual([{ sessionId: 'sess_a', at: 5 }]);
+      expect(migrated.get('old_1')?.deliveries).toEqual([{ sessionId: 'sess_b', at: 6 }]);
+      expect(migrated.get('old_1')?.delivered).toBe(true);
+    } finally {
+      migrated.close();
+      // WAL sidecar files can linger briefly on Windows; cleanup is not the
+      // assertion under test.
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
+  });
+});
+
 describe('EventStore counts and retention', () => {
   it('counts per source for the listener cards', () => {
     store.insert(makeEvent({ id: 'a1', source: 'qqmail' }));

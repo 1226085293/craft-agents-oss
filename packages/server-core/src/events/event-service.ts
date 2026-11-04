@@ -84,9 +84,12 @@ export class EventService {
         this.supervisor.markHealthy(listenerId);
       },
       onInserted: (event) => {
-        this.options.onChanged?.(event);
+        // A freshly inserted event has no deliveries yet — they land via
+        // onDelivered below. Renderers get the enriched record shape.
+        const record: EventRecord = { ...event, deliveries: [] };
+        this.options.onChanged?.(record);
         // Strip the body: the dispatcher only formats a nudge.
-        const { body: _body, ...meta } = event;
+        const { body: _body, ...meta } = record;
         this.dispatcher?.dispatch(meta);
       },
     });
@@ -95,6 +98,15 @@ export class EventService {
       ? new EventDispatcher({
           getSubscriptions: () => loadSubscriptions(options.workspaceRoot),
           target: options.dispatchTarget,
+          onDelivered: (eventId, sessionId) => {
+            try {
+              this.store.recordDelivery(eventId, sessionId, Date.now());
+            } catch (error) {
+              eventLog.warn(
+                `[events] cannot record delivery for ${eventId}: ${error instanceof Error ? error.message : String(error)}`,
+              );
+            }
+          },
         })
       : null;
 

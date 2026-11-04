@@ -74,7 +74,7 @@ export interface ParsedCompoundRoute {
  * Known prefixes that indicate a compound route
  */
 const COMPOUND_ROUTE_PREFIXES = [
-  'allSessions', 'archived', 'state', 'view', 'sources', 'skills', 'automations', 'projects', 'pages', 'events', 'settings'
+  'allSessions', 'archived', 'state', 'view', 'sources', 'skills', 'automations', 'projects', 'pages', 'events', 'tasks', 'settings'
 ]
 
 /**
@@ -450,6 +450,16 @@ export function parseRoute(route: string): ParsedRoute | null {
  * Convert a parsed compound route to ParsedRoute format (type: 'view')
  */
 function convertCompoundToViewRoute(compound: ParsedCompoundRoute): ParsedRoute {
+  // Task board
+  if (compound.navigator === 'tasks') {
+    return {
+      type: 'view',
+      name: 'tasks',
+      id: compound.selectedTaskId ?? compound.details?.id,
+      params: {},
+    }
+  }
+
   // Settings
   if (compound.navigator === 'settings') {
     const subpage = compound.details?.type || 'app'
@@ -590,6 +600,14 @@ export function parseRouteToNavigationState(
  * Convert a ParsedCompoundRoute to NavigationState
  */
 function convertCompoundToNavigationState(compound: ParsedCompoundRoute): NavigationState {
+  // Task board
+  if (compound.navigator === 'tasks') {
+    return {
+      navigator: 'tasks',
+      selectedTaskId: compound.selectedTaskId ?? compound.details?.id ?? null,
+    }
+  }
+
   // Settings
   if (compound.navigator === 'settings') {
     if (!compound.details) {

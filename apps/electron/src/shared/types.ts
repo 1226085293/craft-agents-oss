@@ -531,6 +531,7 @@ export interface ElectronAPI {
     description?: string
     builtin?: boolean
   }>>
+  agentsGet(workspaceId: string, id: string): Promise<Record<string, unknown>>
   agentsSave(workspaceId: string, agent: Record<string, unknown>): Promise<{ id: string }>
   agentsDelete(workspaceId: string, id: string): Promise<{ ok: boolean }>
   onAgentsChanged(callback: (payload: { workspaceId: string }) => void): () => void

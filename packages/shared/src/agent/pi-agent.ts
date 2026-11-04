@@ -1336,7 +1336,7 @@ export class PiAgent extends BaseAgent {
     // These tools (SubmitPlan, config_validate, source auth, call_llm, etc.)
     // are executed in the main process when the LLM calls them.
     this.assertBackendSessionToolParity();
-    let sessionToolDefs = getSessionToolProxyDefs();
+    let sessionToolDefs = getSessionToolProxyDefs(this.config.session?.role === 'supervisor' ? 'supervisor' : 'worker');
 
     // Hide `browser_tool` when the user has disabled the built-in browser
     // tool, so the advertised tool set matches the configured capability.
@@ -3763,6 +3763,17 @@ export class PiAgent extends BaseAgent {
 
       // Build system prompt
       const projectContext = this.resolveProjectContext();
+      // Agent persona + skill ceiling come from the session's frozen snapshot,
+      // never from the live profile: editing an agent must not rewrite the
+      // prompt of a session that already exists (that would also break cache).
+      const agentSnapshot = this.config.session?.agentSnapshot;
+      const personaBlock = agentSnapshot?.persona?.trim()
+        ? `<persona>
+${agentSnapshot.persona.trim()}
+</persona>`
+        : undefined;
+      const allowedSkillSlugs =
+        agentSnapshot?.skills?.mode === 'allowlist' ? agentSnapshot.skills.slugs : undefined;
       const systemPrompt = getSystemPrompt(
         undefined, // pinnedPreferencesPrompt
         this.config.debugMode,
@@ -3775,6 +3786,8 @@ export class PiAgent extends BaseAgent {
         // Event Center: enabled listeners, so the agent knows what it can
         // subscribe to. '' when nothing is enabled.
         buildEventsBlock(this.config.workspace.rootPath),
+        personaBlock,
+        allowedSkillSlugs,
       );
 
       // Build context from sources

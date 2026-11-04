@@ -356,6 +356,31 @@ export interface SessionToolContext {
     askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;
   };
 
+  /** Task-board surface (supervisor only). */
+  taskTools?: {
+    create(payload: {
+      name: string;
+      instruction: string;
+      assigneeAgentId?: string;
+      parentTaskId?: string;
+      dependsOn?: string[];
+      priority?: number;
+    }): Promise<{ id: string }>;
+    list(params: { status?: string; limit?: number }): Promise<
+      Array<{ id: string; name: string; status: string; pauseReason?: string | null }>
+    >;
+    get(identifier: string, includeJournal: boolean): Promise<unknown | null>;
+    update(
+      identifier: string,
+      patch: { status?: string; pauseReason?: string; assigneeAgentId?: string; error?: string },
+    ): Promise<{ status: string }>;
+    handoff(
+      identifier: string,
+      handoff: Record<string, unknown>,
+      fromSessionId: string,
+    ): Promise<{ passed: boolean; reasons: string[]; status: string }>;
+  };
+
   /** Get detailed info about a session. Defaults to current session if no ID given. Injected by backend. */
   getSessionInfo?(sessionId?: string): SessionInfo | null;
 

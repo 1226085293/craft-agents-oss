@@ -413,6 +413,8 @@ export const RPC_CHANNELS = {
   agents: {
     /** Role profiles for the picker (built-in default first). */
     LIST: 'agents:list',
+    /** One profile in full (the picker list is deliberately flat). */
+    GET: 'agents:get',
     /** Create or update one profile (built-in default edits `defaults`). */
     SAVE: 'agents:save',
     /** Soft-delete a profile. */

@@ -35,6 +35,7 @@ export interface SettingsPageDefinition {
  * time via t(). Do NOT call i18n.t() here — this module loads before i18n init.
  */
 export const SETTINGS_PAGES = [
+  { id: 'agents' as const, labelKey: 'settings.agents.title', descriptionKey: 'settings.agents.description' },
   { id: 'app' as const, labelKey: 'settings.app.title', descriptionKey: 'settings.app.description' },
   // One entry for the whole in-process LLM gateway. Its four views live behind
   // a segmented control inside the page rather than as four more nav rows — the

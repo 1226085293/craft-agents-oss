@@ -27,12 +27,16 @@ import {
   applyScope,
   buildAgentSnapshot,
   loadAgents,
+  migrateAgentsFile,
   resolveSessionDefaults,
   type AgentSnapshot,
 } from '@craft-agent/shared/agents'
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
+import { readJournal } from '@craft-agent/shared/tasks'
+import { startWatchdog } from '../tasks/task-watchdog.ts'
 import { SupervisorRuntime } from '../routing/supervisor-runtime.ts'
+import { SUPERVISOR_TURN_TIMEOUT_MS } from '@craft-agent/shared/agents/supervisor'
 import { buildAgentToolBindings } from './agent-tools-bindings.ts'
 import { kindRouting, registerAttachmentName, pickStrategyModel, type ModelRequestKind, type ModelWindow } from '@craft-agent/shared/config'
 import { generateShortId } from '@craft-agent/shared/automations/resolve-config-path'
@@ -2002,9 +2006,38 @@ export class SessionManager implements ISessionManager {
     managed.isProcessing = processing
     if (!was && processing) {
       sessionRuntimeHooks.onSessionStarted()
+      // A supervisor turn must stay short: it either dispatches and ends, or
+      // answers. Without a cap, one slow model call parks every queued event
+      // behind it (the backlog only drains when the supervisor is idle).
+      if (managed.role === 'supervisor') this.armSupervisorTurnCap(managed)
     } else if (was && !processing) {
       sessionRuntimeHooks.onSessionStopped()
+      this.clearSupervisorTurnCap(managed)
     }
+  }
+
+  /** Turn caps, keyed by session id. */
+  private readonly supervisorTurnCaps = new Map<string, ReturnType<typeof setTimeout>>()
+
+  private armSupervisorTurnCap(managed: ManagedSession): void {
+    this.clearSupervisorTurnCap(managed)
+    const timer = setTimeout(() => {
+      if (!managed.isProcessing || managed.role !== 'supervisor') return
+      sessionLog.warn(`[supervisor] turn exceeded the cap in ${managed.id}; closing it`)
+      void this.cancelProcessing(managed.id, true).catch((error) => {
+        sessionLog.warn('[supervisor] failed to close an over-long turn', { error })
+      })
+    }, SUPERVISOR_TURN_TIMEOUT_MS)
+    // Node keeps the process alive for a pending timer; this one is disposable.
+    timer.unref?.()
+    this.supervisorTurnCaps.set(managed.id, timer)
+  }
+
+  private clearSupervisorTurnCap(managed: ManagedSession): void {
+    const timer = this.supervisorTurnCaps.get(managed.id)
+    if (!timer) return
+    clearTimeout(timer)
+    this.supervisorTurnCaps.delete(managed.id)
   }
 
   /** Wait until initialize() has completed (sessions loaded from disk).
@@ -4049,6 +4082,20 @@ export class SessionManager implements ISessionManager {
     //
     // `wsConfig.defaults.*` is only a legacy tier, for an upgrade that runs
     // before the v0->v1 agents migration has touched the workspace.
+    // One-shot v0->v1: absorb the legacy workspace defaults and the old gateway
+    // `defaultStrategy` into the default agent. Guarded by the file version, so
+    // every later create is a no-op.
+    try {
+      migrateAgentsFile(workspaceRootPath, {
+        strategy: wsConfig?.defaults?.strategy,
+        model: wsConfig?.defaults?.model,
+        permissionMode: wsConfig?.defaults?.permissionMode,
+        thinkingLevel: wsConfig?.defaults?.thinkingLevel,
+      })
+    } catch (error) {
+      sessionLog.warn('agents migration failed; continuing with legacy defaults', { error })
+    }
+
     const resolvedDefaults = resolveSessionDefaults({
       workspaceRoot: workspaceRootPath,
       agentId: options?.agentId,
@@ -5391,6 +5438,56 @@ export class SessionManager implements ISessionManager {
             return runtime.dispatch({ fromSessionId: managed.id, ...params })
           },
         })
+
+        // Task board surface: the supervisor creates and advances tasks. Kept
+        // separate from `agentTools` because it is only meaningful for a
+        // supervisor, and the tool table already hides it from workers.
+        managed.agent.taskTools = {
+          create: async (payload) => {
+            const task = this.getTasks(managed.workspace.id).create({
+              name: payload.name,
+              instruction: payload.instruction,
+              assigneeAgentId: payload.assigneeAgentId,
+              parentTaskId: payload.parentTaskId,
+              dependsOn: payload.dependsOn,
+              priority: payload.priority as 0 | 1 | 2 | 3 | 4 | undefined,
+              supervisorSessionId: managed.id,
+              toolCallId: randomUUID(),
+            })
+            return { id: task.id }
+          },
+          list: async (params) => {
+            const tasks = this.getTasks(managed.workspace.id).list(params.status as never)
+            return tasks.slice(0, params.limit ?? 20).map((t) => ({
+              id: t.id,
+              name: t.name,
+              status: t.status,
+              pauseReason: t.pauseReason ?? null,
+            }))
+          },
+          get: async (identifier, includeJournal) => {
+            const task = this.getTasks(managed.workspace.id).get(identifier)
+            if (!task) return null
+            if (!includeJournal) return task
+            return { task, journal: readJournal(managed.workspace.rootPath, identifier) }
+          },
+          update: async (identifier, patch) => {
+            const task = this.getTasks(managed.workspace.id).setStatus(
+              identifier,
+              (patch.status ?? 'running') as never,
+              { pauseReason: patch.pauseReason as never, error: patch.error },
+            )
+            return { status: task.status }
+          },
+          handoff: async (identifier, handoff, fromSessionId) => {
+            const result = this.getTasks(managed.workspace.id).reportHandoff(
+              identifier,
+              handoff,
+              fromSessionId,
+            )
+            return { passed: result.passed, reasons: result.reasons, status: result.task.status }
+          },
+        }
       }
 
       sessionLog.info(`Created ${provider} agent for session ${managed.id} (model: ${backendContext.resolvedModel})${managed.sdkSessionId ? ' (resuming)' : ''}`)
@@ -6074,6 +6171,9 @@ export class SessionManager implements ISessionManager {
 
         const session = await this.createSession(managed.workspace.id, {
           name: request.name,
+          agentId: request.agentId,
+          role: request.role,
+          spawnDepth: (managed.spawnDepth ?? 0) + 1,
           llmConnection: request.llmConnection ?? managed.llmConnection,
           model: request.model ?? managed.model,
           enabledSourceSlugs: request.enabledSourceSlugs ?? managed.enabledSourceSlugs,
@@ -6522,6 +6622,8 @@ ${request.prompt}`;
   private readonly taskServices = new Map<string, TaskService>()
   /** One supervisor runtime per workspace (holds the event backlog). */
   private readonly supervisorRuntimes = new Map<string, SupervisorRuntime>()
+  /** Per-workspace watchdog disposers. */
+  private readonly watchdogStops = new Map<string, () => void>()
 
   /** Task service for a workspace. */
   getTasks(workspaceId: string): TaskService {
@@ -6538,6 +6640,35 @@ ${request.prompt}`;
         })
       },
     })
+    // A task left `running` by a process that died did not fail; mark it
+    // resumable once, when the workspace's task service comes up.
+    try {
+      const recovered = service.recoverAfterRestart()
+      if (recovered.length > 0) {
+        sessionLog.info(`[tasks] recovered ${recovered.length} task(s) after restart`)
+      }
+    } catch (error) {
+      sessionLog.warn('task restart recovery failed', { error })
+    }
+
+    // Independent control loop: pure rules on a timer, never inside a session
+    // turn. A stuck supervisor therefore cannot stop the checks.
+    try {
+      const stop = startWatchdog({
+        listTasks: () => service.list(),
+        sessionExists: (sessionId) => this.sessions.has(sessionId),
+        pause: (id, reason, note) => {
+          service.setStatus(id, 'paused', { pauseReason: reason, error: note })
+        },
+        notify: (sessionId, text) => {
+          void this.sendMessage(sessionId, text).catch(() => undefined)
+        },
+      })
+      this.watchdogStops.set(workspaceId, stop)
+    } catch (error) {
+      sessionLog.warn('failed to start the task watchdog', { error })
+    }
+
     this.taskServices.set(workspaceId, service)
     return service
   }

@@ -152,3 +152,107 @@ export async function handleAskUser(
     );
   }
 }
+
+// ------------------------------------------------------------
+// Task tools (supervisor only)
+// ------------------------------------------------------------
+
+/** Create a task and return its human-facing id. */
+export async function handleTaskCreate(
+  ctx: SessionToolContext,
+  args: { name: string; instruction: string; assigneeAgentId?: string; parentTaskId?: string; dependsOn?: string[]; priority?: number },
+): Promise<ToolResult> {
+  if (!ctx.taskTools?.create) return errorResponse('task_create is only available to a supervisor session.');
+  if (!args.name?.trim()) return errorResponse('name is required.');
+  if (!args.instruction?.trim()) return errorResponse('instruction is required — it is immutable once created.');
+  try {
+    const { id } = await ctx.taskTools.create({
+      name: args.name.trim(),
+      instruction: args.instruction.trim(),
+      assigneeAgentId: args.assigneeAgentId,
+      parentTaskId: args.parentTaskId,
+      dependsOn: args.dependsOn,
+      priority: args.priority,
+    });
+    return successResponse(`Task ${id} created.`);
+  } catch (error) {
+    return errorResponse(`Failed to create the task: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+}
+
+/** List the workspace's tasks, newest activity first. */
+export async function handleTaskList(
+  ctx: SessionToolContext,
+  args: { status?: string; limit?: number },
+): Promise<ToolResult> {
+  if (!ctx.taskTools?.list) return errorResponse('task_list is only available to a supervisor session.');
+  try {
+    const tasks = await ctx.taskTools.list({ status: args.status, limit: args.limit ?? 20 });
+    if (tasks.length === 0) return successResponse('No tasks.');
+    const lines = tasks.map(
+      (t) => `- ${t.id} [${t.status}] ${t.name}${t.pauseReason ? ` (paused: ${t.pauseReason})` : ''}`,
+    );
+    return successResponse(lines.join('\n'));
+  } catch (error) {
+    return errorResponse(`Failed to list tasks: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+}
+
+/** One task, with its handoff trail. */
+export async function handleTaskGet(
+  ctx: SessionToolContext,
+  args: { identifier: string; includeJournal?: boolean },
+): Promise<ToolResult> {
+  if (!ctx.taskTools?.get) return errorResponse('task_get is only available to a supervisor session.');
+  if (!args.identifier?.trim()) return errorResponse('identifier is required.');
+  try {
+    const task = await ctx.taskTools.get(args.identifier, args.includeJournal === true);
+    if (!task) return errorResponse(`Task not found: ${args.identifier}`);
+    return successResponse(JSON.stringify(task, null, 2));
+  } catch (error) {
+    return errorResponse(`Failed to read the task: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+}
+
+/** Advance or annotate a task. Illegal transitions are refused by the service. */
+export async function handleTaskUpdate(
+  ctx: SessionToolContext,
+  args: { identifier: string; status?: string; pauseReason?: string; assigneeAgentId?: string; error?: string },
+): Promise<ToolResult> {
+  if (!ctx.taskTools?.update) return errorResponse('task_update is only available to a supervisor session.');
+  if (!args.identifier?.trim()) return errorResponse('identifier is required.');
+  try {
+    const result = await ctx.taskTools.update(args.identifier, {
+      status: args.status,
+      pauseReason: args.pauseReason,
+      assigneeAgentId: args.assigneeAgentId,
+      error: args.error,
+    });
+    return successResponse(`Task ${args.identifier} → ${result.status}.`);
+  } catch (error) {
+    return errorResponse(`Failed to update the task: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+}
+
+/** Record a handoff produced by another session (the rule gate still applies). */
+export async function handleTaskHandoff(
+  ctx: SessionToolContext,
+  args: { identifier: string; handoff: Record<string, unknown>; fromSessionId?: string },
+): Promise<ToolResult> {
+  if (!ctx.taskTools?.handoff) return errorResponse('task_handoff is only available to a supervisor session.');
+  if (!args.identifier?.trim()) return errorResponse('identifier is required.');
+  try {
+    const result = await ctx.taskTools.handoff(
+      args.identifier,
+      args.handoff,
+      args.fromSessionId ?? ctx.sessionId,
+    );
+    return successResponse(
+      result.passed
+        ? `Handoff accepted; task is now ${result.status}.`
+        : `Handoff rejected: ${result.reasons.join('; ')}`,
+    );
+  } catch (error) {
+    return errorResponse(`Failed to record the handoff: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+}

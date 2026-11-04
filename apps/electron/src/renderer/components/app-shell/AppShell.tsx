@@ -1696,6 +1696,28 @@ function AppShellContent({
   }, [projectFilter, activeFolderScopeId, projectScopeProjectId, projectFolderIds, rootFolderIds])
 
   // Create a new chat and select it
+  /**
+   * Start a session on the supervisor.
+   *
+   * Same creation path as a normal chat, but the record carries
+   * `role: 'supervisor'`, so the tool table is pruned and dispatch is available.
+   */
+  const handleStartSession = useCallback(async (newPanel: boolean = false) => {
+    if (!activeWorkspace) return
+    setSearchActive(false)
+    setSearchQuery('')
+    try {
+      const workspaceId = activeWorkspace.id
+      const session = await window.electronAPI.createSession(workspaceId, {
+        name: t('session.supervisorDefaultName', { defaultValue: '督导' }),
+        role: 'supervisor',
+      } as never)
+      navigate(routes.view.allSessions(session.id), newPanel ? { newPanel: true } : undefined)
+    } catch (error) {
+      console.warn('[AppShell] failed to start a supervisor session:', error)
+    }
+  }, [activeWorkspace, t])
+
   const handleNewChat = useCallback((newPanel: boolean = false) => {
     if (!activeWorkspace) return
 
@@ -2740,6 +2762,14 @@ function AppShellContent({
                             <span className="truncate">{t("session.newSession")}</span>
                           </Button>
                         </ContextMenuTrigger>
+                        <Button
+                          variant="ghost"
+                          onClick={() => handleStartSession()}
+                          className="mt-1 flex h-[28px] w-full items-center justify-center gap-2 rounded-[6px] px-2 text-[12px] font-normal text-muted-foreground transition-colors hover:bg-foreground/[0.08] hover:text-foreground"
+                        >
+                          <Bot className="h-3.5 w-3.5 shrink-0" />
+                          <span className="truncate">{t("session.startSession", { defaultValue: "开始会话" })}</span>
+                        </Button>
                         <StyledContextMenuContent>
                           <ContextMenuProvider>
                             <SidebarMenu type="newSession" />

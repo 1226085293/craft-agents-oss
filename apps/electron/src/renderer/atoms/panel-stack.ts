@@ -71,6 +71,8 @@ export function getPanelTypeFromRoute(route: ViewRoute): PanelType {
       return 'session'
     case 'sources':
       return 'source'
+    case 'tasks':
+      return 'session'
     case 'settings':
       return 'settings'
     case 'skills':

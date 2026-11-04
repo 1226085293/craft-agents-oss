@@ -23,6 +23,7 @@ import type { HandlerDeps } from '../handler-deps';
 
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.agents.LIST,
+  RPC_CHANNELS.agents.GET,
   RPC_CHANNELS.agents.SAVE,
   RPC_CHANNELS.agents.DELETE,
   RPC_CHANNELS.agents.CHANGED,
@@ -72,6 +73,20 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
     // The built-in default is materialized, never stored: exactly one default.
     return [toOption(getDefaultAgent(file)), ...file.agents.filter((a) => !a.deletedAt).map(toOption)];
   });
+
+  server.handle(
+    RPC_CHANNELS.agents.GET,
+    async (_ctx, payload: { workspaceId: string; id: string }) => {
+      const workspace = requireWorkspace(payload.workspaceId);
+      const file = loadAgents(workspace.rootPath);
+      const profile =
+        payload.id === DEFAULT_AGENT_ID
+          ? getDefaultAgent(file)
+          : file.agents.find((a) => a.id === payload.id && !a.deletedAt);
+      if (!profile) throw new Error(`Agent not found: ${payload.id}`);
+      return profile;
+    },
+  );
 
   server.handle(
     RPC_CHANNELS.agents.SAVE,

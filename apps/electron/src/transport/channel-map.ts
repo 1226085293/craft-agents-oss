@@ -387,6 +387,7 @@ export const CHANNEL_MAP = {
   updateModelEnabled: invoke(RPC_CHANNELS.llmConnections.UPDATE_MODEL_ENABLED),
   // Multi-agent: role profiles + task board
   agentsList: invoke(RPC_CHANNELS.agents.LIST),
+  agentsGet: invoke(RPC_CHANNELS.agents.GET),
   agentsSave: invoke(RPC_CHANNELS.agents.SAVE),
   agentsDelete: invoke(RPC_CHANNELS.agents.DELETE),
   tasksList: invoke(RPC_CHANNELS.taskboard.LIST),

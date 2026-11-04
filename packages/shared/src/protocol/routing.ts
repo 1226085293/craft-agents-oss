@@ -70,6 +70,7 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   RPC_CHANNELS.taskboard.HANDOFF,
   RPC_CHANNELS.taskboard.CHANGED,
   RPC_CHANNELS.agents.LIST,
+  RPC_CHANNELS.agents.GET,
   RPC_CHANNELS.agents.SAVE,
   RPC_CHANNELS.agents.DELETE,
   RPC_CHANNELS.tasks.GET_OUTPUT,

@@ -13,7 +13,7 @@
  */
 
 import * as React from 'react'
-import { Search, Inbox, ChevronDown, Check } from 'lucide-react'
+import { Search, Inbox, ChevronDown, Check, ArrowDownWideNarrow, ArrowUpNarrowWide } from 'lucide-react'
 import { SimpleDropdown, SimpleDropdownItem } from '@craft-agent/ui'
 import type { EventMetaDto } from '@craft-agent/shared/protocol/dto'
 
@@ -30,6 +30,8 @@ export interface EventsListPanelProps {
  * non-default choices of the same question the user asks about a row.
  */
 type ReceptionFilter = '' | 'has-recipients' | 'undelivered'
+/** Sort order of the list, by receivedAt. Newest-first is the default. */
+type SortOrder = 'desc' | 'asc'
 
 interface FilterState {
   source: string
@@ -99,6 +101,47 @@ function FilterMenu({
   )
 }
 
+/** Sort selector — same styling as FilterMenu but a two-value toggle. */
+function SortMenu({
+  value,
+  onChange,
+}: {
+  value: SortOrder
+  onChange: (next: SortOrder) => void
+}): React.ReactElement {
+  const label = value === 'desc' ? '最新优先' : '最早优先'
+  const Icon = value === 'desc' ? ArrowDownWideNarrow : ArrowUpNarrowWide
+  return (
+    <SimpleDropdown
+      align="start"
+      trigger={
+        <button
+          type="button"
+          className="h-8 px-2.5 inline-flex items-center gap-1.5 text-xs rounded-md border border-transparent bg-muted/40 text-muted-foreground hover:text-foreground hover:bg-foreground/5 transition-colors"
+        >
+          <Icon className="h-3.5 w-3.5 shrink-0 opacity-60" />
+          <span>{label}</span>
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-60" />
+        </button>
+      }
+    >
+      {(['desc', 'asc'] as const).map((order) => {
+        const OrderIcon = order === 'desc' ? ArrowDownWideNarrow : ArrowUpNarrowWide
+        const optionLabel = order === 'desc' ? '最新优先' : '最早优先'
+        return (
+          <SimpleDropdownItem key={order} onClick={() => onChange(order)}>
+            <span className="flex items-center gap-1.5">
+              <Check className={`h-3 w-3 ${value === order ? 'opacity-100' : 'opacity-0'}`} />
+              <OrderIcon className="h-3.5 w-3.5 opacity-60" />
+              {optionLabel}
+            </span>
+          </SimpleDropdownItem>
+        )
+      })}
+    </SimpleDropdown>
+  )
+}
+
 export function EventsListPanel({
   workspaceId,
   selectedEventId,
@@ -108,6 +151,7 @@ export function EventsListPanel({
   const [events, setEvents] = React.useState<EventMetaDto[]>([])
   const [search, setSearch] = React.useState('')
   const [filters, setFilters] = React.useState<FilterState>(EMPTY_FILTERS)
+  const [sortOrder, setSortOrder] = React.useState<SortOrder>('desc')
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
 
@@ -160,6 +204,13 @@ export function EventsListPanel({
   }, [workspaceId, filters.source])
 
   const sources = React.useMemo(() => Array.from(new Set(events.map((e) => e.source))).sort(), [events])
+
+  // Sort is a pure view concern: the store query returns newest-first and the
+  // broadcast path prepends, so reversing once here covers both paths.
+  const sortedEvents = React.useMemo(
+    () => (sortOrder === 'desc' ? events : [...events].sort((a, b) => a.receivedAt - b.receivedAt)),
+    [events, sortOrder],
+  )
   // Types are a sub-classification *within* a source: only meaningful once a
   // specific source is selected, and the option list must not mix types from
   // unrelated listeners.
@@ -222,6 +273,7 @@ export function EventsListPanel({
               }))
             }
           />
+          <SortMenu value={sortOrder} onChange={setSortOrder} />
         </div>
       </div>
 
@@ -236,7 +288,7 @@ export function EventsListPanel({
           </div>
         )}
 
-        {events.map((event) => {
+        {sortedEvents.map((event) => {
           const selected = event.id === selectedEventId
           return (
             <button
@@ -252,12 +304,23 @@ export function EventsListPanel({
               }`}
               style={{ width: 'calc(100% - 8px)' }}
             >
-              <div className="flex items-center gap-2 mb-1">
-                <span className="text-[11px] leading-4 px-1.5 rounded bg-muted text-muted-foreground shrink-0">
+              {/* Primary: title + summary carry the row; metadata sinks to the
+                  bottom line so scanning matches reading order. */}
+              <div className="text-sm leading-5 truncate">{event.title}</div>
+              {event.summary && (
+                <div className="text-[12px] leading-4 text-foreground/55 truncate mt-0.5">
+                  {event.summary}
+                </div>
+              )}
+              <div className="flex items-center gap-1.5 mt-1 text-[11px] leading-4 text-muted-foreground">
+                <span className="truncate" title={`${event.source} · ${event.type}`}>
+                  {event.source}
+                </span>
+                <span className="opacity-50 shrink-0">·</span>
+                <span className="truncate" title={event.type}>
                   {event.type}
                 </span>
-                <span className="text-[12px] text-muted-foreground truncate">{event.source}</span>
-                <span className="ml-auto text-[12px] text-muted-foreground/80 shrink-0 tabular-nums">
+                <span className="ml-auto shrink-0 tabular-nums text-muted-foreground/80">
                   {formatTime(event.receivedAt)}
                 </span>
                 <span
@@ -268,12 +331,6 @@ export function EventsListPanel({
                   title={event.delivered ? '已接收' : '未被接收'}
                 />
               </div>
-              <div className="text-sm leading-5 truncate">{event.title}</div>
-              {event.summary && (
-                <div className="text-[12px] leading-4 text-foreground/55 truncate mt-0.5">
-                  {event.summary}
-                </div>
-              )}
             </button>
           )
         })}

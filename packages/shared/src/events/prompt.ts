@@ -13,8 +13,13 @@ import { parseManifest } from './manifest.ts';
 export interface EventPromptEntry {
   id: string;
   name: string;
+  /** One-line description from the manifest; falls back to event types when absent. */
+  description?: string;
   eventTypes: string[];
 }
+
+/** The block rides every session prompt, so a description must stay one line. */
+const MAX_DESCRIPTION_CHARS = 120;
 
 /** Read enabled listeners straight from disk (no supervisor dependency). */
 export function readEnabledListeners(workspaceRootPath: string): EventPromptEntry[] {
@@ -48,6 +53,7 @@ export function readEnabledListeners(workspaceRootPath: string): EventPromptEntr
       entries.push({
         id: parsed.manifest.id,
         name: parsed.manifest.name,
+        ...(parsed.manifest.description ? { description: parsed.manifest.description } : {}),
         eventTypes: parsed.manifest.eventTypes,
       });
     } catch {
@@ -64,16 +70,25 @@ export function readEnabledListeners(workspaceRootPath: string): EventPromptEntr
 export function formatEventsBlock(entries: EventPromptEntry[]): string {
   if (entries.length === 0) return '';
 
+  // The id leads: it is what `subscribe_event` takes. Name and description are
+  // there so the model can tell which listener is worth subscribing to. When the
+  // description already names the listener, printing both reads like a stutter.
   const lines = entries.map((entry) => {
     const types = entry.eventTypes.length ? entry.eventTypes.join(', ') : '(any)';
-    return `- ${entry.name}（\`${entry.id}\`）→ ${types}`;
+    const blurb = entry.description?.trim().replace(/\s+/g, ' ').slice(0, MAX_DESCRIPTION_CHARS);
+    const label = !blurb
+      ? entry.name
+      : blurb.includes(entry.name)
+        ? blurb
+        : `${entry.name}：${blurb}`;
+    return `- \`${entry.id}\`（${label}）→ ${types}`;
   });
 
   return [
     '',
     '## 事件',
     '',
-    '以下事件监听器已启用。默认你**不会**收到任何事件；需要时用 `subscribe_event` 订阅：',
+    '以下事件监听器已启用。默认你**不会**收到任何事件；需要时用 `subscribe_event` 订阅（参数是上面的 id）：',
     '',
     ...lines,
     '',

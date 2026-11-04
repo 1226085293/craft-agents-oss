@@ -6,12 +6,19 @@ import { buildEventsBlock, formatEventsBlock, readEnabledListeners } from './pro
 
 let root: string
 
-function writeListener(id: string, name: string, types: string[]): void {
+function writeListener(id: string, name: string, types: string[], description?: string): void {
   const dir = join(root, 'events', id)
   mkdirSync(dir, { recursive: true })
   writeFileSync(
     join(dir, 'manifest.json'),
-    JSON.stringify({ spec: 'craft-listener/1', id, name, version: '1.0.0', eventTypes: types }),
+    JSON.stringify({
+      spec: 'craft-listener/1',
+      id,
+      name,
+      version: '1.0.0',
+      eventTypes: types,
+      ...(description ? { description } : {}),
+    }),
     'utf8',
   )
 }
@@ -61,6 +68,42 @@ describe('event prompt block', () => {
     writeListener('a', 'A', ['x.y'])
     setEnabled(['a'])
     expect(readEnabledListeners(root)).toEqual([{ id: 'a', name: 'A', eventTypes: ['x.y'] }])
+  })
+
+  it('leads each line with the id and avoids repeating it in the blurb', () => {
+    writeListener('qqmail-idle', 'QQ 邮箱', ['mail.received'], '监听 QQ 邮箱新邮件')
+    setEnabled(['qqmail-idle'])
+
+    const line = formatEventsBlock(readEnabledListeners(root))
+      .split('\n')
+      .find((row) => row.startsWith('- '))
+    expect(line).toBe('- `qqmail-idle`（监听 QQ 邮箱新邮件）→ mail.received')
+  })
+
+  it('carries the manifest description into the block', () => {
+    writeListener('qqmail-idle', 'QQ 邮箱', ['mail.received'], '监听 QQ 邮箱新邮件')
+    setEnabled(['qqmail-idle'])
+    expect(readEnabledListeners(root)[0]?.description).toBe('监听 QQ 邮箱新邮件')
+  })
+
+  it('falls back to the bare name when the manifest has no description', () => {
+    writeListener('plain', 'Plain', ['p.q'])
+    setEnabled(['plain'])
+    const line = formatEventsBlock(readEnabledListeners(root)).split('\n').find((row) => row.startsWith('- '))
+    expect(line).toBe('- `plain`（Plain）→ p.q')
+  })
+
+  it('keeps a chatty description on one line and bounded', () => {
+    var long =
+      '\u76d1\u542c QQ \u90ae\u7bb1\u65b0\u90ae\u4ef6\u3002\n\u8fd9\u662f\u4e00\u6bb5\u6362\u884c\u540e\u7684\u5185\u5bb9\uff0c\u4e0d\u5e94\u8be5\u628a\u6b63\u6587\u6491\u6210\u591a\u884c\u3002\n\n\u8fd8\u6709\u7b2c\u4e09\u6bb5 '
+      + 'x'.repeat(200)
+    writeListener('noisy', 'Noisy', ['n.q'], long)
+    setEnabled(['noisy'])
+    const line = formatEventsBlock(readEnabledListeners(root)).split('\n').find((row) => row.startsWith('- '))!
+    expect(line).not.toContain('\n')
+    expect(line).not.toContain('\u3002\u8fd9')
+    expect(line).toContain('\u4e0d\u5e94\u8be5')
+    expect(line.length).toBeLessThan(220)
   })
 
   it('formats an explicit entry list', () => {

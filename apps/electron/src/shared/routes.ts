@@ -87,6 +87,14 @@ export const routes = {
     allSessions: (sessionId?: string) =>
       sessionId ? `allSessions/session/${sessionId}` as const : 'allSessions' as const,
 
+    /**
+     * Task board (multi-agent tasks).
+     *
+     * `taskId` selects one task's detail; omitted shows the grouped list.
+     */
+    tasks: (taskId?: string) =>
+      taskId ? `tasks/${encodeURIComponent(taskId)}` as const : 'tasks' as const,
+
     /** Archived view (sessions navigator, archived filter) */
     archived: (sessionId?: string) =>
       sessionId ? `archived/session/${sessionId}` as const : 'archived' as const,

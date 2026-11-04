@@ -160,7 +160,22 @@ export function EventsListPanel({
   }, [workspaceId, filters.source])
 
   const sources = React.useMemo(() => Array.from(new Set(events.map((e) => e.source))).sort(), [events])
-  const types = React.useMemo(() => Array.from(new Set(events.map((e) => e.type))).sort(), [events])
+  // Types are a sub-classification *within* a source: only meaningful once a
+  // specific source is selected, and the option list must not mix types from
+  // unrelated listeners.
+  const types = React.useMemo(
+    () =>
+      filters.source
+        ? Array.from(new Set(events.filter((e) => e.source === filters.source).map((e) => e.type))).sort()
+        : [],
+    [events, filters.source],
+  )
+
+  // Switching source invalidates the type filter — the old type may not exist
+  // in the new source, and it would silently filter everything out.
+  const setSource = (next: string) => {
+    setFilters((prev) => (prev.source === next ? prev : { ...prev, source: next, type: '' }))
+  }
 
   const RECEPTION_OPTIONS: { value: ReceptionFilter; label: string }[] = [
     { value: 'has-recipients', label: '有接收方' },
@@ -185,14 +200,16 @@ export function EventsListPanel({
             value={filters.source}
             placeholder="全部来源"
             options={sources}
-            onChange={(next) => setFilters((prev) => ({ ...prev, source: next }))}
+            onChange={setSource}
           />
-          <FilterMenu
-            value={filters.type}
-            placeholder="全部类型"
-            options={types}
-            onChange={(next) => setFilters((prev) => ({ ...prev, type: next }))}
-          />
+          {filters.source && (
+            <FilterMenu
+              value={filters.type}
+              placeholder="全部类型"
+              options={types}
+              onChange={(next) => setFilters((prev) => ({ ...prev, type: next }))}
+            />
+          )}
           <FilterMenu
             value={RECEPTION_OPTIONS.find((o) => o.value === filters.reception)?.label ?? ''}
             placeholder="接收状态"

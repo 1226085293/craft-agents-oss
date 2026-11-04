@@ -43,6 +43,7 @@ export type NavigatorType =
   | 'projects'
   | 'pages'
   | 'events'
+  | 'tasks'
   | 'settings'
 
 export interface ParsedCompoundRoute {
@@ -56,6 +57,8 @@ export interface ParsedCompoundRoute {
   automationFilter?: AutomationFilter
   /** Which section of the events navigator: the log or the listener cards. */
   eventsSection?: 'list' | 'listeners'
+  /** Selected task (only for the tasks navigator). */
+  selectedTaskId?: string | null
   /** Details page info (null for empty state) */
   details: {
     type: string
@@ -256,6 +259,21 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
         navigator: 'events',
         eventsSection: section,
         details: { type: detailsType, id: segments[3] },
+      }
+    }
+    return null
+  }
+
+  // Tasks navigator: tasks[/:id]
+  if (first === 'tasks') {
+    if (segments.length === 1) {
+      return { navigator: 'tasks', selectedTaskId: null, details: null }
+    }
+    if (segments.length === 2) {
+      return {
+        navigator: 'tasks',
+        selectedTaskId: decodeURIComponent(segments[1]),
+        details: { type: 'task', id: decodeURIComponent(segments[1]) },
       }
     }
     return null
@@ -845,7 +863,12 @@ function navigationStateToCompoundRoute(state: NavigationState): ParsedCompoundR
     }
   }
 
-  // Sessions
+  // Sessions (the only remaining variant that carries filter/details)
+  if (state.navigator !== 'sessions') {
+    // Tasks (and anything else added later) have no session fields; routing
+    // them here would silently produce an empty sessions state.
+    return { navigator: 'tasks', selectedTaskId: null, details: null }
+  }
   return {
     navigator: 'sessions',
     sessionFilter: state.filter,

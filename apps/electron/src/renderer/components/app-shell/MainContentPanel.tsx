@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAtomValue } from 'jotai'
 import { useTranslation } from 'react-i18next'
 import { Panel } from './Panel'
+import { TaskDetailPanel } from '@/components/tasks/TasksPanel'
 import { MultiSelectPanel } from './MultiSelectPanel'
 import { useAppShellContext, useActiveWorkspace } from '@/context/AppShellContext'
 import { sessionMetaMapAtom, type SessionMeta } from '@/atoms/sessions'
@@ -34,6 +35,7 @@ import {
   isPagesNavigation,
   isAutomationsNavigation,
   isEventsNavigation,
+  isTasksNavigation,
 } from '@/contexts/NavigationContext'
 import { useSessionSelection, useIsMultiSelectActive, useSelectedIds, useSelectionCount } from '@/hooks/useSession'
 import { sourceSelection, skillSelection, automationSelection } from '@/hooks/useEntitySelection'
@@ -201,6 +203,26 @@ export function MainContentPanel({
         <SettingsPageComponent />
       </Panel>
     )
+  }
+
+  // Tasks navigator - one task's detail, or a hint to pick one
+  if (isTasksNavigation(navState)) {
+    if (!navState.selectedTaskId) {
+      return wrapWithStoplight(
+        <Panel variant="grow" className={className}>
+          <div className="flex h-full items-center justify-center p-6 text-center text-xs text-muted-foreground">
+            从左侧选一个任务，查看它的交接与验收。
+          </div>
+        </Panel>
+      )
+    }
+    if (activeWorkspaceId) {
+      return wrapWithStoplight(
+        <Panel variant="grow" className={className}>
+          <TaskDetailPanel workspaceId={activeWorkspaceId} taskId={navState.selectedTaskId} />
+        </Panel>
+      )
+    }
   }
 
   // Events navigator - one event's full content, or an empty state

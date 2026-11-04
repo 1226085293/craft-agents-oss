@@ -1624,7 +1624,6 @@
   "sidebar.events": "イベント",
   "sidebar.eventList": "イベント一覧",
   "sidebar.eventListeners": "リスナー",
-
   "sidebar.unknownProject": "不明なプロジェクト",
   "sidebar.whatsNew": "新着情報",
   "sidebarMenu.addAutomation": "自動化を追加",
@@ -1932,5 +1931,12 @@
   "workspace.selectWorkspaceDesc": "このサーバー上のWorkspaceを選択するか、新規作成してください。",
   "workspace.selectWorkspacePlaceholder": "Workspaceを選択...",
   "workspace.serverAuthToken": "サーバー認証トークン",
-  "workspace.underDefaultFolder": ".craft-agentフォルダ内"
+  "workspace.underDefaultFolder": ".craft-agentフォルダ内",
+  "sidebar.tasks": "Tasks",
+  "taskboard.title": "Tasks",
+  "taskboard.empty": "No tasks yet. The supervisor creates one when work spans sessions.",
+  "taskboard.close": "Close",
+  "agent.selector.tooltip": "Role this session runs as",
+  "agent.selector.none": "Default",
+  "agent.selector.builtin": "Built-in"
 }

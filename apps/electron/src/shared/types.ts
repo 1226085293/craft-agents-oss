@@ -1198,6 +1198,16 @@ export interface EventsNavigationState {
 }
 
 /**
+ * Task board navigator: a grouped task list plus one task's detail.
+ */
+export interface TasksNavigationState {
+  navigator: 'tasks'
+  /** Selected task id, or null for the list. */
+  selectedTaskId: string | null
+  rightSidebar?: RightSidebarPanel
+}
+
+/**
  * Unified navigation state
  */
 export type NavigationState =
@@ -1209,10 +1219,15 @@ export type NavigationState =
   | ProjectsNavigationState
   | PagesNavigationState
   | EventsNavigationState
+  | TasksNavigationState
 
 export const isSessionsNavigation = (
   state: NavigationState
 ): state is SessionsNavigationState => state.navigator === 'sessions'
+
+export const isTasksNavigation = (
+  state: NavigationState
+): state is TasksNavigationState => state.navigator === 'tasks'
 
 export const isSourcesNavigation = (
   state: NavigationState
@@ -1288,6 +1303,9 @@ export const getNavigationStateKey = (state: NavigationState): string => {
   if (state.navigator === 'settings') {
     if (state.subpage === null) return 'settings'
     return `settings:${state.subpage}`
+  }
+  if (state.navigator === 'tasks') {
+    return state.selectedTaskId ? `tasks/${encodeURIComponent(state.selectedTaskId)}` : 'tasks'
   }
   // Chats
   const f = state.filter

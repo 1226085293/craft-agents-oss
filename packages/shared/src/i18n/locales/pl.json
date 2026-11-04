@@ -1624,7 +1624,6 @@
   "sidebar.events": "Zdarzenia",
   "sidebar.eventList": "Dziennik zdarzeń",
   "sidebar.eventListeners": "Nasłuchiwacze",
-
   "sidebar.unknownProject": "Nieznany projekt",
   "sidebar.whatsNew": "Co nowego",
   "sidebarMenu.addAutomation": "Dodaj automatyzację",
@@ -1932,5 +1931,12 @@
   "workspace.selectWorkspaceDesc": "Wybierz Workspace na tym serwerze lub utwórz nowy.",
   "workspace.selectWorkspacePlaceholder": "Wybierz Workspace...",
   "workspace.serverAuthToken": "Token uwierzytelniający serwera",
-  "workspace.underDefaultFolder": "w folderze .craft-agent"
+  "workspace.underDefaultFolder": "w folderze .craft-agent",
+  "sidebar.tasks": "Tasks",
+  "taskboard.title": "Tasks",
+  "taskboard.empty": "No tasks yet. The supervisor creates one when work spans sessions.",
+  "taskboard.close": "Close",
+  "agent.selector.tooltip": "Role this session runs as",
+  "agent.selector.none": "Default",
+  "agent.selector.builtin": "Built-in"
 }

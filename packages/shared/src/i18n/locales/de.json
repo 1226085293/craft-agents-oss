@@ -1624,7 +1624,6 @@
   "sidebar.events": "Ereignisse",
   "sidebar.eventList": "Ereignisprotokoll",
   "sidebar.eventListeners": "Listener",
-
   "sidebar.unknownProject": "Unbekanntes Projekt",
   "sidebar.whatsNew": "Neuigkeiten",
   "sidebarMenu.addAutomation": "Automatisierung hinzufügen",
@@ -1932,5 +1931,12 @@
   "workspace.selectWorkspaceDesc": "Workspace auf diesem Server wählen oder neuen erstellen.",
   "workspace.selectWorkspacePlaceholder": "Workspace auswählen...",
   "workspace.serverAuthToken": "Server-Authentifizierungstoken",
-  "workspace.underDefaultFolder": "im .craft-agent-Ordner"
+  "workspace.underDefaultFolder": "im .craft-agent-Ordner",
+  "sidebar.tasks": "Tasks",
+  "taskboard.title": "Tasks",
+  "taskboard.empty": "No tasks yet. The supervisor creates one when work spans sessions.",
+  "taskboard.close": "Close",
+  "agent.selector.tooltip": "Role this session runs as",
+  "agent.selector.none": "Default",
+  "agent.selector.builtin": "Built-in"
 }

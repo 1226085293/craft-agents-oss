@@ -128,10 +128,12 @@ import {
   isPagesNavigation,
   isAutomationsNavigation,
   isEventsNavigation,
+  isTasksNavigation,
   type NavigationState,
 } from "@/contexts/NavigationContext"
 import type { SettingsSubpage } from "../../../shared/types"
 import { SourcesListPanel } from "./SourcesListPanel"
+import { TasksListPanel } from '@/components/tasks/TasksPanel'
 import { EventsListPanel } from "../events/EventsListPanel"
 import { EventsListenersPanel } from "../events/EventsListenersPanel"
 import { SkillsListPanel } from "./SkillsListPanel"
@@ -1564,6 +1566,14 @@ function AppShellContent({
     navigate(routes.view.eventListeners(listenerId))
   }, [])
 
+  const handleTaskSelect = useCallback((taskId: string) => {
+    navigate(routes.view.tasks(taskId))
+  }, [])
+
+  const handleTaskClose = useCallback(() => {
+    navigate(routes.view.tasks())
+  }, [])
+
   // Open settings in its dedicated window. A missing subpage keeps the
   // navigator-only `settings` entry and resolves to the app page in the window.
   const handleSettingsClick = useCallback((subpage?: SettingsSubpage) => {
@@ -2474,6 +2484,13 @@ function AppShellContent({
                       ],
                     },
                     {
+                      id: "nav:tasks",
+                      title: t("sidebar.tasks", { defaultValue: "任务" }),
+                      icon: ListTodo,
+                      variant: isTasksNavigation(navState) ? "default" : "ghost",
+                      onClick: () => navigate(routes.view.tasks()),
+                    },
+                    {
                       id: "nav:events",
                       title: t("sidebar.events"),
                       icon: Radio,
@@ -2750,6 +2767,15 @@ function AppShellContent({
                   onSelectEvent={handleEventSelect}
                 />
               )
+            )}
+            {/* Tasks navigator: the grouped board (multi-agent tasks) */}
+            {isTasksNavigation(navState) && activeWorkspaceId && (
+              <TasksListPanel
+                workspaceId={activeWorkspaceId}
+                selectedTaskId={navState.selectedTaskId}
+                onSelect={handleTaskSelect}
+                onCloseDetail={handleTaskClose}
+              />
             )}
             {/* Content: SessionList, SourcesListPanel, or SettingsNavigator based on navigation state */}
             {/* Memory manager view replaces the sources list in the navigator */}

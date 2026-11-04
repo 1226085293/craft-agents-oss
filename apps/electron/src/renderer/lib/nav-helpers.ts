@@ -27,6 +27,9 @@ export function isDetailNavState(navState: NavigationState | null): boolean {
   switch (navState.navigator) {
     case 'sessions':
       return navState.details !== null
+    case 'tasks':
+      // The content pane shows a hint until a task is picked.
+      return navState.selectedTaskId !== null
     case 'settings':
       return navState.subpage !== null
     case 'sources':

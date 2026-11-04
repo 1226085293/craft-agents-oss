@@ -109,4 +109,31 @@ describe('ListenerSupervisor', () => {
     expect(tail).toContain('line-1')
     expect(tail).toContain('line-2')
   })
+
+  it('writes user config to config.json and hands its path via CRAFT_LISTENER_CONFIG', async () => {
+    const entry = listener('withcfg', [])
+    entry.config = { email: 'me@qq.com', authCode: 'secret-123' }
+    // The child prints the config it received back onto stdout, which lands in
+    // proc.log and proves the env → file → child chain actually closed.
+    const script = [
+      'const fs=require("fs");',
+      'const p=process.env.CRAFT_LISTENER_CONFIG;',
+      'const c=JSON.parse(fs.readFileSync(p,"utf8"));',
+      'console.log("cfg:"+c.email+":"+c.authCode);',
+      'setInterval(()=>{},1000);',
+    ].join('')
+    writeFileSync(join(entry.dir, 'echo.js'), script, 'utf8')
+    entry.manifest.runtime = { program: [process.execPath, join(entry.dir, 'echo.js')], readyTimeoutMs: 500 }
+
+    supervisor.start(entry)
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    const configPath = join(entry.dataDir, 'config.json')
+    expect(existsSync(configPath)).toBe(true)
+    const onDisk = JSON.parse(readFileSync(configPath, 'utf8'))
+    expect(onDisk).toEqual({ email: 'me@qq.com', authCode: 'secret-123' })
+
+    const log = readFileSync(join(entry.dataDir, 'proc.log'), 'utf8')
+    expect(log).toContain('cfg:me@qq.com:secret-123')
+  })
 })

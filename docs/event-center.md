@@ -71,6 +71,7 @@ Version ranges use an npm subset: `*`, `2.*`, `^1.2.3`, `~1.2.3`,
 | `CRAFT_EVENTS_TOKEN` | bearer token, regenerated every start |
 | `CRAFT_LISTENER_ID` | your id |
 | `CRAFT_LISTENER_DATA` | writable data dir |
+| `CRAFT_LISTENER_CONFIG` | path to `<dataDir>/config.json` holding the user's saved config (email, authCode…), mode 600 — only set when config is non-empty |
 
 The same address and token are published to
 `<workspace>/config/events.json` (mode 600) so you can curl by hand while

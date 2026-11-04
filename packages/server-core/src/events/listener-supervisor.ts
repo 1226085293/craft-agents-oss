@@ -122,6 +122,22 @@ export class ListenerSupervisor {
     const logPath = join(listener.dataDir, 'proc.log');
     rotateIfNeeded(logPath);
 
+    // Surface the user's saved config (email, authCode…) to the child as a
+    // file it can read — secrets stay out of the environment block. Written
+    // on every start so a config edit applies on the next enable.
+    let configPath: string | null = null;
+    if (listener.config && Object.keys(listener.config).length > 0) {
+      configPath = join(listener.dataDir, 'config.json');
+      try {
+        writeFileSync(configPath, `${JSON.stringify(listener.config, null, 2)}\n`, {
+          encoding: 'utf8',
+          mode: 0o600,
+        });
+      } catch {
+        configPath = null;
+      }
+    }
+
     const argv = program.map((part) => substitute(part, listener));
     const cwd = manifest.runtime?.cwd ? substitute(manifest.runtime.cwd, listener) : listener.dir;
 
@@ -131,6 +147,7 @@ export class ListenerSupervisor {
         ...process.env as Record<string, string>,
         ...this.options.envFor(listener.id),
         CRAFT_LISTENER_DATA: listener.dataDir,
+        ...(configPath ? { CRAFT_LISTENER_CONFIG: configPath } : {}),
       };
     } catch (error) {
       const status: ListenerRuntimeStatus = {

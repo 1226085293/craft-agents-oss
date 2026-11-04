@@ -16,7 +16,7 @@ export const EVENT_LIMITS = {
   title: 200,
   summary: 500,
   /** `body` is stored inline. Larger payloads must go through `payloadRef`. */
-  bodyBytes: 256 * 1024,
+  bodyBytes: 2 * 1024 * 1024,
   dedupeKey: 200,
   /** Per-array caps. */
   recipients: 20,

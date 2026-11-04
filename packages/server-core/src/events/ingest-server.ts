@@ -27,8 +27,12 @@ import {
 import { randomBytes } from 'node:crypto';
 import { normalizeEventInput, type CraftEventEnvelope } from '@craft-agent/shared/events/types.ts';
 
-/** Inline body cap. Larger payloads must use `payloadRef`. */
-const MAX_BODY_BYTES = 256 * 1024;
+/**
+ * Inline body cap for the whole request. Sized well above `EVENT_LIMITS.bodyBytes`
+ * because JSON escaping inflates the wire form of a large body (every newline
+ * becomes two bytes). Larger payloads must use `payloadRef`.
+ */
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
 
 /** Everything we need from the store; keeps this module testable. */
 export interface EventSink {

@@ -147,7 +147,9 @@ describe('EventIngestServer content handling', () => {
   });
 
   it('rejects an oversized body with 413', async () => {
-    const big = JSON.stringify({ type: 'mail.received', title: 'x', body: 'y'.repeat(300 * 1024) });
+    // Above the 8 MiB request cap; a body that merely exceeds the 2 MiB inline
+    // limit is a 413 from the validator, not from the reader.
+    const big = JSON.stringify({ type: 'mail.received', title: 'x', body: 'y'.repeat(9 * 1024 * 1024) });
     const res = await call(port, { body: big });
     expect(res.status).toBe(413);
   });

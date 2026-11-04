@@ -18,6 +18,7 @@ import { dirname } from 'node:path';
 import { openSqlite, type SqliteDatabase } from './sqlite.ts';
 import {
   bigramText,
+  type CraftEventAttachment,
   type CraftEventEnvelope,
   type CraftEventLink,
   type CraftEventPayloadRef,
@@ -79,6 +80,7 @@ interface EventRow {
   summary: string | null;
   recipients: string | null;
   links: string | null;
+  attachments: string | null;
   body: string | null;
   payload_kind: string | null;
   payload_path: string | null;
@@ -119,6 +121,7 @@ function toEvent(row: EventRow, includeBody: boolean): EventRecord {
     ...(row.summary ? { summary: row.summary } : {}),
     recipients: parseJsonArray<string>(row.recipients),
     links: parseJsonArray<CraftEventLink>(row.links),
+    attachments: parseJsonArray<CraftEventAttachment>(row.attachments),
     deliveries: parseJsonArray<EventDelivery>(row.deliveries),
     ...(includeBody && row.body !== null ? { body: row.body } : {}),
     ...(payloadRef ? { payloadRef } : {}),
@@ -127,7 +130,7 @@ function toEvent(row: EventRow, includeBody: boolean): EventRecord {
 }
 
 const META_COLUMNS = `e.id, e.source, e.type, e.received_at, e.occurred_at, e.title, e.summary,
-  e.recipients, e.links, e.payload_kind, e.payload_path, e.payload_size,
+  e.recipients, e.links, e.attachments, e.payload_kind, e.payload_path, e.payload_size,
   e.dedupe_key, e.delivered, e.deliveries`;
 
 export class EventStore {
@@ -161,6 +164,7 @@ export class EventStore {
         summary      TEXT,
         recipients   TEXT,
         links        TEXT,
+        attachments  TEXT,
         body         TEXT,
         search_text  TEXT,
         payload_kind TEXT,
@@ -190,6 +194,10 @@ export class EventStore {
     if (!columns.some((column) => column.name === 'deliveries')) {
       this.db.exec('ALTER TABLE events ADD COLUMN deliveries TEXT');
     }
+    // Attachment references (files a listener wrote next to the event).
+    if (!columns.some((column) => column.name === 'attachments')) {
+      this.db.exec('ALTER TABLE events ADD COLUMN attachments TEXT');
+    }
   }
 
   /**
@@ -213,8 +221,8 @@ export class EventStore {
     const insert = this.db.prepare(`
       INSERT INTO events (
         id, source, type, received_at, occurred_at, title, summary, recipients,
-        links, body, search_text, payload_kind, payload_path, payload_size, dedupe_key, delivered, deliveries
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+        links, attachments, body, search_text, payload_kind, payload_path, payload_size, dedupe_key, delivered, deliveries
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
     `);
 
     this.db.exec('BEGIN');
@@ -229,6 +237,7 @@ export class EventStore {
         event.summary ?? null,
         event.recipients.length ? JSON.stringify(event.recipients) : null,
         event.links.length ? JSON.stringify(event.links) : null,
+        event.attachments.length ? JSON.stringify(event.attachments) : null,
         event.body ?? null,
         searchText,
         event.payloadRef?.kind ?? null,

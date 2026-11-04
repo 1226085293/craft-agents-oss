@@ -953,11 +953,32 @@ export interface EventMetaDto {
   summary?: string
   recipients: string[]
   links: Array<{ rel?: string; url: string }>
+  attachments: EventAttachmentDto[]
   payloadRef?: { kind: string; path: string; size?: number }
   delivered: boolean
   /** Which sessions received this event, and when. Latest per session. */
   deliveries: EventDeliveryDto[]
 }
+
+/** One file that arrived with the event. Content is read on demand. */
+export interface EventAttachmentDto {
+  name: string
+  mime: string
+  /** Absolute path on the host, inside the workspace's `events-data`. */
+  path: string
+  size?: number
+}
+
+/**
+ * Attachment content, shaped to reuse the session preview overlays:
+ * text goes through the code/markdown/JSON viewers, images through the image
+ * overlay as a data URL, PDFs through the PDF overlay as raw bytes.
+ */
+export type EventAttachmentContentDto =
+  | { kind: 'text'; text: string; truncated: boolean; bytes: number }
+  | { kind: 'image'; dataUrl: string; bytes: number }
+  | { kind: 'pdf'; data: Uint8Array; bytes: number }
+  | { kind: 'unsupported'; reason: string; bytes: number }
 
 /** `events:get` result: metadata plus the stored body. */
 export interface EventRecordDto extends EventMetaDto {

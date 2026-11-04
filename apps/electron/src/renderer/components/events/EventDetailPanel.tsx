@@ -17,6 +17,7 @@
 import * as React from 'react'
 import { ExternalLink, Paperclip, Inbox, Send } from 'lucide-react'
 import type { EventRecordDto } from '@craft-agent/shared/protocol/dto'
+import { EventAttachments } from './EventAttachments'
 
 export interface EventDetailPanelProps {
   workspaceId: string
@@ -37,7 +38,7 @@ function DeliveryState({ delivered }: { delivered: boolean }): React.ReactElemen
 /** Small muted metadata chip in the header strip. */
 function Chip({ label, value }: { label: string; value: string }): React.ReactElement {
   return (
-    <span className="inline-flex items-center gap-1 min-w-0 text-[11px] leading-5 text-muted-foreground">
+    <span className="inline-flex items-center gap-1 min-w-0 text-[12px] leading-5 text-muted-foreground">
       <span className="opacity-70 shrink-0">{label}</span>
       <span className="text-foreground/75 truncate" title={value}>
         {value}
@@ -49,7 +50,7 @@ function Chip({ label, value }: { label: string; value: string }): React.ReactEl
 /** Metadata row — same label column as before (4-char labels need ~56px). */
 function Row({ label, children }: { label: string; children: React.ReactNode }): React.ReactElement {
   return (
-    <div className="flex gap-3 text-[13px] leading-6">
+    <div className="flex gap-3 text-[13.5px] leading-6">
       <span className="w-20 shrink-0 text-muted-foreground">{label}</span>
       <span className="min-w-0 flex-1 break-words">{children}</span>
     </div>
@@ -60,7 +61,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }):
 function SectionLabel({ children }: { children: React.ReactNode }): React.ReactElement {
   return (
     <div className="flex items-center gap-2 mb-2">
-      <span className="text-[11px] font-medium tracking-wide text-muted-foreground">{children}</span>
+      <span className="text-[12px] font-medium tracking-wide text-muted-foreground">{children}</span>
       <span className="flex-1 h-px bg-border" />
     </div>
   )
@@ -186,16 +187,16 @@ export function EventDetailPanel({
   return (
     <div className={`flex flex-col h-full ${className ?? ''}`}>
       {/* Header: title → summary → muted metadata strip → expandable details */}
-      <div className="px-4 py-3 border-b border-border">
-        <h2 className="text-[15px] font-medium leading-6 break-words">{event.title}</h2>
+      <div className="px-5 py-4 border-b border-border">
+        <h2 className="text-[16px] font-medium leading-7 break-words">{event.title}</h2>
         {event.summary && (
-          <p className="text-[13px] leading-5 text-muted-foreground mt-1">{event.summary}</p>
+          <p className="text-[13.5px] leading-6 text-muted-foreground mt-1.5">{event.summary}</p>
         )}
 
         {/* Metadata strip: delivery · source · type · time in one quiet line.
             Same label:value grammar throughout (labels in muted, values in
             foreground/75) so the line reads as one table row. */}
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2.5 text-[11px]">
+        <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1.5 mt-3 text-[12px]">
           <DeliveryState delivered={event.delivered} />
           {deliveries.length > 0 && (
             <span className="text-muted-foreground">{deliveries.length} 个会话</span>
@@ -230,18 +231,24 @@ export function EventDetailPanel({
       </div>
 
       {/* Body: the actual content, line-length capped for readability */}
-      <div className="flex-1 overflow-auto px-4 py-3">
+      <div className="flex-1 overflow-auto px-5 py-4">
         <SectionLabel>正文</SectionLabel>
         {event.body === undefined ? (
-          <p className="text-sm text-muted-foreground inline-flex items-center gap-2">
+          <p className="text-[13px] text-muted-foreground inline-flex items-center gap-2">
             <Inbox className="h-4 w-4 opacity-60" />
             该事件没有正文
           </p>
         ) : (
-          <pre className="max-w-prose text-[13px] leading-6 whitespace-pre-wrap break-words font-mono bg-muted/30 rounded-md p-3">
+          <pre className="max-w-prose text-[13.5px] leading-7 whitespace-pre-wrap break-words font-mono bg-muted/30 rounded-md p-4">
             {event.body}
           </pre>
         )}
+
+        <EventAttachments
+          workspaceId={workspaceId}
+          eventId={eventId}
+          attachments={event.attachments ?? []}
+        />
       </div>
     </div>
   )

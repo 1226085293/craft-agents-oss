@@ -13,7 +13,7 @@
  */
 
 import * as React from 'react'
-import { Search, Inbox, ChevronDown, Check, ArrowDownWideNarrow, ArrowUpNarrowWide } from 'lucide-react'
+import { Search, Inbox, ChevronDown, Check, ArrowDownWideNarrow, ArrowUpNarrowWide, Paperclip } from 'lucide-react'
 import { SimpleDropdown, SimpleDropdownItem } from '@craft-agent/ui'
 import type { EventMetaDto } from '@craft-agent/shared/protocol/dto'
 
@@ -235,18 +235,18 @@ export function EventsListPanel({
 
   return (
     <div className={className ? `flex flex-col h-full ${className}` : 'flex flex-col h-full'}>
-      <div className="px-3 py-2.5 space-y-2 border-b border-border">
+      <div className="px-3 py-3 space-y-2.5 border-b border-border">
         <div className="relative">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             placeholder="搜索事件…"
-            className="w-full h-8 pl-8 pr-2 text-sm bg-muted/40 rounded-md border border-transparent focus:border-foreground/20 focus:outline-none placeholder:text-muted-foreground/60"
+            className="w-full h-9 pl-9 pr-2.5 text-[13.5px] bg-muted/40 rounded-md border border-transparent focus:border-foreground/20 focus:outline-none placeholder:text-muted-foreground/60"
           />
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-2">
           <FilterMenu
             value={filters.source}
             placeholder="全部来源"
@@ -295,7 +295,7 @@ export function EventsListPanel({
               key={event.id}
               type="button"
               onClick={() => onSelectEvent(event.id)}
-              className={`relative w-full text-left px-3 pr-4 py-2.5 mx-1 rounded-[8px] transition-colors ${
+              className={`relative w-full text-left px-3 pr-4 py-3 mx-1 rounded-[8px] transition-colors ${
                 // Same grammar as EntityRow: faint foreground wash + a left
                 // accent rule; the accent never fills the whole row.
                 selected
@@ -307,9 +307,11 @@ export function EventsListPanel({
               {/* Title line: title left; time + delivery dot right — the
                   right cluster answers "when / did it land", the bottom line
                   answers "from where / what kind". */}
-              <div className="flex items-center gap-2">
-                <div className="text-sm leading-5 truncate min-w-0 flex-1">{event.title}</div>
-                <span className="shrink-0 text-[11px] leading-4 tabular-nums text-muted-foreground/80">
+              <div className="flex items-center gap-2.5">
+                <div className="text-[14.5px] leading-6 text-foreground truncate min-w-0 flex-1">
+                  {event.title}
+                </div>
+                <span className="shrink-0 text-[12px] leading-5 tabular-nums text-muted-foreground/80">
                   {formatTime(event.receivedAt)}
                 </span>
                 <span
@@ -321,11 +323,11 @@ export function EventsListPanel({
                 />
               </div>
               {event.summary && (
-                <div className="text-[12px] leading-4 text-foreground/55 truncate mt-0.5">
+                <div className="text-[12.5px] leading-5 text-foreground/60 truncate mt-1">
                   {event.summary}
                 </div>
               )}
-              <div className="flex items-center gap-1.5 mt-1 text-[11px] leading-4">
+              <div className="flex items-center gap-1.5 mt-1.5 text-[12px] leading-5">
                 <span className="truncate text-foreground/55" title={`${event.source} · ${event.type}`}>
                   {event.source}
                 </span>
@@ -333,6 +335,12 @@ export function EventsListPanel({
                 <span className="truncate text-muted-foreground" title={event.type}>
                   {event.type}
                 </span>
+                {(event.attachments?.length ?? 0) > 0 && (
+                  <span className="ml-auto inline-flex items-center gap-0.5 shrink-0 text-muted-foreground">
+                    <Paperclip className="h-3 w-3" />
+                    {event.attachments.length}
+                  </span>
+                )}
               </div>
             </button>
           )

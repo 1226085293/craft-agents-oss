@@ -433,6 +433,8 @@ export const CHANNEL_MAP = {
   // Events
   listEvents: invoke(RPC_CHANNELS.events.LIST),
   getEvent: invoke(RPC_CHANNELS.events.GET),
+  readEventAttachment: invoke(RPC_CHANNELS.events.READ_ATTACHMENT),
+  openEventAttachment: invoke(RPC_CHANNELS.events.OPEN_ATTACHMENT),
   getEventCounts: invoke(RPC_CHANNELS.events.COUNTS),
   getEventsStatus: invoke(RPC_CHANNELS.events.STATUS),
   onEventsChanged: listener(RPC_CHANNELS.events.CHANGED),

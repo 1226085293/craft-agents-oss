@@ -757,6 +757,13 @@ export interface ElectronAPI {
     workspaceId: string,
     eventId: string
   ): Promise<import('@craft-agent/shared/protocol/dto').EventRecordDto | null>
+  readEventAttachment(
+    workspaceId: string,
+    eventId: string,
+    index: number,
+    mode: 'text' | 'dataUrl' | 'bytes'
+  ): Promise<import('@craft-agent/shared/protocol/dto').EventAttachmentContentDto>
+  openEventAttachment(workspaceId: string, eventId: string, index: number): Promise<void>
   getEventCounts(workspaceId: string): Promise<{
     counts: Record<string, number>
     status: { listening: boolean; host: string | null; port: number | null; baseUrl: string | null }

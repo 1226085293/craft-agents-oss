@@ -13,6 +13,7 @@ function makeEvent(overrides: Partial<CraftEventEnvelope> = {}): CraftEventEnvel
     summary: '请确认附件里的付款条款',
     recipients: ['me@qq.com'],
     links: [],
+    attachments: [],
     body: '请确认附件里的付款条款，谢谢。',
     delivered: false,
     ...overrides,

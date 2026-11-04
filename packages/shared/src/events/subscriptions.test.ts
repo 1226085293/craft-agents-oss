@@ -29,6 +29,7 @@ function event(overrides: Partial<EventMeta> = {}): EventMeta {
     summary: '请确认付款条款',
     recipients: ['me@qq.com'],
     links: [],
+    attachments: [],
     delivered: false,
     deliveries: [],
     ...overrides,

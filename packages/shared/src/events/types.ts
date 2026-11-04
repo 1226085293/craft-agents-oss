@@ -23,6 +23,9 @@ export const EVENT_LIMITS = {
   recipientLength: 64,
   links: 10,
   urlLength: 2048,
+  attachments: 20,
+  attachmentName: 200,
+  attachmentPath: 1024,
   /** `occurredAt` may not be further than this ahead of `receivedAt`. */
   clockSkewMs: 5 * 60 * 1000,
 } as const;
@@ -42,6 +45,23 @@ export interface CraftEventPayloadRef {
 }
 
 /**
+ * A file that arrived with the event, already written to disk by the listener.
+ *
+ * Only the location travels in the envelope: attachments are routinely far
+ * larger than an inline body, and the reader pulls content on demand when the
+ * user opens one.
+ */
+export interface CraftEventAttachment {
+  /** Display name, e.g. `发票.pdf`. */
+  name: string;
+  /** Best-effort MIME type; `application/octet-stream` when unknown. */
+  mime: string;
+  /** Absolute path on this machine, inside the workspace's `events-data`. */
+  path: string;
+  size?: number;
+}
+
+/**
  * A stored event. This is the shape the store returns and the UI renders.
  */
 export interface CraftEventEnvelope {
@@ -56,6 +76,7 @@ export interface CraftEventEnvelope {
   summary?: string;
   recipients: string[];
   links: CraftEventLink[];
+  attachments: CraftEventAttachment[];
   body?: string;
   payloadRef?: CraftEventPayloadRef;
   /** Whether the event was delivered to at least one subscribed session. */
@@ -71,6 +92,7 @@ export interface EventInput {
   dedupeKey?: string;
   recipients?: string[];
   links?: CraftEventLink[];
+  attachments?: CraftEventAttachment[];
   body?: unknown;
   payloadRef?: CraftEventPayloadRef;
 }
@@ -203,6 +225,27 @@ export function normalizeEventInput(
     payloadRef = size === undefined ? { kind, path } : { kind, path, size };
   }
 
+  let attachments: CraftEventAttachment[] = [];
+  if (input.attachments !== undefined && input.attachments !== null) {
+    if (!Array.isArray(input.attachments)) return fail('attachments', 'must be an array');
+    if (input.attachments.length > EVENT_LIMITS.attachments) {
+      return fail('attachments', `at most ${EVENT_LIMITS.attachments} entries`);
+    }
+    for (const [i, entry] of input.attachments.entries()) {
+      if (typeof entry !== 'object' || entry === null) return fail(`attachments[${i}]`, 'must be an object');
+      const item = entry as Record<string, unknown>;
+      const name = asString(item.name)?.trim();
+      if (!name) return fail(`attachments[${i}].name`, 'is required');
+      if (name.length > EVENT_LIMITS.attachmentName) return fail(`attachments[${i}].name`, 'too long');
+      const path = asString(item.path)?.trim();
+      if (!path) return fail(`attachments[${i}].path`, 'is required');
+      if (path.length > EVENT_LIMITS.attachmentPath) return fail(`attachments[${i}].path`, 'too long');
+      const mime = asString(item.mime)?.trim() || 'application/octet-stream';
+      const size = typeof item.size === 'number' && Number.isFinite(item.size) ? item.size : undefined;
+      attachments.push(size === undefined ? { name, mime, path } : { name, mime, path, size });
+    }
+  }
+
   return {
     ok: true,
     event: {
@@ -217,6 +260,7 @@ export function normalizeEventInput(
       ...(summaryRaw ? { summary: summaryRaw } : {}),
       recipients,
       links,
+      attachments,
       ...(body !== undefined ? { body } : {}),
       ...(payloadRef ? { payloadRef } : {}),
       delivered: false,

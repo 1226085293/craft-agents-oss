@@ -421,6 +421,10 @@ export const RPC_CHANNELS = {
     STATUS: 'events:status',
     /** Pushed when a new event lands (workspace-scoped). */
     CHANGED: 'events:changed',
+    /** Content of one attachment: text, image data URL, or PDF bytes. */
+    READ_ATTACHMENT: 'events:readAttachment',
+    /** Hand one attachment to the OS default application. */
+    OPEN_ATTACHMENT: 'events:openAttachment',
 
     /** Installed listener cards. */
     LIST_LISTENERS: 'events:listListeners',

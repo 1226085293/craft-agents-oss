@@ -30,10 +30,18 @@ import {
   type SubscriptionFilter,
 } from '@craft-agent/shared/events/subscriptions.ts';
 import type { EventFilter, EventMeta, EventRecord } from '@craft-agent/shared/events/event-store.ts';
+import type { EventAttachmentContentDto } from '@craft-agent/shared/protocol';
+import {
+  readAttachmentContent,
+  resolveAttachmentPath,
+  type AttachmentReadMode,
+} from '../../events/attachment-file';
 
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.events.LIST,
   RPC_CHANNELS.events.GET,
+  RPC_CHANNELS.events.READ_ATTACHMENT,
+  RPC_CHANNELS.events.OPEN_ATTACHMENT,
   RPC_CHANNELS.events.COUNTS,
   RPC_CHANNELS.events.STATUS,
   RPC_CHANNELS.events.LIST_LISTENERS,
@@ -95,6 +103,52 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
     const svc = await service(workspaceId);
     return svc.get(id);
   });
+
+  /**
+   * Attachment content for the preview overlays.
+   *
+   * `mode` is chosen by the renderer from `classifyFile`, the same function the
+   * session previews use — so the Event Center shows exactly the file types a
+   * session can show, and nothing silently diverges.
+   */
+  server.handle(
+    RPC_CHANNELS.events.READ_ATTACHMENT,
+    async (
+      _ctx,
+      workspaceId: string,
+      eventId: string,
+      index: number,
+      mode: AttachmentReadMode,
+    ): Promise<EventAttachmentContentDto> => {
+      const workspace = requireWorkspace(workspaceId);
+      const svc = await service(workspaceId);
+      const event = svc.get(eventId);
+      if (!event) throw new Error(`Event ${eventId} not found`);
+      const attachment = event.attachments[index];
+      if (!attachment) throw new Error(`Attachment ${index} not found on event ${eventId}`);
+      const filePath = resolveAttachmentPath(workspace.rootPath, attachment.path);
+      return readAttachmentContent(filePath, mode, attachment.mime);
+    },
+  );
+
+  /** Hand the attachment to the OS — the same escape hatch sessions use for
+   *  types the app cannot preview (Office documents, archives). */
+  server.handle(
+    RPC_CHANNELS.events.OPEN_ATTACHMENT,
+    async (_ctx, workspaceId: string, eventId: string, index: number): Promise<void> => {
+      const workspace = requireWorkspace(workspaceId);
+      const svc = await service(workspaceId);
+      const event = svc.get(eventId);
+      if (!event) throw new Error(`Event ${eventId} not found`);
+      const attachment = event.attachments[index];
+      if (!attachment) throw new Error(`Attachment ${index} not found on event ${eventId}`);
+      const filePath = resolveAttachmentPath(workspace.rootPath, attachment.path);
+      if (!_deps.platform.openPath) {
+        throw new Error('this host cannot open files with the system default application');
+      }
+      await _deps.platform.openPath(filePath);
+    },
+  );
 
   server.handle(RPC_CHANNELS.events.COUNTS, async (_ctx, workspaceId: string) => {
     const svc = await service(workspaceId);

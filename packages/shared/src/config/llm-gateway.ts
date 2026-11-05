@@ -43,7 +43,7 @@ import {
   type RateLimitSignal,
 } from './llm-key-pool.ts';
 import { estimateRequestTokens } from './llm-token-estimate.ts';
-import { openStrategyModels } from './strategy-availability.ts';
+import { openStrategyModels, pickStrategyModel } from './strategy-availability.ts';
 import {
   capEffort,
   clampEffort,
@@ -967,6 +967,18 @@ export class LlmGateway {
       // auxiliary calls (title / judge / compaction) have their own fallback
       // paths.
       const waitEligible = payload.stream === true && (!requestKind || requestKind === 'chat');
+      /**
+       * The model this iteration serves.
+       *
+       * A group decides which model it serves, not the caller: the path
+       * (`/s/<id>`) names the group, and the group's own declaration names the
+       * model. That rule held for the session's group only — a fallback used to
+       * inherit the previous group's model name, asking the target to serve
+       * something it never declared, so `candidateUnits` produced nothing and
+       * the transfer died with `no member serves "..."` (261105-onyx-steel,
+       * 2026-11-05: `workbuddy` → `free`, 503 on arrival).
+       */
+      let activeModel = publicModel;
 
       while (current && !visited.has(current.id)) {
         visited.add(current.id);
@@ -984,11 +996,11 @@ export class LlmGateway {
         // cannot serve the request. When that leaves nothing, the planner
         // throws and we fall through below.
         const streamExhaustedUnits = streamRetryState
-          ? this.exhaustedStreamUnits(config, current, publicModel, streamRetryState)
+          ? this.exhaustedStreamUnits(config, current, activeModel, streamRetryState)
           : new Set<string>();
         const availability = await this.unavailableUnitsFor(
           current,
-          publicModel,
+          activeModel,
           streamExhaustedUnits,
           streamRetryState,
         );
@@ -998,7 +1010,7 @@ export class LlmGateway {
           plan = planRequest({
             config,
             strategy: current,
-            publicModel,
+            publicModel: activeModel,
             unavailableUnits: availability.excluded,
           });
         } catch (err) {
@@ -1012,7 +1024,7 @@ export class LlmGateway {
             strategy: current.id,
             provider: '',
             keyId: '',
-            publicModel,
+            publicModel: activeModel,
             upstreamModel: '',
             status: 'no_healthy_account',
             ...(requestKind ? { kind: requestKind } : {}),
@@ -1035,7 +1047,7 @@ export class LlmGateway {
           // waitForCooldown (plan path): nothing routable right now — wait out
           // the soonest cooldown when the strategy opts in and the wait is
           // short, instead of transferring immediately.
-          const plannedWait = await this.maybeWaitForStrategyCooldown(current, publicModel, streamRetryState, {
+          const plannedWait = await this.maybeWaitForStrategyCooldown(current, activeModel, streamRetryState, {
             waitEligible,
             generation,
             req,
@@ -1066,7 +1078,10 @@ export class LlmGateway {
             return;
           }
           if (plannedWait.action === 'disconnected') return;
-          current = this.resolveFallback(config, current.id);
+          const afterPlanFailure = this.resolveFallbackRoute(config, current);
+          if (!afterPlanFailure) break;
+          current = afterPlanFailure.strategy;
+          activeModel = afterPlanFailure.model;
           continue;
         }
 
@@ -1102,7 +1117,7 @@ export class LlmGateway {
         // strategy a bounded wait when its units are merely cooling.
         // requestError / tprRejected never wait — retrying cannot help — and
         // quota walls are excluded by magnitude inside the gate.
-        const executedWait = await this.maybeWaitForStrategyCooldown(current, publicModel, streamRetryState, {
+        const executedWait = await this.maybeWaitForStrategyCooldown(current, activeModel, streamRetryState, {
           waitEligible,
           generation,
           req,
@@ -1132,8 +1147,12 @@ export class LlmGateway {
           return;
         }
         if (executedWait.action === 'disconnected') return;
-        // Exhausted — transfer to the fallback strategy, if one is configured.
-        current = this.resolveFallback(config, current.id);
+        // Exhausted — transfer to the fallback strategy, if one is configured,
+        // and let *that* group choose its model.
+        const next = this.resolveFallbackRoute(config, current);
+        if (!next) break;
+        current = next.strategy;
+        activeModel = next.model;
       }
 
       if (streamRetryState && sessionId) {
@@ -1532,7 +1551,7 @@ export class LlmGateway {
 
         let call: UpstreamCall;
         try {
-          call = await this.callUpstream(provider, selection.keyId, upstreamModel, payload);
+          call = await this.callUpstream(provider, selection.keyId, upstreamModel, payload, unit.publicModel);
         } catch (err) {
           lastError = `upstream ${provider.id} transport error: ${describeError(err)}`;
           this.log(lastError);
@@ -1573,7 +1592,10 @@ export class LlmGateway {
           const outcome = await this.pipeResponse(response, res, timing, {
             provider,
             upstreamModel,
-            publicModel: String(payload.model ?? ''),
+            // The model the *route* serves, not the name the caller asked for:
+            // on a fallback those differ, and echoing the caller's name would
+            // report a model this response did not come from.
+            publicModel: unit.publicModel,
             // Derived from stable inputs rather than random: the same retry
             // should produce a comparable id, which makes trace correlation
             // possible across attempts.
@@ -1588,7 +1610,7 @@ export class LlmGateway {
               ? async () => this.onStreamTruncated({
                   config,
                   strategy: plan.strategy,
-                  publicModel: String(payload.model ?? ''),
+                  publicModel: unit.publicModel,
                   unitId: unit.id,
                   keyId: selection.keyId,
                   retryPolicy,
@@ -2218,6 +2240,8 @@ export class LlmGateway {
     keyId: string,
     upstreamModel: string,
     payload: Record<string, unknown>,
+    /** The model the route serves; differs from `payload.model` on a fallback. */
+    servedModel?: string,
   ): Promise<UpstreamCall> {
     // `''` is the synthetic key for a keyless provider (a local relay with no
     // credentials). It still has a pool entry for cooldown/in-flight tracking,
@@ -2248,7 +2272,11 @@ export class LlmGateway {
     // `output_config.effort` when the SDK takes the adaptive path). OpenAI
     // upstreams only understand `reasoning_effort`, so the level is resolved
     // here, where the model's ladder is in scope.
-    const publicModel = String(payload.model ?? '');
+    // Capabilities (`modelOptions`) are declared per public model of *this*
+    // group. Reading the caller's name looked up the previous group's entry — or
+    // none — after a fallback, so a model that supports thinking was treated as
+    // if it did not.
+    const publicModel = servedModel ?? String(payload.model ?? '');
     const routeKey = this.effortKey(provider, upstreamModel);
     const options = provider.modelOptions?.[publicModel] ?? provider.modelOptions?.[upstreamModel];
     // No thinking asked for — or a model declared not to reason — means no field.
@@ -3079,6 +3107,44 @@ export class LlmGateway {
     const s = config.strategies.find((x) => x.id === strategyId);
     if (!s?.fallbackStrategyId) return null;
     return config.strategies.find((x) => x.id === s.fallbackStrategyId) ?? null;
+  }
+
+  /**
+   * The next *serveable* strategy in the fallback chain, with the model that
+   * group declares.
+   *
+   * Two rules, both about ownership of the model choice:
+   *
+   * - The target group picks the model, exactly as the session router would
+   *   have (`pickStrategyModel`: an open model, in the order the user arranged
+   *   them). Carrying the previous group's name across the transfer asked the
+   *   target to serve something it never declared, which no plan can satisfy.
+   * - A group that declares no model (`modelAliases` empty) can never serve a
+   *   request, so it is skipped rather than answered 503 on its behalf.
+   *
+   * Cycles are cut locally: the chain is data, and `a → b → a` must terminate
+   * even though the outer loop's `visited` guard is not consulted here.
+   */
+  private resolveFallbackRoute(
+    config: LlmConfig,
+    from: LlmStrategy,
+    now: number = Date.now(),
+  ): { strategy: LlmStrategy; model: string } | null {
+    const seen = new Set<string>([from.id]);
+    let next = this.resolveFallback(config, from.id);
+    while (next) {
+      if (seen.has(next.id)) return null;
+      seen.add(next.id);
+      const models = Object.keys(next.modelAliases ?? {});
+      if (models.length > 0) {
+        return {
+          strategy: next,
+          model: pickStrategyModel(next, models, config.providers, undefined, now),
+        };
+      }
+      next = this.resolveFallback(config, next.id);
+    }
+    return null;
   }
 
   private coolingKeyCount(): number {

@@ -2160,13 +2160,14 @@ export function FreeFormInput({
           {/* Strategy + next model: the gateway picks the upstream, so this is
               the only model-shaped control the composer offers. */}
           {/* Role first: it decides the persona and the tool/scope ceilings the
-              rest of this composer inherits. Hidden on a supervisor session,
-              whose role is fixed at creation. */}
+              rest of this composer inherits. Shown on every session — a
+              supervisor keeps its coordination role but can still run as a
+              different profile. */}
           <AgentSelector
             agents={agentOptions ?? []}
             value={agentId ?? ''}
             onChange={(id) => onAgentChange?.(id)}
-            hidden={!agentOptions?.length || sessionRole === 'supervisor'}
+            hidden={!agentOptions?.length}
           />
           {enableCompactModelPicker && (
             <StrategySelector
@@ -2453,7 +2454,7 @@ export function FreeFormInput({
               agents={agentOptions ?? []}
               value={agentId ?? ''}
               onChange={(id) => onAgentChange?.(id)}
-              hidden={!agentOptions?.length || sessionRole === 'supervisor'}
+              hidden={!agentOptions?.length}
             />
           )}
           {!compactMode && (

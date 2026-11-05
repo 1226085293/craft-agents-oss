@@ -3,28 +3,31 @@
  *
  * Two panes: the role list on the left, the editor on the right. The editor is
  * built from the same primitives as every other settings page (SettingsSection /
- * SettingsCard / SettingsRow) — an earlier hand-rolled version looked bolted on:
- * it had its own headings, its own control styling and mixed Chinese literals
- * into an otherwise translated page.
+ * SettingsCard / SettingsRow / SettingsSelectRow) — an earlier hand-rolled
+ * version looked bolted on: it had its own headings, its own control styling
+ * and mixed Chinese literals into an otherwise translated page.
  *
- * The editor stays a plain form on purpose: persona, the inherited defaults and
- * the two scope ceilings (sources, skills). "All vs allowlist" is the one
- * decision that silently changes what a session can touch, so it gets the most
- * visual weight.
+ * Native <select> is deliberately absent: on Windows/Chromium its popup is drawn
+ * by the OS and the option text comes out low-contrast on a dark theme, which
+ * read as "greyed out / disabled". Everything goes through the Radix-based
+ * settings selects instead.
  */
 
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
-import { Check, Plus, Trash2 } from 'lucide-react'
+import { Check, Plus, Smile, Trash2 } from 'lucide-react'
 
 import { useAgents } from '@/hooks/useAgents'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
   SettingsCard,
   SettingsRow,
   SettingsSection,
+  SettingsSelectRow,
 } from '@/components/settings'
 
 interface AgentDraft {
@@ -50,9 +53,111 @@ const EMPTY: AgentDraft = {
   skills: { mode: 'all', slugs: [] },
 }
 
+/** A small curated set — enough to tell roles apart at a glance. */
+const ICON_CHOICES = [
+  '🙂', '🤖', '🧭', '🛠️', '🔍', '📝', '📊', '🧪',
+  '🎨', '🧩', '⚡', '🌱', '🦉', '🐝', '🧠', '📦',
+]
+
+/**
+ * Icon picker.
+ *
+ * The old inline text input held a placeholder emoji, which Chromium renders in
+ * colour regardless of the surrounding text colour — inside a 56px box it read
+ * as a broken control rather than an empty field. A popover of fixed choices
+ * keeps the row a single predictable height and makes clearing explicit.
+ */
+function IconPicker({
+  value,
+  onChange,
+}: {
+  value?: string
+  onChange: (next: string | undefined) => void
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  const [open, setOpen] = React.useState(false)
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          title={t('settings.agents.iconPick', { defaultValue: '选择图标' })}
+          className={cn(
+            'flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-input',
+            'bg-muted/50 text-base leading-none transition-colors hover:bg-accent',
+          )}
+        >
+          {value ? (
+            <span>{value}</span>
+          ) : (
+            <Smile className="h-4 w-4 text-muted-foreground" />
+          )}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="w-56 p-2">
+        <div className="grid grid-cols-8 gap-1">
+          {ICON_CHOICES.map((icon) => (
+            <button
+              key={icon}
+              type="button"
+              onClick={() => {
+                onChange(icon)
+                setOpen(false)
+              }}
+              className={cn(
+                'flex h-6 w-6 items-center justify-center rounded text-sm leading-none transition-colors hover:bg-accent',
+                value === icon && 'bg-accent',
+              )}
+            >
+              {icon}
+            </button>
+          ))}
+        </div>
+        {value ? (
+          <button
+            type="button"
+            onClick={() => {
+              onChange(undefined)
+              setOpen(false)
+            }}
+            className="mt-2 w-full rounded-sm px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-accent"
+          >
+            {t('settings.agents.iconClear', { defaultValue: '清除图标' })}
+          </button>
+        ) : null}
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+/**
+ * Filter the scope candidates for the search box.
+ *
+ * Matches the display name *and* the slug, case-insensitively: typing `git`
+ * has to find "GitHub", and typing a slug has to find an entry whose display
+ * name is Chinese. The earlier name-only filter made the box look broken.
+ */
+export function filterScopeCandidates(
+  candidates: Array<{ slug: string; name: string }>,
+  query: string,
+): Array<{ slug: string; name: string }> {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return candidates
+  return candidates.filter((c) => {
+    const name = (c.name ?? '').toLowerCase()
+    const slug = (c.slug ?? '').toLowerCase()
+    return name.includes(needle) || slug.includes(needle)
+  })
+}
+
 /**
  * Scope ceiling editor. Renders as a settings card: the mode select sits on the
  * row, and picking "指定" reveals the searchable checklist underneath.
+ *
+ * The filter matches the display name *and* the slug: typing `git` has to find
+ * "GitHub" and typing a source's slug has to find it even when its display name
+ * is Chinese.
  */
 function ScopeField({
   title,
@@ -69,39 +174,48 @@ function ScopeField({
 }): React.JSX.Element {
   const { t } = useTranslation()
   const [query, setQuery] = React.useState('')
-  const visible = candidates.filter((c) =>
-    c.name.toLowerCase().includes(query.trim().toLowerCase()),
+  const visible = React.useMemo(
+    () => filterScopeCandidates(candidates, query),
+    [candidates, query],
   )
 
   return (
     <SettingsSection title={title} description={hint}>
       <SettingsCard>
-        <SettingsRow label={t('settings.agents.scopeMode', { defaultValue: '范围' })}>
-          <select
-            className="h-8 w-40 rounded-md border border-input bg-transparent px-2 text-sm"
-            value={scope.mode}
-            onChange={(e) =>
-              onChange({
-                mode: e.target.value as 'all' | 'allowlist',
-                // Switching back to "all" keeps the ticked set, so flipping back
-                // does not lose the user's work.
-                slugs: scope.slugs,
-              })
-            }
-          >
-            <option value="all">{t('settings.agents.scopeAll', { defaultValue: '全部' })}</option>
-            <option value="allowlist">{t('settings.agents.scopePick', { defaultValue: '指定' })}</option>
-          </select>
-        </SettingsRow>
+        <SettingsSelectRow
+          label={t('settings.agents.scopeMode', { defaultValue: '范围' })}
+          value={scope.mode}
+          onValueChange={(next) =>
+            onChange({
+              mode: next as 'all' | 'allowlist',
+              // Switching back to "all" keeps the ticked set, so flipping back
+              // does not lose the user's work.
+              slugs: scope.slugs,
+            })
+          }
+          options={[
+            { value: 'all', label: t('settings.agents.scopeAll', { defaultValue: '全部' }) },
+            { value: 'allowlist', label: t('settings.agents.scopePick', { defaultValue: '指定' }) },
+          ]}
+        />
 
         {scope.mode === 'allowlist' ? (
           <div className="space-y-2 px-4 pb-3">
-            <input
-              className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm"
-              placeholder={t('settings.agents.scopeSearch', { defaultValue: '搜索…' })}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
+            <div className="flex items-center gap-2">
+              <Input
+                className="h-8 bg-muted/50 text-xs"
+                placeholder={t('settings.agents.scopeSearch', { defaultValue: '搜索…' })}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                {t('settings.agents.scopeCount', {
+                  defaultValue: '{{shown}} / {{total}}',
+                  shown: visible.length,
+                  total: candidates.length,
+                })}
+              </span>
+            </div>
             <div className="grid max-h-56 grid-cols-2 gap-1.5 overflow-y-auto">
               {visible.map((candidate) => {
                 const checked = scope.slugs.includes(candidate.slug)
@@ -132,7 +246,7 @@ function ScopeField({
                     >
                       {checked ? <Check className="h-2.5 w-2.5" /> : null}
                     </span>
-                    <span className="truncate">{candidate.name}</span>
+                    <span className="truncate">{candidate.name || candidate.slug}</span>
                   </button>
                 )
               })}
@@ -214,6 +328,21 @@ export function AgentsSettingsPanel({
     await reload()
   }
 
+  const strategyOptions = [
+    {
+      value: '__follow',
+      label: t('settings.agents.followStrategy', { defaultValue: '跟随（第一个启用的组）' }),
+    },
+    ...strategies.map((s) => ({ value: s.id, label: s.name })),
+  ]
+
+  const permissionOptions = [
+    { value: '__follow', label: t('settings.agents.followWorkspace', { defaultValue: '跟随工作区' }) },
+    { value: 'safe', label: t('mode.safe', { defaultValue: '只读' }) },
+    { value: 'ask', label: t('mode.askToEdit', { defaultValue: '每次询问' }) },
+    { value: 'allow-all', label: t('mode.allow-all', { defaultValue: '全部放行' }) },
+  ]
+
   return (
     <div className="flex h-full min-h-0">
       {/* Role list */}
@@ -242,7 +371,7 @@ export function AgentsSettingsPanel({
                 selectedId === agent.id ? 'bg-accent' : 'hover:bg-accent/60',
               )}
             >
-              <span className="shrink-0 text-sm">{agent.icon ?? '👤'}</span>
+              <span className="flex w-4 shrink-0 justify-center text-sm">{agent.icon ?? '👤'}</span>
               <span className="truncate">{agent.name}</span>
               {agent.builtin ? (
                 <span className="ml-auto shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
@@ -261,16 +390,19 @@ export function AgentsSettingsPanel({
             <div className="space-y-8">
               <SettingsSection title={t('settings.agents.identity', { defaultValue: '身份' })}>
                 <SettingsCard>
-                  <SettingsRow label={t('settings.agents.name', { defaultValue: '名称' })}>
-                    <div className="flex items-center gap-2">
-                      <input
-                        className="h-8 w-14 rounded-md border border-input bg-transparent text-center text-sm"
-                        placeholder="🙂"
-                        value={draft.icon ?? ''}
-                        onChange={(e) => setDraft({ ...draft, icon: e.target.value })}
+                  <SettingsRow
+                    label={t('settings.agents.name', { defaultValue: '名称' })}
+                    description={t('settings.agents.nameHint', {
+                      defaultValue: '显示在会话列表与角色选择器里。',
+                    })}
+                  >
+                    <div className="flex w-64 items-center gap-2">
+                      <IconPicker
+                        value={draft.icon}
+                        onChange={(icon) => setDraft({ ...draft, icon })}
                       />
-                      <input
-                        className="h-8 w-64 rounded-md border border-input bg-transparent px-2 text-sm"
+                      <Input
+                        className="h-8 bg-muted/50 text-sm"
                         placeholder={t('agent.namePlaceholder', { defaultValue: '角色名称' })}
                         value={draft.name}
                         onChange={(e) => setDraft({ ...draft, name: e.target.value })}
@@ -289,7 +421,7 @@ export function AgentsSettingsPanel({
                 <SettingsCard>
                   <div className="p-3">
                     <textarea
-                      className="min-h-[140px] w-full resize-y rounded-md border border-input bg-transparent p-2 font-mono text-xs leading-relaxed"
+                      className="min-h-[140px] w-full resize-y rounded-md border border-input bg-muted/50 p-2 font-mono text-xs leading-relaxed"
                       value={draft.persona}
                       onChange={(e) => setDraft({ ...draft, persona: e.target.value })}
                     />
@@ -299,47 +431,34 @@ export function AgentsSettingsPanel({
 
               <SettingsSection title={t('settings.agents.defaults', { defaultValue: '默认值' })}>
                 <SettingsCard>
-                  <SettingsRow label={t('settings.agents.defaultStrategy', { defaultValue: '默认策略组' })}>
-                    <select
-                      className="h-8 w-56 rounded-md border border-input bg-transparent px-2 text-sm"
-                      value={draft.defaults.strategy ?? ''}
-                      onChange={(e) =>
-                        setDraft({
-                          ...draft,
-                          defaults: { ...draft.defaults, strategy: e.target.value || null },
-                        })
-                      }
-                    >
-                      <option value="">
-                        {t('settings.agents.followStrategy', { defaultValue: '跟随（第一个启用的组）' })}
-                      </option>
-                      {strategies.map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name}
-                        </option>
-                      ))}
-                    </select>
-                  </SettingsRow>
-                  <SettingsRow label={t('settings.agents.defaultPermission', { defaultValue: '默认权限模式' })}>
-                    <select
-                      className="h-8 w-56 rounded-md border border-input bg-transparent px-2 text-sm"
-                      value={draft.defaults.permissionMode ?? ''}
-                      onChange={(e) =>
-                        setDraft({
-                          ...draft,
-                          defaults: {
-                            ...draft.defaults,
-                            permissionMode: (e.target.value || null) as AgentDraft['defaults']['permissionMode'],
-                          },
-                        })
-                      }
-                    >
-                      <option value="">{t('settings.agents.followWorkspace', { defaultValue: '跟随工作区' })}</option>
-                      <option value="safe">{t('mode.safe', { defaultValue: '只读' })}</option>
-                      <option value="ask">{t('mode.askToEdit', { defaultValue: '每次询问' })}</option>
-                      <option value="allow-all">{t('mode.allow-all', { defaultValue: '全部放行' })}</option>
-                    </select>
-                  </SettingsRow>
+                  <SettingsSelectRow
+                    label={t('settings.agents.defaultStrategy', { defaultValue: '默认策略组' })}
+                    value={draft.defaults.strategy ?? '__follow'}
+                    onValueChange={(next) =>
+                      setDraft({
+                        ...draft,
+                        defaults: { ...draft.defaults, strategy: next === '__follow' ? null : next },
+                      })
+                    }
+                    options={strategyOptions}
+                  />
+                  <SettingsSelectRow
+                    label={t('settings.agents.defaultPermission', { defaultValue: '默认权限模式' })}
+                    value={draft.defaults.permissionMode ?? '__follow'}
+                    onValueChange={(next) =>
+                      setDraft({
+                        ...draft,
+                        defaults: {
+                          ...draft.defaults,
+                          permissionMode:
+                            next === '__follow'
+                              ? null
+                              : (next as AgentDraft['defaults']['permissionMode']),
+                        },
+                      })
+                    }
+                    options={permissionOptions}
+                  />
                 </SettingsCard>
               </SettingsSection>
 

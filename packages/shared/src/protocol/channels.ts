@@ -36,6 +36,8 @@ export const RPC_CHANNELS = {
     EVENT: 'session:event',
     GET_MODEL: 'session:getModel',
     SET_MODEL: 'session:setModel',
+    /** Re-assign the role profile a session runs as (persona + scopes). */
+    SET_AGENT: 'session:setAgent',
     SWITCH_CONNECTION: 'session:switchConnection',
     GET_FILES: 'sessions:getFiles',
     GET_NOTES: 'sessions:getNotes',

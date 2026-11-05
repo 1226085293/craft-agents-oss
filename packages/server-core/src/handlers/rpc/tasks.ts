@@ -49,9 +49,12 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
     );
   };
 
-  server.handle(RPC_CHANNELS.taskboard.LIST, async (_ctx, payload: { workspaceId: string; status?: TaskStatus }) => {
-    const service = tasksFor(deps, payload.workspaceId);
-    return service.list(payload.status).map((task) => ({
+  // Same contract note as the agents handlers: the transport spreads the RPC
+  // args positionally (`handler(ctx, ...args)`), so an object payload never
+  // matched and every task-board call saw `undefined`.
+  server.handle(RPC_CHANNELS.taskboard.LIST, async (_ctx, workspaceId: string, status?: TaskStatus) => {
+    const service = tasksFor(deps, workspaceId);
+    return service.list(status).map((task) => ({
       id: task.id,
       name: task.name,
       status: task.status,
@@ -66,12 +69,12 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
 
   server.handle(
     RPC_CHANNELS.taskboard.GET,
-    async (_ctx, payload: { workspaceId: string; id: string; includeJournal?: boolean }) => {
-      const service = tasksFor(deps, payload.workspaceId);
-      const task = service.get(payload.id);
-      if (!task) throw new Error(`Task not found: ${payload.id}`);
-      const journal = payload.includeJournal
-        ? readJournal(requireWorkspace(payload.workspaceId).rootPath, payload.id)
+    async (_ctx, workspaceId: string, id: string, includeJournal?: boolean) => {
+      const service = tasksFor(deps, workspaceId);
+      const task = service.get(id);
+      if (!task) throw new Error(`Task not found: ${id}`);
+      const journal = includeJournal
+        ? readJournal(requireWorkspace(workspaceId).rootPath, id)
         : undefined;
       return { task, journal };
     },
@@ -81,30 +84,27 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
     RPC_CHANNELS.taskboard.UPDATE,
     async (
       _ctx,
-      payload: {
-        workspaceId: string;
-        id: string;
-        status?: TaskStatus;
-        pauseReason?: string;
-        error?: string;
-      },
+      workspaceId: string,
+      id: string,
+      status?: TaskStatus,
+      options?: { pauseReason?: string; error?: string },
     ) => {
-      const service = tasksFor(deps, payload.workspaceId);
-      const task = service.setStatus(payload.id, payload.status ?? 'running', {
-        pauseReason: payload.pauseReason as never,
-        error: payload.error,
+      const service = tasksFor(deps, workspaceId);
+      const task = service.setStatus(id, status ?? 'running', {
+        pauseReason: options?.pauseReason as never,
+        error: options?.error,
       });
-      broadcast(payload.workspaceId);
+      broadcast(workspaceId);
       return task;
     },
   );
 
   server.handle(
     RPC_CHANNELS.taskboard.HANDOFF,
-    async (_ctx, payload: { workspaceId: string; id: string; fromSessionId: string; handoff: unknown }) => {
-      const service = tasksFor(deps, payload.workspaceId);
-      const result = service.reportHandoff(payload.id, payload.handoff, payload.fromSessionId);
-      broadcast(payload.workspaceId);
+    async (_ctx, workspaceId: string, id: string, fromSessionId: string, handoff: unknown) => {
+      const service = tasksFor(deps, workspaceId);
+      const result = service.reportHandoff(id, handoff, fromSessionId);
+      broadcast(workspaceId);
       return {
         passed: result.passed,
         reasons: result.reasons,

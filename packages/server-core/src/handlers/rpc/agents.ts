@@ -67,8 +67,14 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
     );
   };
 
-  server.handle(RPC_CHANNELS.agents.LIST, async (_ctx, payload: { workspaceId: string }) => {
-    const workspace = requireWorkspace(payload.workspaceId);
+  // NOTE the argument shape: the RPC transport calls handlers as
+  // `handler(ctx, ...args)`, exactly like the older channels in settings.ts.
+  // These four handlers were written against an object payload, so every
+  // `payload.workspaceId` was `undefined` at runtime — `agents:list` threw
+  // "Cannot read properties of undefined (reading 'toLowerCase')" and the
+  // composer's role picker silently rendered nothing.
+  server.handle(RPC_CHANNELS.agents.LIST, async (_ctx, workspaceId: string) => {
+    const workspace = requireWorkspace(workspaceId);
     const file = loadAgents(workspace.rootPath);
     // The built-in default is materialized, never stored: exactly one default.
     return [toOption(getDefaultAgent(file)), ...file.agents.filter((a) => !a.deletedAt).map(toOption)];
@@ -76,14 +82,12 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
 
   server.handle(
     RPC_CHANNELS.agents.GET,
-    async (_ctx, payload: { workspaceId: string; id: string }) => {
-      const workspace = requireWorkspace(payload.workspaceId);
+    async (_ctx, workspaceId: string, id: string) => {
+      const workspace = requireWorkspace(workspaceId);
       const file = loadAgents(workspace.rootPath);
       const profile =
-        payload.id === DEFAULT_AGENT_ID
-          ? getDefaultAgent(file)
-          : file.agents.find((a) => a.id === payload.id && !a.deletedAt);
-      if (!profile) throw new Error(`Agent not found: ${payload.id}`);
+        id === DEFAULT_AGENT_ID ? getDefaultAgent(file) : file.agents.find((a) => a.id === id && !a.deletedAt);
+      if (!profile) throw new Error(`Agent not found: ${id}`);
       return profile;
     },
   );
@@ -92,14 +96,12 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
     RPC_CHANNELS.agents.SAVE,
     async (
       _ctx,
-      payload: {
-        workspaceId: string;
-        agent?: Partial<AgentProfile> & { id?: string };
-      },
+      workspaceId: string,
+      agent?: Partial<AgentProfile> & { id?: string },
     ) => {
-      const workspace = requireWorkspace(payload.workspaceId);
+      const workspace = requireWorkspace(workspaceId);
       const file = loadAgents(workspace.rootPath);
-      const input = payload.agent ?? {};
+      const input = agent ?? {};
       const now = Date.now();
 
       // Saving the built-in default edits the `defaults` block instead of
@@ -114,7 +116,7 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
             skills: input.skills ? normalizeScope(input.skills) : file.defaults.skills,
           },
         });
-        broadcast(payload.workspaceId);
+        broadcast(workspaceId);
         return { id: DEFAULT_AGENT_ID };
       }
 
@@ -140,17 +142,17 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
           : [...file.agents, profile];
 
       saveAgents(workspace.rootPath, { ...file, agents });
-      broadcast(payload.workspaceId);
+      broadcast(workspaceId);
       return { id: profile.id };
     },
   );
 
   server.handle(
     RPC_CHANNELS.agents.DELETE,
-    async (_ctx, payload: { workspaceId: string; id: string }) => {
-      const workspace = requireWorkspace(payload.workspaceId);
+    async (_ctx, workspaceId: string, id: string) => {
+      const workspace = requireWorkspace(workspaceId);
       const file = loadAgents(workspace.rootPath);
-      if (payload.id === DEFAULT_AGENT_ID) {
+      if (id === DEFAULT_AGENT_ID) {
         throw new Error('The built-in default agent cannot be deleted.');
       }
       // Soft delete: historical sessions keep their snapshot, and the picker
@@ -158,10 +160,10 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
       saveAgents(workspace.rootPath, {
         ...file,
         agents: file.agents.map((agent) =>
-          agent.id === payload.id ? { ...agent, deletedAt: Date.now() } : agent,
+          agent.id === id ? { ...agent, deletedAt: Date.now() } : agent,
         ),
       });
-      broadcast(payload.workspaceId);
+      broadcast(workspaceId);
       return { ok: true };
     },
   );

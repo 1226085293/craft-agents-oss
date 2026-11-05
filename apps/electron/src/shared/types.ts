@@ -440,6 +440,8 @@ export interface ElectronAPI {
   // Session-specific model (overrides global)
   getSessionModel(sessionId: string, workspaceId: string): Promise<string | null>
   setSessionModel(sessionId: string, workspaceId: string, model: string | null, connection?: string): Promise<void>
+  /** Re-assign the role profile (persona + scope ceilings) of an existing session. */
+  setSessionAgent(sessionId: string, workspaceId: string, agentId: string): Promise<void>
   /** Hot connection switch (mid-session): live credential injection + model apply, context preserved. */
   switchSessionConnection(sessionId: string, connectionSlug: string, model?: string): Promise<void>
 

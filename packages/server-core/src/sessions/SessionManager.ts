@@ -26,6 +26,7 @@ import type { AutomationSystem } from '@craft-agent/shared/automations'
 import {
   applyScope,
   buildAgentSnapshot,
+  getAgentById,
   loadAgents,
   migrateAgentsFile,
   resolveSessionDefaults,
@@ -8080,6 +8081,49 @@ ${request.prompt}`;
       this.sendEvent({ type: 'session_model_changed', sessionId, model }, managed.workspace.id)
       sessionLog.info(`Session ${sessionId} model updated to: ${model ?? '(global config)'}`)
     }
+  }
+
+  /**
+   * Re-assign the role profile an existing session runs as.
+   *
+   * The persona, the skill ceiling and the source ceiling all come from the
+   * session's frozen `agentSnapshot`, so the snapshot is rebuilt here instead of
+   * being left to the next creation. A live backend baked its own copy of the
+   * snapshot at construction, so it is disposed: the next turn spawns a fresh
+   * one under the new profile (this also re-prunes the role tool table).
+   *
+   * Refused while the session is processing — swapping the persona mid-turn
+   * would rewrite the prompt between two assistant messages.
+   */
+  async updateSessionAgent(sessionId: string, agentId: string): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new Error(`Session ${sessionId} not found`)
+    if (managed.isProcessing) {
+      throw new Error('Cannot switch the agent of a session that is still processing')
+    }
+
+    const file = loadAgents(managed.workspace.rootPath)
+    const profile = getAgentById(file, agentId)
+    const snapshot: AgentSnapshot = buildAgentSnapshot(profile)
+
+    managed.agentId = profile.id
+    managed.agentSnapshot = snapshot
+    await updateSessionMetadata(managed.workspace.rootPath, sessionId, {
+      agentId: profile.id,
+      agentSnapshot: snapshot,
+    })
+
+    // A live backend holds the previous snapshot; drop it so the next turn
+    // rebuilds the persona prompt and the role-pruned tool table.
+    if (managed.agent) {
+      await this.disposeManagedAgentRuntime(managed, 'agent switch')
+    }
+
+    this.sendEvent(
+      { type: 'session_metadata_changed', sessionId, changes: { agentId: profile.id } },
+      managed.workspace.id,
+    )
+    sessionLog.info(`Session ${sessionId} agent updated to: ${profile.id} (${profile.name})`)
   }
 
   /**

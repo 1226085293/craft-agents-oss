@@ -157,6 +157,7 @@ export const CHANNEL_MAP = {
   // Session-specific model
   getSessionModel: invoke(RPC_CHANNELS.sessions.GET_MODEL),
   setSessionModel: invoke(RPC_CHANNELS.sessions.SET_MODEL),
+  setSessionAgent: invoke(RPC_CHANNELS.sessions.SET_AGENT),
   switchSessionConnection: invoke(RPC_CHANNELS.sessions.SWITCH_CONNECTION),
 
   // Workspace Settings

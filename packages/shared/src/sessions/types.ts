@@ -57,6 +57,10 @@ export const SESSION_PERSISTENT_FIELDS = [
   // Project binding (workspace-scoped grouping)
   'projectId',
   'parentSessionId',
+  // Multi-agent: role profile + its frozen snapshot, the session's role and
+  // the task/lineage binding. Without these, a restart lost the persona, the
+  // scope ceilings and the supervisor/worker distinction.
+  'agentId', 'agentSnapshot', 'role', 'taskId', 'spawnDepth',
   // Folder tree membership (workspace/project scoped folders)
   'folderId', 'archivedFolderId', 'archivedFolderPath', 'archivedProjectId', 'archivedByParent', 'sortOrder', 'pinnedAt',
 ] as const;

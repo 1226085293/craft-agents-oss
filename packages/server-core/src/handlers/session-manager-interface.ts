@@ -159,6 +159,8 @@ export interface ISessionManager {
   deleteProjectSessions(projectId: string): Promise<{ deleted: string[] }>
   setSessionConnection(sessionId: string, connectionSlug: string): Promise<void>
   updateSessionModel(sessionId: string, workspaceId: string, model: string | null, connection?: string): Promise<void>
+  /** Re-assign the role profile (persona + scope ceilings) an existing session runs as. */
+  updateSessionAgent(sessionId: string, agentId: string): Promise<void>
   /** Hot connection switch (mid-session): live credential injection + model apply, context preserved. */
   switchSessionConnection(sessionId: string, connectionSlug: string, model?: string): Promise<void>
 

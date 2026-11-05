@@ -67,6 +67,14 @@ export interface Session {
    * shows as an explicit prompt instead of a silent fallback.
    */
   strategy?: string
+  /**
+   * Role profile this session runs as. Drives the composer's role picker and
+   * the "which role am I talking to" affordance; absent means the workspace
+   * default agent.
+   */
+  agentId?: string
+  /** 'supervisor' sessions coordinate tasks; ordinary sessions are workers. */
+  role?: 'supervisor' | 'worker'
   lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error'
   lastFinalMessageId?: string
   isAsyncOperationOngoing?: boolean
@@ -289,7 +297,7 @@ export type SessionEvent =
   | { type: 'session_unarchived'; sessionId: string }
   | { type: 'name_changed'; sessionId: string; name?: string }
   | { type: 'session_model_changed'; sessionId: string; model: string | null }
-  | { type: 'session_metadata_changed'; sessionId: string; changes: Partial<Pick<Session, 'hasUnread' | 'lastReadMessageId'>> & { projectId?: string | null; folderId?: string | null; archivedFolderId?: string | null; archivedFolderPath?: string[]; archivedProjectId?: string; archivedByParent?: string; sortOrder?: string; pinnedAt?: number } }
+  | { type: 'session_metadata_changed'; sessionId: string; changes: Partial<Pick<Session, 'hasUnread' | 'lastReadMessageId'>> & { agentId?: string; projectId?: string | null; folderId?: string | null; archivedFolderId?: string | null; archivedFolderPath?: string[]; archivedProjectId?: string; archivedByParent?: string; sortOrder?: string; pinnedAt?: number } }
   | { type: 'session_deleted'; sessionId: string }
   | { type: 'session_created'; sessionId: string }
   | { type: 'session_shared'; sessionId: string; sharedUrl: string }

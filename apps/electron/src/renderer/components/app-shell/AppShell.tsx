@@ -2037,6 +2037,12 @@ function AppShellContent({
       return navState.section === 'listeners' ? t("sidebar.eventListeners") : t("sidebar.eventList")
     }
 
+    // Tasks navigator — same reason: the panel lists the task board, and the
+    // sessions fallback below would label it "所有会话".
+    if (isTasksNavigation(navState)) {
+      return t("sidebar.tasks")
+    }
+
     // Sessions navigator - use sessionFilter
     if (!sessionFilter) return t("sidebar.allSessions")
 

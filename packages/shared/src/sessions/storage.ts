@@ -543,6 +543,10 @@ export async function updateSessionMetadata(
     | 'sharedId'
     | 'model'
     | 'llmConnection'
+    // Role profile + its frozen snapshot: switching the agent of an existing
+    // session rewrites both together (they must never drift apart).
+    | 'agentId'
+    | 'agentSnapshot'
     | 'isArchived'
     | 'archivedAt'
     | 'projectId'
@@ -569,6 +573,8 @@ export async function updateSessionMetadata(
   if ('sharedId' in updates) session.sharedId = updates.sharedId;
   if (updates.model !== undefined) session.model = updates.model;
   if (updates.llmConnection !== undefined) session.llmConnection = updates.llmConnection;
+  if (updates.agentId !== undefined) session.agentId = updates.agentId;
+  if (updates.agentSnapshot !== undefined) session.agentSnapshot = updates.agentSnapshot;
   if (updates.isArchived !== undefined) session.isArchived = updates.isArchived;
   if ('archivedAt' in updates) session.archivedAt = updates.archivedAt;
   if ('projectId' in updates) session.projectId = updates.projectId;

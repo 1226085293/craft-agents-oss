@@ -29,6 +29,7 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.appearance.SET_RICH_TOOL_DESCRIPTIONS,
   RPC_CHANNELS.sessions.GET_MODEL,
   RPC_CHANNELS.sessions.SET_MODEL,
+  RPC_CHANNELS.sessions.SET_AGENT,
   RPC_CHANNELS.sessions.SWITCH_CONNECTION,
   RPC_CHANNELS.defense.GET_ENABLED,
   RPC_CHANNELS.defense.SET_ENABLED,
@@ -92,6 +93,14 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
   server.handle(RPC_CHANNELS.sessions.SET_MODEL, async (_ctx, sessionId: string, workspaceId: string, model: string | null, connection?: string) => {
     await deps.sessionManager.updateSessionModel(sessionId, workspaceId, model, connection)
     deps.platform.logger.info(`Session ${sessionId} model updated to: ${model}${connection ? ` (connection: ${connection})` : ''}`)
+  })
+
+  // Re-assign the role profile (persona + scope ceilings) of an existing
+  // session. The frozen snapshot is rebuilt from the profile, so the next turn
+  // runs under the new role; the transcript is untouched.
+  server.handle(RPC_CHANNELS.sessions.SET_AGENT, async (_ctx, sessionId: string, _workspaceId: string, agentId: string) => {
+    await deps.sessionManager.updateSessionAgent(sessionId, agentId)
+    deps.platform.logger.info(`Session ${sessionId} agent updated to: ${agentId}`)
   })
 
   // Hot connection switch (mid-session): injects credentials into the live

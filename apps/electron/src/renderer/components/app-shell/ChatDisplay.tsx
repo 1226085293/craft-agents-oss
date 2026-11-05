@@ -2590,7 +2590,13 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           <ChatInputZone
             compactMode={compactMode}
             permissionMode={permissionMode}
-            onPermissionModeChange={onPermissionModeChange}
+            // The supervisor (督导) is the built-in session: what it may do is
+            // decided by its tool table (SUPERVISOR_TOOL_NAMES never registers
+            // bash / write / edit / MCP), not by a permission gate. Offering
+            // 探索/询问/执行 here reads as "it can be handed tools", which it
+            // cannot — so the control is dropped rather than merely preset.
+            onPermissionModeChange={session.hidden ? undefined : onPermissionModeChange}
+            showOptionBadges={session.hidden ? false : undefined}
             sessionId={session.id}
             sessionFolderPath={sessionFolderPath}
             queuedMessages={session.queuedMessages}

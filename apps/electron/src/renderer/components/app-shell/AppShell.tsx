@@ -2121,7 +2121,7 @@ function AppShellContent({
           canGoForward={canGoForward}
           onToggleSidebar={handleToggleSidebar}
           onToggleFocusMode={() => setIsSidebarAndNavigatorHidden(prev => !prev)}
-          onAddSessionPanel={() => handleNewChat(true)}
+          onAddSessionPanel={() => handleStartSession(true)}
           onAddBrowserPanel={() => { void handleNewBrowserWindow() }}
           isCompact={isAutoCompact}
         />
@@ -2893,7 +2893,8 @@ function AppShellContent({
                   onUnarchive={onUnarchiveSession}
                   onMarkUnread={onMarkSessionUnread}
                   onRename={onRenameSession}
-                  onNewSession={() => handleNewChat()}
+                  // Empty list -> the supervisor, not a blank worker session.
+                  onNewSession={() => handleStartSession()}
                   onFocusChatInput={(targetSessionId) => {
                     focusChatInputForSession(targetSessionId ?? focusedSessionId ?? session.selected)
                   }}
@@ -3110,10 +3111,10 @@ function AppShellContent({
           <button
             type="button"
             className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-accent"
-            onClick={() => { setListMenu(null); handleNewChat() }}
+            onClick={() => { setListMenu(null); handleStartSession() }}
           >
             <SquarePenRounded className="h-3.5 w-3.5 shrink-0" />
-            {t("session.newSession")}
+            {t("session.startSession", { defaultValue: "开始会话" })}
           </button>
           <button
             type="button"

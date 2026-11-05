@@ -6762,6 +6762,11 @@ ${request.prompt}`;
       name: '督导',
       role: 'supervisor',
       hidden: true,
+      // What the supervisor may do is decided by its tool table, not by a
+      // permission gate: SUPERVISOR_TOOL_NAMES never registers bash / write /
+      // edit / MCP, so 放行 cannot hand it hands. Leaving the gate on 探索 only
+      // forced it to ask before reading tasks/ and plans/.
+      permissionMode: 'allow-all',
     })
   }
 

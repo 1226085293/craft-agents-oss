@@ -216,8 +216,6 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   const hideChatHeader = (sessionMeta?.hidden ?? false) || (session?.hidden ?? false)
 
   const autoForcedReloadSessionRef = React.useRef<string | null>(null)
-  // How many automatic force-reloads this session has already burned.
-  const autoAttemptCountRef = React.useRef(0)
   const shouldForceInitialMessagesReload = React.useMemo(() => {
     const expectedMessageCount = session?.messageCount ?? sessionMeta?.messageCount ?? 0
     return messagesLoaded
@@ -231,14 +229,22 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     setMessagesLoadError(null)
     setMessagesRetrying(false)
 
-    // A transcript can read back empty on the first fetch even though the header
-    // says it has history (the backend hands back the in-memory session while the
-    // disk transcript is still settling). Erroring on the first repeat made
-    // 开始会话 show 「无法加载对话」 for a session that loaded fine on retry, so
-    // allow the auto path a bounded number of attempts before giving up.
-    const autoAttempts = autoForcedReloadSessionRef.current === sessionId ? (autoAttemptCountRef.current ?? 0) : 0
-    if (shouldForceInitialMessagesReload && autoAttempts >= MAX_AUTO_RELOAD_ATTEMPTS) {
-      setMessagesLoadError('Session messages are not available')
+    // Already force-reloaded once this mount and the transcript STILL reads empty
+    // while the header claims history. Erroring immediately used to show
+    // 「无法加载对话 / Session messages are not available」 for sessions that the
+    // user's manual 重试 always loaded — the first fetch can race the disk
+    // transcript. So the auto path fetches once more before giving up.
+    if (shouldForceInitialMessagesReload && autoForcedReloadSessionRef.current === sessionId) {
+      void forceMessagesReload(sessionId)
+        .then((retried) => {
+          if (cancelled) return
+          if (!retried || (retried.messages?.length ?? 0) === 0) {
+            setMessagesLoadError('Session messages are not available')
+          }
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) setMessagesLoadError(formatSessionLoadFailure(error))
+        })
       return () => {
         cancelled = true
       }
@@ -247,7 +253,6 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     const useForceReload = shouldForceInitialMessagesReload
     if (useForceReload) {
       autoForcedReloadSessionRef.current = sessionId
-      autoAttemptCountRef.current = autoAttempts + 1
     }
 
     const loadPromise = useForceReload

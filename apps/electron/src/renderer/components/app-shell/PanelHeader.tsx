@@ -122,7 +122,6 @@ export function PanelHeader({
   isRegeneratingTitle,
   hidden,
 }: PanelHeaderProps) {
-  if (hidden) return null
   // Fall back to AppShellContext.leadingAction so per-panel back buttons (set by
   // PanelSlot in compact mode) propagate to every page's PanelHeader without each
   // page having to forward the prop manually. ChatPage explicitly passes its own
@@ -287,6 +286,12 @@ export function PanelHeader({
   )
 
   // Use motion.div with animated paddingLeft to shift content while keeping background full-width
+  //
+  // `hidden` short-circuits AFTER every hook: an early return above them would
+  // change the hook count between renders and crash the tree the moment the
+  // supervisor panel toggled ("Rendered fewer hooks than expected").
+  if (hidden) return null
+
   return (
     <motion.div
       initial={false}

@@ -35,12 +35,15 @@ function tasksApi(): TasksApi {
 export interface AgentsState {
   agents: AgentOption[]
   loading: boolean
+  /** Re-read the file after a save/delete (the broadcast covers other windows). */
+  reload: () => void
 }
 
 /** Role profiles the composer can offer for this workspace. */
 export function useAgents(workspaceId: string | undefined): AgentsState {
   const [agents, setAgents] = React.useState<AgentOption[]>([])
   const [loading, setLoading] = React.useState(true)
+  const [nonce, setNonce] = React.useState(0)
 
   React.useEffect(() => {
     if (!workspaceId) {
@@ -73,9 +76,9 @@ export function useAgents(workspaceId: string | undefined): AgentsState {
       cancelled = true
       off?.()
     }
-  }, [workspaceId])
+  }, [workspaceId, nonce])
 
-  return { agents, loading }
+  return { agents, loading, reload: () => setNonce((n) => n + 1) }
 }
 
 export interface TasksState {

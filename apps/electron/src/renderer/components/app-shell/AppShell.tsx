@@ -1807,6 +1807,9 @@ function AppShellContent({
     result.push({ id: 'nav:sources', type: 'nav', action: handleSourcesClick })
     result.push({ id: 'nav:skills', type: 'nav', action: handleSkillsClick })
     result.push({ id: 'nav:projects', type: 'nav', action: handleProjectsClick })
+    // Task board (multi-agent). The unified registry is what binds a click to an
+    // action, so the nav row below is inert without this entry.
+    result.push({ id: 'nav:tasks', type: 'nav', action: () => navigate(routes.view.tasks()) })
     result.push({ id: 'nav:pages', type: 'nav', action: handlePagesClick })
     result.push({ id: 'nav:settings', type: 'nav', action: () => handleSettingsClick() })
     result.push({ id: 'nav:whats-new', type: 'nav', action: handleWhatsNewClick })
@@ -2743,42 +2746,24 @@ function AppShellContent({
                 </>
               }
             />
-            {/* New Session — first row of the navigator body (not the header):
-                icon + label centred as one group, full width. */}
+            {/* Starting a session is now role-driven: "新建会话" (plain new chat)
+                was removed because the agent picker below supersedes it. */}
             {isSessionsNavigation(navState) && (
               <div className="shrink-0 px-2 pt-1 pb-2">
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <div>
-                      <ContextMenu modal={true}>
-                        <ContextMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            onClick={(e) => handleNewChat(e.metaKey || e.ctrlKey)}
-                            className="flex h-[30px] w-full items-center justify-center gap-2 rounded-[6px] border border-foreground/10 bg-foreground/[0.06] px-2 text-[13px] font-normal shadow-minimal transition-colors hover:bg-foreground/[0.10]"
-                            data-tutorial="new-chat-button"
-                          >
-                            <SquarePenRounded className="h-3.5 w-3.5 shrink-0" />
-                            <span className="truncate">{t("session.newSession")}</span>
-                          </Button>
-                        </ContextMenuTrigger>
-                        <Button
-                          variant="ghost"
-                          onClick={() => handleStartSession()}
-                          className="mt-1 flex h-[28px] w-full items-center justify-center gap-2 rounded-[6px] px-2 text-[12px] font-normal text-muted-foreground transition-colors hover:bg-foreground/[0.08] hover:text-foreground"
-                        >
-                          <Bot className="h-3.5 w-3.5 shrink-0" />
-                          <span className="truncate">{t("session.startSession", { defaultValue: "开始会话" })}</span>
-                        </Button>
-                        <StyledContextMenuContent>
-                          <ContextMenuProvider>
-                            <SidebarMenu type="newSession" />
-                          </ContextMenuProvider>
-                        </StyledContextMenuContent>
-                      </ContextMenu>
-                    </div>
+                    <Button
+                      variant="ghost"
+                      onClick={() => handleStartSession()}
+                      className="flex h-[30px] w-full items-center justify-center gap-2 rounded-[6px] border border-foreground/10 bg-foreground/[0.06] px-2 text-[13px] font-normal shadow-minimal transition-colors hover:bg-foreground/[0.10]"
+                    >
+                      <Bot className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{t("session.startSession", { defaultValue: "开始会话" })}</span>
+                    </Button>
                   </TooltipTrigger>
-                  <TooltipContent side="bottom">{newChatHotkey}</TooltipContent>
+                  <TooltipContent side="bottom">
+                    {t("session.startSessionHint", { defaultValue: "选择一个角色，按它的人设与权限开始" })}
+                  </TooltipContent>
                 </Tooltip>
               </div>
             )}

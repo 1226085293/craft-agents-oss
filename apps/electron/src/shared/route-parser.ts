@@ -881,11 +881,19 @@ function navigationStateToCompoundRoute(state: NavigationState): ParsedCompoundR
     }
   }
 
+  if (state.navigator === 'tasks') {
+    return {
+      navigator: 'tasks',
+      selectedTaskId: state.selectedTaskId ?? null,
+      details: null,
+    }
+  }
+
   // Sessions (the only remaining variant that carries filter/details)
   if (state.navigator !== 'sessions') {
-    // Tasks (and anything else added later) have no session fields; routing
-    // them here would silently produce an empty sessions state.
-    return { navigator: 'tasks', selectedTaskId: null, details: null }
+    // Anything added later must get an explicit branch above; falling through
+    // here would silently produce an empty sessions state.
+    return { navigator: 'sessions', details: null, sessionFilter: undefined }
   }
   return {
     navigator: 'sessions',

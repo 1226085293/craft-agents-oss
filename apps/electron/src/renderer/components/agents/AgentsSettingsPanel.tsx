@@ -1,18 +1,31 @@
 /**
  * Agent (role profile) settings.
  *
- * One list plus one editor. The editor is deliberately a plain form: persona,
- * the inherited defaults, and the two scope ceilings (sources, skills) rendered
- * as toggle grids, because "all vs allowlist" is the one decision that silently
- * changes what a session can touch.
+ * Two panes: the role list on the left, the editor on the right. The editor is
+ * built from the same primitives as every other settings page (SettingsSection /
+ * SettingsCard / SettingsRow) — an earlier hand-rolled version looked bolted on:
+ * it had its own headings, its own control styling and mixed Chinese literals
+ * into an otherwise translated page.
+ *
+ * The editor stays a plain form on purpose: persona, the inherited defaults and
+ * the two scope ceilings (sources, skills). "All vs allowlist" is the one
+ * decision that silently changes what a session can touch, so it gets the most
+ * visual weight.
  */
 
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
-import { Plus, Trash2 } from 'lucide-react'
+import { Check, Plus, Trash2 } from 'lucide-react'
 
 import { useAgents } from '@/hooks/useAgents'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import { ScrollArea } from '@/components/ui/scroll-area'
+import {
+  SettingsCard,
+  SettingsRow,
+  SettingsSection,
+} from '@/components/settings'
 
 interface AgentDraft {
   id?: string
@@ -37,88 +50,102 @@ const EMPTY: AgentDraft = {
   skills: { mode: 'all', slugs: [] },
 }
 
-function ScopeGrid({
-  label,
+/**
+ * Scope ceiling editor. Renders as a settings card: the mode select sits on the
+ * row, and picking "指定" reveals the searchable checklist underneath.
+ */
+function ScopeField({
+  title,
   hint,
   scope,
   candidates,
   onChange,
 }: {
-  label: string
+  title: string
   hint: string
   scope: { mode: 'all' | 'allowlist'; slugs: string[] }
   candidates: Array<{ slug: string; name: string }>
   onChange: (next: { mode: 'all' | 'allowlist'; slugs: string[] }) => void
 }): React.JSX.Element {
+  const { t } = useTranslation()
   const [query, setQuery] = React.useState('')
   const visible = candidates.filter((c) =>
     c.name.toLowerCase().includes(query.trim().toLowerCase()),
   )
 
   return (
-    <section className="space-y-2">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="text-xs font-medium">{label}</div>
-          <div className="text-[11px] text-muted-foreground">{hint}</div>
-        </div>
-        <select
-          className="rounded border bg-transparent px-1.5 py-1 text-xs"
-          value={scope.mode}
-          onChange={(e) =>
-            onChange({
-              mode: e.target.value as 'all' | 'allowlist',
-              // Switching back to "all" keeps the ticked set, so flipping back
-              // does not lose the user's work.
-              slugs: scope.slugs,
-            })
-          }
-        >
-          <option value="all">全部</option>
-          <option value="allowlist">指定</option>
-        </select>
-      </div>
+    <SettingsSection title={title} description={hint}>
+      <SettingsCard>
+        <SettingsRow label={t('settings.agents.scopeMode', { defaultValue: '范围' })}>
+          <select
+            className="h-8 w-40 rounded-md border border-input bg-transparent px-2 text-sm"
+            value={scope.mode}
+            onChange={(e) =>
+              onChange({
+                mode: e.target.value as 'all' | 'allowlist',
+                // Switching back to "all" keeps the ticked set, so flipping back
+                // does not lose the user's work.
+                slugs: scope.slugs,
+              })
+            }
+          >
+            <option value="all">{t('settings.agents.scopeAll', { defaultValue: '全部' })}</option>
+            <option value="allowlist">{t('settings.agents.scopePick', { defaultValue: '指定' })}</option>
+          </select>
+        </SettingsRow>
 
-      {scope.mode === 'allowlist' ? (
-        <>
-          <input
-            className="w-full rounded border bg-transparent px-2 py-1 text-xs"
-            placeholder="搜索…"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
-          <div className="grid max-h-48 grid-cols-2 gap-1 overflow-y-auto">
-            {visible.map((candidate) => {
-              const checked = scope.slugs.includes(candidate.slug)
-              return (
-                <button
-                  key={candidate.slug}
-                  type="button"
-                  onClick={() =>
-                    onChange({
-                      mode: 'allowlist',
-                      slugs: checked
-                        ? scope.slugs.filter((s) => s !== candidate.slug)
-                        : [...scope.slugs, candidate.slug],
-                    })
-                  }
-                  className={cn(
-                    'flex items-center gap-1.5 rounded border px-2 py-1 text-left text-xs',
-                    checked ? 'border-primary/50 bg-primary/10' : 'hover:bg-accent',
-                  )}
-                >
-                  <span className={cn('h-1.5 w-1.5 rounded-full', checked ? 'bg-primary' : 'bg-muted-foreground/40')} />
-                  <span className="truncate">{candidate.name}</span>
-                </button>
-              )
-            })}
-            {visible.length === 0 ? (
-              <div className="col-span-2 py-2 text-center text-[11px] text-muted-foreground">没有可选项</div>
-            ) : null}
+        {scope.mode === 'allowlist' ? (
+          <div className="space-y-2 px-4 pb-3">
+            <input
+              className="h-8 w-full rounded-md border border-input bg-transparent px-2 text-sm"
+              placeholder={t('settings.agents.scopeSearch', { defaultValue: '搜索…' })}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <div className="grid max-h-56 grid-cols-2 gap-1.5 overflow-y-auto">
+              {visible.map((candidate) => {
+                const checked = scope.slugs.includes(candidate.slug)
+                return (
+                  <button
+                    key={candidate.slug}
+                    type="button"
+                    onClick={() =>
+                      onChange({
+                        mode: 'allowlist',
+                        slugs: checked
+                          ? scope.slugs.filter((s) => s !== candidate.slug)
+                          : [...scope.slugs, candidate.slug],
+                      })
+                    }
+                    className={cn(
+                      'flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors',
+                      checked
+                        ? 'border-primary/40 bg-primary/10'
+                        : 'border-transparent hover:bg-accent',
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        'flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-[3px] border',
+                        checked ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/40',
+                      )}
+                    >
+                      {checked ? <Check className="h-2.5 w-2.5" /> : null}
+                    </span>
+                    <span className="truncate">{candidate.name}</span>
+                  </button>
+                )
+              })}
+              {visible.length === 0 ? (
+                <div className="col-span-2 py-3 text-center text-xs text-muted-foreground">
+                  {t('settings.agents.scopeEmpty', { defaultValue: '没有可选项' })}
+                </div>
+              ) : null}
+            </div>
           </div>
-        </>
-      ) : null}
-    </section>
+        ) : null}
+      </SettingsCard>
+    </SettingsSection>
   )
 }
 
@@ -139,7 +166,7 @@ export function AgentsSettingsPanel({
   strategies = [],
 }: AgentsSettingsPanelProps): React.JSX.Element {
   const { t } = useTranslation()
-  const { agents } = useAgents(workspaceId)
+  const { agents, reload } = useAgents(workspaceId)
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
   const [draft, setDraft] = React.useState<AgentDraft>(EMPTY)
   const [saving, setSaving] = React.useState(false)
@@ -172,6 +199,7 @@ export function AgentsSettingsPanel({
       await (window.electronAPI as unknown as {
         agentsSave?: (workspaceId: string, agent: unknown) => Promise<{ id: string }>
       }).agentsSave?.(workspaceId, { ...draft, id: draft.id ?? selectedId ?? undefined })
+      await reload()
     } finally {
       setSaving(false)
     }
@@ -183,145 +211,179 @@ export function AgentsSettingsPanel({
       agentsDelete?: (workspaceId: string, id: string) => Promise<unknown>
     }).agentsDelete?.(workspaceId, selectedId)
     setSelectedId(null)
+    await reload()
   }
 
   return (
     <div className="flex h-full min-h-0">
-      <div className="w-56 shrink-0 border-r p-2">
-        <button
-          type="button"
-          className="mb-2 flex w-full items-center gap-1.5 rounded px-2 py-1 text-xs hover:bg-accent"
-          onClick={() => {
-            setSelectedId(null)
-            setDraft(EMPTY)
-          }}
-        >
-          <Plus className="h-3.5 w-3.5" /> 新建角色
-        </button>
-        {agents.map((agent) => (
-          <button
-            key={agent.id}
-            type="button"
-            onClick={() => setSelectedId(agent.id)}
-            className={cn(
-              'mb-0.5 flex w-full items-center gap-1.5 rounded px-2 py-1 text-left text-xs',
-              selectedId === agent.id ? 'bg-accent' : 'hover:bg-accent',
-            )}
+      {/* Role list */}
+      <div className="flex w-60 shrink-0 flex-col border-r">
+        <div className="p-2">
+          <Button
+            variant="ghost"
+            className="h-8 w-full justify-start gap-1.5 px-2 text-[13px] font-normal"
+            onClick={() => {
+              setSelectedId(null)
+              setDraft(EMPTY)
+            }}
           >
-            <span>{agent.icon ?? '👤'}</span>
-            <span className="truncate">{agent.name}</span>
-            {agent.builtin ? (
-              <span className="ml-auto rounded bg-muted px-1 text-[10px] text-muted-foreground">内置</span>
-            ) : null}
-          </button>
-        ))}
+            <Plus className="h-3.5 w-3.5" />
+            {t('settings.agents.newAgent', { defaultValue: '新建角色' })}
+          </Button>
+        </div>
+        <ScrollArea className="min-h-0 flex-1 px-2 pb-2">
+          {agents.map((agent) => (
+            <button
+              key={agent.id}
+              type="button"
+              onClick={() => setSelectedId(agent.id)}
+              className={cn(
+                'mb-0.5 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors',
+                selectedId === agent.id ? 'bg-accent' : 'hover:bg-accent/60',
+              )}
+            >
+              <span className="shrink-0 text-sm">{agent.icon ?? '👤'}</span>
+              <span className="truncate">{agent.name}</span>
+              {agent.builtin ? (
+                <span className="ml-auto shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                  {t('settings.agents.builtin', { defaultValue: '内置' })}
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </ScrollArea>
       </div>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
-        <div className="flex items-center gap-2">
-          <input
-            className="w-20 rounded border bg-transparent px-2 py-1 text-center text-sm"
-            placeholder="🙂"
-            value={draft.icon ?? ''}
-            onChange={(e) => setDraft({ ...draft, icon: e.target.value })}
-          />
-          <input
-            className="flex-1 rounded border bg-transparent px-2 py-1 text-sm"
-            placeholder={t('agent.namePlaceholder', { defaultValue: '角色名称' })}
-            value={draft.name}
-            onChange={(e) => setDraft({ ...draft, name: e.target.value })}
-          />
-        </div>
+      {/* Editor */}
+      <div className="min-h-0 flex-1 mask-fade-y">
+        <ScrollArea className="h-full">
+          <div className="mx-auto max-w-3xl px-5 py-7">
+            <div className="space-y-8">
+              <SettingsSection title={t('settings.agents.identity', { defaultValue: '身份' })}>
+                <SettingsCard>
+                  <SettingsRow label={t('settings.agents.name', { defaultValue: '名称' })}>
+                    <div className="flex items-center gap-2">
+                      <input
+                        className="h-8 w-14 rounded-md border border-input bg-transparent text-center text-sm"
+                        placeholder="🙂"
+                        value={draft.icon ?? ''}
+                        onChange={(e) => setDraft({ ...draft, icon: e.target.value })}
+                      />
+                      <input
+                        className="h-8 w-64 rounded-md border border-input bg-transparent px-2 text-sm"
+                        placeholder={t('agent.namePlaceholder', { defaultValue: '角色名称' })}
+                        value={draft.name}
+                        onChange={(e) => setDraft({ ...draft, name: e.target.value })}
+                      />
+                    </div>
+                  </SettingsRow>
+                </SettingsCard>
+              </SettingsSection>
 
-        <section>
-          <div className="mb-1 text-xs font-medium">人格提示词</div>
-          <div className="mb-1 text-[11px] text-muted-foreground">
-            写进系统提示的固定段落。创建会话时快照，之后改这里不会影响已有会话。
+              <SettingsSection
+                title={t('settings.agents.persona', { defaultValue: '人设提示词' })}
+                description={t('settings.agents.personaHint', {
+                  defaultValue: '这段文字会作为系统提示的一部分，决定它怎么说话、怎么做事。',
+                })}
+              >
+                <SettingsCard>
+                  <div className="p-3">
+                    <textarea
+                      className="min-h-[140px] w-full resize-y rounded-md border border-input bg-transparent p-2 font-mono text-xs leading-relaxed"
+                      value={draft.persona}
+                      onChange={(e) => setDraft({ ...draft, persona: e.target.value })}
+                    />
+                  </div>
+                </SettingsCard>
+              </SettingsSection>
+
+              <SettingsSection title={t('settings.agents.defaults', { defaultValue: '默认值' })}>
+                <SettingsCard>
+                  <SettingsRow label={t('settings.agents.defaultStrategy', { defaultValue: '默认策略组' })}>
+                    <select
+                      className="h-8 w-56 rounded-md border border-input bg-transparent px-2 text-sm"
+                      value={draft.defaults.strategy ?? ''}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          defaults: { ...draft.defaults, strategy: e.target.value || null },
+                        })
+                      }
+                    >
+                      <option value="">
+                        {t('settings.agents.followStrategy', { defaultValue: '跟随（第一个启用的组）' })}
+                      </option>
+                      {strategies.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}
+                        </option>
+                      ))}
+                    </select>
+                  </SettingsRow>
+                  <SettingsRow label={t('settings.agents.defaultPermission', { defaultValue: '默认权限模式' })}>
+                    <select
+                      className="h-8 w-56 rounded-md border border-input bg-transparent px-2 text-sm"
+                      value={draft.defaults.permissionMode ?? ''}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          defaults: {
+                            ...draft.defaults,
+                            permissionMode: (e.target.value || null) as AgentDraft['defaults']['permissionMode'],
+                          },
+                        })
+                      }
+                    >
+                      <option value="">{t('settings.agents.followWorkspace', { defaultValue: '跟随工作区' })}</option>
+                      <option value="safe">{t('mode.safe', { defaultValue: '只读' })}</option>
+                      <option value="ask">{t('mode.askToEdit', { defaultValue: '每次询问' })}</option>
+                      <option value="allow-all">{t('mode.allow-all', { defaultValue: '全部放行' })}</option>
+                    </select>
+                  </SettingsRow>
+                </SettingsCard>
+              </SettingsSection>
+
+              <ScopeField
+                title={t('settings.agents.sourcesScope', { defaultValue: '可用来源' })}
+                hint={t('settings.agents.sourcesScopeHint', {
+                  defaultValue: '不选表示不限制；选了就只有这些来源对它可见。',
+                })}
+                scope={draft.sources}
+                candidates={sources}
+                onChange={(next) => setDraft({ ...draft, sources: next })}
+              />
+
+              <ScopeField
+                title={t('settings.agents.skillsScope', { defaultValue: '可用技能' })}
+                hint={t('settings.agents.skillsScopeHint', {
+                  defaultValue: '同时影响系统提示里的技能清单和技能调用。',
+                })}
+                scope={draft.skills}
+                candidates={skills}
+                onChange={(next) => setDraft({ ...draft, skills: next })}
+              />
+
+              <div className="flex items-center gap-2 pb-2">
+                <Button size="sm" disabled={saving || !draft.name.trim()} onClick={() => void save()}>
+                  {saving
+                    ? t('settings.agents.saving', { defaultValue: '保存中…' })
+                    : t('settings.agents.save', { defaultValue: '保存' })}
+                </Button>
+                {selected && !selected.builtin ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="gap-1 text-muted-foreground"
+                    onClick={() => void remove()}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    {t('settings.agents.delete', { defaultValue: '删除' })}
+                  </Button>
+                ) : null}
+              </div>
+            </div>
           </div>
-          <textarea
-            className="min-h-[120px] w-full rounded border bg-transparent p-2 font-mono text-xs"
-            value={draft.persona}
-            onChange={(e) => setDraft({ ...draft, persona: e.target.value })}
-          />
-        </section>
-
-        <section className="grid grid-cols-2 gap-2">
-          <label className="text-xs">
-            默认策略组
-            <select
-              className="mt-1 w-full rounded border bg-transparent px-1.5 py-1"
-              value={draft.defaults.strategy ?? ''}
-              onChange={(e) =>
-                setDraft({ ...draft, defaults: { ...draft.defaults, strategy: e.target.value || null } })
-              }
-            >
-              <option value="">跟随（第一个启用的组）</option>
-              {strategies.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-xs">
-            默认权限模式
-            <select
-              className="mt-1 w-full rounded border bg-transparent px-1.5 py-1"
-              value={draft.defaults.permissionMode ?? ''}
-              onChange={(e) =>
-                setDraft({
-                  ...draft,
-                  defaults: {
-                    ...draft.defaults,
-                    permissionMode: (e.target.value || null) as AgentDraft['defaults']['permissionMode'],
-                  },
-                })
-              }
-            >
-              <option value="">跟随工作区</option>
-              <option value="safe">只读</option>
-              <option value="ask">每次询问</option>
-              <option value="allow-all">全部放行</option>
-            </select>
-          </label>
-        </section>
-
-        <ScopeGrid
-          label="来源范围（MCP / API / 本地）"
-          hint="指定模式下这是上限：会话里只能在白名单内勾选。"
-          scope={draft.sources}
-          candidates={sources}
-          onChange={(sources) => setDraft({ ...draft, sources })}
-        />
-
-        <ScopeGrid
-          label="技能范围"
-          hint="同时影响系统提示里的技能清单和技能调用。"
-          scope={draft.skills}
-          candidates={skills}
-          onChange={(skills) => setDraft({ ...draft, skills })}
-        />
-
-        <div className="flex items-center gap-2 pt-1">
-          <button
-            type="button"
-            disabled={saving || !draft.name.trim()}
-            className="rounded bg-primary px-3 py-1 text-xs text-primary-foreground disabled:opacity-50"
-            onClick={() => void save()}
-          >
-            {saving ? '保存中…' : '保存'}
-          </button>
-          {selected && !selected.builtin ? (
-            <button
-              type="button"
-              className="flex items-center gap-1 rounded border px-2 py-1 text-xs text-muted-foreground"
-              onClick={() => void remove()}
-            >
-              <Trash2 className="h-3 w-3" /> 删除
-            </button>
-          ) : null}
-          {selectedId ? <span className="text-[11px] text-muted-foreground">{selectedId}</span> : null}
-        </div>
+        </ScrollArea>
       </div>
     </div>
   )

@@ -106,7 +106,11 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
 
       // Saving the built-in default edits the `defaults` block instead of
       // creating a row, so there is no second "default" to keep in sync.
-      if (!input.id || input.id === DEFAULT_AGENT_ID) {
+      //
+      // The id must be explicit here. Treating a *missing* id as "the default"
+      // made 新建角色 impossible: the editor sends no id for a new profile, so
+      // every save rewrote the workspace defaults and `agents[]` stayed empty.
+      if (input.id === DEFAULT_AGENT_ID) {
         saveAgents(workspace.rootPath, {
           ...file,
           defaults: {
@@ -122,8 +126,8 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
 
       const existingAt = file.agents.findIndex((a) => a.id === input.id);
       const profile: AgentProfile = {
-        id: input.id,
-        name: input.name?.trim() || input.id,
+        id: input.id ?? newAgentId(),
+        name: input.name?.trim() || input.id || '新角色',
         icon: input.icon,
         color: input.color,
         persona: input.persona ?? '',

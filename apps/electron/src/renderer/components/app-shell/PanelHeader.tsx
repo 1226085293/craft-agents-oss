@@ -96,6 +96,12 @@ export interface PanelHeaderProps {
   className?: string
   /** Whether title is being regenerated (shows shimmer effect) */
   isRegeneratingTitle?: boolean
+  /**
+   * Render nothing at all. Used for the supervisor panel: its session is the
+   * built-in 督导 (hidden from the list), so a list title and its buttons have
+   * nothing to act on — they only add chrome above the conversation.
+   */
+  hidden?: boolean
 }
 
 /**
@@ -114,7 +120,9 @@ export function PanelHeader({
   paddingLeft,
   className,
   isRegeneratingTitle,
+  hidden,
 }: PanelHeaderProps) {
+  if (hidden) return null
   // Fall back to AppShellContext.leadingAction so per-panel back buttons (set by
   // PanelSlot in compact mode) propagate to every page's PanelHeader without each
   // page having to forward the prop manually. ChatPage explicitly passes its own

@@ -1706,16 +1706,32 @@ function AppShellContent({
    * Same creation path as a normal chat, but the record carries
    * `role: 'supervisor'`, so the tool table is pruned and dispatch is available.
    */
+  /**
+   * Open the workspace's supervisor session.
+   *
+   * There is exactly one, and it is hidden from the conversation list: the
+   * supervisor coordinates tasks across sessions, so creating a new one per
+   * click split that state (and left a pile of sessions named 督导). The
+   * backend reuses the on-duty session or creates it once.
+   */
+  // Settings navigation carries no `details`; narrow once here so both the
+  // supervisor no-op check and the header gate can read a session id safely.
+  const activeNavSessionId = 'details' in navState && navState.details?.type === 'session'
+    ? navState.details.sessionId
+    : null
+
   const handleStartSession = useCallback(async (newPanel: boolean = false) => {
     if (!activeWorkspace) return
     setSearchActive(false)
     setSearchQuery('')
     try {
       const workspaceId = activeWorkspace.id
-      const session = await window.electronAPI.createSession(workspaceId, {
-        name: t('session.supervisorDefaultName', { defaultValue: '督导' }),
-        role: 'supervisor',
-      } as never)
+      const session = await window.electronAPI.ensureSupervisorSession(workspaceId)
+      // Already there: re-navigating to the same session re-mounts the chat pane,
+      // which drops the loaded transcript and can trip ChatPage's forced-reload
+      // guard into "Session messages are not available". Clicking 开始会话 while
+      // on the supervisor is a no-op by design — there is nothing else to open.
+      if (!newPanel && activeNavSessionId === session.id) return
       // Register before navigating: `resolveAutoSelection` drops a session id the
       // renderer has not learned about yet (it arrives later via
       // `session_created`/getSessions) and then auto-selects the previous
@@ -1724,9 +1740,9 @@ function AppShellContent({
       addSession(session)
       navigate(routes.view.allSessions(session.id), newPanel ? { newPanel: true } : undefined)
     } catch (error) {
-      console.warn('[AppShell] failed to start a supervisor session:', error)
+      console.warn('[AppShell] failed to open the supervisor session:', error)
     }
-  }, [activeWorkspace, t, addSession])
+  }, [activeWorkspace, addSession, activeNavSessionId])
 
   const handleNewChat = useCallback((newPanel: boolean = false) => {
     if (!activeWorkspace) return
@@ -2045,12 +2061,6 @@ function AppShellContent({
     // sessions, so the sessions fallback below would mislabel it "所有会话".
     if (isEventsNavigation(navState)) {
       return navState.section === 'listeners' ? t("sidebar.eventListeners") : t("sidebar.eventList")
-    }
-
-    // Tasks navigator — same reason: the panel lists the task board, and the
-    // sessions fallback below would label it "所有会话".
-    if (isTasksNavigation(navState)) {
-      return t("sidebar.tasks")
     }
 
     // Sessions navigator - use sessionFilter
@@ -2685,6 +2695,9 @@ function AppShellContent({
               onContextMenu={handleListBackgroundContextMenu}
             >
             <PanelHeader
+              // The task board renders its own header (taskboard.title + count), so a
+              // navigator title here printed 「任务」 twice.
+              hidden={isTasksNavigation(navState)}
               // The title stays visible even when the rail is collapsed: hiding
               // it left the list panel with an empty header and no way to tell
               // which view was open. Stoplight padding is macOS-only (Windows

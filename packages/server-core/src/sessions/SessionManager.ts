@@ -6744,6 +6744,27 @@ ${request.prompt}`;
   }
 
   /** The workspace's on-duty supervisor, if one exists and is alive. */
+  /**
+   * The workspace's on-duty supervisor session, created on first use.
+   *
+   * "开始会话" is a single built-in session, not a session factory: the
+   * supervisor coordinates tasks across sessions, so a second one would split
+   * the coordination state in two. The session is `hidden` because it is an
+   * infrastructure surface (reached through 开始会话), not a conversation the
+   * user should find in the list — forty copies named 督导 was the symptom of
+   * every click creating a fresh one.
+   */
+  async ensureSupervisorSession(workspaceId: string): Promise<Session> {
+    const existing = this.findOnDutySupervisor(workspaceId)
+    if (existing) return managedToSession(existing)
+
+    return this.createSession(workspaceId, {
+      name: '督导',
+      role: 'supervisor',
+      hidden: true,
+    })
+  }
+
   private findOnDutySupervisor(workspaceId: string): ManagedSession | undefined {
     for (const managed of this.sessions.values()) {
       if (managed.workspace.id !== workspaceId) continue

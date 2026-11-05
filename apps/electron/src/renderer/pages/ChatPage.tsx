@@ -207,7 +207,17 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   const forceMessagesReload = useSetAtom(forceSessionMessagesReloadAtom)
   const [messagesLoadError, setMessagesLoadError] = React.useState<string | null>(null)
   const [messagesRetrying, setMessagesRetrying] = React.useState(false)
+  /**
+   * The supervisor (督导) panel is the built-in session: one per workspace,
+   * hidden from the list, reached only through 开始会话. Its title/menu row has
+   * nothing to act on (no rename surface the user cares about, no list context),
+   * so the conversation gets the full height instead.
+   */
+  const hideChatHeader = (sessionMeta?.hidden ?? false) || (session?.hidden ?? false)
+
   const autoForcedReloadSessionRef = React.useRef<string | null>(null)
+  // How many automatic force-reloads this session has already burned.
+  const autoAttemptCountRef = React.useRef(0)
   const shouldForceInitialMessagesReload = React.useMemo(() => {
     const expectedMessageCount = session?.messageCount ?? sessionMeta?.messageCount ?? 0
     return messagesLoaded
@@ -221,7 +231,13 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     setMessagesLoadError(null)
     setMessagesRetrying(false)
 
-    if (shouldForceInitialMessagesReload && autoForcedReloadSessionRef.current === sessionId) {
+    // A transcript can read back empty on the first fetch even though the header
+    // says it has history (the backend hands back the in-memory session while the
+    // disk transcript is still settling). Erroring on the first repeat made
+    // 开始会话 show 「无法加载对话」 for a session that loaded fine on retry, so
+    // allow the auto path a bounded number of attempts before giving up.
+    const autoAttempts = autoForcedReloadSessionRef.current === sessionId ? (autoAttemptCountRef.current ?? 0) : 0
+    if (shouldForceInitialMessagesReload && autoAttempts >= MAX_AUTO_RELOAD_ATTEMPTS) {
       setMessagesLoadError('Session messages are not available')
       return () => {
         cancelled = true
@@ -231,6 +247,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     const useForceReload = shouldForceInitialMessagesReload
     if (useForceReload) {
       autoForcedReloadSessionRef.current = sessionId
+      autoAttemptCountRef.current = autoAttempts + 1
     }
 
     const loadPromise = useForceReload
@@ -838,7 +855,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
       return (
         <>
           <div className="h-full flex flex-col" data-focus-zone="chat" onPointerDown={() => setCurrentZone('chat')}>
-            <PanelHeader  title={displayTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
+            <PanelHeader  hidden={hideChatHeader} title={displayTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
             <div className="flex-1 flex flex-col min-h-0">
               <ChatDisplay
                 ref={setChatDisplayRef}
@@ -902,7 +919,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     // Session truly doesn't exist
     return (
       <div className="h-full flex flex-col">
-        <PanelHeader  title={t('chat.session')} leadingAction={leadingAction} rightSidebarButton={rightSidebarButton} />
+        <PanelHeader  hidden={hideChatHeader} title={t('chat.session')} leadingAction={leadingAction} rightSidebarButton={rightSidebarButton} />
         <div className="flex-1 flex flex-col items-center justify-center gap-3 text-muted-foreground">
           <AlertCircle className="h-10 w-10" />
           <p className="text-sm">{t('chat.sessionNoLongerExists')}</p>
@@ -914,7 +931,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   return (
     <>
       <div className="h-full flex flex-col" data-focus-zone="chat" onPointerDown={() => setCurrentZone('chat')}>
-        <PanelHeader  title={displayTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
+        <PanelHeader  hidden={hideChatHeader} title={displayTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
         <div className="flex-1 flex flex-col min-h-0">
           <ChatDisplay
             ref={setChatDisplayRef}

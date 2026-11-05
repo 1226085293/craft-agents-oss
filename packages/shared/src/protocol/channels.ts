@@ -23,6 +23,8 @@ export const RPC_CHANNELS = {
     MARK_ALL_READ: 'sessions:markAllRead',
     UNREAD_SUMMARY_CHANGED: 'sessions:unreadSummaryChanged',
     CREATE: 'sessions:create',
+    /** Reuse the workspace's on-duty supervisor session, creating it once. */
+    ENSURE_SUPERVISOR: 'sessions:ensureSupervisor',
     DELETE: 'sessions:delete',
     GET_MESSAGES: 'sessions:getMessages',
     SEND_MESSAGE: 'sessions:sendMessage',

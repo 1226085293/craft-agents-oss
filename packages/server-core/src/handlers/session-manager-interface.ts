@@ -158,6 +158,8 @@ export interface ISessionManager {
   archiveProjectSessions(projectId: string, archived: boolean): Promise<{ affected: string[] }>
   deleteProjectSessions(projectId: string): Promise<{ deleted: string[] }>
   setSessionConnection(sessionId: string, connectionSlug: string): Promise<void>
+  /** The workspace's single on-duty supervisor session (created once, hidden). */
+  ensureSupervisorSession(workspaceId: string): Promise<import('@craft-agent/shared/protocol').Session>
   updateSessionModel(sessionId: string, workspaceId: string, model: string | null, connection?: string): Promise<void>
   /** Re-assign the role profile (persona + scope ceilings) an existing session runs as. */
   updateSessionAgent(sessionId: string, agentId: string): Promise<void>

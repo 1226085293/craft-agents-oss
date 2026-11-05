@@ -371,6 +371,11 @@ export function buildCompoundRoute(parsed: ParsedCompoundRoute): string {
     return `events/${section}/${parsed.details.type}/${parsed.details.id}`
   }
 
+  if (parsed.navigator === 'tasks') {
+    // `tasks` opens the board; a selected task drills into its detail view.
+    return parsed.selectedTaskId ? `tasks/${parsed.selectedTaskId}` : 'tasks'
+  }
+
   // Sessions navigator
 
   let base: string

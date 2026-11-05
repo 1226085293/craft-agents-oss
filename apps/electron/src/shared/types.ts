@@ -1382,6 +1382,14 @@ export const parseNavigationStateKey = (key: string): NavigationState | null => 
     return { navigator: 'pages', details: null }
   }
 
+  // Handle tasks
+  if (key === 'tasks') return { navigator: 'tasks', selectedTaskId: null }
+  if (key.startsWith('tasks/')) {
+    const taskId = key.slice('tasks/'.length)
+    if (taskId) return { navigator: 'tasks', selectedTaskId: taskId }
+    return { navigator: 'tasks', selectedTaskId: null }
+  }
+
   // Handle settings
   if (key === 'settings') return { navigator: 'settings', subpage: null }
   if (key.startsWith('settings:')) {

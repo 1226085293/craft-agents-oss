@@ -13,7 +13,7 @@ function generatePanelId(): string {
   return `panel-${++nextPanelId}-${Date.now()}`
 }
 
-export type PanelType = 'session' | 'source' | 'settings' | 'skills' | 'other'
+export type PanelType = 'session' | 'source' | 'settings' | 'skills' | 'tasks' | 'other'
 export type PanelLaneId = 'main'
 export type OpenIntent = 'implicit' | 'explicit'
 
@@ -72,7 +72,9 @@ export function getPanelTypeFromRoute(route: ViewRoute): PanelType {
     case 'sources':
       return 'source'
     case 'tasks':
-      return 'session'
+      // Its own type: mapping it to 'session' let the reconcile pass treat a
+      // task route as a session panel and rewrite it back to allSessions.
+      return 'tasks'
     case 'settings':
       return 'settings'
     case 'skills':

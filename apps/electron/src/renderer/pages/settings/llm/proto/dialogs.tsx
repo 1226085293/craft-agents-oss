@@ -39,6 +39,7 @@ import {
 import type { StrategyModelPick } from '../helpers'
 import { parseKeyBlock } from './keyParser'
 import { isRetryDraftValid, retryDraftFromConfig, serializeRetryDraft } from './retrySettings'
+import { retryTimeLimitWarning } from './retryTimeLimit'
 import { isWaitForCooldownDraftValid, serializeWaitForCooldownDraft, waitForCooldownDraftFromConfig } from './waitForCooldownSettings'
 import { WaitForCooldownFields } from './WaitForCooldownFields'
 import { RetrySettingsFields } from './RetrySettingsFields'
@@ -1308,6 +1309,15 @@ function StrategyEditDialog(props: {
             draft={retryDraft}
             onChange={setRetryDraft}
             invalid={retryDraft.maxAttempts === 'unlimited' && !isRetryDraftValid(retryDraft)}
+            // Recomputed on every keystroke: the limit and the member list are
+            // both local state, so the warning tracks the form rather than the
+            // saved config.
+            timeLimitWarning={retryTimeLimitWarning({
+              maxDurationSeconds: retryDraft.maxDurationSeconds,
+              members,
+              providers: props.providers,
+              presets: props.config.presets,
+            })}
           />
           <WaitForCooldownFields
             draft={waitCooldownDraft}

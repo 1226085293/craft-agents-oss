@@ -7,6 +7,12 @@ export function RetrySettingsFields(props: {
   draft: RetrySettingsDraft
   onChange: (update: (draft: RetrySettingsDraft) => RetrySettingsDraft) => void
   invalid?: boolean
+  /**
+   * Live warning about this limit versus the group's slowest first-byte
+   * timeout; see {@link retryTimeLimitWarning}. Null/absent renders nothing,
+   * so the field stays quiet when the value is workable.
+   */
+  timeLimitWarning?: string | null
 }): React.JSX.Element {
   const { draft } = props
   return (
@@ -45,6 +51,13 @@ export function RetrySettingsFields(props: {
             <div className="notice amber" style={{ marginTop: 6 }}>
               可重试错误会在同一目标持续重试，直到达到此时限；之后切换到下一个目标。
             </div>
+            {/* 小号警示行而非第二块 amber notice：这段是对上面那条说明的
+                具体化，块级提示叠两块会分不清哪条才是针对当前输入值的。 */}
+            {props.timeLimitWarning ? (
+              <div className="xs" style={{ color: 'var(--state-warn)', marginTop: 4 }}>
+                {`⚠ ${props.timeLimitWarning}`}
+              </div>
+            ) : null}
             {props.invalid ? <div className="xs" style={{ color: 'var(--state-bad)', marginTop: 4 }}>时限必须为 1 到 86400 秒的整数。</div> : null}
           </div>
         ) : null}

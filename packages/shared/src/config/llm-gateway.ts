@@ -368,6 +368,15 @@ export class LlmGateway {
 
   /** waitForCooldown: max wait→retry rounds per strategy within one request. */
   private static readonly WAIT_COOLDOWN_ROUNDS = 3;
+  /**
+   * How often one strategy may be re-planned after its snapshot went stale
+   * (a unit that was cooling when the plan was built became servable).
+   *
+   * One: a plan is rebuilt with live availability, so a second refresh can only
+   * repeat the same work. Retrying the *upstream* is what the wait budget and
+   * the retry ladder are for.
+   */
+  private static readonly REPLAN_ROUNDS = 1;
   /** waitForCooldown: request-wide total wait budget, shared across the fallback chain.
    *
    * The session client (Anthropic SDK, default timeout) aborts a request whose
@@ -928,8 +937,10 @@ export class LlmGateway {
       let rateLimited = false;
       let quotaExhausted = false;
       let requestRejected = false;
+      let contentRejected = false;
       let routeFailed = false;
       let tprRejected = false;
+      let transportFailure: 'network' | 'timeout' | null = null;
       let retryAfterSeconds = 0;
       // One row per exhausted strategy. Written *after* the status is decided,
       // so the 状态码 column always matches what the client was told.
@@ -944,6 +955,13 @@ export class LlmGateway {
       let waitBudgetLeft = LlmGateway.WAIT_COOLDOWN_BUDGET_SECONDS;
       let waitRoundsLeft = 0;
       let waitRoundsStrategyId = '';
+      // A plan is a snapshot of which units were routable when the request
+      // started. A unit that was parked then can thaw while the plan's own
+      // units are still being tried, and the old code answered 503 without
+      // ever looking again (2026-11-05, `261105-onyx-steel`). One refresh per
+      // strategy per request: a correction, not a retry loop.
+      let replanLeft = 0;
+      let replanStrategyId = '';
       // waitForCooldown v1 scope: streaming chat requests only. Non-stream
       // responses cannot keep the client patient through a silent wait, and
       // auxiliary calls (title / judge / compaction) have their own fallback
@@ -955,6 +973,10 @@ export class LlmGateway {
         if (waitRoundsStrategyId !== current.id) {
           waitRoundsStrategyId = current.id;
           waitRoundsLeft = LlmGateway.WAIT_COOLDOWN_ROUNDS;
+        }
+        if (replanStrategyId !== current.id) {
+          replanStrategyId = current.id;
+          replanLeft = LlmGateway.REPLAN_ROUNDS;
         }
 
         // Exclude units whose keys are all cooling / rate-limited, or whose
@@ -1020,6 +1042,7 @@ export class LlmGateway {
             res,
             budgetLeft: waitBudgetLeft,
             roundsLeft: waitRoundsLeft,
+            replanLeft,
             hardBlocked: false,
           });
           if (plannedWait.action === 'waited') {
@@ -1027,6 +1050,11 @@ export class LlmGateway {
             waitRoundsLeft -= 1;
             // Retry the SAME strategy: a wait-retry re-enters the loop body
             // with fresh availability, so drop the visited-guard entry.
+            visited.delete(current.id);
+            continue;
+          }
+          if (plannedWait.action === 'retry_now') {
+            replanLeft -= 1;
             visited.delete(current.id);
             continue;
           }
@@ -1064,7 +1092,9 @@ export class LlmGateway {
         rateLimited = rateLimited || outcome.rateLimited;
         quotaExhausted = quotaExhausted || outcome.quotaExhausted;
         requestRejected = requestRejected || outcome.requestError;
+        contentRejected = contentRejected || outcome.contentRejected;
         routeFailed = routeFailed || outcome.routeFailure;
+        if (outcome.transportFailure) transportFailure = transportFailure ?? outcome.transportFailure;
         tprRejected = tprRejected || outcome.tprRejected;
         retryAfterSeconds = Math.max(retryAfterSeconds, outcome.retryAfterSeconds);
         lastOutcome = 'exhausted';
@@ -1079,11 +1109,18 @@ export class LlmGateway {
           res,
           budgetLeft: waitBudgetLeft,
           roundsLeft: waitRoundsLeft,
+          replanLeft,
+          plannedUnits: new Set(plan.units.map((unit) => unit.id)),
           hardBlocked: outcome.requestError || outcome.tprRejected,
         });
         if (executedWait.action === 'waited') {
           waitBudgetLeft -= executedWait.seconds;
           waitRoundsLeft -= 1;
+          visited.delete(current.id);
+          continue;
+        }
+        if (executedWait.action === 'retry_now') {
+          replanLeft -= 1;
           visited.delete(current.id);
           continue;
         }
@@ -1112,17 +1149,21 @@ export class LlmGateway {
       // the log must say what the client got, not a constant.
       //
       // Precedence follows what the operator can act on: a malformed request is
-      // the client's fault, an empty balance is the account's, a rate wall is
-      // temporary, a route with no usable unit is configuration, and only an
-      // unclassified upstream failure is a gateway error.
+      // the client's fault, a payload no model accepts is also the client's to
+      // fix, an empty balance is the account's, a rate wall is temporary, a
+      // route with no usable unit is configuration, and the rest are upstream
+      // failures — which are 502/504, never "no healthy account".
       const clientStatus =
         requestRejected ? 400
           : tprRejected ? 400
-            : quotaExhausted ? 402
-              : rateLimited ? 429
-                : lastOutcome === 'plan_failed' ? 503
-                  : routeFailed ? 503
-                    : 502;
+            : contentRejected ? 400
+              : quotaExhausted ? 402
+                : rateLimited ? 429
+                  : lastOutcome === 'plan_failed' ? 503
+                    : transportFailure === 'timeout' ? 504
+                      : transportFailure === 'network' ? 502
+                        : routeFailed ? 503
+                          : 502;
       for (const row of exhaustedRows) this.recordUsage({ ...row, statusCode: clientStatus });
 
       // Respond with the same status that was stamped onto the rows. Keeping a
@@ -1135,7 +1176,7 @@ export class LlmGateway {
       res.writeHead(clientStatus, headers);
       res.end(
         JSON.stringify({
-          error: clientErrorFor(clientStatus, { tprRejected }),
+          error: clientErrorFor(clientStatus, { tprRejected, contentRejected }),
         }),
       );
     } finally {
@@ -1173,8 +1214,12 @@ export class LlmGateway {
       quotaExhausted: boolean;
       /** The request itself was invalid; other units cannot fix it. */
       requestError: boolean;
+      /** The payload was refused (images / context size) by a healthy route. */
+      contentRejected: boolean;
       /** Every attempt died on a route/transport problem (no healthy account). */
       routeFailure: boolean;
+      /** No usable HTTP answer: a dead connection or a first-byte timeout. */
+      transportFailure: 'network' | 'timeout' | null;
       tprRejected: boolean;
       retryAfterSeconds: number;
       row: UsageRecord;
@@ -1212,7 +1257,25 @@ export class LlmGateway {
     let rateLimited = false;
     let quotaExhausted = false;
     let requestError = false;
+    /**
+     * The payload itself was refused by a route that is otherwise healthy.
+     *
+     * Kept apart from `requestError` because another member of the group may
+     * accept it (a vision-capable model, a bigger context window), so the unit
+     * ladder moves on instead of stopping — and the route is never cooled.
+     */
+    let contentRejected = false;
     let routeFailure = false;
+    /**
+     * The upstream never produced a usable HTTP answer: no response at all
+     * (`network`) or silence past the first-byte budget (`timeout`).
+     *
+     * Separate from `routeFailure` because the client status has to say "bad
+     * gateway" / "timed out": answering 503 `no healthy account for this
+     * model` sent the operator hunting for a credential problem that did not
+     * exist (2026-11-05, `261105-onyx-steel`).
+     */
+    let transportFailure: 'network' | 'timeout' | null = null;
     // The request is larger than every key's TPR ceiling: a client error, not
     // a retryable upstream failure.
     let tprRejected = false;
@@ -1476,6 +1539,7 @@ export class LlmGateway {
           // No HTTP response at all: 0 renders as "—" rather than as a status.
           failAttempt(0, lastError);
           routeFailure = true;
+          transportFailure = transportFailure ?? 'network';
           // Connection-level: the endpoint is unreachable, not the account, so
           // another key of the same baseUrl pays the same cost. Cool the
           // route and move to the next unit (2026-10-25 first-byte incident).
@@ -1543,6 +1607,7 @@ export class LlmGateway {
             // there is no HTTP status to record — the timeout itself is.
             failAttempt(0, lastError, firstByteMs);
             routeFailure = true;
+            transportFailure = transportFailure ?? 'timeout';
             const timeoutDelayMs = retryDelayMs(retryPolicy, keyAttempts, 0);
             if (targetBudgetAllowsRetry(retryPolicy, keyAttempts, targetStartedAtMs, Date.now(), timeoutDelayMs)) {
               if (await retrySameTarget(0, timeoutDelayMs)) continue;
@@ -1694,6 +1759,16 @@ export class LlmGateway {
           break;
         }
 
+        if (failure.kind === 'unsupported_content') {
+          // The route is healthy, the payload is not acceptable to it. Move to
+          // the next member — a vision-capable model or a wider window may
+          // still serve the turn — but never cool this route: it answers text
+          // requests perfectly well.
+          contentRejected = true;
+          releaseKey();
+          break;
+        }
+
         if (failure.kind === 'request') {
           // The request itself is unacceptable; another unit will reject it too.
           requestError = true;
@@ -1764,7 +1839,9 @@ export class LlmGateway {
       rateLimited,
       quotaExhausted,
       requestError,
+      contentRejected,
       routeFailure,
+      transportFailure,
       tprRejected,
       retryAfterSeconds: this.minRemainingCooldown(),
       row,
@@ -1792,14 +1869,23 @@ export class LlmGateway {
   }
 
   /**
-   * waitForCooldown: soonest seconds until some candidate unit of `strategy`
-   * can serve `publicModel` again.
+   * Cooldown state of a strategy for one public model, as seen *now*.
+   *
+   * `soonest` is how long the earliest parked unit still needs;
+   * `servableOutsidePlan` says a unit the plan did **not** contain can serve
+   * the request right now — which is precisely the signature of a stale plan:
+   * the route was cooling when the plan was built and thawed while the plan's
+   * own units were still being tried. Reading that state as "nothing to wait
+   * for, give up" is what answered 503 with a perfectly usable route available
+   * (2026-11-05, `261105-onyx-steel`).
+   *
+   * The `planned` set is what keeps a re-plan honest: when every unit was in
+   * the plan, they were all tried and failed, so rebuilding the plan can only
+   * repeat the same calls. Only an unplanned, now-usable unit justifies one.
    *
    * Combines route/endpoint cooldowns and the key pool's soonest wait. A unit
    * that is merely blocked by this stream's exhausted-key set contributes
-   * nothing — waiting does not clear those. Returns 0 when something can serve
-   * right now, or when nothing cooldown-based is pending (the caller then
-   * transfers instead of waiting).
+   * nothing — waiting does not clear those.
    *
    * Cooldown entries carry no quota/rate-limit class (`RateLimitState` stores
    * only an expiry), and none is needed: a day-scale quota wall never passes
@@ -1807,11 +1893,12 @@ export class LlmGateway {
    * by magnitude — while a genuinely soon quota cooldown (an operator-configured
    * short `quotaExhaustedSeconds`) is as waitable as any rate limit.
    */
-  private async strategySoonestUnfreezeSeconds(
+  private async strategyCooldownState(
     strategy: LlmStrategy,
     publicModel: string,
     streamRetryState?: GatewayStreamRetryState,
-  ): Promise<number> {
+    planned?: ReadonlySet<string>,
+  ): Promise<{ servableOutsidePlan: boolean; soonest: number }> {
     const config = this.getConfig();
     let candidates: ReturnType<typeof candidateUnits>;
     try {
@@ -1819,10 +1906,11 @@ export class LlmGateway {
     } catch {
       // Same posture as {@link unavailableUnitsFor}: a dangling provider
       // reference is the planner's error to report, not a cooldown to wait out.
-      return 0;
+      return { servableOutsidePlan: false, soonest: 0 };
     }
     const now = Date.now() / 1000;
     let soonest = Number.POSITIVE_INFINITY;
+    let servableOutsidePlan = false;
     for (const unit of candidates.units) {
       const routeWait = Math.max(
         0,
@@ -1834,12 +1922,17 @@ export class LlmGateway {
         continue;
       }
       const pool = this.pools.get(unit.provider.id);
-      if (!pool) return 0;
+      // A provider without a pool contributes nothing: it is neither waiting
+      // nor newly usable (the planner reports it as its own error).
+      if (!pool) continue;
       const excludedStreamKeys = streamRetryState
         ? this.exhaustedStreamKeys(streamRetryState, unit.id, resolveRetryPolicy(strategy))
         : new Set<string>();
       const availability = await pool.availability(unit.upstreamModel, excludedStreamKeys);
-      if (availability.available) return 0;
+      if (availability.available) {
+        if (!planned || !planned.has(unit.id)) servableOutsidePlan = true;
+        continue;
+      }
       // retryAfterSeconds > 0 = a cooldown/window that waiting can clear
       // (key cooldown, rate-limit window, concurrency drain). === 0 with
       // !available = stream-exhausted keys or an empty pool — waiting does
@@ -1848,7 +1941,7 @@ export class LlmGateway {
         soonest = Math.min(soonest, availability.retryAfterSeconds);
       }
     }
-    return Number.isFinite(soonest) ? soonest : 0;
+    return { servableOutsidePlan, soonest: Number.isFinite(soonest) ? soonest : 0 };
   }
 
   /**
@@ -1892,7 +1985,12 @@ export class LlmGateway {
    * (`waitEligible`), per-strategy rounds, a request-wide wait budget, and
    * `maxWaitSeconds` itself. `requestError`/`tprRejected` never wait, and
    * quota-scale cooldowns are excluded by magnitude inside
-   * {@link strategySoonestUnfreezeSeconds}.
+   * {@link strategyCooldownState}.
+   *
+   * A unit that is servable *now* is not a wait: the plan that excluded it is
+   * simply stale, so the strategy is re-planned once (`retry_now`). That is
+   * not gated on `waitForCooldown` — it is a correctness fix, costs no sleep,
+   * and applies to every caller, including non-stream auxiliary requests.
    */
   private async maybeWaitForStrategyCooldown(
     strategy: LlmStrategy,
@@ -1905,19 +2003,38 @@ export class LlmGateway {
       res: ServerResponse;
       budgetLeft: number;
       roundsLeft: number;
+      replanLeft: number;
+      /** Units the current plan already tried; `undefined` when it never got built. */
+      plannedUnits?: ReadonlySet<string>;
       hardBlocked: boolean;
     },
   ): Promise<
     | { action: 'skip' }
     | { action: 'waited'; seconds: number }
+    | { action: 'retry_now' }
     | { action: 'reloaded' }
     | { action: 'disconnected' }
   > {
+    if (opts.hardBlocked) return { action: 'skip' };
+    const state = await this.strategyCooldownState(
+      strategy,
+      publicModel,
+      streamRetryState,
+      opts.plannedUnits,
+    );
+    if (state.servableOutsidePlan) {
+      if (opts.replanLeft <= 0) return { action: 'skip' };
+      this.log(
+        `strategy ${strategy.id}: a unit is servable again, re-planning before giving up ` +
+          `(stalePlan, retries left ${opts.replanLeft - 1})`,
+      );
+      return { action: 'retry_now' };
+    }
     const cfg = strategy.waitForCooldown;
-    if (!opts.waitEligible || !cfg?.enabled || opts.hardBlocked) return { action: 'skip' };
+    if (!opts.waitEligible || !cfg?.enabled) return { action: 'skip' };
     if (opts.roundsLeft <= 0) return { action: 'skip' };
     const maxWaitSeconds = clampWaitSeconds(cfg.maxWaitSeconds);
-    const soonest = await this.strategySoonestUnfreezeSeconds(strategy, publicModel, streamRetryState);
+    const soonest = state.soonest;
     if (soonest <= 0 || soonest > maxWaitSeconds || soonest > opts.budgetLeft) return { action: 'skip' };
     this.log(
       `strategy ${strategy.id}: all units cooling, waiting ${Math.ceil(soonest)}s before retry ` +
@@ -3023,15 +3140,27 @@ function describeError(err: unknown): string {
  */
 function clientErrorFor(
   status: number,
-  context: { tprRejected: boolean },
+  context: { tprRejected: boolean; contentRejected: boolean },
 ): { type: string; message: string } {
   if (status === 400) {
-    return context.tprRejected
-      ? {
-          type: 'invalid_request_error',
-          message: 'request exceeds the token ceiling (TPR) of every available key',
-        }
-      : { type: 'invalid_request_error', message: 'the upstream rejected the request itself' };
+    if (context.tprRejected) {
+      return {
+        type: 'invalid_request_error',
+        message: 'request exceeds the token ceiling (TPR) of every available key',
+      };
+    }
+    if (context.contentRejected) {
+      // The route was fine; the payload was not. Naming the class (images /
+      // context size) is the difference between the user removing one
+      // attachment and the user chasing a nonexistent outage.
+      return {
+        type: 'invalid_request_error',
+        message:
+          'the request payload was rejected by every model that could serve it ' +
+          '(unsupported content such as images, or a prompt past the context window)',
+      };
+    }
+    return { type: 'invalid_request_error', message: 'the upstream rejected the request itself' };
   }
   if (status === 402) {
     return { type: 'insufficient_balance', message: 'every account is out of balance or quota' };
@@ -3042,16 +3171,33 @@ function clientErrorFor(
   if (status === 503) {
     return { type: 'overloaded_error', message: 'no healthy account for this model' };
   }
+  if (status === 504) {
+    return { type: 'api_error', message: 'no upstream answered before the deadline' };
+  }
   return { type: 'api_error', message: 'all upstreams failed' };
 }
 
 /** Failure buckets the switch policy routes on. */
+/**
+ * Bodies that mean "this model cannot take *this payload*", not "this route
+ * does not serve this model".
+ *
+ * They arrive as 400s and, because they name the model, used to fall into the
+ * `modelish` test below: the route was cooled for 300s as if the model did not
+ * exist and the client was told 503 `no healthy account` for a screenshot it
+ * could have removed (2026-11-05, `261105-onyx-steel`: every turn of a session
+ * with one pasted image died that way).
+ */
+const CONTENT_REJECTION_RE =
+  /image|vision|multimodal|modality|attachment|audio|video|context[\s_-]*(?:length|window|limit)|maximum context|too (?:many tokens|long)|token limit|图片|图像|视觉|音频|视频|上下文长度|超出.{0,6}(?:长度|上限)/i;
+
 type UpstreamFailureKind =
   | 'rate_limit'
   | 'quota'
   | 'auth'
   | 'model_not_found'
   | 'server_error'
+  | 'unsupported_content'
   | 'request';
 
 /**
@@ -3084,6 +3230,13 @@ function classifyUpstreamFailure(code: number, body: string): { kind: UpstreamFa
   }
   if (code === 404) return { kind: 'model_not_found' };
   if (code === 400 || code === 422) {
+    // A payload the model cannot accept as sent (an image on a text-only
+    // model, a prompt past its window) is neither a dead route nor a
+    // malformed request: the next member of the group may still serve it, and
+    // cooling this route would take a perfectly healthy model down for 300s.
+    // Must be tested before `modelish`, because those bodies name the model
+    // ("Model X does not support image input").
+    if (CONTENT_REJECTION_RE.test(low)) return { kind: 'unsupported_content' };
     // A malformed prompt is the client's problem; a model id the provider does
     // not serve is a routing problem. The body is the only thing that
     // distinguishes them at this status.
@@ -3113,8 +3266,9 @@ function describeUpstreamFailure(
       : kind === 'quota' ? 'out of balance/quota'
         : kind === 'auth' ? 'rejected the credential'
           : kind === 'model_not_found' ? 'does not serve this model'
-            : kind === 'server_error' ? 'failed'
-              : 'rejected the request';
+            : kind === 'unsupported_content' ? 'does not accept this payload'
+              : kind === 'server_error' ? 'failed'
+                : 'rejected the request';
   const digest = bodyDigest(body);
   return `upstream ${providerId} ${label} (${code})${digest ? `: ${digest}` : ''}`;
 }

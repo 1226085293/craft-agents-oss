@@ -51,7 +51,13 @@ function baseConfig(over: Partial<LlmConfig> = {}): LlmConfig {
   };
 }
 
-type StubResponse = { status?: number; body?: string; headers?: Record<string, string> };
+type StubResponse = {
+  status?: number;
+  body?: string;
+  headers?: Record<string, string>;
+  /** Hold the answer so a cooldown can expire while this unit is in flight. */
+  delayMs?: number;
+};
 
 function stubUpstream(responses: StubResponse[]) {
   const calls: Array<{ url: string }> = [];
@@ -73,7 +79,8 @@ function stubUpstream(responses: StubResponse[]) {
     calls.push({ url: String(input) });
     const spec = responses[Math.min(i, responses.length - 1)]!;
     i += 1;
-    const { body = JSON.stringify({ ok: true }), status = 200, headers } = spec;
+    const { body = JSON.stringify({ ok: true }), status = 200, headers, delayMs } = spec;
+    if (delayMs && delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
     return new Response(body, { status, headers: headers ?? { 'content-type': 'application/json' } });
   }) as unknown as typeof fetch;
   return { impl, calls };
@@ -217,6 +224,78 @@ describe('LlmGateway waitForCooldown', () => {
     const waits = logs.filter((line) => line.includes('all units cooling, waiting'));
     expect(waits.length).toBeGreaterThanOrEqual(1);
     expect(waits.length).toBeLessThanOrEqual(3);
+  }, 20000);
+
+  it('re-plans when a unit that was cooling at plan time has thawed', async () => {
+    // The 2026-11-05 incident (`261105-onyx-steel`): the plan was built while
+    // p1 was parked, so only p2 was in it. p2 took 2.1s to fail — by then p1
+    // had finished its 2s cooldown — and `soonest === 0` ("something is
+    // servable now") was read as "stop", answering 503 while a healthy route
+    // sat right there. A stale plan must be refreshed, not obeyed.
+    const cfg = baseConfig({
+      providers: [provider('p1', { defaultPreset: 'noLadder' }), provider('p2', { defaultPreset: 'noLadder' })],
+      strategies: [
+        {
+          id: 'auto',
+          type: 'round_robin',
+          members: [{ provider: 'p1' }, { provider: 'p2' }],
+          retry: { maxAttempts: 1, onStatusCodes: [500, 502, 503, 504], backoffMs: 0 },
+          waitForCooldown: { enabled: true, maxWaitSeconds: 60 },
+        },
+      ],
+    });
+    const stub = await start(cfg, [
+      // Priming request: park p1 for 2s, let p2 serve.
+      { status: 429, headers: { 'retry-after': '2' }, body: JSON.stringify({ error: 'rate limited' }) },
+      { body: JSON.stringify({ id: 'p2-first' }) },
+      // Second request: p2 is alone in the plan and fails slowly enough for
+      // p1's cooldown to expire while it is in flight.
+      { status: 503, delayMs: 2100, body: JSON.stringify({ error: 'overloaded' }) },
+      { body: JSON.stringify({ id: 'p1-after-replan' }) },
+    ]);
+
+    const first = await post(gateway!, { stream: true });
+    expect(first.status).toBe(200);
+
+    const second = await post(gateway!, { stream: true });
+    expect(second.status).toBe(200);
+    expect((await readJson(second)).id).toBe('p1-after-replan');
+    expect(logs.some((line) => line.includes('stalePlan'))).toBe(true);
+    // p1 twice (429, then the successful re-plan), p2 twice (served the first
+    // request, failed the second).
+    const hosts = stub.calls.map((call) => new URL(call.url).hostname);
+    expect(hosts.filter((h) => h === 'p1.example.com').length).toBe(2);
+    expect(hosts.filter((h) => h === 'p2.example.com').length).toBe(2);
+  }, 20000);
+
+  it('re-plans a stale plan for non-stream requests too', async () => {
+    // Re-planning is a correctness fix, not part of the waiting policy: a
+    // title/judge/compaction call must not be answered 503 just because its
+    // plan snapshot went stale.
+    const cfg = baseConfig({
+      providers: [provider('p1', { defaultPreset: 'noLadder' }), provider('p2', { defaultPreset: 'noLadder' })],
+      strategies: [
+        {
+          id: 'auto',
+          type: 'round_robin',
+          members: [{ provider: 'p1' }, { provider: 'p2' }],
+          retry: { maxAttempts: 1, onStatusCodes: [500, 502, 503, 504], backoffMs: 0 },
+        },
+      ],
+    });
+    const stub = await start(cfg, [
+      { status: 429, headers: { 'retry-after': '2' }, body: JSON.stringify({ error: 'rate limited' }) },
+      { body: JSON.stringify({ id: 'p2-first' }) },
+      { status: 503, delayMs: 2100, body: JSON.stringify({ error: 'overloaded' }) },
+      { body: JSON.stringify({ id: 'p1-after-replan' }) },
+    ]);
+
+    expect((await post(gateway!, {})).status).toBe(200);
+    const second = await post(gateway!, {});
+    expect(second.status).toBe(200);
+    expect((await readJson(second)).id).toBe('p1-after-replan');
+    expect(logs.some((line) => line.includes('stalePlan'))).toBe(true);
+    expect(stub.calls.length).toBe(4);
   }, 20000);
 
   it('gives up waiting when the client disconnects mid-wait', async () => {

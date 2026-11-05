@@ -752,9 +752,11 @@ describe('LlmGateway', () => {
     await start(cfg, [broken, broken]);
 
     const res = await post(gateway, {});
-    // Transport failures are route failures now: the endpoint is unreachable,
-    // which is "no healthy account" (503), not a malformed upstream answer (502).
-    expect(res.status).toBe(503);
+    // The endpoint is unreachable, so the answer is a bad gateway (502). It
+    // used to be 503 "no healthy account for this model", which sent the
+    // operator hunting for a credential problem that did not exist
+    // (2026-11-05, `261105-onyx-steel`).
+    expect(res.status).toBe(502);
     const usage = gateway.drainUsage();
     // One row per upstream attempt: p1's failure gets its own line (it used to
     // be invisible), and p2's is the request's terminal row.
@@ -810,8 +812,8 @@ describe('LlmGateway', () => {
       },
       body: JSON.stringify({ model: 'auto' }),
     });
-    // A transport failure is a route failure → 503 (see the naming test above).
-    expect(res.status).toBe(503);
+    // A transport failure is a bad gateway → 502 (see the naming test above).
+    expect(res.status).toBe(502);
     const row = gateway.drainUsage()[0]!;
     expect(row.sessionId).toBe('sess-1');
     expect(typeof row.totalMs).toBe('number');
@@ -923,7 +925,7 @@ describe('LlmGateway', () => {
 
   it('spends the retry budget on a transport failure before leaving the model', async () => {
     // An aborted connection or a first-byte timeout is the failure a retry can
-    // actually fix, and it is what the user sees as a 503. Defaulting it to
+    // actually fix, and it is what the user sees as a 502/504. Defaulting it to
     // `retry-same` means "retry 3 times" costs three tries on this route
     // before the group falls through — previously one blip dropped the model
     // with the whole budget unspent (2026-10-30).
@@ -952,7 +954,7 @@ describe('LlmGateway', () => {
         headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
         body: JSON.stringify({ model: 'm1' }),
       });
-      expect(res.status).toBe(503);
+      expect(res.status).toBe(502);
       await res.text().catch(() => {});
       // Three tries on m1, then the budget resets for the group's next route.
       expect(calls).toBe(6);

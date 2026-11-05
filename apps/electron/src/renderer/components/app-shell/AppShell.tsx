@@ -103,7 +103,7 @@ import { getCurrentZone } from "@/actions/keybinding-context"
 import { getSessionTitle } from "@/utils/session"
 import { useSetAtom } from "jotai"
 import type { Session, Workspace, FileAttachment, PermissionRequest, LoadedSource, LoadedSkill, PermissionMode, SourceFilter, UsageStats } from "../../../shared/types"
-import { sessionMetaMapAtom, sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
+import { sessionMetaMapAtom, sendToWorkspaceAtom, addSessionAtom, type SessionMeta } from "@/atoms/sessions"
 import { sourcesAtom } from "@/atoms/sources"
 import { skillsAtom } from "@/atoms/skills"
 import { panelStackAtom, panelCountAtom, focusedPanelIdAtom, focusedSessionIdAtom, focusNextPanelAtom, focusPrevPanelAtom, parseSessionIdFromRoute } from "@/atoms/panel-stack"
@@ -676,6 +676,10 @@ function AppShellContent({
   // Send to Workspace dialog state (driven by sendToWorkspaceAtom set from SessionMenu/BatchSessionMenu)
   const sendToWorkspaceIds = useAtomValue(sendToWorkspaceAtom)
   const setSendToWorkspaceIds = useSetAtom(sendToWorkspaceAtom)
+  // Navigation validates the target session against the renderer's meta map and
+  // silently rewrites an unknown id to the previously selected session, so any
+  // create-then-navigate path must register the session first.
+  const addSession = useSetAtom(addSessionAtom)
   const handleTransferComplete = useCallback((targetWorkspaceId: string, _newSessionIds: string[]) => {
     onSelectWorkspace(targetWorkspaceId)
   }, [onSelectWorkspace])
@@ -1712,11 +1716,17 @@ function AppShellContent({
         name: t('session.supervisorDefaultName', { defaultValue: '督导' }),
         role: 'supervisor',
       } as never)
+      // Register before navigating: `resolveAutoSelection` drops a session id the
+      // renderer has not learned about yet (it arrives later via
+      // `session_created`/getSessions) and then auto-selects the previous
+      // session — the "点击开始会话无效" report, where a session was created but
+      // the view stayed on the old one.
+      addSession(session)
       navigate(routes.view.allSessions(session.id), newPanel ? { newPanel: true } : undefined)
     } catch (error) {
       console.warn('[AppShell] failed to start a supervisor session:', error)
     }
-  }, [activeWorkspace, t])
+  }, [activeWorkspace, t, addSession])
 
   const handleNewChat = useCallback((newPanel: boolean = false) => {
     if (!activeWorkspace) return

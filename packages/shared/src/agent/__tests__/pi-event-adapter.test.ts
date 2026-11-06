@@ -133,6 +133,40 @@ describe('PiEventAdapter', () => {
       expect(adapter.isHoldingTurn).toBe(false);
     });
 
+    it('fallback: gateway retry hold drains if no agent_start follows', () => {
+      jest.useFakeTimers();
+      try {
+        const enqueued: any[] = [];
+        let completed = false;
+        adapter.setRecoveryFallbackHandlers(
+          (event) => enqueued.push(event),
+          () => { completed = true; },
+        );
+
+        collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+        collect(adapter.adaptEvent({
+          type: 'message_end',
+          message: {
+            role: 'assistant',
+            stopReason: 'error',
+            errorMessage: `${GATEWAY_STREAM_TRUNCATION_RETRY_MARKER}: upstream stream ended without a finish_reason`,
+          },
+        } as any));
+        collect(adapter.adaptEvent({ type: 'agent_end', gatewayRetryPending: true } as any));
+
+        jest.advanceTimersByTime(15_000);
+
+        expect(enqueued).toMatchObject([
+          { type: 'retry', phase: 'end', recovered: false },
+          { type: 'error' },
+        ]);
+        expect(completed).toBe(true);
+        expect(adapter.isHoldingTurn).toBe(false);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
     it('surfaces gateway retry exhaustion as a typed network error without another retry', () => {
       collect(adapter.adaptEvent({ type: 'turn_start' } as any));
       collect(adapter.adaptEvent({ type: 'agent_start' } as any));

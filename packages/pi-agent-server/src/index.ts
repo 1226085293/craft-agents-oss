@@ -546,6 +546,11 @@ let defenseEvaluator: DefenseEvaluator | null = null;
 // Mutable state
 let currentUserMessage = '';
 let gatewayStreamRetryRequested = false;
+/** Grace period after agent_end before forcing the same-step retry. */
+const GATEWAY_RETRY_START_GRACE_MS = 5_000;
+let gatewayRetryGuardTimer: ReturnType<typeof setTimeout> | null = null;
+/** Serializes the prompt loop, the agent_end guard, and host retry commands. */
+let gatewayRetryInFlight = false;
 
 // --- Verification bookkeeping -----------------------------------------------
 // 1-based attempt counter for the CURRENT verification cycle (a cycle is one
@@ -2885,6 +2890,15 @@ function stopCompactionProgress(): void {
 function handleSessionEvent(event: AgentSessionEvent): void {
   let forwardedEvent: OutboundAgentEvent = event;
 
+  // A finished run must not leave a tool's timeout budget behind as a
+  // stall-watchdog exemption. A 900 s Bash call that completed long ago would
+  // otherwise suppress the 90 s idle watchdog for the rest of the turn
+  // (2026-11-06 261105-onyx-steel: 13-minute silent hang).
+  if (event.type === 'agent_end') {
+    activeToolSilenceDeadlines.clear();
+    if (gatewayStreamRetryRequested) scheduleGatewayRetryAfterAgentEnd();
+  }
+
   // Compaction heartbeat lifecycle (emits its own outbound events; the SDK
   // compaction events themselves still flow through the normal forward below).
   if (event.type === 'compaction_start') {
@@ -3435,9 +3449,58 @@ function disposeSessionForToolChanges(where: string): void {
   piSession = null;
 }
 
+function cancelGatewayRetryGuard(): void {
+  if (gatewayRetryGuardTimer !== null) {
+    clearTimeout(gatewayRetryGuardTimer);
+    gatewayRetryGuardTimer = null;
+  }
+}
+
+/**
+ * Mark the turn as retryable only once, then re-issue the failed model step.
+ * Both the normal prompt loop and the agent_end guard use this, so a retry
+ * cannot be started twice when the prompt promise settles at the same time.
+ */
+async function runGatewayRetry(source: string): Promise<void> {
+  if (gatewayRetryInFlight) {
+    // Another caller owns the recovery; consume the flag so the prompt loop
+    // cannot spin while that retry is still settling.
+    gatewayStreamRetryRequested = false;
+    return;
+  }
+  if (userAbortRequested) return;
+  gatewayRetryInFlight = true;
+  gatewayStreamRetryRequested = false;
+  cancelGatewayRetryGuard();
+  debugLog(`[gateway-retry] retrying the same model step through AgentSession.continue() (${source})`);
+  try {
+    await handleRetry();
+  } finally {
+    gatewayRetryInFlight = false;
+  }
+}
+
+/**
+ * If agent_end carries the gateway retry marker but the prompt promise never
+ * settles (the SDK can leave it pending after a synthetic stream error), the
+ * normal `while` loop in handlePrompt never runs. Force the same-step retry
+ * after a short grace period instead of waiting for a watchdog.
+ */
+function scheduleGatewayRetryAfterAgentEnd(): void {
+  if (gatewayRetryGuardTimer !== null) return;
+  gatewayRetryGuardTimer = setTimeout(() => {
+    gatewayRetryGuardTimer = null;
+    if (!gatewayStreamRetryRequested || userAbortRequested || gatewayRetryInFlight) return;
+    debugLog('[gateway-retry] retry did not start after agent_end; forcing AgentSession.continue()');
+    void runGatewayRetry('agent-end-guard');
+  }, GATEWAY_RETRY_START_GRACE_MS);
+  (gatewayRetryGuardTimer as { unref?: () => void }).unref?.();
+}
+
 async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): Promise<void> {
 
   gatewayStreamRetryRequested = false;
+  cancelGatewayRetryGuard();
   currentUserMessage = msg.message;
   // A NEW user request starts a fresh verification cycle. Clear the attempt
   // counter and the content-stability baseline here so BOTH are scoped to
@@ -3537,9 +3600,7 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     try {
       await awaitTurnWithStallDetection(promptPromise, activeToolDeadline);
       while (gatewayStreamRetryRequested && !userAbortRequested) {
-        gatewayStreamRetryRequested = false;
-        debugLog('[gateway-retry] retrying the same model step through AgentSession.continue()');
-        await handleRetry();
+        await runGatewayRetry('prompt-loop');
       }
     } catch (stallErr) {
       debugLog(`[prompt] stalled or failed: ${stallErr instanceof Error ? stallErr.message : stallErr}; aborting session to reset state`);
@@ -4432,7 +4493,7 @@ async function processMessage(msg: InboundMessage): Promise<void> {
       break;
 
     case 'retry':
-      await handleRetry();
+      await runGatewayRetry('host-command');
       break;
 
     case 'register_tools':

@@ -439,6 +439,8 @@ export const RPC_CHANNELS = {
     RUN: 'taskboard:run',
     /** Create a task from the UI. */
     CREATE: 'taskboard:create',
+    /** Change what starts a task (manual / cron / event). */
+    UPDATE_TRIGGER: 'taskboard:updateTrigger',
     /** Pushed when any task changes (workspace-scoped). */
     CHANGED: 'taskboard:changed',
   },

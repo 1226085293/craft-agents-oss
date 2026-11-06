@@ -17,7 +17,10 @@ export interface TaskCreateInput {
     deliverables?: Array<{ kind: string; path?: string; note?: string }>
     acceptance?: Array<{ id: string; check: string; command?: string }>
   }
-  trigger?: { kind: 'manual' } | { kind: 'cron'; expr: string; timezone?: string; enabled: boolean }
+  trigger?:
+    | { kind: 'manual' }
+    | { kind: 'cron'; expr: string; timezone?: string; enabled: boolean }
+    | { kind: 'event'; source: string; types?: string[]; textMatch?: string; enabled: boolean }
 }
 
 export interface TaskCreateDialogProps {
@@ -67,6 +70,7 @@ export function TaskCreateDialog({ open, onClose, onSubmit }: TaskCreateDialogPr
   const [deliverables, setDeliverables] = React.useState('')
   const [acceptance, setAcceptance] = React.useState('')
   const [cron, setCron] = React.useState('')
+  const [eventSource, setEventSource] = React.useState('')
 
   if (!open) return null
 
@@ -80,13 +84,17 @@ export function TaskCreateDialog({ open, onClose, onSubmit }: TaskCreateDialogPr
     if (deliverableItems.length) spec.deliverables = deliverableItems
     if (acceptanceItems.length) spec.acceptance = acceptanceItems
 
+    const trigger: TaskCreateInput['trigger'] = eventSource.trim()
+      ? { kind: 'event', source: eventSource.trim(), enabled: true }
+      : cron.trim()
+        ? { kind: 'cron', expr: cron.trim(), enabled: true }
+        : { kind: 'manual' }
+
     onSubmit({
       name: name.trim(),
       instruction: instruction.trim(),
       ...(Object.keys(spec).length ? { spec } : {}),
-      trigger: cron.trim()
-        ? { kind: 'cron', expr: cron.trim(), enabled: true }
-        : { kind: 'manual' },
+      trigger,
     })
     setName('')
     setInstruction('')
@@ -95,6 +103,7 @@ export function TaskCreateDialog({ open, onClose, onSubmit }: TaskCreateDialogPr
     setDeliverables('')
     setAcceptance('')
     setCron('')
+    setEventSource('')
     onClose()
   }
 
@@ -147,6 +156,14 @@ export function TaskCreateDialog({ open, onClose, onSubmit }: TaskCreateDialogPr
         </Field>
         <Field label="定时（5 段 cron，留空 = 手动）">
           <input className={inputClass} value={cron} onChange={(e) => setCron(e.target.value)} placeholder="0 9 * * 1" />
+        </Field>
+        <Field label="事件来源（填写后优先按事件触发，可空）">
+          <input
+            className={inputClass}
+            value={eventSource}
+            onChange={(e) => setEventSource(e.target.value)}
+            placeholder="mail / git / 监听器 source"
+          />
         </Field>
       </div>
 

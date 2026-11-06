@@ -22,6 +22,7 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.taskboard.HANDOFF,
   RPC_CHANNELS.taskboard.RUN,
   RPC_CHANNELS.taskboard.CREATE,
+  RPC_CHANNELS.taskboard.UPDATE_TRIGGER,
   RPC_CHANNELS.taskboard.CHANGED,
 ] as const;
 
@@ -99,6 +100,16 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       });
       broadcast(workspaceId);
       return task;
+    },
+  );
+
+  server.handle(
+    RPC_CHANNELS.taskboard.UPDATE_TRIGGER,
+    async (_ctx, workspaceId: string, id: string, trigger: unknown) => {
+      const service = tasksFor(deps, workspaceId)
+      const task = service.updateTrigger(id, normalizeTrigger(trigger))
+      broadcast(workspaceId)
+      return { id: task.id, trigger: task.trigger }
     },
   );
 

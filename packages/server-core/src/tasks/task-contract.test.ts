@@ -232,6 +232,30 @@ describe('run lifecycle', () => {
   });
 });
 
+describe('trigger editing', () => {
+  it('switches a task from manual to cron and then to event', () => {
+    const { svc } = service();
+    const task = create(svc);
+    expect(task.trigger).toEqual({ kind: 'manual' });
+
+    const cron = svc.updateTrigger(task.id, { kind: 'cron', expr: '0 9 * * 1', enabled: true });
+    expect(cron.trigger).toMatchObject({ kind: 'cron', expr: '0 9 * * 1', enabled: true });
+
+    const event = svc.updateTrigger(task.id, { kind: 'event', source: 'mail', types: ['received'], enabled: true });
+    expect(event.trigger).toMatchObject({ kind: 'event', source: 'mail', types: ['received'] });
+
+    const manual = svc.updateTrigger(task.id, { kind: 'manual' });
+    expect(manual.trigger).toEqual({ kind: 'manual' });
+  })
+
+  it('does not let an unknown trigger kind survive', () => {
+    const { svc } = service();
+    const task = create(svc);
+    const updated = svc.updateTrigger(task.id, normalizeTrigger({ kind: 'webhook', url: 'x' }));
+    expect(updated.trigger).toEqual({ kind: 'manual' });
+  })
+});
+
 describe('pure rules', () => {
   const base = (over: Partial<Task>): Task => ({
     id: 'T-1',

@@ -1534,17 +1534,6 @@ function AppShellContent({
     navigate(routes.view.projects())
   }, [])
 
-  // Handler for automations views (all / scheduled / event / agentic)
-  const handleAutomationsClick = useCallback(() => {
-    navigate(routes.view.automations())
-  }, [])
-  const handleAutomationsScheduledClick = useCallback(() => {
-    navigate(routes.view.automationsScheduled())
-  }, [])
-  const handleAutomationsEventClick = useCallback(() => {
-    navigate(routes.view.automationsEvent())
-  }, [])
-
   // Handler for pages view
   const handlePagesClick = useCallback(() => {
     navigate(routes.view.pages())
@@ -2601,35 +2590,6 @@ function AppShellContent({
                           }
                         },
                       })),
-                    },
-                    {
-                      id: "nav:automations",
-                      title: t("sidebar.automations"),
-                      label: String(automations.length),
-                      icon: ListTodo,
-                      variant: (isAutomationsNavigation(navState) && !automationFilter) ? "default" : "ghost",
-                      onClick: handleAutomationsClick,
-                      expandable: true,
-                      expanded: isExpanded('nav:automations'),
-                      onToggle: () => toggleExpanded('nav:automations'),
-                      items: [
-                        {
-                          id: "nav:automations:scheduled",
-                          title: t("sidebar.scheduled"),
-                          label: String(automationTypeCounts.scheduled),
-                          icon: Clock,
-                          variant: (automationFilter?.kind === 'type' && automationFilter.automationType === 'scheduled') ? "default" : "ghost",
-                          onClick: handleAutomationsScheduledClick,
-                        },
-                        {
-                          id: "nav:automations:event",
-                          title: t("sidebar.eventBased"),
-                          label: String(automationTypeCounts.event),
-                          icon: Radio,
-                          variant: (automationFilter?.kind === 'type' && automationFilter.automationType === 'event') ? "default" : "ghost",
-                          onClick: handleAutomationsEventClick,
-                        },
-                      ],
                     },
                   ]}
                 />

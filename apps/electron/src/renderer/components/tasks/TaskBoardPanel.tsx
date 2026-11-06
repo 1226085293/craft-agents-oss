@@ -149,6 +149,8 @@ export interface TaskBoardPanelProps {
   onRun?: (id: string) => void
   /** Create a task from the UI. */
   onCreate?: (input: TaskCreateInput) => void
+  /** Change what starts a task. */
+  onUpdateTrigger?: (id: string, trigger: unknown) => void
 }
 
 export function TaskBoardPanel({
@@ -161,6 +163,7 @@ export function TaskBoardPanel({
   onCancel,
   onRun,
   onCreate,
+  onUpdateTrigger,
 }: TaskBoardPanelProps): React.JSX.Element {
   const { t } = useTranslation()
   const [creating, setCreating] = React.useState(false)
@@ -262,6 +265,7 @@ export function TaskBoardPanel({
           <TaskDetailPanelView
             detail={detail}
             onRun={onRun}
+            onUpdateTrigger={onUpdateTrigger}
             onClose={onCloseDetail}
             onResume={onResume}
             onCancel={onCancel}

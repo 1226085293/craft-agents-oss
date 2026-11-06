@@ -86,10 +86,12 @@ export interface TaskDetailPanelViewProps {
   onCancel?: (id: string) => void
   /** Start a run now (claims the task lock and spawns a worker). */
   onRun?: (id: string) => void
+  /** Change what starts this task. */
+  onUpdateTrigger?: (id: string, trigger: unknown) => void
 }
 
 /** Full-width task detail for the content panel, with an optional navigator back action. */
-export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun }: TaskDetailPanelViewProps): React.JSX.Element {
+export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
 
   return (
@@ -110,16 +112,28 @@ export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun
         </div>
       ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <TaskDetailContent detail={detail} onResume={onResume} onCancel={onCancel} onRun={onRun} />
+        <TaskDetailContent
+          detail={detail}
+          onResume={onResume}
+          onCancel={onCancel}
+          onRun={onRun}
+          onUpdateTrigger={onUpdateTrigger}
+        />
       </div>
     </div>
   )
 }
 
-function TaskDetailContent({ detail, onResume, onCancel, onRun }: TaskDetailPanelViewProps): React.JSX.Element {
+function TaskDetailContent({ detail, onResume, onCancel, onRun, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
   const isPaused = detail.status === 'paused'
   const isStartable = detail.status === 'backlog' || isPaused
+  const [editingTrigger, setEditingTrigger] = React.useState(false)
+  const [triggerKind, setTriggerKind] = React.useState<'manual' | 'cron' | 'event'>(
+    detail.trigger?.kind ?? 'manual',
+  )
+  const [cronExpr, setCronExpr] = React.useState(detail.trigger?.expr ?? '')
+  const [eventSource, setEventSource] = React.useState(detail.trigger?.source ?? '')
   const triggerLabel = detail.trigger?.kind === 'cron'
     ? `定时 · ${detail.trigger.expr}${detail.trigger.timezone ? ` (${detail.trigger.timezone})` : ''}`
     : detail.trigger?.kind === 'event'
@@ -173,6 +187,84 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun }: TaskDetailPane
           </div>
         ) : null}
       </header>
+
+      <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-trigger-heading">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h2 id="task-trigger-heading" className="text-xs font-semibold text-foreground">触发方式</h2>
+            <p className="mt-1 text-xs text-muted-foreground">{triggerLabel}</p>
+          </div>
+          {onUpdateTrigger ? (
+            <button
+              type="button"
+              className="rounded-md border border-border/70 px-2.5 py-1 text-[11px] text-foreground hover:bg-foreground/5"
+              onClick={() => setEditingTrigger((v) => !v)}
+            >
+              {editingTrigger ? '收起' : '修改'}
+            </button>
+          ) : null}
+        </div>
+
+        {editingTrigger && onUpdateTrigger ? (
+          <div className="mt-3 space-y-2">
+            <div className="flex flex-wrap gap-1.5">
+              {(['manual', 'cron', 'event'] as const).map((kind) => (
+                <button
+                  key={kind}
+                  type="button"
+                  className={cn(
+                    'rounded-md border px-2.5 py-1 text-[11px]',
+                    triggerKind === kind
+                      ? 'border-primary/40 bg-primary/10 text-foreground'
+                      : 'border-border/70 text-muted-foreground hover:bg-foreground/5',
+                  )}
+                  onClick={() => setTriggerKind(kind)}
+                >
+                  {kind === 'manual' ? '手动' : kind === 'cron' ? '定时' : '事件'}
+                </button>
+              ))}
+            </div>
+
+            {triggerKind === 'cron' ? (
+              <input
+                className="w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 text-xs"
+                value={cronExpr}
+                onChange={(e) => setCronExpr(e.target.value)}
+                placeholder="0 9 * * 1"
+              />
+            ) : null}
+            {triggerKind === 'event' ? (
+              <input
+                className="w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 text-xs"
+                value={eventSource}
+                onChange={(e) => setEventSource(e.target.value)}
+                placeholder="mail / git / 监听器 source"
+              />
+            ) : null}
+
+            <button
+              type="button"
+              className="inline-flex min-h-8 items-center rounded-md bg-primary px-3 text-[11px] font-medium text-primary-foreground disabled:opacity-50"
+              disabled={
+                (triggerKind === 'cron' && !cronExpr.trim()) ||
+                (triggerKind === 'event' && !eventSource.trim())
+              }
+              onClick={() => {
+                const next =
+                  triggerKind === 'cron'
+                    ? { kind: 'cron', expr: cronExpr.trim(), enabled: true }
+                    : triggerKind === 'event'
+                      ? { kind: 'event', source: eventSource.trim(), enabled: true }
+                      : { kind: 'manual' }
+                onUpdateTrigger(detail.id, next)
+                setEditingTrigger(false)
+              }}
+            >
+              保存
+            </button>
+          </div>
+        ) : null}
+      </section>
 
       <section className="rounded-xl border border-border/60 bg-foreground/[0.02] p-4 md:p-5" aria-labelledby="task-instruction-heading">
         <div className="mb-2 flex items-center gap-2">

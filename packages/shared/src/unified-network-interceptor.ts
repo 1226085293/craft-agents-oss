@@ -890,12 +890,18 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
   /** Whether any tool-call delta was seen this stream (survives flushTrackedCalls' clear). */
   let sawToolCallDelta = false;
   /**
-   * The buffered terminal finish_reason chunk (original string), or null.
-   * ALL finish chunks are buffered here — including length/tool_calls, which
-   * the hasFinish fast-path used to forward immediately — so that flush()
-   * can apply the empty-stream guard uniformly to every terminal shape.
+   * The buffered terminal finish_reason chunks (original strings), in
+   * arrival order. ALL finish chunks are accumulated here — including
+   * length/tool_calls, which the hasFinish fast-path used to forward
+   * immediately — so that flush() can apply the empty-stream guard
+   * uniformly to every terminal shape.
+   *
+   * An array, not a single slot: some relays emit MULTIPLE finish chunks
+   * (e.g. a content+finish chunk followed by a usage finish chunk). With a
+   * single variable the later chunk overwrote the earlier one and any text
+   * carried by the earlier chunk was lost forever.
    */
-  let pendingFinishLine: string | null = null;
+  let pendingFinishLines: string[] = [];
   /**
    * Truncated tool-call guard (2026-10-04 incident): when an upstream relay
    * cuts the SSE stream mid tool-call arguments, the buffered args JSON is
@@ -928,6 +934,47 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
       choices: [{ index: 0, delta: {}, finish_reason: 'network_error' }],
     });
     emitSseLine(retryable, controller);
+  }
+
+  /**
+   * Emit every buffered terminal finish chunk, in arrival order, after
+   * applying the two terminal guards.
+   *
+   * Why a list and not a single slot: some relays emit MORE THAN ONE finish
+   * chunk (e.g. Maritaca sends a `content:"OK"` + `finish_reason:"stop"`
+   * chunk followed by a `delta:{content:null}` + `finish_reason:"stop"` +
+   * `usage` chunk). With a single slot the second chunk overwrote the first
+   * and the only text of the reply was dropped, which downstream surfaced as
+   * "No response from provider. Check your API key."
+   *
+   * Guard order mirrors the pre-existing semantics exactly:
+   * - truncated tool call → a single retryable network_error; the buffered
+   *   finish chunks are discarded, never emitted;
+   * - zero visible output → a single retryable network_error instead of the
+   *   upstream finish_reason(s).
+   * The buffer is always emptied.
+   */
+  function emitPendingFinishLines(controller: TransformStreamDefaultController<Uint8Array>): void {
+    if (pendingFinishLines.length === 0) return;
+    const buffered = pendingFinishLines;
+    pendingFinishLines = [];
+    if (incompleteToolCallDetected) {
+      // The relay cut the stream mid tool-call arguments — do not present the
+      // truncated call as a finished tool_calls turn.
+      emitRetryableNetworkError(controller);
+      return;
+    }
+    if (!sawVisibleDelta && !sawToolCallDelta) {
+      debugLog('[openai] Empty successful stream detected — swapping finish_reason for network_error (retryable)');
+      const retryable = JSON.stringify({
+        choices: [{ index: 0, delta: {}, finish_reason: 'network_error' }],
+      });
+      emitSseLine(retryable, controller);
+      return;
+    }
+    for (const line of buffered) {
+      emitSseLine(line, controller);
+    }
   }
 
   function flushTrackedCalls(controller: TransformStreamDefaultController<Uint8Array>): void {
@@ -1033,24 +1080,14 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
       // instead of the buffered (or absent) finish chunk.
       if (incompleteToolCallDetected) {
         emitRetryableNetworkError(controller);
-        pendingFinishLine = null;
+        pendingFinishLines = [];
       }
-      // Flush any buffered terminal finish_reason chunk (empty-stream guard)
+      // Flush every buffered terminal finish_reason chunk (empty-stream guard)
       // before emitting [DONE]. The upstream relay sends finish_reason then
-      // [DONE]; without this, pendingFinishLine is never emitted and the
-      // downstream SDK throws "Stream ended without finish_reason".
-      if (pendingFinishLine !== null) {
-        if (!sawVisibleDelta && !sawToolCallDelta) {
-          debugLog('[openai] Empty successful stream detected — swapping finish_reason for network_error (retryable)');
-          const retryable = JSON.stringify({
-            choices: [{ index: 0, delta: {}, finish_reason: 'network_error' }],
-          });
-          emitSseLine(retryable, controller);
-        } else {
-          emitSseLine(pendingFinishLine, controller);
-        }
-        pendingFinishLine = null;
-      }
+      // [DONE]; without this, they are never emitted and the downstream SDK
+      // throws "Stream ended without finish_reason". A relay may send more
+      // than one finish chunk — all of them are forwarded, in order.
+      emitPendingFinishLines(controller);
       emitSseLine(dataStr, controller);
       return;
     }
@@ -1245,7 +1282,7 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
         // the truncated call as a finished tool_calls turn.
         emitRetryableNetworkError(controller);
       } else {
-        pendingFinishLine = forwardStr;
+        pendingFinishLines.push(forwardStr);
       }
       return;
     }
@@ -1294,25 +1331,14 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
           emitSseLine(synthetic, controller);
         }
       }
-      // Empty-stream guard: a buffered finish chunk that terminates a stream
+      // Empty-stream guard: buffered finish chunk(s) that terminate a stream
       // with ZERO visible output (no content/reasoning deltas, no tool calls)
-      // is an upstream fault, not a completion. Swap it for network_error so
+      // are an upstream fault, not a completion. Swap them for network_error so
       // pi-ai maps it to stopReason=error with a retryable errorMessage and
       // AgentSession retries the turn instead of ending it silently.
-      if (pendingFinishLine !== null) {
-        if (incompleteToolCallDetected) {
-          emitRetryableNetworkError(controller);
-        } else if (!sawVisibleDelta && !sawToolCallDelta) {
-          debugLog('[openai] Empty successful stream detected — swapping finish_reason for network_error (retryable)');
-          const retryable = JSON.stringify({
-            choices: [{ index: 0, delta: {}, finish_reason: 'network_error' }],
-          });
-          emitSseLine(retryable, controller);
-        } else {
-          emitSseLine(pendingFinishLine, controller);
-        }
-        pendingFinishLine = null;
-      }
+      // Same rules as the [DONE] path: stream end without [DONE] must not
+      // silently drop the buffered terminal chunk(s) either.
+      emitPendingFinishLines(controller);
       lineBuffer = '';
     },
   });

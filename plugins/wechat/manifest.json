@@ -49,12 +49,30 @@
   "config": {
     "type": "object",
     "properties": {
+      "token": {
+        "type": "string",
+        "title": "Token",
+        "description": "公众号后台配置的服务器 Token",
+        "secret": true,
+        "default": ""
+      },
+      "encodingAesKey": {
+        "type": "string",
+        "title": "EncodingAESKey",
+        "description": "安全模式下的消息加解密密钥",
+        "secret": true,
+        "default": ""
+      },
       "enabled": {
         "type": "boolean",
         "title": "启用",
-        "description": "关闭后该平台不再收发消息；已保存的凭证保留。",
+        "description": "关闭后该平台不再收发消息；上面的凭证会保留。",
         "default": false
       }
-    }
-  }
+    },
+    "required": [
+      "enabled"
+    ]
+  },
+  "icon": "messages-square"
 }

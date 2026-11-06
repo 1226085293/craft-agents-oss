@@ -12,7 +12,43 @@
  */
 
 import * as React from 'react'
-import { AlertTriangle, Plus, Radio, RefreshCw } from 'lucide-react'
+import {
+  AlertTriangle,
+  Blocks,
+  Bot,
+  Mail,
+  MessageCircle,
+  MessagesSquare,
+  Plus,
+  Radio,
+  RefreshCw,
+  Send,
+  Terminal,
+  Webhook,
+  type LucideIcon,
+} from 'lucide-react'
+
+/**
+ * Manifest icon name → component.
+ *
+ * A plugin names its icon as a string so the manifest stays data — no imports,
+ * no code. Unknown or absent names fall back to the neutral block icon: a
+ * missing icon must never look like a broken plugin.
+ */
+const ICONS: Record<string, LucideIcon> = {
+  'message-circle': MessageCircle,
+  'messages-square': MessagesSquare,
+  send: Send,
+  bot: Bot,
+  mail: Mail,
+  terminal: Terminal,
+  webhook: Webhook,
+}
+
+export function PluginIcon({ name, className }: { name?: string; className?: string }): React.ReactElement {
+  const Icon = (name && ICONS[name]) || Blocks
+  return <Icon className={className} />
+}
 import type { ListenerDto } from '@craft-agent/shared/protocol/dto'
 
 export interface EventsListenersPanelProps {
@@ -84,29 +120,27 @@ export function EventsListenersPanel({
 
   return (
     <div className={className ? `flex flex-col h-full ${className}` : 'flex flex-col h-full'}>
-      <div className="px-3 py-2.5 border-b border-border flex items-center gap-2">
-        <Radio className="h-4 w-4 text-muted-foreground" />
-        <span className="text-sm font-medium">监听器</span>
-        <span className="text-xs text-muted-foreground tabular-nums">{listeners.length}</span>
+      {/* No section header: the navigator already says 插件, and a second
+          title row only ate vertical space. Refresh floats over the list. */}
+      <div className="relative flex-1 min-h-0">
         <button
           type="button"
           onClick={() => void load()}
-          className="ml-auto h-7 w-7 inline-flex items-center justify-center rounded-md hover:bg-foreground/5 text-muted-foreground hover:text-foreground"
+          className="absolute right-2 top-2 z-10 h-6 w-6 inline-flex items-center justify-center rounded-md bg-background/80 backdrop-blur hover:bg-foreground/5 text-muted-foreground hover:text-foreground"
           title="刷新"
         >
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+          <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
         </button>
-      </div>
 
-      <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
+        <div className="h-full overflow-y-auto p-2 pt-9 space-y-1.5">
         {error && <div className="px-1 py-2 text-xs text-destructive">{error}</div>}
 
         {!error && listeners.length === 0 && (
           <div className="flex flex-col items-center justify-center gap-2 py-8 text-muted-foreground text-center px-3">
             <Plus className="h-7 w-7 opacity-70" />
-            <p className="text-sm">还没有监听器</p>
+            <p className="text-sm">还没有插件</p>
             <p className="text-xs opacity-70 leading-relaxed">
-              在 <code className="font-mono">&lt;workspace&gt;/events/&lt;id&gt;/manifest.json</code> 放一个清单，
+              把一个插件目录放进 <code className="font-mono">&lt;workspace&gt;/events/&lt;id&gt;/</code>，
               这里就会出现卡片
             </p>
           </div>
@@ -128,7 +162,8 @@ export function EventsListenersPanel({
             >
               <div className="flex items-center gap-2">
                 <StateDot listener={listener} />
-                <span className="text-sm font-medium truncate flex-1">{listener.name}</span>
+                <PluginIcon name={listener.icon} className="h-4 w-4 shrink-0 text-muted-foreground" />
+                <span className="text-sm font-medium truncate">{listener.name}</span>
                 <span className="text-[11px] text-muted-foreground shrink-0 tabular-nums">
                   v{listener.version}
                 </span>
@@ -155,6 +190,7 @@ export function EventsListenersPanel({
             </button>
           )
         })}
+        </div>
       </div>
     </div>
   )

@@ -15,6 +15,7 @@ import type {
   ListenerReportedDepDto,
   ListenerReportedDepsDto,
 } from '@craft-agent/shared/protocol/dto'
+import { PluginIcon } from './EventsListenersPanel'
 
 export interface ListenerDetailPanelProps {
   workspaceId: string
@@ -154,7 +155,7 @@ function ReportedDepsSection({
   return (
     <div className="px-4 py-3 border-b border-border">
       <div className="flex items-center gap-1.5">
-        <span className="text-xs font-medium">依赖状态（监听器提供）</span>
+        <span className="text-xs font-medium">依赖状态（插件提供）</span>
         <button
           type="button"
           disabled={refreshing}
@@ -201,7 +202,7 @@ function ReportedDepsSection({
         </div>
       )}
       {deps && deps.length === 0 && (
-        <p className="text-[11px] text-muted-foreground mt-1">监听器未报告任何依赖。</p>
+        <p className="text-[11px] text-muted-foreground mt-1">插件未报告任何依赖。</p>
       )}
     </div>
   )
@@ -333,10 +334,13 @@ export function ListenerDetailPanel({
 
   return (
     <div className={`flex flex-col h-full overflow-y-auto ${className ?? ''}`}>
-      {/* Header: name + version (top-right) */}
+      {/* Header: icon, then name with its version beside it. The version used
+          to sit alone on the right edge, which read as a separate fact rather
+          than as part of the plugin's identity. */}
       <div className="px-4 py-3 border-b border-border">
-        <div className="flex items-start gap-2">
-          <h2 className="text-base font-medium min-w-0 flex-1 break-words">{listener.name}</h2>
+        <div className="flex items-center gap-2">
+          <PluginIcon name={listener.icon} className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <h2 className="text-base font-medium min-w-0 break-words">{listener.name}</h2>
           <span className="text-[11px] font-mono text-muted-foreground shrink-0">v{listener.version}</span>
         </div>
         <p className="text-xs text-muted-foreground mt-0.5">{listener.description ?? '（无介绍）'}</p>
@@ -387,41 +391,67 @@ export function ListenerDetailPanel({
         )}
       </div>
 
-      {/* Config */}
+      {/* Config — one block per field: label above input, hint underneath.
+          The old single row (label 28 wide, input beside it) forced long
+          Chinese hints into a placeholder, so a token field explained nothing. */}
       {schemaEntries.length > 0 && (
-        <div className="px-4 py-3 border-b border-border space-y-2">
-          <div className="text-xs font-medium">事件配置</div>
-          {schemaEntries.map(([key, schema]) => (
-            <div key={key} className="flex items-center gap-2">
-              <label className="w-28 shrink-0 text-[11px] text-muted-foreground" title={schema.description}>
-                {schema.title ?? key}
-                {(listener.configSchema?.required ?? []).includes(key) && <span className="text-destructive"> *</span>}
-              </label>
-              <input
-                type={schema.secret ? 'password' : 'text'}
-                value={draft[key] ?? ''}
-                onChange={(e) => {
-                  setDraft((prev) => ({ ...prev, [key]: e.target.value }))
-                  setDirty(true)
-                }}
-                placeholder={schema.description ?? ''}
-                className="flex-1 h-7 px-2 text-xs font-mono bg-muted/50 rounded border border-transparent focus:border-border focus:outline-none"
-              />
-            </div>
-          ))}
-          {dirty && (
+        <div className="px-4 py-3 border-b border-border space-y-3">
+          <div className="flex items-baseline gap-2">
+            <span className="text-xs font-medium">配置</span>
+            {listener.missingConfig.length > 0 && (
+              <span className="text-[11px] text-destructive">
+                还缺 {listener.missingConfig.length} 项
+              </span>
+            )}
+          </div>
+
+          <div className="space-y-2.5">
+            {schemaEntries.map(([key, schema]) => {
+              const required = (listener.configSchema?.required ?? []).includes(key)
+              const value = draft[key] ?? ''
+              const missing = required && String(value).trim() === ''
+              return (
+                <div key={key} className="space-y-1">
+                  <div className="flex items-center gap-1.5">
+                    <label className="text-[11px] font-medium text-foreground/80">
+                      {schema.title ?? key}
+                    </label>
+                    {required && missing && <span className="text-[10px] text-destructive">必填</span>}
+                    {schema.secret && value !== '' && (
+                      <span className="text-[10px] text-muted-foreground">已保存</span>
+                    )}
+                  </div>
+                  <input
+                    type={schema.secret ? 'password' : 'text'}
+                    value={value}
+                    onChange={(e) => {
+                      setDraft((prev) => ({ ...prev, [key]: e.target.value }))
+                      setDirty(true)
+                    }}
+                    placeholder={schema.secret ? '粘贴后保存' : ''}
+                    className={`w-full h-7 px-2 text-xs font-mono rounded border bg-muted/40 focus:outline-none focus:bg-background ${
+                      missing ? 'border-destructive/40' : 'border-border/50 focus:border-border'
+                    }`}
+                  />
+                  {schema.description && (
+                    <p className="text-[10px] leading-4 text-muted-foreground">{schema.description}</p>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="flex items-center gap-2">
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || !dirty}
               onClick={() => void saveConfig()}
-              className="h-7 px-2.5 rounded-md bg-primary text-primary-foreground text-xs disabled:opacity-50"
+              className="h-7 px-2.5 rounded-md bg-primary text-primary-foreground text-xs disabled:opacity-40"
             >
               保存配置
             </button>
-          )}
-          {listener.missingConfig.length > 0 && (
-            <p className="text-[11px] text-destructive">还缺：{listener.missingConfig.join(', ')}</p>
-          )}
+            {dirty && <span className="text-[11px] text-muted-foreground">有未保存的改动</span>}
+          </div>
         </div>
       )}
 
@@ -490,13 +520,13 @@ export function ListenerDetailPanel({
         </div>
         <div className="flex items-center gap-1.5">
           <code className="flex-1 min-w-0 text-[11px] font-mono bg-muted/40 rounded px-2 py-1 truncate">
-            {`<CRAFT_EVENTS_URL>`} · 监听器 <code className="font-mono">{listener.id}</code>
+            {`<CRAFT_EVENTS_URL>`} · 插件 <code className="font-mono">{listener.id}</code>
           </code>
           <CopyButton value={listener.id} label="复制 id" />
         </div>
         <p className="text-[11px] text-muted-foreground">
-          启用后 Craft 会启动该监听器，并把 <code className="font-mono">CRAFT_EVENTS_URL</code>/
-          <code className="font-mono">CRAFT_EVENTS_TOKEN</code> 注入其环境变量，监听器向该地址 POST 事件。
+          启用后 Craft 会启动该插件，并把 <code className="font-mono">CRAFT_EVENTS_URL</code>/
+          <code className="font-mono">CRAFT_EVENTS_TOKEN</code> 注入其环境变量，插件向该地址 POST 事件。
         </p>
 
         {listener.logTail && (

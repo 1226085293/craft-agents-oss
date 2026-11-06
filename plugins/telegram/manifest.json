@@ -49,12 +49,23 @@
   "config": {
     "type": "object",
     "properties": {
+      "token": {
+        "type": "string",
+        "title": "Bot Token",
+        "description": "向 @BotFather 申请，形如 123456:ABC-DEF…。保存后不再显示。",
+        "secret": true,
+        "default": ""
+      },
       "enabled": {
         "type": "boolean",
         "title": "启用",
-        "description": "关闭后该平台不再收发消息；已保存的凭证保留。",
+        "description": "关闭后该平台不再收发消息；上面的凭证会保留。",
         "default": false
       }
-    }
-  }
+    },
+    "required": [
+      "enabled"
+    ]
+  },
+  "icon": "send"
 }

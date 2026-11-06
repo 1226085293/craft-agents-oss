@@ -198,9 +198,11 @@ describe('assembler', () => {
     };
     const a = assembleTools(layering, session, mcp);
     expect(a.mode).toBe('layered');
-    // fixed(1) + meta(N) + call_tool(1)
+    // fixed(1) + meta(N + misc) + call_tool(1). `mcp__unmapped__tool` has no
+    // slug, so it lands in misc and misc earns a meta tool of its own.
     const metas = a.metaTools.length;
-    expect(metas).toBe(DEFAULT_TOOL_CATEGORIES.categories.length);
+    expect(metas).toBe(DEFAULT_TOOL_CATEGORIES.categories.length + 1);
+    expect(a.metaTools.some((m) => m.name === SESSION_PREFIX + 'tools_misc')).toBe(true);
     expect(a.topLevel.length).toBe(1 + metas + 1);
     expect(a.topLevel[0]!.name).toBe(SESSION_PREFIX + 'get_session_info');
     expect(a.topLevel.some((t) => t.name === SESSION_PREFIX + 'call_tool')).toBe(true);
@@ -288,12 +290,19 @@ describe('assembler: per-source MCP categories', () => {
     expect(payload.tools.map((t) => t.name)).toEqual(['mcp__codegraph__codegraph_explore']);
   });
 
-  it('misc stays resolvable so a lazily registered tools_misc can be expanded', () => {
+  it('exposes tools_misc whenever the bucket holds a tool', () => {
     const a = assembleTools(layered, session, mcp, { mcpToolSlugs: slugMap });
     expect(a.categoriesByName.has(MISC_CATEGORY_NAME)).toBe(true);
     const payload = buildExpandPayload(a.categoriesByName.get(MISC_CATEGORY_NAME)!, a.registry);
     expect(payload.tools.map((t) => t.name)).toEqual(['mcp__unmapped__tool']);
-    // misc must not get an eager meta tool (it is lazily registered)
+    // Skipping the meta tool left the bucket unexpandable while call_tool kept
+    // answering "请先调用 tools_misc" — a tool nobody could ever reach.
+    expect(a.metaTools.some((m) => m.name === SESSION_PREFIX + 'tools_misc')).toBe(true);
+  });
+
+  it('omits tools_misc when the bucket is empty', () => {
+    const a = assembleTools(layered, session, [], {});
+    expect(a.categoriesByName.get(MISC_CATEGORY_NAME)?.tools).toHaveLength(0);
     expect(a.metaTools.some((m) => m.name === SESSION_PREFIX + 'tools_misc')).toBe(false);
   });
 

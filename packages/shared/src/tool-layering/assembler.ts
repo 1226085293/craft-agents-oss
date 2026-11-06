@@ -223,9 +223,20 @@ export function assembleTools(
       }
     }
     for (const cat of allCategories) {
-      if (cat.name === MISC_CATEGORY_NAME) continue; // misc meta tool is lazy-registered
+      if (cat.name === MISC_CATEGORY_NAME) continue; // handled after the loop
       metaTools.push(defForMeta(cat));
     }
+    // `misc` only deserves a meta tool when it actually holds something. It used
+    // to be skipped unconditionally: a tool nobody categorised then sat in a
+    // bucket that call_tool told the model to expand ("请先调用 tools_misc")
+    // while no such tool existed, so the tool was unreachable and the turn spun
+    // until it was killed. Count from the registry — the synthetic `misc` entry
+    // in categoriesByName has an empty `tools` array by construction.
+    const miscCount = [...registry.values()].filter(
+      (e) => e.category === MISC_CATEGORY_NAME && !e.fixed,
+    ).length;
+    const miscCategory = categoriesByName.get(MISC_CATEGORY_NAME);
+    if (miscCount > 0 && miscCategory) metaTools.push(defForMeta(miscCategory));
     callToolDef = buildCallToolDef();
     topLevel = [...fixedTools, ...metaTools, callToolDef];
   } else {

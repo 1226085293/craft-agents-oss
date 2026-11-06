@@ -165,8 +165,62 @@ describe('planRequest', () => {
     const cfg = config({
       strategies: [strategy('w', { type: 'weighted', members: [{ provider: 'p1', weight: 3 }, { provider: 'p2' }] })],
     });
-    const plan = planRequest({ config: cfg, strategy: cfg.strategies[0]!, publicModel: 'm' });
+    const plan = planRequest({
+      config: cfg,
+      strategy: cfg.strategies[0]!,
+      publicModel: 'm',
+      random: () => 0,
+    });
     expect(plan.units.map((u) => u.weight)).toEqual([3, 1]);
+  });
+
+  it('weighted draws the first unit proportionally and keeps a fallback order', () => {
+    const cfg = config({
+      strategies: [
+        strategy('w', {
+          type: 'weighted',
+          members: [{ provider: 'p1', weight: 1 }, { provider: 'p2', weight: 9 }],
+        }),
+      ],
+    });
+    const order = (sample: number): string[] =>
+      planRequest({
+        config: cfg,
+        strategy: cfg.strategies[0]!,
+        publicModel: 'm',
+        random: () => sample,
+      }).units.map((u) => u.provider.id);
+
+    // 1:9 → the light key only wins the first 10% of the draw.
+    expect(order(0.05)).toEqual(['p1', 'p2']);
+    expect(order(0.5)).toEqual(['p2', 'p1']);
+    expect(order(0.99)).toEqual(['p2', 'p1']);
+  });
+
+  it('weighted draws across the whole group, including other models', () => {
+    const cfg = config({
+      providers: [
+        provider('p1', { models: { a: 'a' } }),
+        provider('p2', { models: { b: 'b' } }),
+      ],
+      strategies: [
+        strategy('w', {
+          type: 'weighted',
+          members: [
+            { provider: 'p1', model: 'a', weight: 1 },
+            { provider: 'p2', model: 'b', weight: 100 },
+          ],
+        }),
+      ],
+    });
+    const plan = planRequest({
+      config: cfg,
+      strategy: cfg.strategies[0]!,
+      publicModel: 'a',
+      random: () => 0.99,
+    });
+    // Group-wide weighting: the heavy b unit wins even though a was requested.
+    expect(plan.units.map((u) => u.publicModel)).toEqual(['b', 'a']);
   });
 
   it('resolves the upstream model per unit', () => {

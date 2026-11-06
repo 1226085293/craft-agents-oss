@@ -134,10 +134,16 @@ export interface LlmPresetShape {
   tpr?: number
   concurrency?: number
   firstByteSeconds?: number
+  streamGapSeconds?: number
   totalSeconds?: number
   defaultSeconds?: number
   /** Prototype name: `rateLimitCooldownSeconds`. */
   rateLimitSeconds?: number
+  /**
+   * What a quota-exhausted response freezes: the whole account key (default)
+   * or only this key + model. Mirrors `LlmPreset.quotaScope`.
+   */
+  quotaScope?: 'account' | 'model'
   /** Prototype name: `quotaExhaustedCooldownSeconds`. */
   quotaExhaustedSeconds?: number
   customLimits?: CustomLimit[]

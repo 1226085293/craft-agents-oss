@@ -2582,6 +2582,11 @@ export class SessionManager implements ISessionManager {
   }
 
   private attachGatewayRouteHandler(): void {
+    getGatewayRuntime().setCooldownWaitHandler((event) => {
+      if (!event.sessionId) return
+      const agent = this.sessions.get(event.sessionId)?.agent
+      agent?.setGatewayCooldownWaiting?.(event.waiting)
+    })
     getGatewayRuntime().setRouteChangeHandler((event) => {
       // A model-level switch means the conversation is now served by a
       // different public model than the session believes. Adopt it so the

@@ -22,7 +22,9 @@
  *    semantic).
  * 2. **The plan is ordered, not a set.** Retry order matters and is the
  *    member order the user arranged in the strategy editor: a failure moves
- *    down the list. Key rotation inside a unit is the pool's job.
+ *    down the list. Key rotation inside a unit is the pool's job. `weighted`
+ *    is the exception: its whole unit order is a weighted draw at plan time,
+ *    including units serving other models.
  */
 
 import type {
@@ -82,6 +84,8 @@ export interface PlanOptions {
    * can place "now" outside a window without waiting for the wall clock.
    */
   now?: number;
+  /** RNG for weighted unit order; injected so tests can pin the draw. */
+  random?: () => number;
 }
 
 /** Hard ceiling on attempts regardless of config, so a typo cannot loop forever. */
@@ -262,6 +266,49 @@ export function candidateUnits(
 }
 
 /**
+ * Weighted draw without replacement across the whole strategy.
+ *
+ * The first unit is picked with probability `weight / total`; after removing
+ * it the remaining weights are renormalised. That makes the first attempt
+ * proportional while still producing a full fallback order when the winner
+ * fails. Unlike the sequential strategies, `weighted` intentionally does not
+ * put the requested model first: the weights describe the group's traffic
+ * split, including across different models.
+ *
+ * Non-positive/non-finite weights fall back to 1 so a hand-edited config
+ * cannot divide by zero or starve every unit.
+ */
+export function weightedUnitOrder(
+  units: readonly PlannedUnit[],
+  random: () => number = Math.random,
+): PlannedUnit[] {
+  const weightOf = (unit: PlannedUnit): number =>
+    Number.isFinite(unit.weight) && unit.weight > 0 ? unit.weight : 1;
+  const draw = (pool: readonly PlannedUnit[]): PlannedUnit[] => {
+    const remaining = [...pool];
+    const out: PlannedUnit[] = [];
+    while (remaining.length > 0) {
+      const total = remaining.reduce((sum, unit) => sum + weightOf(unit), 0);
+      const sample = random();
+      const point = (Number.isFinite(sample) ? Math.min(1, Math.max(0, sample)) : 0) * total;
+      let index = remaining.length - 1;
+      let cursor = point;
+      for (let i = 0; i < remaining.length; i += 1) {
+        cursor -= weightOf(remaining[i]!);
+        if (cursor < 0) {
+          index = i;
+          break;
+        }
+      }
+      out.push(remaining.splice(index, 1)[0]!);
+    }
+    return out;
+  };
+
+  return draw(units);
+}
+
+/**
  * Build the plan for one inbound request.
  *
  * Throws when the strategy cannot serve the model at all (config error) or
@@ -284,12 +331,15 @@ export function planRequest(options: PlanOptions): Plan {
     throw new Error(`Strategy "${strategy.id}" cannot serve "${publicModel}": ${reason}`);
   }
 
-  const units = candidates.units.filter((unit) => !unavailableUnits.has(unit.id));
-  if (units.length === 0) {
+  const available = candidates.units.filter((unit) => !unavailableUnits.has(unit.id));
+  if (available.length === 0) {
     throw new Error(
       `Strategy "${strategy.id}" has no usable unit for "${publicModel}" right now (all cooling or disabled)`,
     );
   }
+  const units = strategy.type === 'weighted'
+    ? weightedUnitOrder(available, options.random)
+    : available;
 
   return {
     strategyId: strategy.id,

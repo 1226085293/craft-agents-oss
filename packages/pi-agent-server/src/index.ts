@@ -93,7 +93,8 @@ import {
   type EphemeralQueryResource,
 } from './ephemeral-query-lifecycle.ts';
 import { isCraftGatewayEndpoint } from './gateway-endpoint.ts';
-import { GATEWAY_STREAM_TRUNCATION_RETRY_MARKER } from '../../shared/src/config/gateway-stream-retry.ts';
+import { isGatewayStreamRetryMarker } from '../../shared/src/config/gateway-stream-retry.ts';
+import { shouldAbortStalledTurn } from './stall-watchdog.ts';
 import {
   buildCustomEndpointModelDef,
   normalizeCustomEndpointModelEntry,
@@ -283,6 +284,8 @@ type InboundMessage =
   | { type: 'set_thinking_level'; level: string }
   | { type: 'compact'; id: string; customInstructions?: string }
   | { type: 'set_auto_compaction'; id: string; enabled: boolean }
+  /** The gateway is parked in waitForCooldown; silence is expected. */
+  | { type: 'gateway_cooldown_wait'; waiting: boolean }
   | RuntimeConfigUpdateMessage
   | SwitchConnectionMessage
   | { type: 'steer'; message: string }
@@ -1682,7 +1685,7 @@ async function createAuthenticatedRuntime(): Promise<{
  * time-to-first-token; completions clustered at exactly ~120 s − 5 s showed the
  * client was cutting the stream right before the upstream finished, then the
  * SDK's silent retry cascade (provider 2 × agent 4) produced zero forwarded
- * events and tripped the 300 s turn-idle watchdog. Raised back to the SDK
+ * events and tripped the turn-idle watchdog. Raised back to the SDK
  * default; the unified retry ladder (pi-agent.ts) owns recovery now.
  *
  * The retry policy is deliberately NOT overridden here: `createCraftSettingsManager`
@@ -1725,7 +1728,7 @@ async function ensureSession(): Promise<AgentSession> {
   // while the turn runs on the FIRST. Every subsequent steer/retry/drain
   // command then hits the wrong session: the steer queues on the empty
   // session, the retry ladder refuses with "transcript is empty", and the
-  // turn hangs on "Thinking..." until the 300s watchdog.
+  // turn hangs on "Thinking..." until the 90s watchdog.
   if (!inFlightSessionCreation) {
     inFlightSessionCreation = createPiSession().finally(() => {
       inFlightSessionCreation = null; // success → piSession set; failure → allow retry
@@ -2789,8 +2792,10 @@ function extractResultText(result: unknown): string {
 // total elapsed time exceeds a cap. Legitimate turns can run 20+ minutes
 // (serial tool loops, long builds); a healthy stream emits events steadily,
 // so silence is the reliable stall signal.
-const TURN_STALL_TIMEOUT_MS = Number(process.env.CRAFT_PI_TURN_STALL_TIMEOUT_MS ?? 5 * 60 * 1000);
+const TURN_STALL_TIMEOUT_MS = Number(process.env.CRAFT_PI_TURN_STALL_TIMEOUT_MS ?? 90 * 1000);
 let lastTurnActivityAt = 0;
+/** Set while the gateway waits on a cooldown; disables stall detection. */
+let gatewayCooldownWaiting = false;
 
 // Tool-silence exemption state (2026-09-08 fit-pulsar incident): a single
 // long-running tool emits no SDK events between start and end, so silence is
@@ -2833,7 +2838,7 @@ let defenseResumeQueued = false;
 
 // Bounded compaction heartbeat: while the Pi SDK runs a threshold/overflow
 // compaction the main stream is silent, so without these ticks the
-// PiAgent's turn-idle watchdog (300 s plain ceiling as of 2026-10-05; 120 s
+// PiAgent's turn-idle watchdog (90 s plain ceiling; 120 s
 // before that) false-positived "stream stalled" for any compaction longer
 // than the cap (2026-10-04 incident). Each
 // tick is a main-process turn-progress event (watchdog-only — the adapter no
@@ -2880,7 +2885,7 @@ function handleSessionEvent(event: AgentSessionEvent): void {
   // Log API errors for debugging and attach provider-native turn anchor for branch cutoffs.
   if (event.type === 'message_end') {
     const msg = event.message as { role?: string; stopReason?: string; errorMessage?: string } | undefined;
-    if (msg?.role === 'assistant' && msg.stopReason === 'error' && msg.errorMessage?.includes(GATEWAY_STREAM_TRUNCATION_RETRY_MARKER)) {
+    if (msg?.role === 'assistant' && msg.stopReason === 'error' && isGatewayStreamRetryMarker(msg.errorMessage)) {
       gatewayStreamRetryRequested = true;
       debugLog('[gateway-retry] truncated stream marked retryable by strategy gateway');
     }
@@ -3227,7 +3232,7 @@ function handleSessionEvent(event: AgentSessionEvent): void {
   // assumed it would): it re-checks the queue only at model-round starts,
   // so a steer queued mid-stream of the final round survives to agent_end
   // with pending>0 and nothing moves — 261007-lean-bamboo hung on
-  // "Thinking..." with pending=1 until the 300s watchdog. We therefore
+  // "Thinking..." with pending=1 until the 90s watchdog. We therefore
   // schedule the drain ourselves (agent.continue(), same mechanism as
   // handleRetry's drain path). The SDK's own post-stop auto-retry path
   // (willRetry) and the defense-resume/verification paths are excluded
@@ -3371,20 +3376,20 @@ async function awaitTurnWithStallDetection(
     promptPromise,
     new Promise<never>((_, reject) => {
       const timer = setInterval(() => {
-        // Tool-silence exemption: an active tool with a finite timeout that
-        // has not expired yet keeps the turn alive (its own timeout will fire
-        // and produce a tool_execution_end event, refreshing the deadline).
-        const deadline = activeToolDeadline();
-        if (deadline != null && Date.now() < deadline) return;
-        // 2026-10-18: a proxy tool is in flight — its own hard timeout
-        // (pendingToolExecutions.create) is the authority on whether it is
-        // hung. Treating an undeclared-timeout tool as a dead turn killed the
-        // whole run after 300s (the 261016-deft-tide screenshot hang).
-        if (pendingToolExecutions.hasActiveTool()) return;
-        if (Date.now() - lastTurnActivityAt > TURN_STALL_TIMEOUT_MS) {
-          clearInterval(timer);
-          reject(new Error(`Turn stalled: no activity for ${TURN_STALL_TIMEOUT_MS / 1000}s — aborting`));
+        if (
+          !shouldAbortStalledTurn({
+            now: Date.now(),
+            lastActivityAt: lastTurnActivityAt,
+            timeoutMs: TURN_STALL_TIMEOUT_MS,
+            cooldownWaiting: gatewayCooldownWaiting,
+            activeToolDeadline: activeToolDeadline(),
+            pendingToolInFlight: pendingToolExecutions.hasActiveTool(),
+          })
+        ) {
+          return;
         }
+        clearInterval(timer);
+        reject(new Error(`Turn stalled: no activity for ${TURN_STALL_TIMEOUT_MS / 1000}s — aborting`));
       }, 1000);
       // Stop polling once the prompt settles (prevents timer leak)
       promptPromise.finally(() => clearInterval(timer)).catch(() => {});
@@ -4461,6 +4466,14 @@ async function processMessage(msg: InboundMessage): Promise<void> {
 
     case 'set_auto_compaction':
       await handleSetAutoCompaction(msg);
+      break;
+
+    case 'gateway_cooldown_wait':
+      gatewayCooldownWaiting = msg.waiting;
+      // A wait end is movement again: give the turn a fresh idle window so the
+      // elapsed wait seconds cannot be charged to the next upstream attempt.
+      lastTurnActivityAt = Date.now();
+      debugLog(`[gateway-retry] cooldown wait ${msg.waiting ? 'started' : 'ended'}`);
       break;
 
     case 'update_runtime_config':

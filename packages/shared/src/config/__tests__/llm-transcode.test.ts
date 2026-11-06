@@ -440,6 +440,40 @@ describe('ResponseTranscoder — tool calls', () => {
 describe('ResponseTranscoder — known traps', () => {
   const ctx = { publicModel: 'auto', upstreamModel: 'up', messageId: 'msg_1' }
 
+  it('distinguishes visible text/tool output from thinking-only output', () => {
+    const thinking = new ResponseTranscoder(ctx)
+    thinking.push({ choices: [{ delta: { reasoning_content: 'private reasoning' } }] })
+    expect(thinking.hasVisibleContent).toBe(false)
+
+    const text = new ResponseTranscoder(ctx)
+    text.push({ choices: [{ delta: { content: 'answer' } }] })
+    expect(text.hasVisibleContent).toBe(true)
+
+    const tool = new ResponseTranscoder(ctx)
+    tool.push({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', function: { name: 'Bash', arguments: '{}' } }] }, finish_reason: 'tool_calls' }] })
+    expect(tool.hasVisibleContent).toBe(true)
+  })
+
+  it('counts a complete tool block even when finish_reason is omitted', () => {
+    const t = new ResponseTranscoder(ctx)
+    t.push({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call-1', function: { name: 'Bash', arguments: '{"command":"ls"}' } }] } }] })
+    expect(t.hasVisibleContent).toBe(true)
+  })
+
+  it('encodes an empty visible response as a retryable refusal', () => {
+    const t = new ResponseTranscoder(ctx)
+    const out = t.finish({
+      truncated: true,
+      retryMarker: 'CRAFT_GATEWAY_EMPTY_RESPONSE_RETRY',
+      failureMessage: 'upstream stream ended without visible text or a tool call',
+    })
+
+    expect(out).toContain('"stop_reason":"refusal"')
+    expect(out).toContain('CRAFT_GATEWAY_EMPTY_RESPONSE_RETRY')
+    expect(out).toContain('without visible text or a tool call')
+    expect(out).not.toContain('event: error')
+  })
+
   it('keeps reasoning_content as a thinking block before text', () => {
     const t = new ResponseTranscoder(ctx)
     let out = t.push({ choices: [{ delta: { reasoning_content: 'let me think' } }] })

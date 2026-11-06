@@ -423,7 +423,7 @@ function validatePreset(label: string, preset: Record<string, unknown>): string[
     'tpr', 'concurrency',
     'contextWindow', 'maxOutputTokens', 'contextTokenBudget',
     'maxImageParts', 'maxFileParts', 'maxRequestBytes',
-    'firstByteSeconds', 'totalSeconds',
+    'firstByteSeconds', 'streamGapSeconds', 'totalSeconds',
     'defaultSeconds', 'rateLimitSeconds', 'quotaExhaustedSeconds',
   ];
   const boolFields = ['supportsStream', 'supportsToolCalls', 'supportsVision'];
@@ -437,6 +437,10 @@ function validatePreset(label: string, preset: Record<string, unknown>): string[
   for (const f of boolFields) {
     const v = preset[f];
     if (v !== undefined && typeof v !== 'boolean') errors.push(`${label}.${f} 必须是布尔`);
+  }
+  const quotaScope = preset.quotaScope;
+  if (quotaScope !== undefined && quotaScope !== 'account' && quotaScope !== 'model') {
+    errors.push(`${label}.quotaScope 需为 account / model`);
   }
   errors.push(...validateCustomLimits(`${label}.customLimits`, preset.customLimits));
   return errors;

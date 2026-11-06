@@ -24,8 +24,8 @@ import { toolMetadataStore } from '../../../interceptor-common.ts';
 import { createAgentError, parseError } from '../../errors.ts';
 import { buildCompactionSummaryParams } from '../../compaction-summary.ts';
 import {
-  GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER,
-  GATEWAY_STREAM_TRUNCATION_RETRY_MARKER,
+  isGatewayStreamExhaustedMarker,
+  isGatewayStreamRetryMarker,
 } from '../../../config/gateway-stream-retry.ts';
 
 /**
@@ -1061,12 +1061,12 @@ export class PiEventAdapter extends BaseEventAdapter {
             this.thinkingBuffer = '';
             this.hasStreamedThinking = false;
           }
-          if (msg.errorMessage.includes(GATEWAY_STREAM_TRUNCATION_RETRY_MARKER)) {
+          if (isGatewayStreamRetryMarker(msg.errorMessage)) {
             // The server will annotate agent_end and continue the SAME model
             // step after the failed SDK run has fully settled.
             break;
           }
-          if (msg.errorMessage.includes(GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER)) {
+          if (isGatewayStreamExhaustedMarker(msg.errorMessage)) {
             const terminalError: CraftAgentEvent = {
               type: 'typed_error',
               error: createAgentError('network_error', msg.errorMessage),

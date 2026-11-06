@@ -80,6 +80,7 @@ export interface ProtoStrategy {
     providerName: string
     model: string
     upstreamModel: string
+    weight: number
   }>
 }
 
@@ -277,7 +278,9 @@ export function buildStrategies(
       name,
       enabled: s.enabled !== false,
       type: s.type,
-      members: s.members.map((m) => m.provider),
+      // Members are stored per (provider, model); the card wants the provider
+      // set, otherwise health and the weight badge repeat the same provider.
+      members: [...new Set(s.members.map((m) => m.provider))],
       models,
       thinking,
       sticky: s.stickySession?.enabled !== false,
@@ -294,6 +297,7 @@ export function buildStrategies(
           providerName: provider?.name ?? m.provider,
           model,
           upstreamModel,
+          weight: m.weight ?? 1,
         }
       }),
     }

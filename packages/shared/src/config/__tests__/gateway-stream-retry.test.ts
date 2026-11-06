@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import {
+  GATEWAY_EMPTY_RESPONSE_EXHAUSTED_MARKER,
+  GATEWAY_EMPTY_RESPONSE_RETRY_MARKER,
   GATEWAY_STREAM_TRUNCATION_RETRY_MARKER,
   GatewayStreamRetryStateStore,
   gatewayRequestFingerprint,
@@ -36,5 +38,7 @@ describe('gateway stream retry state', () => {
     now += 51
     expect(store.getOrCreate('s1', fp, 'group-a').attemptsByRoute.size).toBe(0)
     expect(GATEWAY_STREAM_TRUNCATION_RETRY_MARKER).toContain('CRAFT_GATEWAY_STREAM_TRUNCATION_RETRY')
+    expect(GATEWAY_EMPTY_RESPONSE_RETRY_MARKER).toContain('CRAFT_GATEWAY_EMPTY_RESPONSE_RETRY')
+    expect(GATEWAY_EMPTY_RESPONSE_EXHAUSTED_MARKER).toContain('CRAFT_GATEWAY_EMPTY_RESPONSE_EXHAUSTED')
   })
 })

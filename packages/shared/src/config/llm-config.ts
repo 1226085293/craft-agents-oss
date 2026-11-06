@@ -113,12 +113,23 @@ export interface LlmPreset {
   /** --- Timeouts (seconds) --- */
 
   firstByteSeconds?: number;
+  /** Maximum silence between body chunks after the first chunk. */
+  streamGapSeconds?: number;
   totalSeconds?: number;
 
   /** --- Cooldowns (seconds) --- */
 
   /** Cooldown after a 429 / rate-limit response. */
   rateLimitSeconds?: number;
+  /**
+   * What a quota-exhausted response freezes.
+   *
+   * `account` (default) is the historical behaviour: the whole key is cooled,
+   * so every model served by that account waits. `model` cools only the
+   * `key + model` pair, for providers whose quota is granted per model rather
+   * than per account.
+   */
+  quotaScope?: 'account' | 'model';
   /** Cooldown after a quota-exhausted response. */
   quotaExhaustedSeconds?: number;
   /** Cooldown after any other failure. */
@@ -516,6 +527,7 @@ export const DEFAULT_PRESET: LlmPreset = {
   supportsVision: false,
   maxImageParts: 4,
   firstByteSeconds: 30,
+  streamGapSeconds: 60,
   totalSeconds: 600,
   defaultSeconds: 60,
   rateLimitSeconds: 60,

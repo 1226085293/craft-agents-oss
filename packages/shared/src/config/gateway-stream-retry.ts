@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 
 export const GATEWAY_STREAM_TRUNCATION_RETRY_MARKER = 'CRAFT_GATEWAY_STREAM_TRUNCATION_RETRY'
 export const GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER = 'CRAFT_GATEWAY_STREAM_TRUNCATION_EXHAUSTED'
+export const GATEWAY_EMPTY_RESPONSE_RETRY_MARKER = 'CRAFT_GATEWAY_EMPTY_RESPONSE_RETRY'
+export const GATEWAY_EMPTY_RESPONSE_EXHAUSTED_MARKER = 'CRAFT_GATEWAY_EMPTY_RESPONSE_EXHAUSTED'
 
 export interface GatewayStreamRetryState {
   /** Number of stream attempts already made for each `unitId::keyId` target. */
@@ -93,4 +95,24 @@ export class GatewayStreamRetryStateStore {
       if (now - state.lastUsedAt > this.ttlMs) this.entries.delete(key)
     }
   }
+}
+
+const STREAM_RETRY_MARKERS = [
+  GATEWAY_STREAM_TRUNCATION_RETRY_MARKER,
+  GATEWAY_EMPTY_RESPONSE_RETRY_MARKER,
+] as const
+
+const STREAM_EXHAUSTED_MARKERS = [
+  GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER,
+  GATEWAY_EMPTY_RESPONSE_EXHAUSTED_MARKER,
+] as const
+
+/** True for any marker that asks the client to continue on another target. */
+export function isGatewayStreamRetryMarker(value: string | undefined): boolean {
+  return value !== undefined && STREAM_RETRY_MARKERS.some((marker) => value.includes(marker))
+}
+
+/** True for any marker that says the gateway has no route left to retry. */
+export function isGatewayStreamExhaustedMarker(value: string | undefined): boolean {
+  return value !== undefined && STREAM_EXHAUSTED_MARKERS.some((marker) => value.includes(marker))
 }

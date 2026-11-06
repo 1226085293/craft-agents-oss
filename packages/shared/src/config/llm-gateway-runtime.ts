@@ -79,6 +79,9 @@ export class GatewayRuntime {
    * reload; the runtime outlives it and re-supplies the same closure.
    */
   private routeChangeHandler: ((event: LlmRouteChange) => void) | null = null;
+  private cooldownWaitHandler:
+    | ((event: { sessionId?: string; waiting: boolean; seconds?: number }) => void)
+    | null = null;
 
   constructor(options: GatewayRuntimeOptions = {}) {
     this.log = options.log ?? (() => {});
@@ -91,6 +94,13 @@ export class GatewayRuntime {
    */
   setRouteChangeHandler(handler: ((event: LlmRouteChange) => void) | null): void {
     this.routeChangeHandler = handler;
+  }
+
+  /** Install the listener told when a request enters/leaves a cooldown wait. */
+  setCooldownWaitHandler(
+    handler: ((event: { sessionId?: string; waiting: boolean; seconds?: number }) => void) | null,
+  ): void {
+    this.cooldownWaitHandler = handler;
   }
 
   /** Current config snapshot, loaded on demand. */
@@ -358,6 +368,7 @@ export class GatewayRuntime {
         // Read through `this` on every call so a listener installed after the
         // gateway started still receives events.
         onRouteChanged: (event) => this.routeChangeHandler?.(event),
+        onCooldownWait: (event) => this.cooldownWaitHandler?.(event),
       });
       await gateway.start();
       this.gateway = gateway;

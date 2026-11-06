@@ -242,7 +242,7 @@ function ProviderEditDialog(props: {
                   ...prev,
                   // A new card starts with only the fields the gateway cannot
                   // run without; the quota limits stay empty (= no limit).
-                  { name: '', limits: { ...MANDATORY_DEFAULTS } },
+                  { name: '', limits: { ...MANDATORY_DEFAULTS }, quotaScope: 'account' },
                 ])
               }
             >
@@ -966,6 +966,9 @@ function ModelSettingsDialog(props: {
 
 /* --------------------------------------------------------------- strategy */
 
+const strategyWeightKey = (provider: string, model: string): string =>
+  `${provider}\u0000${model}`
+
 function StrategyEditDialog(props: {
   config: LlmConfigShape
   providers: ProtoProvider[]
@@ -980,19 +983,43 @@ function StrategyEditDialog(props: {
   const view = props.strategyId ? props.strategies.find((s) => s.id === props.strategyId) : null
   const [name, setName] = React.useState(view?.name ?? '')
   const [type, setType] = React.useState<string>(existing?.type ?? 'round_robin')
-  const [members, setMembers] = React.useState<string[]>(existing?.members.map((m) => m.provider) ?? [])
+  // Strategy members are per (provider, model), so the same provider can appear
+  // several times. This list is the provider set used by the pickers/weights;
+  // keeping the duplicates made the preview and weight rows repeat it.
+  const [members, setMembers] = React.useState<string[]>(() => [
+    ...new Set(existing?.members.map((m) => m.provider) ?? []),
+  ])
   // One entry per (provider, model). Two providers serving the same name are two
   // units, not one: turning one off must not drop the other, and a pick has to
   // say which upstream it routes to.
-  const [picked, setPicked] = React.useState<StrategyModelPick[]>(() =>
-    strategyPicks(
+  const [picked, setPicked] = React.useState<StrategyModelPick[]>(() => {
+    const memberIds = [...new Set(existing?.members.map((m) => m.provider) ?? [])]
+    const picks = strategyPicks(
       Object.keys(existing?.modelAliases ?? {}),
       existing?.modelProviders,
-      existing?.members.map((m) => m.provider) ?? [],
+      memberIds,
       props.providers,
-    ),
-  )
-  const [weights, setWeights] = React.useState<Record<string, number>>(view?.weights ?? {})
+    )
+    const seen = new Set<string>()
+    return picks.filter((p) => {
+      const key = `${p.provider}\u0000${p.model}`
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  })
+  const [weights, setWeights] = React.useState<Record<string, number>>(() => {
+    const out: Record<string, number> = {}
+    for (const m of existing?.members ?? []) {
+      out[strategyWeightKey(m.provider, m.model ?? '')] = m.weight ?? 1
+      // Legacy members without `model` cannot name a unit; keep the provider
+      // fallback so their derived picks still get the configured weight.
+      out[m.provider] = m.weight ?? 1
+    }
+    return out
+  })
+  const [dragFrom, setDragFrom] = React.useState<number | null>(null)
+  const [dragOver, setDragOver] = React.useState<number | null>(null)
   const [sticky, setSticky] = React.useState(existing?.stickySession?.enabled !== false)
   const [compactAfterSwitch, setCompactAfterSwitch] = React.useState(existing?.compactAfterSwitch !== false)
   const [retryDraft, setRetryDraft] = React.useState(() => retryDraftFromConfig(existing?.retry))
@@ -1009,28 +1036,61 @@ function StrategyEditDialog(props: {
     picked.some((p) => p.provider === provider && p.model === model)
 
   /**
-   * Reorder the units the user will actually save.
+   * Move one effective unit to another position.
    *
-   * `picked` also holds picks of providers that are no longer members; moving
-   * raw indices would swap the wrong entries. Map to the effective indices
-   * first, then swap those positions inside `picked`.
+   * `picked` also holds picks of providers that are no longer members, so raw
+   * indices cannot be moved directly. Map effective positions back to their
+   * indices in `picked`, reorder the effective slice, then write it back into
+   * those same slots.
    */
   const moveEffective = (from: number, to: number): void => {
+    if (from === to) return
     setPicked((prev) => {
-      const indices = prev
+      const positions = prev
         .map((p, i) => (members.includes(p.provider) ? i : -1))
         .filter((i) => i >= 0)
-      const a = indices[from]
-      const b = indices[to]
-      if (a === undefined || b === undefined) return prev
+      if (from < 0 || to < 0 || from >= positions.length || to >= positions.length) return prev
       const next = [...prev]
-      const tmp = next[a]!
-      next[a] = next[b]!
-      next[b] = tmp
+      const items = positions.map((pos) => next[pos]!)
+      const [moved] = items.splice(from, 1)
+      if (!moved) return prev
+      items.splice(to, 0, moved)
+      positions.forEach((pos, i) => {
+        next[pos] = items[i]!
+      })
       return next
     })
   }
+
+  const weightOf = (provider: string, model: string): number =>
+    weights[strategyWeightKey(provider, model)] ?? weights[provider] ?? 1
+
+  const setMemberWeight = (provider: string, model: string, next: number): void => {
+    const clamped = Math.max(1, Math.min(9999, Math.floor(next) || 1))
+    setWeights((w) => ({ ...w, [strategyWeightKey(provider, model)]: clamped }))
+  }
+
   const now = new Date()
+
+  // Weighted mode is group-wide: every available unit competes in one pool, so
+  // the preview must list units rather than grouping by model.
+  const weightedRoutes: Array<{ key: string; model: string; provider: ProtoProvider; weight: number }> = []
+  if (type === 'weighted') {
+    for (const p of effective) {
+      const provider = props.providers.find((x) => x.id === p.provider)
+      if (!provider || !provider.modelList.includes(p.model)) continue
+      if (!inWindow(now, provider.windows[p.model])) continue
+      weightedRoutes.push({
+        key: `${p.provider}\u0000${p.model}`,
+        model: p.model,
+        provider,
+        weight: weightOf(p.provider, p.model),
+      })
+    }
+  }
+  const weightedTotal = weightedRoutes.reduce((sum, route) => sum + route.weight, 0)
+  const sortedWeightedRoutes = [...weightedRoutes].sort((a, b) => b.weight - a.weight)
+
   const canSave = Boolean(name.trim()) && members.length > 0 && models.length > 0
 
   const save = async (): Promise<void> => {
@@ -1077,7 +1137,7 @@ function StrategyEditDialog(props: {
       members: effective.map((p) => ({
         provider: p.provider,
         model: p.model,
-        ...(type === 'weighted' ? { weight: weights[p.provider] || 1 } : {}),
+        ...(type === 'weighted' ? { weight: weightOf(p.provider, p.model) } : {}),
       })),
       stickySession: { ...(existing?.stickySession ?? {}), enabled: sticky },
       compactAfterSwitch,
@@ -1153,30 +1213,56 @@ function StrategyEditDialog(props: {
           {type === 'weighted' ? (
             <div className="field">
               <label>成员权重（加权调度）</label>
-              <div className="row" style={{ flexWrap: 'wrap', gap: 12 }}>
-                {members.length ? (
-                  members.map((id) => {
-                    const p = props.providers.find((x) => x.id === id)
+              {effective.length ? (
+                <div className="weight-list">
+                  {effective.map((p) => {
+                    const providerName = props.providers.find((x) => x.id === p.provider)?.name ?? p.provider
+                    const weight = weightOf(p.provider, p.model)
                     return (
-                      <label key={id} className="row small" style={{ gap: 6 }}>
-                        {p?.name ?? id}
-                        <input
-                          type="number"
-                          min={1}
-                          step={1}
-                          style={{ width: 64 }}
-                          value={weights[id] ?? 1}
-                          onChange={(e) => setWeights((w) => ({ ...w, [id]: Number(e.target.value) || 1 }))}
-                        />
-                      </label>
+                      <div className="weight-row" key={`${p.provider}\u0000${p.model}`}>
+                        <span className="weight-name" title={`${p.model} / ${providerName}`}>
+                          <span className="weight-model">{p.model}</span>
+                          <span className="muted weight-provider">{` · ${providerName}`}</span>
+                        </span>
+                        <div className="weight-control">
+                          <button
+                            type="button"
+                            className="btn ghost sm weight-step"
+                            title="减少权重"
+                            disabled={weight <= 1}
+                            onClick={() => setMemberWeight(p.provider, p.model, weight - 1)}
+                          >
+                            −
+                          </button>
+                          <input
+                            className="weight-input"
+                            type="number"
+                            min={1}
+                            max={9999}
+                            step={1}
+                            value={weight}
+                            onChange={(e) => setMemberWeight(p.provider, p.model, Number(e.target.value))}
+                          />
+                          <button
+                            type="button"
+                            className="btn ghost sm weight-step"
+                            title="增加权重"
+                            onClick={() => setMemberWeight(p.provider, p.model, weight + 1)}
+                          >
+                            ＋
+                          </button>
+                        </div>
+                      </div>
                     )
-                  })
-                ) : (
-                  <span className="xs muted">请先选择成员提供商</span>
-                )}
-              </div>
-              <div className="xs muted" style={{ marginTop: 4 }}>
-                权重越高，被选中的概率越大（按成员顺序展示）
+                  })}
+                </div>
+              ) : (
+                <span className="xs muted">
+                  {members.length ? '请先选择模型' : '请先选择成员提供商'}
+                </span>
+              )}
+              <div className="xs muted" style={{ marginTop: 6 }}>
+                每个切换单元（模型 / 提供商）单独设置权重；权重越高，被选中的概率越大。
               </div>
             </div>
           ) : null}
@@ -1212,8 +1298,9 @@ function StrategyEditDialog(props: {
               )}
             </div>
           </div>
-          <div className="field">
-            <label>切换顺序（从上到下依次尝试）</label>
+          {type !== 'weighted' ? (
+            <div className="field">
+              <label>切换顺序（拖动排序，从上到下依次尝试）</label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               {effective.length ? (
                 effective.map((p, i) => {
@@ -1221,31 +1308,41 @@ function StrategyEditDialog(props: {
                   return (
                     <div
                       key={`${p.provider}\u0000${p.model}`}
-                      className="row"
-                      style={{ alignItems: 'center', gap: 6 }}
+                      className={`row drag-row ${dragFrom === i ? 'dragging' : ''} ${dragOver === i ? 'drag-over' : ''}`}
+                      draggable
+                      onDragStart={(e) => {
+                        setDragFrom(i)
+                        if (e.dataTransfer) {
+                          e.dataTransfer.effectAllowed = 'move'
+                          e.dataTransfer.setData('text/plain', String(i))
+                        }
+                      }}
+                      onDragOver={(e) => {
+                        e.preventDefault()
+                        if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+                        setDragOver((v) => (v === i ? v : i))
+                      }}
+                      onDragLeave={(e) => {
+                        const next = e.relatedTarget as Node | null
+                        if (next instanceof Node && e.currentTarget.contains(next)) return
+                        setDragOver((v) => (v === i ? null : v))
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault()
+                        if (dragFrom !== null) moveEffective(dragFrom, i)
+                        setDragFrom(null)
+                        setDragOver(null)
+                      }}
+                      onDragEnd={() => {
+                        setDragFrom(null)
+                        setDragOver(null)
+                      }}
                     >
+                      <span className="drag-handle" title="拖动排序">⠿</span>
                       <span className="mono xs muted" style={{ width: 16, textAlign: 'right' }}>
                         {i + 1}
                       </span>
                       <span className="small">{`${providerName} / ${p.model}`}</span>
-                      <button
-                        type="button"
-                        className="btn sm"
-                        style={{ padding: '0 6px', fontSize: 11 }}
-                        disabled={i === 0}
-                        onClick={() => moveEffective(i, i - 1)}
-                      >
-                        ↑
-                      </button>
-                      <button
-                        type="button"
-                        className="btn sm"
-                        style={{ padding: '0 6px', fontSize: 11 }}
-                        disabled={i === effective.length - 1}
-                        onClick={() => moveEffective(i, i + 1)}
-                      >
-                        ↓
-                      </button>
                     </div>
                   )
                 })
@@ -1254,19 +1351,35 @@ function StrategyEditDialog(props: {
               )}
             </div>
             <div className="xs muted" style={{ marginTop: 4 }}>
-              顺序即故障切换顺序：前一个单元失败（模型不存在 / 限流 / 余额）才会尝试下一个。
+              拖动行调整顺序；顺序即故障切换顺序：前一个单元失败（模型不存在 / 限流 / 余额）才会尝试下一个。
             </div>
-          </div>
+            </div>
+          ) : null}
           <div className="field">
             <label>路由预览</label>
             <div className="card" style={{ padding: '8px 10px', background: 'var(--color-surface-muted)' }}>
-              {models.length ? (
+              {type === 'weighted' ? (
+                sortedWeightedRoutes.length ? (
+                  sortedWeightedRoutes.map((route) => {
+                    const pct = weightedTotal > 0 ? Math.round((route.weight / weightedTotal) * 100) : 0
+                    return (
+                      <div key={route.key} className="spread xs" style={{ padding: '2px 0' }}>
+                        <span className="mono">{route.model}</span>
+                        <span style={{ color: 'var(--color-text-muted)' }}>
+                          {`→ ${route.provider.name} ×${route.weight}（${pct}%）`}
+                        </span>
+                      </div>
+                    )
+                  })
+                ) : (
+                  <span className="xs" style={{ color: 'var(--state-bad)' }}>
+                    ⚠ 当前没有可用成员
+                  </span>
+                )
+              ) : models.length ? (
                 models.map((m) => {
-                  // Only the providers this model was picked for — a model pinned
-                  // to one provider must not report the other as a route.
-                  const allowed = effective.filter((p) => p.model === m).map((p) => p.provider)
-                  const mems = members
-                    .filter((id) => allowed.includes(id))
+                  const allowed = [...new Set(effective.filter((p) => p.model === m).map((p) => p.provider))]
+                  const mems = allowed
                     .map((id) => props.providers.find((p) => p.id === id))
                     .filter((p): p is ProtoProvider => Boolean(p && p.modelList.includes(m)))
                   const avail = mems.filter((p) => inWindow(now, p.windows[m]))

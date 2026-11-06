@@ -29,6 +29,7 @@ import {
   type WindowEntry,
   type WindowIndex,
   type RateLimitRule,
+  type ModelCoolingEntry,
 } from './llm-rate-limiter.ts';
 import type { LlmStrategyType } from './llm-config.ts';
 
@@ -277,6 +278,7 @@ export class KeyPool {
       if (this.atCapacity(keyId)) throw new AllKeysUnavailableError(model, 'concurrency');
       const rules = this.rulesFor(keyId);
       if (this.state.isTprExceeded(model, tokens, rules)) throw new AllKeysUnavailableError(model, 'tpr');
+      if (this.state.isModelCooling(keyId, model)) throw new AllKeysUnavailableError(model, 'cooling');
       if (this.state.isRateLimited(keyId, model, rules, this.windows, { commit: false, ignoreCooling: true })) {
         throw new AllKeysUnavailableError(model, 'cooling');
       }
@@ -404,6 +406,9 @@ export class KeyPool {
     for (const id of this.candidateOrder()) {
       if (alreadyTried.has(id) || excludedKeys.has(id)) continue;
       if (this.state.isCooling(id)) continue;
+      // A model-scoped quota only parks this key for that model; every other
+      // model on the same key is still a valid candidate.
+      if (this.state.isModelCooling(id, model)) continue;
       return id;
     }
     return null;
@@ -438,6 +443,10 @@ export class KeyPool {
     }
     const now = Math.floor(Date.now() / 1000);
     if (now - ts > this.stickyTtlSeconds) {
+      this.sticky.delete(sessionKey);
+      return null;
+    }
+    if (this.state.isModelCooling(item, model)) {
       this.sticky.delete(sessionKey);
       return null;
     }
@@ -604,6 +613,31 @@ export class KeyPool {
     this.rateLimitStreak.delete(keyId);
   }
 
+  /**
+   * Cool one `key + model` pair for a provider whose quota is per-model.
+   *
+   * The key's other models stay selectable, and another key serving the same
+   * model is a different account and stays selectable too.
+   */
+  async setModelCooling(
+    keyId: string,
+    model: string,
+    reason: 'quota' | 'default' = 'quota',
+    secondsOverride?: number,
+  ): Promise<number> {
+    const release = await this.acquire();
+    try {
+      const durations = this.cooldowns.get(keyId) ?? DEFAULT_COOLDOWNS;
+      const seconds = Math.max(0, Math.floor(secondsOverride ?? (
+        reason === 'quota' ? durations.quotaSeconds : durations.defaultSeconds
+      )));
+      if (seconds > 0) this.state.setModelCooling(keyId, model, seconds);
+      return seconds;
+    } finally {
+      release();
+    }
+  }
+
   /** Apply a cooldown and honour `returnToOriginalPosition`. Caller holds the lock. */
   private applyCooling(keyId: string, seconds: number): void {
     this.state.setCooling(keyId, Math.max(1, Math.floor(seconds)));
@@ -622,6 +656,7 @@ export class KeyPool {
     const release = await this.acquire();
     try {
       this.state.clearCooling(keyId);
+      this.state.clearModelCoolingForItem(keyId);
     } finally {
       release();
     }
@@ -635,6 +670,16 @@ export class KeyPool {
   /** Restore cooling state (after app restart / config rebuild). */
   importCooling(entries: Map<string, number> | Record<string, number>): void {
     this.state.importCooling(entries);
+  }
+
+  /** Snapshot of live `key + model` cooldowns, for persistence. */
+  exportModelCooling(): ModelCoolingEntry[] {
+    return this.state.exportModelCooling();
+  }
+
+  /** Restore `key + model` cooldowns after a restart or config rebuild. */
+  importModelCooling(entries: readonly ModelCoolingEntry[]): void {
+    this.state.importModelCooling(entries);
   }
 
   /** Whether every key for this model is unavailable. */
@@ -669,6 +714,17 @@ export class KeyPool {
             retryAfterSeconds: this.state.remainingCooldown(id),
           });
           continue;
+        }
+        if (model) {
+          const modelCooling = this.state.remainingModelCooldown(id, model);
+          if (modelCooling > 0) {
+            best = soonest(best, {
+              available: false,
+              reason: 'cooling',
+              retryAfterSeconds: modelCooling,
+            });
+            continue;
+          }
         }
         if (this.atCapacity(id)) {
           // In-flight requests drain on their own; 1s is a floor, not a guess at

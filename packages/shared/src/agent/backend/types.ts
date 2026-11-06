@@ -374,6 +374,15 @@ export interface AgentBackend {
   abort(reason?: string): Promise<void>;
 
   /**
+   * Tells the backend that the gateway is parked in waitForCooldown.
+   *
+   * No model events are produced during that wait, so the turn watchdog must
+   * not interpret the silence as a dead stream. Backends without a watchdog
+   * may ignore it.
+   */
+  setGatewayCooldownWaiting?(waiting: boolean): void;
+
+  /**
    * Force abort with specific reason.
    * Used for true hard-stop semantics (user stop, redirect fallback, teardown).
    *

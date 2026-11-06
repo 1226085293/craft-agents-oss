@@ -117,12 +117,17 @@ describe('LlmGateway waitForCooldown', () => {
     if (sandboxDir) process.env.CRAFT_CONFIG_DIR = sandboxDir;
   });
 
-  async function start(cfg: LlmConfig, responses: StubResponse[]) {
+  async function start(
+    cfg: LlmConfig,
+    responses: StubResponse[],
+    onCooldownWait?: (event: { sessionId?: string; waiting: boolean; seconds?: number }) => void,
+  ) {
     const stub = stubUpstream(responses);
     gateway = new LlmGateway({
       getConfig: () => cfg,
       fetchImpl: stub.impl,
       log: (m) => logs.push(m),
+      ...(onCooldownWait ? { onCooldownWait } : {}),
     });
     await gateway.start();
     return stub;
@@ -147,6 +152,27 @@ describe('LlmGateway waitForCooldown', () => {
     expect(stub.calls.every((call) => call.url.includes('p1.example.com'))).toBe(true);
     // The wall clock really waited out the cooldown.
     expect(Date.now() - started).toBeGreaterThanOrEqual(900);
+  });
+
+  it('signals cooldown wait start/end for the owning session', async () => {
+    const cfg = baseConfig();
+    cfg.strategies[0]!.waitForCooldown = { enabled: true, maxWaitSeconds: 60 };
+    const events: Array<{ sessionId?: string; waiting: boolean; seconds?: number }> = [];
+    await start(
+      cfg,
+      [
+        { status: 429, headers: { 'retry-after': '1' }, body: JSON.stringify({ error: 'rate limited' }) },
+        { status: 200, body: JSON.stringify({ id: 'after-wait' }) },
+      ],
+      (event) => events.push(event),
+    );
+
+    const res = await post(gateway!, { stream: true, sessionKey: 'wait-session' });
+    await readJson(res);
+
+    expect(events[0]).toMatchObject({ sessionId: 'wait-session', waiting: true });
+    expect(events[0]!.seconds).toBeGreaterThanOrEqual(1);
+    expect(events[events.length - 1]).toEqual({ sessionId: 'wait-session', waiting: false });
   });
 
   it('does not wait when the strategy has no waitForCooldown config', async () => {
@@ -297,6 +323,27 @@ describe('LlmGateway waitForCooldown', () => {
     expect(logs.some((line) => line.includes('stalePlan'))).toBe(true);
     expect(stub.calls.length).toBe(4);
   }, 20000);
+
+  it('pairs the wait-end callback when a reload interrupts the wait', async () => {
+    const cfg = baseConfig();
+    cfg.strategies[0]!.waitForCooldown = { enabled: true, maxWaitSeconds: 60 };
+    const events: Array<{ sessionId?: string; waiting: boolean; seconds?: number }> = [];
+    await start(
+      cfg,
+      [{ status: 429, headers: { 'retry-after': '30' }, body: JSON.stringify({ error: 'rate limited' }) }],
+      (event) => events.push(event),
+    );
+
+    const pending = post(gateway!, { stream: true, sessionKey: 'reload-wait' });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    gateway!.rebuild();
+    const res = await pending;
+    await res.text();
+
+    expect(res.status).toBe(503);
+    expect(events[0]).toMatchObject({ sessionId: 'reload-wait', waiting: true });
+    expect(events[events.length - 1]).toEqual({ sessionId: 'reload-wait', waiting: false });
+  });
 
   it('gives up waiting when the client disconnects mid-wait', async () => {
     const cfg = baseConfig();

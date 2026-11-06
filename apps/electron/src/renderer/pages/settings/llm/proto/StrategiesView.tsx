@@ -119,8 +119,13 @@ export function StrategiesView(props: Props): React.JSX.Element {
                   <span style={{ marginRight: 6 }}>
                     <Badge kind="gray">{`${s.units.length} 个切换单元`}</Badge>
                   </span>
-                  {s.type === 'weighted' && s.members.length ? (
-                    <Badge kind="gray">{`权重 ${s.members.map((id) => s.weights[id] ?? 1).join(':')}`}</Badge>
+                  {s.type === 'weighted' && s.units.length ? (
+                    <Badge
+                      kind="gray"
+                      title={s.units
+                        .map((u) => `${u.providerName}${u.model ? ` / ${u.model}` : ''} ×${u.weight}`)
+                        .join('\n')}
+                    >{`权重 ${s.units.map((u) => u.weight).join(':')}`}</Badge>
                   ) : null}
                   {unsupported.length ? (
                     <Badge kind="amber" title={`${unsupported.join('、')} 没有成员支持`}>

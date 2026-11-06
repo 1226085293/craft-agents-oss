@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { SettingsManager } from '@earendil-works/pi-coding-agent';
 import {
   CRAFT_PI_COMPACTION_RESERVE_TOKENS,
+  CRAFT_PI_HTTP_IDLE_TIMEOUT_MS_DEFAULT,
   CRAFT_PI_EPHEMERAL_MAX_BACKOFF_MS,
   CRAFT_PI_EPHEMERAL_QUERY_DEADLINE_MS,
   CRAFT_PI_EPHEMERAL_RETRY_SETTINGS,
@@ -13,9 +14,22 @@ import {
   PI_DEFAULT_KEEP_RECENT_TOKENS,
   craftCompactionSettings,
   createCraftSettingsManager,
+  getCraftPiHttpIdleTimeoutMs,
 } from './session-settings.ts';
 
 describe('createCraftSettingsManager', () => {
+  it('keeps the HTTP fallback above the maximum cooldown wait plus first-byte budget', () => {
+    // 540s maxWaitSeconds + 30s first byte = 570s; 600s leaves scheduling room.
+    expect(CRAFT_PI_HTTP_IDLE_TIMEOUT_MS_DEFAULT).toBe(600_000);
+    const previous = process.env.CRAFT_PI_HTTP_IDLE_TIMEOUT_MS;
+    delete process.env.CRAFT_PI_HTTP_IDLE_TIMEOUT_MS;
+    try {
+      expect(getCraftPiHttpIdleTimeoutMs()).toBe(600_000);
+    } finally {
+      if (previous !== undefined) process.env.CRAFT_PI_HTTP_IDLE_TIMEOUT_MS = previous;
+    }
+  });
+
   it('pins the agent-level auto-retry policy', () => {
     const settings = createCraftSettingsManager();
     // SDK agent-level retry is OFF and has no env switch: the gateway ladder

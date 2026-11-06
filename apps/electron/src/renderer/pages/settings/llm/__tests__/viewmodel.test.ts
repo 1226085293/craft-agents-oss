@@ -9,7 +9,7 @@
 
 import { describe, expect, test } from 'bun:test'
 
-import { buildProviders, gatewaySetupSteps, keyAvailabilitySegments, shouldShowGatewaySetup } from '../proto/viewmodel'
+import { buildProviders, buildStrategies, gatewaySetupSteps, keyAvailabilitySegments, shouldShowGatewaySetup } from '../proto/viewmodel'
 import type { GatewayStatus, LlmConfigShape, LlmKeyStateShape, ProviderDetailShape } from '../types'
 
 function makeConfig(overrides: Partial<LlmConfigShape['providers'][number]> = {}): LlmConfigShape {
@@ -229,5 +229,34 @@ describe('buildProviders — model options', () => {
     // a provider created before the field existed.
     const [p] = buildProviders(makeConfig(), NO_STATUS, NO_KEY_STATES, NO_DETAILS)
     expect(p.modelOptions).toEqual({})
+  })
+})
+
+
+describe('buildStrategies — weighted units', () => {
+  test('keeps one provider row and one weight per switching unit', () => {
+    const base = makeConfig()
+    const config: LlmConfigShape = {
+      ...base,
+      providers: [{ ...base.providers[0]!, models: { a: 'a', b: 'b' }, keys: [] }],
+      strategies: [
+        {
+          id: 's1',
+          type: 'weighted',
+          members: [
+            { provider: 'p1', model: 'a', weight: 3 },
+            { provider: 'p1', model: 'b', weight: 7 },
+          ],
+        },
+      ],
+    }
+    const providers = [
+      { id: 'p1', name: '提供商一', modelList: ['a', 'b'] },
+    ] as unknown as Parameters<typeof buildStrategies>[1]
+    const [strategy] = buildStrategies(config, providers)
+    // The card's provider summary must not repeat p1, but the weight badge
+    // must still see 3 and 7 separately.
+    expect(strategy!.members).toEqual(['p1'])
+    expect(strategy!.units.map((u) => u.weight)).toEqual([3, 7])
   })
 })

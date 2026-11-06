@@ -331,7 +331,7 @@ export class PiAgent extends BaseAgent {
    * always won the race, so a silently hanging upstream (no bytes, no error
    * status) surfaced as "stream stalled … Please retry" before the SDK's
    * auto-retry policy (4 agent retries + provider retries, CRAFT_PI_RETRY_
-   * SETTINGS) got a chance to run. At 300 s each http-idle timeout lands its
+   * SETTINGS) got a chance to run. At 600 s each http-idle timeout lands its
    * auto_retry_* event inside the watchdog window, re-arms the timer, and
    * lets the retry ladder progress — or terminate the turn with the REAL api
    * error once retries are exhausted. A genuinely orphaned/dead stream (no
@@ -340,7 +340,7 @@ export class PiAgent extends BaseAgent {
    * running, so a long-but-healthy model call is unaffected. Override with
    * the CRAFT_PI_TURN_IDLE_TIMEOUT_MS environment variable.
    */
-  private static readonly DEFAULT_TURN_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+  private static readonly DEFAULT_TURN_IDLE_TIMEOUT_MS = 90 * 1000;
   /**
    * Capped idle ceiling for in-flight context compaction. While the Pi SDK
    * runs a threshold/overflow compaction inside the subprocess, the main
@@ -351,7 +351,7 @@ export class PiAgent extends BaseAgent {
    * compaction-specific error instead of the plain turn-stall message. (The
    * cap existed because a 2026-10-04 deepseek session compacted for 3m40s
    * and false-positived the then-120s turn watchdog mid-"Compacting
-   * context..."; as of 2026-10-05 the plain turn ceiling is also 300 s, so
+   * context..."; the plain turn ceiling is 90 s, so
    * the cap governs the same window with the specific message.) Matches the
    * 300 s `waitForCompaction` / `requestCompact` precedent. Override with
    * CRAFT_PI_COMPACTION_IDLE_TIMEOUT_MS.
@@ -360,6 +360,8 @@ export class PiAgent extends BaseAgent {
 
   private activeTurnToolIds = new Set<string>();
   private turnIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True while the gateway waits out a cooldown; silence is expected. */
+  private gatewayCooldownWaiting = false;
   private lastTurnEventAt = 0;
   /**
    * Compaction watch state: `compaction_start` (any, incl. threshold/overflow)
@@ -621,8 +623,23 @@ export class PiAgent extends BaseAgent {
     this.armIdleReaper();
   }
 
+  /**
+   * Pause/resume the turn watchdog around a gateway cooldown wait. The
+   * subprocess watchdog is told too: both would otherwise read the intentional
+   * silence as a dead turn and abort a request the gateway is still holding.
+   */
+  setGatewayCooldownWaiting(waiting: boolean): void {
+    if (this.gatewayCooldownWaiting === waiting) return;
+    this.gatewayCooldownWaiting = waiting;
+    this.send({ type: 'gateway_cooldown_wait', waiting });
+    if (waiting) this.clearTurnIdleWatchdog();
+    else this.refreshTurnIdleWatchdog();
+  }
+
   private refreshTurnIdleWatchdog(): void {
     this.clearTurnIdleWatchdog();
+
+    if (this.gatewayCooldownWaiting) return;
 
     if (!this._isProcessing || this.eventQueue.isComplete || this.activeTurnToolIds.size > 0) {
       return;
@@ -630,8 +647,8 @@ export class PiAgent extends BaseAgent {
     // Verification hold (2026-10-22 fluid-pulsar): the subprocess dispatched
     // an async LLM judge on the captured final reply and the queue is
     // intentionally held open. The judge can take minutes (up to 3 attempts
-    // × the 300s http idle timeout), and NONE of that time produces a
-    // subprocess event — the 300s stall watchdog misread exactly that silence
+    // × the 600s http idle timeout), and NONE of that time produces a
+    // subprocess event — the stall watchdog misread exactly that silence
     // as a dead stream, started a retry ladder, and the (guaranteed) refusal
     // killed the turn while the judge was still running: its eventual PASS was
     // discarded into a completed queue, and the "重试中" + "正在校验最终回复"

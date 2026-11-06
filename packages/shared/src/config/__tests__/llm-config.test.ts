@@ -51,6 +51,24 @@ function makeConfig(overrides: Partial<LlmConfig> = {}): LlmConfig {
 }
 
 describe('validateLlmConfig', () => {
+  it('defaults stream-gap timeout to 60 seconds', () => {
+    expect(DEFAULT_PRESET.streamGapSeconds).toBe(60);
+  });
+
+  it('rejects a negative stream-gap timeout', () => {
+    const errors = validateLlmConfig(makeConfig({ presets: { p: { streamGapSeconds: -1 } } }));
+    expect(errors.join(' ')).toContain('streamGapSeconds');
+    expect(errors.join(' ')).toContain('不能为负');
+  });
+
+  it('accepts both quota scopes and rejects an unknown one', () => {
+    expect(validateLlmConfig(makeConfig({ presets: { p: { quotaScope: 'model' } } }))).toEqual([]);
+    const errors = validateLlmConfig(
+      makeConfig({ presets: { p: { quotaScope: 'bogus' as never } } }),
+    );
+    expect(errors.join(' ')).toContain('quotaScope');
+  });
+
   it('accepts a minimal valid config', () => {
     expect(validateLlmConfig(makeConfig())).toEqual([]);
   });

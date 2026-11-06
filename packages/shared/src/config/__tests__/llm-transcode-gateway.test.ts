@@ -317,6 +317,57 @@ describe('gateway transcoding — inbound', () => {
     expect(text).toContain('"stop_reason":"tool_use"');
   });
 
+  it('retries a cleanly-ended OpenAI stream with no visible text or tool call', async () => {
+    const res = await startWithSSE('data: [DONE]\n\n');
+    const text = await res.text();
+
+    expect(text).toContain('CRAFT_GATEWAY_EMPTY_RESPONSE_RETRY');
+    expect(text).toContain('"stop_reason":"refusal"');
+    expect(gateway.drainUsage()[0]).toMatchObject({ status: 'error', superseded: true });
+  });
+
+  it('treats thinking-only output as empty because it has no user-visible answer', async () => {
+    const thinkingOnly = `data: ${JSON.stringify({ id: 'cmpl_1', choices: [{ index: 0, delta: { reasoning_content: 'private reasoning' } }] })}\n\ndata: [DONE]\n\n`;
+    const res = await startWithSSE(thinkingOnly);
+    const text = await res.text();
+
+    expect(text).toContain('CRAFT_GATEWAY_EMPTY_RESPONSE_RETRY');
+    expect(text).toContain('"stop_reason":"refusal"');
+    expect(gateway.drainUsage()[0]).toMatchObject({ status: 'error', superseded: true });
+  });
+
+  it('does not answer a non-streaming client with an empty JSON message', async () => {
+    let calls = 0;
+    const cfg = configWith(openAIProvider('oai'));
+    cfg.strategies[0]!.retry = { maxAttempts: 2, onStatusCodes: [429, 500, 502, 503, 504], backoffMs: 0 };
+    gateway = new LlmGateway({
+      getConfig: () => cfg,
+      fetchImpl: (async () => {
+        calls += 1;
+        return new Response(
+          JSON.stringify({
+            id: 'cmpl_empty',
+            choices: [{ index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'stop' }],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }) as never,
+      log: () => {},
+    });
+    await gateway.start();
+
+    const res = await fetch(`${gateway.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+      body: JSON.stringify({ model: 'auto', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    await res.text();
+
+    expect(res.status).not.toBe(200);
+    expect(calls).toBe(2);
+    expect(gateway.drainUsage().every((row) => row.status === 'error')).toBe(true);
+  });
+
   it('reports a cut stream with a supported retry marker, not an unknown stop reason', async () => {
     // No finish_reason and no [DONE]: the upstream dropped the connection
     // mid-stream. The refusal stop reason is understood by Pi's Anthropic
@@ -572,11 +623,20 @@ describe('gateway transcoding — pass-through intact', () => {
   let gateway: LlmGateway;
 
   afterEach(async () => {
-    if (gateway) await gateway.stop();
+    if (gateway) {
+      await gateway.clearKeyCooldown();
+      await gateway.stop();
+    }
   });
 
   it('forwards an Anthropic upstream byte-for-byte without rewriting', async () => {
-    const upstreamBody = 'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x"}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n';
+    const upstreamBody =
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x"}}\n\n' +
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n' +
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n' +
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n' +
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n';
     let forwarded = '';
     gateway = new LlmGateway({
       getConfig: () => configWith(anthropicProvider('anth')),
@@ -593,9 +653,166 @@ describe('gateway transcoding — pass-through intact', () => {
     });
     forwarded = await res.text();
 
-    // Identical to what the upstream produced: this is the path that runs today,
-    // and any rewrite here would change behaviour for existing users.
+    // Identical to what the upstream produced: healthy pass-through is untouched.
     expect(forwarded).toBe(upstreamBody);
+  });
+
+  it('forwards a streamed Anthropic tool call without mistaking its empty input seed for empty output', async () => {
+    const upstreamBody =
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x"}}\n\n' +
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}}\n\n' +
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"command\\":\\"ls\\"}"}}\n\n' +
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n' +
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":2}}\n\n' +
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+    const cfg = configWith(anthropicProvider('anth'));
+    cfg.strategies[0]!.retry = { maxAttempts: 2, onStatusCodes: [429, 500, 502, 503, 504], backoffMs: 0 };
+    gateway = new LlmGateway({
+      getConfig: () => cfg,
+      fetchImpl: (async () =>
+        new Response(upstreamBody, { status: 200, headers: { 'content-type': 'text/event-stream' } })) as never,
+      log: () => {},
+    });
+    await gateway.start();
+
+    const res = await fetch(`${gateway.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+      body: JSON.stringify({ model: 'auto', stream: true, sessionKey: 'tool-session', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    const text = await res.text();
+
+    expect(text).toBe(upstreamBody);
+    expect(text).not.toContain('CRAFT_GATEWAY_EMPTY_RESPONSE');
+  });
+
+  it('applies the stream-gap timeout to Anthropic pass-through streams too', async () => {
+    const encoder = new TextEncoder();
+    let aborted = false;
+    const cfg = configWith(anthropicProvider('anth', { defaultPreset: 'gap' } as never));
+    cfg.presets = { gap: { firstByteSeconds: 5, streamGapSeconds: 0.2, totalSeconds: 30 } };
+    cfg.strategies[0]!.retry = { maxAttempts: 2, onStatusCodes: [429, 500, 502, 503, 504], backoffMs: 0 };
+    gateway = new LlmGateway({
+      getConfig: () => cfg,
+      fetchImpl: (async (_input: never, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(
+                'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x"}}\n\n' +
+                  'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+                  'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n',
+              ),
+            );
+            init?.signal?.addEventListener('abort', () => {
+              aborted = true;
+              try {
+                controller.error(new Error('aborted'));
+              } catch {
+                // Already closed.
+              }
+            });
+          },
+        });
+        return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }) as never,
+      log: () => {},
+    });
+    await gateway.start();
+
+    const started = Date.now();
+    const res = await fetch(`${gateway.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+      body: JSON.stringify({ model: 'auto', stream: true, sessionKey: 'anth-gap', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    const text = await res.text();
+
+    expect(text).toContain('CRAFT_GATEWAY_STREAM_TRUNCATION_RETRY');
+    expect(text).toContain('went silent');
+    expect(text).toContain('"stop_reason":"refusal"');
+    expect(aborted).toBe(true);
+    expect(Date.now() - started).toBeLessThan(3_000);
+  });
+
+  it('reports an Anthropic stream that ends cleanly with no visible answer as empty', async () => {
+    const upstreamBody =
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x"}}\n\n' +
+      'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+    const cfg = configWith(anthropicProvider('anth'));
+    cfg.strategies[0]!.retry = { maxAttempts: 2, onStatusCodes: [429, 500, 502, 503, 504], backoffMs: 0 };
+    gateway = new LlmGateway({
+      getConfig: () => cfg,
+      fetchImpl: (async () =>
+        new Response(upstreamBody, { status: 200, headers: { 'content-type': 'text/event-stream' } })) as never,
+      log: () => {},
+    });
+    await gateway.start();
+
+    const res = await fetch(`${gateway.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+      body: JSON.stringify({ model: 'auto', stream: true, sessionKey: 'anth-retry', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    const text = await res.text();
+
+    expect(text).toContain('CRAFT_GATEWAY_EMPTY_RESPONSE_RETRY');
+    expect(text).toContain('"stop_reason":"refusal"');
+  });
+
+  it('turns an Anthropic SSE error event into a retryable failed stream', async () => {
+    const upstreamBody =
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_x"}}\n\n' +
+      'event: error\ndata: {"type":"error","error":{"type":"overloaded_error","message":"busy"}}\n\n';
+    const cfg = configWith(anthropicProvider('anth'));
+    cfg.strategies[0]!.retry = { maxAttempts: 2, onStatusCodes: [429, 500, 502, 503, 504], backoffMs: 0 };
+    gateway = new LlmGateway({
+      getConfig: () => cfg,
+      fetchImpl: (async () =>
+        new Response(upstreamBody, { status: 200, headers: { 'content-type': 'text/event-stream' } })) as never,
+      log: () => {},
+    });
+    await gateway.start();
+
+    const res = await fetch(`${gateway.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+      body: JSON.stringify({ model: 'auto', stream: true, sessionKey: 'anth-retry', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    const text = await res.text();
+
+    expect(text).toContain('CRAFT_GATEWAY_STREAM_TRUNCATION_RETRY');
+    expect(text).toContain('busy');
+    expect(text).not.toContain('event: error');
+  });
+
+  it('retries an empty non-streaming Anthropic message instead of returning it', async () => {
+    let calls = 0;
+    const cfg = configWith(anthropicProvider('anth'));
+    cfg.strategies[0]!.retry = { maxAttempts: 2, onStatusCodes: [429, 500, 502, 503, 504], backoffMs: 0 };
+    gateway = new LlmGateway({
+      getConfig: () => cfg,
+      fetchImpl: (async () => {
+        calls += 1;
+        return new Response(
+          JSON.stringify({ type: 'message', role: 'assistant', content: [] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }) as never,
+      log: () => {},
+    });
+    await gateway.start();
+
+    const res = await fetch(`${gateway.baseUrl}/v1/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-api-key': 'sk-client' },
+      body: JSON.stringify({ model: 'auto', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    await res.text();
+
+    expect(res.status).not.toBe(200);
+    expect(calls).toBe(2);
+    expect(gateway.drainUsage().every((row) => row.status === 'error')).toBe(true);
   });
 
   it('sends Anthropic auth headers to an anthropic-messages upstream', async () => {

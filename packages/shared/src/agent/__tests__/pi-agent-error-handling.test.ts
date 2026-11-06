@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, jest } from 'bun:test'
 import { PiAgent } from '../pi-agent.ts'
 import type { BackendConfig } from '../backend/types.ts'
 import { AbortReason } from '../core/session-lifecycle.ts'
@@ -125,15 +125,59 @@ describe('PiAgent subprocess error handling', () => {
     agent.destroy()
   })
 
-  it('defaults the turn-idle watchdog to 300s when no env override is set', () => {
+  it('pauses the turn watchdog while a gateway cooldown wait is active', () => {
+    const agent = new PiAgent(createConfig())
+    ;(agent as any)._isProcessing = true
+    const timer = setTimeout(() => {}, 60_000)
+    ;(agent as any).turnIdleTimer = timer
+
+    agent.setGatewayCooldownWaiting(true)
+    expect((agent as any).gatewayCooldownWaiting).toBe(true)
+    expect((agent as any).turnIdleTimer).toBeNull()
+
+    agent.setGatewayCooldownWaiting(false)
+    expect((agent as any).gatewayCooldownWaiting).toBe(false)
+    agent.destroy()
+  })
+
+  it('does not trip while a cooldown wait outlasts the idle timeout, then resumes', async () => {
+    const previous = process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS
+    process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS = '30'
+    const agent = new PiAgent(createConfig())
+    try {
+      ;(agent as any)._isProcessing = true
+      ;(agent as any).eventQueue.reset()
+      const timedOut = jest
+        .spyOn(agent as any, 'handleTurnIdleTimeout')
+        .mockImplementation(() => {})
+
+      // A wait longer than the 30ms timeout must not arm or keep a timer.
+      agent.setGatewayCooldownWaiting(true)
+      ;(agent as any).refreshTurnIdleWatchdog()
+      await new Promise((resolve) => setTimeout(resolve, 120))
+      expect(timedOut).not.toHaveBeenCalled()
+      expect((agent as any).turnIdleTimer).toBeNull()
+
+      // Once the wait ends, the normal deadline applies again.
+      agent.setGatewayCooldownWaiting(false)
+      await new Promise((resolve) => setTimeout(resolve, 120))
+      expect(timedOut).toHaveBeenCalled()
+    } finally {
+      if (previous !== undefined) process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS = previous
+      else delete process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS
+      agent.destroy()
+    }
+  })
+
+  it('defaults the turn-idle watchdog to 90s when no env override is set', () => {
     const agent = new PiAgent(createConfig())
     const prev = process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS
     delete process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS
     try {
-      // 2026-10-05: raised from 120s to 300s so a silent hang (no bytes, no
-      // error) can ride the Pi subprocess's 120s http-idle timeout plus at
-      // least one agent-retry backoff cycle before the watchdog fires.
-      expect((agent as any).getTurnIdleTimeoutMs()).toBe(300_000)
+      // 90s is intentionally shorter than the 300s HTTP idle fallback: the
+      // gateway's 60s stream-gap timer normally fires first, and an explicit
+      // cooldown wait pauses both watchdogs for its bounded duration.
+      expect((agent as any).getTurnIdleTimeoutMs()).toBe(90_000)
     } finally {
       if (prev !== undefined) process.env.CRAFT_PI_TURN_IDLE_TIMEOUT_MS = prev
       agent.destroy()

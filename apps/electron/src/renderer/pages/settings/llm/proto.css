@@ -126,6 +126,23 @@
 .llm-proto .pill.plain{border-style:dashed;color:var(--color-text-muted);cursor:default}
 .llm-proto .pill.add{color:var(--color-accent);border-color:var(--color-accent);border-style:dashed}
 .llm-proto .pill.dragging{opacity:.5}
+/* 策略组切换顺序：整行可拖动，拖到目标行上方时用边框标出落点 */
+.llm-proto .drag-row{padding:6px 8px;border:1px solid transparent;border-radius:var(--radius-sm);cursor:grab;user-select:none}
+.llm-proto .drag-row:hover{background:var(--color-surface-hover)}
+.llm-proto .drag-row.dragging{opacity:.45}
+.llm-proto .drag-row.drag-over{border-color:var(--color-accent);background:var(--color-accent-soft)}
+.llm-proto .drag-handle{width:14px;flex-shrink:0;text-align:center;color:var(--color-text-faint);cursor:grab;font-size:14px;line-height:1}
+.llm-proto .drag-row:active .drag-handle{cursor:grabbing}
+/* 加权调度：每行一个提供商，权重按 provider 生效 */
+.llm-proto .weight-list{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+.llm-proto .weight-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 8px;border:1px solid var(--color-border);border-radius:var(--radius-sm);background:var(--color-surface)}
+.llm-proto .weight-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:var(--text-sm)}
+.llm-proto .weight-model{color:var(--color-text);font-weight:600}
+.llm-proto .weight-provider{font-size:var(--text-xs)}
+.llm-proto .weight-control{display:flex;align-items:center;gap:4px;flex-shrink:0}
+.llm-proto .weight-input{width:58px;text-align:center;font-variant-numeric:tabular-nums;appearance:textfield;-moz-appearance:textfield}
+.llm-proto .weight-input::-webkit-outer-spin-button,.llm-proto .weight-input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.llm-proto .weight-step{min-width:24px;padding:0 7px}
 .llm-proto .pill.wrap{position:relative;cursor:pointer}
 .llm-proto .pill .rm{position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;background:var(--color-bg);border:1px solid var(--color-border-strong);color:var(--color-text-muted);font-size:10px;line-height:1;display:none;align-items:center;justify-content:center}
 .llm-proto .pill.wrap:hover .rm{display:inline-flex}
@@ -278,7 +295,7 @@
 .llm-proto .keyitem:not(.dis):hover{background:var(--color-surface-hover)}
 .llm-proto .keyitem.dis{background:var(--color-surface-disabled);opacity:.75}
 .llm-proto .keyitem .left{flex:1;min-width:0}
-.llm-proto .keyitem .kv{font-size:var(--text-md);cursor:text;padding:2px 4px;margin:-2px -4px}
+.llm-proto .keyitem .kv{font-size:var(--text-md);cursor:text;padding:2px 4px;margin:-2px -4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 .llm-proto .keyitem .kv:hover{background:var(--color-accent-soft);border-radius:var(--radius-sm)}
 /* Inline key/note edit — verbatim from the prototype (`.kv-edit` / `.edit-actions`).
    The row is flex: the input or textarea grows, the two actions keep their

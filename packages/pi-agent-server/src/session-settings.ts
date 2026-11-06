@@ -24,10 +24,14 @@ import { LLM_QUERY_TIMEOUT_MS } from '../../shared/src/agent/llm-tool.ts';
  * 261005-fresh-tulip (d4f0731 via uni-api): 700-message contexts with 15–63 s
  * time-to-first-token and ~115 s total completion — a cluster of completions
  * at exactly ~120 s − 5 s proved the client cut the stream right before the
- * upstream finished. Raised to 300_000 (SDK default). Override with
- * CRAFT_PI_HTTP_IDLE_TIMEOUT_MS (0 = disabled).
+ * upstream finished. Raised to 600_000: the gateway can legitimately hold a
+ * streaming request through a 540s cooldown wait plus its 30s first-byte
+ * budget, and the client must not cut that turn short. This is only a final
+ * safety net — the gateway's 60s stream-gap and 600s total timers fire first
+ * for routed requests. Override with CRAFT_PI_HTTP_IDLE_TIMEOUT_MS (0 =
+ * disabled).
  */
-export const CRAFT_PI_HTTP_IDLE_TIMEOUT_MS_DEFAULT = 300_000;
+export const CRAFT_PI_HTTP_IDLE_TIMEOUT_MS_DEFAULT = 600_000;
 
 /** Read the Pi HTTP idle/request timeout from env (ms). 0 disables. */
 export function getCraftPiHttpIdleTimeoutMs(): number {

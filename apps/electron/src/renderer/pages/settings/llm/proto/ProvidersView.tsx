@@ -111,7 +111,7 @@ export function ProvidersView(props: Props): React.JSX.Element {
               // Same rule as the provider dialog's 添加类型: a new card starts
               // with only the fields the gateway cannot run without. The quota
               // limits stay empty, where empty means "no limit".
-              { name: '', limits: { ...MANDATORY_DEFAULTS } },
+              { name: '', limits: { ...MANDATORY_DEFAULTS }, quotaScope: 'account' },
             ])
           }
         />

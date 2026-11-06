@@ -174,10 +174,24 @@ export interface WindowEntry {
  */
 export type WindowIndex = Map<string, Map<string, Map<string, WindowEntry[]>>>;
 
+/** One `key + model` cooldown, used for providers with per-model quota. */
+export interface ModelCoolingEntry {
+  keyId: string;
+  model: string;
+  until: number;
+}
+
+/** NUL cannot appear in an upstream model id, so it is a safe composite separator. */
+function modelCoolingKey(item: string, model: string): string {
+  return `${item}\u0000${model}`;
+}
+
 export class RateLimitState {
   private readonly now: Clock;
   /** item -> epoch-seconds until which the key is cooling down. */
   private coolingUntil = new Map<string, number>();
+  /** `${item}\u0000${model}` -> epoch-seconds until which that pair is cooling. */
+  private modelCoolingUntil = new Map<string, number>();
 
   constructor(now: Clock = () => Math.floor(Date.now() / 1000)) {
     this.now = now;
@@ -200,6 +214,76 @@ export class RateLimitState {
 
   clearCooling(item: string): void {
     this.coolingUntil.delete(item);
+    this.clearModelCoolingForItem(item);
+  }
+
+  /**
+   * Cool one model on one key without touching the key's other models.
+   *
+   * Kept separate from {@link setCooling}: account-level quota still cools the
+   * whole key, while a provider that grants quota per model only parks the
+   * failing pair.
+   */
+  setModelCooling(item: string, model: string, seconds: number): void {
+    this.modelCoolingUntil.set(
+      modelCoolingKey(item, model),
+      this.now() + Math.max(0, Math.floor(seconds)),
+    );
+  }
+
+  /** Remaining `key + model` cooldown in seconds; 0 when not cooling. */
+  remainingModelCooldown(item: string, model: string): number {
+    const until = this.modelCoolingUntil.get(modelCoolingKey(item, model));
+    if (until === undefined) return 0;
+    const remaining = until - this.now();
+    return remaining > 0 ? remaining : 0;
+  }
+
+  isModelCooling(item: string, model: string | null): boolean {
+    return model !== null && this.remainingModelCooldown(item, model) > 0;
+  }
+
+  clearModelCooling(item: string, model: string): void {
+    this.modelCoolingUntil.delete(modelCoolingKey(item, model));
+  }
+
+  /** Clear every model-scoped cooldown for one key. */
+  clearModelCoolingForItem(item: string): void {
+    const prefix = `${item}\u0000`;
+    for (const key of this.modelCoolingUntil.keys()) {
+      if (key.startsWith(prefix)) this.modelCoolingUntil.delete(key);
+    }
+  }
+
+  /** Snapshot of live model-scoped cooldowns, for persistence across restarts. */
+  exportModelCooling(): ModelCoolingEntry[] {
+    const out: ModelCoolingEntry[] = [];
+    const now = this.now();
+    for (const [key, until] of this.modelCoolingUntil) {
+      if (until <= now) {
+        this.modelCoolingUntil.delete(key);
+        continue;
+      }
+      const sep = key.indexOf('\u0000');
+      if (sep < 0) continue;
+      out.push({ keyId: key.slice(0, sep), model: key.slice(sep + 1), until });
+    }
+    return out;
+  }
+
+  /** Restore model-scoped cooldowns; expired entries are dropped. */
+  importModelCooling(entries: readonly ModelCoolingEntry[]): void {
+    const now = this.now();
+    for (const entry of entries) {
+      if (!entry || typeof entry.keyId !== 'string' || typeof entry.model !== 'string') continue;
+      const until = Number(entry.until);
+      if (Number.isFinite(until) && until > now) {
+        this.modelCoolingUntil.set(
+          modelCoolingKey(entry.keyId, entry.model),
+          Math.floor(until),
+        );
+      }
+    }
   }
 
   /**

@@ -53,7 +53,14 @@ import {
   requestedEffort,
   thinkingForEffort,
 } from './reasoning-effort.ts';
-import { loadCooldowns, saveCooldowns, cooldownKey } from './llm-cooldown-store.ts';
+import {
+  loadCooldowns,
+  saveCooldowns,
+  cooldownKey,
+  MODEL_COOLDOWN_PREFIX,
+  modelCooldownKey,
+  parseModelCooldownKey,
+} from './llm-cooldown-store.ts';
 import {
   candidateUnits,
   planRequest,
@@ -65,10 +72,15 @@ import {
 } from './llm-planner.ts';
 import { transcodeRequestToOpenAI, openAIHeaders } from './llm-transcode-request.ts';
 import { ResponseTranscoder, transcodeResponseToAnthropic } from './llm-transcode-response.ts';
+import { SseFrameParser, type SseFrame } from './llm-sse-parser.ts';
+import { attachClientDisconnect } from './client-disconnect.ts';
+import { AnthropicStreamMonitor, type AnthropicStreamFailure } from './llm-anthropic-stream.ts';
 import { DEFAULT_PRESET, resolvePreset, resolvePresetId } from './llm-config.ts';
 import { chatEndpointFor, modelsEndpointFor } from './llm-endpoint.ts';
 import { retryDelayMs, targetBudgetAllowsRetry } from './llm-retry.ts';
 import {
+  GATEWAY_EMPTY_RESPONSE_EXHAUSTED_MARKER,
+  GATEWAY_EMPTY_RESPONSE_RETRY_MARKER,
   GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER,
   GATEWAY_STREAM_TRUNCATION_RETRY_MARKER,
   GatewayStreamRetryStateStore,
@@ -97,6 +109,8 @@ export interface LlmGatewayOptions {
    * only reports the change; the session layer owns compaction.
    */
   onRouteChanged?: (event: LlmRouteChange) => void;
+  /** Notifies the host when a request parks in waitForCooldown. */
+  onCooldownWait?: (event: { sessionId?: string; waiting: boolean; seconds?: number }) => void;
 }
 
 /** A session's route changed since its previous successful request. */
@@ -225,6 +239,40 @@ interface MutableUsage {
  * never produces a chunk. `settle()` releases both timers once the body is done
  * (or abandoned), so a retry does not inherit the previous attempt's clock.
  */
+type GatewayStreamFailureKind = 'truncated' | 'empty_response' | 'upstream_error'
+
+interface GatewayStreamFailure {
+  kind: GatewayStreamFailureKind
+  message: string
+}
+
+function retryMarkersFor(kind: GatewayStreamFailureKind): { retry: string; exhausted: string } {
+  return kind === 'empty_response'
+    ? { retry: GATEWAY_EMPTY_RESPONSE_RETRY_MARKER, exhausted: GATEWAY_EMPTY_RESPONSE_EXHAUSTED_MARKER }
+    : {
+        retry: GATEWAY_STREAM_TRUNCATION_RETRY_MARKER,
+        exhausted: GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER,
+      }
+}
+
+/** A complete Anthropic message has user-visible text or a valid tool call. */
+function hasVisibleAnthropicContent(payload: unknown): boolean {
+  const content = (payload as { content?: unknown } | null)?.content
+  if (!Array.isArray(content)) return true // not a message body — do not judge it
+  return content.some((block) => {
+    const item = block as { type?: unknown; text?: unknown; name?: unknown }
+    if (item.type === 'text' && typeof item.text === 'string' && item.text.trim()) return true
+    if ((item.type === 'tool_use' || item.type === 'server_tool_use') && typeof item.name === 'string' && item.name) {
+      return true
+    }
+    return false
+  })
+}
+
+function isRetryMarker(marker: string | undefined): boolean {
+  return marker === GATEWAY_STREAM_TRUNCATION_RETRY_MARKER || marker === GATEWAY_EMPTY_RESPONSE_RETRY_MARKER
+}
+
 interface UpstreamCall {
   response: Response;
   /**
@@ -357,6 +405,7 @@ export class LlmGateway {
   private readonly waitForRetry: (ms: number) => Promise<void>;
   private readonly log: (message: string) => void;
   private readonly onRouteChanged?: LlmGatewayOptions['onRouteChanged'];
+  private readonly onCooldownWait?: LlmGatewayOptions['onCooldownWait'];
 
   private httpServer: HttpServer | null = null;
   private _port = 0;
@@ -454,6 +503,7 @@ export class LlmGateway {
     this.waitForRetry = options.waitForRetry ?? sleep;
     this.log = options.log ?? (() => {});
     this.onRouteChanged = options.onRouteChanged;
+    this.onCooldownWait = options.onCooldownWait;
     this.rebuild();
   }
 
@@ -621,18 +671,28 @@ export class LlmGateway {
       const oldPool = oldPools.get(providerId);
       if (oldPool) {
         pool.importCooling(oldPool.exportCooling());
+        pool.importModelCooling(oldPool.exportModelCooling());
       } else {
         const entries: Record<string, number> = {};
+        const modelEntries: Array<{ keyId: string; model: string; until: number }> = [];
         for (const [persistKey, until] of Object.entries(persisted)) {
           // The route/endpoint layers are not key cooldowns; their ids never
           // match a provider prefix, but skipping them keeps the intent clear.
           if (persistKey.startsWith(UNIT_COOLDOWN_PREFIX)) continue;
           if (persistKey.startsWith(ENDPOINT_COOLDOWN_PREFIX)) continue;
+          if (persistKey.startsWith(MODEL_COOLDOWN_PREFIX)) {
+            const parsed = parseModelCooldownKey(persistKey);
+            if (parsed && parsed.providerId === providerId && until > nowSeconds) {
+              modelEntries.push({ keyId: parsed.keyId, model: parsed.model, until });
+            }
+            continue;
+          }
           const sep = persistKey.indexOf('::');
           if (sep < 0) continue;
           if (persistKey.slice(0, sep) === providerId) entries[persistKey.slice(sep + 2)] = until;
         }
         pool.importCooling(entries);
+        pool.importModelCooling(modelEntries);
       }
     }
 
@@ -657,6 +717,9 @@ export class LlmGateway {
     for (const [providerId, pool] of this.pools) {
       for (const [keyId, until] of pool.exportCooling()) {
         map[cooldownKey(providerId, keyId)] = until;
+      }
+      for (const entry of pool.exportModelCooling()) {
+        map[modelCooldownKey(providerId, entry.keyId, entry.model)] = entry.until;
       }
     }
     for (const [unitId, until] of this.unitCooling) {
@@ -920,6 +983,14 @@ export class LlmGateway {
     }
 
     this.inFlight += 1;
+    let clientGone = false;
+    let abortActiveUpstream: (() => void) | undefined;
+    const onClientGone = (): void => {
+      if (res.writableEnded) return;
+      clientGone = true;
+      abortActiveUpstream?.();
+    };
+    const detachClientDisconnect = attachClientDisconnect(req, res, onClientGone);
     const streamRetryState = sessionId && payload.stream === true && (!requestKind || requestKind === 'chat')
       ? this.streamRetryStates.getOrCreate(sessionId, gatewayRequestFingerprint(payload), strategy.id)
       : undefined;
@@ -1056,6 +1127,7 @@ export class LlmGateway {
             roundsLeft: waitRoundsLeft,
             replanLeft,
             hardBlocked: false,
+            sessionId,
           });
           if (plannedWait.action === 'waited') {
             waitBudgetLeft -= plannedWait.seconds;
@@ -1071,10 +1143,10 @@ export class LlmGateway {
             continue;
           }
           if (plannedWait.action === 'reloaded') {
-            res.writeHead(503, { 'content-type': 'application/json' });
-            res.end(
-              JSON.stringify({ error: { type: 'overloaded_error', message: 'gateway reloaded, retry' } }),
-            );
+            this.sendTerminalFailure(res, 503, {
+              type: 'overloaded_error',
+              message: 'gateway reloaded, retry',
+            });
             return;
           }
           if (plannedWait.action === 'disconnected') return;
@@ -1085,7 +1157,19 @@ export class LlmGateway {
           continue;
         }
 
-        const outcome = await this.execute(plan, payload, res, generation, requestKind, sessionId, streamRetryState, config);
+        const outcome = await this.execute(
+          plan,
+          payload,
+          res,
+          generation,
+          requestKind,
+          sessionId,
+          streamRetryState,
+          config,
+          () => clientGone,
+          (abort) => { abortActiveUpstream = abort },
+        );
+        if (outcome.kind === 'disconnected') return;
         if (outcome.kind === 'success') {
           if (!outcome.truncated || !outcome.retryable) {
             if (streamRetryState && sessionId) {
@@ -1097,10 +1181,10 @@ export class LlmGateway {
         if (outcome.kind === 'reloaded') {
           // Config reloaded mid-flight: the caller retries against the new plan.
           this.recordUsage({ ...outcome.row, statusCode: 503 });
-          res.writeHead(503, { 'content-type': 'application/json' });
-          res.end(
-            JSON.stringify({ error: { type: 'overloaded_error', message: 'gateway reloaded, retry' } }),
-          );
+          this.sendTerminalFailure(res, 503, {
+            type: 'overloaded_error',
+            message: 'gateway reloaded, retry',
+          });
           return;
         }
         exhaustedRows.push(outcome.row);
@@ -1127,6 +1211,7 @@ export class LlmGateway {
           replanLeft,
           plannedUnits: new Set(plan.units.map((unit) => unit.id)),
           hardBlocked: outcome.requestError || outcome.tprRejected,
+          sessionId,
         });
         if (executedWait.action === 'waited') {
           waitBudgetLeft -= executedWait.seconds;
@@ -1140,10 +1225,10 @@ export class LlmGateway {
           continue;
         }
         if (executedWait.action === 'reloaded') {
-          res.writeHead(503, { 'content-type': 'application/json' });
-          res.end(
-            JSON.stringify({ error: { type: 'overloaded_error', message: 'gateway reloaded, retry' } }),
-          );
+          this.sendTerminalFailure(res, 503, {
+            type: 'overloaded_error',
+            message: 'gateway reloaded, retry',
+          });
           return;
         }
         if (executedWait.action === 'disconnected') return;
@@ -1188,17 +1273,14 @@ export class LlmGateway {
       // Respond with the same status that was stamped onto the rows. Keeping a
       // separate if/else chain here is how the log and the client drifted apart
       // before (502 in the log, 429 to the client, 2026-10-25).
-      const headers: Record<string, string> = { 'content-type': 'application/json' };
-      if (clientStatus === 429 && retryAfterSeconds > 0) {
-        headers['retry-after'] = String(retryAfterSeconds);
-      }
-      res.writeHead(clientStatus, headers);
-      res.end(
-        JSON.stringify({
-          error: clientErrorFor(clientStatus, { tprRejected, contentRejected }),
-        }),
+      this.sendTerminalFailure(
+        res,
+        clientStatus,
+        clientErrorFor(clientStatus, { tprRejected, contentRejected }),
+        clientStatus === 429 && retryAfterSeconds > 0 ? retryAfterSeconds : undefined,
       );
     } finally {
+      detachClientDisconnect();
       this.inFlight -= 1;
     }
   }
@@ -1222,8 +1304,13 @@ export class LlmGateway {
     sessionId?: string,
     streamRetryState?: GatewayStreamRetryState,
     config: LlmConfig = this.getConfig(),
+    /** True once the downstream connection has been torn down. */
+    clientGone?: () => boolean,
+    /** Registers the current upstream abort so a disconnect can stop it now. */
+    onActiveAbort?: (abort: (() => void) | undefined) => void,
   ): Promise<
-    | { kind: 'success'; truncated?: boolean; retryable?: boolean; retryMarker?: string }
+    | { kind: 'success'; truncated?: boolean; retryable?: boolean; retryMarker?: string; failureKind?: GatewayStreamFailureKind; failureMessage?: string }
+    | { kind: 'disconnected' }
     | { kind: 'reloaded'; row: UsageRecord }
     | {
       kind: 'exhausted';
@@ -1522,6 +1609,7 @@ export class LlmGateway {
       // to its configured attempt or time budget. Rate-limit, quota and
       // deterministic failures follow their built-in switching rules.
       for (;;) {
+        if (clientGone?.()) return { kind: 'disconnected' };
         // Leaving an attempt behind: give it its own row before the next one
         // starts. Runs on the same-key retry, the key rotation and the
         // cross-provider hop alike — every one of them is a separate upstream
@@ -1572,6 +1660,14 @@ export class LlmGateway {
           break;
         }
 
+        if (clientGone?.()) {
+          call.settle();
+          call.abort();
+          onActiveAbort?.(undefined);
+          return { kind: 'disconnected' };
+        }
+        onActiveAbort?.(call.abort);
+
         const response = call.response;
         const firstByteMs = call.firstByteRemainingMs;
         // Keep the total timer alive through the body read; `finally` releases
@@ -1605,9 +1701,16 @@ export class LlmGateway {
             stream: payload.stream === true,
           }, {
             firstByteMs,
+            streamGapMs: Math.max(
+              0,
+              (presetFor(this.getConfig(), provider, selection.keyId).streamGapSeconds
+                ?? DEFAULT_PRESET.streamGapSeconds
+                ?? 60) * 1000,
+            ),
             abort: call.abort,
-            onTruncated: streamRetryState
-              ? async () => this.onStreamTruncated({
+            publicModel: unit.publicModel,
+            onStreamFailure: streamRetryState
+              ? async (failure: GatewayStreamFailure) => this.onStreamFailure({
                   config,
                   strategy: plan.strategy,
                   publicModel: unit.publicModel,
@@ -1617,9 +1720,23 @@ export class LlmGateway {
                   targetStartedAtMs,
                   state: streamRetryState,
                   coolKey,
+                  failure,
                 })
               : undefined,
           });
+          if (outcome?.failureKind && payload.stream !== true && !res.headersSent) {
+            lastError = `upstream ${provider.id} ${outcome.failureMessage ?? 'returned an empty response'}`
+            this.log(lastError)
+            failAttempt(200, lastError)
+            const emptyDelayMs = retryDelayMs(retryPolicy, keyAttempts, 0)
+            if (targetBudgetAllowsRetry(retryPolicy, keyAttempts, targetStartedAtMs, Date.now(), emptyDelayMs)) {
+              if (await retrySameTarget(0, emptyDelayMs)) continue
+            }
+            markStage('cooldown_provider')
+            await coolKey('default')
+            releaseKey()
+            break
+          }
           if (outcome?.firstByteTimeout) {
             // Nothing was written to the client yet, so another provider (or a
             // retry of this key) can still serve the turn.
@@ -1648,7 +1765,10 @@ export class LlmGateway {
           if (selection.reservation && actualTokens > 0) {
             pool.reconcileTokens(selection.reservation, actualTokens);
           }
-          pool.noteSuccess(selection.keyId);
+          const streamFailure = outcome?.failureKind
+            ? { kind: outcome.failureKind, message: outcome.failureMessage ?? 'upstream stream failed' }
+            : undefined;
+          if (!streamFailure) pool.noteSuccess(selection.keyId);
           this.recordUsage({
             ts: Date.now(),
             startedAt: requestStartedAt,
@@ -1664,13 +1784,13 @@ export class LlmGateway {
             // A stream that ends without a finish_reason is a failed attempt
             // even though the HTTP status was 200. It remains visible in usage
             // records even when a client retry supersedes it.
-            status: outcome?.truncated ? 'error' : 'success',
+            status: streamFailure ? 'error' : 'success',
             statusCode: 200,
-            ...(outcome?.truncated ? { error: 'upstream stream ended without a finish_reason' } : {}),
+            ...(streamFailure ? { error: streamFailure.message } : {}),
             attempts: logicalAttempt,
             sessionId,
             retried: logicalAttempt > 1,
-            ...(outcome?.retryMarker === GATEWAY_STREAM_TRUNCATION_RETRY_MARKER ? { superseded: true } : {}),
+            ...(isRetryMarker(outcome?.retryMarker) ? { superseded: true } : {}),
             promptTokens: timing.usage.promptTokens,
             completionTokens: timing.usage.completionTokens,
             cachedTokens: timing.usage.cachedTokens,
@@ -1686,14 +1806,14 @@ export class LlmGateway {
           // different group; letting them update the route would attribute
           // their switches to the conversation and trigger pointless work.
           if (!requestKind || requestKind === 'chat') {
-            this.noteRoute(plan, unit, selection.keyId, sessionId, outcome?.truncated === true);
+            this.noteRoute(plan, unit, selection.keyId, sessionId, streamFailure !== undefined);
           }
           releaseKey();
           return {
             kind: 'success',
-            ...(outcome?.truncated ? { truncated: true } : {}),
+            ...(streamFailure ? { truncated: true, failureKind: streamFailure.kind, failureMessage: streamFailure.message } : {}),
             ...(outcome?.retryMarker ? { retryMarker: outcome.retryMarker } : {}),
-            ...(outcome?.retryMarker === GATEWAY_STREAM_TRUNCATION_RETRY_MARKER ? { retryable: true } : {}),
+            ...(isRetryMarker(outcome?.retryMarker) ? { retryable: true } : {}),
           };
         }
 
@@ -1758,6 +1878,17 @@ export class LlmGateway {
           // 402 rather than a rate limit.
           quotaExhausted = true;
           markStage('cooldown_provider');
+          const quotaScope = presetFor(this.getConfig(), provider, selection.keyId).quotaScope ?? 'account';
+          if (quotaScope === 'model') {
+            // Per-model quota: park only this key's failing model. The same key
+            // keeps serving its other models, and another key is a different
+            // account that may still have quota for this model.
+            await pool.setModelCooling(selection.keyId, upstreamModel, 'quota');
+            this.persistCooldowns();
+            releaseKey();
+            if (!(keyTries < keyBudget && await pickKey())) break;
+            continue;
+          }
           if (!(await rotateKey('quota'))) break;
           continue;
         }
@@ -1947,8 +2078,13 @@ export class LlmGateway {
       // A provider without a pool contributes nothing: it is neither waiting
       // nor newly usable (the planner reports it as its own error).
       if (!pool) continue;
+      // Only *explicitly* exhausted stream routes are excluded here. A key
+      // whose target budget is merely spent (for example maxAttempts:1 after a
+      // normal 429) is still a cooldown the strategy can wait out; excluding it
+      // made `soonest` zero and silently disabled waitForCooldown for every
+      // session-keyed request.
       const excludedStreamKeys = streamRetryState
-        ? this.exhaustedStreamKeys(streamRetryState, unit.id, resolveRetryPolicy(strategy))
+        ? this.explicitExhaustedStreamKeys(streamRetryState, unit.id)
         : new Set<string>();
       const availability = await pool.availability(unit.upstreamModel, excludedStreamKeys);
       if (availability.available) {
@@ -1982,6 +2118,8 @@ export class LlmGateway {
     res: ServerResponse,
   ): Promise<'done' | 'reloaded' | 'disconnected'> {
     const deadline = Date.now() + Math.max(0, Math.ceil(seconds * 1000));
+    let lastHeartbeatAt = Date.now();
+    let heartbeatAfterMs = 60_000;
     for (;;) {
       if (generation !== this.generation) return 'reloaded';
       // Client-gone detection uses the response side only: Bun marks the
@@ -1992,6 +2130,23 @@ export class LlmGateway {
       if (res.destroyed) return 'disconnected';
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) return 'done';
+      // Keep the streaming client's HTTP body timer alive while no model events
+      // exist. Comments are valid SSE in both Anthropic and OpenAI streams.
+      if (Date.now() - lastHeartbeatAt >= heartbeatAfterMs) {
+        if (!res.headersSent) {
+          res.writeHead(200, {
+            'content-type': 'text/event-stream',
+            'cache-control': 'no-cache',
+            connection: 'keep-alive',
+          });
+        }
+        if (!res.writableEnded) res.write(': keepalive\n\n');
+        lastHeartbeatAt = Date.now();
+        // The first heartbeat may wait longer (short cooldowns should not
+        // pre-commit an SSE response); once started it stays well inside the
+        // 300s client fallback.
+        heartbeatAfterMs = 15_000;
+      }
       // Real sleep, deliberately not the injectable waitForRetry: the deadline
       // is wall-clock, so a fake that resolves instantly would spin the loop.
       await sleep(Math.min(250, remainingMs));
@@ -2029,6 +2184,7 @@ export class LlmGateway {
       /** Units the current plan already tried; `undefined` when it never got built. */
       plannedUnits?: ReadonlySet<string>;
       hardBlocked: boolean;
+      sessionId?: string;
     },
   ): Promise<
     | { action: 'skip' }
@@ -2062,9 +2218,14 @@ export class LlmGateway {
       `strategy ${strategy.id}: all units cooling, waiting ${Math.ceil(soonest)}s before retry ` +
         `(waitForCooldown, rounds left ${opts.roundsLeft - 1}, budget left ${Math.round(opts.budgetLeft - soonest)}s)`,
     );
-    const end = await this.cooldownSleep(soonest, opts.generation, opts.req, opts.res);
-    if (end === 'done') return { action: 'waited', seconds: soonest };
-    return { action: end };
+    try {
+      this.onCooldownWait?.({ sessionId: opts.sessionId, waiting: true, seconds: soonest });
+      const end = await this.cooldownSleep(soonest, opts.generation, opts.req, opts.res);
+      if (end === 'done') return { action: 'waited', seconds: soonest };
+      return { action: end };
+    } finally {
+      this.onCooldownWait?.({ sessionId: opts.sessionId, waiting: false });
+    }
   }
 
   /**
@@ -2466,10 +2627,18 @@ export class LlmGateway {
     },
     guard: {
       firstByteMs: number;
+      streamGapMs?: number;
       abort: () => void;
-      onTruncated?: () => Promise<string>;
+      publicModel?: string;
+      onStreamFailure?: (failure: GatewayStreamFailure) => Promise<string>;
     } = { firstByteMs: 0, abort: () => {} },
-  ): Promise<{ truncated: boolean; firstByteTimeout?: boolean; retryMarker?: string } | undefined> {
+  ): Promise<{
+    truncated: boolean;
+    firstByteTimeout?: boolean;
+    retryMarker?: string;
+    failureKind?: GatewayStreamFailureKind;
+    failureMessage?: string;
+  } | undefined> {
     const isOpenAI = transcode?.provider.protocol === 'openai-completions';
     const { firstByteMs, abort } = guard;
 
@@ -2495,7 +2664,9 @@ export class LlmGateway {
             timing.firstByteMs = Date.now() - timing.startedAt;
             timing.totalMs = Date.now() - timing.startedAt;
           }
-          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
+          if (!res.headersSent) {
+            res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
+          }
           res.end(text);
           return { truncated: false };
         }
@@ -2509,7 +2680,16 @@ export class LlmGateway {
           timing.firstByteMs = Date.now() - timing.startedAt;
           timing.totalMs = Date.now() - timing.startedAt;
         }
-        res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
+        if (!hasVisibleAnthropicContent(payloadOut)) {
+          return {
+            truncated: true,
+            failureKind: 'empty_response',
+            failureMessage: 'upstream returned a non-streaming response without visible text or a tool call',
+          };
+        }
+        if (!res.headersSent) {
+          res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-cache' });
+        }
         res.end(JSON.stringify(payloadOut));
         return { truncated: false };
       }
@@ -2519,18 +2699,43 @@ export class LlmGateway {
 
     const contentType = response.headers.get('content-type') ?? 'application/json';
 
-    if (!response.body) {
-      const text = await response.text();
+    if (!response.body || contentType.includes('application/json')) {
+      const read = await this.readTextWithTimeout(response, firstByteMs, abort);
+      if (read.firstByteTimeout) return { truncated: true, firstByteTimeout: true };
+      const text = read.text;
       if (timing) {
         this.scrapeUsage(text, timing.usage);
         timing.firstByteMs = Date.now() - timing.startedAt;
         timing.totalMs = Date.now() - timing.startedAt;
       }
-      res.writeHead(200, {
-        'content-type': contentType,
-        'cache-control': 'no-cache',
-        connection: 'keep-alive',
-      });
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        parsed = undefined
+      }
+      const error = (parsed as { error?: unknown } | undefined)?.error
+      if (error && !hasVisibleAnthropicContent(parsed)) {
+        return {
+          truncated: true,
+          failureKind: 'upstream_error',
+          failureMessage: this.sseErrorMessage(text),
+        }
+      }
+      if (parsed !== undefined && (parsed as { type?: string }).type === 'message' && !hasVisibleAnthropicContent(parsed)) {
+        return {
+          truncated: true,
+          failureKind: 'empty_response',
+          failureMessage: 'upstream returned a non-streaming response without visible text or a tool call',
+        }
+      }
+      if (!res.headersSent) {
+        res.writeHead(200, {
+          'content-type': contentType,
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+        });
+      }
       res.end(text);
       return { truncated: false };
     }
@@ -2546,29 +2751,85 @@ export class LlmGateway {
       return { truncated: true, firstByteTimeout: true };
     }
 
-    res.writeHead(200, {
-      'content-type': contentType,
-      'cache-control': 'no-cache',
-      connection: 'keep-alive',
-    });
+    if (!res.headersSent) {
+      res.writeHead(200, {
+        'content-type': contentType,
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      });
+    }
 
+    const isAnthropicSse = contentType.includes('text/event-stream');
+    const parser = isAnthropicSse ? new SseFrameParser() : undefined;
+    const monitor = isAnthropicSse
+      ? new AnthropicStreamMonitor(transcode?.publicModel ?? guard.publicModel ?? 'gateway')
+      : undefined;
+    let streamFailure: AnthropicStreamFailure | undefined;
+    let completed = false;
     let sawByte = false;
     let pending = first.value;
+
+    const forwardAnthropicFrames = (frames: SseFrame[]): boolean => {
+      if (!monitor) return true;
+      for (const frame of frames) {
+        const observed = monitor.observe(frame);
+        if (observed.failure) {
+          streamFailure = observed.failure;
+          return false;
+        }
+        if (observed.action === 'forward') res.write(frame.raw);
+        if (frame.event === 'message_stop') completed = true;
+      }
+      return true;
+    };
+
     try {
       for (;;) {
-        const chunk = pending
+        const chunk: { done: boolean; value?: Uint8Array; gapTimeout?: boolean } = pending
           ? { done: false, value: pending }
-          : await reader.read();
+          : parser
+            ? await this.readChunkWithGap(reader, guard.streamGapMs, abort)
+            : await reader.read();
         pending = undefined;
+        if (chunk.gapTimeout) {
+          streamFailure = {
+            kind: 'truncated',
+            message: `upstream stream went silent for ${Math.round((guard.streamGapMs ?? 0) / 1000)}s`,
+          };
+          break;
+        }
         if (chunk.done) break;
-        if (!sawByte && timing) {
+        if (!sawByte) {
           sawByte = true;
-          timing.firstByteMs = Date.now() - timing.startedAt;
+          if (timing) timing.firstByteMs = Date.now() - timing.startedAt;
         }
-        if (timing) {
-          this.scrapeUsage(Buffer.from(chunk.value!).toString('utf8'), timing.usage);
+        const raw = Buffer.from(chunk.value!);
+        if (timing) this.scrapeUsage(raw.toString('utf8'), timing.usage);
+        if (parser) {
+          if (!forwardAnthropicFrames(parser.push(chunk.value!))) {
+            abort();
+            break;
+          }
+        } else {
+          res.write(raw);
         }
-        res.write(Buffer.from(chunk.value!));
+      }
+      if (parser && !streamFailure) {
+        forwardAnthropicFrames(parser.finish());
+        if (!streamFailure && !completed) streamFailure = monitor!.endOfStream(sawByte);
+      }
+      if (timing) timing.totalMs = Date.now() - timing.startedAt;
+
+      if (streamFailure) {
+        const failure = streamFailure as AnthropicStreamFailure;
+        const retryMarker = await guard.onStreamFailure?.(failure);
+        res.write(monitor!.failureTerminal(retryMarker, failure));
+        return {
+          truncated: true,
+          failureKind: failure.kind,
+          failureMessage: failure.message,
+          ...(retryMarker ? { retryMarker } : {}),
+        };
       }
     } finally {
       if (timing) timing.totalMs = Date.now() - timing.startedAt;
@@ -2576,6 +2837,30 @@ export class LlmGateway {
       res.end();
     }
     return { truncated: false };
+  }
+
+  /** Read one chunk, aborting when the stream stays silent past `gapMs`. */
+  private async readChunkWithGap(
+    reader: { read(): Promise<{ done: boolean; value?: Uint8Array }> },
+    gapMs: number | undefined,
+    abort: () => void,
+  ): Promise<{ done: boolean; value?: Uint8Array; gapTimeout?: boolean }> {
+    if (!gapMs || gapMs <= 0) return reader.read();
+    const read = reader.read();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<{ done: true; gapTimeout: true }>((resolve) => {
+      timer = setTimeout(() => {
+        abort();
+        resolve({ done: true, gapTimeout: true });
+      }, gapMs);
+    });
+    try {
+      return await Promise.race([read, timeout]);
+    } catch {
+      return { done: true, gapTimeout: true };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /**
@@ -2655,10 +2940,17 @@ export class LlmGateway {
     timing?: { firstByteMs?: number; totalMs?: number; usage: MutableUsage; startedAt: number },
     guard: {
       firstByteMs: number;
+      streamGapMs?: number;
       abort: () => void;
-      onTruncated?: () => Promise<string>;
+      onStreamFailure?: (failure: GatewayStreamFailure) => Promise<string>;
     } = { firstByteMs: 0, abort: () => {} },
-  ): Promise<{ truncated: boolean; firstByteTimeout?: boolean; retryMarker?: string }> {
+  ): Promise<{
+    truncated: boolean;
+    firstByteTimeout?: boolean;
+    retryMarker?: string;
+    failureKind?: GatewayStreamFailureKind;
+    failureMessage?: string;
+  }> {
     const transcoder = new ResponseTranscoder({
       publicModel: transcode.publicModel,
       upstreamModel: transcode.upstreamModel,
@@ -2678,9 +2970,19 @@ export class LlmGateway {
         timing.firstByteMs = Date.now() - timing.startedAt;
         timing.totalMs = Date.now() - timing.startedAt;
       }
-      res.writeHead(200, sseHeaders);
-      res.end(transcoder.finish());
-      return { truncated: false };
+      const failure: GatewayStreamFailure = {
+        kind: 'empty_response',
+        message: 'upstream returned an empty stream body',
+      };
+      const retryMarker = await guard.onStreamFailure?.(failure);
+      if (!res.headersSent) res.writeHead(200, sseHeaders);
+      res.end(transcoder.finish({ truncated: true, retryMarker, failureMessage: failure.message }));
+      return {
+        truncated: true,
+        failureKind: failure.kind,
+        failureMessage: failure.message,
+        ...(retryMarker ? { retryMarker } : {}),
+      };
     }
 
     const reader = response.body.getReader();
@@ -2694,73 +2996,86 @@ export class LlmGateway {
       return { truncated: true, firstByteTimeout: true };
     }
 
-    res.writeHead(200, sseHeaders);
+    if (!res.headersSent) res.writeHead(200, sseHeaders);
 
-    const decoder = new TextDecoder();
-    let carry = '';
+    const parser = new SseFrameParser();
     let sawByte = false;
     let receivedDone = false;
+    let failure: GatewayStreamFailure | undefined;
     let pending = first.value;
 
-    const consume = (value: Uint8Array): void => {
-      if (!sawByte && timing) {
-        sawByte = true;
-        timing.firstByteMs = Date.now() - timing.startedAt;
+    const consume = (frame: SseFrame): boolean => {
+      if (frame.event === 'error') {
+        failure = { kind: 'upstream_error', message: this.sseErrorMessage(frame.data) };
+        return false;
       }
-
-      carry += decoder.decode(value, { stream: true });
-      // Keep the last element only when it is an unterminated line: a chunk
-      // may end mid-`data:` and the remainder arrives in the next read.
-      const lines = carry.split('\n');
-      carry = lines.pop() ?? '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data:')) continue;
-        const raw = trimmed.slice(5).trim();
-        if (!raw) continue;
-        if (raw === '[DONE]') {
-          receivedDone = true;
-          continue;
-        }
-        let chunk: unknown;
-        try {
-          chunk = JSON.parse(raw);
-        } catch {
-          continue;
-        }
-        const written = transcoder.push(chunk as never);
-        if (written) res.write(written);
+      const raw = frame.data.trim();
+      if (!raw) return true;
+      if (raw === '[DONE]') {
+        receivedDone = true;
+        return true;
       }
+      let chunk: Record<string, unknown>;
+      try {
+        chunk = JSON.parse(raw) as Record<string, unknown>;
+      } catch {
+        return true;
+      }
+      // Some relays return 200 and put the failure in an SSE data frame.
+      if (chunk.error && !chunk.choices) {
+        failure = { kind: 'upstream_error', message: this.sseErrorMessage(raw) };
+        return false;
+      }
+      const written = transcoder.push(chunk as never);
+      if (written) res.write(written);
+      return true;
     };
 
     try {
       for (;;) {
         const chunk = pending
           ? { done: false, value: pending }
-          : await reader.read();
+          : await this.readChunkWithGap(reader, guard.streamGapMs, abort);
         pending = undefined;
+        if (chunk.gapTimeout) {
+          failure = {
+            kind: 'truncated',
+            message: `upstream stream went silent for ${Math.round((guard.streamGapMs ?? 0) / 1000)}s`,
+          };
+          break;
+        }
         if (chunk.done) break;
-        consume(chunk.value!);
+        if (!sawByte) {
+          sawByte = true;
+          if (timing) timing.firstByteMs = Date.now() - timing.startedAt;
+        }
+        for (const frame of parser.push(chunk.value!)) {
+          if (!consume(frame)) {
+            abort();
+            break;
+          }
+        }
+        if (failure) break;
       }
 
-      // Flush any trailing line without a newline — some gateways omit it.
-      const tail = `${carry}${decoder.decode()}`.trim();
-      if (tail.startsWith('data:')) {
-        const raw = tail.slice(5).trim();
-        if (raw === '[DONE]') receivedDone = true;
-        else if (raw) {
-          try {
-            const written = transcoder.push(JSON.parse(raw) as never);
-            if (written) res.write(written);
-          } catch {
-            // Ignored: a malformed trailing line is not worth failing the turn.
-          }
+      if (!failure) {
+        for (const frame of parser.finish()) {
+          if (!consume(frame)) break;
         }
       }
 
-      // A stream that ended without [DONE] was cut, not completed. Reporting it
-      // as a normal finish would hide a failed turn from the retry logic.
+      if (!failure && !receivedDone) {
+        failure = {
+          kind: 'truncated',
+          message: 'upstream stream ended without a finish_reason',
+        };
+      } else if (!failure && !transcoder.hasVisibleContent) {
+        failure = {
+          kind: 'empty_response',
+          message: 'upstream stream ended without visible text or a tool call',
+        };
+      }
+
       const usage = transcoder.usage();
       if (timing) {
         timing.usage.promptTokens = usage.promptTokens;
@@ -2768,10 +3083,19 @@ export class LlmGateway {
         timing.usage.cachedTokens = usage.cachedTokens;
         timing.totalMs = Date.now() - timing.startedAt;
       }
-      const truncated = !receivedDone;
-      const retryMarker = truncated ? await guard.onTruncated?.() : undefined;
-      res.end(transcoder.finish({ truncated, retryMarker }));
-      return { truncated, ...(retryMarker ? { retryMarker } : {}) };
+      const retryMarker = failure ? await guard.onStreamFailure?.(failure) : undefined;
+      res.end(
+        transcoder.finish({
+          truncated: failure !== undefined,
+          retryMarker,
+          ...(failure ? { failureMessage: failure.message } : {}),
+        }),
+      );
+      return {
+        truncated: failure !== undefined,
+        ...(failure ? { failureKind: failure.kind, failureMessage: failure.message } : {}),
+        ...(retryMarker ? { retryMarker } : {}),
+      };
     } catch (err) {
       this.log(`transcode stream failed: ${describeError(err)}`);
       const partial = transcoder.usage();
@@ -2781,12 +3105,65 @@ export class LlmGateway {
         timing.usage.cachedTokens = partial.cachedTokens;
         timing.totalMs = Date.now() - timing.startedAt;
       }
-      const retryMarker = await guard.onTruncated?.();
-      res.end(transcoder.finish({ truncated: true, retryMarker }));
-      return { truncated: true, ...(retryMarker ? { retryMarker } : {}) };
+      const streamFailure: GatewayStreamFailure = {
+        kind: 'upstream_error',
+        message: `transcode stream failed: ${describeError(err)}`,
+      };
+      const retryMarker = await guard.onStreamFailure?.(streamFailure);
+      res.end(
+        transcoder.finish({
+          truncated: true,
+          retryMarker,
+          failureMessage: streamFailure.message,
+        }),
+      );
+      return {
+        truncated: true,
+        failureKind: streamFailure.kind,
+        failureMessage: streamFailure.message,
+        ...(retryMarker ? { retryMarker } : {}),
+      };
     } finally {
       reader.releaseLock();
     }
+  }
+
+  /**
+   * Write a request-level failure. A streamed request may already have been
+   * committed by the cooldown heartbeat, in which case an HTTP status can no
+   * longer be sent and the error has to travel as an SSE event instead.
+   */
+  private sendTerminalFailure(
+    res: ServerResponse,
+    status: number,
+    error: { type: string; message: string },
+    retryAfterSeconds?: number,
+  ): void {
+    if (res.headersSent) {
+      if (!res.writableEnded) {
+        res.end(`event: error\ndata: ${JSON.stringify({ type: 'error', error })}\n\n`);
+      }
+      return;
+    }
+    const headers: Record<string, string> = { 'content-type': 'application/json' };
+    if (retryAfterSeconds && retryAfterSeconds > 0) headers['retry-after'] = String(retryAfterSeconds);
+    res.writeHead(status, headers);
+    res.end(JSON.stringify({ error }));
+  }
+
+  /** Best-effort human message from an OpenAI-compatible SSE error payload. */
+  private sseErrorMessage(data: string): string {
+    try {
+      const body = JSON.parse(data) as { error?: { message?: unknown } | string; message?: unknown }
+      if (typeof body.error === 'string' && body.error.trim()) return body.error
+      if (typeof body.error === 'object' && body.error && typeof body.error.message === 'string') {
+        return body.error.message
+      }
+      if (typeof body.message === 'string' && body.message.trim()) return body.message
+    } catch {
+      // Raw payload below is more useful than a generic placeholder.
+    }
+    return data.trim() || 'upstream sent an SSE error event'
   }
 
   // -------------------------------------------------------------------------
@@ -2864,7 +3241,7 @@ export class LlmGateway {
    * planner can exclude them before any upstream call — the "state-driven"
    * scheduling that lets a new session avoid a known-failing provider.
    */
-  private async onStreamTruncated(args: {
+  private async onStreamFailure(args: {
     config: LlmConfig;
     strategy: LlmStrategy;
     publicModel: string;
@@ -2874,7 +3251,9 @@ export class LlmGateway {
     targetStartedAtMs: number;
     state: GatewayStreamRetryState;
     coolKey: (kind: 'default' | 'rate_limit' | 'quota') => Promise<number>;
+    failure: GatewayStreamFailure;
   }): Promise<string> {
+    const markers = retryMarkersFor(args.failure.kind)
     const routeKey = `${args.unitId}::${args.keyId}`;
     const startedAt = args.state.startedAtByRoute.get(routeKey) ?? args.targetStartedAtMs;
     args.state.startedAtByRoute.set(routeKey, startedAt);
@@ -2883,7 +3262,7 @@ export class LlmGateway {
     if (targetBudgetAllowsRetry(args.retryPolicy, attempts, startedAt, Date.now(), delayMs)) {
       if (delayMs > 0) await this.waitForRetry(delayMs);
       if (targetBudgetAllowsRetry(args.retryPolicy, attempts, startedAt, Date.now())) {
-        return GATEWAY_STREAM_TRUNCATION_RETRY_MARKER;
+        return markers.retry;
       }
     }
 
@@ -2916,13 +3295,23 @@ export class LlmGateway {
           publicModel: args.publicModel,
           unavailableUnits: availability.excluded,
         });
-        if (plan.units.length > 0) return GATEWAY_STREAM_TRUNCATION_RETRY_MARKER;
+        if (plan.units.length > 0) return markers.retry;
       } catch {
         // Check the configured fallback chain below.
       }
       strategy = this.resolveFallback(args.config, strategy.id);
     }
-    return GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER;
+    return markers.exhausted;
+  }
+
+  /** Keys explicitly marked exhausted by a failed stream continuation. */
+  private explicitExhaustedStreamKeys(state: GatewayStreamRetryState, unitId: string): Set<string> {
+    const prefix = `${unitId}::`;
+    const keys = new Set<string>();
+    for (const route of state.exhaustedRoutes) {
+      if (route.startsWith(prefix)) keys.add(route.slice(prefix.length));
+    }
+    return keys;
   }
 
   private exhaustedStreamKeys(

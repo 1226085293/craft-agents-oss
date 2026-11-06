@@ -53,6 +53,7 @@ describe('draftFromConfig — unset fields', () => {
   })
   test('mandatory fields get a value, quota limits stay unset', () => {
     const [draft] = draftFromConfig(configWithPreset('default', {}))
+    expect(draft.limits.streamGapSeconds).toBe(60)
     for (const field of CONFIG_FIELDS) {
       if (TYPE_MANDATORY.has(field)) {
         expect(draft.limits[field]).toBe(MANDATORY_DEFAULTS[field])
@@ -176,10 +177,11 @@ describe('applyTypeDrafts — writing back', () => {
     const config = configWithPreset('p', {
       customLimits: [{ amount: 500, unit: 'requests', per: 24, perUnit: 'hours', sliding: false }],
       firstByteSeconds: 45,
+      streamGapSeconds: 30,
     })
     const next = applyTypeDrafts(config, draftFromConfig(config))
     // The fixed window round-trips; sliding:false stays explicit.
-    expect(next.presets.p).toMatchObject({ id: 'p', firstByteSeconds: 45 })
+    expect(next.presets.p).toMatchObject({ id: 'p', firstByteSeconds: 45, streamGapSeconds: 30 })
     expect(next.presets.p.customLimits).toEqual([
       { amount: 500, unit: 'requests', per: 24, perUnit: 'hours', sliding: false },
     ])
@@ -210,5 +212,28 @@ describe('applyTypeDrafts — writing back', () => {
     const config = configWithPreset('p', { rateLimitSeconds: 0 })
     const next = applyTypeDrafts(config, draftFromConfig(config))
     expect(next.presets.p.rateLimitSeconds).toBe(0)
+  })
+})
+
+
+describe('quota scope', () => {
+  test('defaults to account and reads an explicit model scope', () => {
+    expect(draftNamed(draftFromConfig(configWithPreset('p', {})), 'p').quotaScope).toBe('account');
+    expect(
+      draftNamed(draftFromConfig(configWithPreset('p', { quotaScope: 'model' })), 'p').quotaScope,
+    ).toBe('model');
+  })
+
+  test('model survives a round trip and account is omitted from the saved preset', () => {
+    const modelConfig = configWithPreset('p', { quotaScope: 'model' });
+    const modelNext = applyTypeDrafts(modelConfig, draftFromConfig(modelConfig));
+    expect(modelNext.presets.p.quotaScope).toBe('model');
+
+    const accountConfig = configWithPreset('p', { quotaScope: 'model' });
+    const accountDrafts = draftFromConfig(accountConfig).map((d) =>
+      d.name === 'p' ? { ...d, quotaScope: 'account' as const } : d,
+    );
+    const accountNext = applyTypeDrafts(accountConfig, accountDrafts);
+    expect('quotaScope' in (accountNext.presets.p as unknown as object)).toBe(false);
   })
 })

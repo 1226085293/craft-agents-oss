@@ -120,6 +120,8 @@ export class ResponseTranscoder {
   private inputTokens = 0
   private outputTokens = 0
   private cachedTokens = 0
+  private hasVisibleText = false
+  private hasCompletedToolCall = false
   private finishReason: string | null = null
   /** Set when the upstream cut the stream without a finish_reason. */
   private truncated = false
@@ -193,6 +195,7 @@ export class ResponseTranscoder {
     }
 
     if (typeof delta.content === 'string' && delta.content.length > 0) {
+      this.hasVisibleText = true
       if (this.toolBlocks.size === 0) {
         // Close reasoning before opening text so blocks do not interleave.
         if (this.reasoningOpen) {
@@ -257,7 +260,12 @@ export class ResponseTranscoder {
       }
     }
 
-    if (choice.finish_reason) this.finishReason = choice.finish_reason
+    if (choice.finish_reason) {
+      this.finishReason = choice.finish_reason
+      if (choice.finish_reason === 'tool_calls') {
+        this.hasCompletedToolCall = [...this.toolBlocks.values()].some((block) => this.isCompleteToolBlock(block))
+      }
+    }
     return out.join('')
   }
 
@@ -268,7 +276,7 @@ export class ResponseTranscoder {
    * drop connections mid-turn, and reporting both as `end_turn` would hide a
    * failed turn from the agent's retry logic.
    */
-  finish(options: { truncated?: boolean; retryMarker?: string } = {}): string {
+  finish(options: { truncated?: boolean; retryMarker?: string; failureMessage?: string } = {}): string {
     const out: string[] = [...this.ensureStarted()]
     this.truncated = options.truncated === true
 
@@ -297,7 +305,7 @@ export class ResponseTranscoder {
           stop_reason: stopReason,
           stop_sequence: null,
           ...(this.truncated && options.retryMarker
-            ? { stop_details: { explanation: `${options.retryMarker}: upstream stream ended without a finish_reason` } }
+            ? { stop_details: { explanation: `${options.retryMarker}: ${options.failureMessage ?? 'upstream stream ended without a finish_reason'}` } }
             : {}),
         },
         usage: {
@@ -319,6 +327,27 @@ export class ResponseTranscoder {
     }
 
     return out.join('')
+  }
+
+  /** True when the stream has user-visible text or a valid completed tool call. */
+  get hasVisibleContent(): boolean {
+    // Some relays omit finish_reason "tool_calls" while still sending a
+    // complete tool block. Judge the assembled block itself, not the label.
+    return (
+      this.hasVisibleText
+      || this.hasCompletedToolCall
+      || [...this.toolBlocks.values()].some((block) => this.isCompleteToolBlock(block))
+    )
+  }
+
+  private isCompleteToolBlock(block: { name: string; args: string }): boolean {
+    if (!block.name.trim()) return false
+    try {
+      const args = JSON.parse(block.args || '{}')
+      return typeof args === 'object' && args !== null && !Array.isArray(args)
+    } catch {
+      return false
+    }
   }
 
   /** Token counts seen so far, for the gateway's usage record. */

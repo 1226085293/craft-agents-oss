@@ -14,12 +14,13 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { LlmGateway } from '../llm-gateway.ts';
 import type { LlmConfig, LlmProvider, LlmStrategy } from '../llm-config.ts';
+import { parseModelCooldownKey } from '../llm-cooldown-store.ts';
 
 function provider(id: string, over: Partial<LlmProvider> = {}): LlmProvider {
   return {
@@ -205,6 +206,45 @@ describe('LlmGateway — switching units', () => {
     const body = (await res.json()) as { error: { type: string; message: string } };
     expect(body.error.type).toBe('insufficient_balance');
     expect(body.error.message).toContain('balance');
+  });
+
+  it('model-scoped quota leaves the same key usable for other models', async () => {
+    const cfg = threeModelConfig();
+    cfg.presets = { p: { quotaScope: 'model', quotaExhaustedSeconds: 60 } };
+    cfg.providers[0]!.defaultPreset = 'p';
+    const { impl, calls } = stubUpstream([
+      { status: 402, body: JSON.stringify({ error: { message: 'quota exhausted for flash' } }) },
+      { status: 200, body: SSE_OK },
+    ]);
+    gateway = new LlmGateway({ getConfig: () => cfg, fetchImpl: impl });
+    await gateway.start();
+
+    const first = await post(gateway, 'flash');
+    expect(first.status).toBe(200);
+    await first.text();
+
+    // Account-scoped cooling would have parked wb-k1, so the fallback to hy4
+    // would have found no key. The model scope parks only flash and lets the
+    // same account serve the healthy model.
+    expect(calls.map((c) => c.body.model)).toEqual(['flash', 'hy4']);
+
+    // The model-scoped cooldown is persisted, not just kept in memory.
+    const persisted = JSON.parse(
+      readFileSync(join(configDir, 'llm-cooldowns.json'), 'utf8'),
+    ) as Record<string, number>;
+    const modelKey = Object.keys(persisted).find((k) => k.startsWith('@model:'));
+    expect(modelKey).toBeDefined();
+    expect(parseModelCooldownKey(modelKey!)).toEqual({
+      providerId: 'wb',
+      keyId: 'wb-k1',
+      model: 'flash',
+    });
+
+    // The cooled pair stays parked: a later flash request starts at hy4.
+    const second = await post(gateway, 'flash');
+    expect(second.status).toBe(200);
+    await second.text();
+    expect(calls.map((c) => c.body.model)).toEqual(['flash', 'hy4', 'hy4']);
   });
 
   it('classifies a balance body on a 400 as quota, not as a bad request', async () => {

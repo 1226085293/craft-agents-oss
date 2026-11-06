@@ -30,6 +30,8 @@ export interface CustomLimitDraft {
   sliding?: boolean
 }
 
+export type QuotaScope = 'account' | 'model'
+
 export interface TypeDraft {
   name: string
   /**
@@ -40,6 +42,8 @@ export interface TypeDraft {
   limits: Record<string, number | undefined>
   /** Limit windows (e.g. 500 次 / 5 小时); optional for older drafts. */
   customLimits?: CustomLimitDraft[]
+  /** What a quota error freezes; `account` is the historical default. */
+  quotaScope?: QuotaScope
 }
 
 /** Amount box: tokens accept `k`/`M` suffixes, request counts must be integers. */
@@ -103,9 +107,10 @@ export const TYPE_META: Array<[string, string, string]> = [
   ['tpr', 'TPR · Token', '单次请求的 Token 上限，超过直接拒绝（不是窗口）'],
   ['concurrency', '并发', '同时进行的请求数'],
   ['firstByteSeconds', '首字节超时 · 秒', '等待响应首字节的最长时间'],
+  ['streamGapSeconds', '流间空闲超时 · 秒', '首块之后连续无数据的最长时间；超时会按策略组重试或转移'],
   ['totalSeconds', '总超时 · 秒', '整个请求（含流式 body）的最长时间'],
   ['rateLimitSeconds', '限流冷却 · 秒', '0 = 不执行本地冷却；大于 0 时 429 冷却当前目标并切换，连续限流会按策略延长冷却'],
-  ['quotaExhaustedSeconds', '配额冷却 · 秒', '0 = 不执行本地冷却；大于 0 时冷却配额耗尽的 Key'],
+  ['quotaExhaustedSeconds', '配额冷却 · 秒', '0 = 不执行本地冷却；大于 0 时按上方冻结范围冷却配额耗尽的目标'],
   ['defaultSeconds', '其他失败冷却 · 秒', '0 = 不执行本地冷却；大于 0 时用于其他失败的冷却时长'],
 
 ]
@@ -126,6 +131,7 @@ export const TYPE_META: Array<[string, string, string]> = [
  */
 export const TYPE_MANDATORY: ReadonlySet<string> = new Set([
   'firstByteSeconds',
+  'streamGapSeconds',
   'totalSeconds',
   'rateLimitSeconds',
   'quotaExhaustedSeconds',
@@ -138,6 +144,7 @@ export const TYPE_MANDATORY: ReadonlySet<string> = new Set([
  */
 export const MANDATORY_DEFAULTS: Record<string, number> = {
   firstByteSeconds: 30,
+  streamGapSeconds: 60,
   totalSeconds: 600,
   rateLimitSeconds: 60,
   quotaExhaustedSeconds: 2592000,
@@ -191,7 +198,12 @@ export function draftFromConfig(config: LlmConfigShape | null): TypeDraft[] {
       if (typeof amount !== 'number' || !(amount > 0)) continue
       customLimits.push({ amount: String(amount), unit, per: String(per), perUnit, sliding })
     }
-    return { name: id, limits, customLimits }
+    return {
+      name: id,
+      limits,
+      customLimits,
+      quotaScope: (p as unknown as { quotaScope?: QuotaScope }).quotaScope === 'model' ? 'model' : 'account',
+    }
   })
 }
 
@@ -226,6 +238,9 @@ export function applyTypeDrafts(config: LlmConfigShape, drafts: TypeDraft[]): Ll
       id: d.name.trim(),
       ...limits,
       ...(customLimits.length ? { customLimits } : {}),
+      // `account` is the default, so omit it rather than adding noise to every
+      // saved preset. Writing `model` explicitly survives a round trip.
+      ...(d.quotaScope === 'model' ? { quotaScope: 'model' as const } : {}),
     }
   })
   const renameMap = new Map<string, string>()
@@ -338,6 +353,27 @@ export function TypeCard(props: {
               <div className="desc">{desc}</div>
             </div>
           ))}
+        </div>
+        <div style={{ marginTop: 10 }}>
+          <label>配额耗尽冻结范围</label>
+          <select
+            value={draft.quotaScope ?? 'account'}
+            style={{ width: '100%' }}
+            onChange={(e) =>
+              props.onChange({ ...draft, quotaScope: e.target.value as QuotaScope })
+            }
+          >
+            <option value="account">账号总额度（冻结key）</option>
+            <option value="model">模型独立额度（冻结key的模型）</option>
+          </select>
+          <div className="desc">
+            只影响收到配额错误后的冷却范围，不改变上游实际额度。
+          </div>
+          {(draft.quotaScope ?? 'account') === 'model' ? (
+            <div className="desc">
+              模型额度通常按日或按月重置，请把上方「配额冷却」设为实际重置周期；默认 30 天可能过长。
+            </div>
+          ) : null}
         </div>
         <div style={{ marginTop: 10 }}>
           <div className="xs muted">限流窗口（可不填；填满一行才生效）</div>

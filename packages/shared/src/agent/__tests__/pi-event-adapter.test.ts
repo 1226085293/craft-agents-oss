@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { PiEventAdapter } from '../backend/pi/event-adapter.ts';
 import { toolMetadataStore } from '../../interceptor-common.ts';
 import {
+  GATEWAY_EMPTY_RESPONSE_RETRY_MARKER,
   GATEWAY_STREAM_TRUNCATION_EXHAUSTED_MARKER,
   GATEWAY_STREAM_TRUNCATION_RETRY_MARKER,
 } from '../../config/gateway-stream-retry.ts';
@@ -91,6 +92,23 @@ describe('PiEventAdapter', () => {
       expect(recovered[0]).toMatchObject({ type: 'retry', phase: 'end', recovered: true });
       expect(recovered.at(-1)).toMatchObject({ type: 'complete' });
       expect(adapter.isHoldingTurn).toBe(false);
+    });
+
+    it('holds the turn for an empty-response retry marker too', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+      const failed = collect(adapter.adaptEvent({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage: `${GATEWAY_EMPTY_RESPONSE_RETRY_MARKER}: upstream stream ended without visible text or a tool call`,
+        },
+      } as any));
+      expect(failed.some((event) => event.type === 'typed_error' || event.type === 'error')).toBe(false);
+
+      const pending = collect(adapter.adaptEvent({ type: 'agent_end', gatewayRetryPending: true } as any));
+      expect(pending).toMatchObject([{ type: 'retry', phase: 'backoff' }]);
+      expect(adapter.isHoldingTurn).toBe(true);
     });
 
     it('releases the gateway retry hold when continuation fails before agent_start', () => {

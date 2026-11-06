@@ -33,6 +33,38 @@ export function cooldownKey(providerId: string, keyId: string): string {
   return `${providerId}::${keyId}`;
 }
 
+/**
+ * Prefix for a `key + model` quota cooldown.
+ *
+ * The tuple is JSON-encoded because both key ids and model names may contain
+ * `::`; the prefix keeps these entries out of the provider::key parser.
+ */
+export const MODEL_COOLDOWN_PREFIX = '@model:';
+
+export function modelCooldownKey(
+  providerId: string,
+  keyId: string,
+  model: string,
+): string {
+  return `${MODEL_COOLDOWN_PREFIX}${JSON.stringify([providerId, keyId, model])}`;
+}
+
+/** Parse a persisted `key + model` cooldown key; null for every other entry. */
+export function parseModelCooldownKey(
+  key: string,
+): { providerId: string; keyId: string; model: string } | null {
+  if (!key.startsWith(MODEL_COOLDOWN_PREFIX)) return null;
+  try {
+    const parsed = JSON.parse(key.slice(MODEL_COOLDOWN_PREFIX.length)) as unknown;
+    if (!Array.isArray(parsed) || parsed.length !== 3) return null;
+    const [providerId, keyId, model] = parsed;
+    if (typeof providerId !== 'string' || typeof keyId !== 'string' || typeof model !== 'string') return null;
+    return { providerId, keyId, model };
+  } catch {
+    return null;
+  }
+}
+
 /** Read the full cooldown snapshot: persisted key -> epoch-seconds until expiry. */
 export function loadCooldowns(): Record<string, number> {
   try {

@@ -209,7 +209,7 @@ export function DetailView(props: Props): React.JSX.Element {
               </div>
             </div>
           ) : (
-            <div className="kv mono" title="点击编辑" onClick={() => setEditKey({ id: k.id, field: 'key', value: k.key })}>
+            <div className="kv mono" title={`点击编辑：${k.key}`} onClick={() => setEditKey({ id: k.id, field: 'key', value: k.key })}>
               {k.key}
             </div>
           )}

@@ -731,3 +731,68 @@ describe('KeyPool — snapshot', () => {
 
 
 
+
+
+describe('KeyPool — model-scoped quota cooldown', () => {
+  it('parks only the failing model on a single key', async () => {
+    const pool = makePool({ keys: [{ id: 'k1', enabled: true, weight: 1 }] });
+    await pool.setModelCooling('k1', 'm1', 'quota');
+
+    await expect(pool.next('m1')).rejects.toBeInstanceOf(AllKeysUnavailableError);
+    expect((await pool.next('m2')).keyId).toBe('k1');
+  });
+
+  it('lets another key serve the same model', async () => {
+    const pool = makePool();
+    await pool.setModelCooling('k1', 'm1', 'quota');
+
+    expect((await pool.next('m1')).keyId).toBe('k2');
+  });
+
+  it('reports only the affected model as unavailable', async () => {
+    const pool = makePool({ keys: [{ id: 'k1', enabled: true, weight: 1 }] });
+    await pool.setModelCooling('k1', 'm1', 'quota');
+
+    const blocked = await pool.availability('m1');
+    expect(blocked.available).toBe(false);
+    expect(blocked.reason).toBe('cooling');
+    expect(blocked.retryAfterSeconds).toBeGreaterThan(0);
+    expect((await pool.availability('m2')).available).toBe(true);
+  });
+
+  it('uses the quota duration and clears both scopes together', async () => {
+    const pool = makePool({
+      now: () => 1000,
+      cooldowns: new Map([['k1', { defaultSeconds: 60, rateLimitSeconds: 60, quotaSeconds: 60 }]]),
+    });
+    expect(await pool.setModelCooling('k1', 'm1', 'quota')).toBe(60);
+    expect(pool.exportModelCooling()).toEqual([{ keyId: 'k1', model: 'm1', until: 1060 }]);
+
+    await pool.clearCooling('k1');
+    expect(pool.exportModelCooling()).toEqual([]);
+    expect((await pool.next('m1')).keyId).toBe('k1');
+  });
+
+  it('does not cool when the quota duration is zero', async () => {
+    const pool = makePool({
+      cooldowns: new Map([['k1', { defaultSeconds: 60, rateLimitSeconds: 60, quotaSeconds: 0 }]]),
+    });
+    expect(await pool.setModelCooling('k1', 'm1', 'quota')).toBe(0);
+    expect((await pool.next('m1')).keyId).toBe('k1');
+  });
+
+  it('restores model cooldowns and drops expired entries', () => {
+    const first = new RateLimitState(() => 1000);
+    first.setModelCooling('k1', 'm1', 60);
+    const snapshot = first.exportModelCooling();
+
+    const restored = new RateLimitState(() => 1000);
+    restored.importModelCooling(snapshot);
+    expect(restored.isModelCooling('k1', 'm1')).toBe(true);
+    expect(restored.isModelCooling('k1', 'm2')).toBe(false);
+
+    const expired = new RateLimitState(() => 2000);
+    expired.importModelCooling(snapshot);
+    expect(expired.isModelCooling('k1', 'm1')).toBe(false);
+  });
+});

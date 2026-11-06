@@ -1,4 +1,12 @@
 /**
+ * This plugin's process entry.
+ *
+ * It belongs to this plugin, not to Craft and not to the other plugins: a
+ * plugin is a standalone thing that ships everything it needs to run. Duplicating
+ * this file across plugins is deliberate — shared host-side code would make five
+ * independent plugins one coupled bundle, and a change for one would change all.
+ */
+/**
  * Generic plugin process.
  *
  * A platform plugin used to be `builtin`: its actions ran inside Craft and the
@@ -176,7 +184,9 @@ const server = createServer((req, res) => {
     if (req.url === '/health') {
       // Craft treats this as proof the plugin is up, so answer only once the
       // adapter exists — a health check that passes with no adapter is a lie.
-      send(adapter ? 200 : 503, { ok: Boolean(adapter), plugin: PLUGIN_ID })
+      // 200 once the platform is actually connected; 503 while it is waiting for
+      // credentials. Craft shows "starting" rather than claiming it is healthy.
+      send(connected ? 200 : 503, { ok: connected, plugin: PLUGIN_ID })
       return
     }
 
@@ -236,14 +246,30 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(JSON.stringify({ ready: true, port }))
 })
 
-// Inbound: the adapter owns the platform connection; this only forwards. Started
-// after listen() so a slow connect cannot delay readiness reporting.
+// Inbound: the adapter owns the platform connection; this only forwards.
+//
+// A failed initialize is not fatal. "No credentials yet" is the normal state the
+// moment a plugin is installed, and taking the process down would turn that into
+// a crash loop the supervisor has to babysit — and would also kill /action, so
+// the plugin could not even report why it is not running.
+let connected = false
 if (adapter) {
   adapter.onMessage?.(async (msg) => {
     const event = toEvent(msg)
     if (event) await publish(event)
   })
-  await adapter.initialize?.(config)
+  try {
+    await adapter.initialize?.(config)
+    connected = true
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: 'initialize_failed',
+        plugin: PLUGIN_ID,
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    )
+  }
 }
 
 const shutdown = async () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { createServer, type Server } from 'node:http'
@@ -15,7 +15,12 @@ import { EventService } from './event-service.ts'
  * Craft rejects — which is exactly the failure this replaces.
  */
 
-const SERVE = resolve(import.meta.dir, '../../../../plugins/_runtime/serve.ts')
+/**
+ * A plugin ships its own process entry — there is no shared runtime any more.
+ * The fixture copies the real one from a shipped plugin so this test exercises
+ * the code that actually runs, not a stand-in.
+ */
+const SERVE_SOURCE = resolve(import.meta.dir, '../../../../plugins/telegram/program/serve.ts')
 
 let root: string
 let service: EventService
@@ -51,6 +56,7 @@ function writeFixture(id: string, adapterSource: string, config?: Record<string,
   const dir = mkdtempSync(join(tmpdir(), `fixture-${id}-`))
   mkdirSync(join(dir, 'program'), { recursive: true })
   writeFileSync(join(dir, 'program', 'index.ts'), adapterSource, 'utf8')
+  writeFileSync(join(dir, 'program', 'serve.ts'), readFileSync(SERVE_SOURCE, 'utf8'), 'utf8')
   if (config) writeFileSync(join(dir, 'config.json'), JSON.stringify(config), 'utf8')
   return dir
 }
@@ -58,7 +64,7 @@ function writeFixture(id: string, adapterSource: string, config?: Record<string,
 /** Spawn the plugin and wait for its readiness line. */
 function spawnPlugin(dir: string, pluginId: string): { stop: () => void; port: Promise<number> } {
   const env = service.listenerEnv(pluginId)
-  const proc = Bun.spawn(['bun', 'run', SERVE], {
+  const proc = Bun.spawn(['bun', 'run', 'program/serve.ts'], {
     cwd: dir,
     env: {
       ...process.env,

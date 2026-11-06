@@ -96,7 +96,7 @@
     "program": [
       "bun",
       "run",
-      "../../_runtime/serve.ts"
+      "program/serve.ts"
     ],
     "env": {
       "CRAFT_PLUGIN_ENTRY": "./program/index.ts"

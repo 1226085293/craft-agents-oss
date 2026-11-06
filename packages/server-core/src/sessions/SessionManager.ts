@@ -7322,7 +7322,17 @@ ${request.prompt}`;
    */
   async ensureSupervisorSession(workspaceId: string): Promise<Session> {
     const existing = this.findOnDutySupervisor(workspaceId)
-    if (existing) return managedToSession(existing)
+    if (existing) {
+      // Must go through `getSession`, not `managedToSession`.
+      //
+      // `managedToSession` reports `messages: []` because it is a metadata
+      // projection. Returning it here handed the renderer an empty transcript
+      // that it then marked as loaded, so "开始会话" after switching away made an
+      // existing supervisor look empty forever — the messages were on disk and in
+      // context, just never requested. `getSession` lazy-loads first.
+      const loaded = await this.getSession(existing.id)
+      if (loaded) return loaded
+    }
 
     return this.createSession(workspaceId, {
       name: '督导',

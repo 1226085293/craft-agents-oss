@@ -264,6 +264,23 @@ export const updateSessionMetaAtom = atom(
  * full session atom and loadedSessionsAtom in one write prevents the chat panel
  * from hiding real messages behind a stale lazy-loading spinner.
  */
+/**
+ * Whether a session payload actually carries its transcript.
+ *
+ * `managedToSession` on the host is a metadata projection and reports
+ * `messages: []` by design. When such a payload reaches the renderer through a
+ * "here is the session" path, marking it loaded would freeze the panel empty:
+ * `ensureSessionMessagesLoaded` short-circuits on that flag, so nothing would ever
+ * fetch the real transcript even though it is on disk.
+ *
+ * A session with genuinely no messages is still loadable — that is the `!claims`
+ * case — so an empty new session is not treated as broken.
+ */
+export function carriesTranscript(session: Pick<Session, 'messages' | 'messageCount'>): boolean {
+  const claims = (session.messageCount ?? 0) > 0
+  return session.messages.length > 0 || !claims
+}
+
 export const replaceLoadedSessionAtom = atom(
   null,
   (get, set, session: Session) => {
@@ -273,6 +290,10 @@ export const replaceLoadedSessionAtom = atom(
     const newMetaMap = new Map(metaMap)
     newMetaMap.set(session.id, extractSessionMeta(session))
     set(sessionMetaMapAtom, newMetaMap)
+
+    // "Loaded" means the transcript is in hand; a payload that claims messages
+    // but carries none is a metadata projection that reached the wrong path.
+    if (!carriesTranscript(session)) return
 
     const loadedSessions = get(loadedSessionsAtom)
     if (!loadedSessions.has(session.id)) {

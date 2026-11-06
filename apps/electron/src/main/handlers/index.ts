@@ -44,6 +44,10 @@ function warmUpEventCenter(deps: HandlerDeps): void {
               // Event delivery must never prevent the ingest endpoint from accepting events.
             })
           },
+          // Publishing session actions is what lets a plugin's own /compact or
+          // /stop reach Craft: the plugin calls POST /host/<name> instead of the
+          // host carrying a per-platform command table.
+          deps.sessionManager?.createHostActions?.(),
         )
         await service.startAllEnabled(workspace.rootPath)
       }

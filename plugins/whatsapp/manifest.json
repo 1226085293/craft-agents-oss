@@ -4,7 +4,6 @@
   "name": "WhatsApp",
   "version": "1.0.0",
   "description": "WhatsApp Business 会话。",
-  "builtin": true,
   "author": "Craft Agents",
   "actions": [
     {
@@ -63,5 +62,16 @@
       "usage": "[name]"
     }
   ],
-  "locales": "i18n"
+  "locales": "i18n",
+  "runtime": {
+    "kind": "script",
+    "program": [
+      "bun",
+      "run",
+      "../../_runtime/serve.ts"
+    ],
+    "env": {
+      "CRAFT_PLUGIN_ENTRY": "./program/index.ts"
+    }
+  }
 }

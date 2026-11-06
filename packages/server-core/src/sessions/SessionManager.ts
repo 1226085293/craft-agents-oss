@@ -3784,6 +3784,37 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Session actions published to plugins over `POST /host/<name>`.
+   *
+   * A platform plugin owns its conversation — which commands exist, what they
+   * say, how it replies. These are the few things it cannot own, because they
+   * touch a session's runtime. Ids only: a plugin proves nothing about who it
+   * is beyond holding the ingest token, so the payload stays minimal.
+   */
+  createHostActions() {
+    return {
+      send: async (sessionId: string, text: string) => {
+        await this.sendMessage(sessionId, text)
+      },
+      stop: async (sessionId: string) => {
+        await this.cancelProcessing(sessionId)
+      },
+      // `/compact` is handled as text by the agent loop, so this stays one line
+      // rather than duplicating the compaction pipeline here.
+      compact: async (sessionId: string) => {
+        await this.sendMessage(sessionId, '/compact')
+      },
+      listSessions: () =>
+        [...this.sessions.values()].map((managed) => ({
+          id: managed.id,
+          // A plugin only needs enough to recognise a session; the full title
+          // belongs to the UI, not to every installed plugin.
+          title: managed.id,
+        })),
+    }
+  }
+
+  /**
    * Get the live agent instance backing a session, if it has been initialized.
    * Used by RPC handlers that need to invoke agent-owned operations (e.g.
    * memory extraction) without reaching into the private sessions map.
@@ -6646,10 +6677,9 @@ ${request.prompt}`;
           }
         },
         // --- Plugin actions ---------------------------------------------
-        // The manifest declares the contract; Craft is the implementation for
-        // builtin plugins. Only "messaging" is builtin today, and its two
-        // actions are the entire outbound story: send to a channel, or reply
-        // to whoever caused this turn.
+        // The manifest declares the contract; the plugin implements it. These
+        // are the actions an agent can dispatch: send somewhere, or reply to
+        // whoever caused this turn.
         listPluginActionsFn: () => {
           const root = managed.workspace.rootPath
           const out: Array<{
@@ -6715,30 +6745,9 @@ ${request.prompt}`;
             if (origin.threadId !== undefined) payload.threadId = payload.threadId ?? origin.threadId
           }
 
-          // The plugin executes; the host has no platform code. A builtin is a
-          // plugin whose program lives in this process, and reaches the same
-          // seam through the messaging registry rather than a second copy of
-          // every adapter.
-          if (installed.manifest.builtin === true) {
-            const registry = this.messagingRegistry
-            if (!registry) return { ok: false, message: '消息网关未初始化，无法发送' }
-            const text = typeof payload.text === 'string' ? payload.text.trim() : ''
-            if (!text) return { ok: false, message: 'text 不能为空' }
-            const channelId = typeof payload.channelId === 'string' ? payload.channelId : ''
-            const platform = typeof payload.platform === 'string' ? payload.platform : plugin
-            if (!channelId) return { ok: false, message: '缺少 channelId' }
-            const sent = await registry.sendTextToChannel({
-              workspaceId: managed.workspace.id,
-              platform,
-              channelId,
-              ...(typeof payload.threadId === 'number' ? { threadId: payload.threadId } : {}),
-              text,
-            })
-            return sent.ok
-              ? { ok: true, message: `已发送到 ${platform} ${channelId}` }
-              : { ok: false, message: `发送失败：${sent.error}` }
-          }
-
+          // The plugin executes, always. There is no in-process alternative:
+          // one code path means the HTTP one is exercised by every platform,
+          // instead of being a rarely-used branch behind a `builtin` flag.
           return callPluginAction(installed.dataDir, { action, args: payload })
         },
 

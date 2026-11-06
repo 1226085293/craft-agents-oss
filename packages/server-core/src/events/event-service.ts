@@ -17,6 +17,7 @@ import { createLogger } from '@craft-agent/shared/utils';
 import { EventStore, type EventFilter, type EventMeta, type EventRecord } from '@craft-agent/shared/events/event-store.ts';
 import { EventIngestServer, type EventIngestAddress } from './ingest-server.ts';
 import { loadListeners, missingConfigKeys, setListenerConfig, setListenerEnabled, type LoadedListener, pluginReadiness } from './listener-registry.ts';
+import type { HostCommand } from './host-command-server.ts';
 import { ListenerSupervisor, type ListenerRuntimeStatus } from './listener-supervisor.ts';
 import { EventDispatcher, type DispatchTarget } from './event-dispatcher.ts';
 import { fetchReportedDeps } from './listener-control.ts';
@@ -26,6 +27,25 @@ import type { CraftEventEnvelope } from '@craft-agent/shared/events/types.ts';
 import type { ListenerReportedDepsDto } from '@craft-agent/shared/protocol/dto';
 
 const eventLog = createLogger('events');
+
+/**
+ * What a plugin may ask Craft to do, expressed as data.
+ *
+ * A platform plugin runs its own conversation: it owns the slash commands, the
+ * wording, and which of them it exposes. What it cannot own is stopping a turn
+ * or compacting a session, so the host publishes those — and only those — over
+ * the command API. Nothing here mentions a platform.
+ */
+export interface HostActions {
+  /** Send text into a session as if the user typed it. */
+  send?: (sessionId: string, text: string) => Promise<void>;
+  /** Stop whatever the session is doing. */
+  stop?: (sessionId: string) => Promise<void>;
+  /** Compact a session's context now. */
+  compact?: (sessionId: string) => Promise<void>;
+  /** Local sessions this plugin may address (id + title only). */
+  listSessions?: () => Array<{ id: string; title: string }>;
+}
 
 export interface EventServiceOptions {
   workspaceId: string;
@@ -39,6 +59,13 @@ export interface EventServiceOptions {
    * events (tests, ingest-only hosts), which leaves dispatching inert.
    */
   dispatchTarget?: DispatchTarget;
+  /**
+   * Session-level actions a plugin may invoke over `POST /host/<name>`.
+   *
+   * Injected by the host because only it owns the session manager. The event
+   * layer publishes them as a catalogue; it does not decide what they mean.
+   */
+  hostActions?: HostActions;
   /**
    * Called for an event no session subscribed to.
    *
@@ -87,6 +114,7 @@ export class EventService {
         this.supervisor.markHealthy(listenerId);
       },
       onInserted: (event) => this.publish(event),
+      hostCommands: buildHostCommands(options.hostActions),
     });
 
     this.dispatcher = options.dispatchTarget ? this.createDispatcher(options.dispatchTarget) : null;
@@ -189,10 +217,18 @@ export class EventService {
     onListenerStatus?: (status: ListenerRuntimeStatus) => void;
     dispatchTarget?: DispatchTarget;
     onUnclaimed?: (event: EventMeta) => void;
+    hostActions?: HostActions;
   }): void {
     if (callbacks.onChanged) this.options.onChanged = callbacks.onChanged;
     if (callbacks.onListenerStatus) this.options.onListenerStatus = callbacks.onListenerStatus;
     if (callbacks.onUnclaimed) this.options.onUnclaimed = callbacks.onUnclaimed;
+    if (callbacks.hostActions) {
+      this.options.hostActions = callbacks.hostActions;
+      // The catalogue is derived from the actions, so rebinding them must
+      // refresh what `GET /host` answers — otherwise a plugin would query an
+      // empty list for the whole session.
+      this.ingest.setHostCommands(buildHostCommands(callbacks.hostActions));
+    }
     // A host that only learns the delivery target after boot (Electron builds it
     // with the session manager) must still get a dispatcher.
     if (callbacks.dispatchTarget && !this.dispatcher) {
@@ -506,6 +542,7 @@ export async function getEventService(
   onChanged?: (event: EventRecord) => void,
   dispatchTarget?: DispatchTarget,
   onUnclaimed?: (event: EventMeta) => void,
+  hostActions?: HostActions,
 ): Promise<EventService> {
   let service = services.get(workspaceId);
   if (!service) {
@@ -515,6 +552,7 @@ export async function getEventService(
       ...(onChanged ? { onChanged } : {}),
       ...(dispatchTarget ? { dispatchTarget } : {}),
       ...(onUnclaimed ? { onUnclaimed } : {}),
+      ...(hostActions ? { hostActions } : {}),
     });
     services.set(workspaceId, service);
   }
@@ -525,6 +563,7 @@ export async function getEventService(
     ...(onChanged ? { onChanged } : {}),
     ...(dispatchTarget ? { dispatchTarget } : {}),
     ...(onUnclaimed ? { onUnclaimed } : {}),
+    ...(hostActions ? { hostActions } : {}),
   });
   await service.start();
   return service;
@@ -550,4 +589,73 @@ export async function stopAllEventServices(): Promise<void> {
 export function resetEventServicesForTest(): void {
   for (const service of services.values()) service.dispose();
   services.clear();
+}
+
+
+/**
+ * The catalogue a plugin sees at `GET /host`.
+ *
+ * Every entry names only what the host owns. A platform that wants `/stop` to
+ * mean something different can implement it itself — this list is an offer, not
+ * a contract, and it deliberately contains no platform vocabulary.
+ */
+function buildHostCommands(actions: HostActions | undefined): HostCommand[] {
+  if (!actions) return [];
+  const commands: HostCommand[] = [];
+  const sessionParam = {
+    name: 'sessionId',
+    type: 'string' as const,
+    required: true,
+    description: 'Target session, as returned by list_sessions',
+  };
+
+  if (actions.send) {
+    commands.push({
+      name: 'send',
+      summary: 'Send text into a session as if the user typed it',
+      params: [
+        sessionParam,
+        { name: 'text', type: 'string', required: true, description: 'Message body' },
+      ],
+      run: async (args) => {
+        await actions.send!(String(args.sessionId), String(args.text));
+        return { delivered: true };
+      },
+    });
+  }
+
+  if (actions.stop) {
+    commands.push({
+      name: 'stop',
+      summary: 'Stop the turn a session is currently running',
+      params: [sessionParam],
+      run: async (args) => {
+        await actions.stop!(String(args.sessionId));
+        return { stopped: true };
+      },
+    });
+  }
+
+  if (actions.compact) {
+    commands.push({
+      name: 'compact',
+      summary: 'Compact the session context now',
+      params: [sessionParam],
+      run: async (args) => {
+        await actions.compact!(String(args.sessionId));
+        return { compacting: true };
+      },
+    });
+  }
+
+  if (actions.listSessions) {
+    commands.push({
+      name: 'list_sessions',
+      summary: 'List sessions this plugin may address',
+      params: [],
+      run: async () => ({ sessions: actions.listSessions!() }),
+    });
+  }
+
+  return commands;
 }

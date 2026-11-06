@@ -139,16 +139,6 @@ export interface ListenerManifest {
   runtime?: ListenerRuntime;
   dependencies?: ListenerDependencies;
   config?: ListenerConfigSchema;
-  permissions?: { network?: string[]; filesystem?: string[] };
-  /**
-   * Actions are executed by Craft itself rather than by a spawned process.
-   *
-   * This is what lets a platform that already runs in-process (the messaging
-   * adapters) present itself as a plugin without being rewritten as an external
-   * program: the manifest describes the contract, Craft is the implementation.
-   * A builtin declares no runtime and is never spawned.
-   */
-  builtin?: boolean;
   /** Outbound actions Craft may invoke. Absent = receive-only plugin. */
   actions?: PluginAction[];
   /** Slash commands this plugin answers; the host only routes them. */
@@ -638,10 +628,6 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
     ...(actions.length ? { actions } : {}),
     ...(commands.length ? { commands } : {}),
     ...(str(input.locales) ? { locales: str(input.locales)! } : {}),
-    ...(input.builtin === true ? { builtin: true } : {}),
-    ...(input.permissions && typeof input.permissions === 'object'
-      ? { permissions: input.permissions as ListenerManifest['permissions'] }
-      : {}),
   };
 
   return { ok: true, manifest, errors, warnings };

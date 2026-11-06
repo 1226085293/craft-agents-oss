@@ -266,8 +266,8 @@ export function loadListeners(options: LoadListenersOptions): LoadedListener[] {
         // it must never be spawned behind the user's back.
         ready:
           source === 'workspace' &&
-          // A builtin is executed in-process, so it needs no runtime program.
-          (Boolean(manifest.runtime) || manifest.builtin === true) &&
+          // A plugin runs as a program, full stop. No in-process variant.
+          Boolean(manifest.runtime) &&
           blocking.length === 0,
         errors: [],
         warnings: parsed.warnings,
@@ -441,8 +441,8 @@ export function pluginReadiness(plugin: LoadedListener): PluginReadiness {
     }
   }
 
-  // A builtin is executed in-process; anything else needs a runnable program.
-  if (plugin.manifest.builtin !== true && !plugin.manifest.runtime) {
+  // Every plugin is a program; there is no in-process variant to exempt.
+  if (!plugin.manifest.runtime) {
     return { ready: false, reason: 'no-program', detail: '插件没有声明 runtime，无法启动' }
   }
 

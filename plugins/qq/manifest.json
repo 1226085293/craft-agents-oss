@@ -4,7 +4,6 @@
   "name": "QQ",
   "version": "1.0.0",
   "description": "腾讯 QQ：群聊 @ 机器人与私聊。群消息走 group:<openid>，私聊走 user:<openid>。",
-  "builtin": true,
   "author": "Craft Agents",
   "actions": [
     {
@@ -91,5 +90,16 @@
       "description": "解除这个聊天的绑定"
     }
   ],
-  "locales": "i18n"
+  "locales": "i18n",
+  "runtime": {
+    "kind": "script",
+    "program": [
+      "bun",
+      "run",
+      "../../_runtime/serve.ts"
+    ],
+    "env": {
+      "CRAFT_PLUGIN_ENTRY": "./program/index.ts"
+    }
+  }
 }

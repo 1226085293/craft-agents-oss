@@ -26,6 +26,7 @@ import {
 } from 'node:http';
 import { randomBytes } from 'node:crypto';
 import { normalizeEventInput, type CraftEventEnvelope } from '@craft-agent/shared/events/types.ts';
+import { handleHostCommandRequest, type HostCommand } from './host-command-server.ts';
 
 /**
  * Inline body cap for the whole request. Sized well above `EVENT_LIMITS.bodyBytes`
@@ -45,6 +46,11 @@ export interface EventIngestOptions {
   onInserted?: (event: CraftEventEnvelope) => void;
   /** A listener proved it can reach us via GET /health — mark it running. */
   onHealth?: (listenerId: string) => void;
+  /**
+   * Host capabilities a plugin may call (`GET /host`, `POST /host/<name>`).
+   * Empty by default so a bare ingest server exposes nothing but events.
+   */
+  hostCommands?: HostCommand[];
   /** Bearer token. Generated when omitted (production path). */
   token?: string;
   /** Bind address. Defaults to loopback. */
@@ -158,9 +164,30 @@ export class EventIngestServer {
     };
   }
 
+  /**
+   * Replace the published command catalogue.
+   *
+   * The host learns its session actions after boot (the session manager is
+   * built later), so the list must be swappable rather than fixed at listen().
+   */
+  setHostCommands(commands: HostCommand[]): void {
+    this.options.hostCommands = commands;
+  }
+
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+
+      // `/host` is a separate surface: same token, same loopback rule, but it
+      // describes what Craft can be asked to do rather than accepting events.
+      const handled = await handleHostCommandRequest(req, res, {
+        commands: this.options.hostCommands ?? [],
+        token: this.token,
+        isLoopbackHostHeader,
+        readBody,
+      });
+      if (handled) return;
+
       const match = /^\/events\/([A-Za-z0-9._-]{1,64})(\/health)?$/.exec(url.pathname);
       if (!match) {
         sendJson(res, 404, { error: 'not_found' });

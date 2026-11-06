@@ -4,7 +4,6 @@
   "name": "飞书",
   "version": "1.0.0",
   "description": "飞书（Lark）机器人与群会话。",
-  "builtin": true,
   "author": "Craft Agents",
   "actions": [
     {
@@ -77,5 +76,16 @@
       "usage": "<code>"
     }
   ],
-  "locales": "i18n"
+  "locales": "i18n",
+  "runtime": {
+    "kind": "script",
+    "program": [
+      "bun",
+      "run",
+      "../../_runtime/serve.ts"
+    ],
+    "env": {
+      "CRAFT_PLUGIN_ENTRY": "./program/index.ts"
+    }
+  }
 }

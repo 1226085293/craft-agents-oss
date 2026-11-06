@@ -71,6 +71,13 @@ export interface MessagingBootstrapOptions {
     senderName?: string
     text: string
     chatKind?: 'private' | 'group'
+    /**
+     * The adapter's own @-mention verdict. Carried separately from `text`
+     * because adapters strip mention markup before dispatch (QQ rewrites
+     * `<@openid>` away), so the text alone cannot answer "was the bot
+     * addressed?".
+     */
+    mentionKind?: 'at' | 'none'
   }) => boolean
 }
 

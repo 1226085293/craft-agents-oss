@@ -86,6 +86,26 @@ describe('message bridge', () => {
     expect(base).not.toBe(threaded);
   });
 
+  it('trusts the adapter when mention markup was stripped out of the text', () => {
+    // QQ rewrites `<@openid> 你好` to `你好` and keeps the fact in mentionKind.
+    // Scanning the text for '@craft_bot' would wrongly report "not mentioned".
+    const verdict = bridgeMessage(
+      msg({ platform: 'qq', text: '你好', mentionKind: 'at' }),
+      ctx,
+    );
+    expect(verdict.kind).toBe('event');
+    if (verdict.kind !== 'event') throw new Error('expected event');
+    expect(verdict.event.summary).toBe('你好');
+  });
+
+  it('does not invent a mention when the adapter says there was none', () => {
+    const verdict = bridgeMessage(
+      msg({ platform: 'qq', text: '今天天气不错', mentionKind: 'none' }),
+      ctx,
+    );
+    expect(verdict.kind).toBe('ignored');
+  });
+
   it('truncates a very long message into the summary but keeps the body', () => {
     const long = '报错'.repeat(400);
     const verdict = bridgeMessage(msg({ text: long }), ctx);

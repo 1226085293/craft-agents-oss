@@ -29,6 +29,16 @@ export interface BridgeableMessage {
   senderName?: string;
   text: string;
   chatKind?: 'private' | 'group';
+  /**
+   * The adapter's own @-mention verdict.
+   *
+   * Needed because adapters strip mention markup before dispatch: the QQ
+   * adapter rewrites `<@openid> 你好` down to `你好` and keeps the fact in
+   * `mentionKind`. Scanning `text` for `@name` therefore reports "not
+   * mentioned" for every QQ group message. When present, this flag is
+   * authoritative and the text scan is only a fallback.
+   */
+  mentionKind?: 'at' | 'none';
 }
 
 export interface MessageEventRules {
@@ -118,7 +128,11 @@ export function bridgeMessage(msg: BridgeableMessage, context: BridgeContext): B
   }
 
   const hitKeyword = keywordHit(msg.text, context.rules.keywords);
-  const hitMention = (context.rules.onMention ?? true) && mentions(msg.text, context.botNames ?? []);
+  // Prefer the adapter's verdict: it saw the raw payload, including mention
+  // markup that never survives into `text`.
+  const addressedToBot =
+    msg.mentionKind === 'at' || mentions(msg.text, context.botNames ?? []);
+  const hitMention = (context.rules.onMention ?? true) && addressedToBot;
   if (!hitKeyword && !hitMention) {
     return { kind: 'ignored', reason: '未命中关键词或 @提及' };
   }

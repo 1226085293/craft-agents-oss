@@ -110,6 +110,8 @@ export interface MessagingGatewayRegistryOptions {
     senderName?: string
     text: string
     chatKind?: 'private' | 'group'
+    /** The adapter's own @-mention verdict; see BridgeableMessage. */
+    mentionKind?: 'at' | 'none'
   }) => boolean
 }
 

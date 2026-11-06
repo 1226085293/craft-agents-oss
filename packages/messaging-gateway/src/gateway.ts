@@ -76,6 +76,8 @@ export interface GatewayOptions {
     senderName?: string
     text: string
     chatKind?: 'private' | 'group'
+    /** The adapter's own @-mention verdict; see BridgeableMessage. */
+    mentionKind?: 'at' | 'none'
   }) => boolean
   /**
    * Reads the workspace's MessagingConfig. Called per-message so config
@@ -536,6 +538,7 @@ export class MessagingGateway {
           ...(msg.senderName ? { senderName: msg.senderName } : {}),
           text: msg.text,
           ...(msg.chatKind ? { chatKind: msg.chatKind } : {}),
+          ...(msg.mentionKind ? { mentionKind: msg.mentionKind } : {}),
         })
       ) {
         return

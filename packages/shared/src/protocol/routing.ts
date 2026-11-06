@@ -305,6 +305,35 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.sessions.IMPORT,
   RPC_CHANNELS.sessions.EXPORT_REMOTE_TRANSFER,
   RPC_CHANNELS.sessions.IMPORT_REMOTE_TRANSFER,
+  RPC_CHANNELS.sessions.SET_AGENT,
+  RPC_CHANNELS.sessions.ENSURE_SUPERVISOR,
+
+  // events — event center (listeners, stored events, subscriptions all live on
+  // the server that owns the workspace; the WebUI must reach them)
+  RPC_CHANNELS.events.LIST,
+  RPC_CHANNELS.events.GET,
+  RPC_CHANNELS.events.COUNTS,
+  RPC_CHANNELS.events.CHANGED,
+  RPC_CHANNELS.events.STATUS,
+  RPC_CHANNELS.events.SUBSCRIBE,
+  RPC_CHANNELS.events.UNSUBSCRIBE,
+  RPC_CHANNELS.events.LIST_SUBSCRIPTIONS,
+  RPC_CHANNELS.events.LIST_LISTENERS,
+  RPC_CHANNELS.events.GET_LISTENER,
+  RPC_CHANNELS.events.SET_LISTENER_ENABLED,
+  RPC_CHANNELS.events.SET_LISTENER_CONFIG,
+  RPC_CHANNELS.events.LISTENER_STATUS,
+  RPC_CHANNELS.events.LISTENER_DEPS,
+  RPC_CHANNELS.events.LISTENER_DEPS_ACTION,
+  RPC_CHANNELS.events.INSTALL_DEPENDENCY,
+  RPC_CHANNELS.events.INSTALL_MCP,
+  RPC_CHANNELS.events.READ_ATTACHMENT,
+  RPC_CHANNELS.events.OPEN_ATTACHMENT,
+
+  // taskboard — tasks are workspace state, not renderer state
+  RPC_CHANNELS.taskboard.CREATE,
+  RPC_CHANNELS.taskboard.RUN,
+  RPC_CHANNELS.taskboard.UPDATE_TRIGGER,
 
   // transfer — chunked large-payload import (sessions, resources)
   RPC_CHANNELS.transfer.START,

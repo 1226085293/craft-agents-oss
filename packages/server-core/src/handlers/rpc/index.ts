@@ -26,7 +26,6 @@ import { registerWorkspaceCoreHandlers } from './workspace'
 import { registerMessagingHandlers } from './messaging'
 import { registerMemoryHandlers } from './memory'
 import { registerUsageHandlers } from './usage'
-import { registerAutomationsHandlers } from './automations'
 import { registerEventsHandlers } from './events'
 import { registerTasksHandlers } from './tasks'
 import { registerAgentsHandlers } from './agents'
@@ -57,7 +56,6 @@ registerLlmConnectionsHandlers(server, deps)
   registerMessagingHandlers(server, deps)
   registerMemoryHandlers(server, deps)
   registerUsageHandlers(server, deps)
-  registerAutomationsHandlers(server, deps)
   registerEventsHandlers(server, deps)
   registerTasksHandlers(server, deps)
   registerAgentsHandlers(server, deps)

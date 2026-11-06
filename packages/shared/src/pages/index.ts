@@ -157,3 +157,8 @@ export {
   type UnpublishResult,
   type DeletePageOutcome,
 } from './publisher.ts';
+
+export {
+  duePageRefreshes,
+  type DuePageRefresh,
+} from './refresh-schedule.ts';

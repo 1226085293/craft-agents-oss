@@ -372,17 +372,6 @@ export const RPC_CHANNELS = {
     REMOVED: 'browser-pane:removed',
     INTERACTED: 'browser-pane:interacted',
   },
-  automations: {
-    GET: 'automations:get',
-    TEST: 'automations:test',
-    SET_ENABLED: 'automations:setEnabled',
-    DUPLICATE: 'automations:duplicate',
-    DELETE: 'automations:delete',
-    GET_HISTORY: 'automations:getHistory',
-    GET_LAST_EXECUTED: 'automations:getLastExecuted',
-    REPLAY: 'automations:replay',
-    CHANGED: 'automations:changed',
-  },
   resources: {
     EXPORT: 'resources:export',
     IMPORT: 'resources:import',

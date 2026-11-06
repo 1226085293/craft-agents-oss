@@ -13,7 +13,6 @@ import type {
   NavigationState,
   SessionFilter,
   SourceFilter,
-  AutomationFilter,
   RightSidebarPanel,
 } from './types'
 import { isValidSettingsSubpage, type SettingsSubpage } from './settings-registry'
@@ -39,7 +38,6 @@ export type NavigatorType =
   | 'sessions'
   | 'sources'
   | 'skills'
-  | 'automations'
   | 'projects'
   | 'pages'
   | 'events'
@@ -53,8 +51,6 @@ export interface ParsedCompoundRoute {
   sessionFilter?: SessionFilter
   /** Source filter (only for sources navigator) */
   sourceFilter?: SourceFilter
-  /** Automation filter (only for automations navigator) */
-  automationFilter?: AutomationFilter
   /** Which section of the events navigator: the log or the listener cards. */
   eventsSection?: 'list' | 'listeners'
   /** Selected task (only for the tasks navigator). */
@@ -74,7 +70,7 @@ export interface ParsedCompoundRoute {
  * Known prefixes that indicate a compound route
  */
 const COMPOUND_ROUTE_PREFIXES = [
-  'allSessions', 'archived', 'state', 'view', 'sources', 'skills', 'automations', 'projects', 'pages', 'events', 'tasks', 'settings'
+  'allSessions', 'archived', 'state', 'view', 'sources', 'skills', 'projects', 'pages', 'events', 'tasks', 'settings'
 ]
 
 /**
@@ -174,56 +170,6 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
       }
     }
 
-    return null
-  }
-
-  // Automations navigator - supports type filters (scheduled, event, agentic)
-  if (first === 'automations') {
-    if (segments.length === 1) {
-      return { navigator: 'automations', details: null }
-    }
-
-    // Check for type filter: automations/scheduled, automations/event, automations/agentic
-    const validAutomationTypes = ['scheduled', 'event', 'agentic']
-    if (validAutomationTypes.includes(segments[1])) {
-      const automationType = segments[1] as 'scheduled' | 'event' | 'agentic'
-      const automationFilter: AutomationFilter = { kind: 'type', automationType }
-
-      // Check for automation selection within filtered view: automations/scheduled/automation/{automationId}
-      if (segments[2] === 'automation' && segments[3]) {
-        return {
-          navigator: 'automations',
-          automationFilter,
-          details: { type: 'automation', id: segments[3] },
-        }
-      }
-
-      // Just the filter, no selection
-      return { navigator: 'automations', automationFilter, details: null }
-    }
-
-    // Unfiltered automation selection: automations/automation/{automationId}
-    if (segments[1] === 'automation' && segments[2]) {
-      return {
-        navigator: 'automations',
-        details: { type: 'automation', id: segments[2] },
-      }
-    }
-
-    return null
-  }
-
-  // Projects navigator
-  if (first === 'projects') {
-    if (segments.length === 1) {
-      return { navigator: 'projects', details: null }
-    }
-    if (segments[1] === 'project' && segments[2]) {
-      return {
-        navigator: 'projects',
-        details: { type: 'project', id: segments[2] },
-      }
-    }
     return null
   }
 
@@ -343,16 +289,6 @@ export function buildCompoundRoute(parsed: ParsedCompoundRoute): string {
   if (parsed.navigator === 'skills') {
     if (!parsed.details) return 'skills'
     return `skills/skill/${parsed.details.id}`
-  }
-
-  if (parsed.navigator === 'automations') {
-    // Base comes from the type filter (automations/scheduled|event|agentic)
-    let base = 'automations'
-    if (parsed.automationFilter?.kind === 'type') {
-      base = `automations/${parsed.automationFilter.automationType}`
-    }
-    if (!parsed.details) return base
-    return `${base}/automation/${parsed.details.id}`
   }
 
   if (parsed.navigator === 'projects') {
@@ -489,14 +425,6 @@ function convertCompoundToViewRoute(compound: ParsedCompoundRoute): ParsedRoute 
       return { type: 'view', name: 'skills', params: {} }
     }
     return { type: 'view', name: 'skill-info', id: compound.details.id, params: {} }
-  }
-
-  // Automations
-  if (compound.navigator === 'automations') {
-    if (!compound.details) {
-      return { type: 'view', name: 'automations', params: {} }
-    }
-    return { type: 'view', name: 'automation-info', id: compound.details.id, params: {} }
   }
 
   // Projects
@@ -647,18 +575,6 @@ function convertCompoundToNavigationState(compound: ParsedCompoundRoute): Naviga
     return {
       navigator: 'skills',
       details: { type: 'skill', skillSlug: compound.details.id },
-    }
-  }
-
-  // Automations
-  if (compound.navigator === 'automations') {
-    if (!compound.details) {
-      return { navigator: 'automations', filter: compound.automationFilter, details: null }
-    }
-    return {
-      navigator: 'automations',
-      filter: compound.automationFilter,
-      details: { type: 'automation', automationId: compound.details.id },
     }
   }
 
@@ -848,14 +764,6 @@ function navigationStateToCompoundRoute(state: NavigationState): ParsedCompoundR
     return {
       navigator: 'skills',
       details: state.details?.type === 'skill' ? { type: 'skill', id: state.details.skillSlug } : null,
-    }
-  }
-
-  if (state.navigator === 'automations') {
-    return {
-      navigator: 'automations',
-      automationFilter: state.filter ?? undefined,
-      details: state.details ? { type: 'automation', id: state.details.automationId } : null,
     }
   }
 

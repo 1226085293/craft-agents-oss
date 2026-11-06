@@ -1,29 +1,24 @@
 /**
- * One-way migration: automation cron matchers → task cron triggers.
+ * One-way import: legacy cron automations → task cron triggers.
  *
- * The automation runtime is no longer started (nothing constructs
- * `AutomationSystem`), so a scheduled automation was a config the user could
- * edit and test but never fire. Rather than rebuild a second scheduler, the
- * existing config is imported into the task system, which now owns scheduling.
+ * The automation runtime is gone (it never ran: nothing constructed
+ * AutomationSystem). This keeps the user's existing schedule alive by turning
+ * each `SchedulerTick` cron matcher into a task trigger, once.
  *
- * Only cron matchers are imported. App/agent lifecycle matchers (Stop,
- * PreToolUse, SessionStart …) are hooks into a session's own turn — they have no
- * meaning outside a session, so they are left where they are instead of being
- * misrepresented as an external event trigger.
+ * Only cron + prompt matchers are imported: an app/agent lifecycle matcher is a
+ * hook inside a session's own turn, not a task trigger.
  *
- * Idempotent: each imported task carries `automation:<matcherId>` as its
- * originating tool call, and `TaskService.create` dedupes on that.
+ * Idempotent via `automation:<matcherId>` as the originating tool call.
  */
 
 import { existsSync, readFileSync } from 'fs';
+import { join } from 'path';
 import { createLogger } from '@craft-agent/shared/utils';
-import { resolveAutomationsConfigPath } from '@craft-agent/shared/automations/resolve-config-path';
-import { validateAutomationsConfig } from '@craft-agent/shared/automations/validation';
-import type { AutomationMatcher, PromptAction } from '@craft-agent/shared/automations/types';
 import type { TaskService } from './task-service.ts';
 
 const log = createLogger('tasks');
 
+const AUTOMATIONS_FILE = 'automations.json';
 const MIGRATION_SUPERVISOR = 'automation-migration';
 
 export interface MigrationResult {
@@ -31,9 +26,30 @@ export interface MigrationResult {
   skipped: number;
 }
 
-/** Matchers that should become scheduled tasks. */
-function cronMatchers(workspaceRoot: string): Array<{ id: string; name: string; matcher: AutomationMatcher; prompt: PromptAction }> {
-  const path = resolveAutomationsConfigPath(workspaceRoot);
+interface LegacyMatcher {
+  id?: unknown;
+  name?: unknown;
+  cron?: unknown;
+  timezone?: unknown;
+  enabled?: unknown;
+  actions?: unknown;
+}
+
+/**
+ * Read cron matchers straight from `automations.json`.
+ *
+ * Plain JSON rather than the old zod schema: the schema lived in the module we
+ * deleted, and this reader only needs four fields. Anything malformed is
+ * skipped, never guessed.
+ */
+function cronMatchers(workspaceRoot: string): Array<{
+  id: string;
+  name: string;
+  expr: string;
+  timezone?: string;
+  prompt: string;
+}> {
+  const path = join(workspaceRoot, AUTOMATIONS_FILE);
   if (!existsSync(path)) return [];
 
   let parsed: unknown;
@@ -44,38 +60,41 @@ function cronMatchers(workspaceRoot: string): Array<{ id: string; name: string; 
     return [];
   }
 
-  const result = validateAutomationsConfig(parsed);
-  if (!result.valid || !result.config) {
-    log.warn('[tasks] automations.json failed validation; nothing to migrate', { errors: result.errors });
-    return [];
-  }
+  const automations = (parsed as { automations?: Record<string, unknown> } | null)?.automations;
+  if (!automations || typeof automations !== 'object') return [];
 
-  const out: Array<{ id: string; name: string; matcher: AutomationMatcher; prompt: PromptAction }> = [];
-  for (const [event, matchers] of Object.entries(result.config.automations)) {
-    // Only the cron tick maps onto a task trigger. Everything else is a
-    // session-lifecycle hook and stays out of the task system.
-    if (event !== 'SchedulerTick') continue;
-    for (const matcher of matchers ?? []) {
-      if (!matcher.cron || matcher.enabled === false) continue;
-      const prompt = matcher.actions.find((a): a is PromptAction => a.type === 'prompt');
-      if (!prompt) continue;
-      out.push({
-        id: matcher.id ?? `anon-${out.length}`,
-        name: matcher.name ?? prompt.prompt.slice(0, 40),
-        matcher,
-        prompt,
-      });
-    }
+  const tickMatchers = (automations as Record<string, unknown>).SchedulerTick;
+  if (!Array.isArray(tickMatchers)) return [];
+
+  const out: Array<{ id: string; name: string; expr: string; timezone?: string; prompt: string }> = [];
+  for (const [index, raw] of tickMatchers.entries()) {
+    const matcher = raw as LegacyMatcher;
+    if (!matcher || typeof matcher !== 'object') continue;
+    if (matcher.enabled === false) continue;
+    const expr = typeof matcher.cron === 'string' ? matcher.cron.trim() : '';
+    if (!expr) continue;
+
+    const actions = Array.isArray(matcher.actions) ? matcher.actions : [];
+    const promptAction = actions.find(
+      (a): a is { prompt: string } =>
+        Boolean(a) && typeof a === 'object' && (a as { type?: unknown }).type === 'prompt' &&
+        typeof (a as { prompt?: unknown }).prompt === 'string',
+    );
+    if (!promptAction) continue;
+
+    const id = typeof matcher.id === 'string' && matcher.id ? matcher.id : `anon-${index}`;
+    const name =
+      typeof matcher.name === 'string' && matcher.name.trim()
+        ? matcher.name.trim()
+        : promptAction.prompt.slice(0, 40);
+    const timezone = typeof matcher.timezone === 'string' && matcher.timezone ? matcher.timezone : undefined;
+
+    out.push({ id, name, expr, ...(timezone ? { timezone } : {}), prompt: promptAction.prompt });
   }
   return out;
 }
 
-/**
- * Import cron automations as tasks.
- *
- * Safe to call on every workspace start: already-imported matchers resolve to
- * the task that was created for them, and nothing is overwritten.
- */
+/** Import cron automations as tasks. Safe to call on every workspace start. */
 export function migrateAutomationCronTasks(tasks: TaskService, workspaceRoot: string): MigrationResult {
   const candidates = cronMatchers(workspaceRoot);
   if (!candidates.length) return { created: 0, skipped: 0 };
@@ -95,13 +114,13 @@ export function migrateAutomationCronTasks(tasks: TaskService, workspaceRoot: st
 
     tasks.create({
       name: candidate.name,
-      instruction: candidate.prompt.prompt,
+      instruction: candidate.prompt,
       supervisorSessionId: MIGRATION_SUPERVISOR,
       toolCallId,
       trigger: {
         kind: 'cron',
-        expr: candidate.matcher.cron!,
-        ...(candidate.matcher.timezone ? { timezone: candidate.matcher.timezone } : {}),
+        expr: candidate.expr,
+        ...(candidate.timezone ? { timezone: candidate.timezone } : {}),
         enabled: true,
         sourceId: candidate.id,
       },

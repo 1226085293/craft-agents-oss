@@ -1,6 +1,6 @@
 import type { EventSink, RpcServer } from '@craft-agent/server-core/transport'
 import { CLIENT_BROWSER_INVOKE } from '@craft-agent/server-core/transport'
-import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, BusyMessageDecision, BusyMessageDecisionInput, GroupChatDecision, GroupChatDecisionInput, GroupChatDecisionAction } from '@craft-agent/server-core/handlers'
+import type { ISessionManager, IBrowserPaneManager, BusyMessageDecision, BusyMessageDecisionInput, GroupChatDecision, GroupChatDecisionInput, GroupChatDecisionAction } from '@craft-agent/server-core/handlers'
 import { RemoteBrowserPaneManager } from './RemoteBrowserPaneManager'
 import { hasBranchForkMetadata, retireBranchForkMetadata } from './branch-fork-metadata'
 import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@craft-agent/server-core/handlers'
@@ -22,7 +22,6 @@ import {
 } from '@craft-agent/shared/agent/backend'
 import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, resolveMidStreamBehavior, getPersistedUiLanguage, resolveTitleLanguageName } from '@craft-agent/shared/config'
 import type { LlmConnection } from '@craft-agent/shared/config'
-import type { AutomationSystem } from '@craft-agent/shared/automations'
 import {
   applyScope,
   buildAgentSnapshot,
@@ -35,15 +34,20 @@ import {
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
 import { readJournal, formatTaskBrief, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
+
+/** 6-hex id, used for collision-free attachment names. */
+function generateShortId(): string {
+  return Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')
+}
 import { startWatchdog } from '../tasks/task-watchdog.ts'
 import { startTaskScheduler, runEventPass } from '../tasks/task-scheduler.ts'
+import { startPageRefreshScheduler } from '../pages/page-refresh-scheduler.ts'
 import { migrateAutomationCronTasks } from '../tasks/automation-migration.ts'
 import { buildJudgePrompt, parseJudgeVerdict } from '../tasks/task-judge.ts'
 import { SupervisorRuntime } from '../routing/supervisor-runtime.ts'
 import { SUPERVISOR_TURN_TIMEOUT_MS } from '@craft-agent/shared/agents/supervisor'
 import { buildAgentToolBindings } from './agent-tools-bindings.ts'
 import { kindRouting, registerAttachmentName, pickStrategyModel, type ModelRequestKind, type ModelWindow } from '@craft-agent/shared/config'
-import { generateShortId } from '@craft-agent/shared/automations/resolve-config-path'
 import type { MidStreamBehavior } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
@@ -1935,7 +1939,6 @@ export class SessionManager implements ISessionManager {
   // Last source-reload timestamp per workspace root (throttle guard)
   private lastSourceReloadAt: Map<string, number> = new Map()
   // Automation systems for workspace event automations - one per workspace (includes scheduler, diffing, and handlers)
-  private automationSystems: Map<string, AutomationSystem> = new Map()
   // Automation systems for workspace event automations - one per workspace (includes scheduler, diffing, and handlers)
   // Periodic flush of buffered LLM gateway usage records to disk (llm-usage.jsonl)
   private usageFlushTimer?: NodeJS.Timeout
@@ -2329,22 +2332,9 @@ export class SessionManager implements ISessionManager {
         this.broadcastAppearanceChanged()
       },
       onAutomationsConfigChange: () => {
-        sessionLog.info(`Automations config changed in ${workspaceId}`)
-        // Reload automations config via AutomationSystem
-        const automationSystem = this.automationSystems.get(workspaceRootPath)
-        if (automationSystem) {
-          const result = automationSystem.reloadConfig()
-          if (result.errors.length === 0) {
-            sessionLog.info(`Reloaded ${result.automationCount} automations for workspace ${workspaceId}`)
-          } else {
-            sessionLog.error(`Failed to reload automations for workspace ${workspaceId}:`, result.errors)
-          }
-        }
-        // Notify renderer to re-read automations.json
-        this.broadcastAutomationsChanged(workspaceId)
-
-        // The task system is the only scheduler: import any cron matcher the
-        // user just saved (or edited) so the schedule actually fires.
+        // The only part of that config still meaningful: cron matchers become
+        // task triggers, so an existing schedule keeps firing. The runtime and
+        // its editor are gone.
         try {
           migrateAutomationCronTasks(this.getTasks(workspaceId), workspaceRootPath)
         } catch (error) {
@@ -2463,12 +2453,6 @@ export class SessionManager implements ISessionManager {
   private broadcastSourcesChanged(workspaceId: string, sources: LoadedSource[]): void {
     if (!this.eventSink) return
     this.eventSink(RPC_CHANNELS.sources.CHANGED, { to: 'workspace', workspaceId }, workspaceId, sources)
-  }
-
-  private broadcastAutomationsChanged(workspaceId: string): void {
-    if (!this.eventSink) return
-    sessionLog.info(`Broadcasting automations changed for ${workspaceId}`)
-    this.eventSink(RPC_CHANNELS.automations.CHANGED, { to: 'workspace', workspaceId }, workspaceId)
   }
 
   private broadcastAppThemeChanged(theme: import('@craft-agent/shared/config').ThemeOverrides | null): void {
@@ -4754,17 +4738,6 @@ export class SessionManager implements ISessionManager {
       this.notifySessionCreated(workspaceId, storedSession.id)
     }
 
-    // Automations: a brand-new session is a path change with an empty oldPath.
-    this.emitPathChange(managed.workspace.rootPath, {
-      subject: 'session',
-      sessionId: managed.id,
-      sessionName: managed.name,
-      changeType: managed.projectId ? 'project' : 'folder',
-      oldPath: null,
-      newPath: describeSessionScope(managed.projectId ?? null, managed.folderId ?? null),
-      workingDirectory: managed.workingDirectory,
-    })
-
     return managedToSession(managed, isBranch ? { messages: managed.messages } : undefined)
   }
 
@@ -6666,6 +6639,8 @@ ${request.prompt}`;
   private readonly watchdogStops = new Map<string, () => void>()
   /** Per-workspace task scheduler disposers. */
   private readonly taskSchedulerStops = new Map<string, () => void>()
+  /** Per-workspace page refresh disposers. */
+  private readonly pageRefreshStops = new Map<string, () => void>()
 
   /**
    * Second acceptance layer: judge a handoff in a read-only session.
@@ -6738,6 +6713,15 @@ ${request.prompt}`;
     // Register before the loops start: the scheduler and event routing both
     // re-enter getTasks, and a second service would mean a second watchdog.
     this.taskServices.set(workspaceId, service)
+
+    // Page refreshes are scripts, not agent runs: a page with a `refresh` spec
+    // is ticked by its own loop so it never costs a session.
+    try {
+      const stop = startPageRefreshScheduler({ workspaceRootPath: workspace.rootPath })
+      this.pageRefreshStops.set(workspaceId, stop)
+    } catch (error) {
+      sessionLog.warn('failed to start the page refresh scheduler', { error })
+    }
 
     // Legacy cron automations become task triggers. The automation runtime is
     // not started anywhere, so without this an existing schedule would keep
@@ -7205,50 +7189,8 @@ ${request.prompt}`;
       // Use null on the wire for the clear signal; the renderer maps it back.
       changes: { projectId: projectId ?? null, folderId: folderId, sortOrder: undefined },
     }, managed.workspace.id)
-
-    // Automations: a session moving between folders/projects is a path change.
-    const changeType = prevProjectId !== (nextProjectId ?? null) ? 'project' : 'folder'
-    const oldPath = changeType === 'project' ? prevProjectId : prevFolderId
-    const newPath = changeType === 'project' ? (nextProjectId ?? null) : (folderId ?? null)
-    if (oldPath !== newPath) {
-      this.emitPathChange(managed.workspace.rootPath, {
-        subject: 'session',
-        sessionId,
-        sessionName: managed.name,
-        changeType,
-        oldPath: oldPath ?? null,
-        newPath: newPath ?? null,
-        workingDirectory: managed.workingDirectory,
-      })
-    }
   }
 
-  /**
-   * Emit a SessionPathChange automation event for the workspace that owns
-   * `workspaceRootPath`. No-op when the workspace has no automation system yet
-   * (nothing could be subscribed).
-   *
-   * Creation and deletion are carried by the paths: `oldPath === null` means
-   * something was created, `newPath === null` means it was deleted.
-   */
-  emitPathChange(
-    workspaceRootPath: string,
-    params: {
-      subject: 'session' | 'folder'
-      sessionId?: string
-      sessionName?: string
-      changeType: 'folder' | 'project' | 'workingDirectory'
-      oldPath: string | null
-      newPath: string | null
-      workingDirectory?: string
-    },
-  ): void {
-    const automationSystem = this.automationSystems.get(workspaceRootPath)
-    if (!automationSystem) return
-    automationSystem.emitSessionPathChange(params).catch((error) => {
-      sessionLog.error(`[Automations] Failed to emit SessionPathChange:`, error)
-    })
-  }
 
   /** Sessions living in the given folders (used by archive/delete sweeps). */
   private sessionsInFolders(scope: FolderScope, folderIds: string[]): ManagedSession[] {
@@ -7360,15 +7302,6 @@ ${request.prompt}`;
     }
 
     const config = deleteFolderConfig(workspace.rootPath, scope, folderId)
-
-    // Automations: a removed folder subtree is a folder path change with an
-    // empty newPath. Emitted once for the root of the deleted subtree.
-    this.emitPathChange(workspace.rootPath, {
-      subject: 'folder',
-      changeType: 'folder',
-      oldPath: `folder:${folderId}`,
-      newPath: null,
-    })
 
     return { deletedFolders: config.deletedFolderIds, deletedSessions: targets.map((m) => m.id), archivedSessions }
   }
@@ -8710,17 +8643,6 @@ ${request.prompt}`;
     // Notify all windows for this workspace that the session was deleted
     this.sendEvent({ type: 'session_deleted', sessionId }, managed.workspace.id)
     this.emitUnreadSummaryChanged()
-
-    // Automations: a deleted session is a path change with an empty newPath.
-    this.emitPathChange(workspaceRootPath, {
-      subject: 'session',
-      sessionId,
-      sessionName: managed.name,
-      changeType: managed.projectId ? 'project' : 'folder',
-      oldPath: describeSessionScope(managed.projectId ?? null, managed.folderId ?? null),
-      newPath: null,
-      workingDirectory: managed.workingDirectory,
-    })
 
     // Clean up attachments directory (handled by deleteStoredSession for workspace-scoped storage)
     sessionLog.info(`Deleted session ${sessionId}`)
@@ -13681,88 +13603,6 @@ ${request.prompt}`;
    * When `thinkingLevel` is omitted, `createSession` falls back to the
    * workspace default (then DEFAULT_THINKING_LEVEL).
    */
-  async executePromptAutomation(
-    input: ExecutePromptAutomationInput,
-  ): Promise<{ sessionId: string }> {
-    const {
-      workspaceId,
-      workspaceRootPath,
-      prompt,
-      permissionMode,
-      mentions,
-      llmConnection,
-      model,
-      thinkingLevel,
-      automationName,
-      telegramTopic,
-      qqChannels,
-      waitForCompletion,
-    } = input
-
-    // Warn if llmConnection was specified but doesn't resolve
-    if (llmConnection) {
-      const connection = resolveSessionConnection(llmConnection)
-      if (!connection) {
-        sessionLog.warn(`[Automations] llmConnection "${llmConnection}" not found, using default`)
-      }
-    }
-
-    // Resolve @mentions to source/skill slugs
-    const resolved = mentions ? this.resolveAutomationMentions(workspaceRootPath, mentions) : undefined
-
-    // Use automation name if provided, otherwise fall back to prompt snippet
-    const fallback = `Automation: ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}`
-    const sessionName = automationName || fallback
-
-    // Create a new session for this automation
-    const session = await this.createSession(workspaceId, {
-      name: sessionName,
-      permissionMode: permissionMode || 'safe',
-      enabledSourceSlugs: resolved?.sourceSlugs,
-      llmConnection,
-      model,
-      thinkingLevel,
-    })
-
-    // Populate triggeredBy metadata so title generation is explicitly skipped
-    // and the session is identifiable as automation-initiated after reload
-    const managed = this.sessions.get(session.id)
-    if (managed) {
-      managed.triggeredBy = { automationName, timestamp: Date.now() }
-      this.persistSession(managed)
-    }
-
-    // (session_created is emitted by createSession above; triggeredBy is set synchronously
-    // before the renderer's hydrate round-trip resolves, so it is observed.)
-
-    // Bind the new session to its Telegram forum topic if the matcher
-    // declared `telegramTopic`. Done before `sendMessage` so the first
-    // assistant tokens already route through the bound topic. Failure
-    // is logged inside the binder; the session continues unbound.
-    // Send the prompt.
-    // Test runs pass `waitForCompletion: false` so we return as soon as the
-    // session exists and the prompt is dispatched — otherwise the RPC blocks
-    // until the entire turn (including tool calls) finishes and trips the 30s
-    // client timeout (craft-agents-oss#943). The session streams live either
-    // way; a background failure surfaces in the session UI and is logged here.
-    if (waitForCompletion === false) {
-      void this.sendMessage(session.id, prompt, undefined, undefined, {
-        skillSlugs: resolved?.skillSlugs,
-      }).catch((err) => {
-        sessionLog.error('[Automations] background sendMessage failed for test run', {
-          sessionId: session.id,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      })
-      return { sessionId: session.id }
-    }
-
-    await this.sendMessage(session.id, prompt, undefined, undefined, {
-      skillSlugs: resolved?.skillSlugs,
-    })
-
-    return { sessionId: session.id }
-  }
 
   /**
    * Resolve @mentions in automation prompts to source and skill slugs

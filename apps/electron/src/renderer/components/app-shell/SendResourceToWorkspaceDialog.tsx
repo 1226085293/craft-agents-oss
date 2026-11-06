@@ -27,7 +27,7 @@ import { useWorkspaceIcons } from '@/hooks/useWorkspaceIcon'
 import { cn } from '@/lib/utils'
 import type { Workspace, ExportResourcesOptions, ResourceImportMode } from '../../../shared/types'
 
-export type SendResourceType = 'source' | 'skill' | 'automation'
+export type SendResourceType = 'source' | 'skill'
 
 export interface SendResourceToWorkspaceDialogProps {
   open: boolean
@@ -49,7 +49,6 @@ export interface SendResourceToWorkspaceDialogProps {
 const RESOURCE_TYPE_LABELS: Record<SendResourceType, { singular: string; plural: string }> = {
   source: { singular: 'source', plural: 'sources' },
   skill: { singular: 'skill', plural: 'skills' },
-  automation: { singular: 'automation', plural: 'automations' },
 }
 
 export function SendResourceToWorkspaceDialog({

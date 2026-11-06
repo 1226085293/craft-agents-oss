@@ -492,17 +492,6 @@ export const CHANNEL_MAP = {
   regeneratePageThumbnail: invoke(RPC_CHANNELS.pages.REGENERATE_THUMBNAIL),
   onPagesChanged: listener(RPC_CHANNELS.pages.CHANGED),
 
-  // Automations
-  getAutomations: invoke(RPC_CHANNELS.automations.GET),
-  testAutomation: invoke(RPC_CHANNELS.automations.TEST),
-  setAutomationEnabled: invoke(RPC_CHANNELS.automations.SET_ENABLED),
-  duplicateAutomation: invoke(RPC_CHANNELS.automations.DUPLICATE),
-  deleteAutomation: invoke(RPC_CHANNELS.automations.DELETE),
-  getAutomationHistory: invoke(RPC_CHANNELS.automations.GET_HISTORY),
-  getAutomationLastExecuted: invoke(RPC_CHANNELS.automations.GET_LAST_EXECUTED),
-  replayAutomation: invoke(RPC_CHANNELS.automations.REPLAY),
-  onAutomationsChanged: listener(RPC_CHANNELS.automations.CHANGED),
-
   // Resources (cross-workspace export/import)
   exportResources: invoke(RPC_CHANNELS.resources.EXPORT),
   importResources: invoke(RPC_CHANNELS.resources.IMPORT),

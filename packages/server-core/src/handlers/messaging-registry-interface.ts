@@ -136,32 +136,6 @@ export interface IMessagingGatewayRegistry {
   /** Unbind the workspace from its currently paired Telegram supergroup. */
   unbindWorkspaceSupergroup(workspaceId: string): Promise<void>
 
-  /**
-   * Bind a freshly-spawned automation session to a Telegram forum topic in
-   * the paired supergroup (creating the topic if it doesn't exist yet).
-   * Best-effort — returns a discriminated result instead of throwing so
-   * callers can log + continue without blocking the session.
-   */
-  bindAutomationSession(args: {
-    workspaceId: string
-    sessionId: string
-    topicName: string
-    qqChannels?: string[]
-  }): Promise<
-    | { ok: true; chatId?: string; threadId?: number; reused: boolean; boundQqGroups?: string[] }
-    | {
-        ok: false
-        reason: 'invalid-name' | 'no-supergroup' | 'no-adapter' | 'topic-create-failed' | 'no-binder-work'
-        error?: string
-      }
-  >
-
-  /**
-   * Drop a cached automation topic entry. Does not delete the Telegram topic
-   * itself. Useful when an automation is renamed/removed and the user wants
-   * the next use of the same name to create a fresh topic.
-   */
-  removeAutomationTopic(workspaceId: string, topicName: string): Promise<void>
 
   /** Unbind all bindings for a session, optionally limited to one platform. */
   unbindSession(workspaceId: string, sessionId: string, platform?: string): void

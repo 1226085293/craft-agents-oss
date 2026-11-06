@@ -56,12 +56,6 @@ export function registerFoldersHandlers(server: RpcServer, deps: HandlerDeps): v
     broadcast(workspaceId, scope)
 
     // Automations: a new folder is a folder path change with an empty oldPath.
-    deps.sessionManager.emitPathChange(workspace.rootPath, {
-      subject: 'folder',
-      changeType: 'folder',
-      oldPath: null,
-      newPath: `folder:${folder.id}`,
-    })
 
     return folder
   })
@@ -90,12 +84,6 @@ export function registerFoldersHandlers(server: RpcServer, deps: HandlerDeps): v
     broadcast(workspaceId, scope)
 
     // Automations: moving a folder reparents the whole subtree.
-    deps.sessionManager.emitPathChange(workspace.rootPath, {
-      subject: 'folder',
-      changeType: 'folder',
-      oldPath: `folder:${input.id}`,
-      newPath: input.parentId ? `folder:${input.id}/parent:${input.parentId}` : `folder:${input.id}`,
-    })
 
     return result.folder
   })
@@ -124,12 +112,6 @@ export function registerFoldersHandlers(server: RpcServer, deps: HandlerDeps): v
     )
 
     // Automations: a cross-scope move reparents the subtree into a new scope.
-    deps.sessionManager.emitPathChange(workspace.rootPath, {
-      subject: 'folder',
-      changeType: 'folder',
-      oldPath: `folder:${input.id}`,
-      newPath: toScope.projectId ? `folder:${input.id}/project:${toScope.projectId}` : `folder:${input.id}`,
-    })
 
     return result.folder
   })

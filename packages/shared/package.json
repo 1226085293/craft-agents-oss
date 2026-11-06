@@ -77,7 +77,6 @@
     "./workspaces": "./src/workspaces/index.ts",
     "./agents": "./src/agents/index.ts",
     "./tasks": "./src/tasks/index.ts",
-    "./automations/cron-matcher": "./src/automations/cron-matcher.ts",
     "./routing": "./src/routing/index.ts"
   },
   "dependencies": {

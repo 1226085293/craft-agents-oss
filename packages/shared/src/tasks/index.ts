@@ -56,6 +56,8 @@ export {
   type TaskAcceptanceVerdict,
 } from './state.ts';
 
+export { matchesCron } from './cron.ts';
+
 export {
   normalizeSpec,
   normalizeTrigger,

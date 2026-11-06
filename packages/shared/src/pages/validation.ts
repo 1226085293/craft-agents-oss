@@ -82,7 +82,7 @@ const CRON_SAMPLE_RUNS = 10;
 
 /**
  * Validate a refresh cron with the SAME engine the scheduler matches with
- * (croner, via automations/cron-matcher.ts) so "valid on write" and "fires at
+ * (croner, via tasks/cron.ts) so "valid on write" and "fires at
  * runtime" cannot disagree. Rejects unparseable expressions and timezones,
  * expressions that never fire (e.g. "0 0 30 2 *"), and anything that can run
  * more often than the minimum interval.

@@ -158,14 +158,6 @@ export interface AppShellContextType {
   /** Acknowledge that the matching ChatPage consumed a search handoff. */
   onChatSearchHandoffConsumed?: (requestId: number) => void
 
-  // Automation management
-  /** Test an automation by ID — executes its actions and returns results */
-  /** Toggle an automation's enabled state by ID */
-  /** Duplicate an automation by ID — clones config with " Copy" suffix */
-  /** Delete an automation by ID — removes from automations config */
-  /** Map of automationId → last test result */
-  /** Fetch execution history for an automation by ID */
-  /** Replay (re-execute) webhook actions for a failed automation */
 }
 
 const AppShellContext = createContext<AppShellContextType | null>(null)

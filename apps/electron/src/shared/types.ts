@@ -210,8 +210,6 @@ import type {
   BrowserInstanceInfo,
   PageWindowInfo,
   DeepLinkNavigation,
-  TestAutomationPayload,
-  TestAutomationResult,
   WindowCloseRequest,
   DirectoryListingResult,
   RemoteSessionTransferPayload,
@@ -900,23 +898,6 @@ export interface ElectronAPI {
   regeneratePageThumbnail(workspaceId: string, pageSlug: string): Promise<boolean>
   onPagesChanged(callback: (workspaceId: string, pages: import('@craft-agent/shared/pages/types').LoadedPage[]) => void): () => void
 
-  // Automations
-  getAutomations(workspaceId: string): Promise<unknown>
-
-  // Automation testing (manual trigger)
-  testAutomation(payload: TestAutomationPayload): Promise<TestAutomationResult>
-
-  // Automation state management
-  setAutomationEnabled(workspaceId: string, eventName: string, matcherIndex: number, enabled: boolean): Promise<void>
-  duplicateAutomation(workspaceId: string, eventName: string, matcherIndex: number): Promise<void>
-  deleteAutomation(workspaceId: string, eventName: string, matcherIndex: number): Promise<void>
-  getAutomationHistory(workspaceId: string, automationId: string, limit?: number): Promise<Array<{ id: string; ts: number; ok: boolean; sessionId?: string; prompt?: string; error?: string; webhook?: { method: string; url: string; statusCode: number; durationMs: number; attempts?: number; error?: string; responseBody?: string } }>>
-  getAutomationLastExecuted(workspaceId: string): Promise<Record<string, number>>
-  replayAutomation(workspaceId: string, automationId: string, eventName: string): Promise<{ results: Array<{ type: string; url: string; statusCode: number; success: boolean; error?: string; duration: number }> }>
-
-  // Automations change listener
-  onAutomationsChanged(callback: (workspaceId: string) => void): () => void
-
   // Language
   changeLanguage(lang: string): Promise<void>
 
@@ -1119,14 +1100,6 @@ export interface SourceFilter {
 }
 
 /**
- * Automation type filter for automations navigation
- */
-export interface AutomationFilter {
-  kind: 'type'
-  automationType: 'scheduled' | 'event' | 'agentic'
-}
-
-/**
  * Sources navigation state
  */
 export interface SourcesNavigationState {
@@ -1155,16 +1128,6 @@ export interface SettingsNavigationState {
 export interface SkillsNavigationState {
   navigator: 'skills'
   details: { type: 'skill'; skillSlug: string } | null
-  rightSidebar?: RightSidebarPanel
-}
-
-/**
- * Automations navigation state
- */
-export interface AutomationsNavigationState {
-  navigator: 'automations'
-  filter?: AutomationFilter
-  details: { type: 'automation'; automationId: string } | null
   rightSidebar?: RightSidebarPanel
 }
 
@@ -1223,7 +1186,6 @@ export type NavigationState =
   | SourcesNavigationState
   | SettingsNavigationState
   | SkillsNavigationState
-  | AutomationsNavigationState
   | ProjectsNavigationState
   | PagesNavigationState
   | EventsNavigationState
@@ -1248,10 +1210,6 @@ export const isSettingsNavigation = (
 export const isSkillsNavigation = (
   state: NavigationState
 ): state is SkillsNavigationState => state.navigator === 'skills'
-
-export const isAutomationsNavigation = (
-  state: NavigationState
-): state is AutomationsNavigationState => state.navigator === 'automations'
 
 export const isProjectsNavigation = (
   state: NavigationState
@@ -1284,12 +1242,6 @@ export const getNavigationStateKey = (state: NavigationState): string => {
       return `skills/skill/${state.details.skillSlug}`
     }
     return 'skills'
-  }
-  if (state.navigator === 'automations') {
-    if (state.details?.type === 'automation') {
-      return `automations/automation/${state.details.automationId}`
-    }
-    return 'automations'
   }
   if (state.navigator === 'projects') {
     if (state.details?.type === 'project') {

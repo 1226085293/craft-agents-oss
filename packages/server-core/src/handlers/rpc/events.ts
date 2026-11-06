@@ -81,32 +81,12 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
         toMeta(event),
       );
     }, _deps.sessionManager?.createEventDispatchTarget?.(), (event: EventMeta) => {
-      // Tier 3: nobody subscribed. Rules run first inside the runtime; only what
-      // the rules cannot decide reaches the supervisor.
-      const manager = _deps.sessionManager as unknown as {
-        getSupervisorRuntime?: (id: string) => {
-          routeUnclaimed: (event: {
-            id: string;
-            source: string;
-            type: string;
-            title: string;
-            summary?: string;
-          }) => Promise<'routed' | 'queued' | 'ignored'>;
-        };
-      } | undefined;
-      const runtime = manager?.getSupervisorRuntime?.(workspaceId);
-      if (!runtime) return;
-      void runtime
-        .routeUnclaimed({
-          id: event.id,
-          source: event.source,
-          type: event.type,
-          title: event.title,
-          summary: event.summary,
-        })
-        .catch(() => {
-          // Routing an event must never take the ingest path down.
-        });
+      // Nobody subscribed. Rules run first; unmatched events fall through to
+      // the supervisor's merged backlog. This callback is also installed during
+      // app warm-up, before any events RPC request occurs.
+      void _deps.sessionManager?.routeUnclaimedEvent?.(workspaceId, event).catch(() => {
+        // Routing an event must never take the ingest path down.
+      });
     });
   };
 

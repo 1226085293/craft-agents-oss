@@ -27,6 +27,7 @@ import type {
 } from '@craft-agent/shared/protocol'
 import type { SessionBundle, DispatchMode, FolderScope } from '@craft-agent/shared/sessions'
 import type { EventSink } from '../transport'
+import type { EventMeta } from '@craft-agent/shared/events/event-store.ts'
 
 export type BusyMessageDecisionAction = 'reply' | 'ignore' | 'queue' | 'abort'
 
@@ -142,19 +143,6 @@ export interface ISessionManager {
   archiveFolder(workspaceId: string, scope: FolderScope, folderId: string): Promise<{ folderIds: string[]; sessionIds: string[]; archived: string[] }>
   unarchiveFolder(workspaceId: string, scope: FolderScope, folderId: string): Promise<{ restored: string[] }>
   deleteFolder(workspaceId: string, scope: FolderScope, folderId: string): Promise<{ deletedFolders: string[]; deletedSessions: string[]; archivedSessions: string[] }>
-  /** Emit a SessionPathChange automation event (creation = empty oldPath, deletion = empty newPath). */
-  emitPathChange(
-    workspaceRootPath: string,
-    params: {
-      subject: 'session' | 'folder'
-      sessionId?: string
-      sessionName?: string
-      changeType: 'folder' | 'project' | 'workingDirectory'
-      oldPath: string | null
-      newPath: string | null
-      workingDirectory?: string
-    },
-  ): void
   archiveProjectSessions(projectId: string, archived: boolean): Promise<{ affected: string[] }>
   deleteProjectSessions(projectId: string): Promise<{ deleted: string[] }>
   setSessionConnection(sessionId: string, connectionSlug: string): Promise<void>
@@ -213,6 +201,11 @@ export interface ISessionManager {
   ): Promise<boolean>
   /** Event Center: true when the user has messages waiting for this session. */
   hasQueuedUserMessage?(sessionId: string): boolean
+  /** Event Center: route events with no subscriber to rules, then the supervisor. */
+  routeUnclaimedEvent?(
+    workspaceId: string,
+    event: Pick<EventMeta, 'id' | 'source' | 'type' | 'title' | 'summary'>,
+  ): Promise<void>
   /** Event Center: the delivery target handed to the dispatcher. */
   createEventDispatchTarget?(): {
     deliver: (sessionId: string, params: {
@@ -459,55 +452,7 @@ export interface ISessionManager {
    */
   refreshGatewayRuntime(): Promise<void>
   completeAuthRequest(sessionId: string, result: AuthResult): Promise<void>
-  executePromptAutomation(input: ExecutePromptAutomationInput): Promise<{ sessionId: string }>
-
-  /**
-   * Install a callback invoked from `executePromptAutomation` after a session
-   * is created when the matcher declared `telegramTopic`. Wired by the
-   * messaging-gateway bootstrap so the SessionManager doesn't need to import
-   * the messaging package (avoids a circular package-level import).
-   *
-   * The callback should be best-effort: failures must not block the session.
-   */
-  setAutomationBinder?(
-    fn: (input: { workspaceId: string; sessionId: string; topicName: string; qqChannels?: string[] }) => Promise<void>,
-  ): void
-
   /** Inject messaging registry for session-scoped messaging tools. */
   setMessagingRegistry?(registry: IMessagingGatewayRegistry): void
 }
 
-/**
- * Input for executePromptAutomation. Options-object form replaces the
- * previous positional-args signature once the param list grew past
- * readability — new optional fields (thinkingLevel, future cwd/permissions
- * overrides) can be added without churn at every call site.
- */
-export interface ExecutePromptAutomationInput {
-  workspaceId: string
-  workspaceRootPath: string
-  prompt: string
-  permissionMode?: PermissionMode
-  mentions?: string[]
-  llmConnection?: string
-  model?: string
-  /** Override the workspace default thinking level for the spawned session. */
-  thinkingLevel?: ThinkingLevel
-  automationName?: string
-  /**
-   * Optional Telegram forum-topic name. When set and the workspace has a
-   * paired supergroup, the new session is bound to a topic of this name
-   * (created on first use). Silently ignored when prerequisites aren't met.
-   */
-  telegramTopic?: string
-  /** QQ group channelIds to bind the new session to (e.g. ["group:94A54DAF..."]). */
-  qqChannels?: string[]
-  /**
-   * When `false`, `executePromptAutomation` returns as soon as the session is
-   * created and the prompt is dispatched, instead of awaiting the whole turn.
-   * Used by the automation **Test** action so a long run (tools / >30s output)
-   * doesn't trip the RPC client timeout (craft-agents-oss#943). The session
-   * still streams live and run errors are logged. Defaults to awaiting completion.
-   */
-  waitForCompletion?: boolean
-}

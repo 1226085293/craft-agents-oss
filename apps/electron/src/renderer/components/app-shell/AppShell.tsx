@@ -126,7 +126,6 @@ import {
   isSkillsNavigation,
   isProjectsNavigation,
   isPagesNavigation,
-  isAutomationsNavigation,
   isEventsNavigation,
   isTasksNavigation,
   type NavigationState,
@@ -139,9 +138,6 @@ import { EventsListenersPanel } from "../events/EventsListenersPanel"
 import { SkillsListPanel } from "./SkillsListPanel"
 import { ProjectsListPanel } from "./ProjectsListPanel"
 import { useProjects } from "@/hooks/useProjects"
-import { useAutomations } from "@/hooks/useAutomations"
-import { APP_EVENTS, AGENT_EVENTS, AUTOMATION_TYPE_TO_FILTER_KIND } from "@/components/automations/types"
-import { AutomationsListPanel } from "@/components/automations/AutomationsListPanel"
 import { usePages } from "@/hooks/usePages"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { PanelHeader } from "./PanelHeader"
@@ -337,7 +333,6 @@ function AppShellContent({
   const sessionFilter = sessionsContext?.filter ?? null
 
   // Automations type filter (scheduled / event / agentic), null when unfiltered.
-  const automationFilter = isAutomationsNavigation(navState) ? (navState.filter ?? null) : null
 
   // Pages behaves the same way: both the library grid and an open page render
   // full-width in the content area — there is no pages navigator list.
@@ -737,29 +732,6 @@ function AppShellContent({
       toast.error(t('projectsList.deleteFailed'))
     }
   }, [activeWorkspace, t, navState, navigate])
-
-  const {
-    automations,
-    handleTestAutomation,
-    handleToggleAutomation,
-    handleDuplicateAutomation,
-    handleDeleteAutomation,
-  } = useAutomations(activeWorkspaceId)
-
-  // Handler for selecting an automation (preserves the active type filter)
-  const handleAutomationSelect = React.useCallback((automationId: string) => {
-    const type = isAutomationsNavigation(navState) ? navState.filter?.automationType : undefined
-    navigate(routes.view.automations({ automationId, type }))
-  }, [navState])
-  const automationTypeCounts = React.useMemo(() => {
-    const counts = { scheduled: 0, event: 0, agentic: 0 }
-    for (const automation of automations) {
-      if (automation.event === 'SchedulerTick') counts.scheduled++
-      else if ((APP_EVENTS as string[]).includes(automation.event)) counts.event++
-      else if ((AGENT_EVENTS as string[]).includes(automation.event)) counts.agentic++
-    }
-    return counts
-  }, [automations])
 
   // Folder tree follows the active scope: a project jump view or the same
   // project's mode-2 detail route shows that project's own tree, backed by its
@@ -2029,17 +2001,6 @@ function AppShellContent({
       return t("sidebar.allPages")
     }
 
-    // Automations navigator
-    if (isAutomationsNavigation(navState)) {
-      if (!automationFilter) return t("sidebar.allAutomations")
-      switch (automationFilter.automationType) {
-        case 'scheduled': return t("sidebar.scheduled")
-        case 'event': return t("sidebar.eventBased")
-        case 'agentic': return t("sidebar.agentic")
-        default: return t("sidebar.allAutomations")
-      }
-    }
-
     // Settings navigator
     if (isSettingsNavigation(navState)) return t("sidebar.settings")
 
@@ -2795,20 +2756,6 @@ function AppShellContent({
                 onDeleteSkill={handleDeleteSkill}
                 selectedSkillSlug={isSkillsNavigation(navState) && navState.details?.type === 'skill' ? navState.details.skillSlug : null}
                 usageStats={usageStats}
-              />
-            )}
-            {isAutomationsNavigation(navState) && activeWorkspaceId && (
-              /* Automations List */
-              <AutomationsListPanel
-                automations={automations}
-                automationFilter={automationFilter ? { kind: AUTOMATION_TYPE_TO_FILTER_KIND[automationFilter.automationType] ?? 'all' } : undefined}
-                onAutomationClick={handleAutomationSelect}
-                onTestAutomation={handleTestAutomation}
-                onToggleAutomation={handleToggleAutomation}
-                onDuplicateAutomation={handleDuplicateAutomation}
-                onDeleteAutomation={handleDeleteAutomation}
-                selectedAutomationId={isAutomationsNavigation(navState) && navState.details ? navState.details.automationId : null}
-                workspaceRootPath={activeWorkspace?.rootPath}
               />
             )}
             {isProjectsNavigation(navState) && activeWorkspaceId && (

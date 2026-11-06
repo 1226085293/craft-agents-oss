@@ -11,8 +11,7 @@
  */
 
 import { createLogger } from '@craft-agent/shared/utils';
-import { matchesCron } from '@craft-agent/shared/automations/cron-matcher';
-import { eventTriggerMatches, type Task } from '@craft-agent/shared/tasks';
+import { eventTriggerMatches, matchesCron, type Task } from '@craft-agent/shared/tasks';
 import type { TaskService } from './task-service.ts';
 
 const log = createLogger('task-scheduler');

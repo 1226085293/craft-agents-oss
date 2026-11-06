@@ -140,6 +140,14 @@ export interface SessionConfig {
   role?: 'supervisor' | 'worker';
   /** Task this session works on (set when the supervisor delegated it). */
   taskId?: string;
+  /**
+   * Tools this session may use, from the task it was spawned for.
+   *
+   * Narrowing only: `allow` filters what the role already permits and `deny`
+   * removes from it. Set once at creation and held, so the tool table the model
+   * sees cannot change mid-conversation.
+   */
+  toolScope?: { allow?: string[]; deny?: string[] };
   /** Delegation depth: supervisor 0 → worker 1 → sub-worker 2 (hard cap). */
   spawnDepth?: number;
   /** 数据源选择器模式：auto（默认）/ only（仅这些）/ exclude（排除这些） */

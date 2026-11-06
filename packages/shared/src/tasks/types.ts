@@ -65,6 +65,17 @@ export interface TaskSpec {
   skills?: string[];
   /** Model override for the worker. */
   model?: string;
+  /**
+   * Tools this task's worker may use.
+   *
+   * A task is a scope: the same worker role can be given a narrower tool set per
+   * job ("this one only reads and greps") without inventing a new role or
+   * editing a global category file. It can only narrow — asking for `bash` on a
+   * supervisor task does nothing, because the role check runs first.
+   */
+  tools?: string[];
+  /** Tools to withhold from this task even though the role allows them. */
+  deniedTools?: string[];
   /** Strategy group override for the worker. */
   strategy?: string;
   /**

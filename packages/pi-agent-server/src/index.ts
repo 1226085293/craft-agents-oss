@@ -236,6 +236,14 @@ interface InitMessage {
    * routing mistake turns into a deleted file.
    */
   sessionRole?: string;
+  /**
+   * Task-level tool scope from the session that spawned this run.
+   *
+   * Filters both the SDK built-ins and the session-tool proxies. Narrowing only:
+   * the role list is applied first, so a scope can never grant what the role
+   * denies.
+   */
+  sessionToolScope?: { allow?: string[]; deny?: string[] };
   defenseGuardrails?: { maxResumes?: number; maxIterations?: number; maxDurationMs?: number; verifyMinSteps?: number; verifyMinDurationMs?: number };
 }
 
@@ -1809,7 +1817,9 @@ async function createPiSession(): Promise<AgentSession> {
   // strip was cosmetic and a supervisor could still run shell commands
   // (observed: a supervisor grep'ing the whole workspace for an event id until
   // the background handoff killed it). Read-only inspection stays.
-  const builtinAllowed = new Set(builtinToolNamesForRole(initConfig?.sessionRole));
+  const builtinAllowed = new Set(
+    builtinToolNamesForRole(initConfig?.sessionRole, initConfig?.sessionToolScope),
+  );
   const allBuiltinDefs = [
     createReadToolDefinition(cwd),
     // Shell timeout policy: the Pi SDK's bash `timeout` unit is SECONDS, but

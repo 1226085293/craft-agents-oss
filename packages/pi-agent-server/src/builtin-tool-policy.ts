@@ -25,9 +25,24 @@ export const FULL_BUILTIN_TOOLS: readonly string[] = [
   'ls',
 ];
 
-/** Names a role is allowed to see, in assembly order. */
-export function builtinToolNamesForRole(role: string | undefined): readonly string[] {
-  return role === 'supervisor' ? SUPERVISOR_BUILTIN_TOOLS : FULL_BUILTIN_TOOLS;
+/**
+ * Names a role may see, after applying the session's task scope.
+ *
+ * The scope narrows, never widens: a worker task that asks for `bash` on a
+ * supervisor session still gets nothing, because the role list is applied first.
+ * This is the same rule the session-tool table follows, so "what can this
+ * worker do" has one answer whichever table you read.
+ */
+export function builtinToolNamesForRole(
+  role: string | undefined,
+  scope?: { allow?: readonly string[]; deny?: readonly string[] },
+): readonly string[] {
+  const allowed = role === 'supervisor' ? SUPERVISOR_BUILTIN_TOOLS : FULL_BUILTIN_TOOLS;
+  return allowed.filter((name) => {
+    if (scope?.allow && !scope.allow.includes(name)) return false;
+    if (scope?.deny?.includes(name)) return false;
+    return true;
+  });
 }
 
 /** Whether a specific built-in is permitted for a role. */

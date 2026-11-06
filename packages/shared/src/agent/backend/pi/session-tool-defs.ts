@@ -26,11 +26,29 @@ const BACKGROUNDABLE_TOOLS = new Set([
   'transform_data',
 ]);
 
-export function getSessionToolProxyDefs(role?: 'supervisor' | 'worker'): SessionToolProxyDef[] {
+/**
+ * Tool scope declared by the task a session was spawned for.
+ *
+ * `allow` narrows what the role already permits; `deny` removes specific tools
+ * from that set. Neither can widen: the role check runs inside
+ * `getToolDefsAsJsonSchema` first, so a task asking for `bash` on a supervisor
+ * task still gets nothing.
+ */
+export interface SessionToolScope {
+  allow?: readonly string[]
+  deny?: readonly string[]
+}
+
+export function getSessionToolProxyDefs(
+  role?: 'supervisor' | 'worker',
+  scope?: SessionToolScope,
+): SessionToolProxyDef[] {
   const defs = getToolDefsAsJsonSchema({
     prefix: 'mcp__session__',
     includeDeveloperFeedback: FEATURE_FLAGS.developerFeedback,
     ...(role ? { role } : {}),
+    ...(scope?.allow ? { allowedTools: scope.allow } : {}),
+    ...(scope?.deny ? { deniedTools: scope.deny } : {}),
   });
 
   return defs.map((def) => {

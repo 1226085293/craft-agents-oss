@@ -188,6 +188,15 @@ export interface CreateSessionOptions {
   role?: 'supervisor' | 'worker'
   /** Task this session works on, when created by the supervisor. */
   taskId?: string
+  /**
+   * Tools this session may use, from the task that spawned it.
+   *
+   * Resolved once at session creation and held for its lifetime — the tool table
+   * must not change mid-session, both because a model's cached prompt would stop
+   * matching and because "what this worker could do" has to be answerable later.
+   * Narrows the role's allowance; never widens it.
+   */
+  toolScope?: { allow?: string[]; deny?: string[] }
   /** Delegation depth, to stop unbounded supervisor→worker→worker chains. */
   spawnDepth?: number
   /**

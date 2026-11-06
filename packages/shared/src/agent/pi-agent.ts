@@ -1316,6 +1316,9 @@ export class PiAgent extends BaseAgent {
       // Role drives built-in tool pruning in the subprocess: a supervisor must
       // coordinate, not execute.
       sessionRole: this.config.session?.role,
+      // Task-level tool scope, applied to both the session-tool table and the SDK
+      // built-ins in the subprocess so the two cannot disagree.
+      ...(this.config.session?.toolScope ? { sessionToolScope: this.config.session.toolScope } : {}),
       providerType: this.config.providerType,
       authType: this.config.authType,
       workspaceId: this.config.workspace.id,
@@ -1356,7 +1359,12 @@ export class PiAgent extends BaseAgent {
     // These tools (SubmitPlan, config_validate, source auth, call_llm, etc.)
     // are executed in the main process when the LLM calls them.
     this.assertBackendSessionToolParity();
-    let sessionToolDefs = getSessionToolProxyDefs(this.config.session?.role === 'supervisor' ? 'supervisor' : 'worker');
+    let sessionToolDefs = getSessionToolProxyDefs(
+      this.config.session?.role === 'supervisor' ? 'supervisor' : 'worker',
+      // Resolved at session creation; never re-read mid-session, or the model's
+      // cached prompt would stop matching the tools it was told about.
+      this.config.session?.toolScope,
+    );
 
     // Hide `browser_tool` when the user has disabled the built-in browser
     // tool, so the advertised tool set matches the configured capability.

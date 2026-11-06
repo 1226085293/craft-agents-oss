@@ -101,3 +101,43 @@ describe('session tool filtering helpers', () => {
     }
   });
 });
+
+describe('session tool scope', () => {
+  /**
+   * A task declares which tools its worker needs. The scope narrows what the
+   * role already allows — it must never be a way to hand a supervisor hands, or
+   * a worker something the role denies.
+   */
+  it('narrows the worker table to the declared tools', () => {
+    const names = getSessionToolNames({ role: 'worker', allowedTools: ['list_events', 'get_event'] })
+    expect([...names].sort()).toEqual(['get_event', 'list_events'])
+  });
+
+  it('cannot grant a worker a supervisor-only tool', () => {
+    const names = getSessionToolNames({ role: 'worker', allowedTools: ['dispatch', 'ask_user'] })
+    expect(names.size).toBe(0)
+  });
+
+  it('cannot grant a supervisor an execution tool', () => {
+    // `bash` is not in the supervisor allowlist, so asking for it does nothing.
+    const names = getSessionToolNames({ role: 'supervisor', allowedTools: ['bash'] })
+    expect(names.has('bash')).toBe(false)
+  });
+
+  it('removes explicitly denied tools without listing the rest', () => {
+    const withoutDeny = getSessionToolNames({ role: 'worker' })
+    const withDeny = getSessionToolNames({ role: 'worker', deniedTools: ['get_event'] })
+    expect(withoutDeny.has('get_event')).toBe(true)
+    expect(withDeny.has('get_event')).toBe(false)
+    expect(withDeny.size).toBe(withoutDeny.size - 1)
+  });
+
+  it('deny wins over allow', () => {
+    const names = getSessionToolNames({
+      role: 'worker',
+      allowedTools: ['get_event', 'list_events'],
+      deniedTools: ['get_event'],
+    })
+    expect([...names]).toEqual(['list_events'])
+  });
+});

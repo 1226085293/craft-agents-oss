@@ -588,6 +588,20 @@ export interface SessionToolFilterOptions {
   includeDeveloperFeedback?: boolean;
   /** Session role; omitted = worker (an ordinary session). */
   role?: SessionRole;
+  /**
+   * Tools this particular session may use, from the task it was spawned for.
+   *
+   * A scope, not a whitelist: it can only narrow what the role already allows,
+   * never widen it. A task must not be able to hand a worker `bash` by asking
+   * for it, and must not be able to grant a supervisor hands either.
+   */
+  allowedTools?: readonly string[];
+  /**
+   * Tools to remove for this session even though the role allows them.
+   * Cheaper to express than listing everything else, and reads as the intent:
+   * "this worker does not need the browser".
+   */
+  deniedTools?: readonly string[];
 }
 
 /**
@@ -655,9 +669,20 @@ export function getSessionToolDefs(options?: SessionToolFilterOptions): SessionT
       return false;
     }
     // Explicit per-tool roles win; otherwise the role allowlists above decide.
-    if (def.roles) return def.roles.includes(role);
-    if (role === 'supervisor') return SUPERVISOR_TOOL_NAMES.has(def.name);
-    return !SUPERVISOR_ONLY_TOOL_NAMES.has(def.name);
+    const roleAllows = def.roles
+      ? def.roles.includes(role)
+      : role === 'supervisor'
+        ? SUPERVISOR_TOOL_NAMES.has(def.name)
+        : !SUPERVISOR_ONLY_TOOL_NAMES.has(def.name);
+    if (!roleAllows) return false;
+
+    // The session scope narrows the role, and only narrows: an entry here can
+    // never re-enable something the role above denied.
+    const allowed = options?.allowedTools;
+    if (allowed && !allowed.includes(def.name)) return false;
+    const denied = options?.deniedTools;
+    if (denied?.includes(def.name)) return false;
+    return true;
   });
 }
 

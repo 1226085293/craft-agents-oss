@@ -1413,6 +1413,14 @@ export interface ManagedSession {
   /** 'supervisor' coordinates; 'worker' (default) does the work. */
   role?: 'supervisor' | 'worker'
   taskId?: string
+  /**
+   * Tools this session may use, resolved once when it was created.
+   *
+   * Held on the session rather than re-read from the task on every turn: the
+   * tool table must not change mid-session, or the model's cached prompt stops
+   * matching and "what could this worker do" becomes unanswerable after the fact.
+   */
+  toolScope?: { allow?: string[]; deny?: string[] }
   /** Last time this session wrote a task heartbeat (runtime-only throttle). */
   lastTaskHeartbeatAt?: number
   spawnDepth?: number
@@ -4804,6 +4812,9 @@ export class SessionManager implements ISessionManager {
       branchFromSdkTurnId: validatedBranch?.branchFromSdkTurnId,
       branchSeedApplied: validatedBranch ? validatedBranch.branchContextStrategy === 'sdk-fork' : undefined,
       messagesLoaded: !isBranch,  // Branched sessions: lazy-load messages from JSONL
+      // Resolved once, held for the session's life: the tool table must not move
+      // under the model mid-conversation.
+      ...(options?.toolScope ? { toolScope: options.toolScope } : {}),
     })
 
     // Eagerly load messages for branched sessions so the renderer gets the full
@@ -5385,6 +5396,7 @@ export class SessionManager implements ISessionManager {
         agentSnapshot: managed.agentSnapshot,
         role: managed.role,
         taskId: managed.taskId,
+        ...(managed.toolScope ? { toolScope: managed.toolScope } : {}),
         spawnDepth: managed.spawnDepth,
       }
 
@@ -7098,6 +7110,16 @@ ${request.prompt}`;
       ...(spec?.sources?.length ? { enabledSourceSlugs: spec.sources } : {}),
       ...(spec?.model ? { model: spec.model } : {}),
       ...(spec?.strategy ? { strategy: spec.strategy } : {}),
+      // A task is a scope: this worker gets exactly the tools the job declares,
+      // within what its role already allows.
+      ...(spec?.tools?.length || spec?.deniedTools?.length
+        ? {
+            toolScope: {
+              ...(spec?.tools?.length ? { allow: spec.tools } : {}),
+              ...(spec?.deniedTools?.length ? { deny: spec.deniedTools } : {}),
+            },
+          }
+        : {}),
     })
     void this.sendMessage(created.id, formatTaskBrief(task, { reason })).catch((error) => {
       sessionLog.warn('failed to send task brief', { taskId: task.id, error })

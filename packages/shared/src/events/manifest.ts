@@ -42,6 +42,16 @@ export interface PluginAction {
    * the event's origin, which the model should not have to invent.
    */
   repliesToOrigin?: boolean;
+  /**
+   * Expose this action as a model tool, not just a host capability.
+   *
+   * The distinction matters for prompt stability: a tool is assembled into the
+   * session's tool table **once, at session creation**, and never re-evaluated
+   * mid-session. Toggling a plugin therefore affects the next session, not the
+   * current turn — changing a running session's tool table would invalidate the
+   * prompt cache and leave the model describing tools it no longer has.
+   */
+  asTool?: boolean;
 }
 
 export interface ListenerRestartPolicy {

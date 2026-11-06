@@ -132,7 +132,7 @@ describe('plan editing', () => {
 
   it('reports an unknown step id instead of silently doing nothing', () => {
     const result = applyPlanPatch([], { id: '9.9', remove: true }, NOW);
-    expect(result.ok).toBeUndefined();
+    expect(result.changed).toBe(false);
     expect(result.error).toContain('9.9');
   });
 });

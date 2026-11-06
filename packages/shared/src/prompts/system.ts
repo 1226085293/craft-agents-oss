@@ -211,6 +211,8 @@ export function getWorkingDirectoryContext(
     parts.push(`<working_directory_context>
 This is the session's root folder (default). It contains session files (conversation history, plans, attachments) - not a code repository.
 You can access any files the user attaches here. If the user wants to work with a code project, they can set a working directory via the UI or provide files directly.
+
+The full transcript of this conversation is \`session.jsonl\` in this folder. Compaction keeps a summary, not every detail — when you need something the summary dropped (an exact command, a full error, a rejected approach), grep it back instead of guessing: \`grep -n "keyword" session.jsonl | head -50\`. Never read the whole file; it is routinely tens of megabytes.
 </working_directory_context>`);
   } else {
     // Check if bash cwd differs from working directory (changed mid-session)

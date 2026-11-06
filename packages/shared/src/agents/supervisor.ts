@@ -171,14 +171,21 @@ export class EventBacklog {
 /** One-line descriptor the supervisor gets instead of a full event body. */
 export function formatBacklogNudge(items: Array<{ id: string; summary: string }>): string {
   if (items.length === 0) return '';
+  // Name the tool explicitly. The summary alone is not enough to act on, and a
+  // supervisor that has to discover `get_event` by trial and error spends its
+  // whole turn cap on category expansion instead of handling the event.
+  const readHint = '读全文：call_tool get_event({"id": "<上面的 id>"})（分层模式下先展开 tools_workspace）';
   if (items.length === 1) {
     const only = items[0];
-    if (only) return `有一条未处理的事件：${only.summary}（id: ${only.id}）`;
+    if (only) {
+      return `有一条未处理的事件：${only.summary}（id: ${only.id}）\n${readHint}`;
+    }
   }
   return [
     `有 ${items.length} 条未处理的事件：`,
     ...items.slice(0, 10).map((item) => `- ${item.summary}（id: ${item.id}）`),
     items.length > 10 ? `…以及 ${items.length - 10} 条` : '',
+    readHint,
   ]
     .filter(Boolean)
     .join('\n');

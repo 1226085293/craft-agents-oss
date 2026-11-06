@@ -592,6 +592,14 @@ export const SUPERVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
   'task_handoff',
   'task_verify',
   'SubmitPlan',
+  // Tier 3 of the event funnel delivers "有一条未处理的事件（id: …）" to this
+  // session, so it must be able to read what it was handed. Denying the read
+  // tools left the supervisor hunting a tool that did not exist in its own
+  // table until the 90s turn cap closed the turn — the event was never seen.
+  // Read-only on purpose: subscribing stays with the user and the RPC surface.
+  'get_event',
+  'list_events',
+  'list_event_subscriptions',
 ]);
 
 /** Tools a worker never sees, even though they exist in the table. */

@@ -81,4 +81,23 @@ describe('session tool filtering helpers', () => {
     expect(blockedPrefixed.has('mcp__session__source_oauth_trigger')).toBe(true);
     expect(blockedPrefixed.has('mcp__session__spawn_session')).toBe(true);
   });
+
+  it('gives a supervisor the tools it needs to read the event it was handed', () => {
+    // The third tier of the event funnel tells the supervisor "有一条未处理的事件
+    // （id: …）". Without these it can neither see nor read that event, and the
+    // turn dies on the 90s cap having done nothing.
+    const names = getSessionToolNames({ role: 'supervisor' });
+
+    expect(names.has('get_event')).toBe(true);
+    expect(names.has('list_events')).toBe(true);
+    expect(names.has('list_event_subscriptions')).toBe(true);
+  });
+
+  it('still keeps hands off a supervisor: no bash, write, edit or MCP', () => {
+    const names = getSessionToolNames({ role: 'supervisor' });
+
+    for (const forbidden of ['bash', 'write', 'edit', 'read', 'browser_tool', 'script_sandbox']) {
+      expect(names.has(forbidden)).toBe(false);
+    }
+  });
 });

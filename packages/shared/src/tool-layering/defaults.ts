@@ -32,8 +32,16 @@ export const DEFAULT_TOOL_CATEGORIES: ToolCategoriesConfig = {
     {
       name: 'workspace',
       metaToolName: 'tools_workspace',
-      description: '会话与任务管理：会话信息、归档、后台任务。',
+      description: '会话与任务管理：会话信息、归档、后台任务、事件读取。',
       tools: [
+        // Event reads live in this bucket rather than their own: the spec caps
+        // the default set at six categories, and an uncategorised tool lands in
+        // `misc` — where a supervisor handed "有一条未处理的事件" cannot guess to
+        // look. `call_tool` refuses a folded tool whose category was not
+        // expanded, so the turn burns its cap without ever reading the event.
+        'get_event',
+        'list_events',
+        'list_event_subscriptions',
         'get_session_info',
         'archive_session',
         'list_sessions',

@@ -8,18 +8,8 @@
   "types": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./transport": "./src/transport/index.ts",
-    "./runtime": "./src/runtime/index.ts",
-    "./handlers": "./src/handlers/index.ts",
     "./bootstrap": "./src/bootstrap/index.ts",
-    "./model-fetchers": "./src/model-fetchers/index.ts",
     "./domain": "./src/domain/index.ts",
-    "./services": "./src/services/index.ts",
-    "./handlers/rpc": "./src/handlers/rpc/index.ts",
-    "./handlers/rpc/*": "./src/handlers/rpc/*.ts",
-    "./sessions": "./src/sessions/index.ts",
-    "./tasks": "./src/tasks/index.ts",
-    "./webui": "./src/webui/index.ts",
     "./events": {
       "types": "./src/events/index.ts",
       "default": "./src/events/index.ts"
@@ -27,7 +17,29 @@
     "./events/*": {
       "types": "./src/events/*.ts",
       "default": "./src/events/*.ts"
-    }
+    },
+    "./handlers": "./src/handlers/index.ts",
+    "./handlers/rpc": "./src/handlers/rpc/index.ts",
+    "./handlers/rpc/*": "./src/handlers/rpc/*.ts",
+    "./model-fetchers": "./src/model-fetchers/index.ts",
+    "./runtime": "./src/runtime/index.ts",
+    "./runtime/hook-audit": {
+      "types": "./src/runtime/hook-audit.ts",
+      "default": "./src/runtime/hook-audit.ts"
+    },
+    "./runtime/scope-consistency": {
+      "types": "./src/runtime/scope-consistency.ts",
+      "default": "./src/runtime/scope-consistency.ts"
+    },
+    "./runtime/workspace-scope": {
+      "types": "./src/runtime/workspace-scope.ts",
+      "default": "./src/runtime/workspace-scope.ts"
+    },
+    "./services": "./src/services/index.ts",
+    "./sessions": "./src/sessions/index.ts",
+    "./tasks": "./src/tasks/index.ts",
+    "./transport": "./src/transport/index.ts",
+    "./webui": "./src/webui/index.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

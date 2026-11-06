@@ -31,6 +31,19 @@ function warmUpEventCenter(deps: HandlerDeps): void {
     try {
       const { getWorkspaces } = await import('@craft-agent/shared/config')
       const { getEventService } = await import('@craft-agent/server-core/events')
+
+      // A hook declared optional and never provided is silent: nothing throws,
+      // the feature simply never runs. Check the ones with user-visible
+      // consequences once, at boot, so the wiring defect is named instead of
+      // waiting for someone to notice an event never arrived.
+      try {
+        const { checkSessionHooks } = await import('@craft-agent/server-core/runtime/hook-audit')
+        const audit = checkSessionHooks(deps.sessionManager as unknown as Record<string, unknown>)
+        if (!audit.ok) console.warn(`[hooks] ${audit.summary}`)
+      } catch {
+        // The audit must never be the reason startup fails.
+      }
+
       for (const workspace of getWorkspaces()) {
         const service = await getEventService(
           workspace.id,

@@ -199,10 +199,11 @@ export const SpawnSessionSchema = z.object({
     .string()
     .optional()
     .describe('Agent (role profile) the new session runs as. Omit to inherit the workspace default; use list of agents from help mode.'),
-  role: z
-    .enum(['worker', 'supervisor'])
-    .optional()
-    .describe('Session role. Workers do the work; only a supervisor may dispatch. Default: worker.'),
+  // `role` is deliberately absent. It used to accept 'supervisor', which let a
+  // supervisor spawn a second supervisor — two sessions draining the same event
+  // backlog, each convinced it was the coordinator. Role is a fact about how the
+  // system built the session, not something the model gets to choose. A spawned
+  // session is always a worker.
   llmConnection: z.string().optional().describe('Connection slug (e.g., "anthropic-api", "codex")'),
   model: z.string().optional().describe('Model ID override'),
   enabledSourceSlugs: z.array(z.string()).optional().describe('Source slugs to enable in the new session'),

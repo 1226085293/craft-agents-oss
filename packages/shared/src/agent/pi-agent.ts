@@ -60,6 +60,7 @@ function isStallErrorMessage(message: string): boolean {
 import { resolveToolTimeoutMs, withToolExecutionTimeout } from './tool-timeouts.ts';
 
 // System prompt for Craft Agent context
+import { getSupervisorSystemPrompt } from '../prompts/supervisor-prompt.ts'
 import { getSystemPrompt } from '../prompts/system.ts';
 import { buildEventsBlock } from '../events/prompt.ts';
 import { getCoAuthorPreference } from '../config/appearance.ts';
@@ -3873,21 +3874,33 @@ ${agentSnapshot.persona.trim()}
         : undefined;
       const allowedSkillSlugs =
         agentSnapshot?.skills?.mode === 'allowlist' ? agentSnapshot.skills.slugs : undefined;
-      const systemPrompt = getSystemPrompt(
-        undefined, // pinnedPreferencesPrompt
-        this.config.debugMode,
-        this.config.workspace.rootPath,
-        this.config.session?.workingDirectory,
-        this.config.systemPromptPreset,
-        'Craft Agents Backend', // backendName
-        getCoAuthorPreference(), // respect user's includeCoAuthoredBy preference (#576)
-        projectContext ?? undefined,
-        // Event Center: enabled listeners, so the agent knows what it can
-        // subscribe to. '' when nothing is enabled.
-        buildEventsBlock(this.config.workspace.rootPath),
-        personaBlock,
-        allowedSkillSlugs,
-      );
+      // A supervisor gets its own document, not a trimmed copy of the main one.
+      // The main prompt is ~26k chars of browser/MCP/Pages/preview/document-tool
+      // guidance, and the supervisor's tool table contains none of it — a prompt
+      // that documents a capability invites the model to use it, so it kept
+      // trying to do the work itself instead of handing it out.
+      const isSupervisor = this.config.session?.role === 'supervisor'
+      const systemPrompt = isSupervisor
+        ? getSupervisorSystemPrompt({
+            workspaceRootPath: this.config.workspace.rootPath,
+            personaBlock,
+            eventsBlock: buildEventsBlock(this.config.workspace.rootPath),
+          })
+        : getSystemPrompt(
+            undefined, // pinnedPreferencesPrompt
+            this.config.debugMode,
+            this.config.workspace.rootPath,
+            this.config.session?.workingDirectory,
+            this.config.systemPromptPreset,
+            'Craft Agents Backend', // backendName
+            getCoAuthorPreference(), // respect user's includeCoAuthoredBy preference (#576)
+            projectContext ?? undefined,
+            // Event Center: enabled listeners, so the agent knows what it can
+            // subscribe to. '' when nothing is enabled.
+            buildEventsBlock(this.config.workspace.rootPath),
+            personaBlock,
+            allowedSkillSlugs,
+          );
 
       // Build context from sources
       const sourceContext = this.sourceManager.formatSourceState();

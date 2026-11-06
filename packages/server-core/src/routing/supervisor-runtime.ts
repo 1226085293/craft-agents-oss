@@ -22,7 +22,8 @@ import {
   newTurnState,
   type SupervisorTurnState,
 } from '@craft-agent/shared/agents/supervisor';
-import { loadRoutes, matchRoute, formatRouteInstruction } from '@craft-agent/shared/routing';
+import { loadRoutes, matchRoute, formatRouteInstruction, ruleParallelism } from '@craft-agent/shared/routing';
+import { DispatchQueue } from './dispatch-queue.ts';
 
 const log = createLogger('supervisor');
 
@@ -48,6 +49,10 @@ export interface SupervisorRuntimeDeps {
     instruction: string;
     taskId?: string;
     spawnDepth: number;
+    /** Working directory the worker must run in (from a routing rule). */
+    cwd?: string;
+    /** Skills the worker must follow (from a routing rule). */
+    skills?: string[];
   }) => Promise<{ sessionId: string }>;
   /** Send a message into an existing session (wakes it if idle). */
   sendToSession: (sessionId: string, text: string) => Promise<void>;
@@ -73,6 +78,15 @@ export class SupervisorRuntime {
   private turnState: SupervisorTurnState = newTurnState();
   /** Cached on-duty supervisor id, refreshed lazily. */
   private onDuty?: string;
+  /**
+   * Per-rule concurrency ceiling.
+   *
+   * Keyed by rule name and capped by `rule.to.parallel`. A second event of the
+   * same kind waits instead of starting a second worker, which is what keeps a
+   * burst of related events from multiplying into parallel agents.
+   */
+  private readonly dispatchQueue = new DispatchQueue((key) => this.ruleCaps.get(key) ?? 1);
+  private readonly ruleCaps = new Map<string, number>();
 
   constructor(private readonly deps: SupervisorRuntimeDeps) {}
 
@@ -123,6 +137,37 @@ export class SupervisorRuntime {
         await this.deps.sendToSession(targetSession, text);
         return 'routed';
       }
+
+      // Rule names an agent with no live session: start one, under this rule's
+      // concurrency ceiling. `parallel: 1` (the default) means the next event of
+      // the same kind queues rather than fanning out.
+      if (decision.rule.to.agentId) {
+        const key = decision.rule.name;
+        this.ruleCaps.set(key, ruleParallelism(decision.rule));
+        const outcome = await this.dispatchQueue.submit(key, {
+          run: async () => {
+            try {
+              const created = await this.deps.spawnWorker({
+                name: decision.rule.name,
+                agentId: decision.rule.to.agentId,
+                scope: key,
+                instruction: text,
+                spawnDepth: 1,
+                ...(decision.rule.to.cwd ? { cwd: decision.rule.to.cwd } : {}),
+                ...(decision.rule.to.skills?.length ? { skills: decision.rule.to.skills } : {}),
+              });
+              return created.sessionId;
+            } catch (error) {
+              log.warn(`[supervisor] rule "${key}" failed to start a worker`, {
+                error: error instanceof Error ? error.message : String(error),
+              });
+              return null;
+            }
+          },
+        });
+        if (outcome === 'started' || outcome === 'queued') return 'routed';
+      }
+
       // Rule named an agent with no live session: fall through to the supervisor
       // rather than silently dropping an event the user asked to handle.
       log.warn(`[supervisor] rule "${decision.rule.name}" has no live session; falling back`);
@@ -287,6 +332,24 @@ export class SupervisorRuntime {
   /** Exposed for tests and for the turn-timeout guard. */
   get pendingEvents(): number {
     return this.backlog.size;
+  }
+
+  /** Release the slot a finished worker held, draining any queued sibling. */
+  releaseDispatch(sessionId: string): void {
+    this.dispatchQueue.release(sessionId);
+  }
+
+  /** Release slots for workers whose session disappeared. */
+  sweepDispatches(): void {
+    this.dispatchQueue.sweep((sessionId) => {
+      const session = this.deps.getSession(sessionId);
+      return Boolean(session && session.isProcessing);
+    });
+  }
+
+  /** Per-rule active/queued counts, for diagnostics. */
+  dispatchSnapshot(): Record<string, { active: number; waiting: number; cap: number }> {
+    return this.dispatchQueue.snapshot();
   }
 
   get dispatchesThisTurn(): number {

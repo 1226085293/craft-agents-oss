@@ -3,4 +3,10 @@
  */
 
 export type { RouteDecision, RouteRule, RoutableEvent } from './rules.ts';
-export { formatRouteInstruction, getRoutesPath, loadRoutes, matchRoute } from './rules.ts';
+export {
+  formatRouteInstruction,
+  getRoutesPath,
+  loadRoutes,
+  matchRoute,
+  ruleParallelism,
+} from './rules.ts';

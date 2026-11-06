@@ -6896,6 +6896,9 @@ ${request.prompt}`;
           role: 'worker',
           taskId: params.taskId,
           spawnDepth: params.spawnDepth,
+          // A rule may pin the worker to a directory; without it the worker would
+          // inherit whatever directory the supervisor happens to sit in.
+          ...(params.cwd ? { workingDirectory: params.cwd } : {}),
         })
         await this.sendMessage(created.id, params.instruction)
         return { sessionId: created.id }

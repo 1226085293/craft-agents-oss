@@ -28,6 +28,20 @@ export interface RouteRule {
     sessionId?: string;
     /** Start a task instead of waking a session — the task owns execution. */
     taskId?: string;
+    /**
+     * Working directory for a worker this rule spawns.
+     * A rule that names an agent with no live session starts one; that worker
+     * must not inherit whatever directory the supervisor happens to sit in.
+     */
+    cwd?: string;
+    /** Skills the spawned worker must follow (the SOP for this kind of event). */
+    skills?: string[];
+    /**
+     * How many workers this rule may keep running at once. Default 1: a second
+     * event of the same kind queues instead of fanning out, which is what keeps
+     * "three colleagues commented" from becoming three parallel agents.
+     */
+    parallel?: number;
   };
   /** One-line instruction prepended to the event when it is delivered. */
   ask?: string;
@@ -103,24 +117,44 @@ export function loadRoutes(workspaceRoot: string): RouteRule[] {
     const parsed = JSON.parse(readFileSync(path, 'utf-8'));
     if (!Array.isArray(parsed)) return [];
     return parsed.filter((rule): rule is RouteRule => {
-      return Boolean(
-        rule &&
-          typeof rule === 'object' &&
-          typeof (rule as RouteRule).name === 'string' &&
-          (rule as RouteRule).when &&
-          typeof (rule as RouteRule).when.source === 'string' &&
-          (rule as RouteRule).to &&
-          (typeof (rule as RouteRule).to.agentId === 'string' ||
-            typeof (rule as RouteRule).to.sessionId === 'string' ||
-            typeof (rule as RouteRule).to.taskId === 'string'),
-      );
+      if (!rule || typeof rule !== 'object') return false;
+      const candidate = rule as RouteRule;
+      if (typeof candidate.name !== 'string') return false;
+      if (!candidate.when || typeof candidate.when.source !== 'string') return false;
+      const to = candidate.to;
+      if (!to) return false;
+      const hasTarget =
+        typeof to.agentId === 'string' ||
+        typeof to.sessionId === 'string' ||
+        typeof to.taskId === 'string';
+      if (!hasTarget) return false;
+      if (to.cwd !== undefined && typeof to.cwd !== 'string') return false;
+      if (to.skills !== undefined && !Array.isArray(to.skills)) return false;
+      if (to.parallel !== undefined && typeof to.parallel !== 'number') return false;
+      return true;
     });
   } catch {
     return [];
   }
 }
 
-/** The line prepended to a delivered event, so the worker knows its instruction. */
+/**
+ * The text prepended to a delivered event, so the worker knows its instruction.
+ *
+ * cwd and skills travel with the instruction because a worker started from a
+ * rule has no other way to learn them: the rule is the only place the user
+ * wrote "where" and "per which SOP".
+ */
 export function formatRouteInstruction(rule: RouteRule): string {
-  return rule.ask?.trim() ? rule.ask.trim() : `按「${rule.name}」这条规则处理。`;
+  const lines = [rule.ask?.trim() ? rule.ask.trim() : `按「${rule.name}」这条规则处理。`];
+  if (rule.to.cwd) lines.push(`工作目录：${rule.to.cwd}`);
+  if (rule.to.skills?.length) lines.push(`必须遵循的技能：${rule.to.skills.join('、')}`);
+  return lines.join('\n');
+}
+
+/** Concurrency cap for a rule; 1 when unspecified (never unbounded by accident). */
+export function ruleParallelism(rule: RouteRule): number {
+  const raw = rule.to.parallel;
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 1) return 1;
+  return Math.floor(raw);
 }

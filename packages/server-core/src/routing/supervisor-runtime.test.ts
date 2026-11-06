@@ -76,11 +76,15 @@ const event = (overrides: Partial<Parameters<SupervisorRuntime['routeUnclaimed']
 });
 
 describe('unclaimed events', () => {
-  it('drops events no rule mentions', async () => {
+  it('queues events no rule mentions for the supervisor', async () => {
     const ws = workspace();
     const h = harness(ws);
-    expect(await h.runtime.routeUnclaimed(event({ source: 'unknown' }))).toBe('ignored');
-    expect(h.sent).toHaveLength(0);
+    // There is no opt-out tier: an unclaimed event reaches the supervisor even
+    // when routes.json does not exist at all — that was the gap the delivery
+    // test caught (ignore used to drop it silently).
+    expect(await h.runtime.routeUnclaimed(event({ source: 'unknown' }))).toBe('queued');
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].text).toContain('未处理的事件');
   });
 
   it('queues undecidable events and nudges the supervisor once', async () => {
@@ -101,7 +105,7 @@ describe('unclaimed events', () => {
     const h = harness(ws, { processeing: true });
     await h.runtime.routeUnclaimed(event({ source: 'no-rule' }));
     expect(h.sent).toHaveLength(0);
-    expect(h.runtime.pendingEvents).toBe(0); // ignored, not queued
+    expect(h.runtime.pendingEvents).toBe(1); // parked, drained on idle
   });
 
   it('drains the backlog when the supervisor goes idle', async () => {

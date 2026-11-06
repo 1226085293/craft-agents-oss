@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { formatRouteInstruction, getRoutesPath, loadRoutes, matchRoute, type RouteRule } from '../rules.ts';
+import { formatRouteInstruction, getRoutesPath, loadRoutes, matchRoute, ruleParallelism, type RouteRule } from '../rules.ts';
 
 const dirs: string[] = [];
 function workspace(): string {
@@ -97,5 +97,38 @@ describe('instruction', () => {
 
   it('falls back to the rule name', () => {
     expect(formatRouteInstruction(rule({ ask: undefined }))).toContain('QQ 邮箱的账单');
+  });
+
+  it('carries cwd and skills into the instruction', () => {
+    const text = formatRouteInstruction({
+      name: 'issue-triage',
+      when: { source: 'github' },
+      to: { agentId: 'triager', cwd: 'E:/repos/app', skills: ['triage', 'git'] },
+      ask: '分诊这个 issue',
+    });
+    expect(text).toContain('E:/repos/app');
+    expect(text).toContain('triage、git');
+  });
+
+  it('omits the cwd/skills lines when the rule does not set them', () => {
+    const text = formatRouteInstruction(rule());
+    expect(text).not.toContain('工作目录');
+    expect(text).not.toContain('必须遵循的技能');
+  });
+});
+
+describe('parallelism', () => {
+  it('defaults to one so a rule never fans out by accident', () => {
+    expect(ruleParallelism(rule())).toBe(1);
+  });
+
+  it('honours an explicit parallel value', () => {
+    expect(ruleParallelism({ ...rule(), to: { agentId: 'a', parallel: 3 } })).toBe(3);
+  });
+
+  it('floors fractions and rejects nonsense', () => {
+    expect(ruleParallelism({ ...rule(), to: { agentId: 'a', parallel: 2.7 } })).toBe(2);
+    expect(ruleParallelism({ ...rule(), to: { agentId: 'a', parallel: 0 } })).toBe(1);
+    expect(ruleParallelism({ ...rule(), to: { agentId: 'a', parallel: -5 } })).toBe(1);
   });
 });

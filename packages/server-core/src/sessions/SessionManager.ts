@@ -4172,10 +4172,18 @@ export class SessionManager implements ISessionManager {
       sessionLog.warn('agents migration failed; continuing with legacy defaults', { error })
     }
 
+    // The supervisor's group is workspace-wide infrastructure, not a per-agent
+    // default: one on-duty session serves every event in the workspace, so the
+    // setting belongs to the LLM gateway config next to miniStrategy and
+    // compactionStrategy. An explicit caller value still wins.
+    const llmConfigForDefaults = gatewayRouteDeps.config ?? loadLlmConfig()
+    const supervisorStrategy =
+      options?.role === 'supervisor' ? llmConfigForDefaults?.supervisorStrategy : undefined
+
     const resolvedDefaults = resolveSessionDefaults({
       workspaceRoot: workspaceRootPath,
       agentId: options?.agentId,
-      strategy: options?.strategy,
+      strategy: options?.strategy ?? supervisorStrategy,
       model: null,
       permissionMode: options?.permissionMode,
       thinkingLevel: normalizeThinkingLevel(options?.thinkingLevel),
@@ -4185,7 +4193,7 @@ export class SessionManager implements ISessionManager {
         permissionMode: wsConfig?.defaults?.permissionMode,
         thinkingLevel: wsConfig?.defaults?.thinkingLevel,
       },
-      enabledStrategies: listEnabledStrategyIds(gatewayRouteDeps.config ?? loadLlmConfig()),
+      enabledStrategies: listEnabledStrategyIds(llmConfigForDefaults),
     })
 
     const resolvedAgent = resolvedDefaults.agent

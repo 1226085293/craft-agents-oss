@@ -178,6 +178,12 @@ export function reconcileStrategyRefs(config: LlmConfigShape): LlmConfigShape {
   const compactionStrategy = config.compactionStrategy && known.has(config.compactionStrategy)
     ? config.compactionStrategy
     : undefined
+  // A dangling supervisor id would be rejected by the validator on every later
+  // save, with the error pointing at a field the user cannot see is wrong.
+  const supervisorStrategy =
+    config.supervisorStrategy && known.has(config.supervisorStrategy)
+      ? config.supervisorStrategy
+      : undefined
   // Same repair for the new-session default: a dangling id would seed every new
   // session with a group that no longer exists, and the validator would then
   // reject every later save.
@@ -187,7 +193,7 @@ export function reconcileStrategyRefs(config: LlmConfigShape): LlmConfigShape {
     delete repaired.fallbackStrategyId
     return repaired
   })
-  return { ...config, clientKeys, miniStrategy, compactionStrategy, strategies }
+  return { ...config, clientKeys, miniStrategy, compactionStrategy, supervisorStrategy, strategies }
 }
 
 /**

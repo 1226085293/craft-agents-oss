@@ -330,6 +330,29 @@ export function validateLlmConfig(input: unknown): string[] {
     }
   }
 
+  // supervisorStrategy — deliberately NOT a hard error, unlike the other pinned
+  // groups. A dangling id here took the whole gateway down: the config failed
+  // validation, `loadLlmConfig` returned null, and every session reported
+  // "gateway_unconfigured". Losing the routing for one optional role must not
+  // cost the user their entire LLM setup, so a bad value is dropped (the
+  // supervisor then follows the default group) instead of rejecting the file.
+  if (cfg.supervisorStrategy !== undefined) {
+    if (typeof cfg.supervisorStrategy !== 'string' || !cfg.supervisorStrategy) {
+      delete (cfg as Record<string, unknown>).supervisorStrategy;
+    } else {
+      const ids = new Set(
+        Array.isArray(cfg.strategies)
+          ? (cfg.strategies as Record<string, unknown>[]).filter(isPlainObject).map(s => String(s.id))
+          : [],
+      );
+      if (ids.size > 0 && !ids.has(cfg.supervisorStrategy)) {
+        // Dropped on read: the settings page then shows "follow the default",
+        // which is exactly what the runtime does.
+        delete (cfg as Record<string, unknown>).supervisorStrategy;
+      }
+    }
+  }
+
   // clientKeys
   if (cfg.clientKeys !== undefined) {    if (!Array.isArray(cfg.clientKeys)) errors.push('clientKeys 必须是数组');
     else {

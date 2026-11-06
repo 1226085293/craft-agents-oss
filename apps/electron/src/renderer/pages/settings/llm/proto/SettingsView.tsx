@@ -121,6 +121,37 @@ export function SettingsView(props: Props): React.JSX.Element {
       </div>
 
       <div className="sec-title" style={{ marginTop: 20 }}>
+        督导
+      </div>
+      <div className="card">
+        <div className="row spread" style={{ padding: '8px 0' }}>
+          <div style={{ minWidth: 0 }}>
+            <span className="small">策略组</span>
+            <div className="xs muted">
+              督导会话是工作区级别的协调者，全工作区只有一个——它读事件、分派任务，大多数时候的判断是“这条不用管”。让它单独走一个便宜快的组，可以不占真正干活的模型的额度。留空则跟随默认策略组。
+            </div>
+          </div>
+          <div style={{ flex: '0 0 200px', width: 200 }}>
+            <ProtoSelect
+              value={props.config.supervisorStrategy ?? ''}
+              options={[{ value: '', label: '跟随默认策略组' }, ...strategyOptions]}
+              onChange={(v) => {
+                void props.onSave({
+                  ...props.config,
+                  supervisorStrategy: v || undefined,
+                }).then((ok) => {
+                  if (ok) shell.toast(v ? `督导将使用「${strategyOptions.find((s) => s.value === v)?.label ?? v}」` : '督导已改为跟随默认策略组')
+                })
+              }}
+            />
+          </div>
+        </div>
+        <div className="xs muted" style={{ paddingBottom: 8 }}>
+          切换后对之后新建的督导会话生效；已存在的督导会话仍用创建时选定的策略组。
+        </div>
+      </div>
+
+      <div className="sec-title" style={{ marginTop: 20 }}>
         总览 KPI
       </div>
       <div className="card">

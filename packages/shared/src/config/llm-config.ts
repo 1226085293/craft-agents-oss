@@ -465,6 +465,19 @@ export interface LlmConfig {
    * rather than failing the turn.
    */
   compactionStrategy?: string;
+
+  /**
+   * Strategy group the supervisor (督导) session runs on.
+   *
+   * The supervisor is workspace-wide infrastructure, not a per-agent choice: one
+   * on-duty session reads events and mostly decides "this is chatter, skip it".
+   * Inheriting the default group meant every such judgement was billed on
+   * whatever model the work sessions use.
+   *
+   * Empty (absent) means "follow the workspace default" — the behaviour before
+   * this setting existed, and what an unset field has to keep meaning.
+   */
+  supervisorStrategy?: string;
 }
 
 /**

@@ -295,6 +295,12 @@ export interface LlmConfigShape {
    * config package.
    */
   compactionStrategy?: string
+  /**
+   * Strategy group the supervisor (督导) session runs on. Workspace-wide, not
+   * per agent: there is one on-duty supervisor and it mostly sorts events.
+   * Absent means "follow the workspace default".
+   */
+  supervisorStrategy?: string
   /** Strategy group new sessions inherit when the caller names none. */
   usage?: {
     persist?: boolean

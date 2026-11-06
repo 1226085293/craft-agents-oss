@@ -37,6 +37,13 @@ function warmUpEventCenter(deps: HandlerDeps): void {
           workspace.rootPath,
           undefined,
           deps.sessionManager?.createEventDispatchTarget?.(),
+          (event) => {
+            // The ingest listener is live immediately after warm-up, so wire
+            // the supervisor fallback before any Events-page RPC occurs.
+            void deps.sessionManager?.routeUnclaimedEvent?.(workspace.id, event).catch(() => {
+              // Event delivery must never prevent the ingest endpoint from accepting events.
+            })
+          },
         )
         await service.startAllEnabled(workspace.rootPath)
       }

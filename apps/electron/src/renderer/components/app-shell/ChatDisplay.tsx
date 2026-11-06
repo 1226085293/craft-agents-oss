@@ -2627,6 +2627,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
               // sidebar uses, so a new role appears without a reload.
               agentOptions,
               agentId: session.agentId,
+              // The role picker is hidden for a supervisor. Passing the role is
+              // what makes that possible: without it `sessionRole` sat unused
+              // and the condition could never fire, so the picker showed up on
+              // a session whose role is fixed anyway.
+              sessionRole: session.role,
               onAgentChange: handleAgentChange,
               structuredInput,
               onStructuredResponse: handleStructuredResponse,

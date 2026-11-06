@@ -31,6 +31,30 @@ export interface AgentSelectorProps {
   className?: string
 }
 
+/**
+ * Whether the role picker should be rendered.
+ *
+ * One function rather than an inline condition at each call site, because the
+ * condition was quietly lost once already: `50d3fb35` dropped the supervisor
+ * check from both call sites and left `sessionRole` destructured but unused, so
+ * the picker appeared on a session whose role is fixed at creation. Nothing
+ * failed, because a prop nobody reads is still a valid prop.
+ *
+ * Two independent reasons to hide it:
+ *  - no roles exist, so there is nothing to pick;
+ *  - the session is a supervisor. `updateSessionAgent` swaps the profile and
+ *    never `role`, so picking here cannot turn a supervisor into a normal
+ *    session — showing a control that cannot do the thing it appears to do is
+ *    exactly the misreading this hides.
+ */
+export function shouldShowAgentPicker(options: {
+  agentCount: number
+  sessionRole?: 'supervisor' | 'worker'
+}): boolean {
+  if (options.agentCount === 0) return false
+  return options.sessionRole !== 'supervisor'
+}
+
 export function AgentSelector({
   agents,
   value,

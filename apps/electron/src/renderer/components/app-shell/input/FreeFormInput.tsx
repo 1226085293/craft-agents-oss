@@ -86,7 +86,7 @@ import {
 import { WorkingDirectorySelector, formatPathForDisplay } from './WorkingDirectorySelector'
 import { CompactPermissionModeSelector } from './CompactPermissionModeSelector'
 import { StrategySelector, type StrategyOption } from './StrategySelector'
-import { AgentSelector, type AgentOption } from './AgentSelector'
+import { AgentSelector, shouldShowAgentPicker, type AgentOption } from './AgentSelector'
 
 import { ContextUsageRing } from './ContextUsageRing'
 import {
@@ -2160,14 +2160,13 @@ export function FreeFormInput({
           {/* Strategy + next model: the gateway picks the upstream, so this is
               the only model-shaped control the composer offers. */}
           {/* Role first: it decides the persona and the tool/scope ceilings the
-              rest of this composer inherits. Shown on every session — a
-              supervisor keeps its coordination role but can still run as a
-              different profile. */}
+              rest of this composer inherits. Visibility is decided in
+              `shouldShowAgentPicker` so the supervisor rule has one home. */}
           <AgentSelector
             agents={agentOptions ?? []}
             value={agentId ?? ''}
             onChange={(id) => onAgentChange?.(id)}
-            hidden={!agentOptions?.length}
+            hidden={!shouldShowAgentPicker({ agentCount: agentOptions?.length ?? 0, sessionRole })}
           />
           {enableCompactModelPicker && (
             <StrategySelector
@@ -2454,7 +2453,7 @@ export function FreeFormInput({
               agents={agentOptions ?? []}
               value={agentId ?? ''}
               onChange={(id) => onAgentChange?.(id)}
-              hidden={!agentOptions?.length}
+              hidden={!shouldShowAgentPicker({ agentCount: agentOptions?.length ?? 0, sessionRole })}
             />
           )}
           {!compactMode && (

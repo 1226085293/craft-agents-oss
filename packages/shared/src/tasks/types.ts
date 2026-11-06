@@ -110,6 +110,14 @@ export interface TaskStats {
   lockSessionId?: string;
   /** When the current run started (epoch ms). */
   runStartedAt?: number;
+  /**
+   * Last time a trigger actually started a run.
+   *
+   * The scheduler compares this against the cron expression on startup: every
+   * matching minute in between happened while the app was closed, and the gap
+   * is recorded rather than silently forgotten.
+   */
+  lastTriggeredAt?: number;
 }
 
 /** Why a task is currently paused (null while running/backlog). */

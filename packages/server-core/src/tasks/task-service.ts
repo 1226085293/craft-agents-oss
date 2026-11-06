@@ -229,6 +229,7 @@ export class TaskService {
         lastHeartbeatAt: now,
         lockSessionId: sessionId,
         runStartedAt: now,
+        lastTriggeredAt: now,
       },
       updatedAt: now,
     };
@@ -238,6 +239,35 @@ export class TaskService {
     saveTask(this.root, next);
     appendJournal(this.root, id, { type: 'run_started', at: now, data: { sessionId } });
     return { ok: true, task: next };
+  }
+
+  /**
+   * Record that one or more cron minutes elapsed while the app was closed.
+   *
+   * Journal only: the task itself is untouched, because the policy is skip —
+   * losing the evidence would be the only real mistake.
+   */
+  recordCronGap(
+    id: string,
+    gap: {
+      missed: number;
+      firstMissedAt?: number;
+      lastMissedAt?: number;
+      expr: string;
+      at: number;
+    },
+  ): void {
+    appendJournal(this.root, id, {
+      type: 'cron_missed',
+      at: gap.at,
+      data: {
+        missed: gap.missed,
+        firstMissedAt: gap.firstMissedAt,
+        lastMissedAt: gap.lastMissedAt,
+        expr: gap.expr,
+        policy: 'skip',
+      },
+    });
   }
 
   /**

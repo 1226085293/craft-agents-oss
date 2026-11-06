@@ -95,12 +95,85 @@ async function startTask(deps: TaskRunnerDeps, task: Task, reason: string): Prom
 /** Default cadence: cron has minute resolution, so check once a minute. */
 export const TASK_SCHEDULER_INTERVAL_MS = 60_000;
 
+/** How far back a startup scan will look, in minutes (one week). */
+export const MAX_CATCHUP_SCAN_MINUTES = 7 * 24 * 60;
+
+/**
+ * Record cron minutes that elapsed while the app was not running.
+ *
+ * The policy is **skip and record**, never catch up:
+ *  - catching up would run a day's worth of "scan the issues" jobs at launch,
+ *    each spawning a worker, which is exactly the flood the design avoids;
+ *  - and "sometimes catch up, sometimes skip" is worse than either, because the
+ *    user cannot reason about when the job last ran.
+ *
+ * So a gap becomes a journal line (`cron_missed`) with a count, and the next
+ * real tick runs normally. Recording it is what makes the skip auditable.
+ */
+export function recordMissedCronRuns(deps: TaskRunnerDeps, now: Date): number {
+  let recorded = 0;
+  const nowMs = now.getTime();
+  // The minute in progress is not "missed" yet — it is being evaluated.
+  const currentMinuteStart = Math.floor(nowMs / 60_000) * 60_000;
+
+  for (const task of deps.listTasks()) {
+    const trigger = task.trigger;
+    if (!trigger || trigger.kind !== 'cron' || !trigger.enabled) continue;
+    if (task.status === 'completed' || task.status === 'canceled') continue;
+
+    const last = task.stats?.lastTriggeredAt;
+    // A task that never ran has no baseline: its first run is the next tick, not
+    // a gap. Treating "created but never fired" as missed would report a gap on
+    // every newly created task.
+    if (typeof last !== 'number' || last <= 0) continue;
+
+    const fromMinute = Math.floor(last / 60_000) * 60_000;
+    const scanStart = Math.max(fromMinute, currentMinuteStart - MAX_CATCHUP_SCAN_MINUTES * 60_000);
+    if (scanStart >= currentMinuteStart) continue;
+
+    let missed = 0;
+    let firstMissed: number | undefined;
+    let lastMissed: number | undefined;
+    for (let at = scanStart; at < currentMinuteStart; at += 60_000) {
+      const minute = new Date(at);
+      // The minute the run actually started on is not a miss.
+      if (at === fromMinute) continue;
+      if (!matchesCron(trigger.expr, trigger.timezone, minute)) continue;
+      missed += 1;
+      firstMissed ??= at;
+      lastMissed = at;
+    }
+    if (missed === 0) continue;
+
+    deps.tasks.recordCronGap(task.id, {
+      missed,
+      firstMissedAt: firstMissed,
+      lastMissedAt: lastMissed,
+      expr: trigger.expr,
+      at: nowMs,
+    });
+    recorded += 1;
+  }
+
+  return recorded;
+}
+
 /**
  * Start the cron loop. Returns a disposer.
  *
  * `unref` so a pending timer never keeps the host process alive on shutdown.
  */
 export function startTaskScheduler(deps: TaskRunnerDeps, intervalMs = TASK_SCHEDULER_INTERVAL_MS): () => void {
+  // Before the loop starts, account for the minutes that passed while the app was
+  // closed. Deterministic skip; the gap is journaled so "why didn't it run at 9?"
+  // has an answer.
+  try {
+    const recorded = recordMissedCronRuns(deps, new Date());
+    if (recorded > 0) log.info(`[task-scheduler] recorded ${recorded} cron gap(s) as skipped`);
+  } catch (error) {
+    log.warn('[task-scheduler] missed-schedule scan failed', { error });
+  }
+
   let lastMinute = '';
   const timer = setInterval(() => {
     const now = new Date();

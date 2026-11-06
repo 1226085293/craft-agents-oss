@@ -13,14 +13,12 @@
 
 import * as React from 'react'
 import {
-  AlertTriangle,
   Blocks,
   Bot,
   Mail,
   MessageCircle,
   MessagesSquare,
   Plus,
-  Radio,
   RefreshCw,
   Send,
   Terminal,
@@ -58,19 +56,45 @@ export interface EventsListenersPanelProps {
   className?: string
 }
 
-function StateDot({ listener }: { listener: ListenerDto }): React.ReactElement {
+/**
+ * Status dot, top-right of each card.
+ *
+ *   gray   — switched off by the user
+ *   green  — enabled and running
+ *   amber  — enabled but not working (starting, unresponsive, or failed)
+ *
+ * A plugin that fails to start is NOT auto-disabled: giving up after the retry
+ * budget keeps `enabled` true, so it keeps reading as amber rather than gray.
+ * Gray must mean "I turned this off", never "it broke".
+ */
+function StatusDot({ listener }: { listener: ListenerDto }): React.ReactElement {
   const state = listener.status.state
-  if (listener.errors.length > 0) {
-    return <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0" aria-label="配置错误" />
-  }
-  if (!listener.enabled) {
-    return <Radio className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" aria-label="已停用" />
-  }
-  if (state === 'running') return <Radio className="h-3.5 w-3.5 text-primary shrink-0" aria-label="运行中" />
-  if (state === 'starting') return <Radio className="h-3.5 w-3.5 text-amber-500 shrink-0" aria-label="启动中" />
-  if (state === 'degraded') return <Radio className="h-3.5 w-3.5 text-amber-500 shrink-0" aria-label="无响应" />
-  if (state === 'failed') return <Radio className="h-3.5 w-3.5 text-destructive shrink-0" aria-label="异常" />
-  return <Radio className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" aria-label="已停止" />
+  const tone = !listener.enabled || (listener.status.state === 'stopped' && !listener.enabled)
+    ? 'off'
+    : state === 'running'
+      ? 'ok'
+      : 'bad'
+
+  const className =
+    tone === 'ok'
+      ? 'bg-emerald-500'
+      : tone === 'bad'
+        ? 'bg-amber-500'
+        : 'bg-muted-foreground/30'
+
+  const title = !listener.enabled
+    ? '已停用'
+    : state === 'running'
+      ? '运行中'
+      : state === 'starting'
+        ? '启动中'
+        : state === 'degraded'
+          ? '无响应'
+          : state === 'failed'
+            ? '启动失败'
+            : '已停止'
+
+  return <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${className}`} title={title} aria-label={title} />
 }
 
 export function EventsListenersPanel({
@@ -126,13 +150,13 @@ export function EventsListenersPanel({
         <button
           type="button"
           onClick={() => void load()}
-          className="absolute right-2 top-2 z-10 h-6 w-6 inline-flex items-center justify-center rounded-md bg-background/80 backdrop-blur hover:bg-foreground/5 text-muted-foreground hover:text-foreground"
+          className="absolute right-3 top-2.5 z-10 h-6 w-6 inline-flex items-center justify-center rounded-md bg-background/80 backdrop-blur hover:bg-foreground/5 text-muted-foreground hover:text-foreground"
           title="刷新"
         >
           <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
         </button>
 
-        <div className="h-full overflow-y-auto p-2 pt-9 space-y-1.5">
+        <div className="h-full overflow-y-auto p-2 space-y-1.5">
         {error && <div className="px-1 py-2 text-xs text-destructive">{error}</div>}
 
         {!error && listeners.length === 0 && (
@@ -160,14 +184,16 @@ export function EventsListenersPanel({
                   : 'border-border/60 hover:bg-foreground/2 hover:border-border'
               }`}
             >
-              <div className="flex items-center gap-2">
-                <StateDot listener={listener} />
+              <div className="flex items-center gap-2 pr-3">
                 <PluginIcon name={listener.icon} className="h-4 w-4 shrink-0 text-muted-foreground" />
                 <span className="text-sm font-medium truncate">{listener.name}</span>
                 <span className="text-[11px] text-muted-foreground shrink-0 tabular-nums">
                   v{listener.version}
                 </span>
               </div>
+              <span className="absolute right-2.5 top-2.5">
+                <StatusDot listener={listener} />
+              </span>
               {listener.description && (
                 <p className="text-[12px] leading-4 text-foreground/55 line-clamp-2 mt-1">
                   {listener.description}

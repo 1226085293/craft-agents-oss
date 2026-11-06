@@ -48,23 +48,12 @@
   ],
   "config": {
     "type": "object",
-    "properties": {
-      "phoneNumber": {
-        "type": "string",
-        "title": "手机号",
-        "description": "用于配对的 WhatsApp Business 号码，含国家码",
-        "default": ""
-      },
-      "enabled": {
-        "type": "boolean",
-        "title": "启用",
-        "description": "关闭后该平台不再收发消息；上面的凭证会保留。",
-        "default": false
-      }
-    },
-    "required": [
-      "enabled"
-    ]
+    "properties": {}
   },
-  "icon": "message-circle"
+  "icon": "message-circle",
+  "setup": [
+    {
+      "text": "在插件右上角点「连接」后用手机 WhatsApp 扫描二维码配对。"
+    }
+  ]
 }

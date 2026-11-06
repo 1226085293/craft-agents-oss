@@ -1,6 +1,5 @@
 import type { ComponentEntry } from './types'
 import { AllowListPreview } from '../demos/messaging/AllowListPreview'
-import { MessagingSettingsPagePreview } from '../demos/messaging/MessagingSettingsPagePreview'
 import { MessagingTelegramReworkedPreview } from '../demos/messaging/MessagingTelegramReworkedPreview'
 import { PairingCodeDialogPreview } from '../demos/messaging/PairingCodeDialogPreview'
 import { WhatsAppConnectDialogPreview } from '../demos/messaging/WhatsAppConnectDialogPreview'
@@ -171,59 +170,6 @@ export const messagingComponents: ComponentEntry[] = [
       {
         name: 'Disconnected',
         props: { telegramConnected: false, supergroupPaired: false, directSessions: 0, supergroupTopics: 0 },
-      },
-    ],
-  },
-  {
-    id: 'messaging-settings-page',
-    name: 'Messaging Settings Page',
-    category: 'Messaging',
-    description: 'Telegram + WhatsApp settings page with inline bindings',
-    component: MessagingSettingsPagePreview,
-    layout: 'full',
-    props: [
-      {
-        name: 'telegramConnected',
-        description: 'Whether the Telegram bot is connected',
-        control: { type: 'boolean' },
-        defaultValue: false,
-      },
-      {
-        name: 'whatsappConnected',
-        description: 'Whether the WhatsApp adapter is connected',
-        control: { type: 'boolean' },
-        defaultValue: false,
-      },
-      {
-        name: 'bindings',
-        description: 'Bindings preset to show in the table',
-        control: {
-          type: 'select',
-          options: [
-            { label: 'None', value: 'none' },
-            { label: 'One binding', value: 'one' },
-            { label: 'Many bindings', value: 'many' },
-          ],
-        },
-        defaultValue: 'none',
-      },
-    ],
-    variants: [
-      {
-        name: 'Both disconnected',
-        props: { telegramConnected: false, whatsappConnected: false, bindings: 'none' },
-      },
-      {
-        name: 'Telegram only',
-        props: { telegramConnected: true, whatsappConnected: false, bindings: 'none' },
-      },
-      {
-        name: 'Both connected, no bindings',
-        props: { telegramConnected: true, whatsappConnected: true, bindings: 'none' },
-      },
-      {
-        name: 'Both connected, 3 bindings',
-        props: { telegramConnected: true, whatsappConnected: true, bindings: 'many' },
       },
     ],
   },

@@ -61,17 +61,8 @@
         "description": "飞书应用密钥。保存后不再显示。",
         "secret": true,
         "default": ""
-      },
-      "enabled": {
-        "type": "boolean",
-        "title": "启用",
-        "description": "关闭后该平台不再收发消息；上面的凭证会保留。",
-        "default": false
       }
-    },
-    "required": [
-      "enabled"
-    ]
+    }
   },
   "icon": "messages-square"
 }

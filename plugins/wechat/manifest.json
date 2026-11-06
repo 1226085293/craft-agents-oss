@@ -48,31 +48,12 @@
   ],
   "config": {
     "type": "object",
-    "properties": {
-      "token": {
-        "type": "string",
-        "title": "Token",
-        "description": "公众号后台配置的服务器 Token",
-        "secret": true,
-        "default": ""
-      },
-      "encodingAesKey": {
-        "type": "string",
-        "title": "EncodingAESKey",
-        "description": "安全模式下的消息加解密密钥",
-        "secret": true,
-        "default": ""
-      },
-      "enabled": {
-        "type": "boolean",
-        "title": "启用",
-        "description": "关闭后该平台不再收发消息；上面的凭证会保留。",
-        "default": false
-      }
-    },
-    "required": [
-      "enabled"
-    ]
+    "properties": {}
   },
-  "icon": "messages-square"
+  "icon": "messages-square",
+  "setup": [
+    {
+      "text": "在插件右上角点「连接」后扫码授权（社区版微信 ClawBot）。扫码过程中的验证码也在那里输入。"
+    }
+  ]
 }

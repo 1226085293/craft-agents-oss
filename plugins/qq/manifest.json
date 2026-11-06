@@ -67,17 +67,8 @@
         "title": "主人 OpenID",
         "description": "允许私聊机器人的 openid，逗号分隔。留空表示不限制。",
         "default": ""
-      },
-      "enabled": {
-        "type": "boolean",
-        "title": "启用",
-        "description": "关闭后该平台不再收发消息；上面的凭证会保留。",
-        "default": false
       }
-    },
-    "required": [
-      "enabled"
-    ]
+    }
   },
   "icon": "message-circle"
 }

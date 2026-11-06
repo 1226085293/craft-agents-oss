@@ -156,3 +156,66 @@ describe('plugin program', () => {
     }
   })
 })
+
+describe('contributed tools', () => {
+  it('executes an action declared as a tool, through the plugin process', async () => {
+    // A plugin marks one action as a tool; the host assembles the name and the
+    // call must reach the plugin and come back with its own result.
+    const dir = mkdtempSync(join(tmpdir(), 'fixture-tool-'))
+    mkdirSync(join(dir, 'program'), { recursive: true })
+    writeFileSync(
+      join(dir, 'program', 'index.ts'),
+      [
+        'export function createAdapter() { return { sendText: async () => ({ id: "x" }) } }',
+        'export async function performAction(action, args) {',
+        '  if (action === "slack_search") return { ok: true, message: `found ${args.limit ?? 1} for ${args.q}` }',
+        '  return { ok: false, message: `unknown ${action}` }',
+        '}',
+      ].join(String.fromCharCode(10)),
+      'utf8',
+    )
+    writeFileSync(
+      join(dir, 'program', 'serve.ts'),
+      readFileSync(resolve(import.meta.dir, '../../../../plugins/telegram/program/serve.ts'), 'utf8'),
+      'utf8',
+    )
+
+    const env = service.listenerEnv('slack')
+    const proc = Bun.spawn(['bun', 'run', 'program/serve.ts'], {
+      cwd: dir,
+      env: {
+        ...process.env,
+        ...env,
+        CRAFT_LISTENER_ID: 'slack',
+        CRAFT_PLUGIN_ENTRY: './program/index.ts',
+        CRAFT_PLUGIN_PORT: '0',
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    try {
+      const reader = proc.stdout.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let port = 0
+      while (!port) {
+        const { value, done } = await reader.read()
+        if (done) throw new Error('plugin exited before readiness')
+        buffer += decoder.decode(value, { stream: true })
+        const line = buffer.split('\n').find((entry) => entry.includes('"ready"'))
+        if (line) port = (JSON.parse(line) as { port: number }).port
+      }
+
+      const res = await fetch(`http://127.0.0.1:${port}/action`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'slack_search', args: { q: 'build', limit: 3 } }),
+      })
+      expect(await res.json()).toEqual({ ok: true, message: 'found 3 for build' })
+    } finally {
+      proc.kill()
+      cleanup(dir)
+    }
+  }, 15000)
+})

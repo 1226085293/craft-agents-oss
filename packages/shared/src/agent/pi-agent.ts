@@ -81,7 +81,7 @@ import { attachSessionSelfManagementBindings } from './session-self-management-b
 
 // Session tool proxy definitions (for registering with subprocess)
 import { getSessionToolProxyDefs, SESSION_TOOL_NAMES } from './backend/pi/session-tool-defs.ts';
-import { parsePluginToolName, pluginToolName } from '../events/plugin-tools.ts';
+import { parsePluginToolName, pluginToolName, validateToolArguments } from '../events/plugin-tools.ts';
 
 // Session tool registry (for executing proxy tool calls)
 import {
@@ -2847,6 +2847,17 @@ export class PiAgent extends BaseAgent {
     tool: string,
     args: Record<string, unknown>,
   ): Promise<{ content: string; isError: boolean }> {
+    // Validate against what the model was shown before spending a round trip on
+    // the plugin. The schema came from the same manifest the tool table was
+    // built from, so the two cannot disagree.
+    const declared = this.config.pluginTools?.find(
+      (entry) => entry.plugin === plugin && entry.name === tool,
+    );
+    if (declared) {
+      const verdict = validateToolArguments(declared.input, args);
+      if (!verdict.ok) return { content: verdict.message, isError: true };
+    }
+
     const call = this._sessionToolContext?.callPluginActionFn;
     if (!call) {
       return { content: `插件工具 ${tool} 不可用：会话未接入插件调用通道`, isError: true };

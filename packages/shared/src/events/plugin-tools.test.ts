@@ -4,6 +4,7 @@ import {
   findToolNameCollisions,
   parsePluginToolName,
   pluginToolName,
+  validateToolArguments,
 } from './plugin-tools.ts'
 
 /**
@@ -123,3 +124,48 @@ describe('plugin tool names', () => {
     expect(parsePluginToolName('plugin__slack__slack_search')?.plugin).toBe('slack')
   })
 })
+
+describe('validateToolArguments', () => {
+  const schema = {
+    type: 'object' as const,
+    properties: {
+      q: { type: 'string' },
+      limit: { type: 'number' },
+      exact: { type: 'boolean' },
+    },
+    required: ['q'],
+  }
+
+  it('accepts a well-formed call', () => {
+    expect(validateToolArguments(schema, { q: 'hello', limit: 10 })).toEqual({ ok: true, message: '' })
+  });
+
+  it('names the missing required parameter', () => {
+    const verdict = validateToolArguments(schema, {})
+    expect(verdict.ok).toBe(false)
+    expect(verdict.message).toContain('q')
+  });
+
+  it('reports a type mismatch with what was received', () => {
+    const verdict = validateToolArguments(schema, { q: 42 })
+    expect(verdict.ok).toBe(false)
+    expect(verdict.message).toContain('q')
+    expect(verdict.message).toContain('string')
+    expect(verdict.message).toContain('number')
+  });
+
+  it('treats null as missing for a required key', () => {
+    expect(validateToolArguments(schema, { q: null }).ok).toBe(false)
+  });
+
+  it('does not reject a schema type this validator does not know', () => {
+    // An unrecognised `type` is the plugin's mistake; rejecting the call would
+    // blame the model for it.
+    const odd = { type: 'object' as const, properties: { x: { type: 'weird' } } }
+    expect(validateToolArguments(odd, { x: 'anything' }).ok).toBe(true)
+  })
+
+  it('accepts when no schema is declared', () => {
+    expect(validateToolArguments(undefined, { anything: 1 }).ok).toBe(true)
+  })
+});

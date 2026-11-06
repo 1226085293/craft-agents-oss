@@ -143,3 +143,73 @@ export function parsePluginToolName(name: string): { plugin: string; tool: strin
   if (!plugin || !tool) return null
   return { plugin, tool }
 }
+
+/**
+ * Check arguments against a declared tool schema before the call leaves Craft.
+ *
+ * The plugin could validate too, but by then the model has already spent a round
+ * trip and the error comes back in the plugin's own words. Catching it here
+ * costs nothing and lets the message say what to do instead.
+ *
+ * Deliberately small: `required`, the primitive `type` of each property, and
+ * unknown keys. A full JSON Schema implementation would be a dependency and a
+ * compatibility surface for what is, in practice, a flat argument object — and
+ * silently accepting anything it did not understand would be worse than saying
+ * so.
+ */
+export interface ToolSchema {
+  type?: 'object'
+  properties?: Record<string, Record<string, unknown>>
+  required?: string[]
+}
+
+export interface ValidationResult {
+  ok: boolean
+  /** One sentence the model can act on; empty when ok. */
+  message: string
+}
+
+const TYPE_CHECKS: Record<string, (value: unknown) => boolean> = {
+  string: (value) => typeof value === 'string',
+  number: (value) => typeof value === 'number' && Number.isFinite(value),
+  integer: (value) => typeof value === 'number' && Number.isInteger(value),
+  boolean: (value) => typeof value === 'boolean',
+  array: (value) => Array.isArray(value),
+  object: (value) => typeof value === 'object' && value !== null && !Array.isArray(value),
+}
+
+export function validateToolArguments(
+  schema: ToolSchema | undefined,
+  args: Record<string, unknown>,
+): ValidationResult {
+  if (!schema) return { ok: true, message: '' }
+
+  const required = schema.required ?? []
+  const missing = required.filter((key) => args[key] === undefined || args[key] === null)
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      message: `缺少必填参数：${missing.join('、')}。请补齐后重试。`,
+    }
+  }
+
+  const properties = schema.properties ?? {}
+  for (const [key, declaredType] of Object.entries(properties)) {
+    const value = args[key]
+    if (value === undefined || value === null) continue
+    const expected = typeof declaredType.type === 'string' ? declaredType.type : undefined
+    if (!expected) continue
+    const check = TYPE_CHECKS[expected]
+    // An unknown `type` word is the plugin's mistake, not the model's: skip
+    // rather than reject a call that is probably fine.
+    if (!check) continue
+    if (!check(value)) {
+      return {
+        ok: false,
+        message: `参数 ${key} 应为 ${expected}，收到的是 ${Array.isArray(value) ? 'array' : typeof value}。`,
+      }
+    }
+  }
+
+  return { ok: true, message: '' }
+}

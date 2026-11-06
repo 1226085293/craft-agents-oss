@@ -5,12 +5,14 @@ import {
   DispatchRefused,
   EventBacklog,
   formatBacklogNudge,
+  getSupervisorTurnTimeoutMs,
   MAX_DISPATCHES_PER_TURN,
   MAX_QUEUED_EVENTS,
   MAX_SPAWN_DEPTH,
   newTurnState,
   normalizeInstruction,
   similarity,
+  SUPERVISOR_TURN_TIMEOUT_MS,
 } from '../supervisor.ts';
 
 describe('instruction normalization', () => {
@@ -115,5 +117,26 @@ describe('event backlog', () => {
 
   it('returns an empty string for an empty batch', () => {
     expect(formatBacklogNudge([])).toBe('');
+  });
+});
+
+describe('turn cap', () => {
+  it('leaves a supervisor enough time to read an event and answer', () => {
+    // 90s was a performance target in disguise: a turn that had to read two
+    // events and reply was thrown away every time on a slow channel.
+    expect(SUPERVISOR_TURN_TIMEOUT_MS).toBeGreaterThanOrEqual(180_000);
+  });
+
+  it('can be tuned per machine', () => {
+    expect(getSupervisorTurnTimeoutMs({ CRAFT_SUPERVISOR_TURN_MS: '600000' } as NodeJS.ProcessEnv)).toBe(600_000);
+  });
+
+  it('ignores nonsense and falls back to the default', () => {
+    for (const raw of ['', 'abc', '0', '-5']) {
+      expect(getSupervisorTurnTimeoutMs({ CRAFT_SUPERVISOR_TURN_MS: raw } as NodeJS.ProcessEnv)).toBe(
+        SUPERVISOR_TURN_TIMEOUT_MS,
+      );
+    }
+    expect(getSupervisorTurnTimeoutMs({} as NodeJS.ProcessEnv)).toBe(SUPERVISOR_TURN_TIMEOUT_MS);
   });
 });

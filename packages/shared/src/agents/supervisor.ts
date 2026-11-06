@@ -16,8 +16,26 @@ export const MAX_DISPATCHES_PER_TURN = 3;
 /** supervisor 0 → worker 1 → sub-worker 2. Deeper is refused. */
 export const MAX_SPAWN_DEPTH = 2;
 
-/** A supervisor turn that runs longer than this is force-closed. */
-export const SUPERVISOR_TURN_TIMEOUT_MS = 90_000;
+/**
+ * A supervisor turn that runs longer than this is force-closed.
+ *
+ * The cap exists so one slow model call cannot park every queued event behind
+ * it. It is a ceiling on a *turn*, not a performance target: a supervisor that
+ * has to read two events and answer legitimately needs minutes on a slow
+ * channel, and closing it at 90s meant the work was thrown away every time.
+ */
+export const SUPERVISOR_TURN_TIMEOUT_MS = 300_000;
+
+/**
+ * Resolve the cap. `CRAFT_SUPERVISOR_TURN_MS` exists so an operator can tune it
+ * per machine (slow local models, throttled channels) without a code change;
+ * anything not a positive number falls back to the default.
+ */
+export function getSupervisorTurnTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CRAFT_SUPERVISOR_TURN_MS;
+  const parsed = raw === undefined ? Number.NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : SUPERVISOR_TURN_TIMEOUT_MS;
+}
 
 /** How many unclaimed events may queue before they get merged. */
 export const MAX_QUEUED_EVENTS = 20;

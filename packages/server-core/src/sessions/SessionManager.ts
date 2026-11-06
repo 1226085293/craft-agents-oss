@@ -45,7 +45,7 @@ import { startPageRefreshScheduler } from '../pages/page-refresh-scheduler.ts'
 import { migrateAutomationCronTasks } from '../tasks/automation-migration.ts'
 import { buildJudgePrompt, parseJudgeVerdict } from '../tasks/task-judge.ts'
 import { SupervisorRuntime } from '../routing/supervisor-runtime.ts'
-import { SUPERVISOR_TURN_TIMEOUT_MS } from '@craft-agent/shared/agents/supervisor'
+import { getSupervisorTurnTimeoutMs } from '@craft-agent/shared/agents/supervisor'
 import { buildAgentToolBindings } from './agent-tools-bindings.ts'
 import { kindRouting, registerAttachmentName, pickStrategyModel, type ModelRequestKind, type ModelWindow } from '@craft-agent/shared/config'
 import type { MidStreamBehavior } from '@craft-agent/shared/config'
@@ -2067,16 +2067,45 @@ export class SessionManager implements ISessionManager {
 
   private armSupervisorTurnCap(managed: ManagedSession): void {
     this.clearSupervisorTurnCap(managed)
+    const capMs = getSupervisorTurnTimeoutMs()
     const timer = setTimeout(() => {
       if (!managed.isProcessing || managed.role !== 'supervisor') return
-      sessionLog.warn(`[supervisor] turn exceeded the cap in ${managed.id}; closing it`)
+      sessionLog.warn(`[supervisor] turn exceeded the ${Math.round(capMs / 1000)}s cap in ${managed.id}; closing it`)
+      // Say so in the transcript. Closing the turn silently left the operator
+      // staring at a session that simply stopped: no error, no reply, no clue.
+      // The note is deliberately terse — it explains the stop, it does not
+      // retry the work (the event is still in the backlog and the next drain
+      // picks it up).
+      this.appendSupervisorNotice(
+        managed,
+        `督导回合超过 ${Math.round(capMs / 1000)} 秒上限，已中止。事件仍在队列里，下个回合会继续。`,
+      )
       void this.cancelProcessing(managed.id, true).catch((error) => {
         sessionLog.warn('[supervisor] failed to close an over-long turn', { error })
       })
-    }, SUPERVISOR_TURN_TIMEOUT_MS)
+    }, capMs)
     // Node keeps the process alive for a pending timer; this one is disposable.
     timer.unref?.()
     this.supervisorTurnCaps.set(managed.id, timer)
+  }
+
+  /** Write a visible info row so an aborted supervisor turn is not silent. */
+  private appendSupervisorNotice(managed: ManagedSession, text: string): void {
+    const infoMessage: Message = {
+      id: generateMessageId(),
+      role: 'info',
+      content: text,
+      timestamp: this.monotonic(),
+      statusType: 'event_wake',
+    }
+    managed.messages.push(infoMessage)
+    this.sendEvent({
+      type: 'info',
+      sessionId: managed.id,
+      message: text,
+      statusType: 'event_wake',
+      timestamp: infoMessage.timestamp,
+    }, managed.workspace.id)
   }
 
   private clearSupervisorTurnCap(managed: ManagedSession): void {

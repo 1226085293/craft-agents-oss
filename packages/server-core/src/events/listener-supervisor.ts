@@ -258,6 +258,58 @@ export class ListenerSupervisor {
     return status;
   }
 
+  /**
+   * Restart with a last-known-good fallback.
+   *
+   * A plugin change used to be "stop, start, hope". If the new configuration
+   * cannot come up, the user was left with nothing running and an error they
+   * had to read to understand. This starts the candidate, waits for it to prove
+   * itself, and puts the previous config back if it does not — so a bad edit
+   * costs a blip instead of an outage.
+   *
+   * The candidate is judged by reaching `running` (health reported), not by the
+   * process merely staying alive: a plugin that spawns and then idles without a
+   * connection is the exact failure this is meant to catch.
+   */
+  async restartWithFallback(listener: LoadedListener, previousConfig?: Record<string, unknown>): Promise<ListenerRuntimeStatus> {
+    await this.stop(listener.id);
+    const candidate = this.start(listener);
+    if (candidate.state === 'failed') return candidate;
+
+    const ready = await this.waitForHealthy(listener.id, listener.manifest.runtime?.readyTimeoutMs ?? 20000);
+    if (ready || previousConfig === undefined) return this.getStatus(listener.id);
+
+    const failure = this.getStatus(listener.id).lastError ?? 'did not become ready';
+    log.warn(`[events] ${listener.id} failed to start with the new config, restoring the previous one`);
+    await this.stop(listener.id);
+    const restored = this.start({ ...listener, config: previousConfig });
+    if (restored.state === 'failed') return restored;
+    await this.waitForHealthy(listener.id, listener.manifest.runtime?.readyTimeoutMs ?? 20000);
+    return {
+      ...this.getStatus(listener.id),
+      lastError: `new configuration failed (${failure}); running the previous configuration`,
+    };
+  }
+
+  waitForHealthyForTest(id: string, timeoutMs: number): Promise<boolean> {
+    return this.waitForHealthy(id, timeoutMs)
+  }
+
+  /** Resolve true once the listener is running, false when the wait expires. */
+  private waitForHealthy(id: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    return new Promise((resolve) => {
+      const poll = () => {
+        const state = this.getStatus(id).state;
+        if (state === 'running') return resolve(true);
+        if (state === 'failed' || state === 'stopped') return resolve(false);
+        if (Date.now() >= deadline) return resolve(false);
+        setTimeout(poll, 200);
+      };
+      poll();
+    });
+  }
+
   /** Mark healthy — called when the listener answers its health probe. */
   markHealthy(id: string): void {
     const entry = this.running.get(id);

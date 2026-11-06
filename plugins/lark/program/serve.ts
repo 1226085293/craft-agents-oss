@@ -261,6 +261,12 @@ if (adapter) {
   try {
     await adapter.initialize?.(config)
     connected = true
+    // Prove liveness to Craft. Without this the host has no way to tell
+    // "connected" from "still starting", and the plugin sits in `starting`
+    // until the readiness timeout downgrades it to `degraded`.
+    await fetch(`${EVENTS_URL}/health`, {
+      headers: { authorization: `Bearer ${EVENTS_TOKEN}` },
+    }).catch(() => undefined)
   } catch (error) {
     console.error(
       JSON.stringify({

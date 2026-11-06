@@ -390,8 +390,31 @@ export class EventService {
     return this.startListener(listener);
   }
 
-  saveListenerConfig(workspaceRoot: string, id: string, config: Record<string, unknown>): void {
+  /**
+   * Save config, and if the plugin is running, apply it with a fallback.
+   *
+   * Editing credentials for a live plugin used to require toggling it off and
+   * on, with no protection: a typo left nothing running. The previous config is
+   * kept, and restored if the new one cannot connect.
+   */
+  async saveListenerConfig(
+    workspaceRoot: string,
+    id: string,
+    config: Record<string, unknown>,
+  ): Promise<ListenerRuntimeStatus | null> {
+    const before = loadListeners({ workspaceRoot, catalogDirs: pluginCatalogDirs() }).find(
+      (entry) => entry.id === id,
+    );
     setListenerConfig(workspaceRoot, id, config);
+
+    const wasRunning = before ? this.supervisor.getStatus(id).state === 'running' : false;
+    if (!before || !wasRunning) return null;
+
+    const updated = loadListeners({ workspaceRoot, catalogDirs: pluginCatalogDirs() }).find(
+      (entry) => entry.id === id,
+    );
+    if (!updated) return null;
+    return this.supervisor.restartWithFallback(updated, before.config);
   }
 
   /**

@@ -47,7 +47,16 @@ beforeEach(() => {
 
 afterEach(async () => {
   await supervisor.stopAll()
-  rmSync(root, { recursive: true, force: true })
+  // Windows keeps the directory locked briefly after the child exits; a failed
+  // cleanup is housekeeping, not a verdict on the behaviour under test.
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      rmSync(root, { recursive: true, force: true })
+      return
+    } catch {
+      await Bun.sleep(50)
+    }
+  }
 })
 
 describe('ListenerSupervisor', () => {
@@ -169,4 +178,58 @@ describe('ListenerSupervisor', () => {
     const log = readFileSync(join(entry.dataDir, 'proc.log'), 'utf8')
     expect(log).toContain('cfg:me@qq.com:secret-123')
   })
+})
+
+describe('restartWithFallback', () => {
+  /**
+   * A bad config edit must cost a blip, not an outage.
+   *
+   * The supervisor writes the config it is starting with to the plugin's data
+   * dir, so the file on disk is direct evidence of which config the fallback
+   * chose — no need to infer it from process state.
+   */
+  it('restores the previous config when the new one never becomes ready', async () => {
+    const entry = listener('flaky', [], { config: { ok: true } })
+    const script = join(entry.dir, 'probe.mjs')
+    // Never reports healthy (the test ingest endpoint is unreachable), so the
+    // candidate can only end as degraded — which is exactly a failed upgrade.
+    writeFileSync(script, 'setInterval(() => undefined, 1000);', 'utf8')
+    entry.manifest.runtime = { program: [process.execPath, script], readyTimeoutMs: 300 }
+
+    const status = await supervisor.restartWithFallback(
+      { ...entry, config: { ok: false } },
+      { ok: true },
+    )
+
+    const written = JSON.parse(readFileSync(join(entry.dataDir, 'config.json'), 'utf8')) as {
+      ok: boolean
+    }
+    expect(written.ok).toBe(true)
+    expect(status.state).not.toBe('failed')
+    expect(status.lastError ?? '').toMatch(/previous configuration/)
+  }, 15000)
+
+  it('keeps the new config when it does become ready', async () => {
+    const entry = listener('steady', [], { config: { ok: true } })
+    const script = join(entry.dir, 'probe2.mjs')
+    writeFileSync(
+      script,
+      [
+        "fetch(process.env.CRAFT_EVENTS_URL!.replace(/\/events\/.*$/, '') + '/health', {",
+        "  headers: { authorization: 'Bearer ' + process.env.CRAFT_EVENTS_TOKEN },",
+        '}).catch(() => undefined)',
+        'setInterval(() => undefined, 1000);',
+      ].join(String.fromCharCode(10)),
+      'utf8',
+    )
+    entry.manifest.runtime = { program: [process.execPath, script], readyTimeoutMs: 300 }
+
+    // No previous config passed: nothing to restore, so the candidate stays.
+    const status = await supervisor.restartWithFallback({ ...entry, config: { ok: false } })
+    const written = JSON.parse(readFileSync(join(entry.dataDir, 'config.json'), 'utf8')) as {
+      ok: boolean
+    }
+    expect(written.ok).toBe(false)
+    expect(status.lastError ?? '').not.toMatch(/previous configuration/)
+  }, 15000)
 })

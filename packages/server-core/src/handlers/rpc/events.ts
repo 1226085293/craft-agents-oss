@@ -200,8 +200,11 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
     async (_ctx, workspaceId: string, id: string, config: Record<string, unknown>) => {
       const workspace = requireWorkspace(workspaceId);
       const svc = await getEventService(workspaceId, workspace.rootPath, undefined);
-      svc.saveListenerConfig(workspace.rootPath, id, config ?? {});
-      return { ok: true };
+      // Applied to a running plugin immediately, with the previous config kept
+      // as a fallback. `restart` is null when the plugin was not running, in
+      // which case the new config simply applies on the next start.
+      const restart = await svc.saveListenerConfig(workspace.rootPath, id, config ?? {});
+      return { ok: true, restart };
     },
   );
 

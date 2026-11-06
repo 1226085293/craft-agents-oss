@@ -405,6 +405,16 @@ export interface AgentBackend {
       handoff: Record<string, unknown>,
       fromSessionId: string,
     ): Promise<{ passed: boolean; reasons: string[]; status: string }>;
+    /**
+     * Update one step of this task's plan.
+     *
+     * The plan is the worker's own checklist; keeping it current is what lets the
+     * watchdog tell "still working" from "went quiet" without reading a transcript.
+     */
+    updatePlan(
+      identifier: string,
+      patch: { id: string; status?: string; title?: string; note?: string; remove?: boolean },
+    ): Promise<{ ok: boolean; error?: string }>;
   } | null;
 
   // ============================================================

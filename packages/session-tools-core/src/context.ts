@@ -383,6 +383,11 @@ export interface SessionToolContext {
       handoff: Record<string, unknown>,
       fromSessionId: string,
     ): Promise<{ passed: boolean; reasons: string[]; status: string }>;
+    /** Update one step of this task's plan (see tasks/plan.ts). */
+    updatePlan(
+      identifier: string,
+      patch: { id: string; status?: string; title?: string; note?: string; remove?: boolean },
+    ): Promise<{ ok: boolean; error?: string }>;
   };
 
   /** Get detailed info about a session. Defaults to current session if no ID given. Injected by backend. */

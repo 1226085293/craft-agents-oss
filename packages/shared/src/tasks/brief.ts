@@ -36,6 +36,10 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
   if (spec?.sources?.length) contract.push(`可用数据源：${spec.sources.join('、')}`);
   if (spec?.skills?.length) contract.push(`绑定技能：${spec.skills.join('、')}`);
   if (spec?.baseline) contract.push(`对照对象：${spec.baseline}`);
+  if (spec?.plan?.length) {
+    const progress = spec.plan.filter((step) => step.status === 'done').length;
+    contract.push(`计划进度：${progress}/${spec.plan.length}`);
+  }
   if (spec?.scope) contract.push(`检查范围：${spec.scope}`);
   if (contract.length) sections.push(`## 执行边界\n${bullet(contract)}`);
 

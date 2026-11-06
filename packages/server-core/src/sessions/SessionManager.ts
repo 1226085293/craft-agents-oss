@@ -5518,6 +5518,25 @@ export class SessionManager implements ISessionManager {
             if (result.compactionPending) this.compactTaskSession(managed.id)
             return { passed: result.passed, reasons: result.reasons, status: result.task.status }
           },
+          updatePlan: async (identifier, patch) => {
+            const service = this.getTasks(managed.workspace.id)
+            const task = service.get(identifier)
+            if (!task) return { ok: false, error: `task not found: ${identifier}` }
+            // A worker may only keep its own task's plan current; a supervisor
+            // editing another task's checklist would be reporting work it did
+            // not do.
+            const owns =
+              task.currentSessionId === managed.id || task.sessionIds.includes(managed.id)
+            if (!owns) return { ok: false, error: 'this session is not working on that task' }
+            const result = service.updatePlan(identifier, {
+              id: patch.id,
+              ...(patch.status ? { status: patch.status as never } : {}),
+              ...(patch.title ? { title: patch.title } : {}),
+              ...(patch.note !== undefined ? { note: patch.note } : {}),
+              ...(patch.remove !== undefined ? { remove: patch.remove } : {}),
+            })
+            return result.ok ? { ok: true } : { ok: false, ...(result.error ? { error: result.error } : {}) }
+          },
         }
       }
 

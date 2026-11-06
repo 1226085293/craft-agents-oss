@@ -115,6 +115,15 @@ export const TaskUpdateSchema = z.object({
   error: z.string().optional(),
 });
 
+export const TaskPlanSchema = z.object({
+  identifier: z.string().describe('Task id (T-1) or name.'),
+  id: z.string().describe('Step id such as "1.0" or "1.2". A new id adds a step.'),
+  title: z.string().optional().describe('Required when adding a step; omitted means "keep the current title".'),
+  status: z.enum(['todo', 'doing', 'done', 'blocked']).optional(),
+  note: z.string().optional().describe('What proves it is done, or why it is blocked.'),
+  remove: z.boolean().optional().describe('Drop an unfinished step (a finished step stays as record).'),
+});
+
 export const TaskGetSchema = z.object({
   identifier: z.string(),
   includeJournal: z.boolean().optional(),

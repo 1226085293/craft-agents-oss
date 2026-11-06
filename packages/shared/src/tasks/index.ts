@@ -62,6 +62,22 @@ export {
 export { matchesCron } from './cron.ts';
 
 export {
+  applyPlanPatch,
+  currentStep,
+  formatPlan,
+  isPlanStepStatus,
+  lastPlanChangeAt,
+  normalizePlan,
+  PLAN_STEP_LIMIT,
+  planProgress,
+  planStalled,
+  stepParent,
+  type PlanProgress,
+  type PlanStep,
+  type PlanStepStatus,
+} from './plan.ts';
+
+export {
   canStartAnother,
   type ConcurrencyInput,
   type ConcurrencySource,

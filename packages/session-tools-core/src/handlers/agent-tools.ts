@@ -234,6 +234,46 @@ export async function handleTaskUpdate(
   }
 }
 
+/**
+ * Update one step of the task's plan.
+ *
+ * The plan is how the watchdog tells "still working" from "went quiet" without
+ * reading a transcript, so keeping it current is not bookkeeping — it is the
+ * signal that keeps a live worker from being paused.
+ */
+export async function handleTaskPlan(
+  ctx: SessionToolContext,
+  args: {
+    identifier: string;
+    id: string;
+    title?: string;
+    status?: string;
+    note?: string;
+    remove?: boolean;
+  },
+): Promise<ToolResult> {
+  if (!ctx.taskTools?.updatePlan) {
+    return errorResponse('task_plan is only available to a session working on a task.');
+  }
+  if (!args.identifier?.trim()) return errorResponse('identifier is required.');
+  if (!args.id?.trim()) return errorResponse('id is required.');
+  try {
+    const result = await ctx.taskTools.updatePlan(args.identifier, {
+      id: args.id.trim(),
+      ...(args.title ? { title: args.title } : {}),
+      ...(args.status ? { status: args.status } : {}),
+      ...(args.note !== undefined ? { note: args.note } : {}),
+      ...(args.remove !== undefined ? { remove: args.remove } : {}),
+    });
+    if (!result.ok) return errorResponse(result.error ?? 'the plan was not updated.');
+    return successResponse(`Plan step ${args.id} updated.`);
+  } catch (error) {
+    return errorResponse(
+      `Failed to update the plan: ${error instanceof Error ? error.message : 'unknown error'}`,
+    );
+  }
+}
+
 /** Record a handoff produced by another session (the rule gate still applies). */
 export async function handleTaskHandoff(
   ctx: SessionToolContext,

@@ -9,6 +9,8 @@
  * as a state would multiply the transitions for no benefit.
  */
 
+import type { PlanStep } from './plan.ts';
+
 export type TaskStatus =
   | 'backlog'
   | 'running'
@@ -83,6 +85,13 @@ export interface TaskSpec {
   deliverables?: TaskDeliverable[];
   acceptance?: TaskAcceptanceItem[];
   permissions?: TaskPermissions;
+  /**
+   * The worker's own checklist for this task.
+   *
+   * Kept on the spec so it survives session replacement and appears in the
+   * cold-start brief; steps may be added or removed while the work proceeds.
+   */
+  plan?: PlanStep[];
 }
 
 /**

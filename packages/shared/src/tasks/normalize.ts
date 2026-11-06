@@ -13,6 +13,7 @@ import type {
   TaskSpec,
   TaskTrigger,
 } from './types.ts';
+import { normalizePlan } from './plan.ts';
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
@@ -65,6 +66,8 @@ export function normalizeSpec(raw: unknown): TaskSpec | undefined {
         .filter((a): a is TaskAcceptanceItem => a !== null)
     : [];
 
+  const plan = normalizePlan(v.plan);
+
   const permissionsRaw = v.permissions;
   const permissions =
     permissionsRaw && typeof permissionsRaw === 'object'
@@ -89,6 +92,7 @@ export function normalizeSpec(raw: unknown): TaskSpec | undefined {
     ...(deliverables.length ? { deliverables } : {}),
     ...(acceptance.length ? { acceptance } : {}),
     ...(permissions && Object.keys(permissions).length ? { permissions } : {}),
+    ...(plan ? { plan } : {}),
   };
 
   return Object.keys(spec).length ? spec : undefined;

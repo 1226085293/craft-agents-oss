@@ -16,6 +16,9 @@
 import { createLogger } from '@craft-agent/shared/utils';
 import {
   isHeartbeatStalled,
+  lastPlanChangeAt,
+  planProgress,
+  planStalled,
   shouldTripFuse,
   type Task,
 } from '@craft-agent/shared/tasks';
@@ -28,7 +31,8 @@ export type WatchdogFinding =
   | { kind: 'overdue'; task: Task }
   | { kind: 'orphaned'; task: Task }
   | { kind: 'decision_timeout'; task: Task }
-  | { kind: 'looping'; task: Task };
+  | { kind: 'looping'; task: Task }
+  | { kind: 'off_track'; task: Task };
 
 export interface WatchdogDeps {
   /** Tasks to inspect (already filtered to the workspace). */
@@ -57,6 +61,15 @@ export interface WatchdogDeps {
  * task will not finish on its own and a human should look.
  */
 export const MAX_REPEATED_HANDOFFS = 3;
+
+/**
+ * How long a plan may sit unchanged before the worker is considered off track.
+ *
+ * Longer than the stall window on purpose: a step can legitimately take twenty
+ * minutes (a build, a test run), and pausing a worker that is mid-task is worse
+ * than letting a stuck one run a little longer.
+ */
+export const OFF_TRACK_MS = 40 * 60_000;
 
 /** Strip whitespace so a reformatted repeat still counts as a repeat. */
 function normalizeSummary(text: string): string {
@@ -117,6 +130,18 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
       findings.push({ kind: 'looping', task });
       continue;
     }
+    // Structural drift: the plan exists, is unfinished, and nothing has moved in
+    // it. This replaces guessing whether the worker "went off target" — a
+    // checklist that stopped moving is the same claim, and it is a timestamp
+    // comparison rather than a model call.
+    const plan = task.spec?.plan;
+    if (plan?.length && !planProgress(plan).complete) {
+      const lastChange = Math.max(lastPlanChangeAt(plan), task.updatedAt);
+      if (planStalled(plan, lastChange, now, OFF_TRACK_MS)) {
+        findings.push({ kind: 'off_track', task });
+        continue;
+      }
+    }
     if (task.budget.deadline && now > task.budget.deadline) {
       findings.push({ kind: 'overdue', task });
     }
@@ -142,6 +167,16 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         );
         acted += 1;
         break;
+      case 'off_track': {
+        const progress = planProgress(finding.task.spec?.plan);
+        deps.pause(finding.task.id, 'waiting', 'plan stopped moving');
+        deps.notify(
+          finding.task.supervisorSessionId,
+          `${finding.task.id} 的计划已 ${Math.round(OFF_TRACK_MS / 60_000)} 分钟没有推进（完成 ${progress.done}/${progress.total}），任务已暂停，需要确认它是否偏离目标。`,
+        );
+        acted += 1;
+        break;
+      }
       case 'looping':
         deps.pause(finding.task.id, 'failures', 'repeated identical handoffs');
         deps.notify(

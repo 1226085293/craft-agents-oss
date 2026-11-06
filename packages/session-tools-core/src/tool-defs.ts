@@ -43,6 +43,7 @@ import {
   handleTaskCreate,
   handleTaskGet,
   handleTaskHandoff,
+  handleTaskPlan,
   handleTaskList,
   handleTaskUpdate,
 } from './handlers/agent-tools.ts';
@@ -56,6 +57,7 @@ import {
   TaskHandoffSchema,
   TaskListSchema,
   TaskUpdateSchema,
+  TaskPlanSchema,
 } from './tool-schemas-agent.ts';
 import { handleListBackgroundTasks } from './handlers/list-background-tasks.ts';
 import { handleGetBackgroundTaskOutput } from './handlers/get-background-task-output.ts';
@@ -401,6 +403,7 @@ export const TOOL_DESCRIPTIONS = {
   task_list: `Supervisor-only: list tasks, newest activity first. Filter by status to find what is still running or waiting on a decision.`,
   task_get: `Supervisor-only: read one task, including its handoff trail and budget. Use includeJournal for the full event log.`,
   task_update: `Supervisor-only: advance a task (running / paused / completed / failed / canceled) or annotate it. Illegal transitions are refused.`,
+  task_plan: `Keep this task's plan current: add a step (new id + title), move a step to todo/doing/done/blocked, or drop an unfinished step. Add or remove steps freely as the work changes — but a step marked done should say in note what proves it. The plan is how progress is observed without reading the transcript: a plan that stops moving for 40 minutes pauses the task.`,
   task_handoff: `Supervisor-only: record a handoff produced by another session against a task. The rule gate (artifacts + a verification command) still applies.`,
   report_result: `Report the outcome of this turn to the supervisor: what you did (summary, max ~200 chars), what you found, what the next session should do, where the deliverables are, and how you verified it. outcome defaults to 'handoff' — use 'delivered' only when this is the final answer for the user, and 'needs_decision' when a human must choose. The supervisor's rule gate fails a handoff with no artifacts or no verification command.`,
   dispatch: `Supervisor-only: send work to an existing session, an existing task, or a brand new session. Requires instruction (the work: goal, acceptance criteria, where the deliverable goes) and scope (one sentence describing what that session is responsible for, used to match later dispatches). At most 3 dispatches per turn; end the turn after dispatching instead of polling.`,
@@ -516,6 +519,7 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'task_list', description: TOOL_DESCRIPTIONS.task_list, inputSchema: TaskListSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskList },
   { name: 'task_get', description: TOOL_DESCRIPTIONS.task_get, inputSchema: TaskGetSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskGet },
   { name: 'task_update', description: TOOL_DESCRIPTIONS.task_update, inputSchema: TaskUpdateSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskUpdate },
+  { name: 'task_plan', description: TOOL_DESCRIPTIONS.task_plan, inputSchema: TaskPlanSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskPlan },
   { name: 'task_handoff', description: TOOL_DESCRIPTIONS.task_handoff, inputSchema: TaskHandoffSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskHandoff },
   // Browser tool (backend-specific — requires BrowserPaneManager in Electron)
   // Single CLI-like tool that handles all browser actions via command string.

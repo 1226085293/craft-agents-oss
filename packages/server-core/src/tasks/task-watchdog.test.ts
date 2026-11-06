@@ -273,3 +273,47 @@ describe('event-driven scheduling', () => {
     expect(passes).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe('plan drift', () => {
+  function withPlan(updatedAt: number): Task {
+    return task({
+      // Fresh heartbeat: the worker is alive, it simply stopped reporting
+      // progress — that is exactly the case the plan check exists for.
+      stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 30_000, runStartedAt: NOW - 60_000 },
+      updatedAt: updatedAt,
+      spec: {
+        plan: [
+          { id: '1.0', title: '接口改造', status: 'done', updatedAt: NOW - 120 * 60_000 },
+          { id: '1.1', title: '改 handler', status: 'doing', updatedAt },
+        ],
+      },
+    });
+  }
+
+  it('leaves a worker whose plan is moving alone', () => {
+    expect(inspectTasks(deps([withPlan(NOW - 60_000)]))).toEqual([]);
+  });
+
+  it('flags a plan that stopped moving for 40 minutes', () => {
+    const findings = inspectTasks(deps([withPlan(NOW - 41 * 60_000)]));
+    expect(findings.map((f) => f.kind)).toEqual(['off_track']);
+  });
+
+  it('pauses the task and says how far it got', () => {
+    const paused: string[] = [];
+    const notified: string[] = [];
+    runWatchdogPass(
+      deps([withPlan(NOW - 41 * 60_000)], {
+        pause: (id) => paused.push(id),
+        notify: (_sup, text) => notified.push(text),
+      }),
+    );
+    expect(paused).toEqual(['T-1']);
+    expect(notified[0]).toContain('1/2');
+  });
+
+  it('does not flag a task that has no plan', () => {
+    const noPlan = task({ updatedAt: NOW - 60_000 });
+    expect(inspectTasks(deps([noPlan]))).toEqual([]);
+  });
+});

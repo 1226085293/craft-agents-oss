@@ -32,7 +32,9 @@ import {
   listTasks,
   activeTasks,
   assessDecisionRequest,
+  applyPlanPatch,
   DECISION_TIMEOUT_MS,
+  type PlanStepStatus,
   type ArtifactProbe,
   type Handoff,
   type Task,
@@ -284,6 +286,36 @@ export class TaskService {
     saveTask(this.root, next);
     appendJournal(this.root, id, { type: 'decision_resolved', at: now, data: { resolution } });
     return next;
+  }
+
+  /**
+   * Apply one step-level change to the task's plan.
+   *
+   * Returns the reason when nothing changed, so a worker that mistyped a step id
+   * finds out immediately instead of assuming progress was recorded.
+   */
+  updatePlan(
+    id: string,
+    patch: { id: string; status?: PlanStepStatus; title?: string; note?: string; remove?: boolean },
+  ): { ok: boolean; error?: string; plan?: Task['spec'] extends undefined ? never : NonNullable<Task['spec']>['plan'] } {
+    const task = this.require(id);
+    const now = this.now();
+    const result = applyPlanPatch(task.spec?.plan, patch, now);
+    if (result.error) return { ok: false, error: result.error };
+    if (!result.changed) return { ok: true, plan: result.plan };
+
+    const next: Task = {
+      ...task,
+      spec: { ...(task.spec ?? {}), plan: result.plan },
+      updatedAt: now,
+    };
+    saveTask(this.root, next);
+    appendJournal(this.root, id, {
+      type: 'plan_updated',
+      at: now,
+      data: { step: patch.id, status: patch.status, removed: patch.remove === true },
+    });
+    return { ok: true, plan: result.plan };
   }
 
   /**

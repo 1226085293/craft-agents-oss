@@ -323,6 +323,10 @@ export abstract class BaseAgent implements AgentBackend {
       handoff: Record<string, unknown>,
       fromSessionId: string,
     ): Promise<{ passed: boolean; reasons: string[]; status: string }>;
+    updatePlan(
+      identifier: string,
+      patch: { id: string; status?: string; title?: string; note?: string; remove?: boolean },
+    ): Promise<{ ok: boolean; error?: string }>;
   };
   onSourceChange: SourceChangeCallback | null = null;
   onSourcesListChange: ((sources: LoadedSource[]) => void) | null = null;

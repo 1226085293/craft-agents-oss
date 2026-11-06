@@ -39,6 +39,7 @@ import { TaskService } from '../tasks/task-service.ts'
 import { readJournal, formatTaskBrief, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
+import { activateInOrder } from '../runtime/activation.ts'
 import { assemblePluginTools } from '@craft-agent/shared/events/plugin-tools'
 
 /** 6-hex id, used for collision-free attachment names. */
@@ -7033,17 +7034,44 @@ ${request.prompt}`;
       },
       judgeHandoff: (task, handoff) => this.judgeTaskHandoff(workspaceId, task, handoff),
     })
-    // Register before the loops start: the scheduler and event routing both
-    // re-enter getTasks, and a second service would mean a second watchdog.
-    this.taskServices.set(workspaceId, service)
-
-    // Page refreshes are scripts, not agent runs: a page with a `refresh` spec
-    // is ticked by its own loop so it never costs a session.
+    // Registered through the dependency graph rather than by code order. The
+    // scheduler and event routing both re-enter getTasks through this map, so
+    // it has to exist before any loop starts — and that used to be held by a
+    // comment. `activateInOrder` derives the order, and a loop whose service is
+    // missing is skipped instead of running against a half-built workspace.
+    // Activation is transactional: the loops below are started inside it, so a
+    // throw halfway leaves nothing running and nothing cached. Without this an
+    // initialization failure would leave a task service in the map with no
+    // watchdog, and the next getTasks would return that half-built one.
+    let taskServiceActivation: ReturnType<typeof activateInOrder>
     try {
-      const stop = startPageRefreshScheduler({ workspaceRootPath: workspace.rootPath })
-      this.workspaceScopes.open(workspaceId).effect(() => stop)
+      taskServiceActivation = activateInOrder([
+      {
+        id: 'task-service',
+        consequence: '任务调度、看门狗与事件触发的任务都不会启动',
+        activate: () => this.taskServices.set(workspaceId, service),
+      },
+      {
+        id: 'page-refresh',
+        consequence: '页面定时刷新不会运行',
+        activate: () => {
+          const stop = startPageRefreshScheduler({ workspaceRootPath: workspace.rootPath })
+          this.workspaceScopes.open(workspaceId).effect(() => stop)
+        },
+      },
+      ])
     } catch (error) {
-      sessionLog.warn('failed to start the page refresh scheduler', { error })
+      // Roll back everything this attempt created, then let the caller see the
+      // failure: a workspace whose task machinery is half-up is worse than one
+      // that reports it cannot start.
+      this.taskServices.delete(workspaceId)
+      this.workspaceScopes.dispose(workspaceId, (disposeError, index) => {
+        sessionLog.warn('rollback disposer failed', { workspaceId, index, disposeError })
+      })
+      throw error
+    }
+    for (const failure of taskServiceActivation.failed) {
+      sessionLog.warn('subsystem activation failed', { workspaceId, ...failure })
     }
 
     // Legacy cron automations become task triggers. The automation runtime is
@@ -7068,7 +7096,13 @@ ${request.prompt}`;
 
     // Independent control loop: pure rules on a timer, never inside a session
     // turn. A stuck supervisor therefore cannot stop the checks.
-    try {
+    // No task service means no tasks to watch. Starting anyway would query a
+    // service that does not exist and fail every pass.
+    const watchdogReady = taskServiceActivation.activated.includes('task-service')
+    if (!watchdogReady) {
+      sessionLog.warn('task watchdog skipped: task service did not activate', { workspaceId })
+    }
+    if (watchdogReady) try {
       const stop = startWatchdog({
         listTasks: () => service.list(),
         sessionExists: (sessionId) => this.sessions.has(sessionId),
@@ -7101,7 +7135,10 @@ ${request.prompt}`;
 
     // Trigger loop: cron-fired tasks start here, without touching a session or
     // a model. Kept beside the watchdog because both are external control loops.
-    try {
+    if (!watchdogReady) {
+      sessionLog.warn('task scheduler skipped: task service did not activate', { workspaceId })
+    }
+    if (watchdogReady) try {
       const stop = startTaskScheduler({
         tasks: service,
         listTasks: () => service.list(),

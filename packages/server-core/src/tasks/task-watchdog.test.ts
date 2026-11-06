@@ -2,7 +2,13 @@ import { describe, expect, it } from 'bun:test';
 
 import type { Task } from '@craft-agent/shared/tasks';
 
-import { inspectTasks, runWatchdogPass, type WatchdogDeps } from './task-watchdog.ts';
+import {
+  inspectTasks,
+  MAX_WATCHDOG_FAILURES,
+  runWatchdogPass,
+  startWatchdog,
+  type WatchdogDeps,
+} from './task-watchdog.ts';
 
 const NOW = Date.UTC(2026, 10, 6, 12, 0, 0);
 
@@ -149,5 +155,67 @@ describe('decision timeout', () => {
     expect(denied).toEqual(['T-1']);
     expect(notified[0]).toContain('超时');
     expect(notified[0]).toContain('拒绝');
+  });
+});
+
+describe('loop detection', () => {
+  function withHandoffs(summaries: string[]): Task {
+    return task({
+      handoffs: summaries.map((summary, index) => ({
+        at: NOW - (summaries.length - index) * 1000,
+        fromSessionId: 'sess-1',
+        outcome: 'handoff' as const,
+        summary,
+      })),
+    });
+  }
+
+  it('flags three identical handoffs in a row', () => {
+    const looping = withHandoffs(['还在改', '还在改', '还在改']);
+    expect(inspectTasks(deps([looping])).map((f) => f.kind)).toEqual(['looping']);
+  });
+
+  it('ignores a repeat that is followed by progress', () => {
+    const progressing = withHandoffs(['还在改', '还在改', '改完了，开始测试']);
+    expect(inspectTasks(deps([progressing]))).toEqual([]);
+  });
+
+  it('treats whitespace-only differences as the same report', () => {
+    const looping = withHandoffs(['还在 改', '还在改', '还在  改']);
+    expect(inspectTasks(deps([looping])).map((f) => f.kind)).toEqual(['looping']);
+  });
+
+  it('pauses a looping worker instead of killing its session', () => {
+    const paused: string[] = [];
+    const looping = withHandoffs(['还在改', '还在改', '还在改']);
+    runWatchdogPass(
+      deps([looping], {
+        pause: (id) => paused.push(id),
+        notify: () => undefined,
+      }),
+    );
+    expect(paused).toEqual(['T-1']);
+  });
+});
+
+describe('watchdog self monitoring', () => {
+  it('reports once when its own passes keep failing', async () => {
+    const reports: Array<{ failures: number; lastError: string }> = [];
+    const stop = startWatchdog(
+      deps([], {
+        listTasks: () => {
+          throw new Error('store unavailable');
+        },
+      }),
+      5,
+      { onSelfFailure: (info) => reports.push(info) },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    stop();
+
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.failures).toBe(MAX_WATCHDOG_FAILURES);
+    expect(reports[0]?.lastError).toContain('store unavailable');
   });
 });

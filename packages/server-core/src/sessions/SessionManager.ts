@@ -6756,6 +6756,20 @@ ${request.prompt}`;
         notify: (sessionId, text) => {
           void this.sendMessage(sessionId, text).catch(() => undefined)
         },
+      }, undefined, {
+        // A watchdog that throws every pass looks exactly like one that finds
+        // nothing, so it has to announce its own breakage.
+        onSelfFailure: ({ failures, lastError }) => {
+          sessionLog.warn('task watchdog keeps failing', { failures, lastError })
+          void this.ensureSupervisorSession(workspaceId)
+            .then((supervisor) =>
+              this.sendMessage(
+                supervisor.id,
+                `巡检器连续 ${failures} 次执行失败（${lastError}），任务状态可能不再被监视，需要人工检查。`,
+              ),
+            )
+            .catch(() => undefined)
+        },
       })
       this.watchdogStops.set(workspaceId, stop)
     } catch (error) {

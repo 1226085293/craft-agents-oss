@@ -27,7 +27,8 @@ export type WatchdogFinding =
   | { kind: 'failing'; task: Task }
   | { kind: 'overdue'; task: Task }
   | { kind: 'orphaned'; task: Task }
-  | { kind: 'decision_timeout'; task: Task };
+  | { kind: 'decision_timeout'; task: Task }
+  | { kind: 'looping'; task: Task };
 
 export interface WatchdogDeps {
   /** Tasks to inspect (already filtered to the workspace). */
@@ -46,6 +47,36 @@ export interface WatchdogDeps {
    */
   denyDecision?: (id: string, note: string) => void;
   now?: () => number;
+}
+
+/**
+ * Consecutive handoffs that say the same thing = the worker is turning in
+ * circles: still alive, still handing off, never progressing.
+ *
+ * Three is deliberate: one repeat is a retry, two is bad luck, three means the
+ * task will not finish on its own and a human should look.
+ */
+export const MAX_REPEATED_HANDOFFS = 3;
+
+/** Strip whitespace so a reformatted repeat still counts as a repeat. */
+function normalizeSummary(text: string): string {
+  return text.replace(/\s+/g, '').trim();
+}
+
+/**
+ * Detect a worker that keeps reporting the same thing.
+ *
+ * Only the tail matters: an early repeated summary followed by real progress is
+ * normal, and a task that changed direction legitimately starts a new run of
+ * distinct summaries.
+ */
+export function isLooping(task: Task): boolean {
+  const handoffs = task.handoffs;
+  if (handoffs.length < MAX_REPEATED_HANDOFFS) return false;
+  const tail = handoffs.slice(-MAX_REPEATED_HANDOFFS).map((handoff) => normalizeSummary(handoff.summary));
+  const first = tail[0];
+  if (!first) return false;
+  return tail.every((summary) => summary === first);
 }
 
 /** Only tasks that claim to be running are worth inspecting. */
@@ -80,6 +111,12 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
       findings.push({ kind: 'failing', task });
       continue;
     }
+    // Checked after liveness: a looping worker is alive and heartbeating, which
+    // is exactly why the cheap checks never caught it.
+    if (isLooping(task)) {
+      findings.push({ kind: 'looping', task });
+      continue;
+    }
     if (task.budget.deadline && now > task.budget.deadline) {
       findings.push({ kind: 'overdue', task });
     }
@@ -102,6 +139,14 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         deps.notify(
           finding.task.supervisorSessionId,
           `${finding.task.id} 的决策请求已超时，默认按拒绝处理，任务未继续。`,
+        );
+        acted += 1;
+        break;
+      case 'looping':
+        deps.pause(finding.task.id, 'failures', 'repeated identical handoffs');
+        deps.notify(
+          finding.task.supervisorSessionId,
+          `${finding.task.id} 连续 ${MAX_REPEATED_HANDOFFS} 次交接内容相同，Worker 在原地打转，任务已暂停。`,
         );
         acted += 1;
         break;
@@ -150,17 +195,50 @@ export function runWatchdogPass(deps: WatchdogDeps): number {
 /** Default cadence: often enough to catch a stall, cheap enough to ignore. */
 export const WATCHDOG_INTERVAL_MS = 5 * 60_000;
 
+/** Consecutive failed passes before the watchdog reports that it is broken. */
+export const MAX_WATCHDOG_FAILURES = 3;
+
+export interface WatchdogLoopOptions {
+  /**
+   * Called when the watchdog itself looks broken.
+   *
+   * A timer that throws every pass is indistinguishable from a timer that finds
+   * nothing, and "the supervisor never told me" is how a whole automation layer
+   * dies quietly. The host turns this into one visible message.
+   */
+  onSelfFailure?: (info: { failures: number; lastError: string }) => void;
+}
+
 /**
  * Start the loop. Returns a disposer.
  *
  * `unref` so a pending timer never keeps the host process alive on shutdown.
  */
-export function startWatchdog(deps: WatchdogDeps, intervalMs = WATCHDOG_INTERVAL_MS): () => void {
+export function startWatchdog(
+  deps: WatchdogDeps,
+  intervalMs = WATCHDOG_INTERVAL_MS,
+  options: WatchdogLoopOptions = {},
+): () => void {
+  let failures = 0;
+  let lastError = '';
   const timer = setInterval(() => {
     try {
       runWatchdogPass(deps);
+      failures = 0;
+      lastError = '';
     } catch (error) {
-      log.warn('[watchdog] pass failed', { error });
+      failures += 1;
+      lastError = error instanceof Error ? error.message : String(error);
+      log.warn(`[watchdog] pass failed (${failures}/${MAX_WATCHDOG_FAILURES})`, { error: lastError });
+      // Report once per outage, not every pass: a broken watchdog must not add
+      // its own flood to the problem.
+      if (failures === MAX_WATCHDOG_FAILURES) {
+        try {
+          options.onSelfFailure?.({ failures, lastError });
+        } catch {
+          // Nothing left to report to.
+        }
+      }
     }
   }, intervalMs);
   timer.unref?.();

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { request as httpRequest } from 'node:http';
 import { getEventService, resetEventServicesForTest } from './event-service.ts';
-import type { EventRecord } from '@craft-agent/shared/events/event-store.ts';
+import type { EventMeta, EventRecord } from '@craft-agent/shared/events/event-store.ts';
 
 const roots: string[] = [];
 
@@ -52,6 +52,32 @@ afterEach(() => {
 });
 
 describe('getEventService callback rebinding', () => {
+  it('routes unclaimed events when the supervisor callback is wired during warm-up', async () => {
+    const root = makeRoot();
+    const seen: EventMeta[] = [];
+    const dispatchTarget = {
+      deliver: async () => true,
+      isBusy: () => false,
+      hasQueuedUserMessage: () => false,
+    };
+
+    const service = await getEventService(
+      'ws-unclaimed-startup',
+      root,
+      undefined,
+      dispatchTarget,
+      (event) => seen.push(event),
+    );
+    const env = service.listenerEnv('probe');
+    const response = await postJson(env.CRAFT_EVENTS_URL!, env.CRAFT_EVENTS_TOKEN!, {
+      type: 'acceptance.ping',
+      title: '启动预热直接绑定',
+    });
+
+    expect(response.status).toBe(200);
+    expect(seen.map((event) => event.title)).toEqual(['启动预热直接绑定']);
+  });
+
   /**
    * Regression: the boot warm-up creates the service before any renderer exists
    * and passes no `onChanged`. Binding only in the constructor meant every later
@@ -80,6 +106,39 @@ describe('getEventService callback rebinding', () => {
     expect(response.status).toBe(200);
     expect(seen).toHaveLength(1);
     expect(seen[0]?.title).toBe('晚绑定测试');
+    expect(seen[0]?.source).toBe('probe');
+  });
+
+  it('rebinds the unclaimed-event callback after boot warm-up', async () => {
+    const root = makeRoot();
+    const dispatchTarget = {
+      deliver: async () => true,
+      isBusy: () => false,
+      hasQueuedUserMessage: () => false,
+    };
+
+    // Boot warm-up knows how to deliver directly to sessions, but the supervisor
+    // callback is only supplied later when the RPC handler is registered.
+    const booted = await getEventService('ws-unclaimed-rebind', root, undefined, dispatchTarget);
+    const seen: EventMeta[] = [];
+    const rebound = await getEventService(
+      'ws-unclaimed-rebind',
+      root,
+      undefined,
+      dispatchTarget,
+      (event) => seen.push(event),
+    );
+    expect(rebound).toBe(booted);
+
+    const env = rebound.listenerEnv('probe');
+    const response = await postJson(env.CRAFT_EVENTS_URL!, env.CRAFT_EVENTS_TOKEN!, {
+      type: 'acceptance.ping',
+      title: '预热后绑定督导回调',
+    });
+
+    expect(response.status).toBe(200);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.title).toBe('预热后绑定督导回调');
     expect(seen[0]?.source).toBe('probe');
   });
 

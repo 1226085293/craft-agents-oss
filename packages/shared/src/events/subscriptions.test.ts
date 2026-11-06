@@ -32,6 +32,7 @@ function event(overrides: Partial<EventMeta> = {}): EventMeta {
     attachments: [],
     delivered: false,
     deliveries: [],
+    routing: [],
     ...overrides,
   }
 }

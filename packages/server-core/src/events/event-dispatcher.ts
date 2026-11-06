@@ -52,8 +52,8 @@ export interface EventDispatcherOptions {
   target: DispatchTarget;
   /**
    * Last tier of the funnel: called only when no session subscribed to the
-   * event. Wired to the on-duty supervisor, and deliberately opt-in — with the
-   * switch off an unclaimed event is dropped exactly as before.
+   * event. Wired to the on-duty supervisor; absent only in headless/test hosts
+   * that intentionally collect events without session routing.
    */
   onUnclaimed?: (event: EventMeta) => void;
   mergeWindowMs?: number;

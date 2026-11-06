@@ -47,7 +47,7 @@ export interface EventServiceOptions {
    * Called for an event no session subscribed to.
    *
    * The host wires this to the workspace supervisor runtime (rules first, then
-   * the supervisor). Absent = unclaimed events are dropped, exactly as before.
+   * the supervisor). May be rebound after a boot warm-up creates the service.
    */
   onUnclaimed?: (event: EventMeta) => void;
   /** Override for tests. */
@@ -93,7 +93,7 @@ export class EventService {
       onInserted: (event) => {
         // A freshly inserted event has no deliveries yet — they land via
         // onDelivered below. Renderers get the enriched record shape.
-        const record: EventRecord = { ...event, deliveries: [] };
+        const record: EventRecord = { ...event, deliveries: [], routing: [] };
         this.options.onChanged?.(record);
         // Strip the body: the dispatcher only formats a nudge.
         const { body: _body, ...meta } = record;
@@ -113,10 +113,32 @@ export class EventService {
     return new EventDispatcher({
       getSubscriptions: () => loadSubscriptions(this.options.workspaceRoot),
       target,
-      ...(this.options.onUnclaimed ? { onUnclaimed: this.options.onUnclaimed } : {}),
+      // Read the current host callback at dispatch time. The boot warm-up can
+      // create this dispatcher before RPC registers the supervisor callback.
+      onUnclaimed: (event) => {
+        // Tier boundary: nothing was subscribed, so the rule table (and, failing
+        // that, the supervisor) owns it. Recorded here rather than downstream so
+        // "nobody subscribed" stays visible even if routing throws.
+        try {
+          this.store.recordRouting(event.id, {
+            via: 'supervisor',
+            outcome: '无订阅者，转规则/督导',
+            at: Date.now(),
+          });
+        } catch {
+          // Audit is best-effort: losing a trail line must not drop the event.
+        }
+        this.options.onUnclaimed?.(event);
+      },
       onDelivered: (eventId, sessionId) => {
         try {
           this.store.recordDelivery(eventId, sessionId, Date.now());
+          this.store.recordRouting(eventId, {
+            via: 'subscription',
+            target: sessionId,
+            outcome: '投递给订阅会话',
+            at: Date.now(),
+          });
         } catch (error) {
           eventLog.warn(
             `[events] cannot record delivery for ${eventId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -140,9 +162,11 @@ export class EventService {
     onChanged?: (event: EventRecord) => void;
     onListenerStatus?: (status: ListenerRuntimeStatus) => void;
     dispatchTarget?: DispatchTarget;
+    onUnclaimed?: (event: EventMeta) => void;
   }): void {
     if (callbacks.onChanged) this.options.onChanged = callbacks.onChanged;
     if (callbacks.onListenerStatus) this.options.onListenerStatus = callbacks.onListenerStatus;
+    if (callbacks.onUnclaimed) this.options.onUnclaimed = callbacks.onUnclaimed;
     // A host that only learns the delivery target after boot (Electron builds it
     // with the session manager) must still get a dispatcher.
     if (callbacks.dispatchTarget && !this.dispatcher) {
@@ -435,6 +459,7 @@ export async function getEventService(
   service.updateCallbacks({
     ...(onChanged ? { onChanged } : {}),
     ...(dispatchTarget ? { dispatchTarget } : {}),
+    ...(onUnclaimed ? { onUnclaimed } : {}),
   });
   await service.start();
   return service;

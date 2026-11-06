@@ -84,6 +84,8 @@ export function normalizeSpec(raw: unknown): TaskSpec | undefined {
     ...(asStringArray(v.skills) ? { skills: asStringArray(v.skills)! } : {}),
     ...(asString(v.model) ? { model: asString(v.model)! } : {}),
     ...(asString(v.strategy) ? { strategy: asString(v.strategy)! } : {}),
+    ...(asString(v.baseline) ? { baseline: asString(v.baseline)! } : {}),
+    ...(asString(v.scope) ? { scope: asString(v.scope)! } : {}),
     ...(deliverables.length ? { deliverables } : {}),
     ...(acceptance.length ? { acceptance } : {}),
     ...(permissions && Object.keys(permissions).length ? { permissions } : {}),

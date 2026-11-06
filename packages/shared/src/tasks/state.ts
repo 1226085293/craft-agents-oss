@@ -21,6 +21,7 @@ import {
   type TaskSpec,
   type TaskStatus,
   type TaskTrigger,
+  type TaskVerifyConfig,
 } from './types.ts';
 
 /**
@@ -168,6 +169,7 @@ export function normalizeHandoff(raw: unknown, fromSessionId: string, now: numbe
     nextAction: str(v.nextAction),
     artifacts: normalizeArtifacts(v.artifacts),
     verify: normalizeVerify(v.verify),
+    ...(str(v.revision) ? { revision: str(v.revision) } : {}),
   };
 }
 
@@ -282,6 +284,21 @@ export function checkDependencies(
   return { ok: reasons.length === 0, reasons };
 }
 
+/**
+ * Does this handoff judge a different object than the last verdict?
+ *
+ * The failure loop needs it: "review failed → human fixed → new commit pushed →
+ * review again" must not be blocked by the old round budget, and the old record
+ * must stay untouched.
+ */
+export function isNewRevision(
+  verify: TaskVerifyConfig,
+  revision: string | undefined,
+): boolean {
+  if (!revision) return false;
+  return verify.lastVerifiedRevision !== revision;
+}
+
 /** True when another session already holds this task's run lock. */
 export function isRunLocked(task: Task, sessionExists: (id: string) => boolean): boolean {
   const lock = task.stats?.lockSessionId;
@@ -344,8 +361,7 @@ export function recordRunResult(
   };
 }
 
-/** A task is stalled when two heartbeats in a row never arrived. */
-export function isHeartbeatStalled(task: Task, now: number): boolean {
+/** A task is stalled when two heartbeats in a row never arrived. */export function isHeartbeatStalled(task: Task, now: number): boolean {
   // `0` is a legitimate timestamp (epoch), so test for presence explicitly.
   const last = task.stats?.lastHeartbeatAt ?? task.lastHeartbeatAt;
   if (typeof last !== 'number') return false;

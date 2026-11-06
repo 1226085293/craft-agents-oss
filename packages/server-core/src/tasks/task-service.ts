@@ -20,6 +20,7 @@ import {
   checkHandoffRules,
   createTask,
   isHeartbeatMissing,
+  isNewRevision,
   isRunLocked,
   loadTask,
   nextTaskId,
@@ -477,9 +478,14 @@ export class TaskService {
       verify: {
         ...task.verify,
         lastVerdict: accepted ? 'pass' : 'fail',
+        ...(handoff.revision ? { lastVerifiedRevision: handoff.revision } : {}),
       },
-      // Every handoff round counts, so `maxIterations` is no longer decorative.
-      verifyRounds: (task.verifyRounds ?? 0) + 1,
+      // Every handoff round counts, so `maxIterations` is no longer decorative —
+      // except across a revision boundary, where the previous rounds were spent
+      // judging a different object.
+      verifyRounds: isNewRevision(task.verify, handoff.revision)
+        ? 1
+        : (task.verifyRounds ?? 0) + 1,
     };
 
     if (handoff.outcome === 'needs_decision') {

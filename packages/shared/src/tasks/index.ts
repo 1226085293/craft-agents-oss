@@ -48,6 +48,7 @@ export {
   IllegalTransitionError,
   isHeartbeatMissing,
   isHeartbeatStalled,
+  isNewRevision,
   isRunLocked,
   isTerminal,
   normalizeHandoff,

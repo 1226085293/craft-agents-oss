@@ -65,6 +65,21 @@ export interface TaskSpec {
   model?: string;
   /** Strategy group override for the worker. */
   strategy?: string;
+  /**
+   * What this task compares against ("对照对象").
+   *
+   * A review job is meaningless without saying "against what": the target
+   * branch, the previous report, the agreed spec. Free text because the answer
+   * is a human reference, not a machine one.
+   */
+  baseline?: string;
+  /**
+   * The slice this task is responsible for ("检查范围").
+   *
+   * Without it a worker either checks everything (and never finishes) or checks
+   * something arbitrary (and misses the point).
+   */
+  scope?: string;
   deliverables?: TaskDeliverable[];
   acceptance?: TaskAcceptanceItem[];
   permissions?: TaskPermissions;
@@ -158,6 +173,14 @@ export interface Handoff {
   nextAction?: string;
   artifacts?: HandoffArtifact[];
   verify?: HandoffVerify;
+  /**
+   * What this handoff was produced against.
+   *
+   * The failure loop this serves: review fails → human fixes → a new commit is
+   * pushed → the review must judge *that* commit, not the old one. Older handoff
+   * records keep their own revision, so history is never rewritten.
+   */
+  revision?: string;
 }
 
 export interface TaskBudget {
@@ -178,6 +201,8 @@ export interface TaskVerifyConfig {
   /** Max repair/rerun iterations before pausing. */
   maxIterations: number;
   lastVerdict?: 'pass' | 'fail';
+  /** Revision the last verdict applied to, so a new commit gets a fresh round. */
+  lastVerifiedRevision?: string;
 }
 
 export interface TaskLifecycle {

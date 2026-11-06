@@ -164,3 +164,65 @@ describe('restart recovery', () => {
     expect(svc.recoverAfterRestart()).toHaveLength(0);
   });
 });
+
+describe('revision tracking', () => {
+  it('keeps the old handoff and gives a new commit a fresh round', async () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.setStatus(task.id, 'running');
+
+    // First review fails against commit aaa.
+    await svc.reportHandoff(
+      task.id,
+      { summary: '发现两个问题', revision: 'aaa' },
+      'sess_w',
+    );
+    let current = svc.get(task.id)!;
+    expect(current.handoffs[0]?.revision).toBe('aaa');
+    expect(current.verify.lastVerifiedRevision).toBe('aaa');
+    expect(current.verifyRounds).toBe(1);
+
+    // Human fixes and pushes bbb: the second round must not be blocked by the
+    // rounds spent on aaa, and the first record must still be there.
+    await svc.reportHandoff(
+      task.id,
+      { summary: 'bbb 已修复', revision: 'bbb' },
+      'sess_w',
+    );
+    current = svc.get(task.id)!;
+    expect(current.handoffs.map((h) => h.revision)).toEqual(['aaa', 'bbb']);
+    expect(current.verify.lastVerifiedRevision).toBe('bbb');
+    expect(current.verifyRounds).toBe(1);
+  });
+
+  it('keeps counting rounds within the same revision', async () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.setStatus(task.id, 'running');
+
+    await svc.reportHandoff(task.id, { summary: '第一次', revision: 'aaa' }, 'sess_w');
+    await svc.reportHandoff(task.id, { summary: '第二次', revision: 'aaa' }, 'sess_w');
+
+    expect(svc.get(task.id)!.verifyRounds).toBe(2);
+  });
+});
+
+describe('task metadata', () => {
+  it('keeps baseline and scope through create + reload', () => {
+    const { svc } = service(workspace());
+    const task = svc.create({
+      name: '复核 PR',
+      instruction: '复核这个 PR',
+      supervisorSessionId: 'sup',
+      toolCallId: 'call-meta',
+      spec: {
+        baseline: 'main 分支',
+        scope: '只复核 src/api 下的改动',
+      },
+    });
+
+    const reloaded = svc.get(task.id)!;
+    expect(reloaded.spec?.baseline).toBe('main 分支');
+    expect(reloaded.spec?.scope).toBe('只复核 src/api 下的改动');
+  });
+});

@@ -769,15 +769,105 @@ function setCursorPosition(element: HTMLElement, targetPosition: number): void {
 }
 
 /**
- * Insert HTML at the caret and return the last inserted node.
+ * True while a programmatic insertion (`insertHtmlAtCaret`) is running.
  *
- * The caret has to end up immediately after what was inserted. Deriving that
- * from a text offset is unreliable right after a cut: the cut rewrites the whole
- * editor DOM, so an offset measured "before" the insert can describe the old
- * markup and the caret lands off by the characters preceding the insertion.
- * Anchoring to the inserted node instead is exact, whatever came before.
+ * `execCommand('insertHTML')` dispatches `input` synchronously. That `input`
+ * must not be published by `handleInput`: the caller pre-arms the mention
+ * signature right after inserting, and publishing first would re-serialize
+ * `innerHTML` on the markup that was just written — the exact DOM rewrite that
+ * strands Windows IME input (see the sync effect below). The caller publishes
+ * once, after the signature is armed.
  */
-function insertHtmlAtCaret(element: HTMLElement, html: string): Node | null {
+let programmaticInsertionInFlight = false
+
+export function isProgrammaticInsertionInFlight(): boolean {
+  return programmaticInsertionInFlight
+}
+
+export interface EditingPipelineInsertionInput {
+  /** Does the runtime implement `insertHTML` (Chromium/Electron always does)? */
+  supported: boolean
+  /** Is the editor itself the focused element? */
+  focused: boolean
+  /** Is the caret inside the editor (not in some other selection)? */
+  caretInside: boolean
+}
+
+/**
+ * Should the insertion go through the browser's editing pipeline?
+ *
+ * Editing-pipeline insertion (`execCommand`) is the only way to change a
+ * contenteditable that keeps Chromium's edit context — and therefore the
+ * Windows TSF text store — in sync. Mutating the tree directly
+ * (`range.insertNode`) leaves that store describing the *pre-insertion* text
+ * and caret. The very next keystroke then bypasses the IME and lands as a raw
+ * character, and the composition that starts afterwards still reports the old
+ * caret, so the IME's first pre-edit letter is inserted on top of it: the
+ * duplicated first character ("nn" instead of one n) reported after pasting.
+ *
+ * The direct-DOM path is kept only as a fallback for runtimes/selection states
+ * where the command cannot run.
+ */
+export function shouldInsertViaEditingPipeline(input: EditingPipelineInsertionInput): boolean {
+  return input.supported && input.focused && input.caretInside
+}
+
+export interface HtmlInsertionResult {
+  /** False when nothing could be inserted (empty markup / no caret). */
+  ok: boolean
+  /**
+   * Node the caret must be moved after. `null` when the editing pipeline
+   * already placed the caret after the inserted run.
+   */
+  caretAnchor: Node | null
+}
+
+/**
+ * Insert HTML at the caret.
+ *
+ * Through the editing pipeline the browser owns the caret, so `caretAnchor` is
+ * `null` and callers must not reposition it. The manual fallback returns the
+ * last inserted node: the caret has to end up immediately after what was
+ * inserted, and deriving that from a text offset is unreliable right after a
+ * cut (the cut rewrites the whole editor DOM, so an offset measured "before"
+ * the insert can describe the old markup). Anchoring to the inserted node is
+ * exact, whatever came before.
+ */
+function insertHtmlAtCaret(element: HTMLElement, html: string): HtmlInsertionResult {
+  if (!html) return { ok: false, caretAnchor: null }
+
+  programmaticInsertionInFlight = true
+  try {
+    const selection = window.getSelection()
+    const caretInside =
+      !!selection &&
+      selection.rangeCount > 0 &&
+      !!selection.anchorNode &&
+      element.contains(selection.anchorNode)
+
+    if (
+      shouldInsertViaEditingPipeline({
+        supported: document.queryCommandSupported?.('insertHTML') === true,
+        focused: document.activeElement === element,
+        caretInside,
+      }) &&
+      document.execCommand('insertHTML', false, html)
+    ) {
+      // The command replaced the selection, dropped the `<br>` placeholder of an
+      // empty editor and collapsed the caret after the inserted run — all
+      // without bypassing the edit context.
+      return { ok: true, caretAnchor: null }
+    }
+
+    const anchor = insertHtmlAtCaretManually(element, html)
+    return { ok: anchor !== null, caretAnchor: anchor }
+  } finally {
+    programmaticInsertionInFlight = false
+  }
+}
+
+/** Direct-DOM insertion. Only used when the editing command is unavailable. */
+function insertHtmlAtCaretManually(element: HTMLElement, html: string): Node | null {
   const template = document.createElement('template')
   template.innerHTML = html
   const fragment = template.content
@@ -1046,6 +1136,27 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
     const pendingCursorRef = React.useRef<number | null>(null)
     /** Timestamp of the last TSF recovery cycle (dedupes the re-entrant focus event). */
     const tsfRepairAtRef = React.useRef(0)
+    /**
+     * Re-prime Windows TSF after a mutation that bypassed the editing pipeline.
+     *
+     * Only the direct-DOM fallback of `insertHtmlAtCaret` needs this: the
+     * editing command keeps the edit context in sync by itself. A cycle is
+     * never started mid-composition (it would abort the IME) or for an empty
+     * editor (nothing to re-synchronize).
+     *
+     * Deliberately not called from caret-sensitive mutations (undo/redo, chip
+     * deletion): the focus detour can move the selection, and those paths prove
+     * the caret rather than parking it at the end of a fresh insertion.
+     */
+    const repairEditContext = React.useCallback((el: HTMLElement | null) => {
+      if (!el || document.activeElement !== el) return
+      if (isComposing.current) return
+      if (!needsTsfRepair({ hasExistingText: getTextFromElement(el).length > 0, isComposing: false })) return
+      // The cycle's own refocus re-fires `handleFocus`; this stamp keeps that
+      // re-entry from chaining another cycle.
+      tsfRepairAtRef.current = performance.now()
+      runTsfRecoveryCycle(el)
+    }, [])
     /** Latest staged attachments (ref form: read inside DOM event handlers). */
     const attachmentsRef = React.useRef<RichTextAttachmentChip[]>(attachments ?? [])
     attachmentsRef.current = attachments ?? []
@@ -1150,6 +1261,11 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
 
     // Handle input events
     const handleInput = React.useCallback((e?: React.FormEvent<HTMLDivElement>) => {
+      // A programmatic insertion publishes itself once its mention signature is
+      // armed. `execCommand('insertHTML')` fires `input` synchronously, and
+      // publishing here would re-render `innerHTML` on the markup that was just
+      // written (see `programmaticInsertionInFlight`).
+      if (isProgrammaticInsertionInFlight()) return
       // Never publish while a composition is active — neither when the local
       // ref is set (compositionstart ran) nor when only the event says so
       // (Windows TSF can flip nativeEvent.isComposing before compositionstart).
@@ -1195,6 +1311,28 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
     }, [onChange, onInput, skills, sources, skillSlugs, sourceSlugs, workspaceId, getChipAttachments])
 
     /**
+     * Insert markup at the caret and leave the editor typeable afterwards.
+     *
+     * The pipeline path needs nothing extra. The direct-DOM fallback bypasses
+     * the edit context, so it re-primes TSF — otherwise the next keystroke
+     * misses the IME (raw letter) and the composition reuses the stale caret,
+     * duplicating that letter.
+     *
+     * Returns false when nothing was inserted.
+     */
+    const insertAtCaret = React.useCallback((html: string): boolean => {
+      const el = divRef.current
+      if (!el) return false
+      const { ok, caretAnchor } = insertHtmlAtCaret(el, html)
+      if (!ok) return false
+      if (caretAnchor) {
+        placeCaretAfter(caretAnchor)
+        repairEditContext(el)
+      }
+      return true
+    }, [repairEditContext])
+
+    /**
      * Insert a chip at the caret.
      *
      * Insertion goes through `insertHTML` (not `insertNode`) so the browser's
@@ -1227,12 +1365,9 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
         selection?.addRange(range)
       }
 
-      const inserted = insertHtmlAtCaret(el, html)
-      if (!inserted) return false
-      // Caret anchored to the inserted chip, then publish. The signature is
-      // pre-armed so `handleInput` does not rewrite innerHTML (which would move
-      // the caret from an offset again).
-      placeCaretAfter(inserted)
+      if (!insertAtCaret(html)) return false
+      // The signature is pre-armed so `handleInput` does not rewrite innerHTML
+      // (which would move the caret from an offset again).
       lastMentionSignatureRef.current = getInlineSignature(getTextFromElement(el), skillSlugs, sourceSlugs)
       handleInput()
       return true
@@ -1405,11 +1540,13 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
         // chip). Any offset we compute ourselves becomes a second opinion, and
         // applying it after the browser already moved the caret is exactly how a
         // paste ends up shifted by the text that preceded it.
-        const inserted = insertHtmlAtCaret(
-          el,
-          textToHTML(attachmentPayload.text, skills, sources, workspaceId, getChipAttachments())
-        )
-        if (inserted) placeCaretAfter(inserted)
+        if (
+          !insertAtCaret(
+            textToHTML(attachmentPayload.text, skills, sources, workspaceId, getChipAttachments())
+          )
+        ) {
+          return
+        }
         // The inserted markup already renders chips/badges, so suppress the
         // signature-triggered rewrite for this input: that rewrite restores the
         // caret from an offset measured before the browser settled the
@@ -1455,11 +1592,15 @@ export const RichTextInput = React.forwardRef<RichTextInputHandle, RichTextInput
       // See the payload branch above: the browser's own insertion keeps the caret
       // correct, and the signature is pre-armed so `handleInput` does not rewrite
       // the DOM (and reposition the caret) right after the paste.
-      const inserted = insertHtmlAtCaret(el, textToHTML(normalizedText, skills, sources, workspaceId, chipAttachments))
-      if (inserted) placeCaretAfter(inserted)
+      const inserted = insertAtCaret(textToHTML(normalizedText, skills, sources, workspaceId, chipAttachments))
+      if (!inserted) {
+        // The paste is already swallowed; leaving the editor untouched is safer
+        // than publishing a value the DOM never received.
+        return
+      }
       lastMentionSignatureRef.current = getInlineSignature(getTextFromElement(el), skillSlugs, sourceSlugs)
       handleInput()
-    }, [onPaste, onLongTextPaste, onPasteAttachments, getChipAttachments, skills, sources, workspaceId, handleInput])
+    }, [onPaste, onLongTextPaste, onPasteAttachments, getChipAttachments, skills, sources, workspaceId, handleInput, insertAtCaret])
 
     //
     // Selection helpers for Ctrl+C / Ctrl+X over chips.

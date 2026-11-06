@@ -5,6 +5,8 @@ import {
   syncCompositionFromKeydown,
   isImeCompositionPaste,
   needsTsfRepair,
+  shouldInsertViaEditingPipeline,
+  isProgrammaticInsertionInFlight,
   parseAttachmentClipboardPayload,
   serializeAttachmentClipboardPayload,
 } from '../rich-text-input'
@@ -122,8 +124,7 @@ describe('needsTsfRepair', () => {
   })
 })
 
-describe('attachment clipboard payload', () => {
-  it('round-trips the text model and the attachment payloads', () => {
+describe('attachment clipboard payload', () => {  it('round-trips the text model and the attachment payloads', () => {
     const text = 'see [attachment:report.md] please'
     const parsed = parseAttachmentClipboardPayload(
       serializeAttachmentClipboardPayload(text, [reportAttachment])
@@ -153,5 +154,37 @@ describe('attachment clipboard payload', () => {
 
     expect(parsed?.attachments).toHaveLength(1)
     expect(parsed?.attachments[0].name).toBe('report.md')
+  })
+})
+
+describe('shouldInsertViaEditingPipeline', () => {
+  it('uses the editing command when it can run', () => {
+    expect(
+      shouldInsertViaEditingPipeline({ supported: true, focused: true, caretInside: true })
+    ).toBe(true)
+  })
+
+  it('falls back to direct DOM insertion when the command is unsupported', () => {
+    expect(
+      shouldInsertViaEditingPipeline({ supported: false, focused: true, caretInside: true })
+    ).toBe(false)
+  })
+
+  it('falls back when the editor is not focused (command would target another selection)', () => {
+    expect(
+      shouldInsertViaEditingPipeline({ supported: true, focused: false, caretInside: true })
+    ).toBe(false)
+  })
+
+  it('falls back when the caret sits outside the editor', () => {
+    expect(
+      shouldInsertViaEditingPipeline({ supported: true, focused: true, caretInside: false })
+    ).toBe(false)
+  })
+})
+
+describe('isProgrammaticInsertionInFlight', () => {
+  it('is idle outside an insertion so the input handler publishes normally', () => {
+    expect(isProgrammaticInsertionInFlight()).toBe(false)
   })
 })

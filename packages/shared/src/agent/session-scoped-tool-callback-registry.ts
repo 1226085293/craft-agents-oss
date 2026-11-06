@@ -67,6 +67,8 @@ export interface SessionScopedToolCallbacks {
     title: string;
     summary?: string;
     recipients: string[];
+    /** Provenance links; the channel id separates a group from a DM. */
+    links?: Array<{ rel?: string; url: string }>;
     body?: string;
     payloadPath?: string;
   } | null;

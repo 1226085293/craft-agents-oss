@@ -149,6 +149,10 @@ export function bridgeMessage(msg: BridgeableMessage, context: BridgeContext): B
   ];
 
   const summary = (msg.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 200);
+  // Say where it happened. A bare `提到了你` reads the same for a group and a
+  // DM, and a reader with no channel to look at fills the gap by guessing —
+  // observed: a group message described to the user as a private message.
+  const where = msg.channelId.startsWith('group:') ? '在群里提到了你' : '提到了你';
 
   const event: CraftEventEnvelope = {
     spec: 'craft-event/1',
@@ -157,7 +161,7 @@ export function bridgeMessage(msg: BridgeableMessage, context: BridgeContext): B
     type: 'message.mention',
     receivedAt: now,
     dedupeKey: messageDedupeKey(msg),
-    title: `${msg.senderName ?? msg.senderId} · ${hitKeyword ? `命中关键词「${hitKeyword}」` : '提到了你'}`,
+    title: `${msg.senderName ?? msg.senderId} · ${hitKeyword ? `命中关键词「${hitKeyword}」` : where}`,
     summary,
     recipients: [],
     links,

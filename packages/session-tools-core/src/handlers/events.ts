@@ -139,6 +139,13 @@ export async function handleGetEvent(ctx: SessionToolContext, args: GetEventArgs
     `title: ${event.title}`,
     ...(event.summary ? [`summary: ${event.summary}`] : []),
     ...(event.recipients.length ? [`recipients: ${event.recipients.join(', ')}`] : []),
+    // Provenance. Without this the reader has to guess where the event came
+    // from, and it guesses wrong: a supervisor looking at `source: qq` with no
+    // channel called a group message a private message. The channel id carries
+    // that distinction (`group:<id>` vs `user:<id>`).
+    ...(event.links?.length
+      ? [`links: ${event.links.map((link) => `${link.rel}=${link.url}`).join(', ')}`]
+      : []),
     ...(event.payloadPath ? [`payload: ${event.payloadPath}`] : []),
   ].join('\n');
 

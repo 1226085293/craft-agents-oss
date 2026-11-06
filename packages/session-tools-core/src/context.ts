@@ -494,6 +494,12 @@ export interface SessionToolContext {
     title: string;
     summary?: string;
     recipients: string[];
+    /**
+     * Where the event came from. The channel id distinguishes a group from a
+     * direct message (`group:<id>` vs `user:<id>`), which is the only thing
+     * that tells a reader who is actually speaking.
+     */
+    links?: Array<{ rel?: string; url: string }>;
     body?: string;
     payloadPath?: string;
   } | null;

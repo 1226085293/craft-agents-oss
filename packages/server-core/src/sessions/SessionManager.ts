@@ -6562,6 +6562,9 @@ ${request.prompt}`;
               title: event.title,
               ...(event.summary ? { summary: event.summary } : {}),
               recipients: event.recipients,
+              // Provenance: the channel id is what distinguishes a group message
+              // from a DM, and it is the only way a reader can tell who spoke.
+              ...(event.links?.length ? { links: event.links } : {}),
               ...(event.body !== undefined ? { body: event.body } : {}),
               ...(event.payloadRef ? { payloadPath: event.payloadRef.path } : {}),
             }

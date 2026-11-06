@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'bun:test'
 import { WorkspaceScope, WorkspaceScopes } from './workspace-scope.ts'
+import {
+  expectNothingLeaked,
+  expectWorkspaceReleased,
+  snapshotScopes,
+} from './scope-consistency.ts'
 
 /**
  * The point of this class is narrow: anything started must be stoppable, and
@@ -92,5 +97,47 @@ describe('WorkspaceScopes', () => {
     scopes.disposeAll()
     expect(stopped.sort()).toEqual(['a', 'b'])
     expect(scopes.activeIds()).toEqual([])
+  })
+})
+
+describe('install/uninstall consistency', () => {
+  /**
+   * The property worth asserting is not "it started" but "nothing is left".
+   * These cases exist so the next bug of that shape fails here instead of in
+   * production.
+   */
+  it('returns to the starting state after disposing a workspace', () => {
+    const scopes = new WorkspaceScopes()
+    const before = snapshotScopes(scopes)
+
+    const scope = scopes.open('ws')
+    scope.effect(() => () => undefined)
+    scope.effect(() => () => undefined)
+    expect(snapshotScopes(scopes).pendingDisposers.ws).toBe(2)
+
+    scopes.dispose('ws')
+    expectNothingLeaked(before, snapshotScopes(scopes))
+    expectWorkspaceReleased(scopes, 'ws')
+  })
+
+  it('leaves other workspaces untouched', () => {
+    const scopes = new WorkspaceScopes()
+    scopes.open('a').effect(() => () => undefined)
+    scopes.open('b').effect(() => () => undefined)
+
+    scopes.dispose('a')
+    expect(scopes.activeIds()).toEqual(['b'])
+    expect(scopes.get('b')?.pendingCount).toBe(1)
+  })
+
+  it('does not accumulate disposers across repeated open/dispose cycles', () => {
+    const scopes = new WorkspaceScopes()
+    const before = snapshotScopes(scopes)
+    for (let i = 0; i < 5; i += 1) {
+      const scope = scopes.open('ws')
+      scope.effect(() => () => undefined)
+      scopes.dispose('ws')
+    }
+    expectNothingLeaked(before, snapshotScopes(scopes))
   })
 })

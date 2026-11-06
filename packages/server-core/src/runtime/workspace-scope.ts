@@ -30,6 +30,17 @@ export class WorkspaceScope {
   }
 
   /**
+   * How many undos are still registered.
+   *
+   * Exposed for the consistency check: "dispose, then nothing remains" is the
+   * property worth asserting, and it needs a number to assert on rather than an
+   * inspection of private state.
+   */
+  get pendingCount(): number {
+    return this.disposers.length
+  }
+
+  /**
    * Run `start` and register what it returns as a disposer.
    *
    * A throw from `start` is the caller's to handle: a subsystem that fails to

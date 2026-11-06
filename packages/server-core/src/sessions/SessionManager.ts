@@ -37,6 +37,7 @@ import {
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
 import { readJournal, formatTaskBrief, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
+import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 
 /** 6-hex id, used for collision-free attachment names. */
 function generateShortId(): string {
@@ -2038,7 +2039,6 @@ export class SessionManager implements ISessionManager {
   >()
 
   /** Messaging gateway registry, injected by the host after bootstrap. */
-  private messagingRegistry: IMessagingGatewayRegistry | null = null
 
   /**
    * Centralized setter for session processing state.
@@ -2136,9 +2136,6 @@ export class SessionManager implements ISessionManager {
     return this.initGate.wait()
   }
 
-  setMessagingRegistry(registry: IMessagingGatewayRegistry): void {
-    this.messagingRegistry = registry
-  }
 
   private browserPaneManager: IBrowserPaneManager | null = null
   private enqueuePageThumbnailFn?: (req: { workspaceId: string; workspaceRootPath: string; slug: string }) => void
@@ -6751,32 +6748,30 @@ ${request.prompt}`;
           return callPluginAction(installed.dataDir, { action, args: payload })
         },
 
-        getMessagingBindingsFn: (sessionId: string) => {
-          const registry = this.messagingRegistry
-          if (!registry) return []
-          return registry
-            .getBindings(managed.workspace.id)
-            .filter((b) => b.sessionId === sessionId)
-            .map((b) => ({
-              platform: b.platform,
-              channelId: b.channelId,
-              threadId: b.threadId,
-              channelName: b.channelName,
-              enabled: b.enabled,
-            }))
-        },
+        // A "binding" is now just a routing rule: which event source reaches
+        // this session. The plugin owns the chat — its id, its threads, whether
+        // it even has threads — so Craft only knows the source name.
+        getMessagingBindingsFn: (sessionId: string) =>
+          loadRoutes(managed.workspace.rootPath)
+            .filter((rule) => rule.to.sessionId === sessionId)
+            .map((rule) => ({
+              platform: rule.when.source,
+              channelId: '',
+              channelName: rule.name,
+              enabled: true,
+            })),
         unbindMessagingChannelFn: (sessionId: string, platform?: string) => {
-          const registry = this.messagingRegistry
-          if (!registry) return 0
-          const before = registry
-            .getBindings(managed.workspace.id)
-            .filter((b) => b.sessionId === sessionId && (!platform || b.platform === platform)).length
-          registry.unbindSession(managed.workspace.id, sessionId, platform)
-          return before
+          const rules = loadRoutes(managed.workspace.rootPath)
+          const keep = rules.filter(
+            (rule) => !(rule.to.sessionId === sessionId && (!platform || rule.when.source === platform)),
+          )
+          if (keep.length === rules.length) return 0
+          // `routes.json` is read by the dispatcher on every event, so the
+          // write is the unbind: no separate binding store to keep in sync.
+          writeFileSync(getRoutesPath(managed.workspace.rootPath), JSON.stringify(keep, null, 2), 'utf8')
+          return rules.length - keep.length
         },
         deliverFileToMessagingFn: async (args) => {
-          const registry = this.messagingRegistry
-          if (!registry) throw new Error('Messaging is not configured for this workspace')
 
           // Resolve the path the model supplied:
           // 1. `{{SESSION_PATH}}` is the portable storage token for session dir
@@ -6802,14 +6797,54 @@ ${request.prompt}`;
           ].filter((d): d is string => d !== undefined)
 
           const safePath = await validateFilePath(rawPath, extraDirs)
-          return registry.deliverFileToSessionBindings({
-            workspaceId: managed.workspace.id,
-            sessionId: managed.id,
-            filePath: safePath,
-            filename: args.filename,
-            caption: args.caption,
-            platform: args.platform,
-          })
+
+          // Deliver through the plugin that owns the source. Craft does not
+          // know which platforms exist, so it asks the rules which sources reach
+          // this session and lets each plugin upload the file itself.
+          const sources = loadRoutes(managed.workspace.rootPath)
+            .filter((rule) => rule.to.sessionId === managed.id)
+            .map((rule) => rule.when.source)
+            .filter((source) => !args.platform || source === args.platform)
+
+          if (sources.length === 0) {
+            throw new Error('没有绑定到本会话的消息来源，无法投递文件')
+          }
+
+          const results: Array<{ ok: boolean; message?: string }> = []
+          for (const source of sources) {
+            const plugin = loadListeners({
+              workspaceRoot: managed.workspace.rootPath,
+              catalogDirs: pluginCatalogDirs(),
+              skipProbes: true,
+            }).find((entry) => entry.id === source && isPluginUsable(entry))
+            if (!plugin) {
+              results.push({ ok: false, message: `${source} 未安装或已停用` })
+              continue
+            }
+            results.push(
+              await callPluginAction(plugin.dataDir, {
+                action: 'deliver_file',
+                args: {
+                  filePath: safePath,
+                  ...(args.filename ? { filename: args.filename } : {}),
+                  ...(args.caption ? { caption: args.caption } : {}),
+                },
+              }),
+            )
+          }
+          return {
+            filename: args.filename ?? safePath.split(/[\/]/).pop() ?? safePath,
+            sent: results.filter((r) => r.ok).length,
+            failed: results.filter((r) => !r.ok).length,
+            failures: results
+              .map((r, index) => ({ r, source: sources[index] }))
+              .filter(({ r }) => !r.ok)
+              .map(({ r, source }) => ({
+                platform: source,
+                channelId: '',
+                error: r.message ?? 'unknown error',
+              })),
+          }
         },
       })
 

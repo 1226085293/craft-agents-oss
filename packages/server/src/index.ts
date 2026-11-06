@@ -35,7 +35,6 @@ import { validateSession, createWebuiHandler, nodeHttpAdapter } from '@craft-age
 import type { WebuiHandler } from '@craft-agent/server-core/webui'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { getWorkspaces, getLlmConnections, getDefaultLlmConnection } from '@craft-agent/shared/config'
-import { createMessagingBootstrap, type MessagingBootstrapHandle } from '@craft-agent/messaging-gateway'
 
 // --generate-token: print a crypto-random token and exit
 if (process.argv.includes('--generate-token')) {
@@ -151,18 +150,6 @@ if (webuiEnabled && serverToken) {
   webuiNodeHandler = nodeHttpAdapter(webuiHandler.fetch)
 }
 
-// Resolve WhatsApp worker paths up-front so the helper + Docker env stay in sync.
-// The worker is a Node subprocess — Bun cannot run it directly — so we must
-// pass an explicit `nodeBin` (Electron defaults nodeBin to process.execPath
-// which is correct there but wrong under Bun).
-const waWorkerEntry = process.env.CRAFT_MESSAGING_WA_WORKER
-  ?? join(bundledAssetsRoot, 'packages', 'messaging-whatsapp-worker', 'dist', 'worker.cjs')
-const waNodeBin = process.env.CRAFT_MESSAGING_NODE_BIN ?? 'node'
-
-// Built inside createHandlerDeps (needs sessionManager), populated with the WS
-// publisher after bootstrapServer resolves.
-let messagingHandle: MessagingBootstrapHandle | null = null
-
 const instance = await (async () => {
   try {
     return await bootstrapServer<SessionManager, HandlerDeps>({
@@ -200,56 +187,15 @@ const instance = await (async () => {
       createSessionManager: () => new SessionManager(),
       bindRpcServer: (sm, server) => sm.setRpcServer(server),
       createHandlerDeps: ({ sessionManager, platform, oauthFlowStore }) => {
-        messagingHandle = createMessagingBootstrap({
-          sessionManager,
-          credentialManager: getCredentialManager(),
-          getMessagingDir: (wsId: string) =>
-            join(homedir(), '.craft-agent', 'workspaces', wsId, 'messaging'),
-          // Headless has no legacy messaging dir — workspaces start clean.
-          whatsapp: {
-            workerEntry: waWorkerEntry,
-            nodeBin: waNodeBin,
-            pairingMode: 'qr',
-          },
-          // Live connection lookup for /status — reads config on every call
-          // so deleted/renamed connections are reflected immediately instead
-          // of parroting stale session metadata.
-          resolveConnection: (slug) => {
-            try {
-              const conn = getLlmConnections().find((c) => c.slug === slug)
-              return conn ? { name: conn.name } : undefined
-            } catch {
-              return undefined
-            }
-          },
-          resolveDefaultConnection: () => {
-            try {
-              const slug = getDefaultLlmConnection()
-              if (!slug) return undefined
-              const conn = getLlmConnections().find((c) => c.slug === slug)
-              return conn ? { slug, name: conn.name, defaultModel: conn.defaultModel } : undefined
-            } catch {
-              return undefined
-            }
-          },
-        })
-        sessionManager.setMessagingRegistry?.(messagingHandle.registry)
         return {
           sessionManager,
           platform,
           oauthFlowStore,
-          messagingRegistry: messagingHandle.registry,
         }
       },
       registerAllRpcHandlers: registerCoreRpcHandlers,
       setSessionEventSink: (sessionManager, sink) => {
-        if (!messagingHandle) {
-          // createHandlerDeps always runs before setSessionEventSink, but be
-          // defensive in case bootstrapServer's ordering ever changes.
-          sessionManager.setEventSink(sink)
-          return
-        }
-        sessionManager.setEventSink(messagingHandle.wrapSink(sink))
+        sessionManager.setEventSink(sink)
       },
       initializeSessionManager: async (sessionManager) => {
         await sessionManager.initialize()
@@ -269,28 +215,6 @@ const instance = await (async () => {
   }
 })()
 
-// ---------------------------------------------------------------------------
-// Messaging post-bootstrap: bind the WS publisher and initialize local
-// workspaces. Remote-owned workspaces are skipped because their messaging
-// runs on the remote server.
-// ---------------------------------------------------------------------------
-// CRAFT_DISABLE_MESSAGING lets a dev/test server share a config dir with a live app
-// without both processes fighting over the same Telegram/WhatsApp connections (409s).
-const messagingDisabled = process.env.CRAFT_DISABLE_MESSAGING === 'true' || process.env.CRAFT_DISABLE_MESSAGING === '1'
-if (messagingHandle !== null && !messagingDisabled) {
-  const handle: MessagingBootstrapHandle = messagingHandle
-  handle.setPublisher(instance.wsServer.push.bind(instance.wsServer))
-  try {
-    const localWorkspaceIds = getWorkspaces()
-      .filter((ws) => !ws.remoteServer)
-      .map((ws) => ws.id)
-    await handle.initializeWorkspaces(localWorkspaceIds)
-  } catch (error) {
-    console.error('[messaging] Workspace initialization failed:', error)
-  }
-} else if (messagingDisabled) {
-  console.log('[messaging] Disabled via CRAFT_DISABLE_MESSAGING — skipping workspace messaging init')
-}
 
 // Wire up the lazy health check now that the session manager is ready
 if (webuiHandler) {
@@ -358,13 +282,6 @@ if (!isLocalBind && instance.protocol === 'ws') {
 const shutdown = async () => {
   webuiHandler?.dispose()
   healthServer?.stop()
-  if (messagingHandle) {
-    try {
-      await messagingHandle.dispose()
-    } catch (error) {
-      console.error('[messaging] dispose failed:', error)
-    }
-  }
   await instance.stop()
   process.exit(0)
 }

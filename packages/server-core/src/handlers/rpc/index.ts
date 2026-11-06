@@ -23,7 +23,6 @@ import { registerSourcesHandlers } from './sources'
 import { registerSystemCoreHandlers } from './system'
 import { registerTransferHandlers } from './transfer'
 import { registerWorkspaceCoreHandlers } from './workspace'
-import { registerMessagingHandlers } from './messaging'
 import { registerMemoryHandlers } from './memory'
 import { registerUsageHandlers } from './usage'
 import { registerEventsHandlers } from './events'
@@ -53,7 +52,6 @@ registerLlmConnectionsHandlers(server, deps)
   registerSystemCoreHandlers(server, deps)
   registerTransferHandlers(server)
   registerWorkspaceCoreHandlers(server, deps)
-  registerMessagingHandlers(server, deps)
   registerMemoryHandlers(server, deps)
   registerUsageHandlers(server, deps)
   registerEventsHandlers(server, deps)

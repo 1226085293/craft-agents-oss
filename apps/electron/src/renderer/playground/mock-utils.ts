@@ -6,12 +6,11 @@ import type {
   WhatsAppUiEvent,
 } from '../../shared/types'
 import type { MessagingBinding } from '../atoms/messaging'
-import type {
-  BindingAccess,
-  PendingSender,
-  PlatformAccessMode,
-  PlatformOwner,
-} from '../components/messaging/access/types'
+// Preview-only shapes; the real messaging UI is gone, so they stay local.
+type BindingAccess = any
+type PendingSender = any
+type PlatformAccessMode = any
+type PlatformOwner = any
 
 // ============================================================================
 // Messaging mock state + control handle

@@ -86,7 +86,6 @@ import {
 import { handleArchiveSession } from './handlers/archive-session.ts';
 import { handleSendAgentMessage } from './handlers/send-agent-message.ts';
 import { handleDeliverFile } from './handlers/deliver-file.ts';
-import { handleListMessagingChannels, handleUnbindMessagingChannel } from './handlers/messaging.ts';
 import { handleAddMemory, handleQueryMemories } from './handlers/memory.ts';
 
 // ============================================================
@@ -578,10 +577,8 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'plugin_call', description: TOOL_DESCRIPTIONS.plugin_call, inputSchema: PluginCallSchema, executionMode: 'registry', safeMode: 'block', handler: handlePluginCall },
   { name: 'add_memory', description: TOOL_DESCRIPTIONS.add_memory, inputSchema: AddMemorySchema, executionMode: 'registry', safeMode: 'block', handler: handleAddMemory },
   { name: 'query_memories', description: TOOL_DESCRIPTIONS.query_memories, inputSchema: QueryMemoriesSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleQueryMemories },
-  // Messaging gateway tools
+  // Delivery tools (the plugin owning the source does the actual send)
   { name: 'deliver_file', description: TOOL_DESCRIPTIONS.deliver_file, inputSchema: DeliverFileSchema, executionMode: 'registry', safeMode: 'block', handler: handleDeliverFile },
-  { name: 'list_messaging_channels', description: TOOL_DESCRIPTIONS.list_messaging_channels, inputSchema: ListMessagingChannelsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListMessagingChannels },
-  { name: 'unbind_messaging_channel', description: TOOL_DESCRIPTIONS.unbind_messaging_channel, inputSchema: UnbindMessagingChannelSchema, executionMode: 'registry', safeMode: 'block', handler: handleUnbindMessagingChannel },
 ];
 
 export type SessionRole = 'supervisor' | 'worker';

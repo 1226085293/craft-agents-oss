@@ -85,7 +85,6 @@ function createMockDeps(): HandlerDeps {
     } as unknown as HandlerDeps['oauthFlowStore'],
     // registerMessagingHandlers is a no-op without a registry; the app always
     // supplies one, so mirror that here for channel-coverage assertions.
-    messagingRegistry: {} as any,
   }
 }
 
@@ -94,7 +93,6 @@ async function getExpectedChannels(): Promise<Set<string>> {
   const [
     auth,
     folders,
-    messaging,
     files,
     labels,
     llm,
@@ -116,7 +114,6 @@ async function getExpectedChannels(): Promise<Set<string>> {
   ] = await Promise.all([
     import('@craft-agent/server-core/handlers/rpc/auth'),
     import('@craft-agent/server-core/handlers/rpc/folders'),
-    import('@craft-agent/server-core/handlers/rpc/messaging'),
     import('@craft-agent/server-core/handlers/rpc/files'),
     import('@craft-agent/server-core/handlers/rpc/labels'),
     import('@craft-agent/server-core/handlers/rpc/llm-connections'),
@@ -149,7 +146,6 @@ async function getExpectedChannels(): Promise<Set<string>> {
   return new Set([
     ...auth.HANDLED_CHANNELS,
     ...folders.HANDLED_CHANNELS,
-    ...messaging.HANDLED_CHANNELS,
     ...files.HANDLED_CHANNELS,
     ...labels.HANDLED_CHANNELS,
     ...llm.HANDLED_CHANNELS,

@@ -37,7 +37,6 @@ import { ShareMenuItems } from './SessionMenuParts'
 import { getFileManagerName } from '@/lib/platform'
 import type { SessionMeta } from '@/atoms/sessions'
 import { hasUnreadMeta, hasMessagesMeta } from '@/utils/session'
-import { MessagingSessionMenuItem } from '@/components/messaging/MessagingSessionMenuItem'
 import { useSessionMenuActions } from '@/hooks/useSessionMenuActions'
 
 export interface SessionMenuProjectOption {
@@ -130,7 +129,6 @@ export function SessionMenu({
       )}
 
       {/* Connect to Messaging — pairing code flow */}
-      <MessagingSessionMenuItem sessionId={sessionId} />
 
       <Separator />
 

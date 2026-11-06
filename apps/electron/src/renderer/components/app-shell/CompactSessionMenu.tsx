@@ -57,10 +57,9 @@ import {
 import type { SessionMeta } from '@/atoms/sessions'
 import { hasUnreadMeta, hasMessagesMeta } from '@/utils/session'
 import { getFileManagerName } from '@/lib/platform'
-import { useMessagingConnect, type MessagingPlatform } from '@/components/messaging/MessagingSessionMenuItem'
 import { useSessionMenuActions } from '@/hooks/useSessionMenuActions'
 
-type View = 'root' | 'share' | 'messaging'
+type View = 'root' | 'share'
 
 export interface CompactSessionMenuProps {
   /** Title text shown in the trigger button + drawer header. */
@@ -164,12 +163,6 @@ export function CompactSessionMenu({
     [setOpen],
   )
 
-  const connectMessaging = useMessagingConnect({ sessionId: item.id })
-  const handleConnectMessaging = (platform: MessagingPlatform) => {
-    setOpen(false)
-    void connectMessaging(platform)
-  }
-
   // ---------------------------------------------------------------------------
   // Drawer header — shared between root + sub-panes. Sub-panes show a back
   // chevron; the root pane shows the session title.
@@ -177,7 +170,6 @@ export function CompactSessionMenu({
   const headerTitle = (() => {
     switch (view) {
       case 'share':     return t('sessionMenu.shared')
-      case 'messaging': return t('sessionMenu.connectChannel')
       default:          return title ?? ''
     }
   })()
@@ -257,7 +249,6 @@ export function CompactSessionMenu({
               onShare={closeAfter(actions.share)}
               onOpenShareSub={() => setView('share')}
               onSendToWorkspace={closeAfter(onSendToWorkspace)}
-              onOpenMessagingSub={() => setView('messaging')}
               onArchive={closeAfter(onArchive)}
               onUnarchive={closeAfter(onUnarchive)}
               onMarkUnread={closeAfter(onMarkUnread)}
@@ -279,10 +270,6 @@ export function CompactSessionMenu({
               onRevokeShare={closeAfter(actions.revokeShare)!}
             />
           )}
-
-          {view === 'messaging' && (
-            <MessagingPane onConnect={handleConnectMessaging} />
-          )}
         </div>
       </DrawerContent>
     </Drawer>
@@ -302,7 +289,6 @@ interface RootPaneProps {
   onShare?: () => void
   onOpenShareSub: () => void
   onSendToWorkspace?: () => void
-  onOpenMessagingSub: () => void
   onArchive?: () => void
   onUnarchive?: () => void
   onMarkUnread?: () => void
@@ -324,7 +310,6 @@ function RootPane({
   onShare,
   onOpenShareSub,
   onSendToWorkspace,
-  onOpenMessagingSub,
   onArchive,
   onUnarchive,
   onMarkUnread,
@@ -355,13 +340,6 @@ function RootPane({
       {hasTransferTargets && onSendToWorkspace && (
         <Row icon={<Send className="h-4 w-4" />} label={t('sessionMenu.sendToWorkspace')} onTap={onSendToWorkspace} />
       )}
-
-      <Row
-        icon={<MessageSquare className="h-4 w-4" />}
-        label={t('sessionMenu.connectChannel')}
-        chevron
-        onTap={onOpenMessagingSub}
-      />
 
       <Separator />
 
@@ -427,20 +405,6 @@ function SharePane({
     </div>
   )
 }
-
-function MessagingPane({ onConnect }: { onConnect: (platform: MessagingPlatform) => void }) {
-  return (
-    <div className="flex flex-col">
-      <Row icon={<MessageSquare className="h-4 w-4" />} label="Telegram" onTap={() => onConnect('telegram')} />
-      <Row icon={<MessageSquare className="h-4 w-4" />} label="WhatsApp" onTap={() => onConnect('whatsapp')} />
-      <Row icon={<MessageSquare className="h-4 w-4" />} label="Lark / Feishu" onTap={() => onConnect('lark')} />
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Primitives
-// ---------------------------------------------------------------------------
 
 interface RowProps {
   icon: React.ReactNode

@@ -147,7 +147,6 @@ import { PanelHeader } from "./PanelHeader"
 import { FabNewChat } from "./FabNewChat"
 import { SendToWorkspaceDialog } from "./SendToWorkspaceDialog"
 import { CreateProjectDialog } from "../projects/CreateProjectDialog"
-import { MessagingDialogHost } from "@/components/messaging/MessagingDialogHost"
 import { EditPopover, getEditConfig, type EditContextKey } from "@/components/ui/EditPopover"
 import SettingsNavigator from "@/pages/settings/SettingsNavigator"
 import {
@@ -2990,7 +2989,6 @@ function AppShellContent({
 
       {/* Messaging dialogs (pairing-code + WA connect) — driven by messagingDialogAtom.
           Mounted here so they survive context-menu / dropdown close. */}
-      <MessagingDialogHost />
 
       {/* Navigator panel's empty-space menu (New Session / New Folder). Rendered
           through a portal so the panel's overflow cannot clip it. */}

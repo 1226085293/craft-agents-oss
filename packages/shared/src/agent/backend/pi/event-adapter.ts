@@ -63,6 +63,12 @@ const RETRY_RUN_GRACE_MS = 15_000;
  *  subprocess died in the window. */
 const SUPERSEDED_RELEASE_TIMEOUT_MS = 20_000;
 
+/** How long the gateway-retry hold waits for the subprocess's retried
+ *  `agent_start`. The subprocess normally calls `agent.continue()`
+ *  immediately after `agent_end`; if that never happens the queue would stay
+ *  open forever (2026-11-06 261105-onyx-steel: 13 minutes of silence). */
+const GATEWAY_RETRY_START_FALLBACK_TIMEOUT_MS = 15_000;
+
 /** Retryable provider errors that the shared `parseError` cannot classify are
  *  split into provider-side incidents (surfaced as `service_error`) and
  *  transport failures (surfaced as `network_error`). Patterns mirror the
@@ -228,6 +234,7 @@ export class PiEventAdapter extends BaseEventAdapter {
   private gatewayRetryState: 'none' | 'awaiting' | 'recovering' = 'none';
   private gatewayRetryAttempt = 0;
   private gatewayRetryTerminalError: CraftAgentEvent | null = null;
+  private gatewayRetryFallbackTimerId: ReturnType<typeof setTimeout> | null = null;
   private heldRetryError: CraftAgentEvent | null = null;
   private retryFallbackTimerId: ReturnType<typeof setTimeout> | null = null;
 
@@ -515,6 +522,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.gatewayRetryState = 'none';
     this.gatewayRetryAttempt = 0;
     this.gatewayRetryTerminalError = null;
+    this.cancelGatewayRetryFallbackTimer();
     this.heldRetryError = null;
     this.pendingQueueComplete = false;
     this.defenseResumeHeld = false;
@@ -618,6 +626,42 @@ export class PiEventAdapter extends BaseEventAdapter {
     if (this.supersededReleaseTimerId !== null) {
       clearTimeout(this.supersededReleaseTimerId);
       this.supersededReleaseTimerId = null;
+    }
+  }
+
+  /**
+   * Arm the gateway-retry hold fallback. The subprocess marks the turn
+   * retryable and then continues the same model step; if it never emits the
+   * retried `agent_start`, release the queue instead of holding the UI open
+   * forever. (2026-11-06 261105-onyx-steel: a 900 s tool exemption hid the
+   * subprocess watchdog, leaving a 13-minute silent turn.)
+   */
+  private armGatewayRetryFallbackTimer(): void {
+    this.cancelGatewayRetryFallbackTimer();
+    const armedAttempt = this.gatewayRetryAttempt;
+    this.gatewayRetryFallbackTimerId = setTimeout(() => {
+      this.gatewayRetryFallbackTimerId = null;
+      if (this.gatewayRetryState !== 'awaiting' || this.gatewayRetryAttempt !== armedAttempt) return;
+      this.log.warn('Gateway retry fallback fired — no agent_start followed the retry hold', {
+        timeoutMs: GATEWAY_RETRY_START_FALLBACK_TIMEOUT_MS,
+        attempt: armedAttempt,
+      });
+      this.gatewayRetryState = 'none';
+      const terminal: CraftAgentEvent = this.gatewayRetryTerminalError ?? {
+        type: 'error',
+        message: 'The model stream was interrupted and the automatic retry did not start. Please try again.',
+      };
+      this.gatewayRetryTerminalError = null;
+      this.onFallbackEvent?.({ type: 'retry', phase: 'end', recovered: false, attempt: armedAttempt });
+      this.onFallbackEvent?.(terminal);
+      this.onFallbackComplete?.();
+    }, GATEWAY_RETRY_START_FALLBACK_TIMEOUT_MS);
+  }
+
+  private cancelGatewayRetryFallbackTimer(): void {
+    if (this.gatewayRetryFallbackTimerId !== null) {
+      clearTimeout(this.gatewayRetryFallbackTimerId);
+      this.gatewayRetryFallbackTimerId = null;
     }
   }
 
@@ -770,6 +814,7 @@ export class PiEventAdapter extends BaseEventAdapter {
           this.releaseSupersededByFreshTurn();
         }
         if (this.gatewayRetryState === 'awaiting') {
+          this.cancelGatewayRetryFallbackTimer();
           this.gatewayRetryState = 'recovering';
           yield { type: 'retry', phase: 'active' };
           break;
@@ -805,6 +850,7 @@ export class PiEventAdapter extends BaseEventAdapter {
           // The subprocess can fail to start the continuation (e.g. a
           // continue() rejection) and emit only its synthetic terminal event.
           // Release the host queue instead of waiting forever for agent_start.
+          this.cancelGatewayRetryFallbackTimer();
           this.gatewayRetryState = 'none';
           const terminalError = this.gatewayRetryTerminalError;
           this.gatewayRetryTerminalError = null;
@@ -819,6 +865,7 @@ export class PiEventAdapter extends BaseEventAdapter {
         if ((event as { gatewayRetryPending?: boolean }).gatewayRetryPending) {
           this.gatewayRetryState = 'awaiting';
           this.gatewayRetryAttempt += 1;
+          this.armGatewayRetryFallbackTimer();
           yield { type: 'retry', phase: 'backoff', attempt: this.gatewayRetryAttempt,
             message: `Stream interrupted. Retrying the same turn (attempt ${this.gatewayRetryAttempt})...` };
           yield* this.demoteDraftReplyForHold();

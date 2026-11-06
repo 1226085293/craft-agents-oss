@@ -16,7 +16,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import type { IncomingMessage, PlatformAdapter, SentMessage } from '../adapters/types'
+import type { IncomingMessage, PlatformAdapter, SentMessage } from '../types'
 import { MessagingGateway } from '../gateway'
 
 const noopLogger: {

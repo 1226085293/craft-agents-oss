@@ -26,13 +26,34 @@ import type {
 } from '@craft-agent/server-core/handlers'
 
 import { MessagingGateway } from './gateway'
+import { loadAdapter, parsePluginCredentials } from './adapter-loader'
+import type { WhatsAppAdapterLike as WhatsAppShape } from './adapter-kinds'
+import type { PlatformAdapter } from './types'
+
+/**
+ * Structural check for the WhatsApp program.
+ *
+ * `instanceof` would require the host to import the class — exactly the coupling
+ * that moving adapters into plugins removes. The method this needs is unique to
+ * the platform, so its presence is the contract.
+ */
+function isWhatsAppAdapter(adapter: PlatformAdapter | undefined): adapter is WhatsAppShape {
+  return Boolean(adapter && typeof (adapter as WhatsAppShape).requestPairingCode === 'function')
+}
+
+import type {
+  QQAdapterLike,
+  TelegramAdapterLike,
+  LarkAdapterLike,
+  WeChatAdapterLike,
+  WhatsAppAdapterLike,
+} from './adapter-kinds'
 import { ConfigStore } from './config-store'
 import { PairingCodeManager } from './pairing'
-import { TelegramAdapter } from './adapters/telegram/index'
-import { WhatsAppAdapter, type WhatsAppEvent } from './adapters/whatsapp/index'
-import { LarkAdapter, parseLarkCredentials, type LarkCredentials } from './adapters/lark/index'
-import { QQAdapter, parseQQCredentials, type QQCredentials } from './adapters/qq/index'
-import { WeChatAdapter, parseWeChatCredentials, type WeChatCredentials } from './adapters/wechat/index'
+import type { WhatsAppEvent } from './whatsapp-event'
+import type { LarkCredentials } from './credentials'
+import type { QQCredentials } from './credentials'
+import type { WeChatCredentials } from './credentials'
 import { TopicRegistry } from './topic-registry'
 import type { SessionEvent } from './renderer'
 import type { EventSinkFn } from './event-fanout'
@@ -136,9 +157,9 @@ interface WorkspaceState {
   configStore: ConfigStore
   topicRegistry: TopicRegistry
   botUsernames: Partial<Record<PlatformType, string>>
-  whatsapp: WhatsAppAdapter | null
+  whatsapp: WhatsAppAdapterLike | null
   whatsappOffEvent?: () => void
-  whatsappRecoveryInFlight?: Promise<WhatsAppAdapter | undefined>
+  whatsappRecoveryInFlight?: Promise<WhatsAppAdapterLike | undefined>
   wechatConnect?: WeChatConnectState
   telegramRetryTimer?: ReturnType<typeof setTimeout>
   telegramRetryAttempt: number
@@ -149,7 +170,7 @@ interface WorkspaceState {
    */
   telegramAttemptId: number
   /** 本轮 attempt 已创建、但尚未注册到 gateway 的 adapter（超时分支靠它掐掉孤儿 poller）。 */
-  telegramAttemptAdapter?: TelegramAdapter
+  telegramAttemptAdapter?: TelegramAdapterLike
   telegramBlockedNotices: Map<string, TelegramBlockedNotice>
   runtime: Record<PlatformType, MessagingPlatformRuntimeInfo>
 }
@@ -711,7 +732,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       throw new Error('Workspace-supergroup pairing is only supported on Telegram.')
     }
     const state = this.workspaces.get(workspaceId) ?? this.bootstrapWorkspace(workspaceId)
-    const adapter = state.gateway.getAdapter('telegram') as TelegramAdapter | undefined
+    const adapter = state.gateway.getAdapter('telegram') as TelegramAdapterLike | undefined
     if (!adapter) {
       throw new Error('Telegram adapter is not running. Connect the bot first.')
     }
@@ -781,7 +802,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     // effectively a key-deletion.
     this.patchTelegramConfig(workspaceId, { supergroup: undefined })
 
-    const adapter = state.gateway.getAdapter('telegram') as TelegramAdapter | undefined
+    const adapter = state.gateway.getAdapter('telegram') as TelegramAdapterLike | undefined
     adapter?.setAcceptedSupergroupChatId(undefined)
     this.log.info('workspace supergroup unbound', {
       event: 'workspace_supergroup_unbound',
@@ -1570,7 +1591,8 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       state.whatsapp = null
     }
 
-    const adapter = new WhatsAppAdapter()
+    const adapter = (await loadAdapter('whatsapp')) as WhatsAppAdapterLike | null
+      if (!adapter) throw new Error('whatsapp plugin did not provide a program')
     state.whatsapp = adapter
     state.whatsappOffEvent = adapter.onEvent((ev) => this.onWhatsAppEvent(workspaceId, ev))
 
@@ -1794,7 +1816,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
 
     let creds: LarkCredentials
     try {
-      creds = parseLarkCredentials(cred.value)
+      creds = (await parsePluginCredentials('lark', cred.value)) as LarkCredentials
     } catch (err) {
       this.setPlatformRuntime(workspaceId, state, 'lark', {
         configured: true,
@@ -1814,7 +1836,8 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     })
 
     try {
-      const adapter = new LarkAdapter()
+      const adapter = (await loadAdapter('lark')) as LarkAdapterLike | null
+      if (!adapter) throw new Error('lark plugin did not provide a program')
       await adapter.initialize({
         token: cred.value,
         logger: this.log.child({
@@ -1872,7 +1895,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
 
     let creds: QQCredentials
     try {
-      creds = parseQQCredentials(cred.value)
+      creds = (await parsePluginCredentials('qq', cred.value)) as QQCredentials
     } catch (err) {
       this.setPlatformRuntime(workspaceId, state, 'qq', {
         configured: true,
@@ -1892,7 +1915,8 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     })
 
     try {
-      const adapter = new QQAdapter()
+      const adapter = (await loadAdapter('qq')) as QQAdapterLike | null
+      if (!adapter) throw new Error('qq plugin did not provide a program')
       const qqCfg = state.configStore.get().platforms.qq
       const owners = qqCfg?.owners ?? []
       await adapter.initialize({
@@ -1948,7 +1972,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
 
     let creds: WeChatCredentials
     try {
-      creds = parseWeChatCredentials(cred.value)
+      creds = (await parsePluginCredentials('wechat', cred.value)) as WeChatCredentials
     } catch (err) {
       this.setPlatformRuntime(workspaceId, state, 'wechat', {
         configured: true,
@@ -1968,7 +1992,8 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     })
 
     try {
-      const adapter = new WeChatAdapter()
+      const adapter = (await loadAdapter('wechat')) as WeChatAdapterLike | null
+      if (!adapter) throw new Error('wechat plugin did not provide a program')
       const wechatCfg = state.configStore.get().platforms.wechat
       await adapter.initialize({
         token: cred.value,
@@ -2037,9 +2062,10 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     // ② 旧 adapter 的 destroy 已把 destroyed 同步置位（poll 当拍即停），本轮还没 new，直接退
     if (!this.isCurrentTelegramAttempt(state, attemptId)) return
 
-    let adapter: TelegramAdapter | null = null
+    let adapter: TelegramAdapterLike | null = null
     try {
-      adapter = new TelegramAdapter()
+      adapter = (await loadAdapter('telegram')) as unknown as TelegramAdapterLike | null
+        if (!adapter) throw new Error('telegram plugin did not provide a program')
       // 记录「已创建但未注册」的句柄：超时/换 token 时靠它掐掉孤儿 poller
       state.telegramAttemptAdapter = adapter
       const supergroupChatId = state.configStore.get().platforms.telegram?.supergroup?.chatId
@@ -2287,7 +2313,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
   private async flushTelegramBlockedNotices(
     workspaceId: string,
     state: WorkspaceState,
-    adapter: TelegramAdapter,
+    adapter: TelegramAdapterLike,
   ): Promise<void> {
     // Render replies held during the outage FIRST, so the recovery notice
     // (if any) lands after the missed content instead of replacing it.
@@ -2390,14 +2416,14 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       eventType: string
       reason: string
     },
-  ): Promise<WhatsAppAdapter | undefined> {
+  ): Promise<WhatsAppAdapterLike | undefined> {
     if (info.platform !== 'whatsapp') return undefined
 
     const state = this.workspaces.get(workspaceId)
     if (!state) return undefined
 
     const current = state.gateway.getAdapter('whatsapp')
-    if (current instanceof WhatsAppAdapter && current.isConnected()) return current
+    if (isWhatsAppAdapter(current) && current.isConnected()) return current
 
     if (state.whatsappRecoveryInFlight) {
       this.log.info('reusing in-flight WhatsApp delivery reconnect', {
@@ -2428,7 +2454,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       eventType: string
       reason: string
     },
-  ): Promise<WhatsAppAdapter | undefined> {
+  ): Promise<WhatsAppAdapterLike | undefined> {
     this.log.warn('starting WhatsApp delivery reconnect', {
       event: 'whatsapp_delivery_reconnect_started',
       workspaceId,
@@ -2521,15 +2547,15 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
   private async waitForWhatsAppConnected(
     state: WorkspaceState,
     timeoutMs: number,
-  ): Promise<WhatsAppAdapter | undefined> {
+  ): Promise<WhatsAppAdapterLike | undefined> {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
       const adapter = state.gateway.getAdapter('whatsapp')
-      if (adapter instanceof WhatsAppAdapter && adapter.isConnected()) return adapter
+      if (isWhatsAppAdapter(adapter) && adapter.isConnected()) return adapter
       await delay(250)
     }
     const adapter = state.gateway.getAdapter('whatsapp')
-    return adapter instanceof WhatsAppAdapter && adapter.isConnected() ? adapter : undefined
+    return isWhatsAppAdapter(adapter) && adapter.isConnected() ? adapter : undefined
   }
 
   private setPlatformRuntime(
@@ -2672,7 +2698,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       // Runtime C2C filtering follows the main-QQ list without a reconnect.
       const adapter = state.gateway.getAdapter('qq')
       if (adapter && adapter.platform === 'qq') {
-        ;(adapter as unknown as QQAdapter).setMainQqOpenIds(deduped.map((o) => o.userId))
+        ;(adapter as unknown as QQAdapterLike).setMainQqOpenIds(deduped.map((o) => o.userId))
       }
     }
     this.emitBindingChanged(workspaceId)

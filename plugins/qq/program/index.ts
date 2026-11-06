@@ -38,7 +38,7 @@ import type {
   SentMessage,
   SendOptions,
   MessagingLogger,
-} from '../../types'
+} from '@craft-agent/messaging-gateway/types'
 
 /**
  * Hard cap for downloaded/uploaded attachment size. Matches Telegram's
@@ -1159,3 +1159,14 @@ export class QQAdapter implements PlatformAdapter {
     return localPath
   }
 }
+
+/**
+ * Entry point the host loads. The adapter lives here, in the plugin — Craft only
+ * knows the filename and this export name.
+ */
+export function createAdapter(): QQAdapter {
+  return new QQAdapter()
+}
+
+/** Host entry point: this platform's credential format lives here, not in Craft. */
+export const parseCredentials = parseQQCredentials

@@ -46,7 +46,7 @@ export function MessagingDialogHost() {
             b.platform === current.platform,
         )
         if (bound) {
-          toast.success(t('toast.messagingPaired'))
+          toast.success(t('toast.channelPaired'))
           setState({ kind: 'closed' })
         }
       } catch {

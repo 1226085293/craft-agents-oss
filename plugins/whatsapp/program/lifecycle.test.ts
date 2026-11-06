@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { WhatsAppAdapter, type WhatsAppConfig } from './index'
-import type { IncomingMessage } from '../../types'
+import type { IncomingMessage } from '@craft-agent/messaging-gateway/types'
 
 const cleanups: Array<() => void> = []
 

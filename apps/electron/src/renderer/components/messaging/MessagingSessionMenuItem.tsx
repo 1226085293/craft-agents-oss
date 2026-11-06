@@ -126,7 +126,7 @@ export function MessagingSessionMenuItem(props: MessagingSessionMenuItemProps) {
     <Sub>
       <SubTrigger className="pr-2">
         <MessageSquare className="h-3.5 w-3.5" />
-        <span className="flex-1">{t('sessionMenu.connectMessaging')}</span>
+        <span className="flex-1">{t('sessionMenu.connectChannel')}</span>
       </SubTrigger>
       <SubContent>
         <MenuItem onClick={() => handleConnectMessaging('telegram')}>
@@ -151,10 +151,10 @@ export function MessagingSessionMenuItem(props: MessagingSessionMenuItemProps) {
 export function classifyMessagingError(err: unknown, t: TFunction): string {
   const msg = err instanceof Error ? err.message : String(err)
   if (/platform not connected|no adapter|not configured/i.test(msg)) {
-    return t('toast.messagingNotConfigured')
+    return t('toast.channelNotConfigured')
   }
   if (/rate.?limit/i.test(msg)) {
-    return t('toast.messagingRateLimited')
+    return t('toast.channelRateLimited')
   }
   return msg
 }

@@ -36,7 +36,7 @@ import type {
   ButtonPress,
   ReadReceipt,
   MessagingLogger,
-} from '../../types'
+} from '@craft-agent/messaging-gateway/types'
 
 const NOOP_LOGGER: MessagingLogger = {
   info: () => {},
@@ -539,4 +539,12 @@ export class WhatsAppAdapter implements PlatformAdapter {
         return
     }
   }
+}
+
+/**
+ * Entry point the host loads. The adapter lives here, in the plugin — Craft only
+ * knows the filename and this export name.
+ */
+export function createAdapter(): WhatsAppAdapter {
+  return new WhatsAppAdapter()
 }

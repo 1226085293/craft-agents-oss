@@ -6,7 +6,7 @@ import {
   extractBody,
   parseWeChatChannel,
   parseWeChatCredentials,
-} from '../adapters/wechat/index'
+} from '../index'
 
 describe('WeChat — parseWeChatCredentials', () => {
   test('parses a full credential JSON', () => {

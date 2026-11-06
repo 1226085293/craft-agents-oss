@@ -267,7 +267,7 @@ export function TopBar({
             </StyledDropdownMenuItem>
             <StyledDropdownMenuItem onClick={() => window.electronAPI.openUrl(getDocUrl('messaging'))}>
               <Icons.MessageSquare className="h-3.5 w-3.5" />
-              <span className="flex-1">{t("settings.messaging.title")}</span>
+              <span className="flex-1">{t("session.channelBinding")}</span>
               <Icons.ExternalLink className="h-3 w-3 text-muted-foreground" />
             </StyledDropdownMenuItem>
             <StyledDropdownMenuSeparator />

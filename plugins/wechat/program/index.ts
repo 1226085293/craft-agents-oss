@@ -38,7 +38,7 @@ import type {
   SentMessage,
   InlineButton,
   MessagingLogger,
-} from '../../types'
+} from '@craft-agent/messaging-gateway/types'
 
 const NOOP_LOGGER: MessagingLogger = {
   info: () => {},
@@ -662,3 +662,14 @@ export function collectAttachments(msg: WeixinMessage): Array<{ type: 'photo' | 
   }
   return out
 }
+
+/**
+ * Entry point the host loads. The adapter lives here, in the plugin — Craft only
+ * knows the filename and this export name.
+ */
+export function createAdapter(): WeChatAdapter {
+  return new WeChatAdapter()
+}
+
+/** Host entry point: this platform's credential format lives here, not in Craft. */
+export const parseCredentials = parseWeChatCredentials

@@ -177,7 +177,7 @@ export function CompactSessionMenu({
   const headerTitle = (() => {
     switch (view) {
       case 'share':     return t('sessionMenu.shared')
-      case 'messaging': return t('sessionMenu.connectMessaging')
+      case 'messaging': return t('sessionMenu.connectChannel')
       default:          return title ?? ''
     }
   })()
@@ -358,7 +358,7 @@ function RootPane({
 
       <Row
         icon={<MessageSquare className="h-4 w-4" />}
-        label={t('sessionMenu.connectMessaging')}
+        label={t('sessionMenu.connectChannel')}
         chevron
         onTap={onOpenMessagingSub}
       />

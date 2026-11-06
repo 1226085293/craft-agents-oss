@@ -20,7 +20,7 @@ import type {
   InlineButton,
   ButtonPress,
   MessagingLogger,
-} from '../../types'
+} from '@craft-agent/messaging-gateway/types'
 import { formatForTelegram, TELEGRAM_MAX_CAPTION_LENGTH, TELEGRAM_MAX_MESSAGE_LENGTH, TELEGRAM_PARSE_MODE, type TelegramParseMode } from './format'
 
 /**
@@ -1225,4 +1225,12 @@ function stickerFileExtension(sticker: { is_video?: boolean; is_animated?: boole
   if (sticker.is_video) return '.webm'
   if (sticker.is_animated) return '.tgs'
   return '.webp'
+}
+
+/**
+ * Entry point the host loads. The adapter lives here, in the plugin — Craft only
+ * knows the filename and this export name.
+ */
+export function createAdapter(): TelegramAdapter {
+  return new TelegramAdapter()
 }

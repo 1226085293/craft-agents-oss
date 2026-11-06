@@ -26,7 +26,7 @@ import type {
   ButtonPress,
   MessagingLogger,
   SendOptions,
-} from '../../types'
+} from '@craft-agent/messaging-gateway/types'
 import {
   formatForLarkPost,
   wrapAsTrivialPost,
@@ -809,3 +809,14 @@ export class LarkAdapter implements PlatformAdapter {
     await this.buttonHandler(press)
   }
 }
+
+/**
+ * Entry point the host loads. The adapter lives here, in the plugin — Craft only
+ * knows the filename and this export name.
+ */
+export function createAdapter(): LarkAdapter {
+  return new LarkAdapter()
+}
+
+/** Host entry point: this platform's credential format lives here, not in Craft. */
+export const parseCredentials = parseLarkCredentials

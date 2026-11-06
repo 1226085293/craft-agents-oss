@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, mock } from 'bun:test'
 import type { Context } from 'grammy'
-import type { IncomingMessage } from '../../types'
+import type { IncomingMessage } from '@craft-agent/messaging-gateway/types'
 import {
   TELEGRAM_BOT_COMMANDS,
   TelegramAdapter,

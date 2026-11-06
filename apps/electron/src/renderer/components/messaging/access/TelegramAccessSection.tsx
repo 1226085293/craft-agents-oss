@@ -98,7 +98,7 @@ export function TelegramAccessSection({ workspaceId, accessMode, onAccessModeCha
   const handleLockDown = async () => {
     try {
       await window.electronAPI.setMessagingPlatformAccessMode('telegram', 'owner-only')
-      toast.success(t('toast.messagingTelegramLockedDown'))
+      toast.success(t('toast.channelLockedDown'))
       onAccessModeChange('owner-only')
       await loadAll()
     } catch (err) {

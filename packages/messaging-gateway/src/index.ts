@@ -5,13 +5,6 @@
  */
 
 export { MessagingGateway, type GatewayOptions } from './gateway'
-export { TelegramAdapter } from './adapters/telegram/index'
-export { QQAdapter } from './adapters/qq/index'
-export {
-  WhatsAppAdapter,
-  type WhatsAppConfig,
-  type WhatsAppEvent,
-} from './adapters/whatsapp/index'
 export { BindingStore } from './binding-store'
 export { ConfigStore } from './config-store'
 export { PairingCodeManager, PAIRING_TTL_MS, PAIRING_RATE_LIMIT_PER_MINUTE } from './pairing'
@@ -57,3 +50,7 @@ export {
   type MessagingBootstrapHandle,
   type PublishEventFn,
 } from './bootstrap'
+
+export type { WhatsAppEvent } from './whatsapp-event'
+export type { QQCredentials, LarkCredentials, WeChatCredentials } from './credentials'
+export { loadAdapter, configureAdapterLoader, adapterProgramPath } from './adapter-loader'

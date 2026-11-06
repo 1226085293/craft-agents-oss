@@ -10,7 +10,7 @@
  * via manual smoke against a real Lark Custom App.
  */
 import { describe, expect, it } from 'bun:test'
-import { parseLarkCredentials, LarkAdapter } from '../adapters/lark/index'
+import { parseLarkCredentials, LarkAdapter } from '../index'
 
 describe('parseLarkCredentials', () => {
   it('parses a valid JSON-encoded credential blob', () => {

@@ -333,3 +333,47 @@ export function missingConfigKeys(listener: LoadedListener): string[] {
     return value === undefined || value === null || value === '';
   });
 }
+
+/**
+ * Read a plugin's own translations.
+ *
+ * Each plugin ships `i18n/<locale>.json`; the host merges them under
+ * `plugin.<id>.*` so a plugin can label its own fields without a host release.
+ * Missing files are not an error — a plugin is allowed to be Chinese-only, and
+ * its manifest strings are already the fallback.
+ */
+export function loadPluginLocales(
+  plugin: LoadedListener,
+  locale: string,
+): Record<string, string> {
+  const rel = plugin.manifest.locales;
+  if (!rel) return {};
+
+  const dir = join(plugin.dir, rel);
+  const candidates = [join(dir, `${locale}.json`), join(dir, `${locale.split('-')[0]}.json`), join(dir, 'en.json')];
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    try {
+      const raw = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+      const out: Record<string, string> = {};
+      for (const [key, value] of Object.entries(raw)) {
+        if (typeof value === 'string') out[`plugin.${plugin.id}.${key}`] = value;
+      }
+      return out;
+    } catch (error) {
+      log.warn(`[plugins] ${plugin.id} locale file is unreadable: ${String(error)}`);
+    }
+  }
+  return {};
+}
+
+/** Every enabled plugin's strings for one locale. */
+export function loadAllPluginLocales(
+  options: LoadListenersOptions & { locale: string },
+): Record<string, string> {
+  const merged: Record<string, string> = {};
+  for (const plugin of loadListeners(options)) {
+    Object.assign(merged, loadPluginLocales(plugin, options.locale));
+  }
+  return merged;
+}

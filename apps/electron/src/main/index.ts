@@ -127,6 +127,9 @@ import { WindowManager } from './window-manager'
 import { loadWindowState, saveWindowState } from './window-state'
 import { getWorkspaces, getWorkspaceByNameOrId, loadStoredConfig, addWorkspace, saveConfig } from '@craft-agent/shared/config'
 import { bridgeMessage } from '@craft-agent/shared/events/message-bridge'
+import { loadListeners } from '@craft-agent/server-core/events/listener-registry'
+import { pluginCatalogDirs } from '@craft-agent/server-core/events/event-service'
+import { callPluginAction } from '@craft-agent/server-core/events/listener-control'
 import type { MessageEventRules } from '@craft-agent/shared/events/message-bridge'
 import { provisionBundledRtk } from '@craft-agent/shared/agent'
 import { getDefaultWorkspacesDir } from '@craft-agent/shared/workspaces'
@@ -769,6 +772,59 @@ app.whenReady().then(async () => {
             // session is an external event, not a user turn: it goes through the
             // same filter → route → audit path as a webhook. DMs and bound chats
             // are untouched (the gateway only calls this for the unbound case).
+            // Slash commands come from the plugins. The host only knows the
+            // five that belong to a session; the rest is a plugin's vocabulary,
+            // so it is read from the manifests on demand.
+            declaredCommands: () => {
+              const rows: Array<{ name: string; description: string; usage?: string }> = []
+              for (const ws of getWorkspaces()) {
+                try {
+                  const plugins = loadListeners({
+                    workspaceRoot: ws.rootPath,
+                    catalogDirs: pluginCatalogDirs(),
+                    skipProbes: true,
+                  })
+                  for (const plugin of plugins) {
+                    for (const command of plugin.manifest.commands ?? []) {
+                      rows.push({
+                        name: command.name,
+                        description: command.description,
+                        ...(command.usage ? { usage: command.usage } : {}),
+                      })
+                    }
+                  }
+                } catch {
+                  // A broken manifest must not take the command list with it.
+                }
+              }
+              return rows
+            },
+
+            // An unrecognised command belongs to a plugin. Forward it there and
+            // let the plugin answer; the host has no idea what `/pair` means.
+            forwardPluginCommand: async (_adapter, msg, command) => {
+              const name = command.replace(/^\//, '')
+              for (const ws of getWorkspaces()) {
+                const plugins = loadListeners({
+                  workspaceRoot: ws.rootPath,
+                  catalogDirs: pluginCatalogDirs(),
+                  skipProbes: true,
+                })
+                const owner = plugins.find((plugin) =>
+                  (plugin.manifest.commands ?? []).some((c) => c.name === name),
+                )
+                if (!owner) continue
+                const result = await callPluginAction(owner.dataDir, {
+                  action: 'command',
+                  args: { command: name, text: msg.text, channelId: msg.channelId },
+                })
+                if (result.ok) return true
+                console.warn('[plugins] command refused:', name, result.message)
+                return false
+              }
+              return false
+            },
+
             publishMessageEvent: (msg) => {
               const ws = getWorkspaces().find((w) => w.id === msg.workspaceId)
               if (!ws) return false

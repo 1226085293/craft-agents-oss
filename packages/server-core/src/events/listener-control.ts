@@ -6,6 +6,13 @@
  *   GET  /deps               -> 200 { "deps": DepEntry[] }
  *   POST /deps/<id>/action   -> 202 {"running":true} | 409 while busy
  *
+ * Contract (`craft-plugin/1`) extends the same service with actions:
+ *   POST /action             -> 200 {"ok":bool,"message":string}
+ *
+ * Actions are why a plugin can ship its own program: the manifest says what may
+ * be called, the plugin does the work, and the host keeps no knowledge of any
+ * particular platform.
+ *
  * Address + token come from `<dataDir>/control.json` (mode 600, written by
  * the listener). Craft only ever connects to hard-wired 127.0.0.1 — the port
  * from the file is never interpreted as a host. Every entry is shape-checked:
@@ -128,5 +135,50 @@ export async function postDepAction(
     return { ok: true };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Run one manifest-declared action inside the plugin's own process.
+ *
+ * This is the whole point of a plugin shipping a program: the host posts
+ * `{action, args}` to the loopback service the plugin already runs, and the
+ * plugin decides how to do it. No host module knows what a channel id looks
+ * like, which platform needs which token, or how to format a reply.
+ *
+ * `repliesToOrigin` actions arrive with their destination already filled in by
+ * the caller — the plugin never has to guess who it is answering.
+ */
+export async function callPluginAction(
+  dataDir: string,
+  params: { action: string; args: Record<string, unknown> },
+  timeoutMs = 10_000,
+): Promise<{ ok: boolean; message: string }> {
+  const info = readControlInfo(dataDir)
+  if (!info) {
+    return { ok: false, message: '插件没有提供控制服务（control.json），无法执行动作' }
+  }
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${info.port}/action`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${info.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(params),
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+
+    if (!response.ok) {
+      return { ok: false, message: `插件动作失败：control service returned ${response.status}` }
+    }
+
+    const body = (await response.json()) as { ok?: unknown; message?: unknown }
+    const ok = body?.ok === true
+    const message = typeof body?.message === 'string' ? body.message : ok ? '完成' : '插件没有说明原因'
+    return { ok, message }
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) }
   }
 }

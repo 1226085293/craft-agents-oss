@@ -61,6 +61,14 @@ export interface MessagingBootstrapOptions {
    * Group message → event-center bridge. Supplied by the host that owns the
    * event service; absent in tests and headless hosts.
    */
+  /** Slash commands the installed plugins declare (routing + /help). */
+  declaredCommands?: () => Array<{ name: string; description: string; usage?: string }>
+  /** Hand a command the host does not implement to the plugin that owns it. */
+  forwardPluginCommand?: (
+    adapter: import('./types').PlatformAdapter,
+    msg: import('./types').IncomingMessage,
+    command: string,
+  ) => Promise<boolean>
   publishMessageEvent?: (msg: {
     workspaceId: string
     platform: string
@@ -109,6 +117,8 @@ export function createMessagingBootstrap(opts: MessagingBootstrapOptions): Messa
     resolveConnection: opts.resolveConnection,
     resolveDefaultConnection: opts.resolveDefaultConnection,
     ...(opts.publishMessageEvent ? { publishMessageEvent: opts.publishMessageEvent } : {}),
+    ...(opts.declaredCommands ? { declaredCommands: opts.declaredCommands } : {}),
+    ...(opts.forwardPluginCommand ? { forwardPluginCommand: opts.forwardPluginCommand } : {}),
     whatsapp: {
       workerEntry: opts.whatsapp.workerEntry,
       nodeBin: opts.whatsapp.nodeBin,

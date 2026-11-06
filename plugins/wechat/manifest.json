@@ -55,5 +55,13 @@
     {
       "text": "在插件右上角点「连接」后扫码授权（社区版微信 ClawBot）。扫码过程中的验证码也在那里输入。"
     }
-  ]
+  ],
+  "commands": [
+    {
+      "name": "new",
+      "description": "开一个新会话并绑定到这个聊天",
+      "usage": "[name]"
+    }
+  ],
+  "locales": "i18n"
 }

@@ -1,0 +1,23 @@
+{
+  "apiType": "iLink / ClawBot",
+  "connectTitle": "连接微信机器人",
+  "connected": "已连接",
+  "connecting": "正在启动微信服务…",
+  "connectingTitle": "正在连接微信…",
+  "connectingWait": "连接成功后本窗口会自动关闭。",
+  "description": "用微信扫描二维码，将机器人绑定到你的账号。机器人会以联系人形式出现，在你与 Craft Agent 之间转发消息。",
+  "disconnected": "已断开微信",
+  "expired": "二维码已过期。扫描新二维码重试。",
+  "notConnected": "未连接",
+  "qrInstructions": "打开微信 → 发现 → 扫一扫\n扫描上方二维码。\n\n在手机上确认登录。",
+  "reconfigureTitle": "替换微信凭证",
+  "refresh": "刷新二维码",
+  "retry": "重试",
+  "scanned": "请在手机上确认登录…",
+  "scannedHint": "若手机上提示“暂无法连接”等错误，请关闭本窗口稍后重试。",
+  "starting": "正在获取登录二维码…",
+  "title": "微信",
+  "verifyCodeHint": "微信在手机上显示了验证码。请输入该验证码以完成连接。",
+  "verifyCodePlaceholder": "验证码",
+  "verifyCodeSubmit": "提交"
+}

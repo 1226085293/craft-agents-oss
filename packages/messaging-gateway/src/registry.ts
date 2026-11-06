@@ -100,6 +100,12 @@ export interface MessagingGatewayRegistryOptions {
    * Supplied by the host (which owns the event service). Absent in tests and in
    * headless hosts that do not run the event center.
    */
+  declaredCommands?: () => Array<{ name: string; description: string; usage?: string }>
+  forwardPluginCommand?: (
+    adapter: import('./types').PlatformAdapter,
+    msg: import('./types').IncomingMessage,
+    command: string,
+  ) => Promise<boolean>
   publishMessageEvent?: (msg: {
     workspaceId: string
     platform: string
@@ -1737,6 +1743,8 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       seedOwnerOnFirstPair: async (platform, candidate) =>
         this.seedFirstOwner(workspaceId, platform, candidate),
       ...(this.opts.publishMessageEvent ? { publishMessageEvent: this.opts.publishMessageEvent } : {}),
+      ...(this.opts.declaredCommands ? { declaredCommands: this.opts.declaredCommands } : {}),
+      ...(this.opts.forwardPluginCommand ? { forwardPluginCommand: this.opts.forwardPluginCommand } : {}),
       onBindingChanged: () => this.emitBindingChanged(workspaceId),
       onPendingChanged: () => this.emitPendingChanged(workspaceId),
       onDeliveryBlocked: (info) => this.handleDeliveryBlocked(workspaceId, info),

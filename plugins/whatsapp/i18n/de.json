@@ -1,0 +1,12 @@
+{
+  "apiType": "Inoffizielle Web-API",
+  "connected": "Mit WhatsApp verbunden",
+  "connecting": "Starting WhatsApp service…",
+  "desktopApprovalsOnly": "Genehmigungen erfolgen in der Desktop-App",
+  "disable": "Disable",
+  "disconnected": "WhatsApp getrennt",
+  "forget": "Disconnect",
+  "reconnect": "Reconnect",
+  "title": "WhatsApp",
+  "unofficialApiShort": "Verwendet eine inoffizielle API — Nutzung auf eigenes Risiko"
+}

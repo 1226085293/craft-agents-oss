@@ -1,0 +1,22 @@
+{
+  "apiType": "QQ 开放平台",
+  "appIdLabel": "AppID",
+  "appIdPlaceholder": "如 1905488824",
+  "appSecretLabel": "AppSecret",
+  "appSecretPlaceholder": "QQ 开放平台提供的密钥",
+  "connectTitle": "连接 QQ 机器人",
+  "connected": "已连接",
+  "disconnected": "已断开 QQ",
+  "instructions": "1. 打开 QQ 开放平台（q.qq.com）并创建机器人\n2. 复制 AppID 和 AppSecret\n3. 启用群聊和单聊（C2C）消息事件订阅\n4. （可选）在下方填写主QQ —— 只有主QQ能私聊机器人，群里的斜杠命令也仅限主QQ使用\n5. 获取 OpenID 的方法：先给你的机器人发一条消息，然后从这里显示的发送者 ID 中复制",
+  "mainQqHint": "OpenID 不是 QQ 号。用你的 QQ 给机器人发一条消息后，从状态里复制发送者的 OpenID。留空则接受所有私聊。",
+  "mainQqLabel": "主QQ（OpenID，逗号分隔）",
+  "mainQqPlaceholder": "可选 · 如 5F4D…",
+  "notConnected": "未连接",
+  "reconfigureTitle": "替换 QQ 凭证",
+  "save": "保存",
+  "saveFailed": "无法保存 QQ 凭证",
+  "saved": "已保存 QQ 机器人",
+  "testConnection": "测试连接",
+  "testOk": "凭证已接受",
+  "title": "QQ"
+}

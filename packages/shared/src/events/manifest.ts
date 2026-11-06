@@ -51,6 +51,23 @@ export interface ListenerRestartPolicy {
   backoffMs?: number[];
 }
 
+
+/**
+ * A slash command the plugin answers.
+ *
+ * Declared, not implemented here: the host only knows that `/foo` belongs to
+ * this plugin and forwards the rest. That is what keeps a platform's vocabulary
+ * out of Craft — adding `/dice` to a plugin must not require touching the host.
+ */
+export interface PluginCommand {
+  /** Without the slash: `status`, `bind`, `wallet`. */
+  name: string;
+  /** One line shown by /help, written for a human on a phone. */
+  description: string;
+  /** Optional argument hint, e.g. `<name>`. */
+  usage?: string;
+}
+
 export interface ListenerRuntime {
   /**
    * argv array. `shell:false` is mandatory at spawn time, so this must never
@@ -134,6 +151,14 @@ export interface ListenerManifest {
   builtin?: boolean;
   /** Outbound actions Craft may invoke. Absent = receive-only plugin. */
   actions?: PluginAction[];
+  /** Slash commands this plugin answers; the host only routes them. */
+  commands?: PluginCommand[];
+  /**
+   * Directory with this plugin's own translations, relative to the plugin
+   * directory (`i18n/<locale>.json`). Absent means the plugin ships none and
+   * its UI strings come from the manifest verbatim.
+   */
+  locales?: string;
   setup?: Array<{ text: string; link?: string }>;
 }
 
@@ -554,6 +579,45 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
     }
   }
 
+  // Slash commands. Names are matched after the '/', so they must be a single
+  // token; anything else could never be typed on a phone keyboard.
+  const commands: PluginCommand[] = [];
+  if (input.commands !== undefined) {
+    if (!Array.isArray(input.commands)) {
+      errors.push('commands must be an array');
+    } else {
+      const seenCommands = new Set<string>();
+      for (const [index, entry] of input.commands.entries()) {
+        if (!entry || typeof entry !== 'object') {
+          errors.push(`commands[${index}] must be an object`);
+          continue;
+        }
+        const command = entry as Record<string, unknown>;
+        const cmdName = str(command.name)?.replace(/^\//, '');
+        if (!cmdName) {
+          errors.push(`commands[${index}].name is required`);
+          continue;
+        }
+        if (!ACTION_NAME_PATTERN.test(cmdName)) {
+          errors.push(`commands[${index}].name must be lowercase [a-z0-9_], at most 40 chars`);
+          continue;
+        }
+        if (seenCommands.has(cmdName)) {
+          errors.push(`commands[${index}].name "${cmdName}" is declared twice`);
+          continue;
+        }
+        seenCommands.add(cmdName);
+        const cmdDesc = str(command.description);
+        if (!cmdDesc) errors.push(`commands[${index}].description is required`);
+        commands.push({
+          name: cmdName,
+          description: cmdDesc ?? cmdName,
+          ...(str(command.usage) ? { usage: str(command.usage)! } : {}),
+        });
+      }
+    }
+  }
+
   if (errors.length) return { ok: false, errors, warnings };
 
   const manifest: ListenerManifest = {
@@ -572,6 +636,8 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
     ...(config ? { config } : {}),
     ...(setup.length ? { setup } : {}),
     ...(actions.length ? { actions } : {}),
+    ...(commands.length ? { commands } : {}),
+    ...(str(input.locales) ? { locales: str(input.locales)! } : {}),
     ...(input.builtin === true ? { builtin: true } : {}),
     ...(input.permissions && typeof input.permissions === 'object'
       ? { permissions: input.permissions as ListenerManifest['permissions'] }

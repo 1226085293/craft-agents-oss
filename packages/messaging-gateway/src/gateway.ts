@@ -66,6 +66,14 @@ export interface GatewayOptions {
    * old behaviour (routed normally) — the event center is an addition, not a
    * replacement for how bound chats work.
    */
+  /** Slash commands the installed plugins declare, for routing and /help. */
+  declaredCommands?: () => Array<{ name: string; description: string; usage?: string }>
+  /** Hand an unrecognised command to the plugin that declares it. */
+  forwardPluginCommand?: (
+    adapter: PlatformAdapter,
+    msg: IncomingMessage,
+    command: string,
+  ) => Promise<boolean>
   publishMessageEvent?: (msg: {
     workspaceId: string
     platform: string
@@ -323,6 +331,12 @@ export class MessagingGateway {
       this.log.child({ component: 'commands' }),
       this.accessDeps,
     )
+
+    // Plugin-declared commands. The host switch only knows the five that belong
+    // to a session; everything else is the plugins' vocabulary. Read at call
+    // time so a plugin installed mid-session takes effect without a restart.
+    if (opts.declaredCommands) this.commands.declaredCommands = opts.declaredCommands
+    if (opts.forwardPluginCommand) this.commands.forwardToPlugin = opts.forwardPluginCommand
     this.router = new Router(
       opts.sessionManager,
       this.bindingStore,
@@ -524,6 +538,17 @@ export class MessagingGateway {
       // user turn: it is somebody else's conversation arriving on somebody
       // else's schedule. Offer it to the event center, which can filter, route
       // and audit it. Bound chats and DMs are untouched.
+      //
+      // The `!binding` guard is what keeps two paths apart, and both are load
+      // bearing:
+      //   bound group   → straight into that session (the user pointed this
+      //                   chat at it), plus the decision gate in the router for
+      //                   un-mentioned messages.
+      //   unbound group → event center, never a session, so the supervisor can
+      //                   decide whether anybody should act on it.
+      // Removing either one breaks a case the other cannot serve: bound chats
+      // would start spawning events about their own conversation, and unbound
+      // ones would drop messages nobody subscribed to.
       if (
         !binding &&
         msg.chatKind === 'group' &&

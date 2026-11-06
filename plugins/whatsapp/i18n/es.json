@@ -1,0 +1,12 @@
+{
+  "apiType": "Web API no oficial",
+  "connected": "Conectado a WhatsApp",
+  "connecting": "Starting WhatsApp service…",
+  "desktopApprovalsOnly": "Las aprobaciones ocurren en la app de escritorio",
+  "disable": "Disable",
+  "disconnected": "WhatsApp desconectado",
+  "forget": "Disconnect",
+  "reconnect": "Reconnect",
+  "title": "WhatsApp",
+  "unofficialApiShort": "Utiliza una API no oficial — úsela bajo su propio riesgo"
+}

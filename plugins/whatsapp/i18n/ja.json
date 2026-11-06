@@ -1,0 +1,12 @@
+{
+  "apiType": "非公式 Web API",
+  "connected": "WhatsApp に接続済み",
+  "connecting": "Starting WhatsApp service…",
+  "desktopApprovalsOnly": "承認はデスクトップアプリで行われます",
+  "disable": "Disable",
+  "disconnected": "WhatsApp から切断しました",
+  "forget": "Disconnect",
+  "reconnect": "Reconnect",
+  "title": "WhatsApp",
+  "unofficialApiShort": "非公式 API を使用 — 自己責任で"
+}

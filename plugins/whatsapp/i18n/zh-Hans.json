@@ -1,0 +1,12 @@
+{
+  "apiType": "非官方 Web API",
+  "connected": "已连接到 WhatsApp",
+  "connecting": "正在启动 WhatsApp 服务…",
+  "desktopApprovalsOnly": "审批在桌面应用中进行",
+  "disable": "Disable",
+  "disconnected": "WhatsApp 已断开连接",
+  "forget": "Disconnect",
+  "reconnect": "Reconnect",
+  "title": "WhatsApp",
+  "unofficialApiShort": "使用非官方 API — 风险自负"
+}

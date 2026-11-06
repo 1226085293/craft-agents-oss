@@ -9,6 +9,7 @@ import { basename, dirname, isAbsolute, join } from 'path'
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs'
 import { loadListeners } from '../events/listener-registry.ts'
 import { pluginCatalogDirs } from '../events/event-service.ts'
+import { callPluginAction } from '../events/listener-control.ts'
 import { copyFile, readFile, writeFile, mkdir, stat, rm, readdir } from 'fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { type AgentEvent, setPermissionMode, setTransientPermissionMode, clearTransientPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
@@ -6675,59 +6676,60 @@ ${request.prompt}`;
         },
 
         callPluginActionFn: async ({ plugin, action, args }) => {
-          const registry = this.messagingRegistry
-          if (!registry) return { ok: false, message: '消息网关未初始化，无法发送' }
-
-          // Each platform is its own plugin, so the plugin id IS the platform.
-          // A plugin without a builtin executor (a script listener) is refused
-          // here rather than silently doing nothing.
-          const builtin = loadListeners({
+          const installed = loadListeners({
             workspaceRoot: managed.workspace.rootPath,
             catalogDirs: pluginCatalogDirs(),
             skipProbes: true,
           }).find((entry) => entry.id === plugin)
-          if (builtin?.manifest.builtin !== true) {
-            return { ok: false, message: `插件 ${plugin} 没有内置执行器` }
+          if (!installed) return { ok: false, message: `插件 ${plugin} 未安装` }
+
+          const declared = (installed.manifest.actions ?? []).find((a) => a.name === action)
+          if (!declared) {
+            return { ok: false, message: `插件 ${plugin} 没有声明动作 ${action}` }
           }
 
-          const text = typeof args.text === 'string' ? args.text.trim() : ''
-          if (!text) return { ok: false, message: 'text 不能为空' }
-
-          // Which channel? An explicit one, or the origin of the event that
-          // woke this turn. Reply deliberately takes the second path: the model
-          // cannot know an openid, and guessing one would send the answer to a
-          // stranger.
-          let platform = typeof args.platform === 'string' ? args.platform : plugin
-          let channelId = typeof args.channelId === 'string' ? args.channelId : ''
-          const origin = this.replyOriginFor(managed.id)
-
-          if (action === 'reply' || !channelId) {
+          // Fill in the destination for a reply before the plugin sees it. The
+          // origin lives in the event that woke this turn; the plugin has no
+          // way to know it, and the model must not guess an openid.
+          const payload: Record<string, unknown> = { ...args }
+          if (declared.repliesToOrigin) {
+            const origin = this.replyOriginFor(managed.id)
             if (!origin) {
               return {
                 ok: false,
                 message: '没有可回复的来源：本次回合不是由消息事件触发的，请改用 send_message 并指定 channelId',
               }
             }
-            platform = platform || origin.platform
-            channelId = channelId || origin.channelId
+            payload.channelId = payload.channelId ?? origin.channelId
+            payload.platform = payload.platform ?? origin.platform
+            if (origin.threadId !== undefined) payload.threadId = payload.threadId ?? origin.threadId
           }
 
-          // No guessing: the plugin already names the platform, and inferring
-          // one from bindings would send the answer to a different app.
-          if (!platform) {
-            return { ok: false, message: '缺少平台：请在参数里指定 platform，或改用平台对应的插件' }
+          // The plugin executes; the host has no platform code. A builtin is a
+          // plugin whose program lives in this process, and reaches the same
+          // seam through the messaging registry rather than a second copy of
+          // every adapter.
+          if (installed.manifest.builtin === true) {
+            const registry = this.messagingRegistry
+            if (!registry) return { ok: false, message: '消息网关未初始化，无法发送' }
+            const text = typeof payload.text === 'string' ? payload.text.trim() : ''
+            if (!text) return { ok: false, message: 'text 不能为空' }
+            const channelId = typeof payload.channelId === 'string' ? payload.channelId : ''
+            const platform = typeof payload.platform === 'string' ? payload.platform : plugin
+            if (!channelId) return { ok: false, message: '缺少 channelId' }
+            const sent = await registry.sendTextToChannel({
+              workspaceId: managed.workspace.id,
+              platform,
+              channelId,
+              ...(typeof payload.threadId === 'number' ? { threadId: payload.threadId } : {}),
+              text,
+            })
+            return sent.ok
+              ? { ok: true, message: `已发送到 ${platform} ${channelId}` }
+              : { ok: false, message: `发送失败：${sent.error}` }
           }
 
-          const sent = await registry.sendTextToChannel({
-            workspaceId: managed.workspace.id,
-            platform,
-            channelId,
-            ...(origin?.threadId !== undefined ? { threadId: origin.threadId } : {}),
-            text,
-          })
-          return sent.ok
-            ? { ok: true, message: `已发送到 ${platform} ${channelId}` }
-            : { ok: false, message: `发送失败：${sent.error}` }
+          return callPluginAction(installed.dataDir, { action, args: payload })
         },
 
         getMessagingBindingsFn: (sessionId: string) => {

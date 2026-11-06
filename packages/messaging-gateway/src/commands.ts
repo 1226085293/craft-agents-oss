@@ -174,6 +174,70 @@ export class Commands {
   private readonly access: AccessControlDeps
   private readonly recentRejectReplies = new Map<string, number>()
 
+  /**
+   * Forward a command this host does not implement to whichever plugin
+   * declares it.
+   *
+   * Injected, because the command table lives with the plugins: the host can
+   * only say "not mine" and hand it over. Returning false means nobody claimed
+   * it, and the caller falls back to the built-in reply.
+   */
+  forwardToPlugin?: (
+    adapter: PlatformAdapter,
+    msg: IncomingMessage,
+    command: string,
+  ) => Promise<boolean>
+
+  /** Commands the connected plugins declare, for /help. Injected like the rest. */
+  declaredCommands?: () => Array<{ name: string; description: string; usage?: string }>
+
+  /**
+   * Implementations the host happens to have, keyed by command name.
+   *
+   * A command is reachable only when a plugin declares it: the manifest is the
+   * source of truth for what exists, this table is merely where the code lives
+   * for the ones Craft ships. A plugin can declare `/dice` and answer it in its
+   * own process; it can also declare `/new` and let the implementation below
+   * run, which is what the bundled platform plugins do.
+   */
+  private builtinCommandHandlers(): Record<string, (adapter: PlatformAdapter, msg: IncomingMessage) => Promise<void>> {
+    return {
+      new: (a, m) => this.handleNew(a, m),
+      bind: (a, m) => this.handleBind(a, m),
+      pair: (a, m) => this.handlePair(a, m),
+      unbind: (a, m) => this.handleUnbind(a, m),
+      exec: (a, m) => this.handleExec(a, m),
+      compact: (a, m) => this.handleCompact(a, m),
+    }
+  }
+
+  /**
+   * Answer a plugin-declared command.
+   *
+   * `declaredBy` is the set of command names the connected plugins own; the
+   * host asks it before deciding that a command does not exist, so an unknown
+   * word is a plugin's business rather than a typo the host should judge.
+   */
+  async handleDeclaredCommand(
+    adapter: PlatformAdapter,
+    msg: IncomingMessage,
+    command: string,
+    opts?: {
+      handlers?: Record<string, (adapter: PlatformAdapter, msg: IncomingMessage) => Promise<void>>
+      forward?: (adapter: PlatformAdapter, msg: IncomingMessage, command: string) => Promise<boolean>
+    },
+  ): Promise<boolean> {
+    const name = command.replace(/^\//, '')
+    const handlers = opts?.handlers ?? this.builtinCommandHandlers()
+    const local = handlers[name]
+    if (local) {
+      await local(adapter, msg)
+      return true
+    }
+    if (opts?.forward) return opts.forward(adapter, msg, command)
+    return false
+  }
+
   constructor(
     private readonly sessionManager: ISessionManager,
     private readonly bindingStore: BindingStore,
@@ -290,22 +354,11 @@ export class Commands {
       }
     }
 
+    // Only the commands that belong to a session — not to a platform — are
+    // implemented here. Anything platform-shaped (/new, /bind, /pair, /unbind,
+    // /exec, /compact) is declared by a plugin and forwarded to it, so adding
+    // a command does not mean editing the host.
     switch (cmd) {
-      case '/new':
-        await this.handleNew(adapter, msg)
-        return true
-      case '/bind':
-        await this.handleBind(adapter, msg)
-        return true
-      case '/pair':
-        await this.handlePair(adapter, msg)
-        return true
-      case '/unbind':
-        await this.handleUnbind(adapter, msg)
-        return true
-      case '/exec':
-        await this.handleExec(adapter, msg)
-        return true
       case '/help':
         await this.handleHelp(adapter, msg)
         return true
@@ -318,14 +371,15 @@ export class Commands {
       case '/stop':
         await this.handleStop(adapter, msg)
         return true
-      case '/compact':
-        await this.handleCompact(adapter, msg)
-        return true
       case '/clear':
         await this.handleClear(adapter, msg)
         return true
       default:
-        return false
+        // Not one of the five the host answers by itself. It may still exist:
+        // the plugins decide the vocabulary, so ask them before giving up.
+        return (await this.handleDeclaredCommand(adapter, msg, cmd, {
+          ...(this.forwardToPlugin ? { forward: this.forwardToPlugin } : {}),
+        }))
     }
   }
 
@@ -1153,28 +1207,38 @@ export class Commands {
   }
 
   private async handleHelp(adapter: PlatformAdapter, msg: IncomingMessage): Promise<void> {
-    const bindLine = adapter.platform === 'whatsapp'
-      ? '/bind — list recent sessions (then use /bind <number>)\n'
-      : '/bind — pick from recent sessions\n'
     const replyOpts = msg.threadId !== undefined ? { threadId: msg.threadId } : {}
 
-    await adapter.sendText(
-      msg.channelId,
-      'Commands:\n' +
-      '/new [name] — create + bind new session\n' +
-      bindLine +
-      '/bind <id> — bind to specific session\n' +
-      '/pair <code> — redeem an app-generated pairing code\n' +
-      '/unbind — disconnect this chat\n' +
-      '/status — show current binding, model, thinking level\n' +
-      `/thinking <${THINKING_LEVEL_IDS.join('|')}> — set thinking level\n` +
-      '/exec explore|execute — switch session permission mode\n' +
-      '/stop — abort current agent run\n' +
-      '/compact — compact current context into a summary\n' +
-      '/clear — clear current context and messages\n' +
-      '/help — show this message',
-      replyOpts,
-    )
+    // The list comes from the plugins, not from this file. A platform that
+    // declares three commands shows three; one that declares none shows only
+    // what Craft answers itself. Hardcoding the list here is what made adding a
+    // command a host change.
+    const declared = this.declaredCommands?.() ?? []
+    const seen = new Set<string>()
+    const lines: string[] = []
+
+    for (const command of declared) {
+      if (seen.has(command.name)) continue
+      seen.add(command.name)
+      const usage = command.usage ? ` ${command.usage}` : ''
+      lines.push(`/${command.name}${usage} — ${command.description}`)
+    }
+
+    const core: Array<[string, string, string]> = [
+      ['status', '', 'show current binding, model, thinking level'],
+      ['thinking', ` <${THINKING_LEVEL_IDS.join('|')}>`, 'set thinking level'],
+      ['stop', '', 'abort current agent run'],
+      ['clear', '', 'clear current context and messages'],
+      ['help', '', 'show this message'],
+    ]
+    for (const [name, usage, fallback] of core) {
+      if (seen.has(name)) continue
+      seen.add(name)
+      lines.push(`/${name}${usage} — ${fallback}`)
+    }
+
+    const body = ['Commands:', ...lines].join(String.fromCharCode(10))
+    await adapter.sendText(msg.channelId, body, replyOpts)
   }
 
   private getRecentSessions(): ReturnType<ISessionManager['getSessions']> {

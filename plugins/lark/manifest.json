@@ -64,5 +64,18 @@
       }
     }
   },
-  "icon": "messages-square"
+  "icon": "messages-square",
+  "commands": [
+    {
+      "name": "new",
+      "description": "开一个新会话并绑定到这个聊天",
+      "usage": "[name]"
+    },
+    {
+      "name": "pair",
+      "description": "用 App 里的配对码绑定",
+      "usage": "<code>"
+    }
+  ],
+  "locales": "i18n"
 }

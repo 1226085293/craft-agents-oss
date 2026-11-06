@@ -21,6 +21,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { EventStore } from './event-store.ts';
 import { createLogger } from '../utils/index.ts';
 
 const log = createLogger('events');
@@ -40,6 +41,43 @@ export interface ThreadBinding {
 interface Persisted {
   version: 1;
   bindings: ThreadBinding[];
+}
+
+/**
+ * Record that a session owns the conversation an event arrived in.
+ *
+ * Reads the event from its own store to get `links` — the dispatcher only passes
+ * a summary, not the links, so the identity has to be re-read rather than threaded
+ * through every delivery call.
+ *
+ * Returns the thread key it bound, or undefined when the event carries no message
+ * link (a webhook or a cron tick has no conversation, and inventing one would bind
+ * unrelated events to whichever session happened to be last).
+ */
+export function bindThreadForEvent(params: {
+  workspaceRoot: string;
+  dbPath: string;
+  eventId: string;
+  sessionId: string;
+  taskId?: string;
+  now?: number;
+}): string | undefined {
+  const { workspaceRoot, dbPath, eventId, sessionId, taskId } = params;
+  if (!existsSync(dbPath)) return undefined;
+  const store = new EventStore({ dbPath });
+  try {
+    const event = store.get(eventId);
+    const threadKey = deriveThreadKey(event?.links);
+    if (!threadKey) return undefined;
+    bindThread(
+      workspaceRoot,
+      { threadKey, sessionId, ...(taskId ? { taskId } : {}) },
+      params.now,
+    );
+    return threadKey;
+  } finally {
+    store.close();
+  }
 }
 
 /**

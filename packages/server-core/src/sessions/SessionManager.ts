@@ -11493,23 +11493,14 @@ ${request.prompt}`;
    */
   private bindEventThread(managed: ManagedSession, eventId: string): void {
     try {
-      const { EventStore } = require('@craft-agent/shared/events/event-store.ts') as typeof import('@craft-agent/shared/events/event-store.ts')
-      const { bindThread, deriveThreadKey } = require('@craft-agent/shared/events/thread-bindings.ts') as typeof import('@craft-agent/shared/events/thread-bindings.ts')
-      const dbPath = join(managed.workspace.rootPath, 'config', 'events.sqlite')
-      if (!existsSync(dbPath)) return
-      const store = new EventStore({ dbPath })
-      try {
-        const event = store.get(eventId)
-        const threadKey = deriveThreadKey(event?.links)
-        if (!threadKey) return
-        bindThread(managed.workspace.rootPath, {
-          threadKey,
-          sessionId: managed.id,
-          ...(managed.taskId ? { taskId: managed.taskId } : {}),
-        })
-      } finally {
-        store.close()
-      }
+      const { bindThreadForEvent } = require('@craft-agent/shared/events/thread-bindings.ts') as typeof import('@craft-agent/shared/events/thread-bindings.ts')
+      bindThreadForEvent({
+        workspaceRoot: managed.workspace.rootPath,
+        dbPath: join(managed.workspace.rootPath, 'config', 'events.sqlite'),
+        eventId,
+        sessionId: managed.id,
+        ...(managed.taskId ? { taskId: managed.taskId } : {}),
+      })
     } catch (error) {
       // A lost binding costs a supervisor turn later; it must never fail a
       // delivery that already succeeded.

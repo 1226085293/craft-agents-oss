@@ -48,7 +48,7 @@ export function usePages(activeWorkspaceId: string | null | undefined): UsePages
       // Watcher-driven pushes carry the CONFIG workspace id, but the WebUI
       // identifies its workspace by slug — those pushes still target this
       // client (routing is handshake-based), so on an id-form mismatch we
-      // re-read instead of dropping (mirrors useAutomations' refetch shape).
+      // re-read instead of dropping.
       if (wsId === activeWorkspaceId) {
         setPages(Array.isArray(list) ? list : [])
       } else {

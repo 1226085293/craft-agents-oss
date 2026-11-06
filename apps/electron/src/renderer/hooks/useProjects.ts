@@ -2,7 +2,7 @@
  * useProjects
  *
  * Loads workspace-scoped projects and keeps them in sync via the
- * `projects:changed` broadcast. Mirrors the lightweight half of `useAutomations`.
+ * `projects:changed` broadcast.
  */
 
 import { useState, useEffect, useCallback } from 'react'

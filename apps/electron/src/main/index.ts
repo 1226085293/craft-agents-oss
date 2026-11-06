@@ -804,6 +804,10 @@ app.whenReady().then(async () => {
 
       // Remove workspace from config (cleanup stale entries)
       ipcMain.handle('workspace:remove', async (_event, workspaceId: string) => {
+        // Release the workspace's loops before forgetting it: a watchdog or
+        // scheduler still ticking for a workspace the user just deleted is a
+        // leak nobody can see.
+        sessionManager?.disposeWorkspace?.(workspaceId)
         const { removeWorkspace: remove } = await import('@craft-agent/shared/config')
         return remove(workspaceId)
       })

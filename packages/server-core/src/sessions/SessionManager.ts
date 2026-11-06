@@ -38,6 +38,7 @@ import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.
 import { TaskService } from '../tasks/task-service.ts'
 import { readJournal, formatTaskBrief, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
+import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 
 /** 6-hex id, used for collision-free attachment names. */
 function generateShortId(): string {
@@ -3781,6 +3782,32 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Release everything this host holds for a workspace.
+   *
+   * One call instead of a checklist: watchdog, task scheduler, page-refresh
+   * timer, and the cached service/runtime instances all go together. Called
+   * when a workspace is removed or switched away from — the host should never
+   * keep a timer running for a workspace the user can no longer see.
+   */
+  disposeWorkspace(workspaceId: string): void {
+    this.workspaceScopes.dispose(workspaceId, (error, index) => {
+      sessionLog.warn('workspace disposer failed', { workspaceId, index, error })
+    })
+    this.taskServices.delete(workspaceId)
+    this.supervisorRuntimes.delete(workspaceId)
+    for (const [sessionId, origin] of this.replyOrigins) {
+      const managed = this.sessions.get(sessionId)
+      if (managed?.workspace.id === workspaceId) this.replyOrigins.delete(sessionId)
+      void origin
+    }
+  }
+
+  /** Diagnostic: workspaces whose background loops are still owned. */
+  activeWorkspaceScopes(): string[] {
+    return this.workspaceScopes.activeIds()
+  }
+
+  /**
    * Session actions published to plugins over `POST /host/<name>`.
    *
    * A platform plugin owns its conversation — which commands exist, what they
@@ -6890,12 +6917,15 @@ ${request.prompt}`;
   private readonly taskServices = new Map<string, TaskService>()
   /** One supervisor runtime per workspace (holds the event backlog). */
   private readonly supervisorRuntimes = new Map<string, SupervisorRuntime>()
-  /** Per-workspace watchdog disposers. */
-  private readonly watchdogStops = new Map<string, () => void>()
-  /** Per-workspace task scheduler disposers. */
-  private readonly taskSchedulerStops = new Map<string, () => void>()
-  /** Per-workspace page refresh disposers. */
-  private readonly pageRefreshStops = new Map<string, () => void>()
+  /**
+   * Per-workspace ownership of everything long-lived.
+   *
+   * The `xxxStops` maps this replaces were write-only: stop functions were
+   * recorded and never called, so disabling or removing a workspace left its
+   * watchdog, scheduler and page-refresh timer running. Ownership is now
+   * structural — see `WorkspaceScope`.
+   */
+  private readonly workspaceScopes = new WorkspaceScopes()
 
   /**
    * Second acceptance layer: judge a handoff in a read-only session.
@@ -6973,7 +7003,7 @@ ${request.prompt}`;
     // is ticked by its own loop so it never costs a session.
     try {
       const stop = startPageRefreshScheduler({ workspaceRootPath: workspace.rootPath })
-      this.pageRefreshStops.set(workspaceId, stop)
+      this.workspaceScopes.open(workspaceId).effect(() => stop)
     } catch (error) {
       sessionLog.warn('failed to start the page refresh scheduler', { error })
     }
@@ -7026,7 +7056,7 @@ ${request.prompt}`;
             .catch(() => undefined)
         },
       })
-      this.watchdogStops.set(workspaceId, stop)
+      this.workspaceScopes.open(workspaceId).effect(() => stop)
     } catch (error) {
       sessionLog.warn('failed to start the task watchdog', { error })
     }
@@ -7039,7 +7069,7 @@ ${request.prompt}`;
         listTasks: () => service.list(),
         spawnRun: (task, reason) => this.spawnTaskRun(workspaceId, task, reason),
       })
-      this.taskSchedulerStops.set(workspaceId, stop)
+      this.workspaceScopes.open(workspaceId).effect(() => stop)
     } catch (error) {
       sessionLog.warn('failed to start the task scheduler', { error })
     }

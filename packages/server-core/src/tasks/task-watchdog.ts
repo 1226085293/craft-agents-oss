@@ -26,7 +26,8 @@ export type WatchdogFinding =
   | { kind: 'stalled'; task: Task }
   | { kind: 'failing'; task: Task }
   | { kind: 'overdue'; task: Task }
-  | { kind: 'orphaned'; task: Task };
+  | { kind: 'orphaned'; task: Task }
+  | { kind: 'decision_timeout'; task: Task };
 
 export interface WatchdogDeps {
   /** Tasks to inspect (already filtered to the workspace). */
@@ -37,6 +38,13 @@ export interface WatchdogDeps {
   pause: (id: string, reason: 'failures' | 'budget' | 'process_lost' | 'waiting', note: string) => void;
   /** Tell the owning supervisor, in one line. */
   notify: (supervisorSessionId: string, text: string) => void;
+  /**
+   * Apply the default answer to an unanswered decision request.
+   *
+   * Separate from `pause` because the task is already paused: what changes is
+   * that the decision is now resolved as a refusal.
+   */
+  denyDecision?: (id: string, note: string) => void;
   now?: () => number;
 }
 
@@ -46,6 +54,14 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
   const findings: WatchdogFinding[] = [];
 
   for (const task of deps.listTasks()) {
+    // A decision request that nobody answered expires on its own. Checked before
+    // the running-state filters because a waiting task is paused, not running.
+    const decision = task.decision;
+    if (decision && !decision.resolvedAt && decision.deadlineAt <= now) {
+      findings.push({ kind: 'decision_timeout', task });
+      continue;
+    }
+
     if (task.status !== 'running') continue;
 
     const sessionAlive = task.currentSessionId
@@ -77,6 +93,18 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
   let acted = 0;
   for (const finding of findings) {
     switch (finding.kind) {
+      case 'decision_timeout':
+        // Silence is refusal, never consent.
+        deps.denyDecision?.(
+          finding.task.id,
+          `「${finding.task.decision?.label ?? '决策请求'}」超时未响应，已按拒绝处理。`,
+        );
+        deps.notify(
+          finding.task.supervisorSessionId,
+          `${finding.task.id} 的决策请求已超时，默认按拒绝处理，任务未继续。`,
+        );
+        acted += 1;
+        break;
       case 'orphaned':
         deps.pause(finding.task.id, 'process_lost', 'session disappeared');
         deps.notify(

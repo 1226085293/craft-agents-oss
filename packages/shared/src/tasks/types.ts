@@ -195,6 +195,27 @@ export interface TaskOrigin {
   toolCallId: string;
 }
 
+/**
+ * A pending request for the user's judgement.
+ *
+ * Recorded on the task rather than only in the handoff so the card can say *why*
+ * it is asking, and so the deadline survives a restart.
+ */
+export interface TaskDecision {
+  /** One of the six irreversible categories (see tasks/decisions.ts). */
+  category: string;
+  /** Human label shown on the card. */
+  label: string;
+  /** Why this reached the user. */
+  reason: string;
+  askedAt: number;
+  /** Past this moment silence is treated as refusal. */
+  deadlineAt: number;
+  /** Set once the user answered or the deadline fired. */
+  resolvedAt?: number;
+  resolution?: 'approved' | 'rejected' | 'timeout';
+}
+
 export interface Task {
   /** Human-facing id: T-1, T-2 … */
   id: string;
@@ -224,6 +245,8 @@ export interface Task {
   spec?: TaskSpec;
   /** What starts this task. Missing = manual. */
   trigger?: TaskTrigger;
+  /** Pending user decision, when pauseReason is `needs_decision`. */
+  decision?: TaskDecision;
   /** Run bookkeeping. Missing on tasks created before v2. */
   stats?: TaskStats;
 
@@ -273,3 +296,11 @@ export const FAILURE_FUSE = 3;
 
 /** A session that has used this share of its context must be replaced. */
 export const CONTEXT_ROTATE_THRESHOLD = 0.7;
+
+/**
+ * How long a decision request waits for the user before defaulting to refusal.
+ *
+ * Silence is not consent: a task that would delete data must not proceed because
+ * nobody looked at the inbox overnight.
+ */
+export const DECISION_TIMEOUT_MS = 12 * 60 * 60 * 1000;

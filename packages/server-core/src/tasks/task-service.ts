@@ -30,6 +30,8 @@ import {
   appendJournal,
   listTasks,
   activeTasks,
+  assessDecisionRequest,
+  DECISION_TIMEOUT_MS,
   type ArtifactProbe,
   type Handoff,
   type Task,
@@ -242,6 +244,48 @@ export class TaskService {
   }
 
   /**
+   * Resolve an unanswered decision request with the safe answer.
+   *
+   * The task stays paused (it must not resume on silence); what this records is
+   * *why* it will not resume, so the inbox does not show a request forever.
+   */
+  denyDecision(id: string, note: string): Task {
+    const task = this.require(id);
+    const now = this.now();
+    const decision = task.decision;
+    if (!decision) return task;
+    const next: Task = {
+      ...task,
+      decision: {
+        ...decision,
+        resolvedAt: now,
+        resolution: 'timeout',
+        reason: note,
+      },
+      lifecycle: { ...task.lifecycle, lastError: note },
+      updatedAt: now,
+    };
+    saveTask(this.root, next);
+    appendJournal(this.root, id, { type: 'decision_timeout', at: now, data: { note } });
+    return next;
+  }
+
+  /** Record the user's answer to a decision request. */
+  resolveDecision(id: string, resolution: 'approved' | 'rejected'): Task {
+    const task = this.require(id);
+    const now = this.now();
+    if (!task.decision) return task;
+    const next: Task = {
+      ...task,
+      decision: { ...task.decision, resolvedAt: now, resolution },
+      updatedAt: now,
+    };
+    saveTask(this.root, next);
+    appendJournal(this.root, id, { type: 'decision_resolved', at: now, data: { resolution } });
+    return next;
+  }
+
+  /**
    * Record that one or more cron minutes elapsed while the app was closed.
    *
    * Journal only: the task itself is untouched, because the policy is skip —
@@ -439,7 +483,33 @@ export class TaskService {
     };
 
     if (handoff.outcome === 'needs_decision') {
-      next = applyTransition(next, 'paused', { now, pauseReason: 'needs_decision' }).task;
+      // Not every request deserves the user's attention. The gate is a closed
+      // list of six irreversible categories; anything routine continues on its
+      // own, because a noisy inbox gets ignored and then it is not a gate at all.
+      const assessment = assessDecisionRequest(handoff.summary, {
+        commands: handoff.verify?.ran,
+        paths: handoff.artifacts?.map((artifact) => artifact.path),
+      });
+      if (assessment.needsUser) {
+        next = applyTransition(next, 'paused', { now, pauseReason: 'needs_decision' }).task;
+        next = {
+          ...next,
+          decision: {
+            category: assessment.category ?? 'unspecified',
+            label: assessment.label ?? '需要拍板',
+            reason: assessment.reason,
+            askedAt: now,
+            // Default-deny deadline: silence must not read as consent.
+            deadlineAt: now + DECISION_TIMEOUT_MS,
+          },
+        };
+      } else {
+        appendJournal(this.root, id, {
+          type: 'decision_routine',
+          at: now,
+          data: { summary: handoff.summary, reason: assessment.reason },
+        });
+      }
     } else if (accepted && handoff.outcome === 'delivered') {
       next = applyTransition(next, 'completed', { now }).task;
     } else if (!accepted && shouldTripFuse(next.lifecycle)) {

@@ -6752,6 +6752,7 @@ ${request.prompt}`;
         pause: (id, reason, note) => {
           service.setStatus(id, 'paused', { pauseReason: reason, error: note })
         },
+        denyDecision: (id, note) => service.denyDecision(id, note),
         notify: (sessionId, text) => {
           void this.sendMessage(sessionId, text).catch(() => undefined)
         },

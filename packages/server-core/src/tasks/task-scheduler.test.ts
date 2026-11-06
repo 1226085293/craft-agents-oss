@@ -24,6 +24,7 @@ function makeService(): TaskService {
     now: () => Date.UTC(2026, 10, 6, 0, 0, 0),
     // A spawned worker is alive; ids the test never created are not.
     sessionExists: (id: string) => id.startsWith('sess-'),
+    wakeSupervisor: () => undefined,
   });
 }
 

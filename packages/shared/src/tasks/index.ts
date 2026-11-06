@@ -10,6 +10,7 @@ export type {
   Task,
   TaskAcceptanceItem,
   TaskBudget,
+  TaskDecision,
   TaskDeliverable,
   TaskIndex,
   TaskIndexEntry,
@@ -27,6 +28,7 @@ export type {
 
 export {
   CONTEXT_ROTATE_THRESHOLD,
+  DECISION_TIMEOUT_MS,
   DEFAULT_BUDGET,
   DEFAULT_HEARTBEAT_MINUTES,
   FAILURE_FUSE,
@@ -57,6 +59,16 @@ export {
 } from './state.ts';
 
 export { matchesCron } from './cron.ts';
+
+export {
+  assessDecisionRequest,
+  DECISION_CATEGORIES,
+  isRoutineWork,
+  routineContinuationNote,
+  type DecisionAssessment,
+  type DecisionCategory,
+  type DecisionSignals,
+} from './decisions.ts';
 
 export {
   normalizeSpec,

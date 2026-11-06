@@ -9,6 +9,41 @@
 
 export const LISTENER_SPEC = 'craft-listener/1' as const;
 
+/**
+ * Plugin manifests: `craft-listener/1` was receive-only, `craft-plugin/1` adds
+ * `actions`. Both are accepted — an installed listener from before the rename
+ * must keep working, it simply declares no actions.
+ */
+export const PLUGIN_SPEC = 'craft-plugin/1' as const;
+export const ACCEPTED_SPECS: ReadonlyArray<string> = [PLUGIN_SPEC, LISTENER_SPEC];
+
+/**
+ * One thing Craft may ask a plugin to do.
+ *
+ * This is what makes "the supervisor knows what it can send" possible without
+ * a hand-written prompt: `input` is a JSON Schema, the same shape an MCP tool
+ * uses, so the existing tool table can carry it and the model reads the
+ * parameter meanings straight from the schema descriptions.
+ */
+export interface PluginAction {
+  /** Tool-name segment: lowercase, `send_message`, `reply`, … */
+  name: string;
+  /** What it does. Shown to the model verbatim — write it for the model. */
+  description: string;
+  /** JSON Schema for the arguments. */
+  input: {
+    type?: 'object';
+    properties?: Record<string, Record<string, unknown>>;
+    required?: string[];
+  };
+  /**
+   * True when the action answers whoever caused the current turn rather than
+   * addressing an arbitrary channel. `reply` is the obvious case: the target is
+   * the event's origin, which the model should not have to invent.
+   */
+  repliesToOrigin?: boolean;
+}
+
 export interface ListenerRestartPolicy {
   /** Only `on-failure` is honoured today. */
   policy?: 'on-failure' | 'always' | 'never';
@@ -76,7 +111,7 @@ export interface ListenerConfigSchema {
 }
 
 export interface ListenerManifest {
-  spec: typeof LISTENER_SPEC;
+  spec: typeof LISTENER_SPEC | typeof PLUGIN_SPEC;
   id: string;
   name: string;
   version: string;
@@ -88,6 +123,8 @@ export interface ListenerManifest {
   dependencies?: ListenerDependencies;
   config?: ListenerConfigSchema;
   permissions?: { network?: string[]; filesystem?: string[] };
+  /** Outbound actions Craft may invoke. Absent = receive-only plugin. */
+  actions?: PluginAction[];
   setup?: Array<{ text: string; link?: string }>;
 }
 
@@ -187,6 +224,8 @@ export function satisfiesRange(version: string, range: string): boolean {
 }
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+/** Action names reach the tool table as `plugin__<id>__<name>`, so no dots or dashes. */
+const ACTION_NAME_PATTERN = /^[a-z][a-z0-9_]{0,39}$/;
 
 /** Package names: pip is plain; npm additionally allows `@scope/name`. */
 const PIP_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -218,8 +257,8 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
   const str = (value: unknown): string | undefined =>
     typeof value === 'string' && value.trim() ? value.trim() : undefined;
 
-  if (input.spec !== LISTENER_SPEC) {
-    errors.push(`spec must be "${LISTENER_SPEC}"`);
+  if (!ACCEPTED_SPECS.includes(String(input.spec))) {
+    errors.push(`spec must be one of: ${ACCEPTED_SPECS.join(', ')}`);
   }
 
   const id = str(input.id);
@@ -445,10 +484,73 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
   // A listener without a runtime is display-only (the user runs it by hand).
   if (!runtime) warnings.push('no runtime.program — Craft will not start this listener');
 
+  // Outbound actions. Each becomes a tool, so the schema is the model's only
+  // documentation for the parameters — a missing description is a real defect,
+  // not a style nit.
+  const actions: PluginAction[] = [];
+  if (input.actions !== undefined) {
+    if (!Array.isArray(input.actions)) {
+      errors.push('actions must be an array');
+    } else {
+      const seenActions = new Set<string>();
+      for (const [index, entry] of input.actions.entries()) {
+        if (!entry || typeof entry !== 'object') {
+          errors.push(`actions[${index}] must be an object`);
+          continue;
+        }
+        const action = entry as Record<string, unknown>;
+        const actionName = str(action.name);
+        if (!actionName) {
+          errors.push(`actions[${index}].name is required`);
+          continue;
+        }
+        if (!ACTION_NAME_PATTERN.test(actionName)) {
+          errors.push(`actions[${index}].name must be lowercase [a-z0-9_], at most 40 chars`);
+          continue;
+        }
+        if (seenActions.has(actionName)) {
+          errors.push(`actions[${index}].name "${actionName}" is declared twice`);
+          continue;
+        }
+        seenActions.add(actionName);
+
+        const description = str(action.description);
+        if (!description) errors.push(`actions[${index}].description is required`);
+
+        const rawInput = action.input;
+        if (!rawInput || typeof rawInput !== 'object') {
+          errors.push(`actions[${index}].input must be a JSON Schema object`);
+          continue;
+        }
+        const schema = rawInput as Record<string, unknown>;
+        if (schema.type !== undefined && schema.type !== 'object') {
+          errors.push(`actions[${index}].input.type must be "object"`);
+        }
+
+        actions.push({
+          name: actionName,
+          description: description ?? actionName,
+          input: {
+            type: 'object',
+            ...(schema.properties && typeof schema.properties === 'object'
+              ? { properties: schema.properties as Record<string, Record<string, unknown>> }
+              : {}),
+            ...(Array.isArray(schema.required)
+              ? { required: schema.required.filter((n): n is string => typeof n === 'string') }
+              : {}),
+          },
+          ...(action.repliesToOrigin === true ? { repliesToOrigin: true } : {}),
+        });
+      }
+    }
+  }
+
   if (errors.length) return { ok: false, errors, warnings };
 
   const manifest: ListenerManifest = {
-    spec: LISTENER_SPEC,
+    // Echo whatever was accepted: a v1 listener stays v1 on re-read, so we do
+    // not silently rewrite a user's file just by loading it.
+    spec: input.spec === PLUGIN_SPEC ? PLUGIN_SPEC : LISTENER_SPEC,
     id: id!,
     name: name!,
     version: version!,
@@ -460,6 +562,7 @@ export function parseManifest(raw: unknown, expectedId?: string): ManifestParseR
     ...(dependencies ? { dependencies } : {}),
     ...(config ? { config } : {}),
     ...(setup.length ? { setup } : {}),
+    ...(actions.length ? { actions } : {}),
     ...(input.permissions && typeof input.permissions === 'object'
       ? { permissions: input.permissions as ListenerManifest['permissions'] }
       : {}),

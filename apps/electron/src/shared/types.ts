@@ -1223,6 +1223,18 @@ export const isEventsNavigation = (
   state: NavigationState
 ): state is EventsNavigationState => state.navigator === 'events'
 
+/**
+ * The plugins section of the events navigator.
+ *
+ * `isEventsNavigation` is true for both sections, so the sidebar could not tell
+ * 事件 from 插件 — both lit up at once. These two narrow it to one section each.
+ */
+export const isEventListenersNavigation = (state: NavigationState): boolean =>
+  state.navigator === 'events' && state.section === 'listeners'
+
+export const isEventListNavigation = (state: NavigationState): boolean =>
+  state.navigator === 'events' && state.section === 'list'
+
 export const DEFAULT_NAVIGATION_STATE: NavigationState = {
   navigator: 'sessions',
   filter: { kind: 'allSessions' },

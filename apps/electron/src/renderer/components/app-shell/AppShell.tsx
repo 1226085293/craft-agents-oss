@@ -31,6 +31,7 @@ import {
   ListTodo,
   Clock,
   Radio,
+  Plug,
   Bot,
   Info,
   MailOpen,
@@ -127,6 +128,8 @@ import {
   isProjectsNavigation,
   isPagesNavigation,
   isEventsNavigation,
+  isEventListenersNavigation,
+  isEventListNavigation,
   isTasksNavigation,
   type NavigationState,
 } from "@/contexts/NavigationContext"
@@ -2106,6 +2109,16 @@ function AppShellContent({
                   getItemProps={getSidebarItemProps}
                   focusedItemId={focusedSidebarItemId}
                   links={[
+                    {
+                      // Plugins sit first because they are the workspace's
+                      // hardware: every event that reaches it, and every
+                      // channel it can answer on, comes from one of them.
+                      id: "nav:plugins",
+                      title: t("sidebar.plugins", { defaultValue: "插件" }),
+                      icon: Plug,
+                      variant: isEventListenersNavigation(navState) ? "default" : "ghost",
+                      onClick: handleEventListenersClick,
+                    },
                     // --- Projects (top: a project is the broadest scope a
                     // session can belong to, so it reads first) ---
                     // Two display modes: entries list (mode 1) and, once a
@@ -2489,30 +2502,14 @@ function AppShellContent({
                       onClick: () => navigate(routes.view.tasks()),
                     },
                     {
+                      // One click, one destination: the list. The listener
+                      // panel used to hide behind a disclosure triangle, which
+                      // made the common case ("what came in?") a two-step.
                       id: "nav:events",
                       title: t("sidebar.events"),
                       icon: Radio,
-                      variant: isEventsNavigation(navState) ? "default" : "ghost",
+                      variant: isEventListNavigation(navState) ? "default" : "ghost",
                       onClick: handleEventsClick,
-                      expandable: true,
-                      expanded: isExpanded('nav:events'),
-                      onToggle: () => toggleExpanded('nav:events'),
-                      items: [
-                        {
-                          id: "nav:events:list",
-                          title: t("sidebar.eventList"),
-                          icon: Inbox,
-                          variant: (isEventsNavigation(navState) && navState.section === 'list') ? "default" : "ghost",
-                          onClick: handleEventsClick,
-                        },
-                        {
-                          id: "nav:events:listeners",
-                          title: t("sidebar.eventListeners"),
-                          icon: Radio,
-                          variant: (isEventsNavigation(navState) && navState.section === 'listeners') ? "default" : "ghost",
-                          onClick: handleEventListenersClick,
-                        },
-                      ],
                     },
                     {
                       id: "nav:skills",

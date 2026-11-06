@@ -87,6 +87,14 @@ export const routes = {
     allSessions: (sessionId?: string) =>
       sessionId ? `allSessions/session/${sessionId}` as const : 'allSessions' as const,
 
+    /**
+     * Task board (multi-agent tasks).
+     *
+     * `taskId` selects one task's detail; omitted shows the grouped list.
+     */
+    tasks: (taskId?: string) =>
+      taskId ? `tasks/${encodeURIComponent(taskId)}` as const : 'tasks' as const,
+
     /** Archived view (sessions navigator, archived filter) */
     archived: (sessionId?: string) =>
       sessionId ? `archived/session/${sessionId}` as const : 'archived' as const,
@@ -146,25 +154,6 @@ export const routes = {
       subpage
         ? `settings/${subpage}` as const
         : 'settings' as const,
-
-    automations: (params?: { automationId?: string; type?: 'scheduled' | 'event' | 'agentic' }) => {
-      const { automationId, type } = params ?? {}
-      const base = type ? `automations/${type}` : 'automations'
-      if (automationId) return `${base}/automation/${automationId}` as const
-      return base as 'automations' | `automations/${'scheduled' | 'event' | 'agentic'}`
-    },
-
-    /** Scheduled automations view (automations navigator, scheduled filter) */
-    automationsScheduled: (automationId?: string) =>
-      automationId ? `automations/scheduled/automation/${automationId}` as const : 'automations/scheduled' as const,
-
-    /** Event-based automations view (automations navigator, event filter) */
-    automationsEvent: (automationId?: string) =>
-      automationId ? `automations/event/automation/${automationId}` as const : 'automations/event' as const,
-
-    /** Agentic automations view (automations navigator, agentic filter) */
-    automationsAgentic: (automationId?: string) =>
-      automationId ? `automations/agentic/automation/${automationId}` as const : 'automations/agentic' as const,
 
     /** Projects view (projects navigator) */
     projects: (projectSlug?: string) =>

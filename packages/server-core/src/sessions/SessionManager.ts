@@ -1,6 +1,6 @@
 import type { EventSink, RpcServer } from '@craft-agent/server-core/transport'
 import { CLIENT_BROWSER_INVOKE } from '@craft-agent/server-core/transport'
-import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, BusyMessageDecision, BusyMessageDecisionInput, GroupChatDecision, GroupChatDecisionInput, GroupChatDecisionAction } from '@craft-agent/server-core/handlers'
+import type { ISessionManager, IBrowserPaneManager, BusyMessageDecision, BusyMessageDecisionInput, GroupChatDecision, GroupChatDecisionInput, GroupChatDecisionAction } from '@craft-agent/server-core/handlers'
 import { RemoteBrowserPaneManager } from './RemoteBrowserPaneManager'
 import { hasBranchForkMetadata, retireBranchForkMetadata } from './branch-fork-metadata'
 import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@craft-agent/server-core/handlers'
@@ -22,9 +22,32 @@ import {
 } from '@craft-agent/shared/agent/backend'
 import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, resolveMidStreamBehavior, getPersistedUiLanguage, resolveTitleLanguageName } from '@craft-agent/shared/config'
 import type { LlmConnection } from '@craft-agent/shared/config'
-import type { AutomationSystem } from '@craft-agent/shared/automations'
+import {
+  applyScope,
+  buildAgentSnapshot,
+  getAgentById,
+  loadAgents,
+  migrateAgentsFile,
+  resolveSessionDefaults,
+  type AgentSnapshot,
+} from '@craft-agent/shared/agents'
+import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
+import { TaskService } from '../tasks/task-service.ts'
+import { readJournal, formatTaskBrief, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
+
+/** 6-hex id, used for collision-free attachment names. */
+function generateShortId(): string {
+  return Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')
+}
+import { startWatchdog } from '../tasks/task-watchdog.ts'
+import { startTaskScheduler, runEventPass } from '../tasks/task-scheduler.ts'
+import { startPageRefreshScheduler } from '../pages/page-refresh-scheduler.ts'
+import { migrateAutomationCronTasks } from '../tasks/automation-migration.ts'
+import { buildJudgePrompt, parseJudgeVerdict } from '../tasks/task-judge.ts'
+import { SupervisorRuntime } from '../routing/supervisor-runtime.ts'
+import { SUPERVISOR_TURN_TIMEOUT_MS } from '@craft-agent/shared/agents/supervisor'
+import { buildAgentToolBindings } from './agent-tools-bindings.ts'
 import { kindRouting, registerAttachmentName, pickStrategyModel, type ModelRequestKind, type ModelWindow } from '@craft-agent/shared/config'
-import { generateShortId } from '@craft-agent/shared/automations/resolve-config-path'
 import type { MidStreamBehavior } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
 import { isValidWorkingDirectory } from '../utils/path-validation'
@@ -1379,6 +1402,15 @@ export interface ManagedSession {
   agent: AgentInstance | null  // Lazy-loaded - null until first message
   messages: Message[]
   isProcessing: boolean
+  /** Agent profile this session runs as (see shared/sessions/types). */
+  agentId?: string
+  agentSnapshot?: AgentSnapshot
+  /** 'supervisor' coordinates; 'worker' (default) does the work. */
+  role?: 'supervisor' | 'worker'
+  taskId?: string
+  /** Last time this session wrote a task heartbeat (runtime-only throttle). */
+  lastTaskHeartbeatAt?: number
+  spawnDepth?: number
   /**
    * Set when the user is actively engaged on a mobile/chat channel bound to
    * this session (they sent a message from it, or a real read receipt
@@ -1907,7 +1939,6 @@ export class SessionManager implements ISessionManager {
   // Last source-reload timestamp per workspace root (throttle guard)
   private lastSourceReloadAt: Map<string, number> = new Map()
   // Automation systems for workspace event automations - one per workspace (includes scheduler, diffing, and handlers)
-  private automationSystems: Map<string, AutomationSystem> = new Map()
   // Automation systems for workspace event automations - one per workspace (includes scheduler, diffing, and handlers)
   // Periodic flush of buffered LLM gateway usage records to disk (llm-usage.jsonl)
   private usageFlushTimer?: NodeJS.Timeout
@@ -1968,6 +1999,26 @@ export class SessionManager implements ISessionManager {
    * while the turn is still finishing; the map coalesces repeat notifications.
    */
   private postSwitchCompactions: Map<string, Promise<void>> = new Map()
+
+  /**
+   * Compact a session because its task runs on, not because its route changed.
+   *
+   * Shares the post-switch machinery on purpose: both wait for the turn to end,
+   * coalesce concurrent requests and report through the same event, so there is
+   * one compaction path with two triggers rather than two implementations.
+   */
+  private compactTaskSession(sessionId: string): void {
+    schedulePostSwitchCompaction(
+      {
+        getSession: (id) => this.sessions.get(id),
+        sendEvent: (infoEvent, workspaceId) => this.sendEvent(infoEvent as never, workspaceId),
+        log: (message) => sessionLog.warn(message),
+      },
+      sessionId,
+      'task',
+      this.postSwitchCompactions,
+    )
+  }
   /** Monotonic clock to ensure strictly increasing message timestamps */
   private lastTimestamp = 0
 
@@ -1984,9 +2035,38 @@ export class SessionManager implements ISessionManager {
     managed.isProcessing = processing
     if (!was && processing) {
       sessionRuntimeHooks.onSessionStarted()
+      // A supervisor turn must stay short: it either dispatches and ends, or
+      // answers. Without a cap, one slow model call parks every queued event
+      // behind it (the backlog only drains when the supervisor is idle).
+      if (managed.role === 'supervisor') this.armSupervisorTurnCap(managed)
     } else if (was && !processing) {
       sessionRuntimeHooks.onSessionStopped()
+      this.clearSupervisorTurnCap(managed)
     }
+  }
+
+  /** Turn caps, keyed by session id. */
+  private readonly supervisorTurnCaps = new Map<string, ReturnType<typeof setTimeout>>()
+
+  private armSupervisorTurnCap(managed: ManagedSession): void {
+    this.clearSupervisorTurnCap(managed)
+    const timer = setTimeout(() => {
+      if (!managed.isProcessing || managed.role !== 'supervisor') return
+      sessionLog.warn(`[supervisor] turn exceeded the cap in ${managed.id}; closing it`)
+      void this.cancelProcessing(managed.id, true).catch((error) => {
+        sessionLog.warn('[supervisor] failed to close an over-long turn', { error })
+      })
+    }, SUPERVISOR_TURN_TIMEOUT_MS)
+    // Node keeps the process alive for a pending timer; this one is disposable.
+    timer.unref?.()
+    this.supervisorTurnCaps.set(managed.id, timer)
+  }
+
+  private clearSupervisorTurnCap(managed: ManagedSession): void {
+    const timer = this.supervisorTurnCaps.get(managed.id)
+    if (!timer) return
+    clearTimeout(timer)
+    this.supervisorTurnCaps.delete(managed.id)
   }
 
   /** Wait until initialize() has completed (sessions loaded from disk).
@@ -2272,19 +2352,14 @@ export class SessionManager implements ISessionManager {
         this.broadcastAppearanceChanged()
       },
       onAutomationsConfigChange: () => {
-        sessionLog.info(`Automations config changed in ${workspaceId}`)
-        // Reload automations config via AutomationSystem
-        const automationSystem = this.automationSystems.get(workspaceRootPath)
-        if (automationSystem) {
-          const result = automationSystem.reloadConfig()
-          if (result.errors.length === 0) {
-            sessionLog.info(`Reloaded ${result.automationCount} automations for workspace ${workspaceId}`)
-          } else {
-            sessionLog.error(`Failed to reload automations for workspace ${workspaceId}:`, result.errors)
-          }
+        // The only part of that config still meaningful: cron matchers become
+        // task triggers, so an existing schedule keeps firing. The runtime and
+        // its editor are gone.
+        try {
+          migrateAutomationCronTasks(this.getTasks(workspaceId), workspaceRootPath)
+        } catch (error) {
+          sessionLog.warn('automation→task migration failed after config change', { error })
         }
-        // Notify renderer to re-read automations.json
-        this.broadcastAutomationsChanged(workspaceId)
       },
       onPagesListChange: (pages) => {
         sessionLog.info(`Pages changed in ${workspaceId} (${pages.length} pages)`)
@@ -2398,12 +2473,6 @@ export class SessionManager implements ISessionManager {
   private broadcastSourcesChanged(workspaceId: string, sources: LoadedSource[]): void {
     if (!this.eventSink) return
     this.eventSink(RPC_CHANNELS.sources.CHANGED, { to: 'workspace', workspaceId }, workspaceId, sources)
-  }
-
-  private broadcastAutomationsChanged(workspaceId: string): void {
-    if (!this.eventSink) return
-    sessionLog.info(`Broadcasting automations changed for ${workspaceId}`)
-    this.eventSink(RPC_CHANNELS.automations.CHANGED, { to: 'workspace', workspaceId }, workspaceId)
   }
 
   private broadcastAppThemeChanged(theme: import('@craft-agent/shared/config').ThemeOverrides | null): void {
@@ -3623,6 +3692,13 @@ export class SessionManager implements ISessionManager {
    * Delivery target handed to the Event Center. Kept as a method so the event
    * service never imports SessionManager (no cycle) and tests can stub it.
    */
+  async routeUnclaimedEvent(
+    workspaceId: string,
+    event: { id: string; source: string; type: string; title: string; summary?: string },
+  ): Promise<void> {
+    await this.getSupervisorRuntime(workspaceId).routeUnclaimed(event)
+  }
+
   createEventDispatchTarget() {
     return {
       deliver: (
@@ -4026,32 +4102,64 @@ export class SessionManager implements ISessionManager {
     const wsConfig = loadWorkspaceConfig(workspaceRootPath)
     const globalDefaults = loadConfigDefaults()
 
-    // Read permission mode from workspace config, fallback to global defaults
-    const defaultPermissionMode = options?.permissionMode
-      ?? wsConfig?.defaults?.permissionMode
+    // One resolution point for every inherited value.
+    //
+    // Everything a new session inherits comes from the agent profile, and the
+    // last tier is computed from the enabled strategy groups instead of being
+    // stored in a config field. That is what lets the gateway config drop its
+    // old `defaultStrategy`: automations, messaging and the API all reach this
+    // same function, so none of them can end up unrouted.
+    //
+    // `wsConfig.defaults.*` is only a legacy tier, for an upgrade that runs
+    // before the v0->v1 agents migration has touched the workspace.
+    // One-shot v0->v1: absorb the legacy workspace defaults and the old gateway
+    // `defaultStrategy` into the default agent. Guarded by the file version, so
+    // every later create is a no-op.
+    try {
+      migrateAgentsFile(workspaceRootPath, {
+        strategy: wsConfig?.defaults?.strategy,
+        model: wsConfig?.defaults?.model,
+        permissionMode: wsConfig?.defaults?.permissionMode,
+        thinkingLevel: wsConfig?.defaults?.thinkingLevel,
+      })
+    } catch (error) {
+      sessionLog.warn('agents migration failed; continuing with legacy defaults', { error })
+    }
+
+    const resolvedDefaults = resolveSessionDefaults({
+      workspaceRoot: workspaceRootPath,
+      agentId: options?.agentId,
+      strategy: options?.strategy,
+      model: null,
+      permissionMode: options?.permissionMode,
+      thinkingLevel: normalizeThinkingLevel(options?.thinkingLevel),
+      workspaceDefaults: {
+        strategy: wsConfig?.defaults?.strategy,
+        model: wsConfig?.defaults?.model,
+        permissionMode: wsConfig?.defaults?.permissionMode,
+        thinkingLevel: wsConfig?.defaults?.thinkingLevel,
+      },
+      enabledStrategies: listEnabledStrategyIds(gatewayRouteDeps.config ?? loadLlmConfig()),
+    })
+
+    const resolvedAgent = resolvedDefaults.agent
+    const defaultPermissionMode = resolvedDefaults.permissionMode
       ?? globalDefaults.workspaceDefaults.permissionMode
 
     const userDefaultWorkingDir = wsConfig?.defaults?.workingDirectory || undefined
-    // Every creation path inherits a default group — automations, messaging and
-    // the API included. It resolves here rather than in the composer because
-    // those callers never see a renderer preference. The gateway config carries
-    // the last resort: the settings page can always write it, whatever window
-    // the user happened to be in.
-    const defaultStrategy =
-      options?.strategy ??
-      wsConfig?.defaults?.strategy ??
-      (gatewayRouteDeps.config ?? loadLlmConfig())?.defaultStrategy
-    // Resolve thinking level with caller-first precedence, matching permissionMode above:
-    //   caller override → workspace default → global default.
-    // normalizeThinkingLevel() tolerates undefined/unknown inputs.
+    const defaultStrategy = resolvedDefaults.strategy
     const defaultThinkingLevel =
-      normalizeThinkingLevel(options?.thinkingLevel)
-      ?? normalizeThinkingLevel(wsConfig?.defaults?.thinkingLevel)
+      normalizeThinkingLevel(resolvedDefaults.thinkingLevel)
       ?? getDefaultThinkingLevel()
-    // Get default model from workspace config (used when no session-specific model is set)
-    const defaultModel = wsConfig?.defaults?.model
-    // Get default enabled sources from workspace config
-    const defaultEnabledSourceSlugs = options?.enabledSourceSlugs ?? wsConfig?.defaults?.enabledSourceSlugs
+    const defaultModel = resolvedDefaults.model
+    // Sources are an agent ceiling, not a free-for-all: intersect the caller's
+    // request with the allowlist so a session created by an automation cannot
+    // reach a source its role was never granted.
+    const requestedSourceSlugs =
+      options?.enabledSourceSlugs ?? wsConfig?.defaults?.enabledSourceSlugs ?? undefined
+    const defaultEnabledSourceSlugs = requestedSourceSlugs
+      ? applyScope(resolvedAgent.sources, requestedSourceSlugs)
+      : requestedSourceSlugs
 
     // Resolve model tier hints ('fast' / 'default') to actual model IDs.
     // EditPopover uses tier hints instead of hardcoded Anthropic model names
@@ -4332,16 +4440,26 @@ export class SessionManager implements ISessionManager {
     }
 
     // Use storage layer to create and persist the session
+    // Freeze the agent at creation: later edits must not rewrite this
+    // session's persona or re-open sources it was never granted.
+    const agentSnapshot: AgentSnapshot = buildAgentSnapshot(resolvedAgent)
+
     const storedSession = await createStoredSession(workspaceRootPath, {
       name: options?.name,
       permissionMode: defaultPermissionMode,
       workingDirectory: resolvedWorkingDir,
       ...(defaultStrategy ? { strategy: defaultStrategy } : {}),
-      enabledSourceSlugs: options?.enabledSourceSlugs ?? defaultEnabledSourceSlugs,
+      ...(defaultModel ? { model: defaultModel } : {}),
+      enabledSourceSlugs: defaultEnabledSourceSlugs,
       hidden: options?.hidden,
       projectId: resolvedProjectId,
       folderId: resolvedFolderId,
       parentSessionId: options?.parentSessionId,
+      agentId: resolvedAgent.id,
+      agentSnapshot,
+      role: options?.role,
+      taskId: options?.taskId,
+      spawnDepth: options?.spawnDepth,
     })
 
     // Branch: copy messages from source session up to and including the branch point
@@ -4644,17 +4762,6 @@ export class SessionManager implements ISessionManager {
     if (internal?.emitCreatedEvent !== false) {
       this.notifySessionCreated(workspaceId, storedSession.id)
     }
-
-    // Automations: a brand-new session is a path change with an empty oldPath.
-    this.emitPathChange(managed.workspace.rootPath, {
-      subject: 'session',
-      sessionId: managed.id,
-      sessionName: managed.name,
-      changeType: managed.projectId ? 'project' : 'folder',
-      oldPath: null,
-      newPath: describeSessionScope(managed.projectId ?? null, managed.folderId ?? null),
-      workingDirectory: managed.workingDirectory,
-    })
 
     return managedToSession(managed, isBranch ? { messages: managed.messages } : undefined)
   }
@@ -5145,6 +5252,16 @@ export class SessionManager implements ISessionManager {
         permissionMode: managed.permissionMode,
         previousPermissionMode: managed.previousPermissionMode,
         projectId: managed.projectId,
+        // Multi-agent fields: the backend needs these for the persona prompt,
+        // the skill ceiling and the role-pruned tool table.
+        name: managed.name,
+        strategy: managed.strategy,
+        enabledSourceSlugs: managed.enabledSourceSlugs,
+        agentId: managed.agentId,
+        agentSnapshot: managed.agentSnapshot,
+        role: managed.role,
+        taskId: managed.taskId,
+        spawnDepth: managed.spawnDepth,
       }
 
       const onSdkSessionIdUpdate = (sdkSessionId: string) => {
@@ -5302,6 +5419,131 @@ export class SessionManager implements ISessionManager {
         },
         },
       }) as AgentInstance
+
+      // Multi-agent wiring: the callbacks exist only where the role makes them
+      // meaningful, so a worker never sees `dispatch` and a supervisor never
+      // sees execution tools (the table is pruned in session-tools-core).
+      if (managed.agent) {
+        managed.agent.agentTools = buildAgentToolBindings({
+          sessionId: managed.id,
+          role: managed.role === 'supervisor' ? 'supervisor' : 'worker',
+          taskId: managed.taskId,
+          sessionName: managed.name,
+          tasks: this.getTasks(managed.workspace.id),
+          spawnDepth: managed.spawnDepth ?? 0,
+          spawnWorkerSession: async (params) => {
+            const created = await this.createSession(managed.workspace.id, {
+              name: params.name,
+              agentId: params.agentId,
+              role: 'worker',
+              taskId: params.taskId,
+              spawnDepth: params.spawnDepth,
+              strategy: managed.strategy,
+            })
+            await this.sendMessage(created.id, params.instruction)
+            return { sessionId: created.id }
+          },
+          sendToSession: async (sessionId, text) => {
+            await this.sendMessage(sessionId, text)
+          },
+          writeUserVisible: async (text) => {
+            await this.surfaceSupervisorMessage(managed, text)
+          },
+          askUser: async (questions) => {
+            await this.surfaceSupervisorQuestion(managed, questions)
+          },
+          dispatchViaSupervisor: async (params) => {
+            const runtime = this.getSupervisorRuntime(managed.workspace.id)
+            return runtime.dispatch({ fromSessionId: managed.id, ...params })
+          },
+          continueTask: (taskId) => {
+            // The worker reported that its context is close to the limit. Compact
+            // this session rather than starting a new one: the thread — what was
+            // tried, which file, which error — is the valuable part.
+            this.compactTaskSession(managed.id)
+            void taskId
+          },
+        })
+
+        // Task board surface: the supervisor creates and advances tasks. Kept
+        // separate from `agentTools` because it is only meaningful for a
+        // supervisor, and the tool table already hides it from workers.
+        managed.agent.taskTools = {
+          create: async (payload) => {
+            const task = this.getTasks(managed.workspace.id).create({
+              name: payload.name,
+              instruction: payload.instruction,
+              assigneeAgentId: payload.assigneeAgentId,
+              parentTaskId: payload.parentTaskId,
+              dependsOn: payload.dependsOn,
+              priority: payload.priority as 0 | 1 | 2 | 3 | 4 | undefined,
+              ...(payload.spec ? { spec: normalizeSpec(payload.spec) } : {}),
+              ...(payload.trigger ? { trigger: normalizeTrigger(payload.trigger) } : {}),
+              supervisorSessionId: managed.id,
+              toolCallId: randomUUID(),
+            })
+            return { id: task.id }
+          },
+          list: async (params) => {
+            const tasks = this.getTasks(managed.workspace.id).list(params.status as never)
+            return tasks.slice(0, params.limit ?? 20).map((t) => ({
+              id: t.id,
+              name: t.name,
+              status: t.status,
+              pauseReason: t.pauseReason ?? null,
+            }))
+          },
+          get: async (identifier, includeJournal) => {
+            const task = this.getTasks(managed.workspace.id).get(identifier)
+            if (!task) return null
+            if (!includeJournal) return task
+            return { task, journal: readJournal(managed.workspace.rootPath, identifier) }
+          },
+          update: async (identifier, patch) => {
+            // "running" is not a label: it must start a run. Flipping the status
+            // without spawning was how a task could look alive and do nothing.
+            if (patch.status === 'running') {
+              const started = await this.runTask(managed.workspace.id, identifier, 'supervisor')
+              const current = this.getTasks(managed.workspace.id).get(identifier)
+              return { status: started ? 'running' : (current?.status ?? 'backlog') }
+            }
+            const task = this.getTasks(managed.workspace.id).setStatus(
+              identifier,
+              (patch.status ?? 'running') as never,
+              { pauseReason: patch.pauseReason as never, error: patch.error },
+            )
+            return { status: task.status }
+          },
+          handoff: async (identifier, handoff, fromSessionId) => {
+            const result = await this.getTasks(managed.workspace.id).reportHandoff(
+              identifier,
+              handoff,
+              fromSessionId,
+            )
+            if (result.compactionPending) this.compactTaskSession(managed.id)
+            return { passed: result.passed, reasons: result.reasons, status: result.task.status }
+          },
+          updatePlan: async (identifier, patch) => {
+            const service = this.getTasks(managed.workspace.id)
+            const task = service.get(identifier)
+            if (!task) return { ok: false, error: `task not found: ${identifier}` }
+            // A worker may only keep its own task's plan current; a supervisor
+            // editing another task's checklist would be reporting work it did
+            // not do.
+            const owns =
+              task.currentSessionId === managed.id || task.sessionIds.includes(managed.id)
+            if (!owns) return { ok: false, error: 'this session is not working on that task' }
+            const result = service.updatePlan(identifier, {
+              id: patch.id,
+              ...(patch.status ? { status: patch.status as never } : {}),
+              ...(patch.title ? { title: patch.title } : {}),
+              ...(patch.note !== undefined ? { note: patch.note } : {}),
+              ...(patch.remove !== undefined ? { remove: patch.remove } : {}),
+            })
+            return result.ok ? { ok: true } : { ok: false, ...(result.error ? { error: result.error } : {}) }
+          },
+        }
+      }
 
       sessionLog.info(`Created ${provider} agent for session ${managed.id} (model: ${backendContext.resolvedModel})${managed.sdkSessionId ? ' (resuming)' : ''}`)
 
@@ -5984,6 +6226,9 @@ export class SessionManager implements ISessionManager {
 
         const session = await this.createSession(managed.workspace.id, {
           name: request.name,
+          agentId: request.agentId,
+          role: request.role,
+          spawnDepth: (managed.spawnDepth ?? 0) + 1,
           llmConnection: request.llmConnection ?? managed.llmConnection,
           model: request.model ?? managed.model,
           enabledSourceSlugs: request.enabledSourceSlugs ?? managed.enabledSourceSlugs,
@@ -6428,6 +6673,404 @@ ${request.prompt}`;
     return managed.agent
   }
 
+  /** One task service per workspace (lazy; storage is file-based). */
+  private readonly taskServices = new Map<string, TaskService>()
+  /** One supervisor runtime per workspace (holds the event backlog). */
+  private readonly supervisorRuntimes = new Map<string, SupervisorRuntime>()
+  /** Per-workspace watchdog disposers. */
+  private readonly watchdogStops = new Map<string, () => void>()
+  /** Per-workspace task scheduler disposers. */
+  private readonly taskSchedulerStops = new Map<string, () => void>()
+  /** Per-workspace page refresh disposers. */
+  private readonly pageRefreshStops = new Map<string, () => void>()
+
+  /**
+   * Second acceptance layer: judge a handoff in a read-only session.
+   *
+   * The judge is a normal session with a locked-down prompt and no write intent;
+   * its answer is parsed fail-closed. It is deliberately a separate session —
+   * a worker grading its own homework is not a gate.
+   */
+  private async judgeTaskHandoff(
+    workspaceId: string,
+    task: import('@craft-agent/shared/tasks').Task,
+    handoff: import('@craft-agent/shared/tasks').Handoff,
+  ): Promise<{ pass: boolean; reasons: string[] }> {
+    const created = await this.createSession(workspaceId, {
+      name: `${task.id} 验收`,
+      role: 'worker',
+      hidden: true,
+      permissionMode: 'safe',
+    })
+
+    await this.sendMessage(created.id, buildJudgePrompt(task, handoff))
+
+    const managed = this.sessions.get(created.id)
+    const messages = managed?.messages ?? []
+    const answer = [...messages]
+      .reverse()
+      .find((m) => m.role === 'assistant' && !m.isIntermediate && typeof m.content === 'string')
+
+    return parseJudgeVerdict(typeof answer?.content === 'string' ? answer.content : '')
+  }
+
+  /** Task service for a workspace. */
+  getTasks(workspaceId: string): TaskService {
+    const cached = this.taskServices.get(workspaceId)
+    if (cached) return cached
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) throw new Error(`Workspace ${workspaceId} not found`)
+    const service = new TaskService({
+      workspaceRoot: workspace.rootPath,
+      sessionExists: (sessionId) => this.sessions.has(sessionId),
+      wakeSupervisor: (sessionId, text) => {
+        void this.sendMessage(sessionId, text).catch((error) => {
+          sessionLog.warn('Failed to wake supervisor', { sessionId, error })
+        })
+      },
+      // Acceptance commands run here, not inside the worker: a task must not be
+      // able to certify itself. cwd is resolved against the workspace root so a
+      // spec can stay portable.
+      runAcceptanceCommand: async (command, cwd) => {
+        const { exec } = await import('child_process')
+        const workingDir = cwd
+          ? (isAbsolute(cwd) ? cwd : join(workspace.rootPath, cwd))
+          : workspace.rootPath
+        return await new Promise((resolve) => {
+          exec(command, { cwd: workingDir, timeout: 120_000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+            const output = `${stdout ?? ''}${stderr ?? ''}`.trim()
+            if (error) {
+              const code = typeof (error as { code?: unknown }).code === 'number'
+                ? (error as { code: number }).code
+                : null
+              resolve({ exitCode: code, output: output.slice(-500) })
+              return
+            }
+            resolve({ exitCode: 0, output: output.slice(-500) })
+          })
+        })
+      },
+      judgeHandoff: (task, handoff) => this.judgeTaskHandoff(workspaceId, task, handoff),
+    })
+    // Register before the loops start: the scheduler and event routing both
+    // re-enter getTasks, and a second service would mean a second watchdog.
+    this.taskServices.set(workspaceId, service)
+
+    // Page refreshes are scripts, not agent runs: a page with a `refresh` spec
+    // is ticked by its own loop so it never costs a session.
+    try {
+      const stop = startPageRefreshScheduler({ workspaceRootPath: workspace.rootPath })
+      this.pageRefreshStops.set(workspaceId, stop)
+    } catch (error) {
+      sessionLog.warn('failed to start the page refresh scheduler', { error })
+    }
+
+    // Legacy cron automations become task triggers. The automation runtime is
+    // not started anywhere, so without this an existing schedule would keep
+    // looking configured while never firing.
+    try {
+      migrateAutomationCronTasks(service, workspace.rootPath)
+    } catch (error) {
+      sessionLog.warn('automation→task migration failed', { error })
+    }
+
+    // A task left `running` by a process that died did not fail; mark it
+    // resumable once, when the workspace's task service comes up.
+    try {
+      const recovered = service.recoverAfterRestart()
+      if (recovered.length > 0) {
+        sessionLog.info(`[tasks] recovered ${recovered.length} task(s) after restart`)
+      }
+    } catch (error) {
+      sessionLog.warn('task restart recovery failed', { error })
+    }
+
+    // Independent control loop: pure rules on a timer, never inside a session
+    // turn. A stuck supervisor therefore cannot stop the checks.
+    try {
+      const stop = startWatchdog({
+        listTasks: () => service.list(),
+        sessionExists: (sessionId) => this.sessions.has(sessionId),
+        pause: (id, reason, note) => {
+          service.setStatus(id, 'paused', { pauseReason: reason, error: note })
+        },
+        denyDecision: (id, note) => service.denyDecision(id, note),
+        notify: (sessionId, text) => {
+          void this.sendMessage(sessionId, text).catch(() => undefined)
+        },
+      }, undefined, {
+        // A watchdog that throws every pass looks exactly like one that finds
+        // nothing, so it has to announce its own breakage.
+        onSelfFailure: ({ failures, lastError }) => {
+          sessionLog.warn('task watchdog keeps failing', { failures, lastError })
+          void this.ensureSupervisorSession(workspaceId)
+            .then((supervisor) =>
+              this.sendMessage(
+                supervisor.id,
+                `巡检器连续 ${failures} 次执行失败（${lastError}），任务状态可能不再被监视，需要人工检查。`,
+              ),
+            )
+            .catch(() => undefined)
+        },
+      })
+      this.watchdogStops.set(workspaceId, stop)
+    } catch (error) {
+      sessionLog.warn('failed to start the task watchdog', { error })
+    }
+
+    // Trigger loop: cron-fired tasks start here, without touching a session or
+    // a model. Kept beside the watchdog because both are external control loops.
+    try {
+      const stop = startTaskScheduler({
+        tasks: service,
+        listTasks: () => service.list(),
+        spawnRun: (task, reason) => this.spawnTaskRun(workspaceId, task, reason),
+      })
+      this.taskSchedulerStops.set(workspaceId, stop)
+    } catch (error) {
+      sessionLog.warn('failed to start the task scheduler', { error })
+    }
+
+    return service
+  }
+
+  /**
+   * Spawn the worker for one claimed task run.
+   *
+   * Shared by the cron scheduler and by event triggers. The caller must already
+   * hold the run lock; this only creates the session and hands it the brief.
+   */
+  private async spawnTaskRun(
+    workspaceId: string,
+    task: import('@craft-agent/shared/tasks').Task,
+    reason: string,
+  ): Promise<{ sessionId: string } | null> {
+    const spec = task.spec
+    const created = await this.createSession(workspaceId, {
+      name: `${task.id} ${task.name}`.slice(0, 60),
+      role: 'worker',
+      taskId: task.id,
+      ...(task.assigneeAgentId ? { agentId: task.assigneeAgentId } : {}),
+      ...(spec?.cwd ? { workingDirectory: spec.cwd } : {}),
+      ...(spec?.sources?.length ? { enabledSourceSlugs: spec.sources } : {}),
+      ...(spec?.model ? { model: spec.model } : {}),
+      ...(spec?.strategy ? { strategy: spec.strategy } : {}),
+    })
+    void this.sendMessage(created.id, formatTaskBrief(task, { reason })).catch((error) => {
+      sessionLog.warn('failed to send task brief', { taskId: task.id, error })
+    })
+    return { sessionId: created.id }
+  }
+
+  /**
+   * Start one task by id, claiming the lock first.
+   *
+   * Used by event routing (routes.json `to.taskId`) and by the UI's manual run.
+   */
+  async runTask(workspaceId: string, taskId: string, reason: string): Promise<boolean> {
+    const tasks = this.getTasks(workspaceId)
+    const claim = tasks.startRun(taskId, `pending:${reason}`)
+    if (!claim.ok) {
+      sessionLog.info(`[tasks] ${taskId} not started: ${claim.reason}`)
+      return false
+    }
+    try {
+      const spawned = await this.spawnTaskRun(workspaceId, claim.task, reason)
+      if (!spawned) {
+        tasks.endRun(taskId, { ok: false, error: 'spawn failed' })
+        return false
+      }
+      tasks.attachSession(taskId, spawned.sessionId)
+      tasks.startRun(taskId, spawned.sessionId)
+      return true
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      tasks.endRun(taskId, { ok: false, error: message })
+      return false
+    }
+  }
+
+  /**
+   * Throttled task heartbeat.
+   *
+   * Tool results prove a run is alive; writing the task file on every result
+   * would be wasteful, so at most one write per 30s per session. Failures are
+   * swallowed — a heartbeat must never break a turn.
+   */
+  private touchTaskHeartbeat(managed: ManagedSession): void {
+    if (!managed.taskId) return
+    const now = Date.now()
+    if (now - (managed.lastTaskHeartbeatAt ?? 0) < 30_000) return
+    managed.lastTaskHeartbeatAt = now
+    try {
+      this.getTasks(managed.workspace.id).heartbeat(managed.taskId)
+    } catch (error) {
+      sessionLog.debug('task heartbeat failed', { taskId: managed.taskId, error })
+    }
+  }
+
+  /** Supervisor runtime for a workspace, created on first use. */
+  getSupervisorRuntime(workspaceId: string): SupervisorRuntime {
+    const cached = this.supervisorRuntimes.get(workspaceId)
+    if (cached) return cached
+
+    const runtime = new SupervisorRuntime({
+      workspaceRoot: getWorkspaceByNameOrId(workspaceId)?.rootPath ?? '',
+      ensureSupervisorSession: async () => {
+        const existing = this.findOnDutySupervisor(workspaceId)
+        if (existing) {
+          return {
+            id: existing.id,
+            role: 'supervisor',
+            spawnDepth: existing.spawnDepth ?? 0,
+            agentId: existing.agentId,
+            isProcessing: existing.isProcessing,
+          }
+        }
+        try {
+          const created = await this.createSession(workspaceId, { role: 'supervisor', name: '督导' })
+          return { id: created.id, role: 'supervisor', spawnDepth: 0, isProcessing: false }
+        } catch (error) {
+          sessionLog.warn('Failed to create supervisor session', { workspaceId, error })
+          return null
+        }
+      },
+      getSession: (sessionId) => {
+        const managed = this.sessions.get(sessionId)
+        if (!managed) return null
+        return {
+          id: managed.id,
+          role: managed.role === 'supervisor' ? 'supervisor' : 'worker',
+          spawnDepth: managed.spawnDepth ?? 0,
+          agentId: managed.agentId,
+          isProcessing: managed.isProcessing,
+        }
+      },
+      spawnWorker: async (params) => {
+        const created = await this.createSession(workspaceId, {
+          name: params.name ?? params.scope.slice(0, 24),
+          agentId: params.agentId,
+          role: 'worker',
+          taskId: params.taskId,
+          spawnDepth: params.spawnDepth,
+          // A rule may pin the worker to a directory; without it the worker would
+          // inherit whatever directory the supervisor happens to sit in.
+          ...(params.cwd ? { workingDirectory: params.cwd } : {}),
+        })
+        await this.sendMessage(created.id, params.instruction)
+        return { sessionId: created.id }
+      },
+      sendToSession: async (sessionId, text) => {
+        await this.sendMessage(sessionId, text)
+      },
+      writeToSupervisor: async (sessionId, text) => {
+        const managed = this.sessions.get(sessionId)
+        if (managed) await this.surfaceSupervisorMessage(managed, text)
+      },
+      askUser: async (sessionId, questions) => {
+        const managed = this.sessions.get(sessionId)
+        if (managed) await this.surfaceSupervisorQuestion(managed, questions)
+      },
+      getTask: (taskId) => {
+        const task = this.getTasks(workspaceId).get(taskId)
+        return task ? { id: task.id, currentSessionId: task.currentSessionId } : null
+      },
+    })
+
+    this.supervisorRuntimes.set(workspaceId, runtime)
+    return runtime
+  }
+
+  /** The workspace's on-duty supervisor, if one exists and is alive. */
+  /**
+   * The workspace's on-duty supervisor session, created on first use.
+   *
+   * "开始会话" is a single built-in session, not a session factory: the
+   * supervisor coordinates tasks across sessions, so a second one would split
+   * the coordination state in two. The session is `hidden` because it is an
+   * infrastructure surface (reached through 开始会话), not a conversation the
+   * user should find in the list — forty copies named 督导 was the symptom of
+   * every click creating a fresh one.
+   */
+  async ensureSupervisorSession(workspaceId: string): Promise<Session> {
+    const existing = this.findOnDutySupervisor(workspaceId)
+    if (existing) return managedToSession(existing)
+
+    return this.createSession(workspaceId, {
+      name: '督导',
+      role: 'supervisor',
+      hidden: true,
+      // What the supervisor may do is decided by its tool table, not by a
+      // permission gate: SUPERVISOR_TOOL_NAMES never registers bash / write /
+      // edit / MCP, so 放行 cannot hand it hands. Leaving the gate on 探索 only
+      // forced it to ask before reading tasks/ and plans/.
+      permissionMode: 'allow-all',
+    })
+  }
+
+  private findOnDutySupervisor(workspaceId: string): ManagedSession | undefined {
+    for (const managed of this.sessions.values()) {
+      if (managed.workspace.id !== workspaceId) continue
+      if (managed.role !== 'supervisor') continue
+      if (managed.isArchived) continue
+      return managed
+    }
+    return undefined
+  }
+
+  /**
+   * A supervisor's message to the user.
+   *
+   * Written on the supervisor's own transcript: one channel, so the user never
+   * has to guess which session spoke.
+   */
+  /**
+   * Append a supervisor-authored assistant message.
+   *
+   * Reuses the plan-message shape (persisted + broadcast) rather than inventing
+   * a second transport: the user sees one channel, and a reload keeps it.
+   */
+  private async appendSyntheticMessage(managed: ManagedSession, text: string): Promise<void> {
+    const message = {
+      id: randomUUID(),
+      role: 'assistant' as const,
+      content: [{ type: 'text' as const, text }],
+      timestamp: this.monotonic(),
+      isIntermediate: false,
+    }
+
+    managed.messages.push(message as never)
+    managed.lastMessageRole = 'assistant'
+    this.persistSession(managed)
+
+    this.sendEvent(
+      {
+        type: 'message_appended',
+        sessionId: managed.id,
+        message,
+      } as never,
+      managed.workspace.id,
+    )
+  }
+
+  private async surfaceSupervisorMessage(managed: ManagedSession, text: string): Promise<void> {
+    await this.appendSyntheticMessage(managed, text)
+  }
+
+  /** A supervisor's question to the user. */
+  private async surfaceSupervisorQuestion(
+    managed: ManagedSession,
+    questions: { question: string; options?: string[] }[],
+  ): Promise<void> {
+    const body = questions
+      .map((q, i) => {
+        const options = q.options?.length ? `\n选项：${q.options.join(' / ')}` : ''
+        return `${i + 1}. ${q.question}${options}`
+      })
+      .join('\n')
+    await this.appendSyntheticMessage(managed, `需要你拍板：\n${body}`)
+  }
+
   async archiveSession(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
@@ -6606,50 +7249,8 @@ ${request.prompt}`;
       // Use null on the wire for the clear signal; the renderer maps it back.
       changes: { projectId: projectId ?? null, folderId: folderId, sortOrder: undefined },
     }, managed.workspace.id)
-
-    // Automations: a session moving between folders/projects is a path change.
-    const changeType = prevProjectId !== (nextProjectId ?? null) ? 'project' : 'folder'
-    const oldPath = changeType === 'project' ? prevProjectId : prevFolderId
-    const newPath = changeType === 'project' ? (nextProjectId ?? null) : (folderId ?? null)
-    if (oldPath !== newPath) {
-      this.emitPathChange(managed.workspace.rootPath, {
-        subject: 'session',
-        sessionId,
-        sessionName: managed.name,
-        changeType,
-        oldPath: oldPath ?? null,
-        newPath: newPath ?? null,
-        workingDirectory: managed.workingDirectory,
-      })
-    }
   }
 
-  /**
-   * Emit a SessionPathChange automation event for the workspace that owns
-   * `workspaceRootPath`. No-op when the workspace has no automation system yet
-   * (nothing could be subscribed).
-   *
-   * Creation and deletion are carried by the paths: `oldPath === null` means
-   * something was created, `newPath === null` means it was deleted.
-   */
-  emitPathChange(
-    workspaceRootPath: string,
-    params: {
-      subject: 'session' | 'folder'
-      sessionId?: string
-      sessionName?: string
-      changeType: 'folder' | 'project' | 'workingDirectory'
-      oldPath: string | null
-      newPath: string | null
-      workingDirectory?: string
-    },
-  ): void {
-    const automationSystem = this.automationSystems.get(workspaceRootPath)
-    if (!automationSystem) return
-    automationSystem.emitSessionPathChange(params).catch((error) => {
-      sessionLog.error(`[Automations] Failed to emit SessionPathChange:`, error)
-    })
-  }
 
   /** Sessions living in the given folders (used by archive/delete sweeps). */
   private sessionsInFolders(scope: FolderScope, folderIds: string[]): ManagedSession[] {
@@ -6761,15 +7362,6 @@ ${request.prompt}`;
     }
 
     const config = deleteFolderConfig(workspace.rootPath, scope, folderId)
-
-    // Automations: a removed folder subtree is a folder path change with an
-    // empty newPath. Emitted once for the root of the deleted subtree.
-    this.emitPathChange(workspace.rootPath, {
-      subject: 'folder',
-      changeType: 'folder',
-      oldPath: `folder:${folderId}`,
-      newPath: null,
-    })
 
     return { deletedFolders: config.deletedFolderIds, deletedSessions: targets.map((m) => m.id), archivedSessions }
   }
@@ -7705,6 +8297,49 @@ ${request.prompt}`;
   }
 
   /**
+   * Re-assign the role profile an existing session runs as.
+   *
+   * The persona, the skill ceiling and the source ceiling all come from the
+   * session's frozen `agentSnapshot`, so the snapshot is rebuilt here instead of
+   * being left to the next creation. A live backend baked its own copy of the
+   * snapshot at construction, so it is disposed: the next turn spawns a fresh
+   * one under the new profile (this also re-prunes the role tool table).
+   *
+   * Refused while the session is processing — swapping the persona mid-turn
+   * would rewrite the prompt between two assistant messages.
+   */
+  async updateSessionAgent(sessionId: string, agentId: string): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new Error(`Session ${sessionId} not found`)
+    if (managed.isProcessing) {
+      throw new Error('Cannot switch the agent of a session that is still processing')
+    }
+
+    const file = loadAgents(managed.workspace.rootPath)
+    const profile = getAgentById(file, agentId)
+    const snapshot: AgentSnapshot = buildAgentSnapshot(profile)
+
+    managed.agentId = profile.id
+    managed.agentSnapshot = snapshot
+    await updateSessionMetadata(managed.workspace.rootPath, sessionId, {
+      agentId: profile.id,
+      agentSnapshot: snapshot,
+    })
+
+    // A live backend holds the previous snapshot; drop it so the next turn
+    // rebuilds the persona prompt and the role-pruned tool table.
+    if (managed.agent) {
+      await this.disposeManagedAgentRuntime(managed, 'agent switch')
+    }
+
+    this.sendEvent(
+      { type: 'session_metadata_changed', sessionId, changes: { agentId: profile.id } },
+      managed.workspace.id,
+    )
+    sessionLog.info(`Session ${sessionId} agent updated to: ${profile.id} (${profile.name})`)
+  }
+
+  /**
    * Hot connection switch (mid-session). Unlike setSessionConnection — which
    * is only allowed before the first message and merely updates stored config
    * — this drives a LIVE agent: credentials for the target connection are
@@ -8069,17 +8704,6 @@ ${request.prompt}`;
     this.sendEvent({ type: 'session_deleted', sessionId }, managed.workspace.id)
     this.emitUnreadSummaryChanged()
 
-    // Automations: a deleted session is a path change with an empty newPath.
-    this.emitPathChange(workspaceRootPath, {
-      subject: 'session',
-      sessionId,
-      sessionName: managed.name,
-      changeType: managed.projectId ? 'project' : 'folder',
-      oldPath: describeSessionScope(managed.projectId ?? null, managed.folderId ?? null),
-      newPath: null,
-      workingDirectory: managed.workingDirectory,
-    })
-
     // Clean up attachments directory (handled by deleteStoredSession for workspace-scoped storage)
     sessionLog.info(`Deleted session ${sessionId}`)
   }
@@ -8316,6 +8940,9 @@ ${request.prompt}`;
     if (!managed) {
       throw new Error(`Session ${sessionId} not found`)
     }
+
+    // A turn starting is proof of life even if the first tool runs for minutes.
+    this.touchTaskHeartbeat(managed)
 
     const ownsSourceStartup = !managed.isProcessing && !managed.sourceTurnStarting
     if (ownsSourceStartup) {
@@ -12166,6 +12793,10 @@ ${request.prompt}`;
       }
 
       case 'tool_result': {
+        // A tool completion is proof of progress. Throttled so a fast tool loop
+        // does not rewrite the task file on every result.
+        this.touchTaskHeartbeat(managed)
+
         // toolName comes directly from CraftAgent (resolved via ToolIndex)
         const toolName = event.toolName || 'unknown'
 
@@ -13032,88 +13663,6 @@ ${request.prompt}`;
    * When `thinkingLevel` is omitted, `createSession` falls back to the
    * workspace default (then DEFAULT_THINKING_LEVEL).
    */
-  async executePromptAutomation(
-    input: ExecutePromptAutomationInput,
-  ): Promise<{ sessionId: string }> {
-    const {
-      workspaceId,
-      workspaceRootPath,
-      prompt,
-      permissionMode,
-      mentions,
-      llmConnection,
-      model,
-      thinkingLevel,
-      automationName,
-      telegramTopic,
-      qqChannels,
-      waitForCompletion,
-    } = input
-
-    // Warn if llmConnection was specified but doesn't resolve
-    if (llmConnection) {
-      const connection = resolveSessionConnection(llmConnection)
-      if (!connection) {
-        sessionLog.warn(`[Automations] llmConnection "${llmConnection}" not found, using default`)
-      }
-    }
-
-    // Resolve @mentions to source/skill slugs
-    const resolved = mentions ? this.resolveAutomationMentions(workspaceRootPath, mentions) : undefined
-
-    // Use automation name if provided, otherwise fall back to prompt snippet
-    const fallback = `Automation: ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}`
-    const sessionName = automationName || fallback
-
-    // Create a new session for this automation
-    const session = await this.createSession(workspaceId, {
-      name: sessionName,
-      permissionMode: permissionMode || 'safe',
-      enabledSourceSlugs: resolved?.sourceSlugs,
-      llmConnection,
-      model,
-      thinkingLevel,
-    })
-
-    // Populate triggeredBy metadata so title generation is explicitly skipped
-    // and the session is identifiable as automation-initiated after reload
-    const managed = this.sessions.get(session.id)
-    if (managed) {
-      managed.triggeredBy = { automationName, timestamp: Date.now() }
-      this.persistSession(managed)
-    }
-
-    // (session_created is emitted by createSession above; triggeredBy is set synchronously
-    // before the renderer's hydrate round-trip resolves, so it is observed.)
-
-    // Bind the new session to its Telegram forum topic if the matcher
-    // declared `telegramTopic`. Done before `sendMessage` so the first
-    // assistant tokens already route through the bound topic. Failure
-    // is logged inside the binder; the session continues unbound.
-    // Send the prompt.
-    // Test runs pass `waitForCompletion: false` so we return as soon as the
-    // session exists and the prompt is dispatched — otherwise the RPC blocks
-    // until the entire turn (including tool calls) finishes and trips the 30s
-    // client timeout (craft-agents-oss#943). The session streams live either
-    // way; a background failure surfaces in the session UI and is logged here.
-    if (waitForCompletion === false) {
-      void this.sendMessage(session.id, prompt, undefined, undefined, {
-        skillSlugs: resolved?.skillSlugs,
-      }).catch((err) => {
-        sessionLog.error('[Automations] background sendMessage failed for test run', {
-          sessionId: session.id,
-          error: err instanceof Error ? err.message : String(err),
-        })
-      })
-      return { sessionId: session.id }
-    }
-
-    await this.sendMessage(session.id, prompt, undefined, undefined, {
-      skillSlugs: resolved?.skillSlugs,
-    })
-
-    return { sessionId: session.id }
-  }
 
   /**
    * Resolve @mentions in automation prompts to source and skill slugs

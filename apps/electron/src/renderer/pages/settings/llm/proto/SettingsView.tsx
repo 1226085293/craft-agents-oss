@@ -21,7 +21,6 @@ import { ProtoSelect, Switch } from './atoms'
 import type { ProtoStrategy } from './viewmodel'
 import { KPI_DEFS } from './OverviewView'
 import { useProtoShell } from './state'
-import { DEFAULT_STRATEGY_STORAGE_KEY } from '@/hooks/useSessionOptions'
 
 interface Props {
   config: LlmConfigShape
@@ -31,45 +30,9 @@ interface Props {
   onSave: (next: LlmConfigShape) => Promise<boolean>
 }
 
-function readPref(key: string): string {
-  try {
-    return localStorage.getItem(key) ?? ''
-  } catch {
-    return ''
-  }
-}
-
-function writePref(key: string, value: string): void {
-  try {
-    if (value) localStorage.setItem(key, value)
-    else localStorage.removeItem(key)
-  } catch {
-    // Preference persistence is best-effort.
-  }
-}
-
 export function SettingsView(props: Props): React.JSX.Element {
   const shell = useProtoShell()
   const { strategies } = props
-
-  /**
-   * The gateway config is the source of truth for the default group.
-   *
-   * Sessions are created server-side by automations, messaging and the API, none
-   * of which see a renderer preference, so a localStorage default (or one tied
-   * to whatever workspace the settings window happens to be in) left every one
-   * of those on 未选择策略组. The gateway config is readable by every creation
-   * path and is the file this page already saves. localStorage stays as the seed
-   * for a config written by an older build.
-   */
-  const savedStrategy = props.config?.defaultStrategy ?? ''
-  const [defaultStrategy, setDefaultStrategy] = React.useState(() => savedStrategy || readPref(DEFAULT_STRATEGY_STORAGE_KEY))
-
-  // A config saved elsewhere (another window, the gateway reloading after an
-  // edit) must not be clobbered by this window's stale draft.
-  React.useEffect(() => {
-    if (savedStrategy) setDefaultStrategy(savedStrategy)
-  }, [savedStrategy])
 
   // Performance section — real app config.
   const [rtkEnabled, setRtkEnabled] = React.useState<boolean | null>(null)
@@ -93,46 +56,7 @@ export function SettingsView(props: Props): React.JSX.Element {
   return (
     <>
       <div className="page-title">设置</div>
-      <div className="page-desc">会话默认值与性能选项</div>
-
-      <div className="sec-title" style={{ marginTop: 6 }}>
-        默认模型
-      </div>
-      <div className="card">
-        <div className="row spread" style={{ padding: '8px 0' }}>
-          <div>
-            <span className="small">默认策略组</span>
-            <div className="xs muted">新会话默认通过的策略组；会话内仍可临时切换</div>
-          </div>
-          <div style={{ width: 200 }}>
-            <ProtoSelect
-              value={defaultStrategy}
-              options={[{ value: '', label: '不指定（每次手动选择）' }, ...strategyOptions]}
-              onChange={(v) => {
-                setDefaultStrategy(v)
-                writePref(DEFAULT_STRATEGY_STORAGE_KEY, v)
-                // Persist through the gateway config — the same path this page
-                // already saves — so server-side creation (automations,
-                // messaging, API) picks it up too.
-                void props
-                  .onSave({ ...props.config, defaultStrategy: v || undefined })
-                  .then((ok) => {
-                    shell.toast(
-                      ok === false
-                        ? '保存失败：请检查策略组设置'
-                        : v
-                          ? `新会话默认使用「${strategyOptions.find((s) => s.value === v)?.label ?? v}」`
-                          : '已取消默认策略组',
-                    )
-                  })
-                  .catch((err: unknown) => {
-                    shell.toast(`保存失败：${err instanceof Error ? err.message : String(err)}`)
-                  })
-              }}
-            />
-          </div>
-        </div>
-      </div>
+      <div className="page-desc">辅助模型与性能选项</div>
 
       <div className="sec-title" style={{ marginTop: 20 }}>
         记忆整理

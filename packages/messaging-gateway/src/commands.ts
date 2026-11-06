@@ -227,8 +227,24 @@ export class Commands {
     } else if (cmd === '/help') {
       await this.handleHelp(adapter, msg)
     } else {
-      // Sender passed the access gate (owner or open workspace) and typed
-      // free-form text into a chat with no binding. Show the help prompt.
+      // Sender passed the access gate but typed free-form text into a chat with
+      // no binding.
+      //
+      // In a group, replying here is noise: the bot is one of several members, an
+      // unaddressed "你好" is not a request, and advertising the command list on
+      // every stray message trains people to ignore the bot. Silence is the
+      // correct answer — the same answer the event bridge gives an unaddressed
+      // group message.
+      const addressedInGroup = msg.chatKind !== 'group' || msg.mentionKind === 'at'
+      if (!addressedInGroup) {
+        this.log.info('unbound group text ignored (bot not @-mentioned)', {
+          event: 'unbound_group_text_ignored',
+          platform: adapter.platform,
+          channelId: msg.channelId,
+          threadId: msg.threadId,
+        })
+        return
+      }
       await adapter.sendText(
         msg.channelId,
         'No session bound to this chat.\n\n' +
@@ -343,7 +359,14 @@ export class Commands {
     const replyOpts = msg.threadId !== undefined ? { threadId: msg.threadId } : {}
 
     try {
-      const session = await this.sessionManager.createSession(this.workspaceId, { name })
+        // Mobile is a channel into the same brain, not a separate worker: a new
+      // chat thread starts on the supervisor, so every inbound message there is
+      // routed (and answered) by the single coordinator. `taskboard` still
+      // records what it delegates, and workers stay invisible to the user.
+      const session = await this.sessionManager.createSession(this.workspaceId, {
+        name,
+        role: 'supervisor',
+      })
 
       this.access.onBeforeChannelBind?.({
         platform: adapter.platform,

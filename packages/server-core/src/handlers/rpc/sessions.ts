@@ -110,6 +110,7 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.sessions.GET_UNREAD_SUMMARY,
   RPC_CHANNELS.sessions.MARK_ALL_READ,
   RPC_CHANNELS.sessions.CREATE,
+  RPC_CHANNELS.sessions.ENSURE_SUPERVISOR,
   RPC_CHANNELS.sessions.DELETE,
   RPC_CHANNELS.sessions.GET_MESSAGES,
   RPC_CHANNELS.sessions.SEND_MESSAGE,
@@ -190,6 +191,13 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
   })
 
   // Create a new session
+  // "开始会话" is one built-in supervisor session per workspace, not a factory:
+  // it coordinates tasks across sessions, so a second one would split that
+  // state. Hidden so it never clutters the conversation list.
+  server.handle(RPC_CHANNELS.sessions.ENSURE_SUPERVISOR, async (_ctx, workspaceId: string) => {
+    return sessionManager.ensureSupervisorSession(workspaceId)
+  })
+
   server.handle(RPC_CHANNELS.sessions.CREATE, async (_ctx, workspaceId: string, options?: import('@craft-agent/shared/protocol').CreateSessionOptions) => {
     const end = perf.start('rpc.createSession', { workspaceId })
     // The renderer adds the session synchronously from this return value (App.tsx handleCreateSession),

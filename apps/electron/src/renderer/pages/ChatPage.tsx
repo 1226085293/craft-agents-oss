@@ -207,6 +207,14 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   const forceMessagesReload = useSetAtom(forceSessionMessagesReloadAtom)
   const [messagesLoadError, setMessagesLoadError] = React.useState<string | null>(null)
   const [messagesRetrying, setMessagesRetrying] = React.useState(false)
+  /**
+   * The supervisor (督导) panel is the built-in session: one per workspace,
+   * hidden from the list, reached only through 开始会话. Its title/menu row has
+   * nothing to act on (no rename surface the user cares about, no list context),
+   * so the conversation gets the full height instead.
+   */
+  const hideChatHeader = (sessionMeta?.hidden ?? false) || (session?.hidden ?? false)
+
   const autoForcedReloadSessionRef = React.useRef<string | null>(null)
   const shouldForceInitialMessagesReload = React.useMemo(() => {
     const expectedMessageCount = session?.messageCount ?? sessionMeta?.messageCount ?? 0
@@ -221,8 +229,22 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     setMessagesLoadError(null)
     setMessagesRetrying(false)
 
+    // Already force-reloaded once this mount and the transcript STILL reads empty
+    // while the header claims history. Erroring immediately used to show
+    // 「无法加载对话 / Session messages are not available」 for sessions that the
+    // user's manual 重试 always loaded — the first fetch can race the disk
+    // transcript. So the auto path fetches once more before giving up.
     if (shouldForceInitialMessagesReload && autoForcedReloadSessionRef.current === sessionId) {
-      setMessagesLoadError('Session messages are not available')
+      void forceMessagesReload(sessionId)
+        .then((retried) => {
+          if (cancelled) return
+          if (!retried || (retried.messages?.length ?? 0) === 0) {
+            setMessagesLoadError('Session messages are not available')
+          }
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) setMessagesLoadError(formatSessionLoadFailure(error))
+        })
       return () => {
         cancelled = true
       }
@@ -838,7 +860,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
       return (
         <>
           <div className="h-full flex flex-col" data-focus-zone="chat" onPointerDown={() => setCurrentZone('chat')}>
-            <PanelHeader  title={displayTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
+            <PanelHeader  hidden={hideChatHeader} title={displayTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
             <div className="flex-1 flex flex-col min-h-0">
               <ChatDisplay
                 ref={setChatDisplayRef}
@@ -902,7 +924,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     // Session truly doesn't exist
     return (
       <div className="h-full flex flex-col">
-        <PanelHeader  title={t('chat.session')} leadingAction={leadingAction} rightSidebarButton={rightSidebarButton} />
+        <PanelHeader  hidden={hideChatHeader} title={t('chat.session')} leadingAction={leadingAction} rightSidebarButton={rightSidebarButton} />
         <div className="flex-1 flex flex-col items-center justify-center gap-3 text-muted-foreground">
           <AlertCircle className="h-10 w-10" />
           <p className="text-sm">{t('chat.sessionNoLongerExists')}</p>
@@ -914,7 +936,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   return (
     <>
       <div className="h-full flex flex-col" data-focus-zone="chat" onPointerDown={() => setCurrentZone('chat')}>
-        <PanelHeader  title={displayTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
+        <PanelHeader  hidden={hideChatHeader} title={displayTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
         <div className="flex-1 flex flex-col min-h-0">
           <ChatDisplay
             ref={setChatDisplayRef}

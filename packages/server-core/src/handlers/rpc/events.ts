@@ -80,7 +80,14 @@ export function registerEventsHandlers(server: RpcServer, _deps: HandlerDeps): v
         workspaceId,
         toMeta(event),
       );
-    }, _deps.sessionManager?.createEventDispatchTarget?.());
+    }, _deps.sessionManager?.createEventDispatchTarget?.(), (event: EventMeta) => {
+      // Nobody subscribed. Rules run first; unmatched events fall through to
+      // the supervisor's merged backlog. This callback is also installed during
+      // app warm-up, before any events RPC request occurs.
+      void _deps.sessionManager?.routeUnclaimedEvent?.(workspaceId, event).catch(() => {
+        // Routing an event must never take the ingest path down.
+      });
+    });
   };
 
   const broadcastStatus = (workspaceId: string, status: import('../../events/listener-supervisor').ListenerRuntimeStatus) => {

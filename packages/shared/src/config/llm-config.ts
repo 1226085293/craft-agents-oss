@@ -465,18 +465,6 @@ export interface LlmConfig {
    * rather than failing the turn.
    */
   compactionStrategy?: string;
-  /**
-   * Strategy group new sessions route through when the caller does not name one.
-   *
-   * This lives in the gateway config — not in the renderer's localStorage and not
-   * only in a workspace's `defaults` — because sessions are created server-side
-   * by scheduled automations, messaging and the API, none of which see a
-   * renderer preference. A local-only default left every one of those on
-   * 未选择策略组, which the gateway then refuses to route (2026-10-25).
-   *
-   * Resolution: caller → workspace `defaults.strategy` → this field.
-   */
-  defaultStrategy?: string;
 }
 
 /**

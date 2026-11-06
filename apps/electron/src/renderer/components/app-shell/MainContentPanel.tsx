@@ -20,6 +20,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useAtomValue } from 'jotai'
 import { useTranslation } from 'react-i18next'
 import { Panel } from './Panel'
+import { TaskDetailPanel } from '@/components/tasks/TasksPanel'
 import { MultiSelectPanel } from './MultiSelectPanel'
 import { useAppShellContext, useActiveWorkspace } from '@/context/AppShellContext'
 import { sessionMetaMapAtom, type SessionMeta } from '@/atoms/sessions'
@@ -32,19 +33,15 @@ import {
   isSkillsNavigation,
   isProjectsNavigation,
   isPagesNavigation,
-  isAutomationsNavigation,
   isEventsNavigation,
+  isTasksNavigation,
 } from '@/contexts/NavigationContext'
 import { useSessionSelection, useIsMultiSelectActive, useSelectedIds, useSelectionCount } from '@/hooks/useSession'
-import { sourceSelection, skillSelection, automationSelection } from '@/hooks/useEntitySelection'
+import { sourceSelection, skillSelection } from '@/hooks/useEntitySelection'
 import { SourceInfoPage, ChatPage } from '@/pages'
 import SkillInfoPage from '@/pages/SkillInfoPage'
 import { getSettingsPageComponent } from '@/pages/settings/settings-pages'
 import ProjectInfoPage from '@/pages/ProjectInfoPage'
-import { AutomationInfoPage } from '../automations/AutomationInfoPage'
-import type { ExecutionEntry } from '../automations/types'
-import { automationsAtom } from '@/atoms/automations'
-import { useAutomations } from '@/hooks/useAutomations'
 import { PagesHome } from '../pages/PagesHome'
 import { EventDetailPanel } from '../events/EventDetailPanel'
 import { ListenerDetailPanel } from '../events/ListenerDetailPanel'
@@ -100,44 +97,6 @@ export function MainContentPanel({
   const selectedSkillIds = skillSelection.useSelectedIds()
   const { clearMultiSelect: clearSkillSelection } = skillSelection.useSelection()
 
-  // Automation multi-select state
-  const isAutomationMultiSelectActive = automationSelection.useIsMultiSelectActive()
-  const automationSelectionCount = automationSelection.useSelectionCount()
-  const selectedAutomationIds = automationSelection.useSelectedIds()
-  const { clearMultiSelect: clearAutomationSelection } = automationSelection.useSelection()
-
-  const automations = useAtomValue(automationsAtom)
-  const {
-    automationTestResults,
-    handleTestAutomation,
-    handleToggleAutomation,
-    handleDuplicateAutomation,
-    handleDeleteAutomation,
-    getAutomationHistory,
-    handleReplayAutomation,
-  } = useAutomations(activeWorkspaceId ?? null)
-
-  // Execution history for the selected automation (live-refreshed when automations fire)
-  const selectedAutomationId = isAutomationsNavigation(navState) ? navState.details?.automationId : undefined
-  const [executions, setExecutions] = useState<ExecutionEntry[]>([])
-
-  useEffect(() => {
-    if (!selectedAutomationId || !getAutomationHistory) {
-      setExecutions([])
-      return
-    }
-    let stale = false
-    getAutomationHistory(selectedAutomationId).then(entries => {
-      if (!stale) setExecutions(entries)
-    })
-    const cleanup = window.electronAPI.onAutomationsChanged(() => {
-      if (stale) return
-      getAutomationHistory(selectedAutomationId).then(entries => {
-        if (!stale) setExecutions(entries)
-      })
-    })
-    return () => { stale = true; cleanup() }
-  }, [selectedAutomationId, getAutomationHistory])
 
   // Send to Workspace dialog state (shared across resource types)
   const [sendDialogOpen, setSendDialogOpen] = useState(false)
@@ -201,6 +160,26 @@ export function MainContentPanel({
         <SettingsPageComponent />
       </Panel>
     )
+  }
+
+  // Tasks navigator - one task's detail, or a hint to pick one
+  if (isTasksNavigation(navState)) {
+    if (!navState.selectedTaskId) {
+      return wrapWithStoplight(
+        <Panel variant="grow" className={className}>
+          <div className="flex h-full items-center justify-center p-6 text-center text-xs text-muted-foreground">
+            从左侧选一个任务，查看它的交接与验收。
+          </div>
+        </Panel>
+      )
+    }
+    if (activeWorkspaceId) {
+      return wrapWithStoplight(
+        <Panel variant="grow" className={className}>
+          <TaskDetailPanel workspaceId={activeWorkspaceId} taskId={navState.selectedTaskId} />
+        </Panel>
+      )
+    }
   }
 
   // Events navigator - one event's full content, or an empty state
@@ -313,48 +292,6 @@ export function MainContentPanel({
     )
   }
 
-
-  // Automations navigator - show automation info, multi-select panel, or empty state
-  if (isAutomationsNavigation(navState)) {
-    if (isAutomationMultiSelectActive) {
-      return wrapWithStoplight(
-        <Panel variant="grow" className={className}>
-          <MultiSelectPanel
-            count={automationSelectionCount}
-            entityType="automation"
-            onSendToWorkspace={hasOtherWorkspaces ? () => openSendDialog('automation', selectedAutomationIds) : undefined}
-            onClearSelection={clearAutomationSelection}
-          />
-        </Panel>
-      )
-    }
-    if (navState.details) {
-      const automation = automations.find(h => h.id === navState.details!.automationId)
-      if (automation) {
-        return wrapWithStoplight(
-          <Panel variant="grow" className={className}>
-            <AutomationInfoPage
-              automation={automation}
-              executions={executions}
-              testResult={automationTestResults?.[automation.id]}
-              onTest={handleTestAutomation ? () => handleTestAutomation(automation.id) : undefined}
-              onToggleEnabled={handleToggleAutomation ? () => handleToggleAutomation(automation.id) : undefined}
-              onDuplicate={handleDuplicateAutomation ? () => handleDuplicateAutomation(automation.id) : undefined}
-              onDelete={handleDeleteAutomation ? () => handleDeleteAutomation(automation.id) : undefined}
-              onReplay={handleReplayAutomation}
-            />
-          </Panel>
-        )
-      }
-    }
-    return wrapWithStoplight(
-      <Panel variant="grow" className={className}>
-        <div className="flex items-center justify-center h-full text-muted-foreground">
-          <p className="text-sm">{t("automations.noAutomationsConfigured")}</p>
-        </div>
-      </Panel>
-    )
-  }
 
   // Pages navigator - full-width library grid, or one page's embedded render
   if (isPagesNavigation(navState)) {

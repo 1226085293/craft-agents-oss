@@ -6,7 +6,7 @@ import { useSetAtom, useStore, useAtomValue, useAtom } from 'jotai'
 import type { Session, Workspace, SessionEvent, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, SetupNeeds, NewChatActionParams, ContentBadge, LlmConnectionWithStatus, PermissionModeState } from '../shared/types'
 import type { SessionDraft, DraftAttachmentRef } from '@craft-agent/shared/config'
 import type { SessionOptions, SessionOptionUpdates } from './hooks/useSessionOptions'
-import { defaultSessionOptions, mergeSessionOptions, readDefaultStrategy } from './hooks/useSessionOptions'
+import { defaultSessionOptions, mergeSessionOptions } from './hooks/useSessionOptions'
 import { generateMessageId } from '../shared/types'
 import { useEventProcessor } from './event-processor'
 import type { AgentEvent, Effect } from './event-processor'
@@ -1317,25 +1317,10 @@ export default function App() {
 
   const handleCreateSession = useCallback(async (workspaceId: string, options?: import('../shared/types').CreateSessionOptions): Promise<Session> => {
     const session = await window.electronAPI.createSession(workspaceId, options)
-    // A new session follows the user's default strategy group. Persist it on
-    // the record now: the composer would otherwise show the default while the
-    // backend still has none, and the server refuses a session with no strategy.
-    const defaultStrategy = session.strategy ?? readDefaultStrategy()
-    if (defaultStrategy && !session.strategy) {
-      try {
-        await window.electronAPI.sessionCommand(session.id, {
-          type: 'setSessionStrategy',
-          strategy: defaultStrategy,
-        })
-      } catch (error) {
-        // A failed seed is not fatal: the composer still shows the default and
-        // the user can pick a group manually.
-        console.warn('[App] Failed to seed the default strategy on a new session:', error)
-      }
-    }
-    // Add to per-session atom and metadata map (no sessionsAtom)
+    // createSession resolved the group server-side (agent → first enabled) and
+    // persisted it on the record, so there is nothing to seed or repair here.
     addSession(session)
-    syncSessionOptionsFromSession(defaultStrategy ? { ...session, strategy: defaultStrategy } : session)
+    syncSessionOptionsFromSession(session)
 
     return session
   }, [addSession, syncSessionOptionsFromSession])
@@ -1586,22 +1571,6 @@ export default function App() {
         isProcessing: true,
         lastMessageAt: Date.now()
       }))
-
-      // A session whose strategy was never written to the record (e.g. one
-      // created before the default was set) would show the default in the
-      // composer but be refused by the gateway guard. Persist the resolved
-      // default before the turn; sessions that already carry one are untouched.
-      const strategyEntry = sessionOptions.get(sessionId)
-      if (strategyEntry?.strategy === undefined) {
-        const resolved = readDefaultStrategy()
-        if (resolved) {
-          try {
-            await window.electronAPI.sessionCommand(sessionId, { type: 'setSessionStrategy', strategy: resolved })
-          } catch (error) {
-            console.warn('[App] Failed to sync the default strategy before sending:', error)
-          }
-        }
-      }
 
       // Step 6: Send to Claude with processed attachments + stored attachments for persistence
       await window.electronAPI.sendMessage(sessionId, finalMessage, processedAttachments, storedAttachments, {

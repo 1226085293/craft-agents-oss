@@ -21,7 +21,6 @@ import { join, dirname, basename, relative } from 'path';
 import { platform } from 'os';
 import type { FSWatcher } from 'fs';
 import { CONFIG_DIR } from './paths.ts';
-import { AUTOMATIONS_CONFIG_FILE } from '../automations/constants.ts';
 import { debug } from '../utils/debug.ts';
 import { expandPath } from '../utils/paths.ts';
 import { readJsonFileSync } from '../utils/files.ts';
@@ -430,7 +429,8 @@ export class ConfigWatcher {
     }
 
     // Workspace-level automations config file
-    if (relativePath === AUTOMATIONS_CONFIG_FILE) {
+    // Legacy config: only read now to import cron matchers as task triggers.
+    if (relativePath === 'automations.json') {
       debug('[ConfigWatcher] automations config change detected:', relativePath);
       this.debounce('automations-config', () => this.handleAutomationsConfigChange());
       return;

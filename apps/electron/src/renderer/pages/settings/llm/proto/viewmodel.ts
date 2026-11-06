@@ -151,7 +151,9 @@ export function gatewaySetupSteps(
     provider.keyRows.some((key) => key.enabled && key.key.trim().length > 0),
   )
   const providerTested = providers.some((provider) => provider.state !== 'disabled' && provider.lastTestOk)
-  const defaultId = config?.defaultStrategy
+  // The explicit default is gone: the resolver falls back to the first enabled
+  // group, so that group is what a new session routes through.
+  const defaultId = config?.strategies.find((strategy) => strategy.enabled !== false)?.id
   const defaultConfig = config?.strategies.find((strategy) => strategy.id === defaultId && strategy.enabled !== false)
   const defaultView = strategies.find((strategy) => strategy.id === defaultId && strategy.enabled)
   const defaultHasRoute = Boolean(defaultConfig && defaultView && defaultConfig.members.some((member) => {

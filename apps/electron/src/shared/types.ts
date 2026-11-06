@@ -210,8 +210,6 @@ import type {
   BrowserInstanceInfo,
   PageWindowInfo,
   DeepLinkNavigation,
-  TestAutomationPayload,
-  TestAutomationResult,
   WindowCloseRequest,
   DirectoryListingResult,
   RemoteSessionTransferPayload,
@@ -225,6 +223,8 @@ export interface ElectronAPI {
   markAllSessionsRead(workspaceId: string, projectId?: string): Promise<void>
   getSessionMessages(sessionId: string): Promise<Session | null>
   createSession(workspaceId: string, options?: CreateSessionOptions): Promise<Session>
+  /** The workspace's single on-duty supervisor session (created once, hidden from the list). */
+  ensureSupervisorSession(workspaceId: string): Promise<Session>
   deleteSession(sessionId: string): Promise<void>
   sendMessage(sessionId: string, message: string, attachments?: FileAttachment[], storedAttachments?: StoredAttachmentType[], options?: SendMessageOptions): Promise<void>
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>
@@ -440,6 +440,8 @@ export interface ElectronAPI {
   // Session-specific model (overrides global)
   getSessionModel(sessionId: string, workspaceId: string): Promise<string | null>
   setSessionModel(sessionId: string, workspaceId: string, model: string | null, connection?: string): Promise<void>
+  /** Re-assign the role profile (persona + scope ceilings) of an existing session. */
+  setSessionAgent(sessionId: string, workspaceId: string, agentId: string): Promise<void>
   /** Hot connection switch (mid-session): live credential injection + model apply, context preserved. */
   switchSessionConnection(sessionId: string, connectionSlug: string, model?: string): Promise<void>
 
@@ -522,6 +524,43 @@ export interface ElectronAPI {
 
   // LLM connections change listener
   onLlmConnectionsChanged(callback: () => void): () => void
+
+  // Multi-agent: role profiles + task board
+  agentsList(workspaceId: string): Promise<Array<{
+    id: string
+    name: string
+    icon?: string
+    description?: string
+    builtin?: boolean
+  }>>
+  agentsGet(workspaceId: string, id: string): Promise<Record<string, unknown>>
+  agentsSave(workspaceId: string, agent: Record<string, unknown>): Promise<{ id: string }>
+  agentsDelete(workspaceId: string, id: string): Promise<{ ok: boolean }>
+  onAgentsChanged(callback: (payload: { workspaceId: string }) => void): () => void
+
+  tasksList(workspaceId: string, status?: string): Promise<Array<{
+    id: string
+    name: string
+    status: string
+    priority: number
+    updatedAt: number
+    currentSessionId?: string
+    sessionCount: number
+    lastHandoff?: string
+    pauseReason?: string | null
+  }>>
+  tasksGet(workspaceId: string, id: string, includeJournal?: boolean): Promise<unknown>
+  tasksUpdate(workspaceId: string, id: string, status: string): Promise<unknown>
+  tasksRun(workspaceId: string, id: string): Promise<{ started: boolean; reason?: string }>
+  tasksCreate(workspaceId: string, payload: unknown): Promise<{ id: string }>
+  tasksUpdateTrigger(workspaceId: string, id: string, trigger: unknown): Promise<unknown>
+  tasksHandoff(
+    workspaceId: string,
+    id: string,
+    fromSessionId: string,
+    handoff: unknown,
+  ): Promise<{ passed: boolean; reasons: string[]; status: string }>
+  onTasksChanged(callback: (payload: { workspaceId: string }) => void): () => void
 
   // In-process LLM gateway — status is pushed, the rest are pulled on demand.
   llmGatewayGetStatus(): Promise<LlmGatewayStatusPayload>
@@ -859,23 +898,6 @@ export interface ElectronAPI {
   regeneratePageThumbnail(workspaceId: string, pageSlug: string): Promise<boolean>
   onPagesChanged(callback: (workspaceId: string, pages: import('@craft-agent/shared/pages/types').LoadedPage[]) => void): () => void
 
-  // Automations
-  getAutomations(workspaceId: string): Promise<unknown>
-
-  // Automation testing (manual trigger)
-  testAutomation(payload: TestAutomationPayload): Promise<TestAutomationResult>
-
-  // Automation state management
-  setAutomationEnabled(workspaceId: string, eventName: string, matcherIndex: number, enabled: boolean): Promise<void>
-  duplicateAutomation(workspaceId: string, eventName: string, matcherIndex: number): Promise<void>
-  deleteAutomation(workspaceId: string, eventName: string, matcherIndex: number): Promise<void>
-  getAutomationHistory(workspaceId: string, automationId: string, limit?: number): Promise<Array<{ id: string; ts: number; ok: boolean; sessionId?: string; prompt?: string; error?: string; webhook?: { method: string; url: string; statusCode: number; durationMs: number; attempts?: number; error?: string; responseBody?: string } }>>
-  getAutomationLastExecuted(workspaceId: string): Promise<Record<string, number>>
-  replayAutomation(workspaceId: string, automationId: string, eventName: string): Promise<{ results: Array<{ type: string; url: string; statusCode: number; success: boolean; error?: string; duration: number }> }>
-
-  // Automations change listener
-  onAutomationsChanged(callback: (workspaceId: string) => void): () => void
-
   // Language
   changeLanguage(lang: string): Promise<void>
 
@@ -1078,14 +1100,6 @@ export interface SourceFilter {
 }
 
 /**
- * Automation type filter for automations navigation
- */
-export interface AutomationFilter {
-  kind: 'type'
-  automationType: 'scheduled' | 'event' | 'agentic'
-}
-
-/**
  * Sources navigation state
  */
 export interface SourcesNavigationState {
@@ -1114,16 +1128,6 @@ export interface SettingsNavigationState {
 export interface SkillsNavigationState {
   navigator: 'skills'
   details: { type: 'skill'; skillSlug: string } | null
-  rightSidebar?: RightSidebarPanel
-}
-
-/**
- * Automations navigation state
- */
-export interface AutomationsNavigationState {
-  navigator: 'automations'
-  filter?: AutomationFilter
-  details: { type: 'automation'; automationId: string } | null
   rightSidebar?: RightSidebarPanel
 }
 
@@ -1165,6 +1169,16 @@ export interface EventsNavigationState {
 }
 
 /**
+ * Task board navigator: a grouped task list plus one task's detail.
+ */
+export interface TasksNavigationState {
+  navigator: 'tasks'
+  /** Selected task id, or null for the list. */
+  selectedTaskId: string | null
+  rightSidebar?: RightSidebarPanel
+}
+
+/**
  * Unified navigation state
  */
 export type NavigationState =
@@ -1172,14 +1186,18 @@ export type NavigationState =
   | SourcesNavigationState
   | SettingsNavigationState
   | SkillsNavigationState
-  | AutomationsNavigationState
   | ProjectsNavigationState
   | PagesNavigationState
   | EventsNavigationState
+  | TasksNavigationState
 
 export const isSessionsNavigation = (
   state: NavigationState
 ): state is SessionsNavigationState => state.navigator === 'sessions'
+
+export const isTasksNavigation = (
+  state: NavigationState
+): state is TasksNavigationState => state.navigator === 'tasks'
 
 export const isSourcesNavigation = (
   state: NavigationState
@@ -1192,10 +1210,6 @@ export const isSettingsNavigation = (
 export const isSkillsNavigation = (
   state: NavigationState
 ): state is SkillsNavigationState => state.navigator === 'skills'
-
-export const isAutomationsNavigation = (
-  state: NavigationState
-): state is AutomationsNavigationState => state.navigator === 'automations'
 
 export const isProjectsNavigation = (
   state: NavigationState
@@ -1229,12 +1243,6 @@ export const getNavigationStateKey = (state: NavigationState): string => {
     }
     return 'skills'
   }
-  if (state.navigator === 'automations') {
-    if (state.details?.type === 'automation') {
-      return `automations/automation/${state.details.automationId}`
-    }
-    return 'automations'
-  }
   if (state.navigator === 'projects') {
     if (state.details?.type === 'project') {
       return `projects/project/${state.details.projectSlug}`
@@ -1255,6 +1263,9 @@ export const getNavigationStateKey = (state: NavigationState): string => {
   if (state.navigator === 'settings') {
     if (state.subpage === null) return 'settings'
     return `settings:${state.subpage}`
+  }
+  if (state.navigator === 'tasks') {
+    return state.selectedTaskId ? `tasks/${encodeURIComponent(state.selectedTaskId)}` : 'tasks'
   }
   // Chats
   const f = state.filter
@@ -1328,6 +1339,14 @@ export const parseNavigationStateKey = (key: string): NavigationState | null => 
       return { navigator: 'pages', details: { type: 'page', pageSlug } }
     }
     return { navigator: 'pages', details: null }
+  }
+
+  // Handle tasks
+  if (key === 'tasks') return { navigator: 'tasks', selectedTaskId: null }
+  if (key.startsWith('tasks/')) {
+    const taskId = key.slice('tasks/'.length)
+    if (taskId) return { navigator: 'tasks', selectedTaskId: taskId }
+    return { navigator: 'tasks', selectedTaskId: null }
   }
 
   // Handle settings

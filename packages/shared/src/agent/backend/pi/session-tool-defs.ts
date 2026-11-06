@@ -26,10 +26,11 @@ const BACKGROUNDABLE_TOOLS = new Set([
   'transform_data',
 ]);
 
-export function getSessionToolProxyDefs(): SessionToolProxyDef[] {
+export function getSessionToolProxyDefs(role?: 'supervisor' | 'worker'): SessionToolProxyDef[] {
   const defs = getToolDefsAsJsonSchema({
     prefix: 'mcp__session__',
     includeDeveloperFeedback: FEATURE_FLAGS.developerFeedback,
+    ...(role ? { role } : {}),
   });
 
   return defs.map((def) => {

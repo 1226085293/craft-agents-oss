@@ -96,6 +96,12 @@ export interface PanelHeaderProps {
   className?: string
   /** Whether title is being regenerated (shows shimmer effect) */
   isRegeneratingTitle?: boolean
+  /**
+   * Render nothing at all. Used for the supervisor panel: its session is the
+   * built-in 督导 (hidden from the list), so a list title and its buttons have
+   * nothing to act on — they only add chrome above the conversation.
+   */
+  hidden?: boolean
 }
 
 /**
@@ -114,6 +120,7 @@ export function PanelHeader({
   paddingLeft,
   className,
   isRegeneratingTitle,
+  hidden,
 }: PanelHeaderProps) {
   // Fall back to AppShellContext.leadingAction so per-panel back buttons (set by
   // PanelSlot in compact mode) propagate to every page's PanelHeader without each
@@ -279,6 +286,12 @@ export function PanelHeader({
   )
 
   // Use motion.div with animated paddingLeft to shift content while keeping background full-width
+  //
+  // `hidden` short-circuits AFTER every hook: an early return above them would
+  // change the hook count between renders and crash the tree the moment the
+  // supervisor panel toggled ("Rendered fewer hooks than expected").
+  if (hidden) return null
+
   return (
     <motion.div
       initial={false}

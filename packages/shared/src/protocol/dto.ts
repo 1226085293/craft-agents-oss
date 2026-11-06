@@ -67,6 +67,14 @@ export interface Session {
    * shows as an explicit prompt instead of a silent fallback.
    */
   strategy?: string
+  /**
+   * Role profile this session runs as. Drives the composer's role picker and
+   * the "which role am I talking to" affordance; absent means the workspace
+   * default agent.
+   */
+  agentId?: string
+  /** 'supervisor' sessions coordinate tasks; ordinary sessions are workers. */
+  role?: 'supervisor' | 'worker'
   lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error'
   lastFinalMessageId?: string
   isAsyncOperationOngoing?: boolean
@@ -171,6 +179,17 @@ export interface CreateSessionOptions {
   systemPromptPreset?: 'default' | 'mini' | string
   hidden?: boolean
   enabledSourceSlugs?: string[]
+  /** Agent (role profile) this session runs as. Omitted → workspace default agent. */
+  agentId?: string
+  /**
+   * Delegate vs coordinate. A 'supervisor' session gets a pruned tool table and
+   * never executes work itself; 'worker' (default) is an ordinary session.
+   */
+  role?: 'supervisor' | 'worker'
+  /** Task this session works on, when created by the supervisor. */
+  taskId?: string
+  /** Delegation depth, to stop unbounded supervisor→worker→worker chains. */
+  spawnDepth?: number
   /**
    * Message ID to branch from. This is a hard context cutoff:
    * the new session must not include model context from later parent messages.
@@ -278,7 +297,7 @@ export type SessionEvent =
   | { type: 'session_unarchived'; sessionId: string }
   | { type: 'name_changed'; sessionId: string; name?: string }
   | { type: 'session_model_changed'; sessionId: string; model: string | null }
-  | { type: 'session_metadata_changed'; sessionId: string; changes: Partial<Pick<Session, 'hasUnread' | 'lastReadMessageId'>> & { projectId?: string | null; folderId?: string | null; archivedFolderId?: string | null; archivedFolderPath?: string[]; archivedProjectId?: string; archivedByParent?: string; sortOrder?: string; pinnedAt?: number } }
+  | { type: 'session_metadata_changed'; sessionId: string; changes: Partial<Pick<Session, 'hasUnread' | 'lastReadMessageId'>> & { agentId?: string; projectId?: string | null; folderId?: string | null; archivedFolderId?: string | null; archivedFolderPath?: string[]; archivedProjectId?: string; archivedByParent?: string; sortOrder?: string; pinnedAt?: number } }
   | { type: 'session_deleted'; sessionId: string }
   | { type: 'session_created'; sessionId: string }
   | { type: 'session_shared'; sessionId: string; sharedUrl: string }
@@ -657,36 +676,6 @@ export interface WorkspaceSettings {
   strategy?: string
 }
 
-
-// ---------------------------------------------------------------------------
-// Automation types
-// ---------------------------------------------------------------------------
-
-export type TestAutomationAction =
-  | { type: 'prompt'; prompt: string; llmConnection?: string; model?: string; thinkingLevel?: ThinkingLevel }
-  | { type: 'webhook'; url: string; method?: string; headers?: Record<string, string>; bodyFormat?: 'json' | 'form' | 'raw'; body?: unknown; captureResponse?: boolean; auth?: { type: 'basic'; username: string; password: string } | { type: 'bearer'; token: string } }
-  | { type: 'script'; script: string; args?: string[]; runtime?: 'bun' | 'node' | 'python3'; timeoutMs?: number; page?: string }
-
-export interface TestAutomationPayload {
-  workspaceId: string
-  automationId?: string
-  automationName?: string
-  actions: TestAutomationAction[]
-  permissionMode?: PermissionMode
-  /** Forwarded from the matcher; routes test-run sessions into a Telegram topic when paired. */
-  telegramTopic?: string
-  /** QQ group channelIds to bind test-run sessions to. */
-  qqChannels?: string[]
-}
-
-export type TestAutomationActionResult =
-  | { type: 'prompt'; success: boolean; stderr?: string; sessionId?: string; duration: number }
-  | { type: 'webhook'; success: boolean; url: string; statusCode: number; error?: string; duration: number }
-  | { type: 'script'; success: boolean; script: string; exitCode: number | null; stdout?: string; error?: string; duration: number }
-
-export interface TestAutomationResult {
-  actions: TestAutomationActionResult[]
-}
 
 // ---------------------------------------------------------------------------
 // Window types

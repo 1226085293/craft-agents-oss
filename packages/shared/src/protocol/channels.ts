@@ -23,6 +23,8 @@ export const RPC_CHANNELS = {
     MARK_ALL_READ: 'sessions:markAllRead',
     UNREAD_SUMMARY_CHANGED: 'sessions:unreadSummaryChanged',
     CREATE: 'sessions:create',
+    /** Reuse the workspace's on-duty supervisor session, creating it once. */
+    ENSURE_SUPERVISOR: 'sessions:ensureSupervisor',
     DELETE: 'sessions:delete',
     GET_MESSAGES: 'sessions:getMessages',
     SEND_MESSAGE: 'sessions:sendMessage',
@@ -36,6 +38,8 @@ export const RPC_CHANNELS = {
     EVENT: 'session:event',
     GET_MODEL: 'session:getModel',
     SET_MODEL: 'session:setModel',
+    /** Re-assign the role profile a session runs as (persona + scopes). */
+    SET_AGENT: 'session:setAgent',
     SWITCH_CONNECTION: 'session:switchConnection',
     GET_FILES: 'sessions:getFiles',
     GET_NOTES: 'sessions:getNotes',
@@ -368,17 +372,6 @@ export const RPC_CHANNELS = {
     REMOVED: 'browser-pane:removed',
     INTERACTED: 'browser-pane:interacted',
   },
-  automations: {
-    GET: 'automations:get',
-    TEST: 'automations:test',
-    SET_ENABLED: 'automations:setEnabled',
-    DUPLICATE: 'automations:duplicate',
-    DELETE: 'automations:delete',
-    GET_HISTORY: 'automations:getHistory',
-    GET_LAST_EXECUTED: 'automations:getLastExecuted',
-    REPLAY: 'automations:replay',
-    CHANGED: 'automations:changed',
-  },
   resources: {
     EXPORT: 'resources:export',
     IMPORT: 'resources:import',
@@ -409,6 +402,36 @@ export const RPC_CHANNELS = {
     PIN: 'folders:pin',
     DELETE: 'folders:delete',
     CHANGED: 'folders:changed',
+  },
+  agents: {
+    /** Role profiles for the picker (built-in default first). */
+    LIST: 'agents:list',
+    /** One profile in full (the picker list is deliberately flat). */
+    GET: 'agents:get',
+    /** Create or update one profile (built-in default edits `defaults`). */
+    SAVE: 'agents:save',
+    /** Soft-delete a profile. */
+    DELETE: 'agents:delete',
+    /** Pushed when the profile set changes. */
+    CHANGED: 'agents:changed',
+  },
+  taskboard: {
+    /** Task list (metadata only) for the sidebar. */
+    LIST: 'taskboard:list',
+    /** One task, optionally with its journal. */
+    GET: 'taskboard:get',
+    /** Advance a task's status (the state machine still applies). */
+    UPDATE: 'taskboard:update',
+    /** Record a worker handoff against a task. */
+    HANDOFF: 'taskboard:handoff',
+    /** Start a run now (claims the lock, spawns a worker). */
+    RUN: 'taskboard:run',
+    /** Create a task from the UI. */
+    CREATE: 'taskboard:create',
+    /** Change what starts a task (manual / cron / event). */
+    UPDATE_TRIGGER: 'taskboard:updateTrigger',
+    /** Pushed when any task changes (workspace-scoped). */
+    CHANGED: 'taskboard:changed',
   },
   events: {
     /** Paginated metadata list (never includes bodies). */

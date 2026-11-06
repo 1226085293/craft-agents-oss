@@ -73,6 +73,42 @@ Sentry.setUser({ id: machineId })
 
 import { join, delimiter, sep } from 'path'
 import { existsSync, readFileSync } from 'fs'
+
+/**
+ * Group-message → event rules for one workspace.
+ *
+ * Kept in the workspace (not in app config) so a rule change is a file change the
+ * user can diff and revert. A missing or broken file disables the bridge rather
+ * than guessing: waking agents from an unreadable config is worse than silence.
+ */
+function loadMessageEventRules(workspaceRoot: string): MessageEventRules {
+  const path = join(workspaceRoot, 'messaging-events.json')
+  if (!existsSync(path)) return {}
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf-8')) as MessageEventRules
+    return {
+      ...(Array.isArray(parsed.channels) ? { channels: parsed.channels.filter((c) => typeof c === 'string') } : {}),
+      ...(Array.isArray(parsed.keywords) ? { keywords: parsed.keywords.filter((k) => typeof k === 'string') } : {}),
+      ...(typeof parsed.onMention === 'boolean' ? { onMention: parsed.onMention } : {}),
+    }
+  } catch {
+    return {}
+  }
+}
+
+/** Names the bot answers to, so `@mention` detection does not need a model. */
+function getBotNames(): string[] {
+  try {
+    const config = loadStoredConfig() as { messaging?: { botName?: string; platforms?: Record<string, { botUsername?: string }> } }
+    const names = [config.messaging?.botName]
+    for (const platform of Object.values(config.messaging?.platforms ?? {})) {
+      if (platform?.botUsername) names.push(platform.botUsername)
+    }
+    return names.filter((n): n is string => typeof n === 'string' && n.length > 0)
+  } catch {
+    return []
+  }
+}
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { SessionManager, setSessionPlatform, setSessionRuntimeHooks } from '@craft-agent/server-core/sessions'
 import { PageThumbnailer } from './page-thumbnailer'
@@ -90,6 +126,8 @@ import { createApplicationMenu } from './menu'
 import { WindowManager } from './window-manager'
 import { loadWindowState, saveWindowState } from './window-state'
 import { getWorkspaces, getWorkspaceByNameOrId, loadStoredConfig, addWorkspace, saveConfig } from '@craft-agent/shared/config'
+import { bridgeMessage } from '@craft-agent/shared/events/message-bridge'
+import type { MessageEventRules } from '@craft-agent/shared/events/message-bridge'
 import { provisionBundledRtk } from '@craft-agent/shared/agent'
 import { getDefaultWorkspacesDir } from '@craft-agent/shared/workspaces'
 import { initializeDocs } from '@craft-agent/shared/docs'
@@ -727,6 +765,38 @@ app.whenReady().then(async () => {
             // Route messaging diagnostics through the dedicated messaging log
             // at ~/.craft-agent/logs/messaging-gateway.log.
             logger: messagingGatewayLog,
+            // A group message that @-mentions this bot and belongs to no bound
+            // session is an external event, not a user turn: it goes through the
+            // same filter → route → audit path as a webhook. DMs and bound chats
+            // are untouched (the gateway only calls this for the unbound case).
+            publishMessageEvent: (msg) => {
+              const ws = getWorkspaces().find((w) => w.id === msg.workspaceId)
+              if (!ws) return false
+              const verdict = bridgeMessage(msg, {
+                rules: loadMessageEventRules(ws.rootPath),
+                botNames: getBotNames(),
+              })
+              if (verdict.kind !== 'event') return false
+              // Fire and forget: the ingest must never block the adapter's read loop.
+              void (async () => {
+                try {
+                  const { getEventService } = await import('@craft-agent/server-core/events')
+                  const service = await getEventService(
+                    ws.id,
+                    ws.rootPath,
+                    undefined,
+                    sm.createEventDispatchTarget?.(),
+                    (event) => {
+                      void sm.routeUnclaimedEvent?.(ws.id, event).catch(() => undefined)
+                    },
+                  )
+                  service.ingestExternalEvent(verdict.event)
+                } catch (error) {
+                  console.warn('[messaging] message → event bridge failed:', error)
+                }
+              })()
+              return true
+            },
             // WhatsApp worker runs under Electron's embedded Node via
             // ELECTRON_RUN_AS_NODE (WhatsAppAdapter defaults nodeBin to
             // process.execPath). In dev we resolve worker.cjs from the

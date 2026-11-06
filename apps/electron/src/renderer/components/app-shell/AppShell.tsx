@@ -103,7 +103,7 @@ import { getCurrentZone } from "@/actions/keybinding-context"
 import { getSessionTitle } from "@/utils/session"
 import { useSetAtom } from "jotai"
 import type { Session, Workspace, FileAttachment, PermissionRequest, LoadedSource, LoadedSkill, PermissionMode, SourceFilter, UsageStats } from "../../../shared/types"
-import { sessionMetaMapAtom, sendToWorkspaceAtom, type SessionMeta } from "@/atoms/sessions"
+import { sessionMetaMapAtom, sendToWorkspaceAtom, addSessionAtom, type SessionMeta } from "@/atoms/sessions"
 import { sourcesAtom } from "@/atoms/sources"
 import { skillsAtom } from "@/atoms/skills"
 import { panelStackAtom, panelCountAtom, focusedPanelIdAtom, focusedSessionIdAtom, focusNextPanelAtom, focusPrevPanelAtom, parseSessionIdFromRoute } from "@/atoms/panel-stack"
@@ -126,20 +126,18 @@ import {
   isSkillsNavigation,
   isProjectsNavigation,
   isPagesNavigation,
-  isAutomationsNavigation,
   isEventsNavigation,
+  isTasksNavigation,
   type NavigationState,
 } from "@/contexts/NavigationContext"
 import type { SettingsSubpage } from "../../../shared/types"
 import { SourcesListPanel } from "./SourcesListPanel"
+import { TasksListPanel } from '@/components/tasks/TasksPanel'
 import { EventsListPanel } from "../events/EventsListPanel"
 import { EventsListenersPanel } from "../events/EventsListenersPanel"
 import { SkillsListPanel } from "./SkillsListPanel"
 import { ProjectsListPanel } from "./ProjectsListPanel"
 import { useProjects } from "@/hooks/useProjects"
-import { useAutomations } from "@/hooks/useAutomations"
-import { APP_EVENTS, AGENT_EVENTS, AUTOMATION_TYPE_TO_FILTER_KIND } from "@/components/automations/types"
-import { AutomationsListPanel } from "@/components/automations/AutomationsListPanel"
 import { usePages } from "@/hooks/usePages"
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog"
 import { PanelHeader } from "./PanelHeader"
@@ -335,7 +333,6 @@ function AppShellContent({
   const sessionFilter = sessionsContext?.filter ?? null
 
   // Automations type filter (scheduled / event / agentic), null when unfiltered.
-  const automationFilter = isAutomationsNavigation(navState) ? (navState.filter ?? null) : null
 
   // Pages behaves the same way: both the library grid and an open page render
   // full-width in the content area — there is no pages navigator list.
@@ -674,6 +671,10 @@ function AppShellContent({
   // Send to Workspace dialog state (driven by sendToWorkspaceAtom set from SessionMenu/BatchSessionMenu)
   const sendToWorkspaceIds = useAtomValue(sendToWorkspaceAtom)
   const setSendToWorkspaceIds = useSetAtom(sendToWorkspaceAtom)
+  // Navigation validates the target session against the renderer's meta map and
+  // silently rewrites an unknown id to the previously selected session, so any
+  // create-then-navigate path must register the session first.
+  const addSession = useSetAtom(addSessionAtom)
   const handleTransferComplete = useCallback((targetWorkspaceId: string, _newSessionIds: string[]) => {
     onSelectWorkspace(targetWorkspaceId)
   }, [onSelectWorkspace])
@@ -731,29 +732,6 @@ function AppShellContent({
       toast.error(t('projectsList.deleteFailed'))
     }
   }, [activeWorkspace, t, navState, navigate])
-
-  const {
-    automations,
-    handleTestAutomation,
-    handleToggleAutomation,
-    handleDuplicateAutomation,
-    handleDeleteAutomation,
-  } = useAutomations(activeWorkspaceId)
-
-  // Handler for selecting an automation (preserves the active type filter)
-  const handleAutomationSelect = React.useCallback((automationId: string) => {
-    const type = isAutomationsNavigation(navState) ? navState.filter?.automationType : undefined
-    navigate(routes.view.automations({ automationId, type }))
-  }, [navState])
-  const automationTypeCounts = React.useMemo(() => {
-    const counts = { scheduled: 0, event: 0, agentic: 0 }
-    for (const automation of automations) {
-      if (automation.event === 'SchedulerTick') counts.scheduled++
-      else if ((APP_EVENTS as string[]).includes(automation.event)) counts.event++
-      else if ((AGENT_EVENTS as string[]).includes(automation.event)) counts.agentic++
-    }
-    return counts
-  }, [automations])
 
   // Folder tree follows the active scope: a project jump view or the same
   // project's mode-2 detail route shows that project's own tree, backed by its
@@ -1528,20 +1506,6 @@ function AppShellContent({
     navigate(routes.view.projects())
   }, [])
 
-  // Handler for automations views (all / scheduled / event / agentic)
-  const handleAutomationsClick = useCallback(() => {
-    navigate(routes.view.automations())
-  }, [])
-  const handleAutomationsScheduledClick = useCallback(() => {
-    navigate(routes.view.automationsScheduled())
-  }, [])
-  const handleAutomationsEventClick = useCallback(() => {
-    navigate(routes.view.automationsEvent())
-  }, [])
-  const handleAutomationsAgenticClick = useCallback(() => {
-    navigate(routes.view.automationsAgentic())
-  }, [])
-
   // Handler for pages view
   const handlePagesClick = useCallback(() => {
     navigate(routes.view.pages())
@@ -1562,6 +1526,14 @@ function AppShellContent({
 
   const handleListenerSelect = useCallback((listenerId: string) => {
     navigate(routes.view.eventListeners(listenerId))
+  }, [])
+
+  const handleTaskSelect = useCallback((taskId: string) => {
+    navigate(routes.view.tasks(taskId))
+  }, [])
+
+  const handleTaskClose = useCallback(() => {
+    navigate(routes.view.tasks())
   }, [])
 
   // Open settings in its dedicated window. A missing subpage keeps the
@@ -1686,6 +1658,50 @@ function AppShellContent({
   }, [projectFilter, activeFolderScopeId, projectScopeProjectId, projectFolderIds, rootFolderIds])
 
   // Create a new chat and select it
+  /**
+   * Start a session on the supervisor.
+   *
+   * Same creation path as a normal chat, but the record carries
+   * `role: 'supervisor'`, so the tool table is pruned and dispatch is available.
+   */
+  /**
+   * Open the workspace's supervisor session.
+   *
+   * There is exactly one, and it is hidden from the conversation list: the
+   * supervisor coordinates tasks across sessions, so creating a new one per
+   * click split that state (and left a pile of sessions named 督导). The
+   * backend reuses the on-duty session or creates it once.
+   */
+  // Settings navigation carries no `details`; narrow once here so both the
+  // supervisor no-op check and the header gate can read a session id safely.
+  const activeNavSessionId = 'details' in navState && navState.details?.type === 'session'
+    ? navState.details.sessionId
+    : null
+
+  const handleStartSession = useCallback(async (newPanel: boolean = false) => {
+    if (!activeWorkspace) return
+    setSearchActive(false)
+    setSearchQuery('')
+    try {
+      const workspaceId = activeWorkspace.id
+      const session = await window.electronAPI.ensureSupervisorSession(workspaceId)
+      // Already there: re-navigating to the same session re-mounts the chat pane,
+      // which drops the loaded transcript and can trip ChatPage's forced-reload
+      // guard into "Session messages are not available". Clicking 开始会话 while
+      // on the supervisor is a no-op by design — there is nothing else to open.
+      if (!newPanel && activeNavSessionId === session.id) return
+      // Register before navigating: `resolveAutoSelection` drops a session id the
+      // renderer has not learned about yet (it arrives later via
+      // `session_created`/getSessions) and then auto-selects the previous
+      // session — the "点击开始会话无效" report, where a session was created but
+      // the view stayed on the old one.
+      addSession(session)
+      navigate(routes.view.allSessions(session.id), newPanel ? { newPanel: true } : undefined)
+    } catch (error) {
+      console.warn('[AppShell] failed to open the supervisor session:', error)
+    }
+  }, [activeWorkspace, addSession, activeNavSessionId])
+
   const handleNewChat = useCallback((newPanel: boolean = false) => {
     if (!activeWorkspace) return
 
@@ -1775,6 +1791,9 @@ function AppShellContent({
     result.push({ id: 'nav:sources', type: 'nav', action: handleSourcesClick })
     result.push({ id: 'nav:skills', type: 'nav', action: handleSkillsClick })
     result.push({ id: 'nav:projects', type: 'nav', action: handleProjectsClick })
+    // Task board (multi-agent). The unified registry is what binds a click to an
+    // action, so the nav row below is inert without this entry.
+    result.push({ id: 'nav:tasks', type: 'nav', action: () => navigate(routes.view.tasks()) })
     result.push({ id: 'nav:pages', type: 'nav', action: handlePagesClick })
     result.push({ id: 'nav:settings', type: 'nav', action: () => handleSettingsClick() })
     result.push({ id: 'nav:whats-new', type: 'nav', action: handleWhatsNewClick })
@@ -1982,17 +2001,6 @@ function AppShellContent({
       return t("sidebar.allPages")
     }
 
-    // Automations navigator
-    if (isAutomationsNavigation(navState)) {
-      if (!automationFilter) return t("sidebar.allAutomations")
-      switch (automationFilter.automationType) {
-        case 'scheduled': return t("sidebar.scheduled")
-        case 'event': return t("sidebar.eventBased")
-        case 'agentic': return t("sidebar.agentic")
-        default: return t("sidebar.allAutomations")
-      }
-    }
-
     // Settings navigator
     if (isSettingsNavigation(navState)) return t("sidebar.settings")
 
@@ -2060,7 +2068,7 @@ function AppShellContent({
           canGoForward={canGoForward}
           onToggleSidebar={handleToggleSidebar}
           onToggleFocusMode={() => setIsSidebarAndNavigatorHidden(prev => !prev)}
-          onAddSessionPanel={() => handleNewChat(true)}
+          onAddSessionPanel={() => handleStartSession(true)}
           onAddBrowserPanel={() => { void handleNewBrowserWindow() }}
           isCompact={isAutoCompact}
         />
@@ -2474,6 +2482,13 @@ function AppShellContent({
                       ],
                     },
                     {
+                      id: "nav:tasks",
+                      title: t("sidebar.tasks", { defaultValue: "任务" }),
+                      icon: ListTodo,
+                      variant: isTasksNavigation(navState) ? "default" : "ghost",
+                      onClick: () => navigate(routes.view.tasks()),
+                    },
+                    {
                       id: "nav:events",
                       title: t("sidebar.events"),
                       icon: Radio,
@@ -2537,43 +2552,6 @@ function AppShellContent({
                         },
                       })),
                     },
-                    {
-                      id: "nav:automations",
-                      title: t("sidebar.automations"),
-                      label: String(automations.length),
-                      icon: ListTodo,
-                      variant: (isAutomationsNavigation(navState) && !automationFilter) ? "default" : "ghost",
-                      onClick: handleAutomationsClick,
-                      expandable: true,
-                      expanded: isExpanded('nav:automations'),
-                      onToggle: () => toggleExpanded('nav:automations'),
-                      items: [
-                        {
-                          id: "nav:automations:scheduled",
-                          title: t("sidebar.scheduled"),
-                          label: String(automationTypeCounts.scheduled),
-                          icon: Clock,
-                          variant: (automationFilter?.kind === 'type' && automationFilter.automationType === 'scheduled') ? "default" : "ghost",
-                          onClick: handleAutomationsScheduledClick,
-                        },
-                        {
-                          id: "nav:automations:event",
-                          title: t("sidebar.eventBased"),
-                          label: String(automationTypeCounts.event),
-                          icon: Radio,
-                          variant: (automationFilter?.kind === 'type' && automationFilter.automationType === 'event') ? "default" : "ghost",
-                          onClick: handleAutomationsEventClick,
-                        },
-                        {
-                          id: "nav:automations:agentic",
-                          title: t("sidebar.agentic"),
-                          label: String(automationTypeCounts.agentic),
-                          icon: Bot,
-                          variant: (automationFilter?.kind === 'type' && automationFilter.automationType === 'agentic') ? "default" : "ghost",
-                          onClick: handleAutomationsAgenticClick,
-                        },
-                      ],
-                    },
                   ]}
                 />
                 {/* Agent Tree: Hierarchical list of agents */}
@@ -2627,6 +2605,9 @@ function AppShellContent({
               onContextMenu={handleListBackgroundContextMenu}
             >
             <PanelHeader
+              // The task board renders its own header (taskboard.title + count), so a
+              // navigator title here printed 「任务」 twice.
+              hidden={isTasksNavigation(navState)}
               // The title stays visible even when the rail is collapsed: hiding
               // it left the list panel with an empty header and no way to tell
               // which view was open. Stoplight padding is macOS-only (Windows
@@ -2704,34 +2685,24 @@ function AppShellContent({
                 </>
               }
             />
-            {/* New Session — first row of the navigator body (not the header):
-                icon + label centred as one group, full width. */}
+            {/* Starting a session is now role-driven: "新建会话" (plain new chat)
+                was removed because the agent picker below supersedes it. */}
             {isSessionsNavigation(navState) && (
               <div className="shrink-0 px-2 pt-1 pb-2">
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <div>
-                      <ContextMenu modal={true}>
-                        <ContextMenuTrigger asChild>
-                          <Button
-                            variant="ghost"
-                            onClick={(e) => handleNewChat(e.metaKey || e.ctrlKey)}
-                            className="flex h-[30px] w-full items-center justify-center gap-2 rounded-[6px] border border-foreground/10 bg-foreground/[0.06] px-2 text-[13px] font-normal shadow-minimal transition-colors hover:bg-foreground/[0.10]"
-                            data-tutorial="new-chat-button"
-                          >
-                            <SquarePenRounded className="h-3.5 w-3.5 shrink-0" />
-                            <span className="truncate">{t("session.newSession")}</span>
-                          </Button>
-                        </ContextMenuTrigger>
-                        <StyledContextMenuContent>
-                          <ContextMenuProvider>
-                            <SidebarMenu type="newSession" />
-                          </ContextMenuProvider>
-                        </StyledContextMenuContent>
-                      </ContextMenu>
-                    </div>
+                    <Button
+                      variant="ghost"
+                      onClick={() => handleStartSession()}
+                      className="flex h-[30px] w-full items-center justify-center gap-2 rounded-[6px] border border-foreground/10 bg-foreground/[0.06] px-2 text-[13px] font-normal shadow-minimal transition-colors hover:bg-foreground/[0.10]"
+                    >
+                      <Bot className="h-3.5 w-3.5 shrink-0" />
+                      <span className="truncate">{t("session.startSession", { defaultValue: "开始会话" })}</span>
+                    </Button>
                   </TooltipTrigger>
-                  <TooltipContent side="bottom">{newChatHotkey}</TooltipContent>
+                  <TooltipContent side="bottom">
+                    {t("session.startSessionHint", { defaultValue: "选择一个角色，按它的人设与权限开始" })}
+                  </TooltipContent>
                 </Tooltip>
               </div>
             )}
@@ -2750,6 +2721,15 @@ function AppShellContent({
                   onSelectEvent={handleEventSelect}
                 />
               )
+            )}
+            {/* Tasks navigator: the grouped board (multi-agent tasks) */}
+            {isTasksNavigation(navState) && activeWorkspaceId && (
+              <TasksListPanel
+                workspaceId={activeWorkspaceId}
+                selectedTaskId={navState.selectedTaskId}
+                onSelect={handleTaskSelect}
+                onCloseDetail={handleTaskClose}
+              />
             )}
             {/* Content: SessionList, SourcesListPanel, or SettingsNavigator based on navigation state */}
             {/* Memory manager view replaces the sources list in the navigator */}
@@ -2776,20 +2756,6 @@ function AppShellContent({
                 onDeleteSkill={handleDeleteSkill}
                 selectedSkillSlug={isSkillsNavigation(navState) && navState.details?.type === 'skill' ? navState.details.skillSlug : null}
                 usageStats={usageStats}
-              />
-            )}
-            {isAutomationsNavigation(navState) && activeWorkspaceId && (
-              /* Automations List */
-              <AutomationsListPanel
-                automations={automations}
-                automationFilter={automationFilter ? { kind: AUTOMATION_TYPE_TO_FILTER_KIND[automationFilter.automationType] ?? 'all' } : undefined}
-                onAutomationClick={handleAutomationSelect}
-                onTestAutomation={handleTestAutomation}
-                onToggleAutomation={handleToggleAutomation}
-                onDuplicateAutomation={handleDuplicateAutomation}
-                onDeleteAutomation={handleDeleteAutomation}
-                selectedAutomationId={isAutomationsNavigation(navState) && navState.details ? navState.details.automationId : null}
-                workspaceRootPath={activeWorkspace?.rootPath}
               />
             )}
             {isProjectsNavigation(navState) && activeWorkspaceId && (
@@ -2823,7 +2789,8 @@ function AppShellContent({
                   onUnarchive={onUnarchiveSession}
                   onMarkUnread={onMarkSessionUnread}
                   onRename={onRenameSession}
-                  onNewSession={() => handleNewChat()}
+                  // Empty list -> the supervisor, not a blank worker session.
+                  onNewSession={() => handleStartSession()}
                   onFocusChatInput={(targetSessionId) => {
                     focusChatInputForSession(targetSessionId ?? focusedSessionId ?? session.selected)
                   }}
@@ -3040,10 +3007,10 @@ function AppShellContent({
           <button
             type="button"
             className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-accent"
-            onClick={() => { setListMenu(null); handleNewChat() }}
+            onClick={() => { setListMenu(null); handleStartSession() }}
           >
             <SquarePenRounded className="h-3.5 w-3.5 shrink-0" />
-            {t("session.newSession")}
+            {t("session.startSession", { defaultValue: "开始会话" })}
           </button>
           <button
             type="button"

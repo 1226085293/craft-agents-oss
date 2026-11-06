@@ -27,6 +27,7 @@ import { EventDispatcher, type DispatchTarget } from './event-dispatcher.ts';
 import { fetchReportedDeps } from './listener-control.ts';
 import { loadSubscriptions } from '@craft-agent/shared/events/subscriptions.ts';
 import type { ListenerConfigSchema } from '@craft-agent/shared/events/manifest.ts';
+import type { CraftEventEnvelope } from '@craft-agent/shared/events/types.ts';
 import type { ListenerReportedDepsDto } from '@craft-agent/shared/protocol/dto';
 
 const eventLog = createLogger('events');
@@ -43,6 +44,13 @@ export interface EventServiceOptions {
    * events (tests, ingest-only hosts), which leaves dispatching inert.
    */
   dispatchTarget?: DispatchTarget;
+  /**
+   * Called for an event no session subscribed to.
+   *
+   * The host wires this to the workspace supervisor runtime (rules first, then
+   * the supervisor). May be rebound after a boot warm-up creates the service.
+   */
+  onUnclaimed?: (event: EventMeta) => void;
   /** Override for tests. */
   dbPath?: string;
   /** Override for tests; 0 disables. */
@@ -83,15 +91,7 @@ export class EventService {
         // 'starting' (and clear the ready-timeout) on the supervisor side.
         this.supervisor.markHealthy(listenerId);
       },
-      onInserted: (event) => {
-        // A freshly inserted event has no deliveries yet — they land via
-        // onDelivered below. Renderers get the enriched record shape.
-        const record: EventRecord = { ...event, deliveries: [] };
-        this.options.onChanged?.(record);
-        // Strip the body: the dispatcher only formats a nudge.
-        const { body: _body, ...meta } = record;
-        this.dispatcher?.dispatch(meta);
-      },
+      onInserted: (event) => this.publish(event),
     });
 
     this.dispatcher = options.dispatchTarget ? this.createDispatcher(options.dispatchTarget) : null;
@@ -102,13 +102,74 @@ export class EventService {
     });
   }
 
+  /**
+   * Announce and dispatch one freshly stored event.
+   *
+   * Shared by the HTTP ingest server and the messaging bridge so an event that
+   * came from a group chat reaches rules, tasks and the audit trail by exactly
+   * the same path as a webhook — one funnel, one dedupe, one history.
+   */
+  private publish(event: CraftEventEnvelope): void {
+    // A freshly inserted event has no deliveries yet — they land via
+    // onDelivered below. Renderers get the enriched record shape.
+    const record: EventRecord = { ...event, deliveries: [], routing: [] };
+    this.options.onChanged?.(record);
+    // Strip the body: the dispatcher only formats a nudge.
+    const { body: _body, ...meta } = record;
+    this.dispatcher?.dispatch(meta);
+  }
+
+  /**
+   * Store an event that did not arrive over HTTP.
+   *
+   * The messaging bridge produces these: a group message that mentions the bot
+   * is an external event, not a user turn. Returns null when the store rejects
+   * the payload, so the caller can log and continue instead of throwing into a
+   * chat pipeline.
+   */
+  ingestExternalEvent(event: CraftEventEnvelope): { id: string; duplicate: boolean } | null {
+    try {
+      const result = this.store.insert(event);
+      if (!result.duplicate) this.publish(event);
+      return result;
+    } catch (error) {
+      eventLog.warn(
+        `[events] external event rejected: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
   private createDispatcher(target: DispatchTarget): EventDispatcher {
     return new EventDispatcher({
       getSubscriptions: () => loadSubscriptions(this.options.workspaceRoot),
       target,
+      // Read the current host callback at dispatch time. The boot warm-up can
+      // create this dispatcher before RPC registers the supervisor callback.
+      onUnclaimed: (event) => {
+        // Tier boundary: nothing was subscribed, so the rule table (and, failing
+        // that, the supervisor) owns it. Recorded here rather than downstream so
+        // "nobody subscribed" stays visible even if routing throws.
+        try {
+          this.store.recordRouting(event.id, {
+            via: 'supervisor',
+            outcome: '无订阅者，转规则/督导',
+            at: Date.now(),
+          });
+        } catch {
+          // Audit is best-effort: losing a trail line must not drop the event.
+        }
+        this.options.onUnclaimed?.(event);
+      },
       onDelivered: (eventId, sessionId) => {
         try {
           this.store.recordDelivery(eventId, sessionId, Date.now());
+          this.store.recordRouting(eventId, {
+            via: 'subscription',
+            target: sessionId,
+            outcome: '投递给订阅会话',
+            at: Date.now(),
+          });
         } catch (error) {
           eventLog.warn(
             `[events] cannot record delivery for ${eventId}: ${error instanceof Error ? error.message : String(error)}`,
@@ -132,9 +193,11 @@ export class EventService {
     onChanged?: (event: EventRecord) => void;
     onListenerStatus?: (status: ListenerRuntimeStatus) => void;
     dispatchTarget?: DispatchTarget;
+    onUnclaimed?: (event: EventMeta) => void;
   }): void {
     if (callbacks.onChanged) this.options.onChanged = callbacks.onChanged;
     if (callbacks.onListenerStatus) this.options.onListenerStatus = callbacks.onListenerStatus;
+    if (callbacks.onUnclaimed) this.options.onUnclaimed = callbacks.onUnclaimed;
     // A host that only learns the delivery target after boot (Electron builds it
     // with the session manager) must still get a dispatcher.
     if (callbacks.dispatchTarget && !this.dispatcher) {
@@ -408,6 +471,7 @@ export async function getEventService(
   workspaceRoot: string,
   onChanged?: (event: EventRecord) => void,
   dispatchTarget?: DispatchTarget,
+  onUnclaimed?: (event: EventMeta) => void,
 ): Promise<EventService> {
   let service = services.get(workspaceId);
   if (!service) {
@@ -416,6 +480,7 @@ export async function getEventService(
       workspaceRoot,
       ...(onChanged ? { onChanged } : {}),
       ...(dispatchTarget ? { dispatchTarget } : {}),
+      ...(onUnclaimed ? { onUnclaimed } : {}),
     });
     services.set(workspaceId, service);
   }
@@ -425,6 +490,7 @@ export async function getEventService(
   service.updateCallbacks({
     ...(onChanged ? { onChanged } : {}),
     ...(dispatchTarget ? { dispatchTarget } : {}),
+    ...(onUnclaimed ? { onUnclaimed } : {}),
   });
   await service.start();
   return service;

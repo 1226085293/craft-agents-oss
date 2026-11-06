@@ -27,10 +27,15 @@ export interface BroadcastEventMap {
   [RPC_CHANNELS.sessions.UNREAD_SUMMARY_CHANGED]: [summary: UnreadSummary]
   [RPC_CHANNELS.sessions.FILES_CHANGED]: [sessionId: string]
 
+  // Agents (role profiles)
+  [RPC_CHANNELS.agents.CHANGED]: [payload: { workspaceId: string }]
+
+  // Task board (multi-agent tasks)
+  [RPC_CHANNELS.taskboard.CHANGED]: [payload: { workspaceId: string }]
+
   // Domain change broadcasts (global via broadcastToAll)
   [RPC_CHANNELS.sources.CHANGED]: [workspaceId: string, sources: LoadedSource[]]
   [RPC_CHANNELS.folders.CHANGED]: [workspaceId: string, scope: { projectId: string | null }]
-  [RPC_CHANNELS.automations.CHANGED]: [workspaceId: string]
   [RPC_CHANNELS.skills.CHANGED]: [workspaceId: string, skills: LoadedSkill[]]
   [RPC_CHANNELS.projects.CHANGED]: [workspaceId: string, projects: LoadedProject[]]
   [RPC_CHANNELS.pages.CHANGED]: [workspaceId: string, pages: LoadedPage[]]

@@ -43,9 +43,29 @@ export interface EventDelivery {
   at: number;
 }
 
+/**
+ * Where an event ended up, and what became of it.
+ *
+ * The five audit questions are "when / from where / to whom / what was decided /
+ * how was it handled". `deliveries` answers "to whom" for subscribed sessions;
+ * this answers it for the routing tiers, including the supervisor case where no
+ * session ever received the event.
+ */
+export interface EventRouting {
+  /** Which tier handled it. */
+  via: 'subscription' | 'rule' | 'task' | 'supervisor' | 'dropped';
+  /** Rule name, task id or session id, depending on the tier. */
+  target?: string;
+  /** One line describing the outcome, for the audit trail. */
+  outcome: string;
+  at: number;
+}
+
 export interface EventRecord extends CraftEventEnvelope {
   /** Per-session delivery records, latest entry per session. */
   deliveries: EventDelivery[];
+  /** Routing history, oldest first (an event can be re-routed after a retry). */
+  routing: EventRouting[];
 }
 
 /** List projection: everything except `body`. */
@@ -88,6 +108,7 @@ interface EventRow {
   dedupe_key: string | null;
   delivered: number;
   deliveries: string | null;
+  routing: string | null;
 }
 
 function parseJsonArray<T>(value: string | null): T[] {
@@ -123,13 +144,14 @@ function toEvent(row: EventRow, includeBody: boolean): EventRecord {
     links: parseJsonArray<CraftEventLink>(row.links),
     attachments: parseJsonArray<CraftEventAttachment>(row.attachments),
     deliveries: parseJsonArray<EventDelivery>(row.deliveries),
+    routing: parseJsonArray<EventRouting>(row.routing),
     ...(includeBody && row.body !== null ? { body: row.body } : {}),
     ...(payloadRef ? { payloadRef } : {}),
     delivered: row.delivered === 1,
   };
 }
 
-const META_COLUMNS = `e.id, e.source, e.type, e.received_at, e.occurred_at, e.title, e.summary,
+const META_COLUMNS = `e.id, e.source, e.type, e.received_at, e.occurred_at, e.title, e.summary, e.routing,
   e.recipients, e.links, e.attachments, e.payload_kind, e.payload_path, e.payload_size,
   e.dedupe_key, e.delivered, e.deliveries`;
 
@@ -197,6 +219,10 @@ export class EventStore {
     // Attachment references (files a listener wrote next to the event).
     if (!columns.some((column) => column.name === 'attachments')) {
       this.db.exec('ALTER TABLE events ADD COLUMN attachments TEXT');
+    }
+    // Routing audit trail (which tier handled the event and what it decided).
+    if (!columns.some((column) => column.name === 'routing')) {
+      this.db.exec('ALTER TABLE events ADD COLUMN routing TEXT');
     }
   }
 
@@ -357,6 +383,23 @@ export class EventStore {
     this.db
       .prepare('UPDATE events SET deliveries = ?, delivered = 1 WHERE id = ?')
       .run(JSON.stringify(deliveries), id);
+  }
+
+  /**
+   * Append one routing decision to the audit trail.
+   *
+   * Append rather than overwrite: an event may be routed, deferred and routed
+   * again, and the history is the point — "it went to the supervisor, which sent
+   * it to a worker" is two facts, not one.
+   */
+  recordRouting(id: string, entry: EventRouting): void {
+    const row = this.db.prepare('SELECT routing FROM events WHERE id = ?').get(id) as
+      | { routing: string | null }
+      | undefined;
+    if (!row) return;
+    const routing = parseJsonArray<EventRouting>(row.routing);
+    routing.push(entry);
+    this.db.prepare('UPDATE events SET routing = ? WHERE id = ?').run(JSON.stringify(routing), id);
   }
 
   count(): number {

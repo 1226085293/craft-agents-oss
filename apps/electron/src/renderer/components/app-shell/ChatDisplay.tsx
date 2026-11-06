@@ -18,6 +18,7 @@ import { toast } from "sonner"
 
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { cn } from "@/lib/utils"
+import { useAgents } from "@/hooks/useAgents"
 import { coerceInputText, appendRestoredInput } from "@/lib/input-text"
 import { restoreComposerAttachments } from "@/lib/queued-attachments"
 import { AttachmentHoverCard } from './input/AttachmentCapsule'
@@ -619,6 +620,8 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   const prevSessionIdRef = React.useRef<string | null>(null)
   // Reverse pagination: show last N turns initially, load more on scroll up
   const TURNS_PER_PAGE = 20
+  // Role profiles for the composer picker (same source as the sidebar).
+  const { agents: agentOptions } = useAgents(workspaceId)
   // Start with only a handful of turns from the END of the conversation so the
   // initial scroll-to-bottom is always reliable (tiny content), then grow to a
   // full page once we're anchored at the bottom. Older turns load on scroll-up.
@@ -1767,6 +1770,22 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     }
   }, [session?.id, t, inputValue, attachmentsValue, onInputChange, onAttachmentsChange, textareaRef])
 
+  // Switch the role profile this session runs as. The backend rebuilds the
+  // frozen snapshot and disposes the live backend, so the next turn already
+  // speaks as the new role (persona + source/skill ceilings).
+  const handleAgentChange = React.useCallback(
+    (nextAgentId: string) => {
+      if (!session || !workspaceId || nextAgentId === session.agentId) return
+      void window.electronAPI
+        .setSessionAgent(session.id, workspaceId, nextAgentId)
+        .catch((error: unknown) => {
+          console.error('[ChatDisplay] Failed to switch agent:', error)
+          toast.error(t('agent.switchFailed', { defaultValue: '切换角色失败' }))
+        })
+    },
+    [session, workspaceId, t],
+  )
+
   // Handle message submission from InputContainer
   // Backend handles interruption and queueing if currently processing
   const handleSubmit = (message: string, attachments?: FileAttachment[], skillSlugs?: string[], options?: { midStreamBehavior?: 'steer' | 'queue' }) => {
@@ -2571,7 +2590,13 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
           <ChatInputZone
             compactMode={compactMode}
             permissionMode={permissionMode}
-            onPermissionModeChange={onPermissionModeChange}
+            // The supervisor (督导) is the built-in session: what it may do is
+            // decided by its tool table (SUPERVISOR_TOOL_NAMES never registers
+            // bash / write / edit / MCP), not by a permission gate. Offering
+            // 探索/询问/执行 here reads as "it can be handed tools", which it
+            // cannot — so the control is dropped rather than merely preset.
+            onPermissionModeChange={session.hidden ? undefined : onPermissionModeChange}
+            showOptionBadges={session.hidden ? false : undefined}
             sessionId={session.id}
             sessionFolderPath={sessionFolderPath}
             queuedMessages={session.queuedMessages}
@@ -2598,6 +2623,11 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
               onThinkingLevelChange,
               enabledModes,
               enableCompactModelPicker,
+              // Role profile picker: the list comes from the same hook the
+              // sidebar uses, so a new role appears without a reload.
+              agentOptions,
+              agentId: session.agentId,
+              onAgentChange: handleAgentChange,
               structuredInput,
               onStructuredResponse: handleStructuredResponse,
               inputValue,

@@ -35,6 +35,30 @@ import { handleRenderTemplate } from './handlers/render-template.ts';
 import { handleSendDeveloperFeedback } from './handlers/send-developer-feedback.ts';
 import { handleGetSessionInfo } from './handlers/get-session-info.ts';
 import { handleListSessions } from './handlers/list-sessions.ts';
+import {
+  handleAskUser,
+  handleDispatch,
+  handleReportResult,
+  handleReportToUser,
+  handleTaskCreate,
+  handleTaskGet,
+  handleTaskHandoff,
+  handleTaskPlan,
+  handleTaskList,
+  handleTaskUpdate,
+} from './handlers/agent-tools.ts';
+import {
+  AskUserSchema,
+  DispatchSchema,
+  ReportResultSchema,
+  ReportToUserSchema,
+  TaskCreateSchema,
+  TaskGetSchema,
+  TaskHandoffSchema,
+  TaskListSchema,
+  TaskUpdateSchema,
+  TaskPlanSchema,
+} from './tool-schemas-agent.ts';
 import { handleListBackgroundTasks } from './handlers/list-background-tasks.ts';
 import { handleGetBackgroundTaskOutput } from './handlers/get-background-task-output.ts';
 import { handleStopBackgroundTask } from './handlers/stop-background-task.ts';
@@ -171,6 +195,14 @@ export const SpawnSessionSchema = z.object({
   help: z.boolean().optional().describe('If true, returns available connections, models, and sources instead of creating a session'),
   prompt: z.string().optional().describe('Instructions for the new session (required when not in help mode)'),
   name: z.string().optional().describe('Session name'),
+  agentId: z
+    .string()
+    .optional()
+    .describe('Agent (role profile) the new session runs as. Omit to inherit the workspace default; use list of agents from help mode.'),
+  role: z
+    .enum(['worker', 'supervisor'])
+    .optional()
+    .describe('Session role. Workers do the work; only a supervisor may dispatch. Default: worker.'),
   llmConnection: z.string().optional().describe('Connection slug (e.g., "anthropic-api", "codex")'),
   model: z.string().optional().describe('Model ID override'),
   enabledSourceSlugs: z.array(z.string()).optional().describe('Source slugs to enable in the new session'),
@@ -366,6 +398,17 @@ export const TOOL_DESCRIPTIONS = {
   browser_tool: `Drive a built-in browser via a CLI-like command (string or array; array keeps literal semicolons/tabs/newlines). Batching with ';' works but the batch stops after navigation commands (click/navigate/forward/back). Commands: open, navigate, snapshot, find, click, fill, type, wait, screenshot, evaluate, console, network, sign-in flows; window management. Run --help first when unsure.`,
   call_llm: `Get a secondary LLM for focused subtasks: parallel batch processing, efficiency gains, structured extraction (outputSchema), context isolation. Put text in the prompt param; use attachments only for file paths on disk (max 20 items; for files >2000 lines pass a startLine/endLine range).`,
   spawn_session: `Create an independent session running with its own prompt, connection, model, and sources. Useful for delegating research/analysis/drafts to parallel sessions. Use help=true first to list connections/models/sources. The prompt param is required; optional overrides: model, llmConnection, permissionMode, thinkingLevel, enabledSourceSlugs, workingDirectory. By default (subscribe=true) this session starts FOLLOWING the new session: every finished turn is posted back here as a message and you are woken. Pass subscribe=false for fire-and-forget work. This call returns as soon as the session starts (status 'started'); end your turn instead of polling.`,
+
+  task_create: `Supervisor-only: create a task when the work spans more than one session. instruction is the original request and is immutable — changing it means a new task. Returns the human id (T-1).`,
+  task_list: `Supervisor-only: list tasks, newest activity first. Filter by status to find what is still running or waiting on a decision.`,
+  task_get: `Supervisor-only: read one task, including its handoff trail and budget. Use includeJournal for the full event log.`,
+  task_update: `Supervisor-only: advance a task (running / paused / completed / failed / canceled) or annotate it. Illegal transitions are refused.`,
+  task_plan: `Keep this task's plan current: add a step (new id + title), move a step to todo/doing/done/blocked, or drop an unfinished step. Add or remove steps freely as the work changes — but a step marked done should say in note what proves it. The plan is how progress is observed without reading the transcript: a plan that stops moving for 40 minutes pauses the task.`,
+  task_handoff: `Supervisor-only: record a handoff produced by another session against a task. The rule gate (artifacts + a verification command) still applies.`,
+  report_result: `Report the outcome of this turn to the supervisor: what you did (summary, max ~200 chars), what you found, what the next session should do, where the deliverables are, and how you verified it. outcome defaults to 'handoff' — use 'delivered' only when this is the final answer for the user, and 'needs_decision' when a human must choose. The supervisor's rule gate fails a handoff with no artifacts or no verification command.`,
+  dispatch: `Supervisor-only: send work to an existing session, an existing task, or a brand new session. Requires instruction (the work: goal, acceptance criteria, where the deliverable goes) and scope (one sentence describing what that session is responsible for, used to match later dispatches). At most 3 dispatches per turn; end the turn after dispatching instead of polling.`,
+  report_to_user: `Supervisor-only: the single channel to the user. Keep it under ~100 words — conclusions plus a session link for detail. Do not paste worker logs.`,
+  ask_user: `Supervisor-only: ask the user at most two questions when a decision genuinely cannot be made (delete data, spend money, send something external, change direction). Anything else: decide yourself.`,
   send_developer_feedback: `Send freeform feedback to the Craft Agent development team: issues, improvement ideas, patterns found. Write in markdown with as much detail as possible.`,
   archive_session: `Archive or purely unarchive ANOTHER session by ID: removes it from active list/unread counts (does not delete). Requires explicit sessionId; you cannot archive your own. Find ids via list_sessions.`,
   list_pages: `List the workspace's Pages (persistent HTML mini-apps shown in sidebar). Returns slug, name, kind (static/interactive/live), project, refresh schedule, last outcome, share state, folder. Use get_page for full details.`,
@@ -421,6 +464,15 @@ interface SessionToolDefBase {
   safeMode: SessionToolSafeMode;
   /** Whether this tool only reads data (no side effects). Enables parallel execution in backends that support it. */
   readOnly?: boolean;
+  /**
+   * Session roles this tool is exposed to.
+   *
+   * `undefined` = every role (the common case). A supervisor never receives
+   * execution tools; a worker never receives the dispatch/ask surface. The cut
+   * is physical (the tool is absent from the table), not a runtime refusal,
+   * because a model cannot be talked out of a tool it can see.
+   */
+  roles?: SessionRole[];
 }
 
 /** Tool executed from the canonical registry (requires a concrete handler). */
@@ -459,6 +511,16 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'send_developer_feedback', description: TOOL_DESCRIPTIONS.send_developer_feedback, inputSchema: SendDeveloperFeedbackSchema, executionMode: 'registry', safeMode: 'allow', handler: handleSendDeveloperFeedback },
   { name: 'call_llm', description: TOOL_DESCRIPTIONS.call_llm, inputSchema: CallLlmSchema, executionMode: 'backend', safeMode: 'allow', readOnly: true, handler: null },
   { name: 'spawn_session', description: TOOL_DESCRIPTIONS.spawn_session, inputSchema: SpawnSessionSchema, executionMode: 'backend', safeMode: 'block', handler: null },
+  { name: 'report_result', description: TOOL_DESCRIPTIONS.report_result, inputSchema: ReportResultSchema, executionMode: 'registry', safeMode: 'block', handler: handleReportResult },
+  { name: 'dispatch', description: TOOL_DESCRIPTIONS.dispatch, inputSchema: DispatchSchema, executionMode: 'registry', safeMode: 'block', handler: handleDispatch },
+  { name: 'report_to_user', description: TOOL_DESCRIPTIONS.report_to_user, inputSchema: ReportToUserSchema, executionMode: 'registry', safeMode: 'allow', handler: handleReportToUser },
+  { name: 'ask_user', description: TOOL_DESCRIPTIONS.ask_user, inputSchema: AskUserSchema, executionMode: 'registry', safeMode: 'block', handler: handleAskUser },
+  { name: 'task_create', description: TOOL_DESCRIPTIONS.task_create, inputSchema: TaskCreateSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskCreate },
+  { name: 'task_list', description: TOOL_DESCRIPTIONS.task_list, inputSchema: TaskListSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskList },
+  { name: 'task_get', description: TOOL_DESCRIPTIONS.task_get, inputSchema: TaskGetSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskGet },
+  { name: 'task_update', description: TOOL_DESCRIPTIONS.task_update, inputSchema: TaskUpdateSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskUpdate },
+  { name: 'task_plan', description: TOOL_DESCRIPTIONS.task_plan, inputSchema: TaskPlanSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskPlan },
+  { name: 'task_handoff', description: TOOL_DESCRIPTIONS.task_handoff, inputSchema: TaskHandoffSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskHandoff },
   // Browser tool (backend-specific — requires BrowserPaneManager in Electron)
   // Single CLI-like tool that handles all browser actions via command string.
   { name: 'browser_tool', description: TOOL_DESCRIPTIONS.browser_tool, inputSchema: BrowserToolSchema, executionMode: 'backend', safeMode: 'allow', handler: null },
@@ -496,10 +558,52 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'unbind_messaging_channel', description: TOOL_DESCRIPTIONS.unbind_messaging_channel, inputSchema: UnbindMessagingChannelSchema, executionMode: 'registry', safeMode: 'block', handler: handleUnbindMessagingChannel },
 ];
 
+export type SessionRole = 'supervisor' | 'worker';
+
 export interface SessionToolFilterOptions {
   /** Include the experimental send_developer_feedback tool. */
   includeDeveloperFeedback?: boolean;
+  /** Session role; omitted = worker (an ordinary session). */
+  role?: SessionRole;
 }
+
+/**
+ * Tools a supervisor is allowed to keep.
+ *
+ * Everything else — bash, write, edit, browser, MCP, pages, memory — is
+ * stripped. The supervisor coordinates; giving it hands is how a routing
+ * mistake turns into a deleted file.
+ */
+export const SUPERVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'list_sessions',
+  'get_session_info',
+  'list_subscriptions',
+  'subscribe_session',
+  'unsubscribe_session',
+  'spawn_session',
+  'send_agent_message',
+  'dispatch',
+  'report_to_user',
+  'ask_user',
+  'task_create',
+  'task_list',
+  'task_get',
+  'task_update',
+  'task_handoff',
+  'task_verify',
+  'SubmitPlan',
+]);
+
+/** Tools a worker never sees, even though they exist in the table. */
+export const SUPERVISOR_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'dispatch',
+  'report_to_user',
+  'ask_user',
+  'task_create',
+  'task_update',
+  'task_handoff',
+  'task_verify',
+]);
 
 /**
  * Return session tools with optional feature filtering.
@@ -509,12 +613,16 @@ export interface SessionToolFilterOptions {
  */
 export function getSessionToolDefs(options?: SessionToolFilterOptions): SessionToolDef[] {
   const includeDeveloperFeedback = options?.includeDeveloperFeedback ?? true;
+  const role = options?.role ?? 'worker';
 
   return SESSION_TOOL_DEFS.filter(def => {
     if (!includeDeveloperFeedback && def.name === 'send_developer_feedback') {
       return false;
     }
-    return true;
+    // Explicit per-tool roles win; otherwise the role allowlists above decide.
+    if (def.roles) return def.roles.includes(role);
+    if (role === 'supervisor') return SUPERVISOR_TOOL_NAMES.has(def.name);
+    return !SUPERVISOR_ONLY_TOOL_NAMES.has(def.name);
   });
 }
 
@@ -625,9 +733,14 @@ export interface JsonSchemaToolDef {
 export function getToolDefsAsJsonSchema(opts?: {
   prefix?: string;
   includeDeveloperFeedback?: boolean;
+  /** Session role: prunes the table so a supervisor has no execution tools. */
+  role?: SessionRole;
 }): JsonSchemaToolDef[] {
   const prefix = opts?.prefix || '';
-  const defs = getSessionToolDefs({ includeDeveloperFeedback: opts?.includeDeveloperFeedback });
+  const defs = getSessionToolDefs({
+    includeDeveloperFeedback: opts?.includeDeveloperFeedback,
+    ...(opts?.role ? { role: opts.role } : {}),
+  });
 
   return defs.map(def => {
     // Explicit `as any` avoids TS2589 ("type instantiation is excessively deep")

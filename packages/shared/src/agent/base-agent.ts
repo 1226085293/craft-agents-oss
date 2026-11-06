@@ -122,6 +122,10 @@ export interface MiniAgentConfig {
 export interface SpawnSessionRequest {
   prompt: string;
   name?: string;
+  /** Agent profile the child session runs as. Omitted = workspace default. */
+  agentId?: string;
+  /** Child session role; only supervisors may dispatch. Defaults to worker. */
+  role?: 'worker' | 'supervisor';
   llmConnection?: string;
   model?: string;
   enabledSourceSlugs?: string[];
@@ -265,6 +269,65 @@ export abstract class BaseAgent implements AgentBackend {
    * so UI badges/counts refresh live. Optional — hosts may leave it null.
    */
   onMemoryChanged: (() => void) | null = null;
+
+  /**
+   * Multi-agent bindings (report_result / dispatch / report_to_user / ask_user).
+   *
+   * Injected by SessionManager. `null` in a session with no role, which is what
+   * makes the tools refuse themselves instead of silently no-opping.
+   */
+  agentTools: {
+    reportResult(payload: {
+      outcome: 'delivered' | 'handoff' | 'needs_decision';
+      summary: string;
+      keyFindings?: string[];
+      nextAction?: string;
+      artifacts?: { path: string; note?: string }[];
+      verify?: { ran: string[]; passed: boolean; note?: string };
+    }): Promise<{ message: string }>;
+    dispatch(payload: {
+      target:
+        | { kind: 'session'; sessionId: string }
+        | { kind: 'task'; taskId: string }
+        | { kind: 'new'; agentId?: string };
+      name?: string;
+      scope: string;
+      instruction: string;
+      attachTaskId?: string;
+      parallel: boolean;
+    }): Promise<{ message: string }>;
+    reportToUser(payload: { text: string; sessionId?: string }): Promise<void>;
+    askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;
+  } | null = null;
+
+  /** Task-board surface (supervisor only). */
+  taskTools = null as null | {
+    create(payload: {
+      name: string;
+      instruction: string;
+      assigneeAgentId?: string;
+      parentTaskId?: string;
+      dependsOn?: string[];
+      priority?: number;
+    }): Promise<{ id: string }>;
+    list(params: { status?: string; limit?: number }): Promise<
+      Array<{ id: string; name: string; status: string; pauseReason?: string | null }>
+    >;
+    get(identifier: string, includeJournal: boolean): Promise<unknown | null>;
+    update(
+      identifier: string,
+      patch: { status?: string; pauseReason?: string; assigneeAgentId?: string; error?: string },
+    ): Promise<{ status: string }>;
+    handoff(
+      identifier: string,
+      handoff: Record<string, unknown>,
+      fromSessionId: string,
+    ): Promise<{ passed: boolean; reasons: string[]; status: string }>;
+    updatePlan(
+      identifier: string,
+      patch: { id: string; status?: string; title?: string; note?: string; remove?: boolean },
+    ): Promise<{ ok: boolean; error?: string }>;
+  };
   onSourceChange: SourceChangeCallback | null = null;
   onSourcesListChange: ((sources: LoadedSource[]) => void) | null = null;
   onConfigValidationError: ((file: string, errors: string[]) => void) | null = null;
@@ -1598,6 +1661,8 @@ ${formattedMessages}
         ? expandPath(input.workingDirectory)
         : undefined,
       projectId: input.projectId as string | undefined,
+      agentId: input.agentId as string | undefined,
+      role: input.role as 'worker' | 'supervisor' | undefined,
       attachments: input.attachments as SpawnSessionRequest['attachments'],
       mcpServerConfigs: input.mcpServerConfigs as Record<string, SdkMcpServerConfig> | undefined,
       subscribe: input.subscribe as boolean | undefined,

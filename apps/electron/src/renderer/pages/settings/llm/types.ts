@@ -296,7 +296,6 @@ export interface LlmConfigShape {
    */
   compactionStrategy?: string
   /** Strategy group new sessions inherit when the caller names none. */
-  defaultStrategy?: string
   usage?: {
     persist?: boolean
     retainDays?: number

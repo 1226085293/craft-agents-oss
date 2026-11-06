@@ -235,3 +235,46 @@ describe('EventStore counts and retention', () => {
     }
   });
 });
+
+describe('EventStore.recordRouting', () => {
+  it('appends each routing decision so the trail stays complete', () => {
+    const store = new EventStore({ dbPath: ':memory:' });
+    store.insert({
+      spec: 'craft-event/1',
+      id: 'evt_r1',
+      source: 'qqmail',
+      type: 'mail.received',
+      receivedAt: 1_800_000_000_000,
+      title: '合同确认',
+      recipients: [],
+      links: [],
+      attachments: [],
+      delivered: false,
+    });
+
+    store.recordRouting('evt_r1', {
+      via: 'supervisor',
+      outcome: '无订阅者，转规则/督导',
+      at: 1,
+    });
+    store.recordRouting('evt_r1', {
+      via: 'task',
+      target: 'T-2',
+      outcome: '按事件触发器起任务',
+      at: 2,
+    });
+
+    const record = store.get('evt_r1')!;
+    expect(record.routing.map((entry) => entry.via)).toEqual(['supervisor', 'task']);
+    expect(record.routing[1]?.target).toBe('T-2');
+    store.close();
+  });
+
+  it('ignores an unknown event id instead of throwing', () => {
+    const store = new EventStore({ dbPath: ':memory:' });
+    expect(() =>
+      store.recordRouting('missing', { via: 'dropped', outcome: 'x', at: 1 }),
+    ).not.toThrow();
+    store.close();
+  });
+});

@@ -3,7 +3,6 @@ import { existsSync } from 'fs'
 import { isAbsolute, join, resolve, dirname, parse as parsePath } from 'path'
 import { homedir } from 'os'
 import { validatePathFormat } from '../../utils/path-validation'
-import { generateShortId } from '@craft-agent/shared/automations/resolve-config-path'
 import { RPC_CHANNELS, type FileAttachment, type DirectoryListingResult } from '@craft-agent/shared/protocol'
 import type { StoredAttachment } from '@craft-agent/core/types'
 import { readFileAttachment, validateImageForClaudeAPI, IMAGE_LIMITS } from '@craft-agent/shared/utils'
@@ -15,6 +14,12 @@ import { MarkItDown } from 'markitdown-js'
 import type { RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 import { requestClientOpenFileDialog } from '@craft-agent/server-core/transport'
+
+
+/** 6-hex id, used for collision-free temp names. */
+function shortId(): string {
+  return Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')
+}
 
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.file.READ,
@@ -261,11 +266,11 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
       // entropy is enough because the name is only ever looked up inside one
       // session's attachments folder (collisions retry below).
       const safeName = sanitizeFilename(attachment.name)
-      let id = generateShortId()
+      let id = shortId()
       let storedFileName = `${id}_${safeName}`
       let storedPath = join(attachmentsDir, storedFileName)
       for (let attempt = 0; attempt < 5 && existsSync(storedPath); attempt++) {
-        id = generateShortId()
+        id = shortId()
         storedFileName = `${id}_${safeName}`
         storedPath = join(attachmentsDir, storedFileName)
       }

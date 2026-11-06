@@ -63,6 +63,16 @@ export const LOCAL_ONLY_CHANNELS = new Set<string>([
   // via webUtils.getPathForFile in the renderer, so they point at the user's local machine
   // — even when the workspace itself lives on a remote server. Routing this REMOTE_ELIGIBLE
   // would send the local path to a remote filesystem that can't resolve it.
+  RPC_CHANNELS.agents.CHANGED,
+  RPC_CHANNELS.taskboard.LIST,
+  RPC_CHANNELS.taskboard.GET,
+  RPC_CHANNELS.taskboard.UPDATE,
+  RPC_CHANNELS.taskboard.HANDOFF,
+  RPC_CHANNELS.taskboard.CHANGED,
+  RPC_CHANNELS.agents.LIST,
+  RPC_CHANNELS.agents.GET,
+  RPC_CHANNELS.agents.SAVE,
+  RPC_CHANNELS.agents.DELETE,
   RPC_CHANNELS.tasks.GET_OUTPUT,
   RPC_CHANNELS.tasks.LIST,
   RPC_CHANNELS.tasks.STOP,
@@ -295,6 +305,35 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.sessions.IMPORT,
   RPC_CHANNELS.sessions.EXPORT_REMOTE_TRANSFER,
   RPC_CHANNELS.sessions.IMPORT_REMOTE_TRANSFER,
+  RPC_CHANNELS.sessions.SET_AGENT,
+  RPC_CHANNELS.sessions.ENSURE_SUPERVISOR,
+
+  // events — event center (listeners, stored events, subscriptions all live on
+  // the server that owns the workspace; the WebUI must reach them)
+  RPC_CHANNELS.events.LIST,
+  RPC_CHANNELS.events.GET,
+  RPC_CHANNELS.events.COUNTS,
+  RPC_CHANNELS.events.CHANGED,
+  RPC_CHANNELS.events.STATUS,
+  RPC_CHANNELS.events.SUBSCRIBE,
+  RPC_CHANNELS.events.UNSUBSCRIBE,
+  RPC_CHANNELS.events.LIST_SUBSCRIPTIONS,
+  RPC_CHANNELS.events.LIST_LISTENERS,
+  RPC_CHANNELS.events.GET_LISTENER,
+  RPC_CHANNELS.events.SET_LISTENER_ENABLED,
+  RPC_CHANNELS.events.SET_LISTENER_CONFIG,
+  RPC_CHANNELS.events.LISTENER_STATUS,
+  RPC_CHANNELS.events.LISTENER_DEPS,
+  RPC_CHANNELS.events.LISTENER_DEPS_ACTION,
+  RPC_CHANNELS.events.INSTALL_DEPENDENCY,
+  RPC_CHANNELS.events.INSTALL_MCP,
+  RPC_CHANNELS.events.READ_ATTACHMENT,
+  RPC_CHANNELS.events.OPEN_ATTACHMENT,
+
+  // taskboard — tasks are workspace state, not renderer state
+  RPC_CHANNELS.taskboard.CREATE,
+  RPC_CHANNELS.taskboard.RUN,
+  RPC_CHANNELS.taskboard.UPDATE_TRIGGER,
 
   // transfer — chunked large-payload import (sessions, resources)
   RPC_CHANNELS.transfer.START,
@@ -413,16 +452,6 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   // logo — workspace config
   RPC_CHANNELS.logo.GET_URL,
 
-  // automations — workspace automations
-  RPC_CHANNELS.automations.GET,
-  RPC_CHANNELS.automations.TEST,
-  RPC_CHANNELS.automations.SET_ENABLED,
-  RPC_CHANNELS.automations.DUPLICATE,
-  RPC_CHANNELS.automations.DELETE,
-  RPC_CHANNELS.automations.GET_HISTORY,
-  RPC_CHANNELS.automations.GET_LAST_EXECUTED,
-  RPC_CHANNELS.automations.REPLAY,
-  RPC_CHANNELS.automations.CHANGED,
 
   // projects — workspace projects
   RPC_CHANNELS.projects.GET,

@@ -404,16 +404,17 @@ export function SessionList({
         className="h-full"
       >
         <button
+          // The list is "empty" in normal operation: the supervisor (督导) the
+          // 开始会话 button opens is hidden by design, so an empty list is not a
+          // missing-state. Guide to the supervisor instead of minting blank
+          // worker sessions.
           onClick={() => {
-            // An empty folder-scoped list must create INSIDE that folder, so the
-            // shared handler (which inherits project + folder) is used when the
-            // host provides one.
             if (onNewSession) onNewSession()
             else navigate(routes.action.newSession())
           }}
           className="inline-flex items-center h-7 px-3 text-xs font-medium rounded-[8px] bg-background shadow-minimal hover:bg-foreground/[0.03] transition-colors"
         >
-          {t("session.newSession")}
+          {t("session.startSession", { defaultValue: "开始会话" })}
         </button>
       </EntityListEmptyScreen>
     )

@@ -1506,22 +1506,11 @@ function StrategyDeleteDialog(props: {
     const ok = await props.onSave({
       ...props.config,
       strategies: props.config.strategies.filter((s) => s.id !== props.strategy.id),
-      // A stale default would seed new sessions with a group that no longer
-      // exists; reconcileStrategyRefs clears it too, but dropping it here keeps
-      // the saved config honest about what the user chose.
-      defaultStrategy:
-        props.config.defaultStrategy === props.strategy.id ? undefined : props.config.defaultStrategy,
+      // Agents referencing this group are reconciled by reconcileStrategyRefs;
+      // new sessions fall back to the first enabled group, so nothing stale is
+      // left to seed them with.
     })
     if (ok) {
-      // A stale default would seed new sessions with a strategy that no longer
-      // exists, so clear it along with the strategy.
-      try {
-        if (localStorage.getItem('llm-proto.default-strategy') === props.strategy.id) {
-          localStorage.removeItem('llm-proto.default-strategy')
-        }
-      } catch {
-        // Preference cleanup is best-effort.
-      }
       props.toast(`已删除「${props.strategy.name}」`)
       props.onClose()
     }

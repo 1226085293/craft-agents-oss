@@ -1,5 +1,5 @@
 import { formatUserContextForPrompt, getCoAuthorPreference } from '../config/appearance.ts';
-import { formatSkillsBlock } from '../skills/skills-prompt.ts';
+import { DEFAULT_SKILLS_BUDGET_TOKENS, formatSkillsBlock } from '../skills/skills-prompt.ts';
 import { getBrowserToolEnabled } from '../config/storage.ts';
 import { debug } from '../utils/debug.ts';
 import { existsSync, readFileSync, readdirSync } from 'fs';
@@ -211,6 +211,8 @@ export function getWorkingDirectoryContext(
     parts.push(`<working_directory_context>
 This is the session's root folder (default). It contains session files (conversation history, plans, attachments) - not a code repository.
 You can access any files the user attaches here. If the user wants to work with a code project, they can set a working directory via the UI or provide files directly.
+
+The full transcript of this conversation is \`session.jsonl\` in this folder. Compaction keeps a summary, not every detail — when you need something the summary dropped (an exact command, a full error, a rejected approach), grep it back instead of guessing: \`grep -n "keyword" session.jsonl | head -50\`. Never read the whole file; it is routinely tens of megabytes.
 </working_directory_context>`);
   } else {
     // Check if bash cwd differs from working directory (changed mid-session)
@@ -362,6 +364,14 @@ export function getSystemPrompt(
    * listeners pay zero tokens for it.
    */
   eventsBlock?: string,
+  /**
+   * Agent persona: a pinned `<persona>` block placed before the skills
+   * inventory. Pinned (not re-read per turn) so the prompt stays byte-stable
+   * for caching; changing the agent only affects sessions created afterwards.
+   */
+  personaBlock?: string,
+  /** Agent skill ceiling. `undefined` = no ceiling. */
+  allowedSkillSlugs?: string[],
 ): string {
   // Use mini agent prompt for quick edits (pass workspace root for config paths)
   if (preset === 'mini') {
@@ -390,8 +400,16 @@ export function getSystemPrompt(
   // Skills inventory (L1 metadata: slug + description) injected so the model
   // can match a task against skill descriptions and auto-trigger the relevant
   // SKILL.md without waiting for an explicit [skill:slug] mention.
-  const skillsBlock = formatSkillsBlock(workspaceRootPath, workingDirectory);
-  const fullPrompt = `${basePrompt}${skillsBlock}${preferences}${projectBlock}${debugContext}${projectContextFiles}${eventsBlock ?? ''}`;
+  const skillsBlock = formatSkillsBlock(
+    workspaceRootPath,
+    workingDirectory,
+    DEFAULT_SKILLS_BUDGET_TOKENS,
+    allowedSkillSlugs,
+  );
+  const persona = personaBlock ? `
+
+${personaBlock}` : '';
+  const fullPrompt = `${basePrompt}${persona}${skillsBlock}${preferences}${projectBlock}${debugContext}${projectContextFiles}${eventsBlock ?? ''}`;
 
   debug('[getSystemPrompt] full prompt length:', fullPrompt.length);
 

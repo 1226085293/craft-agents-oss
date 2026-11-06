@@ -50,6 +50,12 @@ export interface EventDispatcherOptions {
   /** Reads the current subscriptions for the workspace. */
   getSubscriptions: () => EventSubscription[];
   target: DispatchTarget;
+  /**
+   * Last tier of the funnel: called only when no session subscribed to the
+   * event. Wired to the on-duty supervisor; absent only in headless/test hosts
+   * that intentionally collect events without session routing.
+   */
+  onUnclaimed?: (event: EventMeta) => void;
   mergeWindowMs?: number;
   dailyLimit?: number;
   /** Called after a session actually received the event (surface written). */
@@ -76,12 +82,32 @@ export class EventDispatcher {
     );
   }
 
+  /**
+   * Events already delivered or handed to the supervisor.
+   *
+   * One event must be handled exactly once: a subscription match and the
+   * unclaimed tier are mutually exclusive by construction, but a re-insert of
+   * the same dedupe key (a source retrying a webhook) is not.
+   */
+  private readonly routed = new Set<string>();
+
   /** Entry point: called for every inserted event. */
   dispatch(event: EventMeta): void {
-    const subscriptions = this.options.getSubscriptions();
-    if (subscriptions.length === 0) return;
+    const key = event.dedupeKey || event.id;
+    if (this.routed.has(key)) return;
 
-    const targets = subscribersFor(event, subscriptions);
+    const subscriptions = this.options.getSubscriptions();
+    const targets = subscriptions.length ? subscribersFor(event, subscriptions) : [];
+
+    if (targets.length === 0) {
+      // Tier 2 (rules) is resolved by whoever wired `onUnclaimed`: it can route
+      // deterministically and only fall through to the supervisor itself.
+      this.routed.add(key);
+      this.options.onUnclaimed?.(event);
+      return;
+    }
+
+    this.routed.add(key);
     for (const sessionId of targets) {
       // A session can hold several subscriptions; use the first that matches so
       // the nudge is formatted from a rule the session actually asked for.

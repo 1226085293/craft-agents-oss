@@ -131,6 +131,25 @@ export class WindowManager {
     if (!window.isVisible()) window.show()
   }
 
+  /**
+   * Whether a managed settings window is still rendering the settings shell.
+   *
+   * The mode is stamped at creation, but the URL can drift afterwards: the
+   * settings shell accepts in-window navigation to the app shell, so a deep
+   * link or a session click rewrites its query and drops `windowMode=settings`.
+   * The renderer then boots as an ordinary chat shell inside a window the
+   * manager still believes is settings.
+   */
+  private isSettingsShellIntact(managed: ManagedWindow): boolean {
+    const { window } = managed
+    if (window.isDestroyed() || window.webContents.isDestroyed()) return false
+    const url = window.webContents.getURL()
+    // Empty means the first document has not committed yet — give it a chance.
+    if (!url) return true
+    if (url.startsWith('about:')) return false
+    return url.includes('windowMode=settings')
+  }
+
   private isRendererAppUrl(url: string): boolean {
     if (VITE_DEV_SERVER_URL) {
       try {
@@ -808,14 +827,21 @@ export class WindowManager {
    * Get the single settings window for a workspace, if it exists.
    */
   getSettingsWindowByWorkspace(workspaceId: string): BrowserWindow | null {
+    const drifted: BrowserWindow[] = []
     for (const managed of this.windows.values()) {
-      if (
-        managed.workspaceId === workspaceId &&
-        managed.mode === 'settings' &&
-        !managed.window.isDestroyed()
-      ) {
-        return managed.window
-      }
+      if (managed.workspaceId !== workspaceId || managed.mode !== 'settings') continue
+      if (managed.window.isDestroyed()) continue
+      if (this.isSettingsShellIntact(managed)) return managed.window
+      drifted.push(managed.window)
+    }
+    // A settings window that navigated out of the settings shell can never be
+    // revealed as settings again. Reusing it made "open settings" a permanent
+    // no-op — the manager kept focusing a window whose renderer was a chat
+    // shell, and every later open found it again instead of creating one.
+    // Drop the drifted ones so the caller builds a fresh settings window.
+    for (const window of drifted) {
+      windowLog.info(`Discarding settings window that left the settings shell (workspace ${workspaceId})`)
+      window.destroy()
     }
     return null
   }

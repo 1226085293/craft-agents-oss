@@ -59,6 +59,25 @@ export interface GatewayOptions {
   /** Fired after any binding mutation (bind/unbind). */
   onBindingChanged?: () => void
   /**
+   * Group messages that address this bot but belong to no bound session.
+   *
+   * Returning true means "this was handled as an external event", so the
+   * message is not routed into a session. Left undefined, such messages keep the
+   * old behaviour (routed normally) — the event center is an addition, not a
+   * replacement for how bound chats work.
+   */
+  publishMessageEvent?: (msg: {
+    workspaceId: string
+    platform: string
+    channelId: string
+    threadId?: number
+    messageId: string
+    senderId: string
+    senderName?: string
+    text: string
+    chatKind?: 'private' | 'group'
+  }) => boolean
+  /**
    * Reads the workspace's MessagingConfig. Called per-message so config
    * edits (toggling accessMode, adding owners) take effect without restart.
    * Optional — when omitted, the gateway falls back to a permissive
@@ -235,8 +254,12 @@ export class MessagingGateway {
   private readonly accessDeps: AccessControlDeps
   private readonly buttonRecentRejectReplies = new Map<string, number>()
 
+  /** Optional event-center hook for group messages (see GatewayOptions). */
+  private readonly publishMessageEvent?: GatewayOptions['publishMessageEvent']
+
   constructor(opts: GatewayOptions) {
     this.sessionManager = opts.sessionManager
+    this.publishMessageEvent = opts.publishMessageEvent
     this.workspaceId = opts.workspaceId
     this.onDeliveryBlocked = opts.onDeliveryBlocked
     this.onRecoverDelivery = opts.onRecoverDelivery
@@ -495,6 +518,29 @@ export class MessagingGateway {
             })
           })
       }
+      // A group message that @-mentions this bot but has no binding is not a
+      // user turn: it is somebody else's conversation arriving on somebody
+      // else's schedule. Offer it to the event center, which can filter, route
+      // and audit it. Bound chats and DMs are untouched.
+      if (
+        !binding &&
+        msg.chatKind === 'group' &&
+        msg.mentionKind === 'at' &&
+        this.publishMessageEvent?.({
+          workspaceId: this.workspaceId,
+          platform: adapter.platform,
+          channelId: msg.channelId,
+          ...(msg.threadId !== undefined ? { threadId: msg.threadId } : {}),
+          messageId: msg.messageId,
+          senderId: msg.senderId,
+          ...(msg.senderName ? { senderName: msg.senderName } : {}),
+          text: msg.text,
+          ...(msg.chatKind ? { chatKind: msg.chatKind } : {}),
+        })
+      ) {
+        return
+      }
+
       await this.router.route(adapter, msg)
     })
 

@@ -219,7 +219,7 @@ export interface ProjectIdChangedEvent {
 export interface SessionMetadataChangedEvent {
   type: 'session_metadata_changed'
   sessionId: string
-  changes: Partial<Pick<Session, 'projectId'>> & {
+  changes: Partial<Pick<Session, 'projectId' | 'agentId'>> & {
     folderId?: string | null
     archivedFolderId?: string | null
     archivedFolderPath?: string[]

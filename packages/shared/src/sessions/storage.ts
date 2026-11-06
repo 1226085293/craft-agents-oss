@@ -188,6 +188,12 @@ export async function createSession(
     parentSessionId?: string;
     /** Folder this session belongs to (folder tree of its project scope). undefined = root. */
     folderId?: string | null;
+    /** Agent profile this session runs as, plus its frozen snapshot. */
+    agentId?: string;
+    agentSnapshot?: SessionConfig['agentSnapshot'];
+    role?: 'supervisor' | 'worker';
+    taskId?: string;
+    spawnDepth?: number;
   }
 ): Promise<SessionConfig> {
   ensureSessionsDir(workspaceRootPath);
@@ -217,6 +223,11 @@ export async function createSession(
     llmConnection: options?.llmConnection,
     strategy: options?.strategy,
     hidden: options?.hidden,
+    agentId: options?.agentId,
+    agentSnapshot: options?.agentSnapshot,
+    role: options?.role,
+    taskId: options?.taskId,
+    spawnDepth: options?.spawnDepth,
     projectId: options?.projectId,
     folderId: options?.folderId ?? undefined,
     parentSessionId: options?.parentSessionId,
@@ -532,6 +543,10 @@ export async function updateSessionMetadata(
     | 'sharedId'
     | 'model'
     | 'llmConnection'
+    // Role profile + its frozen snapshot: switching the agent of an existing
+    // session rewrites both together (they must never drift apart).
+    | 'agentId'
+    | 'agentSnapshot'
     | 'isArchived'
     | 'archivedAt'
     | 'projectId'
@@ -558,6 +573,8 @@ export async function updateSessionMetadata(
   if ('sharedId' in updates) session.sharedId = updates.sharedId;
   if (updates.model !== undefined) session.model = updates.model;
   if (updates.llmConnection !== undefined) session.llmConnection = updates.llmConnection;
+  if (updates.agentId !== undefined) session.agentId = updates.agentId;
+  if (updates.agentSnapshot !== undefined) session.agentSnapshot = updates.agentSnapshot;
   if (updates.isArchived !== undefined) session.isArchived = updates.isArchived;
   if ('archivedAt' in updates) session.archivedAt = updates.archivedAt;
   if ('projectId' in updates) session.projectId = updates.projectId;

@@ -347,6 +347,76 @@ export type SdkMcpServerConfig =
  * 4. Allow capability-based UI adaptation
  */
 export interface AgentBackend {
+  /**
+   * Multi-agent tool bindings.
+   *
+   * Optional on the interface and set by SessionManager after construction:
+   * a backend that does not support them simply leaves the tools refusing
+   * themselves, which is the safe default.
+   */
+  agentTools?: {
+    reportResult(payload: {
+      outcome: 'delivered' | 'handoff' | 'needs_decision';
+      summary: string;
+      keyFindings?: string[];
+      nextAction?: string;
+      artifacts?: { path: string; note?: string }[];
+      verify?: { ran: string[]; passed: boolean; note?: string };
+    }): Promise<{ message: string }>;
+    dispatch(payload: {
+      target:
+        | { kind: 'session'; sessionId: string }
+        | { kind: 'task'; taskId: string }
+        | { kind: 'new'; agentId?: string };
+      name?: string;
+      scope: string;
+      instruction: string;
+      attachTaskId?: string;
+      parallel: boolean;
+    }): Promise<{ message: string }>;
+    reportToUser(payload: { text: string; sessionId?: string }): Promise<void>;
+    askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;
+  } | null;
+
+  /** Task-board surface (supervisor only). */
+  taskTools?: {
+    create(payload: {
+      name: string;
+      instruction: string;
+      assigneeAgentId?: string;
+      parentTaskId?: string;
+      dependsOn?: string[];
+      priority?: number;
+      /** Structured execution contract (cwd, sources, deliverables, acceptance). */
+      spec?: Record<string, unknown>;
+      /** What starts this task: manual (default), cron or event. */
+      trigger?: Record<string, unknown>;
+    }): Promise<{ id: string }>;
+    list(params: { status?: string; limit?: number }): Promise<
+      Array<{ id: string; name: string; status: string; pauseReason?: string | null }>
+    >;
+    get(identifier: string, includeJournal: boolean): Promise<unknown | null>;
+    update(
+      identifier: string,
+      patch: { status?: string; pauseReason?: string; assigneeAgentId?: string; error?: string },
+    ): Promise<{ status: string }>;
+    handoff(
+      identifier: string,
+      handoff: Record<string, unknown>,
+      fromSessionId: string,
+    ): Promise<{ passed: boolean; reasons: string[]; status: string }>;
+    /**
+     * Update one step of this task's plan.
+     *
+     * The plan is the worker's own checklist; keeping it current is what lets the
+     * watchdog tell "still working" from "went quiet" without reading a transcript.
+     */
+    updatePlan(
+      identifier: string,
+      patch: { id: string; status?: string; title?: string; note?: string; remove?: boolean },
+    ): Promise<{ ok: boolean; error?: string }>;
+  } | null;
+
   // ============================================================
   // Chat & Lifecycle
   // ============================================================

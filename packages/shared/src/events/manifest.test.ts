@@ -207,3 +207,41 @@ describe('parseManifest', () => {
     expect(result.manifest?.setup?.[0]?.link).toContain('service.mail.qq.com')
   })
 })
+
+describe('parseManifest — ui (plugin-provided HTML config UI)', () => {
+  it('accepts a relative configHtml file path', () => {
+    const result = parseManifest(base({ ui: { configHtml: 'ui/config.html' } }))
+    expect(result.ok).toBe(true)
+    expect(result.manifest?.ui?.configHtml).toBe('ui/config.html')
+  })
+
+  it('accepts an inline document', () => {
+    const result = parseManifest(base({ ui: { configHtmlInline: '<div>form</div>' } }))
+    expect(result.ok).toBe(true)
+    expect(result.manifest?.ui?.configHtmlInline).toBe('<div>form</div>')
+  })
+
+  it('rejects when both configHtml and configHtmlInline are given', () => {
+    const result = parseManifest(base({ ui: { configHtml: 'ui/a.html', configHtmlInline: '<i/>' } }))
+    expect(result.ok).toBe(false)
+    expect(result.errors.join(' ')).toContain('mutually exclusive')
+  })
+
+  it('rejects paths that escape the plugin directory', () => {
+    for (const bad of ['../outside.html', '/abs/path.html', 'a/../../b.html']) {
+      const result = parseManifest(base({ ui: { configHtml: bad } }))
+      expect(result.ok, bad).toBe(false)
+    }
+  })
+
+  it('rejects a non-object ui and an oversized inline document', () => {
+    expect(parseManifest(base({ ui: 'ui/a.html' })).ok).toBe(false)
+    expect(parseManifest(base({ ui: { configHtmlInline: 'x'.repeat(512 * 1024 + 1) } })).ok).toBe(false)
+  })
+
+  it('leaves ui absent when the manifest declares none', () => {
+    const result = parseManifest(base())
+    expect(result.ok).toBe(true)
+    expect(result.manifest?.ui).toBeUndefined()
+  })
+})

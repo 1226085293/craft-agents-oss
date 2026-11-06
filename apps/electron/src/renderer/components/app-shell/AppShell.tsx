@@ -11,6 +11,7 @@ import {
   ChevronDown,
   MoreHorizontal,
   RotateCw,
+  RefreshCw,
   Flag,
   ListFilter,
   Tag,
@@ -1750,6 +1751,10 @@ function AppShellContent({
 
   // Respond to menu bar "New Chat" trigger
   const menuTriggerRef = useRef(menuNewChatTrigger)
+  // The plugin list's reload, shared with the navigator's title row: the
+  // refresh icon lives in the PanelHeader actions (same row as the title),
+  // and the panel registers its load() here. One reload, two owners.
+  const listenerRefreshRef = useRef<(() => void) | null>(null)
   useEffect(() => {
     // Skip initial render
     if (menuTriggerRef.current === menuNewChatTrigger) return
@@ -2701,6 +2706,18 @@ function AppShellContent({
                       onClick={openAddProject}
                     />
                   )}
+                  {/* Refresh the plugin list — on the title row itself. The
+                      panel used to print its own second header row (监听器 +
+                      refresh button), which is where the "two-line" look came
+                      from; the row is gone, the affordance stayed. */}
+                  {isEventsNavigation(navState) && navState.section === 'listeners' && (
+                    <HeaderIconButton
+                      icon={<RefreshCw className="h-4 w-4" />}
+                      tooltip="刷新插件"
+                      aria-label="刷新插件"
+                      onClick={() => listenerRefreshRef.current?.()}
+                    />
+                  )}
                 </>
               }
             />
@@ -2742,6 +2759,7 @@ function AppShellContent({
                   workspaceId={activeWorkspaceId}
                   selectedListenerId={navState.details?.type === 'listener' ? navState.details.listenerId : null}
                   onSelectListener={handleListenerSelect}
+                  refreshRef={listenerRefreshRef}
                 />
               ) : (
                 <EventsListPanel

@@ -36,6 +36,10 @@ export interface BroadcastEventMap {
   [RPC_CHANNELS.pages.CHANGED]: [workspaceId: string, pages: LoadedPage[]]
   [RPC_CHANNELS.events.CHANGED]: [workspaceId: string, event: EventMetaDto]
   [RPC_CHANNELS.events.LISTENER_STATUS]: [workspaceId: string, status: ListenerStatusDto]
+  [RPC_CHANNELS.events.LISTENER_CHANGED]: [
+    workspaceId: string,
+    changed: { listenerId: string; reason: 'enabled' | 'config' | 'dependency' },
+  ]
   [RPC_CHANNELS.llmConnections.CHANGED]: []
   [RPC_CHANNELS.llmGateway.STATUS]: [status: LlmGatewayStatusPayload]
   [RPC_CHANNELS.permissions.DEFAULTS_CHANGED]: [value: null]

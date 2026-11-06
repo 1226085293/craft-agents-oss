@@ -1,46 +1,43 @@
 /**
- * Events navigator column, "listeners" section.
+ * Events navigator column, "listeners" section — the plugin list.
  *
- * Cards list every listener package found under `<workspace>/events/`, its
- * state, and how many events it produced. Picking one opens the detail page
- * (manifest, config, dependencies, setup). The ingest endpoint used to live
- * here; it moved to the detail page of any listener so the header stays about
- * listeners.
+ * Cards list every plugin found under `<workspace>/events/`, its light, and
+ * its state. Picking one opens the detail page (intro, config, dependencies).
+ *
+ * No section header of its own: the navigator's PanelHeader already prints the
+ * title (插件) with the refresh action on the SAME row, and a second title row
+ * only ate vertical space (it was the "two-line header" the plugin list kept
+ * showing). The refresh button no longer floats over the list or owns a row —
+ * it lives in the header row next to the title, and the panel registers its
+ * reload function there via `refreshRef`.
  *
  * Selection follows the EntityRow grammar (faint wash + left accent rule) so
  * the three event pages read like the rest of the app.
  */
 
 import * as React from 'react'
-import { AlertTriangle, Plus, Radio, RefreshCw } from 'lucide-react'
+import { Plus } from 'lucide-react'
 import type { ListenerDto } from '@craft-agent/shared/protocol/dto'
+import { ListenerStatusLight } from './ListenerStatusLight'
 
 export interface EventsListenersPanelProps {
   workspaceId: string
   selectedListenerId: string | null
   onSelectListener: (listenerId: string) => void
+  /**
+   * The navigator's title row owns the refresh affordance: the panel
+   * registers its reload there, so the header's icon button and the card
+   * list share one source of truth instead of a second header row.
+   */
+  refreshRef?: React.MutableRefObject<(() => void) | null>
   className?: string
-}
-
-function StateDot({ listener }: { listener: ListenerDto }): React.ReactElement {
-  const state = listener.status.state
-  if (listener.errors.length > 0) {
-    return <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0" aria-label="配置错误" />
-  }
-  if (!listener.enabled) {
-    return <Radio className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" aria-label="已停用" />
-  }
-  if (state === 'running') return <Radio className="h-3.5 w-3.5 text-primary shrink-0" aria-label="运行中" />
-  if (state === 'starting') return <Radio className="h-3.5 w-3.5 text-amber-500 shrink-0" aria-label="启动中" />
-  if (state === 'degraded') return <Radio className="h-3.5 w-3.5 text-amber-500 shrink-0" aria-label="无响应" />
-  if (state === 'failed') return <Radio className="h-3.5 w-3.5 text-destructive shrink-0" aria-label="异常" />
-  return <Radio className="h-3.5 w-3.5 text-muted-foreground/40 shrink-0" aria-label="已停止" />
 }
 
 export function EventsListenersPanel({
   workspaceId,
   selectedListenerId,
   onSelectListener,
+  refreshRef,
   className,
 }: EventsListenersPanelProps): React.ReactElement {
   const [listeners, setListeners] = React.useState<ListenerDto[]>([])
@@ -69,12 +66,27 @@ export function EventsListenersPanel({
     void load()
   }, [load])
 
+  // The header row's refresh button calls this — one reload function, two
+  // owners (the panel and the PanelHeader icon), so the button is never its
+  // own line again.
+  React.useEffect(() => {
+    if (!refreshRef) return
+    refreshRef.current = () => {
+      void load()
+    }
+    return () => {
+      refreshRef.current = null
+    }
+  }, [load, refreshRef])
+
+  // The process side of the lights: start / running / degraded / failed /
+  // stop events flip the card's dot without a reload.
   React.useEffect(() => {
     if (!workspaceId) return
     const off = window.electronAPI.onEventListenerStatus((wsId, status) => {
       if (wsId !== workspaceId) return
       setListeners((prev) =>
-        prev.map((listener) => (listener.id === status.id ? { ...listener, status, enabled: status.state !== 'stopped' || listener.enabled } : listener)),
+        prev.map((listener) => (listener.id === status.id ? { ...listener, status } : listener)),
       )
     })
     return () => {
@@ -82,29 +94,30 @@ export function EventsListenersPanel({
     }
   }, [workspaceId])
 
+  // The on-disk side: the detail page toggling the enable switch, saving
+  // config, or installing a dependency changes facts a status event cannot
+  // carry. The server pushes listener-changed; re-reading the list (cheap,
+  // probe-free) keeps every card's light and chip on what is true now.
+  React.useEffect(() => {
+    if (!workspaceId) return
+    const off = window.electronAPI.onEventListenerChanged((wsId) => {
+      if (wsId !== workspaceId) return
+      void load()
+    })
+    return () => {
+      if (typeof off === 'function') off()
+    }
+  }, [workspaceId, load])
+
   return (
     <div className={className ? `flex flex-col h-full ${className}` : 'flex flex-col h-full'}>
-      <div className="px-3 py-2.5 border-b border-border flex items-center gap-2">
-        <Radio className="h-4 w-4 text-muted-foreground" />
-        <span className="text-sm font-medium">监听器</span>
-        <span className="text-xs text-muted-foreground tabular-nums">{listeners.length}</span>
-        <button
-          type="button"
-          onClick={() => void load()}
-          className="ml-auto h-7 w-7 inline-flex items-center justify-center rounded-md hover:bg-foreground/5 text-muted-foreground hover:text-foreground"
-          title="刷新"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-        </button>
-      </div>
-
-      <div className="flex-1 overflow-y-auto p-2 space-y-1.5">
+      <div className={`flex-1 overflow-y-auto p-2 space-y-1.5 ${loading ? 'opacity-60' : ''}`} aria-busy={loading}>
         {error && <div className="px-1 py-2 text-xs text-destructive">{error}</div>}
 
         {!error && listeners.length === 0 && (
           <div className="flex flex-col items-center justify-center gap-2 py-8 text-muted-foreground text-center px-3">
             <Plus className="h-7 w-7 opacity-70" />
-            <p className="text-sm">还没有监听器</p>
+            <p className="text-sm">还没有插件</p>
             <p className="text-xs opacity-70 leading-relaxed">
               在 <code className="font-mono">&lt;workspace&gt;/events/&lt;id&gt;/manifest.json</code> 放一个清单，
               这里就会出现卡片
@@ -127,11 +140,12 @@ export function EventsListenersPanel({
               }`}
             >
               <div className="flex items-center gap-2">
-                <StateDot listener={listener} />
-                <span className="text-sm font-medium truncate flex-1">{listener.name}</span>
+                <span className="text-sm font-medium truncate flex-1 min-w-0">{listener.name}</span>
                 <span className="text-[11px] text-muted-foreground shrink-0 tabular-nums">
                   v{listener.version}
                 </span>
+                {/* One shared mapping with the detail page title bar. */}
+                <ListenerStatusLight listener={listener} />
               </div>
               {listener.description && (
                 <p className="text-[12px] leading-4 text-foreground/55 line-clamp-2 mt-1">

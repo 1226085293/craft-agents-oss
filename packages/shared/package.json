@@ -30,6 +30,7 @@
     "./credentials": "./src/credentials/index.ts",
     "./docs": "./src/docs/index.ts",
     "./docs/doc-links": "./src/docs/doc-links.ts",
+    "./events/plugin-status": "./src/events/plugin-status.ts",
     "./feature-flags": "./src/feature-flags.ts",
     "./i18n": "./src/i18n/index.ts",
     "./icons": "./src/icons/index.ts",

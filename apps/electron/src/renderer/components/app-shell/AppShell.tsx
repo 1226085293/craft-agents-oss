@@ -2109,16 +2109,6 @@ function AppShellContent({
                   getItemProps={getSidebarItemProps}
                   focusedItemId={focusedSidebarItemId}
                   links={[
-                    {
-                      // Plugins sit first because they are the workspace's
-                      // hardware: every event that reaches it, and every
-                      // channel it can answer on, comes from one of them.
-                      id: "nav:plugins",
-                      title: t("sidebar.plugins", { defaultValue: "插件" }),
-                      icon: Plug,
-                      variant: isEventListenersNavigation(navState) ? "default" : "ghost",
-                      onClick: handleEventListenersClick,
-                    },
                     // --- Projects (top: a project is the broadest scope a
                     // session can belong to, so it reads first) ---
                     // Two display modes: entries list (mode 1) and, once a
@@ -2430,6 +2420,33 @@ function AppShellContent({
                     { id: "separator:chats-sources", type: "separator" },
                     // --- Sources & Skills Section ---
                     {
+                      id: "nav:tasks",
+                      title: t("sidebar.tasks", { defaultValue: "任务" }),
+                      icon: ListTodo,
+                      variant: isTasksNavigation(navState) ? "default" : "ghost",
+                      onClick: () => navigate(routes.view.tasks()),
+                    },
+                    {
+                      // One click, one destination: the list. The listener
+                      // panel used to hide behind a disclosure triangle, which
+                      // made the common case ("what came in?") a two-step.
+                      id: "nav:events",
+                      title: t("sidebar.events"),
+                      icon: Radio,
+                      variant: isEventListNavigation(navState) ? "default" : "ghost",
+                      onClick: handleEventsClick,
+                    },
+                    {
+                      // Plugins sit first because they are the workspace's
+                      // hardware: every event that reaches it, and every
+                      // channel it can answer on, comes from one of them.
+                      id: "nav:plugins",
+                      title: t("sidebar.plugins", { defaultValue: "插件" }),
+                      icon: Plug,
+                      variant: isEventListenersNavigation(navState) ? "default" : "ghost",
+                      onClick: handleEventListenersClick,
+                    },
+                    {
                       id: "nav:sources",
                       title: t("sidebar.sources"),
                       label: String(sources.length),
@@ -2493,23 +2510,6 @@ function AppShellContent({
                           onClick: () => navigate(routes.view.memories()),
                         },
                       ],
-                    },
-                    {
-                      id: "nav:tasks",
-                      title: t("sidebar.tasks", { defaultValue: "任务" }),
-                      icon: ListTodo,
-                      variant: isTasksNavigation(navState) ? "default" : "ghost",
-                      onClick: () => navigate(routes.view.tasks()),
-                    },
-                    {
-                      // One click, one destination: the list. The listener
-                      // panel used to hide behind a disclosure triangle, which
-                      // made the common case ("what came in?") a two-step.
-                      id: "nav:events",
-                      title: t("sidebar.events"),
-                      icon: Radio,
-                      variant: isEventListNavigation(navState) ? "default" : "ghost",
-                      onClick: handleEventsClick,
                     },
                     {
                       id: "nav:skills",

@@ -1,0 +1,60 @@
+{
+  "spec": "craft-plugin/1",
+  "id": "wechat",
+  "name": "微信",
+  "version": "1.0.0",
+  "description": "微信公众号 / 客服消息。",
+  "builtin": true,
+  "author": "Craft Agents",
+  "actions": [
+    {
+      "name": "send_message",
+      "description": "通过 微信 往指定会话发一条文本消息。channelId 来自事件来源（群为 group:<id>，私聊为 user:<id>）。",
+      "input": {
+        "type": "object",
+        "properties": {
+          "channelId": {
+            "type": "string",
+            "description": "目标频道：group:<id> 表示群，user:<id> 表示私聊。"
+          },
+          "text": {
+            "type": "string",
+            "description": "要发送的文本。过长时由平台侧截断。"
+          }
+        },
+        "required": [
+          "channelId",
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "reply",
+      "description": "用 微信 回复触发本次判断的那条消息。收件人由事件本身决定。",
+      "repliesToOrigin": true,
+      "input": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "回复内容。应简短：用户是在手机上看这条消息。"
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    }
+  ],
+  "config": {
+    "type": "object",
+    "properties": {
+      "enabled": {
+        "type": "boolean",
+        "title": "启用",
+        "description": "关闭后该平台不再收发消息；已保存的凭证保留。",
+        "default": false
+      }
+    }
+  }
+}

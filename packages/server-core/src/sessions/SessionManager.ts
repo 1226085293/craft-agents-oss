@@ -6676,8 +6676,17 @@ ${request.prompt}`;
 
         callPluginActionFn: async ({ plugin, action, args }) => {
           const registry = this.messagingRegistry
-          if (!registry) return { ok: false, message: 'messaging 未初始化，无法发送' }
-          if (plugin !== 'messaging') {
+          if (!registry) return { ok: false, message: '消息网关未初始化，无法发送' }
+
+          // Each platform is its own plugin, so the plugin id IS the platform.
+          // A plugin without a builtin executor (a script listener) is refused
+          // here rather than silently doing nothing.
+          const builtin = loadListeners({
+            workspaceRoot: managed.workspace.rootPath,
+            catalogDirs: pluginCatalogDirs(),
+            skipProbes: true,
+          }).find((entry) => entry.id === plugin)
+          if (builtin?.manifest.builtin !== true) {
             return { ok: false, message: `插件 ${plugin} 没有内置执行器` }
           }
 
@@ -6688,7 +6697,7 @@ ${request.prompt}`;
           // woke this turn. Reply deliberately takes the second path: the model
           // cannot know an openid, and guessing one would send the answer to a
           // stranger.
-          let platform = typeof args.platform === 'string' ? args.platform : ''
+          let platform = typeof args.platform === 'string' ? args.platform : plugin
           let channelId = typeof args.channelId === 'string' ? args.channelId : ''
           const origin = this.replyOriginFor(managed.id)
 
@@ -6703,16 +6712,10 @@ ${request.prompt}`;
             channelId = channelId || origin.channelId
           }
 
+          // No guessing: the plugin already names the platform, and inferring
+          // one from bindings would send the answer to a different app.
           if (!platform) {
-            const platforms = new Set(
-              registry
-                .getBindings(managed.workspace.id)
-                .map((binding) => binding.platform),
-            )
-            if (platforms.size === 1) platform = [...platforms][0]!
-          }
-          if (!platform) {
-            return { ok: false, message: '无法确定平台：请指定 platform（例如 qq）' }
+            return { ok: false, message: '缺少平台：请在参数里指定 platform，或改用平台对应的插件' }
           }
 
           const sent = await registry.sendTextToChannel({

@@ -45,7 +45,6 @@ export const SETTINGS_ICONS: Record<SettingsSubpage, React.ComponentType<IconPro
   input: InputIcon,
   workspace: WorkspaceIcon,
   permissions: PermissionsIcon,
-  messaging: MessagingSettingsIcon,
   server: ServerSettingsIcon,
   shortcuts: ShortcutsIcon,
 }

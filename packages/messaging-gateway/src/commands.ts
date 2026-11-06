@@ -278,18 +278,17 @@ export class Commands {
     // Exact-cmd dispatch (parsed; supports `/cmd@BotName`). Avoids the old
     // `text.startsWith('/new')` bug where `/newuser` would also dispatch
     // to handleNew.
-    if (cmd === '/new') {
-      await this.handleNew(adapter, msg)
-    } else if (cmd === '/bind') {
-      await this.handleBind(adapter, msg)
-    } else if (cmd === '/pair') {
-      await this.handlePair(adapter, msg)
-    } else if (cmd === '/unbind') {
-      await this.handleUnbind(adapter, msg)
-    } else if (cmd === '/exec') {
-      await this.handleExec(adapter, msg)
-    } else if (cmd === '/help') {
+    // Same table as the bound path: a command is reachable because a plugin
+    // declared it, not because this file knows the word. /help stays local —
+    // it explains whatever is currently declared.
+    if (cmd === '/help') {
       await this.handleHelp(adapter, msg)
+    } else if (
+      await this.handleDeclaredCommand(adapter, msg, cmd, {
+        ...(this.forwardToPlugin ? { forward: this.forwardToPlugin } : {}),
+      })
+    ) {
+      // answered by the plugin that declared it
     } else {
       // Sender passed the access gate but typed free-form text into a chat with
       // no binding.
@@ -309,13 +308,20 @@ export class Commands {
         })
         return
       }
+      // Named commands come from the plugins; a host that hardcoded them
+      // would advertise commands no installed plugin answers.
+      const declared = this.declaredCommands?.() ?? []
+      const listed = declared.map(
+        (c) => `/${c.name}${c.usage ? ` ${c.usage}` : ''} — ${c.description}`,
+      )
       await adapter.sendText(
         msg.channelId,
-        'No session bound to this chat.\n\n' +
-        '/new [name] — start a new session\n' +
-        '/bind — connect to an existing session\n' +
-        '/pair <code> — redeem a pairing code from the app\n' +
-        '/help — show all commands',
+        [
+          'No session bound to this chat.',
+          ...(listed.length ? ['', ...listed] : []),
+          '',
+          '/help — show all commands',
+        ].join(String.fromCharCode(10)),
         replyOpts,
       )
     }
@@ -522,7 +528,7 @@ export class Commands {
     if (recent.length === 0) {
       await adapter.sendText(
         msg.channelId,
-        'No sessions found. Use /new to create one.',
+        'No sessions found. Use the new-session command to create one.',
         replyOpts,
       )
       return
@@ -786,7 +792,7 @@ export class Commands {
     const replyOpts = msg.threadId !== undefined ? { threadId: msg.threadId } : {}
     const binding = this.bindingStore.findByChannel(adapter.platform, msg.channelId, msg.threadId)
     if (!binding) {
-      await adapter.sendText(msg.channelId, 'No session bound. Use /bind, /new, or /pair.', replyOpts)
+      await adapter.sendText(msg.channelId, 'No session bound to this chat.', replyOpts)
       return
     }
 
@@ -848,7 +854,7 @@ export class Commands {
     const replyOpts = msg.threadId !== undefined ? { threadId: msg.threadId } : {}
     const binding = this.bindingStore.findByChannel(adapter.platform, msg.channelId, msg.threadId)
     if (!binding) {
-      await adapter.sendText(msg.channelId, 'No session bound. Use /bind, /new, or /pair.', replyOpts)
+      await adapter.sendText(msg.channelId, 'No session bound to this chat.', replyOpts)
       return
     }
 
@@ -919,7 +925,7 @@ export class Commands {
     const replyOpts = msg.threadId !== undefined ? { threadId: msg.threadId } : {}
     const binding = this.bindingStore.findByChannel(adapter.platform, msg.channelId, msg.threadId)
     if (!binding) {
-      await adapter.sendText(msg.channelId, 'No session bound. Use /bind, /new, or /pair.', replyOpts)
+      await adapter.sendText(msg.channelId, 'No session bound to this chat.', replyOpts)
       return
     }
 

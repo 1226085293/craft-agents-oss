@@ -2092,6 +2092,14 @@ export class SessionManager implements ISessionManager {
     } else if (was && !processing) {
       sessionRuntimeHooks.onSessionStopped()
       this.clearSupervisorTurnCap(managed)
+      // Clear the streak only when the turn finished *without* hitting the cap.
+      // `cancelProcessing` (the cap's own abort) also lands here, so clearing
+      // unconditionally would erase the count a moment after it was raised and
+      // the backoff would never engage.
+      if (managed.role === 'supervisor' && !this.supervisorCapAbortInFlight.has(managed.id)) {
+        this.supervisorCapHits.delete(managed.id)
+      }
+      this.supervisorCapAbortInFlight.delete(managed.id)
       // Hand over anything that arrived while this turn was running. Without
       // this, a queued event waited for the NEXT inbound message to be noticed:
       // drainToSupervisor bails while the supervisor is busy and nothing came
@@ -2100,14 +2108,33 @@ export class SessionManager implements ISessionManager {
       // interrupted, error) funnels through here, which is why it lives here
       // rather than in the completion handler.
       if (managed.role === 'supervisor') {
-        void this.getSupervisorRuntime(managed.workspace.id)
-          .onSupervisorIdle()
-          .catch((error) => {
-            sessionLog.warn('[supervisor] failed to drain the backlog after a turn', {
-              sessionId: managed.id,
-              error: error instanceof Error ? error.message : String(error),
+        // Back off when turns keep dying at the cap. Draining straight away is
+        // right for a normal turn, but for one that was just killed for running
+        // too long it reproduces the same over-long turn: start → kill →
+        // re-queue → start. A couple of hits is bad luck with a slow channel;
+        // more than that is work that does not belong in the router, and the
+        // conversion above has already handed it to a worker.
+        const hits = this.supervisorCapHits.get(managed.id) ?? 0
+        const delayMs = hits >= 2 ? Math.min(5 * 60_000, 15_000 * (hits - 1)) : 0
+        const drain = () => {
+          void this.getSupervisorRuntime(managed.workspace.id)
+            .onSupervisorIdle()
+            .catch((error) => {
+              sessionLog.warn('[supervisor] failed to drain the backlog after a turn', {
+                sessionId: managed.id,
+                error: error instanceof Error ? error.message : String(error),
+              })
             })
+        }
+        if (delayMs > 0) {
+          sessionLog.warn(`[supervisor] delaying the next turn by ${delayMs}ms after ${hits} cap hits`, {
+            sessionId: managed.id,
           })
+          const timer = setTimeout(drain, delayMs)
+          timer.unref?.()
+        } else {
+          drain()
+        }
       }
     }
   }
@@ -2115,21 +2142,46 @@ export class SessionManager implements ISessionManager {
   /** Turn caps, keyed by session id. */
   private readonly supervisorTurnCaps = new Map<string, ReturnType<typeof setTimeout>>()
 
+  /**
+   * How many consecutive cap hits before the supervisor stops being re-woken
+   * immediately.
+   *
+   * The old path closed the turn and drained the backlog straight away, so work
+   * that genuinely needed longer than the cap produced: start → kill → re-queue →
+   * start again, each round throwing away the reasoning. A counter is the cheapest
+   * thing that turns an infinite loop into a bounded one.
+   */
+  private readonly supervisorCapHits = new Map<string, number>()
+
+  /**
+   * Sessions whose current turn is being closed by the cap right now.
+   *
+   * Needed because the cap closes the turn through the same path a normal stop
+   * takes, so "the turn ended" cannot distinguish the two — and the difference is
+   * exactly what decides whether the streak is cleared.
+   */
+  private readonly supervisorCapAbortInFlight = new Set<string>()
+
   private armSupervisorTurnCap(managed: ManagedSession): void {
     this.clearSupervisorTurnCap(managed)
     const capMs = getSupervisorTurnTimeoutMs()
     const timer = setTimeout(() => {
       if (!managed.isProcessing || managed.role !== 'supervisor') return
       sessionLog.warn(`[supervisor] turn exceeded the ${Math.round(capMs / 1000)}s cap in ${managed.id}; closing it`)
-      // Say so in the transcript. Closing the turn silently left the operator
-      // staring at a session that simply stopped: no error, no reply, no clue.
-      // The note is deliberately terse — it explains the stop, it does not
-      // retry the work (the event is still in the backlog and the next drain
-      // picks it up).
+      // A turn that cannot finish inside the cap is evidence that the work needs
+      // a record. Discarding it threw the evidence away and guaranteed the next
+      // turn would do the same thing again. Converting it hands the work to a
+      // worker that is not under a turn cap.
+      const converted = this.convertTimedOutTurnToTask(managed, capMs)
       this.appendSupervisorNotice(
         managed,
-        `督导回合超过 ${Math.round(capMs / 1000)} 秒上限，已中止。事件仍在队列里，下个回合会继续。`,
+        converted
+          ? `督导回合超过 ${Math.round(capMs / 1000)} 秒上限，已转为任务 ${converted} 交给 worker 继续。`
+          : `督导回合超过 ${Math.round(capMs / 1000)} 秒上限，已中止。事件仍在队列里，下个回合会继续。`,
       )
+      // Must be set before the abort: the stop path reads it to decide whether
+      // this turn ended normally or was killed by the cap.
+      this.supervisorCapAbortInFlight.add(managed.id)
       void this.cancelProcessing(managed.id, true).catch((error) => {
         sessionLog.warn('[supervisor] failed to close an over-long turn', { error })
       })
@@ -2137,6 +2189,80 @@ export class SessionManager implements ISessionManager {
     // Node keeps the process alive for a pending timer; this one is disposable.
     timer.unref?.()
     this.supervisorTurnCaps.set(managed.id, timer)
+  }
+
+  /**
+   * Turn an over-long supervisor turn into a task, so the work survives.
+   *
+   * Why this instead of retrying: the supervisor is a router with a per-turn cap,
+   * and a turn that cannot finish inside that cap is not a slow turn — it is work
+   * that does not belong in a router. Retrying re-runs the same reasoning and
+   * hits the same wall, which is how a capped supervisor burns cycles without
+   * producing anything. A task outlives the cap: it has a session of its own, no
+   * turn ceiling, and it stays visible on the board.
+   *
+   * Returns the task identifier, or null when conversion is not possible (no
+   * task service, nothing to describe, or the task could not be created). A null
+   * return must not be silent — the caller writes the generic cap notice instead.
+   */
+  private convertTimedOutTurnToTask(managed: ManagedSession, capMs: number): string | null {
+    const hits = (this.supervisorCapHits.get(managed.id) ?? 0) + 1
+    this.supervisorCapHits.set(managed.id, hits)
+    try {
+      // What was it working on? The last user-visible instruction is the closest
+      // thing to a brief, and the last assistant text says how far it got.
+      const lastUser = [...managed.messages].reverse().find((m) => m.role === 'user' && !m.hidden)
+      const lastAssistant = [...managed.messages].reverse().find((m) => m.role === 'assistant' && !m.isIntermediate)
+      const brief = (lastUser?.content ?? '').trim()
+      if (!brief) return null
+
+      // Give the worker the supervisor's partial progress so it does not start
+      // from nothing — that reasoning was the expensive part being thrown away.
+      const handover = [
+        `这条任务来自督导的一个超时回合（上限 ${Math.round(capMs / 1000)} 秒）。`,
+        `原始要求：\n${brief.slice(0, 4000)}`,
+        lastAssistant?.content
+          ? `督导已进行到的部分：\n${String(lastAssistant.content).slice(0, 4000)}`
+          : '',
+        '请独立完成，不要假设督导的中间结论是对的。',
+      ]
+        .filter(Boolean)
+        .join('\n\n')
+
+      const tasks = this.getTasks(managed.workspace.id)
+      const created = tasks.create({
+        name: `督导超时转交（${Math.round(capMs / 1000)}s）`,
+        instruction: handover.slice(0, 8000),
+        supervisorSessionId: managed.id,
+        // Dedupe key includes the hit count so a second timeout on the same
+        // session creates a second task rather than being swallowed as a repeat.
+        toolCallId: `supervisor-timeout:${managed.id}:${hits}`,
+        spec: {
+          // The scope is what makes this task answerable later: "why does T-7
+          // exist?" → the supervisor could not finish it inside one turn.
+          scope: '由督导超时回合转交，需独立会话完成',
+          cwd: managed.workspace.rootPath,
+        },
+      })
+
+      void this.runTask(managed.workspace.id, created.id, 'supervisor-timeout').catch((error) => {
+        sessionLog.warn('[supervisor] cap conversion created a task but could not start it', {
+          taskId: created.id,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+      sessionLog.info(`[supervisor] converted an over-long turn into ${created.id}`, {
+        sessionId: managed.id,
+        capHits: hits,
+      })
+      return created.id
+    } catch (error) {
+      sessionLog.warn('[supervisor] could not convert the over-long turn', {
+        sessionId: managed.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    }
   }
 
   /** Write a visible info row so an aborted supervisor turn is not silent. */

@@ -171,6 +171,17 @@ export interface CoreBackendConfig {
 
   /** Session configuration (for resume) */
   session?: Session;
+  /**
+   * Tools contributed by installed plugins, resolved when the session was
+   * created. Fixed for the session's life so the prompt (which contains the
+   * tool table) never moves under the model mid-conversation.
+   */
+  pluginTools?: ReadonlyArray<{
+    plugin: string;
+    name: string;
+    description: string;
+    input: { type?: 'object'; properties?: Record<string, Record<string, unknown>>; required?: string[] };
+  }>;
 
   /** Initial model ID */
   model?: string;

@@ -106,3 +106,40 @@ export function findToolNameCollisions(sources: readonly DeclarationSource[]): A
     .filter(([, plugins]) => plugins.length > 1)
     .map(([name, plugins]) => ({ name, plugins: plugins.sort() }))
 }
+
+/**
+ * Prefix for tools a plugin contributes.
+ *
+ * Namespaced on purpose: the model sees `plugin__slack__slack_search`, which
+ * cannot collide with a built-in, and the host can route it back to the owning
+ * plugin by parsing the name — no lookup table to keep in sync, and a stale tool
+ * name fails loudly instead of hitting the wrong plugin.
+ *
+ * Double underscore because tool names must stay `[A-Za-z0-9_-]`; `__` is legal
+ * and rare enough in real names to keep the split unambiguous.
+ */
+export const PLUGIN_TOOL_PREFIX = 'plugin__'
+
+const NAME_SAFE = /[^A-Za-z0-9_-]/g
+
+/** Model-visible name for one contributed tool. */
+export function pluginToolName(plugin: string, tool: string): string {
+  return `${PLUGIN_TOOL_PREFIX}${plugin.replace(NAME_SAFE, '_')}__${tool.replace(NAME_SAFE, '_')}`
+}
+
+/**
+ * Parse a contributed tool name back into its owner.
+ *
+ * Returns null for anything that is not one — callers use this as the branch
+ * condition, so a plugin tool and a built-in never share a code path.
+ */
+export function parsePluginToolName(name: string): { plugin: string; tool: string } | null {
+  if (!name.startsWith(PLUGIN_TOOL_PREFIX)) return null
+  const rest = name.slice(PLUGIN_TOOL_PREFIX.length)
+  const split = rest.indexOf('__')
+  if (split <= 0) return null
+  const plugin = rest.slice(0, split)
+  const tool = rest.slice(split + 2)
+  if (!plugin || !tool) return null
+  return { plugin, tool }
+}

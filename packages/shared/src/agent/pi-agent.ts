@@ -81,6 +81,7 @@ import { attachSessionSelfManagementBindings } from './session-self-management-b
 
 // Session tool proxy definitions (for registering with subprocess)
 import { getSessionToolProxyDefs, SESSION_TOOL_NAMES } from './backend/pi/session-tool-defs.ts';
+import { parsePluginToolName, pluginToolName } from '../events/plugin-tools.ts';
 
 // Session tool registry (for executing proxy tool calls)
 import {
@@ -1378,6 +1379,22 @@ export class PiAgent extends BaseAgent {
       if (callLlmDef) {
         callLlmDef.description += `\n\nDefault fast model for this session: ${this.config.miniModel}. Omit the model parameter to use it automatically.`;
       }
+    }
+
+    // Plugin-contributed tools, resolved once here (assembly time) and then
+    // fixed for the session. Namespaced `plugin__<plugin>__<tool>` so they cannot
+    // collide with a built-in and `routeToolCall` can send the call back to the
+    // plugin that declared it.
+    for (const contributed of this.config.pluginTools ?? []) {
+      sessionToolDefs.push({
+        name: pluginToolName(contributed.plugin, contributed.name),
+        description: contributed.description,
+        inputSchema: {
+          type: 'object',
+          ...(contributed.input.properties ? { properties: contributed.input.properties } : {}),
+          ...(contributed.input.required ? { required: contributed.input.required } : {}),
+        },
+      } as (typeof sessionToolDefs)[number]);
     }
 
     // Register session tools via the tool layering path (spec §5): mode is
@@ -2817,8 +2834,35 @@ export class PiAgent extends BaseAgent {
    *
    * Returns { content: string; isError: boolean } matching subprocess protocol.
    */
-  private async routeToolCall(
-    toolName: string,
+  /**
+   * Run a plugin-contributed tool.
+   *
+   * The result is returned to the model as text, not as a structured object:
+   * plugins are separate programs and their reply shape is theirs. A failure is
+   * reported with `isError` so the model can correct course instead of assuming
+   * the call worked.
+   */
+  private async executePluginTool(
+    plugin: string,
+    tool: string,
+    args: Record<string, unknown>,
+  ): Promise<{ content: string; isError: boolean }> {
+    const call = this._sessionToolContext?.callPluginActionFn;
+    if (!call) {
+      return { content: `插件工具 ${tool} 不可用：会话未接入插件调用通道`, isError: true };
+    }
+    try {
+      const result = await call({ plugin, action: tool, args });
+      return { content: result.message || (result.ok ? '已完成' : '插件未返回结果'), isError: !result.ok };
+    } catch (error) {
+      return {
+        content: `插件 ${plugin} 的 ${tool} 执行失败：${error instanceof Error ? error.message : String(error)}`,
+        isError: true,
+      };
+    }
+  }
+
+  private async routeToolCall(    toolName: string,
     args: Record<string, unknown>,
     signal?: AbortSignal,
     onKillResult?: (result: { ok: boolean; error?: string }) => void,
@@ -2835,6 +2879,14 @@ export class PiAgent extends BaseAgent {
     const strippedName = toolName.startsWith('mcp__session__')
       ? toolName.slice('mcp__session__'.length)
       : toolName;
+
+    // Plugin-contributed tools: the name carries the owner, so no lookup table
+    // has to stay in sync. A tool whose plugin was since disabled fails here by
+    // name, which is the honest answer — the tool the model was promised is gone.
+    const pluginTool = parsePluginToolName(toolName) ?? parsePluginToolName(strippedName);
+    if (pluginTool) {
+      return this.executePluginTool(pluginTool.plugin, pluginTool.tool, args);
+    }
 
     if (SESSION_TOOL_NAMES.has(strippedName)) {
       return this.executeSessionTool(strippedName, args, signal, onKillResult);

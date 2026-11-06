@@ -39,6 +39,7 @@ import { TaskService } from '../tasks/task-service.ts'
 import { readJournal, formatTaskBrief, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
+import { assemblePluginTools } from '@craft-agent/shared/events/plugin-tools'
 
 /** 6-hex id, used for collision-free attachment names. */
 function generateShortId(): string {
@@ -5369,6 +5370,28 @@ export class SessionManager implements ISessionManager {
       // Common session + callback config (identical for all backends)
       // ============================================================
 
+      // Plugin tools, assembled once per session. A broken manifest must not
+      // prevent a session from starting, so failure yields no contributions
+      // rather than an error.
+      let pluginTools: ReturnType<typeof assemblePluginTools> = []
+      try {
+        pluginTools = assemblePluginTools(
+          loadListeners({
+            workspaceRoot: managed.workspace.rootPath,
+            catalogDirs: pluginCatalogDirs(),
+            skipProbes: true,
+          }).map((entry) => ({
+            id: entry.id,
+            enabled: entry.enabled,
+            installed: entry.source === 'workspace',
+            actions: entry.manifest.actions ?? [],
+          })),
+          managed.toolScope ?? {},
+        )
+      } catch (error) {
+        sessionLog.warn('plugin tool assembly failed', { sessionId: managed.id, error })
+      }
+
       const sessionConfig = {
         id: managed.id,
         workspaceRootPath: managed.workspace.rootPath,
@@ -5397,6 +5420,9 @@ export class SessionManager implements ISessionManager {
         role: managed.role,
         taskId: managed.taskId,
         ...(managed.toolScope ? { toolScope: managed.toolScope } : {}),
+        // Assembled here, once, for this session: the tool table is part of the
+        // prompt, so it must not be recomputed while the conversation runs.
+        ...(pluginTools.length ? { pluginTools } : {}),
         spawnDepth: managed.spawnDepth,
       }
 

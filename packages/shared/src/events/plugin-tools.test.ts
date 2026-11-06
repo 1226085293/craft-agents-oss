@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'bun:test'
-import { assemblePluginTools, findToolNameCollisions } from './plugin-tools.ts'
+import {
+  assemblePluginTools,
+  findToolNameCollisions,
+  parsePluginToolName,
+  pluginToolName,
+} from './plugin-tools.ts'
 
 /**
  * The tool table is part of the prompt, so these cases are about stability as
@@ -84,5 +89,37 @@ describe('assemblePluginTools', () => {
     expect(findToolNameCollisions([rival, slack])).toEqual([
       { name: 'slack_search', plugins: ['slack', 'zzz'] },
     ])
+  })
+})
+
+describe('plugin tool names', () => {
+  it('round-trips through the model-visible name', () => {
+    const name = pluginToolName('slack', 'slack_search')
+    expect(name).toBe('plugin__slack__slack_search')
+    expect(parsePluginToolName(name)).toEqual({ plugin: 'slack', tool: 'slack_search' })
+  });
+
+  it('keeps a tool name containing double underscores intact', () => {
+    // Splitting on the FIRST separator is what makes this work.
+    const name = pluginToolName('gh', 'pr__list')
+    expect(parsePluginToolName(name)).toEqual({ plugin: 'gh', tool: 'pr__list' })
+  });
+
+  it('replaces characters a tool name may not contain', () => {
+    expect(pluginToolName('my.plugin', 'do:thing')).toBe('plugin__my_plugin__do_thing')
+  });
+
+  it('returns null for anything that is not a plugin tool', () => {
+    expect(parsePluginToolName('bash')).toBeNull()
+    expect(parsePluginToolName('mcp__session__call_llm')).toBeNull()
+    expect(parsePluginToolName('plugin__')).toBeNull()
+    expect(parsePluginToolName('plugin____x')).toBeNull()
+  })
+
+  it('cannot collide with a built-in name', () => {
+    // Built-ins never start with the prefix, and the prefix cannot appear
+    // inside one, so routing by name has exactly one answer.
+    expect(pluginToolName('bash', 'run')).not.toBe('bash')
+    expect(parsePluginToolName('plugin__slack__slack_search')?.plugin).toBe('slack')
   })
 })

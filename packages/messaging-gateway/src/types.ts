@@ -9,7 +9,18 @@
 // Platform types
 // ---------------------------------------------------------------------------
 
-export type PlatformType = 'telegram' | 'whatsapp' | 'lark' | 'qq' | 'wechat'
+/**
+ * A platform id — the id of the plugin that provides it.
+ *
+ * This used to be a closed union (`'telegram' | 'whatsapp' | …`), which meant a
+ * new platform was a host change by definition: the type itself enumerated the
+ * possible answers. An open string is what lets `plugins/discord/` exist without
+ * anyone editing this file.
+ *
+ * The bundled five keep their ids, so persisted bindings and stored credentials
+ * need no migration — only the type changed, not the values.
+ */
+export type PlatformType = string
 
 // ---------------------------------------------------------------------------
 // Logger
@@ -538,104 +549,34 @@ export interface PendingSender {
   threadId?: number
 }
 
+/**
+ * What the host needs to know about one platform in a workspace.
+ *
+ * Only the parts Craft itself acts on: whether it is on, and who may drive the
+ * bot. Everything platform-specific (a supergroup id, a domain, a bot openid) is
+ * the plugin's business and travels through the index signature without being
+ * named here.
+ */
+export interface WorkspacePlatformConfig {
+  enabled: boolean
+  /** Workspace-level access policy. Missing = `'open'` for legacy configs. */
+  accessMode?: PlatformAccessMode
+  /** User ids permitted to drive the bot at workspace level. */
+  owners?: PlatformOwner[]
+  /** Plugin-owned keys; the host stores and returns them untouched. */
+  [key: string]: unknown
+}
+
 export interface MessagingConfig {
   enabled: boolean
-  platforms: {
-    telegram?: {
-      enabled: boolean
-      /**
-       * Optional configured supergroup. Adapter accepts messages from this
-       * chat in addition to DMs. Sessions can bind to specific topics within.
-       */
-      supergroup?: TelegramSupergroupConfig
-      /**
-       * Workspace-level access policy. Missing field = `'open'` for back-
-       * compat with workspaces that predate access control. Fresh setups
-       * land on `'owner-only'` automatically (registry sets it on first pair).
-       */
-      accessMode?: PlatformAccessMode
-      /**
-       * Telegram user ids permitted to drive the bot at workspace level.
-       * Gates `/new`, `/bind`, `/unbind`, `/status`, `/stop` and serves as
-       * the default sender allow-list for bindings whose `accessMode === 'inherit'`.
-       *
-       * `/pair` itself stays open: if the list is empty, the first
-       * successful redeem seeds the list with the consuming sender. After
-       * that, only existing owners may redeem further codes.
-       */
-      owners?: PlatformOwner[]
-    }
-    whatsapp?: {
-      enabled: boolean
-      /**
-       * When true, messages sent from other devices on the same WA account
-       * to the self-JID (your own number) are routed to a bound session.
-       * The worker filters its own echoes via sent-ID tracking + a response
-       * prefix. Defaults to `true` when unset — the no-second-phone flow is
-       * the expected UX for new users.
-       */
-      selfChatMode?: boolean
-    }
-    lark?: {
-      enabled: boolean
-      /**
-       * Which Lark/Feishu domain the bot belongs to. A bot is registered
-       * with one Open Platform — they're separate ecosystems despite
-       * sharing the same SDK + protocols.
-       *  - `lark` → open.larksuite.com (international)
-       *  - `feishu` → open.feishu.cn (China)
-       */
-      domain?: 'lark' | 'feishu'
-    }
-    qq?: {
-      enabled: boolean
-      /**
-       * Workspace-level access policy. QQ defaults to `'owner-only'` so
-       * slash commands (and C2C DMs) are restricted to the configured main
-       * QQ by default. Missing field is treated as `'owner-only'` (unlike
-       * Telegram, where legacy workspaces default to `'open'`).
-       */
-      accessMode?: PlatformAccessMode
-      /**
-       * OpenIDs permitted to drive the bot at workspace level. The "main
-       * QQ" — gates slash commands in both group chats and C2C DMs, and
-       * serves as the default sender allow-list for bindings whose
-       * `accessMode === 'inherit'`.
-       *
-       * QQ Open Platform does not expose a QQ-number → openid lookup, so
-       * the operator must fill these from a C2C message the bot received
-       * (the sender's `user_openid` is visible in logs / the settings UI).
-       */
-      owners?: PlatformOwner[]
-      /**
-       * The bot's own OpenID in group chats. Needed when the QQ platform
-       * has enabled the "read all group messages" scope (which delivers
-       * GROUP_MESSAGE_CREATE events for every group message) so the
-       * adapter can filter out messages that don't @-mention the bot.
-       *
-       * When omitted, the adapter learns it from the first
-       * GROUP_AT_MESSAGE_CREATE event it receives, or — as a fallback —
-       * from an unambiguous single @-mention in a GROUP_MESSAGE_CREATE
-       * event whose author is not the mentioned user.
-       */
-      botOpenId?: string
-    }
-    wechat?: {
-      enabled: boolean
-      /**
-       * Workspace-level access policy. WeChat is a personal-account bot
-       * (ClawBot) — anyone the account can talk to is implicitly a peer;
-       * defaults to `'open'` so DMs and group @-mentions route freely.
-       */
-      accessMode?: PlatformAccessMode
-      /**
-       * User IDs permitted to drive the bot at workspace level, when
-       * `accessMode` is `'owner-only'`. WeChat user ids are opaque
-       * strings issued by the iLink platform (see `from_user_id`).
-       */
-      owners?: PlatformOwner[]
-    }
-  }
+  /**
+   * Per-platform settings, keyed by plugin id.
+   *
+   * A record, not an object literal listing the five bundled platforms: that
+   * list was a closed set in the host, so a new platform could not exist without
+   * editing this file. Unknown keys are preserved and belong to their plugin.
+   */
+  platforms: Record<string, WorkspacePlatformConfig>
 }
 
 export const DEFAULT_MESSAGING_CONFIG: MessagingConfig = {

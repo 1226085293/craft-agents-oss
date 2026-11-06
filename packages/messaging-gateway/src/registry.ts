@@ -813,7 +813,11 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
   /** Read accessor for the current paired supergroup, if any. */
   getWorkspaceSupergroup(workspaceId: string): { chatId: string; title: string; capturedAt: number } | null {
     const state = this.workspaces.get(workspaceId) ?? this.bootstrapWorkspace(workspaceId)
-    const sg = state.configStore.get().platforms.telegram?.supergroup
+    // `supergroup` is Telegram's own key, not a host concept: read it as an
+    // opaque platform value and only assert the shape the host renders.
+    const sg = state.configStore.get().platforms.telegram?.supergroup as
+      | { chatId: string; title: string; capturedAt: number }
+      | undefined
     return sg ? { ...sg } : null
   }
 
@@ -1677,7 +1681,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         })
         return
       case 'error':
-        if (!state.runtime.whatsapp.connected) {
+        if (!state.runtime.whatsapp?.connected) {
           this.setPlatformRuntime(workspaceId, state, 'whatsapp', {
             configured: true,
             connected: false,
@@ -2068,7 +2072,10 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
         if (!adapter) throw new Error('telegram plugin did not provide a program')
       // 记录「已创建但未注册」的句柄：超时/换 token 时靠它掐掉孤儿 poller
       state.telegramAttemptAdapter = adapter
-      const supergroupChatId = state.configStore.get().platforms.telegram?.supergroup?.chatId
+      const supergroup = state.configStore.get().platforms.telegram?.supergroup as
+        | { chatId?: string }
+        | undefined
+      const supergroupChatId = supergroup?.chatId
       await adapter.initialize({
         token: cred.value,
         ...(supergroupChatId ? { acceptedSupergroupChatId: supergroupChatId } : {}),
@@ -2996,8 +3003,10 @@ function createRuntime(platform: PlatformType, configured: boolean): MessagingPl
   }
 }
 
-function cloneRuntime(runtime: MessagingPlatformRuntimeInfo): MessagingPlatformRuntimeInfo {
-  return { ...runtime }
+function cloneRuntime(
+  runtime: MessagingPlatformRuntimeInfo | undefined,
+): MessagingPlatformRuntimeInfo | undefined {
+  return runtime ? { ...runtime } : undefined
 }
 
 async function fetchTelegramBotInfo(

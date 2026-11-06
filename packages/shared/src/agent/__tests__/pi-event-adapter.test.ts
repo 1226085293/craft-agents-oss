@@ -94,6 +94,26 @@ describe('PiEventAdapter', () => {
       expect(adapter.isHoldingTurn).toBe(false);
     });
 
+    it('holds the turn for a subprocess stall retry', () => {
+      collect(adapter.adaptEvent({ type: 'turn_start' } as any));
+
+      const pending = collect(adapter.adaptEvent({
+        type: 'agent_end',
+        stallRetryPending: true,
+      } as any));
+      expect(pending).toMatchObject([{ type: 'retry', phase: 'backoff' }]);
+      expect(adapter.isHoldingTurn).toBe(true);
+
+      expect(collect(adapter.adaptEvent({ type: 'agent_start' } as any))).toEqual([
+        { type: 'retry', phase: 'active' },
+      ]);
+
+      const recovered = collect(adapter.adaptEvent({ type: 'agent_end' } as any));
+      expect(recovered[0]).toMatchObject({ type: 'retry', phase: 'end', recovered: true });
+      expect(recovered.at(-1)).toMatchObject({ type: 'complete' });
+      expect(adapter.isHoldingTurn).toBe(false);
+    });
+
     it('holds the turn for an empty-response retry marker too', () => {
       collect(adapter.adaptEvent({ type: 'turn_start' } as any));
       const failed = collect(adapter.adaptEvent({

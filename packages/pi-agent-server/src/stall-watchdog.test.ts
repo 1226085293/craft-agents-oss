@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { shouldAbortStalledTurn } from './stall-watchdog.ts'
+import {
+  READ_ONLY_TOOL_SILENCE_BUDGET_MS,
+  STALL_EXEMPTION_GRACE_MS,
+  resolveToolSilenceDeadline,
+  shouldAbortStalledTurn,
+} from './stall-watchdog.ts'
 
 const base = {
   now: 1_000_000,
@@ -9,6 +14,32 @@ const base = {
   activeToolDeadline: null as number | null,
   pendingToolInFlight: false,
 }
+
+describe('resolveToolSilenceDeadline', () => {
+  const now = 1_000_000
+
+  it('gives a no-timeout read-only tool a finite default budget', () => {
+    expect(resolveToolSilenceDeadline('Grep', {}, now)).toBe(
+      now + READ_ONLY_TOOL_SILENCE_BUDGET_MS + STALL_EXEMPTION_GRACE_MS,
+    )
+  })
+
+  it('keeps a no-timeout non-read-only tool unbounded', () => {
+    expect(resolveToolSilenceDeadline('Bash', {}, now)).toBeNull()
+  })
+
+  it('honours an explicit timeout in seconds', () => {
+    expect(resolveToolSilenceDeadline('Bash', { timeout: 10 }, now)).toBe(
+      now + 10_000 + STALL_EXEMPTION_GRACE_MS,
+    )
+  })
+
+  it('lets an explicit timeout override the read-only default', () => {
+    expect(resolveToolSilenceDeadline('Grep', { timeout: 5 }, now)).toBe(
+      now + 5_000 + STALL_EXEMPTION_GRACE_MS,
+    )
+  })
+})
 
 describe('shouldAbortStalledTurn', () => {
   it('does not abort while a cooldown wait outlasts the stall timeout', () => {

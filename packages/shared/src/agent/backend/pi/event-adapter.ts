@@ -580,7 +580,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.gatewayRetryFallbackTimerId = setTimeout(() => {
       this.gatewayRetryFallbackTimerId = null;
       if (this.gatewayRetryState !== 'awaiting' || this.gatewayRetryAttempt !== armedAttempt) return;
-      this.log.warn('Gateway retry fallback fired — no agent_start followed the retry hold', {
+      this.log.warn('Subprocess retry fallback fired — no agent_start followed the retry hold', {
         timeoutMs: GATEWAY_RETRY_START_FALLBACK_TIMEOUT_MS,
         attempt: armedAttempt,
       });
@@ -762,9 +762,17 @@ export class PiEventAdapter extends BaseEventAdapter {
         break;
 
       case 'agent_end': {
+        // A subprocess retry can be started for either a gateway stream
+        // truncation or a stalled turn. Both are "the SAME turn will continue
+        // after this agent_end"; holding only the gateway case let a stall
+        // retry start AFTER the host had already emitted `complete`, so the
+        // retried answer landed in a closed queue (2026-11-06 aware-storm).
+        const subprocessRetryPending =
+          (event as { gatewayRetryPending?: boolean }).gatewayRetryPending === true ||
+          (event as { stallRetryPending?: boolean }).stallRetryPending === true;
         if (
           this.gatewayRetryState === 'awaiting' &&
-          !(event as { gatewayRetryPending?: boolean }).gatewayRetryPending
+          !subprocessRetryPending
         ) {
           // The subprocess can fail to start the continuation (e.g. a
           // continue() rejection) and emit only its synthetic terminal event.
@@ -781,12 +789,15 @@ export class PiEventAdapter extends BaseEventAdapter {
           };
           if (terminalError) yield terminalError;
         }
-        if ((event as { gatewayRetryPending?: boolean }).gatewayRetryPending) {
+        if (subprocessRetryPending) {
           this.gatewayRetryState = 'awaiting';
           this.gatewayRetryAttempt += 1;
           this.armGatewayRetryFallbackTimer();
+          const stalled = (event as { stallRetryPending?: boolean }).stallRetryPending === true;
           yield { type: 'retry', phase: 'backoff', attempt: this.gatewayRetryAttempt,
-            message: `Stream interrupted. Retrying the same turn (attempt ${this.gatewayRetryAttempt})...` };
+            message: stalled
+              ? `Turn stalled. Recovering the same turn (attempt ${this.gatewayRetryAttempt})...`
+              : `Stream interrupted. Retrying the same turn (attempt ${this.gatewayRetryAttempt})...` };
           yield* this.demoteDraftReplyForHold();
           break;
         }

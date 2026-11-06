@@ -94,7 +94,7 @@ import {
 } from './ephemeral-query-lifecycle.ts';
 import { isCraftGatewayEndpoint } from './gateway-endpoint.ts';
 import { isGatewayStreamRetryMarker } from '../../shared/src/config/gateway-stream-retry.ts';
-import { shouldAbortStalledTurn } from './stall-watchdog.ts';
+import { shouldAbortStalledTurn, resolveToolSilenceDeadline } from './stall-watchdog.ts';
 import {
   buildCustomEndpointModelDef,
   normalizeCustomEndpointModelEntry,
@@ -2832,13 +2832,10 @@ let gatewayCooldownWaiting = false;
 // long-running tool emits no SDK events between start and end, so silence is
 // NOT a reliable dead-turn signal while a tool runs. Each entry maps a
 // toolCallId to the timestamp until which the tool's own timeout budget keeps
-// the turn alive (start + declared timeout + grace), or null when the tool
-// registered no finite timeout (no exemption — the plain idle deadline
-// applies, so genuinely hung no-timeout tools are still killed).
+// the turn alive (start + declared timeout + grace). Read-only built-ins get a
+// default budget; other no-timeout tools store null (no exemption — the plain
+// idle deadline applies, so genuinely hung tools are still killed).
 const activeToolSilenceDeadlines = new Map<string, number | null>();
-// Grace on top of a tool's declared timeout: the tool result (and its
-// tool_execution_end event) lands shortly after the timeout fires.
-const STALL_EXEMPTION_GRACE_MS = 30_000;
 
 // Abort-attribution flags (2026-09-08 fit-pulsar incident): the defense
 // post-stop evaluation skips EVERY resume signal when the last assistant
@@ -3082,11 +3079,10 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     // long-running tool is indistinguishable from a dead turn (2026-09-08).
     {
       const args = (event.args ?? {}) as Record<string, unknown>;
-      const rawTimeout = args.timeout;
-      const timeoutMs = typeof rawTimeout === 'number' && Number.isFinite(rawTimeout) && rawTimeout > 0
-        ? rawTimeout * 1000
-        : null;
-      activeToolSilenceDeadlines.set(event.toolCallId, timeoutMs == null ? null : Date.now() + timeoutMs + STALL_EXEMPTION_GRACE_MS);
+      activeToolSilenceDeadlines.set(
+        event.toolCallId,
+        resolveToolSilenceDeadline(toolName, args, Date.now()),
+      );
     }
     if (toolName.startsWith('session__') || toolName.startsWith('mcp__session__')) {
       const mcpToolName = toolName.replace(/^(mcp__session__|session__)/, '');
@@ -3312,6 +3308,25 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     );
   }
 
+  // Stall recovery retry: the host sends `retry` on the prompt_error that
+  // follows this abort, then the subprocess calls handleRetry()/continue().
+  // Annotate the aborted agent_end so the host does NOT emit `complete` for a
+  // turn whose retried answer is still coming (2026-11-06 aware-storm: the
+  // retry started after complete and its events landed in a closed queue).
+  if (
+    event.type === 'agent_end' &&
+    stallAbortInProgress &&
+    !userAbortRequested &&
+    !(event as { willRetry?: boolean }).willRetry &&
+    !(forwardedEvent as { defenseResumePending?: boolean }).defenseResumePending &&
+    !(forwardedEvent as { defenseVerificationPending?: boolean }).defenseVerificationPending &&
+    !(forwardedEvent as { queuedFollowUpPending?: boolean }).queuedFollowUpPending &&
+    !gatewayStreamRetryRequested
+  ) {
+    forwardedEvent = { ...(forwardedEvent as Record<string, unknown>), stallRetryPending: true } as unknown as OutboundAgentEvent;
+    debugLog('[retry] agent_end annotated stallRetryPending=true (stall recovery retry expected)');
+  }
+
   if (
     event.type === 'agent_end' &&
     gatewayStreamRetryRequested &&
@@ -3510,6 +3525,11 @@ function scheduleGatewayRetryAfterAgentEnd(): void {
 async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): Promise<void> {
 
   gatewayStreamRetryRequested = false;
+  // Set when this prompt's stall path aborts and the host is expected to
+  // re-issue the same model step. The outer catch must repeat the hold flag on
+  // its synthetic agent_end; otherwise that terminal event would release the
+  // queue before the retry starts.
+  let stallRetryExpected = false;
   cancelGatewayRetryGuard();
   currentUserMessage = msg.message;
   // A NEW user request starts a fresh verification cycle. Clear the attempt
@@ -3661,6 +3681,7 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
         debugLog('[prompt] stall aborted but defense resume completed — turn recovered, not failing the prompt');
         return;
       }
+      stallRetryExpected = true;
       throw finalError;
     }
   } catch (error) {
@@ -3684,7 +3705,14 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     send({ type: 'error', message: errorMsg, code: 'prompt_error' });
     // Send synthetic agent_end so the main process event queue unblocks.
     // willRetry: false — this is the terminal error path, no retry follows.
-    send({ type: 'event', event: { type: 'agent_end', messages: [], willRetry: false } });
+    // EXCEPT for a stall retry: the host sends `retry` on the prompt_error,
+    // so keep the queue open until that retry produces agent_start/agent_end.
+    send({ type: 'event', event: {
+      type: 'agent_end',
+      messages: [],
+      willRetry: false,
+      ...(stallRetryExpected ? { stallRetryPending: true } : {}),
+    } });
   }
 }
 
@@ -3922,8 +3950,16 @@ async function handleRetry(): Promise<void> {
     } finally {
       stallAbortInProgress = false;
     }
+    const stallRetry = errorMsg.includes('Turn stalled');
     send({ type: 'error', message: errorMsg, code: 'prompt_error' });
-    send({ type: 'event', event: { type: 'agent_end', messages: [], willRetry: false } });
+    // A stall retry keeps the queue open for the host's `retry`; a plain API
+    // failure is terminal and must release it immediately.
+    send({ type: 'event', event: {
+      type: 'agent_end',
+      messages: [],
+      willRetry: false,
+      ...(stallRetry ? { stallRetryPending: true } : {}),
+    } as OutboundAgentEvent });
   }
 }
 

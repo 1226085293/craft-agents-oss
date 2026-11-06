@@ -19,7 +19,7 @@ afterEach(() => {
 interface Harness {
   runtime: SupervisorRuntime;
   sent: Array<{ sessionId: string; text: string }>;
-  spawned: Array<{ scope: string; instruction: string; spawnDepth: number }>;
+  spawned: Array<{ scope: string; instruction: string; spawnDepth: number; agentId?: string; taskId?: string }>;
   written: string[];
   asked: Array<{ question: string }[]>;
   supervisor: SupervisorSessionInfo;
@@ -27,7 +27,15 @@ interface Harness {
   sessions: Map<string, SupervisorSessionInfo>;
 }
 
-function harness(root: string, opts: { processeing?: boolean; spawnDepth?: number } = {}): Harness {
+function harness(
+  root: string,
+  opts: {
+    processeing?: boolean;
+    spawnDepth?: number;
+    /** Tasks the runtime can resolve, so a `task` target can be dispatched. */
+    tasks?: Map<string, { id: string; currentSessionId?: string; assigneeAgentId?: string }>;
+  } = {},
+): Harness {
   const sent: Harness['sent'] = [];
   const spawned: Harness['spawned'] = [];
   const written: string[] = [];
@@ -49,6 +57,8 @@ function harness(root: string, opts: { processeing?: boolean; spawnDepth?: numbe
         scope: params.scope,
         instruction: params.instruction,
         spawnDepth: params.spawnDepth,
+        ...(params.agentId ? { agentId: params.agentId } : {}),
+        ...(params.taskId ? { taskId: params.taskId } : {}),
       });
       const id = `sess_worker_${spawned.length}`;
       sessions.set(id, { id, role: 'worker', spawnDepth: params.spawnDepth, isProcessing: false });
@@ -63,6 +73,7 @@ function harness(root: string, opts: { processeing?: boolean; spawnDepth?: numbe
     askUser: async (_sessionId, questions) => {
       asked.push(questions);
     },
+    getTask: (taskId) => opts.tasks?.get(taskId) ?? null,
   });
 
   return { runtime, sent, spawned, written, asked, supervisor, sessions };
@@ -123,6 +134,68 @@ describe('unclaimed events', () => {
 
     h.supervisor.isProcessing = false;
     await h.runtime.onSupervisorIdle();
+    expect(h.sent).toHaveLength(1);
+  });
+});
+
+
+/**
+ * A task names its executor. Both ways of starting it must agree.
+ *
+ * The cron/event runner (`spawnTaskRun`) has always passed `task.assigneeAgentId`
+ * to `createSession`; this path did not, so the same task ran as its assigned
+ * profile when a trigger fired it and as the workspace default when the
+ * supervisor dispatched it. The lookup had been dropping the field, which made
+ * the bug invisible: `dispatch` never received it to pass on.
+ */
+describe('dispatch honours the task assignee', () => {
+  it("spawns the worker under the task's assigned profile", async () => {
+    const tasks = new Map([
+      ['T-1', { id: 'T-1', assigneeAgentId: 'agent-ui' }],
+    ]);
+    const h = harness(workspace(), { tasks });
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      scope: '改前端',
+      instruction: '把按钮改成蓝色',
+      attachTaskId: 'T-1',
+      parallel: false,
+    });
+    expect(h.spawned).toHaveLength(1);
+    expect(h.spawned[0]?.agentId).toBe('agent-ui');
+    expect(h.spawned[0]?.taskId).toBe('T-1');
+  });
+
+  it('leaves the profile unset when the task assigns nobody', async () => {
+    const tasks = new Map([['T-2', { id: 'T-2' }]]);
+    const h = harness(workspace(), { tasks });
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-2' },
+      scope: '查资料',
+      instruction: '查一下这个 API 怎么用',
+      attachTaskId: 'T-2',
+      parallel: false,
+    });
+    // Undefined, not a made-up id: the default profile is resolved downstream.
+    expect(h.spawned[0]?.agentId).toBeUndefined();
+  });
+
+  it('sends a follow-up to the existing session instead of re-spawning', async () => {
+    const tasks = new Map([['T-3', { id: 'T-3', currentSessionId: 'sess_worker_1', assigneeAgentId: 'agent-ui' }]]);
+    const h = harness(workspace(), { tasks });
+    h.sessions.set('sess_worker_1', { id: 'sess_worker_1', role: 'worker', spawnDepth: 1, isProcessing: false, taskId: 'T-3' });
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-3' },
+      scope: '改前端',
+      instruction: '再加个 hover',
+      parallel: false,
+    });
+    // A running task keeps its session (and therefore its profile); re-spawning
+    // would silently switch executors mid-task.
+    expect(h.spawned).toHaveLength(0);
     expect(h.sent).toHaveLength(1);
   });
 });
@@ -264,63 +337,41 @@ describe('user channel', () => {
 });
 
 /**
- * The cap backoff has to cover *both* ways the supervisor is woken: a turn
- * ending (`onSupervisorIdle`) and a fresh event arriving (`routeUnclaimed`).
+ * No per-turn cap, therefore no backoff gate.
  *
- * Gating only the first was a real hole: a busy channel would re-wake the
- * supervisor immediately after every cap kill, so the delay written for one path
- * was bypassed by the other. These cases pin the shared gate.
+ * A cap existed (and a backoff that throttled the backlog after repeated hits).
+ * Both are gone: the cap turned "the supervisor took a while" into a task, which
+ * needed a second mechanism to clean up after itself. What must stay true is the
+ * reason the backoff lived in `drainToSupervisor` rather than at its call sites —
+ * *every* way of waking the supervisor has to hand over the backlog, and does it
+ * right away.
  */
-describe('cap backoff applies to every wake path', () => {
-  it('drains immediately on the first hit — one slow turn is not a pattern', async () => {
+describe('the backlog is handed over on every wake path', () => {
+  it('delivers on a fresh event', async () => {
     const h = harness(workspace());
-    h.runtime.noteCapHit();
     await h.runtime.routeUnclaimed({ id: 'e1', source: 'qq', type: 'message.received', title: 'hi' });
     expect(h.sent.filter((s) => s.sessionId === 'sess_sup')).toHaveLength(1);
     h.runtime.dispose();
   });
 
-  it('holds a new event while the window is open', async () => {
+  it('delivers when a turn ends', async () => {
     const h = harness(workspace());
-    h.runtime.noteCapHit();
-    h.runtime.noteCapHit();
     await h.runtime.routeUnclaimed({ id: 'e1', source: 'qq', type: 'message.received', title: 'hi' });
-    // Nothing delivered: the event waits in the backlog rather than starting a
-    // turn that would be killed the same way.
-    expect(h.sent).toHaveLength(0);
-    h.runtime.dispose();
-  });
-
-  it('holds the post-turn drain while the window is open', async () => {
-    const h = harness(workspace());
-    h.runtime.noteCapHit();
-    h.runtime.noteCapHit();
-    await h.runtime.routeUnclaimed({ id: 'e1', source: 'qq', type: 'message.received', title: 'hi' });
+    const before = h.sent.length;
     await h.runtime.onSupervisorIdle();
-    expect(h.sent).toHaveLength(0);
+    // Nothing new queued, so nothing new sent — but the path must not throw or
+    // strand state.
+    expect(h.sent.length).toBe(before);
     h.runtime.dispose();
   });
 
-  it('delivers the held events once a turn completes normally', async () => {
+  it('never holds an event back waiting for a window to elapse', async () => {
     const h = harness(workspace());
-    h.runtime.noteCapHit();
-    h.runtime.noteCapHit();
-    await h.runtime.routeUnclaimed({ id: 'e1', source: 'qq', type: 'message.received', title: 'hi' });
-    expect(h.sent).toHaveLength(0);
-    // A good turn proves the cap is not the problem; the backlog is released.
-    h.runtime.noteTurnCompleted();
-    await h.runtime.onSupervisorIdle();
-    expect(h.sent.filter((s) => s.sessionId === 'sess_sup')).toHaveLength(1);
+    await h.runtime.routeUnclaimed({ id: 'e1', source: 'qq', type: 'message.received', title: 'one' });
+    await h.runtime.routeUnclaimed({ id: 'e2', source: 'qq', type: 'message.received', title: 'two' });
+    // Both wake-ups delivered immediately; a backoff would have swallowed the
+    // second one until a timer fired.
+    expect(h.sent.filter((s) => s.sessionId === 'sess_sup').length).toBeGreaterThanOrEqual(2);
     h.runtime.dispose();
-  });
-
-  it('dispose stops a pending window from firing later', async () => {
-    const h = harness(workspace());
-    h.runtime.noteCapHit();
-    h.runtime.noteCapHit();
-    await h.runtime.routeUnclaimed({ id: 'e1', source: 'qq', type: 'message.received', title: 'hi' });
-    h.runtime.dispose();
-    await new Promise((r) => setTimeout(r, 30));
-    expect(h.sent).toHaveLength(0);
   });
 });

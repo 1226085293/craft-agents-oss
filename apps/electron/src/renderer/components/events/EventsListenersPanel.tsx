@@ -12,6 +12,7 @@
  */
 
 import * as React from 'react'
+import { toast } from 'sonner'
 import {
   Blocks,
   Bot,
@@ -106,6 +107,10 @@ export function EventsListenersPanel({
   const [listeners, setListeners] = React.useState<ListenerDto[]>([])
   const [loading, setLoading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  // Kept in a ref so the status subscription can name the plugin without
+  // re-subscribing on every list change.
+  const listenersRef = React.useRef<ListenerDto[]>([])
+  listenersRef.current = listeners
 
   const load = React.useCallback(async () => {
     if (!workspaceId) return
@@ -131,11 +136,26 @@ export function EventsListenersPanel({
 
   React.useEffect(() => {
     if (!workspaceId) return
+    // Remember which plugins we have already warned about, so a restart loop
+    // does not produce a toast per attempt.
+    const warned = new Set<string>()
     const off = window.electronAPI.onEventListenerStatus((wsId, status) => {
       if (wsId !== workspaceId) return
       setListeners((prev) =>
         prev.map((listener) => (listener.id === status.id ? { ...listener, status, enabled: status.state !== 'stopped' || listener.enabled } : listener)),
       )
+
+      // A plugin that fails to start is still enabled — Craft does not silently
+      // switch it off. Tell the user instead of leaving a quiet amber dot: the
+      // failure reason is only visible on the detail page otherwise.
+      if (status.state === 'failed' && !warned.has(status.id)) {
+        warned.add(status.id)
+        const name = listenersRef.current.find((l) => l.id === status.id)?.name ?? status.id
+        toast.error(`插件「${name}」启动失败`, {
+          description: status.lastError ?? '检查配置与依赖后重试',
+        })
+      }
+      if (status.state === 'running') warned.delete(status.id)
     })
     return () => {
       if (typeof off === 'function') off()

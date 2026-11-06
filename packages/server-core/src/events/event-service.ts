@@ -16,13 +16,7 @@ import { existsSync } from 'node:fs';
 import { createLogger } from '@craft-agent/shared/utils';
 import { EventStore, type EventFilter, type EventMeta, type EventRecord } from '@craft-agent/shared/events/event-store.ts';
 import { EventIngestServer, type EventIngestAddress } from './ingest-server.ts';
-import {
-  loadListeners,
-  missingConfigKeys,
-  setListenerConfig,
-  setListenerEnabled,
-  type LoadedListener,
-} from './listener-registry.ts';
+import { loadListeners, missingConfigKeys, setListenerConfig, setListenerEnabled, type LoadedListener, pluginReadiness } from './listener-registry.ts';
 import { ListenerSupervisor, type ListenerRuntimeStatus } from './listener-supervisor.ts';
 import { EventDispatcher, type DispatchTarget } from './event-dispatcher.ts';
 import { fetchReportedDeps } from './listener-control.ts';
@@ -310,23 +304,24 @@ export class EventService {
     return this.supervisor.listStatuses();
   }
 
-  /** Spawn (or no-op when already running) after checking readiness. */
+  /**
+   * Spawn (or no-op when already running) — but only when the plugin is ready.
+   *
+   * The gate lives here so every entry point (autostart, the enable toggle,
+   * "start" on the detail page) applies the same rule. A plugin that is not
+   * installed, switched off, missing required config, missing a dependency, or
+   * has no runnable program is reported as `stopped` with a reason — not
+   * `failed`. Nothing is running, but nothing is broken either; a plugin that
+   * has just been installed has no credentials yet, and that must not raise an
+   * error every time Craft starts.
+   */
   startListener(listener: LoadedListener): ListenerRuntimeStatus {
-    const blocking = listener.dependencies.filter(
-      (dep) => dep.state === 'missing' || dep.state === 'mismatch',
-    );
-    if (blocking.length > 0) {
+    const readiness = pluginReadiness(listener);
+    if (!readiness.ready) {
       return {
         ...this.supervisor.getStatus(listener.id),
-        state: 'failed',
-        lastError: `dependencies not satisfied: ${blocking.map((d) => d.label).join(', ')}`,
-      };
-    }
-    if (missingConfigKeys(listener).length > 0) {
-      return {
-        ...this.supervisor.getStatus(listener.id),
-        state: 'failed',
-        lastError: 'required config is missing',
+        state: 'stopped',
+        ...(readiness.detail ? { lastError: readiness.detail } : {}),
       };
     }
     return this.supervisor.start(listener);
@@ -362,9 +357,17 @@ export class EventService {
     setListenerConfig(workspaceRoot, id, config);
   }
 
-  /** Boot every enabled listener (app start, workspace switch). */
+  /**
+   * Boot the ready plugins (app start, workspace switch).
+   *
+   * Unready ones are skipped rather than attempted-and-failed: their state is
+   * already `stopped`, so at launch they simply do not start. This is what
+   * makes autostart conditional on "configured and environment satisfied".
+   */
   async startAllEnabled(workspaceRoot: string): Promise<ListenerRuntimeStatus[]> {
-    const listeners = loadListeners({ workspaceRoot, catalogDirs: pluginCatalogDirs() }).filter((listener) => listener.enabled);
+    const listeners = loadListeners({ workspaceRoot, catalogDirs: pluginCatalogDirs() }).filter(
+      (listener) => pluginReadiness(listener).ready,
+    );
     return listeners.map((listener) => this.startListener(listener));
   }
 

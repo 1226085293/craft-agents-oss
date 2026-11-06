@@ -7,7 +7,7 @@ import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@cr
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
 import { basename, dirname, isAbsolute, join } from 'path'
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs'
-import { loadListeners } from '../events/listener-registry.ts'
+import { isPluginUsable, loadListeners } from '../events/listener-registry.ts'
 import { pluginCatalogDirs } from '../events/event-service.ts'
 import { callPluginAction } from '../events/listener-control.ts'
 import { copyFile, readFile, writeFile, mkdir, stat, rm, readdir } from 'fs/promises'
@@ -6660,8 +6660,9 @@ ${request.prompt}`;
             input: unknown
           }> = []
           for (const plugin of loadListeners({ workspaceRoot: root, catalogDirs: pluginCatalogDirs(), skipProbes: true })) {
-            if (plugin.manifest.builtin !== true) continue
-            if (!plugin.enabled && plugin.source === 'catalog') continue
+            // Installed and switched on. A catalog entry that was never adopted
+            // must not appear as callable: it has no config and no data dir.
+            if (!isPluginUsable(plugin)) continue
             for (const action of plugin.manifest.actions ?? []) {
               out.push({
                 plugin: plugin.id,
@@ -6682,6 +6683,15 @@ ${request.prompt}`;
             skipProbes: true,
           }).find((entry) => entry.id === plugin)
           if (!installed) return { ok: false, message: `插件 ${plugin} 未安装` }
+          if (!isPluginUsable(installed)) {
+            return {
+              ok: false,
+              message:
+                installed.source === 'catalog'
+                  ? `插件 ${plugin} 尚未安装：先在「插件」里启用它`
+                  : `插件 ${plugin} 已停用`,
+            }
+          }
 
           const declared = (installed.manifest.actions ?? []).find((a) => a.name === action)
           if (!declared) {

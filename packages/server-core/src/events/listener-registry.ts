@@ -377,3 +377,74 @@ export function loadAllPluginLocales(
   }
   return merged;
 }
+
+/**
+ * Whether a plugin may be used at all.
+ *
+ * Two conditions, both about the user's intent rather than the plugin's state:
+ *
+ *   installed — a copy exists in the workspace. A catalog entry is *available*,
+ *               not installed: nothing has been adopted, so nothing may be
+ *               called, spawned, or asked to parse a credential.
+ *   enabled   — the user switched it on. Installed but off means "keep my
+ *               config, do not act".
+ *
+ * A plugin that fails to start is still installed+enabled; "broken" is a runtime
+ * state (shown amber), not a reason to pretend it does not exist.
+ */
+export function isPluginUsable(plugin: LoadedListener): boolean {
+  return plugin.source === 'workspace' && plugin.enabled === true
+}
+
+/**
+ * Why a plugin may or may not be started right now.
+ *
+ * Autostart is gated on this at every entry point: Craft must not spawn a
+ * program whose credentials are blank or whose interpreter is missing, and it
+ * must not record that as a failure — "not configured yet" is a normal state,
+ * not a broken plugin. Only a genuine crash reaches `failed` and produces a
+ * notification.
+ */
+export interface PluginReadiness {
+  ready: boolean
+  /** Machine-readable cause, so the UI can word it without a switch per case. */
+  reason?: 'not-installed' | 'disabled' | 'missing-config' | 'missing-deps' | 'no-program'
+  /** Human sentence for the detail panel and the toast description. */
+  detail?: string
+}
+
+export function pluginReadiness(plugin: LoadedListener): PluginReadiness {
+  if (plugin.source !== 'workspace') {
+    return { ready: false, reason: 'not-installed', detail: '插件尚未安装到工作区' }
+  }
+  if (plugin.enabled !== true) {
+    return { ready: false, reason: 'disabled', detail: '插件已停用' }
+  }
+
+  const missing = missingConfigKeys(plugin)
+  if (missing.length > 0) {
+    return {
+      ready: false,
+      reason: 'missing-config',
+      detail: `还缺配置：${missing.join('、')}`,
+    }
+  }
+
+  const blocking = plugin.dependencies.filter(
+    (dep) => dep.state === 'missing' || dep.state === 'mismatch',
+  )
+  if (blocking.length > 0) {
+    return {
+      ready: false,
+      reason: 'missing-deps',
+      detail: `依赖未满足：${blocking.map((dep) => dep.label).join('、')}`,
+    }
+  }
+
+  // A builtin is executed in-process; anything else needs a runnable program.
+  if (plugin.manifest.builtin !== true && !plugin.manifest.runtime) {
+    return { ready: false, reason: 'no-program', detail: '插件没有声明 runtime，无法启动' }
+  }
+
+  return { ready: true }
+}

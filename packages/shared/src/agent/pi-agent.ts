@@ -63,6 +63,7 @@ import { resolveToolTimeoutMs, withToolExecutionTimeout } from './tool-timeouts.
 import { getSupervisorSystemPrompt } from '../prompts/supervisor-prompt.ts'
 import { getSystemPrompt } from '../prompts/system.ts';
 import { buildEventsBlock } from '../events/prompt.ts';
+import { buildAgentRosterBlock } from '../agents/prompt.ts';
 import { getCoAuthorPreference } from '../config/appearance.ts';
 import { loadProjectById, getProjectAssetsPath, listProjectAssets, getProjectMemoryPath, loadProjectMemory } from '../projects/storage.ts';
 import type { ProjectPromptContext } from '../projects/types.ts';
@@ -3884,6 +3885,10 @@ ${agentSnapshot.persona.trim()}
         ? getSupervisorSystemPrompt({
             workspaceRootPath: this.config.workspace.rootPath,
             personaBlock,
+            // Who can do the work. A task names its executor (assigneeAgentId),
+            // so the supervisor has to know the roster before it can choose —
+            // otherwise every task runs as the default profile.
+            agentsBlock: buildAgentRosterBlock(this.config.workspace.rootPath),
             eventsBlock: buildEventsBlock(this.config.workspace.rootPath),
           })
         : getSystemPrompt(

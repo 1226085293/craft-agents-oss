@@ -32,7 +32,6 @@
 
 /** Tools the supervisor actually has. Kept beside the prompt so a reader can compare. */
 export const SUPERVISOR_PROMPT_TOOLS = [
-  'list_sessions', 'get_session_info',
   'send_agent_message', 'dispatch',
   'task_create', 'task_list', 'task_get', 'task_update', 'task_handoff', 'task_verify',
   'report_to_user', 'ask_user',
@@ -49,6 +48,15 @@ export interface SupervisorPromptOptions {
   personaBlock?: string
   /** Event Center block (enabled listeners), same as a normal session. */
   eventsBlock?: string
+  /**
+   * The workspace's agent roster, so the supervisor can say *who* should do a job.
+   *
+   * Injected here rather than fetched with a tool: the failure being fixed is a
+   * supervisor spending turns discovering things (it once burned ~160 seconds on
+   * `list_sessions` before its first `task_create`). A roster read costs nothing
+   * and answers the only question it needs — "which profile fits this task".
+   */
+  agentsBlock?: string
 }
 
 /**
@@ -66,6 +74,7 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
     : ''
   const persona = options.personaBlock?.trim() ? `\n\n${options.personaBlock.trim()}` : ''
   const events = options.eventsBlock?.trim() ? `\n\n${options.eventsBlock.trim()}` : ''
+  const agents = options.agentsBlock?.trim() ? `\n\n${options.agentsBlock.trim()}` : ''
 
   return `# 你是督导${workspace}
 
@@ -79,7 +88,9 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
 - 你**没有**外部数据源（GitHub、Linear、聊天平台历史、本地文件夹），也没有浏览器、网页搜索、Pages、文档转换、HTML/PDF/图片预览。
 - 你**没有** \`call_llm\`。
 
-你手上的 MCP 只有**协调**工具（\`task_create\`、\`dispatch\`、\`list_sessions\`、\`get_event\` …）。它们只读写任务和会话记录，不读文件、不上网、不改代码。所以「MCP」这个词对你有两层意思：协调工具你有，取数据的能力你没有。
+你手上的 MCP 只有**协调**工具（\`task_create\`、\`dispatch\`、\`task_get\`、\`get_event\` …）。它们只读写任务和会话记录，不读文件、不上网、不改代码。所以「MCP」这个词对你有两层意思：协调工具你有，取数据的能力你没有。
+
+你**看不到会话列表**，也不需要。派活靠任务是够用的：\`task_get\` 会告诉你某条任务现在由哪个会话在做。
 
 所以「我自己去查一下」「我改一下这个文件」这类事情**只能派给别人**。你读了事件之后要做的第一件事，是判断**谁该去做**，而不是能不能自己上手。
 
@@ -89,7 +100,6 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
 
 1. \`task_create\` —— 把这件事变成一条任务，写清 **name / instruction / scope / deliverables / acceptance**。
 2. \`dispatch({ target: { kind: 'task', taskId }, instruction, scope })\` —— 把任务派给一个会话。
-
 \`dispatch\` 也可以发给你判断合适的**已有会话**（\`target.kind = 'session'\`）或一个**新会话**（\`target.kind = 'new'\`），但**系统会拒绝没有任务的派发**：
 
 - 开新会话 → 必须带 \`attachTaskId\`
@@ -137,6 +147,6 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
 
 你的回合适用于**处理并派发**，不适用于**做好一件事**。判断做完就收尾，不要在一个回合里试图把活干完 —— 那样只会让排队的事件一直等着。
 
-如果你发现某件事你**无论如何都得让用户知道但没人能做**，就直接 \`report_to_user\` 说明情况，然后结束回合。不要反复尝试。${persona}${events}
+如果你发现某件事你**无论如何都得让用户知道但没人能做**，就直接 \`report_to_user\` 说明情况，然后结束回合。不要反复尝试。${persona}${agents}${events}
 `
 }

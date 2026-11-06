@@ -217,3 +217,65 @@ describe('user channel', () => {
     expect(h.asked[0]).toHaveLength(2);
   });
 });
+
+/**
+ * The cap backoff has to cover *both* ways the supervisor is woken: a turn
+ * ending (`onSupervisorIdle`) and a fresh event arriving (`routeUnclaimed`).
+ *
+ * Gating only the first was a real hole: a busy channel would re-wake the
+ * supervisor immediately after every cap kill, so the delay written for one path
+ * was bypassed by the other. These cases pin the shared gate.
+ */
+describe('cap backoff applies to every wake path', () => {
+  it('drains immediately on the first hit — one slow turn is not a pattern', async () => {
+    const h = harness(workspace());
+    h.runtime.noteCapHit();
+    await h.runtime.routeUnclaimed({ id: 'e1', source: 'qq', type: 'message.received', title: 'hi' });
+    expect(h.sent.filter((s) => s.sessionId === 'sess_sup')).toHaveLength(1);
+    h.runtime.dispose();
+  });
+
+  it('holds a new event while the window is open', async () => {
+    const h = harness(workspace());
+    h.runtime.noteCapHit();
+    h.runtime.noteCapHit();
+    await h.runtime.routeUnclaimed({ id: 'e1', source: 'qq', type: 'message.received', title: 'hi' });
+    // Nothing delivered: the event waits in the backlog rather than starting a
+    // turn that would be killed the same way.
+    expect(h.sent).toHaveLength(0);
+    h.runtime.dispose();
+  });
+
+  it('holds the post-turn drain while the window is open', async () => {
+    const h = harness(workspace());
+    h.runtime.noteCapHit();
+    h.runtime.noteCapHit();
+    await h.runtime.routeUnclaimed({ id: 'e1', source: 'qq', type: 'message.received', title: 'hi' });
+    await h.runtime.onSupervisorIdle();
+    expect(h.sent).toHaveLength(0);
+    h.runtime.dispose();
+  });
+
+  it('delivers the held events once a turn completes normally', async () => {
+    const h = harness(workspace());
+    h.runtime.noteCapHit();
+    h.runtime.noteCapHit();
+    await h.runtime.routeUnclaimed({ id: 'e1', source: 'qq', type: 'message.received', title: 'hi' });
+    expect(h.sent).toHaveLength(0);
+    // A good turn proves the cap is not the problem; the backlog is released.
+    h.runtime.noteTurnCompleted();
+    await h.runtime.onSupervisorIdle();
+    expect(h.sent.filter((s) => s.sessionId === 'sess_sup')).toHaveLength(1);
+    h.runtime.dispose();
+  });
+
+  it('dispose stops a pending window from firing later', async () => {
+    const h = harness(workspace());
+    h.runtime.noteCapHit();
+    h.runtime.noteCapHit();
+    await h.runtime.routeUnclaimed({ id: 'e1', source: 'qq', type: 'message.received', title: 'hi' });
+    h.runtime.dispose();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(h.sent).toHaveLength(0);
+  });
+});

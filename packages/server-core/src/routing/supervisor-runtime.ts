@@ -88,6 +88,62 @@ export class SupervisorRuntime {
   private readonly dispatchQueue = new DispatchQueue((key) => this.ruleCaps.get(key) ?? 1);
   private readonly ruleCaps = new Map<string, number>();
 
+  /**
+   * Consecutive supervisor turns that died at the per-turn cap.
+   *
+   * The cap used to close the turn and immediately re-drain, so work that needed
+   * longer than the cap produced start → kill → re-queue → start again, throwing
+   * the reasoning away every round. The counter is what turns that into a bounded
+   * wait.
+   */
+  private capHits = 0;
+  /** No supervisor turn may start before this timestamp. 0 = no wait. */
+  private capBackoffUntil = 0;
+  /** Armed by `noteCapHit` so the backlog is not stranded when the window ends. */
+  private capBackoffTimer?: ReturnType<typeof setTimeout>;
+
+  /**
+   * One hit is bad luck with a slow channel; a streak is work that does not
+   * belong in a router. So the first hit still drains immediately and the delay
+   * only starts from the second.
+   */
+  private static backoffFor(hits: number): number {
+    return hits >= 2 ? Math.min(5 * 60_000, 15_000 * (hits - 1)) : 0;
+  }
+
+  /**
+   * Record that a supervisor turn exceeded the cap.
+   *
+   * Called by whoever closed the turn, because only that side knows the turn was
+   * killed by the cap rather than finishing on its own — the two arrive through
+   * the same "turn ended" path.
+   */
+  noteCapHit(): void {
+    this.capHits += 1;
+    const delay = SupervisorRuntime.backoffFor(this.capHits);
+    if (delay <= 0) return;
+    this.capBackoffUntil = Date.now() + delay;
+    log.warn(`[supervisor] ${this.capHits} consecutive cap hits; holding the backlog for ${delay}ms`);
+  }
+
+  /** A turn finished without hitting the cap, so the streak is over. */
+  noteTurnCompleted(): void {
+    this.capHits = 0;
+    this.capBackoffUntil = 0;
+    if (this.capBackoffTimer) {
+      clearTimeout(this.capBackoffTimer);
+      this.capBackoffTimer = undefined;
+    }
+  }
+
+  /** Stop the timer when the workspace is released. */
+  dispose(): void {
+    if (this.capBackoffTimer) {
+      clearTimeout(this.capBackoffTimer);
+      this.capBackoffTimer = undefined;
+    }
+  }
+
   constructor(private readonly deps: SupervisorRuntimeDeps) {}
 
   // ------------------------------------------------------------
@@ -196,6 +252,28 @@ export class SupervisorRuntime {
   /** Push the current backlog into the supervisor, once, merged. */
   private async drainToSupervisor(): Promise<void> {
     if (this.backlog.size === 0) return;
+
+    // The wait lives here, not at the call sites, because there are two ways in:
+    // a turn ending (`onSupervisorIdle`) and a fresh event arriving
+    // (`routeUnclaimed`). Gating only the first left the second able to start the
+    // very turn the backoff was meant to prevent — a busy channel would have
+    // re-woken the supervisor immediately after each cap kill.
+    const waitMs = this.capBackoffUntil - Date.now();
+    if (waitMs > 0) {
+      // Arm a timer, not just a return: nothing else would come back for these
+      // events, and a stranded backlog is the older bug this whole path exists to
+      // avoid. One timer is enough — a second event during the window joins it.
+      if (!this.capBackoffTimer) {
+        this.capBackoffTimer = setTimeout(() => {
+          this.capBackoffTimer = undefined;
+          void this.drainToSupervisor();
+        }, waitMs);
+        this.capBackoffTimer.unref?.();
+      }
+      log.info(`[supervisor] holding ${this.backlog.size} event(s) for ${waitMs}ms`);
+      return;
+    }
+
     const supervisor = await this.ensureSupervisor();
     if (!supervisor) {
       log.warn('[supervisor] no supervisor session available; events stay queued');

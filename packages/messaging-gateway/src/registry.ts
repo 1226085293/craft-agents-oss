@@ -94,6 +94,23 @@ export interface MessagingGatewayRegistryOptions {
    * each workspace's Commands for `/status` display.
    */
   resolveDefaultConnection?: () => { slug: string; name?: string; defaultModel?: string } | undefined
+  /**
+   * Turn a group message that addresses this bot into an event-center event.
+   *
+   * Supplied by the host (which owns the event service). Absent in tests and in
+   * headless hosts that do not run the event center.
+   */
+  publishMessageEvent?: (msg: {
+    workspaceId: string
+    platform: string
+    channelId: string
+    threadId?: number
+    messageId: string
+    senderId: string
+    senderName?: string
+    text: string
+    chatKind?: 'private' | 'group'
+  }) => boolean
 }
 
 interface TelegramBlockedNotice {
@@ -1684,6 +1701,7 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
       resolveDefaultConnection: this.opts.resolveDefaultConnection,
       seedOwnerOnFirstPair: async (platform, candidate) =>
         this.seedFirstOwner(workspaceId, platform, candidate),
+      ...(this.opts.publishMessageEvent ? { publishMessageEvent: this.opts.publishMessageEvent } : {}),
       onBindingChanged: () => this.emitBindingChanged(workspaceId),
       onPendingChanged: () => this.emitPendingChanged(workspaceId),
       onDeliveryBlocked: (info) => this.handleDeliveryBlocked(workspaceId, info),

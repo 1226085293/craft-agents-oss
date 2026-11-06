@@ -27,6 +27,7 @@ import { EventDispatcher, type DispatchTarget } from './event-dispatcher.ts';
 import { fetchReportedDeps } from './listener-control.ts';
 import { loadSubscriptions } from '@craft-agent/shared/events/subscriptions.ts';
 import type { ListenerConfigSchema } from '@craft-agent/shared/events/manifest.ts';
+import type { CraftEventEnvelope } from '@craft-agent/shared/events/types.ts';
 import type { ListenerReportedDepsDto } from '@craft-agent/shared/protocol/dto';
 
 const eventLog = createLogger('events');
@@ -90,15 +91,7 @@ export class EventService {
         // 'starting' (and clear the ready-timeout) on the supervisor side.
         this.supervisor.markHealthy(listenerId);
       },
-      onInserted: (event) => {
-        // A freshly inserted event has no deliveries yet — they land via
-        // onDelivered below. Renderers get the enriched record shape.
-        const record: EventRecord = { ...event, deliveries: [], routing: [] };
-        this.options.onChanged?.(record);
-        // Strip the body: the dispatcher only formats a nudge.
-        const { body: _body, ...meta } = record;
-        this.dispatcher?.dispatch(meta);
-      },
+      onInserted: (event) => this.publish(event),
     });
 
     this.dispatcher = options.dispatchTarget ? this.createDispatcher(options.dispatchTarget) : null;
@@ -107,6 +100,44 @@ export class EventService {
       envFor: (listenerId) => this.ingest.listenerEnv(listenerId),
       onStatus: (status) => this.options.onListenerStatus?.(status),
     });
+  }
+
+  /**
+   * Announce and dispatch one freshly stored event.
+   *
+   * Shared by the HTTP ingest server and the messaging bridge so an event that
+   * came from a group chat reaches rules, tasks and the audit trail by exactly
+   * the same path as a webhook — one funnel, one dedupe, one history.
+   */
+  private publish(event: CraftEventEnvelope): void {
+    // A freshly inserted event has no deliveries yet — they land via
+    // onDelivered below. Renderers get the enriched record shape.
+    const record: EventRecord = { ...event, deliveries: [], routing: [] };
+    this.options.onChanged?.(record);
+    // Strip the body: the dispatcher only formats a nudge.
+    const { body: _body, ...meta } = record;
+    this.dispatcher?.dispatch(meta);
+  }
+
+  /**
+   * Store an event that did not arrive over HTTP.
+   *
+   * The messaging bridge produces these: a group message that mentions the bot
+   * is an external event, not a user turn. Returns null when the store rejects
+   * the payload, so the caller can log and continue instead of throwing into a
+   * chat pipeline.
+   */
+  ingestExternalEvent(event: CraftEventEnvelope): { id: string; duplicate: boolean } | null {
+    try {
+      const result = this.store.insert(event);
+      if (!result.duplicate) this.publish(event);
+      return result;
+    } catch (error) {
+      eventLog.warn(
+        `[events] external event rejected: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
   }
 
   private createDispatcher(target: DispatchTarget): EventDispatcher {

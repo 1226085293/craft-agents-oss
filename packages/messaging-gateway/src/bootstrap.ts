@@ -57,6 +57,21 @@ export interface MessagingBootstrapOptions {
     nodeBin?: string
     pairingMode?: 'qr' | 'code'
   }
+  /**
+   * Group message → event-center bridge. Supplied by the host that owns the
+   * event service; absent in tests and headless hosts.
+   */
+  publishMessageEvent?: (msg: {
+    workspaceId: string
+    platform: string
+    channelId: string
+    threadId?: number
+    messageId: string
+    senderId: string
+    senderName?: string
+    text: string
+    chatKind?: 'private' | 'group'
+  }) => boolean
 }
 
 export interface MessagingBootstrapHandle {
@@ -86,6 +101,7 @@ export function createMessagingBootstrap(opts: MessagingBootstrapOptions): Messa
     logger: opts.logger,
     resolveConnection: opts.resolveConnection,
     resolveDefaultConnection: opts.resolveDefaultConnection,
+    ...(opts.publishMessageEvent ? { publishMessageEvent: opts.publishMessageEvent } : {}),
     whatsapp: {
       workerEntry: opts.whatsapp.workerEntry,
       nodeBin: opts.whatsapp.nodeBin,

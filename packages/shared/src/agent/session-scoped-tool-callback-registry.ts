@@ -133,6 +133,26 @@ export interface SessionScopedToolCallbacks {
   listSubscriptionsFn?: () => string[];
   /** Get messaging bindings for a session. */
   getMessagingBindingsFn?: (sessionId: string) => Array<{ platform: string; channelId: string; threadId?: number; channelName?: string; enabled: boolean }>;
+
+  // --- Plugin actions -----------------------------------------------------
+  /** Every action an enabled plugin declares, flattened for the tool listing. */
+  listPluginActionsFn?: () => Array<{
+    plugin: string;
+    name: string;
+    description: string;
+    repliesToOrigin?: boolean;
+    input: unknown;
+  }>;
+
+  /**
+   * Execute one plugin action. `repliesToOrigin` actions resolve their target
+   * from the event that woke the turn, so the caller passes no destination.
+   */
+  callPluginActionFn?: (params: {
+    plugin: string;
+    action: string;
+    args: Record<string, unknown>;
+  }) => Promise<{ ok: boolean; message: string }>;
   /** Unbind messaging channels from a session. Returns count of removed bindings. */
   unbindMessagingChannelFn?: (sessionId: string, platform?: string) => number;
   /** Deliver a local file to messaging channels bound to this session. */

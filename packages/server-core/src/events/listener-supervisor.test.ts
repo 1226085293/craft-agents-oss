@@ -31,6 +31,7 @@ function listener(id: string, program: string[], overrides: Partial<LoadedListen
     ready: true,
     errors: [],
     warnings: [],
+    source: 'workspace' as const,
     ...overrides,
   }
 }

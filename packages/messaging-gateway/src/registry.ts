@@ -559,6 +559,39 @@ export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
     return removed
   }
 
+  /**
+   * Send plain text to one channel, by address rather than by binding.
+   *
+   * Bindings point a chat at a session; this points at a chat directly. That is
+   * what a plugin action needs: the supervisor has no binding of its own, and
+   * the destination is "wherever this event came from".
+   */
+  async sendTextToChannel(args: {
+    workspaceId: string
+    platform: string
+    channelId: string
+    threadId?: number
+    text: string
+  }): Promise<{ ok: true } | { ok: false; error: string }> {
+    const state = this.workspaces.get(args.workspaceId)
+    if (!state) return { ok: false, error: `Messaging is not initialized for workspace ${args.workspaceId}` }
+    if (!isKnownPlatform(args.platform)) return { ok: false, error: `Unknown messaging platform: ${args.platform}` }
+
+    const adapter = state.gateway.getAdapter(args.platform as PlatformType)
+    if (!adapter) return { ok: false, error: `${args.platform} is not connected` }
+
+    try {
+      await adapter.sendText(
+        args.channelId,
+        args.text,
+        args.threadId !== undefined ? { threadId: args.threadId } : undefined,
+      )
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
   async deliverFileToSessionBindings(args: {
     workspaceId: string
     sessionId: string

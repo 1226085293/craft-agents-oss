@@ -144,6 +144,19 @@ export interface IMessagingGatewayRegistry {
   unbindBinding(workspaceId: string, bindingId: string): boolean
 
   /** Deliver a local file to enabled messaging bindings for a session. */
+  /**
+   * Send plain text to one channel, addressed directly rather than through a
+   * session binding. This is how a plugin action (and a supervisor reply)
+   * reaches the chat an event came from.
+   */
+  sendTextToChannel(args: {
+    workspaceId: string
+    platform: string
+    channelId: string
+    threadId?: number
+    text: string
+  }): Promise<{ ok: true } | { ok: false; error: string }>
+
   deliverFileToSessionBindings(args: {
     workspaceId: string
     sessionId: string

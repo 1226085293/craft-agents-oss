@@ -505,6 +505,32 @@ export interface SessionToolContext {
   } | null;
 
   // ============================================================
+  // Plugin actions (installed plugins that can be called back)
+  // ============================================================
+
+  /** Actions every enabled plugin declares, flattened for the tool listing. */
+  listPluginActionsFn?(): Array<{
+    plugin: string;
+    name: string;
+    description: string;
+    repliesToOrigin?: boolean;
+    input: unknown;
+  }>;
+
+  /**
+   * Execute one plugin action.
+   *
+   * `repliesToOrigin` actions get their destination from the event that woke
+   * this turn; the host resolves it, so the model never has to invent a
+   * channel id it cannot know.
+   */
+  callPluginActionFn?(params: {
+    plugin: string;
+    action: string;
+    args: Record<string, unknown>;
+  }): Promise<{ ok: boolean; message: string }>;
+
+  // ============================================================
   // Messaging Gateway (for list/unbind messaging channels)
   // ============================================================
 

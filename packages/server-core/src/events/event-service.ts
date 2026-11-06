@@ -12,6 +12,7 @@
  */
 
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { createLogger } from '@craft-agent/shared/utils';
 import { EventStore, type EventFilter, type EventMeta, type EventRecord } from '@craft-agent/shared/events/event-store.ts';
 import { EventIngestServer, type EventIngestAddress } from './ingest-server.ts';
@@ -350,7 +351,7 @@ export class EventService {
       await this.supervisor.stop(id);
       return this.supervisor.getStatus(id);
     }
-    const listener = loadListeners({ workspaceRoot }).find((entry) => entry.id === id);
+    const listener = loadListeners({ workspaceRoot, catalogDirs: pluginCatalogDirs() }).find((entry) => entry.id === id);
     if (!listener) {
       return { ...this.supervisor.getStatus(id), state: 'failed', lastError: 'listener not found' };
     }
@@ -363,7 +364,7 @@ export class EventService {
 
   /** Boot every enabled listener (app start, workspace switch). */
   async startAllEnabled(workspaceRoot: string): Promise<ListenerRuntimeStatus[]> {
-    const listeners = loadListeners({ workspaceRoot }).filter((listener) => listener.enabled);
+    const listeners = loadListeners({ workspaceRoot, catalogDirs: pluginCatalogDirs() }).filter((listener) => listener.enabled);
     return listeners.map((listener) => this.startListener(listener));
   }
 
@@ -435,8 +436,38 @@ function toListenerView(
   }
 }
 
+/**
+ * Bundled plugin directories, highest priority first.
+ *
+ * The catalog ships with Craft (a plain `plugins/` directory in the repo or the
+ * packaged app) and is read-only in spirit: it exists so a plugin can be seen
+ * and adopted without a download step. Plugin *data* never lives there — see
+ * `events-data/<id>` in the workspace.
+ *
+ * `CRAFT_PLUGIN_CATALOG` lets a developer point at another directory without
+ * rebuilding.
+ */
+export function pluginCatalogDirs(): string[] {
+  const dirs: string[] = []
+  const envDir = process.env.CRAFT_PLUGIN_CATALOG
+  if (envDir && existsSync(envDir)) dirs.push(envDir)
+
+  // Repo layout: <root>/plugins. Packaged: resources/plugins next to the app.
+  const candidates = [
+    join(process.cwd(), 'plugins'),
+    join(process.cwd(), '..', '..', 'plugins'),
+    typeof (process as { resourcesPath?: string }).resourcesPath === 'string'
+      ? join((process as { resourcesPath?: string }).resourcesPath!, 'plugins')
+      : '',
+  ]
+  for (const candidate of candidates) {
+    if (candidate && existsSync(candidate) && !dirs.includes(candidate)) dirs.push(candidate)
+  }
+  return dirs
+}
+
 export function listListenersFor(service: EventService, workspaceRoot: string, skipProbes = false): ListenerView[] {
-  return loadListeners({ workspaceRoot, skipProbes }).map((listener) =>
+  return loadListeners({ workspaceRoot, skipProbes, catalogDirs: pluginCatalogDirs() }).map((listener) =>
     toListenerView(listener, service, ''),
   )
 }
@@ -446,7 +477,7 @@ export async function getListenerFor(
   workspaceRoot: string,
   id: string,
 ): Promise<ListenerView | null> {
-  const listener = loadListeners({ workspaceRoot }).find((entry) => entry.id === id);
+  const listener = loadListeners({ workspaceRoot, catalogDirs: pluginCatalogDirs() }).find((entry) => entry.id === id);
   if (!listener) return null;
   // The control service is listener-provided and optional; a missing or slow
   // answer just renders as "no dependency info".

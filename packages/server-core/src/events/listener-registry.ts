@@ -55,6 +55,15 @@ export interface LoadedListener {
   /** Manifest / IO problems that block loading. */
   errors: string[]
   warnings: string[]
+  /**
+   * Where the code came from: the workspace (installed by the user) or the
+   * bundled catalog (shipped with Craft, listed but not yet adopted).
+   *
+   * Keeping them distinct is what makes a catalog possible without a download
+   * step: the manifest is visible, but nothing runs and no data directory is
+   * created until the user turns it on.
+   */
+  source: 'workspace' | 'catalog'
 }
 
 interface PersistedListenerState {
@@ -168,100 +177,105 @@ export interface LoadListenersOptions {
   workspaceRoot: string
   /** Skip the subprocess probes (tests, fast UI pass). */
   skipProbes?: boolean
+  /**
+   * Bundled plugin directories, highest priority first.
+   *
+   * Manifests here are listed as available; a same-id directory in the
+   * workspace wins, so a user can pin or patch a bundled plugin locally.
+   */
+  catalogDirs?: string[]
 }
 
-/** Scan `events/` and return every listener with its readiness. */
+/** Scan `events/` and the bundled catalog, workspace winning on a duplicate id. */
 export function loadListeners(options: LoadListenersOptions): LoadedListener[] {
   const { workspaceRoot } = options;
-  const eventsDir = join(workspaceRoot, 'events');
-  if (!existsSync(eventsDir)) return [];
-
   const state = readState(workspaceRoot);
+
+  // Workspace first: a local copy of a bundled plugin shadows the catalog one,
+  // so patch or pin a plugin by putting your own directory there.
+  const roots: Array<{ root: string; source: LoadedListener['source'] }> = [
+    { root: join(workspaceRoot, 'events'), source: 'workspace' },
+    ...(options.catalogDirs ?? []).map((root) => ({ root, source: 'catalog' as const })),
+  ];
+
   const listeners: LoadedListener[] = [];
+  const seen = new Set<string>();
 
-  for (const entry of readdirSync(eventsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const id = entry.name;
-    const dir = join(eventsDir, id);
-    const manifestPath = join(dir, 'manifest.json');
+  for (const { root, source } of roots) {
+    if (!existsSync(root)) continue;
 
-    if (!existsSync(manifestPath)) {
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const id = entry.name;
+      if (seen.has(id)) continue;
+      seen.add(id);
+
+      const dir = join(root, id);
+      const manifestPath = join(dir, 'manifest.json');
+      const dataDir = join(workspaceRoot, 'events-data', id);
+      const blank = { spec: 'craft-listener/1' as const, id, name: id, version: '0.0.0' };
+
+      if (!existsSync(manifestPath)) {
+        listeners.push({
+          id, manifest: blank, dir, dataDir, enabled: false, config: {},
+          dependencies: [], ready: false, errors: ['manifest.json is missing'], warnings: [], source,
+        });
+        continue;
+      }
+
+      let raw: unknown;
+      try {
+        raw = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      } catch (error) {
+        listeners.push({
+          id, manifest: blank, dir, dataDir, enabled: false, config: {},
+          dependencies: [], ready: false,
+          errors: [`manifest.json is not valid JSON: ${String(error)}`], warnings: [], source,
+        });
+        continue;
+      }
+
+      const parsed = parseManifest(raw, id);
+      if (!parsed.ok || !parsed.manifest) {
+        listeners.push({
+          id, manifest: blank, dir, dataDir, enabled: false, config: {},
+          dependencies: [], ready: false, errors: parsed.errors, warnings: parsed.warnings, source,
+        });
+        continue;
+      }
+
+      const manifest = parsed.manifest;
+      const persisted = state.listeners[id] ?? {};
+      const dependencies =
+        options.skipProbes || source === 'catalog'
+          ? []
+          : evaluateDependencies(manifest, workspaceRoot);
+      const blocking = dependencies.filter(
+        (dep) => dep.state === 'missing' || dep.state === 'mismatch',
+      );
+
       listeners.push({
         id,
-        manifest: {
-          spec: 'craft-listener/1',
-          id,
-          name: id,
-          version: '0.0.0',
-                  },
+        manifest,
         dir,
-        dataDir: join(workspaceRoot, 'events-data', id),
-        enabled: false,
-        config: {},
-        dependencies: [],
-        ready: false,
-        errors: ['manifest.json is missing'],
-        warnings: [],
-      });
-      continue;
-    }
-
-    let raw: unknown;
-    try {
-      raw = JSON.parse(readFileSync(manifestPath, 'utf8'));
-    } catch (error) {
-      listeners.push({
-        id,
-        manifest: { spec: 'craft-listener/1', id, name: id, version: '0.0.0' },
-        dir,
-        dataDir: join(workspaceRoot, 'events-data', id),
-        enabled: false,
-        config: {},
-        dependencies: [],
-        ready: false,
-        errors: [`manifest.json is not valid JSON: ${String(error)}`],
-        warnings: [],
-      });
-      continue;
-    }
-
-    const parsed = parseManifest(raw, id);
-    if (!parsed.ok || !parsed.manifest) {
-      listeners.push({
-        id,
-        manifest: { spec: 'craft-listener/1', id, name: id, version: '0.0.0' },
-        dir,
-        dataDir: join(workspaceRoot, 'events-data', id),
-        enabled: false,
-        config: {},
-        dependencies: [],
-        ready: false,
-        errors: parsed.errors,
+        dataDir,
+        enabled: persisted.enabled === true,
+        config: persisted.config ?? {},
+        dependencies,
+        // A catalog plugin is available, not running: no user config yet, and
+        // it must never be spawned behind the user's back.
+        ready:
+          source === 'workspace' &&
+          // A builtin is executed in-process, so it needs no runtime program.
+          (Boolean(manifest.runtime) || manifest.builtin === true) &&
+          blocking.length === 0,
+        errors: [],
         warnings: parsed.warnings,
+        source,
       });
-      continue;
     }
-
-    const manifest = parsed.manifest;
-    const persisted = state.listeners[id] ?? {};
-    const dependencies = options.skipProbes ? [] : evaluateDependencies(manifest, workspaceRoot);
-    const blocking = dependencies.filter((dep) => dep.state === 'missing' || dep.state === 'mismatch');
-
-    listeners.push({
-      id,
-      manifest,
-      dir,
-      dataDir: join(workspaceRoot, 'events-data', id),
-      enabled: persisted.enabled === true,
-      config: persisted.config ?? {},
-      dependencies,
-      ready: Boolean(manifest.runtime) && blocking.length === 0,
-      errors: [],
-      warnings: parsed.warnings,
-    });
   }
 
-  listeners.sort((a, b) => a.manifest.name.localeCompare(b.manifest.name));
   return listeners;
 }
 
@@ -270,6 +284,34 @@ export function setListenerEnabled(workspaceRoot: string, id: string, enabled: b
   const current = state.listeners[id] ?? {};
   state.listeners[id] = { ...current, enabled };
   writeState(workspaceRoot, state);
+}
+
+/**
+ * Copy a bundled plugin into the workspace so it can be started.
+ *
+ * The catalog is code only — it ships with Craft and is generally read-only.
+ * Adopting one copies it into `<workspace>/events/<id>`, after which it is an
+ * ordinary workspace plugin: the same directory a user could have written by
+ * hand. Data stays under `events-data/<id>` and is never part of the copy, so
+ * reinstalling cannot destroy credentials.
+ *
+ * @returns the directory the plugin now lives in.
+ */
+export function installListenerFromCatalog(
+  workspaceRoot: string,
+  id: string,
+  catalogDirs: string[],
+): string {
+  const target = join(workspaceRoot, 'events', id);
+  if (existsSync(target)) return target;
+
+  const source = catalogDirs.map((dir) => join(dir, id)).find((dir) => existsSync(dir));
+  if (!source) throw new Error(`plugin "${id}" is not in the catalog`);
+
+  const { cpSync, mkdirSync } = require('node:fs') as typeof import('node:fs');
+  mkdirSync(join(workspaceRoot, 'events'), { recursive: true });
+  cpSync(source, target, { recursive: true });
+  return target;
 }
 
 export function setListenerConfig(

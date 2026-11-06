@@ -46,7 +46,9 @@ export const SETTINGS_PAGES = [
   { id: 'input' as const, labelKey: 'settings.input.title', descriptionKey: 'settings.input.description' },
   { id: 'workspace' as const, labelKey: 'settings.workspace.title', descriptionKey: 'settings.workspace.description' },
   { id: 'permissions' as const, labelKey: 'settings.permissions.title', descriptionKey: 'settings.permissions.description' },
-  { id: 'messaging' as const, labelKey: 'settings.messaging.title', descriptionKey: 'settings.messaging.description' },
+  // Messaging is no longer a settings page: the platforms are a plugin now
+  // (plugins/messaging). Its stored credentials and channel bindings are left
+  // untouched on disk, so nothing a user already connected stops working.
   { id: 'server' as const, labelKey: 'settings.server.title', descriptionKey: 'settings.server.description' },
   { id: 'shortcuts' as const, labelKey: 'settings.shortcuts.title', descriptionKey: 'settings.shortcuts.description' },
 ] satisfies readonly SettingsPageDefinition[]

@@ -7,6 +7,8 @@ import { validateFilePath, getWorkspaceAllowedDirs, sanitizeFilename } from '@cr
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
 import { basename, dirname, isAbsolute, join } from 'path'
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'fs'
+import { loadListeners } from '../events/listener-registry.ts'
+import { pluginCatalogDirs } from '../events/event-service.ts'
 import { copyFile, readFile, writeFile, mkdir, stat, rm, readdir } from 'fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
 import { type AgentEvent, setPermissionMode, setTransientPermissionMode, clearTransientPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
@@ -2021,6 +2023,18 @@ export class SessionManager implements ISessionManager {
   }
   /** Monotonic clock to ensure strictly increasing message timestamps */
   private lastTimestamp = 0
+
+  /**
+   * Where the last event that woke a session came from.
+   *
+   * The supervisor has no binding of its own, so when it answers it has nothing
+   * to address. The origin of the event it is answering is the only correct
+   * destination — and the only one the model cannot invent.
+   */
+  private readonly replyOrigins = new Map<
+    string,
+    { platform: string; channelId: string; threadId?: number }
+  >()
 
   /** Messaging gateway registry, injected by the host after bootstrap. */
   private messagingRegistry: IMessagingGatewayRegistry | null = null
@@ -6630,6 +6644,89 @@ ${request.prompt}`;
             targetBusy,
           }
         },
+        // --- Plugin actions ---------------------------------------------
+        // The manifest declares the contract; Craft is the implementation for
+        // builtin plugins. Only "messaging" is builtin today, and its two
+        // actions are the entire outbound story: send to a channel, or reply
+        // to whoever caused this turn.
+        listPluginActionsFn: () => {
+          const root = managed.workspace.rootPath
+          const out: Array<{
+            plugin: string
+            name: string
+            description: string
+            repliesToOrigin?: boolean
+            input: unknown
+          }> = []
+          for (const plugin of loadListeners({ workspaceRoot: root, catalogDirs: pluginCatalogDirs(), skipProbes: true })) {
+            if (plugin.manifest.builtin !== true) continue
+            if (!plugin.enabled && plugin.source === 'catalog') continue
+            for (const action of plugin.manifest.actions ?? []) {
+              out.push({
+                plugin: plugin.id,
+                name: action.name,
+                description: action.description,
+                ...(action.repliesToOrigin ? { repliesToOrigin: true } : {}),
+                input: action.input,
+              })
+            }
+          }
+          return out
+        },
+
+        callPluginActionFn: async ({ plugin, action, args }) => {
+          const registry = this.messagingRegistry
+          if (!registry) return { ok: false, message: 'messaging 未初始化，无法发送' }
+          if (plugin !== 'messaging') {
+            return { ok: false, message: `插件 ${plugin} 没有内置执行器` }
+          }
+
+          const text = typeof args.text === 'string' ? args.text.trim() : ''
+          if (!text) return { ok: false, message: 'text 不能为空' }
+
+          // Which channel? An explicit one, or the origin of the event that
+          // woke this turn. Reply deliberately takes the second path: the model
+          // cannot know an openid, and guessing one would send the answer to a
+          // stranger.
+          let platform = typeof args.platform === 'string' ? args.platform : ''
+          let channelId = typeof args.channelId === 'string' ? args.channelId : ''
+          const origin = this.replyOriginFor(managed.id)
+
+          if (action === 'reply' || !channelId) {
+            if (!origin) {
+              return {
+                ok: false,
+                message: '没有可回复的来源：本次回合不是由消息事件触发的，请改用 send_message 并指定 channelId',
+              }
+            }
+            platform = platform || origin.platform
+            channelId = channelId || origin.channelId
+          }
+
+          if (!platform) {
+            const platforms = new Set(
+              registry
+                .getBindings(managed.workspace.id)
+                .map((binding) => binding.platform),
+            )
+            if (platforms.size === 1) platform = [...platforms][0]!
+          }
+          if (!platform) {
+            return { ok: false, message: '无法确定平台：请指定 platform（例如 qq）' }
+          }
+
+          const sent = await registry.sendTextToChannel({
+            workspaceId: managed.workspace.id,
+            platform,
+            channelId,
+            ...(origin?.threadId !== undefined ? { threadId: origin.threadId } : {}),
+            text,
+          })
+          return sent.ok
+            ? { ok: true, message: `已发送到 ${platform} ${channelId}` }
+            : { ok: false, message: `发送失败：${sent.error}` }
+        },
+
         getMessagingBindingsFn: (sessionId: string) => {
           const registry = this.messagingRegistry
           if (!registry) return []
@@ -11022,12 +11119,56 @@ ${request.prompt}`;
    * idle → wake title + process row + hidden nudge; busy → process row only,
    * with the text steered into the running turn instead.
    */
+  /**
+   * Remember where an event came from, by reading its `links`.
+   *
+   * The bridge writes `message://<platform>/<channelId>/<messageId>`, and the
+   * channel id already encodes group vs DM (`group:` / `user:`). That is the
+   * whole address a reply needs; nothing else has to be threaded through the
+   * event plumbing.
+   */
+  private rememberEventOrigin(sessionId: string, eventId: string): void {
+    try {
+      const { EventStore } = require('@craft-agent/shared/events/event-store.ts') as typeof import('@craft-agent/shared/events/event-store.ts')
+      const dbPath = join(this.sessions.get(sessionId)?.workspace.rootPath ?? '', 'config', 'events.sqlite')
+      if (!existsSync(dbPath)) return
+      const store = new EventStore({ dbPath })
+      try {
+        const event = store.get(eventId)
+        const link = event?.links?.find((entry) => entry.url?.startsWith('message://'))
+        if (!link) return
+        // message://platform/channelId/messageId — channelId may itself contain
+        // colons (group:<id>), so split only the first three segments.
+        const rest = link.url.slice('message://'.length)
+        const firstSlash = rest.indexOf('/')
+        if (firstSlash <= 0) return
+        const platform = rest.slice(0, firstSlash)
+        const tail = rest.slice(firstSlash + 1)
+        const lastSlash = tail.lastIndexOf('/')
+        const channelId = lastSlash > 0 ? tail.slice(0, lastSlash) : tail
+        if (!platform || !channelId) return
+        this.replyOrigins.set(sessionId, { platform, channelId })
+      } finally {
+        store.close()
+      }
+    } catch (error) {
+      sessionLog.warn(`[events] could not read the origin of ${eventId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** The channel the session is currently answering, if any. */
+  private replyOriginFor(sessionId: string): { platform: string; channelId: string; threadId?: number } | undefined {
+    return this.replyOrigins.get(sessionId)
+  }
+
   async surfaceEventToSession(
     sessionId: string,
     params: { eventId: string; source: string; type: string; title: string; summary?: string; receivedAt: number; nudge: string },
   ): Promise<boolean> {
     const managed = this.sessions.get(sessionId)
     if (!managed || managed.isArchived) return false
+
+    this.rememberEventOrigin(managed.id, params.eventId)
 
     if (!managed.isProcessing) this.pushEventWakeTitle(managed, params)
     this.insertEventProcessRow(managed, params)

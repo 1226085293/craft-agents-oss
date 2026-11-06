@@ -1,0 +1,59 @@
+{
+  "spec": "craft-plugin/1",
+  "id": "messaging",
+  "name": "消息平台",
+  "version": "1.0.0",
+  "description": "QQ / Telegram / 飞书 / 微信 / WhatsApp 的收发通道。取代了原来的 Messaging 设置页：平台配置属于插件，不属于全局设置。",
+  "icon": "message-circle",
+  "author": "Craft Agents",
+  "builtin": true,
+  "actions": [
+    {
+      "name": "send_message",
+      "description": "往指定会话发一条文本消息。channelId 来自事件来源（group:<id> 为群，user:<id> 为私聊）。",
+      "input": {
+        "type": "object",
+        "properties": {
+          "channelId": {
+            "type": "string",
+            "description": "目标频道：group:<id> 表示群，user:<id> 表示私聊。"
+          },
+          "text": {
+            "type": "string",
+            "description": "要发送的文本。过长时由平台侧截断。"
+          },
+          "platform": {
+            "type": "string",
+            "description": "目标平台，如 qq、telegram。省略时按本工作区唯一已连接的平台推断。"
+          }
+        },
+        "required": ["channelId", "text"]
+      }
+    },
+    {
+      "name": "reply",
+      "description": "回复触发本次判断的那条消息。收件人由事件本身决定，不需要也不允许指定。",
+      "repliesToOrigin": true,
+      "input": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "回复内容。应简短：用户是在手机上看这条消息。"
+          }
+        },
+        "required": ["text"]
+      }
+    }
+  ],
+  "config": {
+    "type": "object",
+    "properties": {
+      "platforms": {
+        "type": "string",
+        "title": "已连接的平台",
+        "description": "由各平台的连接流程写入，此处只读展示。"
+      }
+    }
+  }
+}

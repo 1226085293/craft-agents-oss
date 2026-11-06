@@ -18,6 +18,7 @@ import type { ToolResult } from './types.ts';
 
 // Handlers
 import { handleSubmitPlan } from './handlers/submit-plan.ts';
+import { handleListPluginActions, handlePluginCall } from './handlers/plugins.ts';
 import { handleConfigValidate } from './handlers/config-validate.ts';
 import { handleSkillValidate } from './handlers/skill-validate.ts';
 import { handleMermaidValidate } from './handlers/mermaid-validate.ts';
@@ -338,6 +339,27 @@ export const GetEventSchema = z.object({
   id: z.string().describe('Event id from a [event] message or list_events.'),
 });
 
+/**
+ * Call an action declared by an installed plugin.
+ *
+ * One tool instead of one-per-action on purpose: the number of plugins is not
+ * known ahead of time, and a flat tool per action would crowd the tool table on
+ * every request. The model discovers the catalogue with `list_plugin_actions`
+ * and then calls here with the plugin, the action and its arguments.
+ */
+export const PluginCallSchema = z.object({
+  plugin: z.string().describe('Plugin id, e.g. "messaging".'),
+  action: z
+    .string()
+    .describe('Action name declared by that plugin, e.g. "send_message" or "reply".'),
+  args: z
+    .record(z.string(), z.unknown())
+    .optional()
+    .describe('Arguments matching the action schema shown by list_plugin_actions.'),
+});
+
+export const ListPluginActionsSchema = z.object({});
+
 // Inter-session messaging
 export const SendAgentMessageSchema = z.object({
   sessionId: z.string().describe('Target session ID to send the message to'),
@@ -430,6 +452,8 @@ export const TOOL_DESCRIPTIONS = {
   unsubscribe_event: `Stop receiving events. Pass subscriptionId (preferred) or source to drop the matching subscription; with neither it refuses, so a typo cannot silently unsubscribe everything.`,
   list_event_subscriptions: `List this session's event subscriptions.`,
   list_events: `List received events (metadata only, newest first). Use it to catch up on what arrived, then get_event for the body.`,
+  list_plugin_actions: `List what installed plugins can do: plugin.action, a description, and the JSON Schema for the arguments. Call this before plugin_call.`,
+  plugin_call: `Run one plugin action — send a message on a connected platform, or reply to whoever triggered this turn. Arguments must match the schema from list_plugin_actions.`,
   get_event: `Read one event in full by id: headers plus up to 64KB of body. Larger payloads are referenced by a file path returned in the header.`,
   add_memory: `Store information that should persist beyond this conversation. Use when the user wants something retained for later — a fact, preference, instruction, name or alias, or a rule — and write it down instead of only acknowledging it in your reply. Use session scope for temporary/task-specific facts about this conversation; use global scope for durable user preferences, rules, and reusable knowledge that should persist across sessions.`,
   query_memories: `Check what has been stored before answering. Call this proactively whenever the question may depend on information from earlier conversations (preferences, rules, facts, names) instead of guessing from current context alone. Performs semantic retrieval (embedding similarity) across this session's memories and workspace-global memories.`,
@@ -550,6 +574,8 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'list_event_subscriptions', description: TOOL_DESCRIPTIONS.list_event_subscriptions, inputSchema: ListEventSubscriptionsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListEventSubscriptions },
   { name: 'list_events', description: TOOL_DESCRIPTIONS.list_events, inputSchema: ListEventsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListEvents },
   { name: 'get_event', description: TOOL_DESCRIPTIONS.get_event, inputSchema: GetEventSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleGetEvent },
+  { name: 'list_plugin_actions', description: TOOL_DESCRIPTIONS.list_plugin_actions, inputSchema: ListPluginActionsSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleListPluginActions },
+  { name: 'plugin_call', description: TOOL_DESCRIPTIONS.plugin_call, inputSchema: PluginCallSchema, executionMode: 'registry', safeMode: 'block', handler: handlePluginCall },
   { name: 'add_memory', description: TOOL_DESCRIPTIONS.add_memory, inputSchema: AddMemorySchema, executionMode: 'registry', safeMode: 'block', handler: handleAddMemory },
   { name: 'query_memories', description: TOOL_DESCRIPTIONS.query_memories, inputSchema: QueryMemoriesSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleQueryMemories },
   // Messaging gateway tools
@@ -600,6 +626,10 @@ export const SUPERVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
   'get_event',
   'list_events',
   'list_event_subscriptions',
+  // Sending is the supervisor's job when nobody else is listening: it must be
+  // able to see which plugins can talk and then talk through them.
+  'list_plugin_actions',
+  'plugin_call',
 ]);
 
 /** Tools a worker never sees, even though they exist in the table. */

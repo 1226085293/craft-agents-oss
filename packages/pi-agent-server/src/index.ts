@@ -1816,7 +1816,17 @@ async function createPiSession(): Promise<AgentSession> {
   // role, but the SDK's built-ins are assembled here unconditionally — so the
   // strip was cosmetic and a supervisor could still run shell commands
   // (observed: a supervisor grep'ing the whole workspace for an event id until
-  // the background handoff killed it). Read-only inspection stays.
+  // the background handoff killed it).
+  //
+  // A first fix left read/grep/find/ls in place. That was worse than nothing:
+  // the supervisor prompt states the role has no file tools, so granting them
+  // falsified the prompt, and the model — correctly trusting its tool table over
+  // the document — concluded its prohibitions were fiction and spent a whole
+  // turn investigating instead of dispatching. The supervisor set is now empty.
+  //
+  // `webTools` gets the same treatment below. It used to be concatenated raw,
+  // which handed a supervisor web_search/web_fetch while its prompt said it had
+  // no web access — the same contradiction, one line further down.
   const builtinAllowed = new Set(
     builtinToolNamesForRole(initConfig?.sessionRole, initConfig?.sessionToolScope),
   );
@@ -1881,10 +1891,12 @@ async function createPiSession(): Promise<AgentSession> {
     createLsToolDefinition(cwd),
   ];
   const builtinDefs = allBuiltinDefs.filter((def) => builtinAllowed.has(def.name));
+  // Web tools are gated by the same role list, not appended unconditionally.
+  const webDefs = webTools.filter((def) => builtinAllowed.has(def.name));
   const proxyTools = buildProxyTools();
-  const wrappedAll = wrapToolsWithHooks([...builtinDefs, ...webTools, ...proxyTools]);
+  const wrappedAll = wrapToolsWithHooks([...builtinDefs, ...webDefs, ...proxyTools]);
   const toolAllowlist = wrappedAll.map(t => t.name);
-  debugLog(`Session tools: ${builtinDefs.length} builtin + ${webTools.length} web + ${proxyTools.length} proxy = ${wrappedAll.length} total`);
+  debugLog(`Session tools: ${builtinDefs.length} builtin + ${webDefs.length} web + ${proxyTools.length} proxy = ${wrappedAll.length} total`);
 
   // The tool preamble (names + descriptions + JSON Schemas) is serialised into
   // EVERY request and charged against the channel's request ceiling, not just

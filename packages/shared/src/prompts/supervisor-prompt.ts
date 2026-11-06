@@ -5,7 +5,18 @@
  * prompt: the main prompt is ~26k chars describing browser tools, MCP, Pages,
  * HTML/PDF/image previews, document converters, `call_llm`, code diffs and so on.
  * The supervisor's tool table contains **none** of them — `SUPERVISOR_TOOL_NAMES`
- * is 22 coordination tools with no bash, no write, no MCP.
+ * is 21 coordination tools with no bash, no write, and no data-source MCP. (The
+ * coordination tools are themselves MCP-delivered; what the supervisor lacks is
+ * the ability to reach a source, not the transport. The prompt says so
+ * explicitly, because a blanket "you have no MCP" sitting next to "unfold
+ * `tools_workspace`, then `call_tool`" is the kind of contradiction that teaches
+ * a model its whole prompt is unreliable.)
+ *
+ * Built-in tools are a separate axis: `SUPERVISOR_BUILTIN_TOOLS` is empty, so
+ * read/grep/find/ls/bash/edit/write/web_search/web_fetch are all absent. Any
+ * sentence here that implies reading a file would therefore be a lie, which is
+ * why the file-access context blocks are withheld from this role in pi-agent.ts
+ * rather than merely reworded.
  *
  * That mismatch was not merely wasted tokens. A prompt that documents a
  * capability invites the model to use it: told it can write files, the supervisor
@@ -65,8 +76,10 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
 这些你必须清楚，否则会浪费回合去尝试：
 
 - 你**没有** shell、文件读写、编辑工具。你无法运行命令、无法查看文件内容、无法修改任何东西。
-- 你**没有**浏览器、MCP、网页搜索、Pages、文档转换、HTML/PDF/图片预览。
+- 你**没有**外部数据源（GitHub、Linear、聊天平台历史、本地文件夹），也没有浏览器、网页搜索、Pages、文档转换、HTML/PDF/图片预览。
 - 你**没有** \`call_llm\`。
+
+你手上的 MCP 只有**协调**工具（\`task_create\`、\`dispatch\`、\`list_sessions\`、\`get_event\` …）。它们只读写任务和会话记录，不读文件、不上网、不改代码。所以「MCP」这个词对你有两层意思：协调工具你有，取数据的能力你没有。
 
 所以「我自己去查一下」「我改一下这个文件」这类事情**只能派给别人**。你读了事件之后要做的第一件事，是判断**谁该去做**，而不是能不能自己上手。
 

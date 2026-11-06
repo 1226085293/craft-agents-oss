@@ -3918,10 +3918,23 @@ ${agentSnapshot.persona.trim()}
       // re-stamp doesn't invalidate the prompt cache. buildVolatileContextParts
       // consumes the one-shot mode-change signal, so it is called exactly once.
       const plansFolderPath = getSessionPlansPath(this.config.workspace.rootPath, this._sessionId);
-      const stableParts = this.promptBuilder.buildStableContextParts();
+      // The stable blocks are written for a session that can touch the
+      // filesystem. The session-root variant says "You can access any files the
+      // user attaches here" and then actively prescribes `grep -n "keyword"
+      // session.jsonl`. The source-state block likewise lists absolute local
+      // paths and instructs "You MUST read a source's guide with the Read tool".
+      //
+      // Appending either to the supervisor document — whose entire premise is
+      // "you have no file tools" — makes that document self-refuting, and a
+      // self-refuting prompt stops constraining anything: observed 2026-11-06,
+      // the supervisor read the contradiction, decided the prohibitions were
+      // fiction, and spent its whole turn grepping instead of dispatching.
+      // The supervisor needs no working directory (it never runs anything) and
+      // no source inventory (workers resolve their own sources).
+      const stableParts = isSupervisor ? [] : this.promptBuilder.buildStableContextParts();
       const volatileParts = this.promptBuilder.buildVolatileContextParts(
         { plansFolderPath },
-        sourceContext
+        isSupervisor ? undefined : sourceContext
       );
 
       // Process attachments

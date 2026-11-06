@@ -2,19 +2,54 @@
  * Which SDK built-in tools a session role may have.
  *
  * The session-tool table (mcp__session__*) is already pruned per role, but the
- * Pi SDK's own coding tools — bash, edit, write, read, grep, find, ls — are
- * assembled separately. Nothing filtered them, so a supervisor session was
- * handed a shell: it grepped the entire workspace looking for an event id,
- * blew the 30s foreground budget into a background handoff, and failed.
+ * Pi SDK's own coding tools — bash, edit, write, read, grep, find, ls — plus
+ * `web_search` / `web_fetch` are assembled separately. Nothing filtered them, so
+ * a supervisor session was handed a shell: it grepped the entire workspace
+ * looking for an event id, blew the 30s foreground budget into a background
+ * handoff, and failed.
  *
- * A supervisor coordinates. It reads to understand what it was asked about, and
- * it must not be able to run commands or change files.
+ * A later attempt kept `read/grep/find/ls` on the theory that "a supervisor
+ * reads to understand what it was asked about". That theory lost, and it lost
+ * for an instructive reason: the supervisor prompt says in as many words that
+ * the role has no file tools. Granting them did not just add capability — it
+ * falsified the prompt. Observed on 2026-11-06 (session 261106-aware-storm), the
+ * model's own reasoning names the contradiction out loud:
+ *
+ *   "As the supervisor, I don't have shell/file tools — wait, actually looking
+ *    at my available tools, I DO have read, grep, find, ls, web_search,
+ *    web_fetch, plus MCP…"
+ *
+ * Once a prompt is caught lying about one thing, its other prohibitions stop
+ * binding. That turn spent all 293 seconds of its cap reading files and issuing
+ * zero `task_create` / `dispatch` calls — it investigated the work instead of
+ * handing it out, which is the exact failure this policy exists to prevent.
+ *
+ * So: a supervisor gets **no** built-in tools at all. Everything it needs to
+ * understand a request arrives inside the request — the event body (via
+ * `get_event`), session metadata, and the workspace root in its prompt. If a
+ * question genuinely needs files read, that is a task for a worker.
  */
 
-/** Built-ins a supervisor keeps: read-only inspection only. */
-export const SUPERVISOR_BUILTIN_TOOLS: readonly string[] = ['read', 'grep', 'find', 'ls'];
+/**
+ * Built-ins a supervisor keeps: none.
+ *
+ * Deliberately empty rather than "read-only inspection". Any inspection tool is
+ * an invitation to substitute reading for delegating, and the role has no
+ * legitimate call that requires one. Keep this empty; if a future supervisor
+ * genuinely needs to read something, pass it through the prompt or the event
+ * body instead of widening this list.
+ */
+export const SUPERVISOR_BUILTIN_TOOLS: readonly string[] = [];
 
-/** Built-ins a worker (or any non-supervisor session) gets. */
+/**
+ * Built-ins a worker (or any non-supervisor session) gets.
+ *
+ * `web_search` / `web_fetch` live here rather than being appended
+ * unconditionally at assembly time, so that "which built-in does this role
+ * have" has exactly one answer in one place. They are still not SDK built-ins —
+ * they are our own tool definitions — but they are gated by the same list, and
+ * the assembly code filters them through `builtinToolNamesForRole` like the rest.
+ */
 export const FULL_BUILTIN_TOOLS: readonly string[] = [
   'read',
   'bash',
@@ -23,6 +58,8 @@ export const FULL_BUILTIN_TOOLS: readonly string[] = [
   'grep',
   'find',
   'ls',
+  'web_search',
+  'web_fetch',
 ];
 
 /**

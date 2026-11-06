@@ -1313,6 +1313,9 @@ export class PiAgent extends BaseAgent {
       compactionRoute,
       // What this backend is for; the subprocess forwards it to the gateway.
       requestKind: this.config.requestKind,
+      // Role drives built-in tool pruning in the subprocess: a supervisor must
+      // coordinate, not execute.
+      sessionRole: this.config.session?.role,
       providerType: this.config.providerType,
       authType: this.config.authType,
       workspaceId: this.config.workspace.id,

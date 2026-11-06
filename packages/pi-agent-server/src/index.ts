@@ -160,6 +160,7 @@ import {
 import { applyForcedCompactionPatch } from './forced-compaction.ts';
 import { normalizeShellTimeout } from './shell-timeout.ts';
 import { withAutoBackground } from './background-shell.ts';
+import { builtinToolNamesForRole } from './builtin-tool-policy.ts';
 import {
   TOOL_PAYLOAD_WARN_TOKENS,
   buildPromptSnippet,
@@ -229,6 +230,12 @@ interface InitMessage {
    * first turn is unbounded (stall detection bounds runaway turns).
    * Omitted fields fall back to SessionLifecycle defaults.
    */
+  /**
+   * "supervisor" | "worker". Only used to prune the SDK's built-in coding
+   * tools: the supervisor coordinates, so handing it bash/write/edit is how a
+   * routing mistake turns into a deleted file.
+   */
+  sessionRole?: string;
   defenseGuardrails?: { maxResumes?: number; maxIterations?: number; maxDurationMs?: number; verifyMinSteps?: number; verifyMinDurationMs?: number };
 }
 
@@ -1790,7 +1797,15 @@ async function createPiSession(): Promise<AgentSession> {
   //     our hooked versions take effect (permissions + large-response summarization).
   //   - Do NOT pass tool *objects* to `tools` — `allowedToolNames = new Set(options.tools)`
   //     then `.has(name)` returns false for every string lookup → zero tools active.
-  const builtinDefs = [
+  //
+  // Role pruning (see builtin-tool-policy.ts): a supervisor coordinates, it does
+  // not execute. The session tool table already strips bash/write/edit for that
+  // role, but the SDK's built-ins are assembled here unconditionally — so the
+  // strip was cosmetic and a supervisor could still run shell commands
+  // (observed: a supervisor grep'ing the whole workspace for an event id until
+  // the background handoff killed it). Read-only inspection stays.
+  const builtinAllowed = new Set(builtinToolNamesForRole(initConfig?.sessionRole));
+  const allBuiltinDefs = [
     createReadToolDefinition(cwd),
     // Shell timeout policy: the Pi SDK's bash `timeout` unit is SECONDS, but
     // models routinely pass millisecond values (120000 intending 120 s → a
@@ -1850,6 +1865,7 @@ async function createPiSession(): Promise<AgentSession> {
     createFindToolDefinition(cwd),
     createLsToolDefinition(cwd),
   ];
+  const builtinDefs = allBuiltinDefs.filter((def) => builtinAllowed.has(def.name));
   const proxyTools = buildProxyTools();
   const wrappedAll = wrapToolsWithHooks([...builtinDefs, ...webTools, ...proxyTools]);
   const toolAllowlist = wrappedAll.map(t => t.name);

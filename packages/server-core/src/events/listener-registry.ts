@@ -207,6 +207,11 @@ export function loadListeners(options: LoadListenersOptions): LoadedListener[] {
     for (const entry of readdirSync(root, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
       const id = entry.name;
+      // `_shared`, `_runtime`: code the plugins import, not plugins. Craft used
+      // to surface them as broken entries ("manifest.json is missing"), which is
+      // both wrong and alarming — a missing manifest is not a broken plugin, it
+      // is a directory that was never meant to be one.
+      if (id.startsWith('_') || id.startsWith('.')) continue;
       if (seen.has(id)) continue;
       seen.add(id);
 

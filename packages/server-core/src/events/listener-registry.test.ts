@@ -169,3 +169,20 @@ describe('listener state', () => {
     expect(missingConfigKeys(listener!)).toEqual([])
   })
 })
+
+describe('loadListeners — non-plugin directories', () => {
+  it('ignores directories that only hold shared plugin code', () => {
+    // `plugins/_runtime` is imported by every plugin; it is not one of them.
+    // Treating it as a plugin made the list show a permanent
+    // "manifest.json is missing" entry, which reads as a broken install.
+    mkdirSync(join(root, 'events', '_runtime'), { recursive: true })
+    writeFileSync(join(root, 'events', '_runtime', 'serve.ts'), 'export const x = 1\n', 'utf8')
+    mkdirSync(join(root, 'events', '.cache'), { recursive: true })
+    writeListener('real', manifestFor('real'))
+
+    const ids = loadListeners({ workspaceRoot: root, catalogDirs: [], skipProbes: true }).map((l) => l.id)
+    expect(ids).toContain('real')
+    expect(ids).not.toContain('_runtime')
+    expect(ids).not.toContain('.cache')
+  })
+})

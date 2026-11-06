@@ -34,8 +34,11 @@ import {
 } from '@craft-agent/shared/agents'
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
-import { readJournal } from '@craft-agent/shared/tasks'
+import { readJournal, formatTaskBrief, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
 import { startWatchdog } from '../tasks/task-watchdog.ts'
+import { startTaskScheduler, runEventPass } from '../tasks/task-scheduler.ts'
+import { migrateAutomationCronTasks } from '../tasks/automation-migration.ts'
+import { buildJudgePrompt, parseJudgeVerdict } from '../tasks/task-judge.ts'
 import { SupervisorRuntime } from '../routing/supervisor-runtime.ts'
 import { SUPERVISOR_TURN_TIMEOUT_MS } from '@craft-agent/shared/agents/supervisor'
 import { buildAgentToolBindings } from './agent-tools-bindings.ts'
@@ -1401,6 +1404,8 @@ export interface ManagedSession {
   /** 'supervisor' coordinates; 'worker' (default) does the work. */
   role?: 'supervisor' | 'worker'
   taskId?: string
+  /** Last time this session wrote a task heartbeat (runtime-only throttle). */
+  lastTaskHeartbeatAt?: number
   spawnDepth?: number
   /**
    * Set when the user is actively engaged on a mobile/chat channel bound to
@@ -2337,6 +2342,14 @@ export class SessionManager implements ISessionManager {
         }
         // Notify renderer to re-read automations.json
         this.broadcastAutomationsChanged(workspaceId)
+
+        // The task system is the only scheduler: import any cron matcher the
+        // user just saved (or edited) so the schedule actually fires.
+        try {
+          migrateAutomationCronTasks(this.getTasks(workspaceId), workspaceRootPath)
+        } catch (error) {
+          sessionLog.warn('automation→task migration failed after config change', { error })
+        }
       },
       onPagesListChange: (pages) => {
         sessionLog.info(`Pages changed in ${workspaceId} (${pages.length} pages)`)
@@ -3670,6 +3683,13 @@ export class SessionManager implements ISessionManager {
    * Delivery target handed to the Event Center. Kept as a method so the event
    * service never imports SessionManager (no cycle) and tests can stub it.
    */
+  async routeUnclaimedEvent(
+    workspaceId: string,
+    event: { id: string; source: string; type: string; title: string; summary?: string },
+  ): Promise<void> {
+    await this.getSupervisorRuntime(workspaceId).routeUnclaimed(event)
+  }
+
   createEventDispatchTarget() {
     return {
       deliver: (
@@ -5438,6 +5458,11 @@ export class SessionManager implements ISessionManager {
             const runtime = this.getSupervisorRuntime(managed.workspace.id)
             return runtime.dispatch({ fromSessionId: managed.id, ...params })
           },
+          continueTask: (taskId) => {
+            void this.runTask(managed.workspace.id, taskId, 'rotate').catch((error) => {
+              sessionLog.warn('failed to continue a rotated task', { taskId, error })
+            })
+          },
         })
 
         // Task board surface: the supervisor creates and advances tasks. Kept
@@ -5452,6 +5477,8 @@ export class SessionManager implements ISessionManager {
               parentTaskId: payload.parentTaskId,
               dependsOn: payload.dependsOn,
               priority: payload.priority as 0 | 1 | 2 | 3 | 4 | undefined,
+              ...(payload.spec ? { spec: normalizeSpec(payload.spec) } : {}),
+              ...(payload.trigger ? { trigger: normalizeTrigger(payload.trigger) } : {}),
               supervisorSessionId: managed.id,
               toolCallId: randomUUID(),
             })
@@ -5473,6 +5500,13 @@ export class SessionManager implements ISessionManager {
             return { task, journal: readJournal(managed.workspace.rootPath, identifier) }
           },
           update: async (identifier, patch) => {
+            // "running" is not a label: it must start a run. Flipping the status
+            // without spawning was how a task could look alive and do nothing.
+            if (patch.status === 'running') {
+              const started = await this.runTask(managed.workspace.id, identifier, 'supervisor')
+              const current = this.getTasks(managed.workspace.id).get(identifier)
+              return { status: started ? 'running' : (current?.status ?? 'backlog') }
+            }
             const task = this.getTasks(managed.workspace.id).setStatus(
               identifier,
               (patch.status ?? 'running') as never,
@@ -5481,11 +5515,16 @@ export class SessionManager implements ISessionManager {
             return { status: task.status }
           },
           handoff: async (identifier, handoff, fromSessionId) => {
-            const result = this.getTasks(managed.workspace.id).reportHandoff(
+            const result = await this.getTasks(managed.workspace.id).reportHandoff(
               identifier,
               handoff,
               fromSessionId,
             )
+            if (result.rotationPending) {
+              void this.runTask(managed.workspace.id, identifier, 'rotate').catch((error) => {
+                sessionLog.warn('failed to continue a rotated task', { taskId: identifier, error })
+              })
+            }
             return { passed: result.passed, reasons: result.reasons, status: result.task.status }
           },
         }
@@ -6625,6 +6664,38 @@ ${request.prompt}`;
   private readonly supervisorRuntimes = new Map<string, SupervisorRuntime>()
   /** Per-workspace watchdog disposers. */
   private readonly watchdogStops = new Map<string, () => void>()
+  /** Per-workspace task scheduler disposers. */
+  private readonly taskSchedulerStops = new Map<string, () => void>()
+
+  /**
+   * Second acceptance layer: judge a handoff in a read-only session.
+   *
+   * The judge is a normal session with a locked-down prompt and no write intent;
+   * its answer is parsed fail-closed. It is deliberately a separate session —
+   * a worker grading its own homework is not a gate.
+   */
+  private async judgeTaskHandoff(
+    workspaceId: string,
+    task: import('@craft-agent/shared/tasks').Task,
+    handoff: import('@craft-agent/shared/tasks').Handoff,
+  ): Promise<{ pass: boolean; reasons: string[] }> {
+    const created = await this.createSession(workspaceId, {
+      name: `${task.id} 验收`,
+      role: 'worker',
+      hidden: true,
+      permissionMode: 'safe',
+    })
+
+    await this.sendMessage(created.id, buildJudgePrompt(task, handoff))
+
+    const managed = this.sessions.get(created.id)
+    const messages = managed?.messages ?? []
+    const answer = [...messages]
+      .reverse()
+      .find((m) => m.role === 'assistant' && !m.isIntermediate && typeof m.content === 'string')
+
+    return parseJudgeVerdict(typeof answer?.content === 'string' ? answer.content : '')
+  }
 
   /** Task service for a workspace. */
   getTasks(workspaceId: string): TaskService {
@@ -6640,7 +6711,43 @@ ${request.prompt}`;
           sessionLog.warn('Failed to wake supervisor', { sessionId, error })
         })
       },
+      // Acceptance commands run here, not inside the worker: a task must not be
+      // able to certify itself. cwd is resolved against the workspace root so a
+      // spec can stay portable.
+      runAcceptanceCommand: async (command, cwd) => {
+        const { exec } = await import('child_process')
+        const workingDir = cwd
+          ? (isAbsolute(cwd) ? cwd : join(workspace.rootPath, cwd))
+          : workspace.rootPath
+        return await new Promise((resolve) => {
+          exec(command, { cwd: workingDir, timeout: 120_000, maxBuffer: 2 * 1024 * 1024 }, (error, stdout, stderr) => {
+            const output = `${stdout ?? ''}${stderr ?? ''}`.trim()
+            if (error) {
+              const code = typeof (error as { code?: unknown }).code === 'number'
+                ? (error as { code: number }).code
+                : null
+              resolve({ exitCode: code, output: output.slice(-500) })
+              return
+            }
+            resolve({ exitCode: 0, output: output.slice(-500) })
+          })
+        })
+      },
+      judgeHandoff: (task, handoff) => this.judgeTaskHandoff(workspaceId, task, handoff),
     })
+    // Register before the loops start: the scheduler and event routing both
+    // re-enter getTasks, and a second service would mean a second watchdog.
+    this.taskServices.set(workspaceId, service)
+
+    // Legacy cron automations become task triggers. The automation runtime is
+    // not started anywhere, so without this an existing schedule would keep
+    // looking configured while never firing.
+    try {
+      migrateAutomationCronTasks(service, workspace.rootPath)
+    } catch (error) {
+      sessionLog.warn('automation→task migration failed', { error })
+    }
+
     // A task left `running` by a process that died did not fail; mark it
     // resumable once, when the workspace's task service comes up.
     try {
@@ -6670,8 +6777,95 @@ ${request.prompt}`;
       sessionLog.warn('failed to start the task watchdog', { error })
     }
 
-    this.taskServices.set(workspaceId, service)
+    // Trigger loop: cron-fired tasks start here, without touching a session or
+    // a model. Kept beside the watchdog because both are external control loops.
+    try {
+      const stop = startTaskScheduler({
+        tasks: service,
+        listTasks: () => service.list(),
+        spawnRun: (task, reason) => this.spawnTaskRun(workspaceId, task, reason),
+      })
+      this.taskSchedulerStops.set(workspaceId, stop)
+    } catch (error) {
+      sessionLog.warn('failed to start the task scheduler', { error })
+    }
+
     return service
+  }
+
+  /**
+   * Spawn the worker for one claimed task run.
+   *
+   * Shared by the cron scheduler and by event triggers. The caller must already
+   * hold the run lock; this only creates the session and hands it the brief.
+   */
+  private async spawnTaskRun(
+    workspaceId: string,
+    task: import('@craft-agent/shared/tasks').Task,
+    reason: string,
+  ): Promise<{ sessionId: string } | null> {
+    const spec = task.spec
+    const created = await this.createSession(workspaceId, {
+      name: `${task.id} ${task.name}`.slice(0, 60),
+      role: 'worker',
+      taskId: task.id,
+      ...(task.assigneeAgentId ? { agentId: task.assigneeAgentId } : {}),
+      ...(spec?.cwd ? { workingDirectory: spec.cwd } : {}),
+      ...(spec?.sources?.length ? { enabledSourceSlugs: spec.sources } : {}),
+      ...(spec?.model ? { model: spec.model } : {}),
+      ...(spec?.strategy ? { strategy: spec.strategy } : {}),
+    })
+    void this.sendMessage(created.id, formatTaskBrief(task, { reason })).catch((error) => {
+      sessionLog.warn('failed to send task brief', { taskId: task.id, error })
+    })
+    return { sessionId: created.id }
+  }
+
+  /**
+   * Start one task by id, claiming the lock first.
+   *
+   * Used by event routing (routes.json `to.taskId`) and by the UI's manual run.
+   */
+  async runTask(workspaceId: string, taskId: string, reason: string): Promise<boolean> {
+    const tasks = this.getTasks(workspaceId)
+    const claim = tasks.startRun(taskId, `pending:${reason}`)
+    if (!claim.ok) {
+      sessionLog.info(`[tasks] ${taskId} not started: ${claim.reason}`)
+      return false
+    }
+    try {
+      const spawned = await this.spawnTaskRun(workspaceId, claim.task, reason)
+      if (!spawned) {
+        tasks.endRun(taskId, { ok: false, error: 'spawn failed' })
+        return false
+      }
+      tasks.attachSession(taskId, spawned.sessionId)
+      tasks.startRun(taskId, spawned.sessionId)
+      return true
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      tasks.endRun(taskId, { ok: false, error: message })
+      return false
+    }
+  }
+
+  /**
+   * Throttled task heartbeat.
+   *
+   * Tool results prove a run is alive; writing the task file on every result
+   * would be wasteful, so at most one write per 30s per session. Failures are
+   * swallowed — a heartbeat must never break a turn.
+   */
+  private touchTaskHeartbeat(managed: ManagedSession): void {
+    if (!managed.taskId) return
+    const now = Date.now()
+    if (now - (managed.lastTaskHeartbeatAt ?? 0) < 30_000) return
+    managed.lastTaskHeartbeatAt = now
+    try {
+      this.getTasks(managed.workspace.id).heartbeat(managed.taskId)
+    } catch (error) {
+      sessionLog.debug('task heartbeat failed', { taskId: managed.taskId, error })
+    }
   }
 
   /** Supervisor runtime for a workspace, created on first use. */
@@ -8764,6 +8958,9 @@ ${request.prompt}`;
     if (!managed) {
       throw new Error(`Session ${sessionId} not found`)
     }
+
+    // A turn starting is proof of life even if the first tool runs for minutes.
+    this.touchTaskHeartbeat(managed)
 
     const ownsSourceStartup = !managed.isProcessing && !managed.sourceTurnStarting
     if (ownsSourceStartup) {
@@ -12614,6 +12811,10 @@ ${request.prompt}`;
       }
 
       case 'tool_result': {
+        // A tool completion is proof of progress. Throttled so a fast tool loop
+        // does not rewrite the task file on every result.
+        this.touchTaskHeartbeat(managed)
+
         // toolName comes directly from CraftAgent (resolved via ToolIndex)
         const toolName = event.toolName || 'unknown'
 

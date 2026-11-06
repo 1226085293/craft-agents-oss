@@ -19,6 +19,99 @@ export type TaskStatus =
 
 export type TaskPriority = 0 | 1 | 2 | 3 | 4;
 
+/**
+ * The structured execution contract.
+ *
+ * `instruction` stays the immutable human request; `spec` is what makes that
+ * request executable: where to run, what may be touched, what must exist at
+ * the end. Keeping it separate from prose is what lets a worker start cold and
+ * lets the acceptance gate check something other than vibes.
+ */
+export interface TaskDeliverable {
+  /** What kind of thing is owed. */
+  kind: 'file' | 'directory' | 'pr' | 'doc' | 'message';
+  /** Path (workspace- or absolute) for file/directory kinds. */
+  path?: string;
+  /** Human note: what this deliverable must contain. */
+  note?: string;
+  /** Required for the gate? Defaults to true. */
+  required?: boolean;
+}
+
+/** One checkable line of the acceptance list. */
+export interface TaskAcceptanceItem {
+  id: string;
+  /** What must be true, in words (shown to the worker and the human). */
+  check: string;
+  /** Optional command that proves it. Exit 0 = pass. */
+  command?: string;
+}
+
+export interface TaskPermissions {
+  /** Paths the worker may write. Empty = the workspace root. */
+  writePaths?: string[];
+  /** True when the task may send things outside the machine. Default false. */
+  allowExternal?: boolean;
+}
+
+export interface TaskSpec {
+  /** Working directory, workspace-relative or absolute. */
+  cwd?: string;
+  /** Source slugs the worker may use. Empty = inherit from the agent. */
+  sources?: string[];
+  /** Skill slugs bound to this task (SOP). */
+  skills?: string[];
+  /** Model override for the worker. */
+  model?: string;
+  /** Strategy group override for the worker. */
+  strategy?: string;
+  deliverables?: TaskDeliverable[];
+  acceptance?: TaskAcceptanceItem[];
+  permissions?: TaskPermissions;
+}
+
+/**
+ * What may start a task.
+ *
+ * Only one trigger per task: a task that is both cron-driven and event-driven
+ * is two tasks sharing a spec, and pretending otherwise makes "why did this
+ * run?" unanswerable.
+ */
+export type TaskTrigger =
+  | { kind: 'manual' }
+  | {
+      kind: 'cron';
+      /** Five-field cron expression. */
+      expr: string;
+      timezone?: string;
+      enabled: boolean;
+      /** Automation matcher id this trigger was imported from, if any. */
+      sourceId?: string;
+    }
+  | {
+      kind: 'event';
+      source: string;
+      types?: string[];
+      /** Case-insensitive substring / `a|b` alternation. */
+      textMatch?: string;
+      enabled: boolean;
+      sourceId?: string;
+    };
+
+/** Run bookkeeping that the watchdog and the budget gate both read. */
+export interface TaskStats {
+  /** Completed + started runs. A retry counts. */
+  runs: number;
+  /** Accumulated active milliseconds (only while running). */
+  activeMs: number;
+  /** Last time the task proved it was alive. */
+  lastHeartbeatAt?: number;
+  /** Session currently holding the run lock. */
+  lockSessionId?: string;
+  /** When the current run started (epoch ms). */
+  runStartedAt?: number;
+}
+
 /** Why a task is currently paused (null while running/backlog). */
 export type TaskPauseReason =
   | 'failures'
@@ -119,6 +212,13 @@ export interface Task {
   lifecycle: TaskLifecycle;
   origin: TaskOrigin;
 
+  /** Structured execution contract (see TaskSpec). */
+  spec?: TaskSpec;
+  /** What starts this task. Missing = manual. */
+  trigger?: TaskTrigger;
+  /** Run bookkeeping. Missing on tasks created before v2. */
+  stats?: TaskStats;
+
   /** Task-level heartbeat: proves the whole task is alive, not just a turn. */
   heartbeatIntervalMin: number;
   lastHeartbeatAt?: number;
@@ -128,6 +228,8 @@ export interface Task {
 
   createdAt: number;
   updatedAt: number;
+  /** File schema version; bumped by normalizeTask on read. */
+  version?: number;
 }
 
 export interface TaskIndexEntry {
@@ -154,6 +256,9 @@ export const DEFAULT_BUDGET: Omit<TaskBudget, 'activeMinutes'> = {
 };
 
 export const DEFAULT_HEARTBEAT_MINUTES = 10;
+
+/** Current task file schema version (v2 added spec/trigger/stats). */
+export const TASK_VERSION = 2;
 
 /** Consecutive failures that pause a task. */
 export const FAILURE_FUSE = 3;

@@ -14,9 +14,13 @@ import {
   type HandoffOutcome,
   type HandoffVerify,
   type Task,
+  type TaskAcceptanceItem,
   type TaskBudget,
+  type TaskDeliverable,
   type TaskPauseReason,
+  type TaskSpec,
   type TaskStatus,
+  type TaskTrigger,
 } from './types.ts';
 
 /**
@@ -167,14 +171,30 @@ export function normalizeHandoff(raw: unknown, fromSessionId: string, now: numbe
   };
 }
 
+export interface ArtifactProbe {
+  /** True when the path exists and is readable. */
+  exists: boolean;
+  /** True when the path is a file with content (directories are exempt). */
+  nonEmpty: boolean;
+  isDirectory?: boolean;
+}
+
 /**
  * Rule gate (the first, mandatory acceptance layer).
  *
  * Cheap, deterministic, and the only layer that runs when no `requirement` was
  * written. Returns the reasons it failed so the supervisor can send them back
  * verbatim.
+ *
+ * `probe` replaces the old `artifactsExist` boolean because "the path is there"
+ * and "the deliverable can actually be opened" are different claims — an empty
+ * file or a dangling symlink used to pass.
  */
-export function checkHandoffRules(handoff: Handoff, artifactsExist: (path: string) => boolean): {
+export function checkHandoffRules(
+  handoff: Handoff,
+  probe: (path: string) => ArtifactProbe,
+  options?: { requiredDeliverables?: TaskDeliverable[]; acceptance?: TaskAcceptanceVerdict },
+): {
   passed: boolean;
   reasons: string[];
 } {
@@ -188,8 +208,28 @@ export function checkHandoffRules(handoff: Handoff, artifactsExist: (path: strin
     reasons.push('no artifacts');
   } else {
     for (const artifact of handoff.artifacts) {
-      if (!artifactsExist(artifact.path)) reasons.push(`missing artifact: ${artifact.path}`);
+      const found = probe(artifact.path);
+      if (!found.exists) {
+        reasons.push(`missing artifact: ${artifact.path}`);
+      } else if (!found.nonEmpty && !found.isDirectory) {
+        reasons.push(`empty artifact: ${artifact.path}`);
+      }
     }
+  }
+
+  // Declared deliverables are part of the contract, not a suggestion: a task
+  // that promised a PR must not complete on an unrelated README edit.
+  for (const deliverable of options?.requiredDeliverables ?? []) {
+    if (deliverable.required === false) continue;
+    if (!deliverable.path) {
+      // A deliverable without a path (pr/doc/message) can only be checked when
+      // the worker names it in its artifacts; require at least one artifact.
+      if (!handoff.artifacts?.length) reasons.push(`missing deliverable: ${deliverable.kind}`);
+      continue;
+    }
+    const found = probe(deliverable.path);
+    if (!found.exists) reasons.push(`missing deliverable: ${deliverable.path}`);
+    else if (!found.nonEmpty && !found.isDirectory) reasons.push(`empty deliverable: ${deliverable.path}`);
   }
 
   if (!handoff.verify || handoff.verify.ran.length === 0) {
@@ -198,7 +238,55 @@ export function checkHandoffRules(handoff: Handoff, artifactsExist: (path: strin
     reasons.push('verification did not pass');
   }
 
+  // Acceptance commands are the deterministic second layer: they run here, not
+  // inside the model's story about itself.
+  if (options?.acceptance) {
+    for (const failure of options.acceptance.failures) reasons.push(failure);
+  }
+
   return { passed: reasons.length === 0, reasons };
+}
+
+/** Outcome of running the task's acceptance commands. */
+export interface TaskAcceptanceVerdict {
+  checked: number;
+  failures: string[];
+  /** Per-item detail, for the journal. */
+  results: Array<{ id: string; passed: boolean; note?: string }>;
+}
+
+export function acceptanceItems(spec: TaskSpec | undefined): TaskAcceptanceItem[] {
+  return (spec?.acceptance ?? []).filter((item) => item && item.id && item.check);
+}
+
+// ------------------------------------------------------------
+// Dependencies and the run lock
+// ------------------------------------------------------------
+
+/**
+ * A task may not start until every declared dependency is `completed`.
+ * Reported as reasons so the supervisor can say exactly what is blocking.
+ */
+export function checkDependencies(
+  task: Task,
+  lookup: (id: string) => Pick<Task, 'id' | 'status' | 'name'> | null,
+): { ok: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+  for (const depId of task.dependsOn ?? []) {
+    const dep = lookup(depId);
+    if (!dep) reasons.push(`dependency ${depId} not found`);
+    else if (dep.status !== 'completed') {
+      reasons.push(`dependency ${dep.name} (${dep.id}) is ${dep.status}`);
+    }
+  }
+  return { ok: reasons.length === 0, reasons };
+}
+
+/** True when another session already holds this task's run lock. */
+export function isRunLocked(task: Task, sessionExists: (id: string) => boolean): boolean {
+  const lock = task.stats?.lockSessionId;
+  if (!lock) return false;
+  return sessionExists(lock);
 }
 
 // ------------------------------------------------------------
@@ -259,9 +347,48 @@ export function recordRunResult(
 /** A task is stalled when two heartbeats in a row never arrived. */
 export function isHeartbeatStalled(task: Task, now: number): boolean {
   // `0` is a legitimate timestamp (epoch), so test for presence explicitly.
-  if (typeof task.lastHeartbeatAt !== 'number') return false;
+  const last = task.stats?.lastHeartbeatAt ?? task.lastHeartbeatAt;
+  if (typeof last !== 'number') return false;
   const windowMs = task.heartbeatIntervalMin * 60_000 * 2;
-  return now - task.lastHeartbeatAt > windowMs;
+  return now - last > windowMs;
+}
+
+/**
+ * A running task with no heartbeat at all is stalled, not "fine".
+ *
+ * The old rule treated a missing heartbeat as healthy, which made the watchdog
+ * blind to the most common failure: a worker that never hands off.
+ */
+export function isHeartbeatMissing(task: Task, now: number): boolean {
+  const last = task.stats?.lastHeartbeatAt ?? task.lastHeartbeatAt;
+  if (typeof last === 'number') return isHeartbeatStalled(task, now);
+  const startedAt = task.stats?.runStartedAt ?? task.updatedAt;
+  return now - startedAt > task.heartbeatIntervalMin * 60_000 * 2;
+}
+
+/**
+ * Trigger matching, kept pure so the scheduler stays trivially testable.
+ *
+ * Cron evaluation itself needs a tick timestamp, so the caller passes the
+ * minute the tick represents; `cronMatches` lives with the cron matcher.
+ */
+export function eventTriggerMatches(
+  trigger: TaskTrigger | undefined,
+  event: { source: string; type: string; title?: string; summary?: string },
+): boolean {
+  if (!trigger || trigger.kind !== 'event' || !trigger.enabled) return false;
+  if (trigger.source !== event.source) return false;
+  if (trigger.types?.length && !trigger.types.includes(event.type)) return false;
+  if (trigger.textMatch) {
+    const haystack = `${event.title ?? ''} ${event.summary ?? ''}`.toLowerCase();
+    const hit = trigger.textMatch
+      .split('|')
+      .map((part) => part.trim().toLowerCase())
+      .filter(Boolean)
+      .some((part) => haystack.includes(part));
+    if (!hit) return false;
+  }
+  return true;
 }
 
 /**

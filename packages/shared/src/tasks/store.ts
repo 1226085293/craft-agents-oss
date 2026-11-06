@@ -26,10 +26,13 @@ import {
   DEFAULT_BUDGET,
   DEFAULT_HEARTBEAT_MINUTES,
   TASK_INDEX_VERSION,
+  TASK_VERSION,
   type Task,
   type TaskIndex,
   type TaskIndexEntry,
+  type TaskSpec,
   type TaskStatus,
+  type TaskTrigger,
 } from './types.ts';
 
 export function getTasksDir(workspaceRoot: string): string {
@@ -63,10 +66,34 @@ export function loadTask(workspaceRoot: string, id: string): Task | null {
   const path = getTaskPath(workspaceRoot, id);
   if (!existsSync(path)) return null;
   try {
-    return JSON.parse(readFileSync(path, 'utf-8')) as Task;
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as Task;
+    return normalizeTask(raw);
   } catch {
     return null;
   }
+}
+
+/**
+ * Fill in fields that older task files predate.
+ *
+ * Read-side migration, not a rewrite: a task written by an older build stays
+ * valid and is upgraded the next time something saves it.
+ */
+export function normalizeTask(task: Task): Task {
+  const stats = task.stats ?? {
+    runs: 0,
+    activeMs: 0,
+    ...(typeof task.lastHeartbeatAt === 'number' ? { lastHeartbeatAt: task.lastHeartbeatAt } : {}),
+  };
+  return {
+    ...task,
+    dependsOn: task.dependsOn ?? [],
+    handoffs: task.handoffs ?? [],
+    sessionIds: task.sessionIds ?? [],
+    trigger: task.trigger ?? { kind: 'manual' },
+    stats,
+    version: TASK_VERSION,
+  };
 }
 
 export function saveTask(workspaceRoot: string, task: Task): void {
@@ -186,6 +213,8 @@ export interface CreateTaskInput {
   dependsOn?: string[];
   priority?: Task['priority'];
   deadline?: number | null;
+  spec?: TaskSpec;
+  trigger?: TaskTrigger;
   now?: number;
 }
 
@@ -206,12 +235,22 @@ export function createTask(input: CreateTaskInput): Task {
     priority: input.priority ?? 0,
     budget: { ...DEFAULT_BUDGET, activeMinutes: 120, deadline: input.deadline ?? null },
     handoffs: [],
-    verify: { enabled: false, maxIterations: 3 },
+    verify: {
+      enabled: Boolean(input.spec?.acceptance?.length),
+      maxIterations: 3,
+      ...(input.spec?.acceptance?.length
+        ? { requirement: input.spec.acceptance.map((item) => item.check).join('\n') }
+        : {}),
+    },
     lifecycle: { errorCount: 0, consecutiveFailures: 0 },
     origin: { supervisorSessionId: input.supervisorSessionId, toolCallId: input.toolCallId },
+    spec: input.spec,
+    trigger: input.trigger ?? { kind: 'manual' },
+    stats: { runs: 0, activeMs: 0 },
     heartbeatIntervalMin: DEFAULT_HEARTBEAT_MINUTES,
     createdAt: now,
     updatedAt: now,
+    version: TASK_VERSION,
   };
 }
 

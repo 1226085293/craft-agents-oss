@@ -111,7 +111,7 @@ describe('handoff', () => {
 
   it('fails the rule gate without artifacts or a verification run', () => {
     const h = normalizeHandoff({ summary: 'done' }, 'sess_1', 1);
-    const verdict = checkHandoffRules(h, () => true);
+    const verdict = checkHandoffRules(h, () => ({ exists: true, nonEmpty: true }));
     expect(verdict.passed).toBe(false);
     expect(verdict.reasons).toContain('no artifacts');
     expect(verdict.reasons).toContain('no verification command was run');
@@ -123,7 +123,7 @@ describe('handoff', () => {
       'sess_1',
       1,
     );
-    expect(checkHandoffRules(h, () => false).reasons).toContain('missing artifact: /missing');
+    expect(checkHandoffRules(h, () => ({ exists: false, nonEmpty: false })).reasons).toContain('missing artifact: /missing');
   });
 
   it('passes when artifacts exist and verification passed', () => {
@@ -132,12 +132,12 @@ describe('handoff', () => {
       'sess_1',
       1,
     );
-    expect(checkHandoffRules(h, () => true).passed).toBe(true);
+    expect(checkHandoffRules(h, () => ({ exists: true, nonEmpty: true })).passed).toBe(true);
   });
 
   it('never passes a needs_decision handoff', () => {
     const h = normalizeHandoff({ outcome: 'needs_decision' }, 'sess_1', 1);
-    expect(checkHandoffRules(h, () => true).passed).toBe(false);
+    expect(checkHandoffRules(h, () => ({ exists: true, nonEmpty: true })).passed).toBe(false);
   });
 });
 

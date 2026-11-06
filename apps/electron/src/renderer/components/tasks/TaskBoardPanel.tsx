@@ -1,16 +1,24 @@
 /**
- * Task board (sidebar panel).
+ * Task navigator and detail presentation.
  *
- * Two levels: a grouped list (进行中 / 等我拍板 / 已完成) and a detail pane
- * with the handoff trail. Deliberately no third column at this width — the
- * detail slides over the list, which is what the shell's panel width can hold.
+ * The navigator stays compact in the shell's second column. The right content
+ * panel uses TaskDetailPanelView directly so it can use the available width
+ * without overlaying or duplicating the navigator.
  */
 
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
-import { AlertTriangle, CheckCircle2, CircleDot, PauseCircle, XCircle } from 'lucide-react'
+import {
+  ArrowRight,
+  CheckCircle2,
+  CircleDot,
+  PauseCircle,
+  XCircle,
+} from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { TaskDetailPanelView } from './TaskDetailPanelView'
+import { TaskCreateDialog, type TaskCreateInput } from './TaskCreateDialog'
 
 export type TaskStatus = 'backlog' | 'running' | 'paused' | 'completed' | 'failed' | 'canceled'
 
@@ -49,6 +57,16 @@ export interface TaskDetailView {
   budget: { maxSessions: number; maxRuns: number; activeMinutes: number; deadline?: number | null }
   verify: { enabled: boolean; requirement?: string; maxIterations: number; lastVerdict?: 'pass' | 'fail' }
   lifecycle: { errorCount: number; consecutiveFailures: number; lastError?: string }
+  /** Structured contract (v2 tasks). Missing on older tasks. */
+  spec?: {
+    cwd?: string
+    sources?: string[]
+    skills?: string[]
+    deliverables?: Array<{ kind: string; path?: string; note?: string; required?: boolean }>
+    acceptance?: Array<{ id: string; check: string; command?: string }>
+  }
+  trigger?: { kind: 'manual' | 'cron' | 'event'; expr?: string; timezone?: string; source?: string; types?: string[]; enabled?: boolean }
+  stats?: { runs: number; activeMs: number; lastHeartbeatAt?: number }
   createdAt: number
   updatedAt: number
 }
@@ -65,17 +83,49 @@ const STATUS_ICON: Record<TaskStatus, React.ReactNode> = {
 const STATUS_LABEL: Record<TaskStatus, string> = {
   backlog: '待开始',
   running: '进行中',
-  paused: '暂停',
+  paused: '等我拍板',
   completed: '已完成',
   failed: '失败',
   canceled: '已取消',
 }
 
-/** Three buckets the user actually acts on. */
-const GROUPS: Array<{ key: string; label: string; match: (s: TaskStatus) => boolean }> = [
-  { key: 'active', label: '进行中', match: (s) => s === 'running' || s === 'backlog' },
-  { key: 'blocked', label: '等我拍板', match: (s) => s === 'paused' },
-  { key: 'done', label: '已完成', match: (s) => s === 'completed' || s === 'failed' || s === 'canceled' },
+const PAUSE_REASON_LABEL: Record<string, string> = {
+  failures: '连续失败',
+  budget: '预算用尽',
+  process_lost: '工作进程中断',
+  waiting: '等待中',
+  needs_decision: '等待你决定',
+}
+
+function pauseReasonLabel(reason: string): string {
+  return PAUSE_REASON_LABEL[reason] ?? reason
+}
+
+const GROUPS: Array<{
+  key: string
+  label: string
+  hint?: string
+  match: (task: TaskListItem) => boolean
+}> = [
+  {
+    key: 'decision',
+    label: '等你拍板',
+    hint: '必须由人决定，任务已停在这里',
+    match: (task) => task.status === 'paused' && task.pauseReason === 'needs_decision',
+  },
+  { key: 'running', label: '进行中', match: (task) => task.status === 'running' },
+  { key: 'backlog', label: '待开始', match: (task) => task.status === 'backlog' },
+  {
+    key: 'paused',
+    label: '已暂停',
+    hint: '失败、超预算或进程丢失',
+    match: (task) => task.status === 'paused' && task.pauseReason !== 'needs_decision',
+  },
+  {
+    key: 'done',
+    label: '已结束',
+    match: (task) => task.status === 'completed' || task.status === 'failed' || task.status === 'canceled',
+  },
 ]
 
 function formatAge(ts: number): string {
@@ -95,6 +145,10 @@ export interface TaskBoardPanelProps {
   /** Resume / cancel, surfaced as buttons on a paused task. */
   onResume?: (id: string) => void
   onCancel?: (id: string) => void
+  /** Start a run now (backlog or paused). */
+  onRun?: (id: string) => void
+  /** Create a task from the UI. */
+  onCreate?: (input: TaskCreateInput) => void
 }
 
 export function TaskBoardPanel({
@@ -105,143 +159,113 @@ export function TaskBoardPanel({
   onCloseDetail,
   onResume,
   onCancel,
+  onRun,
+  onCreate,
 }: TaskBoardPanelProps): React.JSX.Element {
   const { t } = useTranslation()
+  const [creating, setCreating] = React.useState(false)
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center justify-between px-3 py-2">
-        <span className="text-sm font-medium">{t('taskboard.title', { defaultValue: '任务' })}</span>
-        <span className="text-xs text-muted-foreground">{tasks.length}</span>
+      <div className="flex items-center justify-between border-b border-border/50 px-4 py-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="text-sm font-semibold">{t('taskboard.title', { defaultValue: '任务' })}</span>
+          <span className="rounded-full bg-foreground/5 px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground" aria-label={`${tasks.length} 项任务`}>
+            {tasks.length}
+          </span>
+        </div>
+        {onCreate ? (
+          <button
+            type="button"
+            className="rounded-md border border-border/70 px-2 py-1 text-[11px] font-medium text-foreground hover:bg-foreground/5"
+            onClick={() => setCreating(true)}
+          >
+            + 新建
+          </button>
+        ) : null}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      <TaskCreateDialog open={creating} onClose={() => setCreating(false)} onSubmit={(input) => onCreate?.(input)} />
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-3">
         {tasks.length === 0 ? (
-          <div className="px-2 py-8 text-center text-xs text-muted-foreground">
+          <div className="mx-1 rounded-lg border border-dashed border-border/70 px-4 py-8 text-center text-xs leading-relaxed text-muted-foreground">
             {t('taskboard.empty', { defaultValue: '还没有任务。督导在处理跨会话的活时会建一个。' })}
           </div>
         ) : (
-          GROUPS.map((group) => {
-            const items = tasks.filter((task) => group.match(task.status))
-            if (items.length === 0) return null
-            return (
-              <div key={group.key} className="mb-2">
-                <div className="px-2 py-1 text-[11px] uppercase tracking-wide text-muted-foreground">
-                  {group.label}
-                </div>
-                {items.map((task) => (
-                  <button
-                    key={task.id}
-                    type="button"
-                    onClick={() => onSelect(task.id)}
-                    className={cn(
-                      'mb-0.5 flex w-full flex-col gap-0.5 rounded-md px-2 py-1.5 text-left',
-                      'hover:bg-accent',
-                      selectedId === task.id && 'bg-accent',
-                    )}
-                  >
-                    <span className="flex items-center gap-1.5">
-                      {STATUS_ICON[task.status]}
-                      <span className="truncate text-sm">{task.name}</span>
-                    </span>
-                    <span className="truncate text-[11px] text-muted-foreground">
-                      {task.id} · {STATUS_LABEL[task.status]}
-                      {task.pauseReason ? ` · ${task.pauseReason}` : ''} · {formatAge(task.updatedAt)}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )
-          })
+          <div className="space-y-4">
+            {GROUPS.map((group) => {
+              const items = tasks.filter((task) => group.match(task))
+              if (items.length === 0) return null
+              return (
+                <section key={group.key} aria-label={`${group.label}，${items.length} 项任务`}>
+                  <div className="mb-1.5 flex items-center justify-between px-2">
+                    <h2 className="text-[11px] font-medium tracking-wide text-muted-foreground">{group.label}</h2>
+                    <span className="text-[10px] tabular-nums text-muted-foreground/80">{items.length}</span>
+                  </div>
+                  <div className="space-y-1">
+                    {items.map((task) => (
+                      <button
+                        key={task.id}
+                        type="button"
+                        aria-pressed={selectedId === task.id}
+                        onClick={() => onSelect(task.id)}
+                        className={cn(
+                          'group flex w-full flex-col gap-1 rounded-lg border-l-2 border-transparent px-3 py-2.5 text-left transition-colors duration-150',
+                          'hover:bg-foreground/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background',
+                          selectedId === task.id && 'border-accent bg-accent/10',
+                        )}
+                      >
+                        <span className="flex min-w-0 items-center gap-2">
+                          {STATUS_ICON[task.status]}
+                          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">{task.name}</span>
+                          <ArrowRight className={cn(
+                            'h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity duration-150 group-hover:opacity-70',
+                            selectedId === task.id && 'opacity-70',
+                          )} aria-hidden="true" />
+                        </span>
+                        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[22px] text-[10px] text-muted-foreground">
+                          <span className="font-mono">{task.id}</span>
+                          <span aria-hidden="true">·</span>
+                          <span>{STATUS_LABEL[task.status]}</span>
+                          <span aria-hidden="true">·</span>
+                          <span>{formatAge(task.updatedAt)}</span>
+                          {task.sessionCount > 0 ? (
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span>会话 {task.sessionCount}</span>
+                            </>
+                          ) : null}
+                        </span>
+                        {task.pauseReason ? (
+                          <span className="truncate pl-[22px] text-[10px] text-amber-400" title={pauseReasonLabel(task.pauseReason)}>
+                            {pauseReasonLabel(task.pauseReason)}
+                          </span>
+                        ) : null}
+                        {task.lastHandoff ? (
+                          <span className="line-clamp-2 pl-[22px] text-[10px] leading-relaxed text-muted-foreground" title={task.lastHandoff}>
+                            {task.lastHandoff}
+                          </span>
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>
+                </section>
+              )
+            })}
+          </div>
         )}
       </div>
 
       {detail ? (
         <div className="absolute inset-0 z-10 flex flex-col bg-background">
-          <div className="flex items-center justify-between border-b px-3 py-2">
-            <span className="truncate text-sm font-medium">
-              {detail.id} · {detail.name}
-            </span>
-            <button type="button" className="text-xs text-muted-foreground" onClick={onCloseDetail}>
-              {t('taskboard.close', { defaultValue: '关闭' })}
-            </button>
-          </div>
-
-          <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-3 py-2 text-xs">
-            <section>
-              <div className="mb-1 text-[11px] uppercase text-muted-foreground">说明</div>
-              <p className="whitespace-pre-wrap">{detail.instruction}</p>
-            </section>
-
-            <section className="flex flex-wrap gap-2">
-              <span className="rounded bg-muted px-1.5 py-0.5">{STATUS_LABEL[detail.status]}</span>
-              <span className="rounded bg-muted px-1.5 py-0.5">
-                会话 {detail.sessionIds.length}/{detail.budget.maxSessions}
-              </span>
-              <span className="rounded bg-muted px-1.5 py-0.5">
-                失败 {detail.lifecycle.consecutiveFailures}/3
-              </span>
-              {detail.verify.enabled ? (
-                <span className="rounded bg-muted px-1.5 py-0.5">
-                  验收 {detail.verify.lastVerdict ?? '待判定'}
-                </span>
-              ) : null}
-            </section>
-
-            {detail.pauseReason ? (
-              <div className="flex items-start gap-1.5 rounded border border-amber-500/30 bg-amber-500/10 p-2">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500" />
-                <span>暂停原因：{detail.pauseReason}</span>
-              </div>
-            ) : null}
-
-            <section>
-              <div className="mb-1 text-[11px] uppercase text-muted-foreground">交接流水</div>
-              {detail.handoffs.length === 0 ? (
-                <div className="text-muted-foreground">还没有交接。</div>
-              ) : (
-                <ol className="space-y-2">
-                  {detail.handoffs.map((handoff, index) => (
-                    <li key={`${handoff.at}-${index}`} className="rounded border p-2">
-                      <div className="mb-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                        <span>{new Date(handoff.at).toLocaleString()}</span>
-                        <span>· {handoff.outcome}</span>
-                        <span>· {handoff.fromSessionId}</span>
-                      </div>
-                      <p className="whitespace-pre-wrap">{handoff.summary}</p>
-                      {handoff.nextAction ? (
-                        <p className="mt-1 text-muted-foreground">下一步：{handoff.nextAction}</p>
-                      ) : null}
-                      {handoff.verify ? (
-                        <p className={handoff.verify.passed ? 'mt-1 text-emerald-600' : 'mt-1 text-destructive'}>
-                          验证：{handoff.verify.ran.join(' / ')} → {handoff.verify.passed ? '通过' : '未通过'}
-                        </p>
-                      ) : null}
-                    </li>
-                  ))}
-                </ol>
-              )}
-            </section>
-
-            {detail.status === 'paused' ? (
-              <div className="flex gap-2 pt-1">
-                <button
-                  type="button"
-                  className="rounded border px-2 py-1"
-                  onClick={() => onResume?.(detail.id)}
-                >
-                  继续
-                </button>
-                <button
-                  type="button"
-                  className="rounded border px-2 py-1 text-muted-foreground"
-                  onClick={() => onCancel?.(detail.id)}
-                >
-                  取消任务
-                </button>
-              </div>
-            ) : null}
-          </div>
+          <TaskDetailPanelView
+            detail={detail}
+            onRun={onRun}
+            onClose={onCloseDetail}
+            onResume={onResume}
+            onCancel={onCancel}
+          />
         </div>
       ) : null}
     </div>

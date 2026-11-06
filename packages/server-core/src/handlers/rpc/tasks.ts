@@ -12,6 +12,7 @@ import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport';
 import type { HandlerDeps } from '../handler-deps';
 import type { TaskService } from '../../tasks/task-service';
 import { readJournal } from '@craft-agent/shared/tasks';
+import { normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks';
 import type { TaskStatus } from '@craft-agent/shared/tasks';
 
 export const HANDLED_CHANNELS = [
@@ -19,6 +20,8 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.taskboard.GET,
   RPC_CHANNELS.taskboard.UPDATE,
   RPC_CHANNELS.taskboard.HANDOFF,
+  RPC_CHANNELS.taskboard.RUN,
+  RPC_CHANNELS.taskboard.CREATE,
   RPC_CHANNELS.taskboard.CHANGED,
 ] as const;
 
@@ -100,10 +103,23 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
   );
 
   server.handle(
+    RPC_CHANNELS.taskboard.RUN,
+    async (_ctx, workspaceId: string, id: string) => {
+      const manager = deps.sessionManager as unknown as {
+        runTask?: (workspaceId: string, taskId: string, reason: string) => Promise<boolean>
+      }
+      if (!manager.runTask) throw new Error('Task runner is not available in this build.')
+      const started = await manager.runTask(workspaceId, id, 'manual')
+      broadcast(workspaceId)
+      return { started, ...(started ? {} : { reason: 'task is already running, blocked, or out of budget' }) }
+    },
+  );
+
+  server.handle(
     RPC_CHANNELS.taskboard.HANDOFF,
     async (_ctx, workspaceId: string, id: string, fromSessionId: string, handoff: unknown) => {
       const service = tasksFor(deps, workspaceId);
-      const result = service.reportHandoff(id, handoff, fromSessionId);
+      const result = await service.reportHandoff(id, handoff, fromSessionId);
       broadcast(workspaceId);
       return {
         passed: result.passed,

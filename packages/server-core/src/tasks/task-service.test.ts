@@ -70,20 +70,20 @@ describe('status transitions', () => {
 });
 
 describe('handoff gate', () => {
-  it('fails a handoff with no artifacts and keeps the task running', () => {
+  it('fails a handoff with no artifacts and keeps the task running', async () => {
     const { svc, wakes } = service(workspace());
     const task = create(svc);
     svc.setStatus(task.id, 'running');
     svc.attachSession(task.id, 'sess_worker');
 
-    const result = svc.reportHandoff(task.id, { summary: '做完了' }, 'sess_worker');
+    const result = await svc.reportHandoff(task.id, { summary: '做完了' }, 'sess_worker');
     expect(result.passed).toBe(false);
     expect(result.task.status).toBe('running');
     expect(result.reasons.length).toBeGreaterThan(0);
     expect(wakes[0]?.text).toContain('交接未通过');
   });
 
-  it('passes when artifacts exist and verification ran', () => {
+  it('passes when artifacts exist and verification ran', async () => {
     const ws = workspace();
     const artifact = join(ws, 'out.txt');
     writeFileSync(artifact, 'ok', 'utf-8');
@@ -92,7 +92,7 @@ describe('handoff gate', () => {
     const task = create(svc);
     svc.setStatus(task.id, 'running');
 
-    const result = svc.reportHandoff(
+    const result = await svc.reportHandoff(
       task.id,
       {
         outcome: 'delivered',
@@ -106,21 +106,21 @@ describe('handoff gate', () => {
     expect(result.task.status).toBe('completed');
   });
 
-  it('pauses on a needs_decision handoff', () => {
+  it('pauses on a needs_decision handoff', async () => {
     const { svc } = service(workspace());
     const task = create(svc);
     svc.setStatus(task.id, 'running');
-    const result = svc.reportHandoff(task.id, { outcome: 'needs_decision', summary: '要你定' }, 'sess_w');
+    const result = await svc.reportHandoff(task.id, { outcome: 'needs_decision', summary: '要你定' }, 'sess_w');
     expect(result.task.status).toBe('paused');
     expect(result.task.pauseReason).toBe('needs_decision');
   });
 
-  it('trips the fuse after three rejected handoffs', () => {
+  it('trips the fuse after three rejected handoffs', async () => {
     const { svc } = service(workspace());
     const task = create(svc);
     svc.setStatus(task.id, 'running');
     for (let i = 0; i < 3; i += 1) {
-      svc.reportHandoff(task.id, { summary: `第 ${i} 次` }, 'sess_w');
+      await svc.reportHandoff(task.id, { summary: `第 ${i} 次` }, 'sess_w');
     }
     const final = svc.get(task.id);
     expect(final?.status).toBe('paused');

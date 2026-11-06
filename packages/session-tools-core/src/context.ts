@@ -365,6 +365,10 @@ export interface SessionToolContext {
       parentTaskId?: string;
       dependsOn?: string[];
       priority?: number;
+      /** Structured execution contract (cwd, sources, deliverables, acceptance). */
+      spec?: Record<string, unknown>;
+      /** What starts this task: manual (default), cron or event. */
+      trigger?: Record<string, unknown>;
     }): Promise<{ id: string }>;
     list(params: { status?: string; limit?: number }): Promise<
       Array<{ id: string; name: string; status: string; pauseReason?: string | null }>

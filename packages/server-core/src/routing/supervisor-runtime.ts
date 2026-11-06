@@ -57,6 +57,15 @@ export interface SupervisorRuntimeDeps {
   askUser: (supervisorSessionId: string, questions: { question: string; options?: string[] }[]) => Promise<void>;
   /** Resolve a task by id (for task targets). */
   getTask?: (taskId: string) => { id: string; currentSessionId?: string } | null;
+  /** Start a task by id; returns true when a run actually began. */
+  runTask?: (taskId: string, reason: string) => Promise<boolean>;
+  /** Start every task whose event trigger matches; returns how many started. */
+  startEventTasks?: (event: {
+    source: string;
+    type: string;
+    title?: string;
+    summary?: string;
+  }) => Promise<number>;
 }
 
 export class SupervisorRuntime {
@@ -84,18 +93,30 @@ export class SupervisorRuntime {
     type: string;
     title: string;
     summary?: string;
-  }): Promise<'routed' | 'queued' | 'ignored'> {
+  }): Promise<'routed' | 'queued'> {
     const rules = loadRoutes(this.deps.workspaceRoot);
     const decision = matchRoute(
       { source: event.source, type: event.type, title: event.title, summary: event.summary },
       rules,
     );
 
-    if (decision.kind === 'ignore') return 'ignored';
+    // There is no opt-out tier: an event nobody subscribed to goes to the
+    // supervisor, full stop. "No rule mentions this source" (ignore) routes the
+    // same as "a rule exists but could not decide" (unknown) — dropping silent
+    // drops made the third tier unreachable on any workspace without
+    // routes.json, which the delivery test caught. The backlog merge below is
+    // the flood guard.
 
     if (decision.kind === 'match') {
       const instruction = formatRouteInstruction(decision.rule);
       const text = `[event] ${event.title}${event.summary ? `\n${event.summary}` : ''}\n\n${instruction}`;
+      // A rule may name a task instead of a session: the task owns execution,
+      // so "route to task" means "start that task", not "find its session".
+      const taskId = decision.rule.to.taskId;
+      if (taskId && this.deps.runTask) {
+        const started = await this.deps.runTask(taskId, `event:${event.source}/${event.type}`);
+        if (started) return 'routed';
+      }
       const targetSession = decision.rule.to.sessionId
         ?? (await this.resolveSessionForAgent(decision.rule.to.agentId));
       if (targetSession) {
@@ -105,6 +126,18 @@ export class SupervisorRuntime {
       // Rule named an agent with no live session: fall through to the supervisor
       // rather than silently dropping an event the user asked to handle.
       log.warn(`[supervisor] rule "${decision.rule.name}" has no live session; falling back`);
+    }
+
+    // Task-level event triggers are consulted even without a routing rule: the
+    // trigger lives on the task, so there is nothing to duplicate in routes.json.
+    if (this.deps.startEventTasks) {
+      const started = await this.deps.startEventTasks({
+        source: event.source,
+        type: event.type,
+        title: event.title,
+        summary: event.summary,
+      });
+      if (started > 0) return 'routed';
     }
 
     this.backlog.push({

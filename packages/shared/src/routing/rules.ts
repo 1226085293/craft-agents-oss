@@ -26,6 +26,8 @@ export interface RouteRule {
     agentId?: string;
     /** Explicit session, for a fixed pipeline. */
     sessionId?: string;
+    /** Start a task instead of waking a session — the task owns execution. */
+    taskId?: string;
   };
   /** One-line instruction prepended to the event when it is delivered. */
   ask?: string;
@@ -109,7 +111,8 @@ export function loadRoutes(workspaceRoot: string): RouteRule[] {
           typeof (rule as RouteRule).when.source === 'string' &&
           (rule as RouteRule).to &&
           (typeof (rule as RouteRule).to.agentId === 'string' ||
-            typeof (rule as RouteRule).to.sessionId === 'string'),
+            typeof (rule as RouteRule).to.sessionId === 'string' ||
+            typeof (rule as RouteRule).to.taskId === 'string'),
       );
     });
   } catch {

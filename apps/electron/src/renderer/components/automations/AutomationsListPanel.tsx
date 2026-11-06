@@ -279,6 +279,14 @@ export function AutomationsListPanel({
 
   return (
     <div className={cn('flex flex-col flex-1 min-h-0', className)}>
+      {/* The task system owns scheduling: a cron matcher saved here is imported
+          as a task trigger on the next config change. */}
+      <div className="mx-3 mb-1 mt-2 rounded-md border border-border/60 bg-foreground/[0.02] px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
+        {t('automations.taskTriggerNotice', {
+          defaultValue: '定时条目保存后会自动变成任务触发器，由任务系统执行；这里只负责“什么时候跑”。',
+        })}
+      </div>
+
       {/* Search header */}
       {searchActive && (
         <SessionSearchHeader

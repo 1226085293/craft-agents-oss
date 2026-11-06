@@ -395,6 +395,8 @@ export const CHANNEL_MAP = {
   tasksList: invoke(RPC_CHANNELS.taskboard.LIST),
   tasksGet: invoke(RPC_CHANNELS.taskboard.GET),
   tasksUpdate: invoke(RPC_CHANNELS.taskboard.UPDATE),
+  tasksRun: invoke(RPC_CHANNELS.taskboard.RUN),
+  tasksCreate: invoke(RPC_CHANNELS.taskboard.CREATE),
   tasksHandoff: invoke(RPC_CHANNELS.taskboard.HANDOFF),
   llmGatewayGetStatus: invoke(RPC_CHANNELS.llmGateway.GET_STATUS),
   llmGatewayGetConfig: invoke(RPC_CHANNELS.llmGateway.GET_CONFIG),

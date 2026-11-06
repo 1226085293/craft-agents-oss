@@ -1544,9 +1544,6 @@ function AppShellContent({
   const handleAutomationsEventClick = useCallback(() => {
     navigate(routes.view.automationsEvent())
   }, [])
-  const handleAutomationsAgenticClick = useCallback(() => {
-    navigate(routes.view.automationsAgentic())
-  }, [])
 
   // Handler for pages view
   const handlePagesClick = useCallback(() => {
@@ -2631,14 +2628,6 @@ function AppShellContent({
                           icon: Radio,
                           variant: (automationFilter?.kind === 'type' && automationFilter.automationType === 'event') ? "default" : "ghost",
                           onClick: handleAutomationsEventClick,
-                        },
-                        {
-                          id: "nav:automations:agentic",
-                          title: t("sidebar.agentic"),
-                          label: String(automationTypeCounts.agentic),
-                          icon: Bot,
-                          variant: (automationFilter?.kind === 'type' && automationFilter.automationType === 'agentic') ? "default" : "ghost",
-                          onClick: handleAutomationsAgenticClick,
                         },
                       ],
                     },

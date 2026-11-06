@@ -435,6 +435,10 @@ export const RPC_CHANNELS = {
     UPDATE: 'taskboard:update',
     /** Record a worker handoff against a task. */
     HANDOFF: 'taskboard:handoff',
+    /** Start a run now (claims the lock, spawns a worker). */
+    RUN: 'taskboard:run',
+    /** Create a task from the UI. */
+    CREATE: 'taskboard:create',
     /** Pushed when any task changes (workspace-scoped). */
     CHANGED: 'taskboard:changed',
   },

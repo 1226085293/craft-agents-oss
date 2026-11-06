@@ -1,22 +1,26 @@
 /**
  * Task service — the only place that mutates a task.
  *
- * The supervisor's tools, the worker's `report_result`, and the RPC layer all
- * funnel through here so the state machine, the budget check and the failure
- * fuse are applied consistently. Pure rules live in `@craft-agent/shared/tasks`.
+ * The supervisor's tools, the worker's `report_result`, the RPC layer and the
+ * scheduler all funnel through here so the state machine, the budget check, the
+ * dependency gate, the run lock and the failure fuse are applied consistently.
+ * Pure rules live in `@craft-agent/shared/tasks`.
  */
 
-import { existsSync } from 'fs';
+import { existsSync, statSync } from 'fs';
 import { createLogger } from '@craft-agent/shared/utils';
 
 const log = createLogger('tasks');
 import {
+  acceptanceItems,
   applyTransition,
   attachSession,
   checkBudget,
+  checkDependencies,
   checkHandoffRules,
   createTask,
-  isHeartbeatStalled,
+  isHeartbeatMissing,
+  isRunLocked,
   loadTask,
   nextTaskId,
   normalizeHandoff,
@@ -26,9 +30,13 @@ import {
   appendJournal,
   listTasks,
   activeTasks,
+  type ArtifactProbe,
   type Handoff,
   type Task,
+  type TaskAcceptanceVerdict,
+  type TaskSpec,
   type TaskStatus,
+  type TaskTrigger,
 } from '@craft-agent/shared/tasks';
 
 export interface TaskServiceDeps {
@@ -37,8 +45,24 @@ export interface TaskServiceDeps {
   sessionExists: (sessionId: string) => boolean;
   /** Wake the owning supervisor with a one-line nudge. */
   wakeSupervisor: (sessionId: string, text: string) => void;
+  /** Run one acceptance command; resolves to exit code + output tail. */
+  runAcceptanceCommand?: (command: string, cwd?: string) => Promise<{ exitCode: number | null; output?: string }>;
+  /**
+   * Second acceptance layer: a read-only model call that judges the handoff
+   * against `verify.requirement`. Only consulted when the deterministic rules
+   * already passed, so a cheap failure never costs a model call.
+   */
+  judgeHandoff?: (task: Task, handoff: Handoff) => Promise<{ pass: boolean; reasons: string[] }>;
   now?: () => number;
+  /** Id generator (tests inject a stable one). */
+  newId?: () => string;
 }
+
+/** A task that keeps handing off in one session gets a fresh one. */
+export const MAX_HANDOFFS_PER_SESSION = 4;
+
+/** Context use above which the next run starts cold. */
+export const ROTATE_CONTEXT_THRESHOLD = 0.7;
 
 export interface CreateTaskRequest {
   name: string;
@@ -49,7 +73,14 @@ export interface CreateTaskRequest {
   parentTaskId?: string;
   dependsOn?: string[];
   priority?: Task['priority'];
+  spec?: TaskSpec;
+  trigger?: TaskTrigger;
+  deadline?: number | null;
 }
+
+export type StartRunResult =
+  | { ok: true; task: Task }
+  | { ok: false; reason: string };
 
 export class TaskService {
   private readonly now: () => number;
@@ -96,29 +127,30 @@ export class TaskService {
     return activeTasks(this.root);
   }
 
+  /** Find a task by name (used by triggers that reference a task by label). */
+  findByName(name: string): Task | null {
+    return listTasks(this.root).find((t) => t.name === name) ?? null;
+  }
+
   /**
-   * Move a task, applying the fuse and budget before a `running` transition so a
-   * task can never be started into a state it has already exhausted.
+   * Move a task, applying the fuse, budget and dependency gate before a
+   * `running` transition so a task can never be started into a state it has
+   * already exhausted or does not yet own.
    */
   setStatus(id: string, status: TaskStatus, options?: { pauseReason?: Task['pauseReason']; error?: string }): Task {
     const task = this.require(id);
     const now = this.now();
 
     if (status === 'running') {
-      const verdict = checkBudget(task.budget, {
-        sessions: task.sessionIds.length,
-        runs: task.verifyRounds ?? 0,
-        activeMinutes: task.budget.activeMinutes,
-      }, now);
-      if (verdict.exceeded) {
-        const paused = applyTransition(task, 'paused', { now, pauseReason: 'budget', error: verdict.reason }).task;
+      const blocked = this.startGate(task, now);
+      if (blocked) {
+        const paused = applyTransition(task, 'paused', {
+          now,
+          pauseReason: blocked.pauseReason,
+          error: blocked.reason,
+        }).task;
         saveTask(this.root, paused);
-        appendJournal(this.root, id, { type: 'paused', at: now, data: { reason: verdict.reason } });
-        return paused;
-      }
-      if (shouldTripFuse(task.lifecycle)) {
-        const paused = applyTransition(task, 'paused', { now, pauseReason: 'failures' }).task;
-        saveTask(this.root, paused);
+        appendJournal(this.root, id, { type: 'paused', at: now, data: { reason: blocked.reason } });
         return paused;
       }
     }
@@ -139,6 +171,133 @@ export class TaskService {
     return result.task;
   }
 
+  /**
+   * Everything that must hold before a run starts.
+   *
+   * Returns null when the task may run, or the reason it may not. Budget and
+   * dependencies are checked here — not in the prompt — because a supervisor
+   * that forgets is indistinguishable from a supervisor that was never told.
+   */
+  private startGate(task: Task, now: number): { pauseReason: Task['pauseReason']; reason: string } | null {
+    if (isRunLocked(task, this.deps.sessionExists)) {
+      return { pauseReason: 'waiting', reason: `run already owned by ${task.stats?.lockSessionId}` };
+    }
+
+    const deps = checkDependencies(task, (id) => this.get(id));
+    if (!deps.ok) {
+      return { pauseReason: 'waiting', reason: deps.reasons.join('; ') };
+    }
+
+    const verdict = checkBudget(
+      task.budget,
+      {
+        sessions: task.sessionIds.length,
+        runs: task.stats?.runs ?? 0,
+        activeMinutes: Math.floor((task.stats?.activeMs ?? 0) / 60_000),
+      },
+      now,
+    );
+    if (verdict.exceeded) return { pauseReason: 'budget', reason: verdict.reason };
+
+    if (shouldTripFuse(task.lifecycle)) {
+      return { pauseReason: 'failures', reason: 'consecutive failures' };
+    }
+    return null;
+  }
+
+  /**
+   * Claim the run lock.
+   *
+   * The scheduler and the supervisor can both decide to start the same task at
+   * the same moment; the lock is what stops two workers from doing it twice.
+   */
+  startRun(id: string, sessionId: string): StartRunResult {
+    const task = this.require(id);
+    const now = this.now();
+    const blocked = this.startGate(task, now);
+    if (blocked) return { ok: false, reason: blocked.reason };
+
+    let next: Task = {
+      ...task,
+      status: 'running',
+      pauseReason: null,
+      currentSessionId: sessionId,
+      sessionIds: task.sessionIds.includes(sessionId) ? task.sessionIds : [...task.sessionIds, sessionId],
+      stats: {
+        runs: (task.stats?.runs ?? 0) + 1,
+        activeMs: task.stats?.activeMs ?? 0,
+        lastHeartbeatAt: now,
+        lockSessionId: sessionId,
+        runStartedAt: now,
+      },
+      updatedAt: now,
+    };
+    if (task.status === 'paused') {
+      next = { ...next, lifecycle: { ...task.lifecycle, lastRecoveredAt: now } };
+    }
+    saveTask(this.root, next);
+    appendJournal(this.root, id, { type: 'run_started', at: now, data: { sessionId } });
+    return { ok: true, task: next };
+  }
+
+  /**
+   * Release the lock and bank the active time.
+   *
+   * Called when a run ends for any reason — handoff, failure, or the session
+   * disappearing. Without this the lock leaks and the task can never restart.
+   */
+  endRun(id: string, outcome: { ok: boolean; error?: string; sessionId?: string }): Task {
+    const task = this.require(id);
+    const now = this.now();
+    const stats = task.stats ?? { runs: 0, activeMs: 0 };
+    const elapsed = stats.runStartedAt ? Math.max(0, now - stats.runStartedAt) : 0;
+
+    const next: Task = {
+      ...task,
+      stats: {
+        ...stats,
+        activeMs: stats.activeMs + elapsed,
+        lockSessionId: undefined,
+        runStartedAt: undefined,
+        lastHeartbeatAt: now,
+      },
+      lastHeartbeatAt: now,
+      lifecycle: recordRunResult(task.lifecycle, outcome.ok, now, outcome.error),
+      updatedAt: now,
+    };
+    saveTask(this.root, next);
+    appendJournal(this.root, id, {
+      type: 'run_ended',
+      at: now,
+      data: { ok: outcome.ok, activeMs: elapsed, error: outcome.error },
+    });
+    return next;
+  }
+
+  /** Prove the task is alive. Called on every tool result and turn boundary. */
+  heartbeat(id: string): Task {
+    const task = this.require(id);
+    const now = this.now();
+    const stats = task.stats ?? { runs: 0, activeMs: 0 };
+    const next: Task = {
+      ...task,
+      lastHeartbeatAt: now,
+      stats: { ...stats, lastHeartbeatAt: now },
+      updatedAt: now,
+    };
+    saveTask(this.root, next);
+    return next;
+  }
+
+  /** Heartbeat by session — the worker knows its session id, not its task id. */
+  heartbeatForSession(sessionId: string): Task | null {
+    const task = listTasks(this.root).find(
+      (t) => t.status === 'running' && (t.stats?.lockSessionId === sessionId || t.currentSessionId === sessionId),
+    );
+    if (!task) return null;
+    return this.heartbeat(task.id);
+  }
+
   attachSession(id: string, sessionId: string): Task {
     const task = attachSession(this.require(id), sessionId, this.now());
     saveTask(this.root, task);
@@ -146,37 +305,107 @@ export class TaskService {
     return task;
   }
 
+  updateSpec(id: string, spec: TaskSpec): Task {
+    const task = this.require(id);
+    const next: Task = { ...task, spec, updatedAt: this.now() };
+    saveTask(this.root, next);
+    appendJournal(this.root, id, { type: 'spec_updated', at: this.now(), data: { spec } });
+    return next;
+  }
+
+  updateTrigger(id: string, trigger: TaskTrigger): Task {
+    const task = this.require(id);
+    const next: Task = { ...task, trigger, updatedAt: this.now() };
+    saveTask(this.root, next);
+    appendJournal(this.root, id, { type: 'trigger_updated', at: this.now(), data: { trigger } });
+    return next;
+  }
+
+  /** Does this task's declared deliverables require at least one artifact? */
+  private requiredDeliverables(spec: TaskSpec | undefined) {
+    return (spec?.deliverables ?? []).filter((d) => d.required !== false);
+  }
+
   /**
    * Record a worker's handoff and decide whether the task can complete.
    *
-   * The rule gate is mandatory; the acceptance requirement (if any) is the
-   * second layer and is evaluated elsewhere. A handoff that fails the gate
-   * leaves the task running and wakes the supervisor with the reasons.
+   * Two layers, in order: deterministic rules (artifacts readable, verification
+   * ran, acceptance commands pass), then the task is allowed to complete. The
+   * worker's own `verify.passed` is necessary but never sufficient — acceptance
+   * commands are executed here, by us.
    */
-  reportHandoff(id: string, raw: unknown, fromSessionId: string): {
+  async reportHandoff(id: string, raw: unknown, fromSessionId: string, options?: {
+    /** Worker context use (0..1), when the caller knows it. */
+    contextUtilization?: number;
+  }): Promise<{
     task: Task;
     handoff: Handoff;
     passed: boolean;
     reasons: string[];
-  } {
+    /** True when the continuation must start in a fresh session. */
+    rotationPending: boolean;
+  }> {
     const task = this.require(id);
     const now = this.now();
     const handoff = normalizeHandoff(raw, fromSessionId, now);
 
-    const verify = handoff.verify;
-    const verdict = checkHandoffRules(handoff, (path) => existsSync(path));
+    const acceptance = await this.runAcceptance(task);
+    const verdict = checkHandoffRules(handoff, (path) => this.probe(path), {
+      requiredDeliverables: this.requiredDeliverables(task.spec),
+      ...(acceptance ? { acceptance } : {}),
+    });
 
     // A `delivered` handoff still has to pass the gate: "it says it is done" is
     // not evidence. `needs_decision` bypasses the gate and pauses instead.
-    const accepted = handoff.outcome === 'needs_decision' ? false : verdict.passed;
+    let accepted = handoff.outcome === 'needs_decision' ? false : verdict.passed;
+    const reasons = [...verdict.reasons];
+
+    // Second layer: a requirement the commands cannot express is judged by a
+    // model that only reads — never by the worker that wrote the handoff, and
+    // only after the cheap rules passed.
+    if (accepted && task.verify.requirement && this.deps.judgeHandoff) {
+      try {
+        const judged = await this.deps.judgeHandoff(task, handoff);
+        if (!judged.pass) {
+          accepted = false;
+          reasons.push(...(judged.reasons.length ? judged.reasons : ['acceptance requirement not met']));
+        }
+      } catch (error) {
+        // A judge that cannot run must not silently pass the task.
+        accepted = false;
+        reasons.push(`judge unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    const handoffCount = task.handoffs.length + 1;
+    const rotationPending =
+      accepted &&
+      handoff.outcome === 'handoff' &&
+      (handoffCount >= MAX_HANDOFFS_PER_SESSION ||
+        (options?.contextUtilization ?? 0) >= ROTATE_CONTEXT_THRESHOLD);
+
+    const stats = task.stats ?? { runs: 0, activeMs: 0 };
+    const elapsed = stats.runStartedAt ? Math.max(0, now - stats.runStartedAt) : 0;
 
     let next: Task = {
       ...task,
       handoffs: [...task.handoffs, handoff],
       lastHeartbeatAt: now,
       updatedAt: now,
-      lifecycle: recordRunResult(task.lifecycle, accepted, now, accepted ? undefined : verdict.reasons.join('; ')),
-      verify: { ...task.verify, lastVerdict: accepted ? 'pass' : 'fail' },
+      stats: {
+        ...stats,
+        activeMs: stats.activeMs + elapsed,
+        lockSessionId: undefined,
+        runStartedAt: undefined,
+        lastHeartbeatAt: now,
+      },
+      lifecycle: recordRunResult(task.lifecycle, accepted, now, accepted ? undefined : reasons.join('; ')),
+      verify: {
+        ...task.verify,
+        lastVerdict: accepted ? 'pass' : 'fail',
+      },
+      // Every handoff round counts, so `maxIterations` is no longer decorative.
+      verifyRounds: (task.verifyRounds ?? 0) + 1,
     };
 
     if (handoff.outcome === 'needs_decision') {
@@ -191,7 +420,13 @@ export class TaskService {
     appendJournal(this.root, id, {
       type: 'handoff',
       at: now,
-      data: { outcome: handoff.outcome, passed: accepted, reasons: verdict.reasons },
+      data: {
+        outcome: handoff.outcome,
+        passed: accepted,
+        reasons,
+        acceptance: acceptance?.results,
+        ...(rotationPending ? { rotationPending: true } : {}),
+      },
     });
 
     // Only the supervisor decides what the user sees; the worker never does.
@@ -199,18 +434,66 @@ export class TaskService {
       next.supervisorSessionId,
       accepted
         ? `${id} 交接通过：${handoff.summary}`
-        : `${id} 交接未通过（${verdict.reasons.join('；') || handoff.outcome}）：${handoff.summary}`,
+        : `${id} 交接未通过（${reasons.join('；') || handoff.outcome}）：${handoff.summary}`,
     );
 
-    return { task: next, handoff, passed: accepted, reasons: verdict.reasons };
+    return { task: next, handoff, passed: accepted, reasons, rotationPending };
   }
 
-  /** Heartbeat: proves the task is alive, independent of any single turn. */
-  heartbeat(id: string): Task {
-    const task = this.require(id);
-    const next = { ...task, lastHeartbeatAt: this.now(), updatedAt: this.now() };
-    saveTask(this.root, next);
-    return next;
+  /** Existence + readability + non-emptiness, in one probe. */
+  private probe(path: string): ArtifactProbe {
+    try {
+      if (!existsSync(path)) return { exists: false, nonEmpty: false };
+      const stat = statSync(path);
+      if (stat.isDirectory()) return { exists: true, nonEmpty: true, isDirectory: true };
+      return { exists: true, nonEmpty: stat.size > 0 };
+    } catch {
+      return { exists: false, nonEmpty: false };
+    }
+  }
+
+  /**
+   * Execute the task's acceptance commands.
+   *
+   * Returns null when the task declares no commands (pure rule gate), so the
+   * caller can tell "nothing to check" from "everything passed".
+   */
+  private async runAcceptance(task: Task): Promise<TaskAcceptanceVerdict | null> {
+    const items = acceptanceItems(task.spec);
+    const withCommands = items.filter((item) => item.command?.trim());
+    if (!withCommands.length) return null;
+    if (!this.deps.runAcceptanceCommand) {
+      return {
+        checked: withCommands.length,
+        failures: ['acceptance runner is unavailable'],
+        results: withCommands.map((item) => ({ id: item.id, passed: false, note: 'runner unavailable' })),
+      };
+    }
+
+    const cwd = task.spec?.cwd;
+    const failures: string[] = [];
+    const results: TaskAcceptanceVerdict['results'] = [];
+
+    for (const item of withCommands) {
+      try {
+        const result = await this.deps.runAcceptanceCommand(item.command!, cwd);
+        const passed = result.exitCode === 0;
+        results.push({
+          id: item.id,
+          passed,
+          note: passed ? undefined : `exit ${result.exitCode ?? 'null'}${result.output ? `: ${result.output.slice(0, 200)}` : ''}`,
+        });
+        if (!passed) {
+          failures.push(`acceptance failed: ${item.id}${result.exitCode === null ? '' : ` (exit ${result.exitCode})`}`);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        results.push({ id: item.id, passed: false, note: message });
+        failures.push(`acceptance failed: ${item.id} (${message})`);
+      }
+    }
+
+    return { checked: withCommands.length, failures, results };
   }
 
   /**
@@ -222,22 +505,40 @@ export class TaskService {
     const recovered: Task[] = [];
     for (const task of listTasks(this.root)) {
       if (task.status !== 'running') continue;
-      const alive = task.currentSessionId ? this.deps.sessionExists(task.currentSessionId) : false;
+      const lockId = task.stats?.lockSessionId ?? task.currentSessionId;
+      const alive = lockId ? this.deps.sessionExists(lockId) : false;
       if (alive) {
-        if (isHeartbeatStalled(task, now)) {
-          const paused = applyTransition(task, 'paused', { now, pauseReason: 'process_lost' }).task;
-          saveTask(this.root, paused);
-          appendJournal(this.root, task.id, { type: 'paused', at: now, data: { reason: 'heartbeat_stalled' } });
+        if (isHeartbeatMissing(task, now)) {
+          const paused = this.pauseAfterLoss(task, now, 'heartbeat_stalled', lockId);
           recovered.push(paused);
         }
         continue;
       }
-      const paused = applyTransition(task, 'paused', { now, pauseReason: 'process_lost' }).task;
-      saveTask(this.root, paused);
-      appendJournal(this.root, task.id, { type: 'paused', at: now, data: { reason: 'process_lost' } });
-      recovered.push(paused);
+      recovered.push(this.pauseAfterLoss(task, now, 'process_lost', lockId));
     }
     return recovered;
+  }
+
+  private pauseAfterLoss(task: Task, now: number, reason: string, lockId?: string): Task {
+    const stats = task.stats ?? { runs: 0, activeMs: 0 };
+    const elapsed = stats.runStartedAt ? Math.max(0, now - stats.runStartedAt) : 0;
+    const base: Task = {
+      ...task,
+      stats: {
+        ...stats,
+        activeMs: stats.activeMs + elapsed,
+        lockSessionId: undefined,
+        runStartedAt: undefined,
+      },
+    };
+    const paused = applyTransition(base, 'paused', { now, pauseReason: 'process_lost' }).task;
+    saveTask(this.root, paused);
+    appendJournal(this.root, task.id, {
+      type: 'paused',
+      at: now,
+      data: { reason, sessionId: lockId },
+    });
+    return paused;
   }
 
   private require(id: string): Task {

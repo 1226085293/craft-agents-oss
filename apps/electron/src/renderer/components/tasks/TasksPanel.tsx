@@ -10,6 +10,7 @@ import * as React from 'react'
 
 import { useTasks, useTaskDetail } from '@/hooks/useAgents'
 import { TaskBoardPanel, type TaskDetailView, type TaskListItem } from './TaskBoardPanel'
+import { TaskDetailPanelView } from './TaskDetailPanelView'
 
 /** Detail payload from the RPC is `{ task, journal? }`. */
 function toDetail(raw: unknown): TaskDetailView | null {
@@ -35,16 +36,22 @@ export function TasksListPanel({
 }: TasksPanelProps): React.JSX.Element {
   const { tasks } = useTasks(workspaceId)
 
-  const resume = (id: string) => {
-    void (window.electronAPI as unknown as {
-      tasksUpdate?: (workspaceId: string, id: string, status: string) => Promise<unknown>
-    }).tasksUpdate?.(workspaceId, id, 'running')
-  }
-
   const cancel = (id: string) => {
     void (window.electronAPI as unknown as {
       tasksUpdate?: (workspaceId: string, id: string, status: string) => Promise<unknown>
     }).tasksUpdate?.(workspaceId, id, 'canceled')
+  }
+
+  const run = (id: string) => {
+    void (window.electronAPI as unknown as {
+      tasksRun?: (workspaceId: string, id: string) => Promise<unknown>
+    }).tasksRun?.(workspaceId, id)
+  }
+
+  const create = (input: import('./TaskCreateDialog').TaskCreateInput) => {
+    void (window.electronAPI as unknown as {
+      tasksCreate?: (workspaceId: string, payload: unknown) => Promise<unknown>
+    }).tasksCreate?.(workspaceId, input)
   }
 
   return (
@@ -54,8 +61,10 @@ export function TasksListPanel({
         selectedId={selectedTaskId ?? undefined}
         onSelect={onSelect}
         onCloseDetail={onCloseDetail}
-        onResume={resume}
+        onResume={run}
         onCancel={cancel}
+        onRun={run}
+        onCreate={create}
       />
     </div>
   )
@@ -76,30 +85,19 @@ export function TaskDetailPanel({
     return <div className="p-4 text-xs text-muted-foreground">读取任务中…</div>
   }
 
-  // Reuse the board's detail rendering by handing it a single-item list and no
-  // selection: the panel shows the detail overlay as its only content.
   return (
-    <div className="relative h-full min-h-0">
-      <TaskBoardPanel
-        tasks={[
-          {
-            id: detail.id,
-            name: detail.name,
-            status: detail.status,
-            priority: 0,
-            updatedAt: detail.updatedAt,
-            sessionCount: detail.sessionIds.length,
-            pauseReason: detail.pauseReason,
-          },
-        ]}
-        selectedId={detail.id}
+    <div className="h-full min-h-0">
+      <TaskDetailPanelView
         detail={detail}
-        onSelect={() => undefined}
-        onCloseDetail={() => undefined}
         onResume={(id) => {
           void (window.electronAPI as unknown as {
-            tasksUpdate?: (workspaceId: string, id: string, status: string) => Promise<unknown>
-          }).tasksUpdate?.(workspaceId, id, 'running')
+            tasksRun?: (workspaceId: string, id: string) => Promise<unknown>
+          }).tasksRun?.(workspaceId, id)
+        }}
+        onRun={(id) => {
+          void (window.electronAPI as unknown as {
+            tasksRun?: (workspaceId: string, id: string) => Promise<unknown>
+          }).tasksRun?.(workspaceId, id)
         }}
         onCancel={(id) => {
           void (window.electronAPI as unknown as {

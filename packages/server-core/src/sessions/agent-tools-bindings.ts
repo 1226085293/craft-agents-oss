@@ -41,6 +41,8 @@ export interface AgentToolBindingsDeps {
     attachTaskId?: string;
     parallel: boolean;
   }) => Promise<{ sessionId: string }>;
+  /** Start the next run in a fresh session (context rotation). */
+  continueTask?: (taskId: string) => void;
   /** Depth of the calling session, for the delegation cap. */
   spawnDepth?: number;
 }
@@ -63,10 +65,13 @@ export function buildAgentToolBindings(deps: AgentToolBindingsDeps) {
             'Handoff recorded. There is no task attached to this session, so the supervisor was notified without a task journal entry.',
         };
       }
-      const result = deps.tasks.reportHandoff(deps.taskId, payload, deps.sessionId);
+      const result = await deps.tasks.reportHandoff(deps.taskId, payload, deps.sessionId);
+      // A long task must not keep growing one session: when the service says
+      // rotate, the next run starts cold from the handoff just recorded.
+      if (result.rotationPending) deps.continueTask?.(deps.taskId);
       return {
         message: result.passed
-          ? `Handoff accepted${result.task.status === 'completed' ? '; task completed' : ''}.`
+          ? `Handoff accepted${result.task.status === 'completed' ? '; task completed' : result.rotationPending ? '; continuing in a fresh session' : ''}.`
           : `Handoff rejected: ${result.reasons.join('; ')}`,
       };
     },

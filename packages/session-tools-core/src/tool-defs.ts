@@ -444,8 +444,8 @@ export const TOOL_DESCRIPTIONS = {
   list_background_tasks: `List background agents/tasks tracked for a session: running, finished, or orphaned (terminated when the turn launched them ended). Authoritative answer for 'what is running / what's the status?'. Omit sessionId for the current session.`,
   get_background_task_output: `Read the tail of a background task's output by taskId. Use after list_background_tasks or a completion notice; tailLines defaults to 100 (max 1000).`,
   stop_background_task: `Stop a running background shell/agent and record the source (model or user). The stop notice is delivered before its record is removed; use list_background_tasks to verify remaining work.`,
-  send_agent_message: `Send a message to another session; the target receives it with your session ID so it can reply. Use to coordinate spawned sessions, follow-up instructions, or relay information. Find ids via list_sessions or use the sessionId from spawn_session. Send exactly "/stop" (with no other text) to abort that session's running turn — the receipt reports whether a turn was actually stopped or the session was already idle.`,
-  subscribe_session: `Follow another session in this workspace: every finished turn is posted here as a message and wakes you. Spawned sessions are already followed by default (spawn_session subscribe=true). Use list_subscriptions to see what you follow.`,
+  send_agent_message: `Send a message to another session; the target receives it with your session ID so it can reply. Use to coordinate spawned sessions, follow-up instructions, or relay information. Get the id from a task (\`task_get\` reports the session running it) — a supervisor has no session list to browse, and work without a task has no session to point at. Send exactly "/stop" (with no other text) to abort that session's running turn — the receipt reports whether a turn was actually stopped or the session was already idle.`,
+  subscribe_session: `Follow another session in this workspace: every finished turn is posted here as a message and wakes you. Workers started by a dispatch are already followed by default. Use list_subscriptions to see what you follow.`,
   unsubscribe_session: `Stop following a session (idempotent). You will stop receiving its finished turns.`,
   list_subscriptions: `List the sessions this session currently follows.` ,
   subscribe_event: `Subscribe to external events (mail, GitHub, pages…) collected by the Event Center. Events arrive as "[event]" messages and wake you. You receive NOTHING until you subscribe. Filter by source (listener id) or type (e.g. "mail.received" or "mail.*"); an empty filter subscribes to everything, which is rarely what you want.`,
@@ -613,8 +613,18 @@ export interface SessionToolFilterOptions {
  * mistake turns into a deleted file.
  */
 export const SUPERVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'list_sessions',
-  'get_session_info',
+  // `list_sessions` and `get_session_info` are deliberately absent.
+  //
+  // They read as harmless lookups, but they were the single biggest consumer of
+  // a supervisor turn: on 2026-11-07 (session 261106-aware-storm) it spent ~160
+  // of its 301 seconds running `list_sessions` four times and `get_session_info`
+  // four times, hunting for a session to hand the work to, before its first
+  // `task_create`. The work had no owner yet — that is what a task is for, and
+  // looking for a session first inverts the order the whole design rests on.
+  //
+  // Nothing is lost: `task_get` returns the session a task is running in, so the
+  // task is the handle. A supervisor that cannot enumerate sessions cannot
+  // substitute browsing for dispatching.
   'list_subscriptions',
   'subscribe_session',
   'unsubscribe_session',

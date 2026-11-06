@@ -13,6 +13,7 @@
 
 import * as React from 'react'
 import { toast } from 'sonner'
+import { buildStartupReport } from '@craft-agent/shared/events/startup-report'
 import {
   Blocks,
   Bot,
@@ -134,6 +135,21 @@ export function EventsListenersPanel({
     void load()
   }, [load])
 
+  const startupReport = React.useMemo(() => {
+    if (listeners.length === 0) return null
+    return buildStartupReport(
+      listeners.map((listener) => ({
+        id: listener.id,
+        name: listener.name,
+        enabled: listener.enabled,
+        ready: listener.ready,
+        missingConfig: listener.missingConfig,
+        dependencies: listener.dependencies.map((dep) => ({ label: dep.label, state: dep.state })),
+        status: listener.status ? { state: listener.status.state, lastError: listener.status.lastError } : undefined,
+      })),
+    )
+  }, [listeners])
+
   React.useEffect(() => {
     if (!workspaceId) return
     // Remember which plugins we have already warned about, so a restart loop
@@ -178,6 +194,23 @@ export function EventsListenersPanel({
 
         <div className="h-full overflow-y-auto p-2 space-y-1.5">
         {error && <div className="px-1 py-2 text-xs text-destructive">{error}</div>}
+        {/* Why something is not running, before the list: the same sentence the
+            host logs at boot, so the two never disagree. */}
+        {!error && startupReport && startupReport.reasons.length > 0 && (
+          <div className="rounded-md border border-border/60 bg-muted/30 px-2.5 py-2 text-xs text-muted-foreground">
+            <div className="font-medium text-foreground/80">
+              {startupReport.running} 个运行中 · {startupReport.waiting} 个等待中
+              {startupReport.failed > 0 ? ` · ${startupReport.failed} 个启动失败` : ''}
+            </div>
+            <ul className="mt-1 space-y-0.5">
+              {startupReport.reasons.map((reason) => (
+                <li key={reason.id}>
+                  <span className="text-foreground/70">{reason.label}</span>：{reason.reason}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {!error && listeners.length === 0 && (
           <div className="flex flex-col items-center justify-center gap-2 py-8 text-muted-foreground text-center px-3">

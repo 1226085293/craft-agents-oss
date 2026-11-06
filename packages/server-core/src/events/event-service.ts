@@ -18,6 +18,7 @@ import { EventStore, type EventFilter, type EventMeta, type EventRecord } from '
 import { EventIngestServer, type EventIngestAddress } from './ingest-server.ts';
 import { loadListeners, missingConfigKeys, setListenerConfig, setListenerEnabled, type LoadedListener, pluginReadiness } from './listener-registry.ts';
 import type { HostCommand } from './host-command-server.ts';
+import { buildStartupReport } from '@craft-agent/shared/events/startup-report.ts';
 import { ListenerSupervisor, type ListenerRuntimeStatus } from './listener-supervisor.ts';
 import { EventDispatcher, type DispatchTarget } from './event-dispatcher.ts';
 import { fetchReportedDeps } from './listener-control.ts';
@@ -401,10 +402,29 @@ export class EventService {
    * makes autostart conditional on "configured and environment satisfied".
    */
   async startAllEnabled(workspaceRoot: string): Promise<ListenerRuntimeStatus[]> {
-    const listeners = loadListeners({ workspaceRoot, catalogDirs: pluginCatalogDirs() }).filter(
-      (listener) => pluginReadiness(listener).ready,
-    );
-    return listeners.map((listener) => this.startListener(listener));
+    const installed = loadListeners({ workspaceRoot, catalogDirs: pluginCatalogDirs() });
+    const listeners = installed.filter((listener) => pluginReadiness(listener).ready);
+    const statuses = listeners.map((listener) => this.startListener(listener));
+
+    // One line that answers "why is this plugin not running?" at boot, instead
+    // of leaving it to be discovered one detail page at a time.
+    if (installed.length > 0) {
+      const report = buildStartupReport(
+        installed.map((listener) => ({
+          id: listener.id,
+          name: listener.manifest.name,
+          enabled: listener.enabled,
+          ready: pluginReadiness(listener).ready,
+          missingConfig: missingConfigKeys(listener),
+          dependencies: listener.dependencies.map((dep) => ({ label: dep.label, state: dep.state })),
+        })),
+      );
+      eventLog.info(`[plugins] ${report.summary}`);
+      for (const reason of report.reasons) {
+        eventLog.info(`[plugins] ${reason.label}: ${reason.reason}`);
+      }
+    }
+    return statuses;
   }
 
   /** A session stopped processing: release events deferred for it. */

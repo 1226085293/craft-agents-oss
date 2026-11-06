@@ -618,7 +618,12 @@ export const SUPERVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
   'list_subscriptions',
   'subscribe_session',
   'unsubscribe_session',
-  'spawn_session',
+  // `spawn_session` is deliberately absent. It duplicated `dispatch` (which can
+  // already target a new session) while producing no record: a throwaway session
+  // has no task, no acceptance, no board entry, and disappears from view. The
+  // supervisor kept choosing it because nothing said otherwise, and the work it
+  // did became untraceable. One creation path — task → dispatch → session —
+  // means there is no wrong path to pick.
   'send_agent_message',
   'dispatch',
   'report_to_user',

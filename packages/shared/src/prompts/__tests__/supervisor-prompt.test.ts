@@ -71,31 +71,31 @@ describe('supervisor prompt', () => {
     expect(text).toContain('文件读写')
   })
 
-  it('tells it to create a task when there is a deliverable', () => {
-    // It never created tasks; nothing had told it to.
+  it('tells it to create a task before dispatching', () => {
+    // It never created tasks; nothing had told it to. And the tool table no
+    // longer offers a way to create a session without one, so the prompt must
+    // describe the only path that exists.
     const text = prompt()
     expect(text).toContain('task_create')
-    expect(text).toContain('交付物')
+    expect(text).toContain('先建任务，再派发')
     expect(text).toContain('验收')
   })
 
-  it('names task_create as the default path, not spawn_session', () => {
-    const text = prompt()
-    const taskAt = text.indexOf('① 建任务')
-    const spawnAt = text.indexOf('③ 建临时会话')
-    expect(taskAt).toBeGreaterThan(-1)
-    expect(spawnAt).toBeGreaterThan(-1)
-    // Task must be presented first: ordering is what the model reads as priority.
-    expect(taskAt).toBeLessThan(spawnAt)
+  it('never mentions spawn_session', () => {
+    // The supervisor cannot call it any more; naming it would send the model
+    // looking for a tool that is not in its table, which is exactly the failure
+    // the pruned table is meant to prevent.
+    expect(prompt()).not.toContain('spawn_session')
   })
 
-  it('restricts spawn_session to work that needs no record', () => {
+  it('names the fields a task needs to be verifiable', () => {
     const text = prompt()
-    expect(text).toContain('不需要交付物')
-    expect(text).toContain('不需要验收')
+    for (const field of ['name', 'instruction', 'scope', 'deliverables', 'acceptance']) {
+      expect({ field, present: text.includes(field) }).toEqual({ field, present: true })
+    }
   })
 
-  it('warns against giving deliverable work to a throwaway session', () => {
+  it('warns against dispatching work that has no task', () => {
     expect(prompt()).toContain('常见错误')
   })
 

@@ -22,7 +22,7 @@
 /** Tools the supervisor actually has. Kept beside the prompt so a reader can compare. */
 export const SUPERVISOR_PROMPT_TOOLS = [
   'list_sessions', 'get_session_info',
-  'spawn_session', 'send_agent_message', 'dispatch',
+  'send_agent_message', 'dispatch',
   'task_create', 'task_list', 'task_get', 'task_update', 'task_handoff', 'task_verify',
   'report_to_user', 'ask_user',
   'get_event', 'list_events', 'list_event_subscriptions',
@@ -70,32 +70,18 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
 
 所以「我自己去查一下」「我改一下这个文件」这类事情**只能派给别人**。你读了事件之后要做的第一件事，是判断**谁该去做**，而不是能不能自己上手。
 
-## 三条件：怎么把活派出去
+## 怎么把活派出去
 
-你手上有三条路径，选错了代价不同。
+你只有一条路：**先建任务，再派发**。
 
-**① 建任务（\`task_create\`）——默认选择**
+1. \`task_create\` —— 把这件事变成一条任务，写清 **name / instruction / scope / deliverables / acceptance**。
+2. \`dispatch({ target: { kind: 'task', taskId }, instruction, scope })\` —— 把任务派给一个会话。
 
-满足任一条件就用它：
-- 这件事有**交付物**（要产出文件、报告、改动）
-- 这件事需要**验收**（做完得有标准判断对错）
-- 这件事可能**跨越多个回合**，或需要等外部条件
+\`dispatch\` 也可以直接发给你判断合适的**已有会话**（\`target.kind = 'session'\`）或一个**新会话**（\`target.kind = 'new'\`），但那只在你已经有一条任务、只是选择由谁执行时使用。
 
-任务的好处是它**可追溯**：有状态、有心跳、有验收轮次、重启后仍在任务板里。用户能看到它在跑。
-建完任务后用 \`dispatch\` 把它派给一个会话，或者等任务自己的触发器启动。
+为什么必须有任务：任务有状态、有验收、有重启恢复，用户能在任务板上看到它。**没有任务的活，做完了也没有人知道它发生过。**
 
-**② 派给已有会话（\`dispatch\` 到 sessionId）**——当某会话正适合
-
-如果某个已有会话已经在做相邻的工作、上下文合适，直接把新活发给它，不要另起炉灶。
-
-**③ 建临时会话（\`spawn_session\`）**——仅限明确不需要留痕的
-
-只在同时满足时才用：纯调研/查询、**不需要交付物**、**不需要验收**、结束后结果就不必再被追溯。
-这是一个一次性的旁路，做完即散，不会出现在任务板上。
-
-**判断顺序：先想「这活要不要被验收」，要 → 任务；不要 → 再看有没有合适的现有会话；都没有才考虑临时会话。**
-
-⚠️ 常见错误：把一件**有交付物**的活派给 \`spawn_session\`。那样用户看不到进度、没有验收、也无法在任务板上追踪。如果事件里写明了要产出什么、要满足什么条件，那它就是一个任务。
+⚠️ 常见错误：不建任务，直接把活派给一个会话。那样即使做完了，也没有验收、不在任务板上、重启后丢失。
 
 ## 派活的纪律
 

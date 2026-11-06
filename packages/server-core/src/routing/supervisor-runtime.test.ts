@@ -23,6 +23,8 @@ interface Harness {
   written: string[];
   asked: Array<{ question: string }[]>;
   supervisor: SupervisorSessionInfo;
+  /** Live session table, so cases can build a session with or without a task. */
+  sessions: Map<string, SupervisorSessionInfo>;
 }
 
 function harness(root: string, opts: { processeing?: boolean; spawnDepth?: number } = {}): Harness {
@@ -63,7 +65,7 @@ function harness(root: string, opts: { processeing?: boolean; spawnDepth?: numbe
     },
   });
 
-  return { runtime, sent, spawned, written, asked, supervisor };
+  return { runtime, sent, spawned, written, asked, supervisor, sessions };
 }
 
 const event = (overrides: Partial<Parameters<SupervisorRuntime['routeUnclaimed']>[0]> = {}) => ({
@@ -133,14 +135,40 @@ describe('dispatch guards', () => {
       target: { kind: 'new' },
       scope: '改前端',
       instruction: '把输入框改成两行',
+      attachTaskId: 'T-1',
       parallel: true,
     });
     expect(result.sessionId).toBe('sess_worker_1');
     expect(h.spawned[0].spawnDepth).toBe(1);
   });
 
+  it('refuses a new session that carries no task', async () => {
+    // The structural rule: every dispatched unit of work is a task. Without this,
+    // a throwaway session has no acceptance, no board entry and no way to answer
+    // "what happened to that?" afterwards.
+    const h = harness(workspace());
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'new' },
+        scope: '改前端',
+        instruction: '把输入框改成两行',
+        parallel: true,
+      }),
+    ).rejects.toThrow(/attachTaskId/);
+    expect(h.spawned).toHaveLength(0);
+  });
+
   it('sends into an existing session instead of spawning', async () => {
     const h = harness(workspace());
+    // An existing session may already own a task; the dispatch is then a
+    // follow-up to recorded work, which is exactly what should be allowed.
+    h.sessions.set('sess_existing', {
+      id: 'sess_existing',
+      role: 'worker',
+      isProcessing: false,
+      taskId: 'T-1',
+    } as never);
     const result = await h.runtime.dispatch({
       fromSessionId: 'sess_sup',
       target: { kind: 'session', sessionId: 'sess_existing' },
@@ -152,6 +180,20 @@ describe('dispatch guards', () => {
     expect(h.sent[0].sessionId).toBe('sess_existing');
   });
 
+  it('refuses an existing session that has no task', async () => {
+    const h = harness(workspace());
+    h.sessions.set('sess_orphan', { id: 'sess_orphan', role: 'worker', isProcessing: false } as never);
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'session', sessionId: 'sess_orphan' },
+        scope: '继续',
+        instruction: '随便干点什么',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/任务/);
+  });
+
   it('refuses past the depth cap', async () => {
     const h = harness(workspace(), { spawnDepth: 2 });
     await expect(
@@ -160,6 +202,7 @@ describe('dispatch guards', () => {
         target: { kind: 'new' },
         scope: 'x',
         instruction: 'y',
+        attachTaskId: 'T-1',
         parallel: false,
       }),
     ).rejects.toThrow();
@@ -173,6 +216,7 @@ describe('dispatch guards', () => {
         target: { kind: 'new' },
         scope: `范围 ${i}`,
         instruction: `任务 ${i}`,
+        attachTaskId: `T-${i}`,
         parallel: true,
       });
     }
@@ -182,6 +226,7 @@ describe('dispatch guards', () => {
         target: { kind: 'new' },
         scope: '第四个',
         instruction: '第四个任务',
+        attachTaskId: 'T-4',
         parallel: true,
       }),
     ).rejects.toThrow();

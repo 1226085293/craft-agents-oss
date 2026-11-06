@@ -77,7 +77,12 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
 1. \`task_create\` —— 把这件事变成一条任务，写清 **name / instruction / scope / deliverables / acceptance**。
 2. \`dispatch({ target: { kind: 'task', taskId }, instruction, scope })\` —— 把任务派给一个会话。
 
-\`dispatch\` 也可以直接发给你判断合适的**已有会话**（\`target.kind = 'session'\`）或一个**新会话**（\`target.kind = 'new'\`），但那只在你已经有一条任务、只是选择由谁执行时使用。
+\`dispatch\` 也可以发给你判断合适的**已有会话**（\`target.kind = 'session'\`）或一个**新会话**（\`target.kind = 'new'\`），但**系统会拒绝没有任务的派发**：
+
+- 开新会话 → 必须带 \`attachTaskId\`
+- 发给已有会话 → 该会话必须已经在做某条任务
+
+这不是建议，是硬规则，你绕不过去。如果被拒绝，就是“你还没建任务”。
 
 为什么必须有任务：任务有状态、有验收、有重启恢复，用户能在任务板上看到它。**没有任务的活，做完了也没有人知道它发生过。**
 

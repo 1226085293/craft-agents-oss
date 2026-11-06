@@ -32,6 +32,14 @@ export interface SupervisorSessionInfo {
   role: 'supervisor' | 'worker';
   spawnDepth?: number;
   agentId?: string;
+  /**
+   * Task this session is working on, if any.
+   *
+   * Needed to enforce "every dispatched unit of work is a task": sending an
+   * instruction to a session that has no task would be work with no record, and
+   * that used to be allowed simply because nothing checked.
+   */
+  taskId?: string;
   /** True while the session is mid-turn. */
   isProcessing: boolean;
 }
@@ -351,6 +359,22 @@ export class SupervisorRuntime {
       existingSessionId = task.currentSessionId;
     } else {
       targetKey = `new:${params.target.agentId ?? 'default'}:${params.scope}`;
+      // Every dispatched unit of work must be a task.
+      //
+      // The prompt asks for this, but prompting is exactly what the DeepSeek
+      // ablation found unreliable: with a neutral prompt the model delegated 0
+      // times out of 5, and even when told to delegate it still did the small jobs
+      // itself. So the rule is enforced here, at the one door every dispatch goes
+      // through, rather than hoped for.
+      //
+      // A throwaway session is not merely untidy: no acceptance, no board entry, no
+      // restart recovery, and it disappears once done — the work becomes
+      // unanswerable afterwards.
+      if (!params.attachTaskId) {
+        throw new DispatchRefused(
+          '新会话必须挂到一条任务上（attachTaskId）。先 task_create，再 dispatch：没有任务的活做完也没人知道它发生过。',
+        );
+      }
     }
 
     assertDispatchAllowed({
@@ -362,6 +386,17 @@ export class SupervisorRuntime {
     });
 
     if (existingSessionId) {
+      // Same rule for an existing session: the work must belong to a task. Either
+      // this dispatch says which one, or the session is already working on one —
+      // in which case the instruction is a follow-up to recorded work, which is
+      // exactly what should be allowed.
+      const targetSession = this.deps.getSession(existingSessionId);
+      const hasRecord = Boolean(params.attachTaskId || targetSession?.taskId);
+      if (!hasRecord) {
+        throw new DispatchRefused(
+          `会话 ${existingSessionId} 没有挂任务，不能直接给它派活。先 task_create 建一条任务，再 dispatch 到该任务。`,
+        );
+      }
       await this.deps.sendToSession(existingSessionId, params.instruction);
       return { sessionId: existingSessionId };
     }

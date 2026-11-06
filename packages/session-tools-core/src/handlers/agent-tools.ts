@@ -91,6 +91,15 @@ export async function handleDispatch(
   if (target.kind === 'task' && !target.taskId?.trim()) {
     return errorResponse('target.taskId is required when dispatching into a task.');
   }
+  // Every unit of work must belong to a task. The runtime enforces this too —
+  // this check exists so the model gets an actionable message in the same turn
+  // instead of an exception from deeper down. `target.kind === 'session'` is
+  // allowed to omit it because that session may already be working on a task.
+  if (target.kind === 'new' && !args.attachTaskId?.trim()) {
+    return errorResponse(
+      'attachTaskId is required when dispatching to a new session. Call task_create first, then dispatch to that task id — work with no task leaves no acceptance, no board entry, and nothing to point at afterwards.',
+    );
+  }
 
   try {
     const result = await ctx.agentTools.dispatch({

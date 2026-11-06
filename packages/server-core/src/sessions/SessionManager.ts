@@ -7411,6 +7411,9 @@ ${request.prompt}`;
           role: managed.role === 'supervisor' ? 'supervisor' : 'worker',
           spawnDepth: managed.spawnDepth ?? 0,
           agentId: managed.agentId,
+          // Read from the live managed session: `getSessions()` is a projection
+          // that does not carry the task binding.
+          ...(managed.taskId ? { taskId: managed.taskId } : {}),
           isProcessing: managed.isProcessing,
         }
       },

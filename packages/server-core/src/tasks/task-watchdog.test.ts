@@ -3,8 +3,12 @@ import { describe, expect, it } from 'bun:test';
 import type { Task } from '@craft-agent/shared/tasks';
 
 import {
+  clampSleep,
   inspectTasks,
   MAX_WATCHDOG_FAILURES,
+  MAX_WATCHDOG_SLEEP_MS,
+  MIN_WATCHDOG_SLEEP_MS,
+  nextCheckDelayMs,
   runWatchdogPass,
   startWatchdog,
   type WatchdogDeps,
@@ -217,5 +221,55 @@ describe('watchdog self monitoring', () => {
     expect(reports).toHaveLength(1);
     expect(reports[0]?.failures).toBe(MAX_WATCHDOG_FAILURES);
     expect(reports[0]?.lastError).toContain('store unavailable');
+  });
+});
+
+describe('event-driven scheduling', () => {
+  it('sleeps to the cap when nothing is pending', () => {
+    expect(nextCheckDelayMs(deps([]), NOW)).toBe(Number.POSITIVE_INFINITY);
+    expect(clampSleep(Number.POSITIVE_INFINITY)).toBe(MAX_WATCHDOG_SLEEP_MS);
+  });
+
+  it('wakes exactly when a healthy task would become stalled', () => {
+    // Last beat one minute ago, 10 minute interval → due in 19 minutes.
+    const delay = nextCheckDelayMs(deps([task()]), NOW);
+    expect(delay).toBe(19 * 60_000);
+  });
+
+  it('wakes at the decision deadline rather than on a fixed tick', () => {
+    const waiting = task({
+      status: 'paused',
+      pauseReason: 'needs_decision',
+      decision: {
+        category: 'spend-money',
+        label: '花钱',
+        reason: 'x',
+        askedAt: NOW,
+        deadlineAt: NOW + 7 * 60_000,
+      },
+    });
+    expect(nextCheckDelayMs(deps([waiting]), NOW)).toBe(7 * 60_000);
+  });
+
+  it('is due immediately when a heartbeat is already overdue', () => {
+    const stalled = task({ stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 60 * 60_000 } });
+    expect(nextCheckDelayMs(deps([stalled]), NOW)).toBeLessThan(0);
+    // ...but the loop never busy-spins on it.
+    expect(clampSleep(nextCheckDelayMs(deps([stalled]), NOW))).toBe(MIN_WATCHDOG_SLEEP_MS);
+  });
+
+  it('keeps the sleep bounded so an idle app still re-reads disk', () => {
+    expect(clampSleep(24 * 60 * 60_000)).toBe(MAX_WATCHDOG_SLEEP_MS);
+  });
+
+  it('runs a pass immediately on start instead of waiting a full interval', async () => {
+    let passes = 0;
+    const stop = startWatchdog(
+      deps([], { listTasks: () => { passes += 1; return []; } }),
+      60_000,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    stop();
+    expect(passes).toBeGreaterThanOrEqual(1);
   });
 });

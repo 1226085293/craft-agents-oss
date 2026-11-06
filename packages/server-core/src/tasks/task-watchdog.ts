@@ -195,6 +195,18 @@ export function runWatchdogPass(deps: WatchdogDeps): number {
 /** Default cadence: often enough to catch a stall, cheap enough to ignore. */
 export const WATCHDOG_INTERVAL_MS = 5 * 60_000;
 
+/** A silent session is suspicious after this long, not immediately. */
+export const SILENT_SESSION_MS = 5 * 60_000;
+
+/** No progress at all for this long is a different (worse) signal. */
+export const STALE_TASK_MS = 30 * 60_000;
+
+/** Never sleep longer than this, even when nothing is due. */
+export const MAX_WATCHDOG_SLEEP_MS = 30 * 60_000;
+
+/** Never spin faster than this, even when a deadline is already past. */
+export const MIN_WATCHDOG_SLEEP_MS = 15_000;
+
 /** Consecutive failed passes before the watchdog reports that it is broken. */
 export const MAX_WATCHDOG_FAILURES = 3;
 
@@ -210,6 +222,64 @@ export interface WatchdogLoopOptions {
 }
 
 /**
+ * When the next check is actually due.
+ *
+ * A fixed interval is wrong in both directions: it fires when nothing can have
+ * changed, and it fires late when a deadline passed a minute ago. Every signal
+ * the watchdog acts on already has a timestamp, so the interval is derived from
+ * the task state instead of from the clock:
+ *
+ *  - a running task is due at `lastHeartbeatAt + 2 × interval` (the stall rule);
+ *  - a paused task with a decision is due at its `deadlineAt`;
+ *  - a task that has not changed for 30 minutes is due now (no progress);
+ *  - a session that went silent 5 minutes ago is due now.
+ *
+ * Returns `Infinity` when nothing is pending — the caller then sleeps to its cap.
+ */
+export function nextCheckDelayMs(deps: WatchdogDeps, now = Date.now()): number {
+  let soonest = Number.POSITIVE_INFINITY;
+
+  for (const task of deps.listTasks()) {
+    const decision = task.decision;
+    if (decision && !decision.resolvedAt) {
+      soonest = Math.min(soonest, decision.deadlineAt - now);
+      continue;
+    }
+    if (task.status !== 'running') continue;
+
+    // Stall deadline: two heartbeat windows without a beat.
+    const lastBeat = task.stats?.lastHeartbeatAt ?? task.lastHeartbeatAt;
+    if (typeof lastBeat === 'number') {
+      soonest = Math.min(soonest, lastBeat + task.heartbeatIntervalMin * 60_000 * 2 - now);
+    } else {
+      const startedAt = task.stats?.runStartedAt ?? task.updatedAt;
+      soonest = Math.min(soonest, startedAt + task.heartbeatIntervalMin * 60_000 * 2 - now);
+    }
+
+    // A running task whose session is alive but producing nothing for 30 minutes
+    // is a finding of its own, so it is due as soon as that window elapses.
+    // A missing timestamp is *unknown*, not ancient: treating 0 as "stale since
+    // 1970" would make a freshly migrated task check forever.
+    if (typeof task.updatedAt === 'number' && task.updatedAt > 0) {
+      soonest = Math.min(soonest, task.updatedAt + STALE_TASK_MS - now);
+    }
+  }
+
+  return soonest;
+}
+
+/**
+ * Sleep until the next due moment, bounded at both ends.
+ *
+ * The bounds matter: a past-due task must not turn into a busy loop, and an idle
+ * system must still wake occasionally in case a task was edited on disk.
+ */
+export function clampSleep(delayMs: number): number {
+  if (!Number.isFinite(delayMs)) return MAX_WATCHDOG_SLEEP_MS;
+  return Math.min(MAX_WATCHDOG_SLEEP_MS, Math.max(MIN_WATCHDOG_SLEEP_MS, delayMs));
+}
+
+/**
  * Start the loop. Returns a disposer.
  *
  * `unref` so a pending timer never keeps the host process alive on shutdown.
@@ -221,7 +291,11 @@ export function startWatchdog(
 ): () => void {
   let failures = 0;
   let lastError = '';
-  const timer = setInterval(() => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+
+  const tick = (): void => {
+    if (stopped) return;
     try {
       runWatchdogPass(deps);
       failures = 0;
@@ -240,7 +314,34 @@ export function startWatchdog(
         }
       }
     }
-  }, intervalMs);
+
+    // Derive the next wake-up from what is actually pending. `intervalMs` is the
+    // floor when a caller wants a faster sweep than the state suggests.
+    //
+    // This read is inside its own guard on purpose: `nextCheckDelayMs` touches the
+    // task store, and a store that throws here would otherwise escape the timer
+    // callback and stop the loop for good — the exact failure mode the self-
+    // monitor exists to catch.
+    let suggested = Number.POSITIVE_INFINITY;
+    try {
+      suggested = nextCheckDelayMs(deps);
+    } catch (error) {
+      log.warn('[watchdog] cannot compute the next check; retrying later', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    let delay = clampSleep(suggested);
+    if (Number.isFinite(intervalMs) && intervalMs > 0) delay = Math.min(delay, intervalMs);
+    timer = setTimeout(tick, delay);
+    timer.unref?.();
+  };
+
+  // First pass immediately: a task may already be stalled when the app starts.
+  timer = setTimeout(tick, 0);
   timer.unref?.();
-  return () => clearInterval(timer);
+
+  return () => {
+    stopped = true;
+    if (timer) clearTimeout(timer);
+  };
 }

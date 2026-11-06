@@ -66,12 +66,13 @@ export function buildAgentToolBindings(deps: AgentToolBindingsDeps) {
         };
       }
       const result = await deps.tasks.reportHandoff(deps.taskId, payload, deps.sessionId);
-      // A long task must not keep growing one session: when the service says
-      // rotate, the next run starts cold from the handoff just recorded.
-      if (result.rotationPending) deps.continueTask?.(deps.taskId);
+      // A long task must not keep growing one session: when the service says the
+      // context is nearly full, compact in place (same thread, same window
+      // budget) instead of restarting cold.
+      if (result.compactionPending) deps.continueTask?.(deps.taskId);
       return {
         message: result.passed
-          ? `Handoff accepted${result.task.status === 'completed' ? '; task completed' : result.rotationPending ? '; continuing in a fresh session' : ''}.`
+          ? `Handoff accepted${result.task.status === 'completed' ? '; task completed' : result.compactionPending ? '; context compacted for the next round' : ''}.`
           : `Handoff rejected: ${result.reasons.join('; ')}`,
       };
     },

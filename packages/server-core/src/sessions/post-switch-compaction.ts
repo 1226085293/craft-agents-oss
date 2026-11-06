@@ -52,7 +52,7 @@ export interface PostSwitchCompactDeps {
 export function schedulePostSwitchCompaction(
   deps: PostSwitchCompactDeps,
   sessionId: string,
-  reason: 'key' | 'model' | 'both',
+  reason: 'key' | 'model' | 'both' | 'task',
   running: Map<string, Promise<void>>,
 ): void {
   if (running.has(sessionId)) return;
@@ -80,7 +80,13 @@ export function schedulePostSwitchCompaction(
       const before = stats?.before ?? result.tokensBefore;
       const after = result.tokensAfter;
       const reasonLabel =
-        reason === 'key' ? '切换 key 后' : reason === 'model' ? '切换模型后' : '切换 key/模型后';
+        reason === 'key'
+          ? '切换 key 后'
+          : reason === 'model'
+            ? '切换模型后'
+            : reason === 'task'
+              ? '任务上下文接近上限'
+              : '切换 key/模型后';
 
       deps.sendEvent(
         {

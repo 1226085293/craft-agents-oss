@@ -62,6 +62,16 @@ export {
 export { matchesCron } from './cron.ts';
 
 export {
+  canStartAnother,
+  type ConcurrencyInput,
+  type ConcurrencySource,
+  type ConcurrencyVerdict,
+  machineConcurrency,
+  resolveConcurrency,
+  WORKERS_PER_CORE,
+} from './concurrency.ts';
+
+export {
   assessDecisionRequest,
   DECISION_CATEGORIES,
   isRoutineWork,

@@ -1999,6 +1999,26 @@ export class SessionManager implements ISessionManager {
    * while the turn is still finishing; the map coalesces repeat notifications.
    */
   private postSwitchCompactions: Map<string, Promise<void>> = new Map()
+
+  /**
+   * Compact a session because its task runs on, not because its route changed.
+   *
+   * Shares the post-switch machinery on purpose: both wait for the turn to end,
+   * coalesce concurrent requests and report through the same event, so there is
+   * one compaction path with two triggers rather than two implementations.
+   */
+  private compactTaskSession(sessionId: string): void {
+    schedulePostSwitchCompaction(
+      {
+        getSession: (id) => this.sessions.get(id),
+        sendEvent: (infoEvent, workspaceId) => this.sendEvent(infoEvent as never, workspaceId),
+        log: (message) => sessionLog.warn(message),
+      },
+      sessionId,
+      'task',
+      this.postSwitchCompactions,
+    )
+  }
   /** Monotonic clock to ensure strictly increasing message timestamps */
   private lastTimestamp = 0
 
@@ -5432,9 +5452,11 @@ export class SessionManager implements ISessionManager {
             return runtime.dispatch({ fromSessionId: managed.id, ...params })
           },
           continueTask: (taskId) => {
-            void this.runTask(managed.workspace.id, taskId, 'rotate').catch((error) => {
-              sessionLog.warn('failed to continue a rotated task', { taskId, error })
-            })
+            // The worker reported that its context is close to the limit. Compact
+            // this session rather than starting a new one: the thread — what was
+            // tried, which file, which error — is the valuable part.
+            this.compactTaskSession(managed.id)
+            void taskId
           },
         })
 
@@ -5493,11 +5515,7 @@ export class SessionManager implements ISessionManager {
               handoff,
               fromSessionId,
             )
-            if (result.rotationPending) {
-              void this.runTask(managed.workspace.id, identifier, 'rotate').catch((error) => {
-                sessionLog.warn('failed to continue a rotated task', { taskId: identifier, error })
-              })
-            }
+            if (result.compactionPending) this.compactTaskSession(managed.id)
             return { passed: result.passed, reasons: result.reasons, status: result.task.status }
           },
         }

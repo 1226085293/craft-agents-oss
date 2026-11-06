@@ -77,7 +77,10 @@ describe('context rotation', () => {
       toolCallId: 'call_1',
     });
 
-  it('asks for a fresh session once the handoff count piles up', async () => {
+  it('never rotates just because handoffs pile up', async () => {
+    // Rotation was a context tool; compaction replaced it. Counting handoffs is
+    // no longer a reason to start a new session — a task can legitimately hand
+    // off a dozen times inside one window.
     const svc = service();
     const artifact = join(root, 'out.md');
     writeFileSync(artifact, 'ok', 'utf-8');
@@ -92,13 +95,35 @@ describe('context rotation', () => {
     };
 
     const results = [];
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i < 6; i += 1) {
       svc.startRun(task.id, `sess_${i}`);
       results.push(await svc.reportHandoff(task.id, handoff, `sess_${i}`));
     }
 
-    expect(results.slice(0, 3).every((r) => r.rotationPending === false)).toBe(true);
-    expect(results[3].rotationPending).toBe(true);
+    expect(results.every((r) => r.compactionPending === false)).toBe(true);
+  });
+
+  it('asks for a compaction once the context is nearly full', async () => {
+    const svc = service();
+    const artifact = join(root, 'out.md');
+    writeFileSync(artifact, 'ok', 'utf-8');
+    const task = create(svc);
+    svc.setStatus(task.id, 'running');
+    svc.startRun(task.id, 'sess_ctx');
+
+    const result = await svc.reportHandoff(
+      task.id,
+      {
+        outcome: 'handoff',
+        summary: '还有下一步',
+        artifacts: [{ path: artifact }],
+        verify: { ran: ['x'], passed: true },
+      },
+      'sess_ctx',
+      { contextUtilization: 0.75 },
+    );
+
+    expect(result.compactionPending).toBe(true);
   });
 
   it('rotates immediately when the worker is nearly out of context', async () => {
@@ -120,7 +145,7 @@ describe('context rotation', () => {
       'sess_0',
       { contextUtilization: 0.82 },
     );
-    expect(result.rotationPending).toBe(true);
+    expect(result.compactionPending).toBe(true);
   });
 
   it('does not rotate for a delivered task', async () => {
@@ -143,7 +168,7 @@ describe('context rotation', () => {
       { contextUtilization: 0.95 },
     );
     expect(result.passed).toBe(true);
-    expect(result.rotationPending).toBe(false);
+    expect(result.compactionPending).toBe(false);
   });
 });
 

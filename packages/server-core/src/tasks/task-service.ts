@@ -417,8 +417,8 @@ export class TaskService {
     handoff: Handoff;
     passed: boolean;
     reasons: string[];
-    /** True when the continuation must start in a fresh session. */
-    rotationPending: boolean;
+    /** True when the session should be compacted before the next turn. */
+    compactionPending: boolean;
   }> {
     const task = this.require(id);
     const now = this.now();
@@ -452,12 +452,20 @@ export class TaskService {
       }
     }
 
-    const handoffCount = task.handoffs.length + 1;
-    const rotationPending =
+    // Context pressure is answered with compaction, not with a new session.
+    //
+    // The session is the thread: rotating throws away everything the summary
+    // could not express (which file, which line, what was tried and failed) and
+    // then pays to re-inject the brief into a fresh window. Auto-compaction is
+    // already on for every session and its summary prompt explicitly preserves
+    // exact paths, function names and error messages, so compacting keeps the
+    // work *and* the room. Rotation survives only for the case where compaction
+    // itself cannot run, which the caller detects.
+    const contextUtilization = options?.contextUtilization ?? 0;
+    const compactionPending =
       accepted &&
       handoff.outcome === 'handoff' &&
-      (handoffCount >= MAX_HANDOFFS_PER_SESSION ||
-        (options?.contextUtilization ?? 0) >= ROTATE_CONTEXT_THRESHOLD);
+      contextUtilization >= ROTATE_CONTEXT_THRESHOLD;
 
     const stats = task.stats ?? { runs: 0, activeMs: 0 };
     const elapsed = stats.runStartedAt ? Math.max(0, now - stats.runStartedAt) : 0;
@@ -531,7 +539,7 @@ export class TaskService {
         passed: accepted,
         reasons,
         acceptance: acceptance?.results,
-        ...(rotationPending ? { rotationPending: true } : {}),
+        ...(compactionPending ? { compactionPending: true } : {}),
       },
     });
 
@@ -543,7 +551,7 @@ export class TaskService {
         : `${id} 交接未通过（${reasons.join('；') || handoff.outcome}）：${handoff.summary}`,
     );
 
-    return { task: next, handoff, passed: accepted, reasons, rotationPending };
+    return { task: next, handoff, passed: accepted, reasons, compactionPending };
   }
 
   /** Existence + readability + non-emptiness, in one probe. */

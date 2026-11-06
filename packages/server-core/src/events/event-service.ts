@@ -23,6 +23,7 @@ import { ListenerSupervisor, type ListenerRuntimeStatus } from './listener-super
 import { EventDispatcher, type DispatchTarget } from './event-dispatcher.ts';
 import { fetchReportedDeps } from './listener-control.ts';
 import { loadSubscriptions } from '@craft-agent/shared/events/subscriptions.ts';
+import { deriveThreadKey, findThreadOwner } from '@craft-agent/shared/events/thread-bindings.ts';
 import type { ListenerConfigSchema } from '@craft-agent/shared/events/manifest.ts';
 import type { CraftEventEnvelope } from '@craft-agent/shared/events/types.ts';
 import type { ListenerReportedDepsDto } from '@craft-agent/shared/protocol/dto';
@@ -167,6 +168,22 @@ export class EventService {
   private createDispatcher(target: DispatchTarget): EventDispatcher {
     return new EventDispatcher({
       getSubscriptions: () => loadSubscriptions(this.options.workspaceRoot),
+      // Thread ownership: one conversation, one owner. Checked before
+      // subscriptions so a follow-up message in a channel already being handled
+      // never reaches the supervisor.
+      resolveThreadOwner: (event) => {
+        const threadKey = deriveThreadKey(event.links)
+        if (!threadKey) return undefined;
+        const owner = findThreadOwner(this.options.workspaceRoot, threadKey);
+        if (!owner) return undefined;
+        // A binding outlives a deleted session. Treat that as unbound so the
+        // event falls through to the funnel instead of being posted to a session
+        // that no longer exists — delivering into the void is worse than
+        // re-triaging, because the event is then invisible.
+        const exists = this.options.dispatchTarget?.exists;
+        if (exists && !exists(owner.sessionId)) return undefined;
+        return owner.sessionId;
+      },
       target,
       // Read the current host callback at dispatch time. The boot warm-up can
       // create this dispatcher before RPC registers the supervisor callback.

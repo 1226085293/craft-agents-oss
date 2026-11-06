@@ -44,6 +44,13 @@ export interface DispatchTarget {
   isBusy: (sessionId: string) => boolean;
   /** Sessions with user messages waiting — events yield to those. */
   hasQueuedUserMessage: (sessionId: string) => boolean;
+  /**
+   * Whether a session still exists.
+   *
+   * Thread bindings outlive sessions. Posting an event to a deleted session
+   * would make it invisible — it was routed, so nothing else will retry it.
+   */
+  exists?: (sessionId: string) => boolean;
 }
 
 export interface EventDispatcherOptions {
@@ -60,6 +67,18 @@ export interface EventDispatcherOptions {
   dailyLimit?: number;
   /** Called after a session actually received the event (surface written). */
   onDelivered?: (eventId: string, sessionId: string) => void;
+  /**
+   * Thread ownership, consulted before subscriptions.
+   *
+   * Subscriptions match a *class* of event ("anything from qq"); a thread is one
+   * conversation. Without this lookup the second message in the same group chat
+   * became a fresh triage decision for the supervisor — a model turn per message,
+   * each one competing with the per-turn cap.
+   *
+   * Returns the session already handling that conversation, if any. Absent in
+   * hosts that do not persist bindings.
+   */
+  resolveThreadOwner?: (event: EventMeta) => string | undefined;
 }
 
 interface DeferredBatch {
@@ -95,6 +114,16 @@ export class EventDispatcher {
   dispatch(event: EventMeta): void {
     const key = event.dedupeKey || event.id;
     if (this.routed.has(key)) return;
+
+    // Thread ownership outranks subscriptions: a conversation already being
+    // handled continues with its owner, so a busy channel never re-enters
+    // triage. This is the whole point — it costs no model call.
+    const threadOwner = this.options.resolveThreadOwner?.(event);
+    if (threadOwner) {
+      this.routed.add(key);
+      this.merger.push(threadOwner, event);
+      return;
+    }
 
     const subscriptions = this.options.getSubscriptions();
     const targets = subscriptions.length ? subscribersFor(event, subscriptions) : [];

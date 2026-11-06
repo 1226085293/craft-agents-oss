@@ -3784,6 +3784,9 @@ export class SessionManager implements ISessionManager {
       ) => this.surfaceEventToSession(sessionId, params),
       isBusy: (sessionId: string) => this.isSessionProcessing(sessionId),
       hasQueuedUserMessage: (sessionId: string) => this.hasQueuedUserMessage(sessionId),
+      // Thread bindings outlive sessions; a stale one must fall back to the
+      // normal funnel instead of routing into a session that is gone.
+      exists: (sessionId: string) => this.sessions.has(sessionId),
     }
   }
 
@@ -11340,6 +11343,40 @@ ${request.prompt}`;
     }
   }
 
+  /**
+   * Bind the event's conversation to this session.
+   *
+   * `rememberEventOrigin` already parses `message://platform/channelId`; this
+   * persists the same identity so routing can use it later, which is the part
+   * that was missing — the origin was kept in memory for replies only, so a
+   * follow-up message always went back to triage.
+   */
+  private bindEventThread(managed: ManagedSession, eventId: string): void {
+    try {
+      const { EventStore } = require('@craft-agent/shared/events/event-store.ts') as typeof import('@craft-agent/shared/events/event-store.ts')
+      const { bindThread, deriveThreadKey } = require('@craft-agent/shared/events/thread-bindings.ts') as typeof import('@craft-agent/shared/events/thread-bindings.ts')
+      const dbPath = join(managed.workspace.rootPath, 'config', 'events.sqlite')
+      if (!existsSync(dbPath)) return
+      const store = new EventStore({ dbPath })
+      try {
+        const event = store.get(eventId)
+        const threadKey = deriveThreadKey(event?.links)
+        if (!threadKey) return
+        bindThread(managed.workspace.rootPath, {
+          threadKey,
+          sessionId: managed.id,
+          ...(managed.taskId ? { taskId: managed.taskId } : {}),
+        })
+      } finally {
+        store.close()
+      }
+    } catch (error) {
+      // A lost binding costs a supervisor turn later; it must never fail a
+      // delivery that already succeeded.
+      sessionLog.warn(`[thread] could not bind ${eventId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
   /** The channel the session is currently answering, if any. */
   private replyOriginFor(sessionId: string): { platform: string; channelId: string; threadId?: number } | undefined {
     return this.replyOrigins.get(sessionId)
@@ -11353,6 +11390,10 @@ ${request.prompt}`;
     if (!managed || managed.isArchived) return false
 
     this.rememberEventOrigin(managed.id, params.eventId)
+    // Record ownership so the next message in the same conversation comes
+    // straight here instead of re-entering triage. Doing it at delivery, not at
+    // dispatch, means only sessions that actually received the event claim it.
+    this.bindEventThread(managed, params.eventId)
 
     if (!managed.isProcessing) this.pushEventWakeTitle(managed, params)
     this.insertEventProcessRow(managed, params)

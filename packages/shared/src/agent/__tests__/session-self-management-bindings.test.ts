@@ -181,3 +181,61 @@ describe('session self-management bindings', () => {
     expect(listResult.content[0]!.text).toContain('not available in this context');
   });
 });
+
+describe('event center bindings', () => {
+  const sessionId = 'test-event-bindings';
+
+  beforeEach(() => {
+    unregisterSessionScopedToolCallbacks(sessionId);
+  });
+
+  it('hands get_event the body it was registered for', async () => {
+    // The registry had these callbacks all along, but nothing copied them onto
+    // the tool context, so get_event answered "not available in this context"
+    // while the tool sat in the table looking callable. A supervisor told
+    // "有一条未处理的事件（id: …）" could never read it.
+    registerSessionScopedToolCallbacks(sessionId, {
+      getEventFn: (id: string) => ({
+        id,
+        type: 'message.mention',
+        source: 'qq',
+        receivedAt: 1_800_000_000_000,
+        title: '张三 · 提到了你',
+        recipients: [],
+        body: '帮我看看这个',
+      }),
+    });
+
+    const ctx = createBaseContext(sessionId);
+    attachSessionSelfManagementBindings(ctx, sessionId);
+
+    const handler = SESSION_TOOL_REGISTRY.get('get_event')!.handler!;
+    const result = await handler(ctx, { id: 'evt_test' });
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0]!.text).toContain('帮我看看这个');
+  });
+
+  it('binds every event callback the handlers expect', () => {
+    registerSessionScopedToolCallbacks(sessionId, {
+      subscribeEventFn: async () => ({ subscriptionId: 'sub_1', total: 1 }),
+      unsubscribeEventFn: async () => ({ removed: 1, remaining: 0 }),
+      listEventSubscriptionsFn: () => [],
+      listEventsFn: () => [],
+      getEventFn: () => null,
+    });
+
+    const ctx = createBaseContext(sessionId);
+    attachSessionSelfManagementBindings(ctx, sessionId);
+
+    for (const prop of [
+      'subscribeEventFn',
+      'unsubscribeEventFn',
+      'listEventSubscriptionsFn',
+      'listEventsFn',
+      'getEventFn',
+    ] as const) {
+      expect(typeof ctx[prop]).toBe('function');
+    }
+  });
+});

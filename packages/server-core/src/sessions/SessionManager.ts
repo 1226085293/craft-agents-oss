@@ -2042,6 +2042,23 @@ export class SessionManager implements ISessionManager {
     } else if (was && !processing) {
       sessionRuntimeHooks.onSessionStopped()
       this.clearSupervisorTurnCap(managed)
+      // Hand over anything that arrived while this turn was running. Without
+      // this, a queued event waited for the NEXT inbound message to be noticed:
+      // drainToSupervisor bails while the supervisor is busy and nothing came
+      // back to retry, so an event could sit indefinitely after a turn ended —
+      // including a turn the cap just killed. Every termination path (complete,
+      // interrupted, error) funnels through here, which is why it lives here
+      // rather than in the completion handler.
+      if (managed.role === 'supervisor') {
+        void this.getSupervisorRuntime(managed.workspace.id)
+          .onSupervisorIdle()
+          .catch((error) => {
+            sessionLog.warn('[supervisor] failed to drain the backlog after a turn', {
+              sessionId: managed.id,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          })
+      }
     }
   }
 

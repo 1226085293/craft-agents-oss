@@ -162,4 +162,27 @@ export function attachSessionSelfManagementBindings(
     configurable: true,
     enumerable: true,
   });
+
+  // Event Center. The host registers these in the session-scoped registry, but
+  // nothing copied them onto the tool context — so every event handler hit its
+  // own `if (!ctx.getEventFn) return fail('not available in this context')`
+  // guard while the tool was perfectly visible in the tool table. A supervisor
+  // told "有一条未处理的事件（id: …）" could see get_event and never call it.
+  for (const [ctxKey, registryKey] of [
+    ['subscribeEventFn', 'subscribeEventFn'],
+    ['unsubscribeEventFn', 'unsubscribeEventFn'],
+    ['listEventSubscriptionsFn', 'listEventSubscriptionsFn'],
+    ['listEventsFn', 'listEventsFn'],
+    ['getEventFn', 'getEventFn'],
+  ] as const) {
+    Object.defineProperty(context, ctxKey, {
+      get() {
+        return (getSessionScopedToolCallbacks(sessionId) as Record<string, unknown> | undefined)?.[
+          registryKey
+        ];
+      },
+      configurable: true,
+      enumerable: true,
+    });
+  }
 }

@@ -160,7 +160,18 @@ export async function handleAskUser(
 /** Create a task and return its human-facing id. */
 export async function handleTaskCreate(
   ctx: SessionToolContext,
-  args: { name: string; instruction: string; assigneeAgentId?: string; parentTaskId?: string; dependsOn?: string[]; priority?: number },
+  args: {
+    name: string;
+    instruction: string;
+    scope?: string;
+    deliverables?: Array<{ kind: 'file' | 'directory' | 'pr' | 'doc' | 'message'; path?: string; note?: string; required?: boolean }>;
+    acceptance?: Array<{ check: string; command?: string }>;
+    cwd?: string;
+    assigneeAgentId?: string;
+    parentTaskId?: string;
+    dependsOn?: string[];
+    priority?: number;
+  },
 ): Promise<ToolResult> {
   if (!ctx.taskTools?.create) return errorResponse('task_create is only available to a supervisor session.');
   if (!args.name?.trim()) return errorResponse('name is required.');
@@ -169,6 +180,26 @@ export async function handleTaskCreate(
     const { id } = await ctx.taskTools.create({
       name: args.name.trim(),
       instruction: args.instruction.trim(),
+      // The execution contract goes through `spec`, which already exists, rather
+      // than adding four parallel fields to the tool payload. A task created
+      // without any of these has no scope and no way to be judged — the shape
+      // that let tasks be created but never verifiable.
+      spec: {
+        ...(args.scope?.trim() ? { scope: args.scope.trim() } : {}),
+        ...(args.deliverables?.length ? { deliverables: args.deliverables } : {}),
+        // Acceptance items carry an id in the spec; derive one so the caller
+        // does not have to invent stable identifiers for a checklist.
+        ...(args.acceptance?.length
+          ? {
+              acceptance: args.acceptance.map((item, index) => ({
+                id: `a${index + 1}`,
+                check: item.check,
+                ...(item.command ? { command: item.command } : {}),
+              })),
+            }
+          : {}),
+        ...(args.cwd ? { cwd: args.cwd } : {}),
+      },
       assigneeAgentId: args.assigneeAgentId,
       parentTaskId: args.parentTaskId,
       dependsOn: args.dependsOn,

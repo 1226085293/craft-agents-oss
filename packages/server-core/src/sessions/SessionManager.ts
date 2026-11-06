@@ -1845,6 +1845,30 @@ const DEFAULT_TOKEN_USAGE = {
  * Convert a ManagedSession to a renderer-side Session object.
  * Uses pickSessionFields() for persistent fields so new fields propagate automatically.
  */
+/**
+ * The responsibility a session currently carries, looked up from its task.
+ *
+ * Lives outside the class so both session projections (`list_sessions` and
+ * `get_session_info`) answer this the same way. Returning `{}` rather than
+ * throwing matters: a projection that fails would take the whole tool call with
+ * it, and "no scope" is a legitimate answer for a session without a task.
+ */
+function scopeFieldFor(
+  workspaceId: string,
+  taskId: string | undefined,
+  resolver?: (workspaceId: string) => { list: () => Array<{ id: string; spec?: { scope?: string } }> },
+): { scope?: string } {
+  if (!taskId) return {}
+  try {
+    const tasks = resolver?.(workspaceId)
+    if (!tasks) return {}
+    const scope = tasks.list().find((task) => task.id === taskId)?.spec?.scope
+    return scope ? { scope } : {}
+  } catch {
+    return {}
+  }
+}
+
 function managedToSession(m: ManagedSession, overrides?: Partial<Session>): Session {
   return {
     ...pickSessionFields(m),
@@ -6540,6 +6564,9 @@ ${request.prompt}`;
             projectId: session.projectId,
             ...routing,
             isActive: session.agent != null,
+            ...(session.taskId ? { taskId: session.taskId } : {}),
+            ...(session.role === 'supervisor' ? { role: 'supervisor' } : {}),
+            ...scopeFieldFor(managed.workspace.id, session.taskId, (id) => this.getTasks(id)),
           }
         },
         listSessionsFn: (options) => {
@@ -6569,6 +6596,12 @@ ${request.prompt}`;
           // Paginate
           const page = sessions.slice(offset, offset + limit)
 
+          // A session list without responsibilities cannot answer "which session
+          // is right for this", which is the question the supervisor is asked to
+          // settle. Name and timestamp alone forced it to guess from titles.
+          const taskService = this.getTasks(managed.workspace.id)
+          const scopeOf = (taskId: string | undefined): string | undefined =>
+            scopeFieldFor(managed.workspace.id, taskId, () => taskService).scope
           return {
             total,
             returned: page.length,
@@ -6577,6 +6610,11 @@ ${request.prompt}`;
               name: s.name ?? s.id,
               createdAt: s.createdAt ?? 0,
               projectId: s.projectId,
+              ...(this.sessions.get(s.id)?.taskId
+                ? { taskId: this.sessions.get(s.id)!.taskId }
+                : {}),
+              ...(s.role === 'supervisor' ? { role: 'supervisor' } : {}),
+              ...(scopeOf(this.sessions.get(s.id)?.taskId) ? { scope: scopeOf(this.sessions.get(s.id)!.taskId) } : {}),
             })),
           }
         },

@@ -99,6 +99,39 @@ export type AskUserInput = z.infer<typeof AskUserSchema>;
 export const TaskCreateSchema = z.object({
   name: z.string(),
   instruction: z.string().describe('The original request. Immutable once created.'),
+  /**
+   * Responsibility, in one sentence.
+   *
+   * `TaskSpec` has had this field all along, but no tool could set it — so a
+   * created task never said what it was for, and nothing downstream could answer
+   * "which session is right for this". Required in spirit: a task without a
+   * scope is a task nobody can hand off.
+   */
+  scope: z
+    .string()
+    .optional()
+    .describe('One sentence: what this task is responsible for. Used to match later hand-offs.'),
+  deliverables: z
+    .array(
+      z.object({
+        kind: z.enum(['file', 'directory', 'pr', 'doc', 'message']),
+        path: z.string().optional().describe('Workspace- or absolute path for file/directory kinds.'),
+        note: z.string().optional().describe('What it must contain.'),
+        required: z.boolean().optional(),
+      }),
+    )
+    .optional()
+    .describe('What this task owes. A task with no deliverable cannot be checked.'),
+  acceptance: z
+    .array(
+      z.object({
+        check: z.string().describe('What must be true, in words.'),
+        command: z.string().optional().describe('Command the host runs; exit 0 = pass.'),
+      }),
+    )
+    .optional()
+    .describe('How completion is judged. Run by the host, never by the worker itself.'),
+  cwd: z.string().optional().describe('Working directory for the worker.'),
   assigneeAgentId: z.string().optional(),
   parentTaskId: z.string().optional(),
   dependsOn: z.array(z.string()).optional(),

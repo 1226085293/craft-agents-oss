@@ -104,6 +104,11 @@ export function buildAgentToolBindings(deps: AgentToolBindingsDeps) {
 
       if (payload.attachTaskId) {
         deps.tasks.attachSession(payload.attachTaskId, created.sessionId);
+        // `scope` used to reach this point and stop: it fed the dedupe key and the
+        // default session name, then was dropped. Persisting it makes the
+        // responsibility readable later, which is what "which session is right for
+        // this" needs in order to be answerable from data instead of titles.
+        deps.tasks.setScope(payload.attachTaskId, payload.scope);
       }
       return { message: `Dispatched to ${created.sessionId}. End your turn; you will be woken when it reports.` };
     },

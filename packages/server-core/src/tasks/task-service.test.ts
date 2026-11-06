@@ -226,3 +226,40 @@ describe('task metadata', () => {
     expect(reloaded.spec?.scope).toBe('只复核 src/api 下的改动');
   });
 });
+
+/**
+ * `dispatch` has always required a `scope` — "one sentence describing what this
+ * session is responsible for, so later dispatches can be matched to it". It never
+ * reached the task: it fed a dedupe key and the default session title, then was
+ * dropped. So a created task could not say what it was for, and nothing could
+ * answer "which session is right for this" from data.
+ */
+describe('task scope', () => {
+  it('records the responsibility', () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.setScope(task.id, '负责督导与任务板');
+    expect(svc.get(task.id)?.spec?.scope).toBe('负责督导与任务板');
+  })
+
+  it('keeps the rest of the spec intact', () => {
+    // updateSpec replaces the whole contract, so writing one sentence through it
+    // would silently drop cwd/tools/acceptance.
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.updateSpec(task.id, { cwd: 'packages/shared', tools: ['read'], scope: 'old' })
+    svc.setScope(task.id, 'new scope')
+    const spec = svc.get(task.id)?.spec
+    expect(spec?.scope).toBe('new scope')
+    expect(spec?.cwd).toBe('packages/shared')
+    expect(spec?.tools).toEqual(['read'])
+  })
+
+  it('ignores a blank scope instead of erasing the existing one', () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.setScope(task.id, 'kept')
+    svc.setScope(task.id, '   ')
+    expect(svc.get(task.id)?.spec?.scope).toBe('kept')
+  })
+})

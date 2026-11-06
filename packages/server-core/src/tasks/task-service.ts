@@ -412,6 +412,22 @@ export class TaskService {
     return task;
   }
 
+  /**
+   * Record what this task is responsible for, without disturbing the rest of the
+   * spec.
+   *
+   * `updateSpec` replaces the whole contract, so calling it to set one sentence
+   * would silently drop cwd, tools and acceptance. Scope arrives separately from
+   * the other spec fields (a dispatch supplies it), so it needs its own door.
+   */
+  setScope(id: string, scope: string | undefined): Task {
+    const task = this.require(id)
+    const trimmed = scope?.trim()
+    if (!trimmed) return task
+    if (task.spec?.scope === trimmed) return task
+    return this.updateSpec(id, { ...task.spec, scope: trimmed })
+  }
+
   updateSpec(id: string, spec: TaskSpec): Task {
     const task = this.require(id);
     const next: Task = { ...task, spec, updatedAt: this.now() };

@@ -1,51 +1,142 @@
 /**
  * Generic plugin process.
  *
- * Every platform plugin used to be `builtin`: its actions ran inside Craft, so
- * the plugin was a manifest plus an in-process adapter. That meant two kinds of
- * plugin existed and only one of them was ever really exercised.
+ * A platform plugin used to be `builtin`: its actions ran inside Craft and the
+ * gateway ran its adapter. Both are gone, so this file is the whole contract —
+ * and it carries no platform knowledge. A plugin supplies `createAdapter`; the
+ * rest is the same for every platform, because it is only about turning platform
+ * messages into events and host calls into adapter calls.
  *
- * This file is the smallest thing that makes a plugin a real program: it loads
- * the plugin's own adapter, serves `POST /action` for the host to call, and
- * exits. It contains no platform knowledge — each plugin supplies its adapter
- * through `createAdapter`, exactly as before.
+ * Three jobs:
  *
- * The host sends `{ action, args }` and gets `{ ok, message }` back. Anything the
- * plugin wants to tell its users goes through the action itself; anything it
- * wants Craft to do it calls on the host command API (`POST /host/<name>`),
- * whose address and token arrive in the environment.
+ *   inbound   initialize the adapter, receive its messages, POST each one as a
+ *             `craft-event/1` event. Craft never learns the platform's shape.
+ *   outbound  serve `POST /action` so Craft can ask the plugin to send.
+ *   host      the plugin decides everything user-facing; when it needs Craft to
+ *             do something (stop a turn, compact) it calls `POST /host/<name>`,
+ *             whose address arrives in the environment.
  */
 
 import { createServer } from 'node:http'
+import { readFileSync } from 'node:fs'
 
 const PORT = Number(process.env.CRAFT_PLUGIN_PORT ?? 0)
-const WORKSPACE = process.env.CRAFT_WORKSPACE_DIR ?? process.cwd()
+const PLUGIN_ID = process.env.CRAFT_LISTENER_ID ?? 'plugin'
+const EVENTS_URL = process.env.CRAFT_EVENTS_URL ?? ''
+const EVENTS_TOKEN = process.env.CRAFT_EVENTS_TOKEN ?? ''
+const CONFIG_PATH = process.env.CRAFT_LISTENER_CONFIG ?? ''
 
-interface ActionRequest {
-  action?: string
-  args?: Record<string, unknown>
+interface IncomingLike {
+  channelId?: string
+  channelName?: string
+  threadId?: number
+  text?: string
+  senderName?: string
+  senderId?: string
+  messageId?: string
+  isGroup?: boolean
+  mentionsBot?: boolean
+}
+
+interface PlatformAdapterLike {
+  initialize?: (config: unknown) => Promise<void>
+  onMessage?: (handler: (msg: IncomingLike) => Promise<void>) => void
+  sendText?: (channelId: string, text: string) => Promise<unknown>
+  destroy?: () => Promise<void>
 }
 
 interface ActionModule {
-  /** The plugin's own adapter factory, kept from the pre-process design. */
   createAdapter?: (options?: Record<string, unknown>) => PlatformAdapterLike
-  /** Preferred: an explicit action dispatcher when the plugin provides one. */
   performAction?: (
     action: string,
     args: Record<string, unknown>,
   ) => Promise<{ ok: boolean; message?: string }>
 }
 
-/** Only the part of the adapter this server uses. */
-interface PlatformAdapterLike {
-  initialize?: (config: unknown) => Promise<void>
-  sendText?: (channelId: string, text: string) => Promise<unknown>
+/** The plugin's own config values, as the user filled them in. */
+function readConfig(): Record<string, unknown> {
+  if (!CONFIG_PATH) return {}
+  try {
+    return JSON.parse(readFileSync(CONFIG_PATH, 'utf8')) as Record<string, unknown>
+  } catch {
+    // Empty config is a normal state (just installed); the adapter decides
+    // whether it can connect without it.
+    return {}
+  }
 }
 
-async function loadPluginModule(entry: string): Promise<ActionModule> {
-  const url = new URL(entry, `file://${WORKSPACE.replace(/\\/g, '/')}/`).href
-  return (await import(url)) as ActionModule
+/**
+ * Turn one platform message into one event.
+ *
+ * The text is the body; everything else is a link or a summary field. `type` is
+ * namespaced by the plugin id so rules can target `telegram.message` without
+ * Craft holding a list of platforms.
+ */
+function toEvent(msg: IncomingLike): Record<string, unknown> | null {
+  const text = (msg.text ?? '').trim()
+  if (!text) return null
+
+  const channelId = msg.channelId ?? ''
+  const event: Record<string, unknown> = {
+    type: `${PLUGIN_ID}.message`,
+    title: text.length > 80 ? `${text.slice(0, 77)}…` : text,
+    summary: text.length > 80 ? text : undefined,
+    body: text,
+    source: PLUGIN_ID,
+    occurredAt: Date.now(),
+    // Reply target: whoever handles this event can answer without knowing the
+    // platform, because the plugin already said which channel it came from.
+    links: channelId
+      ? [{ rel: 'reply', url: `message://${PLUGIN_ID}/${encodeURIComponent(channelId)}/${msg.messageId ?? ''}` }]
+      : [],
+    // Same platform message must never wake two turns, even if the adapter
+    // reconnects and replays a short history window.
+    ...(msg.messageId ? { dedupeKey: `${PLUGIN_ID}:${channelId}:${msg.messageId}` } : {}),
+    meta: {
+      channelId,
+      ...(msg.channelName ? { channelName: msg.channelName } : {}),
+      ...(msg.threadId !== undefined ? { threadId: msg.threadId } : {}),
+      ...(msg.senderName ? { senderName: msg.senderName } : {}),
+      ...(msg.senderId ? { senderId: msg.senderId } : {}),
+      ...(msg.isGroup !== undefined ? { isGroup: msg.isGroup } : {}),
+      ...(msg.mentionsBot !== undefined ? { mentionsBot: msg.mentionsBot } : {}),
+    },
+  }
+  return event
 }
+
+/** POST one event to Craft. Failures are logged, never fatal: a dropped event
+ *  must not take the adapter's read loop down with it. */
+async function publish(event: Record<string, unknown>): Promise<void> {
+  if (!EVENTS_URL) return
+  try {
+    const res = await fetch(EVENTS_URL, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${EVENTS_TOKEN}`,
+      },
+      body: JSON.stringify(event),
+    })
+    if (!res.ok) {
+      console.error(JSON.stringify({ event: 'publish_failed', status: res.status }))
+    }
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: 'publish_error',
+        message: error instanceof Error ? error.message : String(error),
+      }),
+    )
+  }
+}
+
+const entry = process.env.CRAFT_PLUGIN_ENTRY ?? './program/index.ts'
+const url = new URL(entry, `file://${process.cwd().replace(/\\/g, '/')}/`).href
+const plugin = (await import(url)) as ActionModule
+
+const config = readConfig()
+const adapter = plugin.createAdapter?.({ config }) ?? null
 
 function readJson(req: import('node:http').IncomingMessage): Promise<unknown> {
   return new Promise((resolve) => {
@@ -71,9 +162,6 @@ function readJson(req: import('node:http').IncomingMessage): Promise<unknown> {
   })
 }
 
-const entry = process.env.CRAFT_PLUGIN_ENTRY ?? './program/index.ts'
-const plugin = await loadPluginModule(entry)
-
 const server = createServer((req, res) => {
   void (async () => {
     const send = (status: number, payload: unknown) => {
@@ -86,7 +174,9 @@ const server = createServer((req, res) => {
     }
 
     if (req.url === '/health') {
-      send(200, { ok: true })
+      // Craft treats this as proof the plugin is up, so answer only once the
+      // adapter exists — a health check that passes with no adapter is a lie.
+      send(adapter ? 200 : 503, { ok: Boolean(adapter), plugin: PLUGIN_ID })
       return
     }
 
@@ -95,28 +185,21 @@ const server = createServer((req, res) => {
       return
     }
 
-    const body = (await readJson(req)) as ActionRequest | null
+    const body = (await readJson(req)) as { action?: string; args?: Record<string, unknown> } | null
     const action = typeof body?.action === 'string' ? body.action : ''
     if (!action) {
       send(400, { ok: false, message: 'action is required' })
       return
     }
-
     const args = body?.args ?? {}
 
     try {
-      // An explicit dispatcher wins: it can implement actions the adapter's
-      // shape does not cover (pairing, QR handshakes, command replies).
       if (typeof plugin.performAction === 'function') {
         send(200, await plugin.performAction(action, args))
         return
       }
 
-      // Otherwise map the one action every platform has onto the adapter. This
-      // is what `builtin` used to do inside Craft; now it happens here, in the
-      // plugin's own process, which is the whole point of removing builtin.
       if (action === 'send_message') {
-        const adapter = plugin.createAdapter?.({})
         const text = typeof args.text === 'string' ? args.text.trim() : ''
         const channelId = typeof args.channelId === 'string' ? args.channelId : ''
         if (!text) {
@@ -129,6 +212,11 @@ const server = createServer((req, res) => {
         }
         await adapter.sendText(channelId, text)
         send(200, { ok: true, message: `sent to ${channelId}` })
+        return
+      }
+
+      if (action === 'deliver_file') {
+        send(501, { ok: false, message: 'plugin does not implement file delivery yet' })
         return
       }
 
@@ -145,7 +233,25 @@ const server = createServer((req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   const address = server.address()
   const port = typeof address === 'object' && address ? address.port : 0
-  // The host reads this line to learn the port. One line, machine-readable, so
-  // supervision does not depend on guessing a fixed port per plugin.
   console.log(JSON.stringify({ ready: true, port }))
 })
+
+// Inbound: the adapter owns the platform connection; this only forwards. Started
+// after listen() so a slow connect cannot delay readiness reporting.
+if (adapter) {
+  adapter.onMessage?.(async (msg) => {
+    const event = toEvent(msg)
+    if (event) await publish(event)
+  })
+  await adapter.initialize?.(config)
+}
+
+const shutdown = async () => {
+  try {
+    await adapter?.destroy?.()
+  } finally {
+    server.close(() => process.exit(0))
+  }
+}
+process.on('SIGTERM', () => void shutdown())
+process.on('SIGINT', () => void shutdown())

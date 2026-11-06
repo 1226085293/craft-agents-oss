@@ -361,3 +361,48 @@ describe('persistence pipeline filtering', () => {
     expect(final.find(m => m.type === 'assistant')?.id).toBe('msg-final')
   })
 })
+
+// ============================================================================
+// 1b. Content is always text
+// ============================================================================
+
+describe('content normalization', () => {
+  // A supervisor's synthetic message was persisted with the SDK block array
+  // (`content: [{ type: 'text', text }]`) behind an `as never` cast. Every load
+  // of that session then threw `message.content?.trim is not a function` inside
+  // ChatDisplay's turn builder, taking the whole chat panel down to the error
+  // boundary (2026-11-06, session 261106-aware-storm).
+  const blockContent = [{ type: 'text', text: '第一段' }, { type: 'text', text: '第二段' }]
+
+  it('storedToMessage flattens a legacy block-array body into text', () => {
+    const stored = {
+      id: 'uuid-1',
+      type: 'assistant',
+      content: blockContent,
+      timestamp: 1,
+    } as unknown as StoredMessage
+
+    const restored = storedToMessage(stored)
+
+    expect(typeof restored.content).toBe('string')
+    expect(restored.content).toBe('第一段\n第二段')
+    // The exact call that used to throw.
+    expect(restored.content.trim()).toBe('第一段\n第二段')
+  })
+
+  it('messageToStored never writes a block-array body', () => {
+    const msg = {
+      id: 'uuid-2',
+      role: 'assistant',
+      content: blockContent,
+      timestamp: 2,
+    } as unknown as Message
+
+    expect(typeof messageToStored(msg).content).toBe('string')
+  })
+
+  it('leaves string and missing content alone', () => {
+    expect(storedToMessage({ id: 'a', type: 'assistant', content: 'hi' } as StoredMessage).content).toBe('hi')
+    expect(storedToMessage({ id: 'b', type: 'assistant' } as StoredMessage).content).toBe('')
+  })
+})

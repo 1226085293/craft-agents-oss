@@ -7500,27 +7500,32 @@ ${request.prompt}`;
   }
 
   /**
-   * A supervisor's message to the user.
-   *
-   * Written on the supervisor's own transcript: one channel, so the user never
-   * has to guess which session spoke.
-   */
-  /**
    * Append a supervisor-authored assistant message.
    *
-   * Reuses the plan-message shape (persisted + broadcast) rather than inventing
-   * a second transport: the user sees one channel, and a reload keeps it.
+   * A supervisor's message to the user is written on the supervisor's own
+   * transcript: one channel, so the user never has to guess which session
+   * spoke. Reuses the plan-message shape (persisted + broadcast) rather than
+   * inventing a second transport, so a reload keeps it.
+   *
+   * `content` is a plain string, like every other transcript row. It was once
+   * the SDK's block array (`[{ type: 'text', text }]`), cast through `as never`
+   * to satisfy the compiler — which is exactly how it dodged the type check and
+   * broke the renderer: ChatDisplay's turn builder calls `content.trim()`, so
+   * every session holding one of these rows threw `message.content?.trim is not
+   * a function` on load and the whole chat panel crashed to the error boundary
+   * (observed 2026-11-06, session 261106-aware-storm). Message content is text;
+   * tool results are the ones that carry blocks.
    */
   private async appendSyntheticMessage(managed: ManagedSession, text: string): Promise<void> {
-    const message = {
+    const message: Message = {
       id: randomUUID(),
-      role: 'assistant' as const,
-      content: [{ type: 'text' as const, text }],
+      role: 'assistant',
+      content: text,
       timestamp: this.monotonic(),
       isIntermediate: false,
     }
 
-    managed.messages.push(message as never)
+    managed.messages.push(message)
     managed.lastMessageRole = 'assistant'
     this.persistSession(managed)
 

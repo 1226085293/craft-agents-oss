@@ -303,6 +303,11 @@ export function isNewRevision(
 export function isRunLocked(task: Task, sessionExists: (id: string) => boolean): boolean {
   const lock = task.stats?.lockSessionId;
   if (!lock) return false;
+  // A `pending:<reason>` placeholder holds the lock only until the session exists.
+  // It is not a session, so it can never keep the task locked: asking about it
+  // returns "exists" in any caller whose table answers loosely, and the task then
+  // refuses to start its own real run.
+  if (lock.startsWith('pending:')) return false;
   return sessionExists(lock);
 }
 

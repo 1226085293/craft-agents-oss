@@ -27,6 +27,7 @@ import {
   nextTaskId,
   normalizeHandoff,
   nextLeg,
+  currentStep,
   recordRunResult,
   saveTask,
   shouldTripFuse,
@@ -79,6 +80,34 @@ export interface TaskServiceDeps {
 
 /** A task that keeps handing off in one session gets a fresh one. */
 export const MAX_HANDOFFS_PER_SESSION = 4;
+
+/**
+ * How many consecutive hand-offs with no plan movement count as "spinning".
+ *
+ * Three, not two: one unproductive round is ordinary (a command failed, a path was
+ * wrong). Three in a row with nothing marked done is a pattern.
+ */
+export const SPIN_LIMIT = 3;
+
+/**
+ * Is the task going nowhere despite reporting?
+ *
+ * Measured on the plan, not on the text of the reports: "still working" is what a
+ * worker says whether it is making progress or not. A step that never reaches `done`
+ * across several hand-offs is observable, and it is the thing a person can act on.
+ */
+export function isSpinningInPlace(task: Task): boolean {
+  const plan = task.spec?.plan;
+  if (!plan?.length) return false;
+  const recent = task.handoffs.slice(-SPIN_LIMIT);
+  if (recent.length < SPIN_LIMIT) return false;
+  // Every one of them was "someone else must continue", never "done here".
+  if (recent.some((handoff) => handoff.outcome !== 'handoff')) return false;
+  // And in that stretch the plan did not advance: no step finished after the first
+  // of these hand-offs.
+  const firstOfRun = recent[0]!.at;
+  return !plan.some((step) => step.status === 'done' && (step.updatedAt ?? 0) >= firstOfRun);
+}
 
 /** Context use above which the next run starts cold. */
 export const ROTATE_CONTEXT_THRESHOLD = 0.7;
@@ -259,12 +288,21 @@ export class TaskService {
     const blocked = this.startGate(task, now);
     if (blocked) return { ok: false, reason: blocked.reason };
 
+    // `pending:<reason>` and `pending:next-leg:<step>` are placeholders: they hold
+    // the run lock while the session is being created, before there is an id. They
+    // are not sessions, and treating them as one made the board report "2 / 8" for
+    // a task that had started a single worker — the placeholder sat in `sessionIds`
+    // (and in `currentSessionId`) for good, because the real id is attached afterwards.
+    const isPlaceholder = sessionId.startsWith('pending:');
+
     let next: Task = {
       ...task,
       status: 'running',
       pauseReason: null,
-      currentSessionId: sessionId,
-      sessionIds: task.sessionIds.includes(sessionId) ? task.sessionIds : [...task.sessionIds, sessionId],
+      ...(isPlaceholder ? {} : { currentSessionId: sessionId }),
+      sessionIds: isPlaceholder || task.sessionIds.includes(sessionId)
+        ? task.sessionIds
+        : [...task.sessionIds, sessionId],
       stats: {
         runs: (task.stats?.runs ?? 0) + 1,
         activeMs: task.stats?.activeMs ?? 0,
@@ -667,6 +705,34 @@ export class TaskService {
       next = applyTransition(next, 'completed', { now }).task;
     } else if (!accepted && shouldTripFuse(next.lifecycle)) {
       next = applyTransition(next, 'paused', { now, pauseReason: 'failures' }).task;
+    } else if (handoff.outcome === 'handoff' && isSpinningInPlace(next)) {
+      //
+      // "Still working on it" repeated without the plan moving is not progress.
+      //
+      // A worker that hits a wall does the reasonable thing at every step — try
+      // another way, report a hand-off — and the loop never surfaces, because each
+      // individual turn ends cleanly and lands in the timeline as a report. Observed
+      // in a real run: a worker alternated "cannot write here" hand-offs ten times
+      // while the plan stayed empty, and the task sat in `running` looking busy.
+      //
+      // The failure fuse counts rejections; this counts motion. Three hand-offs with
+      // no plan change, or a step stuck `doing` between all of them, is the point at
+      // which a person should decide, and the decision is recorded as such instead of
+      // being buried in the trail.
+      //
+      next = applyTransition(next, 'paused', { now, pauseReason: 'needs_decision' }).task;
+      next = {
+        ...next,
+        decision: {
+          category: 'direction',
+          label: '原地打转',
+          reason:
+            `连续 ${SPIN_LIMIT} 次交接但计划没有推进（当前步骤：${currentStep(next.spec?.plan)?.id ?? '未规划'}）。` +
+            '这通常意味着环境不允许或方向不对，需要人拍板。',
+          askedAt: now,
+          deadlineAt: now + DECISION_TIMEOUT_MS,
+        },
+      };
     }
 
     saveTask(this.root, next);

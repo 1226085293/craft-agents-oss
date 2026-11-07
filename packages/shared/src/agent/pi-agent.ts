@@ -1375,6 +1375,18 @@ export class PiAgent extends BaseAgent {
       sessionToolDefs = sessionToolDefs.filter(d => d.name !== 'mcp__session__browser_tool');
     }
 
+    // A session that is executing a task does not ask the user to approve a plan.
+    //
+    // `SubmitPlan` is the human-in-the-loop primitive for an ordinary conversation:
+    // it stops and waits for someone to accept. A worker already has an owner — the
+    // supervisor — and its plan is `task_plan`, which lives on the task, is visible
+    // on the board and needs no approval click. Leaving `SubmitPlan` in place put two
+    // approval chains behind one piece of work, and the one the worker could reach
+    // was the one that stalls it while the supervisor waits for a hand-off.
+    if (this.config.session?.taskId) {
+      sessionToolDefs = sessionToolDefs.filter(d => d.name !== 'mcp__session__SubmitPlan');
+    }
+
     // Patch call_llm description with provider-specific model hint
     if (this.config.miniModel) {
       const callLlmDef = sessionToolDefs.find(d => d.name === 'mcp__session__call_llm');

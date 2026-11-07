@@ -148,6 +148,11 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
     : detail.trigger?.kind === 'event'
       ? `事件 · ${detail.trigger.source ?? ''}${detail.trigger.types?.length ? `/${detail.trigger.types.join(',')}` : ''}`
       : '手动'
+  // Placeholders hold the run lock before a session exists; they are not sessions.
+  const realSessions = detail.sessionIds.filter((id) => !id.startsWith('pending:'))
+  // `activeMs` is the accumulated time actually spent running; the budget is the
+  // ceiling and belongs in the hint, not in the value.
+  const activeMinutes = Math.round(((detail.stats?.activeMs ?? 0) / 60_000))
   const verificationLabel = detail.verify.lastVerdict === 'pass'
     ? '通过'
     : detail.verify.lastVerdict === 'fail'
@@ -340,9 +345,25 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
       ) : null}
 
       <section className="grid grid-cols-2 gap-3 xl:grid-cols-4" aria-label="任务摘要">
-        <MetricCard label="会话" value={`${detail.sessionIds.length} / ${detail.budget.maxSessions}`} hint="已使用 / 上限" />
+        {/*
+          Two numbers used to be wrong here in a way that made the board untrustworthy.
+          The session count included the `pending:<reason>` placeholder that holds the run
+          lock before a session exists, so a task with one worker read "2 / 8". And the
+          active-time card printed `budget.activeMinutes` — the ceiling — under the label
+          累计执行时间, so every task claimed exactly 120 minutes of work.
+        */}
+        <MetricCard
+          label="会话"
+          value={`${realSessions.length} / ${detail.budget.maxSessions}`}
+          hint="已使用 / 上限"
+        />
         <MetricCard label="连续失败" value={`${detail.lifecycle.consecutiveFailures} / ${FAILURE_FUSE}`} hint="触发暂停阈值" tone={detail.lifecycle.consecutiveFailures > 0 ? 'warning' : 'default'} />
-        <MetricCard label="活跃时间" value={`${detail.budget.activeMinutes} 分钟`} hint="累计执行时间" />
+        <MetricCard
+          label="活跃时间"
+          value={`${activeMinutes} 分钟`}
+          hint={`上限 ${detail.budget.activeMinutes} 分钟`}
+          tone={activeMinutes >= detail.budget.activeMinutes ? 'warning' : 'default'}
+        />
         {detail.verify.enabled ? (
           <MetricCard
             label="验收"

@@ -36,7 +36,7 @@ import {
 } from '@craft-agent/shared/agents'
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
-import { readJournal, formatTaskBrief, formatResumeBrief, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
+import { readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -7369,6 +7369,10 @@ ${request.prompt}`;
         await this.sendMessage(sessionId, text)
       },
       logDispatch: (message) => sessionLog.info(`[dispatch] ${message}`),
+      handoffContext: (taskId) => {
+        const task = this.getTasks(workspaceId).get(taskId)
+        return task ? formatHandoffContext(task) : undefined
+      },
       writeToSupervisor: async (sessionId, text) => {
         const managed = this.sessions.get(sessionId)
         if (managed) await this.surfaceSupervisorMessage(managed, text)

@@ -109,6 +109,7 @@ export {
 export {
   describeTrigger,
   formatTaskBrief,
+  formatHandoffContext,
   formatResumeBrief,
   type TaskBriefOptions,
 } from './brief.ts';

@@ -66,6 +66,15 @@ export interface SupervisorRuntimeDeps {
   sendToSession: (sessionId: string, text: string) => Promise<void>;
   /** Diagnostics for routing decisions that change who runs the work. */
   logDispatch?: (message: string) => void;
+  /**
+   * The last hand-off for a task, rendered as a block.
+   *
+   * Dispatching the next step into an existing session used to send the
+   * supervisor's instruction and nothing else, so the recorded findings, next
+   * action and artifacts never reached the session that had to act on them. The
+   * text is built by the caller because it knows how to read a task.
+   */
+  handoffContext?: (taskId: string) => string | undefined;
   /** Record a user-visible message on the supervisor's transcript. */
   writeToSupervisor: (sessionId: string, text: string) => Promise<void>;
   /** Ask the user (surfaced as a question card / message). */
@@ -356,7 +365,15 @@ export class SupervisorRuntime {
           `会话 ${existingSessionId} 没有挂任务，不能直接给它派活。先 task_create 建一条任务，再 dispatch 到该任务。`,
         );
       }
-      await this.deps.sendToSession(existingSessionId, params.instruction);
+      // The hand-off travels with the work. Everything recorded about the last
+      // round — what was found, what must happen next, which files exist — belongs
+      // in the message that asks someone to continue it, not only in the task
+      // file. Same rule for a new worker (its brief carries it) and for a session
+      // that is already running (this does).
+      const taskId = params.attachTaskId ?? targetSession?.taskId;
+      const handoff = taskId ? this.deps.handoffContext?.(taskId) : undefined;
+      const message = handoff ? `${handoff}\n\n## 这一轮要做的事\n${params.instruction}` : params.instruction;
+      await this.deps.sendToSession(existingSessionId, message);
       return { sessionId: existingSessionId };
     }
 

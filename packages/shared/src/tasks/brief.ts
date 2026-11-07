@@ -77,14 +77,8 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
     sections.push(`## 验收清单\n${bullet(lines)}\n\n每条都要真正验证过；交付时把跑过的命令写进 verify.ran。`);
   }
 
-  const last = [...task.handoffs].reverse().find((h) => h.outcome !== 'needs_decision');
-  if (last) {
-    const prior: string[] = [`上一轮结论：${last.summary}`];
-    if (last.keyFindings?.length) prior.push(`已知事实：\n${bullet(last.keyFindings)}`);
-    if (last.nextAction) prior.push(`下一步：${last.nextAction}`);
-    if (last.artifacts?.length) prior.push(`已有产物：\n${bullet(last.artifacts.map((a) => a.path))}`);
-    sections.push(`## 交接上下文\n${prior.join('\n\n')}`);
-  }
+  const handoffBlock = formatHandoffContext(task);
+  if (handoffBlock) sections.push(handoffBlock);
 
   sections.push(
     [
@@ -125,13 +119,43 @@ export function formatResumeBrief(task: Task, reason = 'manual'): string {
     ? `计划进度 ${progress.done}/${progress.total}，${progress.doing > 0 ? '有一条正在进行' : '当前没有进行中的小节'}`
     : '这条任务还没有计划';
 
+  // The hand-off goes in even though this session has its own transcript: after a
+  // long pause the transcript may have been compacted, and the hand-off is the
+  // condensed statement of where the work actually stands.
+  const handoffBlock = formatHandoffContext(task);
+
   return [
     `继续任务 ${task.id}（${task.name}）。`,
     '',
     `任务刚刚被暂停，现在恢复（原因：${reason}）。`,
     `当前状态：${state}。`,
+    ...(handoffBlock ? ['', handoffBlock] : []),
     '',
     '不要从头再来，也不要重新规划已经完成的部分——那些已经冻结。',
     '从计划里没完成的那一条接着做；如果计划里没有可执行的小节，先按大纲展开下一条。',
   ].join('\n');
 }
+
+/**
+ * The previous hand-off, as a block that can be handed to whoever takes over.
+ *
+ * One function rather than a copy per caller, because this text has to reach
+ * every path that gives someone this task: a new worker's brief, a dispatch into
+ * an existing session, and a resume. It used to live only inside the brief — so a
+ * supervisor dispatching the next step into a running session sent its own
+ * instruction and nothing else, and the recorded findings, next action and
+ * artifacts stayed in the task file where nobody read them.
+ *
+ * Returns undefined when there is nothing to say: no hand-off yet, or the last one
+ * is an open question rather than a result.
+ */
+export function formatHandoffContext(task: Task): string | undefined {
+  const last = [...task.handoffs].reverse().find((h) => h.outcome !== 'needs_decision');
+  if (!last) return undefined;
+  const prior: string[] = [`上一轮结论：${last.summary}`];
+  if (last.keyFindings?.length) prior.push(`已知事实：\n${bullet(last.keyFindings)}`);
+  if (last.nextAction) prior.push(`下一步：${last.nextAction}`);
+  if (last.artifacts?.length) prior.push(`已有产物：\n${bullet(last.artifacts.map((a) => a.path))}`);
+  return `## 交接上下文\n${prior.join('\n\n')}`;
+}
+

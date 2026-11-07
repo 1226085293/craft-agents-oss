@@ -30,10 +30,13 @@ describe('pluginStatusReading', () => {
     expect(reading.label).toBe('运行中')
   })
 
-  it('reads gray when the user switched the plugin off — even if it last failed', () => {
+  it('red beats gray: a disabled plugin that last failed still reads red', () => {
     const failed = { state: 'failed', lastError: 'exit 1' } as const
-    expect(pluginStatusReading(input({ enabled: false, status: failed })).tone).toBe('off')
-    expect(pluginStatusReading(input({ enabled: false, status: running })).reason).toBe('disabled')
+    const reading = pluginStatusReading(input({ enabled: false, status: failed }))
+    expect(reading.tone).toBe('bad')
+    expect(reading.reason).toBe('failed')
+    // A clean disable (stopped) is gray: "I turned this off", not "it broke".
+    expect(pluginStatusReading(input({ enabled: false, status: stopped })).reason).toBe('disabled')
   })
 
   it('reads red for a manifest/config error', () => {
@@ -138,11 +141,11 @@ describe('pluginStatusReading', () => {
     expect(pluginStatusReading(input({ status: { state: 'starting', lastError: null }, unauthorized: true })).reason).toBe('starting')
   })
 
-  it('reads gray (disabled) over everything, including red facts', () => {
+  it('lets red beat gray even when the user disabled the plugin (T-8: 缺了先报红)', () => {
     const failed = { state: 'failed', lastError: 'x' } as const
     const reading = pluginStatusReading(input({ enabled: false, status: failed, missingConfig: ['email'] }))
-    expect(reading.tone).toBe('off')
-    expect(reading.reason).toBe('disabled')
+    expect(reading.tone).toBe('bad')
+    expect(reading.reason).toBe('failed')
   })
 
   it('prioritises hard failures over soft ones: failed + missing config stays red/failed', () => {
@@ -154,6 +157,39 @@ describe('pluginStatusReading', () => {
   it('prioritises manifest errors over a failed process', () => {
     const failed = { state: 'failed', lastError: 'exit 1' } as const
     expect(pluginStatusReading(input({ status: failed, errors: ['manifest.json is not valid JSON'] })).reason).toBe('config-error')
+  })
+})
+
+describe('T-8 四档映射补全分支 (red > yellow > gray > green)', () => {
+  it('missing dependency + stopped still reports red first', () => {
+    const reading = pluginStatusReading(input({ status: stopped, dependencies: [{ state: 'missing' as const }] }))
+    expect(reading.tone).toBe('bad')
+    expect(reading.reason).toBe('missing-deps')
+  })
+
+  it('yellow beats gray: disabling while still starting reads yellow first', () => {
+    const reading = pluginStatusReading(
+      input({ enabled: false, status: { state: 'starting', lastError: null } as const }),
+    )
+    expect(reading.tone).toBe('warn')
+    expect(reading.reason).toBe('starting')
+  })
+
+  it('not-ready beats unauthorized (deterministic amber order)', () => {
+    const reading = pluginStatusReading(input({ status: running, ready: false, unauthorized: true }))
+    expect(reading.tone).toBe('warn')
+    expect(reading.reason).toBe('not-ready')
+  })
+
+  it('state missing while disabled reads gray/disabled', () => {
+    const reading = pluginStatusReading({
+      enabled: false,
+      status: { lastError: null } as unknown as PluginStatusInput['status'],
+      errors: [],
+      missingConfig: [],
+    })
+    expect(reading.tone).toBe('off')
+    expect(reading.reason).toBe('disabled')
   })
 })
 

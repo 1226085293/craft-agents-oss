@@ -198,8 +198,19 @@ export class AnthropicStreamMonitor {
     return out.join('')
   }
 
-  private hasVisibleContent(): boolean {
+  /**
+   * Whether the stream has produced anything the user would actually see.
+   *
+   * Reasoning deltas keep the socket busy without counting here, which is the
+   * whole point: a model can stream chain-of-thought for minutes and still owe
+   * the caller an answer.
+   */
+  get hasVisibleOutput(): boolean {
     return this.hasVisibleText || this.hasCompletedToolCall
+  }
+
+  private hasVisibleContent(): boolean {
+    return this.hasVisibleOutput
   }
 
   private isToolBlock(block: BlockState): boolean {

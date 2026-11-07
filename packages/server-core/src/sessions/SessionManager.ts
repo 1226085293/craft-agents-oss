@@ -4884,6 +4884,22 @@ export class SessionManager implements ISessionManager {
     this.sendEvent({ type: 'session_created', sessionId }, workspaceId)
   }
 
+  /**
+   * Tell every open board that a task changed.
+   *
+   * The task board refreshes on `taskboard:CHANGED`, which the RPC handlers emit
+   * after their own mutations. Work that happens inside a session — the plan a
+   * worker keeps updating — goes through the tool layer instead, so without this
+   * the checklist only moved when the user changed pages by hand.
+   */
+  notifyTasksChanged(workspaceId: string): void {
+    if (!this.eventSink) {
+      sessionLog.warn('Cannot send taskboard change - no event sink')
+      return
+    }
+    this.eventSink(RPC_CHANNELS.taskboard.CHANGED, { to: 'workspace', workspaceId }, { workspaceId })
+  }
+
   /** Resolved working directory of a live session. Undefined if the session has none or is unknown. */
   getSessionWorkingDirectory(sessionId: string): string | undefined {
     return this.sessions.get(sessionId)?.workingDirectory
@@ -5678,9 +5694,17 @@ export class SessionManager implements ISessionManager {
               id: patch.id,
               ...(patch.status ? { status: patch.status as never } : {}),
               ...(patch.title ? { title: patch.title } : {}),
+              // Without this the owner a worker declares is accepted by the tool
+              // schema and then dropped here — the step would render with no
+              // `@agent` and silently disagree with what the worker recorded.
+              ...(patch.agent ? { agent: patch.agent } : {}),
               ...(patch.note !== undefined ? { note: patch.note } : {}),
               ...(patch.remove !== undefined ? { remove: patch.remove } : {}),
             })
+            // The checklist is the thing the user watches while work happens. A
+            // plan that updates only on a manual page switch is not a progress
+            // indicator; every accepted patch has to reach the board.
+            if (result.ok) this.notifyTasksChanged(managed.workspace.id)
             return result.ok ? { ok: true } : { ok: false, ...(result.error ? { error: result.error } : {}) }
           },
         }

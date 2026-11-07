@@ -21,7 +21,6 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.taskboard.UPDATE,
   RPC_CHANNELS.taskboard.HANDOFF,
   RPC_CHANNELS.taskboard.RUN,
-  RPC_CHANNELS.taskboard.CREATE,
   RPC_CHANNELS.taskboard.UPDATE_TRIGGER,
   RPC_CHANNELS.taskboard.CHANGED,
 ] as const;

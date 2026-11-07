@@ -386,7 +386,7 @@ export interface SessionToolContext {
     /** Update one step of this task's plan (see tasks/plan.ts). */
     updatePlan(
       identifier: string,
-      patch: { id: string; status?: string; title?: string; note?: string; remove?: boolean },
+      patch: { id: string; status?: string; title?: string; agent?: string; note?: string; remove?: boolean },
     ): Promise<{ ok: boolean; error?: string }>;
   };
 

@@ -331,7 +331,6 @@ export const REMOTE_ELIGIBLE_CHANNELS = new Set<string>([
   RPC_CHANNELS.events.OPEN_ATTACHMENT,
 
   // taskboard — tasks are workspace state, not renderer state
-  RPC_CHANNELS.taskboard.CREATE,
   RPC_CHANNELS.taskboard.RUN,
   RPC_CHANNELS.taskboard.UPDATE_TRIGGER,
 

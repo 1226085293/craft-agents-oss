@@ -660,7 +660,7 @@ function PlanSection({
       </div>
 
       <ul className="space-y-0.5">
-        {visible.map((step, index) => {
+        {visible.map((step) => {
           const depth = step.id.split('.').length - 1
           const isOutline = depth === 0
           const kids = isOutline ? childrenOf(step.id) : []
@@ -668,9 +668,6 @@ function PlanSection({
           const jump = jumps?.get(step.id)
           const canJump = Boolean(jump?.sessionId && onJump)
           const hint = isOutline ? '跳到这一节开始的地方' : '跳到这一步完成的地方'
-          // Compared against the previous *visible* row, so collapsing a section
-          // that had its own owner does not leave a stale badge suppressed.
-          const previousOwner = index > 0 ? ownerOf(visible[index - 1]) : undefined
 
           // Status is carried by an SVG mark, not an emoji: emoji render
           // differently on every platform, cannot be themed, and cannot be sized by
@@ -695,7 +692,7 @@ function PlanSection({
                   onClick={() => toggle(step.id)}
                   aria-expanded={!isFolded}
                   aria-label={isFolded ? '展开这一节' : '折叠这一节'}
-                  className="-ml-1 mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="-ml-1 flex h-[1.55em] w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
                   <ChevronRight
                     className={cn('h-3.5 w-3.5 transition-transform duration-200', !isFolded && 'rotate-90')}
@@ -703,23 +700,25 @@ function PlanSection({
                   />
                 </button>
               ) : (
-                <span className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
+                <span className="h-[1.55em] w-5 shrink-0" aria-hidden="true" />
               )}
 
               <span className="min-w-0 flex-1">
-                <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+                {/*
+                  * `items-start`, and the mark gets a box exactly one line tall so it centres
+                  * on that line. With `items-baseline` the icon had no text of its own, so its
+                  * baseline was its bottom edge — it sat a couple of pixels below the words it
+                  * belongs to. A wrapping title still keeps the mark on the first line.
+                  */}
+                <span className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1">
                   {/*
-                    * Status mark, then "1. title" as one run of text, then the owner after an
-                    * em dash.
+                    * Status mark, then "1. title" as one run of text, then the owner.
                     *
-                    * The number used to be its own span at 70% opacity with a middot after
-                    * it, so "1 · 创建 docs/e2e-a.md" rendered as two differently-toned pieces
-                    * and the underline broke across them. Worse, a long title wrapped and the
-                    * number stayed stranded on the first line, separated from the words it
-                    * numbers. One string means the underline, the wrap and the colour are all
-                    * continuous — the step reads as one item.
+                    * The number is part of the same string as the title so the underline,
+                    * the colour and the line wrap all cover "1. 创建 docs/e2e-a.md" as one
+                    * item instead of three differently-toned pieces.
                     */}
-                  <span className="flex h-4 w-4 shrink-0 items-center justify-center">{mark}</span>
+                  <span className="flex h-[1.55em] w-4 shrink-0 items-center justify-center">{mark}</span>
                   {canJump ? (
                     <button
                       type="button"
@@ -745,14 +744,16 @@ function PlanSection({
                     </span>
                   )}
                   {/*
-                    * The owner is shown once per run of steps that share it, not on every
-                    * row. A plan one worker carried end to end repeated the same name four
-                    * times, which read as a column of data rather than one fact. A step whose
-                    * owner differs from the previous visible one still gets the mark, so a
-                    * hand-off inside the plan stays legible.
+                    * Every step names its owner — outlines and sub-steps alike.
+                    *
+                    * This was deduplicated once, on the theory that repeating "默认" four
+                    * times was noise. It is not: a plan is a list of assignments, and the
+                    * owner is part of each entry. Hiding it on all but the first row made a
+                    * step look unassigned when it was not, and the reader could not tell
+                    * "same worker" from "no worker".
                     */}
-                  {ownerOf(step) && ownerOf(step) !== previousOwner ? (
-                    <span className="shrink-0 td-row-sub text-muted-foreground">—— {ownerOf(step)}</span>
+                  {ownerOf(step) ? (
+                    <span className="shrink-0 whitespace-nowrap td-row-sub text-muted-foreground">— {ownerOf(step)}</span>
                   ) : null}
                 </span>
                 {step.note ? (

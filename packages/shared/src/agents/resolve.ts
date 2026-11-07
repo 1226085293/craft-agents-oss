@@ -16,6 +16,7 @@ import {
   ALL_SCOPE,
   DEFAULT_AGENT_ID,
   EMPTY_DEFAULTS,
+  MAX_DISPATCH_HINT_CHARS,
   emptyAgentsFile,
   type AgentDefaults,
   type AgentProfile,
@@ -32,6 +33,7 @@ export function getDefaultAgent(file: AgentsFile): AgentProfile {
     icon: undefined,
     color: undefined,
     persona: file.defaults.persona ?? '',
+    dispatchHint: file.defaults.dispatchHint,
     defaults: { ...EMPTY_DEFAULTS, ...file.defaults.defaults },
     sources: file.defaults.sources ?? { ...ALL_SCOPE },
     skills: file.defaults.skills ?? { ...ALL_SCOPE },
@@ -134,7 +136,14 @@ export function resolveSessionDefaults(options: ResolveDefaultsOptions): Resolve
   };
 }
 
-/** What a session stores so later edits to the agent do not rewrite history. */
+/**
+ * What a session stores so later edits to the agent do not rewrite history.
+ *
+ * `dispatchHint` is absent on purpose, not by oversight: it describes how to
+ * *choose* the agent, and the choice has already been made by the time a
+ * snapshot exists. Putting it here would eventually put it in the system prompt
+ * of the agent it describes.
+ */
 export interface AgentSnapshot {
   agentId: string;
   name: string;

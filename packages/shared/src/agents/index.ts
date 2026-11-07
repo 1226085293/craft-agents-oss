@@ -25,6 +25,7 @@ export {
   ALL_SCOPE,
   DEFAULT_AGENT_ID,
   EMPTY_DEFAULTS,
+  MAX_DISPATCH_HINT_CHARS,
   applyScope,
   emptyAgentsFile,
   isAgentScope,

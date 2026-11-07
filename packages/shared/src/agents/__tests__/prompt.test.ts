@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { buildAgentRosterBlock, formatAgentRosterBlock, readAgentRoster } from '../prompt.ts';
 import { saveAgents } from '../storage.ts';
 import { emptyAgentsFile, DEFAULT_AGENT_ID, type AgentProfile, type AgentsFile } from '../types.ts';
+import { buildAgentSnapshot } from '../resolve.ts';
 
 const dirs: string[] = [];
 function workspace(): string {
@@ -97,5 +98,63 @@ describe('agent roster', () => {
 
   it('formats nothing from an empty roster', () => {
     expect(formatAgentRosterBlock([])).toBe('');
+  });
+
+  describe('dispatchHint', () => {
+    it('routes on the hint, not on a behavioural first line', () => {
+      // The failure this exists to prevent: a persona that opens with a manner
+      // instruction and says nothing about scope. Routing on it is a coin flip.
+      const root = workspace();
+      writeRoster(root, [
+        profile({
+          id: 'agent-ui',
+          name: '前端工',
+          persona: '你是一位严谨的工程师。在任何情况下都先复述需求。',
+          dispatchHint: '改界面、调样式。不接后端接口。',
+        }),
+      ]);
+      const entry = readAgentRoster(root).find((e) => e.id === 'agent-ui');
+      expect(entry?.gist).toBe('改界面、调样式。不接后端接口。');
+    });
+
+    it('falls back to the persona first line when the hint is absent', () => {
+      // Rows written before the field existed must keep the old signal rather
+      // than going silent — a blank gist cannot be routed on at all.
+      const root = workspace();
+      writeRoster(root, [
+        profile({ id: 'agent-ui', name: '前端工', persona: '你负责界面实现。\n第二行不该出现。' }),
+      ]);
+      const entry = readAgentRoster(root).find((e) => e.id === 'agent-ui');
+      expect(entry?.gist).toBe('你负责界面实现。');
+    });
+
+    it('caps an over-long hint so it cannot inflate every turn', () => {
+      const root = workspace();
+      writeRoster(root, [
+        profile({ id: 'agent-wordy', name: '话痨', persona: 'x', dispatchHint: '啰'.repeat(400) }),
+      ]);
+      const entry = readAgentRoster(root).find((e) => e.id === 'agent-wordy');
+      expect(entry?.gist?.length).toBe(120);
+    });
+
+    it('collapses newlines so a multi-line hint stays one roster entry', () => {
+      const root = workspace();
+      writeRoster(root, [
+        profile({ id: 'agent-ml', name: '多行', persona: 'x', dispatchHint: '改界面。\n不接后端。' }),
+      ]);
+      const entry = readAgentRoster(root).find((e) => e.id === 'agent-ml');
+      expect(entry?.gist).toBe('改界面。 不接后端。');
+    });
+
+    it('keeps the hint out of the snapshot bound for the system prompt', () => {
+      // A persona is frozen into the session; the hint describes how to choose a
+      // session and would be nonsense inside one.
+      const file = emptyAgentsFile();
+      const agent = profile({ id: 'agent-ui', name: '前端工', persona: 'P', dispatchHint: 'H' });
+      const snapshot = buildAgentSnapshot(agent);
+      expect(snapshot.persona).toBe('P');
+      expect(Object.keys(snapshot)).not.toContain('dispatchHint');
+      expect(file.defaults.persona).toBe('');
+    });
   });
 });

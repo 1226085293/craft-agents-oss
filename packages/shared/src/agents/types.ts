@@ -30,6 +30,14 @@ export interface AgentDefaults {
   thinkingLevel?: string | null;
 }
 
+/**
+ * Upper bound on `dispatchHint`, enforced on write and again on read.
+ *
+ * This string is repeated in the supervisor's prompt **every turn**, so its
+ * length is a per-turn cost, not just a layout constraint.
+ */
+export const MAX_DISPATCH_HINT_CHARS = 120;
+
 export interface AgentProfile {
   id: string;
   name: string;
@@ -37,6 +45,28 @@ export interface AgentProfile {
   color?: string;
   /** Markdown injected into the system prompt as a pinned `<persona>` block. */
   persona: string;
+  /**
+   * How a dispatcher should *choose* this agent — for someone else, not for the
+   * agent itself.
+   *
+   * Kept separate from `persona` because the two answer opposite questions.
+   * `persona` is second-person behavioural instruction ("你负责…") addressed to
+   * the agent and read by it after it was already chosen. This field is
+   * third-person and discriminative ("接什么、不接什么"), addressed to whatever
+   * decides who does the work, and read before a session exists.
+   *
+   * Before this existed, the supervisor derived a routing gist from the first
+   * line of `persona` — a behavioural sentence moonlighting as a job
+   * description. That works only by luck: a persona opening with "你是一位严谨
+   * 的工程师" routes as nothing.
+   *
+   * **NOT part of the agent's system prompt.** Deliberately excluded from
+   * `AgentSnapshot`: routing happens before the session exists, and an agent
+   * that could read its own dispatch description would start reasoning about
+   * being dispatched. If you are adding a prompt block somewhere and this field
+   * is in reach, leave it out.
+   */
+  dispatchHint?: string;
   defaults: AgentDefaults;
   sources: AgentScope;
   skills: AgentScope;

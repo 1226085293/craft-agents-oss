@@ -19,6 +19,12 @@ export interface AgentOption {
   icon?: string
   /** One-line description shown under the name. */
   description?: string
+  /**
+   * How a dispatcher should choose this role — third-person, discriminative.
+   * Distinct from `persona`, which is addressed to the agent itself and never
+   * reaches a routing decision.
+   */
+  dispatchHint?: string
   builtin?: boolean
 }
 

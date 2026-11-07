@@ -14,10 +14,19 @@ import { DEFAULT_AGENT_ID, type AgentProfile } from '../agents/types.ts';
  * where it costs nothing per turn and is re-read every turn (the prompt is
  * rebuilt per turn, so an added agent appears without recreating the session).
  *
- * Persona is truncated to its first line: enough to answer "is this a UI job or
- * a research job", which is the only question the supervisor asks of it.
+ * The routing gist comes from `dispatchHint` when the profile has one — that
+ * field exists precisely to answer "is this a UI job or a research job", the
+ * only question the supervisor asks of an entry.
+ *
+ * Profiles written before the field existed fall back to the first line of the
+ * persona. That fallback is a compromise, not a design: a persona opens with a
+ * behavioural instruction addressed to the agent itself, so an entry can route
+ * on a sentence that says nothing about scope. Filling in the hint upgrades the
+ * entry; leaving it blank keeps the old behaviour rather than going silent.
  */
 const MAX_PERSONA_CHARS = 160;
+/** The hint has its own bound: it is sentence-shaped, so it needs less room. */
+const MAX_HINT_CHARS = 120;
 
 export interface AgentPromptEntry {
   id: string;
@@ -29,11 +38,14 @@ export interface AgentPromptEntry {
 }
 
 function toEntry(agent: AgentProfile, defaultAgentId: string): AgentPromptEntry {
+  const hint = agent.dispatchHint?.replace(/\s+/g, ' ').trim();
   const firstLine = agent.persona
     ?.split('\n')
     .map((line) => line.trim())
-    .find((line) => line.length > 0)
-  const gist = firstLine?.replace(/\s+/g, ' ').slice(0, MAX_PERSONA_CHARS);
+    .find((line) => line.length > 0);
+  const gist = hint
+    ? hint.slice(0, MAX_HINT_CHARS)
+    : firstLine?.replace(/\s+/g, ' ').slice(0, MAX_PERSONA_CHARS);
   return {
     id: agent.id,
     name: agent.name,

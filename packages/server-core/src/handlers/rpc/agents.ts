@@ -13,6 +13,7 @@ import {
   ALL_SCOPE,
   DEFAULT_AGENT_ID,
   EMPTY_DEFAULTS,
+  MAX_DISPATCH_HINT_CHARS,
   getDefaultAgent,
   loadAgents,
   saveAgents,
@@ -46,15 +47,36 @@ function normalizeScope(input: unknown): AgentScope {
   };
 }
 
-/** The flat shape the renderer/picker consumes. */
+/**
+ * The flat shape the renderer/picker consumes.
+ *
+ * `description` is the one-line label under the name in the picker, so it prefers
+ * `dispatchHint` — the field written to be read by someone other than the agent.
+ * The hint is returned in full as well, because the settings page shows every
+ * role's hint side by side to make overlaps visible, and a label clipped to 80
+ * characters cannot do that job.
+ */
 function toOption(agent: AgentProfile) {
+  const firstLine = agent.persona
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  const hint = agent.dispatchHint?.trim() || undefined;
   return {
     id: agent.id,
     name: agent.name,
     icon: agent.icon,
-    description: agent.persona.split('\n')[0]?.slice(0, 80) || undefined,
+    description: (hint ?? firstLine)?.slice(0, 80) || undefined,
+    dispatchHint: hint,
     builtin: agent.builtin === true,
   };
+}
+
+/** Trim, cap, drop-if-empty: the same normalisation the storage layer applies. */
+function normalizeHint(input: unknown): string | undefined {
+  if (typeof input !== 'string') return undefined;
+  const trimmed = input.trim();
+  return trimmed ? trimmed.slice(0, MAX_DISPATCH_HINT_CHARS) : undefined;
 }
 
 export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): void {
@@ -115,6 +137,12 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
           ...file,
           defaults: {
             persona: input.persona ?? file.defaults.persona,
+            // The default profile's hint *is* editable — unlike its name, which is
+            // derived. Routing needs to know what the fallback agent is for just as
+            // much as it needs to know for a named role.
+            ...(input.dispatchHint !== undefined
+              ? { dispatchHint: normalizeHint(input.dispatchHint) }
+              : {}),
             defaults: { ...EMPTY_DEFAULTS, ...file.defaults.defaults, ...(input.defaults ?? {}) },
             sources: input.sources ? normalizeScope(input.sources) : file.defaults.sources,
             skills: input.skills ? normalizeScope(input.skills) : file.defaults.skills,
@@ -131,6 +159,9 @@ export function registerAgentsHandlers(server: RpcServer, _deps: HandlerDeps): v
         icon: input.icon,
         color: input.color,
         persona: input.persona ?? '',
+        ...(normalizeHint(input.dispatchHint)
+          ? { dispatchHint: normalizeHint(input.dispatchHint) }
+          : {}),
         defaults: { ...EMPTY_DEFAULTS, ...(input.defaults ?? {}) },
         sources: normalizeScope(input.sources),
         skills: normalizeScope(input.skills),

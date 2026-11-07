@@ -17,6 +17,7 @@ import {
   DEFAULT_AGENT_ID,
   EMPTY_DEFAULTS,
   ALL_SCOPE,
+  MAX_DISPATCH_HINT_CHARS,
   emptyAgentsFile,
   type AgentDefaults,
   type AgentProfile,
@@ -64,6 +65,9 @@ function normalizeProfile(raw: unknown, now: number): AgentProfile | null {
     icon: typeof v.icon === 'string' ? v.icon : undefined,
     color: typeof v.color === 'string' ? v.color : undefined,
     persona: typeof v.persona === 'string' ? v.persona : '',
+    ...(typeof v.dispatchHint === 'string' && v.dispatchHint.trim()
+      ? { dispatchHint: v.dispatchHint.trim().slice(0, MAX_DISPATCH_HINT_CHARS) }
+      : {}),
     defaults: normalizeDefaults(v.defaults),
     sources: normalizeScope(v.sources, ALL_SCOPE),
     skills: normalizeScope(v.skills, ALL_SCOPE),
@@ -103,6 +107,9 @@ export function loadAgents(workspaceRoot: string): AgentsFile {
         : DEFAULT_AGENT_ID,
     defaults: {
       persona: typeof defaultsRaw.persona === 'string' ? defaultsRaw.persona : '',
+      ...(typeof defaultsRaw.dispatchHint === 'string' && defaultsRaw.dispatchHint.trim()
+        ? { dispatchHint: defaultsRaw.dispatchHint.trim().slice(0, MAX_DISPATCH_HINT_CHARS) }
+        : {}),
       defaults: normalizeDefaults(defaultsRaw.defaults),
       sources: normalizeScope(defaultsRaw.sources, ALL_SCOPE),
       skills: normalizeScope(defaultsRaw.skills, ALL_SCOPE),

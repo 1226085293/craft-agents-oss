@@ -34,6 +34,11 @@ interface AgentDraft {
   id?: string
   name: string
   icon?: string
+  /**
+   * How a dispatcher should pick this role. Third-person, discriminative, and
+   * shown to whoever assigns work — never to the agent itself.
+   */
+  dispatchHint: string
   persona: string
   defaults: {
     strategy?: string | null
@@ -65,6 +70,7 @@ function contentKey(draft: AgentDraft): string {
   return JSON.stringify({
     name: draft.name,
     icon: draft.icon ?? null,
+    dispatchHint: draft.dispatchHint,
     persona: draft.persona,
     defaults: draft.defaults,
     sources: draft.sources,
@@ -72,8 +78,16 @@ function contentKey(draft: AgentDraft): string {
   })
 }
 
+/**
+ * Mirrors `MAX_DISPATCH_HINT_CHARS` in @craft-agent/shared/agents. The renderer
+ * bundle does not import that package, so the number is repeated here; the
+ * server caps again on write, so a drift can never produce an oversized hint.
+ */
+const MAX_HINT_CHARS = 120
+
 const EMPTY: AgentDraft = {
   name: '',
+  dispatchHint: '',
   persona: '',
   defaults: { strategy: null, model: null, permissionMode: null, thinkingLevel: null },
   sources: { mode: 'all', slugs: [] },
@@ -347,7 +361,9 @@ export function AgentsSettingsPanel({
       .agentsGet?.(workspaceId, selectedId)
       .then((profile) => {
         if (cancelled || !profile) return
-        const next = { ...EMPTY, ...profile }
+        // `dispatchHint` is optional on the wire (older rows have none), but the
+        // editor needs a string it can type into.
+        const next = { ...EMPTY, ...profile, dispatchHint: profile.dispatchHint ?? '' }
         hydratedForRef.current = selectedId
         // Seeding the draft must not look like an edit.
         persistedRef.current = contentKey(next)
@@ -428,6 +444,24 @@ export function AgentsSettingsPanel({
     },
     ...strategies.map((s) => ({ value: s.id, label: s.name })),
   ]
+
+  /**
+   * Roles whose hints are identical. Two roles that describe themselves the same
+   * way cannot be routed between, and the editor shows one role at a time, so
+   * this is the only place the collision is visible at all.
+   *
+   * The current draft is folded in, so a half-typed hint that duplicates another
+   * role is flagged before it is saved.
+   */
+  const hints = agents.map((agent) =>
+    (agent.id === (draft.id ?? selectedId) ? draft.dispatchHint : (agent.dispatchHint ?? '')).trim(),
+  )
+  const seenHints = new Map<string, number>()
+  for (const hint of hints) {
+    if (hint) seenHints.set(hint, (seenHints.get(hint) ?? 0) + 1)
+  }
+  const collisionCount = Array.from(seenHints.values()).filter((n) => n > 1).length
+  const headlineCollision = collisionCount > 0
 
   const permissionOptions = [
     { value: '__follow', label: t('settings.agents.followWorkspace', { defaultValue: '跟随工作区' }) },
@@ -535,6 +569,94 @@ export function AgentsSettingsPanel({
                       />
                     </div>
                   </SettingsRow>
+                </SettingsCard>
+              </SettingsSection>
+
+              {/*
+                * 分工说明 sits above 人设提示词 on purpose: it is the field that
+                * decides whether this role ever gets work, and the one people
+                * forget to fill in. Putting it below a 140px textarea buried it.
+                */}
+              <SettingsSection
+                title={t('settings.agents.dispatchHint', { defaultValue: '分工说明' })}
+                description={t('settings.agents.dispatchHintHint', {
+                  defaultValue:
+                    '写给「决定把活派给谁」的那个模型看，不是写给这个角色自己看的。写清接什么、不接什么，最好带一个典型触发。留空则退回到人设首行。',
+                })}
+              >
+                <SettingsCard>
+                  <div className="p-3">
+                    <div className="flex items-start gap-2">
+                      <textarea
+                        className="min-h-[52px] w-full resize-y rounded-md border border-input bg-muted/50 p-2 text-[13px] leading-relaxed"
+                        maxLength={MAX_HINT_CHARS}
+                        placeholder={t('settings.agents.dispatchHintPlaceholder', {
+                          defaultValue: '例：改界面、调样式、排版与交互。不接后端接口与数据迁移。看到「页面／组件／配色／间距」就派给它。',
+                        })}
+                        value={draft.dispatchHint}
+                        onChange={(e) => setDraft({ ...draft, dispatchHint: e.target.value })}
+                      />
+                      <span
+                        className={cn(
+                          'shrink-0 pt-2 text-[11px] tabular-nums',
+                          draft.dispatchHint.length >= MAX_HINT_CHARS
+                            ? 'text-destructive'
+                            : 'text-muted-foreground',
+                        )}
+                      >
+                        {draft.dispatchHint.length}/{MAX_HINT_CHARS}
+                      </span>
+                    </div>
+                    {/*
+                      * Every role's hint in one place. Routing fails when two roles
+                      * describe themselves the same way, and a per-agent editor can
+                      * never show that — the collision only exists between rows.
+                      */}
+                    <div className="mt-3 border-t pt-2.5">
+                      <div className="flex items-baseline justify-between">
+                        <span className="text-[11px] text-muted-foreground">
+                          {t('settings.agents.dispatchCompare', { defaultValue: '全部角色的分工（对照用）' })}
+                        </span>
+                        {headlineCollision ? (
+                          <span className="text-[11px] text-destructive">
+                            {t('settings.agents.dispatchCollision', {
+                              defaultValue: '有 {{count}} 组分工完全一样，派活时会分不清',
+                              count: collisionCount,
+                            })}
+                          </span>
+                        ) : null}
+                      </div>
+                      <ul className="mt-1.5 space-y-1">
+                        {agents.map((agent) => {
+                          const mine = agent.id === (draft.id ?? selectedId)
+                          const text = mine ? draft.dispatchHint.trim() : (agent.dispatchHint ?? '').trim()
+                          return (
+                            <li key={agent.id} className="flex gap-2 text-[11px] leading-snug">
+                              <span
+                                className={cn(
+                                  'w-16 shrink-0 truncate',
+                                  mine ? 'font-medium text-foreground' : 'text-muted-foreground',
+                                )}
+                              >
+                                {agent.name}
+                              </span>
+                              <span
+                                className={cn(
+                                  'min-w-0 flex-1 break-words',
+                                  text ? 'text-muted-foreground' : 'text-muted-foreground/60 italic',
+                                )}
+                              >
+                                {text ||
+                                  t('settings.agents.dispatchEmpty', {
+                                    defaultValue: '未填（退回人设首行）',
+                                  })}
+                              </span>
+                            </li>
+                          )
+                        })}
+                      </ul>
+                    </div>
+                  </div>
                 </SettingsCard>
               </SettingsSection>
 

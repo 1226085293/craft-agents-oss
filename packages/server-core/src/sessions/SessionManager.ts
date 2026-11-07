@@ -5612,6 +5612,9 @@ export class SessionManager implements ISessionManager {
               taskId: params.taskId,
               spawnDepth: params.spawnDepth,
               strategy: managed.strategy,
+              // A dispatched worker is here to change things; inheriting a read-only
+              // mode would block both writes and `task_plan`.
+              permissionMode: 'allow-all',
             })
             this.claimTaskRun(managed.workspace.id, params.taskId, created.id)
             // Handing over work is routing, not waiting: `sendMessage` resolves
@@ -7184,6 +7187,7 @@ ${request.prompt}`;
             name: `${task.id} ${leg.step.id} ${leg.step.title}`.slice(0, 60),
             role: 'worker',
             taskId: task.id,
+            permissionMode: 'allow-all',
             ...(agent ? { agentId: agent } : {}),
             ...(task.spec?.cwd ? { workingDirectory: task.spec.cwd } : {}),
             ...(task.spec?.sources?.length ? { enabledSourceSlugs: task.spec.sources } : {}),
@@ -7384,6 +7388,17 @@ ${request.prompt}`;
       name: `${task.id} ${task.name}`.slice(0, 60),
       role: 'worker',
       taskId: task.id,
+      //
+      // A worker is here to change things, so it does not inherit whatever mode
+      // the user happens to be in.
+      //
+      // Left unset, it took the workspace default — and when that was `safe`
+      // (read-only), the worker could not write a file **or call `task_plan`**, both
+      // of which are gated. Observed in a real run: the worker reported
+      // "Explore 模式无法执行，task_plan 和 docs/ 写文件都被权限系统拦" twice and the task
+      // made no progress at all. A task that cannot write cannot be done.
+      //
+      permissionMode: 'allow-all',
       ...(task.assigneeAgentId ? { agentId: task.assigneeAgentId } : {}),
       ...(spec?.cwd ? { workingDirectory: spec.cwd } : {}),
       ...(spec?.sources?.length ? { enabledSourceSlugs: spec.sources } : {}),
@@ -7529,6 +7544,8 @@ ${request.prompt}`;
           role: 'worker',
           taskId: params.taskId,
           spawnDepth: params.spawnDepth,
+          // Same reason: a worker that cannot write cannot do the work.
+          permissionMode: 'allow-all',
           // A rule may pin the worker to a directory; without it the worker would
           // inherit whatever directory the supervisor happens to sit in.
           ...(params.cwd ? { workingDirectory: params.cwd } : {}),

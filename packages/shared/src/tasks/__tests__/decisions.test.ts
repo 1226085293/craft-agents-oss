@@ -93,3 +93,30 @@ describe('decision gate', () => {
     expect(note).toContain('六类');
   });
 });
+
+/**
+ * A blocker is a question, not a status.
+ *
+ * The routine vocabulary is matched on words, and a report that says it is stuck
+ * can contain those same words — "被只读模式拦住" contains 只读. Treating that as
+ * routine is how a task kept running while its worker reported twice that it could
+ * not write anything.
+ */
+describe('a blocked request is never routine', () => {
+  it('asks even when the sentence mentions routine vocabulary', () => {
+    const verdict = assessDecisionRequest(
+      'Explore 模式无法执行，task_plan 和 docs/ 写文件都被权限系统拦住了，只读模式不允许写入。',
+    )
+    expect(verdict.needsUser).toBe(true)
+  })
+
+  it('asks on the English form too', () => {
+    const verdict = assessDecisionRequest('Cannot write: permission denied in read-only mode')
+    expect(verdict.needsUser).toBe(true)
+  })
+
+  it('still treats plain routine work as routine', () => {
+    const verdict = assessDecisionRequest('巡检完成，只读检查了 12 个配置文件')
+    expect(verdict.needsUser).toBe(false)
+  })
+})

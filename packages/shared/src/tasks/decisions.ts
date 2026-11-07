@@ -100,6 +100,18 @@ const ROUTINE_PATTERNS: RegExp[] = [
   /(inspect|review|audit|check|scan|verify|read-?only|report|summari[sz]e)/i,
 ];
 
+/**
+ * The request says it cannot proceed.
+ *
+ * A blocker is a question, not a status: whoever asked needs an answer before the
+ * work can continue. These beat the routine vocabulary, because the same sentence
+ * can contain both ("被只读模式拦住") and only one of them is the point.
+ */
+const BLOCKED_PATTERNS: RegExp[] = [
+  /(无法|不能|不可|不允许|被拦|拦截|受阻|阻塞|卡住|失败|出错|报错|缺少权限|没有权限|权限不足|被阻止)/,
+  /(cannot|can't|unable to|blocked|denied|forbidden|not permitted|failed|error|no permission|permission denied)/i,
+];
+
 /** Signals the worker itself emitted while asking — cheaper than re-reading prose. */
 export interface DecisionSignals {
   /** Commands the worker says it is about to run, if it listed them. */
@@ -118,6 +130,18 @@ export interface DecisionAssessment {
 
 /** True when the text reads as routine work rather than an irreversible action. */
 export function isRoutineWork(text: string): boolean {
+  //
+  // "Read-only" in the vocabulary used to be enough to call a request routine —
+  // including when the worker was saying it was **blocked by** a read-only mode.
+  //
+  // Observed in a real run: the worker reported "Explore 模式无法执行，task_plan 和 docs/
+  // 写文件都被权限系统拦" twice, the word 只读 appeared in its explanation, the report
+  // was filed as routine, and the task kept running while the trail filled up with
+  // hand-offs. The task needed a person and kept telling itself it did not.
+  //
+  // So a request that says it is stuck is never routine, whatever else it mentions.
+  //
+  if (BLOCKED_PATTERNS.some((pattern) => pattern.test(text))) return false;
   return ROUTINE_PATTERNS.some((pattern) => pattern.test(text));
 }
 

@@ -113,6 +113,26 @@ describe('unclaimed events', () => {
     expect(h.sent[0].text).toContain('未处理的事件');
   });
 
+  it('stops a rule whose agent does not exist instead of spawning the default', async () => {
+    const ws = workspace();
+    writeFileSync(
+      getRoutesPath(ws),
+      JSON.stringify([
+        { name: '账单', when: { source: 'qqmail-idle', textMatch: '账单' }, to: { agentId: 'agent-typo' } },
+      ]),
+      'utf-8',
+    );
+    const h = harness(ws);
+    // Without the guard this spawned a worker: `getAgentById` turns an unknown id
+    // into the workspace default, so the event was handled by a persona the rule
+    // never named, and nothing said so.
+    expect(await h.runtime.routeUnclaimed(event())).toBe('queued');
+    expect(h.spawned).toHaveLength(0);
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].text).toContain('agent-typo');
+    expect(h.sent[0].text).toContain('账单');
+  });
+
   it('keeps the backlog while the supervisor is busy', async () => {
     const ws = workspace();
     const h = harness(ws, { processeing: true });

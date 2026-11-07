@@ -22,7 +22,8 @@ import {
   newTurnState,
   type SupervisorTurnState,
 } from '@craft-agent/shared/agents/supervisor';
-import { loadRoutes, matchRoute, formatRouteInstruction, ruleParallelism } from '@craft-agent/shared/routing';
+import { loadRoutes, matchRoute, formatRouteInstruction, formatRouteRuleIssue, ruleParallelism } from '@craft-agent/shared/routing';
+import { readAgentRoster } from '@craft-agent/shared/agents';
 import { DispatchQueue } from './dispatch-queue.ts';
 
 const log = createLogger('supervisor');
@@ -176,6 +177,25 @@ export class SupervisorRuntime {
       // concurrency ceiling. `parallel: 1` (the default) means the next event of
       // the same kind queues rather than fanning out.
       if (decision.rule.to.agentId) {
+        // A rule naming a role that does not exist must stop here, not spawn.
+        // `spawnWorker` would create the session anyway — `getAgentById` treats a
+        // missing id as "use the workspace default" — so the event would be
+        // handled by a persona the rule never asked for, and the only trace would
+        // be a session whose persona looks wrong. Sending the event to the
+        // supervisor with the reason attached keeps the work and reports the bug.
+        const wantedAgent = decision.rule.to.agentId.trim();
+        const known = new Set(readAgentRoster(this.deps.workspaceRoot).map((entry) => entry.id));
+        if (!known.has(wantedAgent)) {
+          const notice = formatRouteRuleIssue({ rule: decision.rule.name, agentId: wantedAgent });
+          log.error(`[supervisor] ${notice}`);
+          this.backlog.push({
+            id: event.id,
+            summary: `${event.source}/${event.type}: ${event.title} — ${notice}`,
+          });
+          await this.drainToSupervisor();
+          return 'queued';
+        }
+
         const key = decision.rule.name;
         this.ruleCaps.set(key, ruleParallelism(decision.rule));
         const outcome = await this.dispatchQueue.submit(key, {

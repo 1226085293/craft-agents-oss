@@ -139,6 +139,51 @@ export function loadRoutes(workspaceRoot: string): RouteRule[] {
 }
 
 /**
+ * A rule whose `to.agentId` names a role the workspace does not have.
+ */
+export interface RouteRuleIssue {
+  rule: string;
+  agentId: string;
+}
+
+/**
+ * Find rules that point at a role that does not exist.
+ *
+ * `loadRoutes` is tolerant about *shape* on purpose — one malformed entry must
+ * not take the file down and disable every other rule. It must not be tolerant
+ * about *identity*. An unknown id does not fail at spawn: `getAgentById` falls
+ * back to the workspace default and the session is created anyway, so the event
+ * is handled by a persona the rule never asked for and nothing anywhere says a
+ * rule is broken. That is worse than not routing at all — the user believes a
+ * role is on it, and finds out by reading the transcript.
+ */
+export function findUnknownRuleAgents(
+  rules: RouteRule[],
+  knownAgentIds: ReadonlySet<string>,
+): RouteRuleIssue[] {
+  const issues: RouteRuleIssue[] = [];
+  const seen = new Set<string>();
+  for (const rule of rules) {
+    const agentId = rule.to.agentId?.trim();
+    if (!agentId || knownAgentIds.has(agentId)) continue;
+    // The same broken rule listed twice is one mistake, not two.
+    const key = `${rule.name}\u0000${agentId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    issues.push({ rule: rule.name, agentId });
+  }
+  return issues;
+}
+
+/** One line a human can act on. Says what happened, not just what is wrong. */
+export function formatRouteRuleIssue(issue: RouteRuleIssue): string {
+  return (
+    `规则「${issue.rule}」的 to.agentId 指向不存在的角色 \`${issue.agentId}\`，` +
+    '已停止按该规则路由——继续下去会静默换成默认角色，等于让错的人接活。请修正 routes.json。'
+  );
+}
+
+/**
  * The text prepended to a delivered event, so the worker knows its instruction.
  *
  * cwd and skills travel with the instruction because a worker started from a

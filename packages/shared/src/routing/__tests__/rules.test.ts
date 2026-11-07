@@ -3,7 +3,16 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { formatRouteInstruction, getRoutesPath, loadRoutes, matchRoute, ruleParallelism, type RouteRule } from '../rules.ts';
+import {
+  findUnknownRuleAgents,
+  formatRouteInstruction,
+  formatRouteRuleIssue,
+  getRoutesPath,
+  loadRoutes,
+  matchRoute,
+  ruleParallelism,
+  type RouteRule,
+} from '../rules.ts';
 
 const dirs: string[] = [];
 function workspace(): string {
@@ -130,5 +139,37 @@ describe('parallelism', () => {
     expect(ruleParallelism({ ...rule(), to: { agentId: 'a', parallel: 2.7 } })).toBe(2);
     expect(ruleParallelism({ ...rule(), to: { agentId: 'a', parallel: 0 } })).toBe(1);
     expect(ruleParallelism({ ...rule(), to: { agentId: 'a', parallel: -5 } })).toBe(1);
+  });
+});
+
+describe('unknown rule agents', () => {
+  const known = new Set(['builtin-default', 'agent-ui']);
+
+  it('reports a rule that names a role the workspace does not have', () => {
+    // `getAgentById` resolves an unknown id to the workspace default instead of
+    // failing, so without this check the event would be quietly handled by the
+    // wrong persona — no error, no log, no way to notice from the outside.
+    expect(findUnknownRuleAgents([rule({ name: '账单', to: { agentId: 'agent-typo' } })], known)).toEqual([
+      { rule: '账单', agentId: 'agent-typo' },
+    ]);
+  });
+
+  it('stays quiet for rules that resolve, or that name nobody', () => {
+    expect(findUnknownRuleAgents([rule({ to: { agentId: 'agent-ui' } })], known)).toEqual([]);
+    expect(findUnknownRuleAgents([rule({ to: {} })], known)).toEqual([]);
+    // Whitespace is not an id.
+    expect(findUnknownRuleAgents([rule({ to: { agentId: '   ' } })], known)).toEqual([]);
+  });
+
+  it('reports the same broken rule once, not once per entry', () => {
+    const bad = rule({ name: '同一个', to: { agentId: 'agent-typo' } });
+    expect(findUnknownRuleAgents([bad, { ...bad }], known)).toHaveLength(1);
+  });
+
+  it('names the rule and the id, so the fix is obvious', () => {
+    const text = formatRouteRuleIssue({ rule: '账单', agentId: 'agent-typo' });
+    expect(text).toContain('账单');
+    expect(text).toContain('agent-typo');
+    expect(text).toContain('routes.json');
   });
 });

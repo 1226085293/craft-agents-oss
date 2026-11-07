@@ -94,12 +94,33 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       options?: { pauseReason?: string; error?: string },
     ) => {
       const service = tasksFor(deps, workspaceId);
+      const before = service.get(id);
       const task = service.setStatus(id, status ?? 'running', {
         pauseReason: options?.pauseReason as never,
         error: options?.error,
       });
+      // Stopping a task has to stop the work. Writing `paused` and leaving the
+      // session running is the same lie as a board that says 待开始 while a
+      // worker is editing files: the label and the machine disagree, and the
+      // worker keeps writing into a task nobody thinks is live.
+      const stopped = task.status === 'paused' || task.status === 'canceled';
+      const wasRunning = before?.status === 'running';
+      if (stopped && wasRunning && before?.currentSessionId) {
+        const manager = deps.sessionManager as unknown as {
+          cancelProcessing?: (sessionId: string, silent?: boolean) => Promise<void>
+        };
+        try {
+          await manager.cancelProcessing?.(before.currentSessionId, true);
+        } catch {
+          // A session that never started cannot be stopped; the status change
+          // still stands.
+        }
+      }
+      // Give the lock back as well: `isRunLocked` keeps it while the session is
+      // alive, so a paused task would refuse to resume until that session died.
+      const after = stopped && wasRunning ? service.suspendRun(id) : task;
       broadcast(workspaceId);
-      return task;
+      return after;
     },
   );
 

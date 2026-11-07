@@ -46,6 +46,45 @@ export function stepParent(id: string): string | undefined {
   return cut > 0 ? id.slice(0, cut) : undefined;
 }
 
+/** An outline item: `1`, `2`. Written before execution, coarse, rarely edited. */
+export function isOutlineStep(id: string): boolean {
+  return !id.includes('.');
+}
+
+/** Sub-steps of one outline item, in plan order. */
+export function childrenOf(plan: PlanStep[] | undefined, id: string): PlanStep[] {
+  return (plan ?? []).filter((step) => stepParent(step.id) === id);
+}
+
+function outlineSteps(plan: PlanStep[] | undefined): PlanStep[] {
+  return (plan ?? []).filter((step) => isOutlineStep(step.id));
+}
+
+/**
+ * The outline item being worked on: the first one that is not finished.
+ *
+ * This is the anchor the "you may edit what comes next" rule is measured from —
+ * everything before it is history, everything after it is still a plan.
+ */
+export function currentOutline(plan: PlanStep[] | undefined): PlanStep | undefined {
+  return outlineSteps(plan).find((step) => step.status !== 'done');
+}
+
+/** The outline item directly after `id`, if the plan has one. */
+function outlineAfter(plan: PlanStep[], id: string): PlanStep | undefined {
+  const outlines = outlineSteps(plan);
+  const at = outlines.findIndex((step) => step.id === id);
+  return at >= 0 ? outlines[at + 1] : undefined;
+}
+
+/**
+ * Steps that carry work — sub-steps, and outlines nobody decomposed.
+ * Progress counts these, so an outline is never counted twice.
+ */
+function leafSteps(plan: PlanStep[] | undefined): PlanStep[] {
+  return (plan ?? []).filter((step) => childrenOf(plan, step.id).length === 0);
+}
+
 export function isPlanStepStatus(value: unknown): value is PlanStepStatus {
   return typeof value === 'string' && (STATUSES as readonly string[]).includes(value);
 }
@@ -99,7 +138,9 @@ export interface PlanProgress {
 }
 
 export function planProgress(plan: PlanStep[] | undefined): PlanProgress {
-  const steps = plan ?? [];
+  // Leaves only: an outline that was decomposed reports through its sub-steps,
+  // otherwise "3 of 8 done" would count a parent and its children twice.
+  const steps = leafSteps(plan);
   const total = steps.length;
   const done = steps.filter((step) => step.status === 'done').length;
   const doing = steps.filter((step) => step.status === 'doing').length;
@@ -162,8 +203,17 @@ export function applyPlanPatch(
 
   if (patch.remove) {
     if (index < 0) return { plan: steps, changed: false, error: `no such step: ${patch.id}` };
-    if (steps[index]!.status === 'done') {
+    const removing = steps[index]!;
+    if (removing.status === 'done') {
       return { plan: steps, changed: false, error: 'a finished step stays in the plan' };
+    }
+    const kids = childrenOf(steps, removing.id);
+    if (kids.length > 0) {
+      return {
+        plan: steps,
+        changed: false,
+        error: `${removing.id} 还有 ${kids.length} 个小节（${kids.map((s) => s.id).join(', ')}），先移除它们`,
+      };
     }
     steps.splice(index, 1);
     return { plan: steps, changed: true };
@@ -173,6 +223,26 @@ export function applyPlanPatch(
     if (!patch.title) return { plan: steps, changed: false, error: 'a new step needs a title' };
     if (steps.length >= PLAN_STEP_LIMIT) {
       return { plan: steps, changed: false, error: `plan is limited to ${PLAN_STEP_LIMIT} steps` };
+    }
+    // A sub-step without its outline is a step nobody agreed to. It also makes
+    // "do the current section" unanswerable, because there is no section.
+    const parent = stepParent(patch.id);
+    if (parent) {
+      const parentStep = steps.find((step) => step.id === parent);
+      if (!parentStep) {
+        return {
+          plan: steps,
+          changed: false,
+          error: `小节 ${patch.id} 没有对应的大纲 ${parent}：先写大纲，再展开它的小节`,
+        };
+      }
+      if (parentStep.status === 'done') {
+        return {
+          plan: steps,
+          changed: false,
+          error: `大纲 ${parent} 已完成并冻结，不能再往它下面加小节；返工请新开一条大纲`,
+        };
+      }
     }
     steps.push({
       id: patch.id,
@@ -186,6 +256,65 @@ export function applyPlanPatch(
   }
 
   const previous = steps[index]!;
+
+  // Frozen: a finished step is a record of what happened, not a draft. Rewriting
+  // it would make the plan disagree with the journal, which already says it was
+  // done. Rework is a new step; erasing is not editing.
+  if (previous.status === 'done') {
+    if (patch.status && patch.status !== 'done') {
+      return {
+        plan: steps,
+        changed: false,
+        error: `${previous.id} 已完成并冻结，不能改回 ${patch.status}；要返工就新开一条小节`,
+      };
+    }
+    if (patch.title && patch.title.trim() !== previous.title) {
+      return { plan: steps, changed: false, error: `${previous.id} 已完成并冻结，标题不能再改` };
+    }
+    if (patch.agent && patch.agent !== previous.agent) {
+      return { plan: steps, changed: false, error: `${previous.id} 已完成并冻结，负责的 agent 不能再改` };
+    }
+    if (patch.note !== undefined && !patch.note.trim()) {
+      return { plan: steps, changed: false, error: `${previous.id} 已完成并冻结，它的完成证据不能被清空` };
+    }
+  }
+
+  // An outline earns `doing`/`done` only through its sub-steps: "section 2 is
+  // under way" means some step of section 2 is, and "section 2 is done" means
+  // all of them are.
+  if (isOutlineStep(previous.id) && (patch.status === 'doing' || patch.status === 'done')) {
+    const kids = childrenOf(steps, previous.id);
+    if (kids.length === 0) {
+      return {
+        plan: steps,
+        changed: false,
+        error: `大纲 ${previous.id} 还没有小节。先把它拆成可执行的步骤（如 ${previous.id}.1），再开始`,
+      };
+    }
+    if (patch.status === 'done') {
+      const unfinished = kids.filter((step) => step.status !== 'done');
+      if (unfinished.length > 0) {
+        return {
+          plan: steps,
+          changed: false,
+          error: `大纲 ${previous.id} 还有 ${unfinished.length} 个小节未完成（${unfinished.map((s) => s.id).join(', ')}）`,
+        };
+      }
+      // Lookahead: the next section must already be broken down, or the moment
+      // this one closes there is nothing executable to pick up. Enforcing it here
+      // (rather than telling the worker to do it next) means the plan is never
+      // observed in a state where execution has nowhere to go.
+      const next = outlineAfter(steps, previous.id);
+      if (next && childrenOf(steps, next.id).length === 0) {
+        return {
+          plan: steps,
+          changed: false,
+          error: `完成 ${previous.id} 之前，先把下一条大纲 ${next.id} 的小节建出来 —— 否则下一条开工时没有可执行的步骤`,
+        };
+      }
+    }
+  }
+
   const next: PlanStep = {
     ...previous,
     ...(patch.title ? { title: patch.title.slice(0, 200) } : {}),
@@ -219,6 +348,9 @@ export function formatPlan(plan: PlanStep[] | undefined): string[] {
     const mark = step.status === 'done' ? 'x' : step.status === 'doing' ? '>' : step.status === 'blocked' ? '!' : ' ';
     const owner = step.agent ? ` @${step.agent}` : '';
     const note = step.note ? ` — ${step.note}` : '';
-    return `- [${mark}] ${step.title}${owner} (${step.id})${note}`;
+    // Indent by depth so an outline and its sub-steps read as one thing; the
+    // box still comes first because this is a task list.
+    const indent = '  '.repeat(step.id.split('.').length - 1);
+    return `${indent}- [${mark}] ${step.title}${owner} (${step.id})${note}`;
   });
 }

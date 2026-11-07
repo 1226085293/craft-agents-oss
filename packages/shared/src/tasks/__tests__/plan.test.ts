@@ -90,28 +90,34 @@ describe('plan progress', () => {
 });
 
 describe('plan editing', () => {
-  it('adds a step with a new id', () => {
-    const result = applyPlanPatch([], { id: '1.0', title: '读现有实现' }, NOW);
+  it('adds an outline item with a new id', () => {
+    const result = applyPlanPatch([], { id: '1', title: '读现有实现' }, NOW);
     expect(result.changed).toBe(true);
-    expect(result.plan[0]).toMatchObject({ id: '1.0', title: '读现有实现', status: 'todo' });
+    expect(result.plan[0]).toMatchObject({ id: '1', title: '读现有实现', status: 'todo' });
   });
 
   it('refuses to add a step without a title', () => {
-    const result = applyPlanPatch([], { id: '1.0' }, NOW);
+    const result = applyPlanPatch([], { id: '1' }, NOW);
     expect(result.changed).toBe(false);
     expect(result.error).toContain('title');
   });
 
-  it('moves a step to done and stamps the change', () => {
-    const start = normalizePlan([{ id: '1.0', title: 'a', status: 'todo' }], NOW - 1000);
-    const result = applyPlanPatch(start, { id: '1.0', status: 'done', note: '测试通过' }, NOW);
+  it('moves a sub-step to done and stamps the change', () => {
+    const start = normalizePlan(
+      [
+        { id: '1', title: '大纲', status: 'doing' },
+        { id: '1.1', title: 'a', status: 'doing' },
+      ],
+      NOW - 1000,
+    );
+    const result = applyPlanPatch(start, { id: '1.1', status: 'done', note: '测试通过' }, NOW);
     expect(result.changed).toBe(true);
-    expect(result.plan[0]).toMatchObject({ status: 'done', note: '测试通过', updatedAt: NOW });
+    expect(result.plan[1]).toMatchObject({ status: 'done', note: '测试通过', updatedAt: NOW });
   });
 
   it('reports no change when nothing actually changed', () => {
-    const start = normalizePlan([{ id: '1.0', title: 'a', status: 'todo' }], NOW);
-    const result = applyPlanPatch(start, { id: '1.0', status: 'todo' }, NOW);
+    const start = normalizePlan([{ id: '1', title: 'a', status: 'todo' }], NOW);
+    const result = applyPlanPatch(start, { id: '1', status: 'todo' }, NOW);
     expect(result.changed).toBe(false);
   });
 
@@ -168,9 +174,9 @@ describe('plan rendering', () => {
   it('renders the checklist the way the user writes it', () => {
     const plan = normalizePlan(
       [
-        { id: '1.0', title: '接口改造', status: 'done' },
+        { id: '1', title: '接口改造', status: 'done' },
         { id: '1.1', title: '改 handler', status: 'doing', note: '正在跑测试' },
-        { id: '2.0', title: '补测试', status: 'blocked', note: '等接口定稿' },
+        { id: '2', title: '补测试', status: 'blocked', note: '等接口定稿' },
       ],
       NOW,
     );
@@ -179,22 +185,126 @@ describe('plan rendering', () => {
     // written and read in that shape. The old assertion locked in
     // `- 1.0 [x] title`, which is not how anyone writes a checklist — the id
     // now trails the title so the box stays where the eye lands.
-    expect(lines[0]).toBe('- [x] 接口改造 (1.0)');
-    expect(lines[1]).toContain('[>]');
-    expect(lines[1]).toContain('改 handler');
-    expect(lines[2]).toContain('[!]');
+    expect(lines[0]).toBe('- [x] 接口改造 (1)');
+    // Sub-steps are indented so an outline and its steps read as one thing.
+    expect(lines[1]!.startsWith('  - [>] 改 handler')).toBe(true);
+    expect(lines[2]).toBe('- [!] 补测试 (2) — 等接口定稿');
   });
 
   it('renders the owner of each stage when one is recorded', () => {
     const plan = normalizePlan(
       [
-        { id: '1.0', title: '设计', status: 'done', agent: 'architect' },
-        { id: '2.0', title: '实现', status: 'doing', agent: 'coder' },
+        { id: '1', title: '设计', status: 'done', agent: 'architect' },
+        { id: '2', title: '实现', status: 'doing', agent: 'coder' },
       ],
       NOW,
     );
     const lines = formatPlan(plan);
-    expect(lines[0]).toBe('- [x] 设计 @architect (1.0)');
+    expect(lines[0]).toBe('- [x] 设计 @architect (1)');
     expect(lines[1]).toContain('@coder');
+  });
+});
+
+/**
+ * The outline model.
+ *
+ * An outline is written first and stays coarse; its sub-steps are expanded just
+ * before that section is worked on. Three rules make that hold:
+ *
+ *   1. a sub-step needs its outline,
+ *   2. an outline is done only when its sub-steps are, and the next outline must
+ *      already be broken down before this one closes,
+ *   3. a finished step is frozen — rework is a new step, not an edit.
+ */
+describe('outline invariants', () => {
+  it('refuses a sub-step whose outline does not exist', () => {
+    const result = applyPlanPatch([], { id: '1.1', title: '改 handler' }, NOW);
+    expect(result.changed).toBe(false);
+    expect(result.error).toContain('大纲 1');
+  });
+
+  it('accepts a sub-step once its outline exists', () => {
+    const withOutline = applyPlanPatch([], { id: '1', title: '接口改造' }, NOW).plan;
+    const result = applyPlanPatch(withOutline, { id: '1.1', title: '改 handler' }, NOW);
+    expect(result.changed).toBe(true);
+    expect(result.plan.map((s) => s.id)).toEqual(['1', '1.1']);
+  });
+
+  it('will not start an outline that has no sub-steps', () => {
+    const plan = normalizePlan([{ id: '1', title: '接口改造', status: 'todo' }], NOW);
+    const result = applyPlanPatch(plan, { id: '1', status: 'doing' }, NOW);
+    expect(result.changed).toBe(false);
+    expect(result.error).toContain('还没有小节');
+  });
+
+  it('will not close an outline while a sub-step is unfinished', () => {
+    const plan = normalizePlan(
+      [
+        { id: '1', title: '接口改造', status: 'doing' },
+        { id: '1.1', title: '改 handler', status: 'done' },
+        { id: '1.2', title: '补类型', status: 'doing' },
+      ],
+      NOW,
+    );
+    const result = applyPlanPatch(plan, { id: '1', status: 'done' }, NOW);
+    expect(result.changed).toBe(false);
+    expect(result.error).toContain('1.2');
+  });
+
+  it('requires the next outline to be broken down before closing this one', () => {
+    const plan = normalizePlan(
+      [
+        { id: '1', title: '接口改造', status: 'doing' },
+        { id: '1.1', title: '改 handler', status: 'done' },
+        { id: '2', title: '补测试', status: 'todo' },
+      ],
+      NOW,
+    );
+    const blocked = applyPlanPatch(plan, { id: '1', status: 'done' }, NOW);
+    expect(blocked.changed).toBe(false);
+    expect(blocked.error).toContain('2');
+
+    const withNext = applyPlanPatch(plan, { id: '2.1', title: '写单测' }, NOW).plan;
+    const allowed = applyPlanPatch(withNext, { id: '1', status: 'done' }, NOW);
+    expect(allowed.changed).toBe(true);
+  });
+
+  it('closes the last outline without demanding a next one', () => {
+    const plan = normalizePlan(
+      [
+        { id: '1', title: '唯一一节', status: 'doing' },
+        { id: '1.1', title: '做完它', status: 'done' },
+      ],
+      NOW,
+    );
+    const result = applyPlanPatch(plan, { id: '1', status: 'done' }, NOW);
+    expect(result.changed).toBe(true);
+  });
+
+  it('freezes a finished step against reopening, renaming and owner changes', () => {
+    const plan = normalizePlan([{ id: '1', title: '做完了', status: 'done' }], NOW);
+    expect(applyPlanPatch(plan, { id: '1', status: 'doing' }, NOW).changed).toBe(false);
+    expect(applyPlanPatch(plan, { id: '1', title: '换个名字' }, NOW).changed).toBe(false);
+    expect(applyPlanPatch(plan, { id: '1', agent: 'someone' }, NOW).changed).toBe(false);
+    expect(applyPlanPatch(plan, { id: '1', remove: true }, NOW).changed).toBe(false);
+  });
+
+  it('still lets a finished step record what proved it', () => {
+    const plan = normalizePlan([{ id: '1', title: '做完了', status: 'done' }], NOW);
+    // Evidence may be added or corrected; the conclusion may not be erased.
+    expect(applyPlanPatch(plan, { id: '1', note: 'bun test 全绿' }, NOW).changed).toBe(true);
+    expect(applyPlanPatch(plan, { id: '1', note: '' }, NOW).changed).toBe(false);
+  });
+
+  it('counts leaves, so a decomposed outline is not counted twice', () => {
+    const plan = normalizePlan(
+      [
+        { id: '1', title: '一节', status: 'done' },
+        { id: '1.1', title: 'a', status: 'done' },
+        { id: '1.2', title: 'b', status: 'todo' },
+      ],
+      NOW,
+    );
+    expect(planProgress(plan)).toMatchObject({ total: 2, done: 1, complete: false });
   });
 });

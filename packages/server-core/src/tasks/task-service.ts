@@ -373,6 +373,40 @@ export class TaskService {
   }
 
   /**
+   * Release the run lock after a pause or cancel, without counting a failure.
+   *
+   * `endRun` records an outcome, and a pause is not a failure — counting it
+   * would let three pauses trip the fuse and strand the task in a state nobody
+   * asked for. What a pause does have to do is give the lock back: `isRunLocked`
+   * holds it while `lockSessionId` points at a live session, so a paused task
+   * would refuse to resume until that session died.
+   */
+  suspendRun(id: string): Task {
+    const task = this.require(id);
+    const now = this.now();
+    const stats = task.stats ?? { runs: 0, activeMs: 0 };
+    const elapsed = stats.runStartedAt ? Math.max(0, now - stats.runStartedAt) : 0;
+    const next: Task = {
+      ...task,
+      stats: {
+        ...stats,
+        activeMs: stats.activeMs + elapsed,
+        lockSessionId: undefined,
+        runStartedAt: undefined,
+        lastHeartbeatAt: now,
+      },
+      updatedAt: now,
+    };
+    saveTask(this.root, next);
+    appendJournal(this.root, id, {
+      type: 'run_ended',
+      at: now,
+      data: { ok: true, suspended: true, activeMs: elapsed },
+    });
+    return next;
+  }
+
+  /**
    * Release the lock and bank the active time.
    *
    * Called when a run ends for any reason — handoff, failure, or the session

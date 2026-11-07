@@ -64,8 +64,11 @@ export { matchesCron } from './cron.ts';
 
 export {
   applyPlanPatch,
+  childrenOf,
+  currentOutline,
   currentStep,
   formatPlan,
+  isOutlineStep,
   isPlanStepStatus,
   lastPlanChangeAt,
   normalizePlan,

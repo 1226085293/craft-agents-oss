@@ -593,8 +593,17 @@ function PlanSection({
       ) : null}
 
       <ul className="space-y-1.5">
-        {plan.map((step) => (
-          <li key={step.id} className="flex items-start gap-2.5 text-xs leading-relaxed">
+        {plan.map((step) => {
+          // Depth from the id itself (`1` → 0, `1.2` → 1) rather than a stored
+          // field, so the nesting can never disagree with how steps are addressed.
+          const depth = step.id.split('.').length - 1
+          const isOutline = depth === 0
+          return (
+          <li
+            key={step.id}
+            className="flex items-start gap-2.5 text-xs leading-relaxed"
+            style={{ paddingLeft: depth * 18 }}
+          >
             <span
               aria-hidden="true"
               className={cn(
@@ -610,7 +619,8 @@ function PlanSection({
             <span className="min-w-0 flex-1">
               <span
                 className={cn(
-                  'break-words text-foreground/90',
+                  'break-words',
+                  isOutline ? 'font-medium text-foreground' : 'text-foreground/90',
                   step.status === 'done' && 'text-muted-foreground line-through decoration-border',
                 )}
               >
@@ -627,7 +637,8 @@ function PlanSection({
             </span>
             <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{step.id}</span>
           </li>
-        ))}
+          )
+        })}
       </ul>
     </section>
   )

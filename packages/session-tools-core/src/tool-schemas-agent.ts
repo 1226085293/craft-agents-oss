@@ -150,7 +150,10 @@ export const TaskUpdateSchema = z.object({
 
 export const TaskPlanSchema = z.object({
   identifier: z.string().describe('Task id (T-1) or name.'),
-  id: z.string().describe('Step id such as "1.0" or "1.2". A new id adds a step.'),
+  id: z
+    .string()
+    .optional()
+    .describe('Step id such as "1" (outline) or "1.2" (sub-step). A new id adds a step.'),
   title: z.string().optional().describe('Required when adding a step; omitted means "keep the current title".'),
   status: z.enum(['todo', 'doing', 'done', 'blocked']).optional(),
   agent: z
@@ -159,6 +162,26 @@ export const TaskPlanSchema = z.object({
     .describe('Which profile owns this step. Set it when a stage is handed to a different agent than the one running now.'),
   note: z.string().optional().describe('What proves it is done, or why it is blocked.'),
   remove: z.boolean().optional().describe('Drop an unfinished step (a finished step stays as record).'),
+  /**
+   * Several steps in one call.
+   *
+   * Writing the outline one call per item costs N round trips, and at that price
+   * planning first loses to starting — which is exactly why plans came out thin.
+   * One call makes "write the whole outline, then work" the cheap path.
+   */
+  steps: z
+    .array(
+      z.object({
+        id: z.string(),
+        title: z.string().optional(),
+        status: z.enum(['todo', 'doing', 'done', 'blocked']).optional(),
+        agent: z.string().optional(),
+        note: z.string().optional(),
+        remove: z.boolean().optional(),
+      }),
+    )
+    .optional()
+    .describe('Apply several steps at once, in order. Use this to write the outline in a single call.'),
 });
 
 export const TaskGetSchema = z.object({

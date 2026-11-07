@@ -43,6 +43,22 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
   if (spec?.scope) contract.push(`检查范围：${spec.scope}`);
   if (contract.length) sections.push(`## 执行边界\n${bullet(contract)}`);
 
+  //
+  // The plan rule belongs in the brief, not only in the tool's error messages:
+  // a worker that finds out by being refused has already spent the turn.
+  //
+  sections.push(
+    [
+      '## 怎么推进',
+      '',
+      '1. 先用 **一次** `task_plan({ steps: [...] })` 写下大纲：3–7 条，id 用 `1`、`2`、`3`。',
+      '2. 开工前把当前大纲拆成小节（`1.1`、`1.2`），然后逐条执行——小节开始前才写，不要预设没做过的部分的细节。',
+      '3. 一条大纲的小节都完成后，才能把它标为 done；标 done 之前，下一条大纲的小节必须已经存在。',
+      '4. 已完成的大纲和小节是记录，不能改回、不能改名——要返工就新开一条。',
+      '',
+    ].join('\n'),
+  );
+
   if (spec?.deliverables?.length) {
     const lines = spec.deliverables.map((d) => {
       const where = d.path ? ` → ${d.path}` : '';

@@ -285,19 +285,53 @@ export async function handleTaskPlan(
   ctx: SessionToolContext,
   args: {
     identifier: string;
-    id: string;
+    id?: string;
     title?: string;
     status?: string;
     agent?: string;
     note?: string;
     remove?: boolean;
+    steps?: Array<{
+      id: string;
+      title?: string;
+      status?: string;
+      agent?: string;
+      note?: string;
+      remove?: boolean;
+    }>;
   },
 ): Promise<ToolResult> {
   if (!ctx.taskTools?.updatePlan) {
     return errorResponse('task_plan is only available to a session working on a task.');
   }
   if (!args.identifier?.trim()) return errorResponse('identifier is required.');
-  if (!args.id?.trim()) return errorResponse('id is required.');
+
+  // Batch form. Written in order, stopping at the first refusal: a plan that is
+  // half-applied is worse than one that is unchanged, and the error names the
+  // step that stopped it.
+  if (args.steps?.length) {
+    let applied = 0;
+    for (const step of args.steps) {
+      if (!step.id?.trim()) return errorResponse(`steps[${applied}].id is required.`);
+      const result = await ctx.taskTools.updatePlan(args.identifier, {
+        id: step.id.trim(),
+        ...(step.title ? { title: step.title } : {}),
+        ...(step.status ? { status: step.status } : {}),
+        ...(step.agent ? { agent: step.agent } : {}),
+        ...(step.note !== undefined ? { note: step.note } : {}),
+        ...(step.remove !== undefined ? { remove: step.remove } : {}),
+      });
+      if (!result.ok) {
+        return errorResponse(
+          `Plan not updated at ${step.id}: ${result.error ?? 'refused'}${applied ? ` (${applied} earlier step(s) were applied)` : ''}`,
+        );
+      }
+      applied += 1;
+    }
+    return successResponse(`Plan updated: ${applied} step(s).`);
+  }
+
+  if (!args.id?.trim()) return errorResponse('id is required (or pass steps[] to write several).');
   try {
     const result = await ctx.taskTools.updatePlan(args.identifier, {
       id: args.id.trim(),

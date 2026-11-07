@@ -153,6 +153,10 @@ export const TaskPlanSchema = z.object({
   id: z.string().describe('Step id such as "1.0" or "1.2". A new id adds a step.'),
   title: z.string().optional().describe('Required when adding a step; omitted means "keep the current title".'),
   status: z.enum(['todo', 'doing', 'done', 'blocked']).optional(),
+  agent: z
+    .string()
+    .optional()
+    .describe('Which profile owns this step. Set it when a stage is handed to a different agent than the one running now.'),
   note: z.string().optional().describe('What proves it is done, or why it is blocked.'),
   remove: z.boolean().optional().describe('Drop an unfinished step (a finished step stays as record).'),
 });

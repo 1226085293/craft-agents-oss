@@ -22,6 +22,14 @@ export interface PlanStep {
   id: string;
   title: string;
   status: PlanStepStatus;
+  /**
+   * Which profile owns this step.
+   *
+   * A task can be handed between agents — one plans, another executes, a third
+   * verifies. Without this the plan said what happens but never who does it, so
+   * "during which stage is which agent responsible" had no answer anywhere.
+   */
+  agent?: string;
   /** Why it is blocked, or what proves it is done. */
   note?: string;
   /** When the status last changed — the drift check reads this. */
@@ -65,6 +73,9 @@ export function normalizePlan(raw: unknown, now = Date.now()): PlanStep[] | unde
       id,
       title: title.slice(0, 200),
       status: isPlanStepStatus(value.status) ? value.status : 'todo',
+      ...(typeof value.agent === 'string' && value.agent.trim()
+        ? { agent: value.agent.trim().slice(0, 60) }
+        : {}),
       ...(typeof value.note === 'string' && value.note.trim()
         ? { note: value.note.trim().slice(0, 300) }
         : {}),
@@ -143,7 +154,7 @@ export function lastPlanChangeAt(plan: PlanStep[] | undefined): number {
  */
 export function applyPlanPatch(
   plan: PlanStep[] | undefined,
-  patch: { id: string; status?: PlanStepStatus; title?: string; note?: string; remove?: boolean },
+  patch: { id: string; status?: PlanStepStatus; title?: string; note?: string; agent?: string; remove?: boolean },
   now = Date.now(),
 ): { plan: PlanStep[]; changed: boolean; error?: string } {
   const steps = [...(plan ?? [])];
@@ -167,6 +178,7 @@ export function applyPlanPatch(
       id: patch.id,
       title: patch.title.slice(0, 200),
       status: patch.status ?? 'todo',
+      ...(patch.agent ? { agent: patch.agent.slice(0, 60) } : {}),
       ...(patch.note ? { note: patch.note.slice(0, 300) } : {}),
       updatedAt: now,
     });
@@ -178,24 +190,35 @@ export function applyPlanPatch(
     ...previous,
     ...(patch.title ? { title: patch.title.slice(0, 200) } : {}),
     ...(patch.status ? { status: patch.status } : {}),
+    ...(patch.agent ? { agent: patch.agent.slice(0, 60) } : {}),
     ...(patch.note !== undefined ? { note: patch.note.slice(0, 300) } : {}),
     updatedAt: now,
   };
   const changed =
     next.status !== previous.status ||
     next.title !== previous.title ||
-    next.note !== previous.note;
+    next.note !== previous.note ||
+    next.agent !== previous.agent;
   if (!changed) return { plan: steps, changed: false };
   steps[index] = next;
   return { plan: steps, changed: true };
 }
 
-/** Render the plan for the cold-start brief and for the task detail page. */
+/**
+ * Render the plan as a checklist.
+ *
+ * The mark comes first — `- [x] title` — because that is the form the plan is
+ * written and read in: it is a markdown task list, and every checkbox renderer
+ * (and every human) reads the box before the text. The id trails the title so a
+ * step can still be addressed by `task_plan`, without pushing the box off the
+ * part of the line the eye lands on.
+ */
 export function formatPlan(plan: PlanStep[] | undefined): string[] {
   if (!plan?.length) return [];
   return plan.map((step) => {
     const mark = step.status === 'done' ? 'x' : step.status === 'doing' ? '>' : step.status === 'blocked' ? '!' : ' ';
+    const owner = step.agent ? ` @${step.agent}` : '';
     const note = step.note ? ` — ${step.note}` : '';
-    return `- ${step.id} [${mark}] ${step.title}${note}`;
+    return `- [${mark}] ${step.title}${owner} (${step.id})${note}`;
   });
 }

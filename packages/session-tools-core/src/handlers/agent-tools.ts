@@ -288,6 +288,7 @@ export async function handleTaskPlan(
     id: string;
     title?: string;
     status?: string;
+    agent?: string;
     note?: string;
     remove?: boolean;
   },
@@ -302,6 +303,7 @@ export async function handleTaskPlan(
       id: args.id.trim(),
       ...(args.title ? { title: args.title } : {}),
       ...(args.status ? { status: args.status } : {}),
+      ...(args.agent ? { agent: args.agent } : {}),
       ...(args.note !== undefined ? { note: args.note } : {}),
       ...(args.remove !== undefined ? { remove: args.remove } : {}),
     });

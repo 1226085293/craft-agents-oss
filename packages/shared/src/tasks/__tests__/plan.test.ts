@@ -175,8 +175,26 @@ describe('plan rendering', () => {
       NOW,
     );
     const lines = formatPlan(plan);
-    expect(lines[0]).toBe('- 1.0 [x] 接口改造');
+    // The box comes first: this is a markdown task list, and the plan is both
+    // written and read in that shape. The old assertion locked in
+    // `- 1.0 [x] title`, which is not how anyone writes a checklist — the id
+    // now trails the title so the box stays where the eye lands.
+    expect(lines[0]).toBe('- [x] 接口改造 (1.0)');
     expect(lines[1]).toContain('[>]');
+    expect(lines[1]).toContain('改 handler');
     expect(lines[2]).toContain('[!]');
+  });
+
+  it('renders the owner of each stage when one is recorded', () => {
+    const plan = normalizePlan(
+      [
+        { id: '1.0', title: '设计', status: 'done', agent: 'architect' },
+        { id: '2.0', title: '实现', status: 'doing', agent: 'coder' },
+      ],
+      NOW,
+    );
+    const lines = formatPlan(plan);
+    expect(lines[0]).toBe('- [x] 设计 @architect (1.0)');
+    expect(lines[1]).toContain('@coder');
   });
 });

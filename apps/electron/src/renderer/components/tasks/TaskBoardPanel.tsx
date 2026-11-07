@@ -64,7 +64,18 @@ export interface TaskDetailView {
     skills?: string[]
     deliverables?: Array<{ kind: string; path?: string; note?: string; required?: boolean }>
     acceptance?: Array<{ id: string; check: string; command?: string }>
+    /** The worker's own checklist — the stages this task went through. */
+    plan?: Array<{
+      id: string
+      title: string
+      status: 'todo' | 'doing' | 'done' | 'blocked'
+      /** Which profile owns the stage; absent means the task's assignee. */
+      agent?: string
+      note?: string
+    }>
   }
+  /** Profile this task is assigned to; absent means the workspace default. */
+  assigneeAgentId?: string
   trigger?: { kind: 'manual' | 'cron' | 'event'; expr?: string; timezone?: string; source?: string; types?: string[]; enabled?: boolean }
   stats?: { runs: number; activeMs: number; lastHeartbeatAt?: number }
   createdAt: number

@@ -2594,9 +2594,12 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
             // decided by its tool table (SUPERVISOR_TOOL_NAMES never registers
             // bash / write / edit / MCP), not by a permission gate. Offering
             // 探索/询问/执行 here reads as "it can be handed tools", which it
-            // cannot — so the control is dropped rather than merely preset.
+            // cannot — so that one control is dropped rather than merely preset.
+            //
+            // Only that control. `showOptionBadges={false}` used to ride along
+            // with it and took the whole badge row — 后台任务 and 信息 — which
+            // are about observing the session, not about granting it powers.
             onPermissionModeChange={session.hidden ? undefined : onPermissionModeChange}
-            showOptionBadges={session.hidden ? false : undefined}
             sessionId={session.id}
             sessionFolderPath={sessionFolderPath}
             queuedMessages={session.queuedMessages}

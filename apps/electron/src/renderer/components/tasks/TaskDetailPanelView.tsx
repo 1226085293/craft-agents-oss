@@ -274,6 +274,8 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onUpdateTrigger 
         <p className="whitespace-pre-wrap text-sm leading-6 text-foreground/90">{detail.instruction}</p>
       </section>
 
+      <PlanSection plan={detail.spec?.plan} assignee={detail.assigneeAgentId} />
+
       {(detail.spec?.cwd || detail.spec?.sources?.length || detail.spec?.deliverables?.length || detail.spec?.acceptance?.length) ? (
         <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-contract-heading">
           <div className="mb-3 flex items-center gap-2">
@@ -519,6 +521,93 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onUpdateTrigger 
         创建于 {formatTimestamp(detail.createdAt)}
       </p>
     </div>
+  )
+}
+
+function PlanSection({
+  plan,
+  assignee,
+}: {
+  plan?: { id: string; title: string; status: 'todo' | 'doing' | 'done' | 'blocked'; agent?: string; note?: string }[]
+  assignee?: string
+}): React.JSX.Element {
+  if (!plan || plan.length === 0) {
+    return (
+      <section className="rounded-xl border border-dashed border-border/70 p-4 md:p-5" aria-labelledby="task-plan-heading">
+        <h2 id="task-plan-heading" className="text-xs font-semibold text-foreground">执行计划</h2>
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          还没有计划。负责的会话会边做边用 task_plan 记下阶段，这里就会长出勾选清单。
+        </p>
+      </section>
+    )
+  }
+
+  const done = plan.filter((step) => step.status === 'done').length
+  const ownerOf = (step: { agent?: string }) => step.agent ?? assignee ?? '未指定'
+  // Group by owner so "which agent carries which stage" is answerable at a
+  // glance instead of by reading every row.
+  const owners = Array.from(new Set(plan.map(ownerOf)))
+
+  return (
+    <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-plan-heading">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h2 id="task-plan-heading" className="text-xs font-semibold text-foreground">执行计划</h2>
+        <span className="text-[11px] tabular-nums text-muted-foreground">
+          {done} / {plan.length} 已完成
+        </span>
+      </div>
+
+      {owners.length > 1 ? (
+        <div className="mb-3 flex flex-wrap items-center gap-1.5">
+          {owners.map((owner) => (
+            <span
+              key={owner}
+              className="rounded-full border border-border/60 bg-foreground/5 px-2 py-0.5 text-[10px] text-muted-foreground"
+            >
+              {owner} · {plan.filter((step) => ownerOf(step) === owner).length} 阶段
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      <ul className="space-y-1.5">
+        {plan.map((step) => (
+          <li key={step.id} className="flex items-start gap-2.5 text-xs leading-relaxed">
+            <span
+              aria-hidden="true"
+              className={cn(
+                'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border font-mono text-[10px] leading-none',
+                step.status === 'done' && 'border-emerald-500/40 bg-emerald-500/15 text-emerald-400',
+                step.status === 'doing' && 'border-blue-500/40 bg-blue-500/15 text-blue-400',
+                step.status === 'blocked' && 'border-amber-500/40 bg-amber-500/15 text-amber-400',
+                step.status === 'todo' && 'border-border/70 text-transparent',
+              )}
+            >
+              {step.status === 'done' ? 'x' : step.status === 'doing' ? '>' : step.status === 'blocked' ? '!' : ' '}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span
+                className={cn(
+                  'break-words text-foreground/90',
+                  step.status === 'done' && 'text-muted-foreground line-through decoration-border',
+                )}
+              >
+                {step.title}
+              </span>
+              {step.agent ? (
+                <span className="ml-1.5 rounded bg-foreground/5 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                  @{step.agent}
+                </span>
+              ) : null}
+              {step.note ? (
+                <span className="mt-0.5 block break-words text-[11px] text-muted-foreground">{step.note}</span>
+              ) : null}
+            </span>
+            <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{step.id}</span>
+          </li>
+        ))}
+      </ul>
+    </section>
   )
 }
 

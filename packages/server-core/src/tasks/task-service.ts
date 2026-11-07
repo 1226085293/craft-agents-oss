@@ -296,7 +296,7 @@ export class TaskService {
    */
   updatePlan(
     id: string,
-    patch: { id: string; status?: PlanStepStatus; title?: string; note?: string; remove?: boolean },
+    patch: { id: string; status?: PlanStepStatus; title?: string; note?: string; agent?: string; remove?: boolean },
   ): { ok: boolean; error?: string; plan?: Task['spec'] extends undefined ? never : NonNullable<Task['spec']>['plan'] } {
     const task = this.require(id);
     const now = this.now();
@@ -313,7 +313,7 @@ export class TaskService {
     appendJournal(this.root, id, {
       type: 'plan_updated',
       at: now,
-      data: { step: patch.id, status: patch.status, removed: patch.remove === true },
+      data: { step: patch.id, status: patch.status, agent: patch.agent, removed: patch.remove === true },
     });
     return { ok: true, plan: result.plan };
   }

@@ -64,6 +64,8 @@ export interface SupervisorRuntimeDeps {
   }) => Promise<{ sessionId: string }>;
   /** Send a message into an existing session (wakes it if idle). */
   sendToSession: (sessionId: string, text: string) => Promise<void>;
+  /** Diagnostics for routing decisions that change who runs the work. */
+  logDispatch?: (message: string) => void;
   /** Record a user-visible message on the supervisor's transcript. */
   writeToSupervisor: (sessionId: string, text: string) => Promise<void>;
   /** Ask the user (surfaced as a question card / message). */
@@ -302,7 +304,16 @@ export class SupervisorRuntime {
       const task = this.deps.getTask?.(params.target.taskId);
       if (!task) throw new Error(`Task not found: ${params.target.taskId}`);
       targetKey = `task:${task.id}`;
-      existingSessionId = task.currentSessionId;
+      // A task with a live session is already dispatched. Spawning a second
+      // worker for it produced two sessions doing the same work, both writing
+      // the same task's journal, and a board that could not say who owned it.
+      // The instruction is a follow-up to recorded work, so it goes to that
+      // session; only an absent or dead session means "start a new run".
+      const live = task.currentSessionId ? this.deps.getSession(task.currentSessionId) : null;
+      existingSessionId = live ? task.currentSessionId : undefined;
+      if (task.currentSessionId && !live) {
+        this.deps.logDispatch?.(`${task.id}: previous session ${task.currentSessionId} is gone; starting a new run`);
+      }
       workerAgentId = task.assigneeAgentId;
     } else {
       targetKey = `new:${params.target.agentId ?? 'default'}:${params.scope}`;

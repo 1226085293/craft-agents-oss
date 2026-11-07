@@ -375,3 +375,60 @@ describe('the backlog is handed over on every wake path', () => {
     h.runtime.dispose();
   });
 });
+
+/**
+ * A task that already has a live session is already dispatched.
+ *
+ * The board showed two sessions for one task and no way to say who owned it,
+ * because every dispatch to a `task` target spawned another worker regardless of
+ * whether one was running. The instruction belongs to the existing session.
+ */
+describe('dispatching into a task respects the session already running it', () => {
+  it('sends into the live session instead of spawning a second worker', async () => {
+    const tasks = new Map([
+      ['T-1', { id: 'T-1', currentSessionId: 'sess_live' }],
+    ]);
+    const h = harness(workspace(), { tasks });
+    h.sessions.set('sess_live', {
+      id: 'sess_live',
+      role: 'worker',
+      spawnDepth: 1,
+      isProcessing: true,
+      taskId: 'T-1',
+    });
+
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      scope: 'T-1 的实现',
+      instruction: '继续第 2 步',
+      attachTaskId: 'T-1',
+      parallel: false,
+    });
+
+    expect(h.spawned).toHaveLength(0);
+    expect(h.sent.map((s) => s.sessionId)).toContain('sess_live');
+    h.runtime.dispose();
+  });
+
+  it('starts a fresh run when the recorded session is gone', async () => {
+    const tasks = new Map([
+      ['T-2', { id: 'T-2', currentSessionId: 'sess_dead' }],
+    ]);
+    const h = harness(workspace(), { tasks });
+    // sess_dead is deliberately absent from the live table.
+
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-2' },
+      scope: 'T-2 的实现',
+      instruction: '开始',
+      attachTaskId: 'T-2',
+      parallel: false,
+    });
+
+    expect(h.spawned).toHaveLength(1);
+    expect(h.spawned[0]!.taskId).toBe('T-2');
+    h.runtime.dispose();
+  });
+});

@@ -5572,7 +5572,16 @@ export class SessionManager implements ISessionManager {
               spawnDepth: params.spawnDepth,
               strategy: managed.strategy,
             })
-            await this.sendMessage(created.id, params.instruction)
+            this.claimTaskRun(managed.workspace.id, params.taskId, created.id)
+            // Handing over work is routing, not waiting: `sendMessage` resolves
+            // only once the worker's whole first turn is over, so awaiting it
+            // held the supervisor's dispatch block open for minutes.
+            void this.sendMessage(created.id, params.instruction).catch((error) => {
+              sessionLog.warn('dispatch: failed to send the first instruction', {
+                sessionId: created.id,
+                error,
+              })
+            })
             return { sessionId: created.id }
           },
           sendToSession: async (sessionId, text) => {
@@ -7136,6 +7145,26 @@ ${request.prompt}`;
   }
 
   /**
+   * A dispatched worker is working on a task — so the task has to say so.
+   *
+   * `attachSession` only recorded the link, which left the board reporting
+   * 待开始 while a session was already running the work. The state and the
+   * session had drifted apart at exactly the moment the user looks at the board
+   * to find out what is happening.
+   */
+  private claimTaskRun(workspaceId: string, taskId: string | undefined, sessionId: string): void {
+    if (!taskId) return
+    try {
+      const result = this.getTasks(workspaceId).startRun(taskId, sessionId)
+      if (!result.ok) {
+        sessionLog.info(`[tasks] ${taskId} dispatched but not marked running: ${result.reason}`)
+      }
+    } catch (error) {
+      sessionLog.warn('failed to mark a dispatched task as running', { taskId, sessionId, error })
+    }
+  }
+
+  /**
    * Spawn the worker for one claimed task run.
    *
    * Shared by the cron scheduler and by event triggers. The caller must already
@@ -7271,12 +7300,22 @@ ${request.prompt}`;
           // inherit whatever directory the supervisor happens to sit in.
           ...(params.cwd ? { workingDirectory: params.cwd } : {}),
         })
-        await this.sendMessage(created.id, params.instruction)
+        this.claimTaskRun(workspaceId, params.taskId, created.id)
+        // Same reason as above: awaiting the worker's first turn made the
+        // dispatch block look hung, and a block that never returns reads as a
+        // failed dispatch — which is what invited the duplicate ones.
+        void this.sendMessage(created.id, params.instruction).catch((error) => {
+          sessionLog.warn('dispatch: failed to send the first instruction', {
+            sessionId: created.id,
+            error,
+          })
+        })
         return { sessionId: created.id }
       },
       sendToSession: async (sessionId, text) => {
         await this.sendMessage(sessionId, text)
       },
+      logDispatch: (message) => sessionLog.info(`[dispatch] ${message}`),
       writeToSupervisor: async (sessionId, text) => {
         const managed = this.sessions.get(sessionId)
         if (managed) await this.surfaceSupervisorMessage(managed, text)

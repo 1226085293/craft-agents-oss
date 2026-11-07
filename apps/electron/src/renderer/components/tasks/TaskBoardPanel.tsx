@@ -175,8 +175,8 @@ export interface TaskBoardPanelProps {
   onDelete?: (id: string) => void
   /** Same, for a multi-selection — one pass, so the caller can clear selection once. */
   onDeleteMany?: (ids: string[]) => void
-  /** Change what starts a task. */
-  onUpdateTrigger?: (id: string, trigger: unknown) => void
+  /** Workspace roster, so a plan step's owner prints as its display name. */
+  agents?: ReadonlyArray<{ id: string; name: string }>
 }
 
 /** One item in the right-click menu, plus who it applies to. */
@@ -237,7 +237,7 @@ export function TaskBoardPanel({
   onPause,
   onDelete,
   onDeleteMany,
-  onUpdateTrigger,
+  agents,
 }: TaskBoardPanelProps): React.JSX.Element {
   const { t } = useTranslation()
 
@@ -490,8 +490,8 @@ export function TaskBoardPanel({
         <div className="absolute inset-0 z-10 flex flex-col bg-background">
           <TaskDetailPanelView
             detail={detail}
+            agents={agents}
             onRun={onRun}
-            onUpdateTrigger={onUpdateTrigger}
             onClose={onCloseDetail}
             onResume={onResume}
             onCancel={onCancel}

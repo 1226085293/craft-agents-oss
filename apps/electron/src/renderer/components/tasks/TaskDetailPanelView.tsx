@@ -22,6 +22,7 @@ import {
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import { agentLabelMap } from './agent-label'
 import type { TaskDetailView, TaskHandoffView, TaskStatus } from './TaskBoardPanel'
 import type { PlanJumpTarget } from '@/lib/plan-jump'
 
@@ -95,12 +96,17 @@ export interface TaskDetailPanelViewProps {
   /** Jump to the moment in a session that a plan step came from. */
   planJumps?: Map<string, PlanJumpTarget>
   onJumpToStep?: (target: PlanJumpTarget) => void
-  /** Change what starts this task. */
-  onUpdateTrigger?: (id: string, trigger: unknown) => void
+  /**
+   * The workspace roster, so a step's owner prints as the name settings shows.
+   * A plan stores `agent: "builtin-default"`; that id is a storage key, and printing it
+   * on the page asked the reader to translate. Optional so the page still renders (with
+   * ids) when the roster has not loaded yet.
+   */
+  agents?: ReadonlyArray<{ id: string; name: string }>
 }
 
 /** Full-width task detail for the content panel, with an optional navigator back action. */
-export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onOpenSession, planJumps, onJumpToStep, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
+export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onOpenSession, planJumps, onJumpToStep, agents }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
 
   return (
@@ -109,7 +115,7 @@ export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun
         <div className="flex shrink-0 items-center justify-between border-b border-border/60 bg-background px-4 py-3">
           <div className="flex min-w-0 items-center gap-2.5">
             <span className="truncate td-row-sub font-semibold">{detail.name}</span>
-            <span className="shrink-0 font-mono text-xs text-muted-foreground">{detail.id}</span>
+            <span className="shrink-0 font-mono text-xs text-muted-foreground">任务id：{detail.id}</span>
           </div>
           <button
             type="button"
@@ -129,23 +135,17 @@ export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun
           onOpenSession={onOpenSession}
           planJumps={planJumps}
           onJumpToStep={onJumpToStep}
-          onUpdateTrigger={onUpdateTrigger}
+          agents={agents}
         />
       </div>
     </div>
   )
 }
 
-function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, planJumps, onJumpToStep, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
+function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, planJumps, onJumpToStep, agents }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
   const isPaused = detail.status === 'paused'
   const isStartable = detail.status === 'backlog' || isPaused
-  const [editingTrigger, setEditingTrigger] = React.useState(false)
-  const [triggerKind, setTriggerKind] = React.useState<'manual' | 'cron' | 'event'>(
-    detail.trigger?.kind ?? 'manual',
-  )
-  const [cronExpr, setCronExpr] = React.useState(detail.trigger?.expr ?? '')
-  const [eventSource, setEventSource] = React.useState(detail.trigger?.source ?? '')
   const triggerLabel = detail.trigger?.kind === 'cron'
     ? `定时 · ${detail.trigger.expr}${detail.trigger.timezone ? ` (${detail.trigger.timezone})` : ''}`
     : detail.trigger?.kind === 'event'
@@ -178,7 +178,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
             <h1 className="td-title text-foreground">{detail.name}</h1>
             <StatusBadge status={detail.status} />
           </div>
-          <p className="mt-2 flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
+          <p className="td-body mt-2 flex flex-wrap items-center gap-1.5 text-muted-foreground">
             <Clock3 className="h-4 w-4" aria-hidden="true" />
             最近更新 {formatTimestamp(detail.updatedAt)}
             {typeof detail.stats?.runs === 'number' ? (
@@ -190,7 +190,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <span className="font-mono text-xs text-muted-foreground/80">{detail.id}</span>
+          <span className="font-mono text-xs text-muted-foreground/80">任务id：{detail.id}</span>
           {isStartable ? (
             <>
               <button
@@ -213,88 +213,20 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
         </div>
       </header>
 
-      <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-trigger-heading">
-        {/*
-          * One line, not a heading stacked over a value. "触发方式" is a field label —
-          * it names the value beside it — so it takes the label size, and "手动" takes
-          * the body size. Before, the heading was larger than the answer it introduced,
-          * which read as a section title with something tiny dropped underneath.
-          */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2.5 gap-y-1">
-            <h2 id="task-trigger-heading" className="td-label text-muted-foreground">触发方式</h2>
-            <span className="td-row text-foreground">{triggerLabel}</span>
-          </div>
-          {onUpdateTrigger ? (
-            <button
-              type="button"
-              className="rounded-md border border-border/70 px-2.5 py-1 text-xs text-foreground hover:bg-foreground/5"
-              onClick={() => setEditingTrigger((v) => !v)}
-            >
-              {editingTrigger ? '收起' : '修改'}
-            </button>
-          ) : null}
+      {/*
+        * 触发方式 is a section heading, at the same size as 任务说明 and 执行计划, and it
+        * carries its value on the same line after a colon.
+        *
+        * The 修改 button is gone. It opened an inline editor for a field that the supervisor
+        * session already owns — two places to change one thing, and the panel could drift
+        * from what the supervisor would do. Changing how a task starts belongs in the
+        * conversation that runs it.
+        */}
+      <section aria-labelledby="task-trigger-heading" className="border-t border-border/40 pt-5">
+        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <h2 id="task-trigger-heading" className="td-heading text-foreground">触发方式：</h2>
+          <span className="td-body text-foreground/90">{triggerLabel}</span>
         </div>
-
-        {editingTrigger && onUpdateTrigger ? (
-          <div className="mt-3 space-y-2">
-            <div className="flex flex-wrap gap-1.5">
-              {(['manual', 'cron', 'event'] as const).map((kind) => (
-                <button
-                  key={kind}
-                  type="button"
-                  className={cn(
-                    'rounded-md border px-2.5 py-1 text-xs',
-                    triggerKind === kind
-                      ? 'border-primary/40 bg-primary/10 text-foreground'
-                      : 'border-border/70 text-muted-foreground hover:bg-foreground/5',
-                  )}
-                  onClick={() => setTriggerKind(kind)}
-                >
-                  {kind === 'manual' ? '手动' : kind === 'cron' ? '定时' : '事件'}
-                </button>
-              ))}
-            </div>
-
-            {triggerKind === 'cron' ? (
-              <input
-                className="w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 text-xs"
-                value={cronExpr}
-                onChange={(e) => setCronExpr(e.target.value)}
-                placeholder="0 9 * * 1"
-              />
-            ) : null}
-            {triggerKind === 'event' ? (
-              <input
-                className="w-full rounded-md border border-border/70 bg-background px-2.5 py-1.5 text-xs"
-                value={eventSource}
-                onChange={(e) => setEventSource(e.target.value)}
-                placeholder="mail / git / 监听器 source"
-              />
-            ) : null}
-
-            <button
-              type="button"
-              className="inline-flex min-h-8 items-center rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
-              disabled={
-                (triggerKind === 'cron' && !cronExpr.trim()) ||
-                (triggerKind === 'event' && !eventSource.trim())
-              }
-              onClick={() => {
-                const next =
-                  triggerKind === 'cron'
-                    ? { kind: 'cron', expr: cronExpr.trim(), enabled: true }
-                    : triggerKind === 'event'
-                      ? { kind: 'event', source: eventSource.trim(), enabled: true }
-                      : { kind: 'manual' }
-                onUpdateTrigger(detail.id, next)
-                setEditingTrigger(false)
-              }}
-            >
-              保存
-            </button>
-          </div>
-        ) : null}
       </section>
 
       <section className="rounded-xl border border-border/60 bg-foreground/[0.02] p-4 md:p-5" aria-labelledby="task-instruction-heading">
@@ -305,7 +237,15 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
         <p className="td-body whitespace-pre-wrap text-foreground/90">{detail.instruction}</p>
       </section>
 
-      <PlanSection plan={detail.spec?.plan} assignee={detail.assigneeAgentId} jumps={planJumps} onJump={onJumpToStep} />
+      <PlanSection
+        plan={detail.spec?.plan}
+        assignee={detail.assigneeAgentId}
+        jumps={planJumps}
+        onJump={onJumpToStep}
+        agents={agents}
+        currentSessionId={detail.currentSessionId}
+        onOpenSession={onOpenSession}
+      />
 
       {(detail.spec?.cwd || detail.spec?.sources?.length || detail.spec?.deliverables?.length || detail.spec?.acceptance?.length) ? (
         <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-contract-heading">
@@ -320,51 +260,60 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
             * character. Label vs value is hierarchy; 11px vs 15px was not, it was just
             * small.
             */}
-          <dl className="grid gap-3 md:grid-cols-2">
+          {/*
+            * A vertical list, not a two-column grid. One value per line reads as a
+            * contract: "· 工作目录: …" then "· 数据源: …". The grid split each row into two
+            * columns, so adding a third field reflowed the existing ones and a long path
+            * wrapped inside a half-width cell.
+            */}
+          <ul className="space-y-1.5 td-body">
             {detail.spec?.cwd ? (
-              <div className="min-w-0">
-                <dt className="td-label text-muted-foreground">工作目录</dt>
-                <dd className="td-row mt-1 break-words font-mono text-foreground/90">{detail.spec.cwd}</dd>
-              </div>
+              <li className="flex min-w-0 gap-1.5">
+                <span className="shrink-0 text-muted-foreground" aria-hidden="true">·</span>
+                <span className="shrink-0 text-muted-foreground">工作目录:</span>
+                <span className="min-w-0 break-all font-mono text-foreground">{detail.spec.cwd}</span>
+              </li>
             ) : null}
             {detail.spec?.sources?.length ? (
-              <div className="min-w-0">
-                <dt className="td-label text-muted-foreground">数据源</dt>
-                <dd className="td-row mt-1 break-words text-foreground/90">{detail.spec.sources.join('、')}</dd>
-              </div>
+              <li className="flex min-w-0 gap-1.5">
+                <span className="shrink-0 text-muted-foreground" aria-hidden="true">·</span>
+                <span className="shrink-0 text-muted-foreground">数据源:</span>
+                <span className="min-w-0 break-words text-foreground">{detail.spec.sources.join('、')}</span>
+              </li>
             ) : null}
-          </dl>
-          {detail.spec?.deliverables?.length ? (
-            <div className="mt-4">
-              <div className="td-label uppercase tracking-wide text-muted-foreground">交付物</div>
-              <ul className="mt-1.5 space-y-1">
-                {detail.spec.deliverables.map((item, index) => (
-                  <li key={`${item.kind}-${index}`} className="td-row flex flex-wrap items-baseline gap-1.5 text-foreground/90">
-                    <span className="rounded bg-foreground/5 px-1.5 py-0.5 font-mono td-label text-muted-foreground">{item.kind}</span>
-                    {item.path ? <span className="break-all font-mono">{item.path}</span> : null}
-                    {item.note ? <span className="text-muted-foreground">{item.note}</span> : null}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-          {detail.spec?.acceptance?.length ? (
-            <div className="mt-4">
-              <div className="td-label uppercase tracking-wide text-muted-foreground">验收命令</div>
-              <p className="td-row-sub mt-0.5 text-muted-foreground">
-                逐条跑命令，退出码 0 即通过。这些是确定性判定，不经过模型。
-              </p>
-              <ul className="mt-1.5 space-y-1">
-                {detail.spec.acceptance.map((item) => (
-                  <li key={item.id} className="td-row text-foreground/90">
-                    <span className="mr-1.5 font-mono text-muted-foreground">{item.id}</span>
-                    {item.check}
-                    {item.command ? <span className="ml-1.5 break-all font-mono text-muted-foreground">{item.command}</span> : null}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
+            {detail.spec?.deliverables?.length ? (
+              <li className="flex min-w-0 gap-1.5">
+                <span className="shrink-0 text-muted-foreground" aria-hidden="true">·</span>
+                <span className="shrink-0 text-muted-foreground">交付物:</span>
+                <span className="min-w-0 break-words text-foreground">
+                  {detail.spec.deliverables.map((item, index) => (
+                    <span key={`${item.kind}-${index}`} className="block">
+                      <span className="font-mono text-muted-foreground">{item.kind}</span>
+                      {item.path ? <span className="ml-1.5 break-all font-mono">{item.path}</span> : null}
+                      {item.note ? <span className="ml-1.5 text-muted-foreground">{item.note}</span> : null}
+                    </span>
+                  ))}
+                </span>
+              </li>
+            ) : null}
+            {detail.spec?.acceptance?.length ? (
+              <li className="flex min-w-0 gap-1.5">
+                <span className="shrink-0 text-muted-foreground" aria-hidden="true">·</span>
+                <span className="shrink-0 text-muted-foreground">验收命令:</span>
+                <span className="min-w-0 break-words text-foreground">
+                  {detail.spec.acceptance.map((item) => (
+                    <span key={item.id} className="block">
+                      <span className="mr-1.5 font-mono text-muted-foreground">{item.id}</span>
+                      {item.check}
+                      {item.command ? (
+                        <span className="ml-1.5 break-all font-mono text-muted-foreground">{item.command}</span>
+                      ) : null}
+                    </span>
+                  ))}
+                </span>
+              </li>
+            ) : null}
+          </ul>
         </section>
       ) : null}
 
@@ -404,7 +353,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
             <div className="min-w-0 flex-1">
               <h2 id="task-decision-heading" className="text-xs font-semibold text-amber-300">等你拍板</h2>
-              <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-foreground/90">
+              <p className="td-body mt-1 whitespace-pre-wrap text-foreground/90">
                 {detail.handoffs.at(-1)?.summary ?? '执行会话停下来请求决定，但没留下说明。'}
               </p>
               <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -433,7 +382,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
           <div className="min-w-0">
             <div className="text-xs font-semibold text-amber-300">暂停原因</div>
-            <p className="mt-1 text-xs leading-relaxed text-foreground/85">{pauseReasonLabel(detail.pauseReason)}</p>
+            <p className="td-body mt-1 text-foreground/85">{pauseReasonLabel(detail.pauseReason)}</p>
           </div>
         </div>
       ) : null}
@@ -443,7 +392,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
           <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-destructive" aria-hidden="true" />
           <div className="min-w-0">
             <div className="text-xs font-semibold text-destructive">最近错误</div>
-            <p className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground/85">{detail.lifecycle.lastError}</p>
+            <p className="td-body mt-1 whitespace-pre-wrap break-words text-foreground/85">{detail.lifecycle.lastError}</p>
           </div>
         </div>
       ) : null}
@@ -468,26 +417,18 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
           <p className="mt-1 text-xs text-muted-foreground">
             一句话说明「什么算完成」。命令判定不了的部分，由模型拿它对照交接内容判断。
           </p>
-          <p className="mt-2 text-sm leading-6 text-foreground/85">{detail.verify.requirement || '尚未设置验收要求。'}</p>
+          <p className="td-body mt-2 text-foreground/85">{detail.verify.requirement || '尚未设置验收要求。'}</p>
         </section>
       ) : null}
 
       <section aria-labelledby="task-handoff-heading">
+        {/* The current session moved to the plan header — it names the work in progress, not
+            the record of what already happened. This section only counts its entries. */}
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <h2 id="task-handoff-heading" className="td-heading text-foreground">交接时间线</h2>
             <span className="rounded-full bg-foreground/5 px-2 py-0.5 text-xs tabular-nums text-muted-foreground">{detail.handoffs.length}</span>
           </div>
-          {detail.currentSessionId ? (
-            <button
-              type="button"
-              onClick={() => onOpenSession?.(detail.currentSessionId!)}
-              title="打开这个会话"
-              className="truncate text-xs text-muted-foreground underline decoration-border underline-offset-2 transition-colors hover:text-foreground"
-            >
-              当前会话 · {detail.currentSessionId}
-            </button>
-          ) : null}
         </div>
         {detail.handoffs.length === 0 ? (
           <div className="rounded-xl border border-dashed border-border/70 px-5 py-8 text-center">
@@ -613,11 +554,19 @@ function PlanSection({
   assignee,
   jumps,
   onJump,
+  agents,
+  currentSessionId,
+  onOpenSession,
 }: {
   plan?: { id: string; title: string; status: 'todo' | 'doing' | 'done' | 'blocked'; agent?: string; note?: string }[]
   assignee?: string
   jumps?: Map<string, PlanJumpTarget>
   onJump?: (target: PlanJumpTarget) => void
+  /** Roster for owner names; see `agentLabelMap`. */
+  agents?: ReadonlyArray<{ id: string; name: string }>
+  /** The session currently carrying this task, shown in the heading's right corner. */
+  currentSessionId?: string
+  onOpenSession?: (sessionId: string) => void
 }): React.JSX.Element {
   // Which outlines the user has folded. Seeded from the plan itself, then left
   // alone until the plan's shape changes — a toggle the user just made must not
@@ -650,7 +599,9 @@ function PlanSection({
   // not counted alongside its children.
   const leaves = plan.filter((step) => !plan.some((other) => other.id.startsWith(`${step.id}.`)))
   const done = leaves.filter((step) => step.status === 'done').length
-  const ownerOf = (step: { agent?: string }) => step.agent ?? assignee
+  // Resolved once per render: the roster lookup is a map build, not a scan per step.
+  const labelOf = agentLabelMap(agents)
+  const ownerOf = (step: { agent?: string }) => labelOf(step.agent ?? assignee)
 
   const childrenOf = (id: string) => plan.filter((step) => step.id.startsWith(`${id}.`))
   const toggle = (id: string) =>
@@ -694,11 +645,27 @@ function PlanSection({
 
   return (
     <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-plan-heading">
+      {/*
+        * Progress sits inside the heading — "执行计划（4/4）" — instead of floating at the
+        * far right as "4 / 4 已完成". The count belongs to the plan, not to the section's
+        * corner, and at the far edge it read as a separate status chip. Now the right side
+        * of this row is free for the one thing that actually changes: which session is
+        * working on it.
+        */}
       <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
-        <h2 id="task-plan-heading" className="td-heading text-foreground">执行计划</h2>
-        <span className="text-xs tabular-nums text-muted-foreground">
-          {done} / {leaves.length} 已完成
-        </span>
+        <h2 id="task-plan-heading" className="td-heading text-foreground">
+          执行计划<span className="ml-1 tabular-nums text-muted-foreground">（{done}/{leaves.length}）</span>
+        </h2>
+        {currentSessionId ? (
+          <button
+            type="button"
+            onClick={() => onOpenSession?.(currentSessionId)}
+            title="打开这个会话"
+            className="truncate text-xs text-muted-foreground underline decoration-border underline-offset-2 transition-colors hover:text-foreground"
+          >
+            当前会话 · {currentSessionId}
+          </button>
+        ) : null}
       </div>
 
       <ul className="space-y-0.5">
@@ -751,35 +718,42 @@ function PlanSection({
               <span className="min-w-0 flex-1">
                 <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                   {/*
-                    * Status mark first, then the step number, then the title — it reads
-                    * "☑ 1 创建 docs/e2e-a.md", left to right in the order you scan it.
-                    * The number used to come first, which put a monospaced id where the
-                    * eye looks for the state and pushed the mark into the middle of the
-                    * line where it divided the number from the words it labels.
+                    * Status mark first, then "number title", then the owner.
+                    *
+                    * The number is *inside* the jump target now, not a separate monospaced
+                    * span before it. One row used to carry three sizes and three colours —
+                    * 11.25px monospace grey for the id, 15px for an outline title, 13px for
+                    * a sub-step, then an 11.25px monospace owner tag — so a single line read
+                    * like three unrelated fields. Row text is now one size and one colour;
+                    * only the status mark and the owner keep their own tone, and the owner
+                    * is a qualifier rather than part of the sentence.
                     */}
                   <span className="flex h-4 w-4 shrink-0 items-center justify-center">{mark}</span>
-                  <span className="shrink-0 font-mono text-xs text-muted-foreground/60">{step.id}</span>
                   {canJump ? (
                     <button
                       type="button"
                       title={hint}
                       onClick={() => onJump?.(jump!)}
                       className={cn(
-                        'min-w-0 rounded text-left underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                        isOutline ? 'font-medium text-foreground' : 'td-row-sub text-foreground/85',
-                        step.status === 'done' && 'text-muted-foreground',
+                        'td-row min-w-0 rounded text-left underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                        isOutline ? 'font-medium' : 'font-normal',
+                        step.status === 'done' ? 'text-muted-foreground' : 'text-foreground',
                       )}
                     >
+                      <span className="font-mono tabular-nums opacity-70">{step.id}</span>
+                      <span className="mx-1.5 opacity-40">·</span>
                       {step.title}
                     </button>
                   ) : (
                     <span
                       className={cn(
-                        'min-w-0 break-words',
-                        isOutline ? 'font-medium text-foreground' : 'td-row-sub text-foreground/85',
-                        step.status === 'done' && 'text-muted-foreground',
+                        'td-row min-w-0 break-words',
+                        isOutline ? 'font-medium' : 'font-normal',
+                        step.status === 'done' ? 'text-muted-foreground' : 'text-foreground',
                       )}
                     >
+                      <span className="font-mono tabular-nums opacity-70">{step.id}</span>
+                      <span className="mx-1.5 opacity-40">·</span>
                       {step.title}
                     </span>
                   )}
@@ -792,11 +766,11 @@ function PlanSection({
                     * badge, so a hand-off inside the plan stays legible.
                     */}
                   {ownerOf(step) && ownerOf(step) !== previousOwner ? (
-                    <span className="shrink-0 font-mono text-xs text-muted-foreground">· {ownerOf(step)}</span>
+                    <span className="shrink-0 font-mono text-xs text-muted-foreground">{ownerOf(step)}</span>
                   ) : null}
                 </span>
                 {step.note ? (
-                  <span className="mt-1 block break-words text-xs leading-5 text-muted-foreground">{step.note}</span>
+                  <span className="td-row-sub mt-1 block break-words text-muted-foreground">{step.note}</span>
                 ) : null}
               </span>
             </li>

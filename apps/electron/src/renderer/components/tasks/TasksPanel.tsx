@@ -8,7 +8,7 @@
 
 import * as React from 'react'
 
-import { useTasks, useTaskDetail } from '@/hooks/useAgents'
+import { useAgents, useTasks, useTaskDetail } from '@/hooks/useAgents'
 import { useNavigation } from '@/contexts/NavigationContext'
 import { TaskBoardPanel, type TaskDetailView, type TaskListItem } from './TaskBoardPanel'
 import { TaskDetailPanelView } from './TaskDetailPanelView'
@@ -47,6 +47,8 @@ export function TasksListPanel({
   onCloseDetail,
 }: TasksPanelProps): React.JSX.Element {
   const { tasks } = useTasks(workspaceId)
+  // The roster is what turns a plan step's `builtin-default` into the name settings shows.
+  const { agents } = useAgents(workspaceId)
   const { navigateToSession } = useNavigation()
 
   const cancel = (id: string) => {
@@ -101,7 +103,7 @@ export function TasksListPanel({
         onPause={pause}
         onDelete={remove}
         onDeleteMany={removeMany}
-        onUpdateTrigger={(id, trigger) => updateTaskTrigger(workspaceId, id, trigger)}
+        agents={agents}
       />
     </div>
   )
@@ -118,6 +120,7 @@ export function TaskDetailPanel({
   const { detail: raw, settled } = useTaskDetail(workspaceId, taskId)
   const parsed = toDetail(raw)
   const detail = parsed?.detail
+  const { agents } = useAgents(workspaceId)
   const { navigateToSession } = useNavigation()
 
   if (!detail) {
@@ -156,7 +159,7 @@ export function TaskDetailPanel({
             tasksRun?: (workspaceId: string, id: string) => Promise<unknown>
           }).tasksRun?.(workspaceId, id)
         }}
-        onUpdateTrigger={(id, trigger) => updateTaskTrigger(workspaceId, id, trigger)}
+        agents={agents}
         onCancel={(id) => {
           void (window.electronAPI as unknown as {
             tasksUpdate?: (workspaceId: string, id: string, status: string) => Promise<unknown>

@@ -217,23 +217,29 @@
 
      role          size    use
      ─────────────────────────────────────────────────────────────
-     --td-title     22px   the task name (one per page)
-     --td-heading   15px   section headings (执行计划, 交接时间线…) — same size as
-                           body on purpose: at 18px a heading competed with the task
-                           name, and five of them stacked down the page shouted louder
-                           than the content they introduce. Hierarchy is weight (600)
-                           and full-opacity foreground, not size.
-     --td-body      15px   prose: instruction, handoff summaries
-     --td-row       15px   plan outline rows, contract values
-     --td-row-sub   13px   plan sub-steps, secondary hints
-     --td-label   11.5px   field labels, metric labels, meta ids
+     --td-title     20px   the task name (one per page)
+     --td-heading   15px   section headings — 触发方式, 任务说明, 执行计划,
+                           执行契约, 交接时间线. User-set: the five section headings are
+                           the loudest label level on the page and sit one step above the
+                           content they introduce.
+     --td-body      13px   content under a heading: instruction prose, contract
+                           values, handoff summaries. Exactly one step below the heading,
+                           so reading order is label → value and never the reverse.
+     --td-row       13px   plan rows, same level as body
+     --td-row-sub   13px   plan sub-steps and notes — same size as body on purpose;
+                           the plan used to mix 15/13/11.5px inside one row
+     --td-label   11.5px   field labels inside a card (绝不作为区块标题)
+     --td-metric    18px   the one big number in a summary card
+     --td-meta      11.5px the hint under a metric value
   */
-  --td-title: 1.5rem;
+  --td-title: 1.33rem;
   --td-heading: 1rem;
-  --td-body: 1rem;
-  --td-row: 1rem;
+  --td-body: 0.87rem;
+  --td-row: 0.87rem;
   --td-row-sub: 0.87rem;
   --td-label: 0.77rem;
+  --td-metric: 1.2rem;
+  --td-meta: 0.77rem;
   --td-leading-body: 1.65;
   --td-leading-row: 1.55;
 
@@ -1563,13 +1569,16 @@ html.dark[data-scenic] .fullscreen-overlay-background {
 }
 
 .td-meta {
-  font-size: var(--td-label);
+  font-size: var(--td-meta);
   line-height: 1.45;
 }
 
-/* Metric value: the number the card exists to show. */
+/* Metric value: the number the card exists to show.
+   It used to read `--td-title`, so the number grew and shrank with the task name —
+   changing the title size silently resized four summary cards. Its own token now, one
+   step below the heading so the card does not out-shout the section it summarises. */
 .td-metric {
-  font-size: var(--td-title);
+  font-size: var(--td-metric);
   line-height: 1;
   font-weight: 600;
   font-variant-numeric: tabular-nums;

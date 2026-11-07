@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'bun:test'
 import {
+  controlDepsUnauthorized,
   pluginStatusReading,
   missingRequiredConfigValues,
   configSectionInitiallyOpen,
@@ -78,15 +79,64 @@ describe('pluginStatusReading', () => {
     expect(pluginStatusReading(input({ status: { state: 'degraded', lastError: null } })).tone).toBe('warn')
   })
 
-  it('reads amber when enabled yet not running — and works without dependency facts (list view)', () => {
+  it('reads gray when enabled yet stopped — and works without dependency facts (list view)', () => {
     const reading = pluginStatusReading({
       enabled: true,
       status: stopped,
       errors: [],
       missingConfig: [],
     })
-    expect(reading.tone).toBe('warn')
+    expect(reading.tone).toBe('off')
     expect(reading.reason).toBe('stopped')
+  })
+
+  it('reads gray when the state is missing entirely (defensive, enabled)', () => {
+    const reading = pluginStatusReading(
+      input({ status: { lastError: null } as unknown as PluginStatusInput['status'] }),
+    )
+    expect(reading.tone).toBe('off')
+    expect(reading.reason).toBe('stopped')
+  })
+
+  it('reads green only when running AND ready', () => {
+    expect(pluginStatusReading(input({ status: running, ready: true })).tone).toBe('ok')
+    // Running while the registry still says not runnable: amber, not green.
+    const notReady = pluginStatusReading(input({ status: running, ready: false }))
+    expect(notReady.tone).toBe('warn')
+    expect(notReady.reason).toBe('not-ready')
+    // Ready unknown (older payload shape) — trust the running state.
+    expect(pluginStatusReading(input({ status: running })).tone).toBe('ok')
+  })
+
+  it('reads amber when the control service rejected the token (unauthorized)', () => {
+    // stopped + unauthorized: amber beats gray
+    const reading = pluginStatusReading(input({ unauthorized: true }))
+    expect(reading.tone).toBe('warn')
+    expect(reading.reason).toBe('unauthorized')
+    // running + ready + unauthorized: amber beats green
+    expect(pluginStatusReading(input({ status: running, ready: true, unauthorized: true })).reason).toBe('unauthorized')
+  })
+
+  it('lets red facts beat amber ones (missing config / failed + unauthorized)', () => {
+    expect(pluginStatusReading(input({ unauthorized: true, missingConfig: ['email'] })).reason).toBe('missing-config')
+    const failed = { state: 'failed', lastError: 'x' } as const
+    expect(pluginStatusReading(input({ status: failed, unauthorized: true })).reason).toBe('failed')
+  })
+
+  it('lets red beat gray (missing config while stopped)', () => {
+    expect(pluginStatusReading(input({ missingConfig: ['email'] })).reason).toBe('missing-config')
+  })
+
+  it('keeps a deterministic order inside the amber tier', () => {
+    expect(pluginStatusReading(input({ status: { state: 'degraded', lastError: null }, unauthorized: true })).reason).toBe('degraded')
+    expect(pluginStatusReading(input({ status: { state: 'starting', lastError: null }, unauthorized: true })).reason).toBe('starting')
+  })
+
+  it('reads gray (disabled) over everything, including red facts', () => {
+    const failed = { state: 'failed', lastError: 'x' } as const
+    const reading = pluginStatusReading(input({ enabled: false, status: failed, missingConfig: ['email'] }))
+    expect(reading.tone).toBe('off')
+    expect(reading.reason).toBe('disabled')
   })
 
   it('prioritises hard failures over soft ones: failed + missing config stays red/failed', () => {
@@ -98,6 +148,21 @@ describe('pluginStatusReading', () => {
   it('prioritises manifest errors over a failed process', () => {
     const failed = { state: 'failed', lastError: 'exit 1' } as const
     expect(pluginStatusReading(input({ status: failed, errors: ['manifest.json is not valid JSON'] })).reason).toBe('config-error')
+  })
+})
+
+describe('controlDepsUnauthorized', () => {
+  it('detects 401 / unauthorized reasons, case-insensitively', () => {
+    expect(controlDepsUnauthorized({ reason: 'HTTP 401' })).toBe(true)
+    expect(controlDepsUnauthorized({ reason: 'unauthorized' })).toBe(true)
+    expect(controlDepsUnauthorized({ reason: 'UNAUTHORIZED' })).toBe(true)
+  })
+
+  it('is false for unrelated reasons or absent payloads', () => {
+    expect(controlDepsUnauthorized({ reason: 'timeout' })).toBe(false)
+    expect(controlDepsUnauthorized({ reason: '' })).toBe(false)
+    expect(controlDepsUnauthorized(undefined)).toBe(false)
+    expect(controlDepsUnauthorized(null)).toBe(false)
   })
 })
 

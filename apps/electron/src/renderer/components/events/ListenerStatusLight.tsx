@@ -4,11 +4,11 @@
  * columns can never disagree about what is wrong with a plugin.
  *
  * Tone → theme token (no raw colors in components):
- *   ok   → --success (running, healthy)
- *   warn → --info    (starting / unresponsive / enabled-but-stopped)
+ *   ok   → --success (running + ready)
+ *   warn → --info    (starting / unresponsive / unauthorized / running-but-not-ready)
  *   bad  → --destructive (manifest error, failed process, missing config or deps)
  *   off  → foreground-30 (the user switched it off — "I turned this off",
- *           never "it broke")
+ *           never "it broke" — or enabled but simply not running)
  *
  * The dot is never the only cue: every instance carries a title + aria-label,
  * and the detail page prints the sentence next to the dot.
@@ -16,6 +16,7 @@
 
 import * as React from 'react'
 import {
+  controlDepsUnauthorized,
   pluginStatusReading,
   type PluginStatusTone,
 } from '@craft-agent/shared/events/plugin-status'
@@ -47,7 +48,8 @@ export function ListenerStatusLight({
   className?: string
 }): React.ReactElement {
   // The list view loads without dependency probes, so its dependencies array
-  // is empty and the mapping simply skips that fact — the detail view, which
+  // is empty, `ready` reflects runtime-only, and controlDeps is absent — the
+  // mapping simply skips facts that view does not carry. The detail view, which
   // has the probed states, computes the full reading from the same function.
   const reading = pluginStatusReading({
     enabled: listener.enabled,
@@ -55,6 +57,8 @@ export function ListenerStatusLight({
     errors: listener.errors,
     missingConfig: listener.missingConfig,
     dependencies: listener.dependencies,
+    ready: listener.ready,
+    unauthorized: controlDepsUnauthorized(listener.controlDeps),
   })
   const dot = `rounded-full shrink-0 ${size === 'sm' ? 'h-1.5 w-1.5' : 'h-2 w-2'} ${TONE_DOT[reading.tone]}`
 

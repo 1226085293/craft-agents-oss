@@ -70,6 +70,19 @@ export function TasksListPanel({
     }).tasksDelete?.(workspaceId, id)
   }
 
+  /**
+   * Delete several tasks, then drop the selection if it pointed at any of them.
+   *
+   * The detail pane is keyed by the selected id. Leaving it pointing at a record
+   * that no longer exists is what made a deleted task keep rendering in the
+   * content column — so closing the selection is part of deleting, and it has to
+   * cover the multi-select case where the open task is one of many removed.
+   */
+  const removeMany = (ids: string[]) => {
+    for (const id of ids) remove(id)
+    if (selectedTaskId && ids.includes(selectedTaskId)) onCloseDetail()
+  }
+
   return (
     <div className="relative h-full min-h-0">
       <TaskBoardPanel
@@ -83,6 +96,7 @@ export function TasksListPanel({
         onOpenSession={(sessionId) => navigateToSession(sessionId)}
         onPause={pause}
         onDelete={remove}
+        onDeleteMany={removeMany}
         onUpdateTrigger={(id, trigger) => updateTaskTrigger(workspaceId, id, trigger)}
       />
     </div>
@@ -97,12 +111,23 @@ export function TaskDetailPanel({
   workspaceId: string
   taskId: string
 }): React.JSX.Element {
-  const raw = useTaskDetail(workspaceId, taskId)
+  const { detail: raw, settled } = useTaskDetail(workspaceId, taskId)
   const detail = toDetail(raw)
   const { navigateToSession } = useNavigation()
 
   if (!detail) {
-    return <div className="p-4 text-xs text-muted-foreground">读取任务中…</div>
+    // Two very different states used to look identical. Still fetching is a
+    // moment; a task that cannot be read is gone — deleted from the navigator,
+    // most likely — and the honest thing is to send the user back to "pick one"
+    // rather than leave the last-rendered task on screen as if it still existed.
+    if (!settled) {
+      return <div className="p-4 text-xs text-muted-foreground">读取任务中…</div>
+    }
+    return (
+      <div className="flex h-full items-center justify-center p-6 text-center text-xs text-muted-foreground">
+        从左侧选一个任务，查看它的交接与验收。
+      </div>
+    )
   }
 
   return (

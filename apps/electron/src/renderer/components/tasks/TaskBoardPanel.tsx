@@ -173,6 +173,8 @@ export interface TaskBoardPanelProps {
   onPause?: (id: string) => void
   /** Delete a finished task for good (record, journal, index entry). */
   onDelete?: (id: string) => void
+  /** Same, for a multi-selection — one pass, so the caller can clear selection once. */
+  onDeleteMany?: (ids: string[]) => void
   /** Change what starts a task. */
   onUpdateTrigger?: (id: string, trigger: unknown) => void
 }
@@ -234,6 +236,7 @@ export function TaskBoardPanel({
   onOpenSession,
   onPause,
   onDelete,
+  onDeleteMany,
   onUpdateTrigger,
 }: TaskBoardPanelProps): React.JSX.Element {
   const { t } = useTranslation()
@@ -249,7 +252,8 @@ export function TaskBoardPanel({
         if (action === 'pause') onPause?.(id)
         else if (action === 'resume') onRun?.(id)
         else if (action === 'cancel') onCancel?.(id)
-        else onDelete?.(id)
+        else if (action === 'delete' && onDeleteMany) onDeleteMany(ids)
+        else if (action === 'delete') onDelete?.(id)
       }
       if (action === 'delete') {
         // A deleted task cannot stay selected, or the detail pane would keep
@@ -257,7 +261,7 @@ export function TaskBoardPanel({
         setMulti((prev) => prev.filter((id) => !ids.includes(id)))
       }
     },
-    [onPause, onRun, onCancel, onDelete],
+    [onPause, onRun, onCancel, onDelete, onDeleteMany],
   )
 
   /**

@@ -126,25 +126,47 @@ export function useTasks(workspaceId: string | undefined): TasksState {
 /** Load one task with its journal (detail pane). */
 export function useTaskDetail(workspaceId: string | undefined, id: string | undefined) {
   const [detail, setDetail] = React.useState<unknown>(null)
+  const [settled, setSettled] = React.useState(false)
 
   React.useEffect(() => {
     if (!workspaceId || !id) {
       setDetail(null)
+      setSettled(true)
       return
     }
     let cancelled = false
-    void tasksApi()
-      .tasksGet?.(workspaceId, id, true)
-      .then((result) => {
-        if (!cancelled) setDetail(result ?? null)
-      })
-      .catch(() => {
-        if (!cancelled) setDetail(null)
-      })
+    setSettled(false)
+
+    const load = () => {
+      void tasksApi()
+        .tasksGet?.(workspaceId, id, true)
+        .then((result) => {
+          if (cancelled) return
+          setDetail(result ?? null)
+          setSettled(true)
+        })
+        .catch(() => {
+          if (cancelled) return
+          // A rejected get means the record is gone (deleted, or the workspace
+          // moved). That is an answer, not a pending state.
+          setDetail(null)
+          setSettled(true)
+        })
+    }
+
+    load()
+    // The detail pane used to be fetched once and then never again, so a task
+    // deleted from the navigator kept rendering its last-known contents. Any
+    // change in the workspace re-reads it; the miss becomes a null.
+    const off = tasksApi().onTasksChanged?.((payload) => {
+      if (!cancelled && payload?.workspaceId === workspaceId) load()
+    })
+
     return () => {
       cancelled = true
+      off?.()
     }
   }, [workspaceId, id])
 
-  return detail
+  return { detail, settled }
 }

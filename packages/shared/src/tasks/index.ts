@@ -112,6 +112,7 @@ export {
   formatTaskBrief,
   formatHandoffContext,
   formatNextLegBrief,
+  formatPlanRuleBlock,
   formatResumeBrief,
   type TaskBriefOptions,
 } from './brief.ts';

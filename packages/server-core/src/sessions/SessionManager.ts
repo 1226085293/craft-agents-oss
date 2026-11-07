@@ -36,7 +36,7 @@ import {
 } from '@craft-agent/shared/agents'
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
-import { readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatNextLegBrief, nextLeg, stepParent, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
+import { readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatNextLegBrief, formatPlanRuleBlock, nextLeg, stepParent, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -5617,7 +5617,15 @@ export class SessionManager implements ISessionManager {
             // Handing over work is routing, not waiting: `sendMessage` resolves
             // only once the worker's whole first turn is over, so awaiting it
             // held the supervisor's dispatch block open for minutes.
-            void this.sendMessage(created.id, params.instruction).catch((error) => {
+            //
+            // A dispatched session is still a session working on a task, so it has
+            // to be told how to keep the plan. This used to travel only in the task
+            // brief — which this path does not use — so a real worker ran ten shell
+            // commands exploring the disk and never wrote one.
+            const body = params.taskId
+              ? `${params.instruction}\n\n${formatPlanRuleBlock()}`
+              : params.instruction
+            void this.sendMessage(created.id, body).catch((error) => {
               sessionLog.warn('dispatch: failed to send the first instruction', {
                 sessionId: created.id,
                 error,
@@ -7529,7 +7537,13 @@ ${request.prompt}`;
         // Same reason as above: awaiting the worker's first turn made the
         // dispatch block look hung, and a block that never returns reads as a
         // failed dispatch — which is what invited the duplicate ones.
-        void this.sendMessage(created.id, params.instruction).catch((error) => {
+        //
+        // And the same rule about the plan: this path does not use the task
+        // brief, so without this the worker is never told to keep one.
+        const body = params.taskId
+          ? `${params.instruction}\n\n${formatPlanRuleBlock()}`
+          : params.instruction
+        void this.sendMessage(created.id, body).catch((error) => {
           sessionLog.warn('dispatch: failed to send the first instruction', {
             sessionId: created.id,
             error,

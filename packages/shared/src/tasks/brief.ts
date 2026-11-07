@@ -21,6 +21,27 @@ function bullet(items: string[]): string {
   return items.map((item) => `- ${item}`).join('\n');
 }
 
+/**
+ * How to keep the plan, told to whoever is about to start work.
+ *
+ * One block, used by the task brief and by a dispatch that hands a task to a new
+ * session. It lived only in the brief, and a dispatched worker therefore never saw
+ * it: in a real run the worker spent ten shell calls exploring the disk and never
+ * wrote a plan at all. The rule has to travel with the work, not with one of the
+ * ways work is handed out.
+ */
+export function formatPlanRuleBlock(): string {
+  return [
+    '## 怎么推进',
+    '',
+    '1. 先用 **一次** `task_plan({ steps: [...] })` 写下大纲：3–7 条，id 用 `1`、`2`、`3`。',
+    '2. 开工前把当前大纲拆成小节（`1.1`、`1.2`），然后逐条执行——小节开始前才写，不要预设没做过的部分的细节。',
+    '3. 一条大纲的小节都完成后，才能把它标为 done；标 done 之前，下一条大纲的小节必须已经存在。',
+    '4. 已完成的大纲和小节是记录，不能改回、不能改名——要返工就新开一条。',
+    '',
+  ].join('\n');
+}
+
 export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): string {
   const sections: string[] = [];
   const id = task.id;
@@ -45,20 +66,11 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
   if (contract.length) sections.push(`## 执行边界\n${bullet(contract)}`);
 
   //
-  // The plan rule belongs in the brief, not only in the tool's error messages:
+  // The plan rule belongs wherever a session is told to start work — the brief,
+  // and a dispatch that hands over a task — not only in the tool's error messages:
   // a worker that finds out by being refused has already spent the turn.
   //
-  sections.push(
-    [
-      '## 怎么推进',
-      '',
-      '1. 先用 **一次** `task_plan({ steps: [...] })` 写下大纲：3–7 条，id 用 `1`、`2`、`3`。',
-      '2. 开工前把当前大纲拆成小节（`1.1`、`1.2`），然后逐条执行——小节开始前才写，不要预设没做过的部分的细节。',
-      '3. 一条大纲的小节都完成后，才能把它标为 done；标 done 之前，下一条大纲的小节必须已经存在。',
-      '4. 已完成的大纲和小节是记录，不能改回、不能改名——要返工就新开一条。',
-      '',
-    ].join('\n'),
-  );
+  sections.push(formatPlanRuleBlock());
 
   if (spec?.deliverables?.length) {
     const lines = spec.deliverables.map((d) => {

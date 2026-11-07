@@ -681,7 +681,7 @@ function PlanSection({
       </div>
 
       <ul className="space-y-0.5">
-        {visible.map((step) => {
+        {visible.map((step, index) => {
           const depth = step.id.split('.').length - 1
           const isOutline = depth === 0
           const kids = isOutline ? childrenOf(step.id) : []
@@ -689,6 +689,9 @@ function PlanSection({
           const jump = jumps?.get(step.id)
           const canJump = Boolean(jump?.sessionId && onJump)
           const hint = isOutline ? '跳到这一节开始的地方' : '跳到这一步完成的地方'
+          // Compared against the previous *visible* row, so collapsing a section
+          // that had its own owner does not leave a stale badge suppressed.
+          const previousOwner = index > 0 ? ownerOf(visible[index - 1]) : undefined
 
           // Status is carried by an SVG mark, not an emoji: emoji render
           // differently on every platform, cannot be themed, and cannot be sized by
@@ -752,7 +755,15 @@ function PlanSection({
                       {step.title}
                     </span>
                   )}
-                  {ownerOf(step) ? (
+                  {/*
+                    * The owner is shown once per run of steps that share it, not on every
+                    * row. When one worker does the whole plan, the badge read
+                    * `· builtin-default` four times in a row — it looked like a column of
+                    * data rather than one fact, and it pushed the step titles off centre.
+                    * A step whose owner differs from the previous visible one still gets a
+                    * badge, so a hand-off inside the plan stays legible.
+                    */}
+                  {ownerOf(step) && ownerOf(step) !== previousOwner ? (
                     <span className="shrink-0 font-mono text-xs text-muted-foreground">· {ownerOf(step)}</span>
                   ) : null}
                 </span>

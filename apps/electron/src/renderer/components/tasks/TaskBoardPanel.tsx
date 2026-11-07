@@ -405,7 +405,7 @@ export function TaskBoardPanel({
                               type="button"
                               onClick={() => onOpenSession(task.currentSessionId!)}
                               title="打开正在执行这个任务的会话"
-                              className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                              className="shrink-0 rounded px-1.5 py-0.5 text-[11.5px] text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                             >
                               会话 ↗
                             </button>
@@ -415,7 +415,7 @@ export function TaskBoardPanel({
                             selectedId === task.id && 'opacity-70',
                           )} aria-hidden="true" />
                         </span>
-                        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[22px] text-[10px] text-muted-foreground">
+                        <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 pl-[22px] text-[11.5px] text-muted-foreground">
                           <span className="font-mono">{task.id}</span>
                           <span aria-hidden="true">·</span>
                           <span>{STATUS_LABEL[task.status]}</span>
@@ -429,12 +429,12 @@ export function TaskBoardPanel({
                           ) : null}
                         </span>
                         {task.pauseReason ? (
-                          <span className="truncate pl-[22px] text-[10px] text-amber-400" title={pauseReasonLabel(task.pauseReason)}>
+                          <span className="truncate pl-[22px] text-[11.5px] text-amber-400" title={pauseReasonLabel(task.pauseReason)}>
                             {pauseReasonLabel(task.pauseReason)}
                           </span>
                         ) : null}
                         {task.lastHandoff ? (
-                          <span className="line-clamp-2 pl-[22px] text-[10px] leading-relaxed text-muted-foreground" title={task.lastHandoff}>
+                          <span className="line-clamp-2 pl-[22px] text-[12px] leading-relaxed text-muted-foreground/90" title={task.lastHandoff}>
                             {task.lastHandoff}
                           </span>
                         ) : null}

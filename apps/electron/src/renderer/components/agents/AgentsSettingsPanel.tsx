@@ -45,6 +45,33 @@ interface AgentDraft {
   skills: { mode: 'all' | 'allowlist'; slugs: string[] }
 }
 
+/**
+ * How long a typing pause has to last before the draft is written.
+ *
+ * Long enough that a sentence typed at speed is one save, short enough that
+ * clicking away does not lose the tail of a word.
+ */
+const AUTOSAVE_MS = 500
+
+/**
+ * Everything about a draft that is *content*, with identity left out.
+ *
+ * Autosave gates on this string: when the user has not actually changed
+ * anything, the key is unchanged and no request goes out. `id` is deliberately
+ * excluded — creating a role assigns one mid-flight, and counting that as a
+ * change would cause a second save of the same content.
+ */
+function contentKey(draft: AgentDraft): string {
+  return JSON.stringify({
+    name: draft.name,
+    icon: draft.icon ?? null,
+    persona: draft.persona,
+    defaults: draft.defaults,
+    sources: draft.sources,
+    skills: draft.skills,
+  })
+}
+
 const EMPTY: AgentDraft = {
   name: '',
   persona: '',
@@ -283,23 +310,48 @@ export function AgentsSettingsPanel({
   const { agents, reload } = useAgents(workspaceId)
   const [selectedId, setSelectedId] = React.useState<string | null>(null)
   const [draft, setDraft] = React.useState<AgentDraft>(EMPTY)
-  const [saving, setSaving] = React.useState(false)
+  /**
+   * No save button. The page writes itself: every edit is persisted after a
+   * short pause. A settings page that makes you press Save teaches you to
+   * distrust it — the only question that matters is whether your change
+   * survived, and the answer should always be yes.
+   */
+  const [status, setStatus] = React.useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  /** contentKey() of what is already on disk. The autosave gate. */
+  const persistedRef = React.useRef(contentKey(EMPTY))
+  /**
+   * The id whose profile is currently in `draft`. Guards re-hydration: after
+   * creating a role the server hands back an id, and re-fetching it would
+   * overwrite whatever the user typed in the meantime.
+   */
+  const hydratedForRef = React.useRef<string | null>(null)
+  const flashRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const selected = agents.find((a) => a.id === selectedId)
 
   React.useEffect(() => {
     // The picker list is flat; load the full profile for the selected id.
     if (!selectedId) {
+      hydratedForRef.current = null
+      persistedRef.current = contentKey(EMPTY)
       setDraft(EMPTY)
       return
     }
+    // Already holding this profile — a refetch would only clobber the field the
+    // user is in the middle of editing.
+    if (hydratedForRef.current === selectedId) return
     let cancelled = false
     void (window.electronAPI as unknown as {
       agentsGet?: (workspaceId: string, id: string) => Promise<AgentDraft | null>
     })
       .agentsGet?.(workspaceId, selectedId)
       .then((profile) => {
-        if (!cancelled && profile) setDraft({ ...EMPTY, ...profile })
+        if (cancelled || !profile) return
+        const next = { ...EMPTY, ...profile }
+        hydratedForRef.current = selectedId
+        // Seeding the draft must not look like an edit.
+        persistedRef.current = contentKey(next)
+        setDraft(next)
       })
       .catch(() => undefined)
     return () => {
@@ -307,17 +359,58 @@ export function AgentsSettingsPanel({
     }
   }, [workspaceId, selectedId])
 
-  const save = async () => {
-    setSaving(true)
-    try {
-      await (window.electronAPI as unknown as {
-        agentsSave?: (workspaceId: string, agent: unknown) => Promise<{ id: string }>
-      }).agentsSave?.(workspaceId, { ...draft, id: draft.id ?? selectedId ?? undefined })
-      await reload()
-    } finally {
-      setSaving(false)
-    }
+  const flash = (next: 'saved' | 'error') => {
+    setStatus(next)
+    if (flashRef.current) clearTimeout(flashRef.current)
+    flashRef.current = setTimeout(() => setStatus('idle'), next === 'saved' ? 1600 : 5000)
   }
+
+  React.useEffect(() => {
+    return () => {
+      if (flashRef.current) clearTimeout(flashRef.current)
+    }
+  }, [])
+
+  /**
+   * Autosave.
+   *
+   * Three guards, each for a specific way this goes wrong:
+   *  - unchanged content, or a draft that came from disk, sends nothing;
+   *  - an empty name sends nothing, because every role needs a label;
+   *  - a brand-new role is not written until it has a name, so merely opening
+   *    the page does not litter the list with rows named 「新角色」.
+   */
+  React.useEffect(() => {
+    const key = contentKey(draft)
+    if (key === persistedRef.current) return
+    if (!draft.name.trim()) return
+
+    const timer = setTimeout(() => {
+      const payload = { ...draft, id: draft.id ?? selectedId ?? undefined }
+      setStatus('saving')
+      void (window.electronAPI as unknown as {
+        agentsSave?: (workspaceId: string, agent: unknown) => Promise<{ id: string }>
+      })
+        .agentsSave?.(workspaceId, payload)
+        .then((result) => {
+          // The key recorded is the one that was actually sent: if a keystroke
+          // landed while the request was in flight, the effect fires again
+          // with a different key, which is exactly right.
+          persistedRef.current = key
+          if (result?.id && draft.id !== result.id) {
+            // Adopt the id the server assigned so the next edit updates this
+            // role instead of creating a twin.
+            hydratedForRef.current = result.id
+            setSelectedId(result.id)
+            setDraft((current) => (contentKey(current) === key ? { ...current, id: result.id } : current))
+          }
+          flash('saved')
+        })
+        .catch(() => flash('error'))
+    }, AUTOSAVE_MS)
+
+    return () => clearTimeout(timer)
+  }, [draft, selectedId, workspaceId])
 
   const remove = async () => {
     if (!selectedId) return
@@ -405,14 +498,39 @@ export function AgentsSettingsPanel({
                     })}
                   >
                     <div className="flex w-64 items-center gap-2">
-                      <IconPicker
-                        value={draft.icon}
-                        onChange={(icon) => setDraft({ ...draft, icon })}
-                      />
+                      <span
+                        className={cn(selected?.builtin === true && 'pointer-events-none opacity-50')}
+                        title={
+                          selected?.builtin
+                            ? t('settings.agents.builtinNameFixed', {
+                                defaultValue: '内置角色的名称固定',
+                              })
+                            : undefined
+                        }
+                      >
+                        <IconPicker
+                          value={draft.icon}
+                          onChange={(icon) => setDraft({ ...draft, icon })}
+                        />
+                      </span>
                       <Input
                         className="h-8 bg-muted/50 text-sm"
                         placeholder={t('agent.namePlaceholder', { defaultValue: '角色名称' })}
                         value={draft.name}
+                        // Identity is fixed for the built-in role: the server's save
+                        // path for it edits the workspace defaults block and never
+                        // writes a name or an icon. Editable fields that silently
+                        // discard what you type are worse than read-only ones — with
+                        // autosave there is no longer a button press to hint that the
+                        // write was a no-op.
+                        readOnly={selected?.builtin === true}
+                        title={
+                          selected?.builtin
+                            ? t('settings.agents.builtinNameFixed', {
+                                defaultValue: '内置角色的名称固定',
+                              })
+                            : undefined
+                        }
                         onChange={(e) => setDraft({ ...draft, name: e.target.value })}
                       />
                     </div>
@@ -490,12 +608,7 @@ export function AgentsSettingsPanel({
                 onChange={(next) => setDraft({ ...draft, skills: next })}
               />
 
-              <div className="flex items-center gap-2 pb-2">
-                <Button size="sm" disabled={saving || !draft.name.trim()} onClick={() => void save()}>
-                  {saving
-                    ? t('settings.agents.saving', { defaultValue: '保存中…' })
-                    : t('settings.agents.save', { defaultValue: '保存' })}
-                </Button>
+              <div className="flex min-h-8 items-center gap-3 pb-2">
                 {selected && !selected.builtin ? (
                   <Button
                     size="sm"
@@ -507,6 +620,30 @@ export function AgentsSettingsPanel({
                     {t('settings.agents.delete', { defaultValue: '删除' })}
                   </Button>
                 ) : null}
+                {/*
+                  * A status word, not a button. Saving is no longer an action the
+                  * user takes, so the only thing worth showing is the result:
+                  * nothing while idle, a brief 「已保存」, and a persistent
+                  * 「保存失败」 if the write did not land. Failure has to stay on
+                  * screen — a silent autosave that quietly dropped a change is
+                  * worse than a button you forgot to press.
+                  */}
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className={cn(
+                    'text-[11px] tabular-nums',
+                    status === 'error' ? 'text-destructive' : 'text-muted-foreground',
+                  )}
+                >
+                  {status === 'saving'
+                    ? t('settings.agents.saving', { defaultValue: '保存中…' })
+                    : status === 'saved'
+                      ? t('settings.agents.saved', { defaultValue: '已保存' })
+                      : status === 'error'
+                        ? t('settings.agents.saveFailed', { defaultValue: '保存失败' })
+                        : ''}
+                </span>
               </div>
             </div>
           </div>

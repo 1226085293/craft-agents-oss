@@ -564,7 +564,11 @@ function PlanSection({
     )
   }
 
-  const done = plan.filter((step) => step.status === 'done').length
+  // Leaves only — the same rule `planProgress` uses. Counting every row would
+  // report "2 / 6" for a plan whose real progress is "1 / 4", because an outline
+  // and its sub-steps would each be counted.
+  const leaves = plan.filter((step) => !plan.some((other) => other.id.startsWith(`${step.id}.`)))
+  const done = leaves.filter((step) => step.status === 'done').length
   const ownerOf = (step: { agent?: string }) => step.agent ?? assignee ?? '未指定'
   // Group by owner so "which agent carries which stage" is answerable at a
   // glance instead of by reading every row.
@@ -575,7 +579,7 @@ function PlanSection({
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h2 id="task-plan-heading" className="text-xs font-semibold text-foreground">执行计划</h2>
         <span className="text-[11px] tabular-nums text-muted-foreground">
-          {done} / {plan.length} 已完成
+          {done} / {leaves.length} 已完成
         </span>
       </div>
 

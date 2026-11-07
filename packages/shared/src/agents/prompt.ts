@@ -101,7 +101,7 @@ export function formatAgentRosterBlock(entries: AgentPromptEntry[]): string {
     '',
     '## 可选角色',
     '',
-    '`task_create` 的 `assigneeAgentId` 决定**由谁来做**。按任务性质选：要改 UI 的和要查资料的，不该是同一个人。留空就用默认角色。',
+    '`task_create` 的 `assigneeAgentId` 和 `dispatch` 的 `target.agentId` 决定**由谁来做**。按任务性质选：要改 UI 的和要查资料的，不该是同一个人。留空就用默认角色。',
     '',
     ...lines,
     '',

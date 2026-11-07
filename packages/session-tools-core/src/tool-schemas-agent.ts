@@ -55,7 +55,13 @@ export const DispatchSchema = z.object({
     .discriminatedUnion('kind', [
       z.object({ kind: z.literal('session'), sessionId: z.string() }),
       z.object({ kind: z.literal('task'), taskId: z.string() }),
-      z.object({ kind: z.literal('new'), agentId: z.string().optional() }),
+      z.object({
+        kind: z.literal('new'),
+        agentId: z
+          .string()
+          .optional()
+          .describe('Role id for the new session, from the roster above. Omit for the workspace default.'),
+      }),
     ])
     .describe('Where the work goes: an existing session, an existing task, or a brand new session.'),
   name: z.string().optional().describe('Name for a newly created session.'),
@@ -132,7 +138,10 @@ export const TaskCreateSchema = z.object({
     .optional()
     .describe('How completion is judged. Run by the host, never by the worker itself.'),
   cwd: z.string().optional().describe('Working directory for the worker.'),
-  assigneeAgentId: z.string().optional(),
+  assigneeAgentId: z
+    .string()
+    .optional()
+    .describe('Role id that will execute this task, from the roster above. Omit for the workspace default.'),
   parentTaskId: z.string().optional(),
   dependsOn: z.array(z.string()).optional(),
   priority: z.number().int().min(0).max(4).optional(),
@@ -144,7 +153,10 @@ export const TaskUpdateSchema = z.object({
   pauseReason: z
     .enum(['failures', 'budget', 'process_lost', 'waiting', 'needs_decision'])
     .optional(),
-  assigneeAgentId: z.string().optional(),
+  assigneeAgentId: z
+    .string()
+    .optional()
+    .describe('Reassign to this role id. An id that is not a real profile silently falls back to the workspace default, so use one from the roster.'),
   error: z.string().optional(),
 });
 
@@ -159,7 +171,9 @@ export const TaskPlanSchema = z.object({
   agent: z
     .string()
     .optional()
-    .describe('Which profile owns this step. Set it when a stage is handed to a different agent than the one running now.'),
+    .describe(
+      'Role id that owns this step. Only set one you were actually given a roster for — a worker cannot see the roster, and a guessed id is replaced by the section owner. Omitting it is safe: the section owner assigns a real role.',
+    ),
   note: z.string().optional().describe('What proves it is done, or why it is blocked.'),
   remove: z.boolean().optional().describe('Drop an unfinished step (a finished step stays as record).'),
   /**

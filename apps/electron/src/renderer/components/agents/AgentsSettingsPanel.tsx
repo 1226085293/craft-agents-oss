@@ -85,7 +85,7 @@ function IconPicker({
           title={t('settings.agents.iconPick', { defaultValue: '选择图标' })}
           className={cn(
             'flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-input',
-            'bg-muted/50 text-base leading-none transition-colors hover:bg-accent',
+            'bg-muted/50 text-base leading-none transition-colors hover:bg-foreground/[0.055]',
           )}
         >
           {value ? (
@@ -106,7 +106,7 @@ function IconPicker({
                 setOpen(false)
               }}
               className={cn(
-                'flex h-6 w-6 items-center justify-center rounded text-sm leading-none transition-colors hover:bg-accent',
+                'flex h-6 w-6 items-center justify-center rounded text-sm leading-none transition-colors hover:bg-foreground/[0.055]',
                 value === icon && 'bg-accent',
               )}
             >
@@ -121,7 +121,7 @@ function IconPicker({
               onChange(undefined)
               setOpen(false)
             }}
-            className="mt-2 w-full rounded-sm px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-accent"
+            className="mt-2 w-full rounded-sm px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-foreground/[0.055]"
           >
             {t('settings.agents.iconClear', { defaultValue: '清除图标' })}
           </button>
@@ -235,7 +235,7 @@ function ScopeField({
                       'flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-left text-[13px] transition-colors',
                       checked
                         ? 'border-primary/40 bg-primary/10'
-                        : 'border-transparent hover:bg-accent',
+                        : 'border-transparent hover:bg-foreground/[0.055]',
                     )}
                   >
                     <span
@@ -368,7 +368,15 @@ export function AgentsSettingsPanel({
               onClick={() => setSelectedId(agent.id)}
               className={cn(
                 'mb-0.5 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors',
-                selectedId === agent.id ? 'bg-accent' : 'hover:bg-accent/60',
+                // `--accent` is the purple brand colour (Auto mode). Using it for
+                // row hover and selection painted the whole list purple whenever the
+                // pointer moved, which fights the neutral surfaces everywhere else in
+                // settings. A hover is a surface, not a brand moment: the selected row
+                // is a neutral fill with a left marker, so colour is reserved for
+                // things that actually mean something.
+                selectedId === agent.id
+                  ? 'bg-foreground/[0.08] font-medium text-foreground'
+                  : 'text-foreground/85 hover:bg-foreground/[0.055]',
               )}
             >
               <span className="flex w-4 shrink-0 justify-center text-sm">{agent.icon ?? '👤'}</span>

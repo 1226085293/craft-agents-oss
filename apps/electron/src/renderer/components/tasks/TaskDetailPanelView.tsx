@@ -166,16 +166,21 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-7 px-6 py-7 md:px-10 md:py-9">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
-          <div className="mb-2 flex flex-wrap items-center gap-2">
-            <span className="font-mono text-xs font-medium text-muted-foreground">{detail.id}</span>
+          {/*
+            * The status belongs to the name, so it sits on the name's baseline: "E2E
+            * 计划验证 已完成" is one sentence. It used to sit above the title next to the
+            * id, which made the id look like it qualified the status and left the reader
+            * to pair the badge back up with the title by eye.
+            * The id moves to the page's top-right corner — it is a reference number for
+            * talking about the task, not part of its identity.
+            */}
+          <div className="flex flex-wrap items-center gap-2.5">
+            <h1 className="td-title text-foreground">{detail.name}</h1>
             <StatusBadge status={detail.status} />
           </div>
-          <h1 className="td-title text-foreground">{detail.name}</h1>
-          <p className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
+          <p className="mt-2 flex flex-wrap items-center gap-1.5 text-sm text-muted-foreground">
+            <Clock3 className="h-4 w-4" aria-hidden="true" />
             最近更新 {formatTimestamp(detail.updatedAt)}
-            <span className="mx-1 text-border">·</span>
-            {triggerLabel}
             {typeof detail.stats?.runs === 'number' ? (
               <>
                 <span className="mx-1 text-border">·</span>
@@ -184,32 +189,41 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
             ) : null}
           </p>
         </div>
-        {isStartable ? (
-          <div className="flex shrink-0 items-center gap-2">
-            <button
-              type="button"
-              className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-border/70 bg-foreground/5 px-3 text-xs font-medium text-foreground transition-colors hover:bg-foreground/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onClick={() => (onRun ?? onResume)?.(detail.id)}
-            >
-              <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
-              {isPaused ? '继续' : '开始'}
-            </button>
-            <button
-              type="button"
-              className="inline-flex min-h-9 items-center rounded-md px-3 text-xs text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              onClick={() => onCancel?.(detail.id)}
-            >
-              取消任务
-            </button>
-          </div>
-        ) : null}
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="font-mono text-xs text-muted-foreground/80">{detail.id}</span>
+          {isStartable ? (
+            <>
+              <button
+                type="button"
+                className="inline-flex min-h-9 items-center gap-1.5 rounded-md border border-border/70 bg-foreground/5 px-3 text-xs font-medium text-foreground transition-colors hover:bg-foreground/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => (onRun ?? onResume)?.(detail.id)}
+              >
+                <RotateCcw className="h-3.5 w-3.5" aria-hidden="true" />
+                {isPaused ? '继续' : '开始'}
+              </button>
+              <button
+                type="button"
+                className="inline-flex min-h-9 items-center rounded-md px-3 text-xs text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => onCancel?.(detail.id)}
+              >
+                取消任务
+              </button>
+            </>
+          ) : null}
+        </div>
       </header>
 
       <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-trigger-heading">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <h2 id="task-trigger-heading" className="td-heading text-foreground">触发方式</h2>
-            <p className="mt-1 text-xs text-muted-foreground">{triggerLabel}</p>
+        {/*
+          * One line, not a heading stacked over a value. "触发方式" is a field label —
+          * it names the value beside it — so it takes the label size, and "手动" takes
+          * the body size. Before, the heading was larger than the answer it introduced,
+          * which read as a section title with something tiny dropped underneath.
+          */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-wrap items-baseline gap-x-2.5 gap-y-1">
+            <h2 id="task-trigger-heading" className="td-label text-muted-foreground">触发方式</h2>
+            <span className="td-row text-foreground">{triggerLabel}</span>
           </div>
           {onUpdateTrigger ? (
             <button
@@ -299,17 +313,24 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
             <FileText className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             <h2 id="task-contract-heading" className="td-heading text-foreground">执行契约</h2>
           </div>
-          <dl className="grid gap-3 text-xs md:grid-cols-2">
+          {/*
+            * Values take the body size, labels take the label size. Every value here was
+            * `text-xs` (11.25px) — the smallest text on the page — even though a working
+            * directory and an acceptance command are things people read character by
+            * character. Label vs value is hierarchy; 11px vs 15px was not, it was just
+            * small.
+            */}
+          <dl className="grid gap-3 md:grid-cols-2">
             {detail.spec?.cwd ? (
               <div className="min-w-0">
-                <dt className="text-muted-foreground">工作目录</dt>
-                <dd className="mt-1 break-words font-mono text-xs text-foreground/90">{detail.spec.cwd}</dd>
+                <dt className="td-label text-muted-foreground">工作目录</dt>
+                <dd className="td-row mt-1 break-words font-mono text-foreground/90">{detail.spec.cwd}</dd>
               </div>
             ) : null}
             {detail.spec?.sources?.length ? (
               <div className="min-w-0">
-                <dt className="text-muted-foreground">数据源</dt>
-                <dd className="mt-1 break-words text-foreground/90">{detail.spec.sources.join('、')}</dd>
+                <dt className="td-label text-muted-foreground">数据源</dt>
+                <dd className="td-row mt-1 break-words text-foreground/90">{detail.spec.sources.join('、')}</dd>
               </div>
             ) : null}
           </dl>
@@ -318,9 +339,9 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
               <div className="td-label uppercase tracking-wide text-muted-foreground">交付物</div>
               <ul className="mt-1.5 space-y-1">
                 {detail.spec.deliverables.map((item, index) => (
-                  <li key={`${item.kind}-${index}`} className="flex flex-wrap items-baseline gap-1.5 text-xs text-foreground/90">
-                    <span className="rounded bg-foreground/5 px-1.5 py-0.5 font-mono text-xs text-muted-foreground">{item.kind}</span>
-                    {item.path ? <span className="break-all font-mono text-xs">{item.path}</span> : null}
+                  <li key={`${item.kind}-${index}`} className="td-row flex flex-wrap items-baseline gap-1.5 text-foreground/90">
+                    <span className="rounded bg-foreground/5 px-1.5 py-0.5 font-mono td-label text-muted-foreground">{item.kind}</span>
+                    {item.path ? <span className="break-all font-mono">{item.path}</span> : null}
                     {item.note ? <span className="text-muted-foreground">{item.note}</span> : null}
                   </li>
                 ))}
@@ -330,15 +351,15 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
           {detail.spec?.acceptance?.length ? (
             <div className="mt-4">
               <div className="td-label uppercase tracking-wide text-muted-foreground">验收命令</div>
-              <p className="mt-0.5 text-xs text-muted-foreground">
+              <p className="td-row-sub mt-0.5 text-muted-foreground">
                 逐条跑命令，退出码 0 即通过。这些是确定性判定，不经过模型。
               </p>
               <ul className="mt-1.5 space-y-1">
                 {detail.spec.acceptance.map((item) => (
-                  <li key={item.id} className="text-xs text-foreground/90">
-                    <span className="mr-1.5 font-mono text-xs text-muted-foreground">{item.id}</span>
+                  <li key={item.id} className="td-row text-foreground/90">
+                    <span className="mr-1.5 font-mono text-muted-foreground">{item.id}</span>
                     {item.check}
-                    {item.command ? <span className="ml-1.5 break-all font-mono text-xs text-muted-foreground">{item.command}</span> : null}
+                    {item.command ? <span className="ml-1.5 break-all font-mono text-muted-foreground">{item.command}</span> : null}
                   </li>
                 ))}
               </ul>
@@ -729,8 +750,15 @@ function PlanSection({
 
               <span className="min-w-0 flex-1">
                 <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                  {/*
+                    * Status mark first, then the step number, then the title — it reads
+                    * "☑ 1 创建 docs/e2e-a.md", left to right in the order you scan it.
+                    * The number used to come first, which put a monospaced id where the
+                    * eye looks for the state and pushed the mark into the middle of the
+                    * line where it divided the number from the words it labels.
+                    */}
+                  <span className="flex h-4 w-4 shrink-0 items-center justify-center">{mark}</span>
                   <span className="shrink-0 font-mono text-xs text-muted-foreground/60">{step.id}</span>
-                  <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center">{mark}</span>
                   {canJump ? (
                     <button
                       type="button"

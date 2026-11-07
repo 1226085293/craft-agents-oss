@@ -218,14 +218,18 @@
      role          size    use
      ─────────────────────────────────────────────────────────────
      --td-title     22px   the task name (one per page)
-     --td-heading   18px   section headings (执行计划, 交接时间线…)
+     --td-heading   15px   section headings (执行计划, 交接时间线…) — same size as
+                           body on purpose: at 18px a heading competed with the task
+                           name, and five of them stacked down the page shouted louder
+                           than the content they introduce. Hierarchy is weight (600)
+                           and full-opacity foreground, not size.
      --td-body      15px   prose: instruction, handoff summaries
-     --td-row       15px   plan outline rows
-     --td-row-sub   13px   plan sub-steps
+     --td-row       15px   plan outline rows, contract values
+     --td-row-sub   13px   plan sub-steps, secondary hints
      --td-label   11.5px   field labels, metric labels, meta ids
   */
   --td-title: 1.5rem;
-  --td-heading: 1.2rem;
+  --td-heading: 1rem;
   --td-body: 1rem;
   --td-row: 1rem;
   --td-row-sub: 0.87rem;

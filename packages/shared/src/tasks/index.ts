@@ -55,6 +55,7 @@ export {
   recordRunResult,
   shouldRotateSession,
   shouldTripFuse,
+  TERMINAL_STATUSES,
   type ArtifactProbe,
   type TaskAcceptanceVerdict,
 } from './state.ts';
@@ -121,6 +122,7 @@ export {
   loadIndex,
   loadTask,
   nextTaskId,
+  deleteTask,
   normalizeTask,
   readJournal,
   saveTask,

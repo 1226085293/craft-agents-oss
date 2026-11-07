@@ -426,8 +426,8 @@ export const RPC_CHANNELS = {
     HANDOFF: 'taskboard:handoff',
     /** Start a run now (claims the lock, spawns a worker). */
     RUN: 'taskboard:run',
-    /** Create a task from the UI. */
-    CREATE: 'taskboard:create',
+    /** Delete a finished task for good (record, journal, index entry). */
+    DELETE: 'taskboard:delete',
     /** Change what starts a task (manual / cron / event). */
     UPDATE_TRIGGER: 'taskboard:updateTrigger',
     /** Pushed when any task changes (workspace-scoped). */

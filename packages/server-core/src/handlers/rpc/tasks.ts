@@ -21,6 +21,7 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.taskboard.UPDATE,
   RPC_CHANNELS.taskboard.HANDOFF,
   RPC_CHANNELS.taskboard.RUN,
+  RPC_CHANNELS.taskboard.DELETE,
   RPC_CHANNELS.taskboard.UPDATE_TRIGGER,
   RPC_CHANNELS.taskboard.CHANGED,
 ] as const;
@@ -122,6 +123,16 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       const started = await manager.runTask(workspaceId, id, 'manual')
       broadcast(workspaceId)
       return { started, ...(started ? {} : { reason: 'task is already running, blocked, or out of budget' }) }
+    },
+  );
+
+  server.handle(
+    RPC_CHANNELS.taskboard.DELETE,
+    async (_ctx: unknown, workspaceId: string, id: string) => {
+      const service = tasksFor(deps, workspaceId);
+      const result = service.remove(id);
+      if (result.ok) broadcast(workspaceId);
+      return result;
     },
   );
 

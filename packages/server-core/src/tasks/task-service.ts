@@ -19,6 +19,7 @@ import {
   checkDependencies,
   checkHandoffRules,
   createTask,
+  deleteTask,
   isHeartbeatMissing,
   isNewRevision,
   isRunLocked,
@@ -34,6 +35,7 @@ import {
   assessDecisionRequest,
   applyPlanPatch,
   DECISION_TIMEOUT_MS,
+  TERMINAL_STATUSES,
   type PlanStepStatus,
   type ArtifactProbe,
   type Handoff,
@@ -121,6 +123,29 @@ export class TaskService {
 
   get(id: string): Task | null {
     return loadTask(this.root, id);
+  }
+
+  /**
+   * Delete a finished task for good.
+   *
+   * Refused while the task is still live: a running task has a session writing
+   * to its journal, and removing the file underneath a worker turns a working
+   * task into a stream of "task not found" the user cannot explain. Cancel it
+   * first — cancellation is the operation that stops the work; deletion only
+   * clears the record afterwards.
+   */
+  remove(id: string): { ok: boolean; reason?: string } {
+    const task = this.get(id);
+    if (!task) return { ok: true };
+    if (!TERMINAL_STATUSES.includes(task.status)) {
+      return {
+        ok: false,
+        reason: `${task.status} 的任务不能直接删除，先取消它（还有会话正在写这条任务的记录）`,
+      };
+    }
+    deleteTask(this.root, id);
+    log.info(`[tasks] deleted ${id}`);
+    return { ok: true };
   }
 
   list(status?: TaskStatus): Task[] {

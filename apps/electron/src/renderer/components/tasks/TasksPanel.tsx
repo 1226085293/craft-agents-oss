@@ -57,6 +57,19 @@ export function TasksListPanel({
     }).tasksRun?.(workspaceId, id)
   }
 
+  /** Pause keeps the task; cancelling ends it. They are different answers. */
+  const pause = (id: string) => {
+    void (window.electronAPI as unknown as {
+      tasksUpdate?: (workspaceId: string, id: string, status: string, options?: unknown) => Promise<unknown>
+    }).tasksUpdate?.(workspaceId, id, 'paused', { pauseReason: 'waiting' })
+  }
+
+  const remove = (id: string) => {
+    void (window.electronAPI as unknown as {
+      tasksDelete?: (workspaceId: string, id: string) => Promise<unknown>
+    }).tasksDelete?.(workspaceId, id)
+  }
+
   return (
     <div className="relative h-full min-h-0">
       <TaskBoardPanel
@@ -68,6 +81,8 @@ export function TasksListPanel({
         onCancel={cancel}
         onRun={run}
         onOpenSession={(sessionId) => navigateToSession(sessionId)}
+        onPause={pause}
+        onDelete={remove}
         onUpdateTrigger={(id, trigger) => updateTaskTrigger(workspaceId, id, trigger)}
       />
     </div>

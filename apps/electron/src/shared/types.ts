@@ -552,6 +552,7 @@ export interface ElectronAPI {
   tasksGet(workspaceId: string, id: string, includeJournal?: boolean): Promise<unknown>
   tasksUpdate(workspaceId: string, id: string, status: string): Promise<unknown>
   tasksRun(workspaceId: string, id: string): Promise<{ started: boolean; reason?: string }>
+  tasksDelete(workspaceId: string, id: string): Promise<{ ok: boolean; reason?: string }>
   tasksUpdateTrigger(workspaceId: string, id: string, trigger: unknown): Promise<unknown>
   tasksHandoff(
     workspaceId: string,

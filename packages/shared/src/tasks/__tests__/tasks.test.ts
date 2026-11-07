@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,8 +19,12 @@ import {
 import {
   activeTasks,
   appendJournal,
+  deleteTask,
   attachSession,
   createTask,
+  getJournalPath,
+  getTaskPath,
+  loadIndex,
   loadTask,
   nextTaskId,
   readJournal,
@@ -233,5 +237,47 @@ describe('store', () => {
   it('returns null for a missing or corrupt task file', () => {
     const ws = workspace();
     expect(loadTask(ws, 'T-404')).toBeNull();
+  });
+});
+
+/**
+ * Deleting a task removes the record, the journal and the index entry — and the
+ * id is not handed back. Reusing a number would leave an old log line pointing
+ * at a different task, and the journal is meant to be evidence.
+ */
+describe('deleting a task', () => {
+  it('removes the record, the journal and the index entry', () => {
+    const root = mkdtempSync(join(tmpdir(), 'craft-task-rm-'));
+    const task = createTask({ id: 'T-1', name: 'cleanup', instruction: 'x', supervisorSessionId: 's', toolCallId: 'c', now: 1 });
+    saveTask(root, task);
+    appendJournal(root, 'T-1', { type: 'created', at: 1, data: {} });
+
+    expect(existsSync(getTaskPath(root, 'T-1'))).toBe(true);
+    expect(existsSync(getJournalPath(root, 'T-1'))).toBe(true);
+    expect(loadIndex(root).tasks.map((t) => t.id)).toContain('T-1');
+
+    expect(deleteTask(root, 'T-1')).toBe(true);
+
+    expect(existsSync(getTaskPath(root, 'T-1'))).toBe(false);
+    expect(existsSync(getJournalPath(root, 'T-1'))).toBe(false);
+    expect(loadIndex(root).tasks.map((t) => t.id)).not.toContain('T-1');
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('does not hand the id back to the pool', () => {
+    const root = mkdtempSync(join(tmpdir(), 'craft-task-rm2-'));
+    expect(nextTaskId(root)).toBe('T-1');
+    deleteTask(root, 'T-1');
+    // Still T-2: a deleted number stays retired, so old log lines keep meaning
+    // what they meant.
+    expect(nextTaskId(root)).toBe('T-2');
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('is idempotent so a second click cannot raise an error', () => {
+    const root = mkdtempSync(join(tmpdir(), 'craft-task-rm3-'));
+    expect(deleteTask(root, 'T-404')).toBe(false);
+    expect(deleteTask(root, 'T-404')).toBe(false);
+    rmSync(root, { recursive: true, force: true });
   });
 });

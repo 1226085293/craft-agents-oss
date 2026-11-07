@@ -13,10 +13,19 @@ import {
   CheckCircle2,
   CircleDot,
   PauseCircle,
+  PlayCircle,
+  Trash2,
   XCircle,
 } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu'
 import { TaskDetailPanelView } from './TaskDetailPanelView'
 
 
@@ -160,8 +169,57 @@ export interface TaskBoardPanelProps {
   onRun?: (id: string) => void
   /** Open the session that is working on a task (board entry as a link). */
   onOpenSession?: (sessionId: string) => void
+  /** Pause a live task without cancelling it. */
+  onPause?: (id: string) => void
+  /** Delete a finished task for good (record, journal, index entry). */
+  onDelete?: (id: string) => void
   /** Change what starts a task. */
   onUpdateTrigger?: (id: string, trigger: unknown) => void
+}
+
+/** One item in the right-click menu, plus who it applies to. */
+type BoardAction = 'pause' | 'resume' | 'cancel' | 'delete'
+
+const ACTION_LABEL: Record<BoardAction, string> = {
+  pause: '暂停',
+  resume: '恢复',
+  cancel: '取消任务',
+  delete: '删除',
+}
+
+/** Statuses that are finished — their record can be removed. */
+const FINISHED: readonly TaskStatus[] = ['completed', 'failed', 'canceled']
+
+function isFinished(status: TaskStatus): boolean {
+  return FINISHED.includes(status)
+}
+
+/**
+ * What one task can do, judged from its status alone.
+ *
+ * `paused` offers resume rather than pause: a task already stopped has nothing
+ * to stop. A running task offers cancel but not delete — deleting it would pull
+ * the record out from under the session that is still writing to it.
+ */
+export function actionsFor(status: TaskStatus): BoardAction[] {
+  if (isFinished(status)) return ['delete']
+  if (status === 'paused') return ['resume', 'cancel']
+  return ['pause', 'cancel']
+}
+
+/**
+ * Actions every one of these tasks can do.
+ *
+ * The intersection, not the union: offering 取消 when one of five selected tasks
+ * is already finished would either fail for that one or silently skip it. When
+ * nothing is shared the result is empty, and the caller opens no menu at all —
+ * a menu that opens with no items is worse than no menu.
+ */
+export function sharedActionsFor(statuses: TaskStatus[]): BoardAction[] {
+  if (statuses.length === 0) return []
+  return statuses
+    .map(actionsFor)
+    .reduce((acc, list) => acc.filter((action) => list.includes(action)))
 }
 
 export function TaskBoardPanel({
@@ -174,9 +232,99 @@ export function TaskBoardPanel({
   onCancel,
   onRun,
   onOpenSession,
+  onPause,
+  onDelete,
   onUpdateTrigger,
 }: TaskBoardPanelProps): React.JSX.Element {
   const { t } = useTranslation()
+
+  // Selection is local to the navigator: it is a way to act on several tasks at
+  // once, not a piece of app state that routes depend on.
+  const [multi, setMulti] = React.useState<string[]>([])
+  const anchorRef = React.useRef<string | null>(null)
+
+  const runAction = React.useCallback(
+    (action: BoardAction, ids: string[]) => {
+      for (const id of ids) {
+        if (action === 'pause') onPause?.(id)
+        else if (action === 'resume') onRun?.(id)
+        else if (action === 'cancel') onCancel?.(id)
+        else onDelete?.(id)
+      }
+      if (action === 'delete') {
+        // A deleted task cannot stay selected, or the detail pane would keep
+        // asking the backend for a record that no longer exists.
+        setMulti((prev) => prev.filter((id) => !ids.includes(id)))
+      }
+    },
+    [onPause, onRun, onCancel, onDelete],
+  )
+
+  /**
+   * Click / ctrl-click / shift-click, the way a file list behaves.
+   *
+   * Shift selects the visible range in board order — the order the user sees,
+   * not the order the array happens to be in, otherwise a range selection would
+   * jump across groups.
+   */
+  const handleItemClick = React.useCallback(
+    (event: React.MouseEvent, id: string) => {
+      // A right-click is not a left-click: the browser fires mousedown for it
+      // too, and letting that path run would collapse a multi-selection down to
+      // the one row under the cursor — the menu would then act on one task while
+      // the user had picked five.
+      if (event.button !== 0) {
+        if (!multi.includes(id)) {
+          setMulti([id])
+          anchorRef.current = id
+        }
+        return
+      }
+      const ordered = tasks.map((task) => task.id)
+      if (event.shiftKey && anchorRef.current) {
+        const from = ordered.indexOf(anchorRef.current)
+        const to = ordered.indexOf(id)
+        if (from >= 0 && to >= 0) {
+          const [start, end] = from <= to ? [from, to] : [to, from]
+          setMulti(ordered.slice(start, end + 1))
+          return
+        }
+      }
+      if (event.ctrlKey || event.metaKey) {
+        setMulti((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
+        anchorRef.current = id
+        return
+      }
+      setMulti([id])
+      anchorRef.current = id
+      onSelect(id)
+    },
+    [tasks, onSelect, multi],
+  )
+
+  /** Right-click targets: the selection if it was hit, otherwise just this row. */
+  const targetsFor = React.useCallback(
+    (id: string): string[] => (multi.includes(id) ? multi : [id]),
+    [multi],
+  )
+
+  /**
+   * Actions every targeted task can do.
+   *
+   * The intersection, not the union: offering 取消 when one of five selected
+   * tasks is already finished would either fail for that one or silently skip
+   * it. When nothing is shared the list is empty and no menu opens at all — a
+   * menu that opens with no items is worse than no menu.
+   */
+  const sharedActions = React.useCallback(
+    (ids: string[]): BoardAction[] => {
+      const chosen = tasks.filter((task) => ids.includes(task.id))
+      return sharedActionsFor(chosen.map((task) => task.status))
+    },
+    [tasks],
+  )
+
+  const selection = multi.length > 0 ? multi : selectedId ? [selectedId] : []
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -213,21 +361,31 @@ export function TaskBoardPanel({
                     <span className="text-[10px] tabular-nums text-muted-foreground/80">{items.length}</span>
                   </div>
                   <div className="space-y-1">
-                    {items.map((task) => (
+                    {items.map((task) => {
+                      const targets = targetsFor(task.id)
+                      const menu = sharedActions(targets)
+                      const selected = multi.includes(task.id)
+                      return (
+                      <ContextMenu key={task.id}>
+                        <ContextMenuTrigger asChild disabled={menu.length === 0}>
                       <div
-                        key={task.id}
                         className={cn(
                           'group flex w-full flex-col gap-1 rounded-lg border-l-2 border-transparent px-3 py-2.5 text-left transition-colors duration-150',
                           'hover:bg-foreground/5',
-                          selectedId === task.id && 'border-accent bg-accent/10',
+                          (selected || selectedId === task.id) && 'border-accent bg-accent/10',
                         )}
+                        onMouseDown={(event) => handleItemClick(event, task.id)}
+                        aria-selected={selected || selectedId === task.id}
                       >
                         <span className="flex min-w-0 items-center gap-2">
                           {STATUS_ICON[task.status]}
                           <button
                             type="button"
-                            aria-pressed={selectedId === task.id}
-                            onClick={() => onSelect(task.id)}
+                            aria-pressed={selected || selectedId === task.id}
+                            onClick={(event) => {
+                              if (event.shiftKey || event.ctrlKey || event.metaKey) handleItemClick(event, task.id)
+                              else onSelect(task.id)
+                            }}
                             className="min-w-0 flex-1 truncate text-left text-[13px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
                           >
                             {task.name}
@@ -277,7 +435,45 @@ export function TaskBoardPanel({
                           </span>
                         ) : null}
                       </div>
-                    ))}
+                        </ContextMenuTrigger>
+                        <ContextMenuContent className="w-44">
+                          {targets.length > 1 ? (
+                            <div className="px-2 py-1.5 text-[10px] text-muted-foreground">
+                              已选 {targets.length} 项
+                            </div>
+                          ) : null}
+                          {menu.includes('pause') ? (
+                            <ContextMenuItem onSelect={() => runAction('pause', targets)}>
+                              <PauseCircle className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
+                              {ACTION_LABEL.pause}
+                            </ContextMenuItem>
+                          ) : null}
+                          {menu.includes('resume') ? (
+                            <ContextMenuItem onSelect={() => runAction('resume', targets)}>
+                              <PlayCircle className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
+                              {ACTION_LABEL.resume}
+                            </ContextMenuItem>
+                          ) : null}
+                          {menu.includes('cancel') ? (
+                            <ContextMenuItem onSelect={() => runAction('cancel', targets)}>
+                              <XCircle className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
+                              {ACTION_LABEL.cancel}
+                            </ContextMenuItem>
+                          ) : null}
+                          {menu.includes('delete') && menu.length > 1 ? <ContextMenuSeparator /> : null}
+                          {menu.includes('delete') ? (
+                            <ContextMenuItem
+                              onSelect={() => runAction('delete', targets)}
+                              className="text-destructive focus:bg-destructive/10 focus:text-destructive"
+                            >
+                              <Trash2 className="mr-2 h-3.5 w-3.5" aria-hidden="true" />
+                              {ACTION_LABEL.delete}
+                            </ContextMenuItem>
+                          ) : null}
+                        </ContextMenuContent>
+                      </ContextMenu>
+                      )
+                    })}
                   </div>
                 </section>
               )

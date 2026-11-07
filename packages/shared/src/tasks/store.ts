@@ -19,6 +19,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from 'fs';
 import { join } from 'path';
@@ -276,4 +277,39 @@ export function activeTasks(workspaceRoot: string): Task[] {
 
 export function tasksByStatus(workspaceRoot: string, status: TaskStatus): Task[] {
   return listTasks(workspaceRoot).filter((t) => t.status === status);
+}
+
+/**
+ * Remove a task for good: its record, its journal, and its index entry.
+ *
+ * The id is deliberately *not* returned to the pool — `seq` only moves forward,
+ * so a deleted T-3 stays deleted. Reusing the number would leave old log lines
+ * pointing at a different task, and the journal exists to be evidence.
+ *
+ * Idempotent on purpose: a second click on the same menu item must not raise an
+ * error about something that is already gone.
+ */
+export function deleteTask(workspaceRoot: string, id: string): boolean {
+  let removed = false;
+
+  for (const path of [getTaskPath(workspaceRoot, id), getJournalPath(workspaceRoot, id)]) {
+    try {
+      if (existsSync(path)) {
+        rmSync(path, { force: true });
+        removed = true;
+      }
+    } catch {
+      // A locked file is not a reason to leave the index disagreeing with disk.
+    }
+  }
+
+  const index = loadIndex(workspaceRoot);
+  const before = index.tasks.length;
+  index.tasks = index.tasks.filter((entry) => entry.id !== id);
+  if (index.tasks.length !== before) {
+    saveIndex(workspaceRoot, index);
+    removed = true;
+  }
+
+  return removed;
 }

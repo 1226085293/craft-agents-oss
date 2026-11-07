@@ -538,8 +538,28 @@ export class TaskService {
     reasons: string[];
     /** True when the session should be compacted before the next turn. */
     compactionPending: boolean;
+    /** True when the task no longer exists (deleted from the board). */
+    taskGone?: boolean;
   }> {
-    const task = this.require(id);
+    // A session outlives its task on purpose — deleting a board entry must not
+    // delete the conversation that explains it. So a worker can still report into a
+    // task that has since been removed, and throwing there would turn an ordinary
+    // end-of-turn into an error the user has to interpret. The report is accepted
+    // and simply goes nowhere.
+    const existing = this.get(id);
+    if (!existing) {
+      log.info(`[tasks] handoff for deleted task ${id} from ${fromSessionId} dropped`);
+      return {
+        task: { id } as Task,
+        handoff: normalizeHandoff(raw, fromSessionId, this.now()),
+        passed: false,
+        reasons: ['任务已删除，这次交接只留在会话记录里'],
+        compactionPending: false,
+        taskGone: true,
+      };
+    }
+
+    const task = existing;
     const now = this.now();
     const handoff = normalizeHandoff(raw, fromSessionId, now);
 

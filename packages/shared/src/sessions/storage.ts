@@ -547,6 +547,9 @@ export async function updateSessionMetadata(
     // session rewrites both together (they must never drift apart).
     | 'agentId'
     | 'agentSnapshot'
+    // The task a session works on. Updatable so a task deleted from the board can
+    // detach its sessions: the conversation stays, the dangling reference goes.
+    | 'taskId'
     | 'isArchived'
     | 'archivedAt'
     | 'projectId'

@@ -4886,6 +4886,30 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Clear a session's reference to a task that no longer exists.
+   *
+   * Called when a task is deleted from the board. The session itself is kept — it
+   * is the conversation, not an artifact of the task — but a session that still
+   * claims to belong to T-3 shows a task chip leading nowhere and keeps asking the
+   * task service about a record that is gone.
+   *
+   * Only clears the link when it still points at the task being removed: a session
+   * that has since been re-attached elsewhere keeps its new task.
+   */
+  detachTask(sessionId: string, taskId: string): void {
+    const managed = this.sessions.get(sessionId)
+    if (!managed || managed.taskId !== taskId) return
+    managed.taskId = undefined
+    void updateSessionMetadata(managed.workspace.rootPath, sessionId, { taskId: undefined }).catch(
+      (error) => sessionLog.warn('failed to detach a session from a deleted task', { sessionId, taskId, error }),
+    )
+    this.sendEvent(
+      { type: 'session_metadata_changed', sessionId, changes: { taskId: undefined } },
+      managed.workspace.id,
+    )
+  }
+
+  /**
    * Tell every open board that a task changed.
    *
    * The task board refreshes on `taskboard:CHANGED`, which the RPC handlers emit

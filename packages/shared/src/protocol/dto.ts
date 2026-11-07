@@ -306,7 +306,7 @@ export type SessionEvent =
   | { type: 'session_unarchived'; sessionId: string }
   | { type: 'name_changed'; sessionId: string; name?: string }
   | { type: 'session_model_changed'; sessionId: string; model: string | null }
-  | { type: 'session_metadata_changed'; sessionId: string; changes: Partial<Pick<Session, 'hasUnread' | 'lastReadMessageId'>> & { agentId?: string; projectId?: string | null; folderId?: string | null; archivedFolderId?: string | null; archivedFolderPath?: string[]; archivedProjectId?: string; archivedByParent?: string; sortOrder?: string; pinnedAt?: number } }
+  | { type: 'session_metadata_changed'; sessionId: string; changes: Partial<Pick<Session, 'hasUnread' | 'lastReadMessageId'>> & { agentId?: string; taskId?: string; projectId?: string | null; folderId?: string | null; archivedFolderId?: string | null; archivedFolderPath?: string[]; archivedProjectId?: string; archivedByParent?: string; sortOrder?: string; pinnedAt?: number } }
   | { type: 'session_deleted'; sessionId: string }
   | { type: 'session_created'; sessionId: string }
   | { type: 'session_shared'; sessionId: string; sharedUrl: string }

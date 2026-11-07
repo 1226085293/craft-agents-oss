@@ -151,9 +151,26 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
     RPC_CHANNELS.taskboard.DELETE,
     async (_ctx: unknown, workspaceId: string, id: string) => {
       const service = tasksFor(deps, workspaceId);
+      const task = service.get(id);
+      const sessionIds = task?.sessionIds ?? [];
       const result = service.remove(id);
-      if (result.ok) broadcast(workspaceId);
-      return result;
+      if (!result.ok) return result;
+
+      // The sessions stay. A task is a board entry; a session is the conversation
+      // that explains it — the tool calls, the files read, the errors. Deleting the
+      // entry must not delete the history, and the same session can be referenced by
+      // more than one task, so removing one task may not take it down anyway.
+      //
+      // What must go is the dangling reference: an orphan that still says "I belong
+      // to T-3" shows a task chip that leads nowhere and keeps asking the task
+      // service about a record that no longer exists.
+      const manager = deps.sessionManager as unknown as {
+        detachTask?: (sessionId: string, taskId: string) => void;
+      };
+      for (const sessionId of sessionIds) manager.detachTask?.(sessionId, id);
+
+      broadcast(workspaceId);
+      return { ...result, sessionsKept: sessionIds.length };
     },
   );
 

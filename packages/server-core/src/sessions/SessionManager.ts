@@ -36,7 +36,7 @@ import {
 } from '@craft-agent/shared/agents'
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
-import { readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatNextLegBrief, nextLeg, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
+import { readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatNextLegBrief, nextLeg, stepParent, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -53,6 +53,7 @@ import { migrateAutomationCronTasks } from '../tasks/automation-migration.ts'
 import { buildJudgePrompt, parseJudgeVerdict } from '../tasks/task-judge.ts'
 import { SupervisorRuntime } from '../routing/supervisor-runtime.ts'
 import { buildAgentToolBindings } from './agent-tools-bindings.ts'
+import { buildSectionOwnerPrompt, parseSectionOwner, readRoster } from '../tasks/section-owner.ts'
 import { kindRouting, registerAttachmentName, pickStrategyModel, type ModelRequestKind, type ModelWindow } from '@craft-agent/shared/config'
 import type { MidStreamBehavior } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
@@ -5690,17 +5691,41 @@ export class SessionManager implements ISessionManager {
             const owns =
               task.currentSessionId === managed.id || task.sessionIds.includes(managed.id)
             if (!owns) return { ok: false, error: 'this session is not working on that task' }
+
+            // A worker no longer names the owner. It cannot see the roster, so the
+            // name it wrote was a guess — either itself or an id that matched
+            // nothing — and the auto-dispatch that trusts the field would hand the
+            // section to a role nobody meant. Assignment happens below, when a
+            // section is first expanded.
+            void patch.agent
+
+            const beforeIds = new Set((task.spec?.plan ?? []).map((step) => step.id))
             const result = service.updatePlan(identifier, {
               id: patch.id,
               ...(patch.status ? { status: patch.status as never } : {}),
               ...(patch.title ? { title: patch.title } : {}),
-              // Without this the owner a worker declares is accepted by the tool
-              // schema and then dropped here — the step would render with no
-              // `@agent` and silently disagree with what the worker recorded.
-              ...(patch.agent ? { agent: patch.agent } : {}),
               ...(patch.note !== undefined ? { note: patch.note } : {}),
               ...(patch.remove !== undefined ? { remove: patch.remove } : {}),
             })
+            // A section that just gained its first step needs an owner, and that is
+            // a routing decision — made once per section, by reading the roster, in
+            // a hidden session. Waiting for the worker to name itself would leave
+            // the field empty or guessed, and every later hand-off would inherit
+            // that guess.
+            const outlineId = stepParent(patch.id)
+            if (result.ok && outlineId && !beforeIds.has(patch.id)) {
+              const fresh = service.get(identifier)
+              const outline = fresh?.spec?.plan?.find((step) => step.id === outlineId)
+              const siblings = (fresh?.spec?.plan ?? []).filter(
+                (step) => stepParent(step.id) === outlineId,
+              )
+              const already = outline?.agent ?? siblings.find((step) => step.agent)?.agent
+              if (outline && !already) {
+                void this.assignSectionOwner(managed.workspace.id, identifier, outlineId).catch(
+                  (error) => sessionLog.warn('[tasks] section owner not assigned', { identifier, outlineId, error }),
+                )
+              }
+            }
             // The checklist is the thing the user watches while work happens. A
             // plan that updates only on a manual page switch is not a progress
             // indicator; every accepted patch has to reach the board.
@@ -6989,6 +7014,79 @@ ${request.prompt}`;
    * its answer is parsed fail-closed. It is deliberately a separate session —
    * a worker grading its own homework is not a gate.
    */
+  /**
+   * Decide who owns a section of a task, and stamp it on the section.
+   *
+   * Runs in a hidden session, the same way the hand-off judge does: the question
+   * needs a model (the roster has to be read and weighed) but must not be asked in
+   * the supervisor's conversation, which belongs to the user. Queuing a planning
+   * question there would put bookkeeping in front of the user's next sentence, and
+   * the wait would grow with the number of tasks.
+   *
+   * One call per section, when it is first expanded — not per step, and not again
+   * for a section that already has an owner.
+   */
+  private async assignSectionOwner(
+    workspaceId: string,
+    taskId: string,
+    outlineId: string,
+  ): Promise<void> {
+    const service = this.getTasks(workspaceId)
+    const task = service.get(taskId)
+    if (!task) return
+    const plan = task.spec?.plan ?? []
+    const outline = plan.find((step) => step.id === outlineId)
+    if (!outline) return
+    if (outline.status === 'done') return
+
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    const roster = readRoster(workspace?.rootPath)
+    // Nothing to choose from: the default profile is already the answer, and
+    // stamping it would freeze "whatever the default was today" into the plan.
+    if (roster.length <= 1) return
+
+    const steps = plan.filter((step) => stepParent(step.id) === outlineId)
+    if (steps.length === 0) return
+
+    const created = await this.createSession(workspaceId, {
+      name: `${taskId} ${outlineId} 分工`,
+      role: 'worker',
+      hidden: true,
+      permissionMode: 'safe',
+    })
+
+    try {
+      await this.sendMessage(
+        created.id,
+        buildSectionOwnerPrompt({
+          task: { name: task.name, instruction: task.instruction, spec: task.spec },
+          outline,
+          steps,
+          roster,
+        }),
+      )
+      const messages = this.sessions.get(created.id)?.messages ?? []
+      const answer = [...messages]
+        .reverse()
+        .find((m) => m.role === 'assistant' && !m.isIntermediate && typeof m.content === 'string')
+      const agent = parseSectionOwner(typeof answer?.content === 'string' ? answer.content : '', roster)
+      if (!agent) return
+
+      // Record it on the outline and on steps that carry no owner of their own, so
+      // the section reads as one responsibility instead of a mixed bag.
+      for (const step of [outline, ...steps]) {
+        if (step.agent) continue
+        service.updatePlan(taskId, { id: step.id, agent })
+      }
+      sessionLog.info(`[tasks] ${taskId} ${outlineId} assigned to ${agent}`)
+      this.notifyTasksChanged(workspaceId)
+    } finally {
+      // The chooser is a scratch session; nothing is gained by keeping it around,
+      // and a hidden session per section would otherwise accumulate.
+      await this.cancelProcessing(created.id, true).catch(() => {})
+    }
+  }
+
   private async judgeTaskHandoff(
     workspaceId: string,
     task: import('@craft-agent/shared/tasks').Task,

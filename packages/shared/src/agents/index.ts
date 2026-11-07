@@ -32,6 +32,9 @@ export {
 
 export { getAgentsFilePath, hasAgentsFile, loadAgents, saveAgents } from './storage.ts';
 
+export { buildAgentRosterBlock, formatAgentRosterBlock, readAgentRoster } from './prompt.ts';
+export type { AgentPromptEntry } from './prompt.ts';
+
 export {
   buildAgentSnapshot,
   getAgentById,

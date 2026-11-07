@@ -18,7 +18,7 @@ import {
 
 import { cn } from '@/lib/utils'
 import { TaskDetailPanelView } from './TaskDetailPanelView'
-import { TaskCreateDialog, type TaskCreateInput } from './TaskCreateDialog'
+
 
 export type TaskStatus = 'backlog' | 'running' | 'paused' | 'completed' | 'failed' | 'canceled'
 
@@ -158,8 +158,8 @@ export interface TaskBoardPanelProps {
   onCancel?: (id: string) => void
   /** Start a run now (backlog or paused). */
   onRun?: (id: string) => void
-  /** Create a task from the UI. */
-  onCreate?: (input: TaskCreateInput) => void
+  /** Open the session that is working on a task (board entry as a link). */
+  onOpenSession?: (sessionId: string) => void
   /** Change what starts a task. */
   onUpdateTrigger?: (id: string, trigger: unknown) => void
 }
@@ -173,11 +173,10 @@ export function TaskBoardPanel({
   onResume,
   onCancel,
   onRun,
-  onCreate,
+  onOpenSession,
   onUpdateTrigger,
 }: TaskBoardPanelProps): React.JSX.Element {
   const { t } = useTranslation()
-  const [creating, setCreating] = React.useState(false)
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -188,18 +187,14 @@ export function TaskBoardPanel({
             {tasks.length}
           </span>
         </div>
-        {onCreate ? (
-          <button
-            type="button"
-            className="rounded-md border border-border/70 px-2 py-1 text-[11px] font-medium text-foreground hover:bg-foreground/5"
-            onClick={() => setCreating(true)}
-          >
-            + 新建
-          </button>
-        ) : null}
+        {/*
+          No "+ 新建" here on purpose. A task carries a scope, an acceptance
+          list and an executor — none of which a dialog can invent, and a task
+          created by hand has no supervisor watching it. Work is created by
+          asking the supervisor, which is the only path that also assigns who
+          does it and how it is judged.
+        */}
       </div>
-
-      <TaskCreateDialog open={creating} onClose={() => setCreating(false)} onSubmit={(input) => onCreate?.(input)} />
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2.5 py-3">
         {tasks.length === 0 ? (
@@ -219,20 +214,40 @@ export function TaskBoardPanel({
                   </div>
                   <div className="space-y-1">
                     {items.map((task) => (
-                      <button
+                      <div
                         key={task.id}
-                        type="button"
-                        aria-pressed={selectedId === task.id}
-                        onClick={() => onSelect(task.id)}
                         className={cn(
                           'group flex w-full flex-col gap-1 rounded-lg border-l-2 border-transparent px-3 py-2.5 text-left transition-colors duration-150',
-                          'hover:bg-foreground/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background',
+                          'hover:bg-foreground/5',
                           selectedId === task.id && 'border-accent bg-accent/10',
                         )}
                       >
                         <span className="flex min-w-0 items-center gap-2">
                           {STATUS_ICON[task.status]}
-                          <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground">{task.name}</span>
+                          <button
+                            type="button"
+                            aria-pressed={selectedId === task.id}
+                            onClick={() => onSelect(task.id)}
+                            className="min-w-0 flex-1 truncate text-left text-[13px] font-medium text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background"
+                          >
+                            {task.name}
+                          </button>
+                          {/*
+                            The task is what the board is about; the session is
+                            where the work actually is. Jumping straight there is
+                            the difference between "this task is running" and
+                            "let me see what it is doing right now".
+                          */}
+                          {task.currentSessionId && onOpenSession ? (
+                            <button
+                              type="button"
+                              onClick={() => onOpenSession(task.currentSessionId!)}
+                              title="打开正在执行这个任务的会话"
+                              className="shrink-0 rounded px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-foreground/10 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                            >
+                              会话 ↗
+                            </button>
+                          ) : null}
                           <ArrowRight className={cn(
                             'h-3.5 w-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity duration-150 group-hover:opacity-70',
                             selectedId === task.id && 'opacity-70',
@@ -261,7 +276,7 @@ export function TaskBoardPanel({
                             {task.lastHandoff}
                           </span>
                         ) : null}
-                      </button>
+                      </div>
                     ))}
                   </div>
                 </section>

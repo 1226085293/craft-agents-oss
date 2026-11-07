@@ -136,7 +136,7 @@ describe('task detail presentation', () => {
       '会话',
       '失败',
       '活跃时间',
-      '验收要求',
+      '验收判据',
       '列表和详情在三栏布局下都清楚可读',
       '等你拍板',
       '同意，继续跑',
@@ -200,7 +200,7 @@ describe('task detail presentation', () => {
     })
 
     expect(minimal).toContain('继续处理其余内容。')
-    expect(minimal).not.toContain('验收要求')
+    expect(minimal).not.toContain('验收判据')
     expect(minimal).not.toContain('下一步')
     expect(minimal).not.toContain('关键发现')
     expect(minimal).not.toContain('产物')

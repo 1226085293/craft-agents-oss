@@ -86,12 +86,14 @@ export interface TaskDetailPanelViewProps {
   onCancel?: (id: string) => void
   /** Start a run now (claims the task lock and spawns a worker). */
   onRun?: (id: string) => void
+  /** Open a session in the main pane (task ↔ session are two views of one thing). */
+  onOpenSession?: (sessionId: string) => void
   /** Change what starts this task. */
   onUpdateTrigger?: (id: string, trigger: unknown) => void
 }
 
 /** Full-width task detail for the content panel, with an optional navigator back action. */
-export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
+export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onOpenSession, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
 
   return (
@@ -117,6 +119,7 @@ export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun
           onResume={onResume}
           onCancel={onCancel}
           onRun={onRun}
+          onOpenSession={onOpenSession}
           onUpdateTrigger={onUpdateTrigger}
         />
       </div>
@@ -124,7 +127,7 @@ export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun
   )
 }
 
-function TaskDetailContent({ detail, onResume, onCancel, onRun, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
+function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
   const isPaused = detail.status === 'paused'
   const isStartable = detail.status === 'backlog' || isPaused
@@ -312,7 +315,10 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onUpdateTrigger 
           ) : null}
           {detail.spec?.acceptance?.length ? (
             <div className="mt-4">
-              <div className="text-[11px] font-medium text-muted-foreground">验收清单</div>
+              <div className="text-[11px] font-medium text-muted-foreground">验收命令</div>
+              <p className="mt-0.5 text-[10px] text-muted-foreground">
+                逐条跑命令，退出码 0 即通过。这些是确定性判定，不经过模型。
+              </p>
               <ul className="mt-1.5 space-y-1">
                 {detail.spec.acceptance.map((item) => (
                   <li key={item.id} className="text-xs text-foreground/90">
@@ -394,7 +400,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onUpdateTrigger 
       {detail.verify.enabled ? (
         <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-verification-heading">
           <div className="mb-2 flex items-center justify-between gap-3">
-            <h2 id="task-verification-heading" className="text-xs font-semibold text-foreground">验收要求</h2>
+            <h2 id="task-verification-heading" className="text-xs font-semibold text-foreground">验收判据</h2>
             <span className={cn(
               'rounded-full border px-2 py-0.5 text-[10px] font-medium',
               detail.verify.lastVerdict === 'pass' && 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
@@ -402,7 +408,16 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onUpdateTrigger 
               !detail.verify.lastVerdict && 'border-border/60 bg-foreground/5 text-muted-foreground',
             )}>{verificationLabel}</span>
           </div>
-          <p className="text-sm leading-6 text-foreground/85">{detail.verify.requirement || '尚未设置验收要求。'}</p>
+          {/*
+            Deliberately not called 验收清单: that is the acceptance list above,
+            which is a set of commands with pass/fail. This is one sentence a
+            model reads to judge a handoff that no command can check — the two
+            are different questions and used to look like a duplicate.
+          */}
+          <p className="mt-1 text-[10px] text-muted-foreground">
+            一句话说明「什么算完成」。命令判定不了的部分，由模型拿它对照交接内容判断。
+          </p>
+          <p className="mt-2 text-sm leading-6 text-foreground/85">{detail.verify.requirement || '尚未设置验收要求。'}</p>
         </section>
       ) : null}
 
@@ -413,7 +428,14 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onUpdateTrigger 
             <span className="rounded-full bg-foreground/5 px-2 py-0.5 text-[10px] tabular-nums text-muted-foreground">{detail.handoffs.length}</span>
           </div>
           {detail.currentSessionId ? (
-            <span className="truncate text-[11px] text-muted-foreground">当前会话 · {detail.currentSessionId}</span>
+            <button
+              type="button"
+              onClick={() => onOpenSession?.(detail.currentSessionId!)}
+              title="打开这个会话"
+              className="truncate text-[11px] text-muted-foreground underline decoration-border underline-offset-2 transition-colors hover:text-foreground"
+            >
+              当前会话 · {detail.currentSessionId}
+            </button>
           ) : null}
         </div>
         {detail.handoffs.length === 0 ? (

@@ -9,6 +9,7 @@
 import * as React from 'react'
 
 import { useTasks, useTaskDetail } from '@/hooks/useAgents'
+import { useNavigation } from '@/contexts/NavigationContext'
 import { TaskBoardPanel, type TaskDetailView, type TaskListItem } from './TaskBoardPanel'
 import { TaskDetailPanelView } from './TaskDetailPanelView'
 
@@ -42,6 +43,7 @@ export function TasksListPanel({
   onCloseDetail,
 }: TasksPanelProps): React.JSX.Element {
   const { tasks } = useTasks(workspaceId)
+  const { navigateToSession } = useNavigation()
 
   const cancel = (id: string) => {
     void (window.electronAPI as unknown as {
@@ -55,12 +57,6 @@ export function TasksListPanel({
     }).tasksRun?.(workspaceId, id)
   }
 
-  const create = (input: import('./TaskCreateDialog').TaskCreateInput) => {
-    void (window.electronAPI as unknown as {
-      tasksCreate?: (workspaceId: string, payload: unknown) => Promise<unknown>
-    }).tasksCreate?.(workspaceId, input)
-  }
-
   return (
     <div className="relative h-full min-h-0">
       <TaskBoardPanel
@@ -71,7 +67,7 @@ export function TasksListPanel({
         onResume={run}
         onCancel={cancel}
         onRun={run}
-        onCreate={create}
+        onOpenSession={(sessionId) => navigateToSession(sessionId)}
         onUpdateTrigger={(id, trigger) => updateTaskTrigger(workspaceId, id, trigger)}
       />
     </div>
@@ -88,6 +84,7 @@ export function TaskDetailPanel({
 }): React.JSX.Element {
   const raw = useTaskDetail(workspaceId, taskId)
   const detail = toDetail(raw)
+  const { navigateToSession } = useNavigation()
 
   if (!detail) {
     return <div className="p-4 text-xs text-muted-foreground">读取任务中…</div>
@@ -97,6 +94,7 @@ export function TaskDetailPanel({
     <div className="h-full min-h-0">
       <TaskDetailPanelView
         detail={detail}
+        onOpenSession={(sessionId) => navigateToSession(sessionId)}
         onResume={(id) => {
           void (window.electronAPI as unknown as {
             tasksRun?: (workspaceId: string, id: string) => Promise<unknown>

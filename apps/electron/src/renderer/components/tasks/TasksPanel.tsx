@@ -12,13 +12,17 @@ import { useTasks, useTaskDetail } from '@/hooks/useAgents'
 import { useNavigation } from '@/contexts/NavigationContext'
 import { TaskBoardPanel, type TaskDetailView, type TaskListItem } from './TaskBoardPanel'
 import { TaskDetailPanelView } from './TaskDetailPanelView'
+import { resolvePlanJumps, type JournalLine, type PlanJumpTarget } from '@/lib/plan-jump'
+import { requestSessionJump } from '@/lib/session-jump'
 
 /** Detail payload from the RPC is `{ task, journal? }`. */
-function toDetail(raw: unknown): TaskDetailView | null {
+function toDetail(raw: unknown): { detail: TaskDetailView; journal: JournalLine[] } | null {
   if (!raw || typeof raw !== 'object') return null
   const maybe = (raw as { task?: unknown }).task
   if (!maybe || typeof maybe !== 'object') return null
-  return maybe as TaskDetailView
+  const lines = (raw as { journal?: unknown }).journal
+  const journal = Array.isArray(lines) ? (lines as JournalLine[]) : []
+  return { detail: maybe as TaskDetailView, journal }
 }
 
 export interface TasksPanelProps {
@@ -112,7 +116,8 @@ export function TaskDetailPanel({
   taskId: string
 }): React.JSX.Element {
   const { detail: raw, settled } = useTaskDetail(workspaceId, taskId)
-  const detail = toDetail(raw)
+  const parsed = toDetail(raw)
+  const detail = parsed?.detail
   const { navigateToSession } = useNavigation()
 
   if (!detail) {
@@ -134,6 +139,12 @@ export function TaskDetailPanel({
     <div className="h-full min-h-0">
       <TaskDetailPanelView
         detail={detail}
+        planJumps={resolvePlanJumps(detail.spec?.plan, parsed?.journal, detail.currentSessionId)}
+        onJumpToStep={(target) => {
+          if (!target.sessionId) return
+          requestSessionJump({ sessionId: target.sessionId, at: target.at })
+          navigateToSession(target.sessionId)
+        }}
         onOpenSession={(sessionId) => navigateToSession(sessionId)}
         onResume={(id) => {
           void (window.electronAPI as unknown as {

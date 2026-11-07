@@ -20,6 +20,7 @@ import {
 
 import { cn } from '@/lib/utils'
 import type { TaskDetailView, TaskHandoffView, TaskStatus } from './TaskBoardPanel'
+import type { PlanJumpTarget } from '@/lib/plan-jump'
 
 const STATUS_ICON: Record<TaskStatus, React.ReactNode> = {
   backlog: <CircleDot className="h-3.5 w-3.5" />,
@@ -88,12 +89,15 @@ export interface TaskDetailPanelViewProps {
   onRun?: (id: string) => void
   /** Open a session in the main pane (task ↔ session are two views of one thing). */
   onOpenSession?: (sessionId: string) => void
+  /** Jump to the moment in a session that a plan step came from. */
+  planJumps?: Map<string, PlanJumpTarget>
+  onJumpToStep?: (target: PlanJumpTarget) => void
   /** Change what starts this task. */
   onUpdateTrigger?: (id: string, trigger: unknown) => void
 }
 
 /** Full-width task detail for the content panel, with an optional navigator back action. */
-export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onOpenSession, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
+export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onOpenSession, planJumps, onJumpToStep, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
 
   return (
@@ -120,6 +124,8 @@ export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun
           onCancel={onCancel}
           onRun={onRun}
           onOpenSession={onOpenSession}
+          planJumps={planJumps}
+          onJumpToStep={onJumpToStep}
           onUpdateTrigger={onUpdateTrigger}
         />
       </div>
@@ -127,7 +133,7 @@ export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun
   )
 }
 
-function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
+function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, planJumps, onJumpToStep, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
   const isPaused = detail.status === 'paused'
   const isStartable = detail.status === 'backlog' || isPaused
@@ -277,7 +283,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, o
         <p className="whitespace-pre-wrap text-sm leading-6 text-foreground/90">{detail.instruction}</p>
       </section>
 
-      <PlanSection plan={detail.spec?.plan} assignee={detail.assigneeAgentId} />
+      <PlanSection plan={detail.spec?.plan} assignee={detail.assigneeAgentId} jumps={planJumps} onJump={onJumpToStep} />
 
       {(detail.spec?.cwd || detail.spec?.sources?.length || detail.spec?.deliverables?.length || detail.spec?.acceptance?.length) ? (
         <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-contract-heading">
@@ -549,9 +555,13 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, o
 function PlanSection({
   plan,
   assignee,
+  jumps,
+  onJump,
 }: {
   plan?: { id: string; title: string; status: 'todo' | 'doing' | 'done' | 'blocked'; agent?: string; note?: string }[]
   assignee?: string
+  jumps?: Map<string, PlanJumpTarget>
+  onJump?: (target: PlanJumpTarget) => void
 }): React.JSX.Element {
   if (!plan || plan.length === 0) {
     return (
@@ -621,15 +631,38 @@ function PlanSection({
               {step.status === 'done' ? 'x' : step.status === 'doing' ? '>' : step.status === 'blocked' ? '!' : ' '}
             </span>
             <span className="min-w-0 flex-1">
-              <span
-                className={cn(
-                  'break-words',
-                  isOutline ? 'font-medium text-foreground' : 'text-foreground/90',
-                  step.status === 'done' && 'text-muted-foreground line-through decoration-border',
-                )}
-              >
-                {step.title}
-              </span>
+              {(() => {
+                const jump = jumps?.get(step.id)
+                const canJump = Boolean(jump?.sessionId && onJump)
+                const title = (
+                  <span
+                    className={cn(
+                      'break-words',
+                      isOutline ? 'font-medium text-foreground' : 'text-foreground/90',
+                      step.status === 'done' && 'text-muted-foreground line-through decoration-border',
+                    )}
+                  >
+                    {step.title}
+                  </span>
+                )
+                if (!canJump) return title
+                // An outline lands where its section STARTED (it moved to doing);
+                // a sub-step lands where it FINISHED, because that is where its
+                // evidence is. A row that cannot resolve stays plain text rather
+                // than jumping somewhere arbitrary.
+                const hint = isOutline ? '跳到这一节开始的地方' : '跳到这一步完成的地方'
+                return (
+                  <button
+                    type="button"
+                    title={hint}
+                    onClick={() => onJump?.(jump!)}
+                    className="inline-flex max-w-full items-baseline gap-1 rounded text-left underline decoration-border underline-offset-2 transition-colors hover:text-foreground hover:decoration-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    {title}
+                    <span className="shrink-0 text-[9px] text-muted-foreground" aria-hidden="true">└</span>
+                  </button>
+                )
+              })()}
               {step.agent ? (
                 <span className="ml-1.5 rounded bg-foreground/5 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
                   @{step.agent}

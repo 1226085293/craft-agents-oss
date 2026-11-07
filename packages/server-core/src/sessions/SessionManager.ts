@@ -36,7 +36,7 @@ import {
 } from '@craft-agent/shared/agents'
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
-import { readJournal, formatTaskBrief, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
+import { readJournal, formatTaskBrief, formatResumeBrief, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -7233,6 +7233,35 @@ ${request.prompt}`;
    */
   async runTask(workspaceId: string, taskId: string, reason: string): Promise<boolean> {
     const tasks = this.getTasks(workspaceId)
+    const existing = tasks.get(taskId)
+
+    // Resuming is not restarting. A paused task still owns its session, and that
+    // session holds the thread — what was tried, which file, which error. Spawning
+    // a fresh worker for a resume throws that away and makes "continue" mean
+    // "start over from the brief". Only a session that is actually gone is
+    // replaced.
+    const resumeInto = existing?.currentSessionId && this.sessions.has(existing.currentSessionId)
+      ? existing.currentSessionId
+      : undefined
+
+    if (resumeInto) {
+      const claimed = tasks.startRun(taskId, resumeInto)
+      if (!claimed.ok) {
+        sessionLog.info(`[tasks] ${taskId} not resumed: ${claimed.reason}`)
+        return false
+      }
+      this.claimTaskRun(workspaceId, taskId, resumeInto)
+      try {
+        await this.sendMessage(resumeInto, formatResumeBrief(claimed.task, reason))
+        return true
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        sessionLog.warn(`[tasks] ${taskId} could not be resumed in ${resumeInto}`, { error: message })
+        tasks.endRun(taskId, { ok: false, error: message })
+        return false
+      }
+    }
+
     const claim = tasks.startRun(taskId, `pending:${reason}`)
     if (!claim.ok) {
       sessionLog.info(`[tasks] ${taskId} not started: ${claim.reason}`)

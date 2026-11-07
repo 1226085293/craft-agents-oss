@@ -23,6 +23,7 @@ import { coerceInputText, appendRestoredInput } from "@/lib/input-text"
 import { restoreComposerAttachments } from "@/lib/queued-attachments"
 import { AttachmentHoverCard } from './input/AttachmentCapsule'
 import { ensureAttachmentTokens, findAttachmentForToken } from '@/lib/attachment-tokens'
+import { takeSessionJump } from '@/lib/session-jump'
 import { Markdown, CollapsibleMarkdownProvider, StreamingMarkdown, type RenderMode } from "@/components/markdown"
 import { AnimatedCollapsibleContent } from "@/components/ui/collapsible"
 import {
@@ -1971,6 +1972,64 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
   const startIndex = Math.max(0, allTurns.length - visibleTurnCount)
   const turns = allTurns.slice(startIndex)
   const hasMoreAbove = startIndex > 0
+
+  /**
+   * Land on a moment in this session.
+   *
+   * A plan step is a moment — when its section started, or when the step
+   * finished — and clicking it should put the user in front of the work that
+   * produced it, not merely open the session at the bottom. So: find the turn
+   * that covers that time, expand its process block (the evidence is inside it),
+   * and scroll it into view.
+   *
+   * Runs once per request. The visible window is widened first when the target is
+   * older than what is mounted, otherwise the turn is not in the DOM to scroll to.
+   */
+  React.useEffect(() => {
+    if (!session?.id) return
+    const target = takeSessionJump(session.id)
+    if (!target) return
+
+    // Only assistant turns carry a process block, and a plan step's evidence
+    // lives in one — landing on a user bubble would show nothing.
+    const ordered = allTurns
+      .map((turn, index) => ({ turn, index }))
+      .filter((entry): entry is { turn: Extract<Turn, { type: 'assistant' }>; index: number } =>
+        entry.turn.type === 'assistant' && typeof (entry.turn as { timestamp?: number }).timestamp === 'number',
+      )
+    if (ordered.length === 0) return
+
+    // The turn that was in flight at that moment: the last one starting at or
+    // before it. If the moment predates the transcript, take the first turn.
+    let pick = ordered[0]!
+    for (const candidate of ordered) {
+      if (candidate.turn.timestamp <= target.at) pick = candidate
+      else break
+    }
+
+    const key = getAssistantTurnUiKey(pick.turn, pick.index)
+    toggleTurn(key, true)
+
+    const scroll = () => {
+      const el = turnRefs.current.get(getTurnKey(pick.turn))
+      if (el) {
+        el.scrollIntoView({ block: 'start', behavior: 'smooth' })
+        el.classList.add('ring-2', 'ring-info', 'ring-offset-2', 'ring-offset-background')
+        // Fade the marker so it reads as "you are here", not as a selection.
+        window.setTimeout(() => {
+          el.classList.remove('ring-2', 'ring-info', 'ring-offset-2', 'ring-offset-background')
+        }, 2400)
+        return true
+      }
+      return false
+    }
+
+    // The turn may be above the mounted window; widen it and retry.
+    if (!scroll() && pick.index < startIndex) {
+      setVisibleTurnCount((count) => Math.max(count, allTurns.length - pick.index + 2))
+      window.setTimeout(scroll, 260)
+    }
+  }, [session?.id, allTurns, startIndex, toggleTurn])
 
   const assistantTurnIndexByMessageId = useMemo(() => {
     const map = new Map<string, number>()

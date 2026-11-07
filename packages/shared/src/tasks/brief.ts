@@ -8,6 +8,7 @@
  */
 
 import type { Task } from './types.ts';
+import { planProgress } from './plan.ts';
 
 export interface TaskBriefOptions {
   /** Why this run started (cron expression, event, manual). */
@@ -106,4 +107,31 @@ export function describeTrigger(task: Task): string {
   if (!trigger || trigger.kind === 'manual') return '手动';
   if (trigger.kind === 'cron') return `定时 ${trigger.expr}${trigger.timezone ? ` (${trigger.timezone})` : ''}`;
   return `事件 ${trigger.source}${trigger.types?.length ? `/${trigger.types.join(',')}` : ''}`;
+}
+
+/**
+ * What a resumed session is told.
+ *
+ * Deliberately short and in the second person: this session already has the
+ * instruction, the contract and the transcript. Re-sending the whole brief would
+ * make it re-read work it did, and re-plan work it already finished. All it needs
+ * is "you were stopped, here is why, pick up from the plan".
+ */
+export function formatResumeBrief(task: Task, reason = 'manual'): string {
+  const progress = task.spec?.plan?.length
+    ? planProgress(task.spec.plan)
+    : undefined;
+  const state = progress
+    ? `计划进度 ${progress.done}/${progress.total}，${progress.doing > 0 ? '有一条正在进行' : '当前没有进行中的小节'}`
+    : '这条任务还没有计划';
+
+  return [
+    `继续任务 ${task.id}（${task.name}）。`,
+    '',
+    `任务刚刚被暂停，现在恢复（原因：${reason}）。`,
+    `当前状态：${state}。`,
+    '',
+    '不要从头再来，也不要重新规划已经完成的部分——那些已经冻结。',
+    '从计划里没完成的那一条接着做；如果计划里没有可执行的小节，先按大纲展开下一条。',
+  ].join('\n');
 }

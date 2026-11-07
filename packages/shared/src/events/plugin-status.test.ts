@@ -127,6 +127,12 @@ describe('pluginStatusReading', () => {
     expect(pluginStatusReading(input({ missingConfig: ['email'] })).reason).toBe('missing-config')
   })
 
+  it('lets missing config beat a degraded state — the blank field is fixable now', () => {
+    const reading = pluginStatusReading(input({ status: { state: 'degraded', lastError: null }, missingConfig: ['email'] }))
+    expect(reading.tone).toBe('bad')
+    expect(reading.reason).toBe('missing-config')
+  })
+
   it('keeps a deterministic order inside the amber tier', () => {
     expect(pluginStatusReading(input({ status: { state: 'degraded', lastError: null }, unauthorized: true })).reason).toBe('degraded')
     expect(pluginStatusReading(input({ status: { state: 'starting', lastError: null }, unauthorized: true })).reason).toBe('starting')

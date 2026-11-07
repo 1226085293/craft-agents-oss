@@ -7,8 +7,8 @@
  *   ok   → --success (running + ready)
  *   warn → --info    (starting / unresponsive / unauthorized / running-but-not-ready)
  *   bad  → --destructive (manifest error, failed process, missing config or deps)
- *   off  → foreground-30 (the user switched it off — "I turned this off",
- *           never "it broke" — or enabled but simply not running)
+ *   off  → --muted-foreground (gray: the user switched it off — "I turned
+ *           this off", never "it broke" — or enabled but simply not running)
  *
  * The dot is never the only cue: every instance carries a title + aria-label,
  * and the detail page prints the sentence next to the dot.
@@ -26,7 +26,7 @@ const TONE_DOT: Record<PluginStatusTone, string> = {
   ok: 'bg-success',
   warn: 'bg-info',
   bad: 'bg-destructive',
-  off: 'bg-foreground-30',
+  off: 'bg-muted-foreground/60',
 }
 
 const TONE_LABEL: Record<PluginStatusTone, string> = {

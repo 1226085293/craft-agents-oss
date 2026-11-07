@@ -756,7 +756,20 @@ function PlanSection({
                     <span className="shrink-0 whitespace-nowrap td-row-sub text-muted-foreground">— {ownerOf(step)}</span>
                   ) : null}
                 </span>
-                {step.note ? (
+                {/*
+                  * Only a leaf step renders its note.
+                  *
+                  * The plan contract tells a worker "a step marked done should say in note
+                  * what proves it" — and the proof of a leaf is genuinely its own: the
+                  * command ran, the byte size, the non-empty file. An outline's note,
+                  * though, can only ever restate its children ("sub-step 1.1 finished: …"),
+                  * because its completion *is* their completion, aggregated into its own
+                  * status and the (N/N) tally in the heading. Worse, it sat between the
+                  * outline and its first child, reading as a summary hanging over the very
+                  * row it describes. The outline group owns the grouping; the leaf owns the
+                  * evidence — so the note belongs to the leaf alone.
+                  */}
+                {step.note && !isOutline ? (
                   <span className="td-row-sub mt-1 block break-words text-muted-foreground">{step.note}</span>
                 ) : null}
               </span>

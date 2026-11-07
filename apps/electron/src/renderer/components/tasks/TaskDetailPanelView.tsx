@@ -552,6 +552,17 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
   )
 }
 
+/**
+ * The plan, one line per step: `1.0 ☑️ 接口改造 · agent-ui`.
+ *
+ * The mark comes before the text and is a real glyph, not a bordered box — a box
+ * with an `x` in it reads as "wrong" at a glance, which is the opposite of what a
+ * finished step means.
+ *
+ * Outlines are collapsible; sub-steps are not, because a sub-step has nothing
+ * under it. On open, finished outlines are collapsed and the section being worked
+ * on is expanded: the screen should show what is happening, not what happened.
+ */
 function PlanSection({
   plan,
   assignee,
@@ -563,6 +574,22 @@ function PlanSection({
   jumps?: Map<string, PlanJumpTarget>
   onJump?: (target: PlanJumpTarget) => void
 }): React.JSX.Element {
+  // Which outlines the user has folded. Seeded from the plan itself, then left
+  // alone until the plan's shape changes — a toggle the user just made must not
+  // be undone by the next render.
+  const [folded, setFolded] = React.useState<Set<string>>(() => new Set())
+  const shape = (plan ?? []).map((step) => `${step.id}:${step.status}`).join('|')
+  const shapeRef = React.useRef<string | null>(null)
+
+  React.useEffect(() => {
+    if (shapeRef.current === shape) return
+    shapeRef.current = shape
+    const steps = plan ?? []
+    // Finished sections start collapsed; everything else stays open so the
+    // current section (and what is queued behind it) is visible immediately.
+    setFolded(new Set(steps.filter((step) => !step.id.includes('.') && step.status === 'done').map((step) => step.id)))
+  }, [shape, plan])
+
   if (!plan || plan.length === 0) {
     return (
       <section className="rounded-xl border border-dashed border-border/70 p-4 md:p-5" aria-labelledby="task-plan-heading">
@@ -574,106 +601,111 @@ function PlanSection({
     )
   }
 
-  // Leaves only — the same rule `planProgress` uses. Counting every row would
-  // report "2 / 6" for a plan whose real progress is "1 / 4", because an outline
-  // and its sub-steps would each be counted.
+  // Leaves only — the same rule `planProgress` uses, so a decomposed outline is
+  // not counted alongside its children.
   const leaves = plan.filter((step) => !plan.some((other) => other.id.startsWith(`${step.id}.`)))
   const done = leaves.filter((step) => step.status === 'done').length
-  const ownerOf = (step: { agent?: string }) => step.agent ?? assignee ?? '未指定'
-  // Group by owner so "which agent carries which stage" is answerable at a
-  // glance instead of by reading every row.
-  const owners = Array.from(new Set(plan.map(ownerOf)))
+  const ownerOf = (step: { agent?: string }) => step.agent ?? assignee
+
+  const childrenOf = (id: string) => plan.filter((step) => step.id.startsWith(`${id}.`))
+  const toggle = (id: string) =>
+    setFolded((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  // A sub-step renders only when its section is open.
+  const visible = plan.filter((step) => {
+    const cut = step.id.lastIndexOf('.')
+    if (cut < 0) return true
+    return !folded.has(step.id.slice(0, cut))
+  })
 
   return (
     <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-plan-heading">
-      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+      <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
         <h2 id="task-plan-heading" className="text-xs font-semibold text-foreground">执行计划</h2>
         <span className="text-[11px] tabular-nums text-muted-foreground">
           {done} / {leaves.length} 已完成
         </span>
       </div>
 
-      {owners.length > 1 ? (
-        <div className="mb-3 flex flex-wrap items-center gap-1.5">
-          {owners.map((owner) => (
-            <span
-              key={owner}
-              className="rounded-full border border-border/60 bg-foreground/5 px-2 py-0.5 text-[10px] text-muted-foreground"
-            >
-              {owner} · {plan.filter((step) => ownerOf(step) === owner).length} 阶段
-            </span>
-          ))}
-        </div>
-      ) : null}
-
-      <ul className="space-y-1.5">
-        {plan.map((step) => {
-          // Depth from the id itself (`1` → 0, `1.2` → 1) rather than a stored
-          // field, so the nesting can never disagree with how steps are addressed.
+      <ul className="space-y-0.5">
+        {visible.map((step) => {
           const depth = step.id.split('.').length - 1
           const isOutline = depth === 0
+          const kids = isOutline ? childrenOf(step.id) : []
+          const isFolded = folded.has(step.id)
+          const jump = jumps?.get(step.id)
+          const canJump = Boolean(jump?.sessionId && onJump)
+          const hint = isOutline ? '跳到这一节开始的地方' : '跳到这一步完成的地方'
+
+          const mark =
+            step.status === 'done' ? '☑️'
+              : step.status === 'doing' ? '⌛️'
+              : step.status === 'blocked' ? '⚠️'
+              : '⬜️'
+
           return (
-          <li
-            key={step.id}
-            className="flex items-start gap-2.5 text-xs leading-relaxed"
-            style={{ paddingLeft: depth * 18 }}
-          >
-            <span
-              aria-hidden="true"
-              className={cn(
-                'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border font-mono text-[10px] leading-none',
-                step.status === 'done' && 'border-emerald-500/40 bg-emerald-500/15 text-emerald-400',
-                step.status === 'doing' && 'border-blue-500/40 bg-blue-500/15 text-blue-400',
-                step.status === 'blocked' && 'border-amber-500/40 bg-amber-500/15 text-amber-400',
-                step.status === 'todo' && 'border-border/70 text-transparent',
-              )}
+            <li
+              key={step.id}
+              className="flex min-w-0 items-start gap-1.5 text-xs leading-relaxed"
+              style={{ paddingLeft: depth * 16 }}
             >
-              {step.status === 'done' ? 'x' : step.status === 'doing' ? '>' : step.status === 'blocked' ? '!' : ' '}
-            </span>
-            <span className="min-w-0 flex-1">
-              {(() => {
-                const jump = jumps?.get(step.id)
-                const canJump = Boolean(jump?.sessionId && onJump)
-                const title = (
-                  <span
-                    className={cn(
-                      'break-words',
-                      isOutline ? 'font-medium text-foreground' : 'text-foreground/90',
-                      step.status === 'done' && 'text-muted-foreground line-through decoration-border',
-                    )}
-                  >
-                    {step.title}
-                  </span>
-                )
-                if (!canJump) return title
-                // An outline lands where its section STARTED (it moved to doing);
-                // a sub-step lands where it FINISHED, because that is where its
-                // evidence is. A row that cannot resolve stays plain text rather
-                // than jumping somewhere arbitrary.
-                const hint = isOutline ? '跳到这一节开始的地方' : '跳到这一步完成的地方'
-                return (
-                  <button
-                    type="button"
-                    title={hint}
-                    onClick={() => onJump?.(jump!)}
-                    className="inline-flex max-w-full items-baseline gap-1 rounded text-left underline decoration-border underline-offset-2 transition-colors hover:text-foreground hover:decoration-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  >
-                    {title}
-                    <span className="shrink-0 text-[9px] text-muted-foreground" aria-hidden="true">└</span>
-                  </button>
-                )
-              })()}
-              {step.agent ? (
-                <span className="ml-1.5 rounded bg-foreground/5 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-                  @{step.agent}
+              {isOutline && kids.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => toggle(step.id)}
+                  aria-expanded={!isFolded}
+                  aria-label={isFolded ? '展开这一节' : '折叠这一节'}
+                  className="mt-0.5 w-3 shrink-0 select-none text-[10px] leading-4 text-muted-foreground transition-transform hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  style={{ transform: isFolded ? 'none' : 'rotate(90deg)' }}
+                >
+                  ›
+                </button>
+              ) : (
+                <span className="mt-0.5 w-3 shrink-0" aria-hidden="true" />
+              )}
+
+              <span className="min-w-0 flex-1">
+                <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
+                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{step.id}</span>
+                  <span aria-hidden="true" className="shrink-0 text-[11px] leading-none">{mark}</span>
+                  {canJump ? (
+                    <button
+                      type="button"
+                      title={hint}
+                      onClick={() => onJump?.(jump!)}
+                      className={cn(
+                        'min-w-0 rounded text-left underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                        isOutline ? 'font-medium text-foreground' : 'text-foreground/90',
+                        step.status === 'done' && 'text-muted-foreground',
+                      )}
+                    >
+                      {step.title}
+                    </button>
+                  ) : (
+                    <span
+                      className={cn(
+                        'min-w-0 break-words',
+                        isOutline ? 'font-medium text-foreground' : 'text-foreground/90',
+                        step.status === 'done' && 'text-muted-foreground',
+                      )}
+                    >
+                      {step.title}
+                    </span>
+                  )}
+                  {ownerOf(step) ? (
+                    <span className="shrink-0 font-mono text-[10px] text-muted-foreground">· {ownerOf(step)}</span>
+                  ) : null}
                 </span>
-              ) : null}
-              {step.note ? (
-                <span className="mt-0.5 block break-words text-[11px] text-muted-foreground">{step.note}</span>
-              ) : null}
-            </span>
-            <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{step.id}</span>
-          </li>
+                {step.note ? (
+                  <span className="mt-0.5 block break-words text-[11px] text-muted-foreground">{step.note}</span>
+                ) : null}
+              </span>
+            </li>
           )
         })}
       </ul>

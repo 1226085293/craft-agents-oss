@@ -187,6 +187,13 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
                 已运行 {detail.stats.runs} 次
               </>
             ) : null}
+            {/*
+              * 触发方式 rides on the meta line. It is one short fact about the task —
+              * manual / cron / event — and giving it its own bordered section put a whole
+              * heading between the title and the instruction for a single word.
+              */}
+            <span className="mx-1 text-border">·</span>
+            <span>触发方式 {triggerLabel}</span>
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -212,22 +219,6 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
           ) : null}
         </div>
       </header>
-
-      {/*
-        * 触发方式 is a section heading, at the same size as 任务说明 and 执行计划, and it
-        * carries its value on the same line after a colon.
-        *
-        * The 修改 button is gone. It opened an inline editor for a field that the supervisor
-        * session already owns — two places to change one thing, and the panel could drift
-        * from what the supervisor would do. Changing how a task starts belongs in the
-        * conversation that runs it.
-        */}
-      <section aria-labelledby="task-trigger-heading" className="border-t border-border/40 pt-5">
-        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-          <h2 id="task-trigger-heading" className="td-heading text-foreground">触发方式：</h2>
-          <span className="td-body text-foreground/90">{triggerLabel}</span>
-        </div>
-      </section>
 
       <section className="rounded-xl border border-border/60 bg-foreground/[0.02] p-4 md:p-5" aria-labelledby="task-instruction-heading">
         <div className="mb-2.5 flex items-center gap-2">
@@ -716,17 +707,17 @@ function PlanSection({
               )}
 
               <span className="min-w-0 flex-1">
-                <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
                   {/*
-                    * Status mark first, then "number title", then the owner.
+                    * Status mark, then "1. title" as one run of text, then the owner after an
+                    * em dash.
                     *
-                    * The number is *inside* the jump target now, not a separate monospaced
-                    * span before it. One row used to carry three sizes and three colours —
-                    * 11.25px monospace grey for the id, 15px for an outline title, 13px for
-                    * a sub-step, then an 11.25px monospace owner tag — so a single line read
-                    * like three unrelated fields. Row text is now one size and one colour;
-                    * only the status mark and the owner keep their own tone, and the owner
-                    * is a qualifier rather than part of the sentence.
+                    * The number used to be its own span at 70% opacity with a middot after
+                    * it, so "1 · 创建 docs/e2e-a.md" rendered as two differently-toned pieces
+                    * and the underline broke across them. Worse, a long title wrapped and the
+                    * number stayed stranded on the first line, separated from the words it
+                    * numbers. One string means the underline, the wrap and the colour are all
+                    * continuous — the step reads as one item.
                     */}
                   <span className="flex h-4 w-4 shrink-0 items-center justify-center">{mark}</span>
                   {canJump ? (
@@ -740,9 +731,7 @@ function PlanSection({
                         step.status === 'done' ? 'text-muted-foreground' : 'text-foreground',
                       )}
                     >
-                      <span className="font-mono tabular-nums opacity-70">{step.id}</span>
-                      <span className="mx-1.5 opacity-40">·</span>
-                      {step.title}
+                      {step.id}. {step.title}
                     </button>
                   ) : (
                     <span
@@ -752,21 +741,18 @@ function PlanSection({
                         step.status === 'done' ? 'text-muted-foreground' : 'text-foreground',
                       )}
                     >
-                      <span className="font-mono tabular-nums opacity-70">{step.id}</span>
-                      <span className="mx-1.5 opacity-40">·</span>
-                      {step.title}
+                      {step.id}. {step.title}
                     </span>
                   )}
                   {/*
                     * The owner is shown once per run of steps that share it, not on every
-                    * row. When one worker does the whole plan, the badge read
-                    * `· builtin-default` four times in a row — it looked like a column of
-                    * data rather than one fact, and it pushed the step titles off centre.
-                    * A step whose owner differs from the previous visible one still gets a
-                    * badge, so a hand-off inside the plan stays legible.
+                    * row. A plan one worker carried end to end repeated the same name four
+                    * times, which read as a column of data rather than one fact. A step whose
+                    * owner differs from the previous visible one still gets the mark, so a
+                    * hand-off inside the plan stays legible.
                     */}
                   {ownerOf(step) && ownerOf(step) !== previousOwner ? (
-                    <span className="shrink-0 font-mono text-xs text-muted-foreground">{ownerOf(step)}</span>
+                    <span className="shrink-0 td-row-sub text-muted-foreground">—— {ownerOf(step)}</span>
                   ) : null}
                 </span>
                 {step.note ? (

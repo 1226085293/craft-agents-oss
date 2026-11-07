@@ -757,21 +757,17 @@ function PlanSection({
                   ) : null}
                 </span>
                 {/*
-                  * Only a leaf step renders its note.
+                  * `note` is intentionally not rendered.
                   *
-                  * The plan contract tells a worker "a step marked done should say in note
-                  * what proves it" — and the proof of a leaf is genuinely its own: the
-                  * command ran, the byte size, the non-empty file. An outline's note,
-                  * though, can only ever restate its children ("sub-step 1.1 finished: …"),
-                  * because its completion *is* their completion, aggregated into its own
-                  * status and the (N/N) tally in the heading. Worse, it sat between the
-                  * outline and its first child, reading as a summary hanging over the very
-                  * row it describes. The outline group owns the grouping; the leaf owns the
-                  * evidence — so the note belongs to the leaf alone.
+                  * The plan contract asks a worker to record in `note` what proves a step
+                  * ("A step marked done should say in note what proves it"), so the field
+                  * carries real evidence: command output, byte sizes, conclusions. But on
+                  * screen it read as a wall of self-summaries, two rows for every one step
+                  * and half of them restating the row above. The value of a note is in the
+                  * record, for audit and for whoever picks the task up next, not in this
+                  * layout. So the data stays untouched in the task file and is simply not
+                  * drawn.
                   */}
-                {step.note && !isOutline ? (
-                  <span className="td-row-sub mt-1 block break-words text-muted-foreground">{step.note}</span>
-                ) : null}
               </span>
             </li>
           )

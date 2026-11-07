@@ -52,6 +52,23 @@ export const DEFAULT_TOOL_CATEGORIES: ToolCategoriesConfig = {
         'deliver_file',
         'list_messaging_channels',
         'unbind_messaging_channel',
+        //
+        // The task surface itself. Every one of these was uncategorised, which put
+        // it in `misc` — and `call_tool` refuses a folded tool from a category that
+        // was never expanded, while `misc` has no meta tool to expand. So the
+        // supervisor could not call `task_create` or `dispatch` at all: the tools
+        // existed, the prompts told it to use them, and the router refused them.
+        // That is a large part of "the supervisor never dispatches and does the work
+        // itself" — it was reading the disk because its own tools were unreachable.
+        //
+        'task_create',
+        'task_get',
+        'task_list',
+        'task_update',
+        'task_handoff',
+        'dispatch',
+        'report_to_user',
+        'ask_user',
       ],
     },
     {
@@ -100,8 +117,27 @@ export const DEFAULT_TOOL_CATEGORIES: ToolCategoriesConfig = {
     {
       name: 'agent',
       metaToolName: 'tools_agent',
-      description: 'agent 运行时辅助：计划提交、浏览器自动化、子会话派生与关注。',
-      tools: ['SubmitPlan', 'browser_tool', 'spawn_session', 'subscribe_session', 'unsubscribe_session', 'list_subscriptions'],
+      description: 'agent 运行时辅助：任务计划、浏览器自动化、子会话派生与关注。',
+      tools: [
+        //
+        // The task tools belong here rather than nowhere.
+        //
+        // `task_plan` was absent from every category, so it fell into `misc` — and
+        // `call_tool` refuses a folded tool whose category has not been expanded,
+        // while `misc` has no meta tool to expand. The result was a worker that could
+        // not use the one tool its brief tells it to call first: observed twice in a
+        // real run, the worker expanded `tools_agent`, then `tools_misc`, found no
+        // `task_plan`, and gave up. A tool nobody can reach is not a tool.
+        //
+        'task_plan',
+        'report_result',
+        'SubmitPlan',
+        'browser_tool',
+        'spawn_session',
+        'subscribe_session',
+        'unsubscribe_session',
+        'list_subscriptions',
+      ],
     },
   ],
 };

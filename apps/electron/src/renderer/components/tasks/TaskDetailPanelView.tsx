@@ -106,7 +106,7 @@ export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun
         <div className="flex shrink-0 items-center justify-between border-b border-border/60 bg-background px-4 py-3">
           <div className="flex min-w-0 items-center gap-2.5">
             <span className="truncate text-[13px] font-semibold">{detail.name}</span>
-            <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{detail.id}</span>
+            <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{detail.id}</span>
           </div>
           <button
             type="button"
@@ -160,7 +160,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
       : '待判定'
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-5 py-6 md:px-8 md:py-8">
+    <div className="mx-auto flex w-full max-w-5xl flex-col gap-7 px-6 py-7 md:px-10 md:py-9">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
           <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -205,13 +205,13 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
       <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-trigger-heading">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 id="task-trigger-heading" className="text-xs font-semibold text-foreground">触发方式</h2>
+            <h2 id="task-trigger-heading" className="text-sm font-semibold text-foreground">触发方式</h2>
             <p className="mt-1 text-xs text-muted-foreground">{triggerLabel}</p>
           </div>
           {onUpdateTrigger ? (
             <button
               type="button"
-              className="rounded-md border border-border/70 px-2.5 py-1 text-[11px] text-foreground hover:bg-foreground/5"
+              className="rounded-md border border-border/70 px-2.5 py-1 text-xs text-foreground hover:bg-foreground/5"
               onClick={() => setEditingTrigger((v) => !v)}
             >
               {editingTrigger ? '收起' : '修改'}
@@ -227,7 +227,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
                   key={kind}
                   type="button"
                   className={cn(
-                    'rounded-md border px-2.5 py-1 text-[11px]',
+                    'rounded-md border px-2.5 py-1 text-xs',
                     triggerKind === kind
                       ? 'border-primary/40 bg-primary/10 text-foreground'
                       : 'border-border/70 text-muted-foreground hover:bg-foreground/5',
@@ -258,7 +258,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
 
             <button
               type="button"
-              className="inline-flex min-h-8 items-center rounded-md bg-primary px-3 text-[11px] font-medium text-primary-foreground disabled:opacity-50"
+              className="inline-flex min-h-8 items-center rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground disabled:opacity-50"
               disabled={
                 (triggerKind === 'cron' && !cronExpr.trim()) ||
                 (triggerKind === 'event' && !eventSource.trim())
@@ -281,11 +281,11 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
       </section>
 
       <section className="rounded-xl border border-border/60 bg-foreground/[0.02] p-4 md:p-5" aria-labelledby="task-instruction-heading">
-        <div className="mb-2 flex items-center gap-2">
+        <div className="mb-2.5 flex items-center gap-2">
           <FileText className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-          <h2 id="task-instruction-heading" className="text-xs font-semibold text-foreground">任务说明</h2>
+          <h2 id="task-instruction-heading" className="text-sm font-semibold text-foreground">任务说明</h2>
         </div>
-        <p className="whitespace-pre-wrap text-sm leading-6 text-foreground/90">{detail.instruction}</p>
+        <p className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/90">{detail.instruction}</p>
       </section>
 
       <PlanSection plan={detail.spec?.plan} assignee={detail.assigneeAgentId} jumps={planJumps} onJump={onJumpToStep} />
@@ -294,13 +294,13 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
         <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-contract-heading">
           <div className="mb-3 flex items-center gap-2">
             <FileText className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-            <h2 id="task-contract-heading" className="text-xs font-semibold text-foreground">执行契约</h2>
+            <h2 id="task-contract-heading" className="text-sm font-semibold text-foreground">执行契约</h2>
           </div>
           <dl className="grid gap-3 text-xs md:grid-cols-2">
             {detail.spec?.cwd ? (
               <div className="min-w-0">
                 <dt className="text-muted-foreground">工作目录</dt>
-                <dd className="mt-1 break-words font-mono text-[11px] text-foreground/90">{detail.spec.cwd}</dd>
+                <dd className="mt-1 break-words font-mono text-xs text-foreground/90">{detail.spec.cwd}</dd>
               </div>
             ) : null}
             {detail.spec?.sources?.length ? (
@@ -312,12 +312,12 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
           </dl>
           {detail.spec?.deliverables?.length ? (
             <div className="mt-4">
-              <div className="text-[11px] font-medium text-muted-foreground">交付物</div>
+              <div className="text-xs font-medium text-muted-foreground">交付物</div>
               <ul className="mt-1.5 space-y-1">
                 {detail.spec.deliverables.map((item, index) => (
                   <li key={`${item.kind}-${index}`} className="flex flex-wrap items-baseline gap-1.5 text-xs text-foreground/90">
-                    <span className="rounded bg-foreground/5 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">{item.kind}</span>
-                    {item.path ? <span className="break-all font-mono text-[11px]">{item.path}</span> : null}
+                    <span className="rounded bg-foreground/5 px-1.5 py-0.5 font-mono text-[11px] text-muted-foreground">{item.kind}</span>
+                    {item.path ? <span className="break-all font-mono text-xs">{item.path}</span> : null}
                     {item.note ? <span className="text-muted-foreground">{item.note}</span> : null}
                   </li>
                 ))}
@@ -326,16 +326,16 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
           ) : null}
           {detail.spec?.acceptance?.length ? (
             <div className="mt-4">
-              <div className="text-[11px] font-medium text-muted-foreground">验收命令</div>
-              <p className="mt-0.5 text-[10px] text-muted-foreground">
+              <div className="text-xs font-medium text-muted-foreground">验收命令</div>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
                 逐条跑命令，退出码 0 即通过。这些是确定性判定，不经过模型。
               </p>
               <ul className="mt-1.5 space-y-1">
                 {detail.spec.acceptance.map((item) => (
                   <li key={item.id} className="text-xs text-foreground/90">
-                    <span className="mr-1.5 font-mono text-[10px] text-muted-foreground">{item.id}</span>
+                    <span className="mr-1.5 font-mono text-[11px] text-muted-foreground">{item.id}</span>
                     {item.check}
-                    {item.command ? <span className="ml-1.5 break-all font-mono text-[10px] text-muted-foreground">{item.command}</span> : null}
+                    {item.command ? <span className="ml-1.5 break-all font-mono text-[11px] text-muted-foreground">{item.command}</span> : null}
                   </li>
                 ))}
               </ul>
@@ -427,9 +427,9 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
       {detail.verify.enabled ? (
         <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-verification-heading">
           <div className="mb-2 flex items-center justify-between gap-3">
-            <h2 id="task-verification-heading" className="text-xs font-semibold text-foreground">验收判据</h2>
+            <h2 id="task-verification-heading" className="text-sm font-semibold text-foreground">验收判据</h2>
             <span className={cn(
-              'rounded-full border px-2 py-0.5 text-[10px] font-medium',
+              'rounded-full border px-2 py-0.5 text-[11px] font-medium',
               detail.verify.lastVerdict === 'pass' && 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
               detail.verify.lastVerdict === 'fail' && 'border-destructive/30 bg-destructive/10 text-destructive',
               !detail.verify.lastVerdict && 'border-border/60 bg-foreground/5 text-muted-foreground',
@@ -441,7 +441,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
             model reads to judge a handoff that no command can check — the two
             are different questions and used to look like a duplicate.
           */}
-          <p className="mt-1 text-[10px] text-muted-foreground">
+          <p className="mt-1 text-[11px] text-muted-foreground">
             一句话说明「什么算完成」。命令判定不了的部分，由模型拿它对照交接内容判断。
           </p>
           <p className="mt-2 text-sm leading-6 text-foreground/85">{detail.verify.requirement || '尚未设置验收要求。'}</p>
@@ -452,14 +452,14 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <h2 id="task-handoff-heading" className="text-sm font-semibold text-foreground">交接时间线</h2>
-            <span className="rounded-full bg-foreground/5 px-2 py-0.5 text-[10px] tabular-nums text-muted-foreground">{detail.handoffs.length}</span>
+            <span className="rounded-full bg-foreground/5 px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground">{detail.handoffs.length}</span>
           </div>
           {detail.currentSessionId ? (
             <button
               type="button"
               onClick={() => onOpenSession?.(detail.currentSessionId!)}
               title="打开这个会话"
-              className="truncate text-[11px] text-muted-foreground underline decoration-border underline-offset-2 transition-colors hover:text-foreground"
+              className="truncate text-xs text-muted-foreground underline decoration-border underline-offset-2 transition-colors hover:text-foreground"
             >
               当前会话 · {detail.currentSessionId}
             </button>
@@ -471,7 +471,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
               <FileText className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
             </div>
             <p className="text-xs font-medium text-foreground">还没有交接记录</p>
-            <p className="mt-1 text-[11px] text-muted-foreground">工蜂提交进展后，会显示在这里。</p>
+            <p className="mt-1 text-xs text-muted-foreground">工蜂提交进展后，会显示在这里。</p>
           </div>
         ) : (
           <ol className="space-y-0">
@@ -492,14 +492,14 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
                 </span>
                 <article className="min-w-0 rounded-xl border border-border/60 bg-foreground/[0.02] p-3.5 md:p-4">
                   <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <time className="text-[11px] text-muted-foreground" dateTime={new Date(handoff.at).toISOString()}>{formatTimestamp(handoff.at)}</time>
+                    <time className="text-xs text-muted-foreground" dateTime={new Date(handoff.at).toISOString()}>{formatTimestamp(handoff.at)}</time>
                     <span className={cn(
-                      'rounded-full border px-2 py-0.5 text-[10px] font-medium',
+                      'rounded-full border px-2 py-0.5 text-[11px] font-medium',
                       handoff.outcome === 'delivered' && 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
                       handoff.outcome === 'handoff' && 'border-blue-500/30 bg-blue-500/10 text-blue-400',
                       handoff.outcome === 'needs_decision' && 'border-amber-500/30 bg-amber-500/10 text-amber-400',
                     )}>{HANDOFF_OUTCOME_LABEL[handoff.outcome]}</span>
-                    <span className="min-w-0 truncate text-[10px] text-muted-foreground">{handoff.fromSessionId}</span>
+                    <span className="min-w-0 truncate text-[11px] text-muted-foreground">{handoff.fromSessionId}</span>
                   </div>
                   <p className="whitespace-pre-wrap break-words text-sm leading-6 text-foreground/90">{handoff.summary}</p>
                   {handoff.nextAction ? (
@@ -510,7 +510,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
                   ) : null}
                   {handoff.keyFindings && handoff.keyFindings.length > 0 ? (
                     <div className="mt-3">
-                      <h3 className="mb-1.5 text-[10px] font-semibold text-muted-foreground">关键发现</h3>
+                      <h3 className="mb-1.5 text-[11px] font-semibold text-muted-foreground">关键发现</h3>
                       <ul className="space-y-1">
                         {handoff.keyFindings.map((finding, findingIndex) => (
                           <li key={`${findingIndex}-${finding}`} className="flex items-start gap-2 text-xs leading-relaxed text-foreground/80">
@@ -523,14 +523,14 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
                   ) : null}
                   {handoff.artifacts && handoff.artifacts.length > 0 ? (
                     <div className="mt-3">
-                      <h3 className="mb-1.5 text-[10px] font-semibold text-muted-foreground">产物</h3>
+                      <h3 className="mb-1.5 text-[11px] font-semibold text-muted-foreground">产物</h3>
                       <ul className="space-y-1.5">
                         {handoff.artifacts.map((artifact, artifactIndex) => (
                           <li key={`${artifactIndex}-${artifact.path}`} className="flex min-w-0 items-start gap-2 text-xs">
                             <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
                             <div className="min-w-0">
-                              <code className="block break-all font-mono text-[11px] text-foreground/85">{artifact.path}</code>
-                              {artifact.note ? <p className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground">{artifact.note}</p> : null}
+                              <code className="block break-all font-mono text-xs text-foreground/85">{artifact.path}</code>
+                              {artifact.note ? <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">{artifact.note}</p> : null}
                             </div>
                           </li>
                         ))}
@@ -542,21 +542,21 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
                       'mt-3 rounded-md border p-3',
                       handoff.verify.passed ? 'border-emerald-500/25 bg-emerald-500/5' : 'border-destructive/25 bg-destructive/5',
                     )}>
-                      <div className="mb-2 flex items-center gap-2">
+                      <div className="mb-2.5 flex items-center gap-2">
                         {handoff.verify.passed
                           ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" aria-hidden="true" />
                           : <CircleAlert className="h-3.5 w-3.5 text-destructive" aria-hidden="true" />}
-                        <h3 className="text-[10px] font-semibold text-foreground">{handoff.verify.passed ? '验证通过' : '验证未通过'}</h3>
+                        <h3 className="text-[11px] font-semibold text-foreground">{handoff.verify.passed ? '验证通过' : '验证未通过'}</h3>
                       </div>
                       {handoff.verify.ran.length > 0 ? (
                         <div className="space-y-1">
-                          <div className="text-[10px] text-muted-foreground">验证命令</div>
+                          <div className="text-[11px] text-muted-foreground">验证命令</div>
                           {handoff.verify.ran.map((command, commandIndex) => (
-                            <code key={`${commandIndex}-${command}`} className="block break-all rounded bg-background/60 px-2 py-1 font-mono text-[10px] text-foreground/80">{command}</code>
+                            <code key={`${commandIndex}-${command}`} className="block break-all rounded bg-background/60 px-2 py-1 font-mono text-[11px] text-foreground/80">{command}</code>
                           ))}
                         </div>
                       ) : null}
-                      {handoff.verify.note ? <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">{handoff.verify.note}</p> : null}
+                      {handoff.verify.note ? <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{handoff.verify.note}</p> : null}
                     </div>
                   ) : null}
                 </article>
@@ -566,7 +566,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
         )}
       </section>
 
-      <p className="border-t border-border/50 pt-3 text-[10px] text-muted-foreground">
+      <p className="border-t border-border/50 pt-3 text-[11px] text-muted-foreground">
         创建于 {formatTimestamp(detail.createdAt)}
       </p>
     </div>
@@ -614,7 +614,7 @@ function PlanSection({
   if (!plan || plan.length === 0) {
     return (
       <section className="rounded-xl border border-dashed border-border/70 p-4 md:p-5" aria-labelledby="task-plan-heading">
-        <h2 id="task-plan-heading" className="text-xs font-semibold text-foreground">执行计划</h2>
+        <h2 id="task-plan-heading" className="text-sm font-semibold text-foreground">执行计划</h2>
         <p className="mt-1.5 text-xs text-muted-foreground">
           还没有计划。负责的会话会边做边用 task_plan 记下阶段，这里就会长出勾选清单。
         </p>
@@ -638,17 +638,41 @@ function PlanSection({
     })
 
   // A sub-step renders only when its section is open.
-  const visible = plan.filter((step) => {
-    const cut = step.id.lastIndexOf('.')
-    if (cut < 0) return true
-    return !folded.has(step.id.slice(0, cut))
-  })
+  /**
+   * Plan order is by id path, not by insertion.
+   *
+   * Workers append in the order they discover things — the outline first, then one
+   * sub-step per section as they get to it — so the stored array reads
+   * `1, 2, 3, 4, 1.1, 2.1, 3.1, 4.1`. Rendering that verbatim put `1.1` under section
+   * 4, which looks like the plan is structured wrong when it is only stored in a
+   * different order than it reads.
+   */
+  const byPath = (a: string, b: string) => {
+    const left = a.split('.').map(Number)
+    const right = b.split('.').map(Number)
+    const depth = Math.max(left.length, right.length)
+    for (let i = 0; i < depth; i += 1) {
+      // A missing segment means "the parent itself", which sorts before its children.
+      const x = left[i] ?? -1
+      const y = right[i] ?? -1
+      if (x !== y) return x - y
+    }
+    return 0
+  }
+
+  const visible = [...plan]
+    .sort((a, b) => byPath(a.id, b.id))
+    .filter((step) => {
+      const cut = step.id.lastIndexOf('.')
+      if (cut < 0) return true
+      return !folded.has(step.id.slice(0, cut))
+    })
 
   return (
     <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-plan-heading">
       <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
-        <h2 id="task-plan-heading" className="text-xs font-semibold text-foreground">执行计划</h2>
-        <span className="text-[11px] tabular-nums text-muted-foreground">
+        <h2 id="task-plan-heading" className="text-sm font-semibold text-foreground">执行计划</h2>
+        <span className="text-xs tabular-nums text-muted-foreground">
           {done} / {leaves.length} 已完成
         </span>
       </div>
@@ -672,7 +696,7 @@ function PlanSection({
           return (
             <li
               key={step.id}
-              className="flex min-w-0 items-start gap-1.5 text-xs leading-relaxed"
+              className="flex min-w-0 items-start gap-2 text-sm leading-6"
               style={{ paddingLeft: depth * 16 }}
             >
               {isOutline && kids.length > 0 ? (
@@ -681,7 +705,7 @@ function PlanSection({
                   onClick={() => toggle(step.id)}
                   aria-expanded={!isFolded}
                   aria-label={isFolded ? '展开这一节' : '折叠这一节'}
-                  className="mt-0.5 w-3 shrink-0 select-none text-[10px] leading-4 text-muted-foreground transition-transform hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="mt-0.5 w-3 shrink-0 select-none text-[11px] leading-4 text-muted-foreground transition-transform hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   style={{ transform: isFolded ? 'none' : 'rotate(90deg)' }}
                 >
                   ›
@@ -692,8 +716,8 @@ function PlanSection({
 
               <span className="min-w-0 flex-1">
                 <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
-                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground">{step.id}</span>
-                  <span aria-hidden="true" className="shrink-0 text-[11px] leading-none">{mark}</span>
+                  <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{step.id}</span>
+                  <span aria-hidden="true" className="shrink-0 text-xs leading-none">{mark}</span>
                   {canJump ? (
                     <button
                       type="button"
@@ -719,11 +743,11 @@ function PlanSection({
                     </span>
                   )}
                   {ownerOf(step) ? (
-                    <span className="shrink-0 font-mono text-[10px] text-muted-foreground">· {ownerOf(step)}</span>
+                    <span className="shrink-0 font-mono text-[11px] text-muted-foreground">· {ownerOf(step)}</span>
                   ) : null}
                 </span>
                 {step.note ? (
-                  <span className="mt-0.5 block break-words text-[11px] text-muted-foreground">{step.note}</span>
+                  <span className="mt-0.5 block break-words text-xs text-muted-foreground">{step.note}</span>
                 ) : null}
               </span>
             </li>
@@ -736,7 +760,7 @@ function PlanSection({
 
 function StatusBadge({ status }: { status: TaskStatus }): React.JSX.Element {
   return (
-    <span className={cn('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium', STATUS_TONE[status])}>
+    <span className={cn('inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium', STATUS_TONE[status])}>
       {STATUS_ICON[status]}
       {STATUS_LABEL[status]}
     </span>
@@ -756,15 +780,15 @@ function MetricCard({
 }): React.JSX.Element {
   return (
     <div className="min-w-0 rounded-xl border border-border/60 bg-foreground/[0.02] p-3.5">
-      <div className="text-[10px] font-medium text-muted-foreground">{label}</div>
+      <div className="text-xs font-medium text-muted-foreground">{label}</div>
       <div className={cn(
-        'mt-2 truncate text-lg font-semibold tabular-nums leading-none',
+        'mt-2 truncate text-xl font-semibold tabular-nums leading-none',
         tone === 'default' && 'text-foreground',
         tone === 'warning' && 'text-amber-400',
         tone === 'success' && 'text-emerald-400',
         tone === 'danger' && 'text-destructive',
       )}>{value}</div>
-      <div className="mt-1.5 truncate text-[10px] text-muted-foreground">{hint}</div>
+      <div className="mt-1.5 truncate text-xs text-muted-foreground">{hint}</div>
     </div>
   )
 }

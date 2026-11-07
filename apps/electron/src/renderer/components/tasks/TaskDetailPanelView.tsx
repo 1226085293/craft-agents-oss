@@ -7,6 +7,9 @@ import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   AlertTriangle,
+  ChevronRight,
+  Circle,
+  Loader2,
   ArrowRight,
   CheckCircle2,
   CircleAlert,
@@ -167,7 +170,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
             <span className="font-mono text-xs font-medium text-muted-foreground">{detail.id}</span>
             <StatusBadge status={detail.status} />
           </div>
-          <h1 className="text-xl font-semibold leading-tight tracking-tight text-foreground md:text-2xl">{detail.name}</h1>
+          <h1 className="text-2xl font-semibold leading-tight tracking-tight text-foreground md:text-3xl">{detail.name}</h1>
           <p className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
             <Clock3 className="h-3.5 w-3.5" aria-hidden="true" />
             最近更新 {formatTimestamp(detail.updatedAt)}
@@ -205,7 +208,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
       <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-trigger-heading">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h2 id="task-trigger-heading" className="text-sm font-semibold text-foreground">触发方式</h2>
+            <h2 id="task-trigger-heading" className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">触发方式</h2>
             <p className="mt-1 text-xs text-muted-foreground">{triggerLabel}</p>
           </div>
           {onUpdateTrigger ? (
@@ -283,9 +286,9 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
       <section className="rounded-xl border border-border/60 bg-foreground/[0.02] p-4 md:p-5" aria-labelledby="task-instruction-heading">
         <div className="mb-2.5 flex items-center gap-2">
           <FileText className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-          <h2 id="task-instruction-heading" className="text-sm font-semibold text-foreground">任务说明</h2>
+          <h2 id="task-instruction-heading" className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">任务说明</h2>
         </div>
-        <p className="whitespace-pre-wrap text-[15px] leading-7 text-foreground/90">{detail.instruction}</p>
+        <p className="whitespace-pre-wrap text-base leading-7 text-foreground/90">{detail.instruction}</p>
       </section>
 
       <PlanSection plan={detail.spec?.plan} assignee={detail.assigneeAgentId} jumps={planJumps} onJump={onJumpToStep} />
@@ -294,7 +297,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
         <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-contract-heading">
           <div className="mb-3 flex items-center gap-2">
             <FileText className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
-            <h2 id="task-contract-heading" className="text-sm font-semibold text-foreground">执行契约</h2>
+            <h2 id="task-contract-heading" className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">执行契约</h2>
           </div>
           <dl className="grid gap-3 text-xs md:grid-cols-2">
             {detail.spec?.cwd ? (
@@ -312,7 +315,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
           </dl>
           {detail.spec?.deliverables?.length ? (
             <div className="mt-4">
-              <div className="text-xs font-medium text-muted-foreground">交付物</div>
+              <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">交付物</div>
               <ul className="mt-1.5 space-y-1">
                 {detail.spec.deliverables.map((item, index) => (
                   <li key={`${item.kind}-${index}`} className="flex flex-wrap items-baseline gap-1.5 text-xs text-foreground/90">
@@ -326,7 +329,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
           ) : null}
           {detail.spec?.acceptance?.length ? (
             <div className="mt-4">
-              <div className="text-xs font-medium text-muted-foreground">验收命令</div>
+              <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">验收命令</div>
               <p className="mt-0.5 text-[11px] text-muted-foreground">
                 逐条跑命令，退出码 0 即通过。这些是确定性判定，不经过模型。
               </p>
@@ -427,7 +430,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
       {detail.verify.enabled ? (
         <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-verification-heading">
           <div className="mb-2 flex items-center justify-between gap-3">
-            <h2 id="task-verification-heading" className="text-sm font-semibold text-foreground">验收判据</h2>
+            <h2 id="task-verification-heading" className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">验收判据</h2>
             <span className={cn(
               'rounded-full border px-2 py-0.5 text-[11px] font-medium',
               detail.verify.lastVerdict === 'pass' && 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400',
@@ -451,7 +454,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
       <section aria-labelledby="task-handoff-heading">
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
-            <h2 id="task-handoff-heading" className="text-sm font-semibold text-foreground">交接时间线</h2>
+            <h2 id="task-handoff-heading" className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">交接时间线</h2>
             <span className="rounded-full bg-foreground/5 px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground">{detail.handoffs.length}</span>
           </div>
           {detail.currentSessionId ? (
@@ -614,7 +617,7 @@ function PlanSection({
   if (!plan || plan.length === 0) {
     return (
       <section className="rounded-xl border border-dashed border-border/70 p-4 md:p-5" aria-labelledby="task-plan-heading">
-        <h2 id="task-plan-heading" className="text-sm font-semibold text-foreground">执行计划</h2>
+        <h2 id="task-plan-heading" className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">执行计划</h2>
         <p className="mt-1.5 text-xs text-muted-foreground">
           还没有计划。负责的会话会边做边用 task_plan 记下阶段，这里就会长出勾选清单。
         </p>
@@ -671,7 +674,7 @@ function PlanSection({
   return (
     <section className="rounded-xl border border-border/60 p-4 md:p-5" aria-labelledby="task-plan-heading">
       <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2">
-        <h2 id="task-plan-heading" className="text-sm font-semibold text-foreground">执行计划</h2>
+        <h2 id="task-plan-heading" className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">执行计划</h2>
         <span className="text-xs tabular-nums text-muted-foreground">
           {done} / {leaves.length} 已完成
         </span>
@@ -696,7 +699,7 @@ function PlanSection({
           return (
             <li
               key={step.id}
-              className="flex min-w-0 items-start gap-2 text-sm leading-6"
+              className="flex min-w-0 items-start gap-2 text-base leading-7"
               style={{ paddingLeft: depth * 16 }}
             >
               {isOutline && kids.length > 0 ? (
@@ -705,18 +708,20 @@ function PlanSection({
                   onClick={() => toggle(step.id)}
                   aria-expanded={!isFolded}
                   aria-label={isFolded ? '展开这一节' : '折叠这一节'}
-                  className="mt-0.5 w-3 shrink-0 select-none text-[11px] leading-4 text-muted-foreground transition-transform hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  style={{ transform: isFolded ? 'none' : 'rotate(90deg)' }}
+                  className="-ml-1 mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 >
-                  ›
+                  <ChevronRight
+                    className={cn('h-3.5 w-3.5 transition-transform duration-200', !isFolded && 'rotate-90')}
+                    aria-hidden="true"
+                  />
                 </button>
               ) : (
-                <span className="mt-0.5 w-3 shrink-0" aria-hidden="true" />
+                <span className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
               )}
 
               <span className="min-w-0 flex-1">
                 <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
-                  <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{step.id}</span>
+                  <span className="shrink-0 font-mono text-xs text-muted-foreground/60">{step.id}</span>
                   <span aria-hidden="true" className="shrink-0 text-xs leading-none">{mark}</span>
                   {canJump ? (
                     <button
@@ -725,7 +730,7 @@ function PlanSection({
                       onClick={() => onJump?.(jump!)}
                       className={cn(
                         'min-w-0 rounded text-left underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-                        isOutline ? 'font-medium text-foreground' : 'text-foreground/90',
+                        isOutline ? 'text-base font-medium text-foreground' : 'text-sm text-foreground/85',
                         step.status === 'done' && 'text-muted-foreground',
                       )}
                     >
@@ -735,7 +740,7 @@ function PlanSection({
                     <span
                       className={cn(
                         'min-w-0 break-words',
-                        isOutline ? 'font-medium text-foreground' : 'text-foreground/90',
+                        isOutline ? 'text-base font-medium text-foreground' : 'text-sm text-foreground/85',
                         step.status === 'done' && 'text-muted-foreground',
                       )}
                     >
@@ -747,7 +752,7 @@ function PlanSection({
                   ) : null}
                 </span>
                 {step.note ? (
-                  <span className="mt-0.5 block break-words text-xs text-muted-foreground">{step.note}</span>
+                  <span className="mt-1 block break-words text-xs leading-5 text-muted-foreground">{step.note}</span>
                 ) : null}
               </span>
             </li>
@@ -780,15 +785,15 @@ function MetricCard({
 }): React.JSX.Element {
   return (
     <div className="min-w-0 rounded-xl border border-border/60 bg-foreground/[0.02] p-3.5">
-      <div className="text-xs font-medium text-muted-foreground">{label}</div>
+      <div className="text-[11px] font-medium text-muted-foreground">{label}</div>
       <div className={cn(
-        'mt-2 truncate text-xl font-semibold tabular-nums leading-none',
+        'mt-2 truncate text-2xl font-semibold tabular-nums leading-none',
         tone === 'default' && 'text-foreground',
         tone === 'warning' && 'text-amber-400',
         tone === 'success' && 'text-emerald-400',
         tone === 'danger' && 'text-destructive',
       )}>{value}</div>
-      <div className="mt-1.5 truncate text-xs text-muted-foreground">{hint}</div>
+      <div className="mt-1 truncate text-[11px] text-muted-foreground">{hint}</div>
     </div>
   )
 }

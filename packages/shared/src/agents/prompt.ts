@@ -37,15 +37,27 @@ export interface AgentPromptEntry {
   isDefault?: boolean;
 }
 
-function toEntry(agent: AgentProfile, defaultAgentId: string): AgentPromptEntry {
-  const hint = agent.dispatchHint?.replace(/\s+/g, ' ').trim();
-  const firstLine = agent.persona
+/**
+ * The one-line routing gist for a profile.
+ *
+ * The hint wins when present: it is written *for* the dispatcher, in third person.
+ * The persona first line is the fallback, not the design — a persona opens with a
+ * behavioural instruction addressed to the agent itself, so it can route on a
+ * sentence that says nothing about scope. Blank hint therefore degrades to the old
+ * behaviour instead of going silent.
+ */
+function readGist(persona: string | undefined, dispatchHint: string | undefined): string | undefined {
+  const hint = dispatchHint?.replace(/\s+/g, ' ').trim();
+  if (hint) return hint.slice(0, MAX_HINT_CHARS);
+  const firstLine = persona
     ?.split('\n')
     .map((line) => line.trim())
     .find((line) => line.length > 0);
-  const gist = hint
-    ? hint.slice(0, MAX_HINT_CHARS)
-    : firstLine?.replace(/\s+/g, ' ').slice(0, MAX_PERSONA_CHARS);
+  return firstLine?.replace(/\s+/g, ' ').slice(0, MAX_PERSONA_CHARS);
+}
+
+function toEntry(agent: AgentProfile, defaultAgentId: string): AgentPromptEntry {
+  const gist = readGist(agent.persona, agent.dispatchHint);
   return {
     id: agent.id,
     name: agent.name,
@@ -77,9 +89,24 @@ export function readAgentRoster(workspaceRootPath: string | undefined): AgentPro
       .filter((agent) => !agent.deletedAt)
       .map((agent) => toEntry(agent, defaultAgentId));
     const hasDefault = live.some((entry) => entry.id === DEFAULT_AGENT_ID);
-    return hasDefault
-      ? live
-      : [{ id: DEFAULT_AGENT_ID, name: '默认', ...(defaultAgentId === DEFAULT_AGENT_ID ? { isDefault: true } : {}) }, ...live];
+    if (hasDefault) return live;
+    // The synthesized default has to carry its own gist. It is the profile every
+    // unassigned task runs as, so it is the one entry the supervisor most needs to
+    // understand — omitting the gist printed a bare id next to fully described
+    // roles, which reads as "this one has no scope" rather than "this one takes
+    // whatever is left". `defaults` is where its persona and hint live, since the
+    // builtin is materialized from that block instead of stored in `agents[]`.
+    return [
+      {
+        id: DEFAULT_AGENT_ID,
+        name: '默认',
+        ...(readGist(file.defaults.persona, file.defaults.dispatchHint)
+          ? { gist: readGist(file.defaults.persona, file.defaults.dispatchHint) }
+          : {}),
+        ...(defaultAgentId === DEFAULT_AGENT_ID ? { isDefault: true } : {}),
+      },
+      ...live,
+    ];
   } catch {
     return [];
   }

@@ -89,6 +89,29 @@ describe('agent roster', () => {
     expect(block).toContain('assigneeAgentId');
   });
 
+  it('describes the synthesized default too, from the defaults block', () => {
+    // The builtin is materialized from `defaults`, not stored in `agents[]`. It used
+    // to reach the roster as a bare id next to fully described roles, which reads
+    // as "this one has no scope" — while it is the profile every unassigned task
+    // actually runs as.
+    const root = workspace();
+    writeRoster(root, [profile({ id: 'agent-ui', name: '前端工', persona: '你负责界面。' })]);
+    const file: AgentsFile = {
+      ...emptyAgentsFile(),
+      agents: [profile({ id: 'agent-ui', name: '前端工', persona: '你负责界面。' })],
+      defaults: {
+        ...emptyAgentsFile().defaults,
+        persona: '你是默认角色。',
+        dispatchHint: '兜底的万能手。',
+      },
+    };
+    saveAgents(root, file);
+
+    const entry = readAgentRoster(root).find((e) => e.id === DEFAULT_AGENT_ID);
+    expect(entry?.gist).toBe('兜底的万能手。');
+    expect(buildAgentRosterBlock(root)).toContain('兜底的万能手。');
+  });
+
   it('says nothing for a workspace that does not exist', () => {
     // `loadAgents` tolerates a missing file, which here would print a one-entry
     // roster for a path that is not there — a list the supervisor could act on.

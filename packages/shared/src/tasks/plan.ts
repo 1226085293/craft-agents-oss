@@ -354,3 +354,42 @@ export function formatPlan(plan: PlanStep[] | undefined): string[] {
     return `${indent}- [${mark}] ${step.title}${owner} (${step.id})${note}`;
   });
 }
+
+export interface NextLeg {
+  /** The step that should be worked on next. */
+  step: PlanStep;
+  /** The outline it belongs to. */
+  outline: PlanStep;
+  /** Who should do it: the step's own owner, else the task's assignee. */
+  agent?: string;
+}
+
+/**
+ * Which step comes next, and who should do it.
+ *
+ * Pure on purpose. Handing work to the next section must not cost a model call
+ * and must not go through the supervisor's conversation: with several tasks
+ * running, every hand-off would queue a message in front of the user's own, and
+ * the user's next sentence would wait behind bookkeeping. The plan already says
+ * what comes next and who owns it — reading it is a lookup, not a judgement.
+ *
+ * Returns undefined when there is nothing scheduled: every section finished, or
+ * the current section has not been broken down yet (in which case a human set the
+ * plan aside mid-flight, and guessing would be worse than waiting).
+ */
+export function nextLeg(plan: PlanStep[] | undefined): NextLeg | undefined {
+  if (!plan?.length) return undefined;
+  const outlines = plan
+    .filter((step) => isOutlineStep(step.id))
+    .sort((a, b) => Number(a.id) - Number(b.id));
+
+  for (const outline of outlines) {
+    if (outline.status === 'done') continue;
+    const kids = childrenOf(plan, outline.id);
+    // A section with no sub-steps has not been expanded; the worker owns that.
+    if (kids.length === 0) return undefined;
+    const step = kids.find((kid) => kid.status !== 'done');
+    if (step) return { step, outline, ...(step.agent ? { agent: step.agent } : {}) };
+  }
+  return undefined;
+}

@@ -26,6 +26,7 @@ import {
   loadTask,
   nextTaskId,
   normalizeHandoff,
+  nextLeg,
   recordRunResult,
   saveTask,
   shouldTripFuse,
@@ -52,6 +53,17 @@ export interface TaskServiceDeps {
   sessionExists: (sessionId: string) => boolean;
   /** Wake the owning supervisor with a one-line nudge. */
   wakeSupervisor: (sessionId: string, text: string) => void;
+  /**
+   * Start the next section's owner on a task, without going through the
+   * supervisor's conversation.
+   *
+   * Why not just wake the supervisor and let it dispatch: that queue is the same
+   * one the user talks to. With several tasks handing off, every hand-off would
+   * put a message in front of the user's next sentence, and the delay would grow
+   * with the number of tasks — the busier the work, the slower the human. The
+   * decision itself is a lookup in the plan, so it does not need a model either.
+   */
+  startNextLeg?: (task: Task, agent: string | undefined) => Promise<boolean>;
   /** Run one acceptance command; resolves to exit code + output tail. */
   runAcceptanceCommand?: (command: string, cwd?: string) => Promise<{ exitCode: number | null; output?: string }>;
   /**
@@ -650,13 +662,48 @@ export class TaskService {
       },
     });
 
+    // The next section may belong to someone else. When it does, start them here
+    // — the plan already says who, so asking the supervisor would be paying a
+    // model call and a queue slot to read a field.
+    //
+    // Only for an accepted `handoff`: `delivered` means the task is finished, and
+    // `needs_decision` means it is waiting on a person. Starting work in either
+    // case would be acting on a decision nobody made.
+    let startedNextLeg = false;
+    if (accepted && handoff.outcome === 'handoff' && this.deps.startNextLeg) {
+      const leg = nextLeg(next.spec?.plan);
+      const current = next.assigneeAgentId;
+      const nextAgent = leg?.agent ?? current;
+      const belongsElsewhere = Boolean(leg && leg.agent && leg.agent !== current);
+      if (leg && belongsElsewhere) {
+        try {
+          startedNextLeg = await this.deps.startNextLeg(next, nextAgent);
+        } catch (error) {
+          startedNextLeg = false;
+          log.warn(`[tasks] could not start the next leg of ${id}`, { error: String(error) });
+        }
+        if (startedNextLeg) {
+          appendJournal(this.root, id, {
+            type: 'next_leg_started',
+            at: now,
+            data: { step: leg.step.id, agent: nextAgent },
+          });
+        }
+      }
+    }
+
     // Only the supervisor decides what the user sees; the worker never does.
-    this.deps.wakeSupervisor(
-      next.supervisorSessionId,
-      accepted
-        ? `${id} 交接通过：${handoff.summary}`
-        : `${id} 交接未通过（${reasons.join('；') || handoff.outcome}）：${handoff.summary}`,
-    );
+    // Skip the nudge when the next leg already started: the supervisor has
+    // nothing to route, and waking it would queue a message in front of the
+    // user's next sentence for no decision.
+    if (!startedNextLeg) {
+      this.deps.wakeSupervisor(
+        next.supervisorSessionId,
+        accepted
+          ? `${id} 交接通过：${handoff.summary}`
+          : `${id} 交接未通过（${reasons.join('；') || handoff.outcome}）：${handoff.summary}`,
+      );
+    }
 
     return { task: next, handoff, passed: accepted, reasons, compactionPending };
   }

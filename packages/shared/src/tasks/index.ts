@@ -70,6 +70,7 @@ export {
   formatPlan,
   isOutlineStep,
   isPlanStepStatus,
+  nextLeg,
   lastPlanChangeAt,
   normalizePlan,
   PLAN_STEP_LIMIT,
@@ -110,6 +111,7 @@ export {
   describeTrigger,
   formatTaskBrief,
   formatHandoffContext,
+  formatNextLegBrief,
   formatResumeBrief,
   type TaskBriefOptions,
 } from './brief.ts';

@@ -36,7 +36,7 @@ import {
 } from '@craft-agent/shared/agents'
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
-import { readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
+import { readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatNextLegBrief, nextLeg, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -7025,6 +7025,56 @@ ${request.prompt}`;
         void this.sendMessage(sessionId, text).catch((error) => {
           sessionLog.warn('Failed to wake supervisor', { sessionId, error })
         })
+      },
+      /**
+       * Start the agent that owns the next section of a task.
+       *
+       * Deliberately does not touch the supervisor's session: that conversation is
+       * the user's, and waking it for every hand-off would put bookkeeping in front
+       * of the user's next sentence. The decision is `nextLeg(plan)` — a lookup —
+       * so no model is involved either.
+       *
+       * The run gate still applies: a task that is out of budget, out of failures,
+       * or locked by a live run must not be started just because a section ended.
+       * When the gate refuses, this returns false and the caller falls back to
+       * telling the supervisor, which is the right place for "this needs a human".
+       */
+      startNextLeg: async (task, agent) => {
+        const leg = nextLeg(task.spec?.plan)
+        if (!leg) return false
+
+        const claim = this.getTasks(workspace.id).startRun(task.id, `pending:next-leg:${leg.step.id}`)
+        if (!claim.ok) {
+          sessionLog.info(`[tasks] next leg of ${task.id} not started: ${claim.reason}`)
+          return false
+        }
+
+        try {
+          const created = await this.createSession(workspace.id, {
+            name: `${task.id} ${leg.step.id} ${leg.step.title}`.slice(0, 60),
+            role: 'worker',
+            taskId: task.id,
+            ...(agent ? { agentId: agent } : {}),
+            ...(task.spec?.cwd ? { workingDirectory: task.spec.cwd } : {}),
+            ...(task.spec?.sources?.length ? { enabledSourceSlugs: task.spec.sources } : {}),
+            ...(task.spec?.model ? { model: task.spec.model } : {}),
+            ...(task.spec?.strategy ? { strategy: task.spec.strategy } : {}),
+          })
+          this.claimTaskRun(workspace.id, task.id, created.id)
+          // Fire and forget for the same reason dispatch does: a hand-off is
+          // routing, and waiting for the whole first turn would hold the worker
+          // that just reported.
+          void this.sendMessage(created.id, formatNextLegBrief(task, leg.step)).catch((error) => {
+            sessionLog.warn(`[tasks] could not brief the next leg of ${task.id}`, { error })
+          })
+          sessionLog.info(`[tasks] started ${task.id} ${leg.step.id} as ${agent ?? 'default'} in ${created.id}`)
+          return true
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          this.getTasks(workspace.id).endRun(task.id, { ok: false, error: message })
+          sessionLog.warn(`[tasks] failed to start the next leg of ${task.id}`, { error: message })
+          return false
+        }
       },
       // Acceptance commands run here, not inside the worker: a task must not be
       // able to certify itself. cwd is resolved against the workspace root so a

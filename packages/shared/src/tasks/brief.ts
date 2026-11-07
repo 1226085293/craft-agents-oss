@@ -159,3 +159,32 @@ export function formatHandoffContext(task: Task): string | undefined {
   return `## 交接上下文\n${prior.join('\n\n')}`;
 }
 
+/**
+ * What the agent taking over the next section is told.
+ *
+ * Short on purpose. This session is not inheriting the whole task — it is
+ * inheriting one step, and it needs three things: which step, where the previous
+ * one left off, and what its own section has to end with. The full brief would
+ * make it re-read work it is not responsible for and invite it to re-plan a task
+ * that already has a plan.
+ */
+export function formatNextLegBrief(task: Task, step: { id: string; title: string; note?: string }): string {
+  const owner = step.note ? `验收要点：${step.note}` : undefined;
+  return [
+    `接手任务 ${task.id}（${task.name}）的下一步：**${step.id} ${step.title}**。`,
+    '',
+    `任务整体：${task.instruction}`,
+    ...(task.spec?.scope ? [`分工范围：${task.spec.scope}`] : []),
+    ...(owner ? [owner] : []),
+    '',
+    formatHandoffContext(task) ?? '',
+    '',
+    '## 你现在要做的',
+    '',
+    `只做 ${step.id}：${step.title}。完成后用 task_plan 把这一步标成 done 并在 note 里写清凭什么算完成，再用 report_result 交接。`,
+    '计划里其它小节不归你，不要改它们。',
+  ]
+    .filter((line) => line !== '')
+    .join('\n');
+}
+

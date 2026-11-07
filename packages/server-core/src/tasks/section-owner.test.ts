@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 
-import { buildSectionOwnerPrompt, parseSectionOwner } from './section-owner.ts'
+import { buildSectionOwnerPrompt, parseSectionOwner, shouldReassignOwner } from './section-owner.ts'
 import type { AgentPromptEntry } from '@craft-agent/shared/agents'
 
 const roster: AgentPromptEntry[] = [
@@ -52,5 +52,15 @@ describe('section owner chooser', () => {
       { id: 'agent-ui-pro', name: 'UI Pro' },
     ]
     expect(parseSectionOwner('agent-ui-pro', overlapping)).toBe('agent-ui-pro')
+  })
+
+  it('overrules an owner the planner guessed, keeps one it could have known', () => {
+    // A worker writing the plan has no roster, so its guess must not outrank the
+    // chooser — otherwise the only participant that could check the name is the
+    // one that gets skipped, and the section runs as the workspace default.
+    expect(shouldReassignOwner({ agent: 'agent-frntend' }, roster)).toBe(true)
+    expect(shouldReassignOwner({ agent: undefined }, roster)).toBe(true)
+    // A name that resolves was deliberate: the chooser leaves it alone.
+    expect(shouldReassignOwner({ agent: 'agent-ui' }, roster)).toBe(false)
   })
 })

@@ -74,6 +74,26 @@ export function parseSectionOwner(answer: string, roster: AgentPromptEntry[]): s
   return undefined;
 }
 
+/**
+ * Whether a step should take the chooser's answer.
+ *
+ * A step already naming a **real** profile keeps it: that decision was deliberate,
+ * and the chooser has no business overruling somebody who knew what they meant.
+ *
+ * A step naming anything else does take the answer. The planner is usually a worker
+ * that cannot see the roster (`task_plan` says so), which makes the name a guess —
+ * and an unresolvable id does not fail loudly: `resolveAgentProfile` falls back to
+ * the workspace default, so the section quietly runs as some other role. The
+ * chooser is the only participant holding the roster, so it overrules the guess.
+ */
+export function shouldReassignOwner(
+  step: Pick<PlanStep, 'agent'>,
+  roster: AgentPromptEntry[],
+): boolean {
+  if (!step.agent) return true;
+  return !roster.some((entry) => entry.id === step.agent);
+}
+
 /** Convenience for callers that have a workspace root on hand. */
 export function readRoster(workspaceRootPath: string | undefined): AgentPromptEntry[] {
   return readAgentRoster(workspaceRootPath);

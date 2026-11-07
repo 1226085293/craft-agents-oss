@@ -53,7 +53,12 @@ import { migrateAutomationCronTasks } from '../tasks/automation-migration.ts'
 import { buildJudgePrompt, parseJudgeVerdict } from '../tasks/task-judge.ts'
 import { SupervisorRuntime } from '../routing/supervisor-runtime.ts'
 import { buildAgentToolBindings } from './agent-tools-bindings.ts'
-import { buildSectionOwnerPrompt, parseSectionOwner, readRoster } from '../tasks/section-owner.ts'
+import {
+  buildSectionOwnerPrompt,
+  parseSectionOwner,
+  readRoster,
+  shouldReassignOwner,
+} from '../tasks/section-owner.ts'
 import { kindRouting, registerAttachmentName, pickStrategyModel, type ModelRequestKind, type ModelWindow } from '@craft-agent/shared/config'
 import type { MidStreamBehavior } from '@craft-agent/shared/config'
 import { PrivilegedExecutionBroker } from '@craft-agent/server-core/services'
@@ -7107,10 +7112,15 @@ ${request.prompt}`;
       const agent = parseSectionOwner(typeof answer?.content === 'string' ? answer.content : '', roster)
       if (!agent) return
 
-      // Record it on the outline and on steps that carry no owner of their own, so
-      // the section reads as one responsibility instead of a mixed bag.
+      // Record it on the outline and on steps that carry no *valid* owner — see
+      // `shouldReassignOwner` for why a guessed name loses to the chooser.
       for (const step of [outline, ...steps]) {
-        if (step.agent) continue
+        if (!shouldReassignOwner(step, roster)) continue
+        if (step.agent) {
+          sessionLog.info(
+            `[tasks] ${taskId} ${step.id} owner "${step.agent}" is not a profile; reassigning to ${agent}`,
+          )
+        }
         service.updatePlan(taskId, { id: step.id, agent })
       }
       sessionLog.info(`[tasks] ${taskId} ${outlineId} assigned to ${agent}`)

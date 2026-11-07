@@ -205,6 +205,34 @@
   --spacing: 0.25rem;
   --tracking-normal: 0em;
 
+  /* === TASK DETAIL TYPE SCALE (semantic layer) ===
+     Three layers, per the design-system spec: the root font is 15px, so every rem
+     size lands one step below its nominal value — `text-base` is 15px and `text-xs`
+     is 11.25px, not 16/12. Sizing elements ad hoc against those numbers is how the
+     task detail page ended up with headings smaller than their own body text and
+     five different sizes for the same kind of label.
+
+     These are the semantic tokens for that page. Components reference the token, the
+     token references the primitive scale — no element picks its own size again.
+
+     role          size    use
+     ─────────────────────────────────────────────────────────────
+     --td-title     22px   the task name (one per page)
+     --td-heading   18px   section headings (执行计划, 交接时间线…)
+     --td-body      15px   prose: instruction, handoff summaries
+     --td-row       15px   plan outline rows
+     --td-row-sub   13px   plan sub-steps
+     --td-label   11.5px   field labels, metric labels, meta ids
+  */
+  --td-title: 1.5rem;
+  --td-heading: 1.2rem;
+  --td-body: 1rem;
+  --td-row: 1rem;
+  --td-row-sub: 0.87rem;
+  --td-label: 0.77rem;
+  --td-leading-body: 1.65;
+  --td-leading-row: 1.55;
+
   /* === Z-INDEX SCALE ===
      Centralized z-index registry for consistent stacking order.
      Use semantic names (z-panel, z-modal) instead of magic numbers.
@@ -1486,4 +1514,59 @@ html.dark[data-scenic] .fullscreen-overlay-background {
 [data-compact] .turn-action-btn {
   min-height: 31px;
   padding: 6px 8px;
+}
+
+/* === TASK DETAIL COMPONENT LAYER ===
+   The component half of the scale above. The page's elements reference these by
+   role, so a heading can never be set smaller than the text it introduces and two
+   labels of the same kind cannot drift to different sizes.
+
+   Colour is a separate token (text-foreground / text-muted-foreground); these
+   classes own size, weight and rhythm only. */
+.td-title {
+  font-size: var(--td-title);
+  line-height: 1.25;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.td-heading {
+  font-size: var(--td-heading);
+  line-height: 1.3;
+  font-weight: 600;
+}
+
+/* A field label names a value; it is not a heading. */
+.td-label {
+  font-size: var(--td-label);
+  line-height: 1.4;
+  font-weight: 500;
+}
+
+.td-body {
+  font-size: var(--td-body);
+  line-height: var(--td-leading-body);
+}
+
+.td-row {
+  font-size: var(--td-row);
+  line-height: var(--td-leading-row);
+}
+
+.td-row-sub {
+  font-size: var(--td-row-sub);
+  line-height: var(--td-leading-row);
+}
+
+.td-meta {
+  font-size: var(--td-label);
+  line-height: 1.45;
+}
+
+/* Metric value: the number the card exists to show. */
+.td-metric {
+  font-size: var(--td-title);
+  line-height: 1;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }

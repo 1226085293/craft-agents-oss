@@ -2835,6 +2835,20 @@ let lastAbortReason: 'user' | 'system' | null = null;
 // catch to decide whether the turn was recovered (and must not be reported
 // as a terminal prompt error).
 let defenseResumeQueued = false;
+// Set while a FRESH user turn settles a still-streaming previous run
+// (2026-11-07 261105-onyx-steel: "send a message and it aborts silently").
+// settleStreamingSessionBeforePrompt() calls session.abort(), which emits an
+// agent_end. That terminal event belongs to the SUPERSEDED run, but the host
+// has already opened the queue for the new turn and had no way to tell the
+// two apart — so it closed the brand-new turn with zero assistant output
+// ("Processing stopped: complete" 39 ms after "Turn started"), while the
+// subprocess went on to run the new prompt invisibly: requests, SSE events
+// and tool calls all landed in the closed iterator. The next message then hit
+// the same unconsumed run and the loop repeated forever.
+// While this flag is set, forwarded agent_end events carry
+// `supersededByFreshTurn: true`; the adapter holds its queue for the fresh
+// turn's agent_start instead of completing.
+let freshTurnSettling = false;
 
 // Bounded compaction heartbeat: while the Pi SDK runs a threshold/overflow
 // compaction the main stream is silent, so without these ticks the
@@ -3283,6 +3297,18 @@ function handleSessionEvent(event: AgentSessionEvent): void {
     forwardedEvent = { ...(forwardedEvent as Record<string, unknown>), gatewayRetryPending: true } as unknown as OutboundAgentEvent;
   }
 
+  // Fresh-turn settlement (see `freshTurnSettling`): this agent_end closes the
+  // run that a newly arrived user prompt just superseded. Tell the host to
+  // hold its queue open — the fresh turn's own agent_start follows — instead
+  // of completing a turn the model has not even answered yet.
+  if (event.type === 'agent_end' && freshTurnSettling) {
+    forwardedEvent = {
+      ...(forwardedEvent as Record<string, unknown>),
+      supersededByFreshTurn: true,
+    } as unknown as OutboundAgentEvent;
+    debugLog('[prompt] agent_end annotated supersededByFreshTurn=true (host holds the queue for the fresh turn)');
+  }
+
   // Forward all events to main process
   send({ type: 'event', event: forwardedEvent });
 }
@@ -3487,7 +3513,20 @@ async function handlePrompt(msg: Extract<InboundMessage, { type: 'prompt' }>): P
     // Mid-turn delivery has its own channel (`steer`), so reaching here while
     // streaming always means the previous run had not settled yet.
     // See prompt-settle.ts for the full incident notes.
-    await settleStreamingSessionBeforePrompt(session, { log: debugLog });
+    //
+    // 2026-11-07 (261105-onyx-steel): the abort issued here terminates the
+    // SUPERSEDED run, not this one. `session.abort()` awaits idle, so every
+    // agent_end it produces is emitted before this await returns — the flag
+    // below therefore covers exactly those events and nothing else. Without
+    // it the host consumed that terminal event as the END of the turn we are
+    // about to start, closed the queue, and the new prompt's entire run
+    // (requests, deltas, tool calls) was dropped on the floor.
+    freshTurnSettling = true;
+    try {
+      await settleStreamingSessionBeforePrompt(session, { log: debugLog });
+    } finally {
+      freshTurnSettling = false;
+    }
 
     // Stall protection: wait on the prompt promise, but poll for SILENCE.
     // If no SDK event (stream delta / tool progress / message_end) arrives

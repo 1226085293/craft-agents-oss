@@ -56,6 +56,13 @@ const RETRY_START_FALLBACK_TIMEOUT_MS = 5_000;
  *  `agent_start` and surface the parked error instead. */
 const RETRY_RUN_GRACE_MS = 15_000;
 
+/** How long to hold the event queue after a `supersededByFreshTurn` agent_end
+ *  before giving up on the fresh turn's `agent_start`. The subprocess emits it
+ *  immediately after `session.prompt()` resolves, so the wait is one SDK
+ *  round-trip; 20 s covers a slow provider while still closing a queue whose
+ *  subprocess died in the window. */
+const SUPERSEDED_RELEASE_TIMEOUT_MS = 20_000;
+
 /** Retryable provider errors that the shared `parseError` cannot classify are
  *  split into provider-side incidents (surfaced as `service_error`) and
  *  transport failures (surfaced as `network_error`). Patterns mirror the
@@ -262,6 +269,21 @@ export class PiEventAdapter extends BaseEventAdapter {
   private verificationHeld: boolean = false;
   /** Correlation id of the final candidate awaiting a successful verification replay. */
   private verificationReplayTurnId: string | null = null;
+  /**
+   * Set when the subprocess annotated an `agent_end` with
+   * `supersededByFreshTurn: true` (2026-11-07, session 261105-onyx-steel).
+   *
+   * That agent_end belongs to a run the host had ALREADY given up on: a fresh
+   * user prompt arrived while the previous run had not settled, so the
+   * subprocess aborted it before starting the new turn. Completing the queue
+   * here would close the turn the user just started — the observed "send a
+   * message and it aborts silently", with the real run continuing invisibly
+   * (requests, SSE events and tool calls all landing in a closed iterator).
+   * The queue stays open until the fresh turn's own `agent_start` arrives;
+   * the timer is a safety net for a subprocess that dies in between.
+   */
+  private supersededByFreshTurnHeld: boolean = false;
+  private supersededReleaseTimerId: ReturnType<typeof setTimeout> | null = null;
 
   // ============================================================
   // Retryable-error deferral (auto-retry terminal-state reporting)
@@ -354,6 +376,12 @@ export class PiEventAdapter extends BaseEventAdapter {
     }
     if (isAgentEnd) {
       if (this.gatewayRetryState !== 'none') return false;
+      if (this.supersededByFreshTurnHeld) {
+        // The run that just ended was superseded by a fresh user turn; its
+        // own agent_start will release this hold. Completing here would close
+        // the newly started turn before the model produced anything.
+        return false;
+      }
       if (defenseResumePending) {
         // A defense resume is in flight — hold the queue open for the
         // resumed turn's events (they arrive after this agent_end).
@@ -494,6 +522,7 @@ export class PiEventAdapter extends BaseEventAdapter {
     this.queuePendingNonEmpty = false;
     this.verificationHeld = false;
     this.verificationReplayTurnId = null;
+    this.releaseSupersededByFreshTurn();
     this.queuedHoldDemotedReply = null;
     this.lastEmittedFinalText = null;
     this.lastFinalTextTurnId = null;
@@ -556,6 +585,39 @@ export class PiEventAdapter extends BaseEventAdapter {
     if (this.retryFallbackTimerId !== null) {
       clearTimeout(this.retryFallbackTimerId);
       this.retryFallbackTimerId = null;
+    }
+  }
+
+  /**
+   * Arm the `supersededByFreshTurn` hold. The queue stays open until the
+   * fresh turn's `agent_start` (released by
+   * {@link releaseSupersededByFreshTurn}) or until the safety timer fires —
+   * whichever comes first.
+   */
+  private holdForSupersededTurn(): void {
+    this.supersededByFreshTurnHeld = true;
+    this.cancelSupersededReleaseTimer();
+    this.supersededReleaseTimerId = setTimeout(() => {
+      this.supersededReleaseTimerId = null;
+      if (!this.supersededByFreshTurnHeld) return;
+      this.supersededByFreshTurnHeld = false;
+      this.log.warn('Superseded-turn hold expired — the fresh turn never started', {
+        timeoutMs: SUPERSEDED_RELEASE_TIMEOUT_MS,
+      });
+      this.onFallbackComplete?.();
+    }, SUPERSEDED_RELEASE_TIMEOUT_MS);
+  }
+
+  /** Release the hold (fresh turn started, or the adapter is being reset). */
+  private releaseSupersededByFreshTurn(): void {
+    this.supersededByFreshTurnHeld = false;
+    this.cancelSupersededReleaseTimer();
+  }
+
+  private cancelSupersededReleaseTimer(): void {
+    if (this.supersededReleaseTimerId !== null) {
+      clearTimeout(this.supersededReleaseTimerId);
+      this.supersededReleaseTimerId = null;
     }
   }
 
@@ -700,6 +762,13 @@ export class PiEventAdapter extends BaseEventAdapter {
       // ============================================================
 
       case 'agent_start':
+        // A fresh user turn superseded a run the host had already been told to
+        // forget (see `supersededByFreshTurnHeld`): this agent_start is that
+        // fresh turn — release the hold and let its events flow into the SAME
+        // queue, so the user finally sees the answer they asked for.
+        if (this.supersededByFreshTurnHeld) {
+          this.releaseSupersededByFreshTurn();
+        }
         if (this.gatewayRetryState === 'awaiting') {
           this.gatewayRetryState = 'recovering';
           yield { type: 'retry', phase: 'active' };
@@ -717,6 +786,18 @@ export class PiEventAdapter extends BaseEventAdapter {
         break;
 
       case 'agent_end': {
+        // A run superseded by a freshly arrived user prompt (2026-11-07,
+        // 261105-onyx-steel). This agent_end is the terminal of the OLD run —
+        // completing on it closed the turn the user had just started, and the
+        // real answer was then streamed into a closed iterator. Hold instead;
+        // the fresh turn's agent_start releases the hold. Placed FIRST so no
+        // other lane (retry/defense/verification) can reinterpret this
+        // terminal as belonging to the new turn.
+        if ((event as { supersededByFreshTurn?: boolean }).supersededByFreshTurn) {
+          this.holdForSupersededTurn();
+          yield* this.demoteDraftReplyForHold();
+          break;
+        }
         if (
           this.gatewayRetryState === 'awaiting' &&
           !(event as { gatewayRetryPending?: boolean }).gatewayRetryPending

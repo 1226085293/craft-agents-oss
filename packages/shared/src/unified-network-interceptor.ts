@@ -2307,6 +2307,104 @@ function synthesizeMalformedBodyResponse(
 // INTERCEPTED FETCH
 // ============================================================================
 
+/**
+ * How long an SSE response may stay byte-silent before we tear its body down.
+ *
+ * 2026-11-07 (session 261105-onyx-steel): the relay answered
+ * `200 OK + content-type: text/event-stream` and then sent NOTHING for 90+ s
+ * (twice: 06:11 and 07:02 UTC). Every timeout above this layer fired first —
+ * the 90 s turn watchdog aborted the run, the SDK was left `isStreaming`, and
+ * every later user message was superseded-then-aborted. The HTTP idle timeout
+ * is 600 s, far too late to matter.
+ *
+ * A response that opens its stream and never writes a byte is a dead
+ * connection, not a slow model: cap the wait well below the turn watchdog so
+ * the failure surfaces as a retryable network error ON THIS REQUEST instead
+ * of poisoning the session state.
+ */
+const SSE_FIRST_BYTE_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.CRAFT_SSE_FIRST_BYTE_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 45_000;
+})();
+
+/**
+ * Wrap an SSE body so that a stream which opens but never delivers a single
+ * byte is errored out (and its upstream reader cancelled) after
+ * {@link SSE_FIRST_BYTE_TIMEOUT_MS}.
+ *
+ * The timer is armed on construction, disarmed by the FIRST incoming chunk, and
+ * cleared on close/cancel, so an ordinary stream pays nothing. The error is
+ * raised through `controller.error()`, which the SDK surfaces as a network
+ * failure on the current model step — retryable, and local to this request.
+ */
+export function withFirstByteWatchdog(
+  body: ReadableStream<Uint8Array>,
+  label: string,
+  timeoutMs: number = SSE_FIRST_BYTE_TIMEOUT_MS,
+): ReadableStream<Uint8Array> {
+  const reader = body.getReader();
+  let sawFirstByte = false;
+  let finished = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearTimer = (): void => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+  };
+
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      timer = setTimeout(() => {
+        timer = null;
+        if (sawFirstByte || finished) return;
+        finished = true;
+        debugLog(
+          `[${label}] SSE stream stayed byte-silent for ${timeoutMs}ms after the response headers — failing this request`,
+        );
+        void reader.cancel('sse-first-byte-timeout').catch(() => {});
+        controller.error(
+          new Error(
+            `SSE stream produced no data within ${timeoutMs}ms (upstream accepted the request but never streamed)`,
+          ),
+        );
+      }, timeoutMs);
+    },
+    async pull(controller) {
+      if (finished) return;
+      let chunk: { done: boolean; value?: Uint8Array };
+      try {
+        chunk = await reader.read();
+      } catch (err) {
+        // The watchdog may have already errored the controller.
+        if (finished) return;
+        finished = true;
+        clearTimer();
+        controller.error(err);
+        return;
+      }
+      if (finished) return;
+      if (chunk.done) {
+        finished = true;
+        clearTimer();
+        controller.close();
+        return;
+      }
+      if (!sawFirstByte) {
+        sawFirstByte = true;
+        clearTimer();
+      }
+      controller.enqueue(chunk.value);
+    },
+    async cancel(reason) {
+      finished = true;
+      clearTimer();
+      await reader.cancel(reason).catch(() => {});
+    },
+  });
+}
+
 const originalFetch = globalThis.fetch.bind(globalThis);
 
 async function interceptedFetch(
@@ -2391,7 +2489,10 @@ async function interceptedFetch(
         if (contentType.includes('text/event-stream') && response.body) {
           debugLog(`[${adapter.name}] Creating SSE processor (${adapter.stripsSseMetadata ? 'strip' : 'capture'})`);
           const processor = adapter.createSseProcessor();
-          const processedBody = response.body.pipeThrough(processor);
+          const processedBody = withFirstByteWatchdog(
+            response.body.pipeThrough(processor),
+            adapter.name,
+          );
           const processedResponse = new Response(processedBody, {
             status: response.status,
             statusText: response.statusText,

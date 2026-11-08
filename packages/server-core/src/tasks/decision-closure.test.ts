@@ -28,7 +28,13 @@ function service() {
 
 /** The real path that produces `paused / needs_decision`: a worker hands off asking to be told. */
 async function pausedOnDecision(svc: TaskService) {
-  const task = svc.create({ name: '状态图标验证', scope: '只做 1.1' })
+  const task = svc.create({
+    name: '状态图标验证',
+    instruction: '建立任务「状态图标验证」，只做 1.1',
+    supervisorSessionId: 'sess_s',
+    toolCallId: 'call_1',
+    spec: { scope: '只做 1.1', cwd: '/tmp' },
+  })
   svc.setStatus(task.id, 'running')
   await svc.reportHandoff(
     task.id,

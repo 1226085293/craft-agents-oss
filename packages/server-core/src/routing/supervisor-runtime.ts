@@ -25,6 +25,7 @@ import {
 import { loadRoutes, matchRoute, formatRouteInstruction, formatRouteRuleIssue, ruleParallelism } from '@craft-agent/shared/routing';
 import { readAgentRoster } from '@craft-agent/shared/agents';
 import { DispatchQueue } from './dispatch-queue.ts';
+import { isAuthorizedStep } from '@craft-agent/shared/tasks';
 
 const log = createLogger('supervisor');
 
@@ -322,7 +323,12 @@ export class SupervisorRuntime {
     task: {
       id: string;
       status?: string;
-      spec?: { scope?: string; plan?: Array<{ id: string; status?: string }> };
+      spec?: {
+        scope?: string;
+        plan?: Array<{ id: string; status?: string }>;
+        authorizedUpTo?: string;
+        authorizedSteps?: string[];
+      };
       handoffs?: Array<{ outcome?: string }>;
     },
     params: { userApproved?: boolean },
@@ -335,9 +341,28 @@ export class SupervisorRuntime {
     if (params.userApproved) return;
     const handedOff = (task.handoffs ?? []).some((h) => h.outcome !== 'needs_decision');
     const planOpen = Boolean(task.spec?.plan?.some((step) => step.status !== 'done'));
-    if (task.spec?.scope && handedOff && planOpen) {
+    if (!handedOff || !planOpen) return;
+    /**
+     * Authorisation is a structured fact, not a sentence.
+     *
+     * This gate used to fire whenever `spec.scope` was set and any step was still open — so a
+     * task whose boundary had been widened to `1.2` was refused anyway, because the prose still
+     * read 「步骤 1.2」 and the plan still had step 2 open. Observed: the user answered
+     * 「完成1.2后暂停」, the supervisor recorded the answer, wrote `authorizedUpTo: "1.2"`, and
+     * the dispatch of 1.2 was still rejected with 「scope 只覆盖已交付的那一段」 — then the
+     * supervisor paused the task and reported success, so the work never happened.
+     *
+     * `authorizedUpTo` / `authorizedSteps` are what `applyPlanPatch` already enforces and what
+     * the resume path already reads. Consulting the prose here made this the one place that
+     * disagreed with the other two about what "authorised" means.
+     */
+    if (!task.spec?.scope) return;
+    const scope = task.spec;
+    const openIds = (scope.plan ?? []).filter((step) => step.status !== 'done').map((s) => s.id);
+    const beyond = openIds.filter((id) => !isAuthorizedStep(id, scope));
+    if (beyond.length > 0) {
       throw new DispatchRefused(
-        `${task.id} 的 scope 只覆盖已交付的那一段（「${task.spec.scope}」），计划里剩下的步骤不在授权范围内。要继续需要用户确认：不要自己派活，向用户说明还剩哪些步骤，等他同意。`,
+        `${task.id} 的 scope 只覆盖已交付的那一段（「${scope.scope}」），计划里还剩 ${beyond.join('、')} 不在授权范围内。要继续需要用户确认：不要自己派活，向用户说明还剩哪些步骤，等他同意。`,
       );
     }
   }

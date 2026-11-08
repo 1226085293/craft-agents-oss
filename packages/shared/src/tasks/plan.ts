@@ -364,17 +364,7 @@ export function applyPlanPatch(
    * The ceiling is what makes 「完成 1.2 后暂停」 enforceable before 1.2 has been planned: the
    * id does not have to exist to be the place to stop at.
    */
-  const keyOf = (id: string) => (id.match(/\d+(?:\.\d+)*/g) ?? ['0'])[0]
-  const cmp = (a: string, b: string): number => {
-    const left = a.split('.').map((n) => Number.parseInt(n, 10) || 0)
-    const right = b.split('.').map((n) => Number.parseInt(n, 10) || 0)
-    for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
-      const d = (left[i] ?? 0) - (right[i] ?? 0)
-      if (d !== 0) return d
-    }
-    return 0
-  }
-  const withinCeiling = ceiling ? cmp(keyOf(patch.id), keyOf(ceiling)) <= 0 : false
+  const withinCeiling = isAuthorizedStep(patch.id, { authorizedSteps: authorized, authorizedUpTo: ceiling })
   if (authorized && authorized.length > 0 && moving && !authorized.includes(patch.id) && !withinCeiling) {
     const allowed = steps.filter((step) => authorized.includes(step.id)).map((step) => step.id)
     return {
@@ -562,6 +552,37 @@ export interface NextLeg {
  * the current section has not been broken down yet (in which case a human set the
  * plan aside mid-flight, and guessing would be worse than waiting).
  */
+/**
+ * Is this step inside what the person authorised?
+ *
+ * The single answer to that question. It used to be spelled out twice — once inline in
+ * `applyPlanPatch`, once (wrongly) as "does `spec.scope` exist" in the dispatch gate — so the
+ * same task could be authorised for the plan writer and unauthorised for the dispatcher.
+ *
+ * A step qualifies if it is in the explicit list, or at or below the ceiling. The ceiling is
+ * what makes 「完成 1.2 后暂停」 enforceable before 1.2 exists in the plan: the id does not have
+ * to be planned to be the place to stop at.
+ */
+export function isAuthorizedStep(
+  stepId: string,
+  scope: { authorizedSteps?: string[]; authorizedUpTo?: string } | undefined,
+): boolean {
+  if (!scope) return false;
+  if (scope.authorizedSteps?.length) {
+    if (scope.authorizedSteps.includes(stepId)) return true;
+  }
+  if (!scope.authorizedUpTo) return false;
+  const keyOf = (id: string) => (id.match(/\d+(?:\.\d+)*/g) ?? ['0'])[0]!;
+  const parts = (id: string) => keyOf(id).split('.').map((n) => Number.parseInt(n, 10) || 0);
+  const left = parts(stepId);
+  const right = parts(scope.authorizedUpTo);
+  for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+    const d = (left[i] ?? 0) - (right[i] ?? 0);
+    if (d !== 0) return d < 0;
+  }
+  return true;
+}
+
 /**
  * The steps a reader still has to do something about.
  *

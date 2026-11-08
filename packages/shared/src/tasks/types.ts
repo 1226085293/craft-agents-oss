@@ -111,6 +111,14 @@ export interface TaskSpec {
    * after 1.2.
    */
   authorizedSteps?: string[];
+  /**
+   * The highest step id this run may touch, e.g. `1.2`.
+   *
+   * The list form can only name steps that exist; a reply is often answered before the step
+   * it names has been planned, so the list came back empty and the run went unbounded. A
+   * ceiling expresses the same boundary without requiring the step to be written down.
+   */
+  authorizedUpTo?: string;
   deliverables?: TaskDeliverable[];
   acceptance?: TaskAcceptanceItem[];
   permissions?: TaskPermissions;

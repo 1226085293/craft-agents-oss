@@ -7760,12 +7760,16 @@ ${request.prompt}`;
         return false
       }
       // The boundary the reply implied becomes the one the run is held to.
-      if (verdict.authorizedSteps?.length) {
-        const current = existing.spec?.authorizedSteps
-        const same =
-          current?.length === verdict.authorizedSteps.length &&
-          current.every((id, i) => id === verdict.authorizedSteps![i])
-        if (!same) tasks.setAuthorizedSteps(taskId, verdict.authorizedSteps)
+      if (verdict.authorizedSteps?.length || verdict.authorizedUpTo) {
+        const current = existing.spec
+        const sameSteps =
+          !verdict.authorizedSteps?.length ||
+          (current?.authorizedSteps?.length === verdict.authorizedSteps.length &&
+            current.authorizedSteps.every((id, i) => id === verdict.authorizedSteps![i]))
+        const sameCeiling = !verdict.authorizedUpTo || current?.authorizedUpTo === verdict.authorizedUpTo
+        if (!sameSteps || !sameCeiling) {
+          tasks.setAuthorizedSteps(taskId, verdict.authorizedSteps, verdict.authorizedUpTo)
+        }
       }
     }
 

@@ -12,10 +12,10 @@
  * task records, may anyone start it, and what may they do when they do.
  */
 import type { Task } from './types.ts';
-import { authorizedStepsFromAnswer } from './answer-scope.ts';
+import { authorizedCeilingFromAnswer, authorizedStepsFromAnswer } from './answer-scope.ts';
 
 export type ResumeVerdict =
-  | { allowed: true; authorizedSteps?: string[]; reason: string }
+  | { allowed: true; authorizedSteps?: string[]; authorizedUpTo?: string; reason: string }
   | { allowed: false; why: string };
 
 /** Replies that end the task rather than continue it. */
@@ -52,13 +52,19 @@ export function resumeDecisionFor(task: Task): ResumeVerdict {
      * step, which is exactly the state 「完成 1.2 后暂停」 is answered in — resumed with the
      * entire plan open.
      */
+    const ceiling = authorizedCeilingFromAnswer(answer, task.spec?.plan) ?? task.spec?.authorizedUpTo;
     const derived = authorizedStepsFromAnswer(answer, task.spec?.plan);
     const stored = task.spec?.authorizedSteps;
     const boundary = derived?.length ? derived : stored?.length ? stored : undefined;
     return {
       allowed: true,
       ...(boundary ? { authorizedSteps: boundary } : {}),
-      reason: boundary ? `已授权到 ${boundary.join('、')}，做到这里就停` : '没有边界，按计划继续',
+      ...(ceiling ? { authorizedUpTo: ceiling } : {}),
+      reason: ceiling
+        ? `你已回复「${answer}」：做到 ${ceiling} 就停`
+        : boundary
+          ? `已授权到 ${boundary.join('、')}，做到这里就停`
+          : '没有边界，按计划继续',
     };
   }
 

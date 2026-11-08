@@ -187,19 +187,33 @@ describe('handoff gate', () => {
     expect(after?.decision?.category).toBe(before?.category);
   })
 
-  it('refuses to rewrite a decision that was already answered', async () => {
+  /**
+   * A question asked after the last one was answered is a new question.
+   *
+   * The old record kept `resolvedAt` and `answer`, so the task page rendered 「已选择」 with the
+   * previous reply while the conversation showed a fresh, unanswered card. The answered state
+   * was per task, so the new question inherited an answer it never received.
+   */
+  it('starts a clean decision when a new question follows an answer', async () => {
     const { svc } = service(workspace());
     const task = create(svc);
     svc.setStatus(task.id, 'running');
-    const paused = await svc.reportHandoff(
+    await svc.reportHandoff(
       task.id,
       { outcome: 'needs_decision', summary: '需要清空旧分支再继续，是否删除这些分支' },
       'sess_w',
     );
+    svc.recordDecisionAnswer(task.id, '先不要动')
     svc.resolveDecision(task.id, 'approved')
 
-    // A late relay must not reopen a question the person already closed.
-    expect(svc.setDecisionWording(task.id, { question: '还问吗？' })).toBeNull()
+    const reopened = svc.setDecisionWording(task.id, { question: '还问吗？' })
+
+    expect(reopened).not.toBeNull()
+    // The new question carries no answer and no resolution…
+    expect(reopened?.decision?.answer).toBeUndefined()
+    expect(reopened?.decision?.resolvedAt).toBeUndefined()
+    // …and it is the one on screen, so both cards ask it instead of one showing history.
+    expect(reopened?.decision?.question).toBe('还问吗？')
   })
 
   /**

@@ -15,6 +15,7 @@ const log = createLogger('tasks');
 import {
   acceptanceItems,
   applyTransition,
+  authorizedCeilingFromAnswer,
   authorizedStepsFromAnswer,
   attachSession,
   checkBudget,
@@ -414,6 +415,7 @@ export class TaskService {
     const now = this.now();
     const result = applyPlanPatch(task.spec?.plan, patch, now, {
       authorizedSteps: task.spec?.authorizedSteps,
+      authorizedUpTo: task.spec?.authorizedUpTo,
     });
     if (result.error) return { ok: false, error: result.error };
     if (!result.changed) return { ok: true, plan: result.plan };
@@ -596,7 +598,32 @@ export class TaskService {
   ): Task | null {
     const task = this.get(id);
     const decision = task?.decision;
-    if (!task || !decision || decision.resolvedAt) return null;
+    if (!task || !decision) return null;
+    /**
+     * A question asked after the last one was answered is a NEW question.
+     *
+     * The old record kept `resolvedAt` and `answer`, so the task page rendered 「已选择」 with
+     * the previous reply while the conversation showed a fresh, unanswered card. Same task,
+     * two questions, one answered-state: the state was per task, so the new question inherited
+     * an answer it never received. Keeping the old answer in the journal and starting a clean
+     * decision is what makes the two cards agree again.
+     */
+    if (decision.resolvedAt) {
+      const fresh: Task = {
+        ...task,
+        decision: {
+          category: decision.category,
+          label: decision.label,
+          reason: decision.reason,
+          askedAt: this.now(),
+          deadlineAt: this.now() + DECISION_TIMEOUT_MS,
+        },
+        updatedAt: this.now(),
+      }
+      this.save(fresh)
+      appendJournal(this.root, id, { type: 'decision_reopened', at: this.now(), data: {} })
+      return this.setDecisionWording(id, wording)
+    }
 
     const options = (wording.options ?? [])
       .map((option) => option.trim())
@@ -671,10 +698,19 @@ export class TaskService {
      * the sentence means the boundary exists only if a model turn succeeds, and that turn
      * had already been rate-limited once.
      */
+    const ceiling = authorizedCeilingFromAnswer(trimmed, task.spec?.plan)
     const derived = authorizedStepsFromAnswer(trimmed, task.spec?.plan)
     const next: Task = {
       ...task,
-      ...(derived?.length ? { spec: { ...task.spec, authorizedSteps: derived } as Task['spec'] } : {}),
+      ...(ceiling || derived?.length
+        ? {
+            spec: {
+              ...task.spec,
+              ...(ceiling ? { authorizedUpTo: ceiling } : {}),
+              ...(derived?.length ? { authorizedSteps: derived } : {}),
+            } as Task['spec'],
+          }
+        : {}),
       decision: { ...decision, answer: { text: trimmed, at: now }, resolvedAt: now, resolution: 'approved' },
       updatedAt: now,
     };
@@ -754,15 +790,23 @@ export class TaskService {
    * scheduler — reads the same slice instead of each deciding for itself what an answer
    * authorised.
    */
-  setAuthorizedSteps(id: string, steps: string[] | undefined): Task {
+  setAuthorizedSteps(id: string, steps: string[] | undefined, upTo?: string): Task {
     const task = this.require(id);
     const next: Task = {
       ...task,
-      spec: { ...task.spec, authorizedSteps: steps?.length ? [...steps] : undefined } as Task['spec'],
+      spec: {
+        ...task.spec,
+        authorizedSteps: steps?.length ? [...steps] : undefined,
+        authorizedUpTo: upTo,
+      } as Task['spec'],
       updatedAt: this.now(),
     };
     this.save(next);
-    appendJournal(this.root, id, { type: 'spec_updated', at: this.now(), data: { authorizedSteps: steps } });
+    appendJournal(this.root, id, {
+      type: 'spec_updated',
+      at: this.now(),
+      data: { authorizedSteps: steps, authorizedUpTo: upTo },
+    });
     return next;
   }
 

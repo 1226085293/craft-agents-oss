@@ -269,13 +269,26 @@ export function formatResumeBrief(task: Task, reason = 'manual'): string {
      * answered 「完成 1.2 后暂停」, the pause lifted, the supervisor resumed, and the worker
      * ran 1.2, 2 and 2.1 and delivered — work that had been explicitly excluded.
      */
-    ...(task.spec?.authorizedSteps?.length
+    /**
+     * The person's own words, then where they said to stop.
+     *
+     * A resumed worker was told 「从计划里没完成的那一条接着做」 and nothing else, so
+     * 「完成 1.2 后暂停」 — the reason it was resumed at all — never reached it. It read the
+     * whole remaining plan as its job and finished the task.
+     */
+    ...(task.decision?.answer?.text ? [`你的答复是：${task.decision.answer.text}`] : []),
+    ...(task.spec?.authorizedUpTo
       ? [
-          `本次只授权到：${task.spec.authorizedSteps.join('、')}。` +
-            '做到这里就停下，用 `report_result`（outcome 用 handoff）交接——' +
-            '授权范围之外的步骤不要开工、不要标完成、不要移除。',
+          `本次只做到 ${task.spec.authorizedUpTo}，到此为止。` +
+            '之后的小节不要开工、不要标完成、不要移除——用 `report_result`（outcome 用 handoff）交接。',
         ]
-      : ['从计划里没完成的那一条接着做；如果计划里没有可执行的小节，先按大纲展开下一条。']),
+      : task.spec?.authorizedSteps?.length
+        ? [
+            `本次只授权到：${task.spec.authorizedSteps.join('、')}。` +
+              '做到这里就停下，用 `report_result`（outcome 用 handoff）交接——' +
+              '授权范围之外的步骤不要开工、不要标完成、不要移除。',
+          ]
+        : ['从计划里没完成的那一条接着做；如果计划里没有可执行的小节，先按大纲展开下一条。']),
   ].join('\n');
 }
 

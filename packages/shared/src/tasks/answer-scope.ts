@@ -44,6 +44,41 @@ const STEP_ID = /(?:步骤\s*|第\s*)?(\d+(?:\.\d+)*)\s*(?:步|小节)?/g;
  * `undefined` is the important half of this contract: "do what you were doing" must not be
  * turned into "do only these steps" by a parser that found no numbers.
  */
+/**
+ * The id the reply says to stop AT — 「完成 1.2 后暂停」 → `1.2`.
+ *
+ * A ceiling rather than a list, because a list can only name steps that already exist: the
+ * reply is answered exactly when 1.2 has *not* been planned, so the list came back empty and
+ * the run went unbounded. A ceiling says "everything up to 1.2", which is true whether or not
+ * 1.2 has been written down yet.
+ */
+export function authorizedCeilingFromAnswer(
+  answer: string,
+  plan: PlanStep[] | undefined,
+): string | undefined {
+  const text = answer.trim();
+  if (!text || (plan ?? []).length === 0) return undefined;
+  if (!STOP_WORDS.test(text)) return undefined;
+
+  const mentioned: string[] = [];
+  for (const match of text.matchAll(STEP_ID)) {
+    const id = match[1] ?? '';
+    if (!id) continue;
+    const before = text.slice(0, match.index ?? 0);
+    if (/[A-Za-z0-9.．]$/.test(before)) continue;
+    if (!mentioned.includes(id)) mentioned.push(id);
+  }
+  if (mentioned.length === 0) return undefined;
+
+  const ceiling = mentioned.map(idKey).sort(compareKeys).at(-1);
+  if (!ceiling) return undefined;
+  // Something has to be left beyond the ceiling, otherwise it is just "finish the plan".
+  const beyond = (plan ?? []).some((step) => compareKeys(idKey(step.id), ceiling) > 0);
+  if (!beyond) return undefined;
+
+  return mentioned.find((id) => compareKeys(idKey(id), ceiling) === 0);
+}
+
 export function authorizedStepsFromAnswer(
   answer: string,
   plan: PlanStep[] | undefined,

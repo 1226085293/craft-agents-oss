@@ -293,6 +293,8 @@ export interface PlanPatchScope {
    * cannot stop a tool call; a list can.
    */
   authorizedSteps?: string[];
+  /** The highest id allowed, e.g. `1.2` — may name a step that does not exist yet. */
+  authorizedUpTo?: string;
 }
 
 export function applyPlanPatch(
@@ -349,8 +351,26 @@ export function applyPlanPatch(
    * pretend — one previous run "cleared" the plan by removing the steps instead.
    */
   const authorized = scope.authorizedSteps
+  const ceiling = scope.authorizedUpTo
   const moving = patch.status === 'doing' || patch.status === 'done'
-  if (authorized && authorized.length > 0 && moving && !authorized.includes(patch.id)) {
+  /**
+   * Allowed if the step is in the explicit list, or at or below the ceiling.
+   *
+   * The ceiling is what makes 「完成 1.2 后暂停」 enforceable before 1.2 has been planned: the
+   * id does not have to exist to be the place to stop at.
+   */
+  const keyOf = (id: string) => (id.match(/\d+(?:\.\d+)*/g) ?? ['0'])[0]
+  const cmp = (a: string, b: string): number => {
+    const left = a.split('.').map((n) => Number.parseInt(n, 10) || 0)
+    const right = b.split('.').map((n) => Number.parseInt(n, 10) || 0)
+    for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+      const d = (left[i] ?? 0) - (right[i] ?? 0)
+      if (d !== 0) return d
+    }
+    return 0
+  }
+  const withinCeiling = ceiling ? cmp(keyOf(patch.id), keyOf(ceiling)) <= 0 : false
+  if (authorized && authorized.length > 0 && moving && !authorized.includes(patch.id) && !withinCeiling) {
     const allowed = steps.filter((step) => authorized.includes(step.id)).map((step) => step.id)
     return {
       plan: steps,

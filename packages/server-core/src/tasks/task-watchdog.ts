@@ -122,21 +122,29 @@ function normalizeSummary(text: string): string {
 }
 
 /**
- * How long a session may sit idle before the task behind it counts as abandoned.
+ * How long a session that has already filed may sit idle before the task counts as stuck.
  *
- * Five minutes, matching the watchdog's own cadence, and that is the honest reason:
- * the check cannot fire more often than a pass runs, so a threshold below the
- * interval buys nothing but a longer wait before the next opportunity to notice. It
- * was eight — a number I picked without evidence — which meant the user watched
- * 进行中 for nearly nine minutes while the recovery sat waiting for a pass that had
- * already gone by.
- *
- * What actually separates "stuck" from "between turns" is not duration, it is
- * `sessionWaiting`: a worker that backgrounded a shell, or is waiting on an event, is
- * idle on purpose and is never woken however long it sits. The clock only decides
- * when to look at everyone else.
+ * This window belongs to the supervisor: the executor did its job and reported, so the
+ * next move is a dispatch, and dispatching takes thought. Five minutes is the supervisor's
+ * budget, not evidence about the worker.
  */
-export const IDLE_SESSION_MS = 5 * 60_000; // same as a watchdog pass; see above
+export const IDLE_SESSION_MS = 5 * 60_000;
+
+/**
+ * How long a session that filed nothing may sit idle before it is asked for a hand-off.
+ *
+ * Much shorter than the idle window, because the two situations are not symmetric. A
+ * worker that ended its turn without `report_result` owes something and nothing else is
+ * going to happen — no dispatch is coming for a run that has not reported. The supervisor
+ * needs no time here, and every minute spent waiting is a minute the user watches 进行中.
+ *
+ * It used to share the five-minute window, on the reasoning that a check cannot fire more
+ * often than a pass runs. That stopped being true when `nextCheckDelayMs` began computing
+ * the exact deadline and the loop began sleeping to it: latency is now the grace itself, so
+ * the grace is the only thing to set. Ninety seconds is long enough for a session that is
+ * genuinely scribbling a `report_result` call to finish it.
+ */
+export const UNREPORTED_GRACE_MS = 90_000;
 
 /**
  * Wakes before the task is handed to a person.
@@ -148,6 +156,23 @@ export const IDLE_SESSION_MS = 5 * 60_000; // same as a watchdog pass; see above
 export const MAX_IDLE_WAKES = 2;
 
 /** The newest evidence that something in this task moved. */
+/**
+ * Did THIS execution run file a hand-off?
+ *
+ * Not "any hand-off ever": a task's second and third legs would look reported forever
+ * because the first session's report is still in the record. The session id and the run
+ * start are what make the question answerable.
+ */
+function hasFiledThisRun(task: Task): boolean {
+  const runStartedAt = task.stats?.runStartedAt;
+  return task.handoffs.some(
+    (handoff) =>
+      handoff.outcome !== 'needs_decision' &&
+      handoff.fromSessionId === task.currentSessionId &&
+      (!runStartedAt || handoff.at >= runStartedAt),
+  );
+}
+
 function lastActivityOf(task: Task): number {
   return Math.max(
     task.lastHeartbeatAt ?? 0,
@@ -215,16 +240,10 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
      * task, because the earlier sessions' reports are still in the record.
      */
     const waiting = task.currentSessionId ? deps.sessionWaiting?.(task.currentSessionId) === true : false
-    const runStartedAt = task.stats?.runStartedAt
-    const filedThisRun = task.handoffs.some(
-      (handoff) =>
-        handoff.outcome !== 'needs_decision' &&
-        handoff.fromSessionId === task.currentSessionId &&
-        (!runStartedAt || handoff.at >= runStartedAt),
-    )
+    const filedThisRun = hasFiledThisRun(task)
     if (deps.sessionWorking && task.currentSessionId && !waiting && !filedThisRun) {
       const working = deps.sessionWorking(task.currentSessionId)
-      if (working === false && now - lastActivityOf(task) >= IDLE_SESSION_MS) {
+      if (working === false && now - lastActivityOf(task) >= UNREPORTED_GRACE_MS) {
         findings.push({ kind: 'unreported', task })
         continue
       }
@@ -501,7 +520,10 @@ export function nextCheckDelayMs(deps: WatchdogDeps, now = Date.now()): number {
       const waiting = deps.sessionWaiting?.(task.currentSessionId) === true;
       const working = deps.sessionWorking(task.currentSessionId);
       if (working === false && !waiting) {
-        soonest = Math.min(soonest, lastActivityOf(task) + IDLE_SESSION_MS - now);
+        // The deadline the matching rule uses, not the coarser one: scheduling the
+        // earlier of the two would wake for a task that is not due yet.
+        const grace = hasFiledThisRun(task) ? IDLE_SESSION_MS : UNREPORTED_GRACE_MS;
+        soonest = Math.min(soonest, lastActivityOf(task) + grace - now);
       }
     }
 

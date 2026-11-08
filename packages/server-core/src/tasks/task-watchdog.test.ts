@@ -545,3 +545,44 @@ describe('a wake that did not happen is not reported as a wake', () => {
     expect(sent.join(' ')).not.toContain('唤醒失败');
   })
 })
+
+describe('the wake is not late', () => {
+  /**
+   * Reported: 「watchdog 还是没及时触发」. Both windows were five minutes, so a worker
+   * that stopped at 13:42 was picked up at 13:47 — and the reason given for five was
+   * that a pass cannot run more often than every five minutes. That stopped being true
+   * once the loop began sleeping to `nextCheckDelayMs`: latency is now the grace itself.
+   */
+  it('asks a session that filed nothing well before the idle window', () => {
+    const stopped = (msAgo: number) =>
+      task({
+        updatedAt: NOW - msAgo,
+        stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - msAgo, runStartedAt: NOW - msAgo },
+      });
+
+    // Past the 90s grace, well under the 5 min idle window.
+    expect(inspectTasks(deps([stopped(2 * 60_000)], { sessionWorking: () => false })).map((f) => f.kind))
+      .toContain('unreported')
+  })
+
+  it('schedules the check at that deadline, not at the idle window', () => {
+    const stopped = task({
+      updatedAt: NOW - 60_000,
+      stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 60_000, runStartedAt: NOW - 60_000 },
+    })
+    const delay = nextCheckDelayMs(deps([stopped], { sessionWorking: () => false }), NOW)
+    // 30s left of the 90s grace; scheduling for the 5 min window would be minutes later.
+    expect(delay).toBeLessThanOrEqual(31_000)
+  })
+
+  it('still gives a supervisor five minutes after a hand-off', () => {
+    const filed = task({
+      updatedAt: NOW - 60_000,
+      stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 60_000, runStartedAt: NOW - 600_000 },
+      handoffs: [{ outcome: 'handoff', fromSessionId: 'sess-1', at: NOW - 60_000, summary: 'x' }] as never,
+    })
+    const findings = inspectTasks(deps([filed], { sessionWorking: () => false }))
+    // Nothing owed by the worker; the ball is with the supervisor.
+    expect(findings.map((f) => f.kind)).not.toContain('unreported')
+  })
+})

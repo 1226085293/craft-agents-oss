@@ -7878,17 +7878,32 @@ ${request.prompt}`;
    * (observed 2026-11-06, session 261106-aware-storm). Message content is text;
    * tool results are the ones that carry blocks.
    */
+  /**
+   * Put a message the session did not produce into its transcript, and wake it.
+   *
+   * Two defects lived here, and together they are why 「任务完成了但没反馈」 kept happening
+   * after every other link was fixed.
+   *
+   * 1. The row was written with `role: 'assistant'`. A forwarded decision request then reads
+   *    as the supervisor talking to itself — in the transcript, in the timeline, and in the
+   *    UI, where it renders as a final answer (`isIntermediate: false`). The user saw
+   *    「等它回报后再决定下一步」 and nothing after it. It is input, so it is a user row.
+   *
+   * 2. Nothing was woken. An assistant row is not input: it starts no turn, so the user
+   *    lane never ran and the request sat in a transcript nobody was reading. Delivering a
+   *    message that nobody is told about is the same as not delivering it.
+   */
   private async appendSyntheticMessage(managed: ManagedSession, text: string): Promise<void> {
     const message: Message = {
       id: randomUUID(),
-      role: 'assistant',
+      role: 'user',
       content: text,
       timestamp: this.monotonic(),
       isIntermediate: false,
     }
 
     managed.messages.push(message)
-    managed.lastMessageRole = 'assistant'
+    managed.lastMessageRole = 'user'
     this.persistSession(managed)
 
     this.sendEvent(
@@ -7899,6 +7914,23 @@ ${request.prompt}`;
       } as never,
       managed.workspace.id,
     )
+
+    // Wake it. A message appended to a transcript nobody is running goes nowhere:
+    // the user lane is idle by construction, so every delivery is also a wake.
+    //
+    // `existingMessageId` reuses the row written above. Without it `sendMessage` appends
+    // its own copy and every forwarded request appears twice — once as the delivery and
+    // once as the turn's input, which reads as a duplicate instruction.
+    if (managed.agent && !managed.isProcessing) {
+      try {
+        await this.sendMessage(managed.id, text, undefined, undefined, undefined, message.id)
+      } catch (error) {
+        sessionLog.warn('[supervisor] delivered a message but could not wake the session', {
+          sessionId: managed.id,
+          error,
+        })
+      }
+    }
   }
 
   private async surfaceSupervisorMessage(managed: ManagedSession, text: string): Promise<void> {

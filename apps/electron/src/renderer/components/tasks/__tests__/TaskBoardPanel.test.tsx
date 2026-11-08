@@ -187,6 +187,31 @@ describe('task detail presentation', () => {
     expect(html).toContain('其他（自己输入）')
   })
 
+  /**
+   * The card said what the worker did instead of what it was asking.
+   *
+   * Observed side by side on one decision: the task card read 「完成 T-1 步骤 1.1：创建
+   * docs/a.md……本轮仅执行 1.1，未做 1.2 读回确认与 2 收尾」 — a work report, taken from
+   * `handoffs.at(-1).summary` — while the conversation asked 「计划中还剩 3 步未授权，是否
+   * 继续？」. Only one of those is a question, so only one can be answered.
+   */
+  it('shows the pending question, not the last work report', () => {
+    const html = renderDetail({
+      ...detail,
+      decision: { reason: '计划中还剩 3 步未授权（1、1.2、2），是否继续？', options: ['放行', '到此为止'] },
+    })
+
+    // The question is the card body…
+    expect(html).toContain('计划中还剩 3 步未授权')
+    expect(html).toContain('放行')
+    // …and the previous hand-off summary is not sitting where the question goes.
+    // Scoped to the decision section: the same sentence may legitimately appear
+    // elsewhere on the page (it is also the recorded last error here).
+    const start = html.indexOf('task-decision-heading')
+    const decisionSection = html.slice(start, html.indexOf('</section>', start))
+    expect(decisionSection).not.toContain('首次截图缺少时间线')
+  })
+
   it('keeps the generic pause banner for a non-decision pause', () => {
     const html = renderDetail({ ...detail, pauseReason: 'failures' })
 

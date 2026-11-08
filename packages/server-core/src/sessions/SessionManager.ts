@@ -5678,11 +5678,35 @@ export class SessionManager implements ISessionManager {
              * So the relayed words go back onto the record the task card reads. Wording
              * only: status, deadline and the answer guard are untouched.
              */
-            if (kind === 'decision' && managed.taskId) {
-              this.getTasks(managed.workspace.id).setDecisionWording(managed.taskId, {
-                question: text,
-                ...(options?.length ? { options: [...options] } : {}),
-              })
+            if (kind === 'decision') {
+              /**
+               * Find the task by asking who is SUPPOSED to be asked, not by what this
+               * session is working on.
+               *
+               * The first version keyed on `managed.taskId`, which a supervisor does not
+               * have — it is the session that relays questions, not the one that does the
+               * work. Observed on a real run: the write-back silently did nothing, the task
+               * card kept the rule-generated text and no options, and the same decision
+               * still read as 「同意，继续跑 / 否，取消任务」 on one surface and as two real
+               * answers on the other.
+               *
+               * A supervisor can relay for more than one task, so every paused task whose
+               * question is still open is a candidate; the handoff it just read is what
+               * makes one of them the right one.
+               */
+              const tasks = this.getTasks(managed.workspace.id)
+              const open = tasks
+                .list()
+                .filter((task) => task.supervisorSessionId === managed.id)
+                .filter((task) => task.decision && !task.decision.resolvedAt)
+                .filter((task) => task.status === 'paused' && task.pauseReason === 'needs_decision')
+              const target = open.length === 1 ? open[0] : open.at(-1)
+              if (target) {
+                tasks.setDecisionWording(target.id, {
+                  question: text,
+                  ...(options?.length ? { options: [...options] } : {}),
+                })
+              }
             }
             await this.deliverToUserLane(managed, text, kind, options)
           },

@@ -522,9 +522,23 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
             <div className="min-w-0 flex-1">
               <h2 id="task-decision-heading" className="text-xs font-semibold text-amber-300">等你拍板</h2>
+              {/*
+                The question, not the work report.
+                This read `handoffs.at(-1).summary` — the worker's account of what it
+                just did — so the card said 「完成 T-1 步骤 1.1：创建 docs/a.md……本轮仅执行
+                1.1」 while the conversation was asking 「计划中还剩 3 步未授权，是否继续？」.
+                Same decision, two different sentences, and only one of them was a question.
+                `decision.reason` is what the asker is actually asking; the summary stays as
+                the fallback for tasks recorded before `reason` existed.
+              */}
               <p className="td-body mt-1 whitespace-pre-wrap text-foreground/90">
-                {detail.handoffs.at(-1)?.summary ?? '执行会话停下来请求决定，但没留下说明。'}
+                {detail.decision?.reason?.trim() ||
+                  detail.handoffs.at(-1)?.summary ||
+                  '执行会话停下来请求决定，但没留下说明。'}
               </p>
+              {detail.decision?.label?.trim() ? (
+                <p className="mt-1 text-[11px] text-amber-300/80">{detail.decision.label}</p>
+              ) : null}
               <TaskDecisionAnswer
                 detail={detail}
                 onApprove={() => (onRun ?? onResume)?.(detail.id)}

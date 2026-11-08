@@ -47,7 +47,7 @@ export function formatPlanRuleBlock(options: { planExists?: boolean } = {}): str
    */
   const ruleOne = options.planExists
     ? '1. 计划已经约定好了，**不要重写**。步骤只在两种情况下改动：计划本身写错了（某一步实际不成立），或者漏了一步必须做的事。开工不是改计划的理由——正常情况下你只需要推进状态。'
-    : '1. 计划还没有。先用 **一次** `task_plan({ steps: [...] })` 写下大纲：3–7 条，id 用 `1`、`2`、`3`。写下去之后它就是记录，不是草稿。';
+    : '1. 计划还没有。先用 **一次** `task_plan({ steps: [...] })` 写下大纲：3–7 条，id 用 `1`、`2`、`3`。写下去之后它就是记录，不是草稿。它和 `report_result` 都在 `tools_agent` 分类下——分层模式下先展开它。';
 
   return [
     '## 怎么推进',
@@ -75,7 +75,7 @@ export function formatExecutionRuleBlock(): string {
   return [
     '## 执行规则',
     '',
-    '- 每做完一个小节，**立刻**用 `task_plan` 把它标成 done。计划是记录：没标状态的步骤，读的人只能认为它没做。',
+    '- 每做完一个小节，**立刻**用 `task_plan` 把它标成 done。计划是记录：没标状态的步骤，读的人只能认为它没做。这两个工具都在 **`tools_agent`** 分类下：分层模式下先展开 `tools_agent`，再 `call_tool` 调 `task_plan` / `report_result`，不要去 `misc`、`workspace` 里找。',
     '- 分给你的部分做完了、计划里还剩没授权的步骤 → `report_result`，`outcome` 用 **handoff**。任务会交给后续会话继续，不会关闭；**不要**把剩下的步骤删掉，也不要替人决定它们是否还要做。',
     '- 整个计划都做完了 → 同样 `report_result`，`outcome` 用 **delivered**（这一版到此收尾）。别用 handoff，那会把一个已经完成的任务再挂到下一个会话头上。',
     '- 还没做完 → 继续做完，然后照样 `report_result` 交接。不要停在半路等人来问，也不要用沉默结束回合：没有交接记录的回合，对任务来说等于什么都没发生。',

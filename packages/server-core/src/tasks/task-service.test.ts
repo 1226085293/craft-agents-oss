@@ -144,6 +144,56 @@ describe('handoff gate', () => {
     ]);
   });
 
+  /**
+   * The task card and the chat card are one question with two renderings.
+   *
+   * The task's own wording comes from a closed list of six categories, so it is generic
+   * by construction and carries no options. The supervisor says the real question and
+   * lists the real answers; if that never reaches the record, the card falls back to
+   * 同意/取消 — which on a real run matched none of the three answers offered.
+   */
+  it('lets the relaying session replace the decision wording, without moving state', async () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.setStatus(task.id, 'running');
+    const paused = await svc.reportHandoff(
+      task.id,
+      { outcome: 'needs_decision', summary: '需要清空旧分支再继续，是否删除这些分支' },
+      'sess_w',
+    );
+    const before = paused.task.decision;
+    expect(before).toBeDefined();
+
+    const after = svc.setDecisionWording(task.id, {
+      question: '仅放行 1.2，其余之后再定？',
+      options: ['仅放行 1.2', '放行 1.2 和 2', '到此为止'],
+    });
+
+    expect(after?.decision?.reason).toBe('仅放行 1.2，其余之后再定？');
+    expect(after?.decision?.options).toEqual(['仅放行 1.2', '放行 1.2 和 2', '到此为止']);
+    // Wording, not a state change: the pause, its clock and its kind are all untouched.
+    expect(after?.status).toBe('paused');
+    expect(after?.pauseReason).toBe('needs_decision');
+    expect(after?.decision?.askedAt).toBe(before?.askedAt);
+    expect(after?.decision?.deadlineAt).toBe(before?.deadlineAt);
+    expect(after?.decision?.category).toBe(before?.category);
+  })
+
+  it('refuses to rewrite a decision that was already answered', async () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.setStatus(task.id, 'running');
+    const paused = await svc.reportHandoff(
+      task.id,
+      { outcome: 'needs_decision', summary: '需要清空旧分支再继续，是否删除这些分支' },
+      'sess_w',
+    );
+    svc.resolveDecision(task.id, 'approved')
+
+    // A late relay must not reopen a question the person already closed.
+    expect(svc.setDecisionWording(task.id, { question: '还问吗？' })).toBeNull()
+  })
+
   it('trips the fuse after three rejected handoffs', async () => {
     const { svc } = service(workspace());
     const task = create(svc);

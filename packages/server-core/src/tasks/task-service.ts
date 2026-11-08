@@ -558,6 +558,49 @@ export class TaskService {
     return next;
   }
 
+  /**
+   * Let the session that is relaying the question say it in its own words.
+   *
+   * A task decision is produced by rules — a closed list of six categories — so its
+   * text is generic by construction: 「范围内的工作已完成」「未识别为日常操作，交人确认」.
+   * The supervisor, reading the same state, writes the actual question (「仅放行 1.2，
+   * 其余之后再定？」) and, with `options`, the actual answers.
+   *
+   * Those were two records of one question, rendered on two surfaces: the chat card had
+   * the supervisor's three answers, the task card had none and fell back to 同意/取消 —
+   * neither of which was one of the three. Copying the words onto the record the task
+   * card reads is what makes them the same question.
+   *
+   * Deliberately does not touch `status`, `pauseReason`, `askedAt` or `deadlineAt`: this
+   * is wording, not a state change. Answering still goes through the same guard.
+   */
+  setDecisionWording(
+    id: string,
+    wording: { question?: string; label?: string; options?: string[] },
+  ): Task | null {
+    const task = this.get(id);
+    const decision = task?.decision;
+    if (!task || !decision || decision.resolvedAt) return null;
+
+    const options = (wording.options ?? [])
+      .map((option) => option.trim())
+      .filter((option) => option.length > 0)
+      .slice(0, 4);
+
+    const next: Task = {
+      ...task,
+      decision: {
+        ...decision,
+        ...(wording.label?.trim() ? { label: wording.label.trim() } : {}),
+        ...(wording.question?.trim() ? { reason: wording.question.trim() } : {}),
+        ...(options.length ? { options } : {}),
+      },
+      updatedAt: this.now(),
+    };
+    saveTask(this.root, next);
+    return next;
+  }
+
   /** Prove the task is alive. Called on every tool result and turn boundary. */
   heartbeat(id: string): Task {
     const task = this.require(id);

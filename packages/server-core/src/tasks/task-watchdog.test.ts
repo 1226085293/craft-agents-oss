@@ -565,6 +565,34 @@ describe('the wake is not late', () => {
       .toContain('unreported')
   })
 
+  /**
+   * The ninety-second grace answers "did it even start?" — a question that is only
+   * open while the run has produced nothing. A real run sat idle from 16:26 to
+   * 16:27:40 because the spawn grace was applied to a session that had already
+   * finished a turn: there was nothing left to wait for, and the model was doing
+   * nothing the whole time.
+   */
+  it('does not make a session that already worked wait out the spawn grace', () => {
+    const worked = task({
+      updatedAt: NOW - 6_000,
+      // Started ten minutes ago, last moved six seconds ago: it ran, then stopped.
+      stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 6_000, runStartedAt: NOW - 600_000 },
+    })
+    const findings = inspectTasks(deps([worked], { sessionWorking: () => false }))
+    expect(findings.map((f) => f.kind)).toContain('unreported')
+  })
+
+  it('still gives a run that never moved the full spawn grace', () => {
+    const notYet = task({
+      updatedAt: NOW - 6_000,
+      // Heartbeat and run start are the same instant: nothing has happened yet.
+      stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 6_000, runStartedAt: NOW - 6_000 },
+    })
+    const findings = inspectTasks(deps([notYet], { sessionWorking: () => false }))
+    // Still spawning, still reading its brief — not late for anything yet.
+    expect(findings.map((f) => f.kind)).not.toContain('unreported')
+  })
+
   it('schedules the check at that deadline, not at the idle window', () => {
     const stopped = task({
       updatedAt: NOW - 60_000,

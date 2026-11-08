@@ -47,7 +47,7 @@ import { assemblePluginTools } from '@craft-agent/shared/events/plugin-tools'
 function generateShortId(): string {
   return Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')
 }
-import { startWatchdog } from '../tasks/task-watchdog.ts'
+import { startWatchdog, type WatchdogLoop } from '../tasks/task-watchdog.ts'
 import { startTaskScheduler, runEventPass } from '../tasks/task-scheduler.ts'
 import { startPageRefreshScheduler } from '../pages/page-refresh-scheduler.ts'
 import { migrateAutomationCronTasks } from '../tasks/automation-migration.ts'
@@ -2098,6 +2098,12 @@ export class SessionManager implements ISessionManager {
       sessionRuntimeHooks.onSessionStarted()
     } else if (was && !processing) {
       sessionRuntimeHooks.onSessionStopped()
+      // A turn ending is the event the watchdog's rules are about: "the task is
+      // running, its executor has stopped, nothing was filed". That is true the
+      // instant this branch runs, and waiting for the next timer means the model
+      // sits idle for up to a full grace period after nothing can change. Poking
+      // the loop is cheap — one rules-only pass, no model call.
+      this.watchdogLoops.get(managed.workspace.id)?.wake()
       if (managed.role === 'supervisor') {
         // Hand over anything that arrived while this turn was running. Without
         // this, a queued event waited for the NEXT inbound message to be noticed:
@@ -2129,6 +2135,8 @@ export class SessionManager implements ISessionManager {
   private remoteBpms = new Map<string, RemoteBrowserPaneManager>()
   /** Pinned desktop client per session for `client:browser:invoke` routing. */
   private browserHostByCanvas = new Map<string, string>()
+  /** Live watchdog loops per workspace, so a turn ending can request a pass. */
+  private watchdogLoops = new Map<string, WatchdogLoop>()
   private eventSink: EventSink | null = null
 
   setEventSink(sink: EventSink): void {
@@ -5656,6 +5664,26 @@ export class SessionManager implements ISessionManager {
             await this.sendMessage(sessionId, text)
           },
           writeUserVisible: async (text, kind, options) => {
+            /**
+             * One question, two surfaces.
+             *
+             * The task card renders `task.decision`, which the task service writes from
+             * a closed list of six categories — so its wording is generic, and it has no
+             * options unless a worker passed them. The chat card is this call, where the
+             * supervisor says the real question and lists the real answers. Observed on
+             * a real run: the same decision appeared as 「仅放行 1.2 / 放行 1.2 和 2 / 到此
+             * 为止」 in the conversation and as 「同意，继续跑 / 否，取消任务」 on the task —
+             * neither button was one of the three.
+             *
+             * So the relayed words go back onto the record the task card reads. Wording
+             * only: status, deadline and the answer guard are untouched.
+             */
+            if (kind === 'decision' && managed.taskId) {
+              this.getTasks(managed.workspace.id).setDecisionWording(managed.taskId, {
+                question: text,
+                ...(options?.length ? { options: [...options] } : {}),
+              })
+            }
             await this.deliverToUserLane(managed, text, kind, options)
           },
           askUser: async (questions) => {
@@ -7491,7 +7519,14 @@ ${request.prompt}`;
             .catch(() => undefined)
         },
       })
-      this.workspaceScopes.open(workspaceId).effect(() => stop)
+      // Kept reachable so a turn ending can ask for a pass right away instead of
+      // waiting for the timer. Dropped with the workspace scope, together with the
+      // loop's own disposer.
+      this.watchdogLoops.set(workspaceId, stop)
+      this.workspaceScopes.open(workspaceId).effect(() => {
+        this.watchdogLoops.delete(workspaceId)
+        stop()
+      })
     } catch (error) {
       sessionLog.warn('failed to start the task watchdog', { error })
     }

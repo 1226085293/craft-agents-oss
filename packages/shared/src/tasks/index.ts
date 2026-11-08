@@ -117,6 +117,7 @@ export {
   formatUnreportedBrief,
   formatNextLegBrief,
   formatPlanRuleBlock,
+  formatExecutionRuleBlock,
   formatResumeBrief,
   type TaskBriefOptions,
 } from './brief.ts';

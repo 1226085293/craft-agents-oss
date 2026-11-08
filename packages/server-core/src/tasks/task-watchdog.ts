@@ -147,6 +147,19 @@ export const IDLE_SESSION_MS = 5 * 60_000;
 export const UNREPORTED_GRACE_MS = 90_000;
 
 /**
+ * How long to wait when this run has already done something and then stopped.
+ *
+ * The ninety-second grace answers "did the worker even start?", and that question is
+ * only open while the run has produced nothing. Once it has — a heartbeat, a plan
+ * step, a tool result — a session that is no longer working is not mid-sentence, it
+ * is finished. The old rule applied the spawn grace to both cases, so a worker that
+ * ended its turn in twelve seconds was left alone for ninety: a real run sat idle
+ * from 16:26 to 16:27:40 with nothing to wait for. Five seconds is one watchdog pass
+ * of slack for the `isProcessing` flag to settle, not a deadline to be lived through.
+ */
+export const STOPPED_AFTER_WORK_GRACE_MS = 5_000;
+
+/**
  * Wakes before the task is handed to a person.
  *
  * One wake is a correction: the worker ended its turn without finishing and may
@@ -171,6 +184,25 @@ function hasFiledThisRun(task: Task): boolean {
       handoff.fromSessionId === task.currentSessionId &&
       (!runStartedAt || handoff.at >= runStartedAt),
   );
+}
+
+/**
+ * Has THIS run produced anything at all?
+ *
+ * `runStartedAt` is written when the run is claimed; the heartbeat moves on every tool
+ * result and turn boundary. So "last activity after the run began" is the difference
+ * between a session that has never got going (still spawning, still reading its brief)
+ * and one that has worked and stopped — two states that need different patience.
+ */
+function hasWorkedThisRun(task: Task): boolean {
+  const startedAt = task.stats?.runStartedAt;
+  if (typeof startedAt !== 'number') return true;
+  return lastActivityOf(task) > startedAt;
+}
+
+/** How long a stopped session gets, given whether it ever started. */
+function stoppedGrace(task: Task): number {
+  return hasWorkedThisRun(task) ? STOPPED_AFTER_WORK_GRACE_MS : UNREPORTED_GRACE_MS;
 }
 
 function lastActivityOf(task: Task): number {
@@ -243,7 +275,7 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
     const filedThisRun = hasFiledThisRun(task)
     if (deps.sessionWorking && task.currentSessionId && !waiting && !filedThisRun) {
       const working = deps.sessionWorking(task.currentSessionId)
-      if (working === false && now - lastActivityOf(task) >= UNREPORTED_GRACE_MS) {
+      if (working === false && now - lastActivityOf(task) >= stoppedGrace(task)) {
         findings.push({ kind: 'unreported', task })
         continue
       }
@@ -521,7 +553,7 @@ export function nextCheckDelayMs(deps: WatchdogDeps, now = Date.now()): number {
       if (working === false && !waiting) {
         // The deadline the matching rule uses, not the coarser one: scheduling the
         // earlier of the two would wake for a task that is not due yet.
-        const grace = hasFiledThisRun(task) ? IDLE_SESSION_MS : UNREPORTED_GRACE_MS;
+        const grace = hasFiledThisRun(task) ? IDLE_SESSION_MS : stoppedGrace(task);
         soonest = Math.min(soonest, lastActivityOf(task) + grace - now);
       }
     }
@@ -564,11 +596,28 @@ export function clampSleep(delayMs: number): number {
  *
  * `unref` so a pending timer never keeps the host process alive on shutdown.
  */
+/** The running loop: a disposer, plus a way to ask for a pass right now. */
+export type WatchdogLoop = (() => void) & {
+  /**
+   * Run a pass at the next tick instead of when the timer happens to expire.
+   *
+   * The loop waits for a *deadline*, but the state it checks changes on events:
+   * a worker's turn ends, and the moment it does the task may be "running, executor
+   * stopped, nothing filed" — true right then, not in ninety seconds. Polling cannot
+   * see that moment, so it waits for a promise the state already made. A real run
+   * showed it: the session stopped at 16:26, the watchdog only noticed at 16:27:40,
+   * and the model had been sitting idle for the whole gap.
+   *
+   * Safe to call from anywhere: a pending timer is replaced, never doubled.
+   */
+  wake: () => void;
+};
+
 export function startWatchdog(
   deps: WatchdogDeps,
   intervalMs = WATCHDOG_INTERVAL_MS,
   options: WatchdogLoopOptions = {},
-): () => void {
+): WatchdogLoop {
   let failures = 0;
   let lastError = '';
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -625,8 +674,19 @@ export function startWatchdog(
   timer = setTimeout(tick, 0);
   timer.unref?.();
 
-  return () => {
+  const loop = (() => {
     stopped = true;
     if (timer) clearTimeout(timer);
+  }) as WatchdogLoop;
+
+  loop.wake = () => {
+    if (stopped) return;
+    // Replace the pending wait rather than adding a second one: two timers would
+    // double every later pass, and the loop is cheap but not free.
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(tick, 0);
+    timer.unref?.();
   };
+
+  return loop;
 }

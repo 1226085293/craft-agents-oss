@@ -62,6 +62,29 @@ export function formatPlanRuleBlock(options: { planExists?: boolean } = {}): str
 }
 
 /**
+ * What to do at the end of a slice — and which `report_result` outcome says it.
+ *
+ * 怎么推进 tells a worker how to keep the plan; it says nothing about how a turn ends.
+ * So every worker invented its own ending, and the two failure modes both come from
+ * that: one stops mid-plan without filing anything (the task sits 进行中 forever, and
+ * the watchdog has to wake it), another files `delivered` on a slice it merely finished
+ * and closes a task that still had three steps. The outcome enum has exactly three
+ * values and the choice between them is not a judgement call, so it is written down.
+ */
+export function formatExecutionRuleBlock(): string {
+  return [
+    '## 执行规则',
+    '',
+    '- 每做完一个小节，**立刻**用 `task_plan` 把它标成 done。计划是记录：没标状态的步骤，读的人只能认为它没做。',
+    '- 分给你的部分做完了、计划里还剩没授权的步骤 → `report_result`，`outcome` 用 **handoff**。任务会交给后续会话继续，不会关闭；**不要**把剩下的步骤删掉，也不要替人决定它们是否还要做。',
+    '- 整个计划都做完了 → 同样 `report_result`，`outcome` 用 **delivered**（这一版到此收尾）。别用 handoff，那会把一个已经完成的任务再挂到下一个会话头上。',
+    '- 还没做完 → 继续做完，然后照样 `report_result` 交接。不要停在半路等人来问，也不要用沉默结束回合：没有交接记录的回合，对任务来说等于什么都没发生。',
+    '- 只有真的需要人拍板时（删数据、停服、花钱、对外发消息、改方向、动密钥）才用 **needs_decision**，并在 `options` 里给出候选答案。能自己判断的不要往上交。',
+    '',
+  ].join('\n');
+}
+
+/**
  * The block a dispatch appends when it hands a task to a new session.
  *
  * The dispatch path never used the task brief, so the worker saw the rules but not the
@@ -145,6 +168,7 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
   }
 
   sections.push(formatPlanRuleBlock());
+  sections.push(formatExecutionRuleBlock());
 
   if (spec?.deliverables?.length) {
     const lines = spec.deliverables.map((d) => {

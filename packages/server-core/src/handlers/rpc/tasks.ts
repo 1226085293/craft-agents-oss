@@ -90,6 +90,14 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
     },
   );
 
+  /**
+   * The task board's update goes through the same implementation as the `task_update` tool.
+   *
+   * It used to call `setStatus` directly, so every option the tool learned — `scope`,
+   * `authorizedUpTo`, `authorizedSteps`, and the resume-on-`running` behaviour — was silently
+   * dropped for the buttons in the UI. Two implementations of one intent is how a page can show
+   * success while the record does not change.
+   */
   server.handle(
     RPC_CHANNELS.taskboard.UPDATE,
     async (
@@ -97,36 +105,42 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       workspaceId: string,
       id: string,
       status?: TaskStatus,
-      options?: { pauseReason?: string; error?: string },
+      options?: {
+        pauseReason?: string
+        error?: string
+        scope?: string
+        authorizedUpTo?: string
+        authorizedSteps?: string[]
+      },
     ) => {
-      const service = tasksFor(deps, workspaceId);
-      const before = service.get(id);
-      const task = service.setStatus(id, status ?? 'running', {
-        pauseReason: options?.pauseReason as never,
-        error: options?.error,
-      });
-      // Stopping a task has to stop the work. Writing `paused` and leaving the
-      // session running is the same lie as a board that says 待开始 while a
-      // worker is editing files: the label and the machine disagree, and the
-      // worker keeps writing into a task nobody thinks is live.
-      const stopped = task.status === 'paused' || task.status === 'canceled';
-      const wasRunning = before?.status === 'running';
-      if (stopped && wasRunning && before?.currentSessionId) {
-        const manager = deps.sessionManager as unknown as {
-          cancelProcessing?: (sessionId: string, silent?: boolean) => Promise<void>
-        };
+      const manager = deps.sessionManager as unknown as {
+        updateTask?: (workspaceId: string, identifier: string, patch: Record<string, unknown>) => Promise<{ status: string }>
+        cancelProcessing?: (sessionId: string, silent?: boolean) => Promise<void>
+      }
+      if (!manager.updateTask) throw new Error('Task updater is not available in this build.')
+      const service = tasksFor(deps, workspaceId)
+      const before = service.get(id)
+      const result = await manager.updateTask(workspaceId, id, {
+        status: status ?? 'running',
+        ...(options?.pauseReason ? { pauseReason: options.pauseReason } : {}),
+        ...(options?.error ? { error: options.error } : {}),
+        ...(options?.scope?.trim() ? { scope: options.scope.trim() } : {}),
+        ...(options?.authorizedUpTo?.trim() ? { authorizedUpTo: options.authorizedUpTo.trim() } : {}),
+        ...(options?.authorizedSteps?.length ? { authorizedSteps: options.authorizedSteps } : {}),
+      })
+      // Stopping a task has to stop the work: a label that changes while the worker keeps
+      // writing is the same lie in the other direction.
+      const after = service.get(id)
+      const stopped = after?.status === 'paused' || after?.status === 'canceled'
+      if (stopped && before?.status === 'running' && before.currentSessionId) {
         try {
-          await manager.cancelProcessing?.(before.currentSessionId, true);
+          await manager.cancelProcessing?.(before.currentSessionId, true)
         } catch {
-          // A session that never started cannot be stopped; the status change
-          // still stands.
+          // A session that never started cannot be stopped; the status change still stands.
         }
       }
-      // Give the lock back as well: `isRunLocked` keeps it while the session is
-      // alive, so a paused task would refuse to resume until that session died.
-      const after = stopped && wasRunning ? service.suspendRun(id) : task;
-      broadcast(workspaceId);
-      return after;
+      broadcast(workspaceId)
+      return { status: result.status }
     },
   );
 
@@ -144,12 +158,26 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
     RPC_CHANNELS.taskboard.RUN,
     async (_ctx, workspaceId: string, id: string) => {
       const manager = deps.sessionManager as unknown as {
-        runTask?: (workspaceId: string, taskId: string, reason: string) => Promise<boolean>
+        runTask?: (
+          workspaceId: string,
+          taskId: string,
+          reason: string,
+        ) => Promise<{ started: boolean; reason?: string }>
       }
       if (!manager.runTask) throw new Error('Task runner is not available in this build.')
-      const started = await manager.runTask(workspaceId, id, 'manual')
+      const result = await manager.runTask(workspaceId, id, 'manual')
       broadcast(workspaceId)
-      return { started, ...(started ? {} : { reason: 'task is already running, blocked, or out of budget' }) }
+      /**
+       * The reason comes from the gate that refused, not from here.
+       *
+       * This answered every `false` with 「task is already running, blocked, or out of budget」.
+       * When the real reason was 「你已回复…，但还没有人把这句话翻译成授权」, the button blamed a
+       * budget nobody had spent.
+       */
+      return {
+        started: result.started,
+        ...(result.started ? {} : { reason: result.reason ?? '任务没有启动' }),
+      }
     },
   );
 

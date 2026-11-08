@@ -44,6 +44,17 @@ import { activateInOrder } from '../runtime/activation.ts'
 import { assemblePluginTools } from '@craft-agent/shared/events/plugin-tools'
 
 /** 6-hex id, used for collision-free attachment names. */
+/** Everything `task_update` and the task board can change about a task. */
+export interface TaskUpdatePatch {
+  status?: string;
+  pauseReason?: string;
+  assigneeAgentId?: string;
+  error?: string;
+  scope?: string;
+  authorizedUpTo?: string;
+  authorizedSteps?: string[];
+}
+
 function generateShortId(): string {
   return Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')
 }
@@ -5885,90 +5896,7 @@ export class SessionManager implements ISessionManager {
             if (!includeJournal) return task
             return { task, journal: readJournal(managed.workspace.rootPath, identifier) }
           },
-          update: async (identifier, patch) => {
-            /**
-             * Widening the boundary answers the question that was waiting on it.
-             *
-             * `scope` was write-once: created at task_create, refreshed by dispatch, and
-             * unreachable from any tool afterwards. So when the user replied 「完成 1.2」 the
-             * supervisor understood the authorisation, had no way to record it, was refused
-             * by the dispatch gate, and asked the same question again — three times in one
-             * real run. Writing the scope here is the missing step between "the user
-             * agreed" and "the system allows it".
-             *
-             * The pending decision is resolved in the same move: it existed because the
-             * boundary was too narrow, and it is no longer true once the boundary moves.
-             */
-            /**
-             * The structured boundary is written first, because it is what the other layers
-             * enforce: `applyPlanPatch` refuses steps past it and `resumeDecisionFor` refuses to
-             * start the task until it exists. Writing it also stamps `authorizedAt`, which is
-             * how a resumed task knows the reply was acted on.
-             */
-            if (patch.authorizedUpTo?.trim() || patch.authorizedSteps?.length) {
-              const service = this.getTasks(managed.workspace.id)
-              service.setAuthorizedSteps(
-                identifier,
-                patch.authorizedSteps,
-                patch.authorizedUpTo?.trim() || undefined,
-              )
-            }
-            if (patch.scope?.trim()) {
-              const service = this.getTasks(managed.workspace.id)
-              service.setScope(identifier, patch.scope.trim())
-              const task = service.get(identifier)
-              if (task?.decision && !task.decision.resolvedAt) {
-                /**
-                 * The question stopped being true — nobody approved anything.
-                 *
-                 * This used to pass `'approved'`, which made a closed decision indistinguishable
-                 * from a person saying yes while `answer` stayed empty: the record claimed human
-                 * consent it never had.
-                 */
-                try {
-                  service.resolveDecision(identifier, 'obsolete', patch.scope.trim())
-                } catch {
-                  // A decision that already expired is not a failure here.
-                }
-              }
-              if (!patch.status) {
-                const current = service.get(identifier)
-                /**
-                 * A closed decision cannot leave the task paused on `needs_decision`.
-                 *
-                 * Widening the scope was supposed to unblock the run, but this branch returned
-                 * the task exactly as it was: `paused` + `pauseReason: needs_decision` with
-                 * `resolvedAt` now set. Nothing could resolve it again (the record looked
-                 * settled) and nothing could resume it (no path asks a non-pending task to
-                 * run), so T-1 sat there forever showing 「等我拍板」 above an empty card.
-                 *
-                 * The pause reason is cleared when it was only the decision holding the task.
-                 */
-                if (current?.status === 'paused' && current.pauseReason === 'needs_decision') {
-                  /*
-                   * `setStatus(id, 'paused')` would be a no-op — `applyTransition` returns early
-                   * when the status does not change — so the reason has to be cleared directly.
-                   */
-                  const cleared = service.clearPauseReason(identifier)
-                  return { status: cleared.status }
-                }
-                return { status: current?.status ?? 'backlog' }
-              }
-            }
-            // "running" is not a label: it must start a run. Flipping the status
-            // without spawning was how a task could look alive and do nothing.
-            if (patch.status === 'running') {
-              const started = await this.runTask(managed.workspace.id, identifier, 'supervisor')
-              const current = this.getTasks(managed.workspace.id).get(identifier)
-              return { status: started ? 'running' : (current?.status ?? 'backlog') }
-            }
-            const task = this.getTasks(managed.workspace.id).setStatus(
-              identifier,
-              (patch.status ?? 'running') as never,
-              { pauseReason: patch.pauseReason as never, error: patch.error },
-            )
-            return { status: task.status }
-          },
+          update: async (identifier, patch) => this.updateTask(managed.workspace.id, identifier, patch as TaskUpdatePatch),
           restructurePlan: async (identifier, request) => {
             const service = this.getTasks(managed.workspace.id)
             const task = service.get(identifier)
@@ -7697,7 +7625,8 @@ ${request.prompt}`;
           const retries = (task.stats?.lostRetries ?? 0) + 1
           service.recordLostRetry(task.id, retries)
           try {
-            return await this.runTask(workspace.id, task.id, 'watchdog')
+            const result = await this.runTask(workspace.id, task.id, 'watchdog')
+            return result.started
           } catch (error) {
             sessionLog.warn('watchdog could not resume a lost task', {
               id: task.id,
@@ -7860,7 +7789,118 @@ ${request.prompt}`;
    *
    * Used by event routing (routes.json `to.taskId`) and by the UI's manual run.
    */
-  async runTask(workspaceId: string, taskId: string, reason: string): Promise<boolean> {
+  /**
+   * Update a task — the one implementation, for both the tool and the RPC.
+   *
+   * There were two: `taskTools.update` (what the supervisor's `task_update` reaches) and the
+   * `taskboard:update` RPC handler (what the task page's buttons reach). They shared nothing.
+   * The tool learned to write `scope`, then `authorizedUpTo` / `authorizedSteps`; the RPC kept
+   * calling `setStatus` and ignoring those options entirely, so a button that widened the
+   * boundary silently wrote nothing. Verified in a running instance: `tasksUpdate(...,
+   * { authorizedUpTo: '2' })` returned the task with `authorizedUpTo` still at `1.1`.
+   *
+   * The `restructure` comment below is the same story a third time — the RPC and the tool must
+   * not each decide what an update means.
+   */
+  async updateTask(workspaceId: string, identifier: string, patch: TaskUpdatePatch): Promise<{ status: string }> {
+    /**
+     * Widening the boundary answers the question that was waiting on it.
+     *
+     * `scope` was write-once: created at task_create, refreshed by dispatch, and
+     * unreachable from any tool afterwards. So when the user replied 「完成 1.2」 the
+     * supervisor understood the authorisation, had no way to record it, was refused
+     * by the dispatch gate, and asked the same question again — three times in one
+     * real run. Writing the scope here is the missing step between "the user
+     * agreed" and "the system allows it".
+     *
+     * The pending decision is resolved in the same move: it existed because the
+     * boundary was too narrow, and it is no longer true once the boundary moves.
+     */
+    /**
+     * The structured boundary is written first, because it is what the other layers
+     * enforce: `applyPlanPatch` refuses steps past it and `resumeDecisionFor` refuses to
+     * start the task until it exists. Writing it also stamps `authorizedAt`, which is
+     * how a resumed task knows the reply was acted on.
+     */
+    if (patch.authorizedUpTo?.trim() || patch.authorizedSteps?.length) {
+      const service = this.getTasks(workspaceId)
+      service.setAuthorizedSteps(
+        identifier,
+        patch.authorizedSteps,
+        patch.authorizedUpTo?.trim() || undefined,
+      )
+    }
+    if (patch.scope?.trim()) {
+      const service = this.getTasks(workspaceId)
+      service.setScope(identifier, patch.scope.trim())
+      const task = service.get(identifier)
+      if (task?.decision && !task.decision.resolvedAt) {
+        /**
+         * The question stopped being true — nobody approved anything.
+         *
+         * This used to pass `'approved'`, which made a closed decision indistinguishable
+         * from a person saying yes while `answer` stayed empty: the record claimed human
+         * consent it never had.
+         */
+        try {
+          service.resolveDecision(identifier, 'obsolete', patch.scope.trim())
+        } catch {
+          // A decision that already expired is not a failure here.
+        }
+      }
+      if (!patch.status) {
+        const current = service.get(identifier)
+        /**
+         * A closed decision cannot leave the task paused on `needs_decision`.
+         *
+         * Widening the scope was supposed to unblock the run, but this branch returned
+         * the task exactly as it was: `paused` + `pauseReason: needs_decision` with
+         * `resolvedAt` now set. Nothing could resolve it again (the record looked
+         * settled) and nothing could resume it (no path asks a non-pending task to
+         * run), so T-1 sat there forever showing 「等我拍板」 above an empty card.
+         *
+         * The pause reason is cleared when it was only the decision holding the task.
+         */
+        if (current?.status === 'paused' && current.pauseReason === 'needs_decision') {
+          /*
+           * `setStatus(id, 'paused')` would be a no-op — `applyTransition` returns early
+           * when the status does not change — so the reason has to be cleared directly.
+           */
+          const cleared = service.clearPauseReason(identifier)
+          return { status: cleared.status }
+        }
+        return { status: current?.status ?? 'backlog' }
+      }
+    }
+    // "running" is not a label: it must start a run. Flipping the status
+    // without spawning was how a task could look alive and do nothing.
+    if (patch.status === 'running') {
+      const started = await this.runTask(workspaceId, identifier, 'supervisor')
+      const current = this.getTasks(workspaceId).get(identifier)
+      return { status: started ? 'running' : (current?.status ?? 'backlog') }
+    }
+    const task = this.getTasks(workspaceId).setStatus(
+      identifier,
+      (patch.status ?? 'running') as never,
+      { pauseReason: patch.pauseReason as never, error: patch.error },
+    )
+    return { status: task.status }
+  }
+
+  /**
+   * Start or resume a task run.
+   *
+   * Returns the refusal reason with the verdict, not just `false`. The RPC behind the 恢复 button
+   * used to invent 「task is already running, blocked, or out of budget」 for every `false` — none
+   * of which was true when the real reason was 「你已回复…，但还没有人把这句话翻译成授权」. A caller
+   * that has to guess why a task will not start guesses wrong, and the person in front of it reads
+   * about a budget nobody spent.
+   */
+  async runTask(
+    workspaceId: string,
+    taskId: string,
+    reason: string,
+  ): Promise<{ started: boolean; reason?: string }> {
     const tasks = this.getTasks(workspaceId)
     const existing = tasks.get(taskId)
 
@@ -7878,7 +7918,7 @@ ${request.prompt}`;
       const verdict = resumeDecisionFor(existing)
       if (!verdict.allowed) {
         sessionLog.info(`[tasks] ${taskId} not started: ${verdict.why}`, { reason })
-        return false
+        return { started: false, reason: verdict.why }
       }
       // The boundary the reply implied becomes the one the run is held to.
       if (verdict.authorizedSteps?.length || verdict.authorizedUpTo) {
@@ -7907,38 +7947,38 @@ ${request.prompt}`;
       const claimed = tasks.startRun(taskId, resumeInto)
       if (!claimed.ok) {
         sessionLog.info(`[tasks] ${taskId} not resumed: ${claimed.reason}`)
-        return false
+        return { started: false, reason: claimed.reason }
       }
       this.claimTaskRun(workspaceId, taskId, resumeInto)
       try {
         await this.sendMessage(resumeInto, formatResumeBrief(claimed.task, reason))
-        return true
+        return { started: true }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         sessionLog.warn(`[tasks] ${taskId} could not be resumed in ${resumeInto}`, { error: message })
         tasks.endRun(taskId, { ok: false, error: message })
-        return false
+        return { started: false, reason: message }
       }
     }
 
     const claim = tasks.startRun(taskId, `pending:${reason}`)
     if (!claim.ok) {
       sessionLog.info(`[tasks] ${taskId} not started: ${claim.reason}`)
-      return false
+      return { started: false, reason: claim.reason }
     }
     try {
       const spawned = await this.spawnTaskRun(workspaceId, claim.task, reason)
       if (!spawned) {
         tasks.endRun(taskId, { ok: false, error: 'spawn failed' })
-        return false
+        return { started: false, reason: '启动 worker 失败' }
       }
       tasks.attachSession(taskId, spawned.sessionId)
       tasks.startRun(taskId, spawned.sessionId)
-      return true
+      return { started: true }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       tasks.endRun(taskId, { ok: false, error: message })
-      return false
+      return { started: false, reason: message }
     }
   }
 

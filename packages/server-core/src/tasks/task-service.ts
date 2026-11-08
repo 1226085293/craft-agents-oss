@@ -820,6 +820,9 @@ export class TaskService {
             askedAt: now,
             // Default-deny deadline: silence must not read as consent.
             deadlineAt: now + DECISION_TIMEOUT_MS,
+            // The worker's own candidates, so the card offers the answers that were
+            // actually considered instead of a yes/no that may match none of them.
+            ...(handoff.options?.length ? { options: [...handoff.options] } : {}),
           },
         };
       } else {

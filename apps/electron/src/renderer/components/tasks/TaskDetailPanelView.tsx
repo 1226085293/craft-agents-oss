@@ -93,6 +93,13 @@ export interface TaskDetailPanelViewProps {
   onCancel?: (id: string) => void
   /** Start a run now (claims the task lock and spawns a worker). */
   onRun?: (id: string) => void
+  /**
+   * Answer a pending decision with words.
+   *
+   * A decision is a question for a person, so the reply has to travel as one: the text is
+   * sent to the session that asked. Without this the card could only ever say yes or no.
+   */
+  onAnswer?: (id: string, text: string) => void
   /** Open a session in the main pane (task ↔ session are two views of one thing). */
   onOpenSession?: (sessionId: string) => void
   /** Jump to the moment in a session that a plan step came from. */
@@ -108,7 +115,7 @@ export interface TaskDetailPanelViewProps {
 }
 
 /** Full-width task detail for the content panel, with an optional navigator back action. */
-export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onOpenSession, planJumps, onJumpToStep, agents }: TaskDetailPanelViewProps): React.JSX.Element {
+export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onAnswer, onOpenSession, planJumps, onJumpToStep, agents }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
 
   return (
@@ -144,7 +151,136 @@ export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun
   )
 }
 
-function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, planJumps, onJumpToStep, agents }: TaskDetailPanelViewProps): React.JSX.Element {
+/**
+ * The answer controls for a pending decision.
+ *
+ * What this replaces: two fixed buttons — 「同意，继续跑」 and 「否，取消任务」 — shown whatever
+ * had actually been asked. A question with three real answers (`1.2` only, `1.2`+`2`, or
+ * stop) was answered by a yes/no that matched none of them, and the user's intent had to be
+ * reconstructed from which of the two they pressed. The asker's own `options` are now the
+ * buttons, and 「其他」 carries everything they did not think of.
+ */
+function TaskDecisionAnswer({
+  detail,
+  onApprove,
+  onCancel,
+  onAnswer,
+}: {
+  detail: TaskDetailView
+  onApprove: () => void
+  onCancel: () => void
+  onAnswer?: (id: string, text: string) => void
+}): React.JSX.Element {
+  const options = (detail.decision?.options ?? []).filter((o) => o.trim().length > 0)
+  const [typing, setTyping] = React.useState(false)
+  const [draft, setDraft] = React.useState('')
+  const [sent, setSent] = React.useState<string | null>(null)
+
+  const submit = (text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed || sent) return
+    onAnswer?.(detail.id, trimmed)
+    setSent(trimmed)
+    setTyping(false)
+  }
+
+  if (sent) {
+    return (
+      <div className="mt-3 rounded-md border border-border/60 bg-background/40 px-3 py-2 text-xs text-foreground/80">
+        已回复：{sent}
+      </div>
+    )
+  }
+
+  return (
+    <>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {options.length > 0 ? (
+          options.map((option) => (
+            <button
+              key={option}
+              type="button"
+              className="inline-flex min-h-8 items-center rounded-md bg-amber-500/20 px-3 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/30 disabled:opacity-40"
+              disabled={!onAnswer}
+              onClick={() => submit(option)}
+            >
+              {option}
+            </button>
+          ))
+        ) : (
+          <>
+            <button
+              type="button"
+              className="inline-flex min-h-8 items-center gap-1.5 rounded-md bg-amber-500/20 px-3 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/30"
+              onClick={onApprove}
+            >
+              同意，继续跑
+            </button>
+            <button
+              type="button"
+              className="inline-flex min-h-8 items-center rounded-md px-3 text-xs text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+              onClick={onCancel}
+            >
+              否，取消任务
+            </button>
+          </>
+        )}
+        {!typing ? (
+          // Not a choice: it submits nothing and only opens the box, so the card can never
+          // be answered by wording the asker invented.
+          <button
+            type="button"
+            className="inline-flex min-h-8 items-center rounded-md border border-dashed border-amber-500/40 px-3 text-xs text-amber-200/70 transition-colors hover:border-solid hover:text-amber-200"
+            onClick={() => setTyping(true)}
+          >
+            其他（自己输入）
+          </button>
+        ) : null}
+      </div>
+
+      {typing ? (
+        <div className="mt-2">
+          <textarea
+            autoFocus
+            rows={2}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                submit(draft)
+              }
+            }}
+            placeholder="写下你的答复，Enter 发送，Shift+Enter 换行"
+            className="w-full resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-foreground outline-none focus:border-ring"
+          />
+          <div className="mt-1.5 flex items-center gap-1.5">
+            <button
+              type="button"
+              disabled={!draft.trim() || !onAnswer}
+              onClick={() => submit(draft)}
+              className="rounded-md bg-amber-500/25 px-2.5 py-1 text-xs text-amber-100 disabled:opacity-40"
+            >
+              发送
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setTyping(false)
+                setDraft('')
+              }}
+              className="rounded-md px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </>
+  )
+}
+
+function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpenSession, planJumps, onJumpToStep, agents }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
   const isPaused = detail.status === 'paused'
   const isStartable = detail.status === 'backlog' || isPaused
@@ -389,22 +525,12 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
               <p className="td-body mt-1 whitespace-pre-wrap text-foreground/90">
                 {detail.handoffs.at(-1)?.summary ?? '执行会话停下来请求决定，但没留下说明。'}
               </p>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  className="inline-flex min-h-8 items-center gap-1.5 rounded-md bg-amber-500/20 px-3 text-xs font-medium text-amber-200 transition-colors hover:bg-amber-500/30"
-                  onClick={() => (onRun ?? onResume)?.(detail.id)}
-                >
-                  同意，继续跑
-                </button>
-                <button
-                  type="button"
-                  className="inline-flex min-h-8 items-center rounded-md px-3 text-xs text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-                  onClick={() => onCancel?.(detail.id)}
-                >
-                  否，取消任务
-                </button>
-              </div>
+              <TaskDecisionAnswer
+                detail={detail}
+                onApprove={() => (onRun ?? onResume)?.(detail.id)}
+                onCancel={() => onCancel?.(detail.id)}
+                onAnswer={onAnswer}
+              />
             </div>
           </div>
         </section>

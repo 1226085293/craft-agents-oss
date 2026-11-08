@@ -160,6 +160,21 @@ export function TaskDetailPanel({
           }).tasksRun?.(workspaceId, id)
         }}
         agents={agents}
+        onAnswer={(id, text) => {
+          // The answer goes to the session that asked, as a normal user message: the card
+          // is a question, and a person's reply is the only thing that may resolve it.
+          void (async () => {
+            const supervisor = (detail as { supervisorSessionId?: string }).supervisorSessionId
+            if (supervisor) {
+              await window.electronAPI.sendMessage(supervisor, text)
+            }
+            // Then let the task move: the supervisor has the answer in its inbox.
+            const run = (window.electronAPI as unknown as {
+              tasksRun?: (workspaceId: string, taskId: string) => Promise<unknown>
+            }).tasksRun
+            await run?.(workspaceId, id)
+          })()
+        }}
         onCancel={(id) => {
           void (window.electronAPI as unknown as {
             tasksUpdate?: (workspaceId: string, id: string, status: string) => Promise<unknown>

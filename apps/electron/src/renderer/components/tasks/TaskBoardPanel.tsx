@@ -87,6 +87,25 @@ export interface TaskDetailView {
       note?: string
     }>
   }
+  /**
+   * The pending question, when `pauseReason` is `needs_decision`.
+   *
+   * The card used to guess: it offered 「同意，继续跑」/「否，取消任务」 no matter what had
+   * actually been asked, so a question with three real answers was answered by a yes/no
+   * that matched none of them. `options` is what the asker enumerated; `其他` covers the
+   * rest.
+   */
+  decision?: {
+    category?: string
+    label?: string
+    reason?: string
+    askedAt?: number
+    deadlineAt?: number
+    resolvedAt?: number
+    options?: string[]
+  }
+  /** Who asked. A free-text answer is a message to this session. */
+  supervisorSessionId?: string
   /** Profile this task is assigned to; absent means the workspace default. */
   assigneeAgentId?: string
   trigger?: { kind: 'manual' | 'cron' | 'event'; expr?: string; timezone?: string; source?: string; types?: string[]; enabled?: boolean }
@@ -190,6 +209,8 @@ export interface TaskBoardPanelProps {
   onCancel?: (id: string) => void
   /** Start a run now (backlog or paused). */
   onRun?: (id: string) => void
+  /** Answer a pending decision with words; see TaskDetailPanelViewProps.onAnswer. */
+  onAnswer?: (id: string, text: string) => void
   /** Open the session that is working on a task (board entry as a link). */
   onOpenSession?: (sessionId: string) => void
   /** Pause a live task without cancelling it. */
@@ -256,6 +277,7 @@ export function TaskBoardPanel({
   onResume,
   onCancel,
   onRun,
+  onAnswer,
   onOpenSession,
   onPause,
   onDelete,
@@ -518,6 +540,7 @@ export function TaskBoardPanel({
             onRun={onRun}
             onClose={onCloseDetail}
             onResume={onResume}
+            onAnswer={onAnswer}
             onCancel={onCancel}
           />
         </div>

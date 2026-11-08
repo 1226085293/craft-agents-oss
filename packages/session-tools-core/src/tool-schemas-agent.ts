@@ -45,6 +45,13 @@ export const ReportResultSchema = z.object({
     })
     .optional()
     .describe('Verification evidence. Required by the rule gate (at least one command).'),
+  options: z
+    .array(z.string())
+    .max(4)
+    .optional()
+    .describe(
+      'Only with outcome=needs_decision: the answers a person can choose, at most 4, e.g. ["仅放行 1.2，其余之后再定", "放行 1.2 和 2，把任务做完", "到此为止，结束任务"]. Each is rendered as a button on the decision card and sent back verbatim. Do not also enumerate them inside summary.',
+    ),
 });
 
 export type ReportResultInput = z.infer<typeof ReportResultSchema>;

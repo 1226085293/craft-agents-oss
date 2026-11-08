@@ -230,6 +230,14 @@ export interface Handoff {
   artifacts?: HandoffArtifact[];
   verify?: HandoffVerify;
   /**
+   * With `needs_decision`: the choices you are asking the person to pick between.
+   *
+   * A worker that stops to ask 「1.2 alone, or 1.2+2, or stop?」 used to say it only in prose,
+   * so the answer card could offer nothing better than yes/no — and neither of those was
+   * one of the three. These become the card's buttons; free text is always available.
+   */
+  options?: string[];
+  /**
    * What this handoff was produced against.
    *
    * The failure loop this serves: review fails → human fixes → a new commit is
@@ -292,6 +300,8 @@ export interface TaskDecision {
   askedAt: number;
   /** Past this moment silence is treated as refusal. */
   deadlineAt: number;
+  /** The answers the asker enumerated. Absent means approve-or-stop. */
+  options?: string[];
   /** Set once the user answered or the deadline fired. */
   resolvedAt?: number;
   resolution?: 'approved' | 'rejected' | 'timeout';

@@ -115,6 +115,35 @@ describe('handoff gate', () => {
     expect(result.task.pauseReason).toBe('needs_decision');
   });
 
+  /**
+   * A worker that stops to ask 「1.2 alone, or 1.2+2, or stop?」 said it only in prose, so the
+   * answer card could offer nothing better than yes/no — and neither of those was one of
+   * the three answers. The candidates have to reach the record the card reads.
+   */
+  it("keeps the worker candidates on the decision, for the card to render", async () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.setStatus(task.id, 'running');
+    const result = await svc.reportHandoff(
+      task.id,
+      {
+        outcome: 'needs_decision',
+        // Has to hit an irreversible category, or `assessDecisionRequest` rules it routine
+        // and the task does not pause at all — the options would then have nowhere to live.
+        // `destroy-data` matches on a verb *and* a data-ish noun; 「文件」 is neither.
+        summary: '需要清空旧分支再继续，是否删除这些分支',
+        options: ['删除旧分支后继续', '保留旧分支，跳过清理', '到此为止，结束任务'],
+      },
+      'sess_w',
+    );
+
+    expect(result.task.decision?.options).toEqual([
+      '删除旧分支后继续',
+      '保留旧分支，跳过清理',
+      '到此为止，结束任务',
+    ]);
+  });
+
   it('trips the fuse after three rejected handoffs', async () => {
     const { svc } = service(workspace());
     const task = create(svc);

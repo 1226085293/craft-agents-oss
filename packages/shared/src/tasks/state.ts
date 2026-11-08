@@ -141,6 +141,8 @@ export function applyTransition(
 // ------------------------------------------------------------
 
 const MAX_SUMMARY = 200;
+/** Four buttons fit on a card; more is a menu, and a decision is not a menu. */
+const MAX_DECISION_OPTIONS = 4;
 
 function str(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
@@ -196,6 +198,16 @@ export function normalizeHandoff(raw: unknown, fromSessionId: string, now: numbe
     nextAction: str(v.nextAction),
     artifacts: normalizeArtifacts(v.artifacts),
     verify: normalizeVerify(v.verify),
+    // The candidates the worker wants the person to choose between. Dropped by this
+    // whitelist before, so a `needs_decision` handoff could enumerate three answers in
+    // prose and the card still had none to render — the reader got yes/no instead.
+    ...(Array.isArray(v.options)
+      ? {
+          options: v.options
+            .filter((x): x is string => typeof x === 'string' && x.trim() !== '')
+            .slice(0, MAX_DECISION_OPTIONS),
+        }
+      : {}),
     ...(str(v.revision) ? { revision: str(v.revision) } : {}),
     // Preserved, not recomputed: the flag records what was true when the hand-off
     // was recorded, and re-deriving it later would silently rewrite history.

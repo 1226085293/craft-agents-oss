@@ -155,6 +155,38 @@ describe('task detail presentation', () => {
     expect(html).not.toContain('关闭任务')
   })
 
+  /**
+   * The card used to answer every question with yes/no.
+   *
+   * A real decision offered three answers — 「仅放行 1.2」, 「放行 1.2 + 2」, 「到此为止」 — and the
+   * card showed 「同意，继续跑」/「否，取消任务」, neither of which was one of them. What the
+   * person meant then had to be inferred from which button they pressed.
+   */
+  it("renders the asker's own options as buttons, plus 其他 for the rest", () => {
+    const html = renderDetail({
+      ...detail,
+      decision: { options: ['仅放行 1.2', '放行 1.2 + 2', '到此为止（结束任务）'] },
+    })
+
+    expect(html).toContain('仅放行 1.2')
+    expect(html).toContain('放行 1.2 + 2')
+    expect(html).toContain('到此为止（结束任务）')
+    // Still reachable, and still not a choice: it only opens the box.
+    expect(html).toContain('其他（自己输入）')
+    // The generic pair must not appear next to real options: two vocabularies for the
+    // same question is what made the answer ambiguous in the first place.
+    expect(html).not.toContain('同意，继续跑')
+  })
+
+  it('keeps yes/no when the asker enumerated nothing', () => {
+    const html = renderDetail({ ...detail, decision: {} })
+
+    // Nothing to choose from is not the same as "cancel": the generic pair stays, because
+    // a decision with no options really is approve-or-stop.
+    expect(html).toContain('同意，继续跑')
+    expect(html).toContain('其他（自己输入）')
+  })
+
   it('keeps the generic pause banner for a non-decision pause', () => {
     const html = renderDetail({ ...detail, pauseReason: 'failures' })
 

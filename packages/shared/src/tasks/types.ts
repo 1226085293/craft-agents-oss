@@ -302,6 +302,20 @@ export interface TaskDecision {
   deadlineAt: number;
   /** The answers the asker enumerated. Absent means approve-or-stop. */
   options?: string[];
+  /**
+   * What the person replied, once they have.
+   *
+   * The card's "answered" state used to live in React state only, so a reload brought
+   * the buttons back on a question that had already been answered — the one screen where
+   * a stale control invites a duplicate answer. Recording it on the decision is what
+   * makes the state survive the app restarting, and it keeps the reply with the record
+   * it belongs to instead of only in a chat log.
+   *
+   * Deliberately not `resolvedAt`: the answer is the person's words, resolution is the
+   * supervisor's decision about them. Keeping them separate is what stops a reply from
+   * being mistaken for consent.
+   */
+  answer?: { text: string; at: number };
   /** Set once the user answered or the deadline fired. */
   resolvedAt?: number;
   resolution?: 'approved' | 'rejected' | 'timeout';

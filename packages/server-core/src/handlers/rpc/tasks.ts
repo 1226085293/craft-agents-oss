@@ -21,6 +21,7 @@ export const HANDLED_CHANNELS = [
   RPC_CHANNELS.taskboard.UPDATE,
   RPC_CHANNELS.taskboard.HANDOFF,
   RPC_CHANNELS.taskboard.RUN,
+  RPC_CHANNELS.taskboard.ANSWER,
   RPC_CHANNELS.taskboard.DELETE,
   RPC_CHANNELS.taskboard.UPDATE_TRIGGER,
   RPC_CHANNELS.taskboard.CHANGED,
@@ -149,6 +150,44 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       const started = await manager.runTask(workspaceId, id, 'manual')
       broadcast(workspaceId)
       return { started, ...(started ? {} : { reason: 'task is already running, blocked, or out of budget' }) }
+    },
+  );
+
+  server.handle(
+    RPC_CHANNELS.taskboard.ANSWER,
+    async (_ctx: unknown, workspaceId: string, id: string, text: string) => {
+      const service = tasksFor(deps, workspaceId)
+      const task = service.recordDecisionAnswer(id, text)
+      if (!task) {
+        // No open question: say so instead of accepting words nobody will read.
+        return { accepted: false, reason: 'no pending decision on this task' }
+      }
+
+      /**
+       * Deliver to the session that asked, and say which task the words belong to.
+       *
+       * `sendMessage` alone was the whole answer path, and it cannot identify the task:
+       * two tasks waiting at once produce two cards, and their answers are both plain
+       * prose in the same inbox. The supervisor then has to guess which decision the
+       * words close — the exact ambiguity that made 「放行」 mean nothing when two
+       * questions were open. Composing the line here, from the task record, is what
+       * removes the guess.
+       */
+      const manager = deps.sessionManager as unknown as {
+        sendMessage?: (sessionId: string, text: string) => Promise<unknown>
+      }
+      const supervisor = task.supervisorSessionId
+      if (supervisor && manager.sendMessage) {
+        const remaining = (task.spec?.plan ?? []).filter((step) => step.status !== 'done')
+        await manager.sendMessage(
+          supervisor,
+          `〔任务 ${task.id} 拍板答复〕${text.trim()}` +
+            (remaining.length ? `
+（该任务当前未完成步骤：${remaining.map((step) => step.id).join('、')}）` : ''),
+        )
+      }
+      broadcast(workspaceId)
+      return { accepted: true }
     },
   );
 

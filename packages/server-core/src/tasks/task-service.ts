@@ -601,7 +601,36 @@ export class TaskService {
     return next;
   }
 
-  /** Prove the task is alive. Called on every tool result and turn boundary. */
+  /**
+   * Record what the person replied to a pending question.
+   *
+   * Not a resolution: the words still have to be read by the supervisor, which is the
+   * only party that can tell 「放行」 from 「到此为止」. Storing them here does two things
+   * the chat log cannot — it says WHICH task the words answer, and it lets the card show
+   * 「已答复」 after a reload instead of offering the same buttons again.
+   *
+   * Returns null when there is nothing to answer, so the caller can report "nothing was
+   * waiting" rather than silently accepting words no one will read.
+   */
+  recordDecisionAnswer(id: string, text: string): Task | null {
+    const task = this.get(id);
+    const decision = task?.decision;
+    if (!task || !decision || decision.resolvedAt) return null;
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+
+    const now = this.now();
+    const next: Task = {
+      ...task,
+      decision: { ...decision, answer: { text: trimmed, at: now } },
+      updatedAt: now,
+    };
+    saveTask(this.root, next);
+    appendJournal(this.root, id, { type: 'decision_answered', at: now, data: { text: trimmed } });
+    return next;
+  }
+
+    /** Prove the task is alive. Called on every tool result and turn boundary. */
   heartbeat(id: string): Task {
     const task = this.require(id);
     const now = this.now();

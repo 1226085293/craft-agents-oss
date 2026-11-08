@@ -194,6 +194,56 @@ describe('handoff gate', () => {
     expect(svc.setDecisionWording(task.id, { question: '还问吗？' })).toBeNull()
   })
 
+  /**
+   * Why this exists: the reply used to travel as a bare chat message, so with two tasks
+   * waiting the supervisor had two identical sentences and no way to tell which decision
+   * each one closed.
+   */
+  it('records the answer on the decision, so the reply knows which task it belongs to', async () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.setStatus(task.id, 'running');
+    await svc.reportHandoff(
+      task.id,
+      { outcome: 'needs_decision', summary: '需要清空旧分支再继续，是否删除这些分支' },
+      'sess_w',
+    );
+
+    const answered = svc.recordDecisionAnswer(task.id, '放行，继续做完');
+
+    expect(answered?.decision?.answer?.text).toBe('放行，继续做完');
+    // Answering is not resolving: the supervisor reads the words and decides what they
+    // mean. A reply mistaken for consent is the failure this separation prevents.
+    expect(answered?.decision?.resolvedAt).toBeUndefined();
+    expect(answered?.status).toBe('paused');
+  })
+
+  it('refuses an answer when no question is waiting', () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+
+    // Nothing was asked, so there is nothing to answer — accepting the words quietly
+    // would leave the card printing 「已答复」 for a reply nobody will read.
+    expect(svc.recordDecisionAnswer(task.id, '随便说点什么')).toBeNull();
+  })
+
+  it('keeps the first answer instead of reopening an answered decision', async () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.setStatus(task.id, 'running');
+    await svc.reportHandoff(
+      task.id,
+      { outcome: 'needs_decision', summary: '需要清空旧分支再继续，是否删除这些分支' },
+      'sess_w',
+    );
+    svc.recordDecisionAnswer(task.id, '先不要动')
+    svc.resolveDecision(task.id, 'rejected')
+
+    // A reload brought the buttons back once; a late second click must not rewrite the
+    // record of what the person actually said.
+    expect(svc.recordDecisionAnswer(task.id, '改了，放行')).toBeNull()
+  })
+
   it('trips the fuse after three rejected handoffs', async () => {
     const { svc } = service(workspace());
     const task = create(svc);

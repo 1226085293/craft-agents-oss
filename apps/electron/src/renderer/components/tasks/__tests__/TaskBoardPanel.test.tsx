@@ -212,6 +212,27 @@ describe('task detail presentation', () => {
     expect(decisionSection).not.toContain('首次截图缺少时间线')
   })
 
+  /**
+   * A card that was answered kept offering its buttons after a reload.
+   *
+   * The answer lived in React state only, so restarting the app restored the question
+   * and invited the same reply twice. `decision.answer` is the durable record — this pins
+   * that the card renders it instead of the buttons.
+   */
+  it('shows the recorded answer instead of the buttons', () => {
+    const html = renderDetail({
+      ...detail,
+      decision: {
+        reason: '计划中还剩 3 步未授权，是否继续？',
+        options: ['放行', '到此为止'],
+        answer: { text: '放行，做完整', at: Date.now() },
+      },
+    })
+
+    expect(html).toContain('已回复：放行，做完整')
+    expect(html).not.toContain('其他（自己输入）')
+  })
+
   it('keeps the generic pause banner for a non-decision pause', () => {
     const html = renderDetail({ ...detail, pauseReason: 'failures' })
 

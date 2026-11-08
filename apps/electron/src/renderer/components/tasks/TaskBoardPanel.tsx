@@ -103,6 +103,8 @@ export interface TaskDetailView {
     deadlineAt?: number
     resolvedAt?: number
     options?: string[]
+    /** What the person replied, recorded on the task so it survives a reload. */
+    answer?: { text: string; at: number }
   }
   /** Who asked. A free-text answer is a message to this session. */
   supervisorSessionId?: string

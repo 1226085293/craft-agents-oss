@@ -6,6 +6,11 @@
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import {
+  readDecisionAnswer,
+  rememberDecisionAnswer,
+  taskDecisionKey,
+} from '../app-shell/decision-answers'
+import {
   AlertTriangle,
   ChevronRight,
   Circle,
@@ -174,8 +179,24 @@ function TaskDecisionAnswer({
   const options = (detail.decision?.options ?? []).filter((o) => o.trim().length > 0)
   const [typing, setTyping] = React.useState(false)
   const [draft, setDraft] = React.useState('')
-  const [sent, setSent] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  const storeKey = taskDecisionKey(detail.id, detail.decision?.askedAt)
+
+  /**
+   * Three sources, in order of authority.
+   *
+   * `decision.answer` is the task's own record — it survives a restart and is the same
+   * value every surface reads. The local store covers the moment between sending and
+   * the task being re-read. Neither existing meant a reload offered the buttons again on
+   * a question that was already answered.
+   */
+  const [sent, setSentState] = React.useState<string | null>(
+    detail.decision?.answer?.text ?? readDecisionAnswer(storeKey),
+  )
+  const setSent = (value: string) => {
+    setSentState(value)
+    rememberDecisionAnswer(storeKey, value)
+  }
 
   /**
    * Announce the answer only once it has actually been delivered.

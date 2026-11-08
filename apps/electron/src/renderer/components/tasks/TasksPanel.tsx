@@ -177,13 +177,32 @@ export function TaskDetailPanel({
            * session that asked; that session resolves the decision and resumes or stops.
            */
           return (async () => {
-            const supervisor = (detail as { supervisorSessionId?: string }).supervisorSessionId
-            if (!supervisor) {
-              // No recipient is not success: say so rather than print 「已回复」.
-              throw new Error('这个任务没有记录督导会话，答复无处投递')
+            /**
+             * Answer through the task, not through a chat message.
+             *
+             * A plain `sendMessage` reaches the supervisor's inbox with no way to say
+             * which task the words belong to. With two tasks waiting, both answers are
+             * the same prose and 「放行」 closes whichever decision is read first — the
+             * question the person is answering is not recoverable from the text.
+             *
+             * `tasksAnswer` records the reply on that task's decision and delivers a line
+             * naming it, so the ambiguity is gone and 「已答复」 has somewhere durable to
+             * live.
+             */
+            const answerTask = (window.electronAPI as unknown as {
+              tasksAnswer?: (
+                workspaceId: string,
+                taskId: string,
+                text: string,
+              ) => Promise<{ accepted?: boolean }>
+            }).tasksAnswer
+            if (!answerTask) throw new Error('这个版本不支持任务答复通道')
+            const result = await answerTask(workspaceId, id, text)
+            if (result?.accepted === false) {
+              // Nothing was waiting: accepting quietly would print 「已回复」 for words
+              // no one will read.
+              throw new Error('这个任务已经没有待答复的问题')
             }
-            await window.electronAPI.sendMessage(supervisor, text)
-            void id
           })()
         }}
         onCancel={(id) => {

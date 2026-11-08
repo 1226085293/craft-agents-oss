@@ -426,6 +426,15 @@ export const RPC_CHANNELS = {
     HANDOFF: 'taskboard:handoff',
     /** Start a run now (claims the lock, spawns a worker). */
     RUN: 'taskboard:run',
+    /**
+     * Answer the task's pending question.
+     *
+     * A bare chat message cannot say which task it answers: two tasks waiting at once
+     * produce two cards whose answers are identical prose, and the supervisor has to
+     * guess. Naming the task here is what makes the answer unambiguous, and recording it
+     * on the decision is what makes 「已答复」 survive a reload.
+     */
+    ANSWER: 'taskboard:answer',
     /** Delete a finished task for good (record, journal, index entry). */
     DELETE: 'taskboard:delete',
     /** Change what starts a task (manual / cron / event). */

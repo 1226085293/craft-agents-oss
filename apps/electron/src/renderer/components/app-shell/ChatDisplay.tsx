@@ -2,6 +2,11 @@ import * as React from "react"
 import { useTranslation } from "react-i18next"
 import { useEffect, useState, useMemo, useCallback } from "react"
 import {
+  readDecisionAnswer,
+  rememberDecisionAnswer,
+  requestDecisionKey,
+} from "./decision-answers"
+import {
   AlertTriangle,
   CheckCircle2,
   ChevronDown,
@@ -2341,6 +2346,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                               onOpenFile={openFileInSession}
                               onOpenUrl={onOpenUrl}
                               sessionId={session?.id}
+                              workspaceId={workspaceId}
                               compactMode={compactMode}
                             />
                             {turn.guidanceMessages?.map((guidanceMessage) => (
@@ -2350,6 +2356,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                                   onOpenFile={openFileInSession}
                                   onOpenUrl={onOpenUrl}
                                   sessionId={session?.id}
+                                  workspaceId={workspaceId}
                                   compactMode={compactMode}
                                 />
                               </div>
@@ -2901,6 +2908,14 @@ interface MessageBubbleProps {
   onOpenUrl: (url: string) => void
   sessionId?: string
   /**
+   * Which workspace the conversation belongs to.
+   *
+   * A decision card answers through `tasksAnswer`, which is workspace-scoped because a
+   * task id is only unique inside one. The bubble already knows its session; this is the
+   * one piece it was missing.
+   */
+  workspaceId?: string
+  /**
    * Markdown render mode for assistant messages
    * @default 'minimal'
    */
@@ -2931,11 +2946,30 @@ interface MessageBubbleProps {
  * State is per card, keyed by nothing shared: two cards can be outstanding at once (two
  * tasks asking, or two questions from one turn) and answering one must not answer another.
  */
-function DecisionRequestCard({ request }: { request: NonNullable<Message['decisionRequest']> }) {
+function DecisionRequestCard({
+  request,
+  workspaceId,
+}: {
+  request: NonNullable<Message['decisionRequest']>
+  workspaceId?: string
+}) {
   const [typing, setTyping] = React.useState(false)
   const [draft, setDraft] = React.useState('')
-  const [sent, setSent] = React.useState<string | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  const storeKey = requestDecisionKey(request.id)
+
+  /**
+   * Whether this card has been answered, read from storage rather than from state.
+   *
+   * The card is a persisted message row, so it comes back on every reload — and so did
+   * its buttons, on questions that had already been answered. Remembering the answer
+   * outside React is what makes 「已答复」 durable.
+   */
+  const [sent, setSentState] = React.useState<string | null>(() => readDecisionAnswer(storeKey))
+  const setSent = (value: string) => {
+    setSentState(value)
+    rememberDecisionAnswer(storeKey, value)
+  }
 
   const answer = React.useCallback(
     async (text: string) => {
@@ -2943,9 +2977,29 @@ function DecisionRequestCard({ request }: { request: NonNullable<Message['decisi
       if (!trimmed || sent) return
       setError(null)
       try {
-        // A real user message, to the session that asked. Not a card mutation: the
-        // supervisor has to see the answer to act on it, and this is the only channel
-        // that carries a person's words.
+        /**
+         * The answer names its task, because the text cannot.
+         *
+         * Two tasks waiting at once produce two cards whose answers are both plain
+         * prose in the same inbox — 「放行」 then closes whichever decision the
+         * supervisor happens to read first. When the card knows its task, the answer
+         * goes through `tasksAnswer`, which records the reply on that decision and
+         * delivers a line naming it. Only a card with no task falls back to a plain
+         * message to the asker.
+         */
+        if (request.taskIdentifier) {
+          const scope = workspaceId
+          const answerTask = (window.electronAPI as unknown as {
+            tasksAnswer?: (workspaceId: string, taskId: string, text: string) => Promise<{ accepted?: boolean }>
+          }).tasksAnswer
+          if (scope && answerTask) {
+            const result = await answerTask(scope, request.taskIdentifier, trimmed)
+            if (result?.accepted === false) throw new Error('这个任务已经没有待答复的问题')
+            setSent(trimmed)
+            setTyping(false)
+            return
+          }
+        }
         await window.electronAPI.sendMessage(request.askedBySessionId, trimmed)
         setSent(trimmed)
         setTyping(false)
@@ -2953,7 +3007,7 @@ function DecisionRequestCard({ request }: { request: NonNullable<Message['decisi
         setError(err instanceof Error ? err.message : String(err))
       }
     },
-    [request.askedBySessionId, sent],
+    [request.askedBySessionId, request.taskIdentifier, sent, storeKey, workspaceId],
   )
 
   return (
@@ -3133,6 +3187,7 @@ function MessageBubble({
   onOpenFile,
   onOpenUrl,
   sessionId,
+  workspaceId,
   renderMode = 'minimal',
   onPopOut,
   compactMode,
@@ -3259,7 +3314,7 @@ function MessageBubble({
     // A question for a person. Drawn as a card with buttons, because the answer has to
     // come from a human: this row is display-only and no model ever receives it.
     if (message.statusType === 'decision_request' && message.decisionRequest) {
-      return <DecisionRequestCard request={message.decisionRequest} />
+      return <DecisionRequestCard request={message.decisionRequest} workspaceId={workspaceId} />
     }
 
     // Compaction complete message - render as horizontal rule with centered label

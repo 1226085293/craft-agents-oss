@@ -18,8 +18,29 @@ export type ResumeVerdict =
   | { allowed: true; authorizedSteps?: string[]; authorizedUpTo?: string; reason: string }
   | { allowed: false; why: string };
 
-/** Replies that end the task rather than continue it. */
-const END_WORDS = /(到此为止|就此结束|结束任务|不用做了|别做了|取消任务|停掉任务)/;
+/**
+ * Replies that end the task rather than continue it.
+ *
+ * 「停止剩下的任务」 was missing, and it is the phrasing that actually arrived: the supervisor
+ * read it correctly (marked the task completed and created a different task for the new request),
+ * but this function did not, so the resume path lifted the pause and handed the worker a brief
+ * ending with 「下一条大纲 2 还没有小节……先判断它，再拆」 — instructions to continue, printed
+ * directly under the reply that said to stop. The worker followed the longer, more specific
+ * instruction, which is the only thing a model can reasonably do with contradictory input.
+ */
+const END_WORDS =
+  /(到此为止|就此结束|结束任务|不用做了|别做了|取消任务|停掉任务|停止[^，。]{0,6}(任务|工作|剩余|剩下)|停掉剩余|不要再做)/;
+
+/**
+ * Does this reply end the task instead of continuing it?
+ *
+ * Exported because the brief needs the same answer: a resume that is refused produces no brief,
+ * but a dispatch can still be built for a task whose reply said stop, and a brief that ends with
+ * 「下一条大纲 2 ……先判断它，再拆」 contradicts the sentence it quotes two lines above.
+ */
+export function answerEndsTask(answer: string | undefined): boolean {
+  return END_WORDS.test((answer ?? '').trim());
+}
 
 /**
  * The single answer to "may this run, and how far".

@@ -23,6 +23,7 @@ import {
   type TaskTrigger,
   type TaskVerifyConfig,
 } from './types.ts';
+import { openSteps } from './plan.ts';
 
 /**
  * Legal transitions. `running → running` is intentionally allowed: a handoff
@@ -100,6 +101,28 @@ export type TransitionResult = {
  * Apply a transition, maintaining the fields that travel with it
  * (`pauseReason`, timestamps, terminal bookkeeping).
  */
+/**
+ * 「完成」 must not mean 「停了」.
+ *
+ * A task marked `completed` while its plan still has open steps reads as finished on the board
+ * and as unfinished everywhere else: the plan keeps showing `doing`/`todo`, the next session
+ * inherits a half-done checklist, and the hand-off history says work remains. Observed on T-1:
+ * the user said 「停止剩下的任务」, the supervisor set `completed`, and the page showed a
+ * completed task whose plan still had 「1 doing」 and 「2 todo」.
+ *
+ * Stopping early is a real outcome, so the way out is `canceled` — that is the state that means
+ * "this ended without finishing". `completed` is reserved for a plan that actually closed.
+ */
+function assertPlanSettled(task: Task, to: TaskStatus): void {
+  if (to !== 'completed') return;
+  const open = openSteps(task.spec?.plan);
+  if (open.length === 0) return;
+  throw new Error(
+    `计划还有 ${open.length} 步没完成（${open.map((step) => step.id).join('、')}），不能标成 completed。` +
+      '要继续就把它们做完；用户叫停了就改成 canceled —— 「完成」和「停止」是两件不同的事。',
+  );
+}
+
 export function applyTransition(
   task: Task,
   to: TaskStatus,
@@ -110,6 +133,7 @@ export function applyTransition(
   }
   assertTransition(task.status, to);
   assertNotAwaitingDecision(task, to);
+  assertPlanSettled(task, to);
 
   const next: Task = { ...task, status: to, updatedAt: options.now };
 

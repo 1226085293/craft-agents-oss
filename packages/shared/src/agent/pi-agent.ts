@@ -262,6 +262,31 @@ type BackgroundProxyTaskState = {
  */
 const RETRY_DEDUPE_MS = 5_000;
 
+/**
+ * Should a retry actually be sent, or is it a duplicate of one already in flight?
+ *
+ * The window collapses two triggers firing on the same failure (the gateway's truncation retry
+ * and the stall watchdog, 3ms apart — it resumed an already-resumed turn and drew two error rows
+ * for one failure). It must not collapse a retry that landed while the subprocess was tearing the
+ * session down: that one goes into an aborting session and does nothing, and suppressing the next
+ * one leaves the turn dead with nobody left to notice.
+ *
+ * Observed: the stall watchdog sent `retry` at 57.506, the subprocess reported 「Turn stalled …
+ * aborting session to reset」 at 57.712, its retry was suppressed as a duplicate, and the worker
+ * produced no further event — the task stayed `running` with `activeMs: 0` and an empty plan.
+ */
+export function shouldResendModelStep(input: {
+  now: number;
+  lastRetrySentAt: number;
+  lastTurnAbortAt: number;
+}): boolean {
+  const { now, lastRetrySentAt, lastTurnAbortAt } = input;
+  // An abort after the last retry means that retry was wasted — a fresh one is required.
+  const retryWasAborted = lastTurnAbortAt > lastRetrySentAt;
+  if (retryWasAborted && now >= lastTurnAbortAt) return true;
+  return now - lastRetrySentAt >= RETRY_DEDUPE_MS;
+}
+
 export class PiAgent extends BaseAgent {
   protected backendName = 'Craft Agents Backend';
 
@@ -780,12 +805,40 @@ export class PiAgent extends BaseAgent {
    * a genuinely later stall is still allowed to retry.
    */
   private lastRetrySentAt = 0;
+  /**
+   * When the current turn was last aborted (stall, user stop, subprocess reset).
+   *
+   * Read by `resendModelStep` to tell "this failure already has a retry in flight" from "the
+   * retry I just sent went into an aborted session".
+   */
+  private lastTurnAbortAt = 0;
 
   private resendModelStep(): void {
     if (this.controlledRestartInProgress) return;
     if (!this.subprocess || !this.subprocess.stdin?.writable) return;
     const now = Date.now();
-    if (now - this.lastRetrySentAt < RETRY_DEDUPE_MS) {
+    /**
+     * A retry that raced an abort did not revive the turn, so the next one must not be
+     * suppressed.
+     *
+     * The window exists to collapse two triggers firing on the same failure (the gateway's
+     * truncation retry and the stall watchdog, 3ms apart). It must not collapse a retry that
+     * arrived while the subprocess was tearing the session down: that attempt goes into a
+     * session being aborted and does nothing, and suppressing the following one leaves the turn
+     * dead with no third caller to notice.
+     *
+     * Observed: the stall watchdog sent `retry` at 57.506, the subprocess reported 「Turn
+     * stalled … aborting session to reset」 at 57.712, its retry was suppressed as a duplicate,
+     * and the worker never produced another event — the task sat `running` with `activeMs: 0`
+     * and an empty plan for the rest of its life.
+     */
+    if (
+      !shouldResendModelStep({
+        now,
+        lastRetrySentAt: this.lastRetrySentAt,
+        lastTurnAbortAt: this.lastTurnAbortAt,
+      })
+    ) {
       this.debug('[retry] suppressed a duplicate retry for the same failure');
       return;
     }
@@ -4479,6 +4532,11 @@ n   * connection can be adopted mid-session.
    * after "Response interrupted" had been shown.
    */
   private sendAbortOrLatch(context: string): void {
+    /**
+     * Every abort leaves through here, so this is the one place that knows a retry sent just
+     * before it went into a dying session.
+     */
+    this.lastTurnAbortAt = Date.now();
     if (this.subprocess?.stdin?.writable) {
       this.send({ type: 'abort' });
       return;

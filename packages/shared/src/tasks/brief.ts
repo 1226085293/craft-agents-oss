@@ -10,6 +10,7 @@
 import type { Task } from './types.ts';
 import { formatPlan } from './plan.ts';
 import { isAuthorizedStep, nextLeg, openSteps } from './plan.ts';
+import { answerEndsTask } from './resume-decision.ts';
 import { planProgress } from './plan.ts';
 
 export interface TaskBriefOptions {
@@ -270,6 +271,20 @@ function openBeyondBoundary(task: Task): boolean {
  * first sub-step exactly as written.
  */
 export function formatFrontierLine(task: Task): string {
+  /**
+   * A reply that ends the task outranks the plan.
+   *
+   * The line is computed from the plan alone, so on a task the person had just stopped it read
+   * 「下一条大纲 2「收尾」还没有小节……先判断它，再拆」 — printed directly under
+   * 「用户的答复是：停止剩下的任务」. The worker follows the longer, more specific instruction,
+   * which is the only thing a model can do with contradictory input.
+   */
+  if (answerEndsTask(task.decision?.answer?.text)) {
+    return (
+      '用户已叫停这个任务：不要再展开大纲、不要标完成、不要移除步骤。' +
+      '用 `report_result` 交接并说明停在哪一步（outcome 用 **handoff**）。'
+    );
+  }
   const leg = nextLeg(task.spec?.plan);
   if (!leg) {
     const anyOpen = openSteps(task.spec?.plan).length > 0;

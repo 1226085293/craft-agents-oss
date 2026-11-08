@@ -138,9 +138,9 @@ describe('task detail presentation', () => {
       '活跃时间',
       '验收判据',
       '列表和详情在三栏布局下都清楚可读',
-      '等你拍板',
-      '同意，继续跑',
-      '否，取消任务',
+      // Paused and waiting for the relay to ask; the card itself appears only then.
+      '暂停原因',
+      '等待督导把问题转达给你',
       '首次截图缺少时间线',
       '完成实现，等待用户确认视觉取舍。',
       '由督导请求用户验收。',
@@ -165,7 +165,10 @@ describe('task detail presentation', () => {
   it("renders the asker's own options as buttons, plus 其他 for the rest", () => {
     const html = renderDetail({
       ...detail,
-      decision: { options: ['仅放行 1.2', '放行 1.2 + 2', '到此为止（结束任务）'] },
+      decision: {
+        question: '仅放行 1.2，其余之后再定？',
+        options: ['仅放行 1.2', '放行 1.2 + 2', '到此为止（结束任务）'],
+      },
     })
 
     expect(html).toContain('仅放行 1.2')
@@ -178,13 +181,15 @@ describe('task detail presentation', () => {
     expect(html).not.toContain('同意，继续跑')
   })
 
-  it('keeps yes/no when the asker enumerated nothing', () => {
+  it('offers no buttons before the relay has asked anything', () => {
     const html = renderDetail({ ...detail, decision: {} })
 
-    // Nothing to choose from is not the same as "cancel": the generic pair stays, because
-    // a decision with no options really is approve-or-stop.
-    expect(html).toContain('同意，继续跑')
-    expect(html).toContain('其他（自己输入）')
+    // The task is paused, but no question exists yet — buttons here would be a card for a
+    // decision the person has not been given, and they would disagree with the
+    // conversation, which has nothing either.
+    expect(html).toContain('等待督导把问题转达给你')
+    expect(html).not.toContain('同意，继续跑')
+    expect(html).not.toContain('其他（自己输入）')
   })
 
   /**
@@ -198,7 +203,10 @@ describe('task detail presentation', () => {
   it('shows the pending question, not the last work report', () => {
     const html = renderDetail({
       ...detail,
-      decision: { reason: '计划中还剩 3 步未授权（1、1.2、2），是否继续？', options: ['放行', '到此为止'] },
+      decision: {
+        question: '计划中还剩 3 步未授权（1、1.2、2），是否继续？',
+        options: ['放行', '到此为止'],
+      },
     })
 
     // The question is the card body…
@@ -224,6 +232,7 @@ describe('task detail presentation', () => {
       ...detail,
       decision: {
         reason: '计划中还剩 3 步未授权，是否继续？',
+        question: '计划中还剩 3 步未授权，是否继续？',
         options: ['放行', '到此为止'],
         answer: { text: '放行，做完整', at: Date.now() },
       },
@@ -245,7 +254,7 @@ describe('task detail presentation', () => {
     const answered: string[] = []
     const html = renderToStaticMarkup(
       createElement(TaskDetailPanelView, {
-        detail: { ...detail, decision: { reason: '是否继续？', options: ['放行', '停止'] } },
+        detail: { ...detail, decision: { question: '是否继续？', options: ['放行', '停止'] } },
         onResume: () => {},
         onCancel: () => {},
         onAnswer: (id, text) => {
@@ -258,6 +267,38 @@ describe('task detail presentation', () => {
     // No `disabled` on the option buttons means the callback reached them.
     expect(sendable).not.toContain('disabled=""')
     expect(html).toContain('放行')
+  })
+
+  /**
+   * The task card must mirror the conversation card: same words, same moment.
+   *
+   * It used to render its own text from the rule that detected the situation, so it showed
+   * up at handoff time with a sentence nobody had been asked, and then changed underneath
+   * the reader once the relay put the real question in the conversation.
+   */
+  it('shows no question until the relay has actually asked one', () => {
+    const html = renderDetail({ ...detail, decision: { reason: '连续 3 次交接未过', askedAt: 1 } })
+
+    // The task is paused, and that is a fact worth showing…
+    expect(html).toContain('暂停原因')
+    // …but there is no question yet, and no buttons for one.
+    expect(html).not.toContain('同意，继续跑')
+    expect(html).not.toContain('其他（自己输入）')
+    expect(html).toContain('等待督导把问题转达给你')
+  })
+
+  it('shows exactly the relayed question and its options once asked', () => {
+    const html = renderDetail({
+      ...detail,
+      decision: { reason: '连续 3 次交接未过', question: '仅放行 1.2，其余之后再定？', options: ['放行', '到此为止'] },
+    })
+
+    expect(html).toContain('仅放行 1.2，其余之后再定？')
+    // The same buttons the conversation card offers — not a generic approve/cancel pair.
+    expect(html).toContain('放行')
+    expect(html).not.toContain('同意，继续跑')
+    // The rule's diagnosis stays visible beneath it; it explains why a person is asked.
+    expect(html).toContain('连续 3 次交接未过')
   })
 
   it('keeps the generic pause banner for a non-decision pause', () => {

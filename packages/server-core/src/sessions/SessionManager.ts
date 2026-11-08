@@ -5730,14 +5730,26 @@ export class SessionManager implements ISessionManager {
                * makes one of them the right one.
                */
               const tasks = this.getTasks(managed.workspace.id)
-              const open = tasks
-                .list()
-                .filter((task) => task.supervisorSessionId === managed.id)
-                .filter((task) => task.decision && !task.decision.resolvedAt)
-                .filter((task) => task.status === 'paused' && task.pauseReason === 'needs_decision')
-              const target = open.length === 1 ? open[0] : open.at(-1)
-              if (target) {
-                tasks.setDecisionWording(target.id, {
+              /**
+               * The task the asker named wins over the lookup.
+               *
+               * The lookup only considers decisions that are still open, so a card raised
+               * after one was resolved found nothing and the task kept the rule-generated
+               * text — the two surfaces disagreed again, for the third time and for the
+               * third different reason.
+               */
+              const targetId =
+                taskId ??
+                (() => {
+                  const open = tasks
+                    .list()
+                    .filter((task) => task.supervisorSessionId === managed.id)
+                    .filter((task) => task.decision && !task.decision.resolvedAt)
+                    .filter((task) => task.status === 'paused' && task.pauseReason === 'needs_decision')
+                  return (open.length === 1 ? open[0] : open.at(-1))?.id
+                })()
+              if (targetId) {
+                tasks.setDecisionWording(targetId, {
                   question: text,
                   ...(options?.length ? { options: [...options] } : {}),
                 })

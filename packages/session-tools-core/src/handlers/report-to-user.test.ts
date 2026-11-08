@@ -43,6 +43,58 @@ describe('report_to_user', () => {
     }
   });
 
+  /**
+   * A decision reported as prose forces the reader to retype a choice the asker already
+   * enumerated. The card renders `options` as buttons, so they have to reach it.
+   */
+  it('carries the answers as options, so the card can render buttons', async () => {
+    const seen: Array<{ text: string; kind?: string; options?: string[] }> = [];
+    const result = await handleReportToUser(
+      {
+        sessionId: 'sess-1',
+        agentTools: { reportToUser: async (p: { text: string; kind?: string }) => void seen.push(p) },
+      } as unknown as SessionToolContext,
+      {
+        text: '步骤 1.1 已完成并验收通过，剩余 1.2、2 未授权。',
+        kind: 'decision',
+        options: ['放行剩余步骤，把任务做完', '到此为止，结束任务'],
+      } as never,
+    );
+
+    expect(seen[0]?.options).toEqual(['放行剩余步骤，把任务做完', '到此为止，结束任务']);
+    // The receipt names them, so a model that got the wording wrong can see it.
+    expect(textOf(result)).toContain('放行剩余步骤');
+  });
+
+  it('drops options on a report that is not a decision', async () => {
+    const seen: Array<{ text: string; kind?: string; options?: string[] }> = [];
+    await handleReportToUser(
+      {
+        sessionId: 'sess-1',
+        agentTools: { reportToUser: async (p: { text: string; kind?: string }) => void seen.push(p) },
+      } as unknown as SessionToolContext,
+      { text: 'done', kind: 'completed', options: ['a', 'b'] } as never,
+    );
+
+    // A completion notice has nothing to choose, so a button on it would be a dead end.
+    expect(seen[0]?.options).toBeUndefined();
+  });
+
+  it('refuses to say the same thing twice, once as prose and once as a button', async () => {
+    const seen: Array<{ text: string; kind?: string }> = [];
+    const result = await handleReportToUser(
+      ctx(seen),
+      {
+        text: '请拍板：放行剩余步骤，把任务做完，或者到此为止。',
+        kind: 'decision',
+        options: ['放行剩余步骤，把任务做完', '到此为止，结束任务'],
+      } as never,
+    );
+
+    expect(seen).toHaveLength(0);
+    expect(textOf(result)).toContain('Do not repeat the options inside');
+  });
+
   it('rejects a reason outside the enum', async () => {
     const seen: Array<{ text: string; kind?: string }> = [];
     await handleReportToUser(ctx(seen), { text: 'x', kind: 'progress' } as never);

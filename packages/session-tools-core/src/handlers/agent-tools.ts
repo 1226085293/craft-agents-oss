@@ -135,12 +135,25 @@ export async function handleReportToUser(
   }
 
   try {
+    const options = args.kind === 'decision' ? args.options?.filter((o) => o.trim()) : undefined;
+    if (options?.length && text.includes(options[0] as string)) {
+      // The same sentence twice: once as a paragraph, once as a button. The card then
+      // shows the choice in two shapes and the reader cannot tell which one answers.
+      return errorResponse(
+        'Do not repeat the options inside `text`. Describe the situation in `text`; put the answers in `options`.',
+      );
+    }
     await ctx.agentTools.reportToUser({
       text: clip(text, 600) ?? text,
       kind: args.kind,
       sessionId: args.sessionId,
+      ...(options?.length ? { options } : {}),
     });
-    return successResponse('Reported to the user.');
+    return successResponse(
+      options?.length
+        ? `Reported to the user with ${options.length} button(s): ${options.join(' / ')}`
+        : 'Reported to the user.',
+    );
   } catch (error) {
     return errorResponse(
       `Failed to report to the user: ${error instanceof Error ? error.message : 'unknown error'}`,

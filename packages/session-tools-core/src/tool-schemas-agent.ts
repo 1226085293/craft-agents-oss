@@ -101,6 +101,21 @@ export const ReportToUserSchema = z.object({
     ),
   text: z.string().describe('At most ~100 words. Conclusions only; link the session for detail.'),
   sessionId: z.string().optional().describe('Session the user can open for the full process.'),
+  /**
+   * The answers, as answers — not as prose.
+   *
+   * A decision was being reported as 「请拍板：(a) 放行，我继续派活…(b) 到此为止，结束任务。」
+   * and rendered as one paragraph: the reader had to retype a choice the asker had already
+   * enumerated. Options given here become the card's buttons, and are matched byte for
+   * byte when an answer comes back, so phrase each as the answer itself, not a label.
+   */
+  options: z
+    .array(z.string())
+    .max(4)
+    .optional()
+    .describe(
+      'Only with kind=decision: the answers a person can choose, at most 4, e.g. ["放行剩余步骤，把任务做完", "到此为止，结束任务"]. Each is rendered as a button and sent back verbatim. Do not also enumerate them inside `text`.',
+    ),
 });
 
 export type ReportToUserInput = z.infer<typeof ReportToUserSchema>;

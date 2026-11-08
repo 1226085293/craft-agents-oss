@@ -355,6 +355,8 @@ export interface SessionToolContext {
       text: string;
       kind: 'completed' | 'decision' | 'blocked';
       sessionId?: string;
+      /** kind=decision only: the answers, rendered as buttons. */
+      options?: string[];
     }): Promise<void>;
     /** Supervisor: ask a question when no decision can be made alone. */
     askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;

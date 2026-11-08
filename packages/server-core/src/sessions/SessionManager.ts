@@ -5655,8 +5655,8 @@ export class SessionManager implements ISessionManager {
           sendToSession: async (sessionId, text) => {
             await this.sendMessage(sessionId, text)
           },
-          writeUserVisible: async (text, kind) => {
-            await this.deliverToUserLane(managed, text, kind)
+          writeUserVisible: async (text, kind, options) => {
+            await this.deliverToUserLane(managed, text, kind, options)
           },
           askUser: async (questions) => {
             await this.deliverQuestionToUserLane(managed, questions)
@@ -8018,6 +8018,7 @@ ${request.prompt}`;
     managed: ManagedSession,
     text: string,
     kind: UserReportKind = 'completed',
+    options?: string[],
   ): Promise<void> {
     // `decision` and `blocked` earn the interruption; `completed` closes the loop.
     // Everything else is progress, and progress has a lane already — the task one.
@@ -8050,6 +8051,7 @@ ${request.prompt}`;
           askedBySessionId: managed.id,
           askedByLabel: this.askerLabel(managed),
           question: text,
+          ...(options?.length ? { options: [...options] } : {}),
           askedAt: Date.now(),
         },
       })

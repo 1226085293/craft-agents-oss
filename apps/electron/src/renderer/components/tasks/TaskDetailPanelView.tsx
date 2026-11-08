@@ -99,7 +99,7 @@ export interface TaskDetailPanelViewProps {
    * A decision is a question for a person, so the reply has to travel as one: the text is
    * sent to the session that asked. Without this the card could only ever say yes or no.
    */
-  onAnswer?: (id: string, text: string) => void
+  onAnswer?: (id: string, text: string) => void | Promise<void>
   /** Open a session in the main pane (task ↔ session are two views of one thing). */
   onOpenSession?: (sessionId: string) => void
   /** Jump to the moment in a session that a plan step came from. */
@@ -169,19 +169,38 @@ function TaskDecisionAnswer({
   detail: TaskDetailView
   onApprove: () => void
   onCancel: () => void
-  onAnswer?: (id: string, text: string) => void
+  onAnswer?: (id: string, text: string) => void | Promise<void>
 }): React.JSX.Element {
   const options = (detail.decision?.options ?? []).filter((o) => o.trim().length > 0)
   const [typing, setTyping] = React.useState(false)
   const [draft, setDraft] = React.useState('')
   const [sent, setSent] = React.useState<string | null>(null)
+  const [error, setError] = React.useState<string | null>(null)
 
+  /**
+   * Announce the answer only once it has actually been delivered.
+   *
+   * This used to mark the card answered and then fire the send — so a delivery that
+   * threw still left 「已回复」 on screen. The card told the person their answer had
+   * arrived while nothing had left the machine, which is worse than an error: there is
+   * nothing to retry because the UI says it is done.
+   */
   const submit = (text: string) => {
     const trimmed = text.trim()
-    if (!trimmed || sent) return
-    onAnswer?.(detail.id, trimmed)
-    setSent(trimmed)
-    setTyping(false)
+    if (!trimmed || sent || !onAnswer) return
+    setError(null)
+    try {
+      // `onAnswer` may be async; a rejection is reported rather than swallowed.
+      void Promise.resolve(onAnswer(detail.id, trimmed)).then(
+        () => {
+          setSent(trimmed)
+          setTyping(false)
+        },
+        (err: unknown) => setError(err instanceof Error ? err.message : String(err)),
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
   }
 
   if (sent) {
@@ -254,6 +273,9 @@ function TaskDecisionAnswer({
             placeholder="写下你的答复，Enter 发送，Shift+Enter 换行"
             className="w-full resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-xs text-foreground outline-none focus:border-ring"
           />
+          {error ? (
+            <p className="mt-1.5 text-[11px] text-destructive">发送失败：{error}</p>
+          ) : null}
           <div className="mt-1.5 flex items-center gap-1.5">
             <button
               type="button"

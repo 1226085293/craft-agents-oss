@@ -161,18 +161,29 @@ export function TaskDetailPanel({
         }}
         agents={agents}
         onAnswer={(id, text) => {
-          // The answer goes to the session that asked, as a normal user message: the card
-          // is a question, and a person's reply is the only thing that may resolve it.
-          void (async () => {
+          /**
+           * The answer is delivered, and nothing else.
+           *
+           * This used to also call `tasksRun` straight after sending, on the theory that
+           * the supervisor had the answer and the task should move. It cannot work: a task
+           * waiting for a decision is refused `paused -> running` by the state machine —
+           * deliberately, because that transition is exactly "the executor answered its own
+           * question". So the send went out, the run was refused, and the card looked like
+           * a dead button. It was doing the right thing and reporting the wrong one.
+           *
+           * Deciding what the words MEAN is the supervisor's job, not the card's: 「到此
+           * 为止」 and 「放行」 arrive as the same text, and only one of them should start a
+           * turn. So the card's whole responsibility is to get the person's words to the
+           * session that asked; that session resolves the decision and resumes or stops.
+           */
+          return (async () => {
             const supervisor = (detail as { supervisorSessionId?: string }).supervisorSessionId
-            if (supervisor) {
-              await window.electronAPI.sendMessage(supervisor, text)
+            if (!supervisor) {
+              // No recipient is not success: say so rather than print 「已回复」.
+              throw new Error('这个任务没有记录督导会话，答复无处投递')
             }
-            // Then let the task move: the supervisor has the answer in its inbox.
-            const run = (window.electronAPI as unknown as {
-              tasksRun?: (workspaceId: string, taskId: string) => Promise<unknown>
-            }).tasksRun
-            await run?.(workspaceId, id)
+            await window.electronAPI.sendMessage(supervisor, text)
+            void id
           })()
         }}
         onCancel={(id) => {

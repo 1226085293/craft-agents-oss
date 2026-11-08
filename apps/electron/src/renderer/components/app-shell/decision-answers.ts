@@ -45,8 +45,17 @@ function store(): Storage | null {
  * by `readDecisionAnswer`'s `askedAt` comparison: an answer given before the current
  * question was asked belongs to a previous one.
  */
-function keyFor(taskId: string): string {
-  return `${KEY_PREFIX}task:${taskId}`
+/**
+ * Keyed by the question, not by the task.
+ *
+ * Keying on the task made every answer belong to the task forever, and the time comparison
+ * meant to guard that was a two-minute window — so a new question asked shortly after a reply
+ * (which is exactly when it happens: the answer resumes the task, the task stops again) showed
+ * the previous answer as if it were this one. The decision's own `askedAt` identifies the
+ * question; two questions on one task are two keys.
+ */
+function keyFor(taskId: string, askedAt: number | undefined): string {
+  return `${KEY_PREFIX}task:${taskId}:${askedAt ?? 0}`
 }
 
 /**
@@ -57,28 +66,13 @@ function keyFor(taskId: string): string {
  */
 export function readDecisionAnswer(taskId: string, askedAt: number | undefined): string | null {
   try {
-    const raw = store()?.getItem(keyFor(taskId))
+    const raw = store()?.getItem(keyFor(taskId, askedAt))
     if (!raw) return null
     const parsed = JSON.parse(raw) as StoredAnswer
     if (typeof parsed?.text !== 'string') return null
-    /**
-     * Only a clearly-older answer is ignored.
-     *
-     * The two surfaces take `askedAt` from different records — the task's decision and the
-     * card's own payload — and the card's is stamped when the row was delivered, which can
-     * be a second after the decision was made. A strict comparison would then treat a real
-     * answer as belonging to a previous question and put the buttons back, which is the bug
-     * this whole file exists to fix. The slack absorbs that drift while still rejecting an
-     * answer from a genuinely earlier round, which is minutes or hours old.
-     */
-    const CLOCK_SLACK_MS = 120_000
-    if (
-      typeof askedAt === 'number' &&
-      typeof parsed.at === 'number' &&
-      parsed.at + CLOCK_SLACK_MS < askedAt
-    ) {
-      return null
-    }
+    // No time comparison: the key already selected this question. A slack window here was
+    // what let a new question inherit the previous answer.
+    void parsed.at
     return parsed.text
   } catch {
     return null
@@ -90,7 +84,7 @@ const listeners = new Set<() => void>()
 export function rememberDecisionAnswer(taskId: string, askedAt: number | undefined, answer: string): void {
   try {
     const payload: StoredAnswer = { text: answer, at: Date.now() }
-    store()?.setItem(keyFor(taskId), JSON.stringify(payload))
+    store()?.setItem(keyFor(taskId, askedAt), JSON.stringify(payload))
   } catch {
     // A full or unavailable store must not break answering.
   }

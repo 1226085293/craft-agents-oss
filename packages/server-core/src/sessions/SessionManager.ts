@@ -8242,6 +8242,19 @@ ${request.prompt}`;
       // A question. Answering it is the person's job, so nothing is woken: the row is
       // written for the reader and the turn that asked ends here.
       const taskId = namedTaskId ?? this.taskIdentifierFor(managed)
+      // The question's identity, taken from the task rather than from this moment, so the
+      // two cards key the same question the same way.
+      const decisionAskedAt = taskId
+        ? (() => {
+            try {
+              return this.getTasks(managed.workspace.id).get?.(taskId)?.decision?.askedAt
+            } catch {
+              // A task that cannot be read is not a reason to withhold the card; the row
+              // simply falls back to its own timestamp.
+              return undefined
+            }
+          })()
+        : undefined
       this.appendReadOnlyRow(target, {
         text,
         statusType: 'decision_request',
@@ -8252,6 +8265,7 @@ ${request.prompt}`;
           question: text,
           ...(options?.length ? { options: [...options] } : {}),
           ...(taskId ? { taskIdentifier: taskId } : {}),
+          ...(decisionAskedAt ? { decisionAskedAt } : {}),
           askedAt: Date.now(),
         },
       })

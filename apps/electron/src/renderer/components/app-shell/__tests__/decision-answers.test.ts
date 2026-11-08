@@ -6,8 +6,13 @@ import {
 } from '../decision-answers.ts'
 
 /**
- * One question, two cards. Answering either must settle both, or the second one keeps
- * offering buttons and the reply goes out twice.
+ * One question, two cards; and a new question is a new question.
+ *
+ * Keying on the task alone made every answer belong to the task forever. A time window was
+ * supposed to guard that, but the very next question usually arrives within it — the answer
+ * resumes the task, the task stops again seconds later — so the new card showed the previous
+ * reply as if it were its own. The decision's `askedAt` identifies the question; two questions
+ * on one task are two keys.
  */
 function memoryStorage(): void {
   const map = new Map<string, string>()
@@ -23,21 +28,20 @@ function memoryStorage(): void {
   } as Storage
 }
 
-describe('one answer, both surfaces', () => {
+describe('one answer, one question', () => {
   beforeEach(() => memoryStorage())
 
-  /**
-   * The two surfaces read `askedAt` from different records — the task's decision and the
-   * card's request payload — and those are two different timestamps. Keying on it meant
-   * they never agreed, so answering the task page left the conversation card's buttons
-   * live and the reply could go out twice.
-   */
-  it('is visible from the other surface even when its askedAt differs', () => {
+  it('is visible from the other surface, which derives the same question key', () => {
     rememberDecisionAnswer('T-1', 1_700_000_000_000, '放行')
+    // Both cards carry the decision's own askedAt, so both derive this key.
+    expect(readDecisionAnswer('T-1', 1_700_000_000_000)).toBe('放行')
+  })
 
-    // The card's payload carries a slightly different timestamp for the same question.
-    expect(readDecisionAnswer('T-1', 1_700_000_000_123)).toBe('放行')
-    expect(readDecisionAnswer('T-1', undefined)).toBe('放行')
+  it('does not leak into the next question on the same task', () => {
+    rememberDecisionAnswer('T-1', 1_700_000_000_000, '完成1.2后暂停')
+    // A new decision, seconds later — the case that failed: the task stopped again right after
+    // the answer resumed it.
+    expect(readDecisionAnswer('T-1', 1_700_000_003_000)).toBeNull()
   })
 
   it('tells the other card as soon as one answers', () => {
@@ -51,15 +55,6 @@ describe('one answer, both surfaces', () => {
     expect(notified).toBe(1)
     off()
     rememberDecisionAnswer('T-1', 1_700_000_000_000, '放行')
-    // Unsubscribed is unsubscribed: a stale card must not react.
     expect(notified).toBe(1)
-  })
-
-  it('does not let a later question inherit an earlier answer', () => {
-    rememberDecisionAnswer('T-1', 1_700_000_000_000, '放行')
-    // The same task stops again ten minutes after the answer: a different question. (A few
-    // seconds of drift is tolerated on purpose — the two surfaces stamp `askedAt` from
-    // different records, and treating that as "previous question" puts the buttons back.)
-    expect(readDecisionAnswer('T-1', Date.now() + 10 * 60_000)).toBeNull()
   })
 })

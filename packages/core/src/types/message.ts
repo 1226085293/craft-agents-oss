@@ -275,6 +275,15 @@ export interface DecisionRequest {
   askedByLabel: string;
   /** The task this belongs to, when the asker is working on one. */
   taskIdentifier?: string;
+  /**
+   * When the task's own decision was made, as opposed to when this row was written.
+   *
+   * The two cards identify a question by its timestamp, and they were each using their own
+   * clock: the task page had `decision.askedAt`, the conversation had this payload's
+   * `askedAt` — a second or two later. Two keys for one question meant an answer landed on
+   * one card and not the other. Carrying the decision's value here makes them the same key.
+   */
+  decisionAskedAt?: number;
   question: string;
   /** Preset answers, rendered as buttons. Free text is always possible via 「其他」. */
   options?: string[];

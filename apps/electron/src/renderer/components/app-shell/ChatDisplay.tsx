@@ -2967,7 +2967,9 @@ function DecisionRequestCard({
    * sides can derive from the same decision.
    */
   const answerKey = request.taskIdentifier
-  const askedAt = request.askedAt
+  // The decision's own timestamp when the server sent one: that is the key the task page
+  // derives, and matching it is what makes one answer settle both cards.
+  const askedAt = request.decisionAskedAt ?? request.askedAt
 
   /**
    * Whether this card has been answered, read from storage rather than from state.

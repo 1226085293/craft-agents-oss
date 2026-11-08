@@ -146,6 +146,11 @@ export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun
           onResume={onResume}
           onCancel={onCancel}
           onRun={onRun}
+          // The card's answer callback has to reach the content component that draws it.
+          // It did not: `onAnswer` stopped at this wrapper, so every option button and the
+          // send button rendered with `disabled={!onAnswer}` — permanently dead, while
+          // 「其他（自己输入）」 still opened its box because that button has no such guard.
+          onAnswer={onAnswer}
           onOpenSession={onOpenSession}
           planJumps={planJumps}
           onJumpToStep={onJumpToStep}

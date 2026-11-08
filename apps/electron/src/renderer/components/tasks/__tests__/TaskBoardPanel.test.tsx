@@ -233,6 +233,33 @@ describe('task detail presentation', () => {
     expect(html).not.toContain('其他（自己输入）')
   })
 
+  /**
+   * Every option button rendered disabled, while 「其他」 still opened its box.
+   *
+   * `onAnswer` stopped at the wrapper component and never reached the card, and the
+   * buttons gate on `disabled={!onAnswer}` — so they looked present and were dead. The
+   * one button without that guard still worked, which is exactly the asymmetry that made
+   * it read as "the send button cannot be clicked" rather than "the wiring is missing".
+   */
+  it('wires the answer callback all the way to the option buttons', () => {
+    const answered: string[] = []
+    const html = renderToStaticMarkup(
+      createElement(TaskDetailPanelView, {
+        detail: { ...detail, decision: { reason: '是否继续？', options: ['放行', '停止'] } },
+        onResume: () => {},
+        onCancel: () => {},
+        onAnswer: (id, text) => {
+          answered.push(`${id}:${text}`)
+        },
+      }),
+    )
+
+    const sendable = html.slice(html.indexOf('task-decision-heading'))
+    // No `disabled` on the option buttons means the callback reached them.
+    expect(sendable).not.toContain('disabled=""')
+    expect(html).toContain('放行')
+  })
+
   it('keeps the generic pause banner for a non-decision pause', () => {
     const html = renderDetail({ ...detail, pauseReason: 'failures' })
 

@@ -39,6 +39,7 @@ export function formatPlanRuleBlock(): string {
     '2. 开工前把当前大纲拆成小节（`1.1`、`1.2`），然后逐条执行——小节开始前才写，不要预设没做过的部分的细节。',
     '3. 一条大纲的小节都完成后，才能把它标为 done；标 done 之前，下一条大纲的小节必须已经存在。',
     '4. 已完成的大纲和小节是记录，不能改回、不能改名——要返工就新开一条。',
+    '5. 写新步骤之前，先对照当前计划里已有的步骤：**同一件事只能有一个 id**。已经有“读回确认”了，就不能再列一条“读回确认”；已经存在的动作（无论做完没做完）继续用它的 id 推进状态，而不是换个名字重开一条。',
     '',
   ].join('\n');
 }
@@ -72,20 +73,37 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
   // a worker that finds out by being refused has already spent the turn.
   //
   /**
-   * The agreed plan is shown, not summarised.
+   * The current plan is shown every time — including when it is empty.
    *
-   * A brief that said only 「计划进度：0/8」 told the worker that *a* plan existed but
-   * not what was in it, so it wrote its own three outlines. The board then showed a
-   * plan nobody had asked for, and the user's 「1 写文件 / 2 收尾」 was nowhere. Reading
-   * the plan is free; re-deriving it is not.
+   * Two failures came from not doing this. A brief that said only 「计划进度：0/8」 told
+   * the worker that *a* plan existed but not what was in it, so it wrote its own three
+   * outlines and the board showed a plan nobody had asked for. And when the plan was
+   * genuinely empty, "no plan field" and "an empty plan" read identically in the text,
+   * so the worker had no way to tell "nothing has been agreed yet" from "something has"
+   * — it just started writing, inventing a second 「读回确认」 beside the one that already
+   * existed under `1.2`.
+   *
+   * Stating the empty case costs one line and makes the instruction actionable: whether
+   * a plan exists is a fact the worker needs before it decides to write anything.
    */
   if (spec?.plan?.length) {
     sections.push(
       [
-        '## 已约定的执行计划（不要重写）',
+        '## 当前执行计划',
         ...formatPlan(spec.plan),
         '',
-        '只在这些大纲下补小节、推进状态。不要新增大纲，也不要改动已有大纲的标题。',
+        '这就是已有的全部步骤。开工前先对照一遍：同一件事只能有一个 id，已经存在的动作（包括已完成、未完成、被跳过的）**继续用它的 id 推进状态**，不要换个名字再列一条。',
+        ...(spec.planAgreed ? ['大纲的标题与顺序由用户约定，不要改动或插队；需要时可以在末尾追加。'] : []),
+      ].join('\n'),
+    );
+  } else {
+    sections.push(
+      [
+        '## 当前执行计划',
+        '',
+        '（空 —— 还没有任何步骤）',
+        '',
+        '写大纲之前先看任务要求：里面已经点明的阶段只能用一次，之后的会话也会看到同一份计划。',
       ].join('\n'),
     );
   }

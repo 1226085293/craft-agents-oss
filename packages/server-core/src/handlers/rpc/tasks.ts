@@ -12,7 +12,7 @@ import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport';
 import type { HandlerDeps } from '../handler-deps';
 import type { TaskService } from '../../tasks/task-service';
 import { readJournal } from '@craft-agent/shared/tasks';
-import { normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks';
+import { normalizeSpec, normalizeTrigger, formatDecisionAnswerLine } from '@craft-agent/shared/tasks';
 import type { TaskStatus } from '@craft-agent/shared/tasks';
 
 export const HANDLED_CHANNELS = [
@@ -212,7 +212,7 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       const askedBy = manager.decisionAskerFor?.(resolvedId)
       const supervisor = task.supervisorSessionId
       if (supervisor && manager.sendMessage) {
-        const remaining = (task.spec?.plan ?? []).filter((step) => step.status !== 'done')
+        const line = formatDecisionAnswerLine(task, text)
         /**
          * Fire and forget. `sendMessage` resolves when the whole turn has finished
          * streaming, so awaiting it kept this RPC open for the length of a model turn —
@@ -221,10 +221,6 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
          * person clicked again. The reply is delivered either way; the card must not
          * wait for the work it triggered.
          */
-        const line =
-          `〔任务 ${task.id} 拍板答复〕${text.trim()}` +
-          (remaining.length ? `
-（该任务当前未完成步骤：${remaining.map((step) => step.id).join('、')}）` : '')
         void manager.sendMessage(supervisor, line).catch(() => undefined)
         // And the lane the card was shown in, so its copy of the question closes too.
         if (askedBy && askedBy !== supervisor) {

@@ -6,6 +6,7 @@ import {
   rememberDecisionAnswer,
   subscribeDecisionAnswers,
 } from "./decision-answers"
+import { submitDecisionAnswer } from "./answer-decision"
 import {
   AlertTriangle,
   CheckCircle2,
@@ -3016,29 +3017,13 @@ function DecisionRequestCard({
          * from the asking session when the card is silent, so there is no path left that
          * loses the identity.
          */
-        const answerTask = (window.electronAPI as unknown as {
-          tasksAnswer?: (
-            workspaceId: string,
-            taskId: string,
-            text: string,
-            askedBySessionId?: string,
-          ) => Promise<{ accepted?: boolean; reason?: string }>
-        }).tasksAnswer
-        if (workspaceId && answerTask) {
-          const result = await answerTask(
-            workspaceId,
-            request.taskIdentifier ?? '',
-            trimmed,
-            request.askedBySessionId,
-          )
-          if (result?.accepted === false) {
-            throw new Error(result.reason ?? '这个任务已经没有待答复的问题')
-          }
-          setSent(trimmed)
-          setTyping(false)
-          return
-        }
-        await window.electronAPI.sendMessage(request.askedBySessionId, trimmed)
+        const result = await submitDecisionAnswer({
+          workspaceId: workspaceId ?? '',
+          ...(request.taskIdentifier ? { taskId: request.taskIdentifier } : {}),
+          askedBySessionId: request.askedBySessionId,
+          text: trimmed,
+        })
+        if (!result.accepted) throw new Error(result.reason ?? '这个任务已经没有待答复的问题')
         setSent(trimmed)
         setTyping(false)
       } catch (err) {

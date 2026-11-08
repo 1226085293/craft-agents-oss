@@ -9,6 +9,7 @@
 import * as React from 'react'
 
 import { useAgents, useTasks, useTaskDetail } from '@/hooks/useAgents'
+import { submitDecisionAnswer } from '@/components/app-shell/answer-decision'
 import { useNavigation } from '@/contexts/NavigationContext'
 import { TaskBoardPanel, type TaskDetailView, type TaskListItem } from './TaskBoardPanel'
 import { TaskDetailPanelView } from './TaskDetailPanelView'
@@ -178,31 +179,18 @@ export function TaskDetailPanel({
            */
           return (async () => {
             /**
-             * Answer through the task, not through a chat message.
+             * The same submission the conversation card uses.
              *
-             * A plain `sendMessage` reaches the supervisor's inbox with no way to say
-             * which task the words belong to. With two tasks waiting, both answers are
-             * the same prose and 「放行」 closes whichever decision is read first — the
-             * question the person is answering is not recoverable from the text.
-             *
-             * `tasksAnswer` records the reply on that task's decision and delivers a line
-             * naming it, so the ambiguity is gone and 「已答复」 has somewhere durable to
-             * live.
+             * These were two implementations of one intent, and they had already drifted:
+             * one passed the task id, the other did not, so a reply could reach the task
+             * supervisor with nothing saying which task it answered.
              */
-            const answerTask = (window.electronAPI as unknown as {
-              tasksAnswer?: (
-                workspaceId: string,
-                taskId: string,
-                text: string,
-              ) => Promise<{ accepted?: boolean }>
-            }).tasksAnswer
-            if (!answerTask) throw new Error('这个版本不支持任务答复通道')
-            const result = await answerTask(workspaceId, id, text)
-            if (result?.accepted === false) {
-              // Nothing was waiting: accepting quietly would print 「已回复」 for words
-              // no one will read.
-              throw new Error('这个任务已经没有待答复的问题')
-            }
+            const result = await submitDecisionAnswer({
+              workspaceId,
+              taskId: id,
+              text,
+            })
+            if (!result.accepted) throw new Error(result.reason ?? '这个任务已经没有待答复的问题')
           })()
         }}
         onCancel={(id) => {

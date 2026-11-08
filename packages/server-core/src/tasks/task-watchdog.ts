@@ -458,7 +458,6 @@ export const SILENT_SESSION_MS = 5 * 60_000;
 export const STALE_TASK_MS = 30 * 60_000;
 
 /** Never sleep longer than this, even when nothing is due. */
-export const MAX_WATCHDOG_SLEEP_MS = 30 * 60_000;
 
 /** Never spin faster than this, even when a deadline is already past. */
 export const MIN_WATCHDOG_SLEEP_MS = 15_000;
@@ -544,7 +543,17 @@ export function nextCheckDelayMs(deps: WatchdogDeps, now = Date.now()): number {
  *
  * The bounds matter: a past-due task must not turn into a busy loop, and an idle
  * system must still wake occasionally in case a task was edited on disk.
+ *
+ * The upper bound is the responsiveness, and it was 30 minutes. That is fine for a
+ * deadline, wrong for a state that changes while the loop sleeps: the loop computed its
+ * sleep *before* the worker's turn ended, so the 90-second grace for a silent worker was
+ * acted on three minutes late — the deadline had already been re-derived from an older
+ * state, and nothing re-evaluated it until the timer fired. Sleeping at most 30 seconds
+ * costs one pure-rules pass (no model, no I/O beyond the task store) and makes the grace
+ * the actual latency.
  */
+export const MAX_WATCHDOG_SLEEP_MS = 30_000;
+
 export function clampSleep(delayMs: number): number {
   if (!Number.isFinite(delayMs)) return MAX_WATCHDOG_SLEEP_MS;
   return Math.min(MAX_WATCHDOG_SLEEP_MS, Math.max(MIN_WATCHDOG_SLEEP_MS, delayMs));
@@ -568,7 +577,11 @@ export function startWatchdog(
   const tick = (): void => {
     if (stopped) return;
     try {
-      runWatchdogPass(deps);
+      const acted = runWatchdogPass(deps);
+      // A silent pass is indistinguishable from a loop that is not running. One line
+      // per pass is the difference between "nothing to do" and "not alive", and this
+      // loop has already been reported dead twice while the code looked correct.
+      log.info(`[watchdog] pass: ${acted} finding(s)`);
       failures = 0;
       lastError = '';
     } catch (error) {
@@ -608,6 +621,7 @@ export function startWatchdog(
   };
 
   // First pass immediately: a task may already be stalled when the app starts.
+  log.info('[watchdog] started');
   timer = setTimeout(tick, 0);
   timer.unref?.();
 

@@ -107,6 +107,11 @@ export function deriveOutlineStatus(plan: PlanStep[], outline: PlanStep): PlanSt
     // explicit patch. Deriving `done` without that check would let the view claim
     // a completion the rules refuse, and the worker would then never be told to
     // expand the next section: the plan would sit finished with nowhere to go.
+    //
+    // This is why the *displayed* status can lag the sub-steps: 「1」 stays `doing` until
+    // 「2」 has sub-steps. That is a flow constraint, and the fix for the confusion it caused
+    // is in `openSteps` below — "what is left to do" counts sub-steps, so a finished section
+    // is not reported as outstanding even while its own status still says `doing`.
     const outlines = plan.filter((step) => isOutlineStep(step.id));
     const at = outlines.findIndex((step) => step.id === outline.id);
     const next = at >= 0 ? outlines[at + 1] : undefined;
@@ -557,6 +562,25 @@ export interface NextLeg {
  * the current section has not been broken down yet (in which case a human set the
  * plan aside mid-flight, and guessing would be worse than waiting).
  */
+/**
+ * The steps a reader still has to do something about.
+ *
+ * An outline whose sub-steps are all closed is finished, so it is not on this list — but the
+ * four places that computed "remaining" did `status !== 'done'` on flat entries, so a finished
+ * section still counted while its stored status lagged one render behind. Observed: the
+ * supervisor asked the person to 「放行剩余步骤 1、2」 when every sub-step of 1 was complete.
+ */
+export function openSteps(plan: PlanStep[] | undefined): PlanStep[] {
+  const steps = plan ?? [];
+  return steps.filter((step) => {
+    if (step.status === 'done') return false;
+    // An outline is only open if something under it is.
+    const kids = childrenOf(steps, step.id);
+    if (kids.length === 0) return true;
+    return kids.some((kid) => kid.status !== 'done');
+  });
+}
+
 export function nextLeg(plan: PlanStep[] | undefined): NextLeg | undefined {
   if (!plan?.length) return undefined;
   const outlines = plan

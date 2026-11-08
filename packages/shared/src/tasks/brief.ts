@@ -9,6 +9,7 @@
 
 import type { Task } from './types.ts';
 import { formatPlan } from './plan.ts';
+import { openSteps } from './plan.ts';
 import { planProgress } from './plan.ts';
 
 export interface TaskBriefOptions {
@@ -276,7 +277,14 @@ export function formatResumeBrief(task: Task, reason = 'manual'): string {
      * 「完成 1.2 后暂停」 — the reason it was resumed at all — never reached it. It read the
      * whole remaining plan as its job and finished the task.
      */
-    ...(task.decision?.answer?.text ? [`你的答复是：${task.decision.answer.text}`] : []),
+    /**
+     * 「用户的答复是」, not 「你的答复是」.
+     *
+     * The reader of this brief is the worker; the person who answered is somebody else. 「你的」
+     * addressed the worker as the one who replied, which reads as though it had answered its own
+     * question — the exact confusion this whole feature exists to prevent.
+     */
+    ...(task.decision?.answer?.text ? [`用户的答复是：${task.decision.answer.text}`] : []),
     ...(task.spec?.authorizedUpTo
       ? [
           `本次只做到 ${task.spec.authorizedUpTo}，到此为止。` +
@@ -374,7 +382,7 @@ export function formatNextLegBrief(task: Task, step: { id: string; title: string
  * is the source of truth for what is left.
  */
 export function formatIdleWakeBrief(task: Task): string {
-  const remaining = (task.spec?.plan ?? []).filter((step) => step.status !== 'done');
+  const remaining = openSteps(task.spec?.plan);
   const lines = [
     `继续任务 ${task.id}（${task.name}）：上个回合结束了，但任务还没完成。`,
     '',
@@ -420,7 +428,7 @@ export function formatIdleWakeBrief(task: Task): string {
 export function formatUnreportedBrief(task: Task): string {
   const plan = task.spec?.plan ?? [];
   const done = plan.filter((step) => step.status === 'done');
-  const open = plan.filter((step) => step.status !== 'done');
+  const open = openSteps(plan);
   const planFinished = plan.length > 0 && open.length === 0;
 
   if (planFinished) {

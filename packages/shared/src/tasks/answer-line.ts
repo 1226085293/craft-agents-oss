@@ -8,10 +8,11 @@
  * not have to re-read the plan to know what the answer applies to.
  */
 import type { Task } from './types.ts';
+import { openSteps } from './plan.ts';
 
 export function formatDecisionAnswerLine(task: Task, text: string): string {
   const answer = text.trim();
-  const remaining = (task.spec?.plan ?? []).filter((step) => step.status !== 'done');
+  const remaining = openSteps(task.spec?.plan);
   return (
     `〔任务 ${task.id} 拍板答复〕${answer}` +
     (remaining.length

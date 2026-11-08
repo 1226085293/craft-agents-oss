@@ -16,6 +16,7 @@ import {
   acceptanceItems,
   applyTransition,
   authorizedCeilingFromAnswer,
+  openSteps,
   authorizedStepsFromAnswer,
   attachSession,
   checkBudget,
@@ -1083,7 +1084,7 @@ export class TaskService {
        * the user through the same door as every other 拍板 request.
        */
       next = applyTransition(next, 'paused', { now, pauseReason: 'needs_decision' }).task;
-      const remaining = (next.spec?.plan ?? []).filter((step) => step.status !== 'done');
+      const remaining = openSteps(next.spec?.plan);
       next = {
         ...next,
         decision: {

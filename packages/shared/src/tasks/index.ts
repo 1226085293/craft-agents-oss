@@ -72,6 +72,7 @@ export {
   isOutlineStep,
   isPlanStepStatus,
   nextLeg,
+  openSteps,
   lastPlanChangeAt,
   normalizePlan,
   PLAN_STEP_LIMIT,

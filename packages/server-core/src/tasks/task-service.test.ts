@@ -326,3 +326,69 @@ describe('artifact paths resolve against the workspace', () => {
     expect(result.reasons).toContain('missing deliverable: docs/nope.md');
   });
 });
+
+describe('handoff milestones', () => {
+  /**
+   * The timeline is a history of the task, not a log of attempts.
+   *
+   * Seven rows appeared for one file: six rejections of the same claim and one
+   * pass, all from the same session. Only the pass changed anything.
+   */
+  const handoff = (overrides: Record<string, unknown> = {}) => ({
+    outcome: 'handoff',
+    summary: 'step done',
+    artifacts: [{ path: 'docs/a.md' }],
+    verify: { ran: ['test -s docs/a.md'], passed: true },
+    ...overrides,
+  })
+
+  const prepared = () => {
+    const root = workspace();
+    const { svc } = service(root);
+    const task = svc.create({
+      name: 'milestones',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_m',
+      spec: { cwd: root } as never,
+    });
+    svc.startRun(task.id, 'sess_w');
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'a.md'), 'x');
+    return { root, svc, task };
+  }
+
+  it('marks a rejected hand-off as not a milestone', async () => {
+    const { svc, task } = prepared();
+    await svc.reportHandoff(task.id, handoff({ artifacts: [{ path: 'docs/missing.md' }] }), 'sess_w');
+    expect(svc.get(task.id)?.handoffs.at(-1)?.milestone).toBe(false);
+  })
+
+  it('keeps the attempt in the record even when it is not a milestone', async () => {
+    // Looping detection reads every attempt; hiding them from the timeline must
+    // not hide them from the detector.
+    const { svc, task } = prepared();
+    await svc.reportHandoff(task.id, handoff({ artifacts: [{ path: 'docs/missing.md' }] }), 'sess_w');
+    expect(svc.get(task.id)?.handoffs).toHaveLength(1);
+  })
+
+  it('marks completion as a milestone', async () => {
+    const { svc, task } = prepared();
+    await svc.reportHandoff(task.id, handoff({ outcome: 'delivered' }), 'sess_w');
+    expect(svc.get(task.id)?.status).toBe('completed');
+    expect(svc.get(task.id)?.handoffs.at(-1)?.milestone).toBe(true);
+  })
+
+  it('marks a decision request as a milestone', async () => {
+    const { svc, task } = prepared();
+    await svc.reportHandoff(task.id, handoff({ outcome: 'needs_decision', summary: '要我删吗' }), 'sess_w');
+    expect(svc.get(task.id)?.handoffs.at(-1)?.milestone).toBe(true);
+  })
+
+  it('does not put a plain progress report on the timeline', async () => {
+    // Same executor, same owner, nothing opened or closed: the task did not change.
+    const { svc, task } = prepared();
+    await svc.reportHandoff(task.id, handoff(), 'sess_w');
+    expect(svc.get(task.id)?.handoffs.at(-1)?.milestone).toBe(false);
+  })
+})

@@ -47,6 +47,8 @@ export interface TaskHandoffView {
   at: number
   fromSessionId: string
   outcome: 'delivered' | 'handoff' | 'needs_decision'
+  /** Did this change the task's state or its executor? See `Handoff.milestone`. */
+  milestone?: boolean
   summary: string
   keyFindings?: string[]
   nextAction?: string

@@ -21,7 +21,9 @@ import {
   XCircle,
 } from 'lucide-react'
 
+import { useAtomValue } from 'jotai'
 import { cn } from '@/lib/utils'
+import { sessionMetaMapAtom } from '@/atoms/sessions'
 import { agentLabelMap } from './agent-label'
 import type { TaskDetailView, TaskHandoffView, TaskStatus } from './TaskBoardPanel'
 import type { PlanJumpTarget } from '@/lib/plan-jump'
@@ -153,6 +155,27 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
       : '手动'
   // Placeholders hold the run lock before a session exists; they are not sessions.
   const realSessions = detail.sessionIds.filter((id) => !id.startsWith('pending:'))
+  /**
+   * The timeline is a history of the task, not a log of attempts.
+   *
+   * Every `report_result` used to add a row, so one file produced seven entries:
+   * six rejections of the same claim and one pass, all from the same session, with
+   * nothing changed in six of them. Rows now appear when the task's state or its
+   * executor changed. `milestone` is absent on hand-offs written before the field
+   * existed, and those keep showing — hiding real history to tidy a list is worse
+   * than a slightly long list.
+   */
+  const milestones = detail.handoffs.filter((handoff) => handoff.milestone !== false)
+  const foldedAttempts = detail.handoffs.length - milestones.length
+  // A hand-off names the session that produced it by id. An id is a storage key,
+  // not something a person can match against the session list, so it is resolved to
+  // the name the user sees — and falls back to the id when the session is gone,
+  // because "who handed this off" must never render blank.
+  const sessionMetas = useAtomValue(sessionMetaMapAtom)
+  const sessionNameOf = React.useCallback(
+    (id: string) => sessionMetas.get(id)?.name?.trim() || id,
+    [sessionMetas],
+  )
   // `activeMs` is the accumulated time actually spent running; the budget is the
   // ceiling and belongs in the hint, not in the value.
   const activeMinutes = Math.round(((detail.stats?.activeMs ?? 0) / 60_000))
@@ -418,9 +441,14 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
         <div className="mb-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <h2 id="task-handoff-heading" className="td-heading text-foreground">交接时间线</h2>
-            <span className="rounded-full bg-foreground/5 px-2 py-0.5 text-xs tabular-nums text-muted-foreground">{detail.handoffs.length}</span>
+            <span className="rounded-full bg-foreground/5 px-2 py-0.5 text-xs tabular-nums text-muted-foreground">{milestones.length}</span>
           </div>
         </div>
+        {milestones.length === 0 && detail.handoffs.length > 0 ? (
+          <div className="rounded-xl border border-dashed border-border/70 px-5 py-6 text-center text-xs text-muted-foreground">
+            还没有改变过执行者或状态。{detail.handoffs.length} 次过程记录只留在任务日志里。
+          </div>
+        ) : null}
         {detail.handoffs.length === 0 ? (
           <div className="rounded-xl border border-dashed border-border/70 px-5 py-8 text-center">
             <div className="mx-auto mb-2 flex h-9 w-9 items-center justify-center rounded-full bg-foreground/5">
@@ -431,9 +459,9 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
           </div>
         ) : (
           <ol className="space-y-0">
-            {detail.handoffs.map((handoff, index) => (
+            {milestones.map((handoff, index) => (
               <li key={`${handoff.at}-${index}`} className="relative grid grid-cols-[24px_minmax(0,1fr)] gap-x-3 pb-5 last:pb-0">
-                {index < detail.handoffs.length - 1 ? (
+                {index < milestones.length - 1 ? (
                   <span className="absolute bottom-0 left-[11px] top-6 w-px bg-border/70" aria-hidden="true" />
                 ) : null}
                 <span className={cn(
@@ -455,7 +483,12 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
                       handoff.outcome === 'handoff' && 'border-blue-500/30 bg-blue-500/10 text-blue-400',
                       handoff.outcome === 'needs_decision' && 'border-amber-500/30 bg-amber-500/10 text-amber-400',
                     )}>{HANDOFF_OUTCOME_LABEL[handoff.outcome]}</span>
-                    <span className="min-w-0 truncate text-xs text-muted-foreground">{handoff.fromSessionId}</span>
+                    <span
+                      className="min-w-0 truncate text-xs text-muted-foreground"
+                      title={handoff.fromSessionId}
+                    >
+                      {sessionNameOf(handoff.fromSessionId)}
+                    </span>
                   </div>
                   <p className="td-body whitespace-pre-wrap break-words text-foreground/90">{handoff.summary}</p>
                   {handoff.nextAction ? (
@@ -520,6 +553,11 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
             ))}
           </ol>
         )}
+        {foldedAttempts > 0 ? (
+          <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground/80">
+            另有 {foldedAttempts} 次过程记录（被拒的交接、未改变执行者的进度汇报）保留在任务日志里，未在这里显示。
+          </p>
+        ) : null}
       </section>
 
       <p className="border-t border-border/50 pt-3 text-xs text-muted-foreground">

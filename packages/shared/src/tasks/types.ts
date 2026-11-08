@@ -198,6 +198,23 @@ export interface Handoff {
   at: number;
   fromSessionId: string;
   outcome: HandoffOutcome;
+  /**
+   * Did this hand-off change anything a person needs to see?
+   *
+   * The timeline used to show every `report_result` call, which is not a history
+   * of the task — it is a log of attempts. On the first real run the user saw seven
+   * rows for one file: six rejections of the same claim and one pass, all from the
+   * same session. Nothing about the task had changed in six of them.
+   *
+   * A hand-off is a milestone when the task's state or its executor changed —
+   * handed to another agent, compacted into a new session, paused, completed, or
+   * waiting on a person. Anything else stays in the record (looping detection reads
+   * every attempt) but not on the timeline.
+   *
+   * Optional so files written before this field still load; absent means "unknown",
+   * and the timeline falls back to showing it rather than hiding history.
+   */
+  milestone?: boolean;
   summary: string;
   keyFindings?: string[];
   nextAction?: string;

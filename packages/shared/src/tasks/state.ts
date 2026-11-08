@@ -170,6 +170,9 @@ export function normalizeHandoff(raw: unknown, fromSessionId: string, now: numbe
     artifacts: normalizeArtifacts(v.artifacts),
     verify: normalizeVerify(v.verify),
     ...(str(v.revision) ? { revision: str(v.revision) } : {}),
+    // Preserved, not recomputed: the flag records what was true when the hand-off
+    // was recorded, and re-deriving it later would silently rewrite history.
+    ...(typeof v.milestone === 'boolean' ? { milestone: v.milestone } : {}),
   };
 }
 

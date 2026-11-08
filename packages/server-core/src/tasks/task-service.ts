@@ -827,6 +827,33 @@ export class TaskService {
       };
     }
 
+    /**
+     * Decide whether this hand-off belongs on the timeline.
+     *
+     * Recorded before the next-leg attempt below, because the question is what this
+     * hand-off implies, not whether the spawn succeeded: "the plan now belongs to
+     * another agent" is a fact about the plan, and a failed spawn does not make the
+     * boundary disappear. Attempts that changed nothing stay in `handoffs` — the
+     * spinning detector reads every one of them — but the timeline stops showing
+     * them, which is the difference between a log of attempts and a history.
+     */
+    const nextLegOwner = nextLeg(next.spec?.plan)?.agent
+    const milestone =
+      handoff.outcome === 'needs_decision' ||
+      next.status !== task.status ||
+      compactionPending ||
+      Boolean(nextLegOwner && nextLegOwner !== next.assigneeAgentId)
+    const lastIndex = next.handoffs.length - 1
+    if (lastIndex >= 0) {
+      next = {
+        ...next,
+        handoffs: next.handoffs.map((entry, index) =>
+          index === lastIndex ? { ...entry, milestone } : entry,
+        ),
+      }
+    }
+    handoff.milestone = milestone
+
     saveTask(this.root, next);
     appendJournal(this.root, id, {
       type: 'handoff',
@@ -834,6 +861,7 @@ export class TaskService {
       data: {
         outcome: handoff.outcome,
         passed: accepted,
+        milestone,
         reasons,
         acceptance: acceptance?.results,
         ...(compactionPending ? { compactionPending: true } : {}),

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { formatDispatchTaskContext, formatPlanRuleBlock, formatTaskBrief } from '../brief.ts';
+import { formatDispatchTaskContext, formatPlanRuleBlock, formatTaskBrief, formatUnreportedBrief } from '../brief.ts';
 import type { Task } from '../types.ts';
 
 const NOW = 1_800_000_000_000;
@@ -111,5 +111,37 @@ describe('the plan is a record, not a draft', () => {
     const text = formatDispatchTaskContext({ spec: undefined });
     expect(text).not.toContain('当前执行计划');
     expect(text).toContain('计划还没有');
+  })
+})
+
+describe('the nudge for a worker that stopped without filing', () => {
+  /**
+   * The nudge used to assume a finished plan. A worker that had finished its assigned
+   * slice but not the whole plan was unreachable by it — and that is the common case,
+   * since legs are usually one step. It needs to say which situation it is.
+   */
+  it('asks for a handoff when the plan still has open steps', () => {
+    const text = formatUnreportedBrief(
+      task({
+        spec: {
+          plan: [
+            { id: '1', title: '写文件', status: 'doing' },
+            { id: '2', title: '收尾', status: 'todo' },
+          ],
+        },
+      }),
+    );
+    expect(text).toContain('handoff');
+    expect(text).toContain('2 收尾');
+    // Explicit, because this is the misconception that cost a whole round.
+    expect(text).toContain('在对话里写总结不算交接');
+  })
+
+  it('asks for delivery when the plan is finished', () => {
+    const text = formatUnreportedBrief(
+      task({ spec: { plan: [{ id: '1', title: '写文件', status: 'done' }] } }),
+    );
+    expect(text).toContain('已经全部完成');
+    expect(text).toContain('delivered');
   })
 })

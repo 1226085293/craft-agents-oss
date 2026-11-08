@@ -59,12 +59,16 @@ describe('idle sessions', () => {
   const idleSince = NOW - 20 * 60_000;
 
   it('flags a running task whose session exists but is not working', () => {
+    // Reported as `unreported`, not `idle`: the session stopped and no hand-off was
+    // filed for this run, so the owed action is 「交作业」, not 「继续」. The distinction
+    // is not cosmetic — resuming a turn that ended normally answers `no re-runnable
+    // model step`, which is exactly how one wake silently did nothing.
     const findings = inspectTasks(
       deps([task({ updatedAt: idleSince, stats: { runs: 1, activeMs: 0, lastHeartbeatAt: idleSince } })], {
         sessionWorking: () => false,
       }),
     );
-    expect(findings.map((f) => f.kind)).toContain('idle');
+    expect(findings.map((f) => f.kind)).toContain('unreported');
   });
 
   it('leaves a working session alone', () => {
@@ -102,9 +106,12 @@ describe('idle sessions', () => {
   it('pauses the task once the wakes are spent', () => {
     // A wake that keeps not working is a loop paying for a model turn each time.
     const pauses: string[] = [];
+    // Already filed this run, so the remaining complaint is 「nothing is moving」 —
+    // that is the idle rule, and it is the one with the wake budget.
     const idle = task({
       updatedAt: idleSince,
       stats: { runs: 1, activeMs: 0, lastHeartbeatAt: idleSince, wakeAttempts: 2 },
+      handoffs: [{ outcome: 'handoff', fromSessionId: 'sess-1', at: NOW, summary: 'x' }] as never,
     });
     runWatchdogPass(
       deps([idle], {
@@ -411,17 +418,33 @@ describe('finished plan, nothing filed', () => {
   })
 
   it('stays quiet once the worker filed something', () => {
-    const filed = finished({ handoffs: [{ outcome: 'handoff', fromSessionId: 's', at: NOW, summary: 'x' }] as never });
+    // The hand-off has to be from THIS run: an earlier session's report is still in the
+    // record and must not silence the current executor.
+    const filed = finished({ handoffs: [{ outcome: 'handoff', fromSessionId: 'sess-1', at: NOW, summary: 'x' }] as never });
     const findings = inspectTasks(deps([filed], { sessionWorking: () => false }));
     expect(findings.map((f) => f.kind)).not.toContain('unreported');
   })
 
-  it('stays quiet while the plan is unfinished', () => {
+  it('flags it even when the plan is unfinished', () => {
+    // The regression this replaces. A worker finished its assigned slice (1.1 done),
+    // the plan still had 1.2 and 2 open, and the old rule required a complete plan
+    // before asking for a hand-off. So nothing asked: the task sat on 进行中 with zero
+    // hand-offs and a supervisor that was never woken, while the worker had already
+    // written its summary in the transcript and considered itself done.
     const half = finished({
       spec: { plan: [{ id: '1', title: 'a', status: 'done' }, { id: '2', title: 'b', status: 'todo' }] },
     });
     const findings = inspectTasks(deps([half], { sessionWorking: () => false }));
-    expect(findings.map((f) => f.kind)).not.toContain('unreported');
+    expect(findings.map((f) => f.kind)).toContain('unreported');
+  })
+
+  it('does not silence a later leg because an earlier session reported', () => {
+    const second = finished({
+      currentSessionId: 'sess-2',
+      handoffs: [{ outcome: 'handoff', fromSessionId: 'sess-1', at: NOW - 600_000, summary: 'x' }] as never,
+    });
+    const findings = inspectTasks(deps([second], { sessionWorking: () => false }));
+    expect(findings.map((f) => f.kind)).toContain('unreported');
   })
 
   it('asks for the report rather than more work', () => {
@@ -462,6 +485,63 @@ describe('waiting is not stuck', () => {
     const findings = inspectTasks(
       deps([idleTask()], { sessionWorking: () => false, sessionWaiting: () => false }),
     )
-    expect(findings.map((f) => f.kind)).toContain('idle');
+    // Nothing filed this run, so the wake is 「交作业」 rather than 「继续」.
+    expect(findings.map((f) => f.kind)).toContain('unreported')
+  })
+})
+
+describe('a wake that did not happen is not reported as a wake', () => {
+  /**
+   * Production: the idle rule called `resumeTurn()` on a session whose turn had ended
+   * normally. The subprocess answered `Cannot retry: no re-runnable model step`, nothing
+   * resumed, and the supervisor was told 「已唤醒它继续」. The task then sat there while
+   * both parties believed it had been woken.
+   */
+  const idleTask = () =>
+    task({
+      updatedAt: NOW - 20 * 60_000,
+      stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 20 * 60_000 },
+    });
+
+  const notices = () => {
+    const sent: string[] = [];
+    return { sent, notify: (_id: string, text: string) => sent.push(text) };
+  };
+
+  it('tells the supervisor when the wake returned false', () => {
+    const { sent, notify } = notices();
+    runWatchdogPass(
+      deps([idleTask()], { sessionWorking: () => false, wakeSession: () => false, notify }),
+    );
+    expect(sent.join(' ')).toContain('唤醒失败');
+  });
+
+  it('tells the supervisor when the wake rejected', async () => {
+    const { sent, notify } = notices();
+    runWatchdogPass(
+      deps([idleTask()], {
+        sessionWorking: () => false,
+        wakeSession: () => Promise.reject(new Error('cannot retry')),
+        notify,
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sent.join(' ')).toContain('唤醒失败');
+  });
+
+  it('reports success only once the wake resolved true', async () => {
+    const { sent, notify } = notices();
+    runWatchdogPass(
+      deps([idleTask()], {
+        sessionWorking: () => false,
+        wakeSession: () => Promise.resolve(true),
+        notify,
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sent.join(' ')).toContain('已');
+    expect(sent.join(' ')).not.toContain('唤醒失败');
   })
 })

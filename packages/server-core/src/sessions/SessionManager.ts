@@ -7427,18 +7427,22 @@ ${request.prompt}`;
           }
           return false
         },
-        wakeSession: (task, sessionId, reason) => {
+        wakeSession: async (task, sessionId, reason) => {
           service.noteWake(task.id)
           const managed = this.sessions.get(sessionId)
-          if (!managed) return
+          if (!managed) return false
           if (reason === 'unreported') {
-            // This one genuinely needs words: a worker whose plan is complete does not
-            // know that "done" without `report_result` leaves the task open, and
-            // continuing the turn gives it nothing new to read.
-            void this.sendMessage(sessionId, formatUnreportedBrief(task)).catch((error) => {
+            // This one genuinely needs words: a worker that stopped without filing does
+            // not know that finishing without `report_result` leaves the task open, and
+            // continuing the turn gives it nothing new to read. No resumeTurn here — the
+            // turn ended normally, so continue() answers `no re-runnable model step`.
+            try {
+              await this.sendMessage(sessionId, formatUnreportedBrief(task))
+              return true
+            } catch (error) {
               sessionLog.warn(`[tasks] could not ask ${task.id} for its hand-off`, { error })
-            })
-            return
+              return false
+            }
           }
           // Idle: resume the session, do not post a user message.
           //
@@ -7448,13 +7452,15 @@ ${request.prompt}`;
           // re-issues the turn from the existing transcript and appends nothing. The
           // message is only a fallback for a session with no live subprocess, where
           // there is nothing to continue.
-          void (async () => {
-            const resumed = await managed.agent?.resumeTurn?.().catch(() => false)
-            if (resumed) return
-            await this.sendMessage(sessionId, formatIdleWakeBrief(task)).catch((error) => {
-              sessionLog.warn(`[tasks] could not wake the idle session of ${task.id}`, { error })
-            })
-          })()
+          const resumed = await managed.agent?.resumeTurn?.().catch(() => false)
+          if (resumed) return true
+          try {
+            await this.sendMessage(sessionId, formatIdleWakeBrief(task))
+            return true
+          } catch (error) {
+            sessionLog.warn(`[tasks] could not wake the idle session of ${task.id}`, { error })
+            return false
+          }
         },
         pause: (id, reason, note) => {
           const before = service.get(id)

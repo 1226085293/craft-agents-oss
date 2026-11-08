@@ -317,21 +317,52 @@ export function formatIdleWakeBrief(task: Task): string {
  * have something to report — which is what happened when the plan was complete and
  * the worker had not called report_result.
  */
+/**
+ * The nudge for a worker that stopped without filing.
+ *
+ * It used to assume the plan was finished, because only that case reached it. A worker
+ * that finished its assigned slice — the common case, since most legs are one step — wrote
+ * a summary in the transcript, never called `report_result`, and the task sat on 进行中 with
+ * zero hand-offs and a supervisor nobody had woken. The plan being open is not evidence
+ * that work remains for THIS session.
+ */
 export function formatUnreportedBrief(task: Task): string {
-  const steps = (task.spec?.plan ?? []).filter((step) => step.status === 'done');
+  const plan = task.spec?.plan ?? [];
+  const done = plan.filter((step) => step.status === 'done');
+  const open = plan.filter((step) => step.status !== 'done');
+  const planFinished = plan.length > 0 && open.length === 0;
+
+  if (planFinished) {
+    return [
+      `任务 ${task.id}（${task.name}）的执行计划已经全部完成，但系统没有收到你的交付记录。`,
+      '',
+      `已完成 ${done.length} 个步骤。`,
+      '',
+      '## 你现在要做的',
+      '',
+      '不要再做新步骤，也不要改计划。直接调用 `report_result` 交付：',
+      '- outcome：任务目标达成就用 delivered；还需要别人接手才用 handoff；确实需要人拍板才用 needs_decision',
+      '- summary：说清做完了什么',
+      '- artifacts：交付物真实路径（必须存在且非空）',
+      '- verify：跑过的命令 + 是否通过',
+      '',
+      '规则门会检查这些内容；没有产物或没跑过验证会被拒绝，那就补上再交，而不是继续加步骤。',
+    ].join('\n');
+  }
+
   return [
-    `任务 ${task.id}（${task.name}）的执行计划已经全部完成，但系统没有收到你的交付记录。`,
+    `任务 ${task.id}（${task.name}）的回合已经结束，但系统没有收到你的交接记录。`,
     '',
-    `已完成 ${steps.length} 个步骤。`,
+    `计划里还有 ${open.length} 步没完成：${open.map((step) => `${step.id} ${step.title}`).join('；')}。`,
     '',
     '## 你现在要做的',
     '',
-    '不要再做新步骤，也不要改计划。直接调用 `report_result` 交付：',
-    '- outcome：任务目标达成就用 delivered；还需要别人接手才用 handoff；确实需要人拍板才用 needs_decision',
-    '- summary：说清做完了什么',
-    '- artifacts：交付物真实路径（必须存在且非空）',
-    '- verify：跑过的命令 + 是否通过',
+    '判断你手上这一步：',
+    '- 已经做完了 → 调用 `report_result`，outcome 用 handoff（任务会交给后续会话继续，不会关闭），不要移除剩下的步骤',
+    '- 还没做完 → 继续做完，然后同样用 `report_result` 交接',
     '',
-    '规则门会检查这些内容；没有产物或没跑过验证会被拒绝，那就补上再交，而不是继续加步骤。',
+    '在对话里写总结不算交接——任务会一直停在「进行中」，督导收不到任何消息。',
+    '',
+    '`report_result` 需要：summary（做完了什么）、artifacts（真实路径，必须存在且非空）、verify（跑过的命令 + 是否通过）。',
   ].join('\n');
 }

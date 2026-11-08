@@ -70,8 +70,20 @@ export interface WatchdogDeps {
    * `reason` distinguishes "you stopped mid-work" from "you finished but never
    * filed": telling a worker with a complete plan to 「从上一次中断的地方继续」 gives
    * it an incentive to invent a step so it has something to report.
+   *
+   * Return whether the wake actually started. A run reported 「已唤醒它继续」 while the
+   * subprocess answered `Cannot retry: no re-runnable model step` — the turn had ended
+   * normally, so there was nothing to continue. The supervisor was told work had resumed
+   * and nothing was working on the task. A claim about an action has to come from the
+   * action's result, not from the intent to perform it; `false` or a rejected promise is
+   * reported as a failure. `void` means the implementation cannot tell, and is treated as
+   * "started" for compatibility.
    */
-  wakeSession?: (task: Task, sessionId: string, reason: 'idle' | 'unreported') => void;
+  wakeSession?: (
+    task: Task,
+    sessionId: string,
+    reason: 'idle' | 'unreported',
+  ) => void | boolean | Promise<boolean>;
   /** Pause a task with a reason. */
   pause: (id: string, reason: 'failures' | 'budget' | 'process_lost' | 'waiting', note: string) => void;
   /** Tell the owning supervisor, in one line. */
@@ -186,19 +198,31 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
       continue;
     }
     /**
-     * Finished the plan but never filed the report.
+     * Stopped working without filing a hand-off.
      *
-     * Checked *before* the idle rule: both describe an idle session, but only one of
-     * them is true about the work. "The plan is complete" means the correct nudge is
-     * 「交作业」, and telling that worker to resume gives it a reason to invent a step
-     * so it has something to report. A coarser rule firing first would make this one
-     * unreachable — which is exactly what a test caught.
+     * The rule used to ask "is the plan finished" first, and that is the wrong question.
+     * A worker that finished its assigned slice but not the whole plan never reached it:
+     * one such worker wrote a summary in the transcript, never called `report_result`, and
+     * the task sat on 进行中 with zero hand-offs and a supervisor that was never woken. The
+     * only thing that happened was the idle rule five minutes later, which resumed a turn
+     * that had ended normally — the subprocess answered `Cannot retry: no re-runnable model
+     * step`, the wake did nothing, and the supervisor was told 「已唤醒它继续」 anyway.
+     *
+     * Whether the plan is complete changes what the nudge should SAY, not whether it is
+     * owed. The condition that matters is the one stated plainly: the task is running, its
+     * executor has stopped, nobody is waiting on a background command, and THIS run has
+     * not filed a hand-off. Checking "any hand-off ever" would silence every later leg of a
+     * task, because the earlier sessions' reports are still in the record.
      */
-    const declaredPlan = task.spec?.plan
-    const planFinished = Boolean(declaredPlan?.length) && planProgress(declaredPlan).complete
-    const reported = task.handoffs.some((h) => h.outcome !== 'needs_decision')
     const waiting = task.currentSessionId ? deps.sessionWaiting?.(task.currentSessionId) === true : false
-    if (planFinished && !reported && deps.sessionWorking && task.currentSessionId && !waiting) {
+    const runStartedAt = task.stats?.runStartedAt
+    const filedThisRun = task.handoffs.some(
+      (handoff) =>
+        handoff.outcome !== 'needs_decision' &&
+        handoff.fromSessionId === task.currentSessionId &&
+        (!runStartedAt || handoff.at >= runStartedAt),
+    )
+    if (deps.sessionWorking && task.currentSessionId && !waiting && !filedThisRun) {
       const working = deps.sessionWorking(task.currentSessionId)
       if (working === false && now - lastActivityOf(task) >= IDLE_SESSION_MS) {
         findings.push({ kind: 'unreported', task })
@@ -251,6 +275,35 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
   return findings;
 }
 
+/**
+ * Tell the supervisor what actually happened, not what was attempted.
+ *
+ * Split out because both wake cases need it and because "已唤醒" was a lie in production:
+ * the call returned without error, the subprocess refused the turn, and the supervisor read
+ * that work had resumed while the task sat idle for minutes.
+ */
+function announceWake(
+  deps: WatchdogDeps,
+  task: Task,
+  result: void | boolean | Promise<boolean>,
+  successText: string,
+  failureText: string,
+): void {
+  const fail = (): void => deps.notify(task.supervisorSessionId, failureText)
+  if (result === false) {
+    fail()
+    return
+  }
+  if (result && typeof (result as Promise<boolean>).then === 'function') {
+    void (result as Promise<boolean>).then((ok) => {
+      if (ok === false) fail()
+      else deps.notify(task.supervisorSessionId, successText)
+    }, fail)
+    return
+  }
+  deps.notify(task.supervisorSessionId, successText)
+}
+
 /** Apply the fixes for a batch of findings. Pure rules; no model calls. */
 export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): number {
   let acted = 0;
@@ -297,16 +350,21 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
       case 'unreported': {
         const sessionId = finding.task.currentSessionId
         if (sessionId && deps.wakeSession) {
-          deps.wakeSession(finding.task, sessionId, 'unreported')
-          deps.notify(
-            finding.task.supervisorSessionId,
-            `${finding.task.id} 的执行计划已全部完成，但还没有交作业（没有 report_result）。已提醒它交付。`,
+          // The nudge text adapts to whether the plan is finished; see
+          // formatUnreportedBrief. The wake itself does not depend on it.
+          const result = deps.wakeSession(finding.task, sessionId, 'unreported')
+          announceWake(
+            deps,
+            finding.task,
+            result,
+            `${finding.task.id} 的执行者已停止但没交作业，已提醒它用 report_result 交接。`,
+            `${finding.task.id} 的执行者已停止且没有交接，唤醒失败——任务卡在这里，需要你确认下一步。`,
           )
         } else {
-          deps.pause(finding.task.id, 'waiting', 'plan complete but no hand-off was filed')
+          deps.pause(finding.task.id, 'waiting', 'stopped without filing a hand-off')
           deps.notify(
             finding.task.supervisorSessionId,
-            `${finding.task.id} 的计划已完成但无人交作业，会话也不在了，任务已暂停。`,
+            `${finding.task.id} 没有交接且会话也不在了，任务已暂停。`,
           )
         }
         acted += 1
@@ -322,14 +380,17 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
           deps.pause(finding.task.id, 'process_lost', 'session idle with no progress');
           deps.notify(
             finding.task.supervisorSessionId,
-            `${finding.task.id} 的会话已空闲 ${Math.round(IDLE_SESSION_MS / 60_000)} 分钟以上，已唤醒 ${attempts} 次仍未推进，任务已暂停，需要你确认下一步。`,
+            `${finding.task.id} 的会话已空闲 ${Math.round(IDLE_SESSION_MS / 60_000)} 分钟以上，唤醒失败 ${attempts} 次仍未推进，任务已暂停，需要你确认下一步。`,
           );
         } else {
-          deps.wakeSession(finding.task, sessionId, 'idle');
-          deps.notify(
-            finding.task.supervisorSessionId,
+          const result = deps.wakeSession(finding.task, sessionId, 'idle')
+          announceWake(
+            deps,
+            finding.task,
+            result,
             `${finding.task.id} 的会话空闲了，已唤醒它继续（第 ${attempts + 1} 次）。`,
-          );
+            `${finding.task.id} 的会话空闲了，但唤醒失败（第 ${attempts + 1} 次），需要你确认下一步。`,
+          )
         }
         acted += 1;
         break;

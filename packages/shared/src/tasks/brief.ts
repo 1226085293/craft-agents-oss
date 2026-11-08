@@ -308,9 +308,24 @@ export function formatResumeBrief(task: Task, reason = 'manual'): string {
 export function formatHandoffContext(task: Task): string | undefined {
   const last = [...task.handoffs].reverse().find((h) => h.outcome !== 'needs_decision');
   if (!last) return undefined;
+  /**
+   * `nextAction` is the previous session's plan, not this run's authority.
+   *
+   * Observed in a resume: the brief said 「上一轮结论：边界只有 1.1」 and then, straight from
+   * the hand-off, 「下一步：从 1.2 读回确认继续」 — two statements about what to do next, the
+   * second written before the person narrowed the boundary. The resumed worker followed the
+   * second one and finished work that had just been excluded.
+   */
+  const ceiling = task.spec?.authorizedUpTo;
   const prior: string[] = [`上一轮结论：${last.summary}`];
   if (last.keyFindings?.length) prior.push(`已知事实：\n${bullet(last.keyFindings)}`);
-  if (last.nextAction) prior.push(`下一步：${last.nextAction}`);
+  if (last.nextAction) {
+    prior.push(
+      ceiling
+        ? `下一步（本次只到 ${ceiling}，超出该范围的部分不要执行）：${last.nextAction}`
+        : `下一步：${last.nextAction}`,
+    );
+  }
   if (last.artifacts?.length) prior.push(`已有产物：\n${bullet(last.artifacts.map((a) => a.path))}`);
   return `## 交接上下文\n${prior.join('\n\n')}`;
 }

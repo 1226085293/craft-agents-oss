@@ -253,6 +253,15 @@ type BackgroundProxyTaskState = {
   forceTimer?: ReturnType<typeof setTimeout>;
 };
 
+/**
+ * Two recoveries for one failure must not become two retries.
+ *
+ * The gateway's truncation retry and the stall watchdog both fire on a silent stream; without
+ * a window they both send, 3ms apart, which resumes an already-resumed turn and draws two
+ * error rows for one failure.
+ */
+const RETRY_DEDUPE_MS = 5_000;
+
 export class PiAgent extends BaseAgent {
   protected backendName = 'Craft Agents Backend';
 
@@ -760,9 +769,27 @@ export class PiAgent extends BaseAgent {
    * upstream retries transparently, so this fires when the SUBPROCESS itself
    * is stuck (turn stall / hung tool / stream stall).
    */
+  /**
+   * Re-issue the current model step once per failure.
+   *
+   * Two independent recoveries can fire for the same failure — the gateway's truncation
+   * retry and the stall watchdog's — and both sent `{type:'retry'}`. The log shows them
+   * 3ms apart (`Got event: retry` twice), which is two `agent.continue()` calls for one
+   * broken step: the second lands on an already-resumed turn, and the UI draws two error
+   * rows for one failure. The stamp makes the recovery idempotent within a short window;
+   * a genuinely later stall is still allowed to retry.
+   */
+  private lastRetrySentAt = 0;
+
   private resendModelStep(): void {
     if (this.controlledRestartInProgress) return;
     if (!this.subprocess || !this.subprocess.stdin?.writable) return;
+    const now = Date.now();
+    if (now - this.lastRetrySentAt < RETRY_DEDUPE_MS) {
+      this.debug('[retry] suppressed a duplicate retry for the same failure');
+      return;
+    }
+    this.lastRetrySentAt = now;
     this.send({ type: 'retry' });
   }
 
@@ -785,6 +812,7 @@ export class PiAgent extends BaseAgent {
     if (this.controlledRestartInProgress) return false;
     if (this._isProcessing) return false;
     if (!this.subprocess || !this.subprocess.stdin?.writable) return false;
+    this.lastRetrySentAt = Date.now();
     this.send({ type: 'retry' });
     return true;
   }

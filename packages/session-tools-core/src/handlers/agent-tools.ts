@@ -363,6 +363,7 @@ export async function handleTaskPlan(
     agent?: string;
     note?: string;
     remove?: boolean;
+    restructure?: { fromId: string; outlines: Array<{ id?: string; title: string }> };
     steps?: Array<{
       id: string;
       title?: string;
@@ -377,6 +378,27 @@ export async function handleTaskPlan(
     return errorResponse('task_plan is only available to a session working on a task.');
   }
   if (!args.identifier?.trim()) return errorResponse('identifier is required.');
+
+  /**
+   * Restructuring is its own intent, so it gets its own branch.
+   *
+   * Mixing it with `steps[]` would let one call report progress and rewrite the future at once,
+   * and the answer to "what did this call change" would stop being readable.
+   */
+  if (args.restructure) {
+    if (!ctx.taskTools.restructurePlan) {
+      return errorResponse('restructuring is not available in this context.');
+    }
+    if (!args.restructure.fromId?.trim()) return errorResponse('restructure.fromId is required.');
+    if (!args.restructure.outlines?.length) return errorResponse('restructure.outlines cannot be empty.');
+    const result = await ctx.taskTools.restructurePlan(args.identifier, args.restructure);
+    if (!result.ok) return errorResponse(result.error ?? 'restructure was refused.');
+    return successResponse(
+      `大纲已重排，从 ${args.restructure.fromId} 起的未开工大纲已换成：` +
+        result.plan?.filter((step) => /^[0-9]+$/.test(step.id)).map((step) => `${step.id} ${step.title}`).join('；') +
+        '。现在只拆这一条的小节。',
+    );
+  }
 
   // Batch form. Written in order, stopping at the first refusal: a plan that is
   // half-applied is worse than one that is unchanged, and the error names the

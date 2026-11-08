@@ -344,6 +344,20 @@ export abstract class BaseAgent implements AgentBackend {
       /** The plan as it stands after the write, so the caller can show it back. */
       plan?: Array<{ id: string; title?: string; status?: string }>;
     }>;
+    /**
+     * Replace the outlines that have not started yet (see tasks/plan.ts).
+     *
+     * Kept beside `updatePlan` rather than inside it: one step is a write, the tail of the plan
+     * is a re-decision, and they have different preconditions.
+     */
+    restructurePlan(
+      identifier: string,
+      request: { fromId: string; outlines: Array<{ id?: string; title: string }> },
+    ): Promise<{
+      ok: boolean;
+      error?: string;
+      plan?: Array<{ id: string; title?: string; status?: string }>;
+    }>;
   };
   onSourceChange: SourceChangeCallback | null = null;
   onSourcesListChange: ((sources: LoadedSource[]) => void) | null = null;

@@ -5915,6 +5915,26 @@ export class SessionManager implements ISessionManager {
             )
             return { status: task.status }
           },
+          restructurePlan: async (identifier, request) => {
+            const service = this.getTasks(managed.workspace.id)
+            const task = service.get(identifier)
+            if (!task) return { ok: false, error: `task not found: ${identifier}` }
+            // Same ownership rule as updatePlan: a session keeps its own task's plan current.
+            const owns =
+              task.currentSessionId === managed.id || task.sessionIds.includes(managed.id)
+            if (!owns) return { ok: false, error: 'this session is not working on that task' }
+            /**
+             * Deliberately not gated by `checkAgreedPlanAppend`.
+             *
+             * That check protects the *order* of outlines the user approved from being shuffled
+             * silently. A restructure is the one case where rewriting them is the point — and it
+             * is not silent: it is a separate tool call, it is journaled with the titles it
+             * replaced, and it cannot touch anything already started.
+             */
+            const result = service.restructurePlan(identifier, request)
+            if (result.ok) this.notifyTasksChanged(managed.workspace.id)
+            return result
+          },
           handoff: async (identifier, handoff, fromSessionId) => {
             const result = await this.getTasks(managed.workspace.id).reportHandoff(
               identifier,
@@ -7421,7 +7441,8 @@ ${request.prompt}`;
        */
       startNextLeg: async (task, agent) => {
         const leg = nextLeg(task.spec?.plan)
-        if (!leg) return false
+        // A section that still needs expanding is not a leg to start: there is no step yet.
+        if (leg?.kind !== 'step') return false
 
         const claim = this.getTasks(workspace.id).startRun(task.id, `pending:next-leg:${leg.step.id}`)
         if (!claim.ok) {

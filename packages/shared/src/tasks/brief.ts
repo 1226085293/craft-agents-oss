@@ -9,7 +9,7 @@
 
 import type { Task } from './types.ts';
 import { formatPlan } from './plan.ts';
-import { isAuthorizedStep, openSteps } from './plan.ts';
+import { isAuthorizedStep, nextLeg, openSteps } from './plan.ts';
 import { planProgress } from './plan.ts';
 
 export interface TaskBriefOptions {
@@ -55,6 +55,7 @@ export function formatPlanRuleBlock(options: { planExists?: boolean } = {}): str
     '',
     ruleOne,
     '2. 大纲拆成小节（`1.1`、`1.2`）后逐条执行——小节开始前才写，不要预设没做过的部分的细节。',
+    '2b. **开始一条大纲之前，先检查它**：对比前面几节实际做出来的东西，这条大纲还成立吗？它的小节对不对、缺不缺、多不多？大纲成立就改小节并开工（缺/多/错都用 `task_plan` 直接改）；大纲本身不成立就用 `task_plan` 的 `restructure` 重排这条及其之后还没开工的大纲，然后只拆这一条的小节。检查的结论要落在计划里，不要只在对话里说。',
     '3. 一条大纲的小节都完成后，才能把它标为 done；标 done 之前，下一条大纲的小节必须已经存在。',
     '4. 已完成的大纲和小节是记录，不能改回、不能改名——要返工就新开一条。',
     '5. 写新步骤之前，先对照当前计划里已有的步骤：**同一件事只能有一个 id**。已经有“读回确认”了，就不能再列一条“读回确认”；已经存在的动作（无论做完没做完）继续用它的 id 推进状态，而不是换个名字重开一条。',
@@ -256,6 +257,39 @@ function openBeyondBoundary(task: Task): boolean {
   return openSteps(plan).some((step) => !isAuthorizedStep(step.id, scope));
 }
 
+/**
+ * What to do next, read from the plan instead of described in advance.
+ *
+ * Both brief paths used to end with the same sentence — 「如果计划里没有可执行的小节，先按大纲展开
+ * 下一条」 — a conditional the reader has to evaluate against a plan it may not have printed,
+ * about a case it may not be in. The plan already knows which case this is, so it is computed.
+ *
+ * The expansion branch carries the check the worker is supposed to perform before starting a
+ * section, written as the three outcomes it can have. "Check whether the sub-steps are right" on
+ * its own produced no action at all: the worker had nothing to compare against and started the
+ * first sub-step exactly as written.
+ */
+export function formatFrontierLine(task: Task): string {
+  const leg = nextLeg(task.spec?.plan);
+  if (!leg) {
+    const anyOpen = openSteps(task.spec?.plan).length > 0;
+    return anyOpen
+      ? '计划里还有没完成的内容，但都缺小节、暂时执行不了：检查大纲和它的小节是否还成立。'
+      : '计划已全部完成。用 `report_result`，outcome 用 **delivered**。';
+  }
+  if (leg.kind === 'step') {
+    return `接着做 ${leg.step.id}「${leg.step.title}」（属于大纲 ${leg.outline.id}）。`;
+  }
+  const { outline } = leg;
+  return [
+    `下一条大纲 **${outline.id}「${outline.title}」还没有小节**，现在没有可执行的步骤——先判断它，再拆：`,
+    `1. 大纲 ${outline.id} 成立、但小节缺/多/错 → 用 \`task_plan\` 把 ${outline.id}.1、${outline.id}.2 写成对的，然后开始第一个；`,
+    `2. 大纲 ${outline.id} 本身已经不成立（前面做出来的东西让它没意义，或者漏了一条大纲）→ 用 \`task_plan\` 的 \`restructure\` 重排 ${outline.id} 及之后的大纲，再只拆 ${outline.id} 的小节；`,
+    '3. 大纲和小节都对 → 直接开始第一个小节。',
+    '只能重排还没拆过的大纲：已完成、正在做、已经拆出小节的都不能动。',
+  ].join('\n');
+}
+
 export function formatResumeBrief(task: Task, reason = 'manual'): string {
   const progress = task.spec?.plan?.length
     ? planProgress(task.spec.plan)
@@ -310,7 +344,7 @@ export function formatResumeBrief(task: Task, reason = 'manual'): string {
      * spent the turn arguing with the plan writer about whether 2.1 existed.
      */
     ...(!openBeyondBoundary(task)
-      ? ['从计划里没完成的那一条接着做；如果计划里没有可执行的小节，先按大纲展开下一条。']
+      ? [formatFrontierLine(task)]
       : task.spec?.authorizedUpTo
       ? [
           `本次只做到 ${task.spec.authorizedUpTo}，到此为止。` +
@@ -322,7 +356,7 @@ export function formatResumeBrief(task: Task, reason = 'manual'): string {
               '做到这里就停下，用 `report_result`（outcome 用 handoff）交接——' +
               '授权范围之外的步骤不要开工、不要标完成、不要移除。',
           ]
-        : ['从计划里没完成的那一条接着做；如果计划里没有可执行的小节，先按大纲展开下一条。']),
+        : [formatFrontierLine(task)]),
   ].join('\n');
 }
 

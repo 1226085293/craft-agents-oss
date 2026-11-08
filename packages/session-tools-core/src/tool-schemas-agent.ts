@@ -290,6 +290,30 @@ export const TaskPlanSchema = z.object({
     )
     .optional()
     .describe('Apply several steps at once, in order. Use this to write the outline in a single call.'),
+  /**
+   * Rewrite the not-yet-started tail of the outline list.
+   *
+   * A plan written up front is a guess about work that has not happened. When the first sections
+   * show the guess was wrong, the only repair was one step at a time, so nobody repaired it and
+   * the plan kept being executed as written. This is the bulk form, limited to sections that
+   * have not started: a section with sub-steps is already begun, and done/doing is history.
+   */
+  restructure: z
+    .object({
+      fromId: z.string().describe('First outline to replace, e.g. "2". It and everything after it must be untouched.'),
+      outlines: z
+        .array(
+          z.object({
+            id: z.string().optional().describe('Outline id; defaults to consecutive numbers from fromId.'),
+            title: z.string(),
+          }),
+        )
+        .describe('The replacement outlines, in order. Titles only — sub-steps are expanded one section at a time.'),
+    })
+    .optional()
+    .describe(
+      'Rewrite the outlines that have not started yet (no sub-steps, not doing, not done). Use when a section turned out to be wrong and the rest of the plan has to follow.',
+    ),
 });
 
 export const TaskGetSchema = z.object({

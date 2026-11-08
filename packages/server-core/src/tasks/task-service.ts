@@ -30,6 +30,7 @@ import {
   nextTaskId,
   normalizeHandoff,
   nextLeg,
+  restructurePlan,
   currentStep,
   recordRunResult,
   saveTask,
@@ -483,7 +484,7 @@ export class TaskService {
     let handedOffTo: string | undefined;
     if (patch.status === 'done') {
       const leg = nextLeg(result.plan);
-      if (leg?.agent && leg.agent !== next.assigneeAgentId && this.deps.startNextLeg) {
+      if (leg?.kind === 'step' && leg.agent && leg.agent !== next.assigneeAgentId && this.deps.startNextLeg) {
         handedOffTo = leg.agent;
         // Record the hand-off on the task before starting it: the new session's
         // own write path reads `assigneeAgentId` to decide whether it is the
@@ -876,6 +877,42 @@ export class TaskService {
     return this.updateSpec(id, { ...task.spec, scope: trimmed })
   }
 
+  /**
+   * Replace the outlines that have not started yet.
+   *
+   * The journal keeps the titles it replaced, because a plan that changes silently is
+   * indistinguishable from a plan that was never followed.
+   */
+  restructurePlan(
+    id: string,
+    request: { fromId: string; outlines: Array<{ id?: string; title: string }> },
+  ): { ok: boolean; error?: string; plan?: NonNullable<Task['spec']>['plan'] } {
+    const task = this.require(id);
+    const before = (task.spec?.plan ?? [])
+      .filter((step) => step.id === request.fromId || Number(step.id) >= Number(request.fromId))
+      .filter((step) => /^\d+$/.test(step.id))
+      .map((step) => `${step.id} ${step.title}`);
+    const result = restructurePlan(task.spec?.plan, request, this.now());
+    if (result.error) return { ok: false, error: result.error };
+    if (!result.changed) return { ok: true, plan: result.plan };
+    const next: Task = {
+      ...task,
+      spec: { ...task.spec, plan: result.plan } as Task['spec'],
+      updatedAt: this.now(),
+    };
+    this.save(next);
+    appendJournal(this.root, id, {
+      type: 'plan_restructured',
+      at: this.now(),
+      data: {
+        fromId: request.fromId,
+        before,
+        after: result.plan.filter((step) => /^\d+$/.test(step.id)).map((step) => `${step.id} ${step.title}`),
+      },
+    });
+    return { ok: true, plan: result.plan };
+  }
+
   updateSpec(id: string, spec: TaskSpec): Task {
     const task = this.require(id);
     const next: Task = { ...task, spec, updatedAt: this.now() };
@@ -1173,7 +1210,9 @@ export class TaskService {
      * spinning detector reads every one of them — but the timeline stops showing
      * them, which is the difference between a log of attempts and a history.
      */
-    const nextLegOwner = nextLeg(next.spec?.plan)?.agent
+    const nextLegRead = nextLeg(next.spec?.plan)
+    // Only a step has an owner: an unexpanded section is not assigned to anyone yet.
+    const nextLegOwner = nextLegRead?.kind === 'step' ? nextLegRead.agent : undefined
     const milestone =
       handoff.outcome === 'needs_decision' ||
       next.status !== task.status ||
@@ -1214,10 +1253,11 @@ export class TaskService {
     let startedNextLeg = false;
     if (accepted && handoff.outcome === 'handoff' && this.deps.startNextLeg) {
       const leg = nextLeg(next.spec?.plan);
+      const startedStep = leg?.kind === 'step' ? leg : undefined;
       const current = next.assigneeAgentId;
-      const nextAgent = leg?.agent ?? current;
-      const belongsElsewhere = Boolean(leg && leg.agent && leg.agent !== current);
-      if (leg && belongsElsewhere) {
+      const nextAgent = startedStep?.agent ?? current;
+      const belongsElsewhere = Boolean(startedStep?.agent && startedStep.agent !== current);
+      if (startedStep && belongsElsewhere) {
         try {
           startedNextLeg = await this.deps.startNextLeg(next, nextAgent);
         } catch (error) {
@@ -1228,7 +1268,7 @@ export class TaskService {
           appendJournal(this.root, id, {
             type: 'next_leg_started',
             at: now,
-            data: { step: leg.step.id, agent: nextAgent },
+            data: { step: startedStep.step.id, agent: nextAgent },
           });
         }
       }

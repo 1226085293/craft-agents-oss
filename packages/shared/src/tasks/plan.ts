@@ -530,14 +530,32 @@ export function formatPlan(plan: PlanStep[] | undefined): string[] {
   });
 }
 
-export interface NextLeg {
-  /** The step that should be worked on next. */
-  step: PlanStep;
-  /** The outline it belongs to. */
-  outline: PlanStep;
-  /** Who should do it: the step's own owner, else the task's assignee. */
-  agent?: string;
-}
+/**
+ * Where execution stands: a step to work on, or a section to expand first.
+ *
+ * These were one `undefined` before, and that is why "expand the next outline" never
+ * happened. `nextLeg` returned `undefined` for "this section has no sub-steps yet" as well as
+ * for "nothing is left", so no caller could tell a gap in the plan from a finished plan, and
+ * the only instruction to expand was a sentence in the brief that the worker could skip.
+ *
+ * Making the two states different *types* means every caller has to decide what an unexpanded
+ * section means — and the brief can say it out loud.
+ */
+export type NextLeg =
+  | {
+      kind: 'step';
+      /** The step that should be worked on next. */
+      step: PlanStep;
+      /** The outline it belongs to. */
+      outline: PlanStep;
+      /** Who should do it: the step's own owner, else the task's assignee. */
+      agent?: string;
+    }
+  | {
+      kind: 'expand';
+      /** The section that has no sub-steps yet, so nothing under it can start. */
+      outline: PlanStep;
+    };
 
 /**
  * Which step comes next, and who should do it.
@@ -612,6 +630,119 @@ export function openSteps(plan: PlanStep[] | undefined): PlanStep[] {
   });
 }
 
+/** What a restructure asks for: replace the tail of the outline list. */
+export interface RestructureRequest {
+  /** The first outline to replace. It and everything after it must be untouched work. */
+  fromId: string;
+  /**
+   * The replacement outlines, in order.
+   *
+   * Titles only. Sub-steps are expanded later, one section at a time, by `applyPlanPatch` —
+   * because that is the only way a section's sub-steps can reflect what the *previous* section
+   * actually produced. Generating them all now would re-create the guesswork this is meant to
+   * remove.
+   */
+  outlines: Array<{ id?: string; title: string }>;
+}
+
+/**
+ * Replace the not-yet-started tail of the outline list.
+ *
+ * A plan written up front is a guess about work that has not happened. When the first sections
+ * show the guess was wrong, the only repair available was `applyPlanPatch`, one step at a time —
+ * so in practice nobody repaired it and the plan kept being executed as written. The brief even
+ * said 「不要重写」, because there was no safe way to write.
+ *
+ * Safe here means: only sections that have not started can be replaced. A section with sub-steps
+ * is started (they were written because it was about to be worked on), and a `done`/`doing`
+ * section is history. Both are refused by name, so a refused restructure tells the worker what
+ * it actually tried to overwrite.
+ */
+export function restructurePlan(
+  plan: PlanStep[] | undefined,
+  request: RestructureRequest,
+  now: number,
+): { plan: PlanStep[]; changed: boolean; error?: string } {
+  const steps = plan ?? [];
+  const from = request.fromId.trim();
+  if (!isOutlineStep(from)) {
+    return { plan: steps, changed: false, error: `只能从某条大纲开始重排（如 2），收到的是 ${from || '空'}` };
+  }
+  const titles = request.outlines ?? [];
+  if (titles.length === 0) {
+    return { plan: steps, changed: false, error: '重排至少要给出一条大纲' };
+  }
+  for (const [index, item] of titles.entries()) {
+    if (!item.title?.trim()) {
+      return { plan: steps, changed: false, error: `outlines[${index}] 缺少标题` };
+    }
+  }
+
+  const fromNum = Number(from);
+  const outlines = steps
+    .filter((step) => isOutlineStep(step.id))
+    .sort((a, b) => Number(a.id) - Number(b.id));
+  const replacing = outlines.filter((step) => Number(step.id) >= fromNum);
+
+  for (const step of replacing) {
+    if (step.status === 'done') {
+      return { plan: steps, changed: false, error: `大纲 ${step.id} 已完成，是记录，不能重排；要改就新开一条` };
+    }
+    if (step.status === 'doing') {
+      return { plan: steps, changed: false, error: `大纲 ${step.id} 正在做，不能重排；先做完或交接` };
+    }
+    const kids = childrenOf(steps, step.id);
+    if (kids.length > 0) {
+      return {
+        plan: steps,
+        changed: false,
+        error: `大纲 ${step.id} 已经拆出小节（${kids.map((s) => s.id).join('、')}），说明它已经开工；只能重排还没拆的大纲`,
+      };
+    }
+  }
+
+  /**
+   * Ids default to consecutive numbers from `fromId`, which keeps the common case (rewrite the
+   * remaining sections, same count) a matter of sending titles.
+   */
+  const resolved: PlanStep[] = [];
+  for (const [index, item] of titles.entries()) {
+    const wanted = item.id?.trim() || String(fromNum + index);
+    if (!isOutlineStep(wanted)) {
+      return { plan: steps, changed: false, error: `大纲 id 必须是数字（如 2），收到 ${wanted}` };
+    }
+    if (Number(wanted) < fromNum) {
+      return { plan: steps, changed: false, error: `大纲 id ${wanted} 在 ${from} 之前，不能这样重排` };
+    }
+    if (resolved.some((step) => step.id === wanted)) {
+      return { plan: steps, changed: false, error: `大纲 id ${wanted} 重复` };
+    }
+    resolved.push({ id: wanted, title: item.title.trim(), status: 'todo', updatedAt: now });
+  }
+  const order = resolved.map((step) => Number(step.id));
+  for (let i = 1; i < order.length; i += 1) {
+    if (order[i]! <= order[i - 1]!) {
+      return { plan: steps, changed: false, error: '大纲 id 必须递增' };
+    }
+  }
+
+  const replacedIds = new Set(replacing.map((step) => step.id));
+  const kept = steps.filter((step) => !replacedIds.has(step.id));
+  const next = [...kept, ...resolved].sort((a, b) => {
+    const left = a.id.split('.').map((n) => Number.parseInt(n, 10) || 0);
+    const right = b.id.split('.').map((n) => Number.parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+      const d = (left[i] ?? 0) - (right[i] ?? 0);
+      if (d !== 0) return d;
+    }
+    return 0;
+  });
+  if (next.length > PLAN_STEP_LIMIT) {
+    return { plan: steps, changed: false, error: `计划最多 ${PLAN_STEP_LIMIT} 条` };
+  }
+  return { plan: next, changed: true };
+}
+
 export function nextLeg(plan: PlanStep[] | undefined): NextLeg | undefined {
   if (!plan?.length) return undefined;
   const outlines = plan
@@ -621,10 +752,16 @@ export function nextLeg(plan: PlanStep[] | undefined): NextLeg | undefined {
   for (const outline of outlines) {
     if (outline.status === 'done') continue;
     const kids = childrenOf(plan, outline.id);
-    // A section with no sub-steps has not been expanded; the worker owns that.
-    if (kids.length === 0) return undefined;
+    /**
+     * A section with no sub-steps stops here, and says so.
+     *
+     * It is not "nothing to do": it is the point where the worker is supposed to check whether
+     * this section and its sub-steps are still right before starting them. Returning
+     * `undefined` made that indistinguishable from a finished plan.
+     */
+    if (kids.length === 0) return { kind: 'expand', outline };
     const step = kids.find((kid) => kid.status !== 'done');
-    if (step) return { step, outline, ...(step.agent ? { agent: step.agent } : {}) };
+    if (step) return { kind: 'step', step, outline, ...(step.agent ? { agent: step.agent } : {}) };
   }
   return undefined;
 }

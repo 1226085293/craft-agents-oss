@@ -443,6 +443,15 @@ export interface AgentBackend {
       /** The plan as it stands after the write, so the caller can show it back. */
       plan?: Array<{ id: string; title?: string; status?: string }>;
     }>;
+    /** Replace the outlines that have not started yet (see tasks/plan.ts). */
+    restructurePlan(
+      identifier: string,
+      request: { fromId: string; outlines: Array<{ id?: string; title: string }> },
+    ): Promise<{
+      ok: boolean;
+      error?: string;
+      plan?: Array<{ id: string; title?: string; status?: string }>;
+    }>;
   } | null;
 
   // ============================================================

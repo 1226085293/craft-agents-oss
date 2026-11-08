@@ -409,6 +409,21 @@ export interface SessionToolContext {
       /** The plan as it stands after the write, so the caller can show it back. */
       plan?: Array<{ id: string; title?: string; status?: string }>;
     }>;
+    /**
+     * Replace the outlines that have not started yet.
+     *
+     * Separate from `updatePlan` because it is a different intent with a different precondition:
+     * one step is a write, the tail of the plan is a re-decision. Folding it into the step patch
+     * would mean a single call could both report progress and rewrite the future.
+     */
+    restructurePlan?(
+      identifier: string,
+      request: { fromId: string; outlines: Array<{ id?: string; title: string }> },
+    ): Promise<{
+      ok: boolean;
+      error?: string;
+      plan?: Array<{ id: string; title?: string; status?: string }>;
+    }>;
   };
 
   /** Get detailed info about a session. Defaults to current session if no ID given. Injected by backend. */

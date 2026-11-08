@@ -68,6 +68,11 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       sessionCount: task.sessionIds.length,
       lastHandoff: task.handoffs.at(-1)?.summary,
       pauseReason: task.pauseReason ?? null,
+      // A paused task that says 「等待你决定」 must also say what about, or the user has
+      // to open it to find out there is nothing there — the decision lives on the task.
+      ...(task.decision && !task.decision.resolvedAt
+        ? { decisionLabel: task.decision.label }
+        : {}),
     }));
   });
 

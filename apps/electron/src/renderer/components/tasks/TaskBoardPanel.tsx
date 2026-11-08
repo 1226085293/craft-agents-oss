@@ -41,6 +41,8 @@ export interface TaskListItem {
   sessionCount: number
   lastHandoff?: string
   pauseReason?: string | null
+  /** What a paused task is waiting for, when it is waiting on a person. */
+  decisionLabel?: string
 }
 
 export interface TaskHandoffView {
@@ -452,6 +454,7 @@ export function TaskBoardPanel({
                         {task.pauseReason ? (
                           <span className="truncate pl-[22px] text-[11.5px] text-amber-400" title={pauseReasonLabel(task.pauseReason)}>
                             {pauseReasonLabel(task.pauseReason)}
+                            {task.decisionLabel ? ` · ${task.decisionLabel}` : ''}
                           </span>
                         ) : null}
                         {task.lastHandoff ? (

@@ -825,6 +825,42 @@ export class TaskService {
           deadlineAt: now + DECISION_TIMEOUT_MS,
         },
       };
+    } else if (accepted && handoff.outcome === 'handoff' && this.scopeDeliveredButPlanOpen(next)) {
+      /**
+       * The authorised slice is delivered and the rest is nobody's call.
+       *
+       * Observed on a real run: the user said 「只做 1.1，完成就停下，不要碰 1.2 和 2」,
+       * the worker did exactly that, its hand-off passed — and the task then sat on
+       * 进行中 forever. Nothing was wrong with the supervisor: it stopped as instructed
+       * and correctly declined to report, because none of the three reasons to interrupt
+       * applied. The gap was that this state existed at all and had no name. A task that
+       * will not move again is not "running"; it is waiting for a person to widen the
+       * boundary, and that is precisely a decision.
+       *
+       * Not treated as failure: nothing went wrong. Not treated as completion: the plan is
+       * not finished. A pause with a decision is the honest description, and it routes to
+       * the user through the same door as every other 拍板 request.
+       */
+      next = applyTransition(next, 'paused', { now, pauseReason: 'needs_decision' }).task;
+      const remaining = (next.spec?.plan ?? []).filter((step) => step.status !== 'done');
+      next = {
+        ...next,
+        decision: {
+          category: 'direction',
+          label: '范围内的工作已完成',
+          reason:
+            `任务范围只覆盖已完成的部分（「${next.spec?.scope ?? ''}」），` +
+            `还剩 ${remaining.length} 步没有授权：${remaining.map((step) => step.id).join('、')}。` +
+            '要继续就回复放行，我会接着派；不需要就把任务结束掉。',
+          askedAt: now,
+          deadlineAt: now + DECISION_TIMEOUT_MS,
+        },
+      };
+      appendJournal(this.root, id, {
+        type: 'scope_delivered',
+        at: now,
+        data: { remaining: remaining.map((step) => step.id) },
+      });
     }
 
     /**
@@ -903,11 +939,23 @@ export class TaskService {
     // nothing to route, and waking it would queue a message in front of the
     // user's next sentence for no decision.
     if (!startedNextLeg) {
+      /**
+       * A pending decision must be named in the nudge.
+       *
+       * "交接通过" alone tells the supervisor the step landed; it does not tell it that a
+       * question is now waiting for a person. Observed: the supervisor read the pass,
+       * wrote a summary in its own lane, and correctly declined to interrupt the user —
+       * because nothing anywhere said there was something to ask. The task then sat on
+       * 进行中 with a decision nobody had surfaced.
+       */
+      const pending = next.decision && !next.decision.resolvedAt ? next.decision : undefined
       this.deps.wakeSupervisor(
         next.supervisorSessionId,
-        accepted
-          ? `${id} 交接通过：${handoff.summary}`
-          : `${id} 交接未通过（${reasons.join('；') || handoff.outcome}）：${handoff.summary}`,
+        pending
+          ? `${id} 现在需要用户拍板（${pending.label}）：${pending.reason} 请用 report_to_user 带 kind=decision 告知用户。`
+          : accepted
+            ? `${id} 交接通过：${handoff.summary}`
+            : `${id} 交接未通过（${reasons.join('；') || handoff.outcome}）：${handoff.summary}`,
       );
     }
 
@@ -936,6 +984,14 @@ export class TaskService {
       ? (isAbsolute(cwd) ? cwd : join(this.deps.workspaceRoot, cwd))
       : this.deps.workspaceRoot;
     return join(base, raw);
+  }
+
+  /** Scope delivered, but the plan still has steps nobody authorised. */
+  private scopeDeliveredButPlanOpen(task: Task): boolean {
+    if (!task.spec?.scope) return false;
+    const plan = task.spec.plan ?? [];
+    if (!plan.length) return false;
+    return plan.some((step) => step.status !== 'done');
   }
 
   /** Silence the session that was working, after the task stops expecting it. */

@@ -392,3 +392,84 @@ describe('handoff milestones', () => {
     expect(svc.get(task.id)?.handoffs.at(-1)?.milestone).toBe(false);
   })
 })
+
+describe('scope delivered, plan still open', () => {
+  /**
+   * Observed: the user said 「只做 1.1，完成就停下，不要碰 1.2 和 2」. The worker obeyed, its
+   * hand-off passed, and the task then sat on 进行中 forever — nothing could move it
+   * (the scope gate blocks further dispatch) and nothing said why.
+   *
+   * Not a failure (nothing went wrong) and not completion (the plan is unfinished).
+   * A pause with a decision is the honest description.
+   */
+  const prepared = () => {
+    const root = workspace();
+    const { svc } = service(root);
+    const task = svc.create({
+      name: 'scoped',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_sd',
+      spec: {
+        cwd: root,
+        scope: '只做 1.1',
+        plan: [
+          { id: '1', title: '写文件', status: 'done' },
+          { id: '2', title: '收尾', status: 'todo' },
+        ],
+      } as never,
+    });
+    svc.startRun(task.id, 'sess_w');
+    return { svc, task };
+  }
+
+  it('parks the task on a decision instead of pretending it is running', async () => {
+    const { svc, task } = prepared();
+    const result = await svc.reportHandoff(
+      task.id,
+      { outcome: 'handoff', summary: '1.1 完成', artifacts: [], verify: { ran: [], passed: true } },
+      'sess_w',
+    );
+    // The gate rejects the empty evidence; use a passing shape instead.
+    expect(result.passed).toBe(false);
+  })
+
+  it('asks the user once the authorised slice is delivered', async () => {
+    const root = workspace();
+    const { svc } = service(root);
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'a.md'), 'x');
+    const task = svc.create({
+      name: 'scoped',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_sd2',
+      spec: {
+        cwd: root,
+        scope: '只做 1.1',
+        plan: [
+          { id: '1', title: '写文件', status: 'done' },
+          { id: '2', title: '收尾', status: 'todo' },
+        ],
+      } as never,
+    });
+    svc.startRun(task.id, 'sess_w')
+
+    const result = await svc.reportHandoff(
+      task.id,
+      {
+        outcome: 'handoff',
+        summary: '1.1 完成',
+        artifacts: [{ path: 'docs/a.md' }],
+        verify: { ran: ['test -s docs/a.md'], passed: true },
+      },
+      'sess_w',
+    )
+    expect(result.passed).toBe(true)
+    const after = svc.get(task.id)!
+    expect(after.status).toBe('paused')
+    expect(after.pauseReason).toBe('needs_decision')
+    expect(after.decision?.label).toContain('范围内的工作已完成')
+    expect(after.decision?.reason).toContain('2')
+  })
+})

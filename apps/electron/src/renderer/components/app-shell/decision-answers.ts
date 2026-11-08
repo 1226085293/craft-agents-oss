@@ -61,9 +61,22 @@ export function readDecisionAnswer(taskId: string, askedAt: number | undefined):
     if (!raw) return null
     const parsed = JSON.parse(raw) as StoredAnswer
     if (typeof parsed?.text !== 'string') return null
-    // An answer older than the question on screen is about a previous question: the task
-    // can legitimately stop again, and that new question must start unanswered.
-    if (typeof askedAt === 'number' && typeof parsed.at === 'number' && parsed.at < askedAt) {
+    /**
+     * Only a clearly-older answer is ignored.
+     *
+     * The two surfaces take `askedAt` from different records — the task's decision and the
+     * card's own payload — and the card's is stamped when the row was delivered, which can
+     * be a second after the decision was made. A strict comparison would then treat a real
+     * answer as belonging to a previous question and put the buttons back, which is the bug
+     * this whole file exists to fix. The slack absorbs that drift while still rejecting an
+     * answer from a genuinely earlier round, which is minutes or hours old.
+     */
+    const CLOCK_SLACK_MS = 120_000
+    if (
+      typeof askedAt === 'number' &&
+      typeof parsed.at === 'number' &&
+      parsed.at + CLOCK_SLACK_MS < askedAt
+    ) {
       return null
     }
     return parsed.text

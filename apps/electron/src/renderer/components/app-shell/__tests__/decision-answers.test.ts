@@ -57,7 +57,9 @@ describe('one answer, both surfaces', () => {
 
   it('does not let a later question inherit an earlier answer', () => {
     rememberDecisionAnswer('T-1', 1_700_000_000_000, '放行')
-    // The same task stops again well after the answer: that is a different question.
-    expect(readDecisionAnswer('T-1', Date.now() + 60_000)).toBeNull()
+    // The same task stops again ten minutes after the answer: a different question. (A few
+    // seconds of drift is tolerated on purpose — the two surfaces stamp `askedAt` from
+    // different records, and treating that as "previous question" puts the buttons back.)
+    expect(readDecisionAnswer('T-1', Date.now() + 10 * 60_000)).toBeNull()
   })
 })

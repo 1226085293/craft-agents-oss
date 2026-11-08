@@ -8069,6 +8069,30 @@ ${request.prompt}`;
     )
   }
 
+  /**
+   * Which task this supervisor's question is about.
+   *
+   * The card needs it for two things it could not do without: telling the supervisor which
+   * decision an answer closes, and letting the task page and the conversation agree that
+   * they are looking at the same question. Without it the card's sync key was `undefined`,
+   * so answering on one surface never reached the other — the second one kept its buttons.
+   *
+   * A supervisor can relay for more than one task, so the paused one with an open decision
+   * is the answer; the handoff it was just woken by is what makes it the right one.
+   */
+  private taskIdentifierFor(managed: ManagedSession): string | undefined {
+    try {
+      const open = this.getTasks(managed.workspace.id)
+        .list()
+        .filter((task) => task.supervisorSessionId === managed.id)
+        .filter((task) => task.decision && !task.decision.resolvedAt)
+        .filter((task) => task.status === 'paused' && task.pauseReason === 'needs_decision')
+      return (open.length === 1 ? open[0] : open.at(-1))?.id
+    } catch {
+      return undefined
+    }
+  }
+
   /** The lane a supervisor's reader-facing rows belong to. */
   private async resolveReaderLane(managed: ManagedSession): Promise<ManagedSession | undefined> {
     if ((managed.supervisorLane ?? 'task') === 'user') return managed
@@ -8121,6 +8145,7 @@ ${request.prompt}`;
     if (kind === 'decision') {
       // A question. Answering it is the person's job, so nothing is woken: the row is
       // written for the reader and the turn that asked ends here.
+      const taskId = this.taskIdentifierFor(managed)
       this.appendReadOnlyRow(target, {
         text,
         statusType: 'decision_request',
@@ -8130,6 +8155,7 @@ ${request.prompt}`;
           askedByLabel: this.askerLabel(managed),
           question: text,
           ...(options?.length ? { options: [...options] } : {}),
+          ...(taskId ? { taskIdentifier: taskId } : {}),
           askedAt: Date.now(),
         },
       })
@@ -8157,6 +8183,8 @@ ${request.prompt}`;
     }
     if (!target) return
 
+    const taskId = this.taskIdentifierFor(managed)
+
     // One card per question, each with its own id. Several cards can be outstanding at
     // once — two tasks asking, or two questions from one turn — and answering one must
     // not answer another, so nothing is shared between rows.
@@ -8170,6 +8198,7 @@ ${request.prompt}`;
           askedByLabel: this.askerLabel(managed),
           question: q.question,
           ...(q.options?.length ? { options: [...q.options] } : {}),
+          ...(taskId ? { taskIdentifier: taskId } : {}),
           askedAt: Date.now(),
         },
       })
@@ -8181,6 +8210,7 @@ ${request.prompt}`;
     managed: ManagedSession,
     questions: { question: string; options?: string[] }[],
   ): Promise<void> {
+    const taskId = this.taskIdentifierFor(managed)
     for (const q of questions) {
       this.appendReadOnlyRow(managed, {
         text: q.question,
@@ -8191,6 +8221,7 @@ ${request.prompt}`;
           askedByLabel: this.askerLabel(managed),
           question: q.question,
           ...(q.options?.length ? { options: [...q.options] } : {}),
+          ...(taskId ? { taskIdentifier: taskId } : {}),
           askedAt: Date.now(),
         },
       })

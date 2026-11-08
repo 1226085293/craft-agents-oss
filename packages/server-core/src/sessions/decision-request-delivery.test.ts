@@ -89,6 +89,42 @@ describe('a decision request is written for the reader', () => {
       .map((line) => JSON.parse(line) as Row);
   }
 
+  /**
+   * The card carries which task it is about, or the two surfaces cannot agree.
+   *
+   * Without it the conversation card's sync key was `undefined`, so answering on the task
+   * page never reached it — the buttons stayed live and the same reply could be sent twice.
+   * It is also what lets the supervisor tell which decision an answer closes when two tasks
+   * are waiting at once.
+   */
+  it('names the task it is asking about', async () => {
+    const requester = buildRequester();
+    // The asker owns exactly one paused task with an open decision.
+    ;(sm as unknown as { getTasks: unknown }).getTasks = () => ({
+      list: () => [
+        {
+          id: 'T-7',
+          status: 'paused',
+          pauseReason: 'needs_decision',
+          supervisorSessionId: 'sess_asker',
+          decision: { askedAt: Date.now(), resolvedAt: undefined },
+        },
+      ],
+    })
+
+    await (
+      sm as unknown as {
+        deliverToUserLane: (m: unknown, t: string, k: string) => Promise<void>
+      }
+    ).deliverToUserLane(requester, '要不要放行 1.2？', 'decision')
+
+    const managed = (sm as unknown as { sessions: Map<string, { messages: Row[] }> }).sessions.get(
+      'sess_asker',
+    )
+    const asked = managed?.messages.find((m) => m.statusType === 'decision_request')
+    expect(asked?.decisionRequest?.taskIdentifier).toBe('T-7')
+  })
+
   it('writes a card instead of input, and starts no turn', async () => {
     const requester = buildRequester();
     await (

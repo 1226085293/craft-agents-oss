@@ -7392,6 +7392,18 @@ ${request.prompt}`;
         // list after its turn ends. Without this distinction the watchdog answered
         // "alive" for a task nobody was driving.
         sessionWorking: (sessionId) => this.sessions.get(sessionId)?.isProcessing,
+        // "Idle" has two meanings and the watchdog must not confuse them: a worker
+        // that backgrounded a long command ended its turn *deliberately* and will be
+        // woken by `shell_completed`. Nudging it here makes it re-run or pre-empt work
+        // that is still running.
+        sessionWaiting: (sessionId) => {
+          const managed = this.sessions.get(sessionId)
+          if (!managed) return false
+          for (const task of managed.backgroundTaskRegistry.values()) {
+            if (task.status === 'running') return true
+          }
+          return false
+        },
         wakeSession: (task, sessionId, reason) => {
           service.noteWake(task.id)
           const brief = reason === 'unreported' ? formatUnreportedBrief(task) : formatIdleWakeBrief(task)

@@ -54,6 +54,17 @@ export interface WatchdogDeps {
    */
   sessionWorking?: (sessionId: string) => boolean | undefined;
   /**
+   * True while the session is legitimately waiting rather than stalled.
+   *
+   * A worker that backgrounded a long command ends its turn on purpose: the shell
+   * reports back through `shell_completed`, and waking the session in the meantime
+   * would make it re-run or pre-empt work that is still going. Same for a session
+   * waiting on an event subscription. This is the check that decides whether "idle"
+   * means "stuck" or "waiting", and it is more honest than any particular minute
+   * count.
+   */
+  sessionWaiting?: (sessionId: string) => boolean;
+  /**
    * Nudge a session that should be doing something it is not.
    *
    * `reason` distinguishes "you stopped mid-work" from "you finished but never
@@ -101,11 +112,19 @@ function normalizeSummary(text: string): string {
 /**
  * How long a session may sit idle before the task behind it counts as abandoned.
  *
- * Long enough not to fight a worker that is between turns by design (a handoff, a
- * tool the model is waiting on), short enough that the user is not staring at
- * 进行中 for half an hour.
+ * Five minutes, matching the watchdog's own cadence, and that is the honest reason:
+ * the check cannot fire more often than a pass runs, so a threshold below the
+ * interval buys nothing but a longer wait before the next opportunity to notice. It
+ * was eight — a number I picked without evidence — which meant the user watched
+ * 进行中 for nearly nine minutes while the recovery sat waiting for a pass that had
+ * already gone by.
+ *
+ * What actually separates "stuck" from "between turns" is not duration, it is
+ * `sessionWaiting`: a worker that backgrounded a shell, or is waiting on an event, is
+ * idle on purpose and is never woken however long it sits. The clock only decides
+ * when to look at everyone else.
  */
-export const IDLE_SESSION_MS = 8 * 60_000;
+export const IDLE_SESSION_MS = 5 * 60_000; // same as a watchdog pass; see above
 
 /**
  * Wakes before the task is handed to a person.
@@ -178,7 +197,8 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
     const declaredPlan = task.spec?.plan
     const planFinished = Boolean(declaredPlan?.length) && planProgress(declaredPlan).complete
     const reported = task.handoffs.some((h) => h.outcome !== 'needs_decision')
-    if (planFinished && !reported && deps.sessionWorking && task.currentSessionId) {
+    const waiting = task.currentSessionId ? deps.sessionWaiting?.(task.currentSessionId) === true : false
+    if (planFinished && !reported && deps.sessionWorking && task.currentSessionId && !waiting) {
       const working = deps.sessionWorking(task.currentSessionId)
       if (working === false && now - lastActivityOf(task) >= IDLE_SESSION_MS) {
         findings.push({ kind: 'unreported', task })
@@ -189,7 +209,7 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
     // Liveness is not the same as progress: the session object outlives the turn.
     // A running task whose session is sitting idle (and has been for a while) is
     // the state the user sees as "进行中 but nothing is happening".
-    if (deps.sessionWorking && task.currentSessionId) {
+    if (deps.sessionWorking && task.currentSessionId && !waiting) {
       const working = deps.sessionWorking(task.currentSessionId);
       if (working === false && now - lastActivityOf(task) >= IDLE_SESSION_MS) {
         findings.push({ kind: 'idle', task });
@@ -416,8 +436,10 @@ export function nextCheckDelayMs(deps: WatchdogDeps, now = Date.now()): number {
     // that is the whole point of noticing it, so waiting for the heartbeat or
     // stale windows would delay the only check that can recover it.
     if (deps.sessionWorking && task.currentSessionId) {
+      // A session that is waiting on a background shell is not late for anything.
+      const waiting = deps.sessionWaiting?.(task.currentSessionId) === true;
       const working = deps.sessionWorking(task.currentSessionId);
-      if (working === false) {
+      if (working === false && !waiting) {
         soonest = Math.min(soonest, lastActivityOf(task) + IDLE_SESSION_MS - now);
       }
     }

@@ -437,3 +437,31 @@ describe('finished plan, nothing filed', () => {
     expect(reason).toBe('unreported');
   })
 })
+
+describe('waiting is not stuck', () => {
+  const idleTask = () =>
+    task({
+      updatedAt: NOW - 20 * 60_000,
+      stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 20 * 60_000 },
+    })
+
+  /**
+   * A worker that backgrounded a long shell ends its turn on purpose and is woken by
+   * `shell_completed`. Waking it on the idle clock makes it re-run or pre-empt work
+   * that is still going — which is why "how long has it been quiet" could never be
+   * the whole rule.
+   */
+  it('leaves a session waiting on a background task alone', () => {
+    const findings = inspectTasks(
+      deps([idleTask()], { sessionWorking: () => false, sessionWaiting: () => true }),
+    )
+    expect(findings).toEqual([]);
+  })
+
+  it('still wakes one that is not waiting on anything', () => {
+    const findings = inspectTasks(
+      deps([idleTask()], { sessionWorking: () => false, sessionWaiting: () => false }),
+    )
+    expect(findings.map((f) => f.kind)).toContain('idle');
+  })
+})

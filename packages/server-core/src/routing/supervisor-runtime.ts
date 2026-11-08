@@ -304,6 +304,44 @@ export class SupervisorRuntime {
    * Supervisor → work. Applies the fan-out, depth and ping-pong guards, then
    * either continues an existing session or spawns a new one.
    */
+  /**
+   * Can this task take more work right now?
+   *
+   * Extracted from the task-target branch because it was *only* there — and the
+   * path that actually ran was `target: { kind: 'new' }` with an `attachTaskId`, which
+   * never reached it. On a real run the user said 「完成 1.2 后暂停」, the task paused
+   * for a decision, and the supervisor still dispatched a fresh session for 1.2 two
+   * minutes later. Two rules now, enforced at every door that carries a task id:
+   *
+   *  - a paused task does not get new work; resuming it is a decision, and the
+   *    board already says paused;
+   *  - a scope is a boundary: once the scoped work has been delivered under it, what
+   *    is left is the user's call, not the supervisor's.
+   */
+  private assertTaskAcceptsWork(
+    task: {
+      id: string;
+      status?: string;
+      spec?: { scope?: string; plan?: Array<{ id: string; status?: string }> };
+      handoffs?: Array<{ outcome?: string }>;
+    },
+    params: { userApproved?: boolean },
+  ): void {
+    if (task.status === 'paused' && !params.userApproved) {
+      throw new DispatchRefused(
+        `${task.id} 现在是暂停状态（可能正在等用户拍板）。不要往暂停的任务里派活：先让用户确认，恢复这个任务再继续。`,
+      );
+    }
+    if (params.userApproved) return;
+    const handedOff = (task.handoffs ?? []).some((h) => h.outcome !== 'needs_decision');
+    const planOpen = Boolean(task.spec?.plan?.some((step) => step.status !== 'done'));
+    if (task.spec?.scope && handedOff && planOpen) {
+      throw new DispatchRefused(
+        `${task.id} 的 scope 只覆盖已交付的那一段（「${task.spec.scope}」），计划里剩下的步骤不在授权范围内。要继续需要用户确认：不要自己派活，向用户说明还剩哪些步骤，等他同意。`,
+      );
+    }
+  }
+
   async dispatch(params: {
     fromSessionId: string;
     target:
@@ -347,35 +385,12 @@ export class SupervisorRuntime {
       const task = this.deps.getTask?.(params.target.taskId);
       if (!task) throw new Error(`Task not found: ${params.target.taskId}`);
       targetKey = `task:${task.id}`;
+      this.assertTaskAcceptsWork(task, params);
       // A task with a live session is already dispatched. Spawning a second
       // worker for it produced two sessions doing the same work, both writing
       // the same task's journal, and a board that could not say who owned it.
       // The instruction is a follow-up to recorded work, so it goes to that
       // session; only an absent or dead session means "start a new run".
-      /**
-       * A scope is a boundary, not a description.
-       *
-       * First real run: the user wrote 「只做 1.1，做完就停下，不要碰 1.2 和 2」 and the
-       * task recorded that as `scope`. The worker did exactly that, stopped, and its
-       * hand-off passed. One minute later the supervisor read the task, saw steps
-       * 1.2/2/3 still open, and dispatched 「继续执行剩余步骤」 into the same session —
-       * the worker then finished all of them. Nobody disobeyed: the worker stopped as
-       * told and the dispatch had no notion that a boundary existed, so "the task is
-       * not complete" silently outranked "the user limited this to one step".
-       *
-       * The check is deliberately narrow: a scope was written, a hand-off has already
-       * been accepted under it, and the plan is not finished. That combination means
-       * the scoped work was delivered and the rest is somebody else's decision. A
-       * worker that is still on its first run, or a task with no scope, is untouched.
-       */
-      const handedOff = (task.handoffs ?? []).some((h: { outcome?: string }) => h.outcome !== 'needs_decision');
-      const planOpen = Boolean(task.spec?.plan?.some((step: { status?: string }) => step.status !== 'done'));
-      if (task.spec?.scope && handedOff && planOpen && !params.userApproved) {
-        throw new DispatchRefused(
-          `${task.id} 的 scope 只覆盖已交付的那一段（「${task.spec.scope}」），计划里剩下的步骤不在授权范围内。要继续需要用户确认：不要自己派活，向用户说明还剩哪些步骤，等他同意。`,
-        );
-      }
-
       const live = task.currentSessionId ? this.deps.getSession(task.currentSessionId) : null;
       existingSessionId = live ? task.currentSessionId : undefined;
       if (task.currentSessionId && !live) {
@@ -401,6 +416,14 @@ export class SupervisorRuntime {
           '新会话必须挂到一条任务上（attachTaskId）。先 task_create，再 dispatch：没有任务的活做完也没人知道它发生过。',
         );
       }
+      // The path that bypassed everything.
+      //
+      // A real run paused T-1 to wait for a decision, and two minutes later this
+      // branch spawned a brand-new session for step 1.2 — the scope check lived in the
+      // `task` branch, which this is not. Every dispatch that names a task now passes
+      // the same gate, including the ones that create a session.
+      const attached = this.deps.getTask?.(params.attachTaskId);
+      if (attached) this.assertTaskAcceptsWork(attached, params);
     }
 
     assertDispatchAllowed({
@@ -429,6 +452,10 @@ export class SupervisorRuntime {
       // file. Same rule for a new worker (its brief carries it) and for a session
       // that is already running (this does).
       const taskId = params.attachTaskId ?? targetSession?.taskId;
+      // Same gate for a follow-up into a live session: the task it belongs to must
+      // still accept work. Without this, 「目标会话」 was a way around both rules.
+      const attached = taskId ? this.deps.getTask?.(taskId) : undefined;
+      if (attached) this.assertTaskAcceptsWork(attached, params);
       const handoff = taskId ? this.deps.handoffContext?.(taskId) : undefined;
       const message = handoff ? `${handoff}\n\n## 这一轮要做的事\n${params.instruction}` : params.instruction;
       await this.deps.sendToSession(existingSessionId, message);

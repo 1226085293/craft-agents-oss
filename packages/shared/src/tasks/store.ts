@@ -35,6 +35,7 @@ import {
   type TaskStatus,
   type TaskTrigger,
 } from './types.ts';
+import { applyDerivedStatuses, normalizePlan } from './plan.ts';
 
 export function getTasksDir(workspaceRoot: string): string {
   return join(workspaceRoot, 'tasks');
@@ -86,8 +87,21 @@ export function normalizeTask(task: Task): Task {
     activeMs: 0,
     ...(typeof task.lastHeartbeatAt === 'number' ? { lastHeartbeatAt: task.lastHeartbeatAt } : {}),
   };
+  /**
+   * Recompute the plan on read; touch nothing else in the spec.
+   *
+   * `normalizeSpec` rebuilds the whole spec from the fields it knows, which silently
+   * drops anything it does not — `tools` among them. Normalising the entire spec here
+   * turned "show the right icon" into "forget which tools this task may use", and the
+   * scope test caught it. Only the plan needs re-deriving, so only the plan is
+   * rebuilt and the rest of `spec` is passed through as found.
+   */
+  const plan = task.spec?.plan
+    ? (applyDerivedStatuses(normalizePlan(task.spec.plan) ?? []) as typeof task.spec.plan)
+    : undefined;
   return {
     ...task,
+    ...(task.spec && plan ? { spec: { ...task.spec, plan } } : {}),
     dependsOn: task.dependsOn ?? [],
     handoffs: task.handoffs ?? [],
     sessionIds: task.sessionIds ?? [],

@@ -531,3 +531,67 @@ describe('scope is a boundary', () => {
     expect(h.sent.length + h.spawned.length).toBe(1);
   })
 })
+
+describe('a paused task does not take new work', () => {
+  const tasks = (overrides: Record<string, unknown> = {}) =>
+    new Map([
+      [
+        'T-1',
+        {
+          id: 'T-1',
+          status: 'paused',
+          currentSessionId: 'sess_worker_1',
+          assigneeAgentId: 'builtin-default',
+          spec: { scope: '只做 1.1', plan: [{ id: '1', status: 'todo' }] },
+          handoffs: [],
+          ...overrides,
+        } as never,
+      ],
+    ])
+
+  /**
+   * The user said 「完成 1.2 后暂停」. The task paused for a decision, and two minutes
+   * later the supervisor spawned a fresh session for 1.2 anyway — through
+   * `target: { kind: 'new' }` with an `attachTaskId`, which never reached the scope
+   * check because that lived in the `task` branch.
+   */
+  it('refuses a brand-new session attached to a paused task', async () => {
+    const h = harness(workspace(), { tasks: tasks() });
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'new' },
+        scope: '继续 1.2',
+        instruction: '读回确认',
+        attachTaskId: 'T-1',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/暂停/);
+    expect(h.spawned).toHaveLength(0);
+  })
+
+  it('refuses a follow-up into the paused task session', async () => {
+    const h = harness(workspace(), { tasks: tasks() });
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-1' },
+        scope: '继续',
+        instruction: '接着做',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/暂停/);
+  })
+
+  it('still lets a task target dispatch when the task is running', async () => {
+    const h = harness(workspace(), { tasks: tasks({ status: 'running', handoffs: [] }) });
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      scope: '继续',
+      instruction: '接着做',
+      parallel: false,
+    });
+    expect(h.sent.length + h.spawned.length).toBe(1);
+  })
+})

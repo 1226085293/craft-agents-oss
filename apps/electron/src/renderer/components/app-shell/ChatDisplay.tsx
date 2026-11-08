@@ -2973,9 +2973,17 @@ function DecisionRequestCard({ request }: { request: NonNullable<Message['decisi
         </div>
       ) : (
         <>
-          {request.options?.length ? (
+          {/*
+            One row, same shape as the task card.
+            「其他」 used to sit on its own line below the options and without a border,
+            so the answers and the escape hatch read as two different kinds of thing —
+            but they are the same choice, offered together. It is a button in the same
+            row here, dashed to say "not one of the asker's", and it still submits
+            nothing: it only opens the box.
+          */}
+          {!typing ? (
             <div className="mt-2.5 flex flex-wrap gap-1.5">
-              {request.options.map((option) => (
+              {request.options?.map((option) => (
                 <button
                   key={option}
                   type="button"
@@ -2985,6 +2993,13 @@ function DecisionRequestCard({ request }: { request: NonNullable<Message['decisi
                   {option}
                 </button>
               ))}
+              <button
+                type="button"
+                onClick={() => setTyping(true)}
+                className="rounded-md border border-dashed border-border px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:border-solid hover:text-foreground"
+              >
+                其他（自己输入）
+              </button>
             </div>
           ) : null}
 
@@ -3025,17 +3040,7 @@ function DecisionRequestCard({ request }: { request: NonNullable<Message['decisi
                 </button>
               </div>
             </div>
-          ) : (
-            // 「其他」 is not a choice: it submits nothing. It only opens the box, so the
-            // card can never be answered by a preset the asker invented.
-            <button
-              type="button"
-              onClick={() => setTyping(true)}
-              className="mt-2.5 rounded-md border border-dashed border-border px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:border-solid hover:text-foreground"
-            >
-              其他（自己写）
-            </button>
-          )}
+          ) : null}
 
           {error ? <div className="mt-2 text-[12px] text-destructive">发送失败：{error}</div> : null}
         </>

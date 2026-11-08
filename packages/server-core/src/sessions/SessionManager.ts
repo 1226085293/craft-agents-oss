@@ -5671,6 +5671,21 @@ export class SessionManager implements ISessionManager {
         // supervisor, and the tool table already hides it from workers.
         managed.agent.taskTools = {
           create: async (payload) => {
+            /**
+             * A task belongs to the working lane, whichever lane created it.
+             *
+             * `supervisorSessionId` is where the watchdog and the acceptance gate
+             * send progress — busy, internal traffic. Recording the creating
+             * supervisor meant a task created from 督导·用户 routed every handoff
+             * verdict and every nudge into the conversation the user reads: the
+             * test task T-9 buried its own 拍板 request under nine
+             * 「〔任务进展〕交接未通过」rows. The lane the user talks in must not be
+             * the lane work reports to.
+             */
+            const ownerSessionId =
+              (managed.supervisorLane ?? 'task') === 'user'
+                ? (await this.ensureSupervisorSession(managed.workspace.id, 'task')).id
+                : managed.id
             const task = this.getTasks(managed.workspace.id).create({
               name: payload.name,
               instruction: payload.instruction,
@@ -5680,7 +5695,7 @@ export class SessionManager implements ISessionManager {
               priority: payload.priority as 0 | 1 | 2 | 3 | 4 | undefined,
               ...(payload.spec ? { spec: normalizeSpec(payload.spec) } : {}),
               ...(payload.trigger ? { trigger: normalizeTrigger(payload.trigger) } : {}),
-              supervisorSessionId: managed.id,
+              supervisorSessionId: ownerSessionId,
               toolCallId: randomUUID(),
             })
             return { id: task.id }
@@ -7232,6 +7247,13 @@ ${request.prompt}`;
       // Acceptance commands run here, not inside the worker: a task must not be
       // able to certify itself. cwd is resolved against the workspace root so a
       // spec can stay portable.
+      stopSession: (sessionId) => {
+        // Fire and forget: pausing must not wait on an abort handshake, and the
+        // session may already be gone.
+        void this.cancelProcessing(sessionId, true).catch((error) => {
+          sessionLog.warn(`[tasks] could not stop ${sessionId}`, { error })
+        })
+      },
       runAcceptanceCommand: async (command, cwd) => {
         const { exec } = await import('child_process')
         const workingDir = cwd
@@ -7336,7 +7358,13 @@ ${request.prompt}`;
           })
         },
         pause: (id, reason, note) => {
+          const before = service.get(id)
           service.setStatus(id, 'paused', { pauseReason: reason, error: note })
+          // The task stopped expecting work; the session must stop producing it.
+          const sessionId = before?.currentSessionId
+          if (sessionId) {
+            void this.cancelProcessing(sessionId, true).catch(() => undefined)
+          }
         },
         denyDecision: (id, note) => service.denyDecision(id, note),
         notify: (sessionId, text) => {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -263,3 +263,66 @@ describe('task scope', () => {
     expect(svc.get(task.id)?.spec?.scope).toBe('kept')
   })
 })
+
+describe('artifact paths resolve against the workspace', () => {
+  /**
+   * The first real run failed seven times on a file that existed.
+   *
+   * `probe` called `existsSync(path)` with the worker's relative path, which
+   * resolved against the host process's cwd — not the workspace. The acceptance
+   * commands resolved against the workspace root, so `test -s docs/a.md` passed
+   * and the gate still said "missing deliverable: docs/a.md". The task was paused
+   * for failures that were never real.
+   */
+  it('accepts a relative deliverable that exists in the workspace', async () => {
+    const root = workspace();
+    const { svc } = service(root);
+    const task = create(svc);
+    svc.startRun(task.id, 'sess_w');
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'a.md'), 'hello');
+
+    const result = await svc.reportHandoff(
+      task.id,
+      {
+        outcome: 'delivered',
+        summary: 'wrote it',
+        artifacts: [{ path: 'docs/a.md' }],
+        verify: { ran: ['test -s docs/a.md'], passed: true },
+      },
+      'sess_w',
+    );
+
+    expect(result.reasons).not.toContain('missing artifact: docs/a.md');
+    expect(result.reasons).not.toContain('missing deliverable: docs/a.md');
+  });
+
+  it('still rejects a deliverable that is genuinely absent', async () => {
+    const root = workspace();
+    const { svc } = service(root);
+    const task = svc.create({
+      name: 'missing',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_2',
+      spec: {
+        deliverables: [{ kind: 'file', path: 'docs/nope.md', required: true }],
+      } as never,
+    });
+    svc.startRun(task.id, 'sess_w');
+
+    const result = await svc.reportHandoff(
+      task.id,
+      {
+        outcome: 'delivered',
+        summary: 'claim',
+        artifacts: [{ path: 'docs/nope.md' }],
+        verify: { ran: ['test -s docs/nope.md'], passed: true },
+      },
+      'sess_w',
+    );
+
+    expect(result.passed).toBe(false);
+    expect(result.reasons).toContain('missing deliverable: docs/nope.md');
+  });
+});

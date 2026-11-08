@@ -8,6 +8,7 @@
  */
 
 import { existsSync, statSync } from 'fs';
+import { isAbsolute, join } from 'path';
 import { createLogger } from '@craft-agent/shared/utils';
 
 const log = createLogger('tasks');
@@ -65,6 +66,17 @@ export interface TaskServiceDeps {
    * decision itself is a lookup in the plan, so it does not need a model either.
    */
   startNextLeg?: (task: Task, agent: string | undefined) => Promise<boolean>;
+  /**
+   * Stop the session that is working on a task.
+   *
+   * Pausing a task used to change a field and nothing else. Observed on the first
+   * real run: T-9 was paused for failures at handoff #3 and kept reporting —
+   * handoffs #4 through #7 arrived after the pause, one of them finished a plan
+   * step, and the failure counter climbed to 7 against a limit of 3. A task that
+   * says paused while a worker is still editing its plan is two different answers
+   * to "is this running".
+   */
+  stopSession?: (sessionId: string) => void;
   /** Run one acceptance command; resolves to exit code + output tail. */
   runAcceptanceCommand?: (command: string, cwd?: string) => Promise<{ exitCode: number | null; output?: string }>;
   /**
@@ -681,7 +693,7 @@ export class TaskService {
     const handoff = normalizeHandoff(raw, fromSessionId, now);
 
     const acceptance = await this.runAcceptance(task);
-    const verdict = checkHandoffRules(handoff, (path) => this.probe(path), {
+    const verdict = checkHandoffRules(handoff, (path) => this.probe(this.resolveArtifactPath(task, path)), {
       requiredDeliverables: this.requiredDeliverables(task.spec),
       ...(acceptance ? { acceptance } : {}),
     });
@@ -784,6 +796,7 @@ export class TaskService {
       next = applyTransition(next, 'completed', { now }).task;
     } else if (!accepted && shouldTripFuse(next.lifecycle)) {
       next = applyTransition(next, 'paused', { now, pauseReason: 'failures' }).task;
+      this.stopWorker(next);
     } else if (handoff.outcome === 'handoff' && isSpinningInPlace(next)) {
       //
       // "Still working on it" repeated without the plan moving is not progress.
@@ -871,6 +884,41 @@ export class TaskService {
     }
 
     return { task: next, handoff, passed: accepted, reasons, compactionPending };
+  }
+
+  /**
+   * Where a relative artifact path actually lives.
+   *
+   * `probe` used to call `existsSync(path)` on whatever the worker wrote, which
+   * resolved against the *host process's* working directory — not the workspace.
+   * The acceptance commands resolved against the workspace root, so the same
+   * handoff could pass `test -s docs/a.md` and still be rejected with "missing
+   * deliverable: docs/a.md". The worker was telling the truth and the gate was
+   * looking in the wrong place, forever: seven handoffs, seven rejections, a task
+   * paused for failures that never existed.
+   *
+   * One base for both layers now: the task's `cwd` when it has one, else the
+   * workspace root — the same fallback `runAcceptanceCommand` uses.
+   */
+  private resolveArtifactPath(task: Task, path: string): string {
+    const raw = path.trim().replace(/^\.\//, '');
+    if (isAbsolute(raw)) return raw;
+    const cwd = task.spec?.cwd;
+    const base = cwd
+      ? (isAbsolute(cwd) ? cwd : join(this.deps.workspaceRoot, cwd))
+      : this.deps.workspaceRoot;
+    return join(base, raw);
+  }
+
+  /** Silence the session that was working, after the task stops expecting it. */
+  private stopWorker(task: Task): void {
+    const sessionId = task.currentSessionId;
+    if (!sessionId || !this.deps.stopSession) return;
+    try {
+      this.deps.stopSession(sessionId);
+    } catch (error) {
+      log.warn(`[tasks] could not stop the worker of ${task.id}`, { error: String(error) });
+    }
   }
 
   /** Existence + readability + non-emptiness, in one probe. */

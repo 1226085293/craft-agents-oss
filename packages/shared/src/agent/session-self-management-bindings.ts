@@ -89,6 +89,28 @@ export function attachSessionSelfManagementBindings(
     enumerable: true,
   });
 
+  /**
+   * Without this line, `/stop` sent through `send_agent_message` is just text.
+   *
+   * The handler asks `ctx.isSessionCommand` to decide whether to wrap the message in the
+   * sender envelope, and the envelope is what buries the token: the target sees
+   * 「[Message from session …] --- /stop」 instead of `/stop`, parses it as ordinary chat, and
+   * queues it behind a turn that never ends. The callback existed on the registry and was
+   * injected by SessionManager, but nothing copied it onto the tool context — so the lookup
+   * returned undefined, `isCommand` was false, and every stop request from one agent to
+   * another became an ineffective utterance.
+   *
+   * Observed: the supervisor reported 「已把 /stop 发给当前会话（队列中）」, the task was marked
+   * completed, and the worker kept running until it stalled on its own.
+   */
+  Object.defineProperty(context, 'isSessionCommand', {
+    get() {
+      return getSessionScopedToolCallbacks(sessionId)?.isSessionCommand;
+    },
+    configurable: true,
+    enumerable: true,
+  });
+
   // Subscription bindings — follow / unfollow another session's turns.
   Object.defineProperty(context, 'subscribeSessionFn', {
     get() {

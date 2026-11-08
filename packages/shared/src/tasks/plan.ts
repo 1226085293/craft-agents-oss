@@ -283,10 +283,23 @@ export function lastPlanChangeAt(plan: PlanStep[] | undefined): number {
  * keeping a stale row would make the plan disagree with the task. A finished
  * step stays, because it is the record of what was accomplished.
  */
+export interface PlanPatchScope {
+  /**
+   * Step ids the person authorised for this run.
+   *
+   * `spec.scope` already says it in prose — 「完成 1.2 后暂停，不执行步骤 2」 — and nothing
+   * read it. Observed on a real run: the boundary was written down in those words, and the
+   * worker went on to mark 1.2, 2 and 2.1 done and delivered the whole task. A sentence
+   * cannot stop a tool call; a list can.
+   */
+  authorizedSteps?: string[];
+}
+
 export function applyPlanPatch(
   plan: PlanStep[] | undefined,
   patch: { id: string; status?: PlanStepStatus; title?: string; note?: string; agent?: string; remove?: boolean },
   now = Date.now(),
+  scope: PlanPatchScope = {},
 ): { plan: PlanStep[]; changed: boolean; error?: string } {
   const steps = [...(plan ?? [])];
   const index = steps.findIndex((step) => step.id === patch.id);
@@ -325,6 +338,28 @@ export function applyPlanPatch(
     }
     steps.splice(index, 1);
     return { plan: steps, changed: true };
+  }
+
+  /**
+   * Refuse to work past the authorised slice.
+   *
+   * Only status moves are gated: writing a note or renaming is harmless, but marking a
+   * step `doing` or `done` claims work that was never authorised. The refusal names the
+   * boundary and the way out, because a wall without an exit is what makes a worker
+   * pretend — one previous run "cleared" the plan by removing the steps instead.
+   */
+  const authorized = scope.authorizedSteps
+  const moving = patch.status === 'doing' || patch.status === 'done'
+  if (authorized && authorized.length > 0 && moving && !authorized.includes(patch.id)) {
+    const allowed = steps.filter((step) => authorized.includes(step.id)).map((step) => step.id)
+    return {
+      plan: steps,
+      changed: false,
+      error:
+        `${patch.id} 不在本次授权范围内（授权：${allowed.join('、') || '无'}）。` +
+        '不要把它标成完成，也不要移除它——保持原样，用 `report_result`（outcome 用 handoff）交接，' +
+        '由督导决定是否扩大范围。',
+    }
   }
 
   if (index < 0) {

@@ -102,6 +102,15 @@ export interface TaskSpec {
    * something arbitrary (and misses the point).
    */
   scope?: string;
+  /**
+   * The steps this run is allowed to touch, by id.
+   *
+   * `scope` is the sentence a person said; this is the same boundary in a form code can
+   * enforce. Both exist because they answer different questions: the sentence tells a
+   * reader why, the list stops a worker marking step 2 done when it was told to stop
+   * after 1.2.
+   */
+  authorizedSteps?: string[];
   deliverables?: TaskDeliverable[];
   acceptance?: TaskAcceptanceItem[];
   permissions?: TaskPermissions;

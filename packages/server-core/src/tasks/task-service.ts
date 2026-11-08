@@ -398,7 +398,9 @@ export class TaskService {
   } {
     const task = this.require(id);
     const now = this.now();
-    const result = applyPlanPatch(task.spec?.plan, patch, now);
+    const result = applyPlanPatch(task.spec?.plan, patch, now, {
+      authorizedSteps: task.spec?.authorizedSteps,
+    });
     if (result.error) return { ok: false, error: result.error };
     if (!result.changed) return { ok: true, plan: result.plan };
 

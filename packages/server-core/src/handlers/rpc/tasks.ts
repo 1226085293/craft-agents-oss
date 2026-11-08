@@ -179,12 +179,22 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       const supervisor = task.supervisorSessionId
       if (supervisor && manager.sendMessage) {
         const remaining = (task.spec?.plan ?? []).filter((step) => step.status !== 'done')
-        await manager.sendMessage(
-          supervisor,
-          `〔任务 ${task.id} 拍板答复〕${text.trim()}` +
-            (remaining.length ? `
+        /**
+         * Fire and forget. `sendMessage` resolves when the whole turn has finished
+         * streaming, so awaiting it kept this RPC open for the length of a model turn —
+         * the answer had already been persisted and was already visible in the
+         * supervisor's transcript, while the card still showed its buttons and the
+         * person clicked again. The reply is delivered either way; the card must not
+         * wait for the work it triggered.
+         */
+        void manager
+          .sendMessage(
+            supervisor,
+            `〔任务 ${task.id} 拍板答复〕${text.trim()}` +
+              (remaining.length ? `
 （该任务当前未完成步骤：${remaining.map((step) => step.id).join('、')}）` : ''),
-        )
+          )
+          .catch(() => undefined)
       }
       broadcast(workspaceId)
       return { accepted: true }

@@ -127,6 +127,22 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
     contract.push(`计划进度：${progress}/${spec.plan.length}`);
   }
   if (spec?.scope) contract.push(`检查范围：${spec.scope}`);
+  if (spec?.authorizedSteps?.length) {
+    /**
+     * The boundary, in the form the tool actually enforces.
+     *
+     * 「完成 1.2 后暂停，不执行步骤 2」 was already in `scope` and the worker ran 1.2, 2 and
+     * 2.1 anyway. A rule the worker only meets as a refusal arrives after it has spent the
+     * turn, so the slice is stated up front as well — with the same ids the refusal uses.
+     */
+    const outside = (spec.plan ?? [])
+      .filter((step) => !spec.authorizedSteps!.includes(step.id))
+      .map((step) => step.id);
+    contract.push(
+      `本次授权步骤：${spec.authorizedSteps.join('、')}` +
+        (outside.length ? `（不在授权内：${outside.join('、')}——不要开工、不要标完成、不要移除，留给后续）` : ''),
+    );
+  }
   if (contract.length) sections.push(`## 执行边界\n${bullet(contract)}`);
 
   //

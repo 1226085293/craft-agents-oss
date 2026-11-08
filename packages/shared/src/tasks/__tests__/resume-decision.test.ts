@@ -81,6 +81,40 @@ describe('may this task run', () => {
     if (verdict.allowed) expect(verdict.authorizedSteps).toEqual(['1', '1.1', '1.2'])
   })
 
+  /**
+   * The whole chain, in the state it actually failed in.
+   *
+   * 「完成 1.2 后暂停」 was answered while 1.2 was not yet in the plan. The boundary came back
+   * undefined, the pause lifted, the supervisor resumed the old session with 「继续任务 T-1 …
+   * 计划进度 1/3」, and the worker ran 1.2, 2 and 2.1 and completed the task.
+   */
+  it('bounds the resume when the reply names a step the plan has not reached', () => {
+    const behind = [
+      { id: '1', title: 'a', status: 'done' as const },
+      { id: '1.1', title: 'b', status: 'done' as const },
+      { id: '2', title: 'c', status: 'todo' as const },
+    ]
+    const verdict = resumeDecisionFor(
+      task({
+        spec: { plan: behind },
+        decision: {
+          category: 'direction',
+          label: 'x',
+          reason: 'x',
+          askedAt: 1,
+          deadlineAt: 2,
+          resolvedAt: 3,
+          answer: { text: '完成1.2后暂停', at: 4 },
+        },
+      }),
+    )
+
+    expect(verdict.allowed).toBe(true)
+    // 1.2 is not in the plan, so the boundary is everything before it — and crucially it is
+    // not `undefined`, which is what let the run continue unbounded.
+    if (verdict.allowed) expect(verdict.authorizedSteps).toEqual(['1', '1.1'])
+  })
+
   it('allows an ordinary resume with no boundary when the reply set none', () => {
     const verdict = resumeDecisionFor(
       task({

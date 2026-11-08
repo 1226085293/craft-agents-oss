@@ -17,6 +17,24 @@ import type { PlanStep } from './plan.ts';
 /** Words that mean "stop when you get here". */
 const STOP_WORDS = /(暂停|停|停止|到此|就此|不要继续|先不要|结束|停一下|停下)/;
 
+/** `1.2` → [1, 2]; comparable without depending on the plan containing it. */
+function idKey(id: string): number[] {
+  return id
+    .split('.')
+    .map((part) => Number.parseInt(part, 10))
+    .filter((n) => Number.isFinite(n));
+}
+
+function compareKeys(a: number[], b: number[]): number {
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i += 1) {
+    const left = a[i] ?? 0;
+    const right = b[i] ?? 0;
+    if (left !== right) return left - right;
+  }
+  return 0;
+}
+
 /** A step id as people write it: 1.2, 步骤 2, 第 3 步. */
 const STEP_ID = /(?:步骤\s*|第\s*)?(\d+(?:\.\d+)*)\s*(?:步|小节)?/g;
 
@@ -33,27 +51,49 @@ export function authorizedStepsFromAnswer(
   const text = answer.trim();
   if (!text) return undefined;
 
-  const known = new Set((plan ?? []).map((step) => step.id));
-  if (known.size === 0) return undefined;
+  const steps = plan ?? [];
+  if (steps.length === 0) return undefined;
 
+  /**
+   * Ordered by id, not by position in the plan.
+   *
+   * The previous version required the named step to already exist — and 「完成 1.2 后暂停」 is
+   * answered exactly when 1.2 does *not* yet exist (the worker has not planned that section,
+   * or the section was expanded after the reply). So the boundary came back `undefined`, the
+   * pause lifted with nothing to hold the run, the worker was resumed with the whole
+   * remaining plan, and the task was completed past the boundary it had just been given.
+   * That is the bug that kept coming back.
+   *
+   * Comparing ids numerically instead means a step named before it exists still bounds the
+   * run: everything up to and including 1.2 is authorised, 2 and later are not.
+   */
   const mentioned: string[] = [];
   for (const match of text.matchAll(STEP_ID)) {
     const id = match[1] ?? '';
-    // Only ids the plan actually has: 「1.2」 in a sentence about something else, or a
-    // version number, must not become a step.
-    if (known.has(id) && !mentioned.includes(id)) mentioned.push(id);
+    if (!id) continue;
+    /**
+     * Skip a number that is part of a larger token.
+     *
+     * Now that the id does not have to exist in the plan, 「v1.9」 or 「3.5 小时」 would
+     * otherwise become a step and bound the run at an arbitrary point. What precedes the
+     * match is the only way to tell: a version number, a decimal, a clock time.
+     */
+    const before = text.slice(0, match.index ?? 0)
+    if (/[A-Za-z0-9.．]$/.test(before)) continue;
+    if (!mentioned.includes(id)) mentioned.push(id);
   }
   if (mentioned.length === 0) return undefined;
 
-  // Today's worker can only be told where to stop, not which single step to do:
-  // 「完成 1.2」 means "get to 1.2", so everything up to it is authorised and the rest is not.
-  const lastIndex = Math.max(...mentioned.map((id) => (plan ?? []).findIndex((s) => s.id === id)));
-  const ordered = (plan ?? []).slice(0, lastIndex + 1).map((step) => step.id);
-  const beyond = (plan ?? []).slice(lastIndex + 1).map((step) => step.id);
+  const ceiling = mentioned.map(idKey).sort((a, b) => compareKeys(a, b)).at(-1);
+  if (!ceiling) return undefined;
 
-  // A boundary only exists if the reply actually asks to stop, and there is something
-  // beyond the named step to stop at. 「1.2 也做完」 is not a boundary.
-  if (!STOP_WORDS.test(text) || beyond.length === 0) return undefined;
+  const authorized = steps.filter((step) => compareKeys(idKey(step.id), ceiling) <= 0).map((s) => s.id);
+  const beyond = steps.filter((step) => compareKeys(idKey(step.id), ceiling) > 0).map((s) => s.id);
 
-  return ordered;
+  // A boundary only exists if the reply asks to stop AND something is actually left beyond
+  // it. 「1.2 也做完」 is permission to continue, and stopping after the last step is just
+  // finishing — neither is a slice.
+  if (!STOP_WORDS.test(text) || beyond.length === 0 || authorized.length === 0) return undefined;
+
+  return authorized;
 }

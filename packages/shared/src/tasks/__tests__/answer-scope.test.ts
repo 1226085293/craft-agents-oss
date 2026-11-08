@@ -26,6 +26,36 @@ describe('a reply can authorise a slice', () => {
     expect(authorizedStepsFromAnswer('做完 1.2 就停下', plan)).toEqual(['1', '1.1', '1.2'])
   })
 
+  /**
+   * The case that kept coming back: the step named in the reply is not in the plan yet.
+   *
+   * 「完成 1.2 后暂停」 is answered exactly when 1.2 has not been planned — the worker has not
+   * expanded that section, or expanded it after the reply. Requiring the id to already exist
+   * returned `undefined`, the pause lifted with nothing holding the run, and the worker was
+   * resumed with the whole remaining plan: the task was completed past the boundary it had
+   * just been given.
+   */
+  it('bounds a run even when the named step does not exist yet', () => {
+    const unfinished: PlanStep[] = [
+      { id: '1', title: '写文件', status: 'done' },
+      { id: '1.1', title: '创建 docs/a.md', status: 'done' },
+      { id: '2', title: '收尾', status: 'todo' },
+    ]
+
+    expect(authorizedStepsFromAnswer('完成1.2后暂停', unfinished)).toEqual(['1', '1.1'])
+  })
+
+  it('orders by id, not by position in the plan', () => {
+    // A plan stored out of order must still bound at the same place.
+    const shuffled: PlanStep[] = [
+      { id: '2', title: '收尾', status: 'todo' },
+      { id: '1.2', title: '读回确认', status: 'todo' },
+      { id: '1', title: '写文件', status: 'done' },
+    ]
+
+    expect(authorizedStepsFromAnswer('完成 1.2 后暂停', shuffled)).toEqual(['1.2', '1'])
+  })
+
   it('refuses to narrow when the reply does not ask to stop', () => {
     // 「1.2 也做完」 is permission to continue, not a boundary.
     expect(authorizedStepsFromAnswer('1.2 也做完', plan)).toBeUndefined()

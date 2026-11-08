@@ -586,11 +586,25 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
                 `decision.reason` is what the asker is actually asking; the summary stays as
                 the fallback for tasks recorded before `reason` existed.
               */}
+              {/*
+                The situation, then the question.
+                These are two different sentences and both matter: `reason` is the rule's
+                diagnosis (「连续 3 次交接但计划没有推进」) — why a person is needed at all —
+                and `question` is what the relay actually asked. One used to overwrite the
+                other, so the card showed a restatement of the question and the finding
+                behind it was gone.
+              */}
               <p className="td-body mt-1 whitespace-pre-wrap text-foreground/90">
-                {detail.decision?.reason?.trim() ||
+                {detail.decision?.question?.trim() ||
+                  detail.decision?.reason?.trim() ||
                   detail.handoffs.at(-1)?.summary ||
                   '执行会话停下来请求决定，但没留下说明。'}
               </p>
+              {detail.decision?.question?.trim() && detail.decision?.reason?.trim() ? (
+                <p className="mt-1.5 whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">
+                  {detail.decision.reason}
+                </p>
+              ) : null}
               {detail.decision?.label?.trim() ? (
                 <p className="mt-1 text-[11px] text-amber-300/80">{detail.decision.label}</p>
               ) : null}

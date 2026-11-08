@@ -169,7 +169,15 @@ describe('handoff gate', () => {
       options: ['仅放行 1.2', '放行 1.2 和 2', '到此为止'],
     });
 
-    expect(after?.decision?.reason).toBe('仅放行 1.2，其余之后再定？');
+    /**
+     * The relay's words go to `question`, not over `reason`.
+     *
+     * `reason` is the rule's diagnosis — 「连续 3 次交接但计划没有推进（当前步骤：1）」 — and it
+     * is the only place that finding exists. Overwriting it left the task card restating the
+     * question while the explanation of what went wrong was gone.
+     */
+    expect(after?.decision?.question).toBe('仅放行 1.2，其余之后再定？');
+    expect(after?.decision?.reason).toBe(before?.reason);
     expect(after?.decision?.options).toEqual(['仅放行 1.2', '放行 1.2 和 2', '到此为止']);
     // Wording, not a state change: the pause, its clock and its kind are all untouched.
     expect(after?.status).toBe('paused');

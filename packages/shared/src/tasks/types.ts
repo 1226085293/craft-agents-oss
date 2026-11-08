@@ -312,6 +312,17 @@ export interface TaskDecision {
   /** The answers the asker enumerated. Absent means approve-or-stop. */
   options?: string[];
   /**
+   * The question as the relaying session put it, kept alongside `reason`.
+   *
+   * `reason` is written by the rule that detected the situation — 「连续 3 次交接但计划没有推进
+   * （当前步骤：1）」 — and that sentence is the diagnosis: why this reached a person at all.
+   * The relay overwrote it with its own phrasing, so the task card's explanation of the
+   * problem was replaced by a restatement of the question, and the original finding existed
+   * nowhere on the task. Both texts have a job: one says what went wrong, the other says
+   * what is being asked.
+   */
+  question?: string;
+  /**
    * What the person replied, once they have.
    *
    * The card's "answered" state used to live in React state only, so a reload brought

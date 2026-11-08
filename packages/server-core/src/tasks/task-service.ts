@@ -608,7 +608,9 @@ export class TaskService {
       decision: {
         ...decision,
         ...(wording.label?.trim() ? { label: wording.label.trim() } : {}),
-        ...(wording.question?.trim() ? { reason: wording.question.trim() } : {}),
+        // Written to its own field, not over `reason`: the diagnostic sentence is what
+        // explains why a person is being asked, and it cannot be reconstructed later.
+        ...(wording.question?.trim() ? { question: wording.question.trim() } : {}),
         ...(options.length ? { options } : {}),
       },
       updatedAt: this.now(),

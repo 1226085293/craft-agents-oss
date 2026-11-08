@@ -15,6 +15,7 @@ const log = createLogger('tasks');
 import {
   acceptanceItems,
   applyTransition,
+  authorizedStepsFromAnswer,
   attachSession,
   checkBudget,
   checkDependencies,
@@ -659,8 +660,19 @@ export class TaskService {
      * The person has spoken; that IS the resolution. What the words mean is still the
      * supervisor's to interpret when it runs — but the pause ends here.
      */
+    /**
+     * If the reply states a boundary, record the boundary — not just the words.
+     *
+     * 「完成 1.2 后暂停」 was answered on a real run, the pause lifted, and the supervisor
+     * resumed the task without narrowing anything: the worker ran 1.2, 2 and 2.1 and
+     * delivered work the person had asked to stop. Relying on the supervisor to translate
+     * the sentence means the boundary exists only if a model turn succeeds, and that turn
+     * had already been rate-limited once.
+     */
+    const derived = authorizedStepsFromAnswer(trimmed, task.spec?.plan)
     const next: Task = {
       ...task,
+      ...(derived?.length ? { spec: { ...task.spec, authorizedSteps: derived } as Task['spec'] } : {}),
       decision: { ...decision, answer: { text: trimmed, at: now }, resolvedAt: now, resolution: 'approved' },
       updatedAt: now,
     };

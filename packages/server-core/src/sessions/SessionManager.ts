@@ -2540,6 +2540,28 @@ export class SessionManager implements ISessionManager {
    *
    * Read from the stored card rather than remembered, so it survives a restart.
    */
+  /**
+   * The task a supervisor's open question is about, when the card did not name one.
+   *
+   * A card delivered without a `taskId` used to answer nothing: the renderer could only
+   * fall back to a plain message, and the task supervisor received bare words — observed,
+   * 「完成1.2后暂停」 arrived with no task at all. Reverse-lookup from the asking session is
+   * the last resort, and it belongs here because only the server can see every task.
+   */
+  openTaskFor(sessionId: string): string | undefined {
+    try {
+      const live = [...this.sessions.values()].find((managed) => managed.id === sessionId)
+      if (!live) return undefined
+      const open = this.getTasks(live.workspace.id)
+        .list()
+        .filter((task) => task.supervisorSessionId === sessionId)
+        .filter((task) => task.status === 'paused' && task.pauseReason === 'needs_decision')
+      return (open.length === 1 ? open[0] : open.at(-1))?.id
+    } catch {
+      return undefined
+    }
+  }
+
   decisionAskerFor(taskId: string): string | undefined {
     for (const managed of this.sessions.values()) {
       for (let i = managed.messages.length - 1; i >= 0; i -= 1) {

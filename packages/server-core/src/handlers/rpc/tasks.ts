@@ -155,9 +155,32 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
 
   server.handle(
     RPC_CHANNELS.taskboard.ANSWER,
-    async (_ctx: unknown, workspaceId: string, id: string, text: string) => {
+    async (
+      _ctx: unknown,
+      workspaceId: string,
+      id: string,
+      text: string,
+      /**
+       * The session the card was shown in, used only when the card carried no task id.
+       *
+       * Cards delivered before the asker named a task have no id, and the renderer could
+       * then only send bare words — observed: 「完成1.2后暂停」 reached the task supervisor
+       * with nothing identifying which task it answered.
+       */
+      askedBySessionId?: string,
+    ) => {
       const service = tasksFor(deps, workspaceId)
-      const task = service.recordDecisionAnswer(id, text)
+      const resolvedId =
+        id ||
+        (askedBySessionId
+          ? (deps.sessionManager as unknown as { openTaskFor?: (s: string) => string | undefined }).openTaskFor?.(
+              askedBySessionId,
+            )
+          : undefined)
+      if (!resolvedId) {
+        return { accepted: false, reason: 'no task to answer — the card did not say which one' }
+      }
+      const task = service.recordDecisionAnswer(resolvedId, text)
       if (!task) {
         // No open question: say so instead of accepting words nobody will read.
         return { accepted: false, reason: 'no pending decision on this task' }
@@ -186,7 +209,7 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
        * owner, so the lane holding the card never learned the question was closed — it kept
        * offering (or hiding) a card for a decision that had already been answered.
        */
-      const askedBy = manager.decisionAskerFor?.(id)
+      const askedBy = manager.decisionAskerFor?.(resolvedId)
       const supervisor = task.supervisorSessionId
       if (supervisor && manager.sendMessage) {
         const remaining = (task.spec?.plan ?? []).filter((step) => step.status !== 'done')

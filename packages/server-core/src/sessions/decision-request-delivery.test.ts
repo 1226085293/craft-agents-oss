@@ -168,6 +168,34 @@ describe('a decision request is written for the reader', () => {
     expect(asked?.decisionRequest?.taskIdentifier).toBe('T-1')
   })
 
+  /**
+   * A card that names no task must still be answerable.
+   *
+   * Observed: 「完成1.2后暂停」 reached the task supervisor as bare words, because the card
+   * carried no task id and the renderer had nothing else to send. The asking session is the
+   * one thing every card has, so it is the last resort for finding the task.
+   */
+  it('finds the task from the asking session when the card named none', () => {
+    const requester = buildRequester()
+    ;(sm as unknown as { getTasks: unknown }).getTasks = () => ({
+      list: () => [
+        {
+          id: 'T-9',
+          status: 'paused',
+          pauseReason: 'needs_decision',
+          supervisorSessionId: 'sess_asker',
+          decision: { askedAt: Date.now(), resolvedAt: Date.now() },
+        },
+      ],
+    })
+
+    // Resolved decision, still paused: the open-decision lookup finds nothing, which is
+    // exactly the state a follow-up card is raised in.
+    expect(
+      (sm as unknown as { openTaskFor: (s: string) => string | undefined }).openTaskFor('sess_asker'),
+    ).toBe('T-9')
+  })
+
   it('writes a card instead of input, and starts no turn', async () => {
     const requester = buildRequester();
     await (

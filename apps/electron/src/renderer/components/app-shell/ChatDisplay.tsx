@@ -2384,6 +2384,7 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
                             onOpenFile={openFileInSession}
                             onOpenUrl={onOpenUrl}
                             sessionId={session?.id}
+                            workspaceId={workspaceId}
                             onRetry={turn.message.role === 'error' ? () => {
                               const msgs = session?.messages
                               if (!msgs) return
@@ -3006,18 +3007,36 @@ function DecisionRequestCard({
          * delivers a line naming it. Only a card with no task falls back to a plain
          * message to the asker.
          */
-        if (request.taskIdentifier) {
-          const scope = workspaceId
-          const answerTask = (window.electronAPI as unknown as {
-            tasksAnswer?: (workspaceId: string, taskId: string, text: string) => Promise<{ accepted?: boolean }>
-          }).tasksAnswer
-          if (scope && answerTask) {
-            const result = await answerTask(scope, request.taskIdentifier, trimmed)
-            if (result?.accepted === false) throw new Error('这个任务已经没有待答复的问题')
-            setSent(trimmed)
-            setTyping(false)
-            return
+        /**
+         * Always answer through the task, even when the card does not name one.
+         *
+         * Falling back to a plain message was how 「完成1.2后暂停」 reached the task
+         * supervisor as bare words with nothing saying which task it answered — and a card
+         * with no task id was exactly the case that fell back. The RPC resolves the task
+         * from the asking session when the card is silent, so there is no path left that
+         * loses the identity.
+         */
+        const answerTask = (window.electronAPI as unknown as {
+          tasksAnswer?: (
+            workspaceId: string,
+            taskId: string,
+            text: string,
+            askedBySessionId?: string,
+          ) => Promise<{ accepted?: boolean; reason?: string }>
+        }).tasksAnswer
+        if (workspaceId && answerTask) {
+          const result = await answerTask(
+            workspaceId,
+            request.taskIdentifier ?? '',
+            trimmed,
+            request.askedBySessionId,
+          )
+          if (result?.accepted === false) {
+            throw new Error(result.reason ?? '这个任务已经没有待答复的问题')
           }
+          setSent(trimmed)
+          setTyping(false)
+          return
         }
         await window.electronAPI.sendMessage(request.askedBySessionId, trimmed)
         setSent(trimmed)

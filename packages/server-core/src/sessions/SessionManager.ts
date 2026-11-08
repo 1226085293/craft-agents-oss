@@ -7906,12 +7906,18 @@ ${request.prompt}`;
     managed.lastMessageRole = 'user'
     this.persistSession(managed)
 
+    // `user_message` is the event the renderer actually listens for. The old name,
+    // `message_appended`, exists in this file and nowhere else — no consumer, in any
+    // package. `as never` silenced the type error that would have caught it, so the row
+    // reached disk and never reached the screen: the panel kept showing the last thing
+    // before the delivery until something forced a reload.
     this.sendEvent(
       {
-        type: 'message_appended',
+        type: 'user_message',
         sessionId: managed.id,
         message,
-      } as never,
+        status: 'accepted',
+      },
       managed.workspace.id,
     )
 

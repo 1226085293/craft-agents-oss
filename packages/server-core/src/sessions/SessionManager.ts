@@ -36,7 +36,7 @@ import {
 } from '@craft-agent/shared/agents'
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
-import { readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatNextLegBrief, formatPlanRuleBlock, nextLeg, stepParent, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
+import { readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatNextLegBrief, formatPlanRuleBlock, nextLeg, stepParent, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -1419,6 +1419,8 @@ export interface ManagedSession {
   agentSnapshot?: AgentSnapshot
   /** 'supervisor' coordinates; 'worker' (default) does the work. */
   role?: 'supervisor' | 'worker'
+  /** Which supervisor conversation this is; see `Session.supervisorLane`. */
+  supervisorLane?: 'user' | 'task'
   taskId?: string
   /**
    * Tools this session may use, resolved once when it was created.
@@ -4567,6 +4569,7 @@ export class SessionManager implements ISessionManager {
       agentId: resolvedAgent.id,
       agentSnapshot,
       role: options?.role,
+      supervisorLane: options?.supervisorLane,
       taskId: options?.taskId,
       spawnDepth: options?.spawnDepth,
     })
@@ -5645,10 +5648,10 @@ export class SessionManager implements ISessionManager {
             await this.sendMessage(sessionId, text)
           },
           writeUserVisible: async (text) => {
-            await this.surfaceSupervisorMessage(managed, text)
+            await this.deliverToUserLane(managed, text)
           },
           askUser: async (questions) => {
-            await this.surfaceSupervisorQuestion(managed, questions)
+            await this.deliverQuestionToUserLane(managed, questions)
           },
           dispatchViaSupervisor: async (params) => {
             const runtime = this.getSupervisorRuntime(managed.workspace.id)
@@ -5770,7 +5773,9 @@ export class SessionManager implements ISessionManager {
             // plan that updates only on a manual page switch is not a progress
             // indicator; every accepted patch has to reach the board.
             if (result.ok) this.notifyTasksChanged(managed.workspace.id)
-            return result.ok ? { ok: true } : { ok: false, ...(result.error ? { error: result.error } : {}) }
+            return result.ok
+              ? { ok: true, ...(result.handedOffTo ? { handedOffTo: result.handedOffTo } : {}) }
+              : { ok: false, error: result.error ?? 'the plan was not updated' }
           },
         }
       }
@@ -7165,7 +7170,11 @@ ${request.prompt}`;
       workspaceRoot: workspace.rootPath,
       sessionExists: (sessionId) => this.sessions.has(sessionId),
       wakeSupervisor: (sessionId, text) => {
-        void this.sendMessage(sessionId, text).catch((error) => {
+        // The supervisor cannot see who spoke. Every system nudge therefore names
+        // its origin: a message that looks like the user talking is acted on as an
+        // instruction, and "交接通过" read as a user request sends the supervisor
+        // looking for a person who never asked for anything.
+        void this.sendMessage(sessionId, `〔任务进展〕${text}`).catch((error) => {
           sessionLog.warn('Failed to wake supervisor', { sessionId, error })
         })
       },
@@ -7316,12 +7325,23 @@ ${request.prompt}`;
       const stop = startWatchdog({
         listTasks: () => service.list(),
         sessionExists: (sessionId) => this.sessions.has(sessionId),
+        // A session that exists is not a session that is working: it stays in the
+        // list after its turn ends. Without this distinction the watchdog answered
+        // "alive" for a task nobody was driving.
+        sessionWorking: (sessionId) => this.sessions.get(sessionId)?.isProcessing,
+        wakeSession: (task, sessionId) => {
+          service.noteWake(task.id)
+          void this.sendMessage(sessionId, formatIdleWakeBrief(task)).catch((error) => {
+            sessionLog.warn(`[tasks] could not wake the idle session of ${task.id}`, { error })
+          })
+        },
         pause: (id, reason, note) => {
           service.setStatus(id, 'paused', { pauseReason: reason, error: note })
         },
         denyDecision: (id, note) => service.denyDecision(id, note),
         notify: (sessionId, text) => {
-          void this.sendMessage(sessionId, text).catch(() => undefined)
+          // Origin, not content: see the note on `wakeSupervisor`.
+          void this.sendMessage(sessionId, `〔巡检〕${text}`).catch(() => undefined)
         },
       }, undefined, {
         // A watchdog that throws every pass looks exactly like one that finds
@@ -7624,9 +7644,24 @@ ${request.prompt}`;
    * user should find in the list — forty copies named 督导 was the symptom of
    * every click creating a fresh one.
    */
-  async ensureSupervisorSession(workspaceId: string): Promise<Session> {
-    const existing = this.findOnDutySupervisor(workspaceId)
+  async ensureSupervisorSession(
+    workspaceId: string,
+    lane: 'user' | 'task' = 'task',
+  ): Promise<Session> {
+    const existing = this.findOnDutySupervisor(workspaceId, lane)
     if (existing) {
+      // Sessions created before lanes existed are called just `督导`. They are the
+      // task lane, but the header reads the session name, so picking 督导·任务 in
+      // the lane menu landed on a panel titled 督导 — the picker appeared not to
+      // work. Renaming once here fixes the data instead of special-casing the
+      // label in the UI, which would then disagree with the session list.
+      //
+      // Only the stock name is rewritten: a supervisor the user renamed keeps its
+      // name, because that is theirs.
+      const wanted = lane === 'user' ? '督导 · 用户' : '督导 · 任务'
+      if (!existing.name || existing.name === '督导') {
+        await this.renameSession(existing.id, wanted)
+      }
       // Must go through `getSession`, not `managedToSession`.
       //
       // `managedToSession` reports `messages: []` because it is a metadata
@@ -7639,8 +7674,11 @@ ${request.prompt}`;
     }
 
     return this.createSession(workspaceId, {
-      name: '督导',
+      // Two lanes, two names. The name is the only thing the user has to tell
+      // them apart in a session list, so it says which audience it serves.
+      name: lane === 'user' ? '督导 · 用户' : '督导 · 任务',
       role: 'supervisor',
+      supervisorLane: lane,
       hidden: true,
       // What the supervisor may do is decided by its tool table, not by a
       // permission gate: SUPERVISOR_TOOL_NAMES never registers bash / write /
@@ -7650,11 +7688,21 @@ ${request.prompt}`;
     })
   }
 
-  private findOnDutySupervisor(workspaceId: string): ManagedSession | undefined {
+  /**
+   * The live supervisor on a lane.
+   *
+   * Sessions created before lanes existed carry no `supervisorLane`; they are
+   * treated as the task lane, which is exactly what they were.
+   */
+  private findOnDutySupervisor(
+    workspaceId: string,
+    lane: 'user' | 'task' = 'task',
+  ): ManagedSession | undefined {
     for (const managed of this.sessions.values()) {
       if (managed.workspace.id !== workspaceId) continue
       if (managed.role !== 'supervisor') continue
       if (managed.isArchived) continue
+      if ((managed.supervisorLane ?? 'task') !== lane) continue
       return managed
     }
     return undefined
@@ -7702,6 +7750,46 @@ ${request.prompt}`;
 
   private async surfaceSupervisorMessage(managed: ManagedSession, text: string): Promise<void> {
     await this.appendSyntheticMessage(managed, text)
+  }
+
+  /**
+   * Deliver something the user has to read onto the user lane.
+   *
+   * The working supervisor produces both kinds of row: bookkeeping and the few
+   * things a person must act on. Appending both to one transcript is why the
+   * decision requests were being pushed off screen by dispatch chatter. The row
+   * still gets written — just where the user actually reads, with the lane it came
+   * from named, so a message the working supervisor forwarded is never mistaken
+   * for something the user typed.
+   */
+  private async deliverToUserLane(managed: ManagedSession, text: string): Promise<void> {
+    if ((managed.supervisorLane ?? 'task') === 'user') {
+      await this.appendSyntheticMessage(managed, text)
+      return
+    }
+    try {
+      const userLane = await this.ensureSupervisorSession(managed.workspace.id, 'user')
+      const target = this.sessions.get(userLane.id)
+      if (!target) return
+      await this.appendSyntheticMessage(target, `〔来自督导·任务〕${text}`)
+    } catch (error) {
+      sessionLog.warn('[supervisor] could not deliver to the user lane', { error })
+      await this.appendSyntheticMessage(managed, text)
+    }
+  }
+
+  /** A supervisor's question to the user. */
+  private async deliverQuestionToUserLane(
+    managed: ManagedSession,
+    questions: { question: string; options?: string[] }[],
+  ): Promise<void> {
+    const body = questions
+      .map((q, i) => {
+        const options = q.options?.length ? `\n选项：${q.options.join(' / ')}` : ''
+        return `${i + 1}. ${q.question}${options}`
+      })
+      .join('\n')
+    await this.deliverToUserLane(managed, `需要你拍板：\n${body}`)
   }
 
   /** A supervisor's question to the user. */

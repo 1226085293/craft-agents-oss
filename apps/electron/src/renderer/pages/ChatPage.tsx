@@ -8,7 +8,7 @@
 import * as React from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAtomValue, useSetAtom } from 'jotai'
-import { AlertCircle, Globe, Copy, RefreshCw, Link2Off, Info, Pencil, Maximize2, Minimize2, Search } from 'lucide-react'
+import { AlertCircle, Globe, Copy, RefreshCw, Link2Off, Info, Pencil, Maximize2, Minimize2, Search, ChevronDown } from 'lucide-react'
 import { useAction } from '@/actions'
 import { getCurrentZone, setCurrentZone } from '@/actions/keybinding-context'
 import { ChatDisplay, type ChatDisplayHandle } from '@/components/app-shell/ChatDisplay'
@@ -213,7 +213,20 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
    * nothing to act on (no rename surface the user cares about, no list context),
    * so the conversation gets the full height instead.
    */
-  const hideChatHeader = (sessionMeta?.hidden ?? false) || (session?.hidden ?? false)
+  /**
+   * A supervisor is hidden from the conversation list, not from itself.
+   *
+   * `hidden` was doing two jobs: keeping the built-in supervisor out of the list,
+   * and blanking its chat header. The second was never the intent — the supervisor
+   * is a surface the user reads — but it meant the panel opened with no title and
+   * no right-hand actions at all, which reads as a broken window rather than a
+   * deliberately minimal one. Scratch sessions (the section-owner chooser, the
+   * acceptance judge) are also hidden and must stay bare, so the exception is
+   * narrow: supervisor, and only supervisor.
+   */
+  const headerRole = sessionMeta?.role ?? session?.role
+  const hideChatHeader =
+    ((sessionMeta?.hidden ?? false) || (session?.hidden ?? false)) && headerRole !== 'supervisor'
 
   const autoForcedReloadSessionRef = React.useRef<string | null>(null)
   const shouldForceInitialMessagesReload = React.useMemo(() => {
@@ -584,6 +597,68 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   // Get display title for header - use getSessionTitle for consistent fallback logic with SessionList
   // Priority: name > first user message > preview > "New chat"
   const displayTitle = session ? getSessionTitle(session) : (sessionMeta ? getSessionTitle(sessionMeta) : t('chat.session'))
+
+  /**
+   * Supervisor lane switcher.
+   *
+   * A workspace has two supervisor conversations: `task`, which does the work and
+   * carries the dispatch bookkeeping, and `user`, which carries only what needs a
+   * person. They are separate transcripts on purpose, so the person has to be able
+   * to get from one to the other — otherwise the second lane is invisible, and
+   * "only what matters" turns into "only what I happen to open".
+   *
+   * The picker sits where the title already is: the lane IS what this conversation
+   * is, so reading it and changing it are the same gesture.
+   */
+  const isSupervisorSession = headerRole === 'supervisor'
+  const currentLane: 'user' | 'task' =
+    (sessionMeta?.supervisorLane ?? session?.supervisorLane) === 'user' ? 'user' : 'task'
+  const lanePeerId = React.useMemo(() => {
+    if (!isSupervisorSession) return undefined
+    const wanted: 'user' | 'task' = currentLane === 'user' ? 'task' : 'user'
+    for (const meta of sessionMetaMap.values()) {
+      if (meta.id === sessionId) continue
+      if (meta.role !== 'supervisor') continue
+      if ((meta.supervisorLane ?? 'task') !== wanted) continue
+      // Another workspace's supervisor is not a lane away — it is a different
+      // workspace, and switching would move the user somewhere they did not ask to go.
+      if (activeWorkspaceId && meta.workspaceId !== activeWorkspaceId) continue
+      return meta.id
+    }
+    return undefined
+  }, [isSupervisorSession, currentLane, sessionMetaMap, sessionId, activeWorkspaceId])
+
+  const handleLaneChange = React.useCallback(
+    async (nextLane: 'user' | 'task') => {
+      if (nextLane === currentLane) return
+      if (lanePeerId) {
+        navigate(routes.view.allSessions(lanePeerId))
+        return
+      }
+      if (!activeWorkspaceId) return
+      try {
+        // Absent lane: creating it on first visit beats making the user discover a
+        // separate "new supervisor" action, and `ensure` is idempotent.
+        const created = await window.electronAPI.ensureSupervisorSession(activeWorkspaceId, nextLane)
+        // The create call resolves before the renderer's session list knows the new
+        // session. Navigating in that window is dropped by the route handler (there
+        // is nothing to select yet) and the user lands back on the list — clicking
+        // "switch lane" appeared to do nothing. Retry until the session is known,
+        // with a bound so a genuine failure still ends quietly.
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          navigate(routes.view.allSessions(created.id))
+          await new Promise((resolve) => setTimeout(resolve, 150))
+          if (window.location.href.includes(encodeURIComponent(created.id)) || window.location.href.includes(created.id)) {
+            return
+          }
+        }
+      } catch {
+        // Stay put: a failed switch must not look like a successful one.
+      }
+    },
+    [activeWorkspaceId, currentLane, lanePeerId],
+  )
+
   const isArchived = session?.isArchived || sessionMeta?.isArchived || false
   const sharedUrl = session?.sharedUrl || sessionMeta?.sharedUrl || null
   const hasMessages = !!(session?.messages?.length || sessionMeta?.lastFinalMessageId)
@@ -793,7 +868,69 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   // Desktop uses Radix DropdownMenu via PanelHeader; compact mode uses a
   // vaul Drawer (CompactSessionMenu) so submenus aren't clipped by the
   // panel container query on narrow viewports.
-  const titleMenu = React.useMemo(() => (sessionMeta && !isCompactMode) ? (
+  /**
+   * Supervisor sessions get no session menu.
+   *
+   * Share / archive / rename / delete are actions about a conversation the user
+   * owns. A supervisor is a built-in system session: archiving or deleting it
+   * either does nothing useful or breaks the workspace's coordination, and the
+   * menu's own chevron sat right next to the lane picker, so the two dropdowns
+   * looked like one broken control. The lane picker below is the only control this
+   * header should offer.
+   */
+  /**
+   * The lane picker is the title.
+   *
+   * A native `<select>` was wrong here: its popup is drawn by the OS, so in the
+   * dark theme it opened as a white panel with white-on-white option text — one of
+   * the two lanes was unreadable, and the control looked broken rather than
+   * themed. It also repeated the name, since the session itself is called
+   * 督导 · 用户: title text, then the same words again inside the box.
+   *
+   * The app's own dropdown follows the theme and lets the title be the trigger, so
+   * there is one control and no duplicated label.
+   */
+  /**
+   * The supervisor's title comes from its lane, not from `session.name`.
+   *
+   * The built-in supervisor was created as `督导` before lanes existed, and
+   * renaming it on disk did not stick — the header kept reading the stored name, so
+   * choosing 督导·任务 landed on a panel still titled 督导 and the picker looked
+   * broken. The lane is what this conversation *is*, and it is already known on the
+   * client, so the label is derived rather than read: correct for old sessions with
+   * no stored lane, and correct without waiting for a rename to be persisted.
+   */
+  const supervisorTitle = currentLane === 'user' ? '督导 · 用户' : '督导 · 任务'
+
+  const headerTitle = isSupervisorSession ? (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          aria-label="切换督导会话"
+          title="督导会话有两个：任务通道做活，用户通道只放需要你读的消息"
+          className="flex min-w-0 max-w-full items-center gap-1 rounded px-1 py-0.5 text-left text-sm font-semibold transition-colors hover:bg-foreground/[0.06] focus:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <span className="min-w-0 truncate">{supervisorTitle}</span>
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+        </button>
+      </DropdownMenuTrigger>
+      <StyledDropdownMenuContent align="start" className="min-w-[9rem]">
+        {(['task', 'user'] as const).map((lane) => (
+          <StyledDropdownMenuItem key={lane} onClick={() => void handleLaneChange(lane)}>
+            <span className="flex-1">{lane === 'task' ? '督导·任务' : '督导·用户'}</span>
+            {currentLane === lane ? (
+              <span className="text-[11px] text-muted-foreground">当前</span>
+            ) : null}
+          </StyledDropdownMenuItem>
+        ))}
+      </StyledDropdownMenuContent>
+    </DropdownMenu>
+  ) : (
+    displayTitle
+  )
+
+  const titleMenu = React.useMemo(() => (sessionMeta && !isCompactMode && !isSupervisorSession) ? (
     <SessionMenu
       item={sessionMeta}
       onRename={handleRename}
@@ -812,6 +949,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
     handleMarkUnread,
     handleOpenInNewWindow,
     handleDelete,
+    isSupervisorSession,
   ])
 
   const compactTitleMenu = React.useMemo(() => (sessionMeta && isCompactMode) ? (
@@ -860,7 +998,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
       return (
         <>
           <div className="h-full flex flex-col" data-focus-zone="chat" onPointerDown={() => setCurrentZone('chat')}>
-            <PanelHeader  hidden={hideChatHeader} title={displayTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
+            <PanelHeader  hidden={hideChatHeader} title={headerTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
             <div className="flex-1 flex flex-col min-h-0">
               <ChatDisplay
                 ref={setChatDisplayRef}
@@ -936,7 +1074,7 @@ const ChatPage = React.memo(function ChatPage({ sessionId }: ChatPageProps) {
   return (
     <>
       <div className="h-full flex flex-col" data-focus-zone="chat" onPointerDown={() => setCurrentZone('chat')}>
-        <PanelHeader  hidden={hideChatHeader} title={displayTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
+        <PanelHeader  hidden={hideChatHeader} title={headerTitle} titleMenu={titleMenu} compactTitleMenu={compactTitleMenu} leadingAction={leadingAction} actions={headerActions} rightSidebarButton={rightSidebarButton} isRegeneratingTitle={isAsyncOperationOngoing} />
         <div className="flex-1 flex flex-col min-h-0">
           <ChatDisplay
             ref={setChatDisplayRef}

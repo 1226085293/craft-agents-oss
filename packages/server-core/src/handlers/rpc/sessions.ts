@@ -191,12 +191,17 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
   })
 
   // Create a new session
-  // "开始会话" is one built-in supervisor session per workspace, not a factory:
-  // it coordinates tasks across sessions, so a second one would split that
-  // state. Hidden so it never clutters the conversation list.
-  server.handle(RPC_CHANNELS.sessions.ENSURE_SUPERVISOR, async (_ctx, workspaceId: string) => {
-    return sessionManager.ensureSupervisorSession(workspaceId)
-  })
+  // "开始会话" is one built-in supervisor session per workspace **per lane**, not a
+  // factory: it coordinates tasks across sessions, so a second one on the same
+  // lane would split that state. Two lanes exist because one transcript mixed two
+  // audiences — `task` does the work, `user` carries only what needs a person.
+  // Hidden so it never clutters the conversation list.
+  server.handle(
+    RPC_CHANNELS.sessions.ENSURE_SUPERVISOR,
+    async (_ctx, workspaceId: string, lane?: 'user' | 'task') => {
+      return sessionManager.ensureSupervisorSession(workspaceId, lane ?? 'task')
+    },
+  )
 
   server.handle(RPC_CHANNELS.sessions.CREATE, async (_ctx, workspaceId: string, options?: import('@craft-agent/shared/protocol').CreateSessionOptions) => {
     const end = perf.start('rpc.createSession', { workspaceId })

@@ -224,7 +224,7 @@ export interface ElectronAPI {
   getSessionMessages(sessionId: string): Promise<Session | null>
   createSession(workspaceId: string, options?: CreateSessionOptions): Promise<Session>
   /** The workspace's single on-duty supervisor session (created once, hidden from the list). */
-  ensureSupervisorSession(workspaceId: string): Promise<Session>
+  ensureSupervisorSession(workspaceId: string, lane?: 'user' | 'task'): Promise<Session>
   deleteSession(sessionId: string): Promise<void>
   sendMessage(sessionId: string, message: string, attachments?: FileAttachment[], storedAttachments?: StoredAttachmentType[], options?: SendMessageOptions): Promise<void>
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>

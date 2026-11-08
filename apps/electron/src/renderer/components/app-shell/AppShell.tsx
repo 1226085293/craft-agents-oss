@@ -1686,7 +1686,15 @@ function AppShellContent({
     setSearchQuery('')
     try {
       const workspaceId = activeWorkspace.id
-      const session = await window.electronAPI.ensureSupervisorSession(workspaceId)
+      // The user-facing lane, not the working one.
+      //
+      // 开始会话 is the person's way in, and a workspace has two supervisor
+      // conversations: `task` does the dispatch bookkeeping, `user` carries only
+      // what needs a human. Opening `task` here dropped the user into the
+      // bookkeeping log — the panel was titled 督导 · 任务 and full of internal
+      // handoff chatter. The task lane is still reachable from the lane picker in
+      // the header; it just is not the default face of the feature.
+      const session = await window.electronAPI.ensureSupervisorSession(workspaceId, 'user')
       // Already there: re-navigating to the same session re-mounts the chat pane,
       // which drops the loaded transcript and can trip ChatPage's forced-reload
       // guard into "Session messages are not available". Clicking 开始会话 while

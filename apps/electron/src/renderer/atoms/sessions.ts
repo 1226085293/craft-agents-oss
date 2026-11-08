@@ -45,6 +45,10 @@ export interface SessionMeta {
   labels?: string[]
   /** Permission mode ('safe', 'ask', 'allow-all') — used by view expressions */
   permissionMode?: string
+  /** 'supervisor' sessions coordinate tasks; ordinary sessions are workers. */
+  role?: 'supervisor' | 'worker'
+  /** Which supervisor conversation this is; see `Session.supervisorLane`. */
+  supervisorLane?: 'user' | 'task'
   /** Folder id inside this session's project tree (undefined = root) */
   folderId?: string | null
   /** Set when archived because an ancestor folder/project was archived (D23/D28) */

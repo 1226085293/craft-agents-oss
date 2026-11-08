@@ -75,6 +75,16 @@ export interface Session {
   agentId?: string
   /** 'supervisor' sessions coordinate tasks; ordinary sessions are workers. */
   role?: 'supervisor' | 'worker'
+  /**
+   * Which conversation a supervisor speaks on.
+   *
+   * Two lanes, because one transcript mixed two audiences: internal bookkeeping
+   * (task dispatch, handoffs, watchdog pauses) drowned the few rows the user
+   * actually had to read. `user` carries only what needs a person — a finished
+   * task, a decision request. `task` carries the work. Absent means the legacy
+   * single supervisor, which behaved as `task`.
+   */
+  supervisorLane?: 'user' | 'task'
   lastMessageRole?: 'user' | 'assistant' | 'plan' | 'tool' | 'error'
   lastFinalMessageId?: string
   isAsyncOperationOngoing?: boolean
@@ -186,6 +196,8 @@ export interface CreateSessionOptions {
    * never executes work itself; 'worker' (default) is an ordinary session.
    */
   role?: 'supervisor' | 'worker'
+  /** Which supervisor conversation this is; see `Session.supervisorLane`. */
+  supervisorLane?: 'user' | 'task'
   /** Task this session works on, when created by the supervisor. */
   taskId?: string
   /**

@@ -60,7 +60,7 @@ export const SESSION_PERSISTENT_FIELDS = [
   // Multi-agent: role profile + its frozen snapshot, the session's role and
   // the task/lineage binding. Without these, a restart lost the persona, the
   // scope ceilings and the supervisor/worker distinction.
-  'agentId', 'agentSnapshot', 'role', 'taskId', 'spawnDepth',
+  'agentId', 'agentSnapshot', 'role', 'supervisorLane', 'taskId', 'spawnDepth',
   // Folder tree membership (workspace/project scoped folders)
   'folderId', 'archivedFolderId', 'archivedFolderPath', 'archivedProjectId', 'archivedByParent', 'sortOrder', 'pinnedAt',
 ] as const;
@@ -138,6 +138,8 @@ export interface SessionConfig {
    * tools; 'worker' is an ordinary session.
    */
   role?: 'supervisor' | 'worker';
+  /** Which supervisor conversation this is; see `Session.supervisorLane`. */
+  supervisorLane?: 'user' | 'task';
   /** Task this session works on (set when the supervisor delegated it). */
   taskId?: string;
   /**

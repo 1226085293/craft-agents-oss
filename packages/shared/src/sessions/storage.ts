@@ -192,6 +192,7 @@ export async function createSession(
     agentId?: string;
     agentSnapshot?: SessionConfig['agentSnapshot'];
     role?: 'supervisor' | 'worker';
+    supervisorLane?: 'user' | 'task';
     taskId?: string;
     spawnDepth?: number;
   }
@@ -226,6 +227,7 @@ export async function createSession(
     agentId: options?.agentId,
     agentSnapshot: options?.agentSnapshot,
     role: options?.role,
+    supervisorLane: options?.supervisorLane,
     taskId: options?.taskId,
     spawnDepth: options?.spawnDepth,
     projectId: options?.projectId,

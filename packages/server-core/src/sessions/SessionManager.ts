@@ -53,6 +53,7 @@ import { startPageRefreshScheduler } from '../pages/page-refresh-scheduler.ts'
 import { migrateAutomationCronTasks } from '../tasks/automation-migration.ts'
 import { buildJudgePrompt, parseJudgeVerdict } from '../tasks/task-judge.ts'
 import { SupervisorRuntime } from '../routing/supervisor-runtime.ts'
+import { resumeDecisionFor } from '@craft-agent/shared/tasks'
 import { buildAgentToolBindings } from './agent-tools-bindings.ts'
 import {
   buildSectionOwnerPrompt,
@@ -7741,6 +7742,32 @@ ${request.prompt}`;
   async runTask(workspaceId: string, taskId: string, reason: string): Promise<boolean> {
     const tasks = this.getTasks(workspaceId)
     const existing = tasks.get(taskId)
+
+    /**
+     * One gate for every way a task can be started.
+     *
+     * Manual run, a supervisor's `task_update({status:'running'})`, an event route and the
+     * scheduler all end up here or in `spawnTaskRun`. Each used to decide for itself what an
+     * answered question meant, so 「完成 1.2 后暂停」 could lift the pause on one path and
+     * resume the whole remaining plan on another — and the task was finished past the
+     * boundary the person had just given. The judgement now lives in `resumeDecisionFor`,
+     * a pure function of the task, and this is where it is applied.
+     */
+    if (existing) {
+      const verdict = resumeDecisionFor(existing)
+      if (!verdict.allowed) {
+        sessionLog.info(`[tasks] ${taskId} not started: ${verdict.why}`, { reason })
+        return false
+      }
+      // The boundary the reply implied becomes the one the run is held to.
+      if (verdict.authorizedSteps?.length) {
+        const current = existing.spec?.authorizedSteps
+        const same =
+          current?.length === verdict.authorizedSteps.length &&
+          current.every((id, i) => id === verdict.authorizedSteps![i])
+        if (!same) tasks.setAuthorizedSteps(taskId, verdict.authorizedSteps)
+      }
+    }
 
     // Resuming is not restarting. A paused task still owns its session, and that
     // session holds the thread — what was tried, which file, which error. Spawning

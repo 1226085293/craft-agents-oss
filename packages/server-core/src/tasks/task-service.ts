@@ -747,7 +747,26 @@ export class TaskService {
    * would silently drop cwd, tools and acceptance. Scope arrives separately from
    * the other spec fields (a dispatch supplies it), so it needs its own door.
    */
-  setScope(id: string, scope: string | undefined): Task {
+  /**
+   * Record the boundary a run is held to.
+   *
+   * Kept on the task so every entry point — manual run, supervisor resume, event route,
+   * scheduler — reads the same slice instead of each deciding for itself what an answer
+   * authorised.
+   */
+  setAuthorizedSteps(id: string, steps: string[] | undefined): Task {
+    const task = this.require(id);
+    const next: Task = {
+      ...task,
+      spec: { ...task.spec, authorizedSteps: steps?.length ? [...steps] : undefined } as Task['spec'],
+      updatedAt: this.now(),
+    };
+    this.save(next);
+    appendJournal(this.root, id, { type: 'spec_updated', at: this.now(), data: { authorizedSteps: steps } });
+    return next;
+  }
+
+    setScope(id: string, scope: string | undefined): Task {
     const task = this.require(id)
     const trimmed = scope?.trim()
     if (!trimmed) return task

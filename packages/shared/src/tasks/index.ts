@@ -146,3 +146,4 @@ export {
 export * from './answer-scope.ts'
 export * from './resume-decision.ts'
 export * from './answer-line.ts'
+export { authorizationFromAnswer } from './answer-scope.ts'

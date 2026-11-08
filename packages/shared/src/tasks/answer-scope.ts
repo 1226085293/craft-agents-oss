@@ -52,6 +52,89 @@ const STEP_ID = /(?:步骤\s*|第\s*)?(\d+(?:\.\d+)*)\s*(?:步|小节)?/g;
  * the run went unbounded. A ceiling says "everything up to 1.2", which is true whether or not
  * 1.2 has been written down yet.
  */
+/** Words that mean "you may go on / do more". */
+const RELEASE_WORDS = /(放行|允许|同意|可以继续|继续|接着|都做|全部|所有|做完|全做|整个|剩下的)/;
+
+/**
+ * Words that make a release cover the whole plan rather than the step named.
+ *
+ * `其余` is deliberately absent: 「仅放行 1.2 读回，其余之后再定」 is a release that EXCLUDES
+ * everything else, and reading 其余 as "the whole plan" turned a narrow permission into full
+ * authorisation — the exact failure direction (too much authority) that matters most.
+ */
+const WHOLE_PLAN_WORDS = /(全部|所有|都做|做完|全做|整个|剩下的|剩的|剩余)/;
+
+/**
+ * What a reply authorises, in both directions.
+ *
+ * The existing parsers could only ever NARROW: both of them start by requiring a stop word, so
+ * 「完成 1.2 后暂停」 became a ceiling and 「放行步骤 2（收尾），把任务做完」 became nothing at
+ * all. Nothing in the codebase could widen an authorisation, so the boundary stayed at 1.2 for
+ * the rest of the task's life — and every later resume carried 「本次只做到 1.2，到此为止」
+ * directly above 「用户的答复是：放行步骤 2」.
+ *
+ * One function decides both directions, so the answer cannot be read one way by the boundary
+ * and another way by the resume path.
+ */
+export function authorizationFromAnswer(
+  answer: string,
+  plan: PlanStep[] | undefined,
+): { authorizedUpTo?: string; authorizedSteps?: string[] } | undefined {
+  const text = answer.trim();
+  const steps = plan ?? [];
+  if (!text || steps.length === 0) return undefined;
+
+  const mentioned: string[] = [];
+  for (const match of text.matchAll(STEP_ID)) {
+    const id = match[1] ?? '';
+    if (!id) continue;
+    const before = text.slice(0, match.index ?? 0);
+    if (/[A-Za-z0-9.．]$/.test(before)) continue;
+    if (!mentioned.includes(id)) mentioned.push(id);
+  }
+  const byId = (a: string, b: string) => compareKeys(idKey(a), idKey(b));
+  const lastStep = [...steps].map((s) => s.id).sort(byId).at(-1);
+
+  // Narrowing: 「完成 1.2 后暂停」.
+  if (STOP_WORDS.test(text) && !RELEASE_WORDS.test(text)) {
+    if (mentioned.length === 0) return undefined;
+    const ceiling = [...mentioned].sort(byId).at(-1)!;
+    const beyond = steps.some((step) => compareKeys(idKey(step.id), idKey(ceiling)) > 0);
+    if (!beyond) return undefined;
+    /**
+     * The explicit list is emitted alongside the ceiling, not instead of it.
+     *
+     * The ceiling is what bounds a step that does not exist yet (「完成 1.2 后暂停」 is answered
+     * before 1.2 is planned); the list is what the resume path hands the worker as its
+     * boundary. Emitting only one of them made each caller pick a different half.
+     */
+    const within = steps
+      .filter((step) => compareKeys(idKey(step.id), idKey(ceiling)) <= 0)
+      .map((step) => step.id);
+    return { authorizedUpTo: ceiling, ...(within.length ? { authorizedSteps: within } : {}) };
+  }
+
+  // Widening: 「放行步骤 2」, 「把任务做完」.
+  if (RELEASE_WORDS.test(text)) {
+    /**
+     * 「做完/全部」 means the whole plan, even when a step is named alongside it: the reply
+     * 「放行步骤 2（收尾），把任务做完」 names 2 and then says to finish, and reading only the
+     * number would authorise up to 2 and stop one step short of what was asked.
+     */
+    const target = WHOLE_PLAN_WORDS.test(text)
+      ? lastStep
+      : [...mentioned].sort(byId).at(-1);
+    if (!target) return undefined;
+    const authorized = steps
+      .filter((step) => compareKeys(idKey(step.id), idKey(target)) <= 0)
+      .map((step) => step.id);
+    if (authorized.length === 0) return undefined;
+    return { authorizedUpTo: target, authorizedSteps: authorized };
+  }
+
+  return undefined;
+}
+
 export function authorizedCeilingFromAnswer(
   answer: string,
   plan: PlanStep[] | undefined,

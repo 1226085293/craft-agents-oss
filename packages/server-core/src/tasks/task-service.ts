@@ -15,9 +15,8 @@ const log = createLogger('tasks');
 import {
   acceptanceItems,
   applyTransition,
-  authorizedCeilingFromAnswer,
+  authorizationFromAnswer,
   openSteps,
-  authorizedStepsFromAnswer,
   attachSession,
   checkBudget,
   checkDependencies,
@@ -747,16 +746,26 @@ export class TaskService {
      * the sentence means the boundary exists only if a model turn succeeds, and that turn
      * had already been rate-limited once.
      */
-    const ceiling = authorizedCeilingFromAnswer(trimmed, task.spec?.plan)
-    const derived = authorizedStepsFromAnswer(trimmed, task.spec?.plan)
+    /**
+     * Both directions through one function.
+     *
+     * A reply can narrow the boundary (「完成 1.2 后暂停」) or widen it (「放行步骤 2」). Only the
+     * narrowing direction used to be derived, so a release answer was recorded and then had no
+     * effect on what the worker was allowed to touch: the task was resumed still bounded at 1.2,
+     * with a brief that said 「本次只做到 1.2，到此为止」 right under 「用户的答复是：放行步骤 2」,
+     * and every attempt at step 2 came back 「2.1 不在本次授权范围内」.
+     */
+    const authorization = authorizationFromAnswer(trimmed, task.spec?.plan)
     const next: Task = {
       ...task,
-      ...(ceiling || derived?.length
+      ...(authorization
         ? {
             spec: {
               ...task.spec,
-              ...(ceiling ? { authorizedUpTo: ceiling } : {}),
-              ...(derived?.length ? { authorizedSteps: derived } : {}),
+              ...(authorization.authorizedUpTo ? { authorizedUpTo: authorization.authorizedUpTo } : {}),
+              ...(authorization.authorizedSteps?.length
+                ? { authorizedSteps: authorization.authorizedSteps }
+                : {}),
             } as Task['spec'],
           }
         : {}),

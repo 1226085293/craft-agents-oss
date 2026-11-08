@@ -9,7 +9,7 @@
 
 import type { Task } from './types.ts';
 import { formatPlan } from './plan.ts';
-import { openSteps } from './plan.ts';
+import { isAuthorizedStep, openSteps } from './plan.ts';
 import { planProgress } from './plan.ts';
 
 export interface TaskBriefOptions {
@@ -241,6 +241,21 @@ export function describeTrigger(task: Task): string {
  * make it re-read work it did, and re-plan work it already finished. All it needs
  * is "you were stopped, here is why, pick up from the plan".
  */
+/**
+ * Is any unfinished step outside the boundary?
+ *
+ * The brief needs this to decide whether a boundary sentence is informative or just noise. With
+ * everything authorised there is no "stop here" to announce, and printing one anyway makes the
+ * brief contradict the answer quoted two lines above it.
+ */
+function openBeyondBoundary(task: Task): boolean {
+  const plan = task.spec?.plan;
+  if (!plan?.length) return false;
+  const scope = task.spec;
+  if (!scope?.authorizedUpTo && !scope?.authorizedSteps?.length) return false;
+  return openSteps(plan).some((step) => !isAuthorizedStep(step.id, scope));
+}
+
 export function formatResumeBrief(task: Task, reason = 'manual'): string {
   const progress = task.spec?.plan?.length
     ? planProgress(task.spec.plan)
@@ -285,7 +300,18 @@ export function formatResumeBrief(task: Task, reason = 'manual'): string {
      * question — the exact confusion this whole feature exists to prevent.
      */
     ...(task.decision?.answer?.text ? [`用户的答复是：${task.decision.answer.text}`] : []),
-    ...(task.spec?.authorizedUpTo
+    /**
+     * Say "stop here" only when something is actually left beyond the boundary.
+     *
+     * The line was printed whenever `authorizedUpTo` existed, so a reply that released the whole
+     * plan produced a brief reading 「本次只做到 2，到此为止」 directly beneath
+     * 「用户的答复是：放行步骤 2（收尾），把任务做完」. The two sentences contradict, and the
+     * worker follows the imperative one — so it stopped one step short of what was asked, or
+     * spent the turn arguing with the plan writer about whether 2.1 existed.
+     */
+    ...(!openBeyondBoundary(task)
+      ? ['从计划里没完成的那一条接着做；如果计划里没有可执行的小节，先按大纲展开下一条。']
+      : task.spec?.authorizedUpTo
       ? [
           `本次只做到 ${task.spec.authorizedUpTo}，到此为止。` +
             '之后的小节不要开工、不要标完成、不要移除——用 `report_result`（outcome 用 handoff）交接。',

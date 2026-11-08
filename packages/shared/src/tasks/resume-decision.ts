@@ -12,7 +12,7 @@
  * task records, may anyone start it, and what may they do when they do.
  */
 import type { Task } from './types.ts';
-import { authorizedCeilingFromAnswer, authorizedStepsFromAnswer } from './answer-scope.ts';
+import { authorizationFromAnswer } from './answer-scope.ts';
 
 export type ResumeVerdict =
   | { allowed: true; authorizedSteps?: string[]; authorizedUpTo?: string; reason: string }
@@ -52,8 +52,16 @@ export function resumeDecisionFor(task: Task): ResumeVerdict {
      * step, which is exactly the state 「完成 1.2 后暂停」 is answered in — resumed with the
      * entire plan open.
      */
-    const ceiling = authorizedCeilingFromAnswer(answer, task.spec?.plan) ?? task.spec?.authorizedUpTo;
-    const derived = authorizedStepsFromAnswer(answer, task.spec?.plan);
+    /**
+     * The same function the recorder used, so the resume cannot read the answer differently.
+     *
+     * `recordDecisionAnswer` stores what a reply authorises; this only decides whether the task
+     * may run and along what boundary. When the two disagreed, a release answer was applied to
+     * the record but not to the run — the task resumed bounded by the previous answer's ceiling.
+     */
+    const read = authorizationFromAnswer(answer, task.spec?.plan);
+    const ceiling = read?.authorizedUpTo ?? task.spec?.authorizedUpTo;
+    const derived = read?.authorizedSteps;
     const stored = task.spec?.authorizedSteps;
     const boundary = derived?.length ? derived : stored?.length ? stored : undefined;
     return {

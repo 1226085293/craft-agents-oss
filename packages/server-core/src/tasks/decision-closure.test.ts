@@ -98,3 +98,55 @@ describe('a re-asked question does not inherit the old diagnosis', () => {
     expect(reopened.decision?.resolvedAt).toBeUndefined()
   })
 })
+
+/**
+ * The second real answer, end to end.
+ *
+ * T-1 was bounded at 1.2 by 「完成1.2后暂停」. The person then said
+ * 「放行步骤 2（收尾），把任务做完」; the answer was recorded, and the boundary did not move —
+ * so the resumed worker was refused on every write for step 2, including creating its sub-step.
+ */
+describe('a release answer moves the boundary with it', () => {
+  it('lets the step it named, and that step’s sub-step, be written', async () => {
+    const svc = service()
+    const task = svc.create({
+      name: '状态图标验证',
+      instruction: '建立任务，先只做 1.1',
+      supervisorSessionId: 'sess_s',
+      toolCallId: 'call_1',
+      spec: {
+        scope: '只做 1.1',
+        cwd: '/tmp',
+        authorizedUpTo: '1.2',
+        plan: [
+          { id: '1', title: '写文件', status: 'done' },
+          { id: '1.1', title: '创建', status: 'done' },
+          { id: '1.2', title: '读回', status: 'done' },
+          { id: '2', title: '收尾', status: 'todo' },
+        ],
+      },
+    })
+    svc.setStatus(task.id, 'running')
+    await svc.reportHandoff(
+      task.id,
+      {
+        outcome: 'needs_decision',
+        summary: '1.2 已完成，2 未授权',
+        decision: { category: 'direction', label: '还剩步骤 2', reason: '2 未授权' },
+      },
+      'sess_w',
+    )
+
+    const answered = svc.recordDecisionAnswer('T-1', '放行步骤 2（收尾），把任务做完')!
+    expect(answered.spec?.authorizedUpTo).toBe('2')
+    expect(answered.spec?.authorizedSteps).toContain('2')
+
+    // What the worker was actually refused on in the run.
+    const written = svc.updatePlan('T-1', { id: '2.1', title: '最终验收与收尾', status: 'doing' })
+    expect(written.error).toBeUndefined()
+    expect(written.ok).toBe(true)
+
+    // And step 2 itself, the one the release named.
+    expect(svc.updatePlan('T-1', { id: '2', status: 'doing' }).ok).toBe(true)
+  })
+})

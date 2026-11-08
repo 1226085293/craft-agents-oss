@@ -573,6 +573,16 @@ export function isAuthorizedStep(
   }
   if (!scope.authorizedUpTo) return false;
   const keyOf = (id: string) => (id.match(/\d+(?:\.\d+)*/g) ?? ['0'])[0]!;
+  const ceiling = keyOf(scope.authorizedUpTo);
+  /**
+   * Anything *inside* the ceiling is authorised too.
+   *
+   * A bare comparison treats `2.1` as past `2`, so a person who released 「步骤 2」 could not
+   * let the worker split it into 2.1 — every attempt came back 「2.1 不在本次授权范围内」.
+   * Authorising a section means authorising its sub-steps: they are the same work, described
+   * one level down. This does not widen 「完成 1.2 后暂停」: `2` is not inside `1.2`.
+   */
+  if (stepId === ceiling || stepId.startsWith(`${ceiling}.`)) return true;
   const parts = (id: string) => keyOf(id).split('.').map((n) => Number.parseInt(n, 10) || 0);
   const left = parts(stepId);
   const right = parts(scope.authorizedUpTo);

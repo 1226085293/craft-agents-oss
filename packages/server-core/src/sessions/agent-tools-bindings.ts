@@ -26,7 +26,7 @@ export interface AgentToolBindingsDeps {
   /** Send into an existing session (wakes it when idle). */
   sendToSession: (sessionId: string, text: string) => Promise<void>;
   /** Append a user-visible assistant message to the caller's own transcript. */
-  writeUserVisible: (text: string) => Promise<void>;
+  writeUserVisible: (text: string, kind: 'completed' | 'decision' | 'blocked') => Promise<void>;
   /** Surface a question to the user (rendered as an ask card / message). */
   askUser: (questions: { question: string; options?: string[] }[]) => Promise<void>;
   /** Supervisor runtime, for dispatch guards. */
@@ -113,8 +113,12 @@ export function buildAgentToolBindings(deps: AgentToolBindingsDeps) {
       return { message: `Dispatched to ${created.sessionId}. End your turn; you will be woken when it reports.` };
     },
 
-    async reportToUser(payload: { text: string; sessionId?: string }): Promise<void> {
-      await deps.writeUserVisible(payload.text);
+    async reportToUser(payload: {
+      text: string;
+      kind: 'completed' | 'decision' | 'blocked';
+      sessionId?: string;
+    }): Promise<void> {
+      await deps.writeUserVisible(payload.text, payload.kind);
     },
 
     async askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void> {

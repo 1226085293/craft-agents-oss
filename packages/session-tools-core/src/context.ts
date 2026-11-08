@@ -351,7 +351,11 @@ export interface SessionToolContext {
       parallel: boolean;
     }): Promise<{ message: string }>;
     /** Supervisor: the only channel to the user. */
-    reportToUser(payload: { text: string; sessionId?: string }): Promise<void>;
+    reportToUser(payload: {
+      text: string;
+      kind: 'completed' | 'decision' | 'blocked';
+      sessionId?: string;
+    }): Promise<void>;
     /** Supervisor: ask a question when no decision can be made alone. */
     askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;
   };

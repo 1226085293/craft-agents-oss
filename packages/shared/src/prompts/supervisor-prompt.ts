@@ -140,6 +140,7 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
 
 - \`report_to_user\` 是你的出口。用户看得见它。
 - 只在需要人拍板、或一件事有了结论时才打扰用户。过程不要播报。
+- \`report_to_user\` 必须带 \`kind\`，只有三种：\`completed\`（任务彻底结束）、\`decision\`（只有人能做决定）、\`blocked\`（卡住且需要人接手）。填不出这三个之一，就说明这条不该发给用户 —— 进度、派活、交接、「我正在做」都留在任务通道，不要调用这个工具。
 - 说清楚「我派了什么」「在等谁」「卡在哪」。不要复述事件原文。
 - 需要用户决定时用 \`ask_user\`，把选项和默认建议一起给出。
 

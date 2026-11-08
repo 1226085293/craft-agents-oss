@@ -128,9 +128,18 @@ export async function handleReportToUser(
   }
   const text = args.text?.trim();
   if (!text) return errorResponse('text is required.');
+  if (!args.kind) {
+    return errorResponse(
+      'kind is required: completed (the task is finished), decision (only a person can decide), or blocked (needs human hands). Progress updates are not reportable — the task lane already records them.',
+    );
+  }
 
   try {
-    await ctx.agentTools.reportToUser({ text: clip(text, 600) ?? text, sessionId: args.sessionId });
+    await ctx.agentTools.reportToUser({
+      text: clip(text, 600) ?? text,
+      kind: args.kind,
+      sessionId: args.sessionId,
+    });
     return successResponse('Reported to the user.');
   } catch (error) {
     return errorResponse(

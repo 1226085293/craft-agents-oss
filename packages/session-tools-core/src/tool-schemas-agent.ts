@@ -80,6 +80,25 @@ export type DispatchInput = z.infer<typeof DispatchSchema>;
 
 /** Supervisor → user, short by contract. */
 export const ReportToUserSchema = z.object({
+  /**
+   * Why the user is being interrupted. Required, and the only three answers.
+   *
+   * Length was the only thing this tool used to constrain ("at most ~100 words"),
+   * which said nothing about *when* to speak — so a supervisor used its "single
+   * channel to the user" for progress narration: "1.1 is done by the previous
+   * session, I dispatched the rest to mr-crystal, I will tell you when it
+   * finishes." True, useful to nobody, and it pushed the next real decision off
+   * the screen — the exact complaint that the user channel was unusable.
+   *
+   * Making the reason a required enum turns "should I interrupt?" into a choice
+   * with three legal answers instead of a judgement call: finished, blocked, or a
+   * decision. Anything in progress belongs on the task lane, silently.
+   */
+  kind: z
+    .enum(['completed', 'decision', 'blocked'])
+    .describe(
+      'Why the user is being told. completed = the task is finished. decision = you cannot proceed without a choice only a person can make. blocked = a failure needing human hands. Work in progress is NOT reportable.',
+    ),
   text: z.string().describe('At most ~100 words. Conclusions only; link the session for detail.'),
   sessionId: z.string().optional().describe('Session the user can open for the full process.'),
 });

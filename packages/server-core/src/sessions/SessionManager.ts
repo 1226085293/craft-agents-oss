@@ -1876,6 +1876,9 @@ function scopeFieldFor(
   }
 }
 
+/** Why a supervisor is interrupting the user; mirrors the report_to_user enum. */
+type UserReportKind = 'completed' | 'decision' | 'blocked';
+
 function managedToSession(m: ManagedSession, overrides?: Partial<Session>): Session {
   return {
     ...pickSessionFields(m),
@@ -5647,8 +5650,8 @@ export class SessionManager implements ISessionManager {
           sendToSession: async (sessionId, text) => {
             await this.sendMessage(sessionId, text)
           },
-          writeUserVisible: async (text) => {
-            await this.deliverToUserLane(managed, text)
+          writeUserVisible: async (text, kind) => {
+            await this.deliverToUserLane(managed, text, kind)
           },
           askUser: async (questions) => {
             await this.deliverQuestionToUserLane(managed, questions)
@@ -7790,7 +7793,20 @@ ${request.prompt}`;
    * from named, so a message the working supervisor forwarded is never mistaken
    * for something the user typed.
    */
-  private async deliverToUserLane(managed: ManagedSession, text: string): Promise<void> {
+  private async deliverToUserLane(
+    managed: ManagedSession,
+    text: string,
+    kind: UserReportKind = 'completed',
+  ): Promise<void> {
+    // `decision` and `blocked` earn the interruption; `completed` closes the loop.
+    // Everything else is progress, and progress has a lane already — the task one.
+    // The enum on the tool is what enforces this; the check here keeps a stale
+    // client (or an older prompt) from sneaking narration through.
+    if (kind !== 'completed' && kind !== 'decision' && kind !== 'blocked') {
+      sessionLog.info('[supervisor] progress report kept off the user lane', { kind })
+      await this.appendSyntheticMessage(managed, text)
+      return
+    }
     if ((managed.supervisorLane ?? 'task') === 'user') {
       await this.appendSyntheticMessage(managed, text)
       return
@@ -7799,7 +7815,8 @@ ${request.prompt}`;
       const userLane = await this.ensureSupervisorSession(managed.workspace.id, 'user')
       const target = this.sessions.get(userLane.id)
       if (!target) return
-      await this.appendSyntheticMessage(target, `〔来自督导·任务〕${text}`)
+      const label = kind === 'decision' ? '需要拍板' : kind === 'blocked' ? '需要人工' : '任务完成'
+      await this.appendSyntheticMessage(target, `〔来自督导·任务·${label}〕${text}`)
     } catch (error) {
       sessionLog.warn('[supervisor] could not deliver to the user lane', { error })
       await this.appendSyntheticMessage(managed, text)

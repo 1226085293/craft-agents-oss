@@ -296,7 +296,11 @@ export abstract class BaseAgent implements AgentBackend {
       attachTaskId?: string;
       parallel: boolean;
     }): Promise<{ message: string }>;
-    reportToUser(payload: { text: string; sessionId?: string }): Promise<void>;
+    reportToUser(payload: {
+      text: string;
+      kind: 'completed' | 'decision' | 'blocked';
+      sessionId?: string;
+    }): Promise<void>;
     askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;
   } | null = null;
 

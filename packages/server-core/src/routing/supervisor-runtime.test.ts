@@ -452,3 +452,82 @@ describe('dispatching into a task respects the session already running it', () =
     h.runtime.dispose();
   });
 });
+
+describe('scope is a boundary', () => {
+  const liveTask = (overrides: Record<string, unknown> = {}) => {
+    const task = {
+      id: 'T-1',
+      currentSessionId: 'sess_worker_1',
+      assigneeAgentId: 'builtin-default',
+      spec: {
+        scope: '执行 1.1 步骤，做完即停',
+        plan: [
+          { id: '1', status: 'doing' },
+          { id: '1.1', status: 'done' },
+          { id: '1.2', status: 'todo' },
+          { id: '2', status: 'todo' },
+        ],
+      },
+      handoffs: [{ outcome: 'handoff' }],
+      ...overrides,
+    };
+    return new Map([['T-1', task as never]]);
+  };
+
+  it('refuses to keep dispatching into a task whose scoped work was delivered', async () => {
+    // Observed: the user said 「只做 1.1，不要碰 1.2 和 2」, the worker stopped, its
+    // hand-off passed — and the supervisor dispatched 「继续执行剩余步骤」 anyway,
+    // because "the task is not finished" outranked a boundary nothing enforced.
+    const h = harness(workspace(), { tasks: liveTask() });
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-1' },
+        scope: '继续 T-1 剩余步骤',
+        instruction: '把 1.2 和 2 也做完',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/scope 只覆盖/);
+    expect(h.sent).toHaveLength(0);
+  });
+
+  it('allows it when a person approved going further', async () => {
+    const h = harness(workspace(), { tasks: liveTask() });
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      scope: '继续 T-1 剩余步骤',
+      instruction: '把 1.2 和 2 也做完',
+      parallel: false,
+      userApproved: true,
+    });
+    expect(h.sent.length + h.spawned.length).toBe(1);
+  });
+
+  it('leaves a first run alone', async () => {
+    // No accepted hand-off yet: the worker is still on the scoped work.
+    const h = harness(workspace(), { tasks: liveTask({ handoffs: [] }) });
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      scope: '继续',
+      instruction: '接着做',
+      parallel: false,
+    });
+    expect(h.sent.length + h.spawned.length).toBe(1);
+  })
+
+  it('leaves a task without a scope alone', async () => {
+    const h = harness(workspace(), {
+      tasks: liveTask({ spec: { plan: [{ id: '1', status: 'todo' }] } }),
+    });
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      scope: '继续',
+      instruction: '接着做',
+      parallel: false,
+    });
+    expect(h.sent.length + h.spawned.length).toBe(1);
+  })
+})

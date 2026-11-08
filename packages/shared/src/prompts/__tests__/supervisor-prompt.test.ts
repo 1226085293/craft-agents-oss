@@ -142,3 +142,31 @@ describe('supervisor prompt', () => {
     expect(SUPERVISOR_PROMPT_TOOLS.length as number).toBe(SUPERVISOR_TOOL_NAMES.size as number)
   })
 })
+
+describe('lane-specific rules', () => {
+  const userLane = () => getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane: 'user' })
+  const taskLane = () => getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane: 'task' })
+
+  it('tells the user lane not to narrate progress or dispatch', () => {
+    const text = userLane()
+    expect(text).toContain('面向用户');
+    expect(text).toContain('不推进任务');
+    expect(text).toContain('不要把范围外的步骤写进计划');
+  });
+
+  it('tells the task lane that scope is a boundary', () => {
+    const text = taskLane()
+    expect(text).toContain('面向任务');
+    expect(text).toContain('不要自己继续派活');
+  });
+
+  it('does not leak one lane rule into the other', () => {
+    // Both blocks use 「面向…」 headings; the other one's must be absent entirely.
+    expect(userLane()).not.toContain('## 这是「面向任务」的通道');
+    expect(taskLane()).not.toContain('## 这是「面向用户」的通道');
+  })
+
+  it('defaults to the working lane when none is given', () => {
+    expect(getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws' })).toBe(taskLane());
+  })
+})

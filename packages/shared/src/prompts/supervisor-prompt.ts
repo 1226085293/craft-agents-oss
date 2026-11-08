@@ -57,6 +57,13 @@ export interface SupervisorPromptOptions {
    * and answers the only question it needs — "which profile fits this task".
    */
   agentsBlock?: string
+  /**
+   * Which conversation this supervisor is.
+   *
+   * Both lanes hold the same tool table but do different jobs, and one prompt for
+   * both made each lane behave like the other — see `laneRules` below.
+   */
+  lane?: 'user' | 'task'
 }
 
 /**
@@ -75,6 +82,40 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
   const persona = options.personaBlock?.trim() ? `\n\n${options.personaBlock.trim()}` : ''
   const events = options.eventsBlock?.trim() ? `\n\n${options.eventsBlock.trim()}` : ''
   const agents = options.agentsBlock?.trim() ? `\n\n${options.agentsBlock.trim()}` : ''
+  const lane = options.lane ?? 'task'
+  /**
+   * The two lanes get different rules, not a different prompt.
+   *
+   * One document for both made each lane behave like the other: the working lane
+   * narrated progress into the user's transcript, and the user-facing lane read the
+   * plan, saw steps still open, and dispatched them — because in a coordination
+   * document "the task is not finished" is the loudest instruction there is. The
+   * tool contract (`kind` on report_to_user) is what binds; this is the half that
+   * tells the model why.
+   */
+  const laneRules =
+    lane === 'user'
+      ? [
+          '',
+          '## 这是「面向用户」的通道',
+          '',
+          '你看的是用户读的那一条会话。这里的每一行都会被当成你在跟他说话。',
+          '',
+          '- 你不推进任务、不派活、不替用户做决定。任务由「督导 · 任务」推进；任务板上的进度不要在这里播报。',
+          '- 你只做两件事：把用户的话转成任务（`task_create`），或者回答他问的事。',
+          '- 用户只要求做其中一部分时，把范围写进任务的 `scope`，并且**不要把范围外的步骤写进计划** —— 计划里写下的步骤会被当成待办，最后总会有人去做。',
+          '- 进度、派活、交接、巡检不需要用户读，不要出现在这里。',
+        ].join('\n')
+      : [
+          '',
+          '## 这是「面向任务」的通道',
+          '',
+          '你在干活，用户不读这条会话。',
+          '',
+          '- 派活、交接、巡检、失败重试都在这里，写清楚即可，不需要措辞客套。',
+          '- 用户只要求做一部分时，`scope` 就是边界。任务已交付过一轮、计划还有剩余步骤时，**不要自己继续派活** —— 那超出授权，应该用 `report_to_user` 说明还剩哪些步骤，等他同意。',
+          '- 需要用户拍板或告知完成时，用 `report_to_user` 带上 `kind`；它会被投到用户那条通道。',
+        ].join('\n')
 
   return `# 你是督导${workspace}
 
@@ -148,6 +189,6 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
 
 你的回合适用于**处理并派发**，不适用于**做好一件事**。判断做完就收尾，不要在一个回合里试图把活干完 —— 那样只会让排队的事件一直等着。
 
-如果你发现某件事你**无论如何都得让用户知道但没人能做**，就直接 \`report_to_user\` 说明情况，然后结束回合。不要反复尝试。${persona}${agents}${events}
+如果你发现某件事你**无论如何都得让用户知道但没人能做**，就直接 \`report_to_user\` 说明情况，然后结束回合。不要反复尝试。${laneRules}${persona}${agents}${events}
 `
 }

@@ -3902,6 +3902,11 @@ ${agentSnapshot.persona.trim()}
             // otherwise every task runs as the default profile.
             agentsBlock: buildAgentRosterBlock(this.config.workspace.rootPath),
             eventsBlock: buildEventsBlock(this.config.workspace.rootPath),
+            // Which of the two supervisor conversations this is. The rules differ
+            // per lane; see `laneRules` in the prompt module.
+            ...(this.config.session?.supervisorLane
+              ? { lane: this.config.session.supervisorLane }
+              : {}),
           })
         : getSystemPrompt(
             undefined, // pinnedPreferencesPrompt

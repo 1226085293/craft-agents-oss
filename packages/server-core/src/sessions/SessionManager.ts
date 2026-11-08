@@ -7656,6 +7656,11 @@ ${request.prompt}`;
           // work as the workspace default, while the cron/event path
           // (spawnTaskRun) honours the same field. Same task, two agents.
           ...(task.assigneeAgentId ? { assigneeAgentId: task.assigneeAgentId } : {}),
+          // The scope gate reads these two: without them the boundary check sees
+          // "no scope, no hand-offs" for every task and never fires — a gate that
+          // silently does nothing is worse than no gate, because it looks handled.
+          ...(task.spec?.scope ? { spec: { scope: task.spec.scope, plan: task.spec.plan } } : {}),
+          handoffs: task.handoffs.map((h) => ({ outcome: h.outcome })),
         }
       },
     })

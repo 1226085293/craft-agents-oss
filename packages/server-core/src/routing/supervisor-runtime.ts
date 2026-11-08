@@ -86,6 +86,13 @@ export interface SupervisorRuntimeDeps {
     currentSessionId?: string;
     /** Profile the task is assigned to; absent means the workspace default. */
     assigneeAgentId?: string;
+    /**
+     * Read by the scope boundary gate: whether a scope was written, what the plan
+     * still has open, and whether work under the scope was already delivered.
+     * Narrowing this back to id/session silently disables that gate.
+     */
+    spec?: { scope?: string; plan?: Array<{ id: string; status?: string }> };
+    handoffs?: Array<{ outcome?: string }>;
   } | null;
   /** Start a task by id; returns true when a run actually began. */
   runTask?: (taskId: string, reason: string) => Promise<boolean>;
@@ -308,6 +315,13 @@ export class SupervisorRuntime {
     instruction: string;
     attachTaskId?: string;
     parallel: boolean;
+    /**
+     * The user explicitly authorised work beyond the task's recorded scope.
+     *
+     * Only a human can widen a boundary, so this is not the supervisor's call to
+     * make on its own — it is set when the user answered 「继续，把剩下的也做完」.
+     */
+    userApproved?: boolean;
   }): Promise<{ sessionId: string }> {
     const supervisor = this.deps.getSession(params.fromSessionId);
     if (!supervisor || supervisor.role !== 'supervisor') {
@@ -338,6 +352,30 @@ export class SupervisorRuntime {
       // the same task's journal, and a board that could not say who owned it.
       // The instruction is a follow-up to recorded work, so it goes to that
       // session; only an absent or dead session means "start a new run".
+      /**
+       * A scope is a boundary, not a description.
+       *
+       * First real run: the user wrote 「只做 1.1，做完就停下，不要碰 1.2 和 2」 and the
+       * task recorded that as `scope`. The worker did exactly that, stopped, and its
+       * hand-off passed. One minute later the supervisor read the task, saw steps
+       * 1.2/2/3 still open, and dispatched 「继续执行剩余步骤」 into the same session —
+       * the worker then finished all of them. Nobody disobeyed: the worker stopped as
+       * told and the dispatch had no notion that a boundary existed, so "the task is
+       * not complete" silently outranked "the user limited this to one step".
+       *
+       * The check is deliberately narrow: a scope was written, a hand-off has already
+       * been accepted under it, and the plan is not finished. That combination means
+       * the scoped work was delivered and the rest is somebody else's decision. A
+       * worker that is still on its first run, or a task with no scope, is untouched.
+       */
+      const handedOff = (task.handoffs ?? []).some((h: { outcome?: string }) => h.outcome !== 'needs_decision');
+      const planOpen = Boolean(task.spec?.plan?.some((step: { status?: string }) => step.status !== 'done'));
+      if (task.spec?.scope && handedOff && planOpen && !params.userApproved) {
+        throw new DispatchRefused(
+          `${task.id} 的 scope 只覆盖已交付的那一段（「${task.spec.scope}」），计划里剩下的步骤不在授权范围内。要继续需要用户确认：不要自己派活，向用户说明还剩哪些步骤，等他同意。`,
+        );
+      }
+
       const live = task.currentSessionId ? this.deps.getSession(task.currentSessionId) : null;
       existingSessionId = live ? task.currentSessionId : undefined;
       if (task.currentSessionId && !live) {

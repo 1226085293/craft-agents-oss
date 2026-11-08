@@ -320,7 +320,14 @@ export abstract class BaseAgent implements AgentBackend {
     get(identifier: string, includeJournal: boolean): Promise<unknown | null>;
     update(
       identifier: string,
-      patch: { status?: string; pauseReason?: string; assigneeAgentId?: string; error?: string },
+      patch: {
+        status?: string;
+        pauseReason?: string;
+        assigneeAgentId?: string;
+        error?: string;
+        /** Widen or move the boundary; see task_update's scope field. */
+        scope?: string;
+      },
     ): Promise<{ status: string }>;
     handoff(
       identifier: string,

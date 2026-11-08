@@ -196,6 +196,18 @@ export const TaskUpdateSchema = z.object({
     .optional()
     .describe('Reassign to this role id. An id that is not a real profile silently falls back to the workspace default, so use one from the roster.'),
   error: z.string().optional(),
+  /**
+   * Replace the task's scope, i.e. widen or move the boundary.
+   *
+   * The user's 「完成 1.2」 is an authorisation, but only `spec.scope` can unlock the
+   * dispatch gate — and until now no tool could write it after creation. A real run
+   * showed the consequence: the supervisor read the answer correctly, could not record
+   * it, was refused by the gate, and asked the user the same question three times.
+   */
+  scope: z
+    .string()
+    .optional()
+    .describe('New scope sentence. Use when the user authorises work beyond the current boundary.'),
 });
 
 export const TaskPlanSchema = z.object({

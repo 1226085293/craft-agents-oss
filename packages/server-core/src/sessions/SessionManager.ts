@@ -5719,6 +5719,35 @@ export class SessionManager implements ISessionManager {
             return { task, journal: readJournal(managed.workspace.rootPath, identifier) }
           },
           update: async (identifier, patch) => {
+            /**
+             * Widening the boundary answers the question that was waiting on it.
+             *
+             * `scope` was write-once: created at task_create, refreshed by dispatch, and
+             * unreachable from any tool afterwards. So when the user replied 「完成 1.2」 the
+             * supervisor understood the authorisation, had no way to record it, was refused
+             * by the dispatch gate, and asked the same question again — three times in one
+             * real run. Writing the scope here is the missing step between "the user
+             * agreed" and "the system allows it".
+             *
+             * The pending decision is resolved in the same move: it existed because the
+             * boundary was too narrow, and it is no longer true once the boundary moves.
+             */
+            if (patch.scope?.trim()) {
+              const service = this.getTasks(managed.workspace.id)
+              service.setScope(identifier, patch.scope.trim())
+              const task = service.get(identifier)
+              if (task?.decision && !task.decision.resolvedAt) {
+                try {
+                  service.resolveDecision(identifier, 'approved')
+                } catch {
+                  // A decision that already expired is not a failure here.
+                }
+              }
+              if (!patch.status) {
+                const current = service.get(identifier)
+                return { status: current?.status ?? 'backlog' }
+              }
+            }
             // "running" is not a label: it must start a run. Flipping the status
             // without spawning was how a task could look alive and do nothing.
             if (patch.status === 'running') {

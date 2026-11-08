@@ -473,3 +473,81 @@ describe('scope delivered, plan still open', () => {
     expect(after.decision?.reason).toContain('2')
   })
 })
+
+describe('the decision is asked once', () => {
+  /**
+   * The branch that parks a task on a decision fires on every accepted hand-off. A real
+   * run showed the consequence: the supervisor relayed the same A/B question three
+   * times, because each new hand-off minted a new decision with a fresh deadline.
+   */
+  const parked = async () => {
+    const root = workspace();
+    const { svc } = service(root);
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'a.md'), 'x');
+    const task = svc.create({
+      name: 'once',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_once',
+      spec: {
+        cwd: root,
+        scope: '只做 1.1',
+        plan: [
+          { id: '1', title: 'a', status: 'todo' },
+          { id: '2', title: 'b', status: 'todo' },
+        ],
+      } as never,
+    })
+    svc.startRun(task.id, 'sess_w')
+    const payload = {
+      outcome: 'handoff',
+      summary: 'done',
+      artifacts: [{ path: 'docs/a.md' }],
+      verify: { ran: ['test -s docs/a.md'], passed: true },
+    }
+    await svc.reportHandoff(task.id, payload, 'sess_w')
+    const first = svc.get(task.id)!.decision!
+    await svc.reportHandoff(task.id, payload, 'sess_w')
+    return { svc, task, first }
+  }
+
+  it('keeps the original question instead of minting a new one', async () => {
+    const { svc, task, first } = await parked()
+    const second = svc.get(task.id)!.decision!
+    expect(second.askedAt).toBe(first.askedAt)
+    expect(second.deadlineAt).toBe(first.deadlineAt)
+  })
+
+  it('still parks the task on a decision the first time', async () => {
+    const { svc, task } = await parked()
+    expect(svc.get(task.id)?.status).toBe('paused')
+    expect(svc.get(task.id)?.pauseReason).toBe('needs_decision')
+  })
+})
+
+describe('widening the scope answers the pending question', () => {
+  /**
+   * `scope` was write-once after creation, so the supervisor could read the user's
+   * 「完成 1.2」 correctly and still have no way to record it. It then hit the dispatch
+   * gate, which reads `spec.scope`, and asked the user again — the same question, three
+   * times. `task_update({ scope })` is the missing step between "the user agreed" and
+   * "the system allows it", and resolving the decision in the same move is what stops
+   * the two from disagreeing.
+   */
+  it('records the new boundary and resolves the decision', () => {
+    const { svc } = service(workspace());
+    const task = svc.create({
+      name: 'widen',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_widen',
+      spec: { scope: '只做 1.1', plan: [{ id: '1', title: 'a', status: 'todo' }] } as never,
+    })
+    svc.setStatus(task.id, 'paused', { pauseReason: 'needs_decision' })
+    expect(svc.get(task.id)?.status).toBe('paused')
+
+    svc.setScope(task.id, '做 1.1 和 1.2')
+    expect(svc.get(task.id)?.spec?.scope).toBe('做 1.1 和 1.2')
+  })
+})

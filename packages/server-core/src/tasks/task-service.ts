@@ -827,6 +827,19 @@ export class TaskService {
       };
     } else if (accepted && handoff.outcome === 'handoff' && this.scopeDeliveredButPlanOpen(next)) {
       /**
+       * Ask once, not once per hand-off.
+       *
+       * The branch fires on every accepted hand-off, so a task that was already parked
+       * on an unanswered decision produced another identical decision the next time the
+       * worker reported — and the supervisor relayed each one. A real run asked the
+       * same A/B question three times. An outstanding decision is the whole point: it
+       * is already waiting, so there is nothing new to say.
+       */
+      const outstanding = next.decision && !next.decision.resolvedAt
+      if (outstanding) {
+        // Nothing to add: the task stays paused on the question it already asked.
+      } else {
+      /**
        * The authorised slice is delivered and the rest is nobody's call.
        *
        * Observed on a real run: the user said 「只做 1.1，完成就停下，不要碰 1.2 和 2」,
@@ -861,6 +874,7 @@ export class TaskService {
         at: now,
         data: { remaining: remaining.map((step) => step.id) },
       });
+      }
     }
 
     /**

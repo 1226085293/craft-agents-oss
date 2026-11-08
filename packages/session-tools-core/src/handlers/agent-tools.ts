@@ -280,7 +280,14 @@ export async function handleTaskGet(
 /** Advance or annotate a task. Illegal transitions are refused by the service. */
 export async function handleTaskUpdate(
   ctx: SessionToolContext,
-  args: { identifier: string; status?: string; pauseReason?: string; assigneeAgentId?: string; error?: string },
+  args: {
+    identifier: string;
+    status?: string;
+    pauseReason?: string;
+    assigneeAgentId?: string;
+    error?: string;
+    scope?: string;
+  },
 ): Promise<ToolResult> {
   if (!ctx.taskTools?.update) return errorResponse('task_update is only available to a supervisor session.');
   if (!args.identifier?.trim()) return errorResponse('identifier is required.');
@@ -290,6 +297,7 @@ export async function handleTaskUpdate(
       pauseReason: args.pauseReason,
       assigneeAgentId: args.assigneeAgentId,
       error: args.error,
+      ...(args.scope?.trim() ? { scope: args.scope.trim() } : {}),
     });
     return successResponse(`Task ${args.identifier} → ${result.status}.`);
   } catch (error) {

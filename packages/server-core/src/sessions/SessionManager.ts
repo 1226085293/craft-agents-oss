@@ -7406,10 +7406,32 @@ ${request.prompt}`;
         },
         wakeSession: (task, sessionId, reason) => {
           service.noteWake(task.id)
-          const brief = reason === 'unreported' ? formatUnreportedBrief(task) : formatIdleWakeBrief(task)
-          void this.sendMessage(sessionId, brief).catch((error) => {
-            sessionLog.warn(`[tasks] could not wake the idle session of ${task.id}`, { error })
-          })
+          const managed = this.sessions.get(sessionId)
+          if (!managed) return
+          if (reason === 'unreported') {
+            // This one genuinely needs words: a worker whose plan is complete does not
+            // know that "done" without `report_result` leaves the task open, and
+            // continuing the turn gives it nothing new to read.
+            void this.sendMessage(sessionId, formatUnreportedBrief(task)).catch((error) => {
+              sessionLog.warn(`[tasks] could not ask ${task.id} for its hand-off`, { error })
+            })
+            return
+          }
+          // Idle: resume the session, do not post a user message.
+          //
+          // A message becomes a permanent 300–400 character row in the transcript that
+          // every later request carries, and it reads as a fresh instruction — which is
+          // why a stalled worker used to re-plan and invent steps. `resumeTurn()`
+          // re-issues the turn from the existing transcript and appends nothing. The
+          // message is only a fallback for a session with no live subprocess, where
+          // there is nothing to continue.
+          void (async () => {
+            const resumed = await managed.agent?.resumeTurn?.().catch(() => false)
+            if (resumed) return
+            await this.sendMessage(sessionId, formatIdleWakeBrief(task)).catch((error) => {
+              sessionLog.warn(`[tasks] could not wake the idle session of ${task.id}`, { error })
+            })
+          })()
         },
         pause: (id, reason, note) => {
           const before = service.get(id)

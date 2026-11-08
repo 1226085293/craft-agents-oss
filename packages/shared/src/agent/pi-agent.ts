@@ -766,6 +766,29 @@ export class PiAgent extends BaseAgent {
     this.send({ type: 'retry' });
   }
 
+  /**
+   * Get an idle session working again WITHOUT adding a user message.
+   *
+   * Waking a stalled worker used to mean `sendMessage(sessionId, brief)`, which puts
+   * a 300–400 character 「用户消息」 into the transcript. Three things follow from that,
+   * all bad: it occupies context forever (every later request carries it), it reads as
+   * a fresh instruction so the model re-plans instead of continuing (the source of a
+   * 「1.3 重做 1.1」 step that appeared from nowhere), and when the provider is flaking,
+   * retries pile the same text up in the queue. The user asked for "resume the
+   * session, not resend a user message" and that is exactly right.
+   *
+   * `{ type: 'retry' }` is the subprocess message that becomes `agent.continue()`: the
+   * turn is re-issued from the existing transcript with nothing appended. Returns false
+   * when there is no live subprocess, so a caller can fall back to a real message.
+   */
+  async resumeTurn(): Promise<boolean> {
+    if (this.controlledRestartInProgress) return false;
+    if (this._isProcessing) return false;
+    if (!this.subprocess || !this.subprocess.stdin?.writable) return false;
+    this.send({ type: 'retry' });
+    return true;
+  }
+
   // ---------------------------------------------------------------------------
   // Stall-triggered subprocess restart (2026-10-18)
   // ---------------------------------------------------------------------------

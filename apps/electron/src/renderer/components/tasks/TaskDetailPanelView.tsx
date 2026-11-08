@@ -179,6 +179,17 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
   // `activeMs` is the accumulated time actually spent running; the budget is the
   // ceiling and belongs in the hint, not in the value.
   const activeMinutes = Math.round(((detail.stats?.activeMs ?? 0) / 60_000))
+  /**
+   * Running, but nothing is working on it.
+   *
+   * The watchdog wakes an idle session after a few minutes, which means there is a
+   * real window where the board says 进行中 and nothing is happening. Observed by the
+   * user as "会话中止了，一直没恢复" — it had not recovered *yet*, and nothing on screen
+   * said it was waiting. A silent wait reads as a hang.
+   */
+  const sessionMeta = detail.currentSessionId ? sessionMetas.get(detail.currentSessionId) : undefined
+  const awaitingRecovery =
+    detail.status === 'running' && Boolean(detail.currentSessionId) && sessionMeta?.isProcessing === false
   const verificationLabel = detail.verify.lastVerdict === 'pass'
     ? '通过'
     : detail.verify.lastVerdict === 'fail'
@@ -200,6 +211,14 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onOpenSession, p
           <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="td-title text-foreground">{detail.name}</h1>
             <StatusBadge status={detail.status} />
+            {awaitingRecovery ? (
+              <span
+                className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-xs font-medium text-amber-400"
+                title="执行会话已经停下，看门狗会在空闲几分钟后自动唤醒它继续；如果连续唤醒仍不推进，任务会被暂停"
+              >
+                等待恢复 · 会话已停下
+              </span>
+            ) : null}
           </div>
           <p className="td-body mt-2 flex flex-wrap items-center gap-1.5 text-muted-foreground">
             <Clock3 className="h-4 w-4" aria-hidden="true" />

@@ -459,6 +459,15 @@ export interface AgentBackend {
   abort(reason?: string): Promise<void>;
 
   /**
+   * Re-issue the current turn without appending a user message.
+   *
+   * Optional: a backend that cannot continue from its transcript leaves it undefined,
+   * and callers fall back to sending a message. Returning false means "nothing to
+   * continue" (no live subprocess, or the turn is already running).
+   */
+  resumeTurn?(): Promise<boolean>;
+
+  /**
    * Tells the backend that the gateway is parked in waitForCooldown.
    *
    * No model events are produced during that wait, so the turn watchdog must

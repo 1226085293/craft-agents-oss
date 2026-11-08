@@ -117,8 +117,9 @@ describe('handoff', () => {
     const h = normalizeHandoff({ summary: 'done' }, 'sess_1', 1);
     const verdict = checkHandoffRules(h, () => ({ exists: true, nonEmpty: true }));
     expect(verdict.passed).toBe(false);
-    expect(verdict.reasons).toContain('no artifacts');
-    expect(verdict.reasons).toContain('no verification command was run');
+    // The reason has to tell the reader what to do, not just which rule tripped.
+    expect(verdict.reasons.join(' ')).toContain('artifacts');
+    expect(verdict.reasons.join(' ')).toContain('verify.ran');
   });
 
   it('fails when an artifact path does not exist', () => {

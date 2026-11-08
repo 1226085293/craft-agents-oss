@@ -210,7 +210,7 @@ export function checkHandoffRules(
   }
 
   if (!handoff.artifacts?.length) {
-    reasons.push('no artifacts');
+    reasons.push('交接里没有列出任何产物（artifacts）。把你实际做出来的文件路径填进去，规则门会用真实路径去检查。');
   } else {
     for (const artifact of handoff.artifacts) {
       const found = probe(artifact.path);
@@ -238,9 +238,9 @@ export function checkHandoffRules(
   }
 
   if (!handoff.verify || handoff.verify.ran.length === 0) {
-    reasons.push('no verification command was run');
+    reasons.push('没有记录任何验证命令（verify.ran）。把真正跑过的命令写进去，并用 verify.passed 说明它是否通过。');
   } else if (!handoff.verify.passed) {
-    reasons.push('verification did not pass');
+    reasons.push('你记录的命令是失败的（verify.passed 为 false），失败的验证不能当作完成证据。');
   }
 
   // Acceptance commands are the deterministic second layer: they run here, not

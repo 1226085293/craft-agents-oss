@@ -983,22 +983,39 @@ export class TaskService {
     const failures: string[] = [];
     const results: TaskAcceptanceVerdict['results'] = [];
 
+    /**
+     * A failed check has to explain itself.
+     *
+     * This used to say `acceptance failed: a1 (exit 1)` — an id and a code, which is
+     * everything the worker cannot interpret. A real run responded exactly as you would
+     * expect: it stopped working and went reading the task to find out what `a1` was.
+     * The information was already here — the id, the human sentence, the command, and the
+     * command's own output — and none of it reached the model.
+     *
+     * Written for a reader who has the task in hand: what was supposed to be true, what was
+     * run, and what came back.
+     */
+    const describe = (item: NonNullable<ReturnType<typeof acceptanceItems>[number]>, detail: string): string =>
+      `验收项 ${item.id} 未通过：「${item.check}」\n  执行的命令：${item.command}\n  ${detail}`;
+
     for (const item of withCommands) {
       try {
         const result = await this.deps.runAcceptanceCommand(item.command!, cwd);
         const passed = result.exitCode === 0;
+        const output = result.output?.trim();
+        const detail = result.exitCode === null
+          ? '命令没有返回退出码（可能被中断）'
+          : `退出码 ${result.exitCode}${output ? `，输出：${output.slice(0, 400)}` : '（没有输出）'}`;
         results.push({
           id: item.id,
           passed,
-          note: passed ? undefined : `exit ${result.exitCode ?? 'null'}${result.output ? `: ${result.output.slice(0, 200)}` : ''}`,
+          note: passed ? undefined : detail,
         });
-        if (!passed) {
-          failures.push(`acceptance failed: ${item.id}${result.exitCode === null ? '' : ` (exit ${result.exitCode})`}`);
-        }
+        if (!passed) failures.push(describe(item, detail));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         results.push({ id: item.id, passed: false, note: message });
-        failures.push(`acceptance failed: ${item.id} (${message})`);
+        failures.push(describe(item, `命令无法执行：${message}`));
       }
     }
 

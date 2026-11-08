@@ -101,7 +101,10 @@ describe('acceptance gate', () => {
     );
 
     expect(result.passed).toBe(false);
-    expect(result.reasons.join(' ')).toContain('acceptance failed: a2');
+    // Names the item, what it checks and the command — not just `a2 (exit 1)`.
+    const text = result.reasons.join(' ');
+    expect(text).toContain('a2');
+    expect(text).toContain('未通过');
     expect(result.task.status).not.toBe('completed');
     expect(wakes[0]?.text).toContain('交接未通过');
   });

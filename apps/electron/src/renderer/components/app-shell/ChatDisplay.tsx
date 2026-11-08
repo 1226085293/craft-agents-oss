@@ -2916,6 +2916,135 @@ interface MessageBubbleProps {
 }
 
 /**
+ * A question for a person, and the way to answer it.
+ *
+ * This row is deliberately NOT a chat message. A decision request used to be delivered by
+ * the same pipe as a worker nudge (persist the row, then wake the session), so a question
+ * addressed to the human arrived as *input to a model* — and the model answered it, then
+ * resumed a task the user had frozen. The row is written as `role: 'info'` and starts no
+ * turn, so no model ever reads it.
+ *
+ * The answer therefore comes from here, from a click or a typed line, and travels back to
+ * the session that asked (`askedBySessionId`) as an ordinary user message — the only kind
+ * of answer a supervisor is allowed to act on.
+ *
+ * State is per card, keyed by nothing shared: two cards can be outstanding at once (two
+ * tasks asking, or two questions from one turn) and answering one must not answer another.
+ */
+function DecisionRequestCard({ request }: { request: NonNullable<Message['decisionRequest']> }) {
+  const [typing, setTyping] = React.useState(false)
+  const [draft, setDraft] = React.useState('')
+  const [sent, setSent] = React.useState<string | null>(null)
+  const [error, setError] = React.useState<string | null>(null)
+
+  const answer = React.useCallback(
+    async (text: string) => {
+      const trimmed = text.trim()
+      if (!trimmed || sent) return
+      setError(null)
+      try {
+        // A real user message, to the session that asked. Not a card mutation: the
+        // supervisor has to see the answer to act on it, and this is the only channel
+        // that carries a person's words.
+        await window.electronAPI.sendMessage(request.askedBySessionId, trimmed)
+        setSent(trimmed)
+        setTyping(false)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [request.askedBySessionId, sent],
+  )
+
+  return (
+    <div className="my-3 mx-3 rounded-[10px] border border-border/60 bg-muted/30 px-3.5 py-3">
+      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+        <CircleAlert className="h-3 w-3 text-info" />
+        <span>{request.askedByLabel} 发来的问句</span>
+        {request.taskIdentifier ? <span className="normal-case tracking-normal">· {request.taskIdentifier}</span> : null}
+      </div>
+
+      <div className="whitespace-pre-wrap text-[13px] leading-relaxed text-foreground">{request.question}</div>
+
+      {sent ? (
+        <div className="mt-2.5 flex items-start gap-1.5 text-[12px] text-success">
+          <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0" />
+          <span className="whitespace-pre-wrap">已答复：{sent}</span>
+        </div>
+      ) : (
+        <>
+          {request.options?.length ? (
+            <div className="mt-2.5 flex flex-wrap gap-1.5">
+              {request.options.map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  onClick={() => void answer(option)}
+                  className="rounded-md border border-border bg-background px-2.5 py-1 text-[12px] text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+                >
+                  {option}
+                </button>
+              ))}
+            </div>
+          ) : null}
+
+          {typing ? (
+            <div className="mt-2.5">
+              <textarea
+                autoFocus
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    void answer(draft)
+                  }
+                }}
+                rows={2}
+                placeholder="写下你的答复，Enter 发送，Shift+Enter 换行"
+                className="w-full resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground outline-none focus:border-ring"
+              />
+              <div className="mt-1.5 flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => void answer(draft)}
+                  disabled={!draft.trim()}
+                  className="rounded-md bg-foreground px-2.5 py-1 text-[12px] text-background disabled:opacity-40"
+                >
+                  发送
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setTyping(false)
+                    setDraft('')
+                  }}
+                  className="rounded-md px-2 py-1 text-[12px] text-muted-foreground hover:text-foreground"
+                >
+                  取消
+                </button>
+              </div>
+            </div>
+          ) : (
+            // 「其他」 is not a choice: it submits nothing. It only opens the box, so the
+            // card can never be answered by a preset the asker invented.
+            <button
+              type="button"
+              onClick={() => setTyping(true)}
+              className="mt-2.5 rounded-md border border-dashed border-border px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:border-solid hover:text-foreground"
+            >
+              其他（自己写）
+            </button>
+          )}
+
+          {error ? <div className="mt-2 text-[12px] text-destructive">发送失败：{error}</div> : null}
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
  * ErrorMessage - Separate component for error messages to allow useState hook
  */
 function ErrorMessage({ message, onOpenUrl, sessionId, onRetry }: { message: Message; onOpenUrl?: (url: string) => void; sessionId?: string; onRetry?: () => void }) {
@@ -3122,6 +3251,12 @@ function MessageBubble({
 
   // === INFO MESSAGE: Icon and color based on level ===
   if (message.role === 'info') {
+    // A question for a person. Drawn as a card with buttons, because the answer has to
+    // come from a human: this row is display-only and no model ever receives it.
+    if (message.statusType === 'decision_request' && message.decisionRequest) {
+      return <DecisionRequestCard request={message.decisionRequest} />
+    }
+
     // Compaction complete message - render as horizontal rule with centered label
     // This persists after reload to show where context was compacted
     if (message.statusType === 'compaction_complete') {

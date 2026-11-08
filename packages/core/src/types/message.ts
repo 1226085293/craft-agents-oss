@@ -253,6 +253,34 @@ export interface StoredAttachment {
 /**
  * Runtime message type (includes transient fields like isStreaming)
  */
+/**
+ * A question only a person can answer.
+ *
+ * The bug this type exists to prevent: the supervisor's decision requests were delivered
+ * through the same pipe as a worker nudge — persist the row, then wake the session. That
+ * pipe means "a message to an agent", so a question addressed to the human became input to
+ * a model, and the model answered it (one real run: "按你最初的授权，我拍板选 (b)") and then
+ * resumed the task the user had frozen.
+ *
+ * So the row is display-only: written to the transcript, never sent to a model, and it
+ * starts no turn. The answer travels back to `askedBySessionId` as a real user message —
+ * the only kind of answer a supervisor is allowed to act on.
+ */
+export interface DecisionRequest {
+  /** Stable id, so an answer can be matched to the card it belongs to. */
+  id: string;
+  /** The session that asked. Its turn ended; the answer wakes only it. */
+  askedBySessionId: string;
+  /** Who asked, for the card header — e.g. 「督导 · 任务」. */
+  askedByLabel: string;
+  /** The task this belongs to, when the asker is working on one. */
+  taskIdentifier?: string;
+  question: string;
+  /** Preset answers, rendered as buttons. Free text is always possible via 「其他」. */
+  options?: string[];
+  askedAt: number;
+}
+
 export interface Message {
   id: string;
   role: MessageRole;
@@ -322,7 +350,9 @@ export interface Message {
   // Turn ID: Correlation ID from the API's message.id, groups all messages in an assistant turn
   turnId?: string;
   // Status type for special status messages (compaction / verification / …).
-  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake' | 'event_wake';
+  /** A question for a person. See `DecisionRequest` — display-only, never model input. */
+  decisionRequest?: DecisionRequest;
+  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake' | 'event_wake' | 'decision_request';
   /** Structured interpolation values for the row's i18n key (e.g. attempt/total, tokens). The renderer resolves display text from `statusType`; these fill its placeholders. */
   statusParams?: Record<string, string | number>;
   // Info level for info messages (determines icon/color)
@@ -406,7 +436,9 @@ export interface StoredMessage {
   /** Streaming start time (first text_delta) for process-card ordering - persisted */
   startedAt?: number;
   // Status type for special status messages (compaction / verification / …).
-  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake' | 'event_wake';
+  /** A question for a person. See `DecisionRequest` — display-only, never model input. */
+  decisionRequest?: DecisionRequest;
+  statusType?: 'compacting' | 'compaction_complete' | 'verification' | 'verification_passed' | 'verification_failed' | 'verification_stabilized' | 'compaction_summary' | 'degeneracy_detected' | 'background_wake' | 'event_wake' | 'decision_request';
   /** Structured interpolation values for the row's i18n key — see statusParams above. */
   statusParams?: Record<string, string | number>;
   // Info level for info messages (persisted for reload)
@@ -644,7 +676,7 @@ export type AgentEvent =
   | { type: 'retry'; phase: 'backoff'; message: string; attempt?: number; nextRetryInMs?: number; /** Ladder-start epoch ms — anchors the row on the ladder's real start (2026-10-10), so a later `end` re-finds the same row by startedAt. */ startedAt?: number }
   | { type: 'retry'; phase: 'active' | 'end'; recovered?: boolean; attempt?: number; startedAt?: number; elapsedMs?: number }
   | { type: 'status'; message: string; statusType?: string; statusParams?: Record<string, string | number> }
-  | { type: 'info'; message: string; statusType?: string; statusParams?: Record<string, string | number>; finalText?: string; /** Present when statusType === 'system_stop': machine key (e.g. 'busy_limit', 'no_progress') explaining why a guardrail killed the turn. */ stopReason?: string }
+  | { type: 'info'; message: string; statusType?: string; statusParams?: Record<string, string | number>; finalText?: string; /** Present when statusType === 'decision_request': the card the renderer draws and the session an answer belongs to. */ decisionRequest?: DecisionRequest; /** Present when statusType === 'system_stop': machine key (e.g. 'busy_limit', 'no_progress') explaining why a guardrail killed the turn. */ stopReason?: string }
   | { type: 'text_delta'; text: string; turnId?: string; parentToolUseId?: string }
   | { type: 'text_complete'; text: string; isIntermediate?: boolean; turnId?: string; parentToolUseId?: string; sdkMessageId?: string; /** Model's message_start time (thinking blocks never stream deltas) - for process-card ordering */ startedAt?: number }
   /**

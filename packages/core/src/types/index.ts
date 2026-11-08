@@ -39,6 +39,7 @@ export type {
   AnnotationV1,
   Message,
   StoredMessage,
+  DecisionRequest,
   TokenUsage,
   AgentEventUsage,
   RecoveryAction,

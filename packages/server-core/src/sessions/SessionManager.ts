@@ -143,7 +143,7 @@ import { restoreFiles } from '@craft-agent/shared/utils/bundle-files'
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { CraftMcpClient, McpClientPool, McpPoolServer } from '@craft-agent/shared/mcp'
 import { type Session, type SessionEvent, type FileAttachment, type SendMessageOptions, type UnreadSummary, type RemoteSessionTransferPayload, type ImportRemoteSessionTransferResult, type QueuedMessageSummary, type QueuedMessageEditResult, RPC_CHANNELS, generateMessageId } from '@craft-agent/shared/protocol'
-import { messageToStored, storedToMessage, type Message, type StoredAttachment, type ToolDisplayMeta, type TokenUsage } from '@craft-agent/core/types'
+import { messageToStored, storedToMessage, type DecisionRequest, type Message, type StoredAttachment, type ToolDisplayMeta, type TokenUsage } from '@craft-agent/core/types'
 import { formatPathsToRelative, formatToolInputPaths, perf, encodeIconToDataUrlAsync, getEmojiIcon, resetSummarizationClient, resolveToolIcon, readFileAttachment, selectSpreadMessages } from '@craft-agent/shared/utils'
 import { loadAllSkills, invalidateSkillsCache } from '@craft-agent/shared/skills'
 import { getMemoryStorePath, loadMemoryStore, saveMemoryStore, recordExtraction, loadSessionMemoryStore, saveSessionMemoryStore, type SessionMemoryStore } from '@craft-agent/shared/memory';
@@ -7944,6 +7944,67 @@ ${request.prompt}`;
   }
 
   /**
+   * Write a row for the reader, and start no turn.
+   *
+   * The distinction this exists to make: `appendSyntheticMessage` persists a row *and
+   * wakes the session*, which makes it a message **to an agent**. Everything the
+   * supervisor wanted a person to see went through that pipe, so a question addressed to
+   * the user arrived as input to a model — and the model answered it (real run: "按你最初
+   * 的授权，我拍板选 (b)：就此结束 T-1"), then resumed work the user had frozen.
+   *
+   * Keeping the persistence and dropping the wake is the whole fix: the row is rendered to
+   * whoever is reading, no model is handed it, and no turn begins. The answer comes back
+   * from the person as an ordinary user message.
+   */
+  private appendReadOnlyRow(
+    managed: ManagedSession,
+    row: {
+      text: string
+      /** Only the card kind declares a sub-type; a plain notice is just `role: 'info'`. */
+      statusType?: 'decision_request'
+      infoLevel?: Message['infoLevel']
+      decisionRequest?: DecisionRequest
+    },
+  ): void {
+    const message: Message = {
+      id: randomUUID(),
+      role: 'info',
+      content: row.text,
+      timestamp: this.monotonic(),
+      ...(row.statusType ? { statusType: row.statusType } : {}),
+      ...(row.infoLevel ? { infoLevel: row.infoLevel } : {}),
+      ...(row.decisionRequest ? { decisionRequest: row.decisionRequest } : {}),
+    }
+    managed.messages.push(message)
+    this.persistSession(managed)
+    this.sendEvent(
+      {
+        type: 'info',
+        sessionId: managed.id,
+        message: row.text,
+        ...(row.statusType ? { statusType: row.statusType } : {}),
+        ...(row.infoLevel ? { level: row.infoLevel } : {}),
+        timestamp: message.timestamp,
+        ...(row.decisionRequest ? { decisionRequest: row.decisionRequest } : {}),
+      },
+      managed.workspace.id,
+    )
+  }
+
+  /** The lane a supervisor's reader-facing rows belong to. */
+  private async resolveReaderLane(managed: ManagedSession): Promise<ManagedSession | undefined> {
+    if ((managed.supervisorLane ?? 'task') === 'user') return managed
+    const userLane = await this.ensureSupervisorSession(managed.workspace.id, 'user')
+    return this.sessions.get(userLane.id)
+  }
+
+  /** How the asker is named on the card. */
+  private askerLabel(managed: ManagedSession): string {
+    if (managed.name?.trim()) return managed.name.trim()
+    return (managed.supervisorLane ?? 'task') === 'user' ? '督导 · 用户' : '督导 · 任务'
+  }
+
+  /**
    * Deliver something the user has to read onto the user lane.
    *
    * The working supervisor produces both kinds of row: bookkeeping and the few
@@ -7967,20 +8028,37 @@ ${request.prompt}`;
       await this.appendSyntheticMessage(managed, text)
       return
     }
-    if ((managed.supervisorLane ?? 'task') === 'user') {
-      await this.appendSyntheticMessage(managed, text)
+    let target: ManagedSession | undefined
+    try {
+      target = await this.resolveReaderLane(managed)
+    } catch (error) {
+      sessionLog.warn('[supervisor] could not open the reader lane', { error })
+      // Falling back to a wake would recreate the very defect this path avoids: a report
+      // meant for a person must stay unread rather than become model input.
       return
     }
-    try {
-      const userLane = await this.ensureSupervisorSession(managed.workspace.id, 'user')
-      const target = this.sessions.get(userLane.id)
-      if (!target) return
-      const label = kind === 'decision' ? '需要拍板' : kind === 'blocked' ? '需要人工' : '任务完成'
-      await this.appendSyntheticMessage(target, `〔来自督导·任务·${label}〕${text}`)
-    } catch (error) {
-      sessionLog.warn('[supervisor] could not deliver to the user lane', { error })
-      await this.appendSyntheticMessage(managed, text)
+    if (!target) return
+
+    if (kind === 'decision') {
+      // A question. Answering it is the person's job, so nothing is woken: the row is
+      // written for the reader and the turn that asked ends here.
+      this.appendReadOnlyRow(target, {
+        text,
+        statusType: 'decision_request',
+        decisionRequest: {
+          id: randomUUID(),
+          askedBySessionId: managed.id,
+          askedByLabel: this.askerLabel(managed),
+          question: text,
+          askedAt: Date.now(),
+        },
+      })
+      return
     }
+    this.appendReadOnlyRow(target, {
+      text,
+      infoLevel: kind === 'blocked' ? 'warning' : 'success',
+    })
   }
 
   /** A supervisor's question to the user. */
@@ -7988,13 +8066,34 @@ ${request.prompt}`;
     managed: ManagedSession,
     questions: { question: string; options?: string[] }[],
   ): Promise<void> {
-    const body = questions
-      .map((q, i) => {
-        const options = q.options?.length ? `\n选项：${q.options.join(' / ')}` : ''
-        return `${i + 1}. ${q.question}${options}`
+    let target: ManagedSession | undefined
+    try {
+      target = await this.resolveReaderLane(managed)
+    } catch (error) {
+      sessionLog.warn('[supervisor] could not open the reader lane', { error })
+      // Falling back to a wake would recreate the very defect this path avoids: a report
+      // meant for a person must stay unread rather than become model input.
+      return
+    }
+    if (!target) return
+
+    // One card per question, each with its own id. Several cards can be outstanding at
+    // once — two tasks asking, or two questions from one turn — and answering one must
+    // not answer another, so nothing is shared between rows.
+    for (const q of questions) {
+      this.appendReadOnlyRow(target, {
+        text: q.question,
+        statusType: 'decision_request',
+        decisionRequest: {
+          id: randomUUID(),
+          askedBySessionId: managed.id,
+          askedByLabel: this.askerLabel(managed),
+          question: q.question,
+          ...(q.options?.length ? { options: [...q.options] } : {}),
+          askedAt: Date.now(),
+        },
       })
-      .join('\n')
-    await this.deliverToUserLane(managed, `需要你拍板：\n${body}`)
+    }
   }
 
   /** A supervisor's question to the user. */
@@ -8002,13 +8101,20 @@ ${request.prompt}`;
     managed: ManagedSession,
     questions: { question: string; options?: string[] }[],
   ): Promise<void> {
-    const body = questions
-      .map((q, i) => {
-        const options = q.options?.length ? `\n选项：${q.options.join(' / ')}` : ''
-        return `${i + 1}. ${q.question}${options}`
+    for (const q of questions) {
+      this.appendReadOnlyRow(managed, {
+        text: q.question,
+        statusType: 'decision_request',
+        decisionRequest: {
+          id: randomUUID(),
+          askedBySessionId: managed.id,
+          askedByLabel: this.askerLabel(managed),
+          question: q.question,
+          ...(q.options?.length ? { options: [...q.options] } : {}),
+          askedAt: Date.now(),
+        },
       })
-      .join('\n')
-    await this.appendSyntheticMessage(managed, `需要你拍板：\n${body}`)
+    }
   }
 
   async archiveSession(sessionId: string): Promise<void> {

@@ -713,12 +713,16 @@ export class TaskService {
      * closed with a step skipped. The plan then reads as both 2/5 and 已完成, which is not
      * a display glitch — the two facts disagree.
      *
-     * The escape hatch matters as much as the rule. A plan is written while the work is
-     * still being discovered, so some steps do become irrelevant; refusing without an
-     * exit would only teach the worker to mark unfinished steps done, which is worse than
-     * skipping them. So the refusal names the remaining steps and both legal exits: mark
-     * it done with evidence, or remove it. Removal of a *finished* step is already refused
-     * elsewhere, and every removal is journalled, so the escape leaves a trace.
+     * The exits matter as much as the rule, and the original pair was wrong. It offered
+     * "mark it done with evidence" (a lie, when the step was assigned to someone else) or
+     * "remove it". A worker told not to touch `1.2`/`2` did exactly as instructed, hit this
+     * gate, and removed both — then wrote in the note that the user had "明确划出本次范围",
+     * which nobody had said. Two steps the user explicitly wanted kept were gone, the task
+     * closed as completed, and nothing ever ran them.
+     *
+     * The correct exit already existed in the outcome field and was never named here:
+     * `delivered` means the whole task is finished, `handoff` means this leg is finished
+     * and the task continues. Naming it costs one sentence; not naming it cost the plan.
      */
     if (handoff.outcome === 'delivered' && accepted) {
       const progress = planProgress(task.spec?.plan);
@@ -728,8 +732,10 @@ export class TaskService {
         );
         accepted = false;
         reasons.push(
-          `计划里还有 ${remaining.length} 步没完成，不能交付整个任务：${remaining.map((step) => `${step.id} ${step.title}`).join('；')}。` +
-            '两条出路：真的做完了就标 done 并在 note 里写证据；不需要了就把它移除（移除会记进任务日志）。',
+          `计划里还有 ${remaining.length} 步没完成，不能作为“整个任务已完成”交付（delivered）：${remaining.map((step) => `${step.id} ${step.title}`).join('；')}。` +
+            '如果你的分配范围只是计划的一部分，用 outcome: "handoff" 交接——任务不会关闭，剩下的步骤留给后绡的会话；' +
+            '如果这一步确实做完了，就标 done 并在 note 里写证据；' +
+            '只有当计划本身写错了（这一步根本不该存在）才移除它。',
         );
       }
     }

@@ -402,6 +402,30 @@ export async function handleTaskPlan(
     );
   }
 
+  if (!args.id?.trim() && !args.steps?.length) {
+    /**
+     * Reading the plan is a legitimate call, not a missing argument.
+     *
+     * Observed: a worker trying to look at the plan called `task_plan({identifier})`
+     * and got `id is required`, then tried `task_plan({identifier, id:'2'})` and got
+     * `a new step needs a title`. Two failed writes to answer one read. The brief shows
+     * the plan at turn start, but a worker several tool calls deep has no way to ask.
+     *
+     * A read is free and cannot corrupt anything — the alternative is a model guessing
+     * at what it already wrote.
+     */
+    const task = (await ctx.taskTools.get(args.identifier, false)) as
+      | { spec?: { plan?: Array<{ id: string; title?: string; status?: string }> } }
+      | null;
+    if (!task) return errorResponse(`Task ${args.identifier} was not found.`);
+    const plan = task.spec?.plan;
+    return successResponse(
+      plan?.length
+        ? `当前计划：${renderPlan(plan)}`
+        : '当前计划为空 —— 还没有任何步骤。',
+    );
+  }
+
   if (!args.id?.trim()) return errorResponse('id is required (or pass steps[] to write several).');
   try {
     const result = await ctx.taskTools.updatePlan(args.identifier, {

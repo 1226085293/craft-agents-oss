@@ -88,3 +88,50 @@ describe('task_plan echoes the plan back', () => {
     expect(textOf(result)).toContain('nope');
   })
 })
+
+describe('task_plan can be read, not only written', () => {
+  /**
+   * A worker looking at the plan called `task_plan({identifier})` and got `id is required`,
+   * then `task_plan({identifier, id:'2'})` and got `a new step needs a title`. Two failed
+   * writes to answer one read. Reading costs nothing and cannot corrupt a plan.
+   */
+  const ctx = (plan: Array<{ id: string; title: string; status: string }>) =>
+    ({
+      sessionId: 'sess-1',
+      taskTools: {
+        get: async () => ({ spec: { plan } }),
+        updatePlan: async () => ({ ok: true, plan }),
+      },
+    }) as unknown as SessionToolContext;
+
+  it('returns the whole plan when called with only an identifier', async () => {
+    const result = await handleTaskPlan(
+      ctx([
+        { id: '1', title: '写文件', status: 'done' },
+        { id: '1.1', title: '创建 docs/a.md', status: 'done' },
+        { id: '2', title: '收尾', status: 'todo' },
+      ]),
+      { identifier: 'T-1' } as never,
+    );
+    const text = textOf(result);
+    expect(text).toContain('1 写文件');
+    expect(text).toContain('2 收尾');
+    expect(text).not.toContain('id is required');
+  })
+
+  it('says so when the plan is still empty', async () => {
+    const result = await handleTaskPlan(ctx([]), { identifier: 'T-1' } as never);
+    expect(textOf(result)).toContain('还没有任何步骤');
+  })
+
+  it('reports an unknown task instead of an empty plan', async () => {
+    const missing = {
+      sessionId: 's',
+      taskTools: { get: async () => null, updatePlan: async () => ({ ok: false }) },
+    };
+    const result = await handleTaskPlan(missing as unknown as SessionToolContext, {
+      identifier: 'T-9',
+    } as never);
+    expect(textOf(result)).toContain('not found');
+  })
+})

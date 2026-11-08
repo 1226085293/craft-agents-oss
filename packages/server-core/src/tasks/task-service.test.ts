@@ -393,6 +393,79 @@ describe('handoff milestones', () => {
   })
 })
 
+describe('the plan gate names the right exit', () => {
+  /**
+   * Observed: the user said 「只做 1.1，不要碰 1.2 和 2」. The worker obeyed, reported
+   * `delivered`, and the gate refused — offering "mark it done" (a lie) or "remove it".
+   * The worker removed both steps, wrote in the note that the user had 明确划出本次范围,
+   * and the task closed as completed. Two steps the user wanted kept were gone.
+   *
+   * The correct exit was already in the outcome field: `handoff` means this leg is done
+   * and the task continues. The gate never named it, so the worker invented a third.
+   */
+  const prepared = () => {
+    const root = workspace();
+    const { svc } = service(root);
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'a.md'), 'x');
+    const task = svc.create({
+      name: 'gate-exit',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_gate',
+      spec: {
+        cwd: root,
+        plan: [
+          { id: '1', title: '写文件', status: 'done' },
+          { id: '2', title: '收尾', status: 'todo' },
+        ],
+      } as never,
+    });
+    svc.startRun(task.id, 'sess_w');
+    return { svc, task };
+  }
+
+  it('points at outcome: handoff instead of teaching removal', async () => {
+    const { svc, task } = prepared();
+    const result = await svc.reportHandoff(
+      task.id,
+      {
+        outcome: 'delivered',
+        summary: '1.1 完成',
+        artifacts: [{ path: 'docs/a.md' }],
+        verify: { ran: ['test -s docs/a.md'], passed: true },
+      },
+      'sess_w',
+    );
+
+    expect(result.passed).toBe(false);
+    const reason = result.reasons.join(' ');
+    expect(reason).toContain('handoff');
+    // The old wording told the worker to delete what it had not been asked to delete.
+    expect(reason).not.toContain('不需要了就把它移除');
+  })
+
+  it('keeps every step when the worker hands off instead of delivering', async () => {
+    const { svc, task } = prepared();
+    const result = await svc.reportHandoff(
+      task.id,
+      {
+        outcome: 'handoff',
+        summary: '1.1 完成',
+        artifacts: [{ path: 'docs/a.md' }],
+        verify: { ran: ['test -s docs/a.md'], passed: true },
+      },
+      'sess_w',
+    );
+
+    expect(result.passed).toBe(true);
+    const after = svc.get(task.id)!;
+    // Not completed: the plan still has step 2, so the task is not finished.
+    expect(after.status).not.toBe('completed');
+    expect(after.spec?.plan?.map((step) => step.id)).toEqual(['1', '2']);
+  })
+})
+
 describe('scope delivered, plan still open', () => {
   /**
    * Observed: the user said 「只做 1.1，完成就停下，不要碰 1.2 和 2」. The worker obeyed, its

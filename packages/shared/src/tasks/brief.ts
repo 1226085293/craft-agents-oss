@@ -31,17 +31,53 @@ function bullet(items: string[]): string {
  * wrote a plan at all. The rule has to travel with the work, not with one of the
  * ways work is handed out.
  */
-export function formatPlanRuleBlock(): string {
+export function formatPlanRuleBlock(options: { planExists?: boolean } = {}): string {
+  /**
+   * The plan is a record, not a draft.
+   *
+   * Rule 1 used to read 「先用一次 task_plan 写下大纲：3–7 条」, unconditionally. So a worker
+   * whose task already had an agreed plan was told to write a new one anyway — and a brief
+   * that says 「当前执行计划」 while the rules below it say 「先写大纲」 is asking for two
+   * different things. One real worker resolved the conflict by writing outline `2 读回确认`
+   * and then `1.2 读回确认` in the same turn: the same action under two ids.
+   *
+   * Steps change for exactly two reasons — the plan was wrong, or something is missing.
+   * Neither is "I just started". When a plan is already agreed the worker's job is to
+   * advance it, and a rule that invites fresh outline-writing every turn guarantees drift.
+   */
+  const ruleOne = options.planExists
+    ? '1. 计划已经约定好了，**不要重写**。步骤只在两种情况下改动：计划本身写错了（某一步实际不成立），或者漏了一步必须做的事。开工不是改计划的理由——正常情况下你只需要推进状态。'
+    : '1. 计划还没有。先用 **一次** `task_plan({ steps: [...] })` 写下大纲：3–7 条，id 用 `1`、`2`、`3`。写下去之后它就是记录，不是草稿。';
+
   return [
     '## 怎么推进',
     '',
-    '1. 先用 **一次** `task_plan({ steps: [...] })` 写下大纲：3–7 条，id 用 `1`、`2`、`3`。',
-    '2. 开工前把当前大纲拆成小节（`1.1`、`1.2`），然后逐条执行——小节开始前才写，不要预设没做过的部分的细节。',
+    ruleOne,
+    '2. 大纲拆成小节（`1.1`、`1.2`）后逐条执行——小节开始前才写，不要预设没做过的部分的细节。',
     '3. 一条大纲的小节都完成后，才能把它标为 done；标 done 之前，下一条大纲的小节必须已经存在。',
     '4. 已完成的大纲和小节是记录，不能改回、不能改名——要返工就新开一条。',
     '5. 写新步骤之前，先对照当前计划里已有的步骤：**同一件事只能有一个 id**。已经有“读回确认”了，就不能再列一条“读回确认”；已经存在的动作（无论做完没做完）继续用它的 id 推进状态，而不是换个名字重开一条。',
     '',
   ].join('\n');
+}
+
+/**
+ * The block a dispatch appends when it hands a task to a new session.
+ *
+ * The dispatch path never used the task brief, so the worker saw the rules but not the
+ * plan the rules talk about. That is the same mismatch as a brief saying 「当前执行计划」
+ * above rules that say 「先写大纲」 — solved differently: show the plan, then give rules
+ * that match what it contains.
+ */
+export function formatDispatchTaskContext(task: Pick<Task, 'spec'>): string {
+  const plan = task.spec?.plan;
+  const hasPlan = Boolean(plan?.length);
+  const sections: string[] = [];
+  if (hasPlan) {
+    sections.push(['## 当前执行计划', ...formatPlan(plan)].join('\n'));
+  }
+  sections.push(formatPlanRuleBlock({ planExists: hasPlan }));
+  return sections.join('\n\n');
 }
 
 export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): string {

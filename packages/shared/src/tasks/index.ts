@@ -111,6 +111,7 @@ export {
 export {
   describeTrigger,
   formatTaskBrief,
+  formatDispatchTaskContext,
   formatHandoffContext,
   formatIdleWakeBrief,
   formatUnreportedBrief,

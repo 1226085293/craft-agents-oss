@@ -36,7 +36,8 @@ import {
 } from '@craft-agent/shared/agents'
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
-import { checkAgreedPlanAppend, readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatUnreportedBrief, formatNextLegBrief, formatPlanRuleBlock, nextLeg, stepParent, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
+import type { Task } from '@craft-agent/shared/tasks'
+import { checkAgreedPlanAppend, readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatUnreportedBrief, formatNextLegBrief, formatDispatchTaskContext, nextLeg, stepParent, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -5636,8 +5637,12 @@ export class SessionManager implements ISessionManager {
             // to be told how to keep the plan. This used to travel only in the task
             // brief — which this path does not use — so a real worker ran ten shell
             // commands exploring the disk and never wrote one.
+            // The dispatch path does not use the task brief, so the rules arrived
+            // without the plan they refer to. A worker told 「不要重写计划」 while never
+            // shown the plan can only guess — and guessing is what produced a second
+            // 「读回确认」 under a new id. Show the plan, then rules that match it.
             const body = params.taskId
-              ? `${params.instruction}\n\n${formatPlanRuleBlock()}`
+              ? `${params.instruction}\n\n${this.dispatchTaskContext(managed.workspace.id, params.taskId)}`
               : params.instruction
             void this.sendMessage(created.id, body).catch((error) => {
               sessionLog.warn('dispatch: failed to send the first instruction', {
@@ -7512,6 +7517,21 @@ ${request.prompt}`;
    * session had drifted apart at exactly the moment the user looks at the board
    * to find out what is happening.
    */
+  /**
+   * What a dispatched worker is told about the plan it is inheriting.
+   *
+   * A read failure here must not block the dispatch: a worker with rules but no plan
+   * still works, whereas a dispatch that throws leaves the task unclaimed.
+   */
+  private dispatchTaskContext(workspaceId: string, taskId: string): string {
+    try {
+      const task = this.getTasks(workspaceId).get(taskId) as { spec?: Task['spec'] } | null
+      return formatDispatchTaskContext({ spec: task?.spec })
+    } catch {
+      return formatDispatchTaskContext({ spec: undefined })
+    }
+  }
+
   private claimTaskRun(workspaceId: string, taskId: string | undefined, sessionId: string): void {
     if (!taskId) return
     try {
@@ -7710,7 +7730,7 @@ ${request.prompt}`;
         // And the same rule about the plan: this path does not use the task
         // brief, so without this the worker is never told to keep one.
         const body = params.taskId
-          ? `${params.instruction}\n\n${formatPlanRuleBlock()}`
+          ? `${params.instruction}\n\n${this.dispatchTaskContext(workspaceId, params.taskId)}`
           : params.instruction
         void this.sendMessage(created.id, body).catch((error) => {
           sessionLog.warn('dispatch: failed to send the first instruction', {

@@ -398,7 +398,13 @@ export interface SessionToolContext {
     updatePlan(
       identifier: string,
       patch: { id: string; status?: string; title?: string; agent?: string; note?: string; remove?: boolean },
-    ): Promise<{ ok: boolean; error?: string; handedOffTo?: string }>;
+    ): Promise<{
+      ok: boolean;
+      error?: string;
+      handedOffTo?: string;
+      /** The plan as it stands after the write, so the caller can show it back. */
+      plan?: Array<{ id: string; title?: string; status?: string }>;
+    }>;
   };
 
   /** Get detailed info about a session. Defaults to current session if no ID given. Injected by backend. */

@@ -5831,7 +5831,13 @@ export class SessionManager implements ISessionManager {
             // indicator; every accepted patch has to reach the board.
             if (result.ok) this.notifyTasksChanged(managed.workspace.id)
             return result.ok
-              ? { ok: true, ...(result.handedOffTo ? { handedOffTo: result.handedOffTo } : {}) }
+              ? {
+                  ok: true,
+                  ...(result.handedOffTo ? { handedOffTo: result.handedOffTo } : {}),
+                  // The plan travels back with the acknowledgement: the tool echoes it so a
+                  // duplicate step is visible where it is created, not at delivery.
+                  ...(result.plan ? { plan: result.plan } : {}),
+                }
               : { ok: false, error: result.error ?? 'the plan was not updated' }
           },
         }

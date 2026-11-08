@@ -306,6 +306,33 @@ export async function handleTaskUpdate(
 }
 
 /**
+ * Render the plan as the worker should read it back.
+ *
+ * A write used to answer `Plan updated: 3 step(s).` — which confirms the call landed and
+ * tells the reader nothing about the result. Observed consequence: a worker wrote outline
+ * `2 读回确认` and, seconds later in the same turn, wrote `1.2 读回确认` as well, because
+ * nothing in front of it said the first one existed. It had to remember, and it did not.
+ *
+ * The fix is the same one that made rejected hand-offs readable: return the fact, not a
+ * receipt. Every successful write now repeats the whole plan, so a duplicate is visible
+ * at the moment it is created rather than at delivery when it blocks.
+ */
+function renderPlan(plan: Array<{ id: string; title?: string; status?: string }> | undefined): string {
+  if (!plan?.length) return '';
+  const mark = (status?: string): string =>
+    status === 'done' ? '[x]' : status === 'doing' ? '[>]' : status === 'blocked' ? '[!]' : '[ ]';
+  const lines = plan.map((step) => {
+    const depth = step.id.split('.').length - 1;
+    return `${'  '.repeat(depth)}- ${mark(step.status)} ${step.id} ${step.title ?? ''}`.trimEnd();
+  });
+  return [
+    '',
+    '当前计划（同一件事只能有一个 id；已有的动作继续用它的 id 推进，不要换个名字重开一条）：',
+    ...lines,
+  ].join('\n');
+}
+
+/**
  * Update one step of the task's plan.
  *
  * The plan is how the watchdog tells "still working" from "went quiet" without
@@ -343,6 +370,7 @@ export async function handleTaskPlan(
   if (args.steps?.length) {
     let applied = 0;
     let handedOffTo: string | undefined;
+    let lastPlan: Array<{ id: string; title?: string; status?: string }> | undefined;
     for (const step of args.steps) {
       if (!step.id?.trim()) return errorResponse(`steps[${applied}].id is required.`);
       const result = await ctx.taskTools.updatePlan(args.identifier, {
@@ -359,6 +387,7 @@ export async function handleTaskPlan(
         );
       }
       applied += 1;
+      lastPlan = result.plan;
       // An ownership boundary ends this worker's authority over the plan; writing
       // more steps after it would edit work that now belongs to someone else.
       if (result.handedOffTo) {
@@ -367,7 +396,9 @@ export async function handleTaskPlan(
       }
     }
     return successResponse(
-      handedOffTo ? boundaryNotice(applied, handedOffTo) : `Plan updated: ${applied} step(s).`,
+      handedOffTo
+        ? boundaryNotice(applied, handedOffTo)
+        : `Plan updated: ${applied} step(s).${renderPlan(lastPlan)}`,
     );
   }
 
@@ -383,7 +414,7 @@ export async function handleTaskPlan(
     });
     if (!result.ok) return errorResponse(result.error ?? 'the plan was not updated.');
     if (result.handedOffTo) return successResponse(boundaryNotice(1, result.handedOffTo));
-    return successResponse(`Plan step ${args.id} updated.`);
+    return successResponse(`Plan step ${args.id} updated.${renderPlan(result.plan)}`);
   } catch (error) {
     return errorResponse(
       `Failed to update the plan: ${error instanceof Error ? error.message : 'unknown error'}`,

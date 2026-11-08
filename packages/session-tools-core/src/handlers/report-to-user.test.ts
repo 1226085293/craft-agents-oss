@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import type { SessionToolContext } from '../context.ts';
-import { handleReportToUser } from './agent-tools.ts';
+import { handleReportToUser, handleTaskPlan } from './agent-tools.ts';
 
 function textOf(result: { content?: Array<{ text?: string }> }): string {
   return (result.content ?? []).map((part) => part.text ?? '').join(' ');
@@ -52,3 +52,39 @@ describe('report_to_user', () => {
     expect(seen[0]?.kind).toBe('progress');
   });
 });
+
+describe('task_plan echoes the plan back', () => {
+  /**
+   * `Plan updated: 3 step(s).` confirms the call landed and says nothing about the result.
+   * A worker wrote outline `2 读回确认` and, seconds later in the same turn, wrote
+   * `1.2 读回确认` too — it had to remember the first existed, and it did not. Returning the
+   * plan makes a duplicate visible where it is created.
+   */
+  const ctx = (plan: Array<{ id: string; title: string; status: string }>) =>
+    ({
+      sessionId: 'sess-1',
+      taskTools: {
+        updatePlan: async () => ({ ok: true, plan }),
+      },
+    }) as unknown as SessionToolContext;
+
+  it('shows every existing step, not just a count', async () => {
+    const result = await handleTaskPlan(
+      ctx([
+        { id: '1', title: '创建 docs/a.md', status: 'todo' },
+        { id: '2', title: '读回确认', status: 'todo' },
+      ]),
+      { identifier: 'T-1', id: '1', status: 'doing' } as never,
+    );
+    const text = textOf(result);
+    expect(text).toContain('1 创建 docs/a.md');
+    expect(text).toContain('2 读回确认');
+    expect(text).toContain('同一件事只能有一个 id');
+  })
+
+  it('still reports a refusal as an error', async () => {
+    const bad = { sessionId: 's', taskTools: { updatePlan: async () => ({ ok: false, error: 'nope' }) } };
+    const result = await handleTaskPlan(bad as unknown as SessionToolContext, { identifier: 'T-1', id: '1' } as never);
+    expect(textOf(result)).toContain('nope');
+  })
+})

@@ -337,7 +337,13 @@ export abstract class BaseAgent implements AgentBackend {
     updatePlan(
       identifier: string,
       patch: { id: string; status?: string; title?: string; agent?: string; note?: string; remove?: boolean },
-    ): Promise<{ ok: boolean; error?: string; handedOffTo?: string }>;
+    ): Promise<{
+      ok: boolean;
+      error?: string;
+      handedOffTo?: string;
+      /** The plan as it stands after the write, so the caller can show it back. */
+      plan?: Array<{ id: string; title?: string; status?: string }>;
+    }>;
   };
   onSourceChange: SourceChangeCallback | null = null;
   onSourcesListChange: ((sources: LoadedSource[]) => void) | null = null;

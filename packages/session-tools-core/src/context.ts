@@ -357,6 +357,8 @@ export interface SessionToolContext {
       sessionId?: string;
       /** kind=decision only: the answers, rendered as buttons. */
       options?: string[];
+      /** The task this report is about; the card carries it so an answer lands on it. */
+      taskId?: string;
     }): Promise<void>;
     /** Supervisor: ask a question when no decision can be made alone. */
     askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;

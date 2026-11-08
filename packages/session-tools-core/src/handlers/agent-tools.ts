@@ -147,6 +147,7 @@ export async function handleReportToUser(
       text: clip(text, 600) ?? text,
       kind: args.kind,
       sessionId: args.sessionId,
+      ...(args.taskId?.trim() ? { taskId: args.taskId.trim() } : {}),
       ...(options?.length ? { options } : {}),
     });
     return successResponse(

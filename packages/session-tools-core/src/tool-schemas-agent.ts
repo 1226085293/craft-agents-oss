@@ -45,6 +45,16 @@ export const ReportResultSchema = z.object({
     })
     .optional()
     .describe('Verification evidence. Required by the rule gate (at least one command).'),
+  /**
+   * The task this report is about, when it is about one.
+   *
+   * Without it the card's task was guessed from "which paused task has an open decision",
+   * and the guess was wrong twice in one run: a card about T-1 for a task that was not yet
+   * paused carried no id at all, and a later card about T-1 was stamped T-2 because that
+   * was the most recent one waiting. The asker knows which task it means; saying so is what
+   * makes the card answerable on the right task.
+   */
+  taskId: z.string().optional().describe('The task id this report concerns, e.g. "T-1". Required for kind=decision when you are answering about a task.'),
   options: z
     .array(z.string())
     .max(4)
@@ -108,6 +118,18 @@ export const ReportToUserSchema = z.object({
     ),
   text: z.string().describe('At most ~100 words. Conclusions only; link the session for detail.'),
   sessionId: z.string().optional().describe('Session the user can open for the full process.'),
+  /**
+   * The task this report is about, when it is about one.
+   *
+   * Without it the card's task was guessed from "which paused task has an open decision",
+   * and the guess was wrong twice in one run: a card about T-1 for a task that had not
+   * paused yet carried no id at all, and a later card about T-1 was stamped T-2 because
+   * that was the most recent one waiting. The asker knows which task it means.
+   */
+  taskId: z
+    .string()
+    .optional()
+    .describe('The task id this report concerns, e.g. "T-1". Give it for kind=decision when the question is about a task.'),
   /**
    * The answers, as answers — not as prose.
    *

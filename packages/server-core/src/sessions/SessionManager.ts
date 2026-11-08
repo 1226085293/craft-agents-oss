@@ -5698,7 +5698,7 @@ export class SessionManager implements ISessionManager {
           sendToSession: async (sessionId, text) => {
             await this.sendMessage(sessionId, text)
           },
-          writeUserVisible: async (text, kind, options) => {
+          writeUserVisible: async (text, kind, options, taskId) => {
             /**
              * One question, two surfaces.
              *
@@ -8143,6 +8143,15 @@ ${request.prompt}`;
     text: string,
     kind: UserReportKind = 'completed',
     options?: string[],
+    /**
+     * The task the asker says this is about.
+     *
+     * Preferred over the lookup below, which can only guess: in one run a card about T-1
+     * carried no task at all (the task had not paused yet) and the next one was stamped T-2
+     * because that happened to be the newest open decision. A guess that is sometimes wrong
+     * is worse than asking the caller, which knows.
+     */
+    namedTaskId?: string,
   ): Promise<void> {
     // `decision` and `blocked` earn the interruption; `completed` closes the loop.
     // Everything else is progress, and progress has a lane already — the task one.
@@ -8167,7 +8176,7 @@ ${request.prompt}`;
     if (kind === 'decision') {
       // A question. Answering it is the person's job, so nothing is woken: the row is
       // written for the reader and the turn that asked ends here.
-      const taskId = this.taskIdentifierFor(managed)
+      const taskId = namedTaskId ?? this.taskIdentifierFor(managed)
       this.appendReadOnlyRow(target, {
         text,
         statusType: 'decision_request',

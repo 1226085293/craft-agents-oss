@@ -127,6 +127,47 @@ describe('a decision request is written for the reader', () => {
     expect(asked?.decisionRequest?.taskIdentifier).toBe('T-7')
   })
 
+  /**
+   * The asker names the task; the card carries it.
+   *
+   * Reading it from "which paused task has an open decision" was wrong twice in one run: a
+   * question about T-1 that arrived before T-1 paused carried no task id at all, and the
+   * next one was stamped T-2 because that was the newest open decision. A card with the
+   * wrong task cannot be answered — the reply resolves the wrong decision.
+   */
+  it('prefers the task the asker named over a guess', async () => {
+    const requester = buildRequester()
+    ;(sm as unknown as { getTasks: unknown }).getTasks = () => ({
+      list: () => [
+        {
+          id: 'T-2',
+          status: 'paused',
+          pauseReason: 'needs_decision',
+          supervisorSessionId: 'sess_asker',
+          decision: { askedAt: Date.now(), resolvedAt: undefined },
+        },
+      ],
+    })
+
+    await (
+      sm as unknown as {
+        deliverToUserLane: (
+          m: unknown,
+          t: string,
+          k: string,
+          o?: string[],
+          taskId?: string,
+        ) => Promise<void>
+      }
+    ).deliverToUserLane(requester, '要不要放行 1.2？', 'decision', ['放行'], 'T-1')
+
+    const managed = (sm as unknown as { sessions: Map<string, { messages: Row[] }> }).sessions.get(
+      'sess_asker',
+    )
+    const asked = managed?.messages.find((m) => m.statusType === 'decision_request')
+    expect(asked?.decisionRequest?.taskIdentifier).toBe('T-1')
+  })
+
   it('writes a card instead of input, and starts no turn', async () => {
     const requester = buildRequester();
     await (

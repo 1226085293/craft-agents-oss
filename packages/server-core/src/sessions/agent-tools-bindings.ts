@@ -30,6 +30,7 @@ export interface AgentToolBindingsDeps {
     text: string,
     kind: 'completed' | 'decision' | 'blocked',
     options?: string[],
+    taskId?: string,
   ) => Promise<void>;
   /** Surface a question to the user (rendered as an ask card / message). */
   askUser: (questions: { question: string; options?: string[] }[]) => Promise<void>;
@@ -122,8 +123,9 @@ export function buildAgentToolBindings(deps: AgentToolBindingsDeps) {
       kind: 'completed' | 'decision' | 'blocked';
       sessionId?: string;
       options?: string[];
+      taskId?: string;
     }): Promise<void> {
-      await deps.writeUserVisible(payload.text, payload.kind, payload.options);
+      await deps.writeUserVisible(payload.text, payload.kind, payload.options, payload.taskId);
     },
 
     async askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void> {

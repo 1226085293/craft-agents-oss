@@ -378,18 +378,59 @@ export class TaskService {
     return next;
   }
 
-  /** Record the user's answer to a decision request. */
-  resolveDecision(id: string, resolution: 'approved' | 'rejected'): Task {
+  /**
+   * Close a decision that is no longer true, without pretending a person answered it.
+   *
+   * This is the path for "the question evaporated" — the boundary was widened, so the thing it
+   * was asking about no longer exists. It is NOT the path for an answer: that is
+   * `recordDecisionAnswer`, which stores the person's words.
+   *
+   * The distinction matters because `resolvedAt` alone is read as "a human settled this" by the
+   * card and by the watchdog. A record that claimed that while holding `answer: null` left the
+   * task paused with `pauseReason: needs_decision`, no question to display, and nothing left to
+   * wake it — observed stuck indefinitely on T-1.
+   *
+   * `resolution: 'obsolete'` says what actually happened, so later readers do not have to
+   * infer it from an empty answer field.
+   */
+  resolveDecision(id: string, resolution: 'approved' | 'rejected' | 'obsolete', note?: string): Task {
     const task = this.require(id);
     const now = this.now();
     if (!task.decision) return task;
     const next: Task = {
       ...task,
-      decision: { ...task.decision, resolvedAt: now, resolution },
+      decision: {
+        ...task.decision,
+        resolvedAt: now,
+        resolution,
+        ...(note?.trim() ? { reason: note.trim() } : {}),
+      },
       updatedAt: now,
     };
     this.save(next);
-    appendJournal(this.root, id, { type: 'decision_resolved', at: now, data: { resolution } });
+    appendJournal(this.root, id, { type: 'decision_resolved', at: now, data: { resolution, note } });
+    return next;
+  }
+
+  /**
+   * Drop a pause reason that no longer describes the task.
+   *
+   * `setStatus(id, 'paused')` cannot do this: `applyTransition` short-circuits when the status
+   * is unchanged, so the write is a no-op and the reason survives. That is correct for a real
+   * transition and wrong here — the status is staying `paused`, and only the *reason* has
+   * stopped being true.
+   *
+   * The case this exists for: a task paused on `needs_decision` whose decision has just been
+   * closed as obsolete. Leaving the reason in place makes the page render 「等我拍板」 above a
+   * card with no question, and every guard that keys off `pauseReason` keeps treating the task
+   * as if a person still owed it an answer.
+   */
+  clearPauseReason(id: string): Task {
+    const task = this.require(id);
+    if (!task.pauseReason) return task;
+    const next: Task = { ...task, pauseReason: null, updatedAt: this.now() };
+    this.save(next);
+    appendJournal(this.root, id, { type: 'pause_reason_cleared', at: this.now(), data: {} });
     return next;
   }
 
@@ -615,7 +656,14 @@ export class TaskService {
         decision: {
           category: decision.category,
           label: decision.label,
-          reason: decision.reason,
+          /**
+           * The reason is the OLD question's diagnosis, and carrying it into the new one is how
+           * a reopened decision ended up quoting a condition that had already been satisfied —
+           * 「还剩 1 步没有授权：2」 kept being rendered next to a card asking something else.
+           * It is re-derived by the caller that re-asks (`setDecisionWording` receives only
+           * wording); when no new reason arrives, the field stays empty rather than stale.
+           */
+          reason: '',
           askedAt: this.now(),
           deadlineAt: this.now() + DECISION_TIMEOUT_MS,
         },

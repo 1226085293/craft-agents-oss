@@ -344,9 +344,16 @@ export interface TaskDecision {
    * being mistaken for consent.
    */
   answer?: { text: string; at: number };
-  /** Set once the user answered or the deadline fired. */
+  /** Set once the user answered, the deadline fired, or the question stopped being true. */
   resolvedAt?: number;
-  resolution?: 'approved' | 'rejected' | 'timeout';
+  /**
+   * How the question closed.
+   *
+   * `obsolete` is the third case and the one that used to masquerade as `approved`: the thing
+   * being asked about disappeared (the boundary moved), so nobody approved anything. It exists
+   * so a closed decision with `answer: null` can be told apart from a broken record.
+   */
+  resolution?: 'approved' | 'rejected' | 'timeout' | 'obsolete';
 }
 
 export interface Task {

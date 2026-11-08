@@ -5864,14 +5864,40 @@ export class SessionManager implements ISessionManager {
               service.setScope(identifier, patch.scope.trim())
               const task = service.get(identifier)
               if (task?.decision && !task.decision.resolvedAt) {
+                /**
+                 * The question stopped being true — nobody approved anything.
+                 *
+                 * This used to pass `'approved'`, which made a closed decision indistinguishable
+                 * from a person saying yes while `answer` stayed empty: the record claimed human
+                 * consent it never had.
+                 */
                 try {
-                  service.resolveDecision(identifier, 'approved')
+                  service.resolveDecision(identifier, 'obsolete', patch.scope.trim())
                 } catch {
                   // A decision that already expired is not a failure here.
                 }
               }
               if (!patch.status) {
                 const current = service.get(identifier)
+                /**
+                 * A closed decision cannot leave the task paused on `needs_decision`.
+                 *
+                 * Widening the scope was supposed to unblock the run, but this branch returned
+                 * the task exactly as it was: `paused` + `pauseReason: needs_decision` with
+                 * `resolvedAt` now set. Nothing could resolve it again (the record looked
+                 * settled) and nothing could resume it (no path asks a non-pending task to
+                 * run), so T-1 sat there forever showing 「等我拍板」 above an empty card.
+                 *
+                 * The pause reason is cleared when it was only the decision holding the task.
+                 */
+                if (current?.status === 'paused' && current.pauseReason === 'needs_decision') {
+                  /*
+                   * `setStatus(id, 'paused')` would be a no-op — `applyTransition` returns early
+                   * when the status does not change — so the reason has to be cleared directly.
+                   */
+                  const cleared = service.clearPauseReason(identifier)
+                  return { status: cleared.status }
+                }
                 return { status: current?.status ?? 'backlog' }
               }
             }

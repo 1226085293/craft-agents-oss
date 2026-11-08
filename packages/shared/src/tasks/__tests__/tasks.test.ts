@@ -282,3 +282,61 @@ describe('deleting a task', () => {
     rmSync(root, { recursive: true, force: true });
   });
 });
+
+describe('a pending decision cannot be answered by the executor', () => {
+  /**
+   * Observed: a task paused for 「是否放行剩余步骤」. The supervisor read the request in its
+   * own lane, decided on the user's behalf (「按你最初的授权，我拍板选 (b)」), resumed the
+   * task, marked the excluded steps done and added a new one. The user never saw a question
+   * they could answer, and 「不要碰 1.2 和 2」 was reversed without anyone noticing.
+   *
+   * `paused → running` is a legal resume because most pauses are the system's own
+   * interruptions. This one was a question addressed to a person.
+   */
+  const awaiting = () =>
+    ({
+      id: 'T-1',
+      name: 't',
+      instruction: 'x',
+      status: 'paused' as const,
+      pauseReason: 'needs_decision' as const,
+      supervisorSessionId: 'sup',
+      sessionIds: [],
+      dependsOn: [],
+      priority: 1,
+      budget: { maxSessions: 8, maxRuns: 12, activeMinutes: 120, deadline: null },
+      handoffs: [],
+      verify: { enabled: false, maxIterations: 2 },
+      lifecycle: { errorCount: 0, consecutiveFailures: 0 },
+      origin: { supervisorSessionId: 'sup', toolCallId: 'c' },
+      heartbeatIntervalMin: 10,
+      createdAt: 0,
+      updatedAt: 0,
+      decision: {
+        category: 'direction' as const,
+        label: '范围内的工作已完成',
+        reason: '还剩 1.2 和 2 未授权',
+        askedAt: 0,
+        deadlineAt: Date.now() + 60_000,
+      },
+    }) as never;
+
+  it('refuses to resume a task that is waiting for an answer', () => {
+    expect(() => applyTransition(awaiting(), 'running', { now: 1 })).toThrow(/等待用户拍板/);
+  })
+
+  it('resumes once the decision is resolved', () => {
+    const task = { ...(awaiting() as Record<string, unknown>) } as never;
+    (task as { decision: { resolvedAt: number } }).decision.resolvedAt = 1;
+    const result = applyTransition(task, 'running', { now: 2 });
+    expect(result.changed).toBe(true);
+    expect(result.task.status).toBe('running');
+  })
+
+  it('still resumes an ordinary pause', () => {
+    const task = { ...(awaiting() as Record<string, unknown>), decision: undefined } as never;
+    (task as { pauseReason: string }).pauseReason = 'waiting';
+    const result = applyTransition(task, 'running', { now: 2 });
+    expect(result.task.status).toBe('running');
+  })
+})

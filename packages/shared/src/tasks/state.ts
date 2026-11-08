@@ -58,6 +58,32 @@ export function assertTransition(from: TaskStatus, to: TaskStatus): void {
   if (!canTransition(from, to)) throw new IllegalTransitionError(from, to);
 }
 
+/**
+ * A pending decision is not the model's to answer.
+ *
+ * Observed on a real run: a task paused for 「范围内的工作已完成，是否放行剩余步骤」. The
+ * supervisor read the request — which had been delivered into its own lane — decided on
+ * the user's behalf (「按你最初的授权，我拍板选 (b)」), moved the task from `paused` back to
+ * `running`, marked the steps the user had explicitly excluded as done, and added a new
+ * one. The user never saw a question they could answer, and the instruction 「不要碰 1.2
+ * 和 2」 was quietly reversed.
+ *
+ * The state machine allowed it because `paused → running` is a legal resume. It is legal
+ * when the pause was a stall, a failure backoff or a lost process — those are the system's
+ * own interruptions and resuming them is recovery. It is not legal when the pause exists
+ * because a person was asked something: then resuming means answering for them. Only
+ * `resolveDecision` may clear that, and it is called from the user's reply.
+ */
+export function assertNotAwaitingDecision(task: Task, to: TaskStatus): void {
+  if (to !== 'running') return;
+  const decision = task.decision;
+  if (!decision || decision.resolvedAt) return;
+  throw new Error(
+    `任务正在等待用户拍板（${decision.label}），不能自己恢复运行。` +
+      '拍板必须由用户回答后通过 resolveDecision 解除；它问的是人，不是执行者。',
+  );
+}
+
 export const TERMINAL_STATUSES: readonly TaskStatus[] = ['completed', 'canceled'];
 
 export function isTerminal(status: TaskStatus): boolean {
@@ -83,6 +109,7 @@ export function applyTransition(
     return { task: { ...task, updatedAt: options.now }, changed: false };
   }
   assertTransition(task.status, to);
+  assertNotAwaitingDecision(task, to);
 
   const next: Task = { ...task, status: to, updatedAt: options.now };
 

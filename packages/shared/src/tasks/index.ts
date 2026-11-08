@@ -111,6 +111,7 @@ export {
   describeTrigger,
   formatTaskBrief,
   formatHandoffContext,
+  formatIdleWakeBrief,
   formatNextLegBrief,
   formatPlanRuleBlock,
   formatResumeBrief,

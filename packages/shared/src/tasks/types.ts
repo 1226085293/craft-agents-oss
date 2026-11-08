@@ -143,6 +143,16 @@ export interface TaskStats {
   lastHeartbeatAt?: number;
   /** Session currently holding the run lock. */
   lockSessionId?: string;
+  /**
+   * Times the watchdog woke this task's idle session, and when.
+   *
+   * A worker that ends its turn without finishing leaves the task `running` with
+   * nothing driving it; waking it once is right, waking it forever is a loop that
+   * costs a model call every few minutes. The count decides when to stop and hand
+   * the task to a person instead.
+   */
+  wakeAttempts?: number;
+  lastWakeAt?: number;
   /** When the current run started (epoch ms). */
   runStartedAt?: number;
   /**

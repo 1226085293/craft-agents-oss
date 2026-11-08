@@ -30,6 +30,7 @@ export type WatchdogFinding =
   | { kind: 'failing'; task: Task }
   | { kind: 'overdue'; task: Task }
   | { kind: 'orphaned'; task: Task }
+  | { kind: 'idle'; task: Task }
   | { kind: 'decision_timeout'; task: Task }
   | { kind: 'looping'; task: Task }
   | { kind: 'off_track'; task: Task };
@@ -39,6 +40,20 @@ export interface WatchdogDeps {
   listTasks: () => Task[];
   /** True while the task's current session exists. */
   sessionExists: (sessionId: string) => boolean;
+  /**
+   * True while the session is actively working.
+   *
+   * Distinct from `sessionExists` on purpose: a session that ended its turn is
+   * still an object in the session list, so "the session exists" answered yes for
+   * a task that nobody was working on. That is the gap this closes — a task sat
+   * on 进行中 with an idle session behind it and nothing ever looked.
+   *
+   * Returning `undefined` means unknown, treated as working: a host that cannot
+   * answer must not cause the watchdog to fire.
+   */
+  sessionWorking?: (sessionId: string) => boolean | undefined;
+  /** Nudge a session that should be working but is not. */
+  wakeSession?: (task: Task, sessionId: string) => void;
   /** Pause a task with a reason. */
   pause: (id: string, reason: 'failures' | 'budget' | 'process_lost' | 'waiting', note: string) => void;
   /** Tell the owning supervisor, in one line. */
@@ -74,6 +89,34 @@ export const OFF_TRACK_MS = 40 * 60_000;
 /** Strip whitespace so a reformatted repeat still counts as a repeat. */
 function normalizeSummary(text: string): string {
   return text.replace(/\s+/g, '').trim();
+}
+
+/**
+ * How long a session may sit idle before the task behind it counts as abandoned.
+ *
+ * Long enough not to fight a worker that is between turns by design (a handoff, a
+ * tool the model is waiting on), short enough that the user is not staring at
+ * 进行中 for half an hour.
+ */
+export const IDLE_SESSION_MS = 8 * 60_000;
+
+/**
+ * Wakes before the task is handed to a person.
+ *
+ * One wake is a correction: the worker ended its turn without finishing and may
+ * simply have lost the thread. A second one means the nudge is not working, and a
+ * third would be a loop paying for a model turn each time.
+ */
+export const MAX_IDLE_WAKES = 2;
+
+/** The newest evidence that something in this task moved. */
+function lastActivityOf(task: Task): number {
+  return Math.max(
+    task.lastHeartbeatAt ?? 0,
+    task.stats?.lastHeartbeatAt ?? 0,
+    task.updatedAt ?? 0,
+    task.stats?.lastWakeAt ?? 0,
+  );
 }
 
 /**
@@ -115,6 +158,16 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
     if (!sessionAlive) {
       findings.push({ kind: 'orphaned', task });
       continue;
+    }
+    // Liveness is not the same as progress: the session object outlives the turn.
+    // A running task whose session is sitting idle (and has been for a while) is
+    // the state the user sees as "进行中 but nothing is happening".
+    if (deps.sessionWorking && task.currentSessionId) {
+      const working = deps.sessionWorking(task.currentSessionId);
+      if (working === false && now - lastActivityOf(task) >= IDLE_SESSION_MS) {
+        findings.push({ kind: 'idle', task });
+        continue;
+      }
     }
     if (isHeartbeatStalled(task, now)) {
       findings.push({ kind: 'stalled', task });
@@ -193,6 +246,28 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         );
         acted += 1;
         break;
+      case 'idle': {
+        const attempts = finding.task.stats?.wakeAttempts ?? 0;
+        const sessionId = finding.task.currentSessionId;
+        if (attempts >= MAX_IDLE_WAKES || !sessionId || !deps.wakeSession) {
+          // Out of attempts (or nobody to wake with): stop pretending the task is
+          // running. A task that says 进行中 while nothing is working on it is
+          // worse than a paused one, because the user waits instead of looking.
+          deps.pause(finding.task.id, 'process_lost', 'session idle with no progress');
+          deps.notify(
+            finding.task.supervisorSessionId,
+            `${finding.task.id} 的会话已空闲 ${Math.round(IDLE_SESSION_MS / 60_000)} 分钟以上，已唤醒 ${attempts} 次仍未推进，任务已暂停，需要你确认下一步。`,
+          );
+        } else {
+          deps.wakeSession(finding.task, sessionId);
+          deps.notify(
+            finding.task.supervisorSessionId,
+            `${finding.task.id} 的会话空闲了，已唤醒它继续（第 ${attempts + 1} 次）。`,
+          );
+        }
+        acted += 1;
+        break;
+      }
       case 'stalled':
         deps.pause(finding.task.id, 'process_lost', 'heartbeat stalled');
         deps.notify(
@@ -289,6 +364,16 @@ export function nextCheckDelayMs(deps: WatchdogDeps, now = Date.now()): number {
     } else {
       const startedAt = task.stats?.runStartedAt ?? task.updatedAt;
       soonest = Math.min(soonest, startedAt + task.heartbeatIntervalMin * 60_000 * 2 - now);
+    }
+
+    // A running task whose session is idle is due once the idle window elapses —
+    // that is the whole point of noticing it, so waiting for the heartbeat or
+    // stale windows would delay the only check that can recover it.
+    if (deps.sessionWorking && task.currentSessionId) {
+      const working = deps.sessionWorking(task.currentSessionId);
+      if (working === false) {
+        soonest = Math.min(soonest, lastActivityOf(task) + IDLE_SESSION_MS - now);
+      }
     }
 
     // A running task whose session is alive but producing nothing for 30 minutes

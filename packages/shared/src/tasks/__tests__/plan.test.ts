@@ -185,11 +185,49 @@ describe('plan rendering', () => {
     // written and read in that shape. The old assertion locked in
     // `- 1.0 [x] title`, which is not how anyone writes a checklist — the id
     // now trails the title so the box stays where the eye lands.
-    expect(lines[0]).toBe('- [x] 接口改造 (1)');
+    expect(lines[0]).toBe('- [>] 接口改造 (1)');
     // Sub-steps are indented so an outline and its steps read as one thing.
     expect(lines[1]!.startsWith('  - [>] 改 handler')).toBe(true);
     expect(lines[2]).toBe('- [!] 补测试 (2) — 等接口定稿');
   });
+
+  it('keeps an outline in step with its sub-steps', () => {
+    // The reported bug: 1.1 said 执行中 but 1. still showed the 未执行 icon, and
+    // finishing every sub-step never turned 1 green. Both were the same cause —
+    // the outline's status was whatever somebody last wrote, and nothing updated
+    // it when a child moved.
+    const started = normalizePlan(
+      [
+        { id: '1', title: '接口改造', status: 'todo' },
+        { id: '1.1', title: '改 handler', status: 'doing' },
+      ],
+      NOW,
+    );
+    expect(started?.find((step) => step.id === '1')?.status).toBe('doing');
+
+    const finished = normalizePlan(
+      [
+        { id: '1', title: '接口改造', status: 'todo' },
+        { id: '1.1', title: '改 handler', status: 'done', note: '测试通过' },
+      ],
+      NOW,
+    );
+    expect(finished?.find((step) => step.id === '1')?.status).toBe('done');
+  })
+
+  it('derives the outline on write, not just on read', () => {
+    const plan = normalizePlan(
+      [
+        { id: '1', title: '接口改造', status: 'todo' },
+        { id: '1.1', title: '改 handler', status: 'todo' },
+        { id: '2', title: '补测试', status: 'todo' },
+        { id: '2.1', title: '写用例', status: 'todo' },
+      ],
+      NOW,
+    );
+    const afterStart = applyPlanPatch(plan, { id: '1.1', status: 'doing' }, NOW).plan;
+    expect(afterStart.find((step) => step.id === '1')?.status).toBe('doing');
+  })
 
   it('renders the owner of each stage when one is recorded', () => {
     const plan = normalizePlan(
@@ -277,8 +315,13 @@ describe('outline invariants', () => {
       ],
       NOW,
     );
+    // The last outline has no successor to break down, so it is already complete
+    // once its only child is: the derivation says so on read, which makes the
+    // explicit close idempotent rather than refused. What matters is the state it
+    // lands in, not whether the patch claimed to change something.
     const result = applyPlanPatch(plan, { id: '1', status: 'done' }, NOW);
-    expect(result.changed).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(result.plan.find((step) => step.id === '1')?.status).toBe('done');
   });
 
   it('freezes a finished step against reopening, renaming and owner changes', () => {

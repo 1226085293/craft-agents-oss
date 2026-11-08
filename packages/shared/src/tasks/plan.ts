@@ -51,6 +51,62 @@ export function isOutlineStep(id: string): boolean {
   return !id.includes('.');
 }
 
+/**
+ * What an outline item's status actually is, given its sub-steps.
+ *
+ * The stored status is only what somebody last wrote; a section's real state is
+ * its sub-steps' state. Without this, marking `1.1` as doing left `1` on the
+ * "not started" icon, and finishing `1.1` and `1.2` never turned `1` green — the
+ * outline looked untouched while the work underneath it was half finished.
+ *
+ * The rules follow the same logic the patch guard already enforces in the other
+ * direction (an outline may not claim doing/done on its own): "section 1 is under
+ * way" means some step of section 1 is, and "section 1 is done" means all are.
+ */
+export function deriveOutlineStatus(plan: PlanStep[], outline: PlanStep): PlanStepStatus {
+  const kids = childrenOf(plan, outline.id);
+  if (kids.length === 0) return outline.status;
+
+  if (kids.every((kid) => kid.status === 'done')) {
+    // All children closed — but a section may only read as closed when the next
+    // one is executable, which is the same rule `applyPlanPatch` enforces on an
+    // explicit patch. Deriving `done` without that check would let the view claim
+    // a completion the rules refuse, and the worker would then never be told to
+    // expand the next section: the plan would sit finished with nowhere to go.
+    const outlines = plan.filter((step) => isOutlineStep(step.id));
+    const at = outlines.findIndex((step) => step.id === outline.id);
+    const next = at >= 0 ? outlines[at + 1] : undefined;
+    if (!next || childrenOf(plan, next.id).length > 0) return 'done';
+    return 'doing';
+  }
+
+  if (kids.some((kid) => kid.status === 'doing')) return 'doing';
+  // Partly finished is still under way: `1` may not sit on "not started" while
+  // one of its sub-steps is already closed.
+  if (kids.some((kid) => kid.status === 'done')) return 'doing';
+  if (kids.some((kid) => kid.status === 'blocked')) return 'blocked';
+  return 'todo';
+}
+
+/**
+ * The plan with every outline's status recomputed from its sub-steps.
+ *
+ * Applied on read and after every patch, so stored data converges without a
+ * migration and files written by older versions still render truthfully.
+ */
+export function applyDerivedStatuses(plan: PlanStep[] | undefined): PlanStep[] {
+  if (!plan?.length) return plan ?? [];
+  let changed = false;
+  const next = plan.map((step) => {
+    if (!isOutlineStep(step.id)) return step;
+    const status = deriveOutlineStatus(plan, step);
+    if (status === step.status) return step;
+    changed = true;
+    return { ...step, status };
+  });
+  return changed ? next : plan;
+}
+
 /** Sub-steps of one outline item, in plan order. */
 export function childrenOf(plan: PlanStep[] | undefined, id: string): PlanStep[] {
   return (plan ?? []).filter((step) => stepParent(step.id) === id);
@@ -123,7 +179,7 @@ export function normalizePlan(raw: unknown, now = Date.now()): PlanStep[] | unde
     if (steps.length >= PLAN_STEP_LIMIT) break;
   }
 
-  return steps.length ? steps : undefined;
+  return steps.length ? applyDerivedStatuses(steps) : undefined;
 }
 
 export interface PlanProgress {
@@ -201,6 +257,24 @@ export function applyPlanPatch(
   const steps = [...(plan ?? [])];
   const index = steps.findIndex((step) => step.id === patch.id);
 
+  /**
+   * Keep an outline in step with its children after any child-level change.
+   *
+   * Done here rather than in the caller because every write path to a plan goes
+   * through this function; syncing at only one of them is how the two halves of
+   * a plan drift apart in the first place.
+   */
+  const syncOutlineOf = (childId: string): void => {
+    const parentId = stepParent(childId);
+    if (!parentId) return;
+    const parentIndex = steps.findIndex((step) => step.id === parentId);
+    if (parentIndex < 0) return;
+    const parent = steps[parentIndex]!;
+    const status = deriveOutlineStatus(steps, parent);
+    if (status === parent.status) return;
+    steps[parentIndex] = { ...parent, status, updatedAt: now };
+  };
+
   if (patch.remove) {
     if (index < 0) return { plan: steps, changed: false, error: `no such step: ${patch.id}` };
     const removing = steps[index]!;
@@ -252,6 +326,7 @@ export function applyPlanPatch(
       ...(patch.note ? { note: patch.note.slice(0, 300) } : {}),
       updatedAt: now,
     });
+    syncOutlineOf(patch.id);
     return { plan: steps, changed: true };
   }
 
@@ -330,6 +405,7 @@ export function applyPlanPatch(
     next.agent !== previous.agent;
   if (!changed) return { plan: steps, changed: false };
   steps[index] = next;
+  syncOutlineOf(next.id);
   return { plan: steps, changed: true };
 }
 

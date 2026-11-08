@@ -372,25 +372,79 @@ export class TaskService {
   updatePlan(
     id: string,
     patch: { id: string; status?: PlanStepStatus; title?: string; note?: string; agent?: string; remove?: boolean },
-  ): { ok: boolean; error?: string; plan?: Task['spec'] extends undefined ? never : NonNullable<Task['spec']>['plan'] } {
+  ): {
+    ok: boolean;
+    error?: string;
+    plan?: Task['spec'] extends undefined ? never : NonNullable<Task['spec']>['plan'];
+    /**
+     * The agent a new session was started for because the plan crossed an
+     * ownership boundary. The caller tells the reporting worker to stop.
+     */
+    handedOffTo?: string;
+  } {
     const task = this.require(id);
     const now = this.now();
     const result = applyPlanPatch(task.spec?.plan, patch, now);
     if (result.error) return { ok: false, error: result.error };
     if (!result.changed) return { ok: true, plan: result.plan };
 
-    const next: Task = {
+    let next: Task = {
       ...task,
       spec: { ...(task.spec ?? {}), plan: result.plan },
       updatedAt: now,
     };
+
+    /**
+     * Ownership is a boundary, not a label.
+     *
+     * The plan says which profile owns each step, and until now nothing acted on
+     * it: one worker finished section 3.1, turned to 3.2 (owned by another
+     * agent), and did it in the same session. The agent column was decoration and
+     * "click 3.1, click 3.2" landed in one conversation.
+     *
+     * Closing a step is the only moment the boundary can be crossed cheaply, so
+     * the check happens here: a lookup in the plan, no model call. The next owner
+     * gets its own session and the current one is told to stop, which is the
+     * difference between a plan that assigns work and a plan that pretends to.
+     */
+    let handedOffTo: string | undefined;
+    if (patch.status === 'done') {
+      const leg = nextLeg(result.plan);
+      if (leg?.agent && leg.agent !== next.assigneeAgentId && this.deps.startNextLeg) {
+        handedOffTo = leg.agent;
+        // Record the hand-off on the task before starting it: the new session's
+        // own write path reads `assigneeAgentId` to decide whether it is the
+        // owner, and leaving it stale would make the next boundary fire on the
+        // wrong comparison.
+        next = { ...next, assigneeAgentId: handedOffTo };
+      }
+    }
+
     saveTask(this.root, next);
     appendJournal(this.root, id, {
       type: 'plan_updated',
       at: now,
       data: { step: patch.id, status: patch.status, agent: patch.agent, removed: patch.remove === true },
     });
-    return { ok: true, plan: result.plan };
+
+    if (handedOffTo) {
+      const agent = handedOffTo;
+      appendJournal(this.root, id, {
+        type: 'next_leg_started',
+        at: now,
+        data: { step: patch.id, agent },
+      });
+      void this.deps
+        .startNextLeg!(next, agent)
+        .then((started) => {
+          if (!started) log.warn(`[tasks] ownership boundary of ${id} not started for ${agent}`);
+        })
+        .catch((error) => {
+          log.warn(`[tasks] could not start ${agent} at the ${id} boundary`, { error: String(error) });
+        });
+    }
+
+    return { ok: true, plan: result.plan, ...(handedOffTo ? { handedOffTo } : {}) };
   }
 
   /**
@@ -502,6 +556,31 @@ export class TaskService {
       updatedAt: now,
     };
     saveTask(this.root, next);
+    return next;
+  }
+
+  /**
+   * Record that the watchdog tried to wake this task's idle session.
+   *
+   * Kept on the task rather than in the watchdog's memory because the watchdog is
+   * restarted with the app, and a counter that resets on every restart would keep
+   * waking a permanently stuck worker forever.
+   */
+  noteWake(id: string): Task {
+    const task = this.require(id);
+    const now = this.now();
+    const stats = task.stats ?? { runs: 0, activeMs: 0 };
+    const next: Task = {
+      ...task,
+      stats: {
+        ...stats,
+        wakeAttempts: (stats.wakeAttempts ?? 0) + 1,
+        lastWakeAt: now,
+      },
+      updatedAt: now,
+    };
+    saveTask(this.root, next);
+    appendJournal(this.root, id, { type: 'idle_wake', at: now, data: {} });
     return next;
   }
 

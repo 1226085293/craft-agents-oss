@@ -52,6 +52,73 @@ function deps(tasks: Task[], overrides: Partial<WatchdogDeps> = {}): WatchdogDep
   };
 }
 
+describe('idle sessions', () => {
+  // The reported bug: the task said 进行中 long after its session had stopped
+  // working. `sessionExists` answered yes because the session object outlives the
+  // turn, so the watchdog never looked again and never woke it.
+  const idleSince = NOW - 20 * 60_000;
+
+  it('flags a running task whose session exists but is not working', () => {
+    const findings = inspectTasks(
+      deps([task({ updatedAt: idleSince, stats: { runs: 1, activeMs: 0, lastHeartbeatAt: idleSince } })], {
+        sessionWorking: () => false,
+      }),
+    );
+    expect(findings.map((f) => f.kind)).toContain('idle');
+  });
+
+  it('leaves a working session alone', () => {
+    const findings = inspectTasks(
+      deps([task({ updatedAt: idleSince, stats: { runs: 1, activeMs: 0, lastHeartbeatAt: idleSince } })], {
+        sessionWorking: () => true,
+      }),
+    );
+    expect(findings).toEqual([]);
+  });
+
+  it('treats an unknown answer as working', () => {
+    // A host that cannot say must not make the watchdog fire.
+    const findings = inspectTasks(
+      deps([task({ updatedAt: idleSince, stats: { runs: 1, activeMs: 0, lastHeartbeatAt: idleSince } })], {
+        sessionWorking: () => undefined,
+      }),
+    );
+    expect(findings).toEqual([]);
+  });
+
+  it('wakes the session before giving up', () => {
+    let woken = 0;
+    runWatchdogPass(
+      deps([task({ updatedAt: idleSince, stats: { runs: 1, activeMs: 0, lastHeartbeatAt: idleSince } })], {
+        sessionWorking: () => false,
+        wakeSession: () => {
+          woken += 1;
+        },
+      }),
+    );
+    expect(woken).toBe(1);
+  });
+
+  it('pauses the task once the wakes are spent', () => {
+    // A wake that keeps not working is a loop paying for a model turn each time.
+    const pauses: string[] = [];
+    const idle = task({
+      updatedAt: idleSince,
+      stats: { runs: 1, activeMs: 0, lastHeartbeatAt: idleSince, wakeAttempts: 2 },
+    });
+    runWatchdogPass(
+      deps([idle], {
+        sessionWorking: () => false,
+        wakeSession: () => {
+          throw new Error('must not wake past the cap');
+        },
+        pause: (id) => pauses.push(id),
+      }),
+    );
+    expect(pauses).toEqual(['T-1']);
+  });
+});
+
 describe('watchdog findings', () => {
   it('leaves a healthy running task alone', () => {
     expect(inspectTasks(deps([task()]))).toEqual([]);

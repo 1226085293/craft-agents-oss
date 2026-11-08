@@ -200,3 +200,37 @@ export function formatNextLegBrief(task: Task, step: { id: string; title: string
     .join('\n');
 }
 
+/**
+ * What an idle worker is told when the watchdog wakes it.
+ *
+ * The task is still `running` and the session ended its turn without finishing.
+ * The message has to say three things or the worker will re-do work: the task is
+ * unfinished, this is a continuation rather than a new instruction, and the plan
+ * is the source of truth for what is left.
+ */
+export function formatIdleWakeBrief(task: Task): string {
+  const remaining = (task.spec?.plan ?? []).filter((step) => step.status !== 'done');
+  const lines = [
+    `继续任务 ${task.id}（${task.name}）：上个回合结束了，但任务还没完成。`,
+    '',
+    `任务目标：${task.instruction}`,
+  ];
+  if (remaining.length > 0) {
+    lines.push(
+      '',
+      '执行计划里还没完成的步骤：',
+      ...remaining.slice(0, 12).map((step) => `- ${step.id} ${step.title}（${step.status}）`),
+    );
+  } else if (task.spec?.plan?.length) {
+    lines.push('', '执行计划看起来已经全部完成 —— 如果是，请直接用 report_result 交接，不要重做。');
+  }
+  lines.push(
+    '',
+    '## 你现在要做的',
+    '',
+    '从上一次中断的地方继续，不要从头重做已经完成的部分。',
+    '如果任务其实已经完成，直接 report_result 交接；如果需要人拍板，用 report_result 报 needs_decision。',
+  );
+  return lines.join('\n');
+}
+

@@ -311,6 +311,7 @@ export async function handleTaskPlan(
   // step that stopped it.
   if (args.steps?.length) {
     let applied = 0;
+    let handedOffTo: string | undefined;
     for (const step of args.steps) {
       if (!step.id?.trim()) return errorResponse(`steps[${applied}].id is required.`);
       const result = await ctx.taskTools.updatePlan(args.identifier, {
@@ -327,8 +328,16 @@ export async function handleTaskPlan(
         );
       }
       applied += 1;
+      // An ownership boundary ends this worker's authority over the plan; writing
+      // more steps after it would edit work that now belongs to someone else.
+      if (result.handedOffTo) {
+        handedOffTo = result.handedOffTo;
+        break;
+      }
     }
-    return successResponse(`Plan updated: ${applied} step(s).`);
+    return successResponse(
+      handedOffTo ? boundaryNotice(applied, handedOffTo) : `Plan updated: ${applied} step(s).`,
+    );
   }
 
   if (!args.id?.trim()) return errorResponse('id is required (or pass steps[] to write several).');
@@ -342,12 +351,30 @@ export async function handleTaskPlan(
       ...(args.remove !== undefined ? { remove: args.remove } : {}),
     });
     if (!result.ok) return errorResponse(result.error ?? 'the plan was not updated.');
+    if (result.handedOffTo) return successResponse(boundaryNotice(1, result.handedOffTo));
     return successResponse(`Plan step ${args.id} updated.`);
   } catch (error) {
     return errorResponse(
       `Failed to update the plan: ${error instanceof Error ? error.message : 'unknown error'}`,
     );
   }
+}
+
+/**
+ * What the worker is told when its step closed an ownership boundary.
+ *
+ * Written as an instruction, not a status line, because the failure mode is a
+ * worker that reads "step updated" and keeps going into someone else's section.
+ * The new session already exists by the time this is returned, so the only thing
+ * left to prevent duplicate work is stopping this one.
+ */
+function boundaryNotice(applied: number, agent: string): string {
+  return [
+    `Plan updated: ${applied} step(s).`,
+    '',
+    `本节已完成，下一节归 ${agent}。已经为它开了一个新会话并交代了上下文。`,
+    '**到此为止：不要继续做下一节，也不要再改这份计划。** 用 report_result 交接你这一段的工作即可。',
+  ].join('\n');
 }
 
 /** Record a handoff produced by another session (the rule gate still applies). */

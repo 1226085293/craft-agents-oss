@@ -387,7 +387,7 @@ export interface SessionToolContext {
     updatePlan(
       identifier: string,
       patch: { id: string; status?: string; title?: string; agent?: string; note?: string; remove?: boolean },
-    ): Promise<{ ok: boolean; error?: string }>;
+    ): Promise<{ ok: boolean; error?: string; handedOffTo?: string }>;
   };
 
   /** Get detailed info about a session. Defaults to current session if no ID given. Injected by backend. */

@@ -425,7 +425,7 @@ export interface AgentBackend {
     updatePlan(
       identifier: string,
       patch: { id: string; status?: string; title?: string; agent?: string; note?: string; remove?: boolean },
-    ): Promise<{ ok: boolean; error?: string }>;
+    ): Promise<{ ok: boolean; error?: string; handedOffTo?: string }>;
   } | null;
 
   // ============================================================

@@ -364,6 +364,18 @@ export function handleInfo(
     infoLevel: event.level,
     ...(event.statusType ? { statusType: event.statusType as Message['statusType'] } : {}),
     ...(event.statusParams ? { statusParams: event.statusParams } : {}),
+    /**
+     * The card's own payload has to survive the live path.
+     *
+     * A decision request arrives as `statusType: 'decision_request'` plus a
+     * `decisionRequest` object holding the question, the options and the session an
+     * answer belongs to. This builder copied the statusType and dropped the payload,
+     * so the freshly-pushed row had a card type and nothing to draw: it fell through
+     * to the plain info branch and rendered as a stray line — then looked correct after
+     * switching sessions, because that path reads the persisted row where every field
+     * is present. Same fields, two different shapes depending on how you arrived.
+     */
+    ...(event.decisionRequest ? { decisionRequest: event.decisionRequest } : {}),
   }
 
   return {

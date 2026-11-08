@@ -295,7 +295,20 @@ export interface InfoEvent {
   type: 'info'
   sessionId: string
   message: string
-  statusType?: 'compaction_complete' | 'compaction_summary' | 'verification_passed' | 'verification_failed'
+  /**
+   * `decision_request` and the two wake notices are in this union because the main
+   * process sends them as `type: 'info'`. Leaving them out did not stop the event from
+   * arriving — it only stopped the handler from being able to describe it, which is how
+   * a card's payload got dropped: the field was untypable, so nobody wrote the copy.
+   */
+  statusType?:
+    | 'compaction_complete'
+    | 'compaction_summary'
+    | 'verification_passed'
+    | 'verification_failed'
+    | 'decision_request'
+    | 'background_wake'
+    | 'event_wake'
   /** Structured interpolation values (e.g. compaction token accounting) */
   statusParams?: Record<string, string | number>
   level?: 'info' | 'warning' | 'error' | 'success'
@@ -303,6 +316,11 @@ export interface InfoEvent {
   timestamp?: number
   /** Verified final reply to replay as THE final bubble (verification_passed) */
   finalText?: string
+  /**
+   * Present when `statusType === 'decision_request'`: the question, its options and the
+   * session an answer belongs to.
+   */
+  decisionRequest?: import('@craft-agent/core').DecisionRequest
 }
 
 /**

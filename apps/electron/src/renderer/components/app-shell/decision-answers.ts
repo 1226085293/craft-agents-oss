@@ -1,20 +1,28 @@
 /**
- * Which decision cards have already been answered.
+ * Which decision cards have already been answered — shared by both surfaces.
  *
- * The answer used to be remembered in `React.useState` and nowhere else, so a reload
- * brought the buttons back on a question that was already answered — a stale control
- * that invites the same answer twice. A decision card is a question, and a question
- * that has been answered must not keep asking.
+ * The same question is drawn twice: as a card in the conversation, and as the decision
+ * section of the task detail page. Each used to remember its own answer under its own
+ * key, so answering one left the other offering its buttons — and answering the second
+ * sent the reply again. A question with two answer paths is a question that can be
+ * answered twice.
  *
- * Stored per request id (the `DecisionRequest.id` written into the message row, or the
- * task id plus its `askedAt` for the task card), so the two surfaces of one decision
- * agree and the state outlives the renderer.
+ * So the key is the QUESTION, not the surface: task id plus the moment it was asked.
+ * Both cards derive the same key from the same decision, which is what makes one answer
+ * visible in both places. The answer also carries the time it was given, so a decision
+ * asked later on the same task is a different question and starts unanswered.
  *
- * `localStorage` rather than a store round-trip on purpose: this is UI memory about what
- * the reader already did on this machine, not a fact about the task. The task's own
- * record carries `decision.answer` for anything that must be authoritative.
+ * `localStorage` because this is UI memory about what this reader already did, not a fact
+ * about the task. The task's own record carries `decision.answer` for anything that must
+ * be authoritative across machines.
  */
 const KEY_PREFIX = 'craft.decisionAnswer:'
+
+interface StoredAnswer {
+  text: string
+  /** When it was given. Compared against a decision's `askedAt` to tell questions apart. */
+  at: number
+}
 
 /** Renderer storage is not guaranteed (tests, private mode); absence is not an error. */
 function store(): Storage | null {
@@ -25,28 +33,53 @@ function store(): Storage | null {
   }
 }
 
-export function readDecisionAnswer(key: string): string | null {
+function keyFor(taskId: string, askedAt: number | undefined): string {
+  return `${KEY_PREFIX}task:${taskId}:${askedAt ?? 0}`
+}
+
+/**
+ * The answer for this question, if this reader already gave one.
+ *
+ * `askedAt` guards the re-ask case: a task can legitimately stop for a decision more than
+ * once, and the second question must not inherit the first one's answer.
+ */
+export function readDecisionAnswer(taskId: string, askedAt: number | undefined): string | null {
   try {
-    return store()?.getItem(KEY_PREFIX + key) ?? null
+    const raw = store()?.getItem(keyFor(taskId, askedAt))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as StoredAnswer
+    return typeof parsed?.text === 'string' ? parsed.text : null
   } catch {
     return null
   }
 }
 
-export function rememberDecisionAnswer(key: string, answer: string): void {
+const listeners = new Set<() => void>()
+
+export function rememberDecisionAnswer(taskId: string, askedAt: number | undefined, answer: string): void {
   try {
-    store()?.setItem(KEY_PREFIX + key, answer)
+    const payload: StoredAnswer = { text: answer, at: Date.now() }
+    store()?.setItem(keyFor(taskId, askedAt), JSON.stringify(payload))
   } catch {
     // A full or unavailable store must not break answering.
   }
+  // The other surface is mounted somewhere else and has no way to know. Telling the
+  // subscribers is what turns "one card answered" into "the question is answered".
+  for (const listener of listeners) {
+    try {
+      listener()
+    } catch {
+      // A broken listener must not stop the rest.
+    }
+  }
 }
 
-/** A task card's key: the decision it is showing, not the task, which can ask again. */
-export function taskDecisionKey(taskId: string, askedAt: number | undefined): string {
-  return `task:${taskId}:${askedAt ?? 0}`
-}
-
-/** A chat card's key: the request id, which is stable in the persisted message row. */
-export function requestDecisionKey(requestId: string): string {
-  return `request:${requestId}`
+/**
+ * Re-read on any answer anywhere.
+ *
+ * Returns the unsubscribe, so a card can stop listening when it unmounts.
+ */
+export function subscribeDecisionAnswers(listener: () => void): () => void {
+  listeners.add(listener)
+  return () => listeners.delete(listener)
 }

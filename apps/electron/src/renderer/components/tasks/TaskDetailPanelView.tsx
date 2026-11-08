@@ -8,7 +8,7 @@ import { useTranslation } from 'react-i18next'
 import {
   readDecisionAnswer,
   rememberDecisionAnswer,
-  taskDecisionKey,
+  subscribeDecisionAnswers,
 } from '../app-shell/decision-answers'
 import {
   AlertTriangle,
@@ -185,22 +185,29 @@ function TaskDecisionAnswer({
   const [typing, setTyping] = React.useState(false)
   const [draft, setDraft] = React.useState('')
   const [error, setError] = React.useState<string | null>(null)
-  const storeKey = taskDecisionKey(detail.id, detail.decision?.askedAt)
+  const askedAt = detail.decision?.askedAt
 
   /**
-   * Three sources, in order of authority.
+   * The answer, from whichever record knows first.
    *
-   * `decision.answer` is the task's own record — it survives a restart and is the same
-   * value every surface reads. The local store covers the moment between sending and
-   * the task being re-read. Neither existing meant a reload offered the buttons again on
-   * a question that was already answered.
+   * `decision.answer` is authoritative and survives a restart; the shared store covers
+   * the window before the task is re-read AND the other surface — the conversation card
+   * asks the same question, and answering it there must lock this one too.
    */
   const [sent, setSentState] = React.useState<string | null>(
-    detail.decision?.answer?.text ?? readDecisionAnswer(storeKey),
+    detail.decision?.answer?.text ?? readDecisionAnswer(detail.id, askedAt),
   )
+  React.useEffect(() => {
+    // Another surface answered the same question: take its answer rather than offering
+    // the buttons again. Keyed on the question, so a re-ask stays answerable.
+    return subscribeDecisionAnswers(() => {
+      const shared = readDecisionAnswer(detail.id, askedAt)
+      if (shared) setSentState(shared)
+    })
+  }, [detail.id, askedAt])
   const setSent = (value: string) => {
     setSentState(value)
-    rememberDecisionAnswer(storeKey, value)
+    rememberDecisionAnswer(detail.id, askedAt, value)
   }
 
   /**

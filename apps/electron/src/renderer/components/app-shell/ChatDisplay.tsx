@@ -4,7 +4,7 @@ import { useEffect, useState, useMemo, useCallback } from "react"
 import {
   readDecisionAnswer,
   rememberDecisionAnswer,
-  requestDecisionKey,
+  subscribeDecisionAnswers,
 } from "./decision-answers"
 import {
   AlertTriangle,
@@ -2956,7 +2956,16 @@ function DecisionRequestCard({
   const [typing, setTyping] = React.useState(false)
   const [draft, setDraft] = React.useState('')
   const [error, setError] = React.useState<string | null>(null)
-  const storeKey = requestDecisionKey(request.id)
+  /**
+   * The key is the QUESTION, shared with the task page.
+   *
+   * Both surfaces draw the same decision. Keying on this card's own request id meant the
+   * task page never learned that this one had been answered, so it kept offering its
+   * buttons and a second reply could be sent; the task id plus `askedAt` is what both
+   * sides can derive from the same decision.
+   */
+  const answerKey = request.taskIdentifier
+  const askedAt = request.askedAt
 
   /**
    * Whether this card has been answered, read from storage rather than from state.
@@ -2965,10 +2974,20 @@ function DecisionRequestCard({
    * its buttons, on questions that had already been answered. Remembering the answer
    * outside React is what makes 「已答复」 durable.
    */
-  const [sent, setSentState] = React.useState<string | null>(() => readDecisionAnswer(storeKey))
+  const [sent, setSentState] = React.useState<string | null>(() =>
+    answerKey ? readDecisionAnswer(answerKey, askedAt) : null,
+  )
+  React.useEffect(() => {
+    if (!answerKey) return
+    // The task page answered it: this card must stop asking.
+    return subscribeDecisionAnswers(() => {
+      const shared = readDecisionAnswer(answerKey, askedAt)
+      if (shared) setSentState(shared)
+    })
+  }, [answerKey, askedAt])
   const setSent = (value: string) => {
     setSentState(value)
-    rememberDecisionAnswer(storeKey, value)
+    if (answerKey) rememberDecisionAnswer(answerKey, askedAt, value)
   }
 
   const answer = React.useCallback(
@@ -3007,7 +3026,7 @@ function DecisionRequestCard({
         setError(err instanceof Error ? err.message : String(err))
       }
     },
-    [request.askedBySessionId, request.taskIdentifier, sent, storeKey, workspaceId],
+    [request.askedBySessionId, request.taskIdentifier, sent, answerKey, askedAt, workspaceId],
   )
 
   return (

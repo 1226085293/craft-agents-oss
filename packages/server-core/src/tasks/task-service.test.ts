@@ -244,6 +244,27 @@ describe('handoff gate', () => {
     expect(svc.recordDecisionAnswer(task.id, '改了，放行')).toBeNull()
   })
 
+  /**
+   * The same reply arrived twice, 1.6 seconds apart, and read as two instructions.
+   * Both surfaces draw the same question; a second click can come from either, and a
+   * window that never saw the first answer's state offers the buttons again. Only the
+   * task holds the record, so only the task can refuse the second one.
+   */
+  it('accepts one answer per question, from whichever surface asks', async () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.setStatus(task.id, 'running');
+    await svc.reportHandoff(
+      task.id,
+      { outcome: 'needs_decision', summary: '需要清空旧分支再继续，是否删除这些分支' },
+      'sess_w',
+    );
+
+    expect(svc.recordDecisionAnswer(task.id, '放行')).not.toBeNull();
+    // The conversation card's click, after the task card's.
+    expect(svc.recordDecisionAnswer(task.id, '放行')).toBeNull();
+  })
+
   it('trips the fuse after three rejected handoffs', async () => {
     const { svc } = service(workspace());
     const task = create(svc);

@@ -618,6 +618,17 @@ export class TaskService {
     if (!task || !decision || decision.resolvedAt) return null;
     const trimmed = text.trim();
     if (!trimmed) return null;
+    /**
+     * One question, one answer.
+     *
+     * The card guards this in the renderer with a `sent` flag, and that guard is not
+     * enough: two surfaces show the same decision, and a second click can arrive from
+     * either — or from a window that never saw the first one's state. Observed on a real
+     * run: the supervisor received the same reply twice, 1.6s apart, and read it as two
+     * separate instructions. The task is the only party that can decide this, because it
+     * is the only one holding the record.
+     */
+    if (decision.answer) return null;
 
     const now = this.now();
     const next: Task = {

@@ -551,3 +551,71 @@ describe('widening the scope answers the pending question', () => {
     expect(svc.get(task.id)?.spec?.scope).toBe('做 1.1 和 1.2')
   })
 })
+
+describe('delivered requires the plan to be finished', () => {
+  /**
+   * Observed: a worker delivered while `1.2` and `3` were still `todo`. The artifact
+   * existed, the acceptance command passed, so the gate was satisfied and the task
+   * closed with a step skipped — the board then showed 2/5 and 已完成 at the same time.
+   *
+   * The escape hatch is part of the rule: a plan is written while the work is still being
+   * discovered, so some steps do become irrelevant. Without an exit the worker would just
+   * mark them done, which is worse than skipping them.
+   */
+  const setup = (plan: Array<{ id: string; title: string; status: string }>) => {
+    const root = workspace();
+    const { svc } = service(root);
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(join(root, 'docs', 'a.md'), 'x');
+    const task = svc.create({
+      name: 'deliver',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: `call_d${Math.random()}`,
+      spec: { cwd: root, plan } as never,
+    });
+    svc.startRun(task.id, 'sess_w');
+    return { svc, task }
+  }
+
+  const delivered = {
+    outcome: 'delivered',
+    summary: '完成',
+    artifacts: [{ path: 'docs/a.md' }],
+    verify: { ran: ['test -s docs/a.md'], passed: true },
+  }
+
+  it('refuses while a work step is unfinished, and says which', async () => {
+    const { svc, task } = setup([
+      { id: '1', title: '写文件', status: 'done' },
+      { id: '2', title: '收尾', status: 'todo' },
+    ])
+    const result = await svc.reportHandoff(task.id, delivered, 'sess_w')
+    expect(result.passed).toBe(false)
+    expect(result.reasons.join(' ')).toContain('2 收尾')
+    expect(svc.get(task.id)?.status).not.toBe('completed')
+  })
+
+  it('allows it once the outstanding step is removed', async () => {
+    // The escape: the step stopped mattering, so it leaves the plan with a journal entry
+    // rather than being lied about.
+    const { svc, task } = setup([
+      { id: '1', title: '写文件', status: 'done' },
+      { id: '2', title: '收尾', status: 'todo' },
+    ])
+    svc.updatePlan(task.id, { id: '2', remove: true })
+    const result = await svc.reportHandoff(task.id, delivered, 'sess_w')
+    expect(result.passed).toBe(true)
+    expect(svc.get(task.id)?.status).toBe('completed')
+  })
+
+  it('ignores an outline whose sub-steps are all done', async () => {
+    // Progress is counted on leaves, so a closed section must not look like an omission.
+    const { svc, task } = setup([
+      { id: '1', title: '写文件', status: 'doing' },
+      { id: '1.1', title: '创建', status: 'done' },
+    ])
+    const result = await svc.reportHandoff(task.id, delivered, 'sess_w')
+    expect(result.reasons.join(' ')).not.toContain('没完成')
+  })
+})

@@ -37,6 +37,8 @@ import {
   activeTasks,
   assessDecisionRequest,
   applyPlanPatch,
+  planProgress,
+  childrenOf,
   DECISION_TIMEOUT_MS,
   TERMINAL_STATUSES,
   type PlanStepStatus,
@@ -702,6 +704,35 @@ export class TaskService {
     // not evidence. `needs_decision` bypasses the gate and pauses instead.
     let accepted = handoff.outcome === 'needs_decision' ? false : verdict.passed;
     const reasons = [...verdict.reasons];
+
+    /**
+     * "Done" cannot mean "done with the parts I felt like doing".
+     *
+     * Observed: a worker delivered while `1.2` and `3` were still `todo`, the gate was
+     * happy because the artifact existed and the acceptance command passed, and the task
+     * closed with a step skipped. The plan then reads as both 2/5 and 已完成, which is not
+     * a display glitch — the two facts disagree.
+     *
+     * The escape hatch matters as much as the rule. A plan is written while the work is
+     * still being discovered, so some steps do become irrelevant; refusing without an
+     * exit would only teach the worker to mark unfinished steps done, which is worse than
+     * skipping them. So the refusal names the remaining steps and both legal exits: mark
+     * it done with evidence, or remove it. Removal of a *finished* step is already refused
+     * elsewhere, and every removal is journalled, so the escape leaves a trace.
+     */
+    if (handoff.outcome === 'delivered' && accepted) {
+      const progress = planProgress(task.spec?.plan);
+      if (progress.total > 0 && !progress.complete) {
+        const remaining = (task.spec?.plan ?? []).filter(
+          (step) => step.status !== 'done' && childrenOf(task.spec?.plan, step.id).length === 0,
+        );
+        accepted = false;
+        reasons.push(
+          `计划里还有 ${remaining.length} 步没完成，不能交付整个任务：${remaining.map((step) => `${step.id} ${step.title}`).join('；')}。` +
+            '两条出路：真的做完了就标 done 并在 note 里写证据；不需要了就把它移除（移除会记进任务日志）。',
+        );
+      }
+    }
 
     // Second layer: a requirement the commands cannot express is judged by a
     // model that only reads — never by the worker that wrote the handoff, and

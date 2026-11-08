@@ -100,6 +100,9 @@ export function formatDispatchTaskContext(task: Pick<Task, 'spec'>): string {
     sections.push(['## 当前执行计划', ...formatPlan(plan)].join('\n'));
   }
   sections.push(formatPlanRuleBlock({ planExists: hasPlan }));
+  // Same reason the plan rules are here: dispatch is how a worker is actually
+  // started, and a rule that lives only in the brief never reaches it.
+  sections.push(formatExecutionRuleBlock());
   return sections.join('\n\n');
 }
 

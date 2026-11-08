@@ -7523,7 +7523,12 @@ ${request.prompt}`;
       // waiting for the timer. Dropped with the workspace scope, together with the
       // loop's own disposer.
       this.watchdogLoops.set(workspaceId, stop)
-      this.workspaceScopes.open(workspaceId).effect(() => {
+      // `effect(start)` calls `start` immediately and keeps its RETURN VALUE as the
+      // disposer. So the body must only build the cleanup — calling `stop()` here
+      // stopped the loop the instant it started: the log showed `[watchdog] started`
+      // and then not one pass, which is the exact "looks alive, is dead" failure this
+      // loop's own self-monitor exists to catch.
+      this.workspaceScopes.open(workspaceId).effect(() => () => {
         this.watchdogLoops.delete(workspaceId)
         stop()
       })

@@ -225,6 +225,9 @@ export async function handleTaskCreate(
                 status: 'todo' as const,
                 ...(step.agent ? { agent: step.agent } : {}),
               })),
+              // Written from what the user asked for, so it is the agreement — append-only
+              // from here on. A plan the worker shapes itself never gets this flag.
+              planAgreed: true,
             }
           : {}),
         ...(args.cwd ? { cwd: args.cwd } : {}),

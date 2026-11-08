@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test';
 
 import {
   applyPlanPatch,
+  checkAgreedPlanAppend,
   currentStep,
   formatPlan,
   lastPlanChangeAt,
@@ -404,5 +405,52 @@ describe('an agreed plan is not the worker\'s to rewrite', () => {
     const next = applyPlanPatch(plan, { id: '1.1', title: '创建 docs/a.md' }, NOW).plan;
     expect(next.find((step) => step.id === '1.1')?.title).toBe('创建 docs/a.md');
     expect(next.filter((step) => !step.id.includes('.')).map((s) => s.id)).toEqual(['1', '2']);
+  })
+})
+
+describe('an agreed plan is append-only', () => {
+  /**
+   * The first cut refused *any* new outline, contradicting the plan contract:
+   * "steps may be added and removed while the work happens; forcing an accurate plan
+   * up front only produces a fake plan". A worker that found a missing step was told
+   * it could only work under 1.1 — and because the refusal fired inside a batch, the
+   * earlier steps had already been written, leaving a half-applied plan.
+   */
+  const plan = () =>
+    normalizePlan(
+      [
+        { id: '1', title: '创建 docs/a.md', status: 'todo' },
+        { id: '2', title: '验收检查（本轮不做）', status: 'todo' },
+      ],
+      NOW,
+    )!
+
+  it('allows appending after the agreed outlines', () => {
+    expect(checkAgreedPlanAppend(plan(), '3', true)).toBeUndefined()
+  })
+
+  it('refuses inserting before the agreed order', () => {
+    const blocked = checkAgreedPlanAppend(plan(), '0', true)
+    expect(blocked).toContain('追加')
+    expect(blocked).toContain('1 创建 docs/a.md')
+  })
+
+  it('refuses a gap that renumbers between agreed outlines', () => {
+    const sparse = normalizePlan(
+      [
+        { id: '1', title: 'a', status: 'todo' },
+        { id: '3', title: 'c', status: 'todo' },
+      ],
+      NOW,
+    )!
+    expect(checkAgreedPlanAppend(sparse, '2', true)).toContain('追加')
+  })
+
+  it('leaves sub-steps alone — that is where the worker works', () => {
+    expect(checkAgreedPlanAppend(plan(), '1.1', true)).toBeUndefined()
+  })
+
+  it('leaves a worker-shaped plan completely free', () => {
+    expect(checkAgreedPlanAppend(plan(), '0', undefined)).toBeUndefined()
   })
 })

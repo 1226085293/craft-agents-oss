@@ -68,6 +68,7 @@ export {
   currentOutline,
   currentStep,
   formatPlan,
+  checkAgreedPlanAppend,
   isOutlineStep,
   isPlanStepStatus,
   nextLeg,

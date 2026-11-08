@@ -93,6 +93,7 @@ export function normalizeSpec(raw: unknown): TaskSpec | undefined {
     ...(acceptance.length ? { acceptance } : {}),
     ...(permissions && Object.keys(permissions).length ? { permissions } : {}),
     ...(plan ? { plan } : {}),
+    ...(v.planAgreed === true ? { planAgreed: true } : {}),
   };
 
   return Object.keys(spec).length ? spec : undefined;

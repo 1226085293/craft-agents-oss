@@ -36,7 +36,7 @@ import {
 } from '@craft-agent/shared/agents'
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
-import { readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatUnreportedBrief, formatNextLegBrief, formatPlanRuleBlock, nextLeg, stepParent, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
+import { checkAgreedPlanAppend, readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatUnreportedBrief, formatNextLegBrief, formatPlanRuleBlock, nextLeg, stepParent, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -5761,31 +5761,14 @@ export class SessionManager implements ISessionManager {
             void patch.agent
 
             /**
-             * A plan the user agreed to is not the worker's to rewrite.
-             *
-             * The user asked for two outlines — 「1 写文件」「2 收尾」. The worker wrote
-             * three of its own (确认位置 / 创建 / 回报) and the board showed a plan
-             * nobody had asked for: the request and the plan disagreed and both were
-             * "correct" in the system's eyes. Adding sub-steps under the agreed
-             * outlines is the worker's job; inventing new outlines is not.
-             *
-             * Only new top-level items are refused, and only when a plan already
-             * exists — a task with no plan still lets the worker shape one, which is
-             * what happens when the supervisor did not specify.
+             * The agreement is append-only, not frozen — see `checkAgreedPlanAppend`.
              */
-            const agreedPlan = task.spec?.plan ?? []
-            const addsOutline =
-              !patch.id.includes('.') && !agreedPlan.some((step) => step.id === patch.id)
-            if (agreedPlan.length > 0 && addsOutline) {
-              const outlines = agreedPlan
-                .filter((step) => !step.id.includes('.'))
-                .map((step) => `${step.id} ${step.title}`)
-                .join('；')
-              return {
-                ok: false,
-                error: `计划由创建者写好，不能新增大纲。现有大纲：${outlines}。你只能在已有小节下工作（如 1.1）。`,
-              }
-            }
+            const appendError = checkAgreedPlanAppend(
+              task.spec?.plan,
+              patch.id,
+              task.spec?.planAgreed,
+            )
+            if (appendError) return { ok: false, error: appendError }
 
             const beforeIds = new Set((task.spec?.plan ?? []).map((step) => step.id))
             const result = service.updatePlan(identifier, {

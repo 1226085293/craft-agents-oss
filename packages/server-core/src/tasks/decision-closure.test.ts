@@ -100,14 +100,14 @@ describe('a re-asked question does not inherit the old diagnosis', () => {
 })
 
 /**
- * The second real answer, end to end.
+ * The second real answer, end to end — under the new contract.
  *
- * T-1 was bounded at 1.2 by 「完成1.2后暂停」. The person then said
- * 「放行步骤 2（收尾），把任务做完」; the answer was recorded, and the boundary did not move —
- * so the resumed worker was refused on every write for step 2, including creating its sub-step.
+ * The reply is recorded verbatim; the boundary comes from a model writing it down through
+ * `task_update`, not from a parser reading 「放行步骤 2」. This is the same scenario the keyword
+ * tables used to handle, and they only handled it because the phrase happened to be in the list.
  */
 describe('a release answer moves the boundary with it', () => {
-  it('lets the step it named, and that step’s sub-step, be written', async () => {
+  it('lets the step a model authorised be written, including its sub-step', async () => {
     const svc = service()
     const task = svc.create({
       name: '状态图标验证',
@@ -138,15 +138,16 @@ describe('a release answer moves the boundary with it', () => {
     )
 
     const answered = svc.recordDecisionAnswer('T-1', '放行步骤 2（收尾），把任务做完')!
-    expect(answered.spec?.authorizedUpTo).toBe('2')
-    expect(answered.spec?.authorizedSteps).toContain('2')
+    // Recording alone authorises nothing: the words are stored, nothing is inferred.
+    expect(answered.spec?.authorizedUpTo).toBe('1.2')
+    expect(answered.spec?.authorizedAt).toBeUndefined()
 
-    // What the worker was actually refused on in the run.
+    // What the supervisor does after reading the reply.
+    svc.setAuthorizedSteps('T-1', ['1', '1.1', '1.2', '2'], '2')
+
     const written = svc.updatePlan('T-1', { id: '2.1', title: '最终验收与收尾', status: 'doing' })
     expect(written.error).toBeUndefined()
     expect(written.ok).toBe(true)
-
-    // And step 2 itself, the one the release named.
     expect(svc.updatePlan('T-1', { id: '2', status: 'doing' }).ok).toBe(true)
   })
 })

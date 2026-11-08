@@ -10,7 +10,6 @@
 import type { Task } from './types.ts';
 import { formatPlan } from './plan.ts';
 import { isAuthorizedStep, nextLeg, openSteps } from './plan.ts';
-import { answerEndsTask } from './resume-decision.ts';
 import { planProgress } from './plan.ts';
 
 export interface TaskBriefOptions {
@@ -279,10 +278,20 @@ export function formatFrontierLine(task: Task): string {
    * 「用户的答复是：停止剩下的任务」. The worker follows the longer, more specific instruction,
    * which is the only thing a model can do with contradictory input.
    */
-  if (answerEndsTask(task.decision?.answer?.text)) {
+  /**
+   * Nothing here reads what the answer meant.
+   *
+   * The line used to be suppressed when the reply "looked like" a stop, decided by a keyword
+   * table — and when the table missed 「停止剩下的任务」 the brief printed 「下一条大纲 2 还没有小节
+   * ……先判断它，再拆」 directly under the reply that said to stop. Interpreting the sentence is
+   * the supervisor's job; this function only states what the record allows.
+   */
+  const answeredAt = task.decision?.answer?.at ?? 0
+  if (answeredAt > 0 && (task.spec?.authorizedAt ?? 0) < answeredAt) {
     return (
-      '用户已叫停这个任务：不要再展开大纲、不要标完成、不要移除步骤。' +
-      '用 `report_result` 交接并说明停在哪一步（outcome 用 **handoff**）。'
+      '你已答复，但还没有人把这句话翻译成授权——所以这里不给下一步。' +
+      '等督导写下授权（authorizedUpTo / authorizedSteps）或结束任务；' +
+      '在那之前不要开工、不要标完成、不要移除步骤。'
     );
   }
   const leg = nextLeg(task.spec?.plan);

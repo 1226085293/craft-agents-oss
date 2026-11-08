@@ -3,44 +3,30 @@
  *
  * This exists because the same decision was being made in four places — a manual run, a
  * supervisor `task_update({status:'running'})`, an event route, and the watchdog — each
- * with its own idea of what an answered question means. The symptom was consistent and
- * wrong: the person answered 「完成 1.2 后暂停」, one path lifted the pause, another resumed
- * the worker with the whole remaining plan, and the task was finished past the boundary it
- * had just been given.
+ * with its own idea of what an answered question means. The question is answered once, here,
+ * as a pure function of what the task records.
  *
- * So the question is answered once, here, as a pure function of the task: given what the
- * task records, may anyone start it, and what may they do when they do.
+ * **What decides the meaning of an answer: a model, not this file.**
+ *
+ * This module used to read the person's reply with keyword tables — 「暂停/停止/放行/其余」 — to
+ * work out what they had authorised. That cannot work: the same intent is phrased countless ways
+ * (「停止剩下的任务」, 「到此为止」, 「别做了」), a word can mean its opposite depending on context
+ * (「其余」 in 「其余之后再定」 excludes, in 「其余都做」 includes), and every miss was silent. Two
+ * live failures came from it: 「完成1.2后暂停」 was understood but 「放行步骤 2」 was not, and
+ * 「停止剩下的任务」 was read as an instruction to keep going.
+ *
+ * Interpreting language is the supervisor's job — it is a model, and it can say what it understood
+ * and write it down through `task_update` (`authorizedUpTo` / `authorizedSteps`). This function
+ * only compares timestamps: has anyone written an authorisation since that reply arrived?
+ *
+ * If not, the task does NOT resume. Silence is not permission, and a guess about what somebody
+ * authorised is worse than an explicit wait.
  */
 import type { Task } from './types.ts';
-import { authorizationFromAnswer } from './answer-scope.ts';
 
 export type ResumeVerdict =
   | { allowed: true; authorizedSteps?: string[]; authorizedUpTo?: string; reason: string }
   | { allowed: false; why: string };
-
-/**
- * Replies that end the task rather than continue it.
- *
- * 「停止剩下的任务」 was missing, and it is the phrasing that actually arrived: the supervisor
- * read it correctly (marked the task completed and created a different task for the new request),
- * but this function did not, so the resume path lifted the pause and handed the worker a brief
- * ending with 「下一条大纲 2 还没有小节……先判断它，再拆」 — instructions to continue, printed
- * directly under the reply that said to stop. The worker followed the longer, more specific
- * instruction, which is the only thing a model can reasonably do with contradictory input.
- */
-const END_WORDS =
-  /(到此为止|就此结束|结束任务|不用做了|别做了|取消任务|停掉任务|停止[^，。]{0,6}(任务|工作|剩余|剩下)|停掉剩余|不要再做)/;
-
-/**
- * Does this reply end the task instead of continuing it?
- *
- * Exported because the brief needs the same answer: a resume that is refused produces no brief,
- * but a dispatch can still be built for a task whose reply said stop, and a brief that ends with
- * 「下一条大纲 2 ……先判断它，再拆」 contradicts the sentence it quotes two lines above.
- */
-export function answerEndsTask(answer: string | undefined): boolean {
-  return END_WORDS.test((answer ?? '').trim());
-}
 
 /**
  * The single answer to "may this run, and how far".
@@ -60,40 +46,41 @@ export function resumeDecisionFor(task: Task): ResumeVerdict {
   }
 
   if (answer) {
-    // The reply can end the task outright — 「到此为止」 is a decision, not a delay.
-    if (END_WORDS.test(answer)) {
-      return { allowed: false, why: `你已回复「${answer}」，任务应结束，不应继续执行` };
+    /**
+     * The reply is recorded; what it *means* has to be written down by someone who can read it.
+     *
+     * `authorizedAt` is stamped by the tool that writes a boundary. Comparing it to when the
+     * reply arrived answers "has this reply been acted on?" without reading a single character
+     * of it. A supervisor that decides 「放行到 2」 writes `authorizedUpTo: '2'`; one that
+     * decides 「停止」 sets the task to `canceled` and never resumes it; one that decides
+     * "nothing changes" writes nothing and the task stays paused.
+     *
+     * Observed: without this, the reply 「停止剩下的任务」 lifted the pause, the worker was
+     * resumed with the whole remaining plan, and the brief under the answer asked it to expand
+     * the next outline.
+     */
+    const answeredAt = decision?.answer?.at ?? 0;
+    const authorizedAt = task.spec?.authorizedAt ?? 0;
+    if (authorizedAt < answeredAt) {
+      return {
+        allowed: false,
+        why:
+          `你已回复「${answer}」，但还没有人把这句话翻译成授权。` +
+          '先由督导用 `task_update` 写下授权（authorizedUpTo / authorizedSteps，或直接结束任务）：' +
+          '答复本身不等于放行，代码也不猜它的意思。',
+      };
     }
-    /**
-     * A reply that names where to stop sets the boundary for whoever runs next.
-     *
-     * This is the half that was missing: the boundary was derived and stored in one place
-     * (`recordDecisionAnswer`) but the resume paths read `spec.authorizedSteps`, and a task
-     * whose boundary had not been stored — because the plan did not yet contain the named
-     * step, which is exactly the state 「完成 1.2 后暂停」 is answered in — resumed with the
-     * entire plan open.
-     */
-    /**
-     * The same function the recorder used, so the resume cannot read the answer differently.
-     *
-     * `recordDecisionAnswer` stores what a reply authorises; this only decides whether the task
-     * may run and along what boundary. When the two disagreed, a release answer was applied to
-     * the record but not to the run — the task resumed bounded by the previous answer's ceiling.
-     */
-    const read = authorizationFromAnswer(answer, task.spec?.plan);
-    const ceiling = read?.authorizedUpTo ?? task.spec?.authorizedUpTo;
-    const derived = read?.authorizedSteps;
-    const stored = task.spec?.authorizedSteps;
-    const boundary = derived?.length ? derived : stored?.length ? stored : undefined;
+    const boundary = task.spec?.authorizedSteps;
+    const ceiling = task.spec?.authorizedUpTo;
     return {
       allowed: true,
-      ...(boundary ? { authorizedSteps: boundary } : {}),
+      ...(boundary?.length ? { authorizedSteps: boundary } : {}),
       ...(ceiling ? { authorizedUpTo: ceiling } : {}),
       reason: ceiling
-        ? `你已回复「${answer}」：做到 ${ceiling} 就停`
-        : boundary
-          ? `已授权到 ${boundary.join('、')}，做到这里就停`
-          : '没有边界，按计划继续',
+        ? `已按你的答复授权到 ${ceiling}`
+        : boundary?.length
+          ? `已按你的答复授权到 ${boundary.join('、')}`
+          : '已按你的答复放行，没有边界',
     };
   }
 

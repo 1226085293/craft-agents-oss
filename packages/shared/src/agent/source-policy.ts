@@ -90,6 +90,19 @@ export function parseSourceSlugFromTool(toolName: string): { slug: string; sourc
   return null;
 }
 
+/**
+ * 这里的字符串匹配不是「理解语义」，是权限裁决的否决条件，两者不要混为一谈。
+ *
+ * 任务/答复那边按语义理解的代码已经全部删掉、改成由模型判断（见 tasks/resume-decision.ts
+ * 的说明）：那边读的是人的自由文本，任何词表都只会偶尔猜中。
+ *
+ * 这里读的是**工具自己的名字与它声明的参数**（method / path），用途是给一次调用定风险档：
+ * 命中 payment 就必须按 critical 拦，命中 delete/external 就必须升级。这类判断不能交给模型，
+ * 因为工具名和描述本身来自第三方，让模型去读它等于让被审对象写自己的审查结论。
+ *
+ * 换句话说：语义交给模型，否决权留给代码。词表漏判时默认落在 medium（需确认），
+ * 也就是漏判的方向是「多问一次」，不是「放过去」。
+ */
 const EXTERNAL_KEYWORDS = ['send', 'transfer', 'share', 'publish', 'broadcast', 'email', 'notify', 'webhook', 'invite']; // 注意：不含 'post' —— HTTP POST 属写操作而非外发
 const DELETE_KEYWORDS = ['delete', 'remove', 'purge', 'destroy', 'drop', 'truncate', 'wipe', 'revoke', 'unlink', 'deactivate', 'clear'];
 const PAYMENT_KEYWORDS = ['pay', 'payment', 'billing', 'charge', 'invoice', 'refund', 'checkout', 'subscribe', 'subscription', 'stripe', 'wallet'];

@@ -99,7 +99,6 @@ export {
 export {
   assessDecisionRequest,
   DECISION_CATEGORIES,
-  isRoutineWork,
   routineContinuationNote,
   type DecisionAssessment,
   type DecisionCategory,
@@ -144,7 +143,5 @@ export {
   saveTask,
   tasksByStatus,
 } from './store.ts';
-export * from './answer-scope.ts'
 export * from './resume-decision.ts'
 export * from './answer-line.ts'
-export { authorizationFromAnswer } from './answer-scope.ts'

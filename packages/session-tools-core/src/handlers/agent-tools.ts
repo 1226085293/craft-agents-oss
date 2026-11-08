@@ -301,6 +301,8 @@ export async function handleTaskUpdate(
     assigneeAgentId?: string;
     error?: string;
     scope?: string;
+    authorizedUpTo?: string;
+    authorizedSteps?: string[];
   },
 ): Promise<ToolResult> {
   if (!ctx.taskTools?.update) return errorResponse('task_update is only available to a supervisor session.');
@@ -312,6 +314,8 @@ export async function handleTaskUpdate(
       assigneeAgentId: args.assigneeAgentId,
       error: args.error,
       ...(args.scope?.trim() ? { scope: args.scope.trim() } : {}),
+      ...(args.authorizedUpTo?.trim() ? { authorizedUpTo: args.authorizedUpTo.trim() } : {}),
+      ...(args.authorizedSteps?.length ? { authorizedSteps: args.authorizedSteps } : {}),
     });
     return successResponse(`Task ${args.identifier} → ${result.status}.`);
   } catch (error) {

@@ -119,6 +119,15 @@ export interface TaskSpec {
    * ceiling expresses the same boundary without requiring the step to be written down.
    */
   authorizedUpTo?: string;
+  /**
+   * When somebody last wrote down what is authorised.
+   *
+   * The answer to "has the person's reply been acted on?" — compared with
+   * `decision.answer.at` by `resumeDecisionFor`. Nothing reads the reply's words to decide this:
+   * a model decides what they mean and writes the boundary, and this timestamp is the evidence
+   * that it happened. Without it, a reply that said 「停止」 lifted the pause and the worker ran on.
+   */
+  authorizedAt?: number;
   deliverables?: TaskDeliverable[];
   acceptance?: TaskAcceptanceItem[];
   permissions?: TaskPermissions;

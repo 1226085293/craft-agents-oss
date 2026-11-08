@@ -62,7 +62,14 @@ describe('may this task run', () => {
     expect(verdict.allowed).toBe(false)
   })
 
-  it('carries the boundary the reply named', () => {
+  /**
+   * The boundary is what a model wrote down, not what a parser guessed from the sentence.
+   *
+   * This test used to assert that 「完成1.2后暂停」 produced `authorizedSteps: ['1','1.1','1.2']`
+   * by keyword matching. That mechanism is gone: it read 「其余」 as "everything" in one phrasing
+   * and as "nothing" in another, and it never saw 「停止剩下的任务」 at all.
+   */
+  it('does not invent a boundary from the words', () => {
     const verdict = resumeDecisionFor(
       task({
         decision: {
@@ -76,19 +83,11 @@ describe('may this task run', () => {
         },
       }),
     )
-
-    expect(verdict.allowed).toBe(true)
-    if (verdict.allowed) expect(verdict.authorizedSteps).toEqual(['1', '1.1', '1.2'])
+    // Nobody has acted on the reply yet, so it must not run — not with a guessed boundary.
+    expect(verdict.allowed).toBe(false)
   })
 
-  /**
-   * The whole chain, in the state it actually failed in.
-   *
-   * 「完成 1.2 后暂停」 was answered while 1.2 was not yet in the plan. The boundary came back
-   * undefined, the pause lifted, the supervisor resumed the old session with 「继续任务 T-1 …
-   * 计划进度 1/3」, and the worker ran 1.2, 2 and 2.1 and completed the task.
-   */
-  it('bounds the resume when the reply names a step the plan has not reached', () => {
+  it('carries the boundary a model recorded, including one the plan has not reached', () => {
     const behind = [
       { id: '1', title: 'a', status: 'done' as const },
       { id: '1.1', title: 'b', status: 'done' as const },
@@ -96,7 +95,7 @@ describe('may this task run', () => {
     ]
     const verdict = resumeDecisionFor(
       task({
-        spec: { plan: behind },
+        spec: { plan: behind, authorizedUpTo: '1.2', authorizedAt: 99 },
         decision: {
           category: 'direction',
           label: 'x',
@@ -108,16 +107,14 @@ describe('may this task run', () => {
         },
       }),
     )
-
     expect(verdict.allowed).toBe(true)
-    // 1.2 is not in the plan, so the boundary is everything before it — and crucially it is
-    // not `undefined`, which is what let the run continue unbounded.
-    if (verdict.allowed) expect(verdict.authorizedSteps).toEqual(['1', '1.1'])
+    if (verdict.allowed) expect(verdict.authorizedUpTo).toBe('1.2')
   })
 
-  it('allows an ordinary resume with no boundary when the reply set none', () => {
+  it('resumes without a boundary when the reply set none and was acted on', () => {
     const verdict = resumeDecisionFor(
       task({
+        spec: { plan: [{ id: '1', title: 'a', status: 'todo' as const }], authorizedAt: 99 },
         decision: {
           category: 'direction',
           label: 'x',
@@ -125,16 +122,10 @@ describe('may this task run', () => {
           askedAt: 1,
           deadlineAt: 2,
           resolvedAt: 3,
-          answer: { text: '继续吧', at: 4 },
+          answer: { text: '继续', at: 4 },
         },
       }),
     )
-
     expect(verdict.allowed).toBe(true)
-    if (verdict.allowed) expect(verdict.authorizedSteps).toBeUndefined()
-  })
-
-  it('does not block a task that never asked anything', () => {
-    expect(resumeDecisionFor(task()).allowed).toBe(true)
   })
 })

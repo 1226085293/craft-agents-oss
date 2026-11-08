@@ -252,6 +252,22 @@ export const TaskUpdateSchema = z.object({
     .string()
     .optional()
     .describe('New scope sentence. Use when the user authorises work beyond the current boundary.'),
+  /**
+   * The structured boundary: what the reply actually authorises.
+   *
+   * These are how a model records its reading of the user's words. `scope` is prose for the
+   * reader; this is the machine-checked boundary that `task_plan` enforces and that
+   * `resumeDecisionFor` requires before it lets the task run again. Writing either one stamps
+   * `authorizedAt`, which is the evidence that the reply was acted on.
+   */
+  authorizedUpTo: z
+    .string()
+    .optional()
+    .describe('Highest step id authorised, e.g. "1.2". Everything at or below it — and anything inside it — may be done.'),
+  authorizedSteps: z
+    .array(z.string())
+    .optional()
+    .describe('Explicit list of authorised step ids. Use when the authorisation is not a prefix of the plan.'),
 });
 
 export const TaskPlanSchema = z.object({

@@ -5859,6 +5859,20 @@ export class SessionManager implements ISessionManager {
              * The pending decision is resolved in the same move: it existed because the
              * boundary was too narrow, and it is no longer true once the boundary moves.
              */
+            /**
+             * The structured boundary is written first, because it is what the other layers
+             * enforce: `applyPlanPatch` refuses steps past it and `resumeDecisionFor` refuses to
+             * start the task until it exists. Writing it also stamps `authorizedAt`, which is
+             * how a resumed task knows the reply was acted on.
+             */
+            if (patch.authorizedUpTo?.trim() || patch.authorizedSteps?.length) {
+              const service = this.getTasks(managed.workspace.id)
+              service.setAuthorizedSteps(
+                identifier,
+                patch.authorizedSteps,
+                patch.authorizedUpTo?.trim() || undefined,
+              )
+            }
             if (patch.scope?.trim()) {
               const service = this.getTasks(managed.workspace.id)
               service.setScope(identifier, patch.scope.trim())

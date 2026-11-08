@@ -1,20 +1,26 @@
 /**
  * Decision gate — what deserves the user's attention.
  *
- * A worker can always *ask*; the question this module answers is whether the
- * question should reach the human at all. Two failure modes matter and they pull
- * in opposite directions:
+ * A worker can always *ask*; the question this module answers is whether the question should
+ * reach the human at all. Two failure modes matter and they pull in opposite directions:
  *
- *  - asking too much turns the inbox into noise, and a noisy inbox is ignored —
- *    which is indistinguishable from having no inbox;
+ *  - asking too much turns the inbox into noise, and a noisy inbox is ignored — indistinguishable
+ *    from having no inbox;
  *  - asking too little lets an agent delete data or spend money on its own.
  *
- * So the rule is a closed list of six irreversible categories. Anything that
- * does not match one of them is routine work the task was created to do, and the
- * worker is told to proceed rather than ask.
+ * **Who judges the meaning: the model that filed the request.**
  *
- * Matching is deliberately lexical. A model judgement here would be circular:
- * the thing deciding whether to involve a model is being decided by a model.
+ * This used to re-check the request text against keyword tables — six categories, plus a routine
+ * vocabulary, plus a blocked-phrase list. That is a semantic judgement performed by character
+ * matching, and it failed exactly the way character matching fails: 「只读」 appeared in a worker's
+ * explanation of being *blocked by* a read-only mode, the request was filed as routine, and the
+ * task kept running while it needed a person. The header even claimed lexical matching was
+ * necessary to avoid circularity — but the caller is the worker's own `outcome: 'needs_decision'`,
+ * which is already a model judgement. Re-judging it with regexes is the circular part.
+ *
+ * So the rule is structural: a worker that declares it needs a decision gets one. A worker that
+ * declares `delivered` or `handoff` is trusted to have decided that on its own. Nothing here
+ * re-reads the sentence.
  */
 
 export type DecisionCategory =
@@ -88,30 +94,6 @@ export const DECISION_CATEGORIES: readonly DecisionCategorySpec[] = [
   },
 ] as const;
 
-/**
- * Things a task may do without asking, even when the vocabulary overlaps.
- *
- * Checked first: "复核一下权限配置有没有过期" reads like credentials work but is a
- * read-only check, and interrupting for it would be exactly the noise this gate
- * exists to prevent.
- */
-const ROUTINE_PATTERNS: RegExp[] = [
-  /(巡检|检查|核对|复核|校验|审计|扫描|排查|只读|查看|统计|汇总|生成报告|巡检报告)/i,
-  /(inspect|review|audit|check|scan|verify|read-?only|report|summari[sz]e)/i,
-];
-
-/**
- * The request says it cannot proceed.
- *
- * A blocker is a question, not a status: whoever asked needs an answer before the
- * work can continue. These beat the routine vocabulary, because the same sentence
- * can contain both ("被只读模式拦住") and only one of them is the point.
- */
-const BLOCKED_PATTERNS: RegExp[] = [
-  /(无法|不能|不可|不允许|被拦|拦截|受阻|阻塞|卡住|失败|出错|报错|缺少权限|没有权限|权限不足|被阻止)/,
-  /(cannot|can't|unable to|blocked|denied|forbidden|not permitted|failed|error|no permission|permission denied)/i,
-];
-
 /** Signals the worker itself emitted while asking — cheaper than re-reading prose. */
 export interface DecisionSignals {
   /** Commands the worker says it is about to run, if it listed them. */
@@ -128,65 +110,35 @@ export interface DecisionAssessment {
   reason: string;
 }
 
-/** True when the text reads as routine work rather than an irreversible action. */
-export function isRoutineWork(text: string): boolean {
-  //
-  // "Read-only" in the vocabulary used to be enough to call a request routine —
-  // including when the worker was saying it was **blocked by** a read-only mode.
-  //
-  // Observed in a real run: the worker reported "Explore 模式无法执行，task_plan 和 docs/
-  // 写文件都被权限系统拦" twice, the word 只读 appeared in its explanation, the report
-  // was filed as routine, and the task kept running while the trail filled up with
-  // hand-offs. The task needed a person and kept telling itself it did not.
-  //
-  // So a request that says it is stuck is never routine, whatever else it mentions.
-  //
-  if (BLOCKED_PATTERNS.some((pattern) => pattern.test(text))) return false;
-  return ROUTINE_PATTERNS.some((pattern) => pattern.test(text));
-}
-
 /**
- * Classify one worker request.
+ * Classify a request that a worker has declared it cannot proceed without.
  *
- * Three outcomes, in this order:
- *  1. routine vocabulary → continue without asking (the task was created for this);
- *  2. a high-risk category matches → ask, with the category on the card;
- *  3. anything else → ask. A lexical matcher can only prove "this is routine",
- *     never "this is safe": suppressing an unrecognised request is how an agent
- *     deletes something nobody classified.
+ * The worker already decided this needs a person — that is what `outcome: 'needs_decision'`
+ * says, and it is a model's judgement made with the whole context in view. Nothing here
+ * second-guesses it by reading the summary.
+ *
+ * `signals` are kept in the signature because callers still pass them, and they are the useful
+ * part of the card: the commands and paths the worker named are what the person needs in order
+ * to answer. They are not used to decide anything.
  */
 export function assessDecisionRequest(
   summary: string,
   signals: DecisionSignals = {},
+  declared?: { category?: DecisionCategory; label?: string },
 ): DecisionAssessment {
-  const text = `${summary}\n${(signals.commands ?? []).join('\n')}\n${(signals.paths ?? []).join('\n')}`.trim();
-  if (!text) {
-    // An empty request is not evidence of routine work either.
-    return { needsUser: true, label: '需要拍板', reason: '请求内容为空，无法判定为日常操作' };
-  }
-
-  if (isRoutineWork(text)) {
-    return { needsUser: false, reason: '属于巡检/复核/只读类日常操作' };
-  }
-
-  for (const spec of DECISION_CATEGORIES) {
-    // Every pattern in a category must be represented in the text: the first
-    // pattern is the verb, the second (when present) the object.
-    const hits = spec.patterns.filter((pattern) => pattern.test(text)).length;
-    if (hits === spec.patterns.length) {
-      return {
-        needsUser: true,
-        category: spec.category,
-        label: spec.label,
-        reason: `命中高风险类别「${spec.label}」`,
-      };
-    }
-  }
-
+  const named = summary.trim();
+  const commands = signals.commands?.length ? `；相关命令：${signals.commands.join(' / ')}` : '';
   return {
     needsUser: true,
-    label: '需要拍板',
-    reason: '未识别为日常操作，交人确认',
+    ...(declared?.category ? { category: declared.category } : {}),
+    label: declared?.label ?? '需要拍板',
+    /**
+     * The reason describes the request, it does not classify it: a claim like 「命中高风险类别」
+     * would be this module pretending to have understood the sentence.
+     */
+    reason: named
+      ? `执行者判断需要你决定${commands}`
+      : `执行者判断需要你决定${commands}`,
   };
 }
 

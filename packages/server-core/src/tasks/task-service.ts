@@ -15,7 +15,6 @@ const log = createLogger('tasks');
 import {
   acceptanceItems,
   applyTransition,
-  authorizationFromAnswer,
   openSteps,
   attachSession,
   checkBudget,
@@ -739,37 +738,24 @@ export class TaskService {
      * supervisor's to interpret when it runs — but the pause ends here.
      */
     /**
-     * If the reply states a boundary, record the boundary — not just the words.
+     * Record the words. Do not interpret them.
      *
-     * 「完成 1.2 后暂停」 was answered on a real run, the pause lifted, and the supervisor
-     * resumed the task without narrowing anything: the worker ran 1.2, 2 and 2.1 and
-     * delivered work the person had asked to stop. Relying on the supervisor to translate
-     * the sentence means the boundary exists only if a model turn succeeds, and that turn
-     * had already been rate-limited once.
-     */
-    /**
-     * Both directions through one function.
+     * This used to run the reply through keyword tables to derive a boundary
+     * (「完成 1.2 后暂停」 → ceiling 1.2, 「放行步骤 2」 → steps up to 2). That is not a thing
+     * text matching can do: 「其余之后再定」 and 「其余都做」 share a word and mean opposite
+     * things, 「停止剩下的任务」 was not in any table, and every miss was silent — the task
+     * resumed with the wrong authority and nobody could tell why.
      *
-     * A reply can narrow the boundary (「完成 1.2 后暂停」) or widen it (「放行步骤 2」). Only the
-     * narrowing direction used to be derived, so a release answer was recorded and then had no
-     * effect on what the worker was allowed to touch: the task was resumed still bounded at 1.2,
-     * with a brief that said 「本次只做到 1.2，到此为止」 right under 「用户的答复是：放行步骤 2」,
-     * and every attempt at step 2 came back 「2.1 不在本次授权范围内」.
+     * Interpreting a sentence is a model's job. The supervisor reads the answer in its own turn
+     * and writes what it understood through `task_update` (`authorizedUpTo` / `authorizedSteps`),
+     * which stamps `authorizedAt`. `resumeDecisionFor` compares that timestamp with the answer's
+     * and refuses to start the task until somebody has actually acted on the words.
+     *
+     * `resolution: 'approved'` here means only "this question is closed" — it is not a claim
+     * about what was authorised, which is why no boundary is inferred from it.
      */
-    const authorization = authorizationFromAnswer(trimmed, task.spec?.plan)
     const next: Task = {
       ...task,
-      ...(authorization
-        ? {
-            spec: {
-              ...task.spec,
-              ...(authorization.authorizedUpTo ? { authorizedUpTo: authorization.authorizedUpTo } : {}),
-              ...(authorization.authorizedSteps?.length
-                ? { authorizedSteps: authorization.authorizedSteps }
-                : {}),
-            } as Task['spec'],
-          }
-        : {}),
       decision: { ...decision, answer: { text: trimmed, at: now }, resolvedAt: now, resolution: 'approved' },
       updatedAt: now,
     };
@@ -857,6 +843,13 @@ export class TaskService {
         ...task.spec,
         authorizedSteps: steps?.length ? [...steps] : undefined,
         authorizedUpTo: upTo,
+        /**
+         * The evidence that somebody acted on the person's reply.
+         *
+         * `resumeDecisionFor` compares this with `decision.answer.at`; it is how "has this been
+         * decided?" is answered without reading the sentence.
+         */
+        authorizedAt: this.now(),
       } as Task['spec'],
       updatedAt: this.now(),
     };

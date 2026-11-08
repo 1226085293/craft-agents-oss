@@ -391,6 +391,9 @@ export interface SessionToolContext {
         error?: string;
         /** Widen or move the boundary; see task_update's scope field. */
         scope?: string;
+        /** The machine-checked boundary a model derived from the user's reply. */
+        authorizedUpTo?: string;
+        authorizedSteps?: string[];
       },
     ): Promise<{ status: string }>;
     handoff(

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { applyTransition } from '../state.ts'
-import { resumeDecisionFor, answerEndsTask } from '../resume-decision.ts'
+import { resumeDecisionFor } from '../resume-decision.ts'
 import { formatFrontierLine } from '../brief.ts'
 import type { Task } from '../types.ts'
 
@@ -72,54 +72,58 @@ describe('completing a task whose plan is not finished', () => {
 })
 
 /**
- * 「停止剩下的任务」 was not in the end-words list, so the resume path lifted the pause and
- * handed the worker a brief that ended with instructions to expand the next outline.
+ * Who decides what the reply meant: a model, not a keyword table.
+ *
+ * The resume path reads one fact — has anybody written an authorisation since the reply arrived
+ * (`spec.authorizedAt` vs `decision.answer.at`) — and refuses until they have. No words are read.
  */
-describe('a reply that stops the rest', () => {
-  it('is recognised as an ending', () => {
-    expect(answerEndsTask('停止剩下的任务，然后将docs改名为docs2')).toBe(true)
-    expect(answerEndsTask('到此为止，结束任务')).toBe(true)
+describe('an answer nobody has acted on', () => {
+  const answered = (over: Record<string, unknown> = {}) =>
+    task({
+      decision: {
+        category: 'direction',
+        label: 'x',
+        reason: 'x',
+        askedAt: 1,
+        deadlineAt: 2,
+        resolvedAt: 3,
+        answer: { text: '停止剩下的任务，然后将docs改名为docs2', at: 100 },
+      },
+      ...over,
+    } as never)
+
+  it('does not resume the task', () => {
+    const verdict = resumeDecisionFor(answered())
+    expect(verdict.allowed).toBe(false)
+    if (!verdict.allowed) expect(verdict.why).toContain('授权')
   })
 
-  it('is not confused with a release', () => {
-    expect(answerEndsTask('放行步骤 2（收尾），把任务做完')).toBe(false)
-    expect(answerEndsTask('完成1.2后暂停')).toBe(false)
-  })
-
-  it('refuses the resume', () => {
+  it('resumes once somebody wrote a boundary after the reply', () => {
     const verdict = resumeDecisionFor(
-      task({
-        decision: {
-          category: 'direction',
-          label: 'x',
-          reason: 'x',
-          askedAt: 1,
-          deadlineAt: 2,
-          resolvedAt: 3,
-          answer: { text: '停止剩下的任务，然后将docs改名为docs2', at: 4 },
-        },
-      }),
+      answered({ spec: { scope: 'x', cwd: '/tmp', authorizedUpTo: '2', authorizedAt: 200 } } as never),
+    )
+    expect(verdict.allowed).toBe(true)
+    if (verdict.allowed) expect(verdict.authorizedUpTo).toBe('2')
+  })
+
+  it('stays paused when the boundary predates the reply', () => {
+    // The ceiling from the PREVIOUS answer must not be read as this answer's meaning.
+    const verdict = resumeDecisionFor(
+      answered({ spec: { scope: 'x', cwd: '/tmp', authorizedUpTo: '1.2', authorizedAt: 50 } } as never),
     )
     expect(verdict.allowed).toBe(false)
   })
 
-  it('and the brief does not tell the worker to continue', () => {
-    const line = formatFrontierLine(
+  it('does not resume a task whose question is still open', () => {
+    const verdict = resumeDecisionFor(
       task({
-        decision: {
-          category: 'direction',
-          label: 'x',
-          reason: 'x',
-          askedAt: 1,
-          deadlineAt: 2,
-          resolvedAt: 3,
-          answer: { text: '停止剩下的任务，然后将docs改名为docs2', at: 4 },
-        },
-      }),
+        decision: { category: 'direction', label: 'x', reason: 'x', askedAt: 1, deadlineAt: 2 },
+      } as never),
     )
-    expect(line).toContain('叫停')
-    // The contradiction that made the worker continue.
-    expect(line).not.toContain('还没有小节')
-    expect(line).not.toContain('直接开始第一个小节')
+    expect(verdict.allowed).toBe(false)
+  })
+
+  it('resumes a task that never asked anything', () => {
+    expect(resumeDecisionFor(task()).allowed).toBe(true)
   })
 })

@@ -191,6 +191,14 @@ export interface TaskStats {
   /** When the current run started (epoch ms). */
   runStartedAt?: number;
   /**
+   * How many times a lost executor has been retried automatically.
+   *
+   * Kept on the task rather than in the watchdog's memory: the watchdog restarts with the app,
+   * and a counter that reset on every boot would turn one lost process into an endless series of
+   * fresh runs. One retry is the design; after that a person decides.
+   */
+  lostRetries?: number;
+  /**
    * Last time a trigger actually started a run.
    *
    * The scheduler compares this against the cron expression on startup: every

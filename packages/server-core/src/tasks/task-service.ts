@@ -764,7 +764,31 @@ export class TaskService {
     return next;
   }
 
-    /** Prove the task is alive. Called on every tool result and turn boundary. */
+    /**
+   * Record that a lost executor has been retried.
+   *
+   * On the task, not in the watchdog: the watchdog is recreated with the app, and a counter that
+   * reset on every boot would retry the same loss forever — which is the opposite of "retry once,
+   * then ask a person".
+   */
+  recordLostRetry(id: string, count: number): Task {
+    const task = this.require(id);
+    const stats = task.stats ?? { runs: 0, activeMs: 0 };
+    const next: Task = {
+      ...task,
+      stats: { ...stats, lostRetries: count },
+      updatedAt: this.now(),
+    };
+    this.save(next);
+    appendJournal(this.root, id, {
+      type: 'lost_retry',
+      at: this.now(),
+      data: { count },
+    });
+    return next;
+  }
+
+  /** Prove the task is alive. Called on every tool result and turn boundary. */
   heartbeat(id: string): Task {
     const task = this.require(id);
     const now = this.now();

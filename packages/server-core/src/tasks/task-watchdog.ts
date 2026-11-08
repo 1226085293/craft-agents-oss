@@ -34,7 +34,8 @@ export type WatchdogFinding =
   | { kind: 'unreported'; task: Task }
   | { kind: 'decision_timeout'; task: Task }
   | { kind: 'looping'; task: Task }
-  | { kind: 'off_track'; task: Task };
+  | { kind: 'off_track'; task: Task }
+  | { kind: 'resume_lost'; task: Task };
 
 export interface WatchdogDeps {
   /** Tasks to inspect (already filtered to the workspace). */
@@ -86,6 +87,16 @@ export interface WatchdogDeps {
   ) => void | boolean | Promise<boolean>;
   /** Pause a task with a reason. */
   pause: (id: string, reason: 'failures' | 'budget' | 'process_lost' | 'waiting', note: string) => void;
+  /**
+   * Start a fresh run for a task whose executor was lost.
+   *
+   * A pause for `process_lost` is the one pause with an obvious recovery: the work did not fail,
+   * the process did. The design says retry once and then ask a human, and until now nothing
+   * retried at all — the task sat `paused / process_lost` until somebody noticed it on the board.
+   *
+   * Returns whether the run actually started; a claim about resuming has to come from the result.
+   */
+  resume?: (task: Task) => void | boolean | Promise<boolean>;
   /** Tell the owning supervisor, in one line. */
   notify: (supervisorSessionId: string, text: string) => void;
   /**
@@ -230,6 +241,19 @@ export function isLooping(task: Task): boolean {
   return tail.every((summary) => summary === first);
 }
 
+/** One automatic retry per loss; the second time a person decides. */
+export const MAX_PROCESS_LOST_RETRIES = 1;
+
+/**
+ * How long a `process_lost` pause waits before the retry.
+ *
+ * Long enough that a process still coming up is not mistaken for a dead one, short enough that
+ * "the app restarted" does not mean "the task waits for a human".
+ */
+export function processLostGraceMs(): number {
+  return STOPPED_AFTER_WORK_GRACE_MS
+}
+
 /** Only tasks that claim to be running are worth inspecting. */
 export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
   const now = (deps.now ?? Date.now)();
@@ -242,6 +266,24 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
     if (decision && !decision.resolvedAt && decision.deadlineAt <= now) {
       findings.push({ kind: 'decision_timeout', task });
       continue;
+    }
+
+    /**
+     * A task paused because its executor died is the one paused task with an obvious recovery.
+     *
+     * Everything below this line inspects `running` tasks, so a `process_lost` pause was never
+     * looked at again: the work had not failed, the process had, and the task waited for a person
+     * to notice it on the board. The design says retry once and then ask; this is the retry.
+     *
+     * The counter lives on the task, so "once" survives a restart — a watchdog that retried on
+     * every boot would turn one lost process into an endless loop of fresh runs.
+     */
+    if (task.status === 'paused' && task.pauseReason === 'process_lost') {
+      const retries = task.stats?.lostRetries ?? 0
+      if (retries < MAX_PROCESS_LOST_RETRIES && now - lastActivityOf(task) >= processLostGraceMs()) {
+        findings.push({ kind: 'resume_lost', task })
+      }
+      continue
     }
 
     if (task.status !== 'running') continue;
@@ -390,6 +432,34 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         );
         acted += 1;
         break;
+      case 'resume_lost': {
+        /**
+         * The pass itself stays synchronous — it is a pure rule sweep and making it async would
+         * push `await` through the loop and every caller. Starting a run is asynchronous, so its
+         * outcome is handled where it arrives. The one thing this must not do is announce a retry
+         * before knowing whether it started: a run refused by the budget gate needs a person, and
+         * 「已自动重试」 would be the same lie the supervisor told in an earlier incident.
+         */
+        const outcome = deps.resume?.(finding.task)
+        Promise.resolve(outcome)
+          .then((started) => {
+            deps.notify(
+              finding.task.supervisorSessionId,
+              started === false
+                ? `${finding.task.id} 的会话丢失后自动重试没有启动（可能超出预算或被门禁拦住），需要你看一下。`
+                : `${finding.task.id} 的会话丢失，已自动重试一次。再丢就需要人工确认。`,
+            )
+          })
+          .catch((error) => {
+            log.warn('[watchdog] resume after process loss failed', { id: finding.task.id, error: String(error) })
+            deps.notify(
+              finding.task.supervisorSessionId,
+              `${finding.task.id} 的会话丢失后自动重试失败，需要你看一下。`,
+            )
+          })
+        acted += 1
+        break
+      }
       case 'orphaned':
         deps.pause(finding.task.id, 'process_lost', 'session disappeared');
         deps.notify(

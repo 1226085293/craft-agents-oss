@@ -2857,6 +2857,22 @@ export class SessionManager implements ISessionManager {
       // Load existing sessions from disk
       this.loadSessionsFromDisk()
 
+      /**
+       * Bring the task subsystem up before anything asks for it.
+       *
+       * `getTasks` is lazy: it builds the service, runs `recoverAfterRestart`, and starts the
+       * watchdog on the first call. So on a fresh start, a task left `running` by a killed
+       * process stayed exactly that way — not recovered, not watched — until some unrelated code
+       * happened to touch it. The board showed 进行中 for work nobody was doing, and the recovery
+       * that exists precisely for this case never ran.
+       *
+       * Verified on a real instance: a seeded `running` task with a ten-minute-old lock was only
+       * marked `paused / process_lost` when the renderer asked for the task list. Nothing touches
+       * that list in a headless or messaging-only session, and a user who never opens the 任务 page
+       * never sees the recovery either.
+       */
+      this.activateTaskServices()
+
       // Signal that initialization is complete — IPC handlers waiting on initGate will proceed
       this.initGate.markReady()
 
@@ -2913,6 +2929,30 @@ export class SessionManager implements ISessionManager {
         }
       }
     })
+  }
+
+  /**
+   * Start the task subsystem for every workspace.
+   *
+   * Recovery and the watchdog are both side effects of `getTasks` being called for the first
+   * time, which made them depend on the user opening a particular page. Starting them at boot is
+   * what makes "a task left running by a dead process gets paused and watched" a guarantee rather
+   * than a coincidence.
+   *
+   * One workspace that fails must not stop the others: a broken task file is a reason to skip
+   * that workspace, not to leave every other task unwatched.
+   */
+  private activateTaskServices(): void {
+    for (const workspace of getWorkspaces()) {
+      try {
+        this.getTasks(workspace.id)
+      } catch (error) {
+        sessionLog.warn('task service did not start for a workspace', {
+          workspaceId: workspace.id,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
   }
 
   // Load all existing sessions from disk into memory (metadata only - messages are lazy-loaded)
@@ -7643,6 +7683,26 @@ ${request.prompt}`;
             return true
           } catch (error) {
             sessionLog.warn(`[tasks] could not wake the idle session of ${task.id}`, { error })
+            return false
+          }
+        },
+        /**
+         * Retry a task whose executor was lost.
+         *
+         * Counted on the task before the attempt, not after: a run that fails to start would
+         * otherwise be retried forever, once per pass. `lostRetries` is what makes "retry once,
+         * then ask a person" a fact the next pass can read.
+         */
+        resume: async (task) => {
+          const retries = (task.stats?.lostRetries ?? 0) + 1
+          service.recordLostRetry(task.id, retries)
+          try {
+            return await this.runTask(workspace.id, task.id, 'watchdog')
+          } catch (error) {
+            sessionLog.warn('watchdog could not resume a lost task', {
+              id: task.id,
+              error: error instanceof Error ? error.message : String(error),
+            })
             return false
           }
         },

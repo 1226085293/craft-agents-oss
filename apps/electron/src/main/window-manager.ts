@@ -120,9 +120,17 @@ export class WindowManager {
       }
     }
     // Fallback: direct webContents.send (used before WS handshake completes)
-    if (!window.isDestroyed() && !window.webContents.isDestroyed() && window.webContents.mainFrame) {
-      window.webContents.send(channel, ...args)
-    }
+    //
+    // `webContents.mainFrame` is a getter that keeps returning a frame object
+    // after that frame was disposed. Sending to it throws "Render frame was
+    // disposed before WebFrameMain could be accessed", which Electron reports
+    // from inside the send — one line per event pushed, forever, because every
+    // later broadcast hits the same dead frame. `isDestroyed()` does not catch
+    // it either: the webContents survives, only the frame is gone.
+    if (window.isDestroyed() || window.webContents.isDestroyed()) return
+    const frame = window.webContents.mainFrame
+    if (!frame || frame.detached || frame.isDestroyed?.()) return
+    frame.send(channel, ...args)
   }
 
   private revealWindow(window: BrowserWindow): void {
@@ -335,6 +343,34 @@ export class WindowManager {
         if (message.includes('[renderer-console]')) return
         windowLog.warn(`[renderer-console] ${message}`)
       }
+    })
+
+    // A renderer that dies takes the whole UI with it and leaves a window-shaped
+    // hole: the BrowserWindow still exists and still reports Responding, but
+    // nothing paints, so the user sees a flat colour. Electron knows exactly why
+    // it died — reason (`crashed` / `oom` / `killed` / `clean-exit`) and exit
+    // code — and nothing was listening, so the only trace afterwards was
+    // "Render frame was disposed" from the next send. That names the symptom
+    // minutes later and never the cause.
+    window.webContents.on('render-process-gone', (_event, details) => {
+      windowLog.error(
+        `[renderer] process gone: reason=${details.reason} exitCode=${details.exitCode} url=${window.webContents.getURL()}`,
+      )
+      // Electron does not reload a gone renderer on its own. `killed` and
+      // `clean-exit` are deliberate teardown (window closing, reload); anything
+      // else means the UI is unrecoverable and the window would sit blank
+      // forever, which is what made this look like a hang rather than a crash.
+      const recoverable = details.reason !== 'clean-exit' && details.reason !== 'killed'
+      if (recoverable && !window.isDestroyed()) {
+        windowLog.warn('[renderer] reloading after unexpected exit')
+        window.webContents.reload()
+      }
+    })
+    window.webContents.on('unresponsive', () => {
+      windowLog.error('[renderer] unresponsive')
+    })
+    window.webContents.on('responsive', () => {
+      windowLog.info('[renderer] responsive again')
     })
     setTimeout(() => {
       this.revealWindow(window)

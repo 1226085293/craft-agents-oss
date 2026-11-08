@@ -33,8 +33,20 @@ function store(): Storage | null {
   }
 }
 
-function keyFor(taskId: string, askedAt: number | undefined): string {
-  return `${KEY_PREFIX}task:${taskId}:${askedAt ?? 0}`
+/**
+ * Keyed by task alone, not by when it was asked.
+ *
+ * The two surfaces derive their `askedAt` from different records — the task's decision and
+ * the card's request payload — and those are two different timestamps. Using them in the
+ * key meant the task page and the conversation never agreed on which answer belonged to
+ * which question, so answering one left the other's buttons live.
+ *
+ * A task id is stable, so it is the key. Whether the stored answer still applies is decided
+ * by `readDecisionAnswer`'s `askedAt` comparison: an answer given before the current
+ * question was asked belongs to a previous one.
+ */
+function keyFor(taskId: string): string {
+  return `${KEY_PREFIX}task:${taskId}`
 }
 
 /**
@@ -45,10 +57,16 @@ function keyFor(taskId: string, askedAt: number | undefined): string {
  */
 export function readDecisionAnswer(taskId: string, askedAt: number | undefined): string | null {
   try {
-    const raw = store()?.getItem(keyFor(taskId, askedAt))
+    const raw = store()?.getItem(keyFor(taskId))
     if (!raw) return null
     const parsed = JSON.parse(raw) as StoredAnswer
-    return typeof parsed?.text === 'string' ? parsed.text : null
+    if (typeof parsed?.text !== 'string') return null
+    // An answer older than the question on screen is about a previous question: the task
+    // can legitimately stop again, and that new question must start unanswered.
+    if (typeof askedAt === 'number' && typeof parsed.at === 'number' && parsed.at < askedAt) {
+      return null
+    }
+    return parsed.text
   } catch {
     return null
   }
@@ -59,7 +77,7 @@ const listeners = new Set<() => void>()
 export function rememberDecisionAnswer(taskId: string, askedAt: number | undefined, answer: string): void {
   try {
     const payload: StoredAnswer = { text: answer, at: Date.now() }
-    store()?.setItem(keyFor(taskId, askedAt), JSON.stringify(payload))
+    store()?.setItem(keyFor(taskId), JSON.stringify(payload))
   } catch {
     // A full or unavailable store must not break answering.
   }

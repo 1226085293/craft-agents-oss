@@ -87,6 +87,19 @@ export interface TaskServiceDeps {
    * already passed, so a cheap failure never costs a model call.
    */
   judgeHandoff?: (task: Task, handoff: Handoff) => Promise<{ pass: boolean; reasons: string[] }>;
+  /**
+   * Called after any write that a reader could be looking at.
+   *
+   * The board used to refresh only when an RPC handler broadcast, which meant every write
+   * made through a TOOL was invisible until something else happened. Observed: sitting on
+   * the task page, a decision card never appeared — the worker had paused the task through
+   * `report_result`, `TaskService` saved it, and no one told the renderer. Same for plan
+   * steps: `task_plan` moved them and the page kept showing the old status.
+   *
+   * Fired from the service rather than from each RPC because the service is the only place
+   * every write passes through.
+   */
+  onChanged?: () => void;
   now?: () => number;
   /** Id generator (tests inject a stable one). */
   newId?: () => string;
@@ -170,7 +183,7 @@ export class TaskService {
       id: nextTaskId(this.root),
       now: this.now(),
     });
-    saveTask(this.root, task);
+    this.save(task);
     appendJournal(this.root, task.id, { type: 'created', at: task.createdAt, data: { name: task.name } });
     log.info(`[tasks] created ${task.id} (${task.name})`);
     return task;
@@ -234,7 +247,7 @@ export class TaskService {
           pauseReason: blocked.pauseReason,
           error: blocked.reason,
         }).task;
-        saveTask(this.root, paused);
+        this.save(paused);
         appendJournal(this.root, id, { type: 'paused', at: now, data: { reason: blocked.reason } });
         return paused;
       }
@@ -247,7 +260,7 @@ export class TaskService {
     });
     if (!result.changed) return result.task;
 
-    saveTask(this.root, result.task);
+    this.save(result.task);
     appendJournal(this.root, id, {
       type: 'status',
       at: now,
@@ -330,7 +343,7 @@ export class TaskService {
     if (task.status === 'paused') {
       next = { ...next, lifecycle: { ...task.lifecycle, lastRecoveredAt: now } };
     }
-    saveTask(this.root, next);
+    this.save(next);
     appendJournal(this.root, id, { type: 'run_started', at: now, data: { sessionId } });
     return { ok: true, task: next };
   }
@@ -357,7 +370,7 @@ export class TaskService {
       lifecycle: { ...task.lifecycle, lastError: note },
       updatedAt: now,
     };
-    saveTask(this.root, next);
+    this.save(next);
     appendJournal(this.root, id, { type: 'decision_timeout', at: now, data: { note } });
     return next;
   }
@@ -372,7 +385,7 @@ export class TaskService {
       decision: { ...task.decision, resolvedAt: now, resolution },
       updatedAt: now,
     };
-    saveTask(this.root, next);
+    this.save(next);
     appendJournal(this.root, id, { type: 'decision_resolved', at: now, data: { resolution } });
     return next;
   }
@@ -436,7 +449,7 @@ export class TaskService {
       }
     }
 
-    saveTask(this.root, next);
+    this.save(next);
     appendJournal(this.root, id, {
       type: 'plan_updated',
       at: now,
@@ -517,7 +530,7 @@ export class TaskService {
       },
       updatedAt: now,
     };
-    saveTask(this.root, next);
+    this.save(next);
     appendJournal(this.root, id, {
       type: 'run_ended',
       at: now,
@@ -551,7 +564,7 @@ export class TaskService {
       lifecycle: recordRunResult(task.lifecycle, outcome.ok, now, outcome.error),
       updatedAt: now,
     };
-    saveTask(this.root, next);
+    this.save(next);
     appendJournal(this.root, id, {
       type: 'run_ended',
       at: now,
@@ -599,7 +612,7 @@ export class TaskService {
       },
       updatedAt: this.now(),
     };
-    saveTask(this.root, next);
+    this.save(next);
     return next;
   }
 
@@ -638,7 +651,7 @@ export class TaskService {
       decision: { ...decision, answer: { text: trimmed, at: now } },
       updatedAt: now,
     };
-    saveTask(this.root, next);
+    this.save(next);
     appendJournal(this.root, id, { type: 'decision_answered', at: now, data: { text: trimmed } });
     return next;
   }
@@ -654,7 +667,7 @@ export class TaskService {
       stats: { ...stats, lastHeartbeatAt: now },
       updatedAt: now,
     };
-    saveTask(this.root, next);
+    this.save(next);
     return next;
   }
 
@@ -678,7 +691,7 @@ export class TaskService {
       },
       updatedAt: now,
     };
-    saveTask(this.root, next);
+    this.save(next);
     appendJournal(this.root, id, { type: 'idle_wake', at: now, data: {} });
     return next;
   }
@@ -694,7 +707,7 @@ export class TaskService {
 
   attachSession(id: string, sessionId: string): Task {
     const task = attachSession(this.require(id), sessionId, this.now());
-    saveTask(this.root, task);
+    this.save(task);
     appendJournal(this.root, id, { type: 'assigned', at: this.now(), data: { sessionId } });
     return task;
   }
@@ -718,7 +731,7 @@ export class TaskService {
   updateSpec(id: string, spec: TaskSpec): Task {
     const task = this.require(id);
     const next: Task = { ...task, spec, updatedAt: this.now() };
-    saveTask(this.root, next);
+    this.save(next);
     appendJournal(this.root, id, { type: 'spec_updated', at: this.now(), data: { spec } });
     return next;
   }
@@ -726,7 +739,7 @@ export class TaskService {
   updateTrigger(id: string, trigger: TaskTrigger): Task {
     const task = this.require(id);
     const next: Task = { ...task, trigger, updatedAt: this.now() };
-    saveTask(this.root, next);
+    this.save(next);
     appendJournal(this.root, id, { type: 'trigger_updated', at: this.now(), data: { trigger } });
     return next;
   }
@@ -1029,7 +1042,7 @@ export class TaskService {
     }
     handoff.milestone = milestone
 
-    saveTask(this.root, next);
+    this.save(next);
     appendJournal(this.root, id, {
       type: 'handoff',
       at: now,
@@ -1253,13 +1266,34 @@ export class TaskService {
       },
     };
     const paused = applyTransition(base, 'paused', { now, pauseReason: 'process_lost' }).task;
-    saveTask(this.root, paused);
+    this.save(paused);
     appendJournal(this.root, task.id, {
       type: 'paused',
       at: now,
       data: { reason, sessionId: lockId },
     });
     return paused;
+  }
+
+  /** Tell whoever is reading that a task changed. Never throws into the write path. */
+  private notifyChanged(): void {
+    try {
+      this.deps.onChanged?.();
+    } catch {
+      // A broken listener must not fail a write that already succeeded.
+    }
+  }
+
+  /**
+   * The one write path.
+   *
+   * Every mutation in this class saved and then told nobody, so a change made by a tool
+   * was invisible to a reader until an unrelated RPC happened to publish. Wrapping the
+   * save keeps "written" and "announced" from drifting apart again.
+   */
+  private save(task: Task): void {
+    saveTask(this.root, task);
+    this.notifyChanged();
   }
 
   private require(id: string): Task {

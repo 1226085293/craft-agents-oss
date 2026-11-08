@@ -26,11 +26,18 @@ function memoryStorage(): void {
 describe('one answer, both surfaces', () => {
   beforeEach(() => memoryStorage())
 
-  it('is visible to whoever derives the same question key', () => {
-    // Task page: task id + when the question was asked.
+  /**
+   * The two surfaces read `askedAt` from different records — the task's decision and the
+   * card's request payload — and those are two different timestamps. Keying on it meant
+   * they never agreed, so answering the task page left the conversation card's buttons
+   * live and the reply could go out twice.
+   */
+  it('is visible from the other surface even when its askedAt differs', () => {
     rememberDecisionAnswer('T-1', 1_700_000_000_000, '放行')
-    // Conversation card derives the same key from the same decision.
-    expect(readDecisionAnswer('T-1', 1_700_000_000_000)).toBe('放行')
+
+    // The card's payload carries a slightly different timestamp for the same question.
+    expect(readDecisionAnswer('T-1', 1_700_000_000_123)).toBe('放行')
+    expect(readDecisionAnswer('T-1', undefined)).toBe('放行')
   })
 
   it('tells the other card as soon as one answers', () => {
@@ -50,7 +57,7 @@ describe('one answer, both surfaces', () => {
 
   it('does not let a later question inherit an earlier answer', () => {
     rememberDecisionAnswer('T-1', 1_700_000_000_000, '放行')
-    // The same task stops again later; that is a different question.
-    expect(readDecisionAnswer('T-1', 1_700_000_500_000)).toBeNull()
+    // The same task stops again well after the answer: that is a different question.
+    expect(readDecisionAnswer('T-1', Date.now() + 60_000)).toBeNull()
   })
 })

@@ -2522,6 +2522,19 @@ export class SessionManager implements ISessionManager {
     }
   }
 
+  /**
+   * A task changed — whoever is looking should re-read it.
+   *
+   * The board only refreshed on RPC-driven writes, so a change made by a TOOL never
+   * reached the page: sitting on a task, a decision card never appeared because the worker
+   * paused the task through `report_result` and nobody broadcast. Plan steps had the same
+   * gap. The task service now reports every write and it lands here.
+   */
+  private broadcastTaskChanged(workspaceId: string): void {
+    if (!this.eventSink) return
+    this.eventSink(RPC_CHANNELS.taskboard.CHANGED, { to: 'workspace', workspaceId }, { workspaceId })
+  }
+
   private broadcastSourcesChanged(workspaceId: string, sources: LoadedSource[]): void {
     if (!this.eventSink) return
     this.eventSink(RPC_CHANNELS.sources.CHANGED, { to: 'workspace', workspaceId }, workspaceId, sources)
@@ -7299,6 +7312,7 @@ ${request.prompt}`;
     if (!workspace) throw new Error(`Workspace ${workspaceId} not found`)
     const service = new TaskService({
       workspaceRoot: workspace.rootPath,
+      onChanged: () => this.broadcastTaskChanged(workspace.id),
       sessionExists: (sessionId) => this.sessions.has(sessionId),
       wakeSupervisor: (sessionId, text) => {
         // The supervisor cannot see who spoke. Every system nudge therefore names

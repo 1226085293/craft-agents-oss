@@ -301,8 +301,19 @@ export function applyPlanPatch(
     // A sub-step without its outline is a step nobody agreed to. It also makes
     // "do the current section" unanswerable, because there is no section.
     const parent = stepParent(patch.id);
+    /**
+     * Who owns a sub-step nobody named.
+     *
+     * Leaving it blank made the plan unable to answer "whose work is this": on a
+     * real run outline 2 and its only sub-step both carried no owner, so the board
+     * fell back to the assignee for display while the routing logic saw "nobody" —
+     * two different answers from one field. A sub-step inherits the owner of the
+     * section it belongs to, which is the same rule the display was already implying.
+     */
+    let inheritedAgent: string | undefined;
     if (parent) {
       const parentStep = steps.find((step) => step.id === parent);
+      inheritedAgent = parentStep?.agent;
       if (!parentStep) {
         return {
           plan: steps,
@@ -322,7 +333,11 @@ export function applyPlanPatch(
       id: patch.id,
       title: patch.title.slice(0, 200),
       status: patch.status ?? 'todo',
-      ...(patch.agent ? { agent: patch.agent.slice(0, 60) } : {}),
+      ...(patch.agent
+        ? { agent: patch.agent.slice(0, 60) }
+        : inheritedAgent
+          ? { agent: inheritedAgent }
+          : {}),
       ...(patch.note ? { note: patch.note.slice(0, 300) } : {}),
       updatedAt: now,
     });

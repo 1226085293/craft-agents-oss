@@ -8,6 +8,7 @@
  */
 
 import type { Task } from './types.ts';
+import { formatPlan } from './plan.ts';
 import { planProgress } from './plan.ts';
 
 export interface TaskBriefOptions {
@@ -70,6 +71,25 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
   // and a dispatch that hands over a task — not only in the tool's error messages:
   // a worker that finds out by being refused has already spent the turn.
   //
+  /**
+   * The agreed plan is shown, not summarised.
+   *
+   * A brief that said only 「计划进度：0/8」 told the worker that *a* plan existed but
+   * not what was in it, so it wrote its own three outlines. The board then showed a
+   * plan nobody had asked for, and the user's 「1 写文件 / 2 收尾」 was nowhere. Reading
+   * the plan is free; re-deriving it is not.
+   */
+  if (spec?.plan?.length) {
+    sections.push(
+      [
+        '## 已约定的执行计划（不要重写）',
+        ...formatPlan(spec.plan),
+        '',
+        '只在这些大纲下补小节、推进状态。不要新增大纲，也不要改动已有大纲的标题。',
+      ].join('\n'),
+    );
+  }
+
   sections.push(formatPlanRuleBlock());
 
   if (spec?.deliverables?.length) {
@@ -234,3 +254,30 @@ export function formatIdleWakeBrief(task: Task): string {
   return lines.join('\n');
 }
 
+
+/**
+ * What a worker is told when its plan is finished but nothing was filed.
+ *
+ * The generic idle brief says 「从上一次中断的地方继续」, which is exactly wrong here:
+ * nothing is left to do. Telling it to keep working invites it to invent step 1.3 to
+ * have something to report — which is what happened when the plan was complete and
+ * the worker had not called report_result.
+ */
+export function formatUnreportedBrief(task: Task): string {
+  const steps = (task.spec?.plan ?? []).filter((step) => step.status === 'done');
+  return [
+    `任务 ${task.id}（${task.name}）的执行计划已经全部完成，但系统没有收到你的交付记录。`,
+    '',
+    `已完成 ${steps.length} 个步骤。`,
+    '',
+    '## 你现在要做的',
+    '',
+    '不要再做新步骤，也不要改计划。直接调用 `report_result` 交付：',
+    '- outcome：任务目标达成就用 delivered；还需要别人接手才用 handoff；确实需要人拍板才用 needs_decision',
+    '- summary：说清做完了什么',
+    '- artifacts：交付物真实路径（必须存在且非空）',
+    '- verify：跑过的命令 + 是否通过',
+    '',
+    '规则门会检查这些内容；没有产物或没跑过验证会被拒绝，那就补上再交，而不是继续加步骤。',
+  ].join('\n');
+}

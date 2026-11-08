@@ -156,6 +156,25 @@ export const TaskCreateSchema = z.object({
     )
     .optional()
     .describe('How completion is judged. Run by the host, never by the worker itself.'),
+  /**
+   * The plan, as agreed with the user.
+   *
+   * Without this the supervisor could promise 「执行计划写两条大纲：1 写文件 2 收尾」
+   * and then have no way to record it — the worker invented its own three-outline
+   * plan instead (确认位置 / 创建 / 回报), and the board showed something nobody
+   * asked for. A plan the user stated is part of the request, not a detail the
+   * executor should re-derive.
+   */
+  plan: z
+    .array(
+      z.object({
+        id: z.string().describe('Outline id ("1", "2") or sub-step id ("1.1").'),
+        title: z.string(),
+        agent: z.string().optional().describe('Role id that owns this step, from the roster.'),
+      }),
+    )
+    .optional()
+    .describe('Outlines and sub-steps exactly as agreed with the user. The worker may only fill in under these, not replace them.'),
   cwd: z.string().optional().describe('Working directory for the worker.'),
   assigneeAgentId: z
     .string()

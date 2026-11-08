@@ -31,6 +31,7 @@ export type WatchdogFinding =
   | { kind: 'overdue'; task: Task }
   | { kind: 'orphaned'; task: Task }
   | { kind: 'idle'; task: Task }
+  | { kind: 'unreported'; task: Task }
   | { kind: 'decision_timeout'; task: Task }
   | { kind: 'looping'; task: Task }
   | { kind: 'off_track'; task: Task };
@@ -52,8 +53,14 @@ export interface WatchdogDeps {
    * answer must not cause the watchdog to fire.
    */
   sessionWorking?: (sessionId: string) => boolean | undefined;
-  /** Nudge a session that should be working but is not. */
-  wakeSession?: (task: Task, sessionId: string) => void;
+  /**
+   * Nudge a session that should be doing something it is not.
+   *
+   * `reason` distinguishes "you stopped mid-work" from "you finished but never
+   * filed": telling a worker with a complete plan to 「从上一次中断的地方继续」 gives
+   * it an incentive to invent a step so it has something to report.
+   */
+  wakeSession?: (task: Task, sessionId: string, reason: 'idle' | 'unreported') => void;
   /** Pause a task with a reason. */
   pause: (id: string, reason: 'failures' | 'budget' | 'process_lost' | 'waiting', note: string) => void;
   /** Tell the owning supervisor, in one line. */
@@ -159,6 +166,26 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
       findings.push({ kind: 'orphaned', task });
       continue;
     }
+    /**
+     * Finished the plan but never filed the report.
+     *
+     * Checked *before* the idle rule: both describe an idle session, but only one of
+     * them is true about the work. "The plan is complete" means the correct nudge is
+     * 「交作业」, and telling that worker to resume gives it a reason to invent a step
+     * so it has something to report. A coarser rule firing first would make this one
+     * unreachable — which is exactly what a test caught.
+     */
+    const declaredPlan = task.spec?.plan
+    const planFinished = Boolean(declaredPlan?.length) && planProgress(declaredPlan).complete
+    const reported = task.handoffs.some((h) => h.outcome !== 'needs_decision')
+    if (planFinished && !reported && deps.sessionWorking && task.currentSessionId) {
+      const working = deps.sessionWorking(task.currentSessionId)
+      if (working === false && now - lastActivityOf(task) >= IDLE_SESSION_MS) {
+        findings.push({ kind: 'unreported', task })
+        continue
+      }
+    }
+
     // Liveness is not the same as progress: the session object outlives the turn.
     // A running task whose session is sitting idle (and has been for a while) is
     // the state the user sees as "进行中 but nothing is happening".
@@ -169,6 +196,7 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
         continue;
       }
     }
+
     if (isHeartbeatStalled(task, now)) {
       findings.push({ kind: 'stalled', task });
       continue;
@@ -246,6 +274,24 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         );
         acted += 1;
         break;
+      case 'unreported': {
+        const sessionId = finding.task.currentSessionId
+        if (sessionId && deps.wakeSession) {
+          deps.wakeSession(finding.task, sessionId, 'unreported')
+          deps.notify(
+            finding.task.supervisorSessionId,
+            `${finding.task.id} 的执行计划已全部完成，但还没有交作业（没有 report_result）。已提醒它交付。`,
+          )
+        } else {
+          deps.pause(finding.task.id, 'waiting', 'plan complete but no hand-off was filed')
+          deps.notify(
+            finding.task.supervisorSessionId,
+            `${finding.task.id} 的计划已完成但无人交作业，会话也不在了，任务已暂停。`,
+          )
+        }
+        acted += 1
+        break;
+      }
       case 'idle': {
         const attempts = finding.task.stats?.wakeAttempts ?? 0;
         const sessionId = finding.task.currentSessionId;
@@ -259,7 +305,7 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
             `${finding.task.id} 的会话已空闲 ${Math.round(IDLE_SESSION_MS / 60_000)} 分钟以上，已唤醒 ${attempts} 次仍未推进，任务已暂停，需要你确认下一步。`,
           );
         } else {
-          deps.wakeSession(finding.task, sessionId);
+          deps.wakeSession(finding.task, sessionId, 'idle');
           deps.notify(
             finding.task.supervisorSessionId,
             `${finding.task.id} 的会话空闲了，已唤醒它继续（第 ${attempts + 1} 次）。`,

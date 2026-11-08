@@ -184,6 +184,7 @@ export async function handleTaskCreate(
     scope?: string;
     deliverables?: Array<{ kind: 'file' | 'directory' | 'pr' | 'doc' | 'message'; path?: string; note?: string; required?: boolean }>;
     acceptance?: Array<{ check: string; command?: string }>;
+    plan?: Array<{ id: string; title: string; agent?: string }>;
     cwd?: string;
     assigneeAgentId?: string;
     parentTaskId?: string;
@@ -213,6 +214,16 @@ export async function handleTaskCreate(
                 id: `a${index + 1}`,
                 check: item.check,
                 ...(item.command ? { command: item.command } : {}),
+              })),
+            }
+          : {}),
+        ...(args.plan?.length
+          ? {
+              plan: args.plan.map((step) => ({
+                id: step.id.trim(),
+                title: step.title.trim(),
+                status: 'todo' as const,
+                ...(step.agent ? { agent: step.agent } : {}),
               })),
             }
           : {}),

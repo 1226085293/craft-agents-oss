@@ -384,3 +384,56 @@ describe('plan drift', () => {
     expect(inspectTasks(deps([noPlan]))).toEqual([]);
   });
 });
+
+describe('finished plan, nothing filed', () => {
+  /**
+   * A real run reached `done` on every step, said 「✅ 已完成」 in its transcript,
+   * and never called report_result — so the task sat on `running` with zero
+   * hand-offs, no verdict, and nothing that would ever notice.
+   */
+  const finished = (overrides: Partial<Task> = {}) =>
+    task({
+      updatedAt: NOW - 20 * 60_000,
+      stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 20 * 60_000 },
+      spec: {
+        plan: [
+          { id: '1', title: 'a', status: 'done' },
+          { id: '2', title: 'b', status: 'done' },
+        ],
+      },
+      handoffs: [],
+      ...overrides,
+    })
+
+  it('flags a task whose plan is complete with no hand-off', () => {
+    const findings = inspectTasks(deps([finished()], { sessionWorking: () => false }));
+    expect(findings.map((f) => f.kind)).toContain('unreported');
+  })
+
+  it('stays quiet once the worker filed something', () => {
+    const filed = finished({ handoffs: [{ outcome: 'handoff', fromSessionId: 's', at: NOW, summary: 'x' }] as never });
+    const findings = inspectTasks(deps([filed], { sessionWorking: () => false }));
+    expect(findings.map((f) => f.kind)).not.toContain('unreported');
+  })
+
+  it('stays quiet while the plan is unfinished', () => {
+    const half = finished({
+      spec: { plan: [{ id: '1', title: 'a', status: 'done' }, { id: '2', title: 'b', status: 'todo' }] },
+    });
+    const findings = inspectTasks(deps([half], { sessionWorking: () => false }));
+    expect(findings.map((f) => f.kind)).not.toContain('unreported');
+  })
+
+  it('asks for the report rather than more work', () => {
+    let reason: string | undefined;
+    runWatchdogPass(
+      deps([finished()], {
+        sessionWorking: () => false,
+        wakeSession: (_task, _sessionId, why) => {
+          reason = why;
+        },
+      }),
+    );
+    expect(reason).toBe('unreported');
+  })
+})

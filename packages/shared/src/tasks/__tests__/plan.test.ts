@@ -351,3 +351,58 @@ describe('outline invariants', () => {
     expect(planProgress(plan)).toMatchObject({ total: 2, done: 1, complete: false });
   });
 });
+
+describe('a sub-step inherits its section owner', () => {
+  /**
+   * Observed on a real run: outline 2 and its only sub-step both had no owner, so
+   * the board displayed the assignee while routing saw nobody — one field, two
+   * answers. A sub-step belongs to the section it lives in, so it takes that
+   * section's owner unless it names its own.
+   */
+  it('takes the outline owner when none is given', () => {
+    const plan = normalizePlan(
+      [
+        { id: '1', title: '创建', status: 'todo', agent: 'builtin-default' },
+        { id: '1.1', title: '写文件', status: 'todo' },
+      ],
+      NOW,
+    );
+    const next = applyPlanPatch(plan, { id: '1.2', title: '读回' }, NOW).plan;
+    expect(next.find((step) => step.id === '1.2')?.agent).toBe('builtin-default');
+  })
+
+  it('keeps an owner it was given', () => {
+    const plan = normalizePlan(
+      [
+        { id: '1', title: '创建', status: 'todo', agent: 'builtin-default' },
+        { id: '1.1', title: '写文件', status: 'todo' },
+      ],
+      NOW,
+    );
+    const next = applyPlanPatch(plan, { id: '1.2', title: '读回', agent: 'agent-ui' }, NOW).plan;
+    expect(next.find((step) => step.id === '1.2')?.agent).toBe('agent-ui');
+  })
+})
+
+describe('an agreed plan is not the worker\'s to rewrite', () => {
+  /**
+   * The user asked for two outlines — 「1 写文件」「2 收尾」. The worker wrote three of
+   * its own (确认位置 / 创建 / 回报) and the board showed a plan nobody had asked for.
+   *
+   * `applyPlanPatch` stays permissive on purpose (a task with no plan lets the worker
+   * shape one); the refusal at the tool boundary is what enforces agreement, and this
+   * records the intent where the plan model lives.
+   */
+  it('lets a worker extend an agreed outline with sub-steps', () => {
+    const plan = normalizePlan(
+      [
+        { id: '1', title: '写文件', status: 'todo' },
+        { id: '2', title: '收尾', status: 'todo' },
+      ],
+      NOW,
+    );
+    const next = applyPlanPatch(plan, { id: '1.1', title: '创建 docs/a.md' }, NOW).plan;
+    expect(next.find((step) => step.id === '1.1')?.title).toBe('创建 docs/a.md');
+    expect(next.filter((step) => !step.id.includes('.')).map((s) => s.id)).toEqual(['1', '2']);
+  })
+})

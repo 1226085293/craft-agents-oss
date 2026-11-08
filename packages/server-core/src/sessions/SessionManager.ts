@@ -2530,7 +2530,29 @@ export class SessionManager implements ISessionManager {
    * paused the task through `report_result` and nobody broadcast. Plan steps had the same
    * gap. The task service now reports every write and it lands here.
    */
-  private broadcastTaskChanged(workspaceId: string): void {
+  /**
+   * Which session actually showed the card for this task's question.
+   *
+   * A task's owner and the lane its questions are displayed in are not always the same
+   * session: `resolveReaderLane` forwards reader-facing rows to the user lane, so the card
+   * lives there while the task belongs to 督导·任务. The answer has to reach both, or the
+   * lane holding the card keeps a question that is already closed.
+   *
+   * Read from the stored card rather than remembered, so it survives a restart.
+   */
+  decisionAskerFor(taskId: string): string | undefined {
+    for (const managed of this.sessions.values()) {
+      for (let i = managed.messages.length - 1; i >= 0; i -= 1) {
+        const message = managed.messages[i]
+        if (message.statusType !== 'decision_request') continue
+        if (message.decisionRequest?.taskIdentifier !== taskId) continue
+        return message.decisionRequest.askedBySessionId
+      }
+    }
+    return undefined
+  }
+
+    private broadcastTaskChanged(workspaceId: string): void {
     if (!this.eventSink) return
     this.eventSink(RPC_CHANNELS.taskboard.CHANGED, { to: 'workspace', workspaceId }, { workspaceId })
   }

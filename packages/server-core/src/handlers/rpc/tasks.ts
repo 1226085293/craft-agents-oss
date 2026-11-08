@@ -175,7 +175,18 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
        */
       const manager = deps.sessionManager as unknown as {
         sendMessage?: (sessionId: string, text: string) => Promise<unknown>
+        /** Which supervisor asked the question the person is answering. */
+        decisionAskerFor?: (taskId: string) => string | undefined
       }
+      /**
+       * The card can live on a different supervisor lane than the task.
+       *
+       * 督导·任务 owns the task; 督导·用户 is where the question was actually shown, because
+       * `resolveReaderLane` forwards reader-facing rows there. The answer went only to the
+       * owner, so the lane holding the card never learned the question was closed — it kept
+       * offering (or hiding) a card for a decision that had already been answered.
+       */
+      const askedBy = manager.decisionAskerFor?.(id)
       const supervisor = task.supervisorSessionId
       if (supervisor && manager.sendMessage) {
         const remaining = (task.spec?.plan ?? []).filter((step) => step.status !== 'done')
@@ -187,14 +198,15 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
          * person clicked again. The reply is delivered either way; the card must not
          * wait for the work it triggered.
          */
-        void manager
-          .sendMessage(
-            supervisor,
-            `〔任务 ${task.id} 拍板答复〕${text.trim()}` +
-              (remaining.length ? `
-（该任务当前未完成步骤：${remaining.map((step) => step.id).join('、')}）` : ''),
-          )
-          .catch(() => undefined)
+        const line =
+          `〔任务 ${task.id} 拍板答复〕${text.trim()}` +
+          (remaining.length ? `
+（该任务当前未完成步骤：${remaining.map((step) => step.id).join('、')}）` : '')
+        void manager.sendMessage(supervisor, line).catch(() => undefined)
+        // And the lane the card was shown in, so its copy of the question closes too.
+        if (askedBy && askedBy !== supervisor) {
+          void manager.sendMessage(askedBy, line).catch(() => undefined)
+        }
       }
       broadcast(workspaceId)
       return { accepted: true }

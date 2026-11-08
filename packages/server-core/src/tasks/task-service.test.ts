@@ -212,9 +212,17 @@ describe('handoff gate', () => {
     const answered = svc.recordDecisionAnswer(task.id, '放行，继续做完');
 
     expect(answered?.decision?.answer?.text).toBe('放行，继续做完');
-    // Answering is not resolving: the supervisor reads the words and decides what they
-    // mean. A reply mistaken for consent is the failure this separation prevents.
-    expect(answered?.decision?.resolvedAt).toBeUndefined();
+    /**
+     * The answer closes the pause.
+     *
+     * It used to be recorded and left open, expecting the supervisor to resolve it on its
+     * next turn. A real run showed why that is unsafe: the task stayed on 「等你拍板」 with
+     * the answer stored and no card on screen to click, because the supervisor had been
+     * rate-limited before it could close the loop. The reply ends the wait; interpreting
+     * the words is still the supervisor's job when it runs.
+     */
+    expect(answered?.decision?.resolvedAt).toBeDefined();
+    // Still paused until someone runs it — resolving a decision is not starting work.
     expect(answered?.status).toBe('paused');
   })
 

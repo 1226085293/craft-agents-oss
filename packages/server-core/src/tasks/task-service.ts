@@ -646,9 +646,22 @@ export class TaskService {
     if (decision.answer) return null;
 
     const now = this.now();
+    /**
+     * An answer is the end of the pause, not a note attached to it.
+     *
+     * The record used to keep `answer` and leave `resolvedAt` empty, on the theory that the
+     * supervisor would resolve it after reading. Observed on a real run: the task sat on
+     * 「等你拍板」 with the answer already stored, the card was gone because it had been
+     * answered, and nothing was left on screen to click. The supervisor that was supposed to
+     * close the loop had been rate-limited mid-turn, so the state waited for a turn that
+     * never happened.
+     *
+     * The person has spoken; that IS the resolution. What the words mean is still the
+     * supervisor's to interpret when it runs — but the pause ends here.
+     */
     const next: Task = {
       ...task,
-      decision: { ...decision, answer: { text: trimmed, at: now } },
+      decision: { ...decision, answer: { text: trimmed, at: now }, resolvedAt: now, resolution: 'approved' },
       updatedAt: now,
     };
     this.save(next);

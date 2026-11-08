@@ -36,6 +36,8 @@ interface Row {
     askedByLabel?: string
     question?: string
     options?: string[]
+    taskIdentifier?: string
+    askedAt?: number
   }
 }
 

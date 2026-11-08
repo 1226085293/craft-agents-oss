@@ -320,11 +320,17 @@ export function formatHandoffContext(task: Task): string | undefined {
   const prior: string[] = [`上一轮结论：${last.summary}`];
   if (last.keyFindings?.length) prior.push(`已知事实：\n${bullet(last.keyFindings)}`);
   if (last.nextAction) {
-    prior.push(
-      ceiling
-        ? `下一步（本次只到 ${ceiling}，超出该范围的部分不要执行）：${last.nextAction}`
-        : `下一步：${last.nextAction}`,
-    );
+    /**
+     * With a boundary, the hand-off's next action is not passed on at all.
+     *
+     * Rephrasing it was not enough — 「下一步（本次只到 1.2，超出该范围的部分不要执行）：从 1.2
+     * 读回确认继续」 still hands the worker an instruction and then asks it to police its own
+     * scope. The scope is already enforced where it is checkable (`applyPlanPatch` refuses a
+     * step above `authorizedUpTo`), so the brief does not need to repeat a plan that was
+     * written before the boundary existed. It states the boundary instead, and the omission
+     * is what stops two instructions competing.
+     */
+    if (!ceiling) prior.push(`下一步：${last.nextAction}`);
   }
   if (last.artifacts?.length) prior.push(`已有产物：\n${bullet(last.artifacts.map((a) => a.path))}`);
   return `## 交接上下文\n${prior.join('\n\n')}`;

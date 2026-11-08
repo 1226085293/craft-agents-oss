@@ -710,7 +710,7 @@ function PlanSection({
                   * baseline was its bottom edge — it sat a couple of pixels below the words it
                   * belongs to. A wrapping title still keeps the mark on the first line.
                   */}
-                <span className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1">
+                <span className="flex min-w-0 items-start gap-x-2">
                   {/*
                     * Status mark, then "1. title" as one run of text, then the owner.
                     *
@@ -722,10 +722,10 @@ function PlanSection({
                   {canJump ? (
                     <button
                       type="button"
-                      title={hint}
+                      title={`${step.id}. ${step.title} — ${hint}`}
                       onClick={() => onJump?.(jump!)}
                       className={cn(
-                        'td-row min-w-0 rounded text-left underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                        'td-row min-w-0 flex-1 truncate rounded text-left underline decoration-border underline-offset-2 transition-colors hover:decoration-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
                         isOutline ? 'font-medium' : 'font-normal',
                         step.status === 'done' ? 'text-muted-foreground' : 'text-foreground',
                       )}
@@ -734,8 +734,9 @@ function PlanSection({
                     </button>
                   ) : (
                     <span
+                      title={`${step.id}. ${step.title}`}
                       className={cn(
-                        'td-row min-w-0 break-words',
+                        'td-row min-w-0 flex-1 truncate',
                         isOutline ? 'font-medium' : 'font-normal',
                         step.status === 'done' ? 'text-muted-foreground' : 'text-foreground',
                       )}
@@ -753,7 +754,12 @@ function PlanSection({
                     * "same worker" from "no worker".
                     */}
                   {ownerOf(step) ? (
-                    <span className="shrink-0 whitespace-nowrap td-row-sub text-muted-foreground">— {ownerOf(step)}</span>
+                    <span
+                      title={ownerOf(step)}
+                      className="td-row-sub max-w-[38%] shrink-0 truncate whitespace-nowrap text-muted-foreground"
+                    >
+                      — {ownerOf(step)}
+                    </span>
                   ) : null}
                 </span>
                 {/*

@@ -156,6 +156,25 @@ function formatAge(ts: number): string {
   return `${Math.round(hours / 24)} 天前`
 }
 
+/**
+ * Task ids in the order the board actually displays them.
+ *
+ * The board renders group by group, so what the eye sees is the concatenation of
+ * the groups — not the order of the incoming array. Range selection read the raw
+ * array instead, which meant a shift-click swept up tasks from a different group
+ * and skipped the rows that sat between them on screen: two different answers to
+ * "what is between these two rows".
+ *
+ * Derived from `GROUPS` rather than hardcoded, so adding a group cannot silently
+ * reintroduce the mismatch. Tasks matching no group are absent here for the same
+ * reason they are absent on screen.
+ */
+function boardOrder(tasks: TaskListItem[]): string[] {
+  return GROUPS.flatMap((group) =>
+    tasks.filter((task) => group.match(task)).map((task) => task.id),
+  )
+}
+
 export interface TaskBoardPanelProps {
   tasks: TaskListItem[]
   selectedId?: string
@@ -284,7 +303,7 @@ export function TaskBoardPanel({
         }
         return
       }
-      const ordered = tasks.map((task) => task.id)
+      const ordered = boardOrder(tasks)
       if (event.shiftKey && anchorRef.current) {
         const from = ordered.indexOf(anchorRef.current)
         const to = ordered.indexOf(id)

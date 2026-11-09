@@ -2341,6 +2341,20 @@ function AppShellContent({
                       // click toggles the folder block; a double click enters the
                       // workspace root list (or the root tree while in project mode).
                       clickTogglesExpand: true,
+                      /**
+                       * Double click opens the supervisor's conversation.
+                       *
+                       * The supervisor is hidden from the list on purpose — there is one, it
+                       * coordinates tasks across sessions, and a row per click would split that
+                       * state. That leaves it with no way in from the place a person starts:
+                       * 「所有会话」 is the first thing in the first panel, and double clicking it
+                       * is the natural gesture for 「open the thing this section is for」.
+                       *
+                       * Without this the double click was a no-op: `clickTogglesExpand` makes the
+                       * dispatcher run `onClick` (a single click's behaviour) and then call this,
+                       * which did not exist.
+                       */
+                      onDoubleClick: () => void handleStartSession(),
                       // Dropping a session here files it back to the root — the only
                       // way out of a subfolder by drag. A session dragged out of a
                       // project also loses its project binding (atomic cross-scope

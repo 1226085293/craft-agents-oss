@@ -6,6 +6,7 @@ import {
   currentStep,
   formatPlan,
   lastPlanChangeAt,
+  nextLeg,
   normalizePlan,
   PLAN_STEP_LIMIT,
   planProgress,
@@ -302,7 +303,7 @@ describe('outline invariants', () => {
     expect(plan!.find((step) => step.id === '1')?.status).toBe('doing');
   });
 
-  it('will not let an outline read as done until the next one is broken down', () => {
+  it('closes an outline as soon as its own sub-steps are closed, wherever the next one is', () => {
     const plan = normalizePlan(
       [
         { id: '1', title: '接口改造', status: 'todo' },
@@ -311,12 +312,67 @@ describe('outline invariants', () => {
       ],
       NOW,
     );
-    // Closing 1 while 2 is still a bare title would leave execution with nowhere to go, so the
-    // derivation keeps 1 at `doing` until 2 has a sub-step.
-    expect(plan!.find((step) => step.id === '1')?.status).toBe('doing');
+    /**
+     * The section whose sub-steps are all closed is closed. The 「still under way」 signal moves to
+     * the section that has not been broken down yet, because that is where work actually goes next.
+     * Keeping the spinner on the finished section made a 3/3 plan look unfinished.
+     */
+    expect(plan!.find((step) => step.id === '1')?.status).toBe('done');
+    expect(plan!.find((step) => step.id === '2')?.status).toBe('doing');
 
     const withNext = applyPlanPatch(plan!, { id: '2.1', title: '写单测', agent: 'agent-qa' }, NOW).plan;
     expect(withNext.find((step) => step.id === '1')?.status).toBe('done');
+  })
+
+  it('leaves a later unstarted section alone when an earlier one is still open', () => {
+    const plan = normalizePlan(
+      [
+        { id: '1', title: '接口改造', status: 'todo' },
+        { id: '1.1', title: '改 handler', status: 'doing' },
+        { id: '2', title: '补测试', status: 'todo' },
+      ],
+      NOW,
+    );
+
+    // Only the section the plan has arrived at reads as being worked on; 「补测试」 is still ahead.
+    expect(plan!.find((step) => step.id === '1')?.status).toBe('doing');
+    expect(plan!.find((step) => step.id === '2')?.status).toBe('todo');
+  })
+
+  it('never reopens a section that already finished as a single step', () => {
+    const plan = normalizePlan(
+      [
+        { id: '1', title: '写文件', status: 'done' },
+        { id: '1.1', title: '创建 docs/a.md', status: 'done' },
+        { id: '2', title: '收尾', status: 'done' },
+      ],
+      NOW,
+    );
+
+    // 「收尾」 has no sub-steps, and it is also the section work arrived at — which must not turn a
+    // finished plan back into one that is under way.
+    expect(plan!.find((step) => step.id === '2')?.status).toBe('done');
+    expect(planProgress(plan!).complete).toBe(true);
+  })
+
+  it('lets a plan end in a single-step tail section', () => {
+    // 「写文件」 then 「收尾」: the tail is one step and nobody wants to split it into two fake ones,
+    // which the old gate demanded before it would let the first section close.
+    const plan = normalizePlan(
+      [
+        { id: '1', title: '写文件', status: 'todo' },
+        { id: '1.1', title: '创建 docs/a.md', status: 'done' },
+        { id: '1.2', title: '读回确认', status: 'done' },
+        { id: '2', title: '收尾', status: 'todo' },
+      ],
+      NOW,
+    );
+
+    expect(plan!.find((step) => step.id === '1')?.status).toBe('done');
+    // Nothing is lost from the flow: the tail is still what comes next, and it still asks to be
+    // broken down. That question belongs to `nextLeg`, which answers it from the plan rather than
+    // from anyone's status.
+    expect(nextLeg(plan!)?.kind).toBe('expand');
   });
 
   it('closes the last outline without demanding a next one', () => {

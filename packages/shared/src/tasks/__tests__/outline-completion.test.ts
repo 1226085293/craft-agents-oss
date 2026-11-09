@@ -3,11 +3,16 @@ import { deriveOutlineStatus, openSteps } from '../plan.ts'
 import type { PlanStep } from '../plan.ts'
 
 /**
- * 「大纲 1」 spun forever while every sub-step of it was closed, and the supervisor therefore
- * read the plan as 「还剩 1、2」 and asked the person to release work that was already done.
+ * 「大纲 1」 spun forever while every sub-step of it was closed.
  *
- * The cause was `deriveOutlineStatus` returning `doing` for a finished section whenever the
- * *next* outline had no sub-steps yet — a navigation concern encoded as a false status.
+ * Two separate harms came from one cause — `deriveOutlineStatus` returning `doing` for a finished
+ * section whenever the *next* outline had no sub-steps yet, a navigation concern encoded as a false
+ * status:
+ *
+ *   1. the supervisor read the plan as 「还剩 1、2」 and asked the person to release work that was
+ *      already done (fixed earlier by having `openSteps` count sub-steps);
+ *   2. the person saw a spinner over a section whose every sub-step was green, and read a 3/3 plan
+ *      as unfinished (fixed now: the status states the section, `nextLeg` carries the nudge).
  */
 const done: PlanStep[] = [
   { id: '1', title: '写文件', status: 'doing' },
@@ -17,15 +22,10 @@ const done: PlanStep[] = [
 ]
 
 describe('a finished section is not reported as outstanding', () => {
-  /**
-   * The status still says `doing` — deliberately, because closing a section requires the next
-   * one to be broken down, and a derived close would walk around that. What was wrong is that
-   * the same lookahead leaked into "what is left to do": the supervisor asked the person to
-   * 「放行剩余步骤 1、2」 when every sub-step of 1 was complete. `openSteps` answers that
-   * question from the sub-steps, so the flow constraint stops being read as unfinished work.
-   */
-  it('stays doing at the status level while the next section is unplanned', () => {
-    expect(deriveOutlineStatus(done, done.find((s) => s.id === '1')!)).toBe('doing')
+  it('reads as done the moment its last sub-step closes', () => {
+    // The screenshot that reported this showed 「执行计划 (3/3)」 with a spinner on 「1」. A plan
+    // that is finished everywhere must not have one section claiming to be under way.
+    expect(deriveOutlineStatus(done, done.find((s) => s.id === '1')!)).toBe('done')
   })
 
   it('is still not counted as work that remains', () => {
@@ -40,7 +40,6 @@ describe('a finished section is not reported as outstanding', () => {
 
 describe('what is actually left to do', () => {
   it('does not count a section whose sub-steps are all closed', () => {
-    // `1` still says `doing` on disk; the answer is still "not this one".
     expect(openSteps(done).map((s) => s.id)).toEqual(['2'])
   })
 

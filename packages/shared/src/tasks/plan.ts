@@ -113,25 +113,20 @@ export function checkAgreedPlanAppend(
  */
 export function deriveOutlineStatus(plan: PlanStep[], outline: PlanStep): PlanStepStatus {
   const kids = childrenOf(plan, outline.id);
-  if (kids.length === 0) return outline.status;
-
-  if (kids.every((kid) => kid.status === 'done')) {
-    // All children closed — but a section may only read as closed when the next
-    // one is executable, which is the same rule `applyPlanPatch` enforces on an
-    // explicit patch. Deriving `done` without that check would let the view claim
-    // a completion the rules refuse, and the worker would then never be told to
-    // expand the next section: the plan would sit finished with nowhere to go.
-    //
-    // This is why the *displayed* status can lag the sub-steps: 「1」 stays `doing` until
-    // 「2」 has sub-steps. That is a flow constraint, and the fix for the confusion it caused
-    // is in `openSteps` below — "what is left to do" counts sub-steps, so a finished section
-    // is not reported as outstanding even while its own status still says `doing`.
-    const outlines = plan.filter((step) => isOutlineStep(step.id));
-    const at = outlines.findIndex((step) => step.id === outline.id);
-    const next = at >= 0 ? outlines[at + 1] : undefined;
-    if (!next || childrenOf(plan, next.id).length > 0) return 'done';
-    return 'doing';
+  if (kids.length === 0) {
+    /**
+     * A section with no sub-steps is either finished as one action, or it is where work goes next.
+     *
+     * The old rule did the opposite: it held a *finished* section at `doing` while the next one was
+     * still a bare title, so 「写文件」 spun while every sub-step under it was green and the plan read
+     * 3/3 done — 「子任务完成后大纲还是进行中状态」, reported from a screenshot. The signal is real,
+     * but it belongs to the section that has not been broken down yet, not to the finished one.
+     */
+    return deriveUndecomposedStatus(plan, outline);
   }
+
+  // Every child closed means this section is closed. Nothing about the next one changes that.
+  if (kids.every((kid) => kid.status === 'done')) return 'done';
 
   if (kids.some((kid) => kid.status === 'doing')) return 'doing';
   // Partly finished is still under way: `1` may not sit on "not started" while
@@ -142,21 +137,58 @@ export function deriveOutlineStatus(plan: PlanStep[], outline: PlanStep): PlanSt
 }
 
 /**
+ * Status of a section that has not been split into sub-steps.
+ *
+ * Two facts decide it, in this order: a section already closed stays closed (the next section
+ * must not reopen it), and the section the plan has arrived at reads as `doing` — that is what
+ * 「现在在这一节」 looks like, and it is why the plan carries one section under way instead of a
+ * spinner stuck on the section before it.
+ */
+function deriveUndecomposedStatus(plan: PlanStep[], outline: PlanStep): PlanStepStatus {
+  if (outline.status === 'done' || outline.status === 'blocked') return outline.status;
+  /**
+   * 「Now」 only means something once the plan has begun.
+   *
+   * Without this, a plan written a second ago showed its first section as already under way before
+   * anyone touched it — the same kind of lie as the spinner on a finished section, pointing the
+   * other way. A section becomes the one being worked on when work has actually arrived at it,
+   * which is visible from the closed steps before it.
+   */
+  const began = plan.some((step) => step.status === 'done');
+  return began && isFrontierOutline(plan, outline) ? 'doing' : outline.status;
+}
+
+/** True when every section before this one is closed, so work has arrived here. */
+function isFrontierOutline(plan: PlanStep[], outline: PlanStep): boolean {
+  const outlines = outlineSteps(plan).sort((a, b) => Number(a.id) - Number(b.id));
+  const at = outlines.findIndex((step) => step.id === outline.id);
+  if (at < 0) return false;
+  return outlines.slice(0, at).every((step) => step.status === 'done');
+}
+
+/**
  * The plan with every outline's status recomputed from its sub-steps.
  *
  * Applied on read and after every patch, so stored data converges without a
  * migration and files written by older versions still render truthfully.
+ *
+ * Walked in order rather than mapped: whether a section reads as `doing` depends on whether the
+ * ones before it are closed, so each answer has to see the previous ones already derived. Mapping
+ * over the input made a section sit one step behind its neighbour — the section that had just been
+ * closed still `doing` meant the next one never got its turn.
  */
 export function applyDerivedStatuses(plan: PlanStep[] | undefined): PlanStep[] {
   if (!plan?.length) return plan ?? [];
   let changed = false;
-  const next = plan.map((step) => {
-    if (!isOutlineStep(step.id)) return step;
-    const status = deriveOutlineStatus(plan, step);
-    if (status === step.status) return step;
+  const next = [...plan];
+  for (let at = 0; at < next.length; at += 1) {
+    const step = next[at]!;
+    if (!isOutlineStep(step.id)) continue;
+    const status = deriveOutlineStatus(next, step);
+    if (status === step.status) continue;
     changed = true;
-    return { ...step, status };
-  });
+    next[at] = { ...step, status };
+  }
   return changed ? next : plan;
 }
 
@@ -177,13 +209,6 @@ function outlineSteps(plan: PlanStep[] | undefined): PlanStep[] {
  */
 export function currentOutline(plan: PlanStep[] | undefined): PlanStep | undefined {
   return outlineSteps(plan).find((step) => step.status !== 'done');
-}
-
-/** The outline item directly after `id`, if the plan has one. */
-function outlineAfter(plan: PlanStep[], id: string): PlanStep | undefined {
-  const outlines = outlineSteps(plan);
-  const at = outlines.findIndex((step) => step.id === id);
-  return at >= 0 ? outlines[at + 1] : undefined;
 }
 
 /**
@@ -485,31 +510,29 @@ export function applyPlanPatch(
   if (isOutlineStep(previous.id) && (patch.status === 'doing' || patch.status === 'done')) {
     const kids = childrenOf(steps, previous.id);
     if (kids.length === 0) {
-      return {
-        plan: steps,
-        changed: false,
-        error: `大纲 ${previous.id} 还没有小节。先把它拆成可执行的步骤（如 ${previous.id}.1），再开始`,
-      };
-    }
-    if (patch.status === 'done') {
+      /**
+       * A section nobody split up is one step, and one step can be finished.
+       *
+       * This used to refuse outright, demanding sub-steps first. A plan ending in 「收尾」 then could
+       * not close it without inventing 「2.1」 for a single action, and the section showed as `doing`
+       * for as long as nobody did. The frontier section reads as `doing` by derivation, so accepting
+       * that write is a no-op rather than a claim; the one thing still refused is closing a section
+       * that has children — that answer comes from them, below.
+       */
+      if (patch.status === 'done' && !(patch.note ?? previous.note)?.trim()) {
+        return {
+          plan: steps,
+          changed: false,
+          error: `大纲 ${previous.id} 没有小节，直接标记完成需要写明做完了什么（note）`,
+        };
+      }
+    } else if (patch.status === 'done') {
       const unfinished = kids.filter((step) => step.status !== 'done');
       if (unfinished.length > 0) {
         return {
           plan: steps,
           changed: false,
           error: `大纲 ${previous.id} 还有 ${unfinished.length} 个小节未完成（${unfinished.map((s) => s.id).join(', ')}）`,
-        };
-      }
-      // Lookahead: the next section must already be broken down, or the moment
-      // this one closes there is nothing executable to pick up. Enforcing it here
-      // (rather than telling the worker to do it next) means the plan is never
-      // observed in a state where execution has nowhere to go.
-      const next = outlineAfter(steps, previous.id);
-      if (next && childrenOf(steps, next.id).length === 0) {
-        return {
-          plan: steps,
-          changed: false,
-          error: `完成 ${previous.id} 之前，先把下一条大纲 ${next.id} 的小节建出来 —— 否则下一条开工时没有可执行的步骤`,
         };
       }
     }
@@ -731,9 +754,15 @@ export function restructurePlan(
     if (step.status === 'done') {
       return { plan: steps, changed: false, error: `大纲 ${step.id} 已完成，是记录，不能重排；要改就新开一条` };
     }
-    if (step.status === 'doing') {
-      return { plan: steps, changed: false, error: `大纲 ${step.id} 正在做，不能重排；先做完或交接` };
-    }
+    /**
+     * 「Can this be rewritten」 is answered by `startedAt`, not by the status.
+     *
+     * `doing` is derived for the section the plan has arrived at, so the next section that has not
+     * been broken down yet reads as `doing` from the moment the one before it closes. Reading that
+     * as 「正在做」 refused to restructure a tail nobody had touched — the display convention was
+     * being mistaken for history. What actually happened is `startedAt`, and a section with
+     * sub-steps was written because it was about to be worked on.
+     */
     if (step.startedAt) {
       return {
         plan: steps,

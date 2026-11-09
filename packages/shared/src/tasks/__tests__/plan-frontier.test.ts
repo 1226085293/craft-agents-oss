@@ -84,12 +84,37 @@ describe('rewriting the part of the plan that has not started', () => {
     expect(result.changed).toBe(false)
   })
 
-  it('refuses to touch a finished or running section', () => {
-    const running: PlanStep[] = [
+  it('refuses to touch a finished or started section', () => {
+    /**
+     * 「Started」 is `startedAt`, not `doing`.
+     *
+     * `doing` is derived for the section the plan has arrived at, so the untouched tail reads as
+     * `doing` and used to be refused as if someone had worked on it. What cannot be rewritten is
+     * a section that was actually picked up.
+     */
+    const started: PlanStep[] = [
+      { id: '1', title: 'a', status: 'done' },
+      { id: '2', title: 'b', status: 'doing', startedAt: 5 },
+    ]
+    expect(restructurePlan(started, { fromId: '2', outlines: [{ title: 'x' }] }, 1).error).toContain('2')
+
+    const finished: PlanStep[] = [
+      { id: '1', title: 'a', status: 'done' },
+      { id: '2', title: 'b', status: 'done' },
+    ]
+    expect(restructurePlan(finished, { fromId: '2', outlines: [{ title: 'x' }] }, 1).error).toContain('2')
+  })
+
+  it('allows rewriting a tail that only reads as doing because it is next', () => {
+    const untouched: PlanStep[] = [
       { id: '1', title: 'a', status: 'done' },
       { id: '2', title: 'b', status: 'doing' },
     ]
-    expect(restructurePlan(running, { fromId: '2', outlines: [{ title: 'x' }] }, 1).error).toContain('2')
+
+    const result = restructurePlan(untouched, { fromId: '2', outlines: [{ title: 'x' }] }, 1)
+
+    expect(result.error).toBeUndefined()
+    expect(result.plan.filter((s) => /^\d+$/.test(s.id)).map((s) => s.title)).toEqual(['a', 'x'])
   })
 
   it('refuses an empty replacement', () => {

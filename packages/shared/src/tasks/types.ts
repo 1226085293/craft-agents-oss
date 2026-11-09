@@ -358,6 +358,15 @@ export interface TaskOrigin {
  * it is asking, and so the deadline survives a restart.
  */
 export interface TaskDecision {
+  /**
+   * Stable identity for this one question.
+   *
+   * A task can hold several open questions at once — the person may be asked about a failing
+   * check and a boundary in the same round — so an answer has to name which one it closes.
+   * Without an id the reply could only ever mean 「the newest question」, which is exactly how a
+   * second question silently stole the first one's answer.
+   */
+  id?: string;
   /** One of the six irreversible categories (see tasks/decisions.ts). */
   category: string;
   /** Human label shown on the card. */
@@ -397,6 +406,16 @@ export interface TaskDecision {
   /** Set once the user answered, the deadline fired, or the question stopped being true. */
   resolvedAt?: number;
   /**
+   * When this answer was handed to the supervisor.
+   *
+   * Answers are collected before they are delivered: asking three things and interrupting the
+   * supervisor three times is noise, and it made the supervisor act on the first reply before
+   * the person had finished thinking. Delivery waits until nothing is left open, then sends
+   * everything at once — this field is how 「already sent」 is told from 「answered, not yet
+   * sent」, and it must survive a restart, so it lives on the record.
+   */
+  deliveredAt?: number;
+  /**
    * How the question closed.
    *
    * `obsolete` is the third case and the one that used to masquerade as `approved`: the thing
@@ -414,6 +433,19 @@ export interface Task {
   instruction: string;
   status: TaskStatus;
   pauseReason?: TaskPauseReason | null;
+  /**
+   * Every question this task has asked, open and closed, oldest first.
+   *
+   * The single `decision` field could only hold one, so a second question overwrote the first —
+   * including its answer. A task legitimately asks several things at once: a worker hands back two
+   * failing checks, the supervisor stops at a boundary with two directions open. One slot turned
+   * that into 「the newest question wins」, and a reply to the first was lost with it.
+   *
+   * `decision` is kept as a mirror of the newest open entry (see `deriveDecisionMirror`) so every
+   * reader that asks 「is a question open?」 keeps working; readers that need to know *which*
+   * question use this list.
+   */
+  decisions?: TaskDecision[];
 
   supervisorSessionId: string;
   /** Every session that has worked on this task, oldest first. */

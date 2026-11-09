@@ -96,6 +96,7 @@ export interface TaskDetailView {
    * rest.
    */
   decision?: {
+    id?: string
     category?: string
     label?: string
     reason?: string
@@ -108,6 +109,24 @@ export interface TaskDetailView {
     /** What the person replied, recorded on the task so it survives a reload. */
     answer?: { text: string; at: number }
   }
+  /**
+   * Every question on the task, open and closed.
+   *
+   * A task can wait on several at once, and the page has to draw them all — `decision` is only the
+   * newest open one, kept for readers written before the queue existed.
+   */
+  decisions?: Array<{
+    id?: string
+    category?: string
+    label?: string
+    reason?: string
+    askedAt?: number
+    deadlineAt?: number
+    resolvedAt?: number
+    options?: string[]
+    question?: string
+    answer?: { text: string; at: number }
+  }>
   /** Who asked. A free-text answer is a message to this session. */
   supervisorSessionId?: string
   /** Profile this task is assigned to; absent means the workspace default. */

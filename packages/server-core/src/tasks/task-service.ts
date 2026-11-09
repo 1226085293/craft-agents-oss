@@ -43,13 +43,19 @@ import {
   childrenOf,
   DECISION_TIMEOUT_MS,
   TERMINAL_STATUSES,
+  allDecisions,
   answeredWithoutProgress,
+  decisionMirror,
+  findDuplicateOpen,
+  normalizeQuestion,
+  openDecisions,
   unownedSubSteps,
   type PlanStepStatus,
   type ArtifactProbe,
   type Handoff,
   type Task,
   type TaskAcceptanceVerdict,
+  type TaskDecision,
   type TaskSpec,
   type TaskStatus,
   type TaskTrigger,
@@ -168,6 +174,33 @@ export interface CreateTaskRequest {
 export type StartRunResult =
   | { ok: true; task: Task }
   | { ok: false; reason: string };
+
+/**
+ * Keep the legacy `decision` slot pointing at the newest open question.
+ *
+ * Every reader that asks 「is a question open?」 — the card, the pause label, the resume gate, the
+ * watchdog — was written against a single slot. The queue is the record now, and this mirror is
+ * how those readers keep their meaning without being rewritten: with anything open, `decision` IS
+ * an open question; with nothing open, it is the last one, which is what the page shows as 「已选择」.
+ */
+function syncDecisionMirror(task: Task): Task {
+  if (!task.decisions?.length) return task
+  const mirror = decisionMirror(task)
+  if (!mirror) return task
+  if (task.decision === mirror) return task
+  return { ...task, decision: mirror }
+}
+
+/**
+ * Identity for one question./**
+ * Identity for one question.
+ *
+ * Timestamp plus position: unique within a task without a uuid, and readable in the journal
+ * (「d-1794262539099-1」) when tracing which question an answer closed.
+ */
+function newDecisionId(now: number, size: number): string {
+  return `d-${now}-${size}`
+}
 
 export class TaskService {
   private readonly now: () => number;
@@ -424,21 +457,33 @@ export class TaskService {
    * `resolution: 'obsolete'` says what actually happened, so later readers do not have to
    * infer it from an empty answer field.
    */
-  resolveDecision(id: string, resolution: 'approved' | 'rejected' | 'obsolete', note?: string): Task {
+  resolveDecision(
+    id: string,
+    resolution: 'approved' | 'rejected' | 'obsolete',
+    note?: string,
+    decisionId?: string,
+  ): Task {
     const task = this.require(id);
     const now = this.now();
-    if (!task.decision) return task;
-    const next: Task = {
-      ...task,
-      decision: {
-        ...task.decision,
-        resolvedAt: now,
-        resolution,
-        ...(note?.trim() ? { reason: note.trim() } : {}),
-      },
-      updatedAt: now,
-    };
-    this.save(next);
+    const all = allDecisions(task);
+    const targets = decisionId
+      ? all.filter((entry) => entry.id === decisionId)
+      : all.filter((entry) => !entry.resolvedAt);
+    if (!targets.length) return task;
+    const queue = all.map((entry) =>
+      targets.includes(entry)
+        ? {
+            ...entry,
+            resolvedAt: now,
+            resolution,
+            ...(note?.trim() ? { reason: note.trim() } : {}),
+          }
+        : entry,
+    );
+    const next: Task = { ...task, decisions: queue, updatedAt: now };
+    // `save` returns the derived record, and the mirror is part of that: without it the caller
+    // reads a task whose `decision` still shows the open state it just closed.
+    const saved = this.save(next);
     appendJournal(this.root, id, { type: 'decision_resolved', at: now, data: { resolution, note } });
     /**
      * The pause the decision created ends with the decision.
@@ -447,7 +492,7 @@ export class TaskService {
      * been settled: `paused / asking`, no question, no answer, and — because every guard looks at
      * either an open decision or a running task — nothing that would ever look at it again.
      */
-    return this.releaseDecisionPause(next);
+    return this.releaseDecisionPause(saved);
   }
 
   /**
@@ -687,138 +732,122 @@ export class TaskService {
   ): Task | null {
     const task = this.get(id);
     if (!task) return null;
-    const decision = task.decision;
-    /**
-     * A question can exist before there is a decision record, and this used to drop it.
-     *
-     * `task.decision` is written by a worker's `needs_decision` hand-off. The supervisor asks in
-     * its own words through `report_to_user`, which reaches here to put the real question and the
-     * real buttons onto the record the task page reads. When the task had no decision — because it
-     * was paused by a plain `task_update({status:'paused', pauseReason:'needs_decision'})`, which
-     * nothing stops — this returned null and wrote nothing.
-     *
-     * The result was three views of one question that did not agree: the task page said 「等待督导把
-     * 问题转达给你，稍后会上来这里」 and, since nothing ever created the record it was waiting for,
-     * kept saying it; the conversation showed a card with buttons; and pressing a button answered
-     * 「no pending decision on this task」. Reported live on T-1.
-     *
-     * Creating the record here is what makes 「one question, one answer」 true: the supervisor's
-     * question becomes the task's question, so both cards read the same thing and either one can
-     * close it.
-     */
-    if (!decision) {
-      const now = this.now();
-      const options = (wording.options ?? [])
-        .map((option) => option.trim())
-        .filter((option) => option.length > 0)
-        .slice(0, 4);
-      const created: Task = {
-        ...task,
-        decision: {
-          category: 'direction',
-          label: wording.label?.trim() || '需要你决定',
-          reason: '',
-          askedAt: now,
-          deadlineAt: now + DECISION_TIMEOUT_MS,
-          ...(wording.question?.trim() ? { question: wording.question.trim() } : {}),
-          ...(options.length ? { options } : {}),
-        },
-        updatedAt: now,
-      };
-      /**
-       * The question exists now, so the pause means what it says.
-       *
-       * 「等问句」 and 「等你决定」 are one state apart by exactly this fact: whether there is
-       * something on screen to answer. Writing the question is the moment that becomes true, so
-       * the kind of pause is corrected here instead of being left for a reader to interpret.
-       */
-      /**
-       * The pause reason is not set here any more.
-       *
-       * It used to be nudged from `asking` to `needs_decision` in this one case, which is exactly
-       * the shape that leaves a gap: the parked-as-`awaiting_release` task kept its reason while
-       * this record made a card appear. `save` derives it from the record now, for every writer.
-       */
-      const asking = task.status === 'paused' && task.pauseReason === 'asking';
-      const created2: Task = this.save(created);
-      appendJournal(this.root, id, {
-        type: 'decision_asked',
-        at: now,
-        data: { source: 'supervisor', question: wording.question, fromAsking: asking },
-      });
-      return created2;
-    }
-    /**
-     * A question asked after the last one was answered is a NEW question.
-     *
-     * The old record kept `resolvedAt` and `answer`, so the task page rendered 「已选择」 with
-     * the previous reply while the conversation showed a fresh, unanswered card. Same task,
-     * two questions, one answered-state: the state was per task, so the new question inherited
-     * an answer it never received. Keeping the old answer in the journal and starting a clean
-     * decision is what makes the two cards agree again.
-     */
-    /**
-     * A question asked before the last answer was acted on is the same question again.
-     *
-     * `resolvedAt` alone used to be enough to reopen, which treated every follow-up card as a new
-     * question and — because the fresh record starts empty — discarded the answer the person had
-     * just given. Observed live on T-1: 「暂不执行 2，保持暂停」 at 06:08:59, 「是否继续？」 at
-     * 06:09:01, and the task ended with an open question and no record of the reply.
-     *
-     * Refusing here rather than at the call site is deliberate: this is the only door to a reopen,
-     * so no entry point can route around it. Callers that want to say something without asking
-     * anything can still send a plain report.
-     */
-    if (decision.resolvedAt && answeredWithoutProgress(task)) {
-      return task;
-    }
-    if (decision.resolvedAt) {
-      const fresh: Task = {
-        ...task,
-        decision: {
-          category: decision.category,
-          label: decision.label,
-          /**
-           * The reason is the OLD question's diagnosis, and carrying it into the new one is how
-           * a reopened decision ended up quoting a condition that had already been satisfied —
-           * 「还剩 1 步没有授权：2」 kept being rendered next to a card asking something else.
-           * It is re-derived by the caller that re-asks (`setDecisionWording` receives only
-           * wording); when no new reason arrives, the field stays empty rather than stale.
-           */
-          reason: '',
-          askedAt: this.now(),
-          deadlineAt: this.now() + DECISION_TIMEOUT_MS,
-        },
-        updatedAt: this.now(),
-      }
-      this.save(fresh)
-      appendJournal(this.root, id, { type: 'decision_reopened', at: this.now(), data: {} })
-      return this.setDecisionWording(id, wording)
-    }
 
+    const now = this.now();
     const options = (wording.options ?? [])
       .map((option) => option.trim())
       .filter((option) => option.length > 0)
       .slice(0, 4);
 
-    const next: Task = {
-      ...task,
-      // A question landing on a task paused as 「等问句」 turns it into 「等你决定」.
-      ...(task.status === 'paused' && task.pauseReason === 'asking'
-        ? { pauseReason: 'needs_decision' as const }
-        : {}),
-      decision: {
-        ...decision,
-        ...(wording.label?.trim() ? { label: wording.label.trim() } : {}),
-        // Written to its own field, not over `reason`: the diagnostic sentence is what
-        // explains why a person is being asked, and it cannot be reconstructed later.
-        ...(wording.question?.trim() ? { question: wording.question.trim() } : {}),
-        ...(options.length ? { options } : {}),
-      },
-      updatedAt: this.now(),
-    };
-    this.save(next);
-    return next;
+    /**
+     * One question, however many times it is relayed.
+     *
+     * 「同一个问题不能问两次」 is judged on what the person would read: a question already open on this
+     * task with the same text, after normalising whitespace and punctuation, is the same question.
+     * Asking it again adds nothing to answer and a second card to dismiss. Only *open* entries
+     * count — the same sentence legitimately reappears after the state it was about has moved on.
+     *
+     * Distinct wording is left alone: whether 「要不要做 2」 and 「继续吗」 are one question is the
+     * supervisor's judgement, and a code that guessed would be wrong without saying so.
+     */
+    const duplicate = wording.question?.trim() ? findDuplicateOpen(task, wording.question!) : undefined
+    if (duplicate) {
+      /**
+       * The card may still need its buttons: the same question relayed twice can carry different
+       * options (the first attempt may have had none). Wording is updated in place, and nothing new
+       * is added — one open entry, one answer.
+       */
+      if (!options.length || duplicate.options?.length === options.length) return task
+      const all = allDecisions(task).map((entry) =>
+        entry === duplicate ? { ...entry, options } : entry,
+      )
+      return this.save({ ...task, decisions: all, updatedAt: now })
+    }
+
+    /**
+     * A question asked before the last answer was acted on is the same question again.
+     *
+     * Nothing in the wording separates 「是否继续？」 from a genuine follow-up, so the test is the
+     * record: when the reply is the newest thing on the task and steps remain, nothing has happened
+     * that a new question could be about. Reported live: answered at 06:08:59, asked again at
+     * 06:09:01, and the reopen discarded the reply.
+     */
+    if (!task.decision || task.decision.resolvedAt) {
+      if (answeredWithoutProgress(task)) return task
+    }
+
+    const all = allDecisions(task);
+    const open = all.filter((entry) => !entry.resolvedAt);
+
+    /**
+     * A question arriving while another is open joins it, and a question arriving with none open
+     * starts a new one in the same list.
+     *
+     * The list is append-only: answering one question must not overwrite the others, and a closed
+     * question keeps its answer so the page can still show what was chosen. The old single slot was
+     * replaced wholesale on every new question, which is how a second card took the first one's
+     * reply with it.
+     */
+    const previous = open.at(-1) ?? all.at(-1)
+    const entry: TaskDecision = {
+      // A new question always gets its own identity: two open questions must be distinguishable,
+      // or an answer cannot say which one it closes.
+      id: newDecisionId(now, all.length),
+      // A new question re-derives its own diagnosis; carrying the old one over is how a reopened
+      // decision ended up quoting a condition that had already been satisfied.
+      category: previous?.category ?? 'direction',
+      label: wording.label?.trim() || previous?.label || '需要你决定',
+      reason: previous && !previous.resolvedAt ? previous.reason : '',
+      askedAt: now,
+      deadlineAt: now + DECISION_TIMEOUT_MS,
+      ...(wording.question?.trim() ? { question: wording.question.trim() } : {}),
+      ...(options.length ? { options } : {}),
+    }
+    // One open entry per question: an open entry is updated in place, a closed one is followed by
+    // a new entry.
+    /**
+     * A different question joins the queue; the same one is only re-worded.
+     *
+     * These are two different events and used to share one branch: re-wording keeps the entry's
+     * identity and clock (restarting `askedAt` moved the deadline under a person who was mid-answer,
+     * and gave an already-visible card a new identity), while a genuinely new question is appended
+     * so the existing ones keep their answers.
+     *
+     * The queue is what makes 「几件事一起问」 possible: a worker hands back two failing checks, or a
+     * boundary opens in two directions, and the person answers both before anybody acts on the first.
+     */
+    /**
+     * The entry this wording belongs to.
+     *
+     * Two cases, and they are the same intent from different directions： a worker's `needs_decision`
+     * hand-off creates a record with no words in it (the rule knows that something must be asked, not
+     * what), and the supervisor then says it — those belong on the existing entry, not beside it.
+     * Otherwise only an identical question is matched.
+     */
+    const unworded = open.length === 1 && !open[0]!.question?.trim() ? open[0] : undefined
+    const sameQuestion =
+      unworded ??
+      open.find((existing) => normalizeQuestion(existing.question) === normalizeQuestion(entry.question))
+    const queue = sameQuestion
+      ? all.map((existing) =>
+          existing === sameQuestion
+            ? {
+                ...existing,
+                ...(wording.label?.trim() ? { label: wording.label.trim() } : {}),
+                ...(wording.question?.trim() ? { question: wording.question.trim() } : {}),
+                ...(options.length ? { options } : {}),
+              }
+            : existing,
+        )
+      : [...all, entry]
+
+    const saved = this.save({ ...task, decisions: queue, updatedAt: now });
+    appendJournal(this.root, id, {
+      type: 'decision_asked',
+      at: now,
+      data: { source: 'supervisor', question: wording.question, decisionId: entry.id, open: open.length },
+    });
+    return saved;
   }
 
   /**
@@ -832,71 +861,89 @@ export class TaskService {
    * Returns null when there is nothing to answer, so the caller can report "nothing was
    * waiting" rather than silently accepting words no one will read.
    */
-  recordDecisionAnswer(id: string, text: string): Task | null {
+  recordDecisionAnswer(id: string, text: string, decisionId?: string): Task | null {
     const task = this.get(id);
-    const decision = task?.decision;
-    if (!task || !decision || decision.resolvedAt) return null;
+    if (!task) return null;
     const trimmed = text.trim();
     if (!trimmed) return null;
+
+    /**
+     * Answer one question, by name.
+     *
+     * A task can be holding several open questions at once, and the reply closes exactly one of
+     * them. Without `decisionId` the target is the newest open question, which is what a card
+     * carries when it was raised before ids existed.
+     *
+     * The single slot this used to write meant a second question replaced the first — so answering
+     * the first silently closed a question nobody had answered.
+     */
+    const all = allDecisions(task);
+    const open = all.filter((entry) => !entry.resolvedAt);
+    if (!open.length) return null;
+    const target = decisionId ? open.find((entry) => entry.id === decisionId) : open.at(-1);
+    if (!target) return null;
     /**
      * One question, one answer.
      *
-     * The card guards this in the renderer with a `sent` flag, and that guard is not
-     * enough: two surfaces show the same decision, and a second click can arrive from
-     * either — or from a window that never saw the first one's state. Observed on a real
-     * run: the supervisor received the same reply twice, 1.6s apart, and read it as two
-     * separate instructions. The task is the only party that can decide this, because it
-     * is the only one holding the record.
+     * The card guards this in the renderer with a `sent` flag, and that guard is not enough: two
+     * surfaces show the same decision, and a second click can arrive from either — or from a window
+     * that never saw the first one's state. Observed on a real run: the supervisor received the
+     * same reply twice, 1.6s apart, and read it as two separate instructions.
      */
-    if (decision.answer) return null;
+    if (target.answer) return null;
 
     const now = this.now();
-    /**
-     * An answer is the end of the pause, not a note attached to it.
-     *
-     * The record used to keep `answer` and leave `resolvedAt` empty, on the theory that the
-     * supervisor would resolve it after reading. Observed on a real run: the task sat on
-     * 「等你拍板」 with the answer already stored, the card was gone because it had been
-     * answered, and nothing was left on screen to click. The supervisor that was supposed to
-     * close the loop had been rate-limited mid-turn, so the state waited for a turn that
-     * never happened.
-     *
-     * The person has spoken; that IS the resolution. What the words mean is still the
-     * supervisor's to interpret when it runs — but the pause ends here.
-     */
     /**
      * Record the words. Do not interpret them.
      *
      * This used to run the reply through keyword tables to derive a boundary
-     * (「完成 1.2 后暂停」 → ceiling 1.2, 「放行步骤 2」 → steps up to 2). That is not a thing
-     * text matching can do: 「其余之后再定」 and 「其余都做」 share a word and mean opposite
-     * things, 「停止剩下的任务」 was not in any table, and every miss was silent — the task
-     * resumed with the wrong authority and nobody could tell why.
+     * (「完成 1.2 后暂停」 → ceiling 1.2, 「放行步骤 2」 → steps up to 2). That is not a thing text
+     * matching can do: 「其余之后再定」 and 「其余都做」 share a word and mean opposite things,
+     * 「停止剩下的任务」 was not in any table, and every miss was silent.
      *
-     * Interpreting a sentence is a model's job. The supervisor reads the answer in its own turn
-     * and writes what it understood through `task_update` (`authorizedUpTo` / `authorizedSteps`),
-     * which stamps `authorizedAt`. `resumeDecisionFor` compares that timestamp with the answer's
-     * and refuses to start the task until somebody has actually acted on the words.
-     *
-     * `resolution: 'approved'` here means only "this question is closed" — it is not a claim
-     * about what was authorised, which is why no boundary is inferred from it.
+     * `resolution: 'approved'` here means only "this question is closed" — it is not a claim about
+     * what was authorised.
      */
-    const next: Task = {
-      ...task,
-      decision: { ...decision, answer: { text: trimmed, at: now }, resolvedAt: now, resolution: 'approved' },
-      updatedAt: now,
-    };
+    const queue = all.map((entry) =>
+      entry === target
+        ? { ...entry, answer: { text: trimmed, at: now }, resolvedAt: now, resolution: 'approved' as const }
+        : entry,
+    );
+    const next: Task = { ...task, decisions: queue, updatedAt: now };
     this.save(next);
-    appendJournal(this.root, id, { type: 'decision_answered', at: now, data: { text: trimmed } });
+    appendJournal(this.root, id, {
+      type: 'decision_answered',
+      at: now,
+      data: { text: trimmed, decisionId: target.id, stillOpen: queue.filter((e) => !e.resolvedAt).length },
+    });
     /**
-     * The answer ends the wait, so it ends the reason for waiting.
+     * The pause ends only when nothing is left to answer.
      *
-     * 「等你拍板」 with an answer already stored is the state this codebase kept hitting: the card
-     * disappeared because it had been answered, the task still said a person owed it a reply, and
-     * every guard treated it as untouchable. The words still have to be turned into a `directive`
-     * before anything runs — `resumeDecisionFor` enforces that — but the pause itself is over.
+     * With another question still open the person is still being waited on, so the task stays
+     * paused for a decision — releasing it there would have said 「nothing is owed」 while a card was
+     * on screen. `save` derives the reason from the queue, so this needs no explicit reset.
      */
-    return this.releaseDecisionPause(next);
+    return this.get(id)
+  }
+
+  /**
+   * Mark answers as handed to the supervisor.
+   *
+   * Separate from recording them because the two are separated in time: answers accumulate while
+   * questions are open, and are delivered in one message once nothing is left. Keeping the mark on
+   * the record is what makes 「answered but not yet sent」 survive a restart — otherwise a crash
+   * between the reply and the delivery would silently drop what the person said.
+   */
+  markAnswersDelivered(id: string): Task {
+    const task = this.require(id);
+    const now = this.now();
+    const queue = allDecisions(task).map((entry) =>
+      entry.answer && !entry.deliveredAt ? { ...entry, deliveredAt: now } : entry,
+    );
+    const next: Task = { ...task, decisions: queue, updatedAt: now };
+    this.save(next);
+    appendJournal(this.root, id, { type: 'answers_delivered', at: now, data: { count: queue.filter((e) => e.deliveredAt === now).length } });
+    return next;
   }
 
     /**
@@ -1049,7 +1096,8 @@ export class TaskService {
      * `awaiting_release` and the other reasons are left untouched: they are not pauses for an
      * answer, and a closed decision does not invalidate them.
      */
-    const openDecision = Boolean(task.decision && !task.decision.resolvedAt);
+    const open = openDecisions(task);
+    const openDecision = open.length > 0;
     /**
      * Only the reasons that are *about* a decision are derived.
      *
@@ -1068,7 +1116,10 @@ export class TaskService {
     if (!isDecisionish) return task;
 
     if (openDecision) {
-      return { ...task, pauseReason: task.decision!.question?.trim() ? 'needs_decision' : 'asking' };
+      // 「等你决定」 needs at least one question with words on it; otherwise the words are still
+      // being written and the honest label is 「等问句」.
+      const worded = open.some((entry) => entry.question?.trim());
+      return { ...task, pauseReason: worded ? 'needs_decision' : 'asking' };
     }
 
     const isDecisionPause = task.pauseReason === 'needs_decision' || task.pauseReason === 'asking';
@@ -1085,7 +1136,7 @@ export class TaskService {
      * That is 「等问句」, not 「nothing is happening」: the distinction is the whole reason `asking`
      * exists, and clearing it to null would hide a pending question behind 「已暂停」.
      */
-    if (task.decision?.resolvedAt) return { ...task, pauseReason: null };
+    if (allDecisions(task).length) return { ...task, pauseReason: null };
     return { ...task, pauseReason: 'asking' };
   }
 
@@ -1827,7 +1878,7 @@ export class TaskService {
    * are handed the same object they saved — see the `save` result threading below.
    */
   private save(task: Task): Task {
-    const derived = this.classifyPauseReason(task);
+    const derived = this.classifyPauseReason(syncDecisionMirror(task));
     saveTask(this.root, derived);
     this.notifyChanged();
     return derived;

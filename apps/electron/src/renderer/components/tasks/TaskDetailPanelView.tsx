@@ -341,6 +341,23 @@ function TaskDecisionAnswer({
 }
 
 function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpenSession, planJumps, onJumpToStep, agents }: TaskDetailPanelViewProps): React.JSX.Element {
+  /**
+   * The questions still waiting for an answer, in the order they were asked.
+   *
+   * Falls back to the single `decision` mirror for tasks written before the queue existed.
+   */
+  const openQuestions = ((detail.decisions?.length ? detail.decisions : detail.decision ? [detail.decision] : []) as Array<{
+    id?: string
+    question?: string
+    reason?: string
+    options?: string[]
+    askedAt?: number
+    answer?: { text: string; at: number }
+  }>)
+    .filter((entry) => !('resolvedAt' in entry) || !(entry as { resolvedAt?: number }).resolvedAt)
+    .filter((entry) => entry.question?.trim())
+
+
   const { t } = useTranslation()
   const isPaused = detail.status === 'paused'
   const isStartable = detail.status === 'backlog' || isPaused
@@ -483,28 +500,59 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         Before that the task is paused and waiting, which is what the banner below says.
       */}
       {detail.pauseReason === 'needs_decision' || detail.pauseReason === 'asking' ? (
-        detail.decision?.question?.trim() ? (
+        openQuestions.length ? (
+          /**
+           * Every open question, not just the newest.
+           *
+           * A task can be waiting on several at once — two failing checks, a boundary with two
+           * directions open — and they are answered one at a time. Rendering only `decision` (the
+           * newest open entry) hid the others completely: the page offered one card while the person
+           * was expected to answer three things.
+           *
+           * Answers are held until the last one arrives (`undeliveredAnswers` on the server), so the
+           * page says so — otherwise «我已答完» looks like nothing happened.
+           */
           <section className="rounded-xl border border-amber-500/35 bg-amber-500/8 p-4 md:p-5" aria-labelledby="task-decision-heading">
             <div className="flex items-start gap-3">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
               <div className="min-w-0 flex-1">
-                <h2 id="task-decision-heading" className="text-xs font-semibold text-amber-300">等你拍板</h2>
-                <p className="td-body mt-1 whitespace-pre-wrap text-foreground/90">
-                  {detail.decision.question}
-                </p>
-                {/* The rule's diagnosis stays as a footnote: same question as the card in
-                    the conversation, plus why a person is being asked at all. */}
-                {detail.decision.reason?.trim() ? (
-                  <p className="mt-1.5 whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">
-                    {detail.decision.reason}
+                <h2 id="task-decision-heading" className="text-xs font-semibold text-amber-300">
+                  等你拍板{openQuestions.length > 1 ? `（${openQuestions.length} 个问题）` : ''}
+                </h2>
+                {openQuestions.length > 1 ? (
+                  <p className="mt-1 text-[11px] leading-relaxed text-amber-300/80">
+                    全部答完才会一起交给督导，中途回答不会打断它。
                   </p>
                 ) : null}
-                <TaskDecisionAnswer
-                  detail={detail}
-                  onApprove={() => (onRun ?? onResume)?.(detail.id)}
-                  onCancel={() => onCancel?.(detail.id)}
-                  onAnswer={onAnswer}
-                />
+                <div className="mt-2 space-y-3">
+                  {openQuestions.map((entry, index) => (
+                    <div key={entry.id ?? `${entry.askedAt}-${index}`} className="rounded-lg bg-background/40 p-3">
+                      <p className="td-body whitespace-pre-wrap text-foreground/90">{entry.question}</p>
+                      {/* The rule's diagnosis stays as a footnote: same question as the card in
+                          the conversation, plus why a person is being asked at all. */}
+                      {entry.reason?.trim() ? (
+                        <p className="mt-1.5 whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">
+                          {entry.reason}
+                        </p>
+                      ) : null}
+                      <TaskDecisionAnswer
+                        detail={{ ...detail, decision: entry }}
+                        onApprove={() => (onRun ?? onResume)?.(detail.id)}
+                        onCancel={() => onCancel?.(detail.id)}
+                        onAnswer={onAnswer}
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="rounded-md border border-amber-500/40 px-2.5 py-1 text-[11.5px] text-amber-200 hover:bg-amber-500/10"
+                    onClick={() => onCancel?.(detail.id)}
+                  >
+                    结束任务
+                  </button>
+                </div>
               </div>
             </div>
           </section>

@@ -12,7 +12,14 @@ import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport';
 import type { HandlerDeps } from '../handler-deps';
 import type { TaskService } from '../../tasks/task-service';
 import { readJournal } from '@craft-agent/shared/tasks';
-import { normalizeSpec, normalizeTrigger, formatDecisionAnswerLine } from '@craft-agent/shared/tasks';
+import {
+  normalizeSpec,
+  normalizeTrigger,
+  formatDecisionAnswerLine,
+  formatDecisionAnswersLine,
+  openDecisions,
+  undeliveredAnswers,
+} from '@craft-agent/shared/tasks';
 import type { TaskStatus } from '@craft-agent/shared/tasks';
 
 export const HANDLED_CHANNELS = [
@@ -195,6 +202,14 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
        * with nothing identifying which task it answered.
        */
       askedBySessionId?: string,
+      /**
+       * Which question this reply closes.
+       *
+       * A task can be holding several open questions at once, so the answer has to name one.
+       * Absent means 「the newest open question」, which is what a card raised before ids existed
+       * carries.
+       */
+      decisionId?: string,
     ) => {
       const service = tasksFor(deps, workspaceId)
       const resolvedId =
@@ -224,7 +239,7 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
        * the words to whoever asked.
        */
       const hadDecision = Boolean(service.get(resolvedId)?.decision)
-      const task = service.recordDecisionAnswer(resolvedId, text)
+      const task = service.recordDecisionAnswer(resolvedId, text, decisionId)
       if (!task && hadDecision) {
         // Answered already, or no longer open: say so instead of accepting words nobody will read.
         return { accepted: false, reason: 'no pending decision on this task' }
@@ -277,10 +292,34 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
        * owner, so the lane holding the card never learned the question was closed — it kept
        * offering (or hiding) a card for a decision that had already been answered.
        */
+      /**
+       * Hold the answer until every question on this task has one.
+       *
+       * A task can hold several open questions — two failing checks, a boundary with two directions
+       * open — and delivering each reply as it lands interrupts the supervisor per question. Worse,
+       * it acts on the first reply while the person is still answering the second, so its next turn
+       * is built on half an instruction.
+       *
+       * The reply is recorded either way (the card must close immediately), and the task stays
+       * paused for a decision while anything is still open; `save` derives that from the queue.
+       */
+      const stillOpen = openDecisions(task)
+      if (stillOpen.length) {
+        broadcast(workspaceId)
+        return { accepted: true, pending: stillOpen.length }
+      }
+
       const askedBy = manager.decisionAskerFor?.(resolvedId)
       const supervisor = task.supervisorSessionId
+      /**
+       * Everything answered since the last delivery, not just this reply.
+       *
+       * This is what makes 「一起交给督导」 true: the batch is composed from the record, so the
+       * supervisor reads the whole set with the question each answer belongs to.
+       */
+      const batch = undeliveredAnswers(task)
       if (supervisor && manager.sendMessage) {
-        const line = formatDecisionAnswerLine(task, text)
+        const line = batch.length > 1 ? formatDecisionAnswersLine(task, batch) : formatDecisionAnswerLine(task, text)
         /**
          * Fire and forget. `sendMessage` resolves when the whole turn has finished
          * streaming, so awaiting it kept this RPC open for the length of a model turn —
@@ -294,9 +333,12 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
         if (askedBy && askedBy !== supervisor) {
           void manager.sendMessage(askedBy, line).catch(() => undefined)
         }
+        // Marked only after the send was issued: an answer that never left is still undelivered,
+        // so a crash between the reply and the delivery does not lose what the person said.
+        service.markAnswersDelivered(resolvedId)
       }
       broadcast(workspaceId)
-      return { accepted: true }
+      return { accepted: true, delivered: batch.length }
     },
   );
 

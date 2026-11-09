@@ -114,15 +114,22 @@ describe('a supervisor question becomes the task question', () => {
     expect(svc.recordDecisionAnswer(task.id, '再来一次')).toBeNull()
   })
 
-  it('does not touch a decision that is already open', () => {
+  it('leaves an open question alone when a different one arrives', () => {
     const task = paused()
     const first = svc.setDecisionWording(task.id, { question: '第一次' })
     const second = svc.setDecisionWording(task.id, { question: '第二次' })
 
-    // Re-asking replaces the wording; it must not mint a fresh `askedAt`, or an answered card
-    // would come back to life with a new identity.
-    expect(second!.decision?.askedAt).toBe(first!.decision?.askedAt)
-    expect(second!.decision?.question).toBe('第二次')
+    /**
+     * A second, different question joins the first instead of replacing it.
+     *
+     * Replacing was how a card took the other card's answer with it. What must not happen is a fresh
+     * `askedAt` on the *existing* question — an answered card coming back to life with a new identity
+     * — so the first entry keeps its clock and its id.
+     */
+    const all = second!.decisions ?? []
+    expect(all.length).toBe(2)
+    expect(all[0]!.askedAt).toBe(first!.decision?.askedAt ?? all[0]!.askedAt)
+    expect(all[1]!.question).toBe('第二次')
   })
 })
 

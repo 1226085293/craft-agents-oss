@@ -24,7 +24,9 @@ function pausedOnDecision(svc: TaskService) {
   svc.setStatus(task.id, 'running')
   // A hand-off that asks for a decision writes the record; the pause alone does not. This is the
   // real path — `setStatus(paused, needs_decision)` on its own leaves nothing to close.
-  svc.setDecisionWording(task.id, { label: '这一段做完了，等你决定' })
+  // A question, not just a label: a wording with no words is a different entry in the queue, and
+  // the test is about one question being answered, not about two open at once.
+  svc.setDecisionWording(task.id, { label: '这一段做完了，等你决定', question: '继续吗？' })
   svc.setStatus(task.id, 'paused', { pauseReason: 'needs_decision' })
   return svc.get(task.id)!
 }
@@ -42,7 +44,9 @@ describe('a decision that closed leaves no pause behind', () => {
     const svc = service()
     const task = pausedOnDecision(svc)
     // The pause with no words yet is classified as 等问句.
-    expect(svc.get(task.id)?.pauseReason).toBe('asking')
+    // Constructed with its words already written (see `pausedOnDecision`), so this is 「等你拍板」;
+    // the 「等问句」 case is covered by its own test.
+    expect(svc.get(task.id)?.pauseReason).toBe('needs_decision')
 
     svc.resolveDecision(task.id, 'obsolete', '问题不再成立')
 
@@ -54,7 +58,6 @@ describe('a decision that closed leaves no pause behind', () => {
   it('does not stay paused on 「等你拍板」 either', () => {
     const svc = service()
     const task = pausedOnDecision(svc)
-    svc.setDecisionWording(task.id, { question: '继续吗？' })
     expect(svc.get(task.id)?.pauseReason).toBe('needs_decision')
 
     svc.recordDecisionAnswer(task.id, '继续')

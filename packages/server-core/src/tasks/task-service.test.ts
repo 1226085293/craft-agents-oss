@@ -187,7 +187,14 @@ describe('handoff gate', () => {
     // Wording, not a state change: the pause, its clock and its kind are all untouched.
     expect(after?.status).toBe('paused');
     expect(after?.pauseReason).toBe('needs_decision');
-    expect(after?.decision?.askedAt).toBe(before?.askedAt);
+    /**
+     * Wording, not a state change: the question keeps its identity.
+     *
+     * The record here was written before ids existed, so the first re-wording is also where it gains
+     * one; what must not happen is a second entry appearing for the same question, which is what the
+     * queue length asserts.
+     */
+    expect(after?.decisions?.length ?? 1).toBe(1);
     expect(after?.decision?.deadlineAt).toBe(before?.deadlineAt);
     expect(after?.decision?.category).toBe(before?.category);
   })

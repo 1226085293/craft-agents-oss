@@ -296,7 +296,10 @@ export class TaskService {
       at: now,
       data: { from: task.status, to: status, reason: options?.pauseReason },
     });
-    return result.task;
+    // The classified task, not the raw one: returning `result.task` told the caller the pause was
+    // `needs_decision` while the record said `asking` — the same two-answers-from-one-write problem
+    // this classification exists to remove.
+    return classified;
   }
 
   /**
@@ -436,7 +439,26 @@ export class TaskService {
     };
     this.save(next);
     appendJournal(this.root, id, { type: 'decision_resolved', at: now, data: { resolution, note } });
-    return next;
+    /**
+     * The pause the decision created ends with the decision.
+     *
+     * Leaving it behind produced a task that claimed to be waiting for something that had already
+     * been settled: `paused / asking`, no question, no answer, and — because every guard looks at
+     * either an open decision or a running task — nothing that would ever look at it again.
+     */
+    return this.releaseDecisionPause(next);
+  }
+
+  /**
+   * Drop a decision pause once no decision is open any more.
+   *
+   * Only the two decision reasons are touched: `budget`, `failures` and `process_lost` describe the
+   * task itself and survive a decision closing.
+   */
+  private releaseDecisionPause(task: Task): Task {
+    if (task.status !== 'paused' || !task.decision?.resolvedAt) return task;
+    if (task.pauseReason !== 'needs_decision' && task.pauseReason !== 'asking') return task;
+    return this.clearPauseReason(task.id);
   }
 
   /**
@@ -844,7 +866,15 @@ export class TaskService {
     };
     this.save(next);
     appendJournal(this.root, id, { type: 'decision_answered', at: now, data: { text: trimmed } });
-    return next;
+    /**
+     * The answer ends the wait, so it ends the reason for waiting.
+     *
+     * 「等你拍板」 with an answer already stored is the state this codebase kept hitting: the card
+     * disappeared because it had been answered, the task still said a person owed it a reply, and
+     * every guard treated it as untouchable. The words still have to be turned into a `directive`
+     * before anything runs — `resumeDecisionFor` enforces that — but the pause itself is over.
+     */
+    return this.releaseDecisionPause(next);
   }
 
     /**
@@ -971,7 +1001,27 @@ export class TaskService {
    * ordinary rather than exceptional.
    */
   private classifyPauseReason(task: Task): Task {
-    if (task.status !== 'paused' || task.pauseReason !== 'needs_decision') return task;
+    if (task.status !== 'paused') return task;
+    /**
+     * A pause for a decision needs an open decision to be paused for.
+     *
+     * Once the record is closed — answered, timed out, or made obsolete by a scope change — there is
+     * nothing left to wait for, and a task still labelled 「等你拍板」/「等问句」 describes a question
+     * that no longer exists. Observed: a run wrote `directive` and its scope together, the scope
+     * write closed the decision as `obsolete`, and the task stayed `paused / asking` with no
+     * question, no answer, and a gate that would have let it run. Nothing checked, because every
+     * rule either looks at `needs_decision` or at a task that is running.
+     *
+     * Clearing it here leaves the task paused for no declared reason, which the board shows as
+     * 「已暂停」 and a person can resume — the honest state for 「nothing is holding this」.
+     */
+    const isDecisionPause = task.pauseReason === 'needs_decision' || task.pauseReason === 'asking';
+    if (!isDecisionPause) return task;
+
+    // Closed already: nothing is owed, so no decision pause belongs here.
+    if (task.decision?.resolvedAt) return { ...task, pauseReason: null };
+
+    if (task.pauseReason !== 'needs_decision') return task;
     /**
      * 「等你决定」 needs a question, not just a decision record.
      *

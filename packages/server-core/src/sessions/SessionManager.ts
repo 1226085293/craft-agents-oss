@@ -8025,23 +8025,42 @@ ${request.prompt}`;
       if (!patch.status) {
         const current = service.get(identifier)
         /**
-         * A closed decision cannot leave the task paused on `needs_decision`.
+         * A closed decision cannot leave the task paused on a reason that no longer holds.
          *
-         * Widening the scope was supposed to unblock the run, but this branch returned
-         * the task exactly as it was: `paused` + `pauseReason: needs_decision` with
-         * `resolvedAt` now set. Nothing could resolve it again (the record looked
-         * settled) and nothing could resume it (no path asks a non-pending task to
-         * run), so T-1 sat there forever showing 「等我拍板」 above an empty card.
+         * Widening the scope was supposed to unblock the run, but this branch returned the task
+         * exactly as it was: `paused` with `resolvedAt` now set. Nothing could resolve it again
+         * (the record looked settled) and nothing could resume it (no path asks a paused task to
+         * run), so T-1 sat there forever above an empty card.
          *
-         * The pause reason is cleared when it was only the decision holding the task.
+         * Both pause reasons count. The pair 「等问句」/「等你拍板」 are distinguished by whether a
+         * question exists, and this branch used to name only the second — so a task paused as
+         * 「等问句」 (record open, no words yet) had its decision closed here and stayed paused for
+         * a reason nobody could clear. Observed on the next run: `paused / asking`, no question, no
+         * answer, and every watchdog pass reporting nothing to do.
          */
-        if (current?.status === 'paused' && current.pauseReason === 'needs_decision') {
+        const heldByDecision =
+          current?.status === 'paused' &&
+          (current.pauseReason === 'needs_decision' || current.pauseReason === 'asking')
+        if (heldByDecision) {
           /*
-           * `setStatus(id, 'paused')` would be a no-op — `applyTransition` returns early
-           * when the status does not change — so the reason has to be cleared directly.
+           * `setStatus(id, 'paused')` would be a no-op — `applyTransition` returns early when the
+           * status does not change — so the reason has to be cleared directly.
            */
-          const cleared = service.clearPauseReason(identifier)
-          return { status: cleared.status }
+          service.clearPauseReason(identifier)
+          /**
+           * And then actually run it.
+           *
+           * Clearing the label is not the same as lifting the stop: the task is paused, so the
+           * scheduler and the watchdog both leave it alone, and only a run gets it moving again.
+           * The gate is consulted first — it refuses when a reply has not yet been turned into a
+           * `directive` — so this cannot resume work nobody has authorised.
+           */
+          const verdict = resumeDecisionFor(service.get(identifier)!)
+          if (!verdict.allowed) {
+            return { status: service.get(identifier)?.status ?? 'paused' }
+          }
+          const started = await this.runTask(workspaceId, identifier, 'scope')
+          return { status: started.started ? 'running' : 'paused' }
         }
         return { status: current?.status ?? 'backlog' }
       }

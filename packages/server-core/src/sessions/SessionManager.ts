@@ -6086,6 +6086,17 @@ export class SessionManager implements ISessionManager {
               id: patch.id,
               ...(patch.status ? { status: patch.status as never } : {}),
               ...(patch.title ? { title: patch.title } : {}),
+              /**
+               * The owner travels with the step.
+               *
+               * `applyPlanPatch` refuses to create a sub-step without one, and the tool schema tells
+               * the worker to name it. This bridge used to pass status, title, note and remove but
+               * not `agent`, so the field was dropped here and the rule below could never be
+               * satisfied: a real run sent `agent: "builtin-default"` seven times, was told each time
+               * that the sub-step had no owner, spent four minutes retrying, and finally handed the
+               * task back with a question about it.
+               */
+              ...(patch.agent ? { agent: patch.agent } : {}),
               ...(patch.note !== undefined ? { note: patch.note } : {}),
               ...(patch.remove !== undefined ? { remove: patch.remove } : {}),
             })

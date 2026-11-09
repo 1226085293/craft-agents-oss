@@ -128,9 +128,12 @@ describe('an outline has no status of its own', () => {
 
     // The value was recomputed from the sub-steps on every read anyway, so accepting the write
     // meant answering "ok" and then showing something else.
+    //
+    // A section with no sub-steps now has a second way out — mark it done with a note saying what
+    // proves it — so the refusal names both paths instead of only "go and split it up".
     expect(result.error).toBeDefined()
-    expect(result.error).toContain('由小节派生')
     expect(result.error).toContain('2.1')
+    expect(result.error).toContain('note')
   })
 
   it('refuses a bare outline that has no sub-steps yet', () => {

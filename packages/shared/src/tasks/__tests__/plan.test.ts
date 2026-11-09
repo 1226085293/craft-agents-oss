@@ -2,7 +2,6 @@ import { describe, expect, it } from 'bun:test';
 
 import {
   applyPlanPatch,
-  fillMissingOwners,
   checkAgreedPlanAppend,
   currentStep,
   formatPlan,
@@ -518,38 +517,5 @@ describe('an agreed plan is append-only', () => {
 
   it('leaves a worker-shaped plan completely free', () => {
     expect(checkAgreedPlanAppend(plan(), '0', undefined)).toBeUndefined()
-  })
-})
-
-/**
- * A plan written in one piece still owes an owner per sub-step.
- *
- * The per-step rule refuses a sub-step without an agent — a sub-step is the unit of assignment —
- * but `task_create` hands `spec.plan` over whole and never passes through it. The page then showed
- * 「1.1. 创建 docs/a.md」 with nobody attached, which reads as 「nobody is doing this」.
- */
-describe('filling in owners for a plan that arrives whole', () => {
-  const plan: PlanStep[] = [
-    { id: '1', title: '写文件', status: 'todo' },
-    { id: '1.1', title: '创建 docs/a.md', status: 'todo' },
-    { id: '1.2', title: '读回确认', status: 'todo', agent: 'agent-qa' },
-    { id: '2', title: '收尾', status: 'todo' },
-  ]
-
-  it('gives every unowned sub-step the task assignee', () => {
-    const filled = fillMissingOwners(plan, 'builtin-default')!
-
-    expect(filled.find((s) => s.id === '1.1')?.agent).toBe('builtin-default')
-    expect(filled.find((s) => s.id === '1.2')?.agent).toBe('agent-qa')
-  })
-
-  it('leaves outlines alone — a stage is not an assignment', () => {
-    const filled = fillMissingOwners(plan, 'builtin-default')!
-
-    expect(filled.find((s) => s.id === '1')?.agent).toBeUndefined()
-  })
-
-  it('changes nothing when there is no assignee to fall back to', () => {
-    expect(fillMissingOwners(plan, undefined)).toBe(plan)
   })
 })

@@ -49,7 +49,7 @@ describe('a supervisor question becomes the task question', () => {
         plan: [
           { id: '1', title: '写文件', status: 'todo' },
           { id: '1.1', title: '创建', status: 'done', agent: 'a', note: 'ok' },
-          { id: '1.2', title: '读回确认', status: 'todo' },
+          { id: '1.2', title: '读回确认', status: 'todo', agent: 'a' },
           { id: '2', title: '收尾', status: 'todo' },
         ],
       } as never,

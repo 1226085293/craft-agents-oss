@@ -35,7 +35,7 @@ import {
   type TaskStatus,
   type TaskTrigger,
 } from './types.ts';
-import { applyDerivedStatuses, fillMissingOwners, normalizePlan } from './plan.ts';
+import { applyDerivedStatuses, normalizePlan } from './plan.ts';
 
 export function getTasksDir(workspaceRoot: string): string {
   return join(workspaceRoot, 'tasks');
@@ -281,21 +281,7 @@ export function createTask(input: CreateTaskInput): Task {
     },
     lifecycle: { errorCount: 0, consecutiveFailures: 0 },
     origin: { supervisorSessionId: input.supervisorSessionId, toolCallId: input.toolCallId },
-    /**
-     * A plan handed in whole still owes an owner per sub-step.
-     *
-     * The per-step rule refuses an unowned sub-step, but `task_create` writes `spec.plan` directly,
-     * so a plan could arrive with nobody attached to any of its steps and the page showed bare
-     * titles. Filled here, once, where the assignee is known.
-     */
-    spec: input.spec
-      ? {
-          ...input.spec,
-          ...(input.spec.plan
-            ? { plan: fillMissingOwners(input.spec.plan, input.assigneeAgentId) }
-            : {}),
-        }
-      : undefined,
+    spec: input.spec,
     trigger: input.trigger ?? { kind: 'manual' },
     stats: { runs: 0, activeMs: 0 },
     heartbeatIntervalMin: DEFAULT_HEARTBEAT_MINUTES,

@@ -43,7 +43,7 @@ import {
   childrenOf,
   DECISION_TIMEOUT_MS,
   TERMINAL_STATUSES,
-  fillMissingOwners,
+  unownedSubSteps,
   type PlanStepStatus,
   type ArtifactProbe,
   type Handoff,
@@ -180,6 +180,24 @@ export class TaskService {
         task.origin.supervisorSessionId === request.supervisorSessionId,
     );
     if (existing) return existing;
+
+    /**
+     * A plan may not arrive with unowned sub-steps.
+     *
+     * `applyPlanPatch` already refuses one, because a sub-step is the unit of assignment and an
+     * unowned one was assigned to nobody. `task_create` writes `spec.plan` in one piece and so
+     * bypassed that rule; the record then looked complete while nobody had decided who does what.
+     * Refused here rather than filled in with the assignee: the assignee is who the task went to,
+     * not a judgement about which profile fits this section, and a stamped guess would stop anyone
+     * from ever asking.
+     */
+    const unowned = unownedSubSteps(request.spec?.plan);
+    if (unowned.length > 0) {
+      throw new Error(
+        `小节必须写明谁做（agent），这几条没有：${unowned.map((step) => step.id).join('、')}。` +
+          '先读这份简报里的「可用分工」，再按每个小节的活把 agent 写上；大纲不用写。',
+      );
+    }
 
     const task = createTask({
       ...request,
@@ -1035,13 +1053,17 @@ export class TaskService {
 
   updateSpec(id: string, spec: TaskSpec): Task {
     const task = this.require(id);
-    // Same rule as `createTask`: a plan written in one piece still owes an owner per sub-step.
-    const withOwners = spec.plan
-      ? { ...spec, plan: fillMissingOwners(spec.plan, task.assigneeAgentId) }
-      : spec;
-    const next: Task = { ...task, spec: withOwners, updatedAt: this.now() };
+    // Same rule as `create`: a plan written in one piece may not skip the owner of a sub-step.
+    const unowned = unownedSubSteps(spec.plan);
+    if (unowned.length > 0) {
+      throw new Error(
+        `小节必须写明谁做（agent），这几条没有：${unowned.map((step) => step.id).join('、')}。` +
+          '按每个小节的活把 agent 写上；大纲不用写。',
+      );
+    }
+    const next: Task = { ...task, spec, updatedAt: this.now() };
     this.save(next);
-    appendJournal(this.root, id, { type: 'spec_updated', at: this.now(), data: { spec: withOwners } });
+    appendJournal(this.root, id, { type: 'spec_updated', at: this.now(), data: { spec } });
     return next;
   }
 

@@ -145,3 +145,35 @@ describe('the nudge for a worker that stopped without filing', () => {
     expect(text).toContain('delivered');
   })
 })
+
+/**
+ * The brief has to say where the owner comes from, before the step is written.
+ *
+ * Rule 6 said 「每一条小节都要写负责人」, which is a statement about the finished row. What was
+ * missing is the step before it: read the roster, then choose. Plans kept arriving with owners
+ * missing because the rule read like a formatting note, and the only place the roster appeared was
+ * further down the brief.
+ */
+describe('writing a sub-step', () => {
+  it('tells the worker to read the roster first and name an owner', () => {
+    const rules = formatPlanRuleBlock({ planExists: true });
+
+    expect(rules).toContain('可用分工');
+    expect(rules).toContain('agent');
+    // Reading the roster is the instruction; stamping a default afterwards is not.
+    expect(rules).toContain('先读');
+    expect(rules).toContain('会被直接拒绝');
+  })
+
+  it('carries the roster with the ids to choose from', () => {
+    const brief = formatTaskBrief(task(), {
+      roster: [
+        { id: 'builtin-default', dispatchHint: '通用执行' },
+        { id: 'agent-qa', dispatchHint: '验收与复现' },
+      ],
+    });
+
+    expect(brief).toContain('agent-qa');
+    expect(brief).toContain('不要自己编名字');
+  })
+})

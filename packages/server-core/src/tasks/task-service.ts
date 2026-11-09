@@ -59,7 +59,15 @@ export interface TaskServiceDeps {
   /** Session ids that currently exist (for process-lost detection). */
   sessionExists: (sessionId: string) => boolean;
   /** Wake the owning supervisor with a one-line nudge. */
-  wakeSupervisor: (sessionId: string, text: string) => void;
+  /**
+   * Tell the owning supervisor something, optionally naming the subject.
+   *
+   * `key` is what the notice is ABOUT — `T-1:handoff-fail` — supplied by the caller because it knows
+   * the fact. Coalescing on the sentence instead would mean two retry notices about one task read as
+   * two different subjects, and inferring the subject from the wording is exactly the kind of
+   * guesswork this codebase keeps having to remove.
+   */
+  wakeSupervisor: (sessionId: string, text: string, key: string) => void;
   /**
    * Start the next section's owner on a task, without going through the
    * supervisor's conversation.
@@ -1051,6 +1059,57 @@ export class TaskService {
     return { ok: true, plan: result.plan };
   }
 
+  /**
+   * Replace the acceptance list.
+   *
+   * Acceptance items describe the RESULT, so a wrong one has to be fixable: a real task carried
+   * 「本轮未执行 1.2」, the user then released 1.2, and from that moment every hand-off contradicted
+   * the item. Three rejections tripped the failure fuse and the task could never close — the
+   * supervisor's only escape was to abandon it, because nothing could edit the list.
+   *
+   * Refused once the task is finished: acceptance is what `completed` was granted against, and
+   * rewriting it afterwards would rewrite the reason for a decision that has already been taken.
+   */
+  setAcceptance(
+    id: string,
+    items: Array<{ id?: string; check: string; command?: string }>,
+  ): Task {
+    const task = this.require(id);
+    if (TERMINAL_STATUSES.includes(task.status)) {
+      throw new Error(`${task.status} 的任务不能再改验收项：它已经按当时的验收结论结束了`);
+    }
+    const acceptance = items.map((item, index) => ({
+      // Keep a given id so an edit replaces that item instead of adding a second copy.
+      id: item.id?.trim() || `a${index + 1}`,
+      check: item.check.trim(),
+      ...(item.command?.trim() ? { command: item.command.trim() } : {}),
+    }));
+    if (acceptance.some((item) => !item.check)) {
+      throw new Error('验收项必须写一句判断：什么算做到了');
+    }
+
+    const spec: TaskSpec = { ...(task.spec ?? {}), acceptance };
+    const next: Task = {
+      ...task,
+      spec,
+      // The judge reads `requirement`; leaving it stale would keep grading against the old wording.
+      verify: {
+        ...task.verify,
+        enabled: true,
+        requirement: acceptance.map((item) => item.check).join('\n'),
+        lastVerdict: undefined,
+      },
+      updatedAt: this.now(),
+    };
+    this.save(next);
+    appendJournal(this.root, id, {
+      type: 'acceptance_updated',
+      at: this.now(),
+      data: { acceptance },
+    });
+    return next;
+  }
+
   updateSpec(id: string, spec: TaskSpec): Task {
     const task = this.require(id);
     // Same rule as `create`: a plan written in one piece may not skip the owner of a sub-step.
@@ -1462,6 +1521,9 @@ export class TaskService {
           : accepted
             ? `${id} 交接通过：${handoff.summary}`
             : `${id} 交接未通过（${reasons.join('；') || handoff.outcome}）：${handoff.summary}`,
+        // One subject per task and outcome: a second failure notice about the same task is the same
+        // fact restated, and a queue that stacks them makes the supervisor act twice.
+        `${id}:${pending ? 'decision' : accepted ? 'handoff-pass' : 'handoff-fail'}`,
       );
     }
 

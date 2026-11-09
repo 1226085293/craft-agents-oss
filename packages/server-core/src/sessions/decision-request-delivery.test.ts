@@ -257,7 +257,7 @@ describe('a decision request is written for the reader', () => {
     expect(sent).toEqual([]);
   })
 
-  it('a completion notice is also read, not answered', async () => {
+  it('a completion notice is read as a message, and never answered', async () => {
     const requester = buildRequester();
     await (
       sm as unknown as {
@@ -269,10 +269,17 @@ describe('a decision request is written for the reader', () => {
       'sess_asker',
     );
     const notice = managed?.messages.find((m) => m.content === 'T-1 已完成');
-    expect(notice?.role).toBe('info');
-    // A plain notice carries no card sub-type; the level is what colours it.
-    expect(notice?.statusType).toBeUndefined();
-    expect(notice?.infoLevel).toBe('success');
+    /**
+     * An agent reporting to a person is a message from an agent.
+     *
+     * This used to be `role: 'info'` — a grey status row, which reads as system chrome rather than
+     * as somebody telling you what happened. It now draws as an assistant bubble, and carries
+     * `isRelayed` so the readers that treat a final assistant message as "this session finished and
+     * this is what it said" (restart recovery, session output) skip it.
+     */
+    expect(notice?.role).toBe('assistant');
+    expect((notice as { isRelayed?: boolean } | undefined)?.isRelayed).toBe(true);
+    // No turn is started by it: the report is for a person, never model input.
     expect(sent).toEqual([]);
   });
 });

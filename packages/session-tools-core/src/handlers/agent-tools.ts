@@ -303,6 +303,7 @@ export async function handleTaskUpdate(
     scope?: string;
     directive?: string;
     agents?: string[];
+    acceptance?: Array<{ id?: string; check: string; command?: string }>;
   },
 ): Promise<ToolResult> {
   if (!ctx.taskTools?.update) return errorResponse('task_update is only available to a supervisor session.');
@@ -315,6 +316,7 @@ export async function handleTaskUpdate(
       error: args.error,
       ...(args.scope?.trim() ? { scope: args.scope.trim() } : {}),
       ...(args.directive?.trim() ? { directive: args.directive.trim() } : {}),
+      ...(args.acceptance?.length ? { acceptance: args.acceptance } : {}),
     });
     return successResponse(`Task ${args.identifier} → ${result.status}.`);
   } catch (error) {

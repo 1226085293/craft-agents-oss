@@ -59,11 +59,39 @@ export interface TaskUpdatePatch {
    * the boundary could be satisfied by renaming and could not express 「把那个登录问题修完」.
    */
   directive?: string;
+  /**
+   * Replace the acceptance list.
+   *
+   * Writable after creation because a mis-worded item used to be permanent: one task carried
+   * 「本轮未执行 1.2」, the user then released 1.2, and every later hand-off contradicted it — three
+   * rejections tripped the failure fuse, and the only way out was to abandon the task.
+   */
+  acceptance?: Array<{ id?: string; check: string; command?: string }>;
+}
+
+/**
+ * Is this row an answer spoken BY this session?
+ *
+ * A relayed row (`isRelayed`) is a message from another agent that was forwarded here for a person
+ * to read. It renders as an ordinary assistant bubble on purpose, but three readers must not take it
+ * for this session's own reply:
+ *
+ * - restart recovery treats a final assistant message as proof the turn ended, and would drop a turn
+ *   that was still in flight;
+ * - `getLastFinalAssistantMessageId` feeds "what did this session conclude", which is how a
+ *   supervisor's output is handed to whoever asked for it;
+ * - the same text is used when merging a child session's result back into its parent.
+ *
+ * Pure and exported so the rule is testable without a session.
+ */
+export function isOwnReply(message: { role?: string; isIntermediate?: boolean; isRelayed?: boolean }): boolean {
+  return message.role === 'assistant' && !message.isIntermediate && !message.isRelayed;
 }
 
 function generateShortId(): string {
   return Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0')
 }
+import { SupervisorNoticeQueue } from './supervisor-notices.ts'
 import { startWatchdog, type WatchdogLoop } from '../tasks/task-watchdog.ts'
 import { startTaskScheduler, runEventPass } from '../tasks/task-scheduler.ts'
 import { startPageRefreshScheduler } from '../pages/page-refresh-scheduler.ts'
@@ -2109,6 +2137,27 @@ export class SessionManager implements ISessionManager {
    * Automatically notifies the power manager on transitions (true→false, false→true)
    * so callers don't need to remember to call onSessionStarted/onSessionStopped.
    */
+  /** Notices waiting for a supervisor that is mid-turn; see `SupervisorNoticeQueue`. */
+  private readonly supervisorNotices = new SupervisorNoticeQueue()
+
+  /**
+   * Hand a notice to a supervisor: now if it is between turns, otherwise when it is.
+   *
+   * `key` is the subject, not the text — `T-1:failures` twice is one notice about the same fact, and
+   * delivering both would ask the reader to act on it twice.
+   */
+  private notifySupervisor(sessionId: string, key: string, text: string): void {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return
+    if (!managed.isProcessing) {
+      void this.sendMessage(sessionId, text).catch((error) => {
+        sessionLog.warn('Failed to wake supervisor', { sessionId, error })
+      })
+      return
+    }
+    this.supervisorNotices.hold(sessionId, key, text)
+  }
+
   private setProcessing(managed: ManagedSession, processing: boolean): void {
     const was = managed.isProcessing
     managed.isProcessing = processing
@@ -2123,6 +2172,14 @@ export class SessionManager implements ISessionManager {
       // the loop is cheap — one rules-only pass, no model call.
       this.watchdogLoops.get(managed.workspace.id)?.wake()
       if (managed.role === 'supervisor') {
+        // Notices that arrived while this turn was running go out first: they are the reason the
+        // supervisor may need to act, and the backlog below can wait one more message.
+        const queued = this.supervisorNotices.take(managed.id)
+        if (queued) {
+          void this.sendMessage(managed.id, queued).catch((error) => {
+            sessionLog.warn('Failed to deliver queued supervisor notices', { sessionId: managed.id, error })
+          })
+        }
         // Hand over anything that arrived while this turn was running. Without
         // this, a queued event waited for the NEXT inbound message to be noticed:
         // drainToSupervisor bails while the supervisor is busy and nothing came
@@ -3195,7 +3252,8 @@ export class SessionManager implements ISessionManager {
     for (let i = managed.messages.length - 1; i >= 0; i--) {
       const m = managed.messages[i]!
       if (
-        (m.role === 'assistant' && !m.isIntermediate) ||
+        // A relayed row is not this session's answer; see `isOwnReply`.
+        isOwnReply(m) ||
         m.role === 'plan' ||
         m.role === 'auth-request' ||
         (m.role === 'error' && !continuedAfterError) ||
@@ -7476,14 +7534,15 @@ ${request.prompt}`;
       workspaceRoot: workspace.rootPath,
       onChanged: () => this.broadcastTaskChanged(workspace.id),
       sessionExists: (sessionId) => this.sessions.has(sessionId),
-      wakeSupervisor: (sessionId, text) => {
+      wakeSupervisor: (sessionId, text, key) => {
         // The supervisor cannot see who spoke. Every system nudge therefore names
         // its origin: a message that looks like the user talking is acted on as an
         // instruction, and "交接通过" read as a user request sends the supervisor
         // looking for a person who never asked for anything.
-        void this.sendMessage(sessionId, `〔任务进展〕${text}`).catch((error) => {
-          sessionLog.warn('Failed to wake supervisor', { sessionId, error })
-        })
+        //
+        // Queued by subject: a task that retries notifies twice, and the second notice used to
+        // arrive as a second instruction to do the same thing.
+        this.notifySupervisor(sessionId, key, `〔任务进展〕${text}`)
       },
       /**
        * Start the agent that owns the next section of a task.
@@ -7732,9 +7791,9 @@ ${request.prompt}`;
          * woken, and a message does that.
          */
         sessionIdle: (sessionId) => !this.sessions.get(sessionId)?.isProcessing,
-        notify: (sessionId, text) => {
+        notify: (sessionId, text, key) => {
           // Origin, not content: see the note on `wakeSupervisor`.
-          void this.sendMessage(sessionId, `〔巡检〕${text}`).catch(() => undefined)
+          this.notifySupervisor(sessionId, key, `〔巡检〕${text}`)
         },
       }, undefined, {
         // A watchdog that throws every pass looks exactly like one that finds
@@ -7930,6 +7989,9 @@ ${request.prompt}`;
     if (patch.directive?.trim()) {
       const service = this.getTasks(workspaceId)
       service.setDirective(identifier, patch.directive.trim())
+    }
+    if (patch.acceptance?.length) {
+      this.getTasks(workspaceId).setAcceptance(identifier, patch.acceptance)
     }
     if (patch.scope?.trim()) {
       const service = this.getTasks(workspaceId)
@@ -8384,13 +8446,24 @@ ${request.prompt}`;
       statusType?: 'decision_request'
       infoLevel?: Message['infoLevel']
       decisionRequest?: DecisionRequest
+      /**
+       * Render as a normal assistant bubble instead of a notice row.
+       *
+       * `report_to_user` is an agent telling a person something. Drawing that as `role: 'info'`
+       * turned an answer into a grey status line — the reader sees system chrome where a message
+       * from an agent should be — and the text itself is long enough that it read like a stray log
+       * entry. The row is still written without waking a model, and it still carries `isRelayed` so
+       * nothing mistakes it for this session's reply.
+       */
+      asAssistantBubble?: boolean
     },
   ): void {
     const message: Message = {
       id: randomUUID(),
-      role: 'info',
+      role: row.asAssistantBubble ? 'assistant' : 'info',
       content: row.text,
       timestamp: this.monotonic(),
+      ...(row.asAssistantBubble ? { isRelayed: true } : {}),
       ...(row.statusType ? { statusType: row.statusType } : {}),
       ...(row.infoLevel ? { infoLevel: row.infoLevel } : {}),
       ...(row.decisionRequest ? { decisionRequest: row.decisionRequest } : {}),
@@ -8529,6 +8602,8 @@ ${request.prompt}`;
     this.appendReadOnlyRow(target, {
       text,
       infoLevel: kind === 'blocked' ? 'warning' : 'success',
+      // A report to the person is a message from an agent, so it reads as one.
+      asAssistantBubble: true,
     })
   }
 
@@ -9403,7 +9478,7 @@ ${request.prompt}`;
     // Iterate backwards to find the most recent final assistant message
     for (let i = messages.length - 1; i >= 0; i--) {
       const msg = messages[i]
-      if (msg.role === 'assistant' && !msg.isIntermediate) {
+      if (isOwnReply(msg)) {
         return msg.id
       }
     }

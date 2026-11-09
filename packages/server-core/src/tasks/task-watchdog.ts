@@ -98,8 +98,14 @@ export interface WatchdogDeps {
    * Returns whether the run actually started; a claim about resuming has to come from the result.
    */
   resume?: (task: Task) => void | boolean | Promise<boolean>;
-  /** Tell the owning supervisor, in one line. */
-  notify: (supervisorSessionId: string, text: string) => void;
+  /**
+   * Tell the owning supervisor, in one line.
+   *
+   * `key` names the subject so duplicate notices collapse: a task that fails twice must not queue two
+   * messages that ask the supervisor to do the same thing twice. The caller supplies it because it
+   * knows which finding this is; reading it back out of the sentence would be guesswork.
+   */
+  notify: (supervisorSessionId: string, text: string, key: string) => void;
   /**
    * Apply the default answer to an unanswered decision request.
    *
@@ -427,11 +433,14 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
 function announceWake(
   deps: WatchdogDeps,
   task: Task,
+  /** What this wake was about — `idle` and `unreported` are different subjects for one task. */
+  subject: string,
   result: void | boolean | Promise<boolean>,
   successText: string,
   failureText: string,
 ): void {
-  const fail = (): void => deps.notify(task.supervisorSessionId, failureText)
+  const key = `${task.id}:${subject}`
+  const fail = (): void => deps.notify(task.supervisorSessionId, failureText, `${key}-failed`)
   if (result === false) {
     fail()
     return
@@ -439,17 +448,26 @@ function announceWake(
   if (result && typeof (result as Promise<boolean>).then === 'function') {
     void (result as Promise<boolean>).then((ok) => {
       if (ok === false) fail()
-      else deps.notify(task.supervisorSessionId, successText)
+      else deps.notify(task.supervisorSessionId, successText, key)
     }, fail)
     return
   }
-  deps.notify(task.supervisorSessionId, successText)
+  deps.notify(task.supervisorSessionId, successText, key)
 }
 
 /** Apply the fixes for a batch of findings. Pure rules; no model calls. */
 export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): number {
   let acted = 0;
   for (const finding of findings) {
+    /**
+     * One subject per finding: the task and what the finding is.
+     *
+     * Everything below writes to the same supervisor, and a task can produce several findings in one
+     * pass. Naming the subject here — from the finding, not from the sentence — is what lets the
+     * outbound queue collapse two notices about the same fact into one.
+     */
+    const notify = (text: string) =>
+      deps.notify(finding.task.supervisorSessionId, text, `${finding.task.id}:${finding.kind}`)
     switch (finding.kind) {
       case 'unworded_question': {
         /**
@@ -476,9 +494,7 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         const next = attempts + 1
         deps.recordUnwordedRetry?.(finding.task.id, next)
         const label = finding.task.decision?.label || '一个决定'
-        deps.notify(
-          finding.task.supervisorSessionId,
-          next >= MAX_UNWORDED_QUESTION_NUDGES
+        notify(next >= MAX_UNWORDED_QUESTION_NUDGES
             ? `${finding.task.id} 停在了「${label}」，问题还是没有写出来。` +
                 `这是最后一次提醒：要么用 report_to_user(kind='decision', taskId='${finding.task.id}', question=…) 写清问什么，要么直接结束这个任务。`
             : `${finding.task.id} 停在了「${label}」，但问题还没写出来（用户那边没有可回答的内容）。` +
@@ -493,27 +509,21 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
           finding.task.id,
           `「${finding.task.decision?.label ?? '决策请求'}」超时未响应，已按拒绝处理。`,
         );
-        deps.notify(
-          finding.task.supervisorSessionId,
-          `${finding.task.id} 的决策请求已超时，默认按拒绝处理，任务未继续。`,
+        notify(`${finding.task.id} 的决策请求已超时，默认按拒绝处理，任务未继续。`,
         );
         acted += 1;
         break;
       case 'off_track': {
         const progress = planProgress(finding.task.spec?.plan);
         deps.pause(finding.task.id, 'waiting', 'plan stopped moving');
-        deps.notify(
-          finding.task.supervisorSessionId,
-          `${finding.task.id} 的计划已 ${Math.round(OFF_TRACK_MS / 60_000)} 分钟没有推进（完成 ${progress.done}/${progress.total}），任务已暂停，需要确认它是否偏离目标。`,
+        notify(`${finding.task.id} 的计划已 ${Math.round(OFF_TRACK_MS / 60_000)} 分钟没有推进（完成 ${progress.done}/${progress.total}），任务已暂停，需要确认它是否偏离目标。`,
         );
         acted += 1;
         break;
       }
       case 'looping':
         deps.pause(finding.task.id, 'failures', 'repeated identical handoffs');
-        deps.notify(
-          finding.task.supervisorSessionId,
-          `${finding.task.id} 连续 ${MAX_REPEATED_HANDOFFS} 次交接内容相同，Worker 在原地打转，任务已暂停。`,
+        notify(`${finding.task.id} 连续 ${MAX_REPEATED_HANDOFFS} 次交接内容相同，Worker 在原地打转，任务已暂停。`,
         );
         acted += 1;
         break;
@@ -528,18 +538,14 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         const outcome = deps.resume?.(finding.task)
         Promise.resolve(outcome)
           .then((started) => {
-            deps.notify(
-              finding.task.supervisorSessionId,
-              started === false
+            notify(started === false
                 ? `${finding.task.id} 的会话丢失后自动重试没有启动（可能超出预算或被门禁拦住），需要你看一下。`
                 : `${finding.task.id} 的会话丢失，已自动重试一次。再丢就需要人工确认。`,
             )
           })
           .catch((error) => {
             log.warn('[watchdog] resume after process loss failed', { id: finding.task.id, error: String(error) })
-            deps.notify(
-              finding.task.supervisorSessionId,
-              `${finding.task.id} 的会话丢失后自动重试失败，需要你看一下。`,
+            notify(`${finding.task.id} 的会话丢失后自动重试失败，需要你看一下。`,
             )
           })
         acted += 1
@@ -547,9 +553,7 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
       }
       case 'orphaned':
         deps.pause(finding.task.id, 'process_lost', 'session disappeared');
-        deps.notify(
-          finding.task.supervisorSessionId,
-          `${finding.task.id} 的会话已消失，任务已暂停（可续跑）。`,
+        notify(`${finding.task.id} 的会话已消失，任务已暂停（可续跑）。`,
         );
         acted += 1;
         break;
@@ -562,15 +566,14 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
           announceWake(
             deps,
             finding.task,
+            'unreported',
             result,
             `${finding.task.id} 的执行者已停止但没交作业，已提醒它用 report_result 交接。`,
             `${finding.task.id} 的执行者已停止且没有交接，唤醒失败——任务卡在这里，需要你确认下一步。`,
           )
         } else {
           deps.pause(finding.task.id, 'waiting', 'stopped without filing a hand-off')
-          deps.notify(
-            finding.task.supervisorSessionId,
-            `${finding.task.id} 没有交接且会话也不在了，任务已暂停。`,
+          notify(`${finding.task.id} 没有交接且会话也不在了，任务已暂停。`,
           )
         }
         acted += 1
@@ -584,15 +587,14 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
           // running. A task that says 进行中 while nothing is working on it is
           // worse than a paused one, because the user waits instead of looking.
           deps.pause(finding.task.id, 'process_lost', 'session idle with no progress');
-          deps.notify(
-            finding.task.supervisorSessionId,
-            `${finding.task.id} 的会话已空闲 ${Math.round(IDLE_SESSION_MS / 60_000)} 分钟以上，唤醒失败 ${attempts} 次仍未推进，任务已暂停，需要你确认下一步。`,
+          notify(`${finding.task.id} 的会话已空闲 ${Math.round(IDLE_SESSION_MS / 60_000)} 分钟以上，唤醒失败 ${attempts} 次仍未推进，任务已暂停，需要你确认下一步。`,
           );
         } else {
           const result = deps.wakeSession(finding.task, sessionId, 'idle')
           announceWake(
             deps,
             finding.task,
+            'idle',
             result,
             `${finding.task.id} 的会话空闲了，已唤醒它继续（第 ${attempts + 1} 次）。`,
             `${finding.task.id} 的会话空闲了，但唤醒失败（第 ${attempts + 1} 次），需要你确认下一步。`,
@@ -603,23 +605,19 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
       }
       case 'stalled':
         deps.pause(finding.task.id, 'process_lost', 'heartbeat stalled');
-        deps.notify(
-          finding.task.supervisorSessionId,
-          `${finding.task.id} 超过两个心跳没有动静，任务已暂停。`,
+        notify(`${finding.task.id} 超过两个心跳没有动静，任务已暂停。`,
         );
         acted += 1;
         break;
       case 'failing':
         deps.pause(finding.task.id, 'failures', 'consecutive failures');
-        deps.notify(
-          finding.task.supervisorSessionId,
-          `${finding.task.id} 连续失败，任务已暂停，需要你决定是否重试。`,
+        notify(`${finding.task.id} 连续失败，任务已暂停，需要你决定是否重试。`,
         );
         acted += 1;
         break;
       case 'overdue':
         deps.pause(finding.task.id, 'budget', 'deadline passed');
-        deps.notify(finding.task.supervisorSessionId, `${finding.task.id} 已过截止时间，任务已暂停。`);
+        notify(`${finding.task.id} 已过截止时间，任务已暂停。`);
         acted += 1;
         break;
       default:

@@ -340,6 +340,17 @@ export interface Message {
   isGuidance?: boolean;
   // Intermediate text (commentary between tool calls, not final response)
   isIntermediate?: boolean;
+  /**
+   * A row that was forwarded to this session's reader, not spoken by this session.
+   *
+   * The supervisor forwards what it wants a person to see (`report_to_user`) into the reader's
+   * transcript. It has to render as an ordinary assistant bubble — it is a message from an agent,
+   * and a grey notice row is not what a person reads as an answer — but it is not this session's
+   * reply, so anything that asks "what did this session finally say" must skip it: restart recovery
+   * treats a final assistant message as proof the turn ended, and merging a session's output takes
+   * the last final assistant message as its result.
+   */
+  isRelayed?: boolean;
   // Aborted: this assistant message belonged to a turn cut short by Stop,
   // redirect, or internal cancellation. Persisted for restart recovery,
   // defense evaluation, and messaging delivery suppression.

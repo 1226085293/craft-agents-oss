@@ -194,12 +194,18 @@ export const TaskCreateSchema = z.object({
   acceptance: z
     .array(
       z.object({
-        check: z.string().describe('What must be true, in words.'),
+        check: z
+          .string()
+          .describe(
+            'What must be true of the finished result, e.g. "docs/a.md 存在且内容非空". Never what this run is allowed to touch.',
+          ),
         command: z.string().optional().describe('Command the host runs; exit 0 = pass.'),
       }),
     )
     .optional()
-    .describe('How completion is judged. Run by the host, never by the worker itself.'),
+    .describe(
+      'How completion is judged. Run by the host, never by the worker itself. Each item outlives a run, so write a fact about the deliverable — 「本轮未执行 1.2」 is not acceptance but a directive, and as acceptance it became permanently false the moment the next run did 1.2.',
+    ),
   /**
    * The plan, as agreed with the user.
    *
@@ -267,6 +273,28 @@ export const TaskUpdateSchema = z.object({
     .string()
     .optional()
     .describe('One sentence saying what the reply authorises, e.g. "只做登录修复，其余不动". Required before a task whose question was answered can run again.'),
+  /**
+   * Replace the acceptance list.
+   *
+   * Acceptance items are about the RESULT (a file exists, a test passes), so they outlive a run.
+   * They used to be writable only at creation, which made a mis-worded one permanent: a real task
+   * carried 「本轮未执行 1.2」, the user then released 1.2, and from that moment every hand-off
+   * contradicted the item — three rejections, the failure fuse, and a task that could never close.
+   * The supervisor's only way out was to abandon the task and start another.
+   *
+   * A check that says what THIS run may do is a directive, not acceptance: write it with
+   * `directive`, which the next run reads as its authorisation.
+   */
+  acceptance: z
+    .array(
+      z.object({
+        id: z.string().optional().describe('Keep the existing id to edit that item; omit to add.'),
+        check: z.string().describe('One sentence about the finished result, e.g. "docs/a.md 存在且内容非空".'),
+        command: z.string().optional().describe('A command that exits 0 when the check holds.'),
+      }),
+    )
+    .optional()
+    .describe('Replace the acceptance list. Write what must be true of the RESULT, never what this run is allowed to touch — that belongs in directive.'),
 });
 
 export const TaskPlanSchema = z.object({

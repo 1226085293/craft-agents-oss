@@ -218,8 +218,14 @@ export class TaskService {
     // create a second task for the same request.
     const existing = listTasks(this.root).find(
       (task) =>
-        task.origin.toolCallId === request.toolCallId &&
-        task.origin.supervisorSessionId === request.supervisorSessionId,
+        /**
+         * A task without `origin` is not a candidate — and must not crash the read.
+         *
+         * Older records (and hand-written ones) can lack it; reading its fields unguarded threw
+         * inside `listTasks`, so creating any task failed once one such file existed.
+         */
+        task.origin?.toolCallId === request.toolCallId &&
+        task.origin?.supervisorSessionId === request.supervisorSessionId,
     );
     if (existing) return existing;
 

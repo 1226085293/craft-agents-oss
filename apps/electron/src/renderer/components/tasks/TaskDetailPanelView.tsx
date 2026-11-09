@@ -530,6 +530,24 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         )
       ) : null}
 
+      {/*
+        * Above the plan, because a stop is what the reader needs first: why nothing is moving
+        * decides whether the plan below is worth reading at all. It used to sit under the whole
+        * plan and the contract, so a paused task's reason was below the fold.
+        *
+        * Only reasons that have no notice of their own: `needs_decision` draws the ask card and
+        * `asking` draws 「等问句」 — repeating them here put one state on screen twice.
+        */}
+      {detail.pauseReason && detail.pauseReason !== 'needs_decision' && detail.pauseReason !== 'asking' ? (
+        <div className="flex items-start gap-3 rounded-lg border border-amber-500/25 bg-amber-500/8 p-3.5" role="status">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+          <div className="min-w-0">
+            <div className="text-xs font-semibold text-amber-300">暂停原因</div>
+            <p className="td-body mt-1 text-foreground/85">{pauseReasonLabel(detail.pauseReason)}</p>
+          </div>
+        </div>
+      ) : null}
+
       <PlanSection
         plan={detail.spec?.plan}
         jumps={planJumps}
@@ -639,20 +657,6 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         ) : null}
       </section>
 
-
-      {/*
-        * Only reasons that have no notice of their own. `needs_decision` draws the ask card
-        * above and `asking` draws 「等问句」; repeating them here put one state on screen twice.
-        */}
-      {detail.pauseReason && detail.pauseReason !== 'needs_decision' && detail.pauseReason !== 'asking' ? (
-        <div className="flex items-start gap-3 rounded-lg border border-amber-500/25 bg-amber-500/8 p-3.5" role="status">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
-          <div className="min-w-0">
-            <div className="text-xs font-semibold text-amber-300">暂停原因</div>
-            <p className="td-body mt-1 text-foreground/85">{pauseReasonLabel(detail.pauseReason)}</p>
-          </div>
-        </div>
-      ) : null}
 
       {detail.lifecycle.lastError ? (
         <div className="flex items-start gap-3 rounded-lg border border-destructive/25 bg-destructive/5 p-3.5" role="alert">

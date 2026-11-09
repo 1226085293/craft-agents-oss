@@ -143,6 +143,9 @@ const PAUSE_REASON_LABEL: Record<string, string> = {
   waiting: '等待中',
   needs_decision: '等待你决定',
   asking: '等问句',
+  // Stopped on instruction with the plan unfinished: the plan has more work, but nobody is
+  // asking anything. Without this the list printed the raw enum value.
+  awaiting_release: '已按指示停止',
 }
 
 function pauseReasonLabel(reason: string): string {
@@ -492,9 +495,14 @@ export function TaskBoardPanel({
                           ) : null}
                         </span>
                         {task.pauseReason ? (
-                          <span className="truncate pl-[22px] text-[11.5px] text-amber-400" title={pauseReasonLabel(task.pauseReason)}>
-                            {pauseReasonLabel(task.pauseReason)}
-                            {task.decisionLabel ? ` · ${task.decisionLabel}` : ''}
+                          {/*
+                            * One label, not two. A decision pause says 「等待你决定」 and the
+                            * decision's own label says 「需要你决定」 — printing both read as
+                            * 「等待你决定 · 需要你决定」. The decision's wording is the more
+                            * specific of the two, so it replaces the generic one when present.
+                            */}
+                          <span className="truncate pl-[22px] text-[11.5px] text-amber-400" title={task.decisionLabel ?? pauseReasonLabel(task.pauseReason)}>
+                            {task.decisionLabel ?? pauseReasonLabel(task.pauseReason)}
                           </span>
                         ) : null}
                         {task.lastHandoff ? (

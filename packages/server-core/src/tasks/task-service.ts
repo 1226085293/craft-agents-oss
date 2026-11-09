@@ -731,9 +731,15 @@ export class TaskService {
        * something on screen to answer. Writing the question is the moment that becomes true, so
        * the kind of pause is corrected here instead of being left for a reader to interpret.
        */
+      /**
+       * The pause reason is not set here any more.
+       *
+       * It used to be nudged from `asking` to `needs_decision` in this one case, which is exactly
+       * the shape that leaves a gap: the parked-as-`awaiting_release` task kept its reason while
+       * this record made a card appear. `save` derives it from the record now, for every writer.
+       */
       const asking = task.status === 'paused' && task.pauseReason === 'asking';
-      const created2: Task = asking ? { ...created, pauseReason: 'needs_decision' } : created;
-      this.save(created2);
+      const created2: Task = this.save(created);
       appendJournal(this.root, id, {
         type: 'decision_asked',
         at: now,
@@ -1002,36 +1008,68 @@ export class TaskService {
    */
   private classifyPauseReason(task: Task): Task {
     if (task.status !== 'paused') return task;
+
     /**
-     * A pause for a decision needs an open decision to be paused for.
+     * The pause reason is derived from the decision record, not stored beside it.
      *
-     * Once the record is closed — answered, timed out, or made obsolete by a scope change — there is
-     * nothing left to wait for, and a task still labelled 「等你拍板」/「等问句」 describes a question
-     * that no longer exists. Observed: a run wrote `directive` and its scope together, the scope
-     * write closed the decision as `obsolete`, and the task stayed `paused / asking` with no
-     * question, no answer, and a gate that would have let it run. Nothing checked, because every
-     * rule either looks at `needs_decision` or at a task that is running.
+     * These were two records of one state and they drifted, visibly:
      *
-     * Clearing it here leaves the task paused for no declared reason, which the board shows as
-     * 「已暂停」 and a person can resume — the honest state for 「nothing is holding this」.
+     *   pauseReason `awaiting_release` — 「已按你的指示停在这里」
+     *   decision    open, with a question — the card headed 「需要你决定」
+     *
+     * A live run showed both at once. The supervisor had parked the task as 「按指示停了」 and then
+     * asked a question; writing the question updated the decision but not the reason, so the board
+     * said one thing and the conversation card another. Nobody could tell which was true, and there
+     * was no way to fix it by writing a better sentence anywhere — one of the two had to go.
+     *
+     * The decision record wins because it is the one a person acts on: if a question is open, the
+     * task is paused for that question, whatever else parked it. Deriving here means the two
+     * cannot disagree again, in either direction, in either order of writes.
+     *
+     *   open decision, question written  → needs_decision  (「等你决定」, answerable)
+     *   open decision, no words yet      → asking          (「等问句」, not yet answerable)
+     *   no open decision                 → nothing is owed (never a decision pause)
+     *
+     * `awaiting_release` and the other reasons are left untouched: they are not pauses for an
+     * answer, and a closed decision does not invalidate them.
      */
+    const openDecision = Boolean(task.decision && !task.decision.resolvedAt);
+    /**
+     * Only the reasons that are *about* a decision are derived.
+     *
+     * `budget` and `failures` say why the run stopped; an old unanswered question can coexist with
+     * them, and rewriting that to 「等你决定」 would hide the thing that actually went wrong. A
+     * question being open does not make those pauses decision pauses.
+     *
+     * `awaiting_release` is included on purpose: the supervisor parks a delivered slice there and
+     * then asks something, and the question is what the person must act on now.
+     */
+    const isDecisionish =
+      task.pauseReason === 'needs_decision' ||
+      task.pauseReason === 'asking' ||
+      task.pauseReason === 'awaiting_release' ||
+      task.pauseReason == null;
+    if (!isDecisionish) return task;
+
+    if (openDecision) {
+      return { ...task, pauseReason: task.decision!.question?.trim() ? 'needs_decision' : 'asking' };
+    }
+
     const isDecisionPause = task.pauseReason === 'needs_decision' || task.pauseReason === 'asking';
     if (!isDecisionPause) return task;
 
-    // Closed already: nothing is owed, so no decision pause belongs here.
-    if (task.decision?.resolvedAt) return { ...task, pauseReason: null };
-
-    if (task.pauseReason !== 'needs_decision') return task;
     /**
-     * 「等你决定」 needs a question, not just a decision record.
+     * No open decision, and two different reasons why that can be.
      *
-     * A decision is written the moment the run hands back (the pause is the rule's decision, the
-     * wording is the supervisor's), so the record can exist with `question` empty — that is what
-     * the person saw on T-2: a card headed 「等你拍板」 with nothing in it, while the supervisor's
-     * turn had been cut off before it could say anything. Nothing was actionable, so this is
-     * 「等问句」, and it turns into 「等你决定」 the moment the words arrive.
+     * `resolvedAt` set — the question closed (answered, timed out, made obsolete). Nothing is owed,
+     * so no decision pause belongs here; leaving the label on made a task claim somebody owed it a
+     * reply while the card was already gone.
+     *
+     * No record at all — the supervisor paused to ask something and has not written a word yet.
+     * That is 「等问句」, not 「nothing is happening」: the distinction is the whole reason `asking`
+     * exists, and clearing it to null would hide a pending question behind 「已暂停」.
      */
-    if (task.decision?.question?.trim()) return task;
+    if (task.decision?.resolvedAt) return { ...task, pauseReason: null };
     return { ...task, pauseReason: 'asking' };
   }
 
@@ -1760,9 +1798,23 @@ export class TaskService {
    * was invisible to a reader until an unrelated RPC happened to publish. Wrapping the
    * save keeps "written" and "announced" from drifting apart again.
    */
-  private save(task: Task): void {
-    saveTask(this.root, task);
+  /**
+   * Every write passes through the derivation.
+   *
+   * `classifyPauseReason` used to be called from two places, and a writer that did not call it —
+   * `setDecisionWording` was one — could leave the pause reason disagreeing with the decision it
+   * had just written. That is how a live task ended up as `awaiting_release` (「已按你的指示停在这
+   * 里」) with an open question on the board at the same time.
+   *
+   * Applying it here makes the pair impossible to desynchronise: the reason is a function of the
+   * record, and the record is what gets stored. Callers still see the derived value because they
+   * are handed the same object they saved — see the `save` result threading below.
+   */
+  private save(task: Task): Task {
+    const derived = this.classifyPauseReason(task);
+    saveTask(this.root, derived);
     this.notifyChanged();
+    return derived;
   }
 
   private require(id: string): Task {

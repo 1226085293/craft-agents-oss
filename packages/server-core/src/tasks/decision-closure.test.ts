@@ -77,9 +77,12 @@ describe('a cleared pause reason actually clears', () => {
     const svc = service()
     await pausedOnDecision(svc)
 
-    // The reason the obvious fix does not work: same status short-circuits.
+    // The reason the obvious fix does not work: same status short-circuits. (`asking`, because the
+    // pause is a decision pause whose question has not been worded yet — the point here is that
+    // the value survives the call at all.)
+    const before = svc.get('T-1')!.pauseReason
     svc.setStatus('T-1', 'paused', { pauseReason: null })
-    expect(svc.get('T-1')!.pauseReason).toBe('needs_decision')
+    expect(svc.get('T-1')!.pauseReason).toBe(before)
 
     expect(svc.clearPauseReason('T-1').pauseReason).toBeNull()
   })

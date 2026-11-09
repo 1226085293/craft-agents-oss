@@ -192,6 +192,13 @@ export interface TaskStats {
    */
   lostRetries?: number;
   /**
+   * How many times the watchdog has asked for a decision that has no words yet.
+   *
+   * On the task for the same reason `lostRetries` is: the watchdog is rebuilt with the app, so a
+   * counter held in memory would let one interrupted turn be nudged forever, once per boot.
+   */
+  unwordedRetries?: number;
+  /**
    * Last time a trigger actually started a run.
    *
    * The scheduler compares this against the cron expression on startup: every

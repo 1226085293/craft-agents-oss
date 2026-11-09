@@ -827,6 +827,25 @@ export class TaskService {
    * reset on every boot would retry the same loss forever — which is the opposite of "retry once,
    * then ask a person".
    */
+  /**
+   * Count a nudge about a decision whose question was never worded.
+   *
+   * Same shape as `recordLostRetry`, same reason: the counter has to outlive the process that
+   * increments it, or a task stuck on an unwritten question is nudged on every boot forever.
+   */
+  recordUnwordedRetry(id: string, count: number): Task {
+    const task = this.require(id);
+    const stats = task.stats ?? { runs: 0, activeMs: 0 };
+    const next: Task = {
+      ...task,
+      stats: { ...stats, unwordedRetries: count },
+      updatedAt: this.now(),
+    };
+    this.save(next);
+    appendJournal(this.root, id, { type: 'unworded_nudge', at: this.now(), data: { count } });
+    return next;
+  }
+
   recordLostRetry(id: string, count: number): Task {
     const task = this.require(id);
     const stats = task.stats ?? { runs: 0, activeMs: 0 };
@@ -926,7 +945,16 @@ export class TaskService {
    */
   private classifyPauseReason(task: Task): Task {
     if (task.status !== 'paused' || task.pauseReason !== 'needs_decision') return task;
-    if (task.decision) return task;
+    /**
+     * 「等你决定」 needs a question, not just a decision record.
+     *
+     * A decision is written the moment the run hands back (the pause is the rule's decision, the
+     * wording is the supervisor's), so the record can exist with `question` empty — that is what
+     * the person saw on T-2: a card headed 「等你拍板」 with nothing in it, while the supervisor's
+     * turn had been cut off before it could say anything. Nothing was actionable, so this is
+     * 「等问句」, and it turns into 「等你决定」 the moment the words arrive.
+     */
+    if (task.decision?.question?.trim()) return task;
     return { ...task, pauseReason: 'asking' };
   }
 

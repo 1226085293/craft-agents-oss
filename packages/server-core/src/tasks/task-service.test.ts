@@ -112,7 +112,12 @@ describe('handoff gate', () => {
     svc.setStatus(task.id, 'running');
     const result = await svc.reportHandoff(task.id, { outcome: 'needs_decision', summary: '要你定' }, 'sess_w');
     expect(result.task.status).toBe('paused');
-    expect(result.task.pauseReason).toBe('needs_decision');
+    /**
+     * 「等问句」, not 「等你拍板」 — the decision record exists but nobody has worded a question yet.
+     * The supervisor's next turn does that, and `setDecisionWording` flips this to
+     * `needs_decision` at the same moment the card gains something to answer.
+     */
+    expect(result.task.pauseReason).toBe('asking');
   });
 
   /**
@@ -729,7 +734,7 @@ describe('scope delivered, plan still open', () => {
     // finished, so the next move is a decision rather than a silent continuation.
     expect(passed).toBe(true);
     expect(after.status).toBe('paused');
-    expect(after.pauseReason).toBe('needs_decision');
+    expect(after.pauseReason).toBe('asking');
     expect(after.decision?.label).toContain('这一段做完了');
     expect(after.decision?.reason).toContain('2');
     // The card quotes the instruction instead of claiming the rest was never authorised.
@@ -826,7 +831,8 @@ describe('the decision is asked once', () => {
   it('still parks the task on a decision the first time', async () => {
     const { svc, task } = await parked()
     expect(svc.get(task.id)?.status).toBe('paused')
-    expect(svc.get(task.id)?.pauseReason).toBe('needs_decision')
+    // Parked and waiting for the supervisor's words; see the 「等问句」 note above.
+    expect(svc.get(task.id)?.pauseReason).toBe('asking')
   })
 })
 

@@ -35,7 +35,8 @@ export type WatchdogFinding =
   | { kind: 'decision_timeout'; task: Task }
   | { kind: 'looping'; task: Task }
   | { kind: 'off_track'; task: Task }
-  | { kind: 'resume_lost'; task: Task };
+  | { kind: 'resume_lost'; task: Task }
+  | { kind: 'unworded_question'; task: Task };
 
 export interface WatchdogDeps {
   /** Tasks to inspect (already filtered to the workspace). */
@@ -106,6 +107,8 @@ export interface WatchdogDeps {
    * that the decision is now resolved as a refusal.
    */
   denyDecision?: (id: string, note: string) => void;
+  /** Count a nudge about an unwritten question, so the next pass can tell it has been tried. */
+  recordUnwordedRetry?: (id: string, attempts: number) => void;
   now?: () => number;
 }
 
@@ -117,6 +120,9 @@ export interface WatchdogDeps {
  * task will not finish on its own and a human should look.
  */
 export const MAX_REPEATED_HANDOFFS = 3;
+
+/** Nudges before the message changes from 「补上问题」 to 「任务停在这里，需要你处理」. */
+export const MAX_UNWORDED_QUESTION_NUDGES = 3;
 
 /**
  * How long a plan may sit unchanged before the worker is considered off track.
@@ -156,6 +162,20 @@ export const IDLE_SESSION_MS = 5 * 60_000;
  * genuinely scribbling a `report_result` call to finish it.
  */
 export const UNREPORTED_GRACE_MS = 90_000;
+
+/**
+ * How long a task may sit waiting for a question that has not been written down.
+ *
+ * The pause and its question are produced by different turns: a run hands back and the task
+ * pauses on a decision, then the supervisor spends a turn putting that decision into words. When
+ * that turn is cut off — as it was on T-2 — the pause survives and the words never arrive, and the
+ * task waits for an answer nobody was asked for. Nothing else looks at a paused task, so without
+ * this it waits forever.
+ *
+ * Two minutes is longer than a wording turn takes and shorter than a person's patience: the point
+ * is to notice, not to interrupt.
+ */
+export const UNWORDED_QUESTION_GRACE_MS = 2 * 60_000;
 
 /**
  * How long to wait when this run has already done something and then stopped.
@@ -278,6 +298,26 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
      * The counter lives on the task, so "once" survives a restart — a watchdog that retried on
      * every boot would turn one lost process into an endless loop of fresh runs.
      */
+    /**
+     * A pause waiting for words that never came.
+     *
+     * Checked after the deadline, because an expired request is the more urgent claim — but before
+     * everything else, because nothing else will ever look at this task: it is paused, so every
+     * running-state rule below skips it, and its decision is unresolved, so the deadline rule waits
+     * for a person who was never asked anything.
+     */
+    if (
+      task.status === 'paused' &&
+      (task.pauseReason === 'needs_decision' || task.pauseReason === 'asking') &&
+      // Already answered: the person has spoken, so there is nothing left to word.
+      !task.decision?.resolvedAt &&
+      !task.decision?.question?.trim() &&
+      now - (task.decision?.askedAt ?? lastActivityOf(task)) >= UNWORDED_QUESTION_GRACE_MS
+    ) {
+      findings.push({ kind: 'unworded_question', task });
+      continue;
+    }
+
     if (task.status === 'paused' && task.pauseReason === 'process_lost') {
       const retries = task.stats?.lostRetries ?? 0
       if (retries < MAX_PROCESS_LOST_RETRIES && now - lastActivityOf(task) >= processLostGraceMs()) {
@@ -402,6 +442,38 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
   let acted = 0;
   for (const finding of findings) {
     switch (finding.kind) {
+      case 'unworded_question': {
+        /**
+         * Ask the supervisor to finish the sentence it started.
+         *
+         * The task stopped because a decision is owed, and the only thing missing is the words —
+         * the supervisor is the party that owes them, and its turn is what got cut off. Telling the
+         * user 「等你拍板」 instead would be asking them to answer a question nobody asked (T-2 sat
+         * like that with a card holding no text).
+         *
+         * Counted, because a supervisor that never manages to say it must not be nudged every
+         * thirty seconds forever. After the limit the sentence changes target: the person is told
+         * what is actually wrong, and can end or restart the task themselves.
+         */
+        const attempts = (finding.task.stats?.unwordedRetries ?? 0) + 1
+        deps.recordUnwordedRetry?.(finding.task.id, attempts)
+        const label = finding.task.decision?.label || '一个决定'
+        if (attempts > MAX_UNWORDED_QUESTION_NUDGES) {
+          deps.notify(
+            finding.task.supervisorSessionId,
+            `${finding.task.id} 已经暂停 ${attempts} 次等你把「${label}」说清楚，仍然没有问题内容。` +
+              `任务停在这里不会自己动：要么写清问什么，要么直接结束这个任务。`,
+          )
+        } else {
+          deps.notify(
+            finding.task.supervisorSessionId,
+            `${finding.task.id} 停在了「${label}」，但问题还没写出来（用户那边没有可回答的内容）。` +
+              `用 report_to_user(kind='decision', taskId='${finding.task.id}', question=…) 把要问的一句话补上。`,
+          )
+        }
+        acted += 1
+        break
+      }
       case 'decision_timeout':
         // Silence is refusal, never consent.
         deps.denyDecision?.(

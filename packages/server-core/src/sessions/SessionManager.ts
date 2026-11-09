@@ -7722,6 +7722,7 @@ ${request.prompt}`;
           }
         },
         denyDecision: (id, note) => service.denyDecision(id, note),
+        recordUnwordedRetry: (id, attempts) => service.recordUnwordedRetry(id, attempts),
         notify: (sessionId, text) => {
           // Origin, not content: see the note on `wakeSupervisor`.
           void this.sendMessage(sessionId, `〔巡检〕${text}`).catch(() => undefined)

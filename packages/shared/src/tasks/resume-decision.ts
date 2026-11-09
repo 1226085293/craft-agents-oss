@@ -16,8 +16,8 @@
  * 「停止剩下的任务」 was read as an instruction to keep going.
  *
  * Interpreting language is the supervisor's job — it is a model, and it can say what it understood
- * and write it down through `task_update` (`authorizedUpTo` / `authorizedSteps`). This function
- * only compares timestamps: has anyone written an authorisation since that reply arrived?
+ * and write it down through `task_update` as `directive`. This function only compares timestamps:
+ * has anyone written an instruction since that reply arrived?
  *
  * If not, the task does NOT resume. Silence is not permission, and a guess about what somebody
  * authorised is worse than an explicit wait.
@@ -25,7 +25,7 @@
 import type { Task } from './types.ts';
 
 export type ResumeVerdict =
-  | { allowed: true; authorizedSteps?: string[]; authorizedUpTo?: string; reason: string }
+  | { allowed: true; /** The supervisor's reading of the reply, verbatim. */ directive?: string; reason: string }
   | { allowed: false; why: string };
 
 /**
@@ -49,38 +49,31 @@ export function resumeDecisionFor(task: Task): ResumeVerdict {
     /**
      * The reply is recorded; what it *means* has to be written down by someone who can read it.
      *
-     * `authorizedAt` is stamped by the tool that writes a boundary. Comparing it to when the
-     * reply arrived answers "has this reply been acted on?" without reading a single character
-     * of it. A supervisor that decides 「放行到 2」 writes `authorizedUpTo: '2'`; one that
-     * decides 「停止」 sets the task to `canceled` and never resumes it; one that decides
-     * "nothing changes" writes nothing and the task stays paused.
+     * `directive.at` is stamped by the tool that records the instruction. Comparing it to when the
+     * reply arrived answers "has this reply been acted on?" without reading a single character of
+     * it. A supervisor that decides 「只剩收尾」 writes that sentence as the directive; one that
+     * decides 「停止」 sets the task to `canceled` and never resumes it; one that decides "nothing
+     * changes" writes nothing and the task stays paused.
      *
      * Observed: without this, the reply 「停止剩下的任务」 lifted the pause, the worker was
      * resumed with the whole remaining plan, and the brief under the answer asked it to expand
      * the next outline.
      */
     const answeredAt = decision?.answer?.at ?? 0;
-    const authorizedAt = task.spec?.authorizedAt ?? 0;
-    if (authorizedAt < answeredAt) {
+    const directive = task.spec?.directive;
+    if (!directive || directive.at <= answeredAt) {
       return {
         allowed: false,
         why:
-          `你已回复「${answer}」，但还没有人把这句话翻译成授权。` +
-          '先由督导用 `task_update` 写下授权（authorizedUpTo / authorizedSteps，或直接结束任务）：' +
-          '答复本身不等于放行，代码也不猜它的意思。',
+          `你已回复「${answer}」，但还没有人把这句话翻译成指令。` +
+          '先由督导用 `task_update` 写下 `directive`（把这句话的意思写成一句话，例如「只做登录修复，其余不动」），' +
+          '或者直接把任务结束掉：答复本身不等于放行，代码也不猜它的意思。',
       };
     }
-    const boundary = task.spec?.authorizedSteps;
-    const ceiling = task.spec?.authorizedUpTo;
     return {
       allowed: true,
-      ...(boundary?.length ? { authorizedSteps: boundary } : {}),
-      ...(ceiling ? { authorizedUpTo: ceiling } : {}),
-      reason: ceiling
-        ? `已按你的答复授权到 ${ceiling}`
-        : boundary?.length
-          ? `已按你的答复授权到 ${boundary.join('、')}`
-          : '已按你的答复放行，没有边界',
+      directive: directive.text,
+      reason: `已按你的答复放行：${directive.text}`,
     };
   }
 

@@ -34,6 +34,20 @@ export interface PlanStep {
   note?: string;
   /** When the status last changed — the drift check reads this. */
   updatedAt?: number;
+  /**
+   * When this step first entered `doing`. Never cleared.
+   *
+   * This is the line between a plan and a record. A step nobody started is still a
+   * proposal: dropping it loses nothing. A step that was started *happened* — someone
+   * read code, ran a command, made a decision — and deleting it leaves the next worker
+   * with a plan that agrees with reality only by forgetting what went wrong. Observed:
+   * a run 「cleared」 its plan by removing the steps it did not want to finish, and the
+   * hand-off looked complete because the evidence had been deleted rather than refuted.
+   *
+   * A timestamp is used because it is checkable without reading anyone's prose: the
+   * question is "was this ever picked up?", not "did the note say it was abandoned?".
+   */
+  startedAt?: number;
 }
 
 export const PLAN_STEP_LIMIT = 60;
@@ -214,6 +228,9 @@ export function normalizePlan(raw: unknown, now = Date.now()): PlanStep[] | unde
         ? { note: value.note.trim().slice(0, 300) }
         : {}),
       ...(typeof value.updatedAt === 'number' ? { updatedAt: value.updatedAt } : { updatedAt: now }),
+      // Carried across a reload, or the "was this ever started?" question resets to "no"
+      // every time the workspace is re-read and started steps become deletable again.
+      ...(typeof value.startedAt === 'number' ? { startedAt: value.startedAt } : {}),
     });
     if (steps.length >= PLAN_STEP_LIMIT) break;
   }
@@ -288,25 +305,10 @@ export function lastPlanChangeAt(plan: PlanStep[] | undefined): number {
  * keeping a stale row would make the plan disagree with the task. A finished
  * step stays, because it is the record of what was accomplished.
  */
-export interface PlanPatchScope {
-  /**
-   * Step ids the person authorised for this run.
-   *
-   * `spec.scope` already says it in prose — 「完成 1.2 后暂停，不执行步骤 2」 — and nothing
-   * read it. Observed on a real run: the boundary was written down in those words, and the
-   * worker went on to mark 1.2, 2 and 2.1 done and delivered the whole task. A sentence
-   * cannot stop a tool call; a list can.
-   */
-  authorizedSteps?: string[];
-  /** The highest id allowed, e.g. `1.2` — may name a step that does not exist yet. */
-  authorizedUpTo?: string;
-}
-
 export function applyPlanPatch(
   plan: PlanStep[] | undefined,
   patch: { id: string; status?: PlanStepStatus; title?: string; note?: string; agent?: string; remove?: boolean },
   now = Date.now(),
-  scope: PlanPatchScope = {},
 ): { plan: PlanStep[]; changed: boolean; error?: string } {
   const steps = [...(plan ?? [])];
   const index = steps.findIndex((step) => step.id === patch.id);
@@ -335,6 +337,29 @@ export function applyPlanPatch(
     if (removing.status === 'done') {
       return { plan: steps, changed: false, error: 'a finished step stays in the plan' };
     }
+    /**
+     * A step that was started is a record, not a draft.
+     *
+     * Nothing below `doing` is history yet — an unstarted step is a proposal nobody acted
+     * on, so dropping it costs nothing but a line. Once picked up, the step has changed
+     * the world: code was read, a command ran, a decision was taken. Removing it does not
+     * undo any of that, it just removes the only place that says it happened, and the next
+     * worker inherits a plan that looks clean. The way out is to record the outcome, not to
+     * delete the evidence.
+     *
+     * `startedAt` rather than `status`: a step taken out of `doing` and put back to `todo`
+     * would otherwise become deletable again, which is the same erasure one click later.
+     */
+    if (removing.startedAt) {
+      return {
+        plan: steps,
+        changed: false,
+        error:
+          `${removing.id} 已经开工过，是发生过的事，不能删。` +
+          '不做它了就把状态改成 blocked 并写明原因（卡在哪、为什么放弃），' +
+          '下一个接手的人得知道这里发生过什么；要换方向就在后面加大纲，不要抹掉已经发生的事。',
+      };
+    }
     const kids = childrenOf(steps, removing.id);
     if (kids.length > 0) {
       return {
@@ -344,37 +369,33 @@ export function applyPlanPatch(
       };
     }
     steps.splice(index, 1);
-    return { plan: steps, changed: true };
+    return { plan: applyDerivedStatuses(steps), changed: true };
   }
 
   /**
-   * Refuse to work past the authorised slice.
+   * An outline's status is an observation, not an instruction.
    *
-   * Only status moves are gated: writing a note or renaming is harmless, but marking a
-   * step `doing` or `done` claims work that was never authorised. The refusal names the
-   * boundary and the way out, because a wall without an exit is what makes a worker
-   * pretend — one previous run "cleared" the plan by removing the steps instead.
-   */
-  const authorized = scope.authorizedSteps
-  const ceiling = scope.authorizedUpTo
-  const moving = patch.status === 'doing' || patch.status === 'done'
-  /**
-   * Allowed if the step is in the explicit list, or at or below the ceiling.
+   * It is already recomputed from the sub-steps on every read and after every patch
+   * (`applyDerivedStatuses`), so writing it was never more than a suggestion that the very
+   * next read overwrote. Accepting the write and then discarding it is worse than either
+   * refusing or ignoring: the caller is told nothing and the value it reads back disagrees
+   * with what it just sent.
    *
-   * The ceiling is what makes 「完成 1.2 后暂停」 enforceable before 1.2 has been planned: the
-   * id does not have to exist to be the place to stop at.
+   * Rejected rather than silently dropped so the caller learns the model in one turn: an
+   * outline says *what stage this is*, a sub-step says *what to do* — "section 2 is under
+   * way" is a statement about 2.1, 2.2, and it stops being true by itself when they close.
    */
-  const withinCeiling = isAuthorizedStep(patch.id, { authorizedSteps: authorized, authorizedUpTo: ceiling })
-  if (authorized && authorized.length > 0 && moving && !authorized.includes(patch.id) && !withinCeiling) {
-    const allowed = steps.filter((step) => authorized.includes(step.id)).map((step) => step.id)
+  if (isOutlineStep(patch.id) && patch.status) {
+    const kids = childrenOf(steps, patch.id);
     return {
       plan: steps,
       changed: false,
       error:
-        `${patch.id} 不在本次授权范围内（授权：${allowed.join('、') || '无'}）。` +
-        '不要把它标成完成，也不要移除它——保持原样，用 `report_result`（outcome 用 handoff）交接，' +
-        '由督导决定是否扩大范围。',
-    }
+        `大纲 ${patch.id} 的状态不用写，它由小节派生（小节开工则进行中，小节全完成则完成）。` +
+        (kids.length === 0
+          ? `先把 ${patch.id} 拆成可执行的小节（如 ${patch.id}.1），标小节的状态。`
+          : `要推进就标小节：${kids.map((kid) => kid.id).join('、')}。`),
+    };
   }
 
   if (index < 0) {
@@ -386,18 +407,17 @@ export function applyPlanPatch(
     // "do the current section" unanswerable, because there is no section.
     const parent = stepParent(patch.id);
     /**
-     * Who owns a sub-step nobody named.
+     * A sub-step names its owner when it is created.
      *
-     * Leaving it blank made the plan unable to answer "whose work is this": on a
-     * real run outline 2 and its only sub-step both carried no owner, so the board
-     * fell back to the assignee for display while the routing logic saw "nobody" —
-     * two different answers from one field. A sub-step inherits the owner of the
-     * section it belongs to, which is the same rule the display was already implying.
+     * Inheritance from the outline used to fill this in, which is why the field could be
+     * left blank and still look filled. It also meant one value answered two questions:
+     * the section's agent and the task's agent. Observed: outline 2 and its only sub-step
+     * both carried no owner, so the board displayed the assignee while routing saw nobody —
+     * two answers from one field. Now that outlines carry no owner at all, a sub-step is
+     * the only thing that can say who does the work, so it has to say it.
      */
-    let inheritedAgent: string | undefined;
     if (parent) {
       const parentStep = steps.find((step) => step.id === parent);
-      inheritedAgent = parentStep?.agent;
       if (!parentStep) {
         return {
           plan: steps,
@@ -412,21 +432,27 @@ export function applyPlanPatch(
           error: `大纲 ${parent} 已完成并冻结，不能再往它下面加小节；返工请新开一条大纲`,
         };
       }
+      if (!patch.agent?.trim()) {
+        return {
+          plan: steps,
+          changed: false,
+          error:
+            `小节 ${patch.id} 要写明谁做（agent）。可用的分工写在这份简报的「可用分工」一节里；` +
+            '小节是派活的单位，没有负责人的小节等于没有派出去。',
+        };
+      }
     }
     steps.push({
       id: patch.id,
       title: patch.title.slice(0, 200),
       status: patch.status ?? 'todo',
-      ...(patch.agent
-        ? { agent: patch.agent.slice(0, 60) }
-        : inheritedAgent
-          ? { agent: inheritedAgent }
-          : {}),
+      ...(patch.agent ? { agent: patch.agent.slice(0, 60) } : {}),
       ...(patch.note ? { note: patch.note.slice(0, 300) } : {}),
+      ...(patch.status === 'doing' ? { startedAt: now } : {}),
       updatedAt: now,
     });
     syncOutlineOf(patch.id);
-    return { plan: steps, changed: true };
+    return { plan: applyDerivedStatuses(steps), changed: true };
   }
 
   const previous = steps[index]!;
@@ -489,12 +515,40 @@ export function applyPlanPatch(
     }
   }
 
+  /**
+   * Walking away from a started step must say why.
+   *
+   * Two different things can end a run: it finished, or it did not. The first is `done`
+   * and needs proof, which the note already carries. The second — blocked, or quietly
+   * put back to `todo` — used to need nothing, so a step could be picked up, abandoned,
+   * and left looking exactly like one nobody ever touched. The next worker then either
+   * redoes it or skips it, and neither of them is a decision anybody can audit.
+   */
+  if (
+    previous.status === 'doing' &&
+    patch.status &&
+    patch.status !== 'doing' &&
+    patch.status !== 'done' &&
+    !patch.note?.trim()
+  ) {
+    return {
+      plan: steps,
+      changed: false,
+      error:
+        `${previous.id} 正在做，改成 ${patch.status} 要写明原因（note）：卡在哪里、为什么放弃、下一步靠什么接上。` +
+        '没写原因就停下的步骤，接手的人分不清是没做还是做失败了。',
+    };
+  }
+
   const next: PlanStep = {
     ...previous,
     ...(patch.title ? { title: patch.title.slice(0, 200) } : {}),
     ...(patch.status ? { status: patch.status } : {}),
     ...(patch.agent ? { agent: patch.agent.slice(0, 60) } : {}),
     ...(patch.note !== undefined ? { note: patch.note.slice(0, 300) } : {}),
+    // First time only: later `doing` writes must not move the line that says
+    // "this step is history now".
+    ...(patch.status === 'doing' && !previous.startedAt ? { startedAt: now } : {}),
     updatedAt: now,
   };
   const changed =
@@ -505,7 +559,15 @@ export function applyPlanPatch(
   if (!changed) return { plan: steps, changed: false };
   steps[index] = next;
   syncOutlineOf(next.id);
-  return { plan: steps, changed: true };
+  /**
+   * Hand back a plan whose outlines already agree with their sub-steps.
+   *
+   * `syncOutlineOf` only fixes the parent of the step that changed, so closing the last sub-step
+   * of 1 left 1 reading `doing` in the returned array — correct on the next read (the store derives
+   * on load) but wrong in the value the caller renders straight back to the worker. Observed by a
+   * test that asserted the returned plan, which is the same value `task_plan` prints.
+   */
+  return { plan: applyDerivedStatuses(steps), changed: true };
 }
 
 /**
@@ -573,43 +635,24 @@ export type NextLeg =
 /**
  * Is this step inside what the person authorised?
  *
- * The single answer to that question. It used to be spelled out twice — once inline in
- * `applyPlanPatch`, once (wrongly) as "does `spec.scope` exist" in the dispatch gate — so the
- * same task could be authorised for the plan writer and unauthorised for the dispatcher.
+ * There used to be an answer here — a list of ids, plus a numeric ceiling. It was wrong in a
+ * way no bug fix could reach: the boundary was written in a coordinate system the worker
+ * itself generates. Outlines are numbered when the task starts, but sub-steps are invented
+ * later, per section, from whatever the code turns out to say. So 「做到 2 就停」 was a promise
+ * about a namespace that did not exist yet, and 「把那个登录问题修完」 — the shape people
+ * actually talk in — cannot be expressed as an id at all, because the work may span two
+ * outlines and half of a third.
  *
- * A step qualifies if it is in the explicit list, or at or below the ceiling. The ceiling is
- * what makes 「完成 1.2 后暂停」 enforceable before 1.2 exists in the plan: the id does not have
- * to be planned to be the place to stop at.
+ * It was also self-defeating. The party being gated could mint ids, so it could satisfy the
+ * gate by renaming: add the same work under an authorised id, or remove the steps it did not
+ * want to finish (one run did exactly that and reported the task done). A guard that the
+ * guarded can rewrite is friction for the honest and decoration for the dishonest.
+ *
+ * So the boundary is now the model's job — read `spec.directive` and the plan, decide what
+ * the person meant. The code's job is what only code can do: keep times, so that 「someone
+ * read the reply and wrote down what to do」 is a fact rather than an assumption, and keep a
+ * started step from being deleted out of the record.
  */
-export function isAuthorizedStep(
-  stepId: string,
-  scope: { authorizedSteps?: string[]; authorizedUpTo?: string } | undefined,
-): boolean {
-  if (!scope) return false;
-  if (scope.authorizedSteps?.length) {
-    if (scope.authorizedSteps.includes(stepId)) return true;
-  }
-  if (!scope.authorizedUpTo) return false;
-  const keyOf = (id: string) => (id.match(/\d+(?:\.\d+)*/g) ?? ['0'])[0]!;
-  const ceiling = keyOf(scope.authorizedUpTo);
-  /**
-   * Anything *inside* the ceiling is authorised too.
-   *
-   * A bare comparison treats `2.1` as past `2`, so a person who released 「步骤 2」 could not
-   * let the worker split it into 2.1 — every attempt came back 「2.1 不在本次授权范围内」.
-   * Authorising a section means authorising its sub-steps: they are the same work, described
-   * one level down. This does not widen 「完成 1.2 后暂停」: `2` is not inside `1.2`.
-   */
-  if (stepId === ceiling || stepId.startsWith(`${ceiling}.`)) return true;
-  const parts = (id: string) => keyOf(id).split('.').map((n) => Number.parseInt(n, 10) || 0);
-  const left = parts(stepId);
-  const right = parts(scope.authorizedUpTo);
-  for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
-    const d = (left[i] ?? 0) - (right[i] ?? 0);
-    if (d !== 0) return d < 0;
-  }
-  return true;
-}
 
 /**
  * The steps a reader still has to do something about.
@@ -690,6 +733,13 @@ export function restructurePlan(
     }
     if (step.status === 'doing') {
       return { plan: steps, changed: false, error: `大纲 ${step.id} 正在做，不能重排；先做完或交接` };
+    }
+    if (step.startedAt) {
+      return {
+        plan: steps,
+        changed: false,
+        error: `大纲 ${step.id} 已经开工过，不能重排；它下面发生的事是记录，要换方向就在后面加大纲`,
+      };
     }
     const kids = childrenOf(steps, step.id);
     if (kids.length > 0) {

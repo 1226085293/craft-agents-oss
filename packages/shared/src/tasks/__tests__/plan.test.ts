@@ -262,67 +262,72 @@ describe('outline invariants', () => {
     expect(result.error).toContain('大纲 1');
   });
 
-  it('accepts a sub-step once its outline exists', () => {
+  it('accepts a sub-step once its outline exists and it names an owner', () => {
     const withOutline = applyPlanPatch([], { id: '1', title: '接口改造' }, NOW).plan;
-    const result = applyPlanPatch(withOutline, { id: '1.1', title: '改 handler' }, NOW);
+    const result = applyPlanPatch(withOutline, { id: '1.1', title: '改 handler', agent: 'agent-api' }, NOW);
     expect(result.changed).toBe(true);
     expect(result.plan.map((s) => s.id)).toEqual(['1', '1.1']);
   });
 
-  it('will not start an outline that has no sub-steps', () => {
+  it('refuses a sub-step that names nobody', () => {
+    // Outlines carry no owner any more, so nothing can be inherited: a sub-step without an
+    // `agent` is work that was written down and never assigned.
+    const withOutline = applyPlanPatch([], { id: '1', title: '接口改造' }, NOW).plan;
+    const result = applyPlanPatch(withOutline, { id: '1.1', title: '改 handler' }, NOW);
+    expect(result.changed).toBe(false);
+    expect(result.error).toContain('agent');
+  });
+
+  it('refuses to start an outline that has no sub-steps', () => {
+    // An outline is a stage, not a task: 「section 1 is under way」 is a statement about 1.1, 1.2.
+    // Writing the outline's own status is refused outright now, and the message says what to write
+    // instead — the value was recomputed from the sub-steps on every read anyway.
     const plan = normalizePlan([{ id: '1', title: '接口改造', status: 'todo' }], NOW);
     const result = applyPlanPatch(plan, { id: '1', status: 'doing' }, NOW);
     expect(result.changed).toBe(false);
-    expect(result.error).toContain('还没有小节');
+    expect(result.error).toContain('拆成可执行的小节');
   });
 
-  it('will not close an outline while a sub-step is unfinished', () => {
+  it('derives `doing` while a sub-step is unfinished', () => {
     const plan = normalizePlan(
       [
-        { id: '1', title: '接口改造', status: 'doing' },
+        { id: '1', title: '接口改造', status: 'todo' },
         { id: '1.1', title: '改 handler', status: 'done' },
         { id: '1.2', title: '补类型', status: 'doing' },
       ],
       NOW,
     );
-    const result = applyPlanPatch(plan, { id: '1', status: 'done' }, NOW);
-    expect(result.changed).toBe(false);
-    expect(result.error).toContain('1.2');
+    // No patch is involved: the status comes from the children, which is why an explicit write
+    // had nothing to add.
+    expect(plan!.find((step) => step.id === '1')?.status).toBe('doing');
   });
 
-  it('requires the next outline to be broken down before closing this one', () => {
+  it('will not let an outline read as done until the next one is broken down', () => {
     const plan = normalizePlan(
       [
-        { id: '1', title: '接口改造', status: 'doing' },
+        { id: '1', title: '接口改造', status: 'todo' },
         { id: '1.1', title: '改 handler', status: 'done' },
         { id: '2', title: '补测试', status: 'todo' },
       ],
       NOW,
     );
-    const blocked = applyPlanPatch(plan, { id: '1', status: 'done' }, NOW);
-    expect(blocked.changed).toBe(false);
-    expect(blocked.error).toContain('2');
+    // Closing 1 while 2 is still a bare title would leave execution with nowhere to go, so the
+    // derivation keeps 1 at `doing` until 2 has a sub-step.
+    expect(plan!.find((step) => step.id === '1')?.status).toBe('doing');
 
-    const withNext = applyPlanPatch(plan, { id: '2.1', title: '写单测' }, NOW).plan;
-    const allowed = applyPlanPatch(withNext, { id: '1', status: 'done' }, NOW);
-    expect(allowed.changed).toBe(true);
+    const withNext = applyPlanPatch(plan!, { id: '2.1', title: '写单测', agent: 'agent-qa' }, NOW).plan;
+    expect(withNext.find((step) => step.id === '1')?.status).toBe('done');
   });
 
   it('closes the last outline without demanding a next one', () => {
     const plan = normalizePlan(
       [
-        { id: '1', title: '唯一一节', status: 'doing' },
+        { id: '1', title: '唯一一节', status: 'todo' },
         { id: '1.1', title: '做完它', status: 'done' },
       ],
       NOW,
     );
-    // The last outline has no successor to break down, so it is already complete
-    // once its only child is: the derivation says so on read, which makes the
-    // explicit close idempotent rather than refused. What matters is the state it
-    // lands in, not whether the patch claimed to change something.
-    const result = applyPlanPatch(plan, { id: '1', status: 'done' }, NOW);
-    expect(result.error).toBeUndefined();
-    expect(result.plan.find((step) => step.id === '1')?.status).toBe('done');
+    expect(plan!.find((step) => step.id === '1')?.status).toBe('done');
   });
 
   it('freezes a finished step against reopening, renaming and owner changes', () => {
@@ -353,14 +358,17 @@ describe('outline invariants', () => {
   });
 });
 
-describe('a sub-step inherits its section owner', () => {
+describe('a sub-step names its own owner', () => {
   /**
    * Observed on a real run: outline 2 and its only sub-step both had no owner, so
    * the board displayed the assignee while routing saw nobody — one field, two
    * answers. A sub-step belongs to the section it lives in, so it takes that
    * section's owner unless it names its own.
    */
-  it('takes the outline owner when none is given', () => {
+  it('does not take the outline owner — there is nothing to take', () => {
+    // The outline used to hand its owner down, which is how one field ended up answering two
+    // questions: the section's owner and the step's. Outlines carry nobody now, so the field has
+    // to be filled in at creation.
     const plan = normalizePlan(
       [
         { id: '1', title: '创建', status: 'todo', agent: 'builtin-default' },
@@ -368,8 +376,9 @@ describe('a sub-step inherits its section owner', () => {
       ],
       NOW,
     );
-    const next = applyPlanPatch(plan, { id: '1.2', title: '读回' }, NOW).plan;
-    expect(next.find((step) => step.id === '1.2')?.agent).toBe('builtin-default');
+    const next = applyPlanPatch(plan, { id: '1.2', title: '读回' }, NOW);
+    expect(next.changed).toBe(false);
+    expect(next.error).toContain('agent');
   })
 
   it('keeps an owner it was given', () => {
@@ -402,7 +411,7 @@ describe('an agreed plan is not the worker\'s to rewrite', () => {
       ],
       NOW,
     );
-    const next = applyPlanPatch(plan, { id: '1.1', title: '创建 docs/a.md' }, NOW).plan;
+    const next = applyPlanPatch(plan, { id: '1.1', title: '创建 docs/a.md', agent: 'agent-ui' }, NOW).plan;
     expect(next.find((step) => step.id === '1.1')?.title).toBe('创建 docs/a.md');
     expect(next.filter((step) => !step.id.includes('.')).map((s) => s.id)).toEqual(['1', '2']);
   })

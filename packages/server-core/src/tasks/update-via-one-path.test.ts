@@ -29,11 +29,15 @@ describe('the task board update', () => {
     expect(body).not.toContain('service.setStatus')
   })
 
-  it('forwards the boundary fields the tool accepts', () => {
+  it('forwards every field the tool accepts', () => {
+    // The failure this guards: the tool learned `scope` and then `authorizedUpTo` /
+    // `authorizedSteps`, the RPC kept calling `setStatus`, and a button that widened the
+    // boundary answered success while the record never changed. Whatever the tool can write,
+    // the board must be able to write; the boundary is now a single `directive` sentence,
+    // because ids the worker invents cannot bound its own work.
     const at = source.indexOf('RPC_CHANNELS.taskboard.UPDATE,', source.indexOf('registerTasksHandlers'))
     const body = source.slice(at, source.indexOf('RPC_CHANNELS.taskboard.UPDATE_TRIGGER,', at))
-    expect(body).toContain('authorizedUpTo')
-    expect(body).toContain('authorizedSteps')
+    expect(body).toContain('directive')
     expect(body).toContain('scope')
   })
 

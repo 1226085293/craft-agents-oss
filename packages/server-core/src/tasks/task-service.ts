@@ -454,10 +454,7 @@ export class TaskService {
   } {
     const task = this.require(id);
     const now = this.now();
-    const result = applyPlanPatch(task.spec?.plan, patch, now, {
-      authorizedSteps: task.spec?.authorizedSteps,
-      authorizedUpTo: task.spec?.authorizedUpTo,
-    });
+    const result = applyPlanPatch(task.spec?.plan, patch, now);
     if (result.error) return { ok: false, error: result.error };
     if (!result.changed) return { ok: true, plan: result.plan };
 
@@ -853,35 +850,31 @@ export class TaskService {
    * the other spec fields (a dispatch supplies it), so it needs its own door.
    */
   /**
-   * Record the boundary a run is held to.
+   * Record what the person's last reply means, in the supervisor's words.
    *
    * Kept on the task so every entry point — manual run, supervisor resume, event route,
-   * scheduler — reads the same slice instead of each deciding for itself what an answer
-   * authorised.
+   * scheduler — reads the same instruction instead of each deciding for itself what an answer
+   * authorised. The text is never parsed: what it means is the model's judgement, and the only
+   * thing code needs is `at`, used by `resumeDecisionFor` to tell "acted on" from "merely
+   * answered".
    */
-  setAuthorizedSteps(id: string, steps: string[] | undefined, upTo?: string): Task {
+  setDirective(id: string, text: string | undefined): Task {
     const task = this.require(id);
+    const trimmed = text?.trim();
+    const now = this.now();
     const next: Task = {
       ...task,
       spec: {
         ...task.spec,
-        authorizedSteps: steps?.length ? [...steps] : undefined,
-        authorizedUpTo: upTo,
-        /**
-         * The evidence that somebody acted on the person's reply.
-         *
-         * `resumeDecisionFor` compares this with `decision.answer.at`; it is how "has this been
-         * decided?" is answered without reading the sentence.
-         */
-        authorizedAt: this.now(),
+        directive: trimmed ? { text: trimmed.slice(0, 800), at: now } : undefined,
       } as Task['spec'],
-      updatedAt: this.now(),
+      updatedAt: now,
     };
     this.save(next);
     appendJournal(this.root, id, {
       type: 'spec_updated',
-      at: this.now(),
-      data: { authorizedSteps: steps, authorizedUpTo: upTo },
+      at: now,
+      data: { directive: trimmed ?? null },
     });
     return next;
   }

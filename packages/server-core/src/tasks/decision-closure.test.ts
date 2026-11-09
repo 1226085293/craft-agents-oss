@@ -102,12 +102,12 @@ describe('a re-asked question does not inherit the old diagnosis', () => {
 /**
  * The second real answer, end to end — under the new contract.
  *
- * The reply is recorded verbatim; the boundary comes from a model writing it down through
+ * The reply is recorded verbatim; what it means comes from a model writing it down through
  * `task_update`, not from a parser reading 「放行步骤 2」. This is the same scenario the keyword
  * tables used to handle, and they only handled it because the phrase happened to be in the list.
  */
-describe('a release answer moves the boundary with it', () => {
-  it('lets the step a model authorised be written, including its sub-step', async () => {
+describe('a release answer unblocks the plan', () => {
+  it('lets the released outline be broken into a sub-step, and that sub-step start', async () => {
     const svc = service()
     const task = svc.create({
       name: '状态图标验证',
@@ -117,7 +117,6 @@ describe('a release answer moves the boundary with it', () => {
       spec: {
         scope: '只做 1.1',
         cwd: '/tmp',
-        authorizedUpTo: '1.2',
         plan: [
           { id: '1', title: '写文件', status: 'done' },
           { id: '1.1', title: '创建', status: 'done' },
@@ -139,15 +138,19 @@ describe('a release answer moves the boundary with it', () => {
 
     const answered = svc.recordDecisionAnswer('T-1', '放行步骤 2（收尾），把任务做完')!
     // Recording alone authorises nothing: the words are stored, nothing is inferred.
-    expect(answered.spec?.authorizedUpTo).toBe('1.2')
-    expect(answered.spec?.authorizedAt).toBeUndefined()
+    expect(answered.spec?.directive).toBeUndefined()
 
     // What the supervisor does after reading the reply.
-    svc.setAuthorizedSteps('T-1', ['1', '1.1', '1.2', '2'], '2')
+    svc.setDirective('T-1', '放行第 2 条（收尾），把任务做完')
 
-    const written = svc.updatePlan('T-1', { id: '2.1', title: '最终验收与收尾', status: 'doing' })
+    /**
+     * The exact call that used to fail on a live run with 「2.1 不在本次授权范围内（授权：2）」.
+     *
+     * Adding a sub-step under a released outline is the first thing 「放行 2」 authorises, because
+     * an outline is a goal, not work: it becomes work only once it has sub-steps.
+     */
+    const written = svc.updatePlan('T-1', { id: '2.1', title: '最终验收与收尾', status: 'doing', agent: 'agent-qa' })
     expect(written.error).toBeUndefined()
     expect(written.ok).toBe(true)
-    expect(svc.updatePlan('T-1', { id: '2', status: 'doing' }).ok).toBe(true)
   })
 })

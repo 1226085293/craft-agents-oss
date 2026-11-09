@@ -94,7 +94,14 @@ export function normalizeSpec(raw: unknown): TaskSpec | undefined {
     ...(permissions && Object.keys(permissions).length ? { permissions } : {}),
     ...(plan ? { plan } : {}),
     ...(v.planAgreed === true ? { planAgreed: true } : {}),
-    ...(typeof v.authorizedAt === 'number' ? { authorizedAt: v.authorizedAt } : {}),
+    ...(v.directive && typeof v.directive === 'object' && asString((v.directive as { text?: unknown }).text)
+      ? {
+          directive: {
+            text: asString((v.directive as { text?: unknown }).text)!.slice(0, 800),
+            at: typeof (v.directive as { at?: unknown }).at === 'number' ? (v.directive as { at: number }).at : 0,
+          },
+        }
+      : {}),
   };
 
   return Object.keys(spec).length ? spec : undefined;

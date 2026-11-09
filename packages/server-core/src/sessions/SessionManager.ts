@@ -51,8 +51,14 @@ export interface TaskUpdatePatch {
   assigneeAgentId?: string;
   error?: string;
   scope?: string;
-  authorizedUpTo?: string;
-  authorizedSteps?: string[];
+  /**
+   * What the person's last reply means, as the supervisor understood it.
+   *
+   * One sentence, written by a model. Replaces `authorizedUpTo` / `authorizedSteps`, which tried
+   * to express the same thing as step ids — a coordinate system the worker itself invents, so
+   * the boundary could be satisfied by renaming and could not express 「把那个登录问题修完」.
+   */
+  directive?: string;
 }
 
 function generateShortId(): string {
@@ -7335,9 +7341,17 @@ ${request.prompt}`;
       const agent = parseSectionOwner(typeof answer?.content === 'string' ? answer.content : '', roster)
       if (!agent) return
 
-      // Record it on the outline and on steps that carry no *valid* owner — see
-      // `shouldReassignOwner` for why a guessed name loses to the chooser.
-      for (const step of [outline, ...steps]) {
+      /**
+       * Record it on the sub-steps, not on the outline.
+       *
+       * The outline is a stage, not a unit of work: it has no agent, because 「who does section 2」
+       * is only answerable as 「who does 2.1, 2.2, 2.3」. Stamping the outline as well made one
+       * value answer two questions — the section's owner and the step's owner — which is how a
+       * plan ended up displaying the assignee for steps whose routing said "nobody".
+       *
+       * Only steps without a *valid* owner are touched; see `shouldReassignOwner`.
+       */
+      for (const step of steps) {
         if (!shouldReassignOwner(step, roster)) continue
         if (step.agent) {
           sessionLog.info(
@@ -7715,11 +7729,22 @@ ${request.prompt}`;
    * still works, whereas a dispatch that throws leaves the task unclaimed.
    */
   private dispatchTaskContext(workspaceId: string, taskId: string): string {
+    /**
+     * The roster goes with the rules: a sub-step names its owner when it is created, so a worker
+     * that is told to divide work but not told who exists will invent a name. Read defensively —
+     * roster trouble must not turn a dispatch into no dispatch.
+     */
+    let roster: ReturnType<typeof readRoster> = []
+    try {
+      roster = readRoster(getWorkspaceByNameOrId(workspaceId)?.rootPath)
+    } catch {
+      roster = []
+    }
     try {
       const task = this.getTasks(workspaceId).get(taskId) as { spec?: Task['spec'] } | null
-      return formatDispatchTaskContext({ spec: task?.spec })
+      return formatDispatchTaskContext({ spec: task?.spec }, { roster })
     } catch {
-      return formatDispatchTaskContext({ spec: undefined })
+      return formatDispatchTaskContext({ spec: undefined }, { roster })
     }
   }
 
@@ -7778,7 +7803,14 @@ ${request.prompt}`;
           }
         : {}),
     })
-    void this.sendMessage(created.id, formatTaskBrief(task, { reason })).catch((error) => {
+    const briefRoster = (() => {
+      try {
+        return readRoster(getWorkspaceByNameOrId(workspaceId)?.rootPath)
+      } catch {
+        return []
+      }
+    })()
+    void this.sendMessage(created.id, formatTaskBrief(task, { reason, roster: briefRoster })).catch((error) => {
       sessionLog.warn('failed to send task brief', { taskId: task.id, error })
     })
     return { sessionId: created.id }
@@ -7817,18 +7849,14 @@ ${request.prompt}`;
      * boundary was too narrow, and it is no longer true once the boundary moves.
      */
     /**
-     * The structured boundary is written first, because it is what the other layers
-     * enforce: `applyPlanPatch` refuses steps past it and `resumeDecisionFor` refuses to
-     * start the task until it exists. Writing it also stamps `authorizedAt`, which is
-     * how a resumed task knows the reply was acted on.
+     * The instruction is written first, because it is what the resume path reads:
+     * `resumeDecisionFor` will not start the task until a directive exists that is newer than
+     * the reply. Writing it stamps `at`, which is how a resumed task knows the reply was acted
+     * on — without any code parsing the sentence.
      */
-    if (patch.authorizedUpTo?.trim() || patch.authorizedSteps?.length) {
+    if (patch.directive?.trim()) {
       const service = this.getTasks(workspaceId)
-      service.setAuthorizedSteps(
-        identifier,
-        patch.authorizedSteps,
-        patch.authorizedUpTo?.trim() || undefined,
-      )
+      service.setDirective(identifier, patch.directive.trim())
     }
     if (patch.scope?.trim()) {
       const service = this.getTasks(workspaceId)
@@ -7920,17 +7948,10 @@ ${request.prompt}`;
         sessionLog.info(`[tasks] ${taskId} not started: ${verdict.why}`, { reason })
         return { started: false, reason: verdict.why }
       }
-      // The boundary the reply implied becomes the one the run is held to.
-      if (verdict.authorizedSteps?.length || verdict.authorizedUpTo) {
-        const current = existing.spec
-        const sameSteps =
-          !verdict.authorizedSteps?.length ||
-          (current?.authorizedSteps?.length === verdict.authorizedSteps.length &&
-            current.authorizedSteps.every((id, i) => id === verdict.authorizedSteps![i]))
-        const sameCeiling = !verdict.authorizedUpTo || current?.authorizedUpTo === verdict.authorizedUpTo
-        if (!sameSteps || !sameCeiling) {
-          tasks.setAuthorizedSteps(taskId, verdict.authorizedSteps, verdict.authorizedUpTo)
-        }
+      // The reasoning recorded with the verdict goes into the journal, so the run that follows
+      // can be read back against the sentence it was allowed by.
+      if (verdict.directive) {
+        sessionLog.info(`[tasks] ${taskId} resuming under directive: ${verdict.directive}`, { reason })
       }
     }
 

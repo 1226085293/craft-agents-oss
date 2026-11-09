@@ -95,21 +95,21 @@ describe('an answer nobody has acted on', () => {
   it('does not resume the task', () => {
     const verdict = resumeDecisionFor(answered())
     expect(verdict.allowed).toBe(false)
-    if (!verdict.allowed) expect(verdict.why).toContain('授权')
+    if (!verdict.allowed) expect(verdict.why).toContain('翻译成指令')
   })
 
-  it('resumes once somebody wrote a boundary after the reply', () => {
+  it('resumes once somebody wrote a directive after the reply', () => {
     const verdict = resumeDecisionFor(
-      answered({ spec: { scope: 'x', cwd: '/tmp', authorizedUpTo: '2', authorizedAt: 200 } } as never),
+      answered({ spec: { scope: 'x', cwd: '/tmp', directive: { text: '把收尾做完', at: 200 } } } as never),
     )
     expect(verdict.allowed).toBe(true)
-    if (verdict.allowed) expect(verdict.authorizedUpTo).toBe('2')
+    if (verdict.allowed) expect(verdict.directive).toBe('把收尾做完')
   })
 
   it('stays paused when the boundary predates the reply', () => {
-    // The ceiling from the PREVIOUS answer must not be read as this answer's meaning.
+    // The directive from the PREVIOUS answer must not be read as this answer's meaning.
     const verdict = resumeDecisionFor(
-      answered({ spec: { scope: 'x', cwd: '/tmp', authorizedUpTo: '1.2', authorizedAt: 50 } } as never),
+      answered({ spec: { scope: 'x', cwd: '/tmp', directive: { text: '做到 1.2 就停', at: 50 } } } as never),
     )
     expect(verdict.allowed).toBe(false)
   })

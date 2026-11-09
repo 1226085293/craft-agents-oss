@@ -474,21 +474,30 @@ describe('scope is a boundary', () => {
     return new Map([['T-1', task as never]]);
   };
 
-  it('refuses to keep dispatching into a task whose scoped work was delivered', async () => {
-    // Observed: the user said 「只做 1.1，不要碰 1.2 和 2」, the worker stopped, its
-    // hand-off passed — and the supervisor dispatched 「继续执行剩余步骤」 anyway,
-    // because "the task is not finished" outranked a boundary nothing enforced.
+  it('no longer refuses a dispatch because a prose scope looks narrower', async () => {
+    /**
+     * The gate that used to fire here was the third implementation of 「is this authorised?」.
+     *
+     * It compared open step ids against `authorizedUpTo` / `authorizedSteps`, and the three
+     * implementations disagreed: the user answered 「完成1.2后暂停」, the supervisor recorded it
+     * correctly, and the dispatch of 1.2 was refused anyway because `spec.scope` still read
+     * 「步骤 1.2」 and the plan still had step 2 open. The supervisor then paused the task and
+     * reported success — the work never happened.
+     *
+     * Both of the things it read are gone: an id list the worker can mint, and prose nobody can
+     * check. What decides now is the recorded directive plus the task's state, and what is
+     * enforced here is only that a paused task does not take new work.
+     */
     const h = harness(workspace(), { tasks: liveTask() });
-    await expect(
-      h.runtime.dispatch({
-        fromSessionId: 'sess_sup',
-        target: { kind: 'task', taskId: 'T-1' },
-        scope: '继续 T-1 剩余步骤',
-        instruction: '把 1.2 和 2 也做完',
-        parallel: false,
-      }),
-    ).rejects.toThrow(/scope 只覆盖/);
-    expect(h.sent).toHaveLength(0);
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      scope: '继续 T-1 剩余步骤',
+      instruction: '把 1.2 和 2 也做完',
+      parallel: false,
+    });
+    // Either path is fine — the point is that the work happens, where the old gate refused it.
+    expect(h.sent.length + h.spawned.length).toBe(1);
   });
 
   it('allows it when a person approved going further', async () => {

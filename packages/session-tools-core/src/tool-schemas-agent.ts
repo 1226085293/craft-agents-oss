@@ -253,21 +253,20 @@ export const TaskUpdateSchema = z.object({
     .optional()
     .describe('New scope sentence. Use when the user authorises work beyond the current boundary.'),
   /**
-   * The structured boundary: what the reply actually authorises.
+   * What the person's last reply means, written by the model that read it.
    *
-   * These are how a model records its reading of the user's words. `scope` is prose for the
-   * reader; this is the machine-checked boundary that `task_plan` enforces and that
-   * `resumeDecisionFor` requires before it lets the task run again. Writing either one stamps
-   * `authorizedAt`, which is the evidence that the reply was acted on.
+   * This is the only record of a reply's meaning, and nothing parses it. Writing it stamps `at`,
+   * and `resumeDecisionFor` refuses to restart a task whose reply is newer than its directive — so
+   * the fact being enforced is 「somebody read this and decided」, not 「the words contained 停止」.
+   *
+   * Say it as an instruction, in the person's own terms: 「只做登录修复，其余不动」. Step ids are
+   * allowed but are not what makes it work: the sub-steps a boundary would name are invented later,
+   * while the work is being done.
    */
-  authorizedUpTo: z
+  directive: z
     .string()
     .optional()
-    .describe('Highest step id authorised, e.g. "1.2". Everything at or below it — and anything inside it — may be done.'),
-  authorizedSteps: z
-    .array(z.string())
-    .optional()
-    .describe('Explicit list of authorised step ids. Use when the authorisation is not a prefix of the plan.'),
+    .describe('One sentence saying what the reply authorises, e.g. "只做登录修复，其余不动". Required before a task whose question was answered can run again.'),
 });
 
 export const TaskPlanSchema = z.object({

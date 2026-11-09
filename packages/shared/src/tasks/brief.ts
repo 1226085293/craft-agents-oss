@@ -9,7 +9,7 @@
 
 import type { Task } from './types.ts';
 import { formatPlan } from './plan.ts';
-import { isAuthorizedStep, nextLeg, openSteps } from './plan.ts';
+import { nextLeg, openSteps } from './plan.ts';
 import { planProgress } from './plan.ts';
 
 export interface TaskBriefOptions {
@@ -17,6 +17,14 @@ export interface TaskBriefOptions {
   reason?: string;
   /** Absolute workspace root, when the spec paths are relative to it. */
   workspaceRoot?: string;
+  /**
+   * The profiles this task may be divided between.
+   *
+   * Passed in rather than read here because the roster lives in the workspace config, and this
+   * module is pure. A sub-step names its owner at creation, so the list has to be in front of the
+   * plan writer — not behind a tool call it may never make.
+   */
+  roster?: Array<{ id: string; dispatchHint?: string; persona?: string }>;
 }
 
 function bullet(items: string[]): string {
@@ -32,6 +40,32 @@ function bullet(items: string[]): string {
  * wrote a plan at all. The rule has to travel with the work, not with one of the
  * ways work is handed out.
  */
+/**
+ * Who can do the work, as the plan writer needs to see it.
+ *
+ * A sub-step names its owner when it is created, so the worker making that decision needs the
+ * roster at that moment. It used not to have one: owners were either copied from the outline or
+ * invented, and a name that matches no profile is dispatched as an agent that does not exist. The
+ * hidden per-section chooser in `section-owner.ts` still runs as a backstop, but a decision made
+ * with the roster in hand is better than one corrected afterwards.
+ *
+ * `dispatchHint` comes first because it is written to answer exactly this question — 「this job
+ * belongs to whom」. Falling back to the persona line keeps older rosters working.
+ */
+export function formatAgentRosterSection(roster: Array<{ id: string; dispatchHint?: string; persona?: string }> | undefined): string {
+  if (!roster?.length) return '';
+  const lines = roster.map((entry) => {
+    const hint = (entry.dispatchHint ?? entry.persona ?? '').split('\n')[0]!.trim();
+    return `- \`${entry.id}\`${hint ? ` — ${hint.slice(0, 120)}` : ''}`;
+  });
+  return [
+    '## 可用分工',
+    ...lines,
+    '',
+    '写小节时从这些 id 里选一个填进 `agent`，不要自己编名字。',
+  ].join('\n');
+}
+
 export function formatPlanRuleBlock(options: { planExists?: boolean } = {}): string {
   /**
    * The plan is a record, not a draft.
@@ -54,11 +88,13 @@ export function formatPlanRuleBlock(options: { planExists?: boolean } = {}): str
     '## 怎么推进',
     '',
     ruleOne,
-    '2. 大纲拆成小节（`1.1`、`1.2`）后逐条执行——小节开始前才写，不要预设没做过的部分的细节。',
+    '2. **大纲只说这一阶段要达到什么，不是一件可做的事**。真正的任务是它下面的小节（`1.1`、`1.2`）：按大纲的目标去读代码，把这一节拆成能执行、能验收的小节，然后逐条做。小节在开工前才写，不要预设没做过的部分的细节。',
     '2b. **开始一条大纲之前，先检查它**：对比前面几节实际做出来的东西，这条大纲还成立吗？它的小节对不对、缺不缺、多不多？大纲成立就改小节并开工（缺/多/错都用 `task_plan` 直接改）；大纲本身不成立就用 `task_plan` 的 `restructure` 重排这条及其之后还没开工的大纲，然后只拆这一条的小节。检查的结论要落在计划里，不要只在对话里说。',
-    '3. 一条大纲的小节都完成后，才能把它标为 done；标 done 之前，下一条大纲的小节必须已经存在。',
-    '4. 已完成的大纲和小节是记录，不能改回、不能改名——要返工就新开一条。',
+    '3. **大纲的状态不用你写**，它由小节派生：有小节开工就是进行中，小节全完成就是完成。想推进就标小节——标大纲的状态会被拒绝，因为没有东西可以标。',
+    '3b. 一条小节都不许在大纲还没拆开时开工：先把大纲拆成小节。完成当前大纲前，下一条大纲的小节要先建好，否则下一条开工时没有可执行的东西。',
+    '4. 已完成的和**开工过的**小节是记录：不能删、不能改回、不能改名。开工过却做不下去，就把状态改成 `blocked` 并写明原因（卡在哪、为什么放弃、下一步靠什么接上）——后面接手的人得知道这里发生过什么。要换方向就在后面加大纲。',
     '5. 写新步骤之前，先对照当前计划里已有的步骤：**同一件事只能有一个 id**。已经有“读回确认”了，就不能再列一条“读回确认”；已经存在的动作（无论做完没做完）继续用它的 id 推进状态，而不是换个名字重开一条。',
+    '6. **每一条小节都要写负责人**（`agent`）。小节是派活的单位，没有负责人的小节等于没有派出去。按这一小节实际要做的事选人，可选的人见下面的「可用分工」。',
     '',
   ].join('\n');
 }
@@ -94,7 +130,10 @@ export function formatExecutionRuleBlock(): string {
  * above rules that say 「先写大纲」 — solved differently: show the plan, then give rules
  * that match what it contains.
  */
-export function formatDispatchTaskContext(task: Pick<Task, 'spec'>): string {
+export function formatDispatchTaskContext(
+  task: Pick<Task, 'spec'>,
+  options: { roster?: Array<{ id: string; dispatchHint?: string; persona?: string }> } = {},
+): string {
   const plan = task.spec?.plan;
   const hasPlan = Boolean(plan?.length);
   const sections: string[] = [];
@@ -129,21 +168,18 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
     contract.push(`计划进度：${progress}/${spec.plan.length}`);
   }
   if (spec?.scope) contract.push(`检查范围：${spec.scope}`);
-  if (spec?.authorizedSteps?.length) {
-    /**
-     * The boundary, in the form the tool actually enforces.
-     *
-     * 「完成 1.2 后暂停，不执行步骤 2」 was already in `scope` and the worker ran 1.2, 2 and
-     * 2.1 anyway. A rule the worker only meets as a refusal arrives after it has spent the
-     * turn, so the slice is stated up front as well — with the same ids the refusal uses.
-     */
-    const outside = (spec.plan ?? [])
-      .filter((step) => !spec.authorizedSteps!.includes(step.id))
-      .map((step) => step.id);
-    contract.push(
-      `本次授权步骤：${spec.authorizedSteps.join('、')}` +
-        (outside.length ? `（不在授权内：${outside.join('、')}——不要开工、不要标完成、不要移除，留给后续）` : ''),
-    );
+  /**
+   * What the person's last reply meant, in the words of whoever read it.
+   *
+   * This used to be a list of step ids and a numeric ceiling, printed so the worker would meet
+   * the boundary before being refused by it. The ids are gone: sub-steps are invented while the
+   * work happens, so a boundary naming them was a promise about a namespace that did not exist
+   * yet, and 「把那个登录问题修完」 cannot be written as an id at all when the work spans two
+   * outlines. The instruction says what to do; the plan says where the work currently is; the
+   * reader decides how they meet.
+   */
+  if (spec?.directive?.text) {
+    contract.push(`本次指令（用户最近一次答复的意思，以此为准）：${spec.directive.text}`);
   }
   if (contract.length) sections.push(`## 执行边界\n${bullet(contract)}`);
 
@@ -190,6 +226,8 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
 
   sections.push(formatPlanRuleBlock());
   sections.push(formatExecutionRuleBlock());
+  const rosterSection = formatAgentRosterSection(options.roster);
+  if (rosterSection) sections.push(rosterSection);
 
   if (spec?.deliverables?.length) {
     const lines = spec.deliverables.map((d) => {
@@ -243,21 +281,6 @@ export function describeTrigger(task: Task): string {
  * is "you were stopped, here is why, pick up from the plan".
  */
 /**
- * Is any unfinished step outside the boundary?
- *
- * The brief needs this to decide whether a boundary sentence is informative or just noise. With
- * everything authorised there is no "stop here" to announce, and printing one anyway makes the
- * brief contradict the answer quoted two lines above it.
- */
-function openBeyondBoundary(task: Task): boolean {
-  const plan = task.spec?.plan;
-  if (!plan?.length) return false;
-  const scope = task.spec;
-  if (!scope?.authorizedUpTo && !scope?.authorizedSteps?.length) return false;
-  return openSteps(plan).some((step) => !isAuthorizedStep(step.id, scope));
-}
-
-/**
  * What to do next, read from the plan instead of described in advance.
  *
  * Both brief paths used to end with the same sentence — 「如果计划里没有可执行的小节，先按大纲展开
@@ -287,10 +310,10 @@ export function formatFrontierLine(task: Task): string {
    * the supervisor's job; this function only states what the record allows.
    */
   const answeredAt = task.decision?.answer?.at ?? 0
-  if (answeredAt > 0 && (task.spec?.authorizedAt ?? 0) < answeredAt) {
+  if (answeredAt > 0 && (task.spec?.directive?.at ?? 0) <= answeredAt) {
     return (
-      '你已答复，但还没有人把这句话翻译成授权——所以这里不给下一步。' +
-      '等督导写下授权（authorizedUpTo / authorizedSteps）或结束任务；' +
+      '你已答复，但还没有人把这句话翻译成指令——所以这里不给下一步。' +
+      '等督导写下 `directive`（把答复的意思写成一句话）或结束任务；' +
       '在那之前不要开工、不要标完成、不要移除步骤。'
     );
   }
@@ -359,28 +382,16 @@ export function formatResumeBrief(task: Task, reason = 'manual'): string {
      */
     ...(task.decision?.answer?.text ? [`用户的答复是：${task.decision.answer.text}`] : []),
     /**
-     * Say "stop here" only when something is actually left beyond the boundary.
+     * One line: what to do next, read from the plan.
      *
-     * The line was printed whenever `authorizedUpTo` existed, so a reply that released the whole
-     * plan produced a brief reading 「本次只做到 2，到此为止」 directly beneath
-     * 「用户的答复是：放行步骤 2（收尾），把任务做完」. The two sentences contradict, and the
-     * worker follows the imperative one — so it stopped one step short of what was asked, or
-     * spent the turn arguing with the plan writer about whether 2.1 existed.
+     * A separate 「本次只做到 X，到此为止」 sentence used to sit here, chosen when a boundary existed
+     * and something was left outside it. It contradicted the sentence two lines above — a reply
+     * that released the whole plan still produced 「到此为止」 — and the worker followed the
+     * imperative branch, stopping a step short or spending the turn arguing with the plan. The
+     * instruction is already stated verbatim above; restating it as a plan-shaped rule is how the
+     * two drift apart.
      */
-    ...(!openBeyondBoundary(task)
-      ? [formatFrontierLine(task)]
-      : task.spec?.authorizedUpTo
-      ? [
-          `本次只做到 ${task.spec.authorizedUpTo}，到此为止。` +
-            '之后的小节不要开工、不要标完成、不要移除——用 `report_result`（outcome 用 handoff）交接。',
-        ]
-      : task.spec?.authorizedSteps?.length
-        ? [
-            `本次只授权到：${task.spec.authorizedSteps.join('、')}。` +
-              '做到这里就停下，用 `report_result`（outcome 用 handoff）交接——' +
-              '授权范围之外的步骤不要开工、不要标完成、不要移除。',
-          ]
-        : [formatFrontierLine(task)]),
+    [formatFrontierLine(task)],
   ].join('\n');
 }
 
@@ -408,21 +419,24 @@ export function formatHandoffContext(task: Task): string | undefined {
    * second written before the person narrowed the boundary. The resumed worker followed the
    * second one and finished work that had just been excluded.
    */
-  const ceiling = task.spec?.authorizedUpTo;
+  const directive = task.spec?.directive?.text;
   const prior: string[] = [`上一轮结论：${last.summary}`];
   if (last.keyFindings?.length) prior.push(`已知事实：\n${bullet(last.keyFindings)}`);
   if (last.nextAction) {
     /**
-     * With a boundary, the hand-off's next action is not passed on at all.
+     * The hand-off's next action is still passed on, marked as subordinate.
      *
-     * Rephrasing it was not enough — 「下一步（本次只到 1.2，超出该范围的部分不要执行）：从 1.2
-     * 读回确认继续」 still hands the worker an instruction and then asks it to police its own
-     * scope. The scope is already enforced where it is checkable (`applyPlanPatch` refuses a
-     * step above `authorizedUpTo`), so the brief does not need to repeat a plan that was
-     * written before the boundary existed. It states the boundary instead, and the omission
-     * is what stops two instructions competing.
+     * It used to be dropped whenever a boundary existed, because two competing instructions left
+     * the worker to guess which won — observed: 「上一轮结论：边界只有 1.1」 next to 「下一步：从 1.2
+     * 读回确认继续」, and it followed the second into work that had just been excluded. Dropping it
+     * is not right either: the last worker's next action is real knowledge. One line saying which
+     * of the two wins is enough, and it is the line a person would say.
      */
-    if (!ceiling) prior.push(`下一步：${last.nextAction}`);
+    prior.push(
+      directive
+        ? `下一步（上一轮留下的，若与本次指令冲突以指令为准）：${last.nextAction}`
+        : `下一步：${last.nextAction}`,
+    );
   }
   if (last.artifacts?.length) prior.push(`已有产物：\n${bullet(last.artifacts.map((a) => a.path))}`);
   return `## 交接上下文\n${prior.join('\n\n')}`;

@@ -103,31 +103,24 @@ export interface TaskSpec {
    */
   scope?: string;
   /**
-   * The steps this run is allowed to touch, by id.
+   * What the person's last reply means, in the supervisor's words.
    *
-   * `scope` is the sentence a person said; this is the same boundary in a form code can
-   * enforce. Both exist because they answer different questions: the sentence tells a
-   * reader why, the list stops a worker marking step 2 done when it was told to stop
-   * after 1.2.
-   */
-  authorizedSteps?: string[];
-  /**
-   * The highest step id this run may touch, e.g. `1.2`.
+   * This replaces a pair of id lists (`authorizedSteps` / `authorizedUpTo`) that tried to answer
+   * the same question structurally. They failed for a reason no fix could reach: the boundary
+   * was measured in a coordinate system the worker generates. Outlines are numbered up front,
+   * but sub-steps are invented later, per section, from whatever the code turns out to say — so
+   * 「做到 2 就停」 promised something about a namespace that did not exist yet, and the shape
+   * people actually speak in (「把那个登录问题修完」) cannot be an id at all when the work spans
+   * two outlines.
    *
-   * The list form can only name steps that exist; a reply is often answered before the step
-   * it names has been planned, so the list came back empty and the run went unbounded. A
-   * ceiling expresses the same boundary without requiring the step to be written down.
-   */
-  authorizedUpTo?: string;
-  /**
-   * When somebody last wrote down what is authorised.
+   * The guarded party could also mint ids, so it could satisfy the gate by renaming. A boundary
+   * the bounded can rewrite is friction for the honest and decoration for the rest.
    *
-   * The answer to "has the person's reply been acted on?" — compared with
-   * `decision.answer.at` by `resumeDecisionFor`. Nothing reads the reply's words to decide this:
-   * a model decides what they mean and writes the boundary, and this timestamp is the evidence
-   * that it happened. Without it, a reply that said 「停止」 lifted the pause and the worker ran on.
+   * So: a model reads the reply and writes down the instruction; code compares `at` against
+   * `decision.answer.at` and never reads the text. That keeps the one thing code is good for —
+   * 「somebody acted on this reply」 as a fact — without faking a judgement it cannot make.
    */
-  authorizedAt?: number;
+  directive?: { text: string; at: number };
   deliverables?: TaskDeliverable[];
   acceptance?: TaskAcceptanceItem[];
   permissions?: TaskPermissions;

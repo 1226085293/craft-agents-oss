@@ -87,7 +87,7 @@ describe('may this task run', () => {
     expect(verdict.allowed).toBe(false)
   })
 
-  it('carries the boundary a model recorded, including one the plan has not reached', () => {
+  it('carries the instruction a model recorded', () => {
     const behind = [
       { id: '1', title: 'a', status: 'done' as const },
       { id: '1.1', title: 'b', status: 'done' as const },
@@ -95,7 +95,7 @@ describe('may this task run', () => {
     ]
     const verdict = resumeDecisionFor(
       task({
-        spec: { plan: behind, authorizedUpTo: '1.2', authorizedAt: 99 },
+        spec: { plan: behind, directive: { text: '做到 1.2 就停', at: 99 } },
         decision: {
           category: 'direction',
           label: 'x',
@@ -108,13 +108,13 @@ describe('may this task run', () => {
       }),
     )
     expect(verdict.allowed).toBe(true)
-    if (verdict.allowed) expect(verdict.authorizedUpTo).toBe('1.2')
+    if (verdict.allowed) expect(verdict.directive).toBe('做到 1.2 就停')
   })
 
-  it('resumes without a boundary when the reply set none and was acted on', () => {
+  it('resumes when the reply was acted on', () => {
     const verdict = resumeDecisionFor(
       task({
-        spec: { plan: [{ id: '1', title: 'a', status: 'todo' as const }], authorizedAt: 99 },
+        spec: { plan: [{ id: '1', title: 'a', status: 'todo' as const }], directive: { text: '继续', at: 99 } },
         decision: {
           category: 'direction',
           label: 'x',

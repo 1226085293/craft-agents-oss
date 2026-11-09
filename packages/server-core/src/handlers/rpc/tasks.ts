@@ -93,10 +93,10 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
   /**
    * The task board's update goes through the same implementation as the `task_update` tool.
    *
-   * It used to call `setStatus` directly, so every option the tool learned — `scope`,
-   * `authorizedUpTo`, `authorizedSteps`, and the resume-on-`running` behaviour — was silently
-   * dropped for the buttons in the UI. Two implementations of one intent is how a page can show
-   * success while the record does not change.
+   * It used to call `setStatus` directly, so every option the tool learned — `scope`, the
+   * instruction that answers a pending decision, and the resume-on-`running` behaviour — was
+   * silently dropped for the buttons in the UI. Two implementations of one intent is how a page
+   * can show success while the record does not change.
    */
   server.handle(
     RPC_CHANNELS.taskboard.UPDATE,
@@ -109,8 +109,8 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
         pauseReason?: string
         error?: string
         scope?: string
-        authorizedUpTo?: string
-        authorizedSteps?: string[]
+        /** The supervisor's reading of the person's reply; see `TaskSpec.directive`. */
+        directive?: string
       },
     ) => {
       const manager = deps.sessionManager as unknown as {
@@ -125,8 +125,7 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
         ...(options?.pauseReason ? { pauseReason: options.pauseReason } : {}),
         ...(options?.error ? { error: options.error } : {}),
         ...(options?.scope?.trim() ? { scope: options.scope.trim() } : {}),
-        ...(options?.authorizedUpTo?.trim() ? { authorizedUpTo: options.authorizedUpTo.trim() } : {}),
-        ...(options?.authorizedSteps?.length ? { authorizedSteps: options.authorizedSteps } : {}),
+        ...(options?.directive?.trim() ? { directive: options.directive.trim() } : {}),
       })
       // Stopping a task has to stop the work: a label that changes while the worker keeps
       // writing is the same lie in the other direction.

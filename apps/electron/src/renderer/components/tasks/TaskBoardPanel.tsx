@@ -495,12 +495,12 @@ export function TaskBoardPanel({
                           ) : null}
                         </span>
                         {task.pauseReason ? (
-                          {/*
-                            * One label, not two. A decision pause says 「等待你决定」 and the
-                            * decision's own label says 「需要你决定」 — printing both read as
-                            * 「等待你决定 · 需要你决定」. The decision's wording is the more
-                            * specific of the two, so it replaces the generic one when present.
-                            */}
+                          /*
+                           * One label, not two. A decision pause says 「等待你决定」 and the
+                           * decision's own label says 「需要你决定」 — printing both read as
+                           * 「等待你决定 · 需要你决定」. The decision's wording is the more
+                           * specific of the two, so it replaces the generic one when present.
+                           */
                           <span className="truncate pl-[22px] text-[11.5px] text-amber-400" title={task.decisionLabel ?? pauseReasonLabel(task.pauseReason)}>
                             {task.decisionLabel ?? pauseReasonLabel(task.pauseReason)}
                           </span>

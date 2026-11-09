@@ -120,6 +120,15 @@ export function normalizeTask(task: Task): Task {
      * A missing counter means no failures recorded, so zero is the honest default.
      */
     lifecycle: task.lifecycle ?? { errorCount: 0, consecutiveFailures: 0 },
+    /**
+     * Same story as `lifecycle`, found the same way.
+     *
+     * `reportHandoff` runs `task.verify.requirement` and spreads `...task.verify` into the next
+     * state, so a task file without this field threw `Cannot read properties of undefined
+     * (reading 'requirement')` in the middle of a hand-off — the report was rejected with a
+     * TypeError rather than accepted or refused. Nothing recorded simply means nothing required.
+     */
+    verify: task.verify ?? {},
     version: TASK_VERSION,
   };
 }

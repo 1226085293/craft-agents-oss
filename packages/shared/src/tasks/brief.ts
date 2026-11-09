@@ -167,7 +167,15 @@ export function formatTaskBrief(task: Task, options: TaskBriefOptions = {}): str
     const progress = spec.plan.filter((step) => step.status === 'done').length;
     contract.push(`计划进度：${progress}/${spec.plan.length}`);
   }
-  if (spec?.scope) contract.push(`检查范围：${spec.scope}`);
+  /**
+   * `scope` says what this task covers — nothing more.
+   *
+   * It used to be printed as 「检查范围」 while the pause logic read the same string as the
+   * authorisation boundary, so one sentence answered two questions and the brief named it after
+   * the wrong one. The boundary is `directive` now, and this is what it always was: the extent of
+   * the work, for whoever has to divide it up.
+   */
+  if (spec?.scope) contract.push(`任务范围：${spec.scope}`);
   /**
    * What the person's last reply meant, in the words of whoever read it.
    *
@@ -457,7 +465,7 @@ export function formatNextLegBrief(task: Task, step: { id: string; title: string
     `接手任务 ${task.id}（${task.name}）的下一步：**${step.id} ${step.title}**。`,
     '',
     `任务整体：${task.instruction}`,
-    ...(task.spec?.scope ? [`分工范围：${task.spec.scope}`] : []),
+    ...(task.spec?.scope ? [`任务范围：${task.spec.scope}`] : []),
     ...(owner ? [owner] : []),
     '',
     formatHandoffContext(task) ?? '',

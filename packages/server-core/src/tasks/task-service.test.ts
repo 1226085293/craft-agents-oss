@@ -687,27 +687,18 @@ describe('scope delivered, plan still open', () => {
     expect(result.passed).toBe(false);
   })
 
-  it('asks the user once the authorised slice is delivered', async () => {
-    const root = workspace();
-    const { svc } = service(root);
+  const handOff = async (spec: Record<string, unknown>, root: string) => {
     mkdirSync(join(root, 'docs'), { recursive: true });
     writeFileSync(join(root, 'docs', 'a.md'), 'x');
+    const { svc } = service(root);
     const task = svc.create({
       name: 'scoped',
       instruction: 'x',
       supervisorSessionId: 'sess_sup',
-      toolCallId: 'call_sd2',
-      spec: {
-        cwd: root,
-        scope: '只做 1.1',
-        plan: [
-          { id: '1', title: '写文件', status: 'done' },
-          { id: '2', title: '收尾', status: 'todo' },
-        ],
-      } as never,
+      toolCallId: `call_${Math.random().toString(36).slice(2)}`,
+      spec: { cwd: root, ...spec } as never,
     });
-    svc.startRun(task.id, 'sess_w')
-
+    svc.startRun(task.id, 'sess_w');
     const result = await svc.reportHandoff(
       task.id,
       {
@@ -717,14 +708,74 @@ describe('scope delivered, plan still open', () => {
         verify: { ran: ['test -s docs/a.md'], passed: true },
       },
       'sess_w',
-    )
-    expect(result.passed).toBe(true)
-    const after = svc.get(task.id)!
-    expect(after.status).toBe('paused')
-    expect(after.pauseReason).toBe('needs_decision')
-    expect(after.decision?.label).toContain('范围内的工作已完成')
-    expect(after.decision?.reason).toContain('2')
-  })
+    );
+    return { passed: result.passed, after: svc.get(task.id)! };
+  };
+
+  it('parks the task on a decision when the worker hands back a slice it was directed to do', async () => {
+    const { passed, after } = await handOff(
+      {
+        directive: { text: '只做 1.1，其余等我确认', at: 1 },
+        plan: [
+          { id: '1', title: '写文件', status: 'todo' },
+          { id: '1.1', title: '创建', status: 'done', agent: 'a' },
+          { id: '2', title: '收尾', status: 'todo' },
+        ],
+      },
+      workspace(),
+    );
+
+    // The whole point of 「交接后暂停」: the executor stopped on purpose and the plan is not
+    // finished, so the next move is a decision rather than a silent continuation.
+    expect(passed).toBe(true);
+    expect(after.status).toBe('paused');
+    expect(after.pauseReason).toBe('needs_decision');
+    expect(after.decision?.label).toContain('这一段做完了');
+    expect(after.decision?.reason).toContain('2');
+    // The card quotes the instruction instead of claiming the rest was never authorised.
+    expect(after.decision?.reason).toContain('只做 1.1，其余等我确认');
+    expect(after.decision?.reason).not.toContain('没有授权');
+  });
+
+  it('does not park without a directive — nothing recorded what this run was for', async () => {
+    const { passed, after } = await handOff(
+      {
+        // `scope` is what used to trigger this and no longer decides anything.
+        scope: '只做 1.1',
+        plan: [
+          { id: '1', title: '写文件', status: 'todo' },
+          { id: '1.1', title: '创建', status: 'done', agent: 'a' },
+          { id: '2', title: '收尾', status: 'todo' },
+        ],
+      },
+      workspace(),
+    );
+
+    expect(passed).toBe(true);
+    expect(after.status).toBe('running');
+    expect(after.decision).toBeUndefined();
+  });
+
+  it('does not park when the plan has nothing left to do', async () => {
+    const { after } = await handOff(
+      {
+        directive: { text: '把这一节做完', at: 1 },
+        plan: [{ id: '1', title: '唯一一节', status: 'todo' }, { id: '1.1', title: '做完它', status: 'done', agent: 'a' }],
+      },
+      workspace(),
+    );
+
+    /**
+     * A finished plan plus `handoff` is not a completion.
+     *
+     * `completed` belongs to `delivered` — 「this is the answer, close it」 — while `handoff` says
+     * 「someone else continues」. With nothing left to continue there is also nothing to ask about,
+     * so the task stays put and the supervisor's nudge decides between 收尾 and 取消. The assertion
+     * is about the absent card, which is the part that would be noise.
+     */
+    expect(after.status).toBe('running');
+    expect(after.decision).toBeUndefined();
+  });
 })
 
 describe('the decision is asked once', () => {
@@ -745,7 +796,7 @@ describe('the decision is asked once', () => {
       toolCallId: 'call_once',
       spec: {
         cwd: root,
-        scope: '只做 1.1',
+        directive: { text: '只做 1.1', at: 1 },
         plan: [
           { id: '1', title: 'a', status: 'todo' },
           { id: '2', title: 'b', status: 'todo' },

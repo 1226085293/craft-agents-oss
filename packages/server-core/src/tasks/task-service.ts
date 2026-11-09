@@ -1158,7 +1158,7 @@ export class TaskService {
           deadlineAt: now + DECISION_TIMEOUT_MS,
         },
       };
-    } else if (accepted && handoff.outcome === 'handoff' && this.scopeDeliveredButPlanOpen(next)) {
+    } else if (accepted && handoff.outcome === 'handoff' && this.sliceDeliveredButPlanOpen(next)) {
       /**
        * Ask once, not once per hand-off.
        *
@@ -1193,17 +1193,29 @@ export class TaskService {
         ...next,
         decision: {
           category: 'direction',
-          label: '范围内的工作已完成',
+          label: '这一段做完了，等你决定',
+          /**
+           * The card no longer claims the rest is unauthorised.
+           *
+           * It used to read 「任务范围只覆盖已完成的部分……还剩 N 步没有授权」, which was true when a
+           * scope named the slice and false in every other case: with a directive like 「把这个模块
+           * 收尾」 the remaining steps *are* authorised, and the person was being asked to release
+           * work they had already released. What is actually true is smaller and more useful: the
+           * executor stopped on purpose, and the plan is not finished.
+           */
           reason:
-            `任务范围只覆盖已完成的部分（「${next.spec?.scope ?? ''}」），` +
-            `还剩 ${remaining.length} 步没有授权：${remaining.map((step) => step.id).join('、')}。` +
+            `执行者把这一段交回来了，计划里还有 ${remaining.length} 步没做完：` +
+            `${remaining.map((step) => step.id).join('、')}。` +
+            (next.spec?.directive?.text
+              ? `本次指令是「${next.spec.directive.text}」——按它判断还要不要继续。`
+              : '') +
             '要继续就回复放行，我会接着派；不需要就把任务结束掉。',
           askedAt: now,
           deadlineAt: now + DECISION_TIMEOUT_MS,
         },
       };
       appendJournal(this.root, id, {
-        type: 'scope_delivered',
+        type: 'slice_delivered',
         at: now,
         data: { remaining: remaining.map((step) => step.id) },
       });
@@ -1337,11 +1349,23 @@ export class TaskService {
   }
 
   /** Scope delivered, but the plan still has steps nobody authorised. */
-  private scopeDeliveredButPlanOpen(task: Task): boolean {
-    if (!task.spec?.scope) return false;
-    const plan = task.spec.plan ?? [];
-    if (!plan.length) return false;
-    return plan.some((step) => step.status !== 'done');
+  /**
+   * The worker handed its slice back, and the plan still has work in it.
+   *
+   * This used to read `spec.scope` — the prose written at task creation — and that stopped being
+   * the right question when the id lists were removed. `scope` no longer decides anything (it is
+   * what the brief prints as 「检查范围」 and what the section chooser reads as 「分工范围」), so a task
+   * whose boundary was recorded the new way, as `spec.directive`, never paused here at all: the
+   * worker finished a slice, handed off, and the task either continued on its own or sat in
+   * `running` with nobody owning the next step.
+   *
+   * `openSteps` rather than a flat `status !== 'done'` scan, for the reason that function exists:
+   * an outline's stored status lags its sub-steps, so the flat scan counted a finished section as
+   * outstanding and asked the person about work that was already done.
+   */
+  private sliceDeliveredButPlanOpen(task: Task): boolean {
+    if (!task.spec?.directive?.text) return false;
+    return openSteps(task.spec.plan).length > 0;
   }
 
   /** Silence the session that was working, after the task stops expecting it. */

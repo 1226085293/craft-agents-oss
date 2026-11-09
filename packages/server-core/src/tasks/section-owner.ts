@@ -37,7 +37,7 @@ export function buildSectionOwnerPrompt(params: {
     '',
     `任务：${params.task.name}`,
     `任务说明：${params.task.instruction}`,
-    ...(params.task.spec?.scope ? [`分工范围：${params.task.spec.scope}`] : []),
+    ...(params.task.spec?.scope ? [`任务范围：${params.task.spec.scope}`] : []),
     '',
     `章节：${params.outline.id} ${params.outline.title}`,
     '这一节包含：',

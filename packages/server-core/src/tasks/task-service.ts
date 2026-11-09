@@ -43,6 +43,7 @@ import {
   childrenOf,
   DECISION_TIMEOUT_MS,
   TERMINAL_STATUSES,
+  answeredWithoutProgress,
   unownedSubSteps,
   type PlanStepStatus,
   type ArtifactProbe,
@@ -756,6 +757,21 @@ export class TaskService {
      * an answer it never received. Keeping the old answer in the journal and starting a clean
      * decision is what makes the two cards agree again.
      */
+    /**
+     * A question asked before the last answer was acted on is the same question again.
+     *
+     * `resolvedAt` alone used to be enough to reopen, which treated every follow-up card as a new
+     * question and — because the fresh record starts empty — discarded the answer the person had
+     * just given. Observed live on T-1: 「暂不执行 2，保持暂停」 at 06:08:59, 「是否继续？」 at
+     * 06:09:01, and the task ended with an open question and no record of the reply.
+     *
+     * Refusing here rather than at the call site is deliberate: this is the only door to a reopen,
+     * so no entry point can route around it. Callers that want to say something without asking
+     * anything can still send a plain report.
+     */
+    if (decision.resolvedAt && answeredWithoutProgress(task)) {
+      return task;
+    }
     if (decision.resolvedAt) {
       const fresh: Task = {
         ...task,

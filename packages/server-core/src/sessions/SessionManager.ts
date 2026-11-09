@@ -5971,10 +5971,30 @@ export class SessionManager implements ISessionManager {
                   return (open.length === 1 ? open[0] : open.at(-1))?.id
                 })()
               if (targetId) {
-                tasks.setDecisionWording(targetId, {
+                const before = tasks.get(targetId)
+                const wrote = tasks.setDecisionWording(targetId, {
                   question: text,
                   ...(options?.length ? { options: [...options] } : {}),
                 })
+                /**
+                 * The question was refused because the last answer is still the newest thing on
+                 * the task — so there is nothing new to ask, and drawing a card would ask it twice.
+                 *
+                 * `setDecisionWording` returns the task untouched in that case (it is the only door
+                 * to a reopen). The person still gets told; what they do not get is a second set of
+                 * buttons for a question they just answered.
+                 */
+                const refused =
+                  Boolean(before) &&
+                  wrote?.decision?.askedAt === before!.decision?.askedAt &&
+                  Boolean(before!.decision?.answer) &&
+                  Boolean(before!.decision?.resolvedAt)
+                if (refused) {
+                  // Delivered as a report, not a card: the words still reach the person, the
+                  // buttons do not.
+                  await this.deliverToUserLane(managed, text, 'completed')
+                  return
+                }
               }
             }
             await this.deliverToUserLane(managed, text, kind, options)

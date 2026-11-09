@@ -69,7 +69,7 @@ describe('unified-network-interceptor truncated tool-call streams', () => {
     const sse = [
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_full","type":"function","function":{"name":"bash","arguments":""}}]}}]}\n\n',
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{"}}]}}]}\n\n',
-      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"_intent\\": \\"run\\""}}]}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"appIntent\\": \\"run\\""}}]}}]}\n\n',
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":", \\"command\\": \\"echo hi\\""}}]}}]}\n\n',
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"}"}}]}}]}\n\n',
       'data: {"choices":[{"index":0,"finish_reason":"tool_calls"}]}\n\n',
@@ -82,7 +82,7 @@ describe('unified-network-interceptor truncated tool-call streams', () => {
     expect(out).toContain('"arguments":"{\\"command\\":\\"echo hi\\"}"');
     expect(out).toContain('"finish_reason":"tool_calls"');
     expect(out).not.toContain('network_error');
-    expect(out).not.toContain('_intent');
+    expect(out).not.toContain('appIntent');
   });
 
   it('suppresses a stream truncated mid-arguments and signals a retryable network_error', async () => {
@@ -92,7 +92,7 @@ describe('unified-network-interceptor truncated tool-call streams', () => {
       'data: {"choices":[{"index":0,"delta":{"reasoning_content":"checking demote impl"}}]}\n\n',
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_cut","type":"function","function":{"name":"bash","arguments":""}}]}}]}\n\n',
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{"}}]}}]}\n\n',
-      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"_displayName\\": \\"check demote impl\\""}}]}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"appDisplayName\\": \\"check demote impl\\""}}]}}]}\n\n',
     ];
 
     const out = await runThroughProcessor(createOpenAiSseStrippingStream(), sse);
@@ -101,7 +101,7 @@ describe('unified-network-interceptor truncated tool-call streams', () => {
     expect(out).not.toContain('"finish_reason":"tool_calls"');
     // The truncated call must not be dispatched in any form.
     expect(out).not.toContain('call_cut');
-    expect(out).not.toContain('_displayName');
+    expect(out).not.toContain('appDisplayName');
     // Reasoning passthrough still works.
     expect(out).toContain('"reasoning_content":"checking demote impl"');
   });
@@ -127,7 +127,7 @@ describe('unified-network-interceptor truncated tool-call streams', () => {
     // the buffered finish must not be forwarded as a finished tool_calls turn.
     const sse = [
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_cut3","type":"function","function":{"name":"bash","arguments":""}}]}}]}\n\n',
-      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"_intent\\": \\"run checks\\""}}]}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"appIntent\\": \\"run checks\\""}}]}}]}\n\n',
       'data: {"choices":[{"index":0,"finish_reason":"tool_calls"}]}\n\n',
       'data: [DONE]\n\n',
     ];
@@ -160,7 +160,7 @@ describe('unified-network-interceptor truncated tool-call streams', () => {
 
   it('keeps the DeepSeek two-phase merge behavior (phase-2 args at shifted index)', async () => {
     const sse = [
-      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_two","type":"function","function":{"name":"web_fetch","arguments":"{\\"_intent\\": \\"fetch\\", \\"_displayName\\": \\"Fetch\\"}"}}]}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_two","type":"function","function":{"name":"web_fetch","arguments":"{\\"appIntent\\": \\"fetch\\", \\"appDisplayName\\": \\"Fetch\\"}"}}]}}]}\n\n',
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\\"url\\": \\"https://example.com\\"}"}}]}}]}\n\n',
       'data: {"choices":[{"index":0,"finish_reason":"tool_calls"}]}\n\n',
       'data: [DONE]\n\n',
@@ -172,13 +172,13 @@ describe('unified-network-interceptor truncated tool-call streams', () => {
     expect(out).toContain('"arguments":"{\\"url\\":\\"https://example.com\\"}"');
     expect(out).toContain('"finish_reason":"tool_calls"');
     expect(out).not.toContain('network_error');
-    expect(out).not.toContain('_intent');
+    expect(out).not.toContain('appIntent');
   });
 
   it('suppresses the whole batch when any call in it was truncated', async () => {
     const sse = [
       'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_ok","type":"function","function":{"name":"bash","arguments":"{\\"command\\": \\"echo a\\"}"}}]}}]}\n\n',
-      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_bad","type":"function","function":{"name":"bash","arguments":"{\\"_displayName\\": \\"b\\""}}]}}]}\n\n',
+      'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_bad","type":"function","function":{"name":"bash","arguments":"{\\"appDisplayName\\": \\"b\\""}}]}}]}\n\n',
     ];
 
     const out = await runThroughProcessor(createOpenAiSseStrippingStream(), sse);

@@ -72,10 +72,24 @@ export function normalizeCommand(cmd: string): string {
 }
 
 /**
+ * Craft UI-metadata transport keys (2026-11-10 rename: `_displayName`/`_intent`
+ * → `appDisplayName`/`appIntent`). They ride along on tool calls for UI
+ * display only — never real arguments, so they must not affect loop
+ * fingerprints or empty-args detection. (Legacy underscore keys are covered
+ * by the `_`-prefix rule below; this set catches the renamed ones.)
+ */
+const METADATA_KEYS = new Set(['appDisplayName', 'appIntent']);
+
+/** True for keys that are transport metadata rather than tool arguments. */
+function isMetadataKey(key: string): boolean {
+  return key.startsWith('_') || METADATA_KEYS.has(key);
+}
+
+/**
  * Stable fingerprint of a tool call: name + identifying args.
  *
  * Bash: the normalized command is the whole identity. Other tools: all
- * non-underscore (non-UI-metadata) args, sorted and string-truncated.
+ * non-metadata args, sorted and string-truncated.
  *
  * NOTE on statelessness: two identical calls to state-dependent tools can
  * legitimately differ (e.g. reading a file between edits) — the detector keys
@@ -89,7 +103,7 @@ export function fingerprintToolCall(
   if (name === 'bash') return `bash:${normalizeCommand(call.command ?? '')}`;
   const args = call.args;
   if (args && Object.keys(args).length > 0) {
-    const keys = Object.keys(args).filter((k) => !k.startsWith('_')).sort();
+    const keys = Object.keys(args).filter((k) => !isMetadataKey(k)).sort();
     const parts = keys.map((k) => {
       let v: string;
       try {
@@ -206,11 +220,11 @@ export class ToolLoopDetector {
  * (proxy/MCP tools may legitimately have an empty schema).
  */
 export function isEmptyArgs(input: Record<string, unknown> | null | undefined): boolean {
-  // Underscore-prefixed keys are craft-metadata transport (e.g. _displayName
-  // / _intent) — not real tool arguments. A call carrying ONLY metadata
-  // counts as empty.
+  // Metadata transport keys (appDisplayName / appIntent, legacy _-prefixed)
+  // are not real tool arguments. A call carrying ONLY metadata counts as
+  // empty.
   if (!input) return true;
-  return !Object.keys(input).some((k) => !k.startsWith('_'));
+  return !Object.keys(input).some((k) => !isMetadataKey(k));
 }
 
 export function shouldRejectEmptyArgs(toolName: string, input: Record<string, unknown> | null | undefined): boolean {

@@ -5,7 +5,7 @@
  * Patches globalThis.fetch before any SDK captures it.
  *
  * Features:
- * - Adds _intent and _displayName metadata to all tool schemas (request)
+ * - Adds appIntent and appDisplayName metadata to all tool schemas (request)
  * - Re-injects stored metadata into conversation history (request)
  * - Processes SSE response streams per API format:
  *   - Anthropic: STRIPS metadata from stream (SDK validates immediately)
@@ -126,6 +126,63 @@ interface ApiAdapter {
 }
 
 // ============================================================================
+// TOOL NAME REPAIR (response-side)
+// ============================================================================
+
+/**
+ * Names of the tools advertised in the CURRENT request, captured read-only from
+ * the outgoing body by each adapter's `addMetadataToTools`.
+ *
+ * Module scope is safe here: the interceptor runs as a preload inside the SDK
+ * subprocess, and Craft spawns one subprocess per session — so this never sees
+ * two concurrent requests from different sessions.
+ */
+let currentRequestToolNames: readonly string[] = [];
+
+/** Record the tool names advertised by a request. Never mutates the body. */
+export function rememberRequestToolNames(names: readonly string[]): void {
+  currentRequestToolNames = names;
+}
+
+/** Test seam: clear the captured tool names. */
+export function _resetRequestToolNamesForTesting(): void {
+  currentRequestToolNames = [];
+}
+
+/**
+ * Repair a tool name that the model mangled in the function-name slot.
+ *
+ * Observed failure (2026-11, deepseek-v4.1-flash): the model emitted
+ * `_bash` with a complete `{command}` payload. The SDK resolves tools by exact
+ * name, so the call died as `Tool _bash not found` and the command never ran —
+ * even though the arguments were perfectly valid. The leading underscore is
+ * imitation of the old `_displayName` / `_intent` schema fields.
+ *
+ * Rules are deliberately conservative — we only ever map onto a tool that the
+ * current request actually advertised:
+ *   1. exact match                     → no repair needed
+ *   2. name with leading ``_`` stripped → that tool
+ *   3. case-insensitive match (also with
+ *      leading underscores stripped)    → the canonically-cased tool name
+ * Anything else returns `null`; we never invent a name.
+ */
+export function repairToolName(rawName: string, knownNames?: readonly string[]): string | null {
+  const known = knownNames ?? currentRequestToolNames;
+  if (!rawName || known.length === 0) return null;
+  if (known.includes(rawName)) return null; // already valid
+
+  const stripped = rawName.replace(/^_+/, '');
+  if (stripped && known.includes(stripped)) return stripped;
+
+  const lowered = stripped.toLowerCase();
+  if (lowered) {
+    const caseMatch = known.find((name) => name.toLowerCase() === lowered);
+    if (caseMatch) return caseMatch;
+  }
+  return null;
+}
+
+// ============================================================================
 // MALFORMED BODY ERROR
 // ============================================================================
 
@@ -164,29 +221,34 @@ export class MalformedBodyError extends Error {
 // ============================================================================
 
 /**
- * Inject _displayName and _intent into a tool's properties object.
+ * Inject appDisplayName and appIntent into a tool's properties object.
  * Shared by both Anthropic and OpenAI adapters (same logic, different schema paths).
  */
 function injectMetadataFields(
   properties: Record<string, unknown>,
   required: string[] | undefined,
 ): { properties: Record<string, unknown>; required: string[] } {
-  const { _displayName, _intent, ...rest } = properties as {
-    _displayName?: unknown;
-    _intent?: unknown;
+  const { appDisplayName, appIntent, ...rest } = properties as {
+    appDisplayName?: unknown;
+    appIntent?: unknown;
     [key: string]: unknown;
   };
   // Place metadata LAST so the real tool parameters (command, path, etc.) stay
-  // visually first in the schema. Putting `_displayName`/`_intent` (underscore-
-  // prefixed) first primed models (esp. DeepSeek) to also underscore the real
-  // parameter names (command -> _command), causing "Validation failed for tool".
+  // visually first in the schema.
+  //
+  // Historical note (2026-11-10): these fields used to be `_displayName` /
+  // `_intent`. The leading underscore primed models (esp. DeepSeek) to treat an
+  // underscore as part of the naming convention — they underscored real
+  // parameter names (command -> _command) and, worse, tool names (bash ->
+  // _bash), producing `Tool _bash not found`. The keys are now `appDisplayName`
+  // / `appIntent` so no underscore appears anywhere in the wire schema.
   const newProperties = {
     ...rest,
-    _displayName: _displayName || displayNameSchema,
-    _intent: _intent || intentSchema,
+    appDisplayName: appDisplayName || displayNameSchema,
+    appIntent: appIntent || intentSchema,
   };
-  const otherRequired = (required || []).filter(r => r !== '_displayName' && r !== '_intent');
-  return { properties: newProperties, required: [...otherRequired, '_displayName', '_intent'] };
+  const otherRequired = (required || []).filter(r => r !== 'appDisplayName' && r !== 'appIntent');
+  return { properties: newProperties, required: [...otherRequired, 'appDisplayName', 'appIntent'] };
 }
 
 /**
@@ -213,14 +275,14 @@ export function injectMetadataIntoToolSchema<T extends {
 }
 
 /**
- * Extract _intent/_displayName from a parsed tool input and store in toolMetadataStore.
+ * Extract appIntent/appDisplayName from a parsed tool input and store in toolMetadataStore.
  * Shared by both SSE processors (Anthropic strips, OpenAI captures).
  *
  * @returns true if metadata was found and stored
  */
 function captureMetadataFromInput(toolId: string, toolName: string, parsed: Record<string, unknown>): boolean {
-  const intent = typeof parsed._intent === 'string' ? parsed._intent : undefined;
-  const displayName = typeof parsed._displayName === 'string' ? parsed._displayName : undefined;
+  const intent = typeof parsed.appIntent === 'string' ? parsed.appIntent : undefined;
+  const displayName = typeof parsed.appDisplayName === 'string' ? parsed.appDisplayName : undefined;
   if (intent || displayName) {
     toolMetadataStore.set(toolId, { intent, displayName, timestamp: Date.now() });
     debugLog(`[SSE] Stored metadata for ${toolName} (${toolId}): intent=${!!intent}, displayName=${!!displayName}`);
@@ -230,14 +292,35 @@ function captureMetadataFromInput(toolId: string, toolName: string, parsed: Reco
 }
 
 /**
+ * Delete Craft metadata keys from a parsed tool input, in place.
+ *
+ * Covers the current wire keys plus the legacy underscore keys: sessions
+ * recorded before the 2026-11-10 rename still carry `_displayName` /
+ * `_intent` in their stored history, and letting either reach the tool fails
+ * Pi's strict-schema validation.
+ */
+export function deleteMetadataKeys(target: Record<string, unknown>): void {
+  delete target.appDisplayName;
+  delete target.appIntent;
+  delete target._displayName;
+  delete target._intent;
+}
+
+/**
  * Best-effort regex removal of metadata fields from raw JSON string.
- * Used as fallback when JSON.parse fails — ensures _intent/_displayName
+ * Used as fallback when JSON.parse fails — ensures appIntent/appDisplayName
  * never leak to the SDK even with malformed JSON.
  *
  * Exported for focused unit tests.
  */
 export function stripMetadataFieldsFromRawJson(json: string): string {
   return json
+    .replace(/"appIntent"\s*:\s*"(?:[^"\\]|\\.)*"\s*,?\s*/g, '')
+    .replace(/"appDisplayName"\s*:\s*"(?:[^"\\]|\\.)*"\s*,?\s*/g, '')
+    // Legacy keys: sessions created before the 2026-11-10 rename still carry
+    // them in stored history. Keeping them out of tool inputs is not
+    // back-compat decoration — an unstripped `_displayName` reaches the tool and
+    // fails Pi's `additionalProperties: false` validation.
     .replace(/"_intent"\s*:\s*"(?:[^"\\]|\\.)*"\s*,?\s*/g, '')
     .replace(/"_displayName"\s*:\s*"(?:[^"\\]|\\.)*"\s*,?\s*/g, '')
     .replace(/,\s*}/g, '}');
@@ -494,7 +577,7 @@ const SSE_DATA_RE = /^data:\s*(.+)$/;
 
 /**
  * Creates a TransformStream that intercepts Anthropic SSE events,
- * buffers tool_use input deltas, extracts _intent/_displayName into the metadata
+ * buffers tool_use input deltas, extracts appIntent/appDisplayName into the metadata
  * store, and re-emits clean events without those fields.
  */
 export function createAnthropicSseStrippingStream(): TransformStream<Uint8Array, Uint8Array> {
@@ -521,6 +604,15 @@ export function createAnthropicSseStrippingStream(): TransformStream<Uint8Array,
       const contentBlock = data.content_block as { type?: string; id?: string; name?: string } | undefined;
       if (contentBlock?.type === 'tool_use' && contentBlock.id && contentBlock.name != null) {
         const index = data.index as number;
+        // Repair a mangled function name before the SDK resolves it. The SDK
+        // matches tool names by exact string, so `_bash` would be rejected with
+        // `Tool _bash not found` and the (valid) command would never run.
+        const repairedName = repairToolName(contentBlock.name);
+        if (repairedName) {
+          debugLog(`[SSE] Repaired tool name "${contentBlock.name}" -> "${repairedName}" (${contentBlock.id})`);
+          contentBlock.name = repairedName;
+          dataStr = JSON.stringify(data);
+        }
         trackedBlocks.set(index, {
           id: contentBlock.id,
           name: contentBlock.name,
@@ -575,8 +667,7 @@ export function createAnthropicSseStrippingStream(): TransformStream<Uint8Array,
       const parsed = JSON.parse(block.bufferedJson);
 
       captureMetadataFromInput(block.id, block.name, parsed);
-      delete parsed._intent;
-      delete parsed._displayName;
+      deleteMetadataKeys(parsed);
 
       const cleanJson = JSON.stringify(parsed);
 
@@ -706,6 +797,10 @@ const anthropicAdapter: ApiAdapter = {
       return body;
     }
 
+    // Read-only: remember what this request advertised so the SSE layer can
+    // repair a mangled tool name (`_bash` -> `bash`) without inventing one.
+    rememberRequestToolNames(tools.map((tool) => tool.name).filter((name): name is string => !!name));
+
     const richDescriptions = isRichToolDescriptionsEnabled();
     let modifiedCount = 0;
     for (const tool of tools) {
@@ -725,7 +820,7 @@ const anthropicAdapter: ApiAdapter = {
       tool.input_schema.properties = updatedSchema.properties;
       tool.input_schema.required = updatedSchema.required;
       // External MCP servers may set additionalProperties: false which would
-      // cause the API to reject _intent/_displayName in tool inputs.
+      // cause the API to reject appIntent/appDisplayName in tool inputs.
       if ((tool.input_schema as Record<string, unknown>).additionalProperties === false) {
         delete (tool.input_schema as Record<string, unknown>).additionalProperties;
       }
@@ -733,7 +828,7 @@ const anthropicAdapter: ApiAdapter = {
     }
 
     if (modifiedCount > 0) {
-      debugLog(`[Anthropic Schema] Added _intent and _displayName to ${modifiedCount} tools`);
+      debugLog(`[Anthropic Schema] Added appIntent and appDisplayName to ${modifiedCount} tools`);
     }
 
     return body;
@@ -759,15 +854,15 @@ const anthropicAdapter: ApiAdapter = {
       for (const block of message.content) {
         if (block.type !== 'tool_use' || !block.id || !block.input) continue;
 
-        const hasIntent = '_intent' in block.input;
-        const hasDisplayName = '_displayName' in block.input;
+        const hasIntent = 'appIntent' in block.input;
+        const hasDisplayName = 'appDisplayName' in block.input;
         if (hasIntent && hasDisplayName) continue;
 
         const stored = toolMetadataStore.get(block.id);
         if (stored) {
           const newInput: Record<string, unknown> = {};
-          if (!hasDisplayName && stored.displayName) newInput._displayName = stored.displayName;
-          if (!hasIntent && stored.intent) newInput._intent = stored.intent;
+          if (!hasDisplayName && stored.displayName) newInput.appDisplayName = stored.displayName;
+          if (!hasIntent && stored.intent) newInput.appIntent = stored.intent;
           if (Object.keys(newInput).length > 0) {
             Object.assign(newInput, block.input);
             block.input = newInput;
@@ -843,7 +938,7 @@ interface TrackedToolCall {
 /**
  * Creates a TransformStream that intercepts OpenAI SSE events,
  * buffers tool_call argument deltas across all upstream chunks, extracts
- * `_intent` / `_displayName` into the metadata store, and emits one
+ * `appIntent` / `appDisplayName` into the metadata store, and emits one
  * consolidated SSE event per logical tool call with `id + name + cleanArgs`
  * together.
  *
@@ -941,11 +1036,18 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
     let anyIncomplete = false;
 
     for (const tc of sorted) {
+      // Repair a mangled function name before anything downstream (metadata
+      // capture, UI, the SDK's tool lookup) sees it — see repairToolName.
+      const repairedName = repairToolName(tc.name);
+      if (repairedName) {
+        debugLog(`[OpenAI SSE] Repaired tool name "${tc.name}" -> "${repairedName}" (${tc.id})`);
+        tc.name = repairedName;
+      }
       // Merge in this priority: phase-1 args (partial-JSON concatenation)
       // first, then any phase-2 "shifted index" args (each a complete JSON
       // object) via object spread. Phase-2 wins on key conflicts since it
       // carries the model's actual content (DeepSeek emits real args there;
-      // phase-1 carries only `_intent` / `_displayName` for those calls).
+      // phase-1 carries only `appIntent` / `appDisplayName` for those calls).
       let merged: Record<string, unknown> = {};
       let phase1Ok = false;
       let phase2Ok = false;
@@ -988,8 +1090,7 @@ export function createOpenAiSseStrippingStream(): TransformStream<Uint8Array, Ui
       }
 
       captureMetadataFromInput(tc.id, tc.name, merged);
-      delete merged._intent;
-      delete merged._displayName;
+      deleteMetadataKeys(merged);
       prepared.push({ tc, outArgs: JSON.stringify(merged) });
     }
 
@@ -1342,6 +1443,11 @@ const openAiAdapter: ApiAdapter = {
       return body;
     }
 
+    // Read-only tool-name capture — see the Anthropic adapter for why.
+    rememberRequestToolNames(
+      tools.map((tool) => tool.function?.name).filter((name): name is string => !!name),
+    );
+
     const richDescriptions = isRichToolDescriptionsEnabled();
     let modifiedCount = 0;
 
@@ -1361,7 +1467,7 @@ const openAiAdapter: ApiAdapter = {
       params.properties = updatedSchema.properties;
       params.required = updatedSchema.required;
       // External MCP servers may set additionalProperties: false which would
-      // cause validation to reject _intent/_displayName in tool inputs.
+      // cause validation to reject appIntent/appDisplayName in tool inputs.
       if ((params as Record<string, unknown>).additionalProperties === false) {
         delete (params as Record<string, unknown>).additionalProperties;
       }
@@ -1369,7 +1475,7 @@ const openAiAdapter: ApiAdapter = {
     }
 
     if (modifiedCount > 0) {
-      debugLog(`[OpenAI Schema] Added _intent and _displayName to ${modifiedCount} tools`);
+      debugLog(`[OpenAI Schema] Added appIntent and appDisplayName to ${modifiedCount} tools`);
     }
 
     return body;
@@ -1408,15 +1514,15 @@ const openAiAdapter: ApiAdapter = {
           continue;
         }
 
-        const hasIntent = '_intent' in args;
-        const hasDisplayName = '_displayName' in args;
+        const hasIntent = 'appIntent' in args;
+        const hasDisplayName = 'appDisplayName' in args;
         if (hasIntent && hasDisplayName) continue;
 
         const stored = toolMetadataStore.get(tc.id);
         if (stored) {
           const newArgs: Record<string, unknown> = {};
-          if (!hasDisplayName && stored.displayName) newArgs._displayName = stored.displayName;
-          if (!hasIntent && stored.intent) newArgs._intent = stored.intent;
+          if (!hasDisplayName && stored.displayName) newArgs.appDisplayName = stored.displayName;
+          if (!hasIntent && stored.intent) newArgs.appIntent = stored.intent;
           if (Object.keys(newArgs).length > 0) {
             Object.assign(newArgs, args);
             tc.function.arguments = JSON.stringify(newArgs);
@@ -1485,8 +1591,7 @@ export function createOpenAiResponsesSseStrippingStream(): TransformStream<Uint8
         try {
           const parsed = JSON.parse(argsStr) as Record<string, unknown>;
           captureMetadataFromInput(callId, 'response:function_call', parsed);
-          delete parsed._intent;
-          delete parsed._displayName;
+          deleteMetadataKeys(parsed);
           data.arguments = JSON.stringify(parsed);
         } catch {
           // pass through unchanged
@@ -1511,8 +1616,7 @@ export function createOpenAiResponsesSseStrippingStream(): TransformStream<Uint8
           try {
             const parsed = JSON.parse(item.arguments) as Record<string, unknown>;
             captureMetadataFromInput(toolId, toolName, parsed);
-            delete parsed._intent;
-            delete parsed._displayName;
+            deleteMetadataKeys(parsed);
             item.arguments = JSON.stringify(parsed);
           } catch {
             // pass through unchanged
@@ -1576,6 +1680,9 @@ const openAiResponsesAdapter: ApiAdapter = {
 
     if (!tools || !Array.isArray(tools)) return body;
 
+    // Read-only tool-name capture — see the Anthropic adapter for why.
+    rememberRequestToolNames(tools.map((tool) => tool.name).filter((name): name is string => !!name));
+
     const richDescriptions = isRichToolDescriptionsEnabled();
     let modifiedCount = 0;
 
@@ -1596,7 +1703,7 @@ const openAiResponsesAdapter: ApiAdapter = {
     }
 
     if (modifiedCount > 0) {
-      debugLog(`[OpenAI Responses Schema] Added _intent and _displayName to ${modifiedCount} tools`);
+      debugLog(`[OpenAI Responses Schema] Added appIntent and appDisplayName to ${modifiedCount} tools`);
     }
 
     return body;
@@ -1627,16 +1734,16 @@ const openAiResponsesAdapter: ApiAdapter = {
         continue;
       }
 
-      const hasIntent = '_intent' in args;
-      const hasDisplayName = '_displayName' in args;
+      const hasIntent = 'appIntent' in args;
+      const hasDisplayName = 'appDisplayName' in args;
       if (hasIntent && hasDisplayName) continue;
 
       const stored = toolMetadataStore.get(entry.call_id);
       if (!stored) continue;
 
       const newArgs: Record<string, unknown> = {};
-      if (!hasDisplayName && stored.displayName) newArgs._displayName = stored.displayName;
-      if (!hasIntent && stored.intent) newArgs._intent = stored.intent;
+      if (!hasDisplayName && stored.displayName) newArgs.appDisplayName = stored.displayName;
+      if (!hasIntent && stored.intent) newArgs.appIntent = stored.intent;
       if (Object.keys(newArgs).length > 0) {
         Object.assign(newArgs, args);
         entry.arguments = JSON.stringify(newArgs);
@@ -2438,7 +2545,7 @@ async function interceptedFetch(
       if (bodyStr) {
         let parsed = JSON.parse(bodyStr);
 
-        // Add _intent and _displayName to all tool schemas
+        // Add appIntent and appDisplayName to all tool schemas
         parsed = adapter.addMetadataToTools(parsed);
         // Re-inject stored metadata into conversation history (also runs the
         // Responses-API repair pass before metadata)

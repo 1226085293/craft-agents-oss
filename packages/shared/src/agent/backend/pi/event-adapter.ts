@@ -1504,8 +1504,8 @@ export class PiEventAdapter extends BaseEventAdapter {
         const { meta: storedMeta, keyTried } = this.resolveStoredMetadata(toolCallId);
 
         // Last-resort fallback: args metadata if present.
-        const argsIntent = typeof args._intent === 'string' ? args._intent : undefined;
-        const argsDisplayName = typeof args._displayName === 'string' ? args._displayName : undefined;
+        const argsIntent = typeof args.appIntent === 'string' ? args.appIntent : undefined;
+        const argsDisplayName = typeof args.appDisplayName === 'string' ? args.appDisplayName : undefined;
 
         const intent = eventMeta?.intent
           || storedMeta?.intent

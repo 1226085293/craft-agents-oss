@@ -5,8 +5,8 @@ import { DSML_TAG, containsDsmlMarkup, stripDsmlResidue } from '../dsml-strip.ts
 // tags — parameter OPEN tags without the marker, CLOSE tags with it, no
 // `<＼DSML＼invoke>` opener, stray closers at the end.
 const malformedLeak =
-  '<parameter name="_displayName">查看剩余 diff</' + DSML_TAG + 'parameter>\n' +
-  '<parameter name="_intent" string="true">确认并行改动性质（删除 caching 通道？）</' + DSML_TAG + 'parameter>\n' +
+  '<parameter name="appDisplayName">查看剩余 diff</' + DSML_TAG + 'parameter>\n' +
+  '<parameter name="appIntent" string="true">确认并行改动性质（删除 caching 通道？）</' + DSML_TAG + 'parameter>\n' +
   '<parameter name="command" string="true">cd "E:/craft-agents-oss" && git diff | head -80</' + DSML_TAG + 'parameter>\n' +
   '<parameter name="timeout" string="false">30</' + DSML_TAG + 'parameter>\n' +
   '</' + DSML_TAG + 'invoke>\n' +

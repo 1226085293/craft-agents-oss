@@ -946,14 +946,14 @@ All support \`--help\` and \`-o <file>\` (write output to file).
 
 ## Tool Metadata
 
-All MCP tools require two metadata fields (schema-enforced):
+Every tool accepts two Craft metadata fields (declared in the tool schema):
 
-- **\`_displayName\`** (required): short action name (2-4 words), e.g. "List Folders"
-- **\`_intent\`** (required): what you're trying to accomplish (1-2 sentences)
+- **\`appDisplayName\`** (required): short action name (2-4 words), e.g. "List Folders"
+- **\`appIntent\`** (required): what you're trying to accomplish (1-2 sentences)
 
 They power UI feedback and result summarization.
 
-**IMPORTANT — do NOT prefix tool argument names with underscores.** \`_displayName\` and \`_intent\` are the ONLY two fields that start with an underscore. Every other argument must use the exact name from the tool's schema (e.g. \`command\`, \`path\`, \`pattern\`, \`content\`, \`edits\`). Writing \`_command\`, \`_path\`, \`_pattern\`, \`_content\`, or \`_edits\` instead of the schema name causes the tool call to be rejected.${FEATURE_FLAGS.developerFeedback ? `
+**IMPORTANT — never prefix a tool name or an argument name with an underscore.** No field in this API starts with an underscore. Argument names must match the tool's schema exactly (e.g. \`command\`, \`path\`, \`pattern\`, \`content\`, \`edits\`), and tool names must be used verbatim (\`bash\`, not \`_bash\`). Writing \`_command\`, \`_path\`, \`_pattern\`, \`_content\`, \`_edits\` or \`_bash\` instead of the real name causes the call to be rejected and the work is not performed.${FEATURE_FLAGS.developerFeedback ? `
 
 ## Developer Feedback
 

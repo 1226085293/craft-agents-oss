@@ -2185,8 +2185,8 @@ export class PiAgent extends BaseAgent {
             const commandValue = (typeof input?.command === 'string' ? input.command : undefined)
               ?? this.bashCommandByToolUseId.get(agentEvent.toolUseId);
             this.bashCommandByToolUseId.delete(agentEvent.toolUseId);
-            const intentValue = typeof input?._intent === 'string' && input._intent
-              ? input._intent
+            const intentValue = typeof input?.appIntent === 'string' && input.appIntent
+              ? input.appIntent
               : (typeof input?.description === 'string' ? input.description : undefined);
             this.onBackgroundEvent?.({
               type: 'shell_backgrounded',
@@ -2304,8 +2304,8 @@ export class PiAgent extends BaseAgent {
 
     // Capture metadata BEFORE centralized checks strip it out.
     // This bridge is deterministic and avoids relying solely on side-channel store lookups.
-    const preIntent = typeof input._intent === 'string' ? input._intent : undefined;
-    const preDisplayName = typeof input._displayName === 'string' ? input._displayName : undefined;
+    const preIntent = typeof input.appIntent === 'string' ? input.appIntent : undefined;
+    const preDisplayName = typeof input.appDisplayName === 'string' ? input.appDisplayName : undefined;
     if (toolCallId && (preIntent || preDisplayName)) {
       this.preToolMetadataByCallId.set(toolCallId, {
         intent: preIntent,
@@ -2623,8 +2623,8 @@ export class PiAgent extends BaseAgent {
     this.backgroundProxyTasks.set(taskId, state);
     this.backgroundTasksPending = true;
 
-    const intent = typeof request.args._intent === 'string' && request.args._intent
-      ? request.args._intent
+    const intent = typeof request.args.appIntent === 'string' && request.args.appIntent
+      ? request.args.appIntent
       : request.toolName.replace(/^mcp__session__/, '');
     this.onBackgroundEvent?.({
       type: 'task_backgrounded',

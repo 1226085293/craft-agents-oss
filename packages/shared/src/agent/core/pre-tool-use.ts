@@ -300,7 +300,7 @@ function resolveSkillPlugin(
 // ============================================================
 
 /**
- * Strip _intent and _displayName metadata from tool inputs.
+ * Strip appIntent and appDisplayName metadata from tool inputs.
  *
  * These fields are injected into all tool schemas by the network interceptor
  * so Claude provides semantic intent for UI display. They must be stripped
@@ -318,15 +318,21 @@ export function stripToolMetadata(
   input: Record<string, unknown>,
   onDebug?: (message: string) => void
 ): MetadataStrippingResult {
-  const hasMetadata = '_intent' in input || '_displayName' in input;
+  const hasMetadata = 'appIntent' in input || 'appDisplayName' in input
+    // Legacy underscore keys (pre-2026-11-10 sessions). Must still be stripped:
+    // an unstripped `_displayName` reaches the tool and fails strict-schema
+    // validation (Pi built-ins use `additionalProperties: false`).
+    || '_intent' in input || '_displayName' in input;
 
   if (!hasMetadata) {
     return { modified: false, input };
   }
 
   // Strip the metadata fields
-  const { _intent, _displayName, ...cleanInput } = input;
-  onDebug?.(`Stripped tool metadata from ${toolName}: _intent=${!!_intent}, _displayName=${!!_displayName}`);
+  const {
+    appIntent, appDisplayName, _intent: legacyIntent, _displayName: legacyDisplayName, ...cleanInput
+  } = input;
+  onDebug?.(`Stripped tool metadata from ${toolName}: appIntent=${!!appIntent}, appDisplayName=${!!appDisplayName}, legacy=${!!(legacyIntent || legacyDisplayName)}`);
 
   return {
     modified: true,

@@ -116,7 +116,7 @@ export function _resetConfigCacheForTesting(): void {
 }
 
 /**
- * Check if rich tool descriptions are enabled (adds _intent/_displayName to all tools).
+ * Check if rich tool descriptions are enabled (adds appIntent/appDisplayName to all tools).
  * Reads from config.json via shared cache — the file is small and this runs once per API request.
  * Defaults to true if config is unreadable or field is not set.
  */
@@ -550,13 +550,13 @@ export const toolMetadataStore = {
 // METADATA SCHEMA DEFINITIONS
 // ============================================================================
 
-/** Schema for _displayName field added to tool definitions */
+/** Schema for appDisplayName field added to tool definitions */
 export const displayNameSchema = {
   type: 'string',
   description: 'REQUIRED: Human-friendly name for this action (2-4 words, e.g., "List Folders", "Search Documents", "Create Task")',
 };
 
-/** Schema for _intent field added to tool definitions */
+/** Schema for appIntent field added to tool definitions */
 export const intentSchema = {
   type: 'string',
   description: 'REQUIRED: Describe what you are trying to accomplish with this tool call (1-2 sentences)',

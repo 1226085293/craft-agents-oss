@@ -333,7 +333,7 @@ describe('PiAgent verification delivery lifecycle', () => {
     const enqueued: any[] = []
     startVerificationHold(agent, enqueued)
     const M = '\uFF5CDSML\uFF5C'
-    const leaked = '<parameter name="_displayName">查看剩余 diff</' + M + 'parameter>\n</' + M + 'invoke>\n</' + M + 'tool_calls>'
+    const leaked = '<parameter name="appDisplayName">查看剩余 diff</' + M + 'parameter>\n</' + M + 'invoke>\n</' + M + 'tool_calls>'
 
     ;(agent as any).handleLine(JSON.stringify({
       type: 'verification_result',

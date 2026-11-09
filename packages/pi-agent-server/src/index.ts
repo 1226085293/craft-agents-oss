@@ -131,6 +131,7 @@ import { createWebFetchTool } from './tools/web-fetch.ts';
 import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
 import { createSearchTool } from './tools/search/create-search-tool.ts';
 import { allowCraftMetadataProperties, normalizeUnderscorePrefixedArgs, stripCraftMetadata } from './craft-metadata-schema.ts';
+import { enrichUnknownToolResult } from './unknown-tool-result.ts';
 import { wrapMidTurnGuidance } from './steer-guidance.ts';
 import { settleStreamingSessionBeforePrompt } from './prompt-settle.ts';
 import { scheduleQueuedFollowUpDrain, type DrainableSession } from './queued-followup-drain.ts';
@@ -508,6 +509,10 @@ let piSession: AgentSession | null = null;
  */
 let contextReliefDeps: ContextReliefDeps | undefined;
 let restoreDsmlReceiver: (() => void) | null = null;
+// Tools advertised by the CURRENT session — read by the DSML receiver as the
+// safety gate for marker-less (bare) leak form. Set once per session creation
+// (one subprocess per session, so no cross-session bleed).
+let currentSessionToolNames: readonly string[] = [];
 let piModelRegistry: PiModelRegistry | null = null;
 let moduleCredentialStore: InMemoryCredentialStore | null = null;
 // Cached runtime build shared by the main session and ephemeral queryLlm
@@ -1752,6 +1757,7 @@ async function createPiSession(): Promise<AgentSession> {
         return /\/(?:chat\/)?completions\/?$/.test(path);
       },
       debugLog,
+      knownToolNames: () => currentSessionToolNames,
     });
   }
 
@@ -1858,6 +1864,7 @@ async function createPiSession(): Promise<AgentSession> {
   const proxyTools = buildProxyTools();
   const wrappedAll = wrapToolsWithHooks([...builtinDefs, ...webTools, ...proxyTools]);
   const toolAllowlist = wrappedAll.map(t => t.name);
+  currentSessionToolNames = toolAllowlist;
   debugLog(`Session tools: ${builtinDefs.length} builtin + ${webTools.length} web + ${proxyTools.length} proxy = ${wrappedAll.length} total`);
 
   // The tool preamble (names + descriptions + JSON Schemas) is serialised into
@@ -2216,7 +2223,7 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
 
   /**
    * Defensive normalization: some models (esp. DeepSeek) learn the
-   * `_displayName`/`_intent` underscore pattern from the schema and also
+   * `appDisplayName`/`appIntent` underscore pattern from the schema and also
    * underscore real parameter names (command -> _command, path -> _path).
    * The Pi SDK runs prepareArguments BEFORE validateToolArguments, so
    * mapping stray `_<param>` back to `<param>` prevents the whole class of
@@ -2236,7 +2243,7 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
     let inputObj: Record<string, unknown> = { ...(params as Record<string, unknown>) };
 
     // Extract intent before main process strips metadata (used for summarization)
-    const intent = typeof inputObj._intent === 'string' ? inputObj._intent : undefined;
+    const intent = typeof inputObj.appIntent === 'string' ? inputObj.appIntent : undefined;
 
     // Normalize Pi SDK parameter names: path → file_path
     if ((sdkToolName === 'Write' || sdkToolName === 'Edit' || sdkToolName === 'MultiEdit' || sdkToolName === 'NotebookEdit')
@@ -2755,8 +2762,8 @@ async function runMiniCompletion(
 function extractToolExecutionMetadata(args: Record<string, unknown> | undefined): ToolExecutionMetadata | undefined {
   if (!args) return undefined;
 
-  const intent = typeof args._intent === 'string' ? args._intent : undefined;
-  const displayName = typeof args._displayName === 'string' ? args._displayName : undefined;
+  const intent = typeof args.appIntent === 'string' ? args.appIntent : undefined;
+  const displayName = typeof args.appDisplayName === 'string' ? args.appDisplayName : undefined;
 
   if (!intent && !displayName) return undefined;
 
@@ -3106,6 +3113,13 @@ function handleSessionEvent(event: AgentSessionEvent): void {
   }
 
   if (event.type === 'tool_execution_end') {
+    // Phantom-call correction: if the model used a Craft metadata field as the
+    // tool name, replace the bare `Tool X not found` with an explanation while
+    // the result is still in flight (see enrichUnknownToolResult).
+    if (event.isError && enrichUnknownToolResult(event.result, event.toolName)) {
+      debugLog(`[pi-server] Enriched unknown-tool result for metadata field "${event.toolName}"`);
+    }
+
     // Stall-detection exemption bookkeeping: the tool settled (success, error,
     // or its own timeout firing) — its exemption dies with it.
     activeToolSilenceDeadlines.delete(event.toolCallId);

@@ -47,10 +47,10 @@ describe('fingerprintToolCall', () => {
   });
 
   it('non-bash: keyed by sorted args, underscore metadata excluded', () => {
-    const a = fingerprintToolCall({ type: 'read', args: { _intent: 'x', path: 'f.ts', limit: 10 } });
+    const a = fingerprintToolCall({ type: 'read', args: { appIntent: 'x', path: 'f.ts', limit: 10 } });
     const b = fingerprintToolCall({ type: 'read', args: { limit: 10, path: 'f.ts' } });
     expect(a).toBe(b);
-    expect(a).not.toContain('_intent');
+    expect(a).not.toContain('appIntent');
   });
 
   it('different args → different fingerprints', () => {
@@ -190,12 +190,12 @@ describe('empty-args guard (P2)', () => {
     expect(shouldRejectEmptyArgs('mcp__github__list_repositories', {})).toBe(false);
   });
 
-  it('counts craft-metadata-only calls as empty (built-in path still has _displayName/_intent attached)', () => {
-    expect(isEmptyArgs({ _displayName: 'X', _intent: 'Y' })).toBe(true);
+  it('counts craft-metadata-only calls as empty (built-in path still has appDisplayName/appIntent attached)', () => {
+    expect(isEmptyArgs({ appDisplayName: 'X', appIntent: 'Y' })).toBe(true);
   });
 
   it('real arguments are never empty', () => {
-    expect(isEmptyArgs({ command: 'echo hi', _displayName: 'X' })).toBe(false);
+    expect(isEmptyArgs({ command: 'echo hi', appDisplayName: 'X' })).toBe(false);
   });
 
   it('message names the tool and offers the stop-calling-tools escape hatch', () => {

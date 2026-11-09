@@ -216,7 +216,7 @@ describe('Fixture: MCP tool', () => {
 
     // MCP tool starts
     const mcpStart: ContentBlock[] = [
-      toolUse('toolu_mcp1', 'mcp__craft__search', { query: 'auth docs', _intent: 'Search docs', _displayName: 'Search' }),
+      toolUse('toolu_mcp1', 'mcp__craft__search', { query: 'auth docs', appIntent: 'Search docs', appDisplayName: 'Search' }),
     ]
     const startEvents = extractToolStarts(mcpStart, null, index, emitted)
     expect(startEvents[0]).toMatchObject({
@@ -295,7 +295,7 @@ describe('Fixture: Backgrounded Task', () => {
     const taskStart: ContentBlock[] = [
       toolUse('toolu_bg_task', 'Task', {
         prompt: 'Run comprehensive analysis',
-        _intent: 'Analyze codebase',
+        appIntent: 'Analyze codebase',
         run_in_background: true,
       }),
     ]
@@ -329,7 +329,7 @@ describe('Fixture: Backgrounded Task', () => {
     const taskStart: ContentBlock[] = [
       toolUse('toolu_fg_task', 'Task', {
         prompt: 'Quick lookup',
-        _intent: 'Find something',
+        appIntent: 'Find something',
       }),
     ]
     extractToolStarts(taskStart, null, index, emitted)

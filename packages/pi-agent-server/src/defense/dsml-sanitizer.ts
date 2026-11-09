@@ -9,7 +9,7 @@ import type {
   InlineExtension,
   MessageEndEvent,
 } from '@earendil-works/pi-coding-agent';
-import { cleanLeakedBlocks, parseLeakedToolCalls } from './leaked-toolcall.ts';
+import { cleanLeakedBlocks, findBareEnvelope, parseLeakedToolCalls, stripBareEnvelope } from './leaked-toolcall.ts';
 import { containsDsmlMarkup, stripDsmlResidue } from '../../../shared/src/utils/dsml-strip.ts';
 
 type MessageEndResult = { message: unknown };
@@ -74,8 +74,18 @@ function sanitizeNativeMessage(
   let changed = false;
   const content = message.content.map((block) => {
     if (block?.type !== 'text' || typeof block.text !== 'string') return block;
-    // Fast gate: no DSML marker at all → nothing to do.
-    if (!containsDsmlMarkup(block.text)) return block;
+    // Fast gate: no DSML marker at all → nothing to do, EXCEPT the bare
+    // (marker-less) envelope form, which is only stripped when the receiver
+    // actually executed a call with the same name+arguments (existence match
+    // below). Without that proof the block is ordinary prose and is left
+    // untouched.
+    if (!containsDsmlMarkup(block.text)) {
+      const bare = findBareEnvelope(block.text);
+      if (!bare) return block;
+      if (!bare.calls.every(matchesNative)) return block;
+      changed = true;
+      return { ...block, text: stripBareEnvelope(block.text) };
+    }
     const parsed = parseLeakedToolCalls(block.text);
     if (!parsed.leaked || parsed.calls.length === 0) {
       // 2026-10-13: malformed/asymmetric leak variants defeat the parser

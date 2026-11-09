@@ -124,9 +124,9 @@ export type ContentBlock = ToolUseBlock | ToolResultBlock | TextBlock | { type: 
 // Pure extraction functions
 // ============================================================================
 
-/** Strip internal metadata fields (_displayName, _intent) from tool input */
+/** Strip internal metadata fields (appDisplayName, appIntent) from tool input */
 function stripInternalFields(input: unknown): Record<string, unknown> {
-  const { _displayName, _intent, ...clean } = input as Record<string, unknown>;
+  const { appDisplayName, appIntent, ...clean } = input as Record<string, unknown>;
   return clean;
 }
 
@@ -333,7 +333,7 @@ export function extractToolResults(
  *
  * Sources (checked in priority order):
  * 1. toolMetadataStore — populated by the SSE stripping stream in unified-network-interceptor.ts
- * 2. toolBlock.input._intent / _displayName — fallback for Codex backend or if SSE interception didn't run
+ * 2. toolBlock.input.appIntent / appDisplayName — fallback for Codex backend or if SSE interception didn't run
  * 3. Bash description field — fallback for intent on Bash tools
  */
 function extractToolMetadata(toolBlock: ToolUseBlock, sessionDir?: string): { intent?: string; displayName?: string } {
@@ -362,15 +362,15 @@ function extractToolMetadata(toolBlock: ToolUseBlock, sessionDir?: string): { in
   }
 
   // Log when metadata store misses — helps diagnose cross-process sync issues
-  const argsHasIntent = typeof toolBlock.input._intent === 'string';
-  const argsHasDisplayName = typeof toolBlock.input._displayName === 'string';
+  const argsHasIntent = typeof toolBlock.input.appIntent === 'string';
+  const argsHasDisplayName = typeof toolBlock.input.appDisplayName === 'string';
   log.debug(
     `extractToolMetadata: store miss for ${toolBlock.name} (${toolBlock.id}); candidates=${Array.from(idCandidates).join(' -> ')}; argsIntent=${argsHasIntent}; argsDisplayName=${argsHasDisplayName}`,
   );
 
   // 2. Fallback: read directly from tool input (Codex backend, non-streaming, etc.)
-  let intent = toolBlock.input._intent as string | undefined;
-  const displayName = toolBlock.input._displayName as string | undefined;
+  let intent = toolBlock.input.appIntent as string | undefined;
+  const displayName = toolBlock.input.appDisplayName as string | undefined;
 
   // 3. Bash description fallback for intent
   if (!intent && toolBlock.name === 'Bash') {
@@ -421,11 +421,11 @@ function detectBackgroundEvents(
   // avoids treating a quoted "agentId:" in a foreground result as a launch.
   const agentIdMatch = resultStr.match(/(?:^|\n)agentId:\s*([a-zA-Z0-9_-]+)/);
   if (isParentTaskTool(entry.name) && !isError && resultStr && agentIdMatch?.[1]) {
-    // Prefer explicit `_intent` metadata; the built-in Agent/Task tool doesn't
+    // Prefer explicit `appIntent` metadata; the built-in Agent/Task tool doesn't
     // set it, so fall back to its concise `description` param (the "3-5 word
     // description of the task") — this is what the chip shows instead of the
     // opaque agent ID. Mirrors the Bash background-shell path below.
-    const intentValue = (typeof entry.input._intent === 'string' && entry.input._intent)
+    const intentValue = (typeof entry.input.appIntent === 'string' && entry.input.appIntent)
       || (typeof entry.input.description === 'string' && entry.input.description)
       || undefined;
     events.push({
@@ -442,7 +442,7 @@ function detectBackgroundEvents(
     const shellIdMatch = resultStr.match(/shell_id:\s*([a-zA-Z0-9_-]+)/)
       || resultStr.match(/"backgroundTaskId":\s*"([a-zA-Z0-9_-]+)"/);
     if (shellIdMatch?.[1]) {
-      const intentValue = (typeof entry.input._intent === 'string' && entry.input._intent)
+      const intentValue = (typeof entry.input.appIntent === 'string' && entry.input.appIntent)
         || (typeof entry.input.description === 'string' && entry.input.description)
         || undefined;
       const commandValue = typeof entry.input.command === 'string' ? entry.input.command : undefined;
@@ -471,7 +471,7 @@ function detectBackgroundEvents(
     if (taskIdMatch?.[1]) {
       const summaryMatch = resultStr.match(/Summary:\s*(.+)/);
       const workflowId = parseWorkflowIdFromTranscriptPath(resultStr);
-      const intentValue = (typeof entry.input._intent === 'string' && entry.input._intent)
+      const intentValue = (typeof entry.input.appIntent === 'string' && entry.input.appIntent)
         || (summaryMatch?.[1]?.trim())
         || undefined;
       events.push({

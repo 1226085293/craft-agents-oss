@@ -404,3 +404,40 @@ describe('task detail presentation', () => {
     expect(legacy).not.toContain('校验员')
     expect(legacy).not.toContain('— 默认')
   })
+
+  /**
+   * The question comes before the plan.
+   *
+   * When a task is waiting for an answer, that answer is the only thing on the page a person can
+   * act on. It used to sit below the instruction, the plan, the contract and four metric cards —
+   * everything already decided — so the reader had to scroll to find the one thing that needed
+   * them.
+   */
+  it('puts the pending question above the plan', () => {
+    const html = renderDetail({
+      ...detail,
+      pauseReason: 'needs_decision',
+      decision: { reason: '计划还有 1 步没做完', question: '仅放行 1.2，其余之后再定？' },
+      spec: {
+        plan: [
+          { id: '1', title: '写文件', status: 'doing' },
+          { id: '1.1', title: '创建 docs/a.md', status: 'done', agent: 'agent-qa' },
+        ],
+      },
+    })
+
+    const question = html.indexOf('task-decision-heading')
+    const plan = html.indexOf('task-plan-heading')
+
+    expect(question).toBeGreaterThan(-1)
+    expect(plan).toBeGreaterThan(-1)
+    expect(question).toBeLessThan(plan)
+  })
+
+  it('puts 「等问句」 above the plan too', () => {
+    // Same place, because it is the same question in a different state — moving only the answered
+    // card would make the page jump when the words arrive.
+    const html = renderDetail({ ...detail, pauseReason: 'asking' })
+
+    expect(html.indexOf('等问句')).toBeLessThan(html.indexOf('task-plan-heading'))
+  })

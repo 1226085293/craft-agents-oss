@@ -461,6 +461,70 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         <p className="td-body whitespace-pre-wrap text-foreground/90">{detail.instruction}</p>
       </section>
 
+      {/*
+        The question sits directly under the instruction, above the plan.
+
+        It used to come after the plan, the contract and four metric cards, so on a task that was
+        waiting for an answer the reader had to scroll past everything already decided to reach the
+        one thing that needed them. This page is ordered by what a person can act on: what was
+        asked, then what is planned, then the record of what happened.
+
+        The card mirrors the conversation card — same words, same options, same moment. It used to
+        build its own text from the rule that detected the situation, so it appeared at handoff time
+        with a sentence nobody had asked, then changed underneath the reader once the relay put the
+        real question in the conversation. Two renderings of one decision disagreeing about both
+        content and timing. So it draws nothing until the relay has actually asked: `question` is
+        written by `setDecisionWording` from the same payload the conversation card is built from.
+        Before that the task is paused and waiting, which is what the banner below says.
+      */}
+      {detail.pauseReason === 'needs_decision' || detail.pauseReason === 'asking' ? (
+        detail.decision?.question?.trim() ? (
+          <section className="rounded-xl border border-amber-500/35 bg-amber-500/8 p-4 md:p-5" aria-labelledby="task-decision-heading">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+              <div className="min-w-0 flex-1">
+                <h2 id="task-decision-heading" className="text-xs font-semibold text-amber-300">等你拍板</h2>
+                <p className="td-body mt-1 whitespace-pre-wrap text-foreground/90">
+                  {detail.decision.question}
+                </p>
+                {/* The rule's diagnosis stays as a footnote: same question as the card in
+                    the conversation, plus why a person is being asked at all. */}
+                {detail.decision.reason?.trim() ? (
+                  <p className="mt-1.5 whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">
+                    {detail.decision.reason}
+                  </p>
+                ) : null}
+                <TaskDecisionAnswer
+                  detail={detail}
+                  onApprove={() => (onRun ?? onResume)?.(detail.id)}
+                  onCancel={() => onCancel?.(detail.id)}
+                  onAnswer={onAnswer}
+                />
+              </div>
+            </div>
+          </section>
+        ) : (
+          /**
+           * Nothing has been asked yet — so say that, and say it does not need the reader.
+           *
+           * The old line was 「等待督导把问题转达给你，稍后会上来这里」. True, but it left the person
+           * unsure whether they were supposed to sit and watch. The state is unambiguous from the
+           * record: the task is paused for a question, and no question exists yet. That is
+           * 「督导正在整理要问你的内容」 — the only thing to do is go and do something else, and this
+           * page will change by itself when the question lands.
+           */
+          <div className="flex items-start gap-3 rounded-lg border border-border/60 bg-muted/30 p-3.5" role="status">
+            <Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-foreground/80">等问句</div>
+              <p className="td-body mt-1 text-foreground/85">
+                督导正在整理要问你的内容，暂时不用你操作。问题写好后会出现在这里，也会出现在会话里。
+              </p>
+            </div>
+          </div>
+        )
+      ) : null}
+
       <PlanSection
         plan={detail.spec?.plan}
         jumps={planJumps}
@@ -570,63 +634,6 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         ) : null}
       </section>
 
-      {/*
-        The task card mirrors the conversation card — same words, same options, same moment.
-        It used to build its own text from the rule that detected the situation, so it
-        appeared at handoff time with a sentence nobody had asked, then changed underneath
-        the reader once the relay put the real question in the conversation. Two renderings
-        of one decision that disagree about both content and timing.
-        So it draws nothing until the relay has actually asked: `decision.question` is
-        written by `setDecisionWording` from the same payload the conversation card is built
-        from. Before that the task is paused and waiting, which the banner below says.
-      */}
-      {detail.pauseReason === 'needs_decision' || detail.pauseReason === 'asking' ? (
-        detail.decision?.question?.trim() ? (
-          <section className="rounded-xl border border-amber-500/35 bg-amber-500/8 p-4 md:p-5" aria-labelledby="task-decision-heading">
-            <div className="flex items-start gap-3">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
-              <div className="min-w-0 flex-1">
-                <h2 id="task-decision-heading" className="text-xs font-semibold text-amber-300">等你拍板</h2>
-                <p className="td-body mt-1 whitespace-pre-wrap text-foreground/90">
-                  {detail.decision.question}
-                </p>
-                {/* The rule's diagnosis stays as a footnote: same question as the card in
-                    the conversation, plus why a person is being asked at all. */}
-                {detail.decision.reason?.trim() ? (
-                  <p className="mt-1.5 whitespace-pre-wrap text-[11px] leading-relaxed text-muted-foreground">
-                    {detail.decision.reason}
-                  </p>
-                ) : null}
-                <TaskDecisionAnswer
-                  detail={detail}
-                  onApprove={() => (onRun ?? onResume)?.(detail.id)}
-                  onCancel={() => onCancel?.(detail.id)}
-                  onAnswer={onAnswer}
-                />
-              </div>
-            </div>
-          </section>
-        ) : (
-          /**
-           * Nothing has been asked yet — so say that, and say it does not need the reader.
-           *
-           * The old line was 「等待督导把问题转达给你，稍后会上来这里」. True, but it left the person
-           * unsure whether they were supposed to sit and watch. The state is unambiguous from the
-           * record: the task is paused for a question, and no question exists yet. That is
-           * 「督导正在整理要问你的内容」 — the only thing to do is go and do something else, and this
-           * page will change by itself when the question lands.
-           */
-          <div className="flex items-start gap-3 rounded-lg border border-border/60 bg-muted/30 p-3.5" role="status">
-            <Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-            <div className="min-w-0">
-              <div className="text-xs font-semibold text-foreground/80">等问句</div>
-              <p className="td-body mt-1 text-foreground/85">
-                督导正在整理要问你的内容，暂时不用你操作。问题写好后会出现在这里，也会出现在会话里。
-              </p>
-            </div>
-          </div>
-        )
-      ) : null}
 
       {detail.pauseReason && detail.pauseReason !== 'needs_decision' ? (
         <div className="flex items-start gap-3 rounded-lg border border-amber-500/25 bg-amber-500/8 p-3.5" role="status">

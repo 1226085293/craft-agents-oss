@@ -75,6 +75,7 @@ export {
   restructurePlan,
   openSteps,
   lastPlanChangeAt,
+  fillMissingOwners,
   normalizePlan,
   PLAN_STEP_LIMIT,
   planProgress,

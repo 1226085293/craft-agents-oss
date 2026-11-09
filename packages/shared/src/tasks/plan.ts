@@ -229,6 +229,34 @@ export function isPlanStepStatus(value: unknown): value is PlanStepStatus {
  * Deliberately forgiving: a malformed step is dropped, not fatal. A plan is a
  * progress aid; refusing to save it because one row is wrong helps nobody.
  */
+/**
+ * Give every sub-step an owner when the plan arrives in one piece.
+ *
+ * `applyPlanPatch` refuses a sub-step without an `agent` — a sub-step is the unit of assignment, and
+ * one without an owner was never assigned to anybody. That rule only guards the per-step path.
+ * Tasks created or re-specified with a whole `spec.plan` never pass through it, so a plan could
+ * arrive with every owner missing, and the page then showed 「1.1. 创建 docs/a.md」 with nobody
+ * attached.
+ *
+ * The fallback is the task's assignee because that is who the task was given to. A step whose owner
+ * differs keeps the owner it has.
+ */
+export function fillMissingOwners(plan: PlanStep[] | undefined, owner: string | undefined): PlanStep[] | undefined {
+  if (!plan?.length) return plan;
+  const fallback = owner?.trim();
+  if (!fallback) return plan;
+  let changed = false;
+  const next = plan.map((step) => {
+    // Outlines carry no owner of their own: a section is a stage, and its steps may go to
+    // different profiles.
+    if (!step.id.includes('.')) return step;
+    if (step.agent?.trim()) return step;
+    changed = true;
+    return { ...step, agent: fallback };
+  });
+  return changed ? next : plan;
+}
+
 export function normalizePlan(raw: unknown, now = Date.now()): PlanStep[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const seen = new Set<string>();

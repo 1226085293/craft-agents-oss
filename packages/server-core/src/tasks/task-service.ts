@@ -43,6 +43,7 @@ import {
   childrenOf,
   DECISION_TIMEOUT_MS,
   TERMINAL_STATUSES,
+  fillMissingOwners,
   type PlanStepStatus,
   type ArtifactProbe,
   type Handoff,
@@ -1034,9 +1035,13 @@ export class TaskService {
 
   updateSpec(id: string, spec: TaskSpec): Task {
     const task = this.require(id);
-    const next: Task = { ...task, spec, updatedAt: this.now() };
+    // Same rule as `createTask`: a plan written in one piece still owes an owner per sub-step.
+    const withOwners = spec.plan
+      ? { ...spec, plan: fillMissingOwners(spec.plan, task.assigneeAgentId) }
+      : spec;
+    const next: Task = { ...task, spec: withOwners, updatedAt: this.now() };
     this.save(next);
-    appendJournal(this.root, id, { type: 'spec_updated', at: this.now(), data: { spec } });
+    appendJournal(this.root, id, { type: 'spec_updated', at: this.now(), data: { spec: withOwners } });
     return next;
   }
 

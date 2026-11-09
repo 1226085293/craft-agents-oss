@@ -635,8 +635,53 @@ export class TaskService {
     wording: { question?: string; label?: string; options?: string[] },
   ): Task | null {
     const task = this.get(id);
-    const decision = task?.decision;
-    if (!task || !decision) return null;
+    if (!task) return null;
+    const decision = task.decision;
+    /**
+     * A question can exist before there is a decision record, and this used to drop it.
+     *
+     * `task.decision` is written by a worker's `needs_decision` hand-off. The supervisor asks in
+     * its own words through `report_to_user`, which reaches here to put the real question and the
+     * real buttons onto the record the task page reads. When the task had no decision — because it
+     * was paused by a plain `task_update({status:'paused', pauseReason:'needs_decision'})`, which
+     * nothing stops — this returned null and wrote nothing.
+     *
+     * The result was three views of one question that did not agree: the task page said 「等待督导把
+     * 问题转达给你，稍后会上来这里」 and, since nothing ever created the record it was waiting for,
+     * kept saying it; the conversation showed a card with buttons; and pressing a button answered
+     * 「no pending decision on this task」. Reported live on T-1.
+     *
+     * Creating the record here is what makes 「one question, one answer」 true: the supervisor's
+     * question becomes the task's question, so both cards read the same thing and either one can
+     * close it.
+     */
+    if (!decision) {
+      const now = this.now();
+      const options = (wording.options ?? [])
+        .map((option) => option.trim())
+        .filter((option) => option.length > 0)
+        .slice(0, 4);
+      const created: Task = {
+        ...task,
+        decision: {
+          category: 'direction',
+          label: wording.label?.trim() || '需要你决定',
+          reason: '',
+          askedAt: now,
+          deadlineAt: now + DECISION_TIMEOUT_MS,
+          ...(wording.question?.trim() ? { question: wording.question.trim() } : {}),
+          ...(options.length ? { options } : {}),
+        },
+        updatedAt: now,
+      };
+      this.save(created);
+      appendJournal(this.root, id, {
+        type: 'decision_asked',
+        at: now,
+        data: { source: 'supervisor', question: wording.question },
+      });
+      return created;
+    }
     /**
      * A question asked after the last one was answered is a NEW question.
      *

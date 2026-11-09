@@ -207,10 +207,51 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       if (!resolvedId) {
         return { accepted: false, reason: 'no task to answer — the card did not say which one' }
       }
+      /**
+       * A question can exist without a `decision` record, and then this used to be a dead end.
+       *
+       * `task.decision` is written by a worker's `needs_decision` hand-off. The supervisor's own
+       * questions — the ones it writes with `report_to_user`, options and all — are messages, not
+       * decisions, so a card drawn from one of those has nothing for `recordDecisionAnswer` to
+       * find. Reported live: the card rendered with options and a textarea, and every send came
+       * back 「no pending decision on this task」. Nothing the person could do with that: the
+       * question was real, the answer had no route, and the task sat paused behind it.
+       *
+       * The distinction that has to survive: a decision that was already answered must still be
+       * refused. Two surfaces show the same question, and accepting a second reply read it as a
+       * second instruction (observed: the same 「放行」 arriving twice, 1.6s apart). So the check is
+       * 「did this task ever have a decision?」 — if yes and it is not open, refuse; if no, deliver
+       * the words to whoever asked.
+       */
+      const hadDecision = Boolean(service.get(resolvedId)?.decision)
       const task = service.recordDecisionAnswer(resolvedId, text)
-      if (!task) {
-        // No open question: say so instead of accepting words nobody will read.
+      if (!task && hadDecision) {
+        // Answered already, or no longer open: say so instead of accepting words nobody will read.
         return { accepted: false, reason: 'no pending decision on this task' }
+      }
+      if (!task) {
+        const managerForReply = deps.sessionManager as unknown as {
+          sendMessage?: (sessionId: string, text: string) => Promise<unknown>
+          decisionAskerFor?: (taskId: string) => string | undefined
+        }
+        const asker = askedBySessionId ?? managerForReply.decisionAskerFor?.(resolvedId)
+        if (!asker || !managerForReply.sendMessage) {
+          return { accepted: false, reason: 'no pending decision on this task' }
+        }
+        /**
+         * Name the task in the reply, same as the decision path does.
+         *
+         * The supervisor's inbox holds several conversations and two open questions read as the
+         * same prose; 「完成1.2，然后暂停」 without 「任务 T-1」 is a sentence the reader has to
+         * place by memory.
+         */
+        const taskRecord = service.get(resolvedId)
+        const line = taskRecord
+          ? formatDecisionAnswerLine(taskRecord, text)
+          : `〔任务 ${resolvedId} 拍板答复〕${text.trim()}`
+        void managerForReply.sendMessage(asker, line).catch(() => undefined)
+        broadcast(workspaceId)
+        return { accepted: true }
       }
 
       /**

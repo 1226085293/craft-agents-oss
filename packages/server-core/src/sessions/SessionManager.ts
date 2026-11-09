@@ -3121,7 +3121,70 @@ export class SessionManager implements ISessionManager {
    * work. On the next lazy load/cold persist, replay every non-guidance user
    * message after the last terminal response in FIFO order.
    */
+  /**
+   * The task this session claims to belong to, when that task is gone.
+   *
+   * Reads through the task service rather than the board, so it answers the question the caller
+   * has: "does the record I am about to report into still exist?" A workspace whose task store
+   * fails to load is not treated as "everything was deleted" — an unreadable store must not make
+   * every session in it abandon its work.
+   */
+  private orphanedTaskBinding(managed: ManagedSession): string | undefined {
+    const taskId = managed.taskId
+    if (!taskId) return undefined
+    try {
+      return this.getTasks(managed.workspace.id).get(taskId) ? undefined : taskId
+    } catch (error) {
+      sessionLog.warn('could not check whether a task still exists', {
+        sessionId: managed.id,
+        taskId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return undefined
+    }
+  }
+
   private recoverPendingUserTurns(managed: ManagedSession): void {
+    /**
+     * A session whose task is gone must not replay the turn it was given.
+     *
+     * `taskboard:delete` already detaches the sessions it knows about, through `detachTask`. That
+     * covers the button. It does not cover the other ways a task record disappears — a workspace
+     * restored from a backup, a migration that dropped the file, an operator clearing `tasks/`, or
+     * a delete that raced a still-running worker. In every one of those the session keeps
+     * `taskId: T-2` and, on the next boot, is picked up here as an interrupted turn and re-run —
+     * with a brief for a task nobody can see, and a `reportHandoff` that will be silently discarded
+     * by the `taskGone` branch when it finally reports. Observed exactly that: a session started
+     * itself on boot titled 「T-2 交接暂停复验」 and then failed a task heartbeat every 30 seconds.
+     *
+     * Recovery exists to finish work that was interrupted. Work that has been cancelled has nothing
+     * to finish, so this is the one place where "do not resume" is the correct answer — and the
+     * binding is dropped so the next read does not keep asking about a record that is not there.
+     */
+    const orphanedTaskId = this.orphanedTaskBinding(managed)
+    if (orphanedTaskId) {
+      sessionLog.info('Not recovering a session whose task no longer exists', {
+        sessionId: managed.id,
+        taskId: orphanedTaskId,
+      })
+      this.detachTask(managed.id, orphanedTaskId)
+      /**
+       * No transcript row here, deliberately.
+       *
+       * The obvious thing to write is 「任务 T-9 已经不存在了」. Measured on a live instance, the row
+       * was appended, `persistSession` was called, and it was gone by the time the session was read
+       * back: this runs while the session is still cold, and hydration replaces `managed.messages`
+       * with the contents of disk afterwards. Log showed exactly that — `Cold-load triggered for
+       * persistSession`, then `returning 1 messages (messageCount=0)`.
+       *
+       * A notice that silently disappears is worse than no notice, because the code that wrote it
+       * believes it was delivered. The session is not left confusing anyway: its own transcript
+       * already holds the brief it was given, and the binding is gone, so it reads as an ordinary
+       * conversation from here.
+       */
+      return
+    }
+
     const existingQueuedIds = new Set(managed.messageQueue.map(q => q.messageId).filter(Boolean))
     let lastTerminalResponseIndex = -1
     let continuedAfterError = false

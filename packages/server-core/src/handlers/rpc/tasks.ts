@@ -264,7 +264,18 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
     async (_ctx: unknown, workspaceId: string, id: string) => {
       const service = tasksFor(deps, workspaceId);
       const task = service.get(id);
-      const sessionIds = task?.sessionIds ?? [];
+      /**
+       * Every session that could still point at this task.
+       *
+       * `sessionIds` is the history; `currentSessionId` is the one that may be running right now.
+       * They are normally the same set, but a task started through `spawnTaskRun` records the
+       * session in two separate writes (`attachSession` for the list, `startRun` for the current
+       * one), so a delete landing between them would leave the running session attached to a
+       * record that no longer exists — the orphan this handler is trying to prevent.
+       */
+      const sessionIds = Array.from(
+        new Set([...(task?.sessionIds ?? []), ...(task?.currentSessionId ? [task.currentSessionId] : [])]),
+      );
       const result = service.remove(id);
       if (!result.ok) return result;
 

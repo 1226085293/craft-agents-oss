@@ -441,43 +441,30 @@ export function applyPlanPatch(
    * outline says *what stage this is*, a sub-step says *what to do* — "section 2 is under
    * way" is a statement about 2.1, 2.2, and it stops being true by itself when they close.
    */
+  /**
+   * An outline's status is derived, never written.
+   *
+   * A section is a stage: it says what this part of the plan is for, and what is under way in it is
+   * reported by the sub-steps inside. Accepting a status here would be a suggestion the very next
+   * read overwrites — and, worse, would need a second rule for sections that have no sub-steps yet,
+   * at which point one field would answer two questions: is this a container, or is this a piece of
+   * work?
+   *
+   * The way to close a section that nobody has split up is therefore to split it: 「2 收尾」 becomes
+   * 「2.1 收尾核对」 with an owner, the section reads `doing` because a child is, and it reads `done`
+   * when that child closes. One extra row, and one meaning per field.
+   */
   if (isOutlineStep(patch.id) && patch.status) {
     const kids = childrenOf(steps, patch.id);
-    /**
-     * A section nobody split up is one action, and one action can be finished.
-     *
-     * Everything else about a status written on an outline is still refused — the value is derived
-     * from the sub-steps on every read, so accepting it would be a suggestion the next read
-     * overwrites. But 「收尾」 style sections exist: a plan may end in a single step that nobody
-     * wants to split into 2.1 for its own sake. Refusing `done` for those closed both doors at
-     * once — the section could not be completed, and no sub-step could be created either — which is
-     * how a finished task ended up unable to close its last row.
-     *
-     * The evidence requirement is what keeps this honest: a `done` here has to say what proves it,
-     * exactly like a sub-step.
-     */
-    if (patch.status === 'done' && kids.length === 0) {
-      if (!(patch.note ?? steps[index]?.note)?.trim()) {
-        return {
-          plan: steps,
-          changed: false,
-          error:
-            `大纲 ${patch.id} 没有小节，要标记完成就得说明做完了什么（note）；` +
-            `或者把它拆成小节（如 ${patch.id}.1）再标小节的状态。`,
-        };
-      }
-      // Falls through to the normal status write below.
-    } else {
-      return {
-        plan: steps,
-        changed: false,
-        error:
-          `大纲 ${patch.id} 的状态不用写，它由小节派生（小节开工则进行中，小节全完成则完成）。` +
-          (kids.length === 0
-            ? `先把 ${patch.id} 拆成可执行的小节（如 ${patch.id}.1），标小节的状态；或者直接标 done 并在 note 里写明证据。`
-            : `要推进就标小节：${kids.map((kid) => kid.id).join('、')}。`),
-      };
-    }
+    return {
+      plan: steps,
+      changed: false,
+      error:
+        `大纲 ${patch.id} 的状态不用写，它由小节派生（小节开工则进行中，小节全完成则完成）。` +
+        (kids.length === 0
+          ? `先把 ${patch.id} 拆成可执行的小节（如 ${patch.id}.1），标小节的状态。`
+          : `要推进就标小节：${kids.map((kid) => kid.id).join('、')}。`),
+    };
   }
 
   if (index < 0) {

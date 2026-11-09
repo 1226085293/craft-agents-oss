@@ -142,6 +142,7 @@ const PAUSE_REASON_LABEL: Record<string, string> = {
   process_lost: '工作进程中断',
   waiting: '等待中',
   needs_decision: '等待你决定',
+  asking: '等问句',
 }
 
 function pauseReasonLabel(reason: string): string {
@@ -160,13 +161,26 @@ const GROUPS: Array<{
     hint: '必须由人决定，任务已停在这里',
     match: (task) => task.status === 'paused' && task.pauseReason === 'needs_decision',
   },
+  {
+    /**
+     * A pause with no question yet is not 「等你拍板」.
+     *
+     * The board used to put it in that group, so the person was shown a column headed 「必须由人
+     * 决定」 with nothing in it to decide. Separate group, separate instruction: nothing to do.
+     */
+    key: 'asking',
+    label: '等问句',
+    hint: '督导正在整理要问的内容，暂时不用操作',
+    match: (task) => task.status === 'paused' && task.pauseReason === 'asking',
+  },
   { key: 'running', label: '进行中', match: (task) => task.status === 'running' },
   { key: 'backlog', label: '待开始', match: (task) => task.status === 'backlog' },
   {
     key: 'paused',
     label: '已暂停',
     hint: '失败、超预算或进程丢失',
-    match: (task) => task.status === 'paused' && task.pauseReason !== 'needs_decision',
+    match: (task) =>
+      task.status === 'paused' && task.pauseReason !== 'needs_decision' && task.pauseReason !== 'asking',
   },
   {
     key: 'done',

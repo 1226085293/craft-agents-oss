@@ -262,7 +262,8 @@ export class TaskService {
     });
     if (!result.changed) return result.task;
 
-    this.save(result.task);
+    const classified = this.classifyPauseReason(result.task);
+    this.save(classified);
     appendJournal(this.root, id, {
       type: 'status',
       at: now,
@@ -674,13 +675,22 @@ export class TaskService {
         },
         updatedAt: now,
       };
-      this.save(created);
+      /**
+       * The question exists now, so the pause means what it says.
+       *
+       * 「等问句」 and 「等你决定」 are one state apart by exactly this fact: whether there is
+       * something on screen to answer. Writing the question is the moment that becomes true, so
+       * the kind of pause is corrected here instead of being left for a reader to interpret.
+       */
+      const asking = task.status === 'paused' && task.pauseReason === 'asking';
+      const created2: Task = asking ? { ...created, pauseReason: 'needs_decision' } : created;
+      this.save(created2);
       appendJournal(this.root, id, {
         type: 'decision_asked',
         at: now,
-        data: { source: 'supervisor', question: wording.question },
+        data: { source: 'supervisor', question: wording.question, fromAsking: asking },
       });
-      return created;
+      return created2;
     }
     /**
      * A question asked after the last one was answered is a NEW question.
@@ -722,6 +732,10 @@ export class TaskService {
 
     const next: Task = {
       ...task,
+      // A question landing on a task paused as 「等问句」 turns it into 「等你决定」.
+      ...(task.status === 'paused' && task.pauseReason === 'asking'
+        ? { pauseReason: 'needs_decision' as const }
+        : {}),
       decision: {
         ...decision,
         ...(wording.label?.trim() ? { label: wording.label.trim() } : {}),
@@ -894,6 +908,28 @@ export class TaskService {
    * would silently drop cwd, tools and acceptance. Scope arrives separately from
    * the other spec fields (a dispatch supplies it), so it needs its own door.
    */
+  /**
+   * 「等你决定」 is only true when there is something to answer.
+   *
+   * A pause can be asked for before the question is worded — the supervisor stops, then spends a
+   * turn composing what to ask. Recording `needs_decision` at that moment puts a card on screen
+   * whose buttons have nothing behind them, and pressing one answered 「no pending decision on this
+   * task」 (reported live on T-1).
+   *
+   * Applied where a pause is finalised rather than inside `applyTransition`: a `needs_decision`
+   * hand-off crosses that function *before* its decision is attached, so deciding there classified
+   * every ordinary hand-off as 「等问句」 — caught by the existing hand-off test.
+   *
+   * A timer was the alternative, and it is worse: it changes the label under a person who is
+   * mid-sentence in the card, and misfires whenever the model is slow, which on this project is
+   * ordinary rather than exceptional.
+   */
+  private classifyPauseReason(task: Task): Task {
+    if (task.status !== 'paused' || task.pauseReason !== 'needs_decision') return task;
+    if (task.decision) return task;
+    return { ...task, pauseReason: 'asking' };
+  }
+
   /**
    * Record what the person's last reply means, in the supervisor's words.
    *
@@ -1296,6 +1332,14 @@ export class TaskService {
     }
     handoff.milestone = milestone
 
+    /**
+     * Classified here, after the decision has been attached.
+     *
+     * The hand-off sets `paused/needs_decision` first and hangs the decision on it a few lines
+     * later, so the pause reason and the question arrive in that order. This is the first moment
+     * both are known, which is exactly the fact 「等你决定」 claims.
+     */
+    next = this.classifyPauseReason(next)
     this.save(next);
     appendJournal(this.root, id, {
       type: 'handoff',

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { applyTransition } from '@craft-agent/shared/tasks'
 import { TaskService } from './task-service.ts'
 
 /**
@@ -122,5 +123,88 @@ describe('a supervisor question becomes the task question', () => {
     // would come back to life with a new identity.
     expect(second!.decision?.askedAt).toBe(first!.decision?.askedAt)
     expect(second!.decision?.question).toBe('第二次')
+  })
+})
+
+describe('a pause with no question is not 「等你决定」', () => {
+  let root: string
+  let svc: TaskService
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'asking-'))
+    svc = new TaskService({
+      workspaceRoot: root,
+      onChanged: () => {},
+      sessionExists: () => true,
+      wakeSupervisor: () => {},
+    })
+  })
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  const paused = () => {
+    const task = svc.create({
+      name: 'x',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: `call_${Math.random().toString(36).slice(2)}`,
+      spec: { cwd: root } as never,
+    })
+    svc.setStatus(task.id, 'paused', { pauseReason: 'needs_decision' })
+    return svc.get(task.id)!
+  }
+
+  it('records 「等问句」 when the question has not been worded yet', () => {
+    const task = paused()
+
+    // The board used to show this under a column headed 「必须由人决定」 with nothing in it to
+    // decide. The record knows the difference is just "is there a question yet".
+    expect(task.pauseReason).toBe('asking')
+    expect(task.decision).toBeUndefined()
+  })
+
+  it('becomes 「等你决定」 the moment the question lands', () => {
+    const task = paused()
+    const asked = svc.setDecisionWording(task.id, { question: '继续吗？', options: ['继续', '停止'] })
+
+    expect(asked!.pauseReason).toBe('needs_decision')
+    expect(asked!.decision?.question).toBe('继续吗？')
+  })
+
+  it('never claims 「等你决定」 on a task that already has a question', () => {
+    // Straight at the transition, because the service cannot produce this sequence: a task with an
+    // open decision refuses to go back to `running` at all, which is the guard doing its job.
+    const withDecision = {
+      id: 'T-9',
+      name: 'y',
+      instruction: 'x',
+      status: 'running',
+      createdAt: 1,
+      updatedAt: 1,
+      sessionIds: [],
+      handoffs: [],
+      lifecycle: { errorCount: 0, consecutiveFailures: 0 },
+      stats: { runs: 1, activeMs: 0 },
+      decision: { category: 'direction', label: '问过了', reason: '', askedAt: 1, deadlineAt: 2 },
+    } as never
+
+    const paused = applyTransition(withDecision, 'paused', { now: 10, pauseReason: 'needs_decision' })
+
+    // There is a question on record, so the pause means what it says from the start.
+    expect(paused.task.pauseReason).toBe('needs_decision')
+  })
+
+  it('leaves other pause reasons untouched', () => {
+    const task = svc.create({
+      name: 'z',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_waiting',
+      spec: { cwd: root } as never,
+    })
+    svc.setStatus(task.id, 'paused', { pauseReason: 'waiting' })
+    expect(svc.get(task.id)!.pauseReason).toBe('waiting')
   })
 })

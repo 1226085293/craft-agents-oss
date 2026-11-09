@@ -139,8 +139,8 @@ describe('task detail presentation', () => {
       '验收判据',
       '列表和详情在三栏布局下都清楚可读',
       // Paused and waiting for the relay to ask; the card itself appears only then.
-      '暂停原因',
-      '等待督导把问题转达给你',
+      '等问句',
+      '督导正在整理要问你的内容',
       '首次截图缺少时间线',
       '完成实现，等待用户确认视觉取舍。',
       '由督导请求用户验收。',
@@ -187,7 +187,8 @@ describe('task detail presentation', () => {
     // The task is paused, but no question exists yet — buttons here would be a card for a
     // decision the person has not been given, and they would disagree with the
     // conversation, which has nothing either.
-    expect(html).toContain('等待督导把问题转达给你')
+    expect(html).toContain('督导正在整理要问你的内容')
+    expect(html).toContain('暂时不用你操作')
     expect(html).not.toContain('同意，继续跑')
     expect(html).not.toContain('其他（自己输入）')
   })
@@ -280,11 +281,11 @@ describe('task detail presentation', () => {
     const html = renderDetail({ ...detail, decision: { reason: '连续 3 次交接未过', askedAt: 1 } })
 
     // The task is paused, and that is a fact worth showing…
-    expect(html).toContain('暂停原因')
+    expect(html).toContain('等问句')
     // …but there is no question yet, and no buttons for one.
     expect(html).not.toContain('同意，继续跑')
     expect(html).not.toContain('其他（自己输入）')
-    expect(html).toContain('等待督导把问题转达给你')
+    expect(html).toContain('督导正在整理要问你的内容')
   })
 
   it('shows exactly the relayed question and its options once asked', () => {

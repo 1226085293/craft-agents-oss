@@ -581,7 +581,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         written by `setDecisionWording` from the same payload the conversation card is built
         from. Before that the task is paused and waiting, which the banner below says.
       */}
-      {detail.pauseReason === 'needs_decision' ? (
+      {detail.pauseReason === 'needs_decision' || detail.pauseReason === 'asking' ? (
         detail.decision?.question?.trim() ? (
           <section className="rounded-xl border border-amber-500/35 bg-amber-500/8 p-4 md:p-5" aria-labelledby="task-decision-heading">
             <div className="flex items-start gap-3">
@@ -608,13 +608,22 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
             </div>
           </section>
         ) : (
-          // Nothing has been asked yet. Saying 「等你拍板」 with no question would be a card
-          // for a decision the person has not been given.
-          <div className="flex items-start gap-3 rounded-lg border border-amber-500/25 bg-amber-500/8 p-3.5" role="status">
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+          /**
+           * Nothing has been asked yet — so say that, and say it does not need the reader.
+           *
+           * The old line was 「等待督导把问题转达给你，稍后会上来这里」. True, but it left the person
+           * unsure whether they were supposed to sit and watch. The state is unambiguous from the
+           * record: the task is paused for a question, and no question exists yet. That is
+           * 「督导正在整理要问你的内容」 — the only thing to do is go and do something else, and this
+           * page will change by itself when the question lands.
+           */
+          <div className="flex items-start gap-3 rounded-lg border border-border/60 bg-muted/30 p-3.5" role="status">
+            <Clock3 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
             <div className="min-w-0">
-              <div className="text-xs font-semibold text-amber-300">暂停原因</div>
-              <p className="td-body mt-1 text-foreground/85">等待督导把问题转达给你，稍后会上来这里。</p>
+              <div className="text-xs font-semibold text-foreground/80">等问句</div>
+              <p className="td-body mt-1 text-foreground/85">
+                督导正在整理要问你的内容，暂时不用你操作。问题写好后会出现在这里，也会出现在会话里。
+              </p>
             </div>
           </div>
         )

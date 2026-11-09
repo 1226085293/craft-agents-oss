@@ -207,7 +207,19 @@ export type TaskPauseReason =
   | 'budget'
   | 'process_lost'
   | 'waiting'
-  | 'needs_decision';
+  | 'needs_decision'
+  /**
+   * Stopped because a question is coming, but it has not been written down yet.
+   *
+   * Distinct from `needs_decision` on purpose: that one tells a person 「有人在问你」 and offers
+   * them something to answer. When the supervisor stops first and words the question a turn
+   * later, there is nothing to answer yet, and saying 「等你决定」 over an empty card is the state
+   * that produced 「no pending decision on this task」 on send.
+   *
+   * The two are separated at the moment the pause is written, never by a timer: a person who is
+   * typing into a card must never have it taken away because a deadline elapsed.
+   */
+  | 'asking';
 
 /** What a worker reports when it finishes a turn. */
 export type HandoffOutcome = 'delivered' | 'handoff' | 'needs_decision';

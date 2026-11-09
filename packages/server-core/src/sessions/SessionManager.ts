@@ -2627,11 +2627,32 @@ export class SessionManager implements ISessionManager {
     try {
       const live = [...this.sessions.values()].find((managed) => managed.id === sessionId)
       if (!live) return undefined
-      const open = this.getTasks(live.workspace.id)
+      const owned = this.getTasks(live.workspace.id)
         .list()
         .filter((task) => task.supervisorSessionId === sessionId)
-        .filter((task) => task.status === 'paused' && task.pauseReason === 'needs_decision')
-      return (open.length === 1 ? open[0] : open.at(-1))?.id
+      /**
+       * An open question is what makes a task answerable — not a pause.
+       *
+       * A supervisor asks when a slice of work is done, and that can happen while the task is
+       * still `running`: nothing has been handed back, the worker is between steps, and the
+       * question is 「要不要继续」 rather than 「执行者卡住了」. Requiring `paused / needs_decision`
+       * made both this lookup and `taskIdentifierFor` return nothing for exactly that case, so the
+       * card carried no task id, the fallback found no task either, and every send came back
+       * 「no task to answer — the card did not say which one」. Observed live on T-1: the question
+       * was written at 05:17:29, the task had been `running` since 05:15:28.
+       */
+      const open = owned.filter((task) => task.decision && !task.decision.resolvedAt)
+      if (open.length) return (open.length === 1 ? open[0] : open.at(-1))?.id
+      /**
+       * Nothing open: the card was raised after its decision closed.
+       *
+       * A follow-up card carries no id of its own and the decision it came from is already
+       * settled, so the only thing left that identifies it is 「the task this conversation is
+       * working on」. The RPC still refuses when the task has a decision that was answered —
+       * `recordDecisionAnswer` is the judge — so returning it here cannot accept a second reply
+       * to a closed question; it only gives that refusal something to name.
+       */
+      return owned.at(-1)?.id
     } catch {
       return undefined
     }
@@ -8531,7 +8552,6 @@ ${request.prompt}`;
         .list()
         .filter((task) => task.supervisorSessionId === managed.id)
         .filter((task) => task.decision && !task.decision.resolvedAt)
-        .filter((task) => task.status === 'paused' && task.pauseReason === 'needs_decision')
       return (open.length === 1 ? open[0] : open.at(-1))?.id
     } catch {
       return undefined

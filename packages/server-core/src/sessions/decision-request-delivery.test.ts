@@ -196,6 +196,50 @@ describe('a decision request is written for the reader', () => {
     ).toBe('T-9')
   })
 
+  /**
+   * A question asked while the task is still running still belongs to a task.
+   *
+   * 「要不要继续」 is asked between steps, when nothing has been handed back and the task is
+   * `running`. Both lookups — the one that stamps the card and the one that finds the task
+   * from the asking session — required `paused / needs_decision`, so that question produced a
+   * card with no task id, no fallback, and every send came back
+   * 「no task to answer — the card did not say which one」. Observed live on T-1: the question
+   * was written at 05:17:29, the task had been `running` since 05:15:28.
+   *
+   * What makes a task answerable is an open decision, not a pause: a pause is only how a
+   * hand-off usually ends up, and the person cannot tell the two apart from the card.
+   */
+  it('names a running task that has an open question', async () => {
+    const requester = buildRequester()
+    ;(sm as unknown as { getTasks: unknown }).getTasks = () => ({
+      list: () => [
+        {
+          id: 'T-1',
+          status: 'running',
+          pauseReason: null,
+          supervisorSessionId: 'sess_asker',
+          decision: { askedAt: Date.now(), resolvedAt: undefined },
+        },
+      ],
+    })
+
+    await (
+      sm as unknown as {
+        deliverToUserLane: (m: unknown, t: string, k: string) => Promise<void>
+      }
+    ).deliverToUserLane(requester, '要不要继续做 1.2？', 'decision')
+
+    const managed = (sm as unknown as { sessions: Map<string, { messages: Row[] }> }).sessions.get(
+      'sess_asker',
+    )
+    const asked = managed?.messages.find((m) => m.statusType === 'decision_request')
+    expect(asked?.decisionRequest?.taskIdentifier).toBe('T-1')
+    // And the same task is what an unlabelled card falls back to.
+    expect(
+      (sm as unknown as { openTaskFor: (s: string) => string | undefined }).openTaskFor('sess_asker'),
+    ).toBe('T-1')
+  })
+
   it('writes a card instead of input, and starts no turn', async () => {
     const requester = buildRequester();
     await (

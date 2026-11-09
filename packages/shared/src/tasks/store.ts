@@ -107,6 +107,19 @@ export function normalizeTask(task: Task): Task {
     sessionIds: task.sessionIds ?? [],
     trigger: task.trigger ?? { kind: 'manual' },
     stats,
+    /**
+     * Six fields are defaulted on read; this was not one of them.
+     *
+     * `startGate` reads `shouldTripFuse(task.lifecycle)`, which dereferences
+     * `lifecycle.consecutiveFailures`. A task file without that field — written by an older
+     * version, hand-edited, or left behind by a failed migration — therefore crashed the resume
+     * path with `Cannot read properties of undefined (reading 'consecutiveFailures')`. Observed
+     * while probing a seeded task: the button reported a TypeError instead of either starting
+     * the run or saying why it would not.
+     *
+     * A missing counter means no failures recorded, so zero is the honest default.
+     */
+    lifecycle: task.lifecycle ?? { errorCount: 0, consecutiveFailures: 0 },
     version: TASK_VERSION,
   };
 }

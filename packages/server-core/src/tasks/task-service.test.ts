@@ -717,7 +717,7 @@ describe('scope delivered, plan still open', () => {
     return { passed: result.passed, after: svc.get(task.id)! };
   };
 
-  it('parks the task on a decision when the worker hands back a slice it was directed to do', async () => {
+  it('parks the task on instruction when the worker hands back a slice it was directed to do', async () => {
     const { passed, after } = await handOff(
       {
         directive: { text: '只做 1.1，其余等我确认', at: 1 },
@@ -730,16 +730,26 @@ describe('scope delivered, plan still open', () => {
       workspace(),
     );
 
-    // The whole point of 「交接后暂停」: the executor stopped on purpose and the plan is not
-    // finished, so the next move is a decision rather than a silent continuation.
+    /**
+     * The whole point of 「交接后暂停」: the executor stopped on purpose and the plan is not
+     * finished, so it does not continue on its own.
+     *
+     * But nobody is asked anything. The directive already said what to do next — 只做 1.1 — so
+     * there is no question, and this used to mint one anyway:
+     *
+     *   pushed pauseReason 'needs_decision' (later classified 'asking' with no question)
+     *   → the board read 「这一段做完了，等你决定」
+     *   → the watchdog chased the supervisor for a question it had not written
+     *   → the supervisor invented 「第 2 步收尾怎么走」
+     *
+     * A live run showed all four steps and the person was asked what they had already answered.
+     * One state was answering two questions: 「有人在问你」 and 「按你的话停了」.
+     */
     expect(passed).toBe(true);
     expect(after.status).toBe('paused');
-    expect(after.pauseReason).toBe('asking');
-    expect(after.decision?.label).toContain('这一段做完了');
-    expect(after.decision?.reason).toContain('2');
-    // The card quotes the instruction instead of claiming the rest was never authorised.
-    expect(after.decision?.reason).toContain('只做 1.1，其余等我确认');
-    expect(after.decision?.reason).not.toContain('没有授权');
+    expect(after.pauseReason).toBe('awaiting_release');
+    // No decision record means no card, and nothing for the watchdog to chase.
+    expect(after.decision).toBeUndefined();
   });
 
   it('does not park without a directive — nothing recorded what this run was for', async () => {
@@ -783,7 +793,7 @@ describe('scope delivered, plan still open', () => {
   });
 })
 
-describe('the decision is asked once', () => {
+describe('a stopped slice asks nothing', () => {
   /**
    * The branch that parks a task on a decision fires on every accepted hand-off. A real
    * run showed the consequence: the supervisor relayed the same A/B question three
@@ -816,23 +826,76 @@ describe('the decision is asked once', () => {
       verify: { ran: ['test -s docs/a.md'], passed: true },
     }
     await svc.reportHandoff(task.id, payload, 'sess_w')
-    const first = svc.get(task.id)!.decision!
     await svc.reportHandoff(task.id, payload, 'sess_w')
-    return { svc, task, first }
+    return { svc, task }
   }
 
-  it('keeps the original question instead of minting a new one', async () => {
-    const { svc, task, first } = await parked()
-    const second = svc.get(task.id)!.decision!
-    expect(second.askedAt).toBe(first.askedAt)
-    expect(second.deadlineAt).toBe(first.deadlineAt)
+  it('mints no question, so nothing can be asked twice', async () => {
+    const { svc, task } = await parked()
+    // 「Ask once」 used to mean "keep the first record and do not mint a second one". The record
+    // itself was the problem: it claimed a question was owed. With nothing to ask there is no
+    // record, and a repeated hand-off cannot produce a second card because there is no first.
+    expect(svc.get(task.id)?.decision).toBeUndefined()
   })
 
-  it('still parks the task on a decision the first time', async () => {
+  it('parks the task once, on instruction', async () => {
     const { svc, task } = await parked()
     expect(svc.get(task.id)?.status).toBe('paused')
-    // Parked and waiting for the supervisor's words; see the 「等问句」 note above.
-    expect(svc.get(task.id)?.pauseReason).toBe('asking')
+    expect(svc.get(task.id)?.pauseReason).toBe('awaiting_release')
+  })
+
+  /**
+   * An open question outlives a later hand-off.
+   *
+   * The guard that used to stop a second card now protects something narrower and still needed:
+   * a question that is genuinely open must not be overwritten by 「stopped on instruction」, or
+   * the card disappears from the pause reason that was drawing it while the decision stays open
+   * — unanswerable from the screen that asked.
+   */
+  it('leaves an open question alone', async () => {
+    const root = workspace()
+    const { svc } = service(root)
+    mkdirSync(join(root, 'docs'), { recursive: true })
+    writeFileSync(join(root, 'docs', 'a.md'), 'x')
+    const task = svc.create({
+      name: 'open-question',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_open',
+      spec: {
+        cwd: root,
+        directive: { text: '只做 1.1', at: 1 },
+        plan: [
+          { id: '1', title: 'a', status: 'todo' },
+          { id: '2', title: 'b', status: 'todo' },
+        ],
+      } as never,
+    })
+    svc.startRun(task.id, 'sess_w')
+
+    // The authentic way a question opens: the worker stops and asks, rather than the
+    // supervisor pausing first. `setStatus(paused → paused)` would be a no-op and would
+    // leave the reason untouched, so building it any other way tests the wrong thing.
+    await svc.reportHandoff(
+      task.id,
+      { outcome: 'needs_decision', summary: '要不要继续', artifacts: [], verify: { ran: [], passed: true } },
+      'sess_w',
+    )
+    const asked = svc.get(task.id)!
+    expect(asked.status).toBe('paused')
+    // A worker's ask arrives without words, so it is classified 「等问句」 — the point here is
+    // only that a decision pause is a pause for an answer, not 「按指示停了」.
+    expect(asked.pauseReason === 'needs_decision' || asked.pauseReason === 'asking').toBe(true)
+
+    // A later hand-off must not re-label that pause as 「按指示停了」.
+    writeFileSync(join(root, 'docs', 'a.md'), 'x')
+    await svc.reportHandoff(
+      task.id,
+      { outcome: 'handoff', summary: 'again', artifacts: [{ path: 'docs/a.md' }], verify: { ran: ['test -s docs/a.md'], passed: true } },
+      'sess_w',
+    )
+    const after = svc.get(task.id)?.pauseReason
+    expect(after === 'needs_decision' || after === 'asking').toBe(true)
   })
 })
 

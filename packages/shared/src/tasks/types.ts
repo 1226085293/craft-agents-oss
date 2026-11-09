@@ -226,7 +226,28 @@ export type TaskPauseReason =
    * The two are separated at the moment the pause is written, never by a timer: a person who is
    * typing into a card must never have it taken away because a deadline elapsed.
    */
-  | 'asking';
+  | 'asking'
+  /**
+   * Stopped on instruction, with nothing to answer.
+   *
+   * The authorised slice is delivered and the plan is not finished, so the task will not move
+   * again on its own — but nobody asked the person anything. This used to borrow
+   * `needs_decision`, which made one value answer two questions:
+   *
+   *   `needs_decision` — 「有人在问你」: there is a question, it belongs on a card, and the
+   *                      supervisor owes the words. The watchdog chases a missing one.
+   *   `awaiting_release` — 「按你的话停了」: the instruction covered what to do next (it said
+   *                      stop), so there is no question to ask and nothing to chase.
+   *
+   * Collapsing them produced a live contradiction: the supervisor reported 「本轮授权范围完成、
+   * 任务已停」, the board said 「这一段做完了，等你决定」, and the watchdog told the supervisor
+   * its question was still unwritten — so it invented one and asked 「第 2 步收尾怎么走」, a
+   * question the person had already answered with 「做完 1.2 就暂停」.
+   *
+   * Same plan model rule as everywhere else: a state that will not move on its own is not the
+   * same as a state that is waiting for an answer, and one field cannot carry both.
+   */
+  | 'awaiting_release';
 
 /** What a worker reports when it finishes a turn. */
 export type HandoffOutcome = 'delivered' | 'handoff' | 'needs_decision';

@@ -69,6 +69,11 @@ const PAUSE_REASON_LABEL: Record<string, string> = {
   process_lost: '工作进程中断',
   waiting: '等待中',
   needs_decision: '等待你决定',
+  // Stopped on instruction: the plan has steps left, but nobody is asking anything.
+  awaiting_release: '已按你的指示停在这里',
+  // The pause before the words exist; it has its own 「等问句」 notice above, so this label
+  // is only a fallback — without it the notice printed the raw enum value.
+  asking: '督导正在写出问题',
 }
 
 const HANDOFF_OUTCOME_LABEL: Record<TaskHandoffView['outcome'], string> = {
@@ -635,7 +640,11 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
       </section>
 
 
-      {detail.pauseReason && detail.pauseReason !== 'needs_decision' ? (
+      {/*
+        * Only reasons that have no notice of their own. `needs_decision` draws the ask card
+        * above and `asking` draws 「等问句」; repeating them here put one state on screen twice.
+        */}
+      {detail.pauseReason && detail.pauseReason !== 'needs_decision' && detail.pauseReason !== 'asking' ? (
         <div className="flex items-start gap-3 rounded-lg border border-amber-500/25 bg-amber-500/8 p-3.5" role="status">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
           <div className="min-w-0">

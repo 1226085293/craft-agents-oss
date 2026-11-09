@@ -1412,6 +1412,11 @@ export class TaskService {
        * worker reported — and the supervisor relayed each one. A real run asked the
        * same A/B question three times. An outstanding decision is the whole point: it
        * is already waiting, so there is nothing new to say.
+       *
+       * Still checked here, and now it guards something narrower: a question that is genuinely
+       * open stays where it is. Overwriting that pause with 「stopped on instruction」 would leave
+       * an open decision behind a pause reason that draws no card — the question would be
+       * unanswerable from the screen that was asking it.
        */
       const outstanding = next.decision && !next.decision.resolvedAt
       if (outstanding) {
@@ -1425,40 +1430,26 @@ export class TaskService {
        * 进行中 forever. Nothing was wrong with the supervisor: it stopped as instructed
        * and correctly declined to report, because none of the three reasons to interrupt
        * applied. The gap was that this state existed at all and had no name. A task that
-       * will not move again is not "running"; it is waiting for a person to widen the
-       * boundary, and that is precisely a decision.
+       * will not move again is not "running"; it is waiting for a person to release it.
        *
        * Not treated as failure: nothing went wrong. Not treated as completion: the plan is
-       * not finished. A pause with a decision is the honest description, and it routes to
-       * the user through the same door as every other 拍板 request.
+       * not finished. Paused, with the reason saying exactly that.
+       *
+       * This used to pause on `needs_decision` and write a decision record with the label
+       * 「这一段做完了，等你决定」 but no question — because the question was left for the
+       * supervisor to word. That made one value mean two things, and the contradiction was
+       * visible on a live run: the supervisor reported 「本轮授权范围完成、任务已停」, the board
+       * said 「等你决定」, and the watchdog chased the supervisor for the question it had not
+       * written. The supervisor obeyed and asked 「第 2 步收尾怎么走」 — a question the person had
+       * already answered with 「做完 1.2 就暂停」.
+       *
+       * The instruction covered what to do next, so there is no question. Pausing on
+       * `awaiting_release` and writing no decision is what makes the three surfaces agree:
+       * the supervisor reports a stop, the board shows a stop, and the watchdog stays quiet
+       * because nobody is owed an answer.
        */
-      next = applyTransition(next, 'paused', { now, pauseReason: 'needs_decision' }).task;
+      next = applyTransition(next, 'paused', { now, pauseReason: 'awaiting_release' }).task;
       const remaining = openSteps(next.spec?.plan);
-      next = {
-        ...next,
-        decision: {
-          category: 'direction',
-          label: '这一段做完了，等你决定',
-          /**
-           * The card no longer claims the rest is unauthorised.
-           *
-           * It used to read 「任务范围只覆盖已完成的部分……还剩 N 步没有授权」, which was true when a
-           * scope named the slice and false in every other case: with a directive like 「把这个模块
-           * 收尾」 the remaining steps *are* authorised, and the person was being asked to release
-           * work they had already released. What is actually true is smaller and more useful: the
-           * executor stopped on purpose, and the plan is not finished.
-           */
-          reason:
-            `执行者把这一段交回来了，计划里还有 ${remaining.length} 步没做完：` +
-            `${remaining.map((step) => step.id).join('、')}。` +
-            (next.spec?.directive?.text
-              ? `本次指令是「${next.spec.directive.text}」——按它判断还要不要继续。`
-              : '') +
-            '要继续就回复放行，我会接着派；不需要就把任务结束掉。',
-          askedAt: now,
-          deadlineAt: now + DECISION_TIMEOUT_MS,
-        },
-      };
       appendJournal(this.root, id, {
         type: 'slice_delivered',
         at: now,

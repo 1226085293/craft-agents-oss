@@ -24,7 +24,7 @@ export interface TaskBriefOptions {
    * module is pure. A sub-step names its owner at creation, so the list has to be in front of the
    * plan writer — not behind a tool call it may never make.
    */
-  roster?: Array<{ id: string; dispatchHint?: string; persona?: string }>;
+  roster?: Array<{ id: string; name?: string; gist?: string; dispatchHint?: string; persona?: string; isDefault?: boolean }>;
 }
 
 function bullet(items: string[]): string {
@@ -49,20 +49,40 @@ function bullet(items: string[]): string {
  * hidden per-section chooser in `section-owner.ts` still runs as a backstop, but a decision made
  * with the roster in hand is better than one corrected afterwards.
  *
- * `dispatchHint` comes first because it is written to answer exactly this question — 「this job
- * belongs to whom」. Falling back to the persona line keeps older rosters working.
+ * `gist` comes first because that is what a roster entry actually carries.
+ *
+ * The roster comes from `readAgentRoster`, whose entries are `{ id, name, gist, isDefault }` —
+ * `gist` being the profile's own line about what work belongs to it (from `dispatchHint`, else the
+ * persona's first line). This section read `dispatchHint`/`persona`, which those entries do not
+ * have, so every line printed as a bare id with no description at all. The rules above then asked
+ * the reader to choose 「按这一小节实际要做的事」 with nothing to compare it against.
+ *
+ * The fallbacks keep older callers working, and `name` is shown because an id is a storage key.
  */
-export function formatAgentRosterSection(roster: Array<{ id: string; dispatchHint?: string; persona?: string }> | undefined): string {
+export function formatAgentRosterSection(
+  roster:
+    | Array<{
+        id: string;
+        name?: string;
+        gist?: string;
+        dispatchHint?: string;
+        persona?: string;
+        isDefault?: boolean;
+      }>
+    | undefined,
+): string {
   if (!roster?.length) return '';
   const lines = roster.map((entry) => {
-    const hint = (entry.dispatchHint ?? entry.persona ?? '').split('\n')[0]!.trim();
-    return `- \`${entry.id}\`${hint ? ` — ${hint.slice(0, 120)}` : ''}`;
+    const hint = (entry.gist ?? entry.dispatchHint ?? entry.persona ?? '').split('\n')[0]!.trim();
+    const name = entry.name?.trim();
+    const who = name && name !== entry.id ? `${name}（\`${entry.id}\`）` : `\`${entry.id}\``;
+    return `- ${who}${hint ? ` — ${hint.slice(0, 160)}` : ''}${entry.isDefault ? '（未指派的活默认走这里）' : ''}`;
   });
   return [
     '## 可用分工',
     ...lines,
     '',
-    '写小节时从这些 id 里选一个填进 `agent`，不要自己编名字。',
+    '写小节时从这里选人：把 `agent` 填成上面括号里的 id。按这一小节实际要做的事，对照每个人后面的说明来选；不要自己编名字，也不要把什么都填成默认。',
   ].join('\n');
 }
 
@@ -132,7 +152,7 @@ export function formatExecutionRuleBlock(): string {
  */
 export function formatDispatchTaskContext(
   task: Pick<Task, 'spec'>,
-  options: { roster?: Array<{ id: string; dispatchHint?: string; persona?: string }> } = {},
+  options: { roster?: Array<{ id: string; name?: string; gist?: string; dispatchHint?: string; persona?: string; isDefault?: boolean }> } = {},
 ): string {
   const plan = task.spec?.plan;
   const hasPlan = Boolean(plan?.length);

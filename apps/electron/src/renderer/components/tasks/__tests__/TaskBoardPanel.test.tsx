@@ -363,36 +363,22 @@ describe('task detail presentation', () => {
 })
 
   /**
-   * Every sub-step says who does it — including when nobody wrote it down.
+   * Every sub-step says who does it — read off the record, never inferred.
    *
-   * The screenshot that reported this showed 「执行计划」 with two bare titles and no owner. The
-   * plan had no `agent` on any step: `assignSectionOwner` deliberately does not stamp one when the
-   * workspace has only the default profile, because the default is the answer. True in the record,
-   * false on screen — an empty field there reads as 「nobody is assigned」.
+   * The screenshot that reported this showed 「执行计划」 with two bare titles and no owner. That
+   * plan had no `agent` on any step, because `task_create` wrote it in one piece and skipped the
+   * rule `applyPlanPatch` enforces. The rule is now enforced on every write path, so a name is
+   * present whenever one was chosen — and when it is missing, the row says nothing on purpose: a
+   * fallback to the task's assignee made a legacy plan look assigned and hid the fact that nobody
+   * had decided who does what.
    */
-  it('names the owner of a sub-step even when the plan never recorded one', () => {
-    const withPlan: TaskDetailView = {
-      ...detail,
-      spec: {
-        plan: [
-          { id: '1', title: '创建 docs/a.md', status: 'done' },
-          { id: '1.1', title: '写入文件', status: 'done' },
-          { id: '1.2', title: '读回确认', status: 'done' },
-        ],
-      },
-    }
-
-    // One role in the workspace: that role is the owner, and the row says so.
-    const single = renderDetail(withPlan, [{ id: 'builtin-default', name: '默认' }])
-    expect(single).toContain('默认')
-
-    // An explicit owner is shown instead of the fallback.
-    const explicit = renderDetail(
+  it('names the owner each step records, and shows nothing when none was recorded', () => {
+    const owned = renderDetail(
       {
-        ...withPlan,
+        ...detail,
         spec: {
           plan: [
-            { id: '1', title: '创建 docs/a.md', status: 'done' },
+            { id: '1', title: '创建 docs/a.md', status: 'doing' },
             { id: '1.1', title: '写入文件', status: 'done', agent: 'agent-qa' },
           ],
         },
@@ -402,5 +388,19 @@ describe('task detail presentation', () => {
         { id: 'agent-qa', name: '校验员' },
       ],
     )
-    expect(explicit).toContain('校验员')
+    expect(owned).toContain('校验员')
+
+    // A plan written before the rule: the gap stays visible instead of being filled with 「默认」.
+    const legacy = renderDetail(
+      {
+        ...detail,
+        spec: { plan: [{ id: '1', title: '创建 docs/a.md', status: 'doing' }, { id: '1.1', title: '写入文件', status: 'done' }] },
+      },
+      [
+        { id: 'builtin-default', name: '默认' },
+        { id: 'agent-qa', name: '校验员' },
+      ],
+    )
+    expect(legacy).not.toContain('校验员')
+    expect(legacy).not.toContain('— 默认')
   })

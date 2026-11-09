@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test';
 
-import { formatDispatchTaskContext, formatPlanRuleBlock, formatTaskBrief, formatUnreportedBrief } from '../brief.ts';
+import { formatAgentRosterSection, formatDispatchTaskContext, formatPlanRuleBlock, formatTaskBrief, formatUnreportedBrief } from '../brief.ts';
 import type { Task } from '../types.ts';
 
 const NOW = 1_800_000_000_000;
@@ -175,5 +175,39 @@ describe('writing a sub-step', () => {
 
     expect(brief).toContain('agent-qa');
     expect(brief).toContain('不要自己编名字');
+  })
+})
+
+/**
+ * The roster line has to carry what the profile is for, not just its id.
+ *
+ * `readAgentRoster` returns `{ id, name, gist, isDefault }`, and this section used to read
+ * `dispatchHint`/`persona` — fields those entries do not have. Every line printed as a bare id, so
+ * the rule above it (「按这一小节实际要做的事选人」) pointed at a list with nothing to compare the
+ * work against. Verified against the real workspace: 「默认」 and 「UI 工」 printed with no
+ * description at all.
+ */
+describe('the roster section', () => {
+  it('prints what each profile takes on', () => {
+    const text = formatAgentRosterSection([
+      { id: 'builtin-default', name: '默认', gist: '兜底的万能手。接临时脚本。', isDefault: true },
+      { id: 'agent-ui', name: 'UI 工', gist: '接界面视觉与交互。' },
+    ] as never)
+
+    expect(text).toContain('兜底的万能手')
+    expect(text).toContain('接界面视觉与交互')
+    // An id is a storage key; the reader is looking for a role.
+    expect(text).toContain('默认')
+    expect(text).toContain('`builtin-default`')
+    // Which one catches the work nobody claimed is part of the division of labour.
+    expect(text).toContain('未指派的活默认走这里')
+  })
+
+  it('still prints an id-only entry rather than dropping it', () => {
+    // A profile with no persona and no hint is still a candidate; hiding it would make the list
+    // look complete when it is not.
+    const text = formatAgentRosterSection([{ id: 'agent-x' }] as never)
+
+    expect(text).toContain('`agent-x`')
   })
 })

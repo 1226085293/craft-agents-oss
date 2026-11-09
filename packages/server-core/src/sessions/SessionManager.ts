@@ -7723,6 +7723,15 @@ ${request.prompt}`;
         },
         denyDecision: (id, note) => service.denyDecision(id, note),
         recordUnwordedRetry: (id, attempts) => service.recordUnwordedRetry(id, attempts),
+        /**
+         * Between turns, or not there at all.
+         *
+         * A nudge sent into a running turn is a steering interruption: on T-2 the watchdog asked
+         * for the missing question every 30 seconds and each ask cut off the turn that was writing
+         * it, so the supervisor could never finish. A missing session counts as idle — it has to be
+         * woken, and a message does that.
+         */
+        sessionIdle: (sessionId) => !this.sessions.get(sessionId)?.isProcessing,
         notify: (sessionId, text) => {
           // Origin, not content: see the note on `wakeSupervisor`.
           void this.sendMessage(sessionId, `〔巡检〕${text}`).catch(() => undefined)

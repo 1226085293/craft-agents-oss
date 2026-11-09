@@ -29,7 +29,7 @@ import {
 import { useAtomValue } from 'jotai'
 import { cn } from '@/lib/utils'
 import { sessionMetaMapAtom } from '@/atoms/sessions'
-import { agentLabelMap } from './agent-label'
+import { agentLabel, agentLabelMap } from './agent-label'
 import type { TaskDetailView, TaskHandoffView, TaskStatus } from './TaskBoardPanel'
 import type { PlanJumpTarget } from '@/lib/plan-jump'
 
@@ -868,7 +868,37 @@ function PlanSection({
   const done = leaves.filter((step) => step.status === 'done').length
   // Resolved once per render: the roster lookup is a map build, not a scan per step.
   const labelOf = agentLabelMap(agents)
-  const ownerOf = (step: { agent?: string }) => labelOf(step.agent ?? assignee)
+  /**
+   * Who does this step — read through the assignment chain, not off one field.
+   *
+   * A sub-step usually carries its own `agent`, but nothing guarantees it: plans written before
+   * the "a sub-step names its worker" rule, plans handed in whole through `task_create`, and
+   * single-role workspaces (where the owner is never stamped, because the default is the answer)
+   * all arrive without it. Reading only `step.agent` then showed no owner at all, and the plan
+   * looked like nobody had been assigned — 「小节应该加 — agent名」, reported from a screenshot.
+   *
+   * So it falls back the way the assignment actually works: this step, then its section (whoever
+   * owns the section owns the work under it), then the task's assignee. When all three are empty
+   * the row still says 「默认」 — a single-role workspace has exactly one worker, and claiming
+   * "unassigned" there would be false.
+   */
+  const ownerOf = (step: { id: string; agent?: string }) => {
+    const own = step.agent?.trim()
+    if (own) return labelOf(own)
+    const parentId = step.id.includes('.') ? step.id.slice(0, step.id.lastIndexOf('.')) : undefined
+    const inherited = parentId ? plan.find((other) => other.id === parentId)?.agent?.trim() : undefined
+    if (inherited) return labelOf(inherited)
+    if (assignee?.trim()) return labelOf(assignee)
+    /**
+     * One role in the workspace means that role is the owner.
+     *
+     * This is the case the screenshot came from: `assignSectionOwner` deliberately skips stamping an
+     * owner when there is only the default profile, so the field is empty by design — and a reader
+     * took the empty field as 「nobody is assigned」. With a single role there is nothing to guess.
+     */
+    if (agents?.length === 1) return agentLabel(agents[0]!.id, agents)
+    return undefined
+  }
 
   const childrenOf = (id: string) => plan.filter((step) => step.id.startsWith(`${id}.`))
   const toggle = (id: string) =>
@@ -976,7 +1006,15 @@ function PlanSection({
                   />
                 </button>
               ) : (
-                <span className="h-[1.55em] w-5 shrink-0" aria-hidden="true" />
+                /**
+                 * Same box as the chevron, including `-ml-1`.
+                 *
+                 * The two are the first thing in the row, so they decide where every row starts.
+                 * Without the negative margin here, a section with sub-steps began 4px left of one
+                 * without — 「执行计划」 showed 「1. 写文件」 and 「2. 收尾」 off by the width of a
+                 * chevron, which reads as a nesting mistake rather than a leaf.
+                 */
+                <span className="-ml-1 h-[1.55em] w-5 shrink-0" aria-hidden="true" />
               )}
 
               <span className="min-w-0 flex-1">

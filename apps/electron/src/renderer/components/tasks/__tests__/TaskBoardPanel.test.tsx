@@ -71,9 +71,13 @@ function renderList(tasks: TaskListItem[], selectedId?: string): string {
   }))
 }
 
-function renderDetail(task: TaskDetailView): string {
+function renderDetail(
+  task: TaskDetailView,
+  agents?: ReadonlyArray<{ id: string; name: string }>,
+): string {
   return renderToStaticMarkup(createElement(TaskDetailPanelView, {
     detail: task,
+    ...(agents ? { agents } : {}),
     onResume: () => {},
     onCancel: () => {},
   }))
@@ -295,6 +299,7 @@ describe('task detail presentation', () => {
     })
 
     expect(html).toContain('仅放行 1.2，其余之后再定？')
+
     // The same buttons the conversation card offers — not a generic approve/cancel pair.
     expect(html).toContain('放行')
     expect(html).not.toContain('同意，继续跑')
@@ -356,3 +361,46 @@ describe('task detail presentation', () => {
     expect(minimal).not.toContain('最近错误')
   })
 })
+
+  /**
+   * Every sub-step says who does it — including when nobody wrote it down.
+   *
+   * The screenshot that reported this showed 「执行计划」 with two bare titles and no owner. The
+   * plan had no `agent` on any step: `assignSectionOwner` deliberately does not stamp one when the
+   * workspace has only the default profile, because the default is the answer. True in the record,
+   * false on screen — an empty field there reads as 「nobody is assigned」.
+   */
+  it('names the owner of a sub-step even when the plan never recorded one', () => {
+    const withPlan: TaskDetailView = {
+      ...detail,
+      spec: {
+        plan: [
+          { id: '1', title: '创建 docs/a.md', status: 'done' },
+          { id: '1.1', title: '写入文件', status: 'done' },
+          { id: '1.2', title: '读回确认', status: 'done' },
+        ],
+      },
+    }
+
+    // One role in the workspace: that role is the owner, and the row says so.
+    const single = renderDetail(withPlan, [{ id: 'builtin-default', name: '默认' }])
+    expect(single).toContain('默认')
+
+    // An explicit owner is shown instead of the fallback.
+    const explicit = renderDetail(
+      {
+        ...withPlan,
+        spec: {
+          plan: [
+            { id: '1', title: '创建 docs/a.md', status: 'done' },
+            { id: '1.1', title: '写入文件', status: 'done', agent: 'agent-qa' },
+          ],
+        },
+      },
+      [
+        { id: 'builtin-default', name: '默认' },
+        { id: 'agent-qa', name: '校验员' },
+      ],
+    )
+    expect(explicit).toContain('校验员')
+  })

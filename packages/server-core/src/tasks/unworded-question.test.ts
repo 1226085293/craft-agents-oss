@@ -3,6 +3,7 @@ import type { Task } from '@craft-agent/shared/tasks'
 import {
   MAX_UNWORDED_QUESTION_NUDGES,
   UNWORDED_QUESTION_GRACE_MS,
+  applyFindings,
   inspectTasks,
   type WatchdogDeps,
 } from './task-watchdog.ts'
@@ -115,5 +116,82 @@ describe('a pause whose question was never worded', () => {
     // Still a finding — the task is still stuck — but the handler switches to telling the person
     // what is wrong instead of asking the supervisor again.
     expect(inspectTasks(deps([nudged])).map((f) => f.kind)).toEqual(['unworded_question'])
+  })
+})
+
+/**
+ * The nudge must not cancel the answer it is asking for.
+ *
+ * T-2 was nudged 32 times. The supervisor was mid-turn each time — composing the very question the
+ * nudge asked for — and a message into a running turn arrives as a steering interruption, so every
+ * ask cut the attempt short. The task could never be un-stuck by a system that kept interrupting
+ * the fix.
+ */
+describe('nudging a supervisor about an unwritten question', () => {
+  function run(over: { busy?: boolean; attempts?: number } = {}) {
+    const sent: string[] = []
+    const counted: number[] = []
+    const stuck = task({
+      pauseReason: 'asking',
+      stats: { runs: 1, activeMs: 0, ...(over.attempts === undefined ? {} : { unwordedRetries: over.attempts }) },
+      decision: {
+        category: 'direction',
+        label: '这一段做完了，等你决定',
+        reason: '',
+        askedAt: NOW - UNWORDED_QUESTION_GRACE_MS - 1,
+        deadlineAt: NOW + 60 * 60_000,
+      },
+    } as Partial<Task>)
+
+    applyFindings(
+      {
+        listTasks: () => [stuck],
+        sessionExists: () => true,
+        notify: (_id, text) => sent.push(text),
+        pause: () => {},
+        recordUnwordedRetry: (_id, attempts) => counted.push(attempts),
+        sessionIdle: () => over.busy !== true,
+        now: () => NOW,
+      },
+      inspectTasks({
+        listTasks: () => [stuck],
+        sessionExists: () => true,
+        notify: () => {},
+        pause: () => {},
+        sessionIdle: () => over.busy !== true,
+        now: () => NOW,
+      }),
+    )
+    return { sent, counted }
+  }
+
+  it('waits for the supervisor to be between turns', () => {
+    const { sent, counted } = run({ busy: true })
+
+    // Nothing sent, and — just as important — nothing counted: a busy supervisor must not burn the
+    // one budget it needs to finish saying what it is already saying.
+    expect(sent).toEqual([])
+    expect(counted).toEqual([])
+  })
+
+  it('asks once the supervisor is idle', () => {
+    const { sent, counted } = run({ attempts: 1 })
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toContain('问题还没写出来')
+    expect(counted).toEqual([2])
+  })
+
+  it('stops for good once the limit is reached', () => {
+    const { sent, counted } = run({ attempts: MAX_UNWORDED_QUESTION_NUDGES })
+
+    expect(sent).toEqual([])
+    expect(counted).toEqual([])
+  })
+
+  it('says it is the last time on the final attempt', () => {
+    const { sent } = run({ attempts: MAX_UNWORDED_QUESTION_NUDGES - 1 })
+
+    expect(sent[0]).toContain('最后一次提醒')
   })
 })

@@ -109,6 +109,15 @@ export interface WatchdogDeps {
   denyDecision?: (id: string, note: string) => void;
   /** Count a nudge about an unwritten question, so the next pass can tell it has been tried. */
   recordUnwordedRetry?: (id: string, attempts: number) => void;
+  /**
+   * Whether a session is between turns.
+   *
+   * A message sent to a running session arrives as a steering interruption. For an executor that
+   * is the point (it is going the wrong way and should change course); for a supervisor that is
+   * being asked to write something, it cancels the writing. Absent means "cannot tell", which
+   * behaves as idle so a caller that has not wired this keeps the old behaviour.
+   */
+  sessionIdle?: (sessionId: string) => boolean;
   now?: () => number;
 }
 
@@ -448,29 +457,33 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
          *
          * The task stopped because a decision is owed, and the only thing missing is the words —
          * the supervisor is the party that owes them, and its turn is what got cut off. Telling the
-         * user 「等你拍板」 instead would be asking them to answer a question nobody asked (T-2 sat
-         * like that with a card holding no text).
+         * user 「等你拍板」 instead would be asking them to answer a question nobody asked.
          *
-         * Counted, because a supervisor that never manages to say it must not be nudged every
-         * thirty seconds forever. After the limit the sentence changes target: the person is told
-         * what is actually wrong, and can end or restart the task themselves.
+         * Two limits, both learned from T-2 being nudged 32 times:
+         *
+         * 1. Only while the supervisor is idle. Sending into a running turn arrives as a steering
+         *    interruption, so the nudge that was supposed to prompt an answer kept cutting off the
+         *    attempt to write it — the supervisor could never finish, and the pass saw it busy
+         *    again thirty seconds later. The counter is only advanced when a nudge is really sent,
+         *    so waiting for an idle supervisor does not burn attempts.
+         * 2. A hard stop after the limit. Past it the task is not going to be worded by this
+         *    supervisor at all; repeating the sentence forever is noise that also keeps interrupting.
          */
-        const attempts = (finding.task.stats?.unwordedRetries ?? 0) + 1
-        deps.recordUnwordedRetry?.(finding.task.id, attempts)
+        const attempts = finding.task.stats?.unwordedRetries ?? 0
+        if (attempts >= MAX_UNWORDED_QUESTION_NUDGES) break
+        if (deps.sessionIdle && !deps.sessionIdle(finding.task.supervisorSessionId)) break
+
+        const next = attempts + 1
+        deps.recordUnwordedRetry?.(finding.task.id, next)
         const label = finding.task.decision?.label || '一个决定'
-        if (attempts > MAX_UNWORDED_QUESTION_NUDGES) {
-          deps.notify(
-            finding.task.supervisorSessionId,
-            `${finding.task.id} 已经暂停 ${attempts} 次等你把「${label}」说清楚，仍然没有问题内容。` +
-              `任务停在这里不会自己动：要么写清问什么，要么直接结束这个任务。`,
-          )
-        } else {
-          deps.notify(
-            finding.task.supervisorSessionId,
-            `${finding.task.id} 停在了「${label}」，但问题还没写出来（用户那边没有可回答的内容）。` +
-              `用 report_to_user(kind='decision', taskId='${finding.task.id}', question=…) 把要问的一句话补上。`,
-          )
-        }
+        deps.notify(
+          finding.task.supervisorSessionId,
+          next >= MAX_UNWORDED_QUESTION_NUDGES
+            ? `${finding.task.id} 停在了「${label}」，问题还是没有写出来。` +
+                `这是最后一次提醒：要么用 report_to_user(kind='decision', taskId='${finding.task.id}', question=…) 写清问什么，要么直接结束这个任务。`
+            : `${finding.task.id} 停在了「${label}」，但问题还没写出来（用户那边没有可回答的内容）。` +
+                `用 report_to_user(kind='decision', taskId='${finding.task.id}', question=…) 把要问的一句话补上。`,
+        )
         acted += 1
         break
       }

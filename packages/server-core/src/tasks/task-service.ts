@@ -1076,6 +1076,24 @@ export class TaskService {
    * ordinary rather than exceptional.
    */
   private classifyPauseReason(task: Task): Task {
+    /**
+     * A running task with an open question is not running.
+     *
+     * The board said 「进行中」 and the watchdog agreed: it saw a task that claimed to be working
+     * with nobody working, and woke the executor with 「继续任务 …」 — six minutes after a question
+     * was asked and while the person was still deciding. The work then moved on and invented a
+     * step, so the question stopped meaning anything.
+     *
+     * `paused` is the truthful state here: the run cannot continue until the answer arrives, and
+     * the whole point of a pause is that nothing happens by itself. Deriving it (rather than asking
+     * every caller to remember) is the same rule as the reason below: state is a function of the
+     * record.
+     */
+    if (task.status === 'running' && openDecisions(task).length > 0) {
+      const worded = openDecisions(task).some((entry) => entry.question?.trim())
+      return { ...task, status: 'paused', pauseReason: worded ? 'needs_decision' : 'asking' }
+    }
+
     if (task.status !== 'paused') return task;
 
     /**

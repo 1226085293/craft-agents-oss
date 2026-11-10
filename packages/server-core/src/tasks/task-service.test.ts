@@ -999,3 +999,55 @@ describe('delivered requires the plan to be finished', () => {
     expect(result.reasons.join(' ')).not.toContain('没完成')
   })
 })
+
+/**
+ * Asking a question stops the task, even when it was running.
+ *
+ * Live sequence: the supervisor asked 「是否继续？」 at 11:30:47 while the task was `running`;
+ * asking deliberately does not touch status, so nothing paused. The watchdog then saw a task
+ * claiming to be in progress with an idle session, woke it with 「继续任务 T-1」 at 11:36:10, and by
+ * 11:42 the work had resumed step 1.2 and invented step 2.1 — while the person was still deciding.
+ *
+ * 「Can this continue?」 cannot coexist with continuing. The pause is derived from the record, the
+ * same way the pause *reason* already is, so no caller has to remember to set it.
+ */
+describe('an open question stops the task', () => {
+  it('parks a running task the moment its question is written', () => {
+    const { svc } = service(workspace(), { alive: ['sess_w'] })
+    const task = create(svc)
+    svc.startRun(task.id, 'sess_w')
+    expect(svc.get(task.id)?.status).toBe('running')
+
+    svc.setDecisionWording(task.id, { question: '是否继续做 1.2？', options: ['继续', '停'] })
+
+    const parked = svc.get(task.id)
+    expect(parked?.status).toBe('paused')
+    expect(parked?.pauseReason).toBe('needs_decision')
+  })
+
+  it('lets the task run again once the question is answered', () => {
+    const { svc } = service(workspace(), { alive: ['sess_w'] })
+    const task = create(svc)
+    svc.startRun(task.id, 'sess_w')
+    svc.setDecisionWording(task.id, { question: '是否继续？' })
+    const open = (svc.get(task.id)?.decisions ?? []).find((d) => !d.resolvedAt)!
+
+    svc.recordDecisionAnswer(task.id, '继续', open.id)
+    svc.resolveDecision(task.id, 'approved')
+    // The run that asked is still holding the lock; a pause is not the end of it. Ending it is
+    // what a real hand-off does, and only then may the next leg start.
+    svc.suspendRun(task.id)
+    svc.endRun(task.id, { ok: true })
+    svc.setStatus(task.id, 'running', {})
+
+    expect(svc.get(task.id)?.status).toBe('running')
+  })
+
+  it('does not freeze a task that asks nothing', () => {
+    // The guard is the question, not the act of reporting: a plain hand-off leaves status alone.
+    const { svc } = service(workspace(), { alive: ['sess_w'] })
+    const task = create(svc)
+    svc.startRun(task.id, 'sess_w')
+    expect(svc.get(task.id)?.status).toBe('running')
+  })
+})

@@ -343,6 +343,28 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
 
     if (task.status !== 'running') continue;
 
+    /**
+     * A task holding an unanswered question is not "running", whatever the field says.
+     *
+     * A supervisor can legitimately ask while the task is `running` — the slice is done and the
+     * next move needs a person. But asking does not set `status`, and `classifyPauseReason`
+     * returns early on anything that is not `paused`, so the task stayed `running` with an open
+     * question on it. Every rule below then read that as 「in progress, nobody working」 and woke
+     * the executor with 「继续任务 …」:
+     *
+     *   11:30:47  decision_asked   是否继续？
+     *   11:36:10  idle_wake
+     *   11:41:16  idle_wake
+     *   11:41:57  plan_updated     1.2 doing   ← unanswered
+     *   11:42:43  plan_updated     2.1 todo    ← and it invented a step
+     *
+     * The person was mid-decision and the work moved on without them. 「继续」 is never the right
+     * instruction while the question is whether to continue, so no wake of any kind is produced
+     * for a task with an open question until one is answered.
+     */
+    const awaitingAnswer = (task.decisions ?? []).some((entry) => !entry.resolvedAt)
+    if (awaitingAnswer) continue;
+
     const sessionAlive = task.currentSessionId
       ? deps.sessionExists(task.currentSessionId)
       : false;

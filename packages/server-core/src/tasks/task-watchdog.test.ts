@@ -614,3 +614,69 @@ describe('the wake is not late', () => {
     expect(findings.map((f) => f.kind)).not.toContain('unreported')
   })
 })
+
+/**
+ * A question being decided is not 「nobody is working」.
+ *
+ * Observed live, in this order: 11:30:47 the supervisor asked 「是否继续？」; 11:36:10 the watchdog
+ * woke the executor with 「继续任务 T-1」; 11:41:57 it resumed step 1.2; 11:42:43 it added a step the
+ * person had never agreed to. The task was `running` (asking does not change status) with an open
+ * question on it, so every rule below read the state as stalled and told the work to carry on.
+ */
+describe('a task with an open question', () => {
+  const openQuestion = {
+    id: 'd-1',
+    category: 'direction',
+    label: '需要你决定',
+    reason: '原指令授权仅到 1.1',
+    question: '是否继续做 1.2？',
+    askedAt: NOW - 10 * 60_000,
+    deadlineAt: NOW + 60 * 60_000,
+  }
+
+  it('is never woken to continue, even when its session looks idle', () => {
+    const findings = inspectTasks(
+      deps([task({ decision: openQuestion as never, decisions: [openQuestion] })], {
+        sessionWorking: () => false,
+      }),
+    )
+    // The only finding that may survive is the deadline, which lives in the future here.
+    expect(findings).toEqual([])
+  })
+
+  it('is not woken as unreported either', () => {
+    const findings = inspectTasks(
+      deps([task({ decision: openQuestion as never, decisions: [openQuestion], handoffs: [] })], {
+        sessionWorking: () => false,
+        sessionWaiting: () => false,
+      }),
+    )
+    expect(findings.filter((f) => f.kind === 'unreported')).toEqual([])
+    expect(findings.filter((f) => f.kind === 'idle')).toEqual([])
+  })
+
+  it('still expires the unanswered question at its deadline', () => {
+    // Waiting forever is the other failure: a question nobody answers must close itself.
+    // The deadline rule reads the `decision` mirror, so the fixture has to carry both —
+    // the store derives the mirror from the queue on every save.
+    const overdue = { ...openQuestion, deadlineAt: NOW - 1 }
+    const findings = inspectTasks(
+      deps([task({ decision: overdue as never, decisions: [overdue] })], {
+        sessionWorking: () => false,
+      }),
+    )
+    expect(findings.map((f) => f.kind)).toEqual(['decision_timeout'])
+  })
+
+  it('resumes being watched once every question is answered', () => {
+    const answered = { ...openQuestion, resolvedAt: NOW - 60_000, answer: { text: '继续', at: NOW - 60_000 } }
+    // Long enough that any grace window has elapsed: the point is that answering re-arms the rules.
+    const findings = inspectTasks(
+      deps(
+        [task({ decisions: [answered], updatedAt: NOW - 2 * 60 * 60_000, stats: { runs: 1, activeMs: 0, lastHeartbeatAt: NOW - 2 * 60 * 60_000, runStartedAt: NOW - 2 * 60 * 60_000 } })],
+        { sessionWorking: () => false },
+      ),
+    )
+    expect(findings.length).toBeGreaterThan(0)
+  })
+})

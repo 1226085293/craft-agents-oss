@@ -1633,6 +1633,42 @@ export class TaskService {
       }
     }
 
+    /**
+     * The same report, again — answered without doing anything.
+     *
+     * `report_result` is a write with side effects: it appends a hand-off, banks the run, wakes the
+     * supervisor. It is not idempotent, and the caller cannot tell 「did it land?」 from a timeout,
+     * because a timeout means exactly that: the answer was lost, not that the work was not done.
+     * The only sane thing a worker can do is retry — and the retry used to write a second hand-off
+     * and wake the supervisor again.
+     *
+     * A retry is identifiable without guessing: same session, same outcome, and the plan has not
+     * moved since the report it repeats. Nothing about the task changed, so the retry says nothing
+     * new. Answering it with the previous verdict skips the acceptance gate too, which is the
+     * expensive part — the very reason the first call timed out.
+     *
+     * A retry that carries real work is untouched: doing work moves a step, and any plan update
+     * after the last hand-off means this is not the same report.
+     */
+    const lastAccepted = [...task.handoffs]
+      .reverse()
+      .find((entry) => entry.passed !== false && entry.fromSessionId === fromSessionId);
+    if (lastAccepted && lastAccepted.outcome === handoff.outcome) {
+      const planMovedSince = (task.spec?.plan ?? []).some(
+        (step) => (step.updatedAt ?? 0) > lastAccepted.at,
+      );
+      if (!planMovedSince) {
+        log.info(`[tasks] duplicate report for ${id} from ${fromSessionId} answered from the record`);
+        return {
+          task,
+          handoff,
+          passed: true,
+          reasons: [],
+          compactionPending: false,
+        };
+      }
+    }
+
     const acceptance = await this.runAcceptance(task);
     const verdict = checkHandoffRules(handoff, (path) => this.probe(this.resolveArtifactPath(task, path)), {
       requiredDeliverables: this.requiredDeliverables(task.spec),

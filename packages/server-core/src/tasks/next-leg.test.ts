@@ -313,3 +313,59 @@ describe('a finished task stays finished', () => {
     rmSync(h.root, { recursive: true, force: true })
   })
 })
+
+describe('a retried report', () => {
+  it('is answered from the record instead of writing a second one', async () => {
+    /**
+     * `report_result` is not idempotent and a timeout cannot say whether it landed — the answer is
+     * lost, not the work. Retrying is the only sane response, and it used to append a second
+     * hand-off and wake the supervisor again.
+     */
+    const h = harness()
+    seed(
+      h,
+      [
+        { id: '1', title: '写文件', status: 'doing' },
+        { id: '1.1', title: '创建', status: 'done', agent: 'builtin-default' },
+        { id: '1.2', title: '读回', status: 'todo', agent: 'builtin-default' },
+      ],
+      undefined,
+    )
+    const first = await h.service.reportHandoff('T-1', handoff, 'sess-1')
+    expect(first.passed).toBe(true)
+    const afterFirst = h.service.get('T-1')!
+    const wakesAfterFirst = h.woken.length
+
+    // The same call again — nothing about the task has moved.
+    const retry = await h.service.reportHandoff('T-1', handoff, 'sess-1')
+    expect(retry.passed).toBe(true)
+    const afterRetry = h.service.get('T-1')!
+    expect(afterRetry.handoffs.length).toBe(afterFirst.handoffs.length)
+    expect(h.woken.length).toBe(wakesAfterFirst)
+    // And the retry did not spend another acceptance round.
+    expect(afterRetry.verifyRounds).toBe(afterFirst.verifyRounds)
+    rmSync(h.root, { recursive: true, force: true })
+  })
+
+  it('is not confused with a report that carries new work', async () => {
+    const h = harness()
+    seed(
+      h,
+      [
+        { id: '1', title: '写文件', status: 'doing' },
+        { id: '1.1', title: '创建', status: 'todo', agent: 'builtin-default' },
+        { id: '1.2', title: '读回', status: 'todo', agent: 'builtin-default' },
+      ],
+      undefined,
+    )
+    h.service.updatePlan('T-1', { id: '1.1', status: 'done' })
+    await h.service.reportHandoff('T-1', handoff, 'sess-1')
+    const before = h.service.get('T-1')!.handoffs.length
+
+    // Real work happened in between: the next step moved.
+    h.service.updatePlan('T-1', { id: '1.2', status: 'done' })
+    await h.service.reportHandoff('T-1', handoff, 'sess-1')
+    expect(h.service.get('T-1')!.handoffs.length).toBe(before + 1)
+    rmSync(h.root, { recursive: true, force: true })
+  })
+})

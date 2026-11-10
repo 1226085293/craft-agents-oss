@@ -91,8 +91,22 @@ export interface SupervisorRuntimeDeps {
      * still has open, and whether work under the scope was already delivered.
      * Narrowing this back to id/session silently disables that gate.
      */
-    spec?: { scope?: string; plan?: Array<{ id: string; status?: string }> };
+    spec?: {
+      scope?: string;
+      plan?: Array<{ id: string; status?: string }>;
+      /** Read by `resumeDecisionFor`: the instruction the person's reply was turned into. */
+      directive?: { text: string; at: number };
+    };
     handoffs?: Array<{ outcome?: string }>;
+    /**
+     * Read by `resumeDecisionFor` — the same verdict the run gate reads.
+     *
+     * Without these three, dispatch could not tell 「paused because nobody authorised it」 from
+     * 「paused but the answer is already written down」, so it demanded a status flip, and a
+     * status flip starts a run.
+     */
+    status?: string;
+    decision?: { resolvedAt?: number; answer?: { at?: number } };
   } | null;
   /** Start a task by id; returns true when a run actually began. */
   runTask?: (taskId: string, reason: string) => Promise<boolean>;
@@ -325,8 +339,10 @@ export class SupervisorRuntime {
       spec?: {
         scope?: string;
         plan?: Array<{ id: string; status?: string }>;
+        /** The instruction a person's reply was turned into; `at` is what makes it current. */
+        directive?: { text: string; at: number };
       };
-      handoffs?: Array<{ outcome?: string }>;
+      handoffs?: Array<{ outcome?: string; at?: number }>;
     },
     params: { userApproved?: boolean; stepId?: string },
   ): void {
@@ -353,10 +369,41 @@ export class SupervisorRuntime {
         );
       }
     }
+    /**
+     * A paused task accepts work when the authorisation exists — not when it is un-paused.
+     *
+     * The old rule said 「先让用户确认，恢复这个任务再继续」, and 「恢复」 meant
+     * `task_update({status:'running'})`, which starts a run immediately. So the supervisor did
+     * as instructed: it resumed the task, the worker woke up before any dispatch arrived, and
+     * did the next step on its own — then the dispatch it had queued was refused with 「这一步
+     * 已经完成了」. Observed live at 11:39:37 (resume) vs 11:40:28 (dispatch refused).
+     *
+     * `resumeDecisionFor` already answers 「may this task continue, and under what instruction」:
+     * a directive newer than the person's reply, or no pending answer at all. That is the gate
+     * dispatch should read, so the order becomes the one the design intends — answer, directive,
+     * dispatch, work — instead of answer, resume, work, dispatch-refused.
+     */
     if (task.status === 'paused' && !params.userApproved) {
-      throw new DispatchRefused(
-        `${task.id} 现在是暂停状态（可能正在等用户拍板）。不要往暂停的任务里派活：先让用户确认，恢复这个任务再继续。`,
-      );
+      /**
+       * Authorisation is a date, not a state.
+       *
+       * A paused task takes new work when someone wrote down what it may do *after* the slice
+       * that stopped it: `directive.at` newer than the last hand-off. That is the same
+       * comparison `resumeDecisionFor` makes, read here for the different question 「may I add
+       * work」 rather than 「may a run start」.
+       *
+       * Too loose is worse than too strict: 「paused」 with no new instruction means the person
+       * asked for a stop, and a supervisor dispatching into it is doing the thing they stopped.
+       */
+      const lastHandoffAt = Math.max(0, ...(task.handoffs ?? []).map((h) => h.at ?? 0));
+      const directiveAt = task.spec?.directive?.at ?? 0;
+      const authorised = directiveAt > lastHandoffAt;
+      if (!authorised) {
+        throw new DispatchRefused(
+          `${task.id} 现在是暂停状态，而且没有覆盖这次继续的授权。` +
+            '先让用户确认，再用 task_update 把他的话写成 directive，然后 dispatch —— 不要用改状态的方式启动任务。',
+        );
+      }
     }
     if (params.userApproved) return;
     const handedOff = (task.handoffs ?? []).some((h) => h.outcome !== 'needs_decision');

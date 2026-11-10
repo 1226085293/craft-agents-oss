@@ -8162,12 +8162,27 @@ ${request.prompt}`;
         return { status: current?.status ?? 'backlog' }
       }
     }
-    // "running" is not a label: it must start a run. Flipping the status
-    // without spawning was how a task could look alive and do nothing.
+    /**
+     * 「Set it running」 is not how work starts — `dispatch` is.
+     *
+     * This used to call `runTask`, so a supervisor that meant 「update the task」 started a run
+     * instead: the worker was resumed with a generic 「继续任务」 brief, did the next step on its
+     * own, and the dispatch the supervisor had queued behind it was refused with 「这一步已经
+     * 完成了」. Observed live: `task_update({directive, status:'running'})` at 11:39:37, the
+     * worker did 1.2 by 11:40:01, and `dispatch({stepId:'1.2'})` at 11:40:28 was refused.
+     *
+     * The invariant the old comment protected is kept — `running` means a run exists — by
+     * refusing the label instead of starting work behind the supervisor's back. Dispatch now
+     * accepts a paused task whose authorisation is written down, so the intended order works:
+     * answer → directive → dispatch → work.
+     */
     if (patch.status === 'running') {
-      const started = await this.runTask(workspaceId, identifier, 'supervisor')
       const current = this.getTasks(workspaceId).get(identifier)
-      return { status: started ? 'running' : (current?.status ?? 'backlog') }
+      throw new Error(
+        `${identifier} 不能靠改状态来启动。要开工就用 dispatch 派活（target.kind='task'，并带上 stepId），` +
+          '它会把任务恢复并派给执行会话；改状态只用于停下或结束。' +
+          (current?.status === 'paused' ? '当前任务已暂停，直接 dispatch 即可。' : ''),
+      )
     }
     /**
      * No status means "annotate only" — not "start it".
@@ -8401,7 +8416,20 @@ ${request.prompt}`;
           // The scope gate reads these two: without them the boundary check sees
           // "no scope, no hand-offs" for every task and never fires — a gate that
           // silently does nothing is worse than no gate, because it looks handled.
-          ...(task.spec?.scope ? { spec: { scope: task.spec.scope, plan: task.spec.plan } } : {}),
+          ...(task.spec?.scope || task.spec?.directive
+            ? {
+                spec: {
+                  ...(task.spec?.scope ? { scope: task.spec.scope } : {}),
+                  ...(task.spec?.plan ? { plan: task.spec.plan } : {}),
+                  // The dispatch gate reads the directive: it is what makes a paused task
+                  // dispatchable without flipping its status first.
+                  ...(task.spec?.directive ? { directive: task.spec.directive } : {}),
+                },
+              }
+            : {}),
+          // `resumeDecisionFor` needs the pause state and the answer it depends on.
+          status: task.status,
+          ...(task.decision ? { decision: task.decision } : {}),
           handoffs: task.handoffs.map((h) => ({ outcome: h.outcome })),
         }
       },

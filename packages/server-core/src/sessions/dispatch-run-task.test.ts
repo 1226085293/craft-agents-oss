@@ -215,17 +215,26 @@ describe('starting a run from the supervisor’s dispatch', () => {
     expect(tasks.get(record.id)?.stats?.runs ?? 0).toBe(0)
   })
 
-  it('still starts a run when the patch asks for running', async () => {
-    // The status branch keeps working — it goes through `runTask`, which spawns.
+  it('refuses to start work by changing the status, and says what to use instead', async () => {
+    /**
+     * This used to be the opposite assertion: `task_update({status:'running'})` started a run.
+     * That is how a supervisor meaning 「update the task」 woke the worker up: it resumed with a
+     * generic 「继续任务」 brief, the worker did the next step on its own, and the dispatch queued
+     * behind it was refused with 「这一步已经完成了」 (live: 11:39:37 resume, 11:40:28 refused).
+     *
+     * `running` still means a run exists — the label is refused rather than honoured behind the
+     * supervisor's back. `dispatch` is the one way to start or continue work.
+     */
     const record = task()
-    ;(sm as unknown as { spawnTaskRun: unknown }).spawnTaskRun = async (_w: string, claimed: { id: string }) => ({
-      sessionId: 'sess_w1',
-      taskId: claimed.id,
-    })
+    let spawned = 0
+    ;(sm as unknown as { spawnTaskRun: unknown }).spawnTaskRun = async () => {
+      spawned += 1
+      return { sessionId: 'sess_w1', taskId: record.id }
+    }
 
-    const result = await sm.updateTask('ws', record.id, { status: 'running' })
-
-    expect(result.status).toBe('running')
-    expect(tasks.get(record.id)?.stats?.lockSessionId).toBe('sess_w1')
+    await expect(sm.updateTask('ws', record.id, { status: 'running' })).rejects.toThrow(/dispatch/)
+    expect(spawned).toBe(0)
+    expect(tasks.get(record.id)?.status).toBe('backlog')
+    expect(tasks.get(record.id)?.stats?.lockSessionId).toBeUndefined()
   })
 })

@@ -603,4 +603,64 @@ describe('a paused task does not take new work', () => {
     });
     expect(h.sent.length + h.spawned.length).toBe(1);
   })
+  /**
+   * The order the design intends: answer → directive → dispatch → work.
+   *
+   * The old gate said 「paused 的任务不能派活，先恢复它」, and 「恢复」 meant
+   * `task_update({status:'running'})`, which starts a run. So the supervisor resumed the task to
+   * satisfy the gate, the worker woke up before any dispatch arrived and did the next step on its
+   * own, and the dispatch it had queued was refused as a duplicate. Live proof: resume at
+   * 11:39:37, 1.2 done by 11:40:01, dispatch refused at 11:40:28.
+   *
+   * Authorization is a date, not a state: a directive written after the slice that stopped the task.
+   */
+  describe('a paused task takes work only when the authorisation is current', () => {
+    it('accepts a dispatch once the directive is newer than the last hand-off', async () => {
+      const h = harness(workspace(), {
+        tasks: tasks({
+          handoffs: [{ outcome: 'handoff', at: 100 }],
+          spec: {
+            scope: '只做 1.1',
+            plan: [{ id: '2', status: 'todo' }],
+            directive: { text: '做完 1.2 再停', at: 200 },
+          },
+        }),
+      })
+      const result = await h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-1' },
+        stepId: '2',
+        scope: '收尾',
+        instruction: '执行步骤 2',
+        parallel: false,
+      })
+      expect(result.sessionId).toBeTruthy()
+      expect(h.spawned.length).toBeGreaterThan(0)
+    })
+
+    it('refuses when the directive predates the slice that stopped it', async () => {
+      const h = harness(workspace(), {
+        tasks: tasks({
+          handoffs: [{ outcome: 'handoff', at: 300 }],
+          spec: {
+            scope: '只做 1.1',
+            plan: [{ id: '2', status: 'todo' }],
+            directive: { text: '只做 1.1', at: 100 },
+          },
+        }),
+      })
+      await expect(
+        h.runtime.dispatch({
+          fromSessionId: 'sess_sup',
+          target: { kind: 'task', taskId: 'T-1' },
+          stepId: '2',
+          scope: '收尾',
+          instruction: '执行步骤 2',
+          parallel: false,
+        }),
+      ).rejects.toThrow(/没有覆盖这次继续的授权/)
+      expect(h.spawned).toHaveLength(0)
+    })
+  })
+
 })

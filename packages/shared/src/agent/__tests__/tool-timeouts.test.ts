@@ -71,12 +71,12 @@ describe('withToolExecutionTimeout', () => {
 describe('the task control plane', () => {
   it('gives report_result a budget that fits a judge turn', () => {
     const budget = resolveToolTimeoutMs('mcp__session__call_tool', { name: 'report_result' })
-    expect(budget).toBeGreaterThanOrEqual(600_000)
+    expect(budget).toBe(300_000)
   })
 
   it('covers the tools that start or rewrite work', () => {
     for (const name of ['report_result', 'task_plan', 'dispatch', 'task_handoff', 'task_update']) {
-      expect(resolveToolTimeoutMs('mcp__session__call_tool', { name })).toBeGreaterThanOrEqual(600_000)
+      expect(resolveToolTimeoutMs('mcp__session__call_tool', { name })).toBe(300_000)
     }
   })
 

@@ -37,16 +37,18 @@ const DEFAULT_TOOL_TIMEOUT_MS = parseMs(process.env.CRAFT_PI_TOOL_TIMEOUT_MS, 12
  * The task control-plane tools, which are not data-plane calls.
  *
  * `report_result` runs the acceptance gate: a read-only judge session is spawned, a model
- * reads the hand-off and answers. That is a whole turn, and the generic 120s budget cut it
- * off mid-flight — the write had already landed (hand-off recorded, task completed, supervisor
- * woken) while the caller was told 「timed out … may not have completed」. The worker did the only
- * sensible thing and retried, the retry was accepted, and one completion produced three
- * 「交接通过」 notices and three 「已全部完成」 reports.
+ * reads the hand-off and answers — one model turn, end to end. The generic 120s budget cut it
+ * off mid-flight; the retry that followed is what produced duplicate hand-offs.
  *
- * A control-plane call is allowed to take as long as the work it governs. The timeout stays,
- * because a hung gate must not hang the turn forever.
+ * The budget is `call_llm`'s, because it is the same kind of work: wait for one model answer.
+ * It is not Bash's (600s, for a shell command that may legitimately run for minutes) and not
+ * the proxy default (120s, for a call that returns in milliseconds). A number copied from an
+ * unrelated budget is how this one became 600s for no reason.
+ *
+ * The timeout stays: a hung gate must not hang the turn forever. And it is no longer load
+ * bearing — a retry after a timeout is answered from the record instead of writing again.
  */
-const TASK_CONTROL_TIMEOUT_MS = parseMs(process.env.CRAFT_PI_TASK_TOOL_TIMEOUT_MS, 600_000);
+const TASK_CONTROL_TIMEOUT_MS = parseMs(process.env.CRAFT_PI_TASK_TOOL_TIMEOUT_MS, 300_000);
 
 /** Session tools whose server side runs a model turn or starts one. */
 const TASK_CONTROL_TOOLS = new Set([

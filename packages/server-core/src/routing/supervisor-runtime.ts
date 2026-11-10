@@ -21,6 +21,7 @@ import {
   MAX_DISPATCHES_PER_TURN,
   newTurnState,
   type SupervisorTurnState,
+  type QueuedActivation,
 } from '@craft-agent/shared/agents/supervisor';
 import { loadRoutes, matchRoute, formatRouteInstruction, formatRouteRuleIssue, ruleParallelism } from '@craft-agent/shared/routing';
 import { readAgentRoster } from '@craft-agent/shared/agents';
@@ -288,7 +289,22 @@ export class SupervisorRuntime {
    * Called when a supervisor turn ends: hand over anything that arrived while it
    * was busy, so a burst costs one extra turn rather than one per event.
    */
-  async onSupervisorIdle(): Promise<void> {
+  async onSupervisorIdle(supervisorSessionId?: string): Promise<void> {
+    /**
+     * The turn is over: its deferred side effects happen now, before the state is reset.
+     *
+     * Any termination path reaches here — complete, interrupted, error — and that is deliberate.
+     * A dispatch already told the user 「已派发」; dropping it because the turn was cut short
+     * would make that sentence false, and the work would silently never start. Failures are
+     * reported instead of swallowed.
+     */
+    /**
+     * The caller knows which supervisor's turn ended; `onDuty` may not be resolved yet (it is
+     * set when the first turn acquires a session), and gating the drain on it silently dropped
+     * every queued dispatch in that window.
+     */
+    const supervisorId = supervisorSessionId ?? this.onDuty;
+    await this.drainActivations(supervisorId);
     this.turnState = newTurnState();
     await this.drainToSupervisor();
   }
@@ -466,7 +482,7 @@ export class SupervisorRuntime {
      * make on its own — it is set when the user answered 「继续，把剩下的也做完」.
      */
     userApproved?: boolean;
-  }): Promise<{ sessionId: string }> {
+  }): Promise<{ sessionId: string; queued?: boolean; position?: number }> {
     const supervisor = this.deps.getSession(params.fromSessionId);
     if (!supervisor || supervisor.role !== 'supervisor') {
       throw new Error('dispatch is only available to a supervisor session.');
@@ -564,19 +580,79 @@ export class SupervisorRuntime {
       if (attached) this.assertTaskAcceptsWork(attached, params);
       const handoff = taskId ? this.deps.handoffContext?.(taskId) : undefined;
       const message = handoff ? `${handoff}\n\n## 这一轮要做的事\n${params.instruction}` : params.instruction;
-      await this.deps.sendToSession(existingSessionId, message);
-      return { sessionId: existingSessionId };
+      /**
+       * Queued, not started.
+       *
+       * Everything above is a fact about the record and belongs in this turn's answer. The call
+       * below is the side effect — it wakes another agent — and it must not land in the middle of
+       * this turn's reasoning. Observed live: the supervisor dispatched 1.2, the worker finished it
+       * before the turn ended, the supervisor reported 「已完成 1.2 并暂停」 from a state it had
+       * already changed, and the queued hand-off then made it report the same thing again.
+       */
+      return {
+        sessionId: existingSessionId,
+        queued: true,
+        position: this.enqueueActivation({ kind: 'send', sessionId: existingSessionId, message }),
+      }
     }
 
-    const created = await this.deps.spawnWorker({
+    const position = this.enqueueActivation({
+      kind: 'spawn',
       name: params.name,
       agentId: workerAgentId,
       scope: params.scope,
       instruction: params.instruction,
       taskId: params.attachTaskId ?? (params.target.kind === 'task' ? params.target.taskId : undefined),
       spawnDepth: (supervisor.spawnDepth ?? 0) + 1,
-    });
-    return { sessionId: created.sessionId };
+    })
+    return { sessionId: '', queued: true, position }
+  }
+
+  /** Queue an activation for the end of this turn; returns its 1-based position. */
+  private enqueueActivation(action: QueuedActivation): number {
+    this.turnState.queuedActivations.push(action)
+    return this.turnState.queuedActivations.length
+  }
+
+  /**
+   * Run what this turn deferred, in the order it was asked for.
+   *
+   * A failure cannot reach the tool call that queued it — the turn is over — so it goes where a
+   * person can act on it: the log, and a notice to the supervisor naming what failed. Silence
+   * would be worse than the extra turn, because the supervisor has already told the user
+   * 「已派发」 and that sentence would quietly become false.
+   */
+  private async drainActivations(supervisorSessionId: string | undefined): Promise<void> {
+    const queued = this.turnState.queuedActivations.splice(0)
+    for (const action of queued) {
+      try {
+        if (action.kind === 'send') {
+          await this.deps.sendToSession(action.sessionId, action.message)
+        } else {
+          await this.deps.spawnWorker({
+            name: action.name,
+            agentId: action.agentId,
+            scope: action.scope,
+            instruction: action.instruction,
+            taskId: action.taskId,
+            spawnDepth: action.spawnDepth,
+          })
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        log.warn('[supervisor] queued dispatch failed', { error: message })
+        if (!supervisorSessionId) continue
+        try {
+          await this.deps.sendToSession(
+            supervisorSessionId,
+            `上一轮排队的派发执行失败：${message}
+这一轮里「已派发」的说法因此没有发生，请重新安排或告知用户。`,
+          )
+        } catch {
+          // Unreachable supervisor: the log has it, and nothing else can be done here.
+        }
+      }
+    }
   }
 
   // ------------------------------------------------------------

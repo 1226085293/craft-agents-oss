@@ -22,7 +22,7 @@ export interface AgentToolBindingsDeps {
     instruction: string;
     taskId?: string;
     spawnDepth: number;
-  }) => Promise<{ sessionId: string }>;
+  }) => Promise<{ sessionId: string; queued?: boolean; position?: number }>;
   /** Send into an existing session (wakes it when idle). */
   sendToSession: (sessionId: string, text: string) => Promise<void>;
   /** Append a user-visible assistant message to the caller's own transcript. */
@@ -45,7 +45,7 @@ export interface AgentToolBindingsDeps {
     instruction: string;
     attachTaskId?: string;
     parallel: boolean;
-  }) => Promise<{ sessionId: string }>;
+  }) => Promise<{ sessionId: string; queued?: boolean; position?: number }>;
   /** Start the next run in a fresh session (context rotation). */
   continueTask?: (taskId: string) => void;
   /** Depth of the calling session, for the delegation cap. */
@@ -108,12 +108,33 @@ export function buildAgentToolBindings(deps: AgentToolBindingsDeps) {
           });
 
       if (payload.attachTaskId) {
-        deps.tasks.attachSession(payload.attachTaskId, created.sessionId);
+        /**
+         * Only when there is a session to record yet.
+         *
+         * The dispatch is queued now, so a new worker has no id at this point — attaching
+         * `''` would put an empty session into the task's `sessionIds`. The scope is a fact
+         * about the record and is written here; the session is attached when the run starts.
+         */
+        if (created.sessionId) deps.tasks.attachSession(payload.attachTaskId, created.sessionId);
         // `scope` used to reach this point and stop: it fed the dedupe key and the
         // default session name, then was dropped. Persisting it makes the
         // responsibility readable later, which is what "which session is right for
         // this" needs in order to be answerable from data instead of titles.
         deps.tasks.setScope(payload.attachTaskId, payload.scope);
+      }
+      /**
+       * Queued, and it says so.
+       *
+       * The work starts when this turn ends — not now — so a receipt that named a session
+       * would be describing something that does not exist yet, and 「you will be woken when it
+       * reports」 would arrive into a turn that may also be reporting the same step.
+       */
+      if (created.queued) {
+        return {
+          message:
+            `已排队（第 ${created.position ?? 1} 位），本轮结束时派发。` +
+            '现在就把这一轮的结论告诉用户，不要在这里等它开工——它开工后会向你回报。',
+        };
       }
       return { message: `Dispatched to ${created.sessionId}. End your turn; you will be woken when it reports.` };
     },

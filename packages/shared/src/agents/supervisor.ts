@@ -45,8 +45,30 @@ export class DispatchRefused extends Error {
  * Per-session bookkeeping for the guards. Lives in the supervisor's runtime,
  * reset at the start of every turn.
  */
+/**
+ * A side effect a turn defers to its end.
+ *
+ * A turn is one decision, and starting someone else's work in the middle of writing that
+ * decision makes the supervisor reason about a world it has already changed. The queue holds
+ * the resolved action — the target is already known, so nothing is re-decided later — and
+ * lives on the turn state, which is disposed exactly when the turn is.
+ */
+export type QueuedActivation =
+  | { kind: 'send'; sessionId: string; message: string }
+  | {
+      kind: 'spawn';
+      name?: string;
+      agentId?: string;
+      scope: string;
+      instruction: string;
+      taskId?: string;
+      spawnDepth: number;
+    };
+
 export interface SupervisorTurnState {
   dispatchesThisTurn: number;
+  /** Actions this turn asked for, in order; drained once when the turn ends. */
+  queuedActivations: QueuedActivation[];
   /** sessionId → normalized instruction of the last thing we sent it. */
   lastInstructionBySession: Map<string, string>;
   /** sessionId → how many consecutive times we sent it near-identical text. */
@@ -56,6 +78,7 @@ export interface SupervisorTurnState {
 export function newTurnState(): SupervisorTurnState {
   return {
     dispatchesThisTurn: 0,
+    queuedActivations: [],
     lastInstructionBySession: new Map(),
     repeatedSendCount: new Map(),
   };

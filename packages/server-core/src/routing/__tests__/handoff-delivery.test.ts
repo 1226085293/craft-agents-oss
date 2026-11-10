@@ -43,6 +43,7 @@ describe('handing work to an existing session', () => {
       attachTaskId: 'T-1',
       parallel: false,
     })
+    await h.runtime.onSupervisorIdle()
     expect(h.sent).toHaveLength(1)
     expect(h.sent[0]!.text).toContain('上一轮结论：接口已改完')
     expect(h.sent[0]!.text).toContain('下一步：补测试')
@@ -63,6 +64,7 @@ describe('handing work to an existing session', () => {
       attachTaskId: 'T-1',
       parallel: false,
     })
+    await h.runtime.onSupervisorIdle()
     expect(h.sent[0]!.text).toBe('开始干活')
     h.runtime.dispose()
     rmSync(h.dir, { recursive: true, force: true })
@@ -145,7 +147,9 @@ describe('dispatching a step the plan already records as done', () => {
       instruction: '读回 docs/a.md',
       parallel: false,
     })
-    expect(result.sessionId).toBe('w2')
+    // Accepted and queued: the spawn happens at the end of the turn, which is the point.
+    expect(result.queued).toBe(true)
+    await runtime.onSupervisorIdle('sup')
     rmSync(dir, { recursive: true, force: true })
   })
 })

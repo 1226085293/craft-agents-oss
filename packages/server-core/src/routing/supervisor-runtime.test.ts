@@ -27,6 +27,16 @@ interface Harness {
   sessions: Map<string, SupervisorSessionInfo>;
 }
 
+/**
+ * `dispatch` queues its side effect; the turn's end is when it happens.
+ *
+ * Every assertion that used to follow `dispatch` directly now follows `dispatch` + `drain`,
+ * because that is the real order: the queue is what makes the supervisor's turn one decision.
+ */
+async function drain(h: Harness): Promise<void> {
+  await h.runtime.onSupervisorIdle()
+}
+
 function harness(
   root: string,
   opts: {
@@ -182,6 +192,7 @@ describe('dispatch honours the task assignee', () => {
       attachTaskId: 'T-1',
       parallel: false,
     });
+    await drain(h)
     expect(h.spawned).toHaveLength(1);
     expect(h.spawned[0]?.agentId).toBe('agent-ui');
     expect(h.spawned[0]?.taskId).toBe('T-1');
@@ -198,6 +209,7 @@ describe('dispatch honours the task assignee', () => {
       attachTaskId: 'T-2',
       parallel: false,
     });
+    await drain(h)
     // Undefined, not a made-up id: the default profile is resolved downstream.
     expect(h.spawned[0]?.agentId).toBeUndefined();
   });
@@ -213,6 +225,7 @@ describe('dispatch honours the task assignee', () => {
       instruction: '再加个 hover',
       parallel: false,
     });
+    await drain(h)
     // A running task keeps its session (and therefore its profile); re-spawning
     // would silently switch executors mid-task.
     expect(h.spawned).toHaveLength(0);
@@ -231,8 +244,15 @@ describe('dispatch guards', () => {
       attachTaskId: 'T-1',
       parallel: true,
     });
-    expect(result.sessionId).toBe('sess_worker_1');
-    expect(h.spawned[0].spawnDepth).toBe(1);
+    // Queued: there is no session yet, and the receipt says so rather than inventing one.
+    expect(result.queued).toBe(true);
+    expect(result.position).toBe(1);
+    expect(h.spawned).toHaveLength(0);
+
+    await drain(h)
+    // The turn ended, so the worker exists — one dispatch, one spawn, at the right depth.
+    expect(h.spawned).toHaveLength(1);
+    expect(h.spawned[0]!.spawnDepth).toBe(1);
   });
 
   it('refuses a new session that carries no task', async () => {
@@ -269,6 +289,7 @@ describe('dispatch guards', () => {
       instruction: '接着改',
       parallel: false,
     });
+    await drain(h)
     expect(result.sessionId).toBe('sess_existing');
     expect(h.sent[0].sessionId).toBe('sess_existing');
   });
@@ -313,6 +334,7 @@ describe('dispatch guards', () => {
         parallel: true,
       });
     }
+    // Three in one turn; the fourth is refused while the turn is still open.
     await expect(
       h.runtime.dispatch({
         fromSessionId: 'sess_sup',
@@ -425,6 +447,7 @@ describe('dispatching into a task respects the session already running it', () =
       attachTaskId: 'T-1',
       parallel: false,
     });
+    await drain(h)
 
     expect(h.spawned).toHaveLength(0);
     expect(h.sent.map((s) => s.sessionId)).toContain('sess_live');
@@ -446,6 +469,7 @@ describe('dispatching into a task respects the session already running it', () =
       attachTaskId: 'T-2',
       parallel: false,
     });
+    await drain(h)
 
     expect(h.spawned).toHaveLength(1);
     expect(h.spawned[0]!.taskId).toBe('T-2');
@@ -496,6 +520,7 @@ describe('scope is a boundary', () => {
       instruction: '把 1.2 和 2 也做完',
       parallel: false,
     });
+    await drain(h)
     // Either path is fine — the point is that the work happens, where the old gate refused it.
     expect(h.sent.length + h.spawned.length).toBe(1);
   });
@@ -510,6 +535,7 @@ describe('scope is a boundary', () => {
       parallel: false,
       userApproved: true,
     });
+    await drain(h)
     expect(h.sent.length + h.spawned.length).toBe(1);
   });
 
@@ -523,6 +549,7 @@ describe('scope is a boundary', () => {
       instruction: '接着做',
       parallel: false,
     });
+    await drain(h)
     expect(h.sent.length + h.spawned.length).toBe(1);
   })
 
@@ -537,6 +564,7 @@ describe('scope is a boundary', () => {
       instruction: '接着做',
       parallel: false,
     });
+    await drain(h)
     expect(h.sent.length + h.spawned.length).toBe(1);
   })
 })
@@ -601,6 +629,7 @@ describe('a paused task does not take new work', () => {
       instruction: '接着做',
       parallel: false,
     });
+    await drain(h)
     expect(h.sent.length + h.spawned.length).toBe(1);
   })
   /**
@@ -634,7 +663,9 @@ describe('a paused task does not take new work', () => {
         instruction: '执行步骤 2',
         parallel: false,
       })
-      expect(result.sessionId).toBeTruthy()
+      // Authorisation is current, so the dispatch is accepted — and queued, not started.
+      expect(result.queued).toBe(true)
+      await drain(h)
       expect(h.spawned.length).toBeGreaterThan(0)
     })
 
@@ -663,4 +694,66 @@ describe('a paused task does not take new work', () => {
     })
   })
 
+})
+
+/**
+ * The race the queue exists to remove.
+ *
+ * Observed live: the supervisor dispatched 1.2, the worker finished it before the supervisor's
+ * turn ended, the supervisor reported 「已完成 1.2 并暂停」 from a state it had already caused,
+ * and the queued hand-off then made it report the same completion a second time.
+ *
+ * With the dispatch deferred, the worker cannot start before the turn ends — so the turn cannot
+ * describe work that has not begun.
+ */
+describe('a dispatch does not start work inside the turn that asked for it', () => {
+  it('leaves the worker untouched until the turn ends', async () => {
+    const h = harness(workspace(), {
+      tasks: new Map([['T-1', { id: 'T-1', assigneeAgentId: 'builtin-default' } as never]]),
+    })
+
+    const result = await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'new' },
+      scope: '读回确认',
+      instruction: '执行 1.2',
+      attachTaskId: 'T-1',
+      parallel: false,
+    })
+
+    // Queued, and nothing has started: no session, no worker, nobody to hand off mid-turn.
+    expect(result.queued).toBe(true)
+    expect(h.spawned).toHaveLength(0)
+    expect(h.sent).toHaveLength(0)
+
+    await drain(h)
+    expect(h.spawned).toHaveLength(1)
+  })
+
+  it('reports a queue position, so the receipt can be honest about ordering', async () => {
+    const h = harness(workspace(), {
+      tasks: new Map([['T-1', { id: 'T-1', assigneeAgentId: 'builtin-default' } as never]]),
+    })
+    const first = await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'new' },
+      scope: '甲',
+      instruction: '第一件事',
+      attachTaskId: 'T-1',
+      parallel: false,
+    })
+    const second = await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'new' },
+      scope: '乙',
+      instruction: '第二件事',
+      attachTaskId: 'T-1',
+      parallel: true,
+    })
+    expect(first.position).toBe(1)
+    expect(second.position).toBe(2)
+    await drain(h)
+    // Order is the order they were asked for, not the order the scheduler felt like.
+    expect(h.spawned.map((s) => s.scope)).toEqual(['甲', '乙'])
+  })
 })

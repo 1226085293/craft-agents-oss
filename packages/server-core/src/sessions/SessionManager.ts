@@ -2187,7 +2187,7 @@ export class SessionManager implements ISessionManager {
         // Every termination path (complete, interrupted, error) funnels through
         // here, which is why it lives here rather than in the completion handler.
         const runtime = this.getSupervisorRuntime(managed.workspace.id)
-        void runtime.onSupervisorIdle().catch((error) => {
+        void runtime.onSupervisorIdle(managed.id).catch((error) => {
           sessionLog.warn('[supervisor] failed to drain the backlog after a turn', {
             sessionId: managed.id,
             error: error instanceof Error ? error.message : String(error),

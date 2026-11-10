@@ -8169,9 +8169,25 @@ ${request.prompt}`;
       const current = this.getTasks(workspaceId).get(identifier)
       return { status: started ? 'running' : (current?.status ?? 'backlog') }
     }
+    /**
+     * No status means "annotate only" — not "start it".
+     *
+     * `patch.status ?? 'running'` made every annotation a start: a supervisor writing a
+     * `directive` (the one field that must be written when an authorisation boundary is set)
+     * flipped the task to `running` five milliseconds after it was created, with no run and no
+     * session behind it. The watchdog then did its job and reported 「会话已消失，任务已暂停」 before
+     * the person had even been told the task existed — observed live at 10:20:38, with the real
+     * run starting at 10:20:43.
+     *
+     * `running` already has its own branch above, precisely because a status is not a label:
+     * it starts a run. Reaching here with `running` was dead code that only the default could hit.
+     */
+    if (!patch.status) {
+      return { status: this.getTasks(workspaceId).get(identifier)?.status ?? 'backlog' }
+    }
     const task = this.getTasks(workspaceId).setStatus(
       identifier,
-      (patch.status ?? 'running') as never,
+      patch.status as never,
       { pauseReason: patch.pauseReason as never, error: patch.error },
     )
     return { status: task.status }

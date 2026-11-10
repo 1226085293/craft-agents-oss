@@ -192,4 +192,40 @@ describe('starting a run from the supervisor’s dispatch', () => {
     // The refusal names the missing directive rather than a generic block.
     expect(result.reason).toMatch(/directive|指令/)
   })
+
+  it('leaves the status alone when only a directive is written', async () => {
+    /**
+     * Observed live: the supervisor wrote the authorisation boundary with `task_update`, and the
+     * patch's missing `status` fell back to `running` — five milliseconds before any run existed.
+     * The watchdog then read 「running, no session」 correctly and told the person the session had
+     * disappeared, about a task that had not started yet.
+     */
+    const record = task()
+    ;(sm as unknown as { spawnTaskRun: unknown }).spawnTaskRun = async () => {
+      throw new Error('must not spawn for an annotation')
+    }
+
+    const result = await sm.updateTask('ws', record.id, { directive: '只做 1.1，做完就停' })
+
+    expect(result.status).toBe('backlog')
+    expect(tasks.get(record.id)?.status).toBe('backlog')
+    expect(tasks.get(record.id)?.spec?.directive?.text).toBe('只做 1.1，做完就停')
+    // And nothing was claimed: no lock, no session, no run counted.
+    expect(tasks.get(record.id)?.stats?.lockSessionId).toBeUndefined()
+    expect(tasks.get(record.id)?.stats?.runs ?? 0).toBe(0)
+  })
+
+  it('still starts a run when the patch asks for running', async () => {
+    // The status branch keeps working — it goes through `runTask`, which spawns.
+    const record = task()
+    ;(sm as unknown as { spawnTaskRun: unknown }).spawnTaskRun = async (_w: string, claimed: { id: string }) => ({
+      sessionId: 'sess_w1',
+      taskId: claimed.id,
+    })
+
+    const result = await sm.updateTask('ws', record.id, { status: 'running' })
+
+    expect(result.status).toBe('running')
+    expect(tasks.get(record.id)?.stats?.lockSessionId).toBe('sess_w1')
+  })
 })

@@ -161,7 +161,7 @@ export function TaskDetailPanel({
           }).tasksRun?.(workspaceId, id)
         }}
         agents={agents}
-        onAnswer={(id, text) => {
+        onAnswer={(id, text, decisionId) => {
           /**
            * The answer is delivered, and nothing else.
            *
@@ -188,6 +188,7 @@ export function TaskDetailPanel({
             const result = await submitDecisionAnswer({
               workspaceId,
               taskId: id,
+              ...(decisionId ? { decisionId } : {}),
               text,
             })
             if (!result.accepted) throw new Error(result.reason ?? '这个任务已经没有待答复的问题')

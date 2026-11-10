@@ -220,7 +220,25 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
             )
           : undefined)
       if (!resolvedId) {
-        return { accepted: false, reason: 'no task to answer — the card did not say which one' }
+        /**
+         * A question asked before the task exists is still a question.
+         *
+         * Planned work is often confirmed first and created afterwards — 「动手前先一次性问我三个
+         * 问题」 — so the card is on screen while no task exists to own it. Every send came back
+         * 「no task to answer」, which reads to the person as their click having failed; the
+         * question was real and the asker was right there.
+         *
+         * The card names the session that asked, so the answer can go straight back to it. There
+         * is no decision record to close in that case — the asker is waiting on the reply itself.
+         */
+        const managerNoTask = deps.sessionManager as unknown as {
+          sendMessage?: (sessionId: string, text: string) => Promise<unknown>
+        }
+        if (!askedBySessionId || !managerNoTask.sendMessage) {
+          return { accepted: false, reason: 'no task to answer — the card did not say which one' }
+        }
+        void managerNoTask.sendMessage(askedBySessionId, text.trim()).catch(() => undefined)
+        return { accepted: true }
       }
       /**
        * A question can exist without a `decision` record, and then this used to be a dead end.

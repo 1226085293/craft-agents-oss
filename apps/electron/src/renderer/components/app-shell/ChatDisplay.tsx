@@ -3022,6 +3022,7 @@ function DecisionRequestCard({
         const result = await submitDecisionAnswer({
           workspaceId: workspaceId ?? '',
           ...(request.taskIdentifier ? { taskId: request.taskIdentifier } : {}),
+          ...(request.decisionId ? { decisionId: request.decisionId } : {}),
           askedBySessionId: request.askedBySessionId,
           text: trimmed,
         })
@@ -3032,7 +3033,7 @@ function DecisionRequestCard({
         setError(err instanceof Error ? err.message : String(err))
       }
     },
-    [request.askedBySessionId, request.taskIdentifier, sent, answerKey, askedAt, workspaceId],
+    [request.askedBySessionId, request.taskIdentifier, request.decisionId, sent, answerKey, askedAt, workspaceId],
   )
 
   return (
@@ -3050,80 +3051,103 @@ function DecisionRequestCard({
           <CheckCircle2 className="mt-0.5 h-3 w-3 shrink-0" />
           <span className="whitespace-pre-wrap">已答复：{sent}</span>
         </div>
-      ) : (
-        <>
-          {/*
-            One row, same shape as the task card.
-            「其他」 used to sit on its own line below the options and without a border,
-            so the answers and the escape hatch read as two different kinds of thing —
-            but they are the same choice, offered together. It is a button in the same
-            row here, dashed to say "not one of the asker's", and it still submits
-            nothing: it only opens the box.
-          */}
-          {!typing ? (
-            <div className="mt-2.5 flex flex-wrap gap-1.5">
-              {request.options?.map((option) => (
-                <button
-                  key={option}
-                  type="button"
-                  onClick={() => void answer(option)}
-                  className="rounded-md border border-border bg-background px-2.5 py-1 text-[12px] text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-                >
-                  {option}
-                </button>
-              ))}
+      ) : null}
+
+      {/*
+        The choices stay on the card after it is answered.
+
+        They used to be replaced by the 「已答复」 line alone, so picking 做 made 不做 disappear and
+        the card stopped showing what the question had actually offered. The answered option is
+        marked and the rest are inert: the card is a record now, not a prompt.
+      */}
+      {request.options?.length ? (
+        <div className="mt-2.5 flex flex-wrap gap-1.5">
+          {request.options.map((option) => {
+            const chosen = sent === option
+            return (
               <button
+                key={option}
                 type="button"
-                onClick={() => setTyping(true)}
-                className="rounded-md border border-dashed border-border px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:border-solid hover:text-foreground"
+                disabled={Boolean(sent)}
+                aria-pressed={chosen}
+                onClick={() => void answer(option)}
+                className={
+                  chosen
+                    ? 'inline-flex items-center gap-1 rounded-md border border-success/40 bg-success/10 px-2.5 py-1 text-[12px] text-success'
+                    : sent
+                      ? 'rounded-md border border-border/50 bg-background/40 px-2.5 py-1 text-[12px] text-muted-foreground/60'
+                      : 'rounded-md border border-border bg-background px-2.5 py-1 text-[12px] text-foreground transition-colors hover:bg-accent hover:text-accent-foreground'
+                }
               >
-                其他（自己输入）
+                {chosen ? <CheckCircle2 className="h-3 w-3" aria-hidden="true" /> : null}
+                {option}
               </button>
-            </div>
+            )
+          })}
+          {!sent && !typing ? (
+            <button
+              type="button"
+              onClick={() => setTyping(true)}
+              className="rounded-md border border-dashed border-border px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:border-solid hover:text-foreground"
+            >
+              其他（自己输入）
+            </button>
           ) : null}
+        </div>
+      ) : null}
 
-          {typing ? (
-            <div className="mt-2.5">
-              <textarea
-                autoFocus
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault()
-                    void answer(draft)
-                  }
-                }}
-                rows={2}
-                placeholder="写下你的答复，Enter 发送，Shift+Enter 换行"
-                className="w-full resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground outline-none focus:border-ring"
-              />
-              <div className="mt-1.5 flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => void answer(draft)}
-                  disabled={!draft.trim()}
-                  className="rounded-md bg-foreground px-2.5 py-1 text-[12px] text-background disabled:opacity-40"
-                >
-                  发送
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTyping(false)
-                    setDraft('')
-                  }}
-                  className="rounded-md px-2 py-1 text-[12px] text-muted-foreground hover:text-foreground"
-                >
-                  取消
-                </button>
-              </div>
-            </div>
-          ) : null}
+      {!sent && !request.options?.length && !typing ? (
+        <div className="mt-2.5 flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            onClick={() => setTyping(true)}
+            className="rounded-md border border-dashed border-border px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:border-solid hover:text-foreground"
+          >
+            其他（自己输入）
+          </button>
+        </div>
+      ) : null}
 
-          {error ? <div className="mt-2 text-[12px] text-destructive">发送失败：{error}</div> : null}
-        </>
-      )}
+      {typing && !sent ? (
+        <div className="mt-2.5">
+          <textarea
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                void answer(draft)
+              }
+            }}
+            rows={2}
+            placeholder="写下你的答复，Enter 发送，Shift+Enter 换行"
+            className="w-full resize-y rounded-md border border-border bg-background px-2.5 py-1.5 text-[13px] text-foreground outline-none focus:border-ring"
+          />
+          <div className="mt-1.5 flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => void answer(draft)}
+              disabled={!draft.trim()}
+              className="rounded-md bg-foreground px-2.5 py-1 text-[12px] text-background disabled:opacity-40"
+            >
+              发送
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setTyping(false)
+                setDraft('')
+              }}
+              className="rounded-md px-2 py-1 text-[12px] text-muted-foreground hover:text-foreground"
+            >
+              取消
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {error ? <div className="mt-2 text-[12px] text-destructive">发送失败：{error}</div> : null}
     </div>
   )
 }

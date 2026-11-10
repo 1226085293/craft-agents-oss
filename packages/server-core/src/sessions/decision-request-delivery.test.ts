@@ -326,4 +326,80 @@ describe('a decision request is written for the reader', () => {
     // No turn is started by it: the report is for a person, never model input.
     expect(sent).toEqual([]);
   });
+
+  /**
+   * The lane that talks to the person is not the lane that owns the task.
+   *
+   * Observed live: three question cards in the conversation, one question on the task page.
+   * The cards were asked by 督导·用户, the task belonged to 督导·任务, and the lookup filtered on
+   * `supervisorSessionId === askingSession` — a condition the user lane can never satisfy. The
+   * two questions it could not attach existed only as chat rows, so the task page never showed
+   * them and answering them found no decision.
+   */
+  it('finds a task owned by the other supervisor lane', async () => {
+    const requester = buildRequester()
+    ;(sm as unknown as { getTasks: unknown }).getTasks = () => ({
+      list: () => [
+        {
+          id: 'T-1',
+          status: 'paused',
+          pauseReason: 'needs_decision',
+          supervisorSessionId: 'sess_task_lane',
+          updatedAt: Date.now(),
+          decision: { askedAt: Date.now(), resolvedAt: undefined },
+        },
+      ],
+    })
+
+    expect(
+      (sm as unknown as { openTaskFor: (s: string) => string | undefined }).openTaskFor('sess_asker'),
+    ).toBe('T-1')
+
+    await (
+      sm as unknown as {
+        deliverToUserLane: (m: unknown, t: string, k: string) => Promise<void>
+      }
+    ).deliverToUserLane(requester, '文件已存在时要不要覆盖？', 'decision')
+
+    const managed = (sm as unknown as { sessions: Map<string, { messages: Row[] }> }).sessions.get(
+      'sess_asker',
+    )
+    const asked = managed?.messages.find((m) => m.statusType === 'decision_request')
+    expect(asked?.decisionRequest?.taskIdentifier).toBe('T-1')
+  })
+
+  /**
+   * A supervisor with work of its own keeps the narrow scope.
+   *
+   * The workspace-wide fallback exists for the lane that owns nothing. A session that does own
+   * tasks must not have its questions attributed to somebody else's task just because that one
+   * happens to be waiting.
+   */
+  it('keeps its own task when it owns one', () => {
+    buildRequester()
+    ;(sm as unknown as { getTasks: unknown }).getTasks = () => ({
+      list: () => [
+        {
+          id: 'T-1',
+          status: 'paused',
+          pauseReason: 'needs_decision',
+          supervisorSessionId: 'sess_asker',
+          updatedAt: 1,
+          decision: { askedAt: 1, resolvedAt: undefined },
+        },
+        {
+          id: 'T-2',
+          status: 'paused',
+          pauseReason: 'needs_decision',
+          supervisorSessionId: 'sess_other',
+          updatedAt: 999,
+          decision: { askedAt: 2, resolvedAt: undefined },
+        },
+      ],
+    })
+
+    expect(
+      (sm as unknown as { openTaskFor: (s: string) => string | undefined }).openTaskFor('sess_asker'),
+    ).toBe('T-1')
+  });
 });

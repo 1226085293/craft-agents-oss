@@ -109,7 +109,8 @@ export interface TaskDetailPanelViewProps {
    * A decision is a question for a person, so the reply has to travel as one: the text is
    * sent to the session that asked. Without this the card could only ever say yes or no.
    */
-  onAnswer?: (id: string, text: string) => void | Promise<void>
+  /** `decisionId` names which open question the reply closes; a task can hold several. */
+  onAnswer?: (id: string, text: string, decisionId?: string) => void | Promise<void>
   /** Open a session in the main pane (task ↔ session are two views of one thing). */
   onOpenSession?: (sessionId: string) => void
   /** Jump to the moment in a session that a plan step came from. */
@@ -184,7 +185,7 @@ function TaskDecisionAnswer({
   detail: TaskDetailView
   onApprove: () => void
   onCancel: () => void
-  onAnswer?: (id: string, text: string) => void | Promise<void>
+  onAnswer?: (id: string, text: string, decisionId?: string) => void | Promise<void>
 }): React.JSX.Element {
   const options = (detail.decision?.options ?? []).filter((o) => o.trim().length > 0)
   const [typing, setTyping] = React.useState(false)
@@ -229,7 +230,7 @@ function TaskDecisionAnswer({
     setError(null)
     try {
       // `onAnswer` may be async; a rejection is reported rather than swallowed.
-      void Promise.resolve(onAnswer(detail.id, trimmed)).then(
+      void Promise.resolve(onAnswer(detail.id, trimmed, detail.decision?.id)).then(
         () => {
           setSent(trimmed)
           setTyping(false)
@@ -242,9 +243,40 @@ function TaskDecisionAnswer({
   }
 
   if (sent) {
+    /**
+     * Answered, but the card stays whole.
+     *
+     * It used to replace the options with a single line, so choosing 做 made 不做 vanish — and
+     * with several questions on the page, the whole question could disappear on the next
+     * refresh. What was on offer is part of what was decided: the chosen option is marked, the
+     * rest stay visible and inert so the record reads the way it happened.
+     */
     return (
-      <div className="mt-3 rounded-md border border-border/60 bg-background/40 px-3 py-2 text-xs text-foreground/80">
-        已回复：{sent}
+      <div className="mt-2">
+        {options.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-2">
+            {options.map((option) => {
+              const chosen = sent === option
+              return (
+                <span
+                  key={option}
+                  aria-pressed={chosen}
+                  className={
+                    chosen
+                      ? 'inline-flex min-h-8 items-center gap-1.5 rounded-md border border-amber-500/45 bg-amber-500/20 px-3 text-xs font-medium text-amber-100'
+                      : 'inline-flex min-h-8 items-center rounded-md border border-border/50 px-3 text-xs text-muted-foreground/60'
+                  }
+                >
+                  {chosen ? <CheckCircle2 className="h-3 w-3" aria-hidden="true" /> : null}
+                  {option}
+                </span>
+              )
+            })}
+          </div>
+        ) : null}
+        <div className="mt-2 rounded-md border border-border/60 bg-background/40 px-3 py-2 text-xs text-foreground/80">
+          已回复：{sent}
+        </div>
       </div>
     )
   }
@@ -346,16 +378,32 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
    *
    * Falls back to the single `decision` mirror for tasks written before the queue existed.
    */
-  const openQuestions = ((detail.decisions?.length ? detail.decisions : detail.decision ? [detail.decision] : []) as Array<{
+  type QuestionEntry = {
     id?: string
     question?: string
     reason?: string
     options?: string[]
     askedAt?: number
     answer?: { text: string; at: number }
-  }>)
-    .filter((entry) => !('resolvedAt' in entry) || !(entry as { resolvedAt?: number }).resolvedAt)
+    resolvedAt?: number
+  }
+  const askedQuestions = ((detail.decisions?.length ? detail.decisions : detail.decision ? [detail.decision] : []) as QuestionEntry[])
     .filter((entry) => entry.question?.trim())
+  const isClosed = (entry: QuestionEntry) => typeof entry.resolvedAt === 'number'
+  const openQuestions = askedQuestions.filter((entry) => !isClosed(entry))
+  /**
+   * Answered questions stay on the page, after the open ones.
+   *
+   * They used to be filtered out the moment they were answered, so a task waiting on three
+   * questions lost each card as the person worked down the list — including the answers they
+   * had just given. The record keeps every question it ever asked (`decisions`, oldest first);
+   * the page was the only thing dropping them. Answered entries move to the end so the ones
+   * still needing a decision stay at the top, closest to where the reader is looking.
+   */
+  const closedQuestions = askedQuestions
+    .filter(isClosed)
+    .sort((a, b) => (a.resolvedAt ?? 0) - (b.resolvedAt ?? 0))
+  const listedQuestions = [...openQuestions, ...closedQuestions]
 
 
   const { t } = useTranslation()
@@ -499,25 +547,37 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
         written by `setDecisionWording` from the same payload the conversation card is built from.
         Before that the task is paused and waiting, which is what the banner below says.
       */}
-      {detail.pauseReason === 'needs_decision' || detail.pauseReason === 'asking' ? (
-        openQuestions.length ? (
+      {
+        listedQuestions.length ? (
           /**
-           * Every open question, not just the newest.
+           * Every question this task has asked: the open ones first, the answered ones after.
            *
-           * A task can be waiting on several at once — two failing checks, a boundary with two
-           * directions open — and they are answered one at a time. Rendering only `decision` (the
-           * newest open entry) hid the others completely: the page offered one card while the person
-           * was expected to answer three things.
-           *
-           * Answers are held until the last one arrives (`undeliveredAnswers` on the server), so the
-           * page says so — otherwise «我已答完» looks like nothing happened.
+           * Answered cards are not a leftover — they are the record of what the person decided,
+           * and the reason the task is where it is. Hiding them made the page look as if the
+           * questions had never existed, and left no way to check what had been agreed.
            */
-          <section className="rounded-xl border border-amber-500/35 bg-amber-500/8 p-4 md:p-5" aria-labelledby="task-decision-heading">
+          <section
+            className={
+              openQuestions.length
+                ? 'rounded-xl border border-amber-500/35 bg-amber-500/8 p-4 md:p-5'
+                : 'rounded-xl border border-border/60 bg-muted/20 p-4 md:p-5'
+            }
+            aria-labelledby="task-decision-heading"
+          >
             <div className="flex items-start gap-3">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+              {openQuestions.length ? (
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" aria-hidden="true" />
+              ) : (
+                <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+              )}
               <div className="min-w-0 flex-1">
-                <h2 id="task-decision-heading" className="text-xs font-semibold text-amber-300">
-                  等你拍板{openQuestions.length > 1 ? `（${openQuestions.length} 个问题）` : ''}
+                <h2
+                  id="task-decision-heading"
+                  className={openQuestions.length ? 'text-xs font-semibold text-amber-300' : 'text-xs font-semibold text-foreground/70'}
+                >
+                  {openQuestions.length
+                    ? `等你拍板${openQuestions.length > 1 ? `（${openQuestions.length} 个问题）` : ''}`
+                    : '已答复'}
                 </h2>
                 {openQuestions.length > 1 ? (
                   <p className="mt-1 text-[11px] leading-relaxed text-amber-300/80">
@@ -525,8 +585,11 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
                   </p>
                 ) : null}
                 <div className="mt-2 space-y-3">
-                  {openQuestions.map((entry, index) => (
-                    <div key={entry.id ?? `${entry.askedAt}-${index}`} className="rounded-lg bg-background/40 p-3">
+                  {listedQuestions.map((entry, index) => (
+                    <div
+                      key={entry.id ?? `${entry.askedAt}-${index}`}
+                      className={`rounded-lg bg-background/40 p-3${isClosed(entry) ? ' opacity-90' : ''}`}
+                    >
                       <p className="td-body whitespace-pre-wrap text-foreground/90">{entry.question}</p>
                       {/* The rule's diagnosis stays as a footnote: same question as the card in
                           the conversation, plus why a person is being asked at all. */}
@@ -544,19 +607,21 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
                     </div>
                   ))}
                 </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="rounded-md border border-amber-500/40 px-2.5 py-1 text-[11.5px] text-amber-200 hover:bg-amber-500/10"
-                    onClick={() => onCancel?.(detail.id)}
-                  >
-                    结束任务
-                  </button>
-                </div>
+                {openQuestions.length ? (
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="rounded-md border border-amber-500/40 px-2.5 py-1 text-[11.5px] text-amber-200 hover:bg-amber-500/10"
+                      onClick={() => onCancel?.(detail.id)}
+                    >
+                      结束任务
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </div>
           </section>
-        ) : (
+        ) : detail.pauseReason === 'needs_decision' || detail.pauseReason === 'asking' ? (
           /**
            * Nothing has been asked yet — so say that, and say it does not need the reader.
            *
@@ -575,8 +640,7 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
               </p>
             </div>
           </div>
-        )
-      ) : null}
+        ) : null}
 
       {/*
         * Above the plan, because a stop is what the reader needs first: why nothing is moving

@@ -250,7 +250,7 @@ export interface TaskBoardPanelProps {
   /** Start a run now (backlog or paused). */
   onRun?: (id: string) => void
   /** Answer a pending decision with words; see TaskDetailPanelViewProps.onAnswer. */
-  onAnswer?: (id: string, text: string) => void
+  onAnswer?: (id: string, text: string, decisionId?: string) => void
   /** Open the session that is working on a task (board entry as a link). */
   onOpenSession?: (sessionId: string) => void
   /** Pause a live task without cancelling it. */

@@ -284,6 +284,16 @@ export interface DecisionRequest {
    * one card and not the other. Carrying the decision's value here makes them the same key.
    */
   decisionAskedAt?: number;
+  /**
+   * Which decision record this card is a view of.
+   *
+   * A task can hold several open questions, and each card used to identify its question only by
+   * text and timestamp. Answering then closed 「the newest open question」 whatever the person had
+   * actually clicked — observed live: three questions, the answer 「覆盖」 recorded against the
+   * README question, and the last card answering 「no pending decision on this task」 because the
+   * earlier clicks had eaten them. A card is a rendering of one record; it should say which.
+   */
+  decisionId?: string;
   question: string;
   /** Preset answers, rendered as buttons. Free text is always possible via 「其他」. */
   options?: string[];

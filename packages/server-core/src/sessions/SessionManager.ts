@@ -37,7 +37,7 @@ import {
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
 import type { Task } from '@craft-agent/shared/tasks'
-import { checkAgreedPlanAppend, readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatUnreportedBrief, formatNextLegBrief, formatDispatchTaskContext, nextLeg, stepParent, normalizeSpec, normalizeTrigger } from '@craft-agent/shared/tasks'
+import { checkAgreedPlanAppend, readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatUnreportedBrief, formatNextLegBrief, formatDispatchTaskContext, nextLeg, stepParent, normalizeSpec, normalizeTrigger, normalizeQuestion } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -2627,22 +2627,8 @@ export class SessionManager implements ISessionManager {
     try {
       const live = [...this.sessions.values()].find((managed) => managed.id === sessionId)
       if (!live) return undefined
-      const owned = this.getTasks(live.workspace.id)
-        .list()
-        .filter((task) => task.supervisorSessionId === sessionId)
-      /**
-       * An open question is what makes a task answerable — not a pause.
-       *
-       * A supervisor asks when a slice of work is done, and that can happen while the task is
-       * still `running`: nothing has been handed back, the worker is between steps, and the
-       * question is 「要不要继续」 rather than 「执行者卡住了」. Requiring `paused / needs_decision`
-       * made both this lookup and `taskIdentifierFor` return nothing for exactly that case, so the
-       * card carried no task id, the fallback found no task either, and every send came back
-       * 「no task to answer — the card did not say which one」. Observed live on T-1: the question
-       * was written at 05:17:29, the task had been `running` since 05:15:28.
-       */
-      const open = owned.filter((task) => task.decision && !task.decision.resolvedAt)
-      if (open.length) return (open.length === 1 ? open[0] : open.at(-1))?.id
+      const picked = this.pickOpenQuestionTask(live)
+      if (picked) return picked
       /**
        * Nothing open: the card was raised after its decision closed.
        *
@@ -2651,11 +2637,48 @@ export class SessionManager implements ISessionManager {
        * working on」. The RPC still refuses when the task has a decision that was answered —
        * `recordDecisionAnswer` is the judge — so returning it here cannot accept a second reply
        * to a closed question; it only gives that refusal something to name.
+       *
+       * Only tasks this session owns are named here: with nothing open, a workspace-wide guess
+       * would label a refusal with a task the asker never touched.
        */
+      const owned = this.getTasks(live.workspace.id)
+        .list()
+        .filter((task) => task.supervisorSessionId === sessionId)
       return owned.at(-1)?.id
     } catch {
       return undefined
     }
+  }
+
+  /**
+   * The tasks a question from this session could be about.
+   *
+   * Scoped to the workspace, not to 「tasks I own」. The lane the person talks to (督导·用户)
+   * is a different session from the one that owns the task (督导·任务), and a workspace has
+   * one of each — so `supervisorSessionId === managed.id` matched nothing for the lane that
+   * asks most of the questions. Observed live: three cards in the conversation, one question
+   * on the task page, and the two extras could never be answered because no task knew them.
+   *
+   * A session that does own tasks keeps the narrow scope: a dispatch supervisor with its own
+   * work must not have its questions attributed to somebody else's task.
+   */
+  private questionTaskCandidates(managed: ManagedSession): Task[] {
+    const all = this.getTasks(managed.workspace.id).list()
+    const owned = all.filter((task) => task.supervisorSessionId === managed.id)
+    return owned.length ? owned : all
+  }
+
+  /** The task an open question belongs to, when one genuinely is waiting on a person. */
+  private pickOpenQuestionTask(managed: ManagedSession): string | undefined {
+    const open = this.questionTaskCandidates(managed).filter((task) => task.decision && !task.decision.resolvedAt)
+    if (!open.length) return undefined
+    /**
+     * A task paused for a decision is waiting on the person; a running one may be asking in
+     * passing. Prefer the waiting one, then the most recently touched — the one on screen.
+     */
+    const pending = open.filter((task) => task.status === 'paused' && task.pauseReason === 'needs_decision')
+    const pool = pending.length ? pending : open
+    return [...pool].sort((a, b) => (a.updatedAt ?? 0) - (b.updatedAt ?? 0)).at(-1)?.id
   }
 
   decisionAskerFor(taskId: string): string | undefined {
@@ -5962,14 +5985,7 @@ export class SessionManager implements ISessionManager {
                */
               const targetId =
                 taskId ??
-                (() => {
-                  const open = tasks
-                    .list()
-                    .filter((task) => task.supervisorSessionId === managed.id)
-                    .filter((task) => task.decision && !task.decision.resolvedAt)
-                    .filter((task) => task.status === 'paused' && task.pauseReason === 'needs_decision')
-                  return (open.length === 1 ? open[0] : open.at(-1))?.id
-                })()
+                this.pickOpenQuestionTask(managed)
               if (targetId) {
                 const before = tasks.get(targetId)
                 const wrote = tasks.setDecisionWording(targetId, {
@@ -5996,11 +6012,44 @@ export class SessionManager implements ISessionManager {
                   return
                 }
               }
+              /**
+               * The id travels with the card.
+               *
+               * `targetId` was resolved and used for the wording write, then dropped on the
+               * next line — so the card row carried no `taskIdentifier` even when the asker
+               * named one, and answering it fell back to a lookup that could not see the task.
+               * One question, two surfaces, and only one of them knew which task it was about.
+               */
+              await this.deliverToUserLane(managed, text, kind, options, targetId)
+              return
             }
             await this.deliverToUserLane(managed, text, kind, options)
           },
           askUser: async (questions) => {
-            await this.deliverQuestionToUserLane(managed, questions)
+            /**
+             * The same questions, written to the task as well as to the card.
+             *
+             * `ask_user` drew cards and nothing else: the words reached the conversation while
+             * the task kept no record of them, so the task page showed fewer questions than the
+             * chat did and an answer sent from the card could not find its decision. Both tools
+             * now go through one path — wording onto the task, then the row onto the lane that
+             * shows it.
+             */
+            const tasks = this.getTasks(managed.workspace.id)
+            const targetId = this.pickOpenQuestionTask(managed)
+            if (targetId) {
+              for (const q of questions) {
+                try {
+                  tasks.setDecisionWording(targetId, {
+                    question: q.question,
+                    ...(q.options?.length ? { options: [...q.options] } : {}),
+                  })
+                } catch (error) {
+                  sessionLog.warn('[supervisor] could not record the question on its task', { error })
+                }
+              }
+            }
+            await this.deliverQuestionToUserLane(managed, questions, targetId)
           },
           dispatchViaSupervisor: async (params) => {
             const runtime = this.getSupervisorRuntime(managed.workspace.id)
@@ -8568,11 +8617,7 @@ ${request.prompt}`;
    */
   private taskIdentifierFor(managed: ManagedSession): string | undefined {
     try {
-      const open = this.getTasks(managed.workspace.id)
-        .list()
-        .filter((task) => task.supervisorSessionId === managed.id)
-        .filter((task) => task.decision && !task.decision.resolvedAt)
-      return (open.length === 1 ? open[0] : open.at(-1))?.id
+      return this.pickOpenQuestionTask(managed)
     } catch {
       return undefined
     }
@@ -8653,6 +8698,15 @@ ${request.prompt}`;
             }
           })()
         : undefined
+      /**
+       * Which question this card is, not just which task.
+       *
+       * The answer used to be applied to 「the newest open question」, so with several cards on
+       * screen a reply closed whichever was newest rather than the one clicked — and the last
+       * card then failed with 「no pending decision」 because the earlier clicks had already
+       * consumed them.
+       */
+      const decisionId = this.openDecisionIdFor(managed.workspace.id, taskId, text)
       this.appendReadOnlyRow(target, {
         text,
         statusType: 'decision_request',
@@ -8663,6 +8717,7 @@ ${request.prompt}`;
           question: text,
           ...(options?.length ? { options: [...options] } : {}),
           ...(taskId ? { taskIdentifier: taskId } : {}),
+          ...(decisionId ? { decisionId } : {}),
           ...(decisionAskedAt ? { decisionAskedAt } : {}),
           askedAt: Date.now(),
         },
@@ -8681,6 +8736,7 @@ ${request.prompt}`;
   private async deliverQuestionToUserLane(
     managed: ManagedSession,
     questions: { question: string; options?: string[] }[],
+    namedTaskId?: string,
   ): Promise<void> {
     let target: ManagedSession | undefined
     try {
@@ -8693,12 +8749,14 @@ ${request.prompt}`;
     }
     if (!target) return
 
-    const taskId = this.taskIdentifierFor(managed)
+    const taskId = namedTaskId ?? this.taskIdentifierFor(managed)
 
     // One card per question, each with its own id. Several cards can be outstanding at
     // once — two tasks asking, or two questions from one turn — and answering one must
     // not answer another, so nothing is shared between rows.
     for (const q of questions) {
+      // The record the wording went to, so answering this card closes this question.
+      const decisionId = this.openDecisionIdFor(managed.workspace.id, taskId, q.question)
       this.appendReadOnlyRow(target, {
         text: q.question,
         statusType: 'decision_request',
@@ -8709,9 +8767,29 @@ ${request.prompt}`;
           question: q.question,
           ...(q.options?.length ? { options: [...q.options] } : {}),
           ...(taskId ? { taskIdentifier: taskId } : {}),
+          ...(decisionId ? { decisionId } : {}),
           askedAt: Date.now(),
         },
       })
+    }
+  }
+
+  /**
+   * The open decision on `taskId` whose question is this text.
+   *
+   * Two questions can be open at once on one task, so 「which task」 does not identify a card's
+   * question — the wording does. Matching on the normalised text is the same rule the queue uses
+   * to decide two questions are one, so the card and the record agree on identity.
+   */
+  private openDecisionIdFor(workspaceId: string, taskId: string | undefined, question: string): string | undefined {
+    if (!taskId) return undefined
+    try {
+      const task = this.getTasks(workspaceId).get?.(taskId)
+      const open = (task?.decisions ?? []).filter((entry) => !entry.resolvedAt)
+      const match = open.find((entry) => normalizeQuestion(entry.question) === normalizeQuestion(question))
+      return (match ?? open.at(-1))?.id
+    } catch {
+      return undefined
     }
   }
 

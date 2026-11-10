@@ -16,6 +16,14 @@ export interface DecisionAnswer {
   taskId?: string
   /** The session the question was shown in; the server's fallback when `taskId` is absent. */
   askedBySessionId?: string
+  /**
+   * Which of the task's questions this reply closes.
+   *
+   * Without it the server closes 「the newest open question」, so with several cards on screen a
+   * click on the first one answered the last — observed live as an answer recorded against the
+   * wrong question, followed by 「no pending decision on this task」 on the card that was left.
+   */
+  decisionId?: string
   text: string
 }
 
@@ -34,6 +42,7 @@ export async function submitDecisionAnswer(answer: DecisionAnswer): Promise<Deci
       taskId: string,
       text: string,
       askedBySessionId?: string,
+      decisionId?: string,
     ) => Promise<DecisionAnswerResult>
   }
 
@@ -43,6 +52,7 @@ export async function submitDecisionAnswer(answer: DecisionAnswer): Promise<Deci
       answer.taskId ?? '',
       text,
       answer.askedBySessionId,
+      answer.decisionId,
     )
     // The server knows which task it refused for; pass its reason through rather than
     // inventing a generic one, because "no pending decision" and "no task to answer" are

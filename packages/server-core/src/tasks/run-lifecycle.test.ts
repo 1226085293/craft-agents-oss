@@ -378,3 +378,34 @@ describe('an answer belongs to the record, not to the run', () => {
     expect(answered?.decisions?.at(-1)?.answer?.text).toBe('先不删');
   });
 });
+
+describe('a question ends the run it interrupts', () => {
+  it('releases the lock and stops the worker, so the answer can resume it', () => {
+    /**
+     * Asking mid-slice is the one ask that arrives while a run is alive.
+     *
+     * `reportHandoff(needs_decision)` ends its own run; `setDecisionWording` did not, and the
+     * record only parked on the next write. The result was `paused` with a live lock: the answer
+     * arrived, `resumeRefusal` read the lock, and the task refused to resume — with a sentence
+     * about a run nobody was driving — until that session died on its own.
+     */
+    const { svc, task, stopped } = harness({ alive: ['sess_worker', 'sess_next'] });
+    expect(svc.startRun(task.id, 'sess_worker').ok).toBe(true);
+
+    const asked = svc.setDecisionWording(task.id, { question: '删掉旧字段吗？' })!
+    expect(asked.status).toBe('paused');
+    expect(asked.pauseReason).toBe('needs_decision');
+    expect(locked(asked)).toBeUndefined();
+    expect(stopped).toEqual(['sess_worker']);
+
+    // The answer arrives; nothing about it depends on the dead run.
+    expect(svc.recordDecisionAnswer(task.id, '先不删')?.decision?.answer?.text).toBe('先不删');
+    svc.resolveDecision(task.id, 'approved');
+
+    const resumed = svc.startRun(task.id, 'sess_next');
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(locked(resumed.task)).toBe('sess_next');
+    expect(resumed.task.stats?.runs).toBe(2);
+  });
+});

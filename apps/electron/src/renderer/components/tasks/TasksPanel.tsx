@@ -33,13 +33,6 @@ export interface TasksPanelProps {
   onCloseDetail: () => void
 }
 
-/** Change what starts a task; shared by the list and the detail pane. */
-function updateTaskTrigger(workspaceId: string, id: string, trigger: unknown): void {
-  void (window.electronAPI as unknown as {
-    tasksUpdateTrigger?: (workspaceId: string, id: string, trigger: unknown) => Promise<unknown>
-  }).tasksUpdateTrigger?.(workspaceId, id, trigger)
-}
-
 /** Navigator (left-2) list. */
 export function TasksListPanel({
   workspaceId,

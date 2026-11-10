@@ -807,8 +807,13 @@ export class TaskService {
    * neither of which was one of the three. Copying the words onto the record the task
    * card reads is what makes them the same question.
    *
-   * Deliberately does not touch `status`, `pauseReason`, `askedAt` or `deadlineAt`: this
-   * is wording, not a state change. Answering still goes through the same guard.
+   * Deliberately does not touch `pauseReason`, `askedAt` or `deadlineAt`: this is wording,
+   * not a state change. Answering still goes through the same guard.
+   *
+   * It does end the run, though — see the park below. A question for a person means nobody
+   * works until the answer arrives, and the record alone cannot say that: `classifyPauseReason`
+   * moves the status to `paused` on the next write, but the run's lock, its session and its
+   * disposers belong to the runtime, not to the record.
    */
   setDecisionWording(
     id: string,
@@ -925,7 +930,26 @@ export class TaskService {
         )
       : [...all, entry]
 
-    const saved = this.save({ ...task, decisions: queue, updatedAt: now });
+    /**
+     * A question asked while the run is going ends the run.
+     *
+     * The supervisor asks mid-slice as well as after a hand-off, and the two paths differ in
+     * exactly one thing: whether a run is still alive. After a hand-off there is none — `reportHandoff`
+     * ended it. Mid-slice there is, and parking the record without ending the run left a task that
+     * was `paused` while a live session held its lock. Observed on a real run: the answer arrived,
+     * `resumeRefusal` read the live lock, and the task could not resume until that session died —
+     * 「run already owned by sess_worker」, on a task nobody was working on.
+     *
+     * `suspended` is the honest mode: the worker must stop producing work behind a question that
+     * asks whether to continue. The record is released first so the same write cannot derive a
+     * pause reason from a lock it is about to drop.
+     */
+    const parksRun = task.status === 'running' && queue.some((candidate) => !candidate.resolvedAt)
+    const next = parksRun
+      ? this.releaseRunRecord({ ...task, decisions: queue, updatedAt: now }, now)
+      : { ...task, decisions: queue, updatedAt: now }
+    const saved = this.save(next);
+    if (parksRun) this.disposeRun(id, 'suspended');
     appendJournal(this.root, id, {
       type: 'decision_asked',
       at: now,

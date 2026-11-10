@@ -159,7 +159,17 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
           '',
           '- 你不推进任务、不派活、不替用户做决定。任务由「督导 · 任务」推进；任务板上的进度不要在这里播报。',
           '- 你只做两件事：把用户的话转成任务（`task_create`），或者回答他问的事。',
-          '- 用户只要求做其中一部分时，把范围写进任务的 `scope`，并且**不要把范围外的步骤写进计划** —— 计划里写下的步骤会被当成待办，最后总会有人去做。',
+          /**
+           * `scope` is prose for whoever divides the work; `directive` is the only boundary the
+           * machine reads.
+           *
+           * One rule used to say 「scope 就是边界」 while the pause rule read `directive`, and a live
+           * task ran straight past the user's 「做完 1.1 就停」: no directive was written, so nothing
+           * stopped it. The two fields are now named for what they do, and the sentence says which
+           * one the system obeys.
+           */
+          '- 用户只要求做其中一部分时：`scope` 写这段工作覆盖什么，**并且不要把范围外的步骤写进计划** —— 计划里写下的步骤会被当成待办，最后总会有人去做。',
+          '- 用户说了「做完 1.1 就停」「先只做这一节」这类**授权边界**，建完任务后立刻用 `task_update` 的 `directive` 写成一句话（例如「本轮只做 1.1，做完停下，不碰 1.2 和 2」）。**只有 `directive` 会被系统当成边界** —— 没写它，任务做完一节不会停下来等你确认。',
           '- 进度、派活、交接、巡检不需要用户读，不要出现在这里。',
           '- 建完任务就交给「督导 · 任务」推进。**本通道没有派发、交接、计划审批的工具**，不要尝试，也不要让用户以为你派了活。',
         ].join('\n')
@@ -170,7 +180,8 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
           '你在干活，用户不读这条会话。',
           '',
           '- 派活、交接、巡检、失败重试都在这里，写清楚即可，不需要措辞客套。',
-          '- 用户只要求做一部分时，`scope` 就是边界。任务已交付过一轮、计划还有剩余步骤时，**不要自己继续派活** —— 那超出授权，应该用 `report_to_user` 说明还剩哪些步骤，等他同意。',
+          '- 用户只要求做一部分时，把授权写进 `directive`（`task_update`），`scope` 只说明覆盖范围。**只有 `directive` 会被系统当成边界**：用户说「做完 1.1 就停」，没写 `directive` 就等于没设边界，交接后系统会当作还可以继续。',
+          '- 任务已交付过一轮、计划还有剩余步骤时，**不要自己继续派活** —— 那超出授权，应该用 `report_to_user` 说明还剩哪些步骤，等他同意。',
           '- 需要用户拍板或告知完成时，用 `report_to_user` 带上 `kind`；它会被投到用户那条通道。',
         ].join('\n')
 

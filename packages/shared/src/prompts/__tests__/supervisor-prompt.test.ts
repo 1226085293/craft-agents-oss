@@ -237,3 +237,30 @@ describe('lane prompts match their tool tables', () => {
     for (const name of user) expect(task.has(name)).toBe(true)
   })
 })
+
+/**
+ * The boundary the prompt names has to be the one the code reads.
+ *
+ * `sliceDeliveredButPlanOpen` pauses a delivery only when `spec.directive` exists. The prompt
+ * said 「scope 就是边界」 for months, so a supervisor did what it was told — wrote the scope,
+ * wrote no directive — and the task ran past the user's 「做完 1.1 就停」 into 1.2 in a fresh
+ * session. A prompt that names the wrong field is worse than one that stays silent: it is a
+ * confident instruction to do the ineffective thing.
+ */
+describe('the authorisation boundary is named the way the code reads it', () => {
+  for (const lane of ['user', 'task'] as const) {
+    it(`tells the ${lane} lane about directive, not scope, as the boundary`, () => {
+      const text = getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane })
+      expect(text).toContain('directive')
+      // The exact claim that was wrong.
+      expect(text).not.toContain('scope` 就是边界')
+    })
+  }
+
+  it('does not leave 「scope is the boundary」 anywhere in either lane', () => {
+    for (const lane of ['user', 'task'] as const) {
+      const text = getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane })
+      expect(text.includes('scope 就是边界')).toBe(false)
+    }
+  })
+})

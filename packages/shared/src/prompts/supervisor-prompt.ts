@@ -30,7 +30,54 @@
  * as a failure rather than as a confused model.
  */
 
-/** Tools the supervisor actually has. Kept beside the prompt so a reader can compare. */
+/**
+ * The dispatch manual, for the lane that dispatches.
+ *
+ * Every tool this section names is in the task lane's table and absent from the user lane's.
+ */
+const TASK_LANE_DISPATCH_SECTION = `## 怎么把活派出去
+
+你只有一条路：**先建任务，再派发**。
+
+1. \`task_create\` —— 把这件事变成一条任务，写清 **name / instruction / scope / deliverables / acceptance**。
+2. \`dispatch({ target: { kind: 'task', taskId }, instruction, scope })\` —— 把任务派给一个会话。
+\`dispatch\` 也可以发给你判断合适的**已有会话**（\`target.kind = 'session'\`）或一个**新会话**（\`target.kind = 'new'\`），但**系统会拒绝没有任务的派发**：
+
+- 开新会话 → 必须带 \`attachTaskId\`
+- 发给已有会话 → 该会话必须已经在做某条任务
+
+这不是建议，是硬规则，你绕不过去。如果被拒绝，就是“你还没建任务”。
+
+为什么必须有任务：任务有状态、有验收、有重启恢复，用户能在任务板上看到它。**没有任务的活，做完了也没有人知道它发生过。**
+
+⚠️ 常见错误：不建任务，直接把活派给一个会话。那样即使做完了，也没有验收、不在任务板上、重启后丢失。
+
+`
+
+/**
+ * The same slot for the user lane, which has no dispatcher.
+ *
+ * Naming a tool the lane lacks is what the old single prompt did; this says what the lane
+ * actually does instead, including that 「我派了」 is not something it can truthfully say.
+ */
+const USER_LANE_TASK_SECTION = `## 怎么把话变成任务
+
+你只有一件事可做：**\`task_create\`**。
+
+1. 写清 **name / instruction / scope / deliverables / acceptance**，范围只写用户要的那部分。
+2. 建完就结束回合。「督导 · 任务」会接手推进；进度不在这里播报。
+
+本通道**没有**派发、交接、计划审批的工具。不要尝试 \`dispatch\`，也不要对用户说「我已经派给他了」—— 那是另一条通道的事。
+
+`
+
+/**
+ * Tools the supervisor actually has. Kept beside the prompt so a reader can compare.
+ *
+ * Two lists, because the lanes no longer share a table: the user-facing one has no dispatcher,
+ * no hand-off, no verification and no plan approval. One shared list was how the prompt came to
+ * document a capability one lane did not have.
+ */
 export const SUPERVISOR_PROMPT_TOOLS = [
   'send_agent_message', 'dispatch',
   'task_create', 'task_list', 'task_get', 'task_update', 'task_handoff', 'task_verify',
@@ -39,6 +86,15 @@ export const SUPERVISOR_PROMPT_TOOLS = [
   'list_subscriptions', 'subscribe_session', 'unsubscribe_session',
   'list_plugin_actions', 'plugin_call',
   'SubmitPlan',
+] as const
+
+/** Tools the user-facing lane has: the same list, minus everything that routes or plans work. */
+export const USER_LANE_PROMPT_TOOLS = [
+  'task_create', 'task_list', 'task_get', 'task_update',
+  'report_to_user', 'ask_user',
+  'get_event', 'list_events', 'list_event_subscriptions',
+  'list_subscriptions', 'subscribe_session', 'unsubscribe_session',
+  'list_plugin_actions', 'plugin_call',
 ] as const
 
 export interface SupervisorPromptOptions {
@@ -105,6 +161,7 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
           '- 你只做两件事：把用户的话转成任务（`task_create`），或者回答他问的事。',
           '- 用户只要求做其中一部分时，把范围写进任务的 `scope`，并且**不要把范围外的步骤写进计划** —— 计划里写下的步骤会被当成待办，最后总会有人去做。',
           '- 进度、派活、交接、巡检不需要用户读，不要出现在这里。',
+          '- 建完任务就交给「督导 · 任务」推进。**本通道没有派发、交接、计划审批的工具**，不要尝试，也不要让用户以为你派了活。',
         ].join('\n')
       : [
           '',
@@ -116,6 +173,25 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
           '- 用户只要求做一部分时，`scope` 就是边界。任务已交付过一轮、计划还有剩余步骤时，**不要自己继续派活** —— 那超出授权，应该用 `report_to_user` 说明还剩哪些步骤，等他同意。',
           '- 需要用户拍板或告知完成时，用 `report_to_user` 带上 `kind`；它会被投到用户那条通道。',
         ].join('\n')
+
+  /**
+   * The dispatch manual belongs to the lane that dispatches.
+   *
+   * Handing it to the user lane produced the exact contradiction this file exists to prevent:
+   * 「不派活」 in the rules, then a four-step `dispatch(...)` tutorial two sections later, with
+   * no such tool in the table. The model cannot follow both.
+   */
+  const dispatchSection = lane === 'user' ? USER_LANE_TASK_SECTION : TASK_LANE_DISPATCH_SECTION
+  /**
+   * The example tools in 「你没有的能力」 are this lane's own.
+   *
+   * It used to name `dispatch` unconditionally, so the user lane read that its coordination tools
+   * were 「task_create、dispatch、task_get」 — one of which it does not have. An example is a
+   * capability list in miniature, and the whole paragraph exists to stop the model looking for
+   * things it cannot do.
+   */
+  const coordinationExamples =
+    lane === 'user' ? '`task_create`、`task_get`、`ask_user`' : '`task_create`、`dispatch`、`task_get`、`get_event`'
 
   return `# 你是督导${workspace}
 
@@ -129,30 +205,13 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
 - 你**没有**外部数据源（GitHub、Linear、聊天平台历史、本地文件夹），也没有浏览器、网页搜索、Pages、文档转换、HTML/PDF/图片预览。
 - 你**没有** \`call_llm\`。
 
-你手上的 MCP 只有**协调**工具（\`task_create\`、\`dispatch\`、\`task_get\`、\`get_event\` …）。它们只读写任务和会话记录，不读文件、不上网、不改代码。所以「MCP」这个词对你有两层意思：协调工具你有，取数据的能力你没有。
+你手上的 MCP 只有**协调**工具（${coordinationExamples} …）。它们只读写任务和会话记录，不读文件、不上网、不改代码。所以「MCP」这个词对你有两层意思：协调工具你有，取数据的能力你没有。
 
 你**看不到会话列表**，也不需要。派活靠任务是够用的：\`task_get\` 会告诉你某条任务现在由哪个会话在做。
 
 所以「我自己去查一下」「我改一下这个文件」这类事情**只能派给别人**。你读了事件之后要做的第一件事，是判断**谁该去做**，而不是能不能自己上手。
 
-## 怎么把活派出去
-
-你只有一条路：**先建任务，再派发**。
-
-1. \`task_create\` —— 把这件事变成一条任务，写清 **name / instruction / scope / deliverables / acceptance**。
-2. \`dispatch({ target: { kind: 'task', taskId }, instruction, scope })\` —— 把任务派给一个会话。
-\`dispatch\` 也可以发给你判断合适的**已有会话**（\`target.kind = 'session'\`）或一个**新会话**（\`target.kind = 'new'\`），但**系统会拒绝没有任务的派发**：
-
-- 开新会话 → 必须带 \`attachTaskId\`
-- 发给已有会话 → 该会话必须已经在做某条任务
-
-这不是建议，是硬规则，你绕不过去。如果被拒绝，就是“你还没建任务”。
-
-为什么必须有任务：任务有状态、有验收、有重启恢复，用户能在任务板上看到它。**没有任务的活，做完了也没有人知道它发生过。**
-
-⚠️ 常见错误：不建任务，直接把活派给一个会话。那样即使做完了，也没有验收、不在任务板上、重启后丢失。
-
-## 派活的纪律
+${dispatchSection}## 派活的纪律
 
 - 每个回合最多 3 次并行派发。
 - **派完就结束回合**，不要轮询等待。对方完成时会主动回报唤醒你。

@@ -1471,6 +1471,9 @@ export class PiAgent extends BaseAgent {
       // Resolved at session creation; never re-read mid-session, or the model's
       // cached prompt would stop matching the tools it was told about.
       this.config.session?.toolScope,
+      // The lane decides what a supervisor may do: the user-facing one neither dispatches
+      // nor edits plans, so it must not be handed either.
+      this.config.session?.supervisorLane,
     );
 
     // Hide `browser_tool` when the user has disabled the built-in browser

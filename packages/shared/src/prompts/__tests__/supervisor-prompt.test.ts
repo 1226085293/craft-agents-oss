@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'bun:test'
-import { getSupervisorSystemPrompt, SUPERVISOR_PROMPT_TOOLS } from '../supervisor-prompt.ts'
-import { SUPERVISOR_TOOL_NAMES } from '../../../../session-tools-core/src/tool-defs.ts'
+import { getSupervisorSystemPrompt, SUPERVISOR_PROMPT_TOOLS, USER_LANE_PROMPT_TOOLS } from '../supervisor-prompt.ts'
+import { SUPERVISOR_TOOL_NAMES, USER_LANE_DENIED_TOOL_NAMES, getSessionToolNames } from '../../../../session-tools-core/src/tool-defs.ts'
 
 /**
  * These tests exist because of an observed failure, not for coverage.
@@ -168,5 +168,72 @@ describe('lane-specific rules', () => {
 
   it('defaults to the working lane when none is given', () => {
     expect(getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws' })).toBe(taskLane());
+  })
+})
+
+/**
+ * A prompt that names a tool the session does not have is the same lie as one that denies a
+ * tool it does have — and both were shipping: the user lane was told 「不派活」 while holding
+ * `dispatch`, and the shared prompt then gave it a `dispatch(...)` tutorial.
+ *
+ * These pin the two lanes against their real tables, in both directions.
+ */
+describe('lane prompts match their tool tables', () => {
+  const userLane = () => getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane: 'user' })
+  const taskLane = () => getSupervisorSystemPrompt({ workspaceRootPath: '/tmp/ws', lane: 'task' })
+
+  /**
+   * Backticked lowercase identifiers that look like tool names, in prose the model will act on.
+   *
+   * `「本通道没有 dispatch」` is allowed — naming a tool to forbid it is the point of that sentence.
+   * What must not appear is a mention the model could read as 「you have this」, i.e. one that is
+   * not preceded by a denial in the same sentence fragment.
+   */
+  const DENIAL = /(没有|不要|不可以|禁止|不要尝试|不能)\s*$/
+  const mentionedTools = (text: string): string[] =>
+    [...text.matchAll(/`([a-z][a-z_]+)`/g)]
+      .filter((m) => {
+        const before = text.slice(Math.max(0, m.index! - 30), m.index!).replace(/\*\*/g, '')
+        return !DENIAL.test(before)
+      })
+      .map((m) => m[1]!)
+      .filter((name) => SUPERVISOR_TOOL_NAMES.has(name) || USER_LANE_DENIED_TOOL_NAMES.has(name))
+
+  it('never names a routing tool in the user lane', () => {
+    const named = new Set(mentionedTools(userLane()))
+    for (const denied of USER_LANE_DENIED_TOOL_NAMES) {
+      expect(named.has(denied)).toBe(false)
+    }
+  })
+
+  it('names no tool the user lane lacks, anywhere in its prompt', () => {
+    const laneTools = getSessionToolNames({ role: 'supervisor', supervisorLane: 'user' })
+    for (const name of mentionedTools(userLane())) {
+      expect(laneTools.has(name)).toBe(true)
+    }
+  })
+
+  it('keeps the dispatch tutorial out of the user lane, and in the working lane', () => {
+    expect(userLane()).not.toContain('怎么把活派出去')
+    expect(userLane()).not.toContain('dispatch({')
+    expect(taskLane()).toContain('怎么把活派出去')
+  })
+
+  it('declares a user-lane tool list that matches the real user-lane table', () => {
+    const laneTools = getSessionToolNames({ role: 'supervisor', supervisorLane: 'user' })
+    for (const name of USER_LANE_PROMPT_TOOLS) {
+      // `task_verify` and friends are declared where they exist; this list must stay truthful.
+      expect(SUPERVISOR_TOOL_NAMES.has(name)).toBe(true)
+      expect(laneTools.has(name)).toBe(true)
+    }
+    expect(USER_LANE_PROMPT_TOOLS.length as number).toBe(laneTools.size as number)
+  })
+
+  it('gives the user lane a smaller table than the working lane', () => {
+    const user = getSessionToolNames({ role: 'supervisor', supervisorLane: 'user' })
+    const task = getSessionToolNames({ role: 'supervisor', supervisorLane: 'task' })
+    expect(user.size as number).toBeLessThan(task.size as number)
+    // Everything the user lane has, the working lane has too: a lane only narrows.
+    for (const name of user) expect(task.has(name)).toBe(true)
   })
 })

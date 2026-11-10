@@ -430,7 +430,7 @@ export const TOOL_DESCRIPTIONS = {
   report_result: `Report the outcome of this turn to the supervisor: what you did (summary, max ~200 chars), what you found, what the next session should do, where the deliverables are, and how you verified it. Choose the outcome by what finished, not by how well you did it: 'handoff' (default) when your assigned part is done and the plan still has steps left — the task continues with the next session; 'delivered' only when the whole plan is finished and this is the final answer for the user; 'needs_decision' when a human must choose. Reporting 'delivered' with steps still open fails the gate — use 'handoff' instead, do not remove the remaining steps. The supervisor's rule gate fails a handoff with no artifacts or no verification command.`,
   dispatch: `Supervisor-only: send work to an existing session, an existing task, or a brand new session. Requires instruction (the work: goal, acceptance criteria, where the deliverable goes) and scope (one sentence describing what that session is responsible for, used to match later dispatches). A brand new session runs as whatever role you name in target.agentId — pick from the roster by what the work actually is, not by rank; omit it only when the workspace default is genuinely the right fit. At most 3 dispatches per turn; end the turn after dispatching instead of polling.`,
   report_to_user: `Supervisor-only: the single channel to the user. Keep it under ~100 words — conclusions plus a session link for detail. Do not paste worker logs. With kind=decision, pass taskId (e.g. "T-1") so the answer lands on the right task, and put the answers in the 'options' array (max 4) so each becomes a button; never enumerate them inside the text field, because the reader then has to retype a choice you already listed. The user answers by clicking, and their answer reaches you as a normal message.`,
-  ask_user: `Supervisor-only: ask the user at most two questions when a decision genuinely cannot be made (delete data, spend money, send something external, change direction). Anything else: decide yourself.`,
+  ask_user: `Supervisor-only: ask the user every question that genuinely cannot be decided without them (delete data, spend money, send something external, change direction) — in one call, all of them at once. Several questions cost the person one interruption: answers are collected and handed back together, so do not ration them and do not answer one on their behalf to save a slot. Ask only what a person must decide; everything else you decide yourself. When the question is about a task, create the task first and pass its id in report_to_user: a question asked before any task exists has nowhere to be recorded, so the task page cannot show it and the answer has no decision to close.`,
   send_developer_feedback: `Send freeform feedback to the Craft Agent development team: issues, improvement ideas, patterns found. Write in markdown with as much detail as possible.`,
   archive_session: `Archive or purely unarchive ANOTHER session by ID: removes it from active list/unread counts (does not delete). Requires explicit sessionId; you cannot archive your own. Find ids via list_sessions.`,
   list_pages: `List the workspace's Pages (persistent HTML mini-apps shown in sidebar). Returns slug, name, kind (static/interactive/live), project, refresh schedule, last outcome, share state, folder. Use get_page for full details.`,
@@ -590,6 +590,16 @@ export interface SessionToolFilterOptions {
   /** Session role; omitted = worker (an ordinary session). */
   role?: SessionRole;
   /**
+   * Which supervisor conversation this is.
+   *
+   * Both lanes are `role: 'supervisor'` and therefore shared one tool table, but they do
+   * different jobs — and the user-lane prompt has always said 「不推进任务、不派活」 while the
+   * dispatcher sat in its table. A prompt that forbids a tool the model can see is the same
+   * class of lie as one that documents a tool the model lacks: whichever half the model trusts,
+   * it is wrong half the time.
+   */
+  supervisorLane?: 'user' | 'task';
+  /**
    * Tools this particular session may use, from the task it was spawned for.
    *
    * A scope, not a whitelist: it can only narrow what the role already allows,
@@ -671,6 +681,38 @@ export const SUPERVISOR_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Tools the user-facing lane must not have.
+ *
+ * The user lane is the conversation a person reads and types into. Its job is 「把话变成任务」
+ * and 「回答他问的事」 — it does not run work and does not hand work out. Everything removed
+ * here is removed for that one reason, not because the lane is untrusted:
+ *
+ * - `dispatch` / `task_handoff` / `send_agent_message`: three ways to route work away from a
+ *   task. The task lane owns routing; a second entrance is how the same job gets done twice or
+ *   once with no record — the argument that retired `spawn_session`.
+ * - `SubmitPlan` / `task_verify`: both edit a task's plan and its acceptance. A lane that owns
+ *   no task can only do that by reaching into somebody else's.
+ *
+ * `task_update` stays: the person's words arrive here, and 「这个任务不做了」 is a scope change
+ * the lane must be able to write down.
+ */
+export const USER_LANE_DENIED_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'dispatch',
+  'task_handoff',
+  'task_verify',
+  'send_agent_message',
+  'SubmitPlan',
+]);
+
+/** Whether a tool is visible to a supervisor lane. */
+export function isToolVisibleToLane(name: string, lane?: 'user' | 'task'): boolean {
+  // Absent lane = the working lane, which keeps the full table. Defaulting the other way
+  // would silently remove the dispatcher from every supervisor written before lanes existed.
+  if ((lane ?? 'task') === 'task') return true;
+  return !USER_LANE_DENIED_TOOL_NAMES.has(name);
+}
+
+/**
  * Return session tools with optional feature filtering.
  *
  * Callers should use this helper instead of filtering ad hoc so tool visibility
@@ -691,6 +733,15 @@ export function getSessionToolDefs(options?: SessionToolFilterOptions): SessionT
         ? SUPERVISOR_TOOL_NAMES.has(def.name)
         : !SUPERVISOR_ONLY_TOOL_NAMES.has(def.name);
     if (!roleAllows) return false;
+
+    /**
+     * The lane narrows the role the same way the scope does: it can only take tools away.
+     *
+     * Only for supervisors. A worker carries `SubmitPlan` so an ordinary session can ask its
+     * person to accept a plan, and a stray lane value on a worker must not remove it — the field
+     * is a supervisor concept, and reading it for other roles quietly deleted a real capability.
+     */
+    if (role === 'supervisor' && !isToolVisibleToLane(def.name, options?.supervisorLane)) return false;
 
     // The session scope narrows the role, and only narrows: an entry here can
     // never re-enable something the role above denied.

@@ -42,11 +42,21 @@ export interface SessionToolScope {
 export function getSessionToolProxyDefs(
   role?: 'supervisor' | 'worker',
   scope?: SessionToolScope,
+  /**
+   * Which supervisor conversation this is, when the role is `supervisor`.
+   *
+   * Both lanes are supervisors, so the role alone handed the user-facing lane the
+   * dispatcher — while its prompt says, in as many words, 「不推进任务、不派活」. A model holding
+   * a tool its instructions forbid does one of two things: uses it, or spends the turn deciding
+   * not to. Neither is the job.
+   */
+  supervisorLane?: 'user' | 'task',
 ): SessionToolProxyDef[] {
   const defs = getToolDefsAsJsonSchema({
     prefix: 'mcp__session__',
     includeDeveloperFeedback: FEATURE_FLAGS.developerFeedback,
     ...(role ? { role } : {}),
+    ...(supervisorLane ? { supervisorLane } : {}),
     ...(scope?.allow ? { allowedTools: scope.allow } : {}),
     ...(scope?.deny ? { deniedTools: scope.deny } : {}),
   });

@@ -57,7 +57,20 @@ describe('status transitions', () => {
     const { svc } = service(workspace());
     const task = create(svc);
     expect(svc.setStatus(task.id, 'running').status).toBe('running');
-    expect(svc.setStatus(task.id, 'paused', { pauseReason: 'waiting' }).pauseReason).toBe('waiting');
+    /**
+     * The reason is derived from the record, not taken from the writer.
+     *
+     * `waiting` means a dependency is unfinished; with none on the task, a pause that claims it is
+     * describing something that is not true, and the record says so by dropping the label. The
+     * reason a pause can always declare is the event kind — `process_lost` — because the record
+     * keeps no evidence of it once the lock is gone.
+     */
+    expect(svc.setStatus(task.id, 'paused', { pauseReason: 'waiting' }).pauseReason).toBeNull();
+    // Back to running, because `paused → paused` is a no-op and would keep the cleared reason.
+    svc.setStatus(task.id, 'running');
+    expect(svc.setStatus(task.id, 'paused', { pauseReason: 'process_lost' }).pauseReason).toBe(
+      'process_lost',
+    );
   });
 
   it('refuses an illegal transition', () => {

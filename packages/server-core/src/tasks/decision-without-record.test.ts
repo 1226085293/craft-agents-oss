@@ -211,7 +211,24 @@ describe('a pause with no question is not 「等你决定」', () => {
       toolCallId: 'call_waiting',
       spec: { cwd: root } as never,
     })
-    svc.setStatus(task.id, 'paused', { pauseReason: 'waiting' })
-    expect(svc.get(task.id)!.pauseReason).toBe('waiting')
+    // `waiting` is derived from the dependency record now, so the test has to have a dependency
+    // that is still unfinished — a pause that only claims `waiting` is cleared to nothing.
+    const blocker = svc.create({
+      name: '前置任务',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_blocker',
+      spec: { cwd: root } as never,
+    })
+    const dependent = svc.create({
+      name: 'z2',
+      instruction: 'x',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_dependent',
+      spec: { cwd: root } as never,
+      dependsOn: [blocker.id],
+    })
+    svc.setStatus(dependent.id, 'paused', { pauseReason: 'waiting' })
+    expect(svc.get(dependent.id)!.pauseReason).toBe('waiting')
   })
 })

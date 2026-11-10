@@ -15,6 +15,7 @@ import { readJournal } from '@craft-agent/shared/tasks';
 import {
   normalizeSpec,
   normalizeTrigger,
+  processLostRetryDue,
   formatDecisionAnswerLine,
   formatDecisionAnswersLine,
   openDecisions,
@@ -76,6 +77,14 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       sessionCount: task.sessionIds.length,
       lastHandoff: task.handoffs.at(-1)?.summary,
       pauseReason: task.pauseReason ?? null,
+      /**
+       * Whether the watchdog is going to retry this on its own.
+       *
+       * The card offered 「继续」 on a task the loop was about to pick up anyway, and the person
+       * clicked it into a gate that refused because a run already owned the task. Same function as
+       * the loop's, so the card cannot promise something the loop is not about to do.
+       */
+      willRetry: processLostRetryDue(task, Date.now(), 0),
       // A paused task that says 「等待你决定」 must also say what about, or the user has
       // to open it to find out there is nothing there — the decision lives on the task.
       ...(task.decision && !task.decision.resolvedAt
@@ -93,7 +102,10 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       const journal = includeJournal
         ? readJournal(requireWorkspace(workspaceId).rootPath, id)
         : undefined;
-      return { task, journal };
+      return {
+        task: { ...task, willRetry: processLostRetryDue(task, Date.now(), 0) },
+        journal,
+      };
     },
   );
 

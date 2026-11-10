@@ -17,14 +17,11 @@ import {
   applyTransition,
   openSteps,
   attachSession,
-  checkBudget,
-  checkDependencies,
   checkHandoffRules,
   createTask,
   deleteTask,
   isHeartbeatMissing,
   isNewRevision,
-  isRunLocked,
   loadTask,
   nextTaskId,
   normalizeHandoff,
@@ -32,6 +29,7 @@ import {
   restructurePlan,
   currentStep,
   recordRunResult,
+  resumeRefusal,
   saveTask,
   shouldTripFuse,
   appendJournal,
@@ -124,7 +122,8 @@ export interface TaskServiceDeps {
    * The loop's sleep is derived from state, so it is due at the moment a deadline
    * passes — not at the moment a fact changes. A decision answered, a plan step
    * moved, a hand-off filed: each is a fact the rules read, and each used to wait
-   * for the derived deadline. Poking is the event, the loop stays the fallback.
+   * for the derived deadline (up to half a minute, and a deadline later than that
+   * for the slow rules). Poking is the event, the loop stays the fallback.
    *
    * Safe to call on every write: the loop replaces a pending timer rather than
    * queueing a second pass, so a burst of writes costs one pass.
@@ -340,9 +339,10 @@ export class TaskService {
           pauseReason: blocked.pauseReason,
           error: blocked.reason,
         }).task;
-        this.save(paused);
         appendJournal(this.root, id, { type: 'paused', at: now, data: { reason: blocked.reason } });
-        return paused;
+        // The saved record, not the pre-derivation object: the reason is derived in `save`, and
+        // returning the earlier copy would tell the caller something the record does not say.
+        return this.save(paused);
       }
     }
 
@@ -395,30 +395,34 @@ export class TaskService {
    * that forgets is indistinguishable from a supervisor that was never told.
    */
   private startGate(task: Task, now: number): { pauseReason: Task['pauseReason']; reason: string } | null {
-    if (isRunLocked(task, this.deps.sessionExists)) {
-      return { pauseReason: 'waiting', reason: `run already owned by ${task.stats?.lockSessionId}` };
+    /**
+     * A question for a person is not a step the executor may skip.
+     *
+     * `applyTransition` already refuses `→ running` while a question is open; `startRun` builds its
+     * record directly and so walked straight past that guard. The result was a task paused on its
+     * own question, holding a run lock, with a worker spawned to work on it — the exact state the
+     * guard exists to prevent, reached by the other door.
+     */
+    const open = openDecisions(task)
+    if (open.length) {
+      const worded = open.some((entry) => entry.question?.trim())
+      return {
+        pauseReason: worded ? 'needs_decision' : 'asking',
+        reason: worded ? `waiting for a person: ${open.find((e) => e.question?.trim())?.question}` : 'waiting for the question to be worded',
+      }
     }
 
-    const deps = checkDependencies(task, (id) => this.get(id));
-    if (!deps.ok) {
-      return { pauseReason: 'waiting', reason: deps.reasons.join('; ') };
-    }
-
-    const verdict = checkBudget(
-      task.budget,
-      {
-        sessions: task.sessionIds.length,
-        runs: task.stats?.runs ?? 0,
-        activeMinutes: Math.floor((task.stats?.activeMs ?? 0) / 60_000),
-      },
+    /**
+     * One implementation, because the board reads the same answer.
+     *
+     * `resumeRefusal` is also what `classifyPauseReason` labels a pause with, so a card can never
+     * offer 「继续」 on a task this gate will refuse: the label IS the refusal.
+     */
+    return resumeRefusal(task, {
+      sessionExists: this.deps.sessionExists,
+      getTask: (id) => this.get(id),
       now,
-    );
-    if (verdict.exceeded) return { pauseReason: 'budget', reason: verdict.reason };
-
-    if (shouldTripFuse(task.lifecycle)) {
-      return { pauseReason: 'failures', reason: 'consecutive failures' };
-    }
-    return null;
+    });
   }
 
   /**
@@ -1219,7 +1223,7 @@ export class TaskService {
       task.pauseReason === 'asking' ||
       task.pauseReason === 'awaiting_release' ||
       task.pauseReason == null;
-    if (!isDecisionish) return task;
+    if (!isDecisionish) return this.deriveGateReason(task);
 
     if (openDecision) {
       // 「等你决定」 needs at least one question with words on it; otherwise the words are still
@@ -1229,7 +1233,12 @@ export class TaskService {
     }
 
     const isDecisionPause = task.pauseReason === 'needs_decision' || task.pauseReason === 'asking';
-    if (!isDecisionPause) return task;
+    /**
+     * Not a decision pause after all — a manual pause has no reason, and a reason may be a claim
+     * about the budget, the fuse or a dependency. Those are derived, so this is where a pause with
+     * nothing to say gets its label from the record.
+     */
+    if (!isDecisionPause) return this.deriveGateReason(task);
 
     /**
      * No open decision, and two different reasons why that can be.
@@ -1242,8 +1251,38 @@ export class TaskService {
      * That is 「等问句」, not 「nothing is happening」: the distinction is the whole reason `asking`
      * exists, and clearing it to null would hide a pending question behind 「已暂停」.
      */
-    if (allDecisions(task).length) return { ...task, pauseReason: null };
+    if (allDecisions(task).length) return this.deriveGateReason({ ...task, pauseReason: null });
     return { ...task, pauseReason: 'asking' };
+  }
+
+  /**
+   * Why a pause would refuse to resume — read from the record, not from the writer.
+   *
+   * The reasons a writer passed were true when it wrote them and stayed written after they stopped
+   * being true: a task paused on `budget` kept saying 「预算用尽」 after the budget was raised, and a
+   * task paused on `waiting` said so long after its dependency finished. Both are computable from
+   * the record, so neither should be stored as a claim — the same argument the decision reasons
+   * already won.
+   *
+   * `process_lost` is exempt: it says 「the process that was running this is gone」, which is an
+   * event, not a condition, and the record no longer carries the evidence once the lock is released.
+   * `awaiting_release` is exempt for the same reason — a person declared it, the record cannot.
+   *
+   * The label comes from `resumeRefusal`, which is also what the start gate asks, so what the card
+   * shows and what a refusal says can no longer be two different answers.
+   */
+  private deriveGateReason(task: Task): Task {
+    if (task.pauseReason === 'process_lost') return task;
+    // A person declared this one; the record cannot prove or disprove it.
+    if (task.pauseReason === 'awaiting_release') return task;
+    const refusal = resumeRefusal(task, {
+      sessionExists: this.deps.sessionExists,
+      getTask: (id) => this.get(id),
+      now: this.now(),
+    });
+    const derived = refusal?.pauseReason ?? null;
+    if ((task.pauseReason ?? null) === derived) return task;
+    return { ...task, pauseReason: derived };
   }
 
   /**
@@ -2050,7 +2089,28 @@ export class TaskService {
      * the only write frequent enough for the passes to be visible in the log.
      */
     if (options?.poke !== false) this.deps.pokeWatchdog?.();
+    /**
+     * A fact that changes elsewhere still changes this record's label.
+     *
+     * `waiting` is derived from a dependency's status, so the moment that dependency completes the
+     * pause stops meaning anything — but nothing writes the waiting task, so the derivation would
+     * never run and the board would keep saying 「等待中」 for a task that is free to go. Completion
+     * is the only event that can invalidate another task's reason, and it happens once.
+     */
+    if (derived.status === 'completed') this.releaseDependents(derived.id);
     return derived;
+  }
+
+  /** Re-derive the label of every paused task that was waiting on `completedId`. */
+  private releaseDependents(completedId: string): void {
+    for (const other of listTasks(this.root)) {
+      if (other.status !== 'paused' || other.pauseReason !== 'waiting') continue;
+      if (!(other.dependsOn ?? []).includes(completedId)) continue;
+      const refreshed = this.classifyPauseReason(other);
+      if (refreshed.pauseReason === other.pauseReason) continue;
+      saveTask(this.root, refreshed);
+      this.notifyChanged();
+    }
   }
 
   private require(id: string): Task {

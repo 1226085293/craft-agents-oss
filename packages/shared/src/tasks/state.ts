@@ -377,6 +377,60 @@ export function isRunLocked(task: Task, sessionExists: (id: string) => boolean):
   return sessionExists(lock);
 }
 
+/** Why a run may not start, or null when it may. */
+export interface ResumeRefusal {
+  /** The label the board shows, in the same vocabulary as `pauseReason`. */
+  pauseReason: TaskPauseReason;
+  /** The sentence a refusal reports — ``runs 12/12``, ``run already owned by sess_x``. */
+  reason: string;
+}
+
+/**
+ * The one answer to 「may this task run right now」.
+ *
+ * Two places used to answer it separately: `startGate` decided whether to start, and the board
+ * decided what to show — the board grouping on `pauseReason`, which each writer passed by hand.
+ * The two drifted, and the drift was visible: a card offered 「继续」 on a task whose budget was
+ * gone, the person clicked it, and the RPC refused with a sentence the page had never shown.
+ *
+ * Order is the order the gate enforces, which is also the order that says the most: a lock held by
+ * a live run, then an unfinished dependency, then the budget, then the failure fuse. The label a
+ * pause derives and the reason a refusal reports come out of this one function, so they cannot
+ * disagree — 「等预算」 on the card is 「runs 12/12」 in the refusal.
+ */
+export function resumeRefusal(
+  task: Task,
+  context: {
+    sessionExists: (id: string) => boolean;
+    getTask: (id: string) => Pick<Task, 'id' | 'status' | 'name'> | null;
+    now?: number;
+  },
+): ResumeRefusal | null {
+  const now = context.now ?? Date.now();
+
+  if (isRunLocked(task, context.sessionExists)) {
+    return { pauseReason: 'waiting', reason: `run already owned by ${task.stats?.lockSessionId}` };
+  }
+
+  const deps = checkDependencies(task, context.getTask);
+  if (!deps.ok) return { pauseReason: 'waiting', reason: deps.reasons.join('; ') };
+
+  const budget = checkBudget(
+    task.budget,
+    {
+      sessions: task.sessionIds.length,
+      runs: task.stats?.runs ?? 0,
+      activeMinutes: Math.floor((task.stats?.activeMs ?? 0) / 60_000),
+    },
+    now,
+  );
+  if (budget.exceeded) return { pauseReason: 'budget', reason: budget.reason };
+
+  if (shouldTripFuse(task.lifecycle)) return { pauseReason: 'failures', reason: 'consecutive failures' };
+
+  return null;
+}
+
 // ------------------------------------------------------------
 // Budget, fuse, heartbeat
 // ------------------------------------------------------------
@@ -430,6 +484,40 @@ export function recordRunResult(
     consecutiveFailures: lifecycle.consecutiveFailures + 1,
     lastError: error ?? lifecycle.lastError,
   };
+}
+
+/**
+ * When the task last showed a sign of life.
+ *
+ * Four timestamps can carry it — the record's heartbeat, the run's heartbeat, the last edit, the
+ * last wake — and the newest one is the truth. Shared because both the retry decision and the
+ * stalled-window reasoning read it, and two copies of 「which timestamp counts」 is how a pause and
+ * a retry end up disagreeing about the same dead process.
+ */
+export function lastActivityOf(task: Task): number {
+  return Math.max(
+    task.lastHeartbeatAt ?? 0,
+    task.stats?.lastHeartbeatAt ?? 0,
+    task.updatedAt ?? 0,
+    task.stats?.lastWakeAt ?? 0,
+  );
+}
+
+/** One automatic retry per loss; the second time a person decides. */
+export const MAX_PROCESS_LOST_RETRIES = 1;
+
+/**
+ * Should a `process_lost` pause be retried by itself?
+ *
+ * The single answer to a question two places asked separately: the watchdog decided whether to
+ * start a run, and the board decided whether to offer 「继续」 — one read the retry counter, the
+ * other read `status`. A task the loop was about to retry showed a button asking the person to do
+ * it by hand, and a task already retried still looked like it had never been tried.
+ */
+export function processLostRetryDue(task: Task, now: number, graceMs: number): boolean {
+  if (task.status !== 'paused' || task.pauseReason !== 'process_lost') return false;
+  const retries = task.stats?.lostRetries ?? 0;
+  return retries < MAX_PROCESS_LOST_RETRIES && now - lastActivityOf(task) >= graceMs;
 }
 
 /** A task is stalled when two heartbeats in a row never arrived. */export function isHeartbeatStalled(task: Task, now: number): boolean {

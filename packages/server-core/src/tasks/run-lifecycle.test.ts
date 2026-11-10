@@ -337,3 +337,44 @@ describe('a completed hand-off releases everything it held', () => {
     expect(locked(result.task)).toBeUndefined();
   });
 });
+
+describe('an answer belongs to the record, not to the run', () => {
+  it('is accepted after the run that asked has ended', async () => {
+    /**
+     * The question outlives the process that asked it.
+     *
+     * A hand-off releases the lock, so by the time the person answers there is no run to deliver to.
+     * Refusing the words there would strand the question: the record keeps it, the card shows it,
+     * and the only party who could act on the reply is the supervisor — which reads the answer from
+     * the task, not from the session that wrote the question. This pins that the answer path does
+     * not depend on a lock, so a re-run cannot swallow a reply meant for the older run.
+     */
+    const { svc, task } = harness({ alive: ['sess_next'] });
+    svc.startRun(task.id, 'sess_worker');
+    await svc.reportHandoff(
+      task.id,
+      { outcome: 'needs_decision', summary: '要不要删掉旧字段？' },
+      'sess_worker',
+    );
+    expect(locked(svc.get(task.id)!)).toBeUndefined();
+
+    /**
+     * And no run may start behind the question.
+     *
+     * The gate's job: a task waiting for a person cannot be resumed into a fresh run, whatever
+     * session asks — the same rule the state machine applies to `→ running`, reached here through
+     * `startRun`, which builds its record directly instead of transitioning.
+     */
+    // The supervisor words the question — the state a person actually sees on the card.
+    svc.setDecisionWording(task.id, { question: '要不要删掉旧字段？' });
+    const started = svc.startRun(task.id, 'sess_next');
+    expect(started.ok).toBe(false);
+    if (started.ok) return;
+    expect(started.reason).toContain('waiting for a person');
+    expect(svc.get(task.id)?.stats?.lockSessionId).toBeUndefined();
+
+    // The words are still recorded: the question belongs to the task, not to a session.
+    const answered = svc.recordDecisionAnswer(task.id, '先不删');
+    expect(answered?.decisions?.at(-1)?.answer?.text).toBe('先不删');
+  });
+});

@@ -16,9 +16,11 @@
 import { createLogger } from '@craft-agent/shared/utils';
 import {
   isHeartbeatStalled,
+  lastActivityOf,
   lastPlanChangeAt,
   planProgress,
   planStalled,
+  processLostRetryDue,
   shouldTripFuse,
   type Task,
 } from '@craft-agent/shared/tasks';
@@ -87,7 +89,16 @@ export interface WatchdogDeps {
     reason: 'idle' | 'unreported',
   ) => void | boolean | Promise<boolean>;
   /** Pause a task with a reason. */
-  pause: (id: string, reason: 'failures' | 'budget' | 'process_lost' | 'waiting', note: string) => void;
+  /**
+   * Park a task, declaring only what a record cannot later prove.
+   *
+   * `process_lost` is a fact: the process is gone, and once the lock is released the record no
+   * longer carries the evidence. Everything else a pause could be labelled with — budget spent,
+   * failures piled up, a dependency unfinished — is computable from the record, so the service
+   * derives it and the caller passes `null`. Two writers of one label is how the board ended up
+   * claiming things the record had stopped saying.
+   */
+  pause: (id: string, reason: 'process_lost' | null, note: string) => void;
   /**
    * Start a fresh run for a task whose executor was lost.
    *
@@ -251,15 +262,6 @@ function stoppedGrace(task: Task): number {
   return hasWorkedThisRun(task) ? STOPPED_AFTER_WORK_GRACE_MS : UNREPORTED_GRACE_MS;
 }
 
-function lastActivityOf(task: Task): number {
-  return Math.max(
-    task.lastHeartbeatAt ?? 0,
-    task.stats?.lastHeartbeatAt ?? 0,
-    task.updatedAt ?? 0,
-    task.stats?.lastWakeAt ?? 0,
-  );
-}
-
 /**
  * Detect a worker that keeps reporting the same thing.
  *
@@ -276,8 +278,8 @@ export function isLooping(task: Task): boolean {
   return tail.every((summary) => summary === first);
 }
 
-/** One automatic retry per loss; the second time a person decides. */
-export const MAX_PROCESS_LOST_RETRIES = 1;
+/** Re-exported so the loop and the board cannot drift on how many retries 「一次」 is. */
+export { MAX_PROCESS_LOST_RETRIES } from '@craft-agent/shared/tasks';
 
 /**
  * How long a `process_lost` pause waits before the retry.
@@ -334,8 +336,7 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
     }
 
     if (task.status === 'paused' && task.pauseReason === 'process_lost') {
-      const retries = task.stats?.lostRetries ?? 0
-      if (retries < MAX_PROCESS_LOST_RETRIES && now - lastActivityOf(task) >= processLostGraceMs()) {
+      if (processLostRetryDue(task, now, processLostGraceMs())) {
         findings.push({ kind: 'resume_lost', task })
       }
       continue
@@ -537,14 +538,14 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         break;
       case 'off_track': {
         const progress = planProgress(finding.task.spec?.plan);
-        deps.pause(finding.task.id, 'waiting', 'plan stopped moving');
+        deps.pause(finding.task.id, null, 'plan stopped moving');
         notify(`${finding.task.id} 的计划已 ${Math.round(OFF_TRACK_MS / 60_000)} 分钟没有推进（完成 ${progress.done}/${progress.total}），任务已暂停，需要确认它是否偏离目标。`,
         );
         acted += 1;
         break;
       }
       case 'looping':
-        deps.pause(finding.task.id, 'failures', 'repeated identical handoffs');
+        deps.pause(finding.task.id, null, 'repeated identical handoffs');
         notify(`${finding.task.id} 连续 ${MAX_REPEATED_HANDOFFS} 次交接内容相同，Worker 在原地打转，任务已暂停。`,
         );
         acted += 1;
@@ -594,7 +595,7 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
             `${finding.task.id} 的执行者已停止且没有交接，唤醒失败——任务卡在这里，需要你确认下一步。`,
           )
         } else {
-          deps.pause(finding.task.id, 'waiting', 'stopped without filing a hand-off')
+          deps.pause(finding.task.id, null, 'stopped without filing a hand-off')
           notify(`${finding.task.id} 没有交接且会话也不在了，任务已暂停。`,
           )
         }
@@ -632,13 +633,13 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         acted += 1;
         break;
       case 'failing':
-        deps.pause(finding.task.id, 'failures', 'consecutive failures');
+        deps.pause(finding.task.id, null, 'consecutive failures');
         notify(`${finding.task.id} 连续失败，任务已暂停，需要你决定是否重试。`,
         );
         acted += 1;
         break;
       case 'overdue':
-        deps.pause(finding.task.id, 'budget', 'deadline passed');
+        deps.pause(finding.task.id, null, 'deadline passed');
         notify(`${finding.task.id} 已过截止时间，任务已暂停。`);
         acted += 1;
         break;

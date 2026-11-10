@@ -58,7 +58,11 @@ describe('the reason follows the question', () => {
   it('does not describe a failure as a decision', () => {
     const { svc, task, root } = setup()
     svc.setStatus(task.id, 'running')
+    // Three failed runs: the fuse is what makes `failures` true, and the reason is derived from
+    // the record now. Claiming it without the failures would be cleared to nothing.
+    for (let i = 0; i < 3; i += 1) svc.endRun(task.id, { ok: false, error: `尝试 ${i + 1} 失败` })
     svc.setStatus(task.id, 'paused', { pauseReason: 'failures' })
+    expect(svc.get(task.id)?.pauseReason).toBe('failures')
     svc.setDecisionWording(task.id, { question: '还试吗？' })
 
     // Both are true, and the failure is what went wrong. Rewriting it hid the diagnosis.

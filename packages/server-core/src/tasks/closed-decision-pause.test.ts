@@ -69,10 +69,13 @@ describe('a decision that closed leaves no pause behind', () => {
     const svc = service()
     const task = pausedOnDecision(svc)
     // `paused → paused` is a no-op, so reach a budget pause the way it really happens: run again,
-    // then pause on the budget gate.
+    // then pause on the budget gate. The budget is spent for real — the reason is derived from the
+    // record now, so a pause that merely claims `budget` would be cleared to nothing.
     svc.resolveDecision(task.id, 'approved', 'ok')
+    for (let i = 0; i < 9; i += 1) svc.attachSession(task.id, `sess_${i}`)
     svc.setStatus(task.id, 'running')
     svc.setStatus(task.id, 'paused', { pauseReason: 'budget' })
+    expect(svc.get(task.id)!.pauseReason).toBe('budget')
 
     // Budget describes the task, not a decision; closing decisions must never rewrite it.
     expect(svc.get(task.id)!.pauseReason).toBe('budget')

@@ -757,3 +757,111 @@ describe('a dispatch does not start work inside the turn that asked for it', () 
     expect(h.spawned.map((s) => s.scope)).toEqual(['甲', '乙'])
   })
 })
+
+/**
+ * Two conversations, one runtime.
+ *
+ * The runtime is per workspace because routes, the event backlog and the per-rule ceilings are
+ * workspace facts. A turn is not: it belongs to one conversation. Observed consequence of
+ * sharing it — whichever supervisor finished first drained the other's queue, so the user lane
+ * ending a turn started work the task lane had asked for, and the failure notice went to the
+ * wrong supervisor.
+ */
+describe('each supervisor lane owns its own turn', () => {
+  it('does not drain the other lane queue when one lane goes idle', async () => {
+    const h = harness(workspace(), {
+      tasks: new Map([['T-1', { id: 'T-1', assigneeAgentId: 'builtin-default' } as never]]),
+    })
+    h.sessions.set('sess_task_lane', { id: 'sess_task_lane', role: 'supervisor', isProcessing: true } as never)
+    h.sessions.set('sess_user_lane', { id: 'sess_user_lane', role: 'supervisor', isProcessing: true } as never)
+
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_task_lane',
+      target: { kind: 'new' },
+      scope: '读回确认',
+      instruction: '执行 1.2',
+      attachTaskId: 'T-1',
+      parallel: false,
+    })
+    expect(h.spawned).toHaveLength(0)
+
+    // The *other* lane's turn ends first. Nothing it did should start the task lane's work.
+    await h.runtime.onSupervisorIdle('sess_user_lane')
+    expect(h.spawned).toHaveLength(0)
+
+    // Its own turn ending is what starts it.
+    await h.runtime.onSupervisorIdle('sess_task_lane')
+    expect(h.spawned).toHaveLength(1)
+  })
+
+  it('counts fan-out per lane, so one lane cannot exhaust the other', async () => {
+    const h = harness(workspace(), {
+      tasks: new Map([
+        ['T-1', { id: 'T-1', assigneeAgentId: 'builtin-default' } as never],
+        ['T-2', { id: 'T-2', assigneeAgentId: 'builtin-default' } as never],
+      ]),
+    })
+    h.sessions.set('sess_task_lane', { id: 'sess_task_lane', role: 'supervisor', isProcessing: true } as never)
+    h.sessions.set('sess_user_lane', { id: 'sess_user_lane', role: 'supervisor', isProcessing: true } as never)
+
+    // Three from the task lane: its own ceiling.
+    for (let i = 0; i < 3; i += 1) {
+      await h.runtime.dispatch({
+        fromSessionId: 'sess_task_lane',
+        target: { kind: 'new' },
+        scope: `任务 ${i}`,
+        instruction: `做 ${i}`,
+        attachTaskId: 'T-1',
+        parallel: true,
+      })
+    }
+    // A fourth from that lane is refused…
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_task_lane',
+        target: { kind: 'new' },
+        scope: '第四个',
+        instruction: '再来一个',
+        attachTaskId: 'T-1',
+        parallel: true,
+      }),
+    ).rejects.toThrow()
+    // … while the other lane still has its full allowance.
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_user_lane',
+      target: { kind: 'new' },
+      scope: '建任务',
+      instruction: '建一条任务',
+      attachTaskId: 'T-2',
+      parallel: true,
+    })
+    expect(h.runtime.dispatchesThisTurn('sess_user_lane')).toBe(1)
+  })
+
+  it('resets the cap when a turn begins, and keeps the ping-pong guard across it', async () => {
+    const h = harness(workspace(), {
+      tasks: new Map([['T-1', { id: 'T-1', assigneeAgentId: 'builtin-default' } as never]]),
+    })
+    const one = {
+      fromSessionId: 'sess_sup',
+      target: { kind: 'new' as const },
+      scope: '同一件事',
+      instruction: '把输入框改成两行',
+      attachTaskId: 'T-1',
+      parallel: false,
+    }
+    await h.runtime.dispatch(one)
+    await h.runtime.dispatch(one)
+    // No `onSupervisorIdle` here on purpose: this is the case `beginTurn` exists for — a turn
+    // that ended without going through the idle path (a reload, a crashed turn, a resumed
+    // session). Counting must not carry over, or the cap becomes a lifetime quota.
+    expect(h.runtime.dispatchesThisTurn('sess_sup')).toBe(2)
+
+    h.runtime.beginTurn('sess_sup')
+    expect(h.runtime.dispatchesThisTurn('sess_sup')).toBe(0)
+
+    // The guard is a different matter: repetition is still remembered, and this is the third
+    // time in a row, so it is refused rather than counted into the new turn.
+    await expect(h.runtime.dispatch(one)).rejects.toThrow(/again|重复|3/)
+  })
+})

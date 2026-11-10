@@ -2162,6 +2162,16 @@ export class SessionManager implements ISessionManager {
     const was = managed.isProcessing
     managed.isProcessing = processing
     if (!was && processing) {
+      /**
+       * A supervisor turn is starting, so its per-turn counters go back to zero.
+       *
+       * `beginTurn` existed with no callers, which meant 「at most 3 dispatches this turn」 was
+       * really 「at most 3 dispatches ever」 — and the queue of deferred activations, which lives
+       * on the same state, accumulated across turns instead of being scoped to one.
+       */
+      if (managed.role === 'supervisor') {
+        this.getSupervisorRuntime(managed.workspace.id).beginTurn(managed.id)
+      }
       sessionRuntimeHooks.onSessionStarted()
     } else if (was && !processing) {
       sessionRuntimeHooks.onSessionStopped()

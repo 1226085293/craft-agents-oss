@@ -19,7 +19,9 @@ import {
   EventBacklog,
   formatBacklogNudge,
   MAX_DISPATCHES_PER_TURN,
+  newGuardState,
   newTurnState,
+  type SupervisorGuardState,
   type SupervisorTurnState,
   type QueuedActivation,
 } from '@craft-agent/shared/agents/supervisor';
@@ -122,7 +124,22 @@ export interface SupervisorRuntimeDeps {
 
 export class SupervisorRuntime {
   private backlog = new EventBacklog();
-  private turnState: SupervisorTurnState = newTurnState();
+  /**
+   * Per-turn state, one slot per supervisor session.
+   *
+   * The runtime is per workspace — routes, the event backlog and the per-rule ceilings are
+   * workspace facts — but a turn belongs to one conversation. One slot shared by both lanes
+   * meant the user lane's turn ending drained the task lane's queue, and the notice about a
+   * failed dispatch went to whichever supervisor happened to finish first.
+   */
+  private readonly turnStates = new Map<string, SupervisorTurnState>()
+  /**
+   * Cross-turn state, also per session.
+   *
+   * Kept apart from the turn state because it must survive `beginTurn`: the ping-pong guard
+   * compares this turn's instruction with the last one sent, which is a fact about earlier turns.
+   */
+  private readonly guardStates = new Map<string, SupervisorGuardState>()
   /** Cached on-duty supervisor id, refreshed lazily. */
   private onDuty?: string;
   /**
@@ -145,7 +162,11 @@ export class SupervisorRuntime {
    * yet, and an empty method is honest about that — deleting it would only move
    * the no-op to the caller.
    */
-  dispose(): void {}
+  dispose(): void {
+    // Workspace teardown: the sessions those slots belong to are going away with it.
+    this.turnStates.clear();
+    this.guardStates.clear();
+  }
 
   // ------------------------------------------------------------
   // Events
@@ -303,9 +324,17 @@ export class SupervisorRuntime {
      * set when the first turn acquires a session), and gating the drain on it silently dropped
      * every queued dispatch in that window.
      */
-    const supervisorId = supervisorSessionId ?? this.onDuty;
-    await this.drainActivations(supervisorId);
-    this.turnState = newTurnState();
+    if (supervisorSessionId) {
+      await this.drainActivations(supervisorSessionId)
+      this.turnStates.delete(supervisorSessionId)
+    } else {
+      // No id given: every turn that is open may be over, so finish all of them rather than
+      // guessing which supervisor the caller meant.
+      for (const id of [...this.turnStates.keys()]) {
+        await this.drainActivations(id)
+        this.turnStates.delete(id)
+      }
+    }
     await this.drainToSupervisor();
   }
 
@@ -549,7 +578,8 @@ export class SupervisorRuntime {
     }
 
     assertDispatchAllowed({
-      state: this.turnState,
+      state: this.turnStateFor(params.fromSessionId),
+      guard: this.guardStateFor(params.fromSessionId),
       spawnDepth: supervisor.spawnDepth ?? 0,
       targetKey,
       instruction: params.instruction,
@@ -592,11 +622,15 @@ export class SupervisorRuntime {
       return {
         sessionId: existingSessionId,
         queued: true,
-        position: this.enqueueActivation({ kind: 'send', sessionId: existingSessionId, message }),
+        position: this.enqueueActivation(params.fromSessionId, {
+          kind: 'send',
+          sessionId: existingSessionId,
+          message,
+        }),
       }
     }
 
-    const position = this.enqueueActivation({
+    const position = this.enqueueActivation(params.fromSessionId, {
       kind: 'spawn',
       name: params.name,
       agentId: workerAgentId,
@@ -609,9 +643,39 @@ export class SupervisorRuntime {
   }
 
   /** Queue an activation for the end of this turn; returns its 1-based position. */
-  private enqueueActivation(action: QueuedActivation): number {
-    this.turnState.queuedActivations.push(action)
-    return this.turnState.queuedActivations.length
+  private enqueueActivation(supervisorSessionId: string, action: QueuedActivation): number {
+    const state = this.turnStateFor(supervisorSessionId)
+    state.queuedActivations.push(action)
+    const position = state.queuedActivations.length
+    /**
+     * Written when it is only a promise, not when it happens.
+     *
+     * This queue lives in memory, so a crash between 「已排队」 and the turn ending would drop it
+     * with nothing left behind. The log is the only place that can still answer 「它到底派过没有」
+     * afterwards, which is the question a person asks when work never starts.
+     */
+    this.deps.logDispatch?.(
+      `${supervisorSessionId} queued #${position}: ${describeActivation(action)}`,
+    )
+    return position
+  }
+
+  private turnStateFor(sessionId: string): SupervisorTurnState {
+    let state = this.turnStates.get(sessionId)
+    if (!state) {
+      state = newTurnState()
+      this.turnStates.set(sessionId, state)
+    }
+    return state
+  }
+
+  private guardStateFor(sessionId: string): SupervisorGuardState {
+    let state = this.guardStates.get(sessionId)
+    if (!state) {
+      state = newGuardState()
+      this.guardStates.set(sessionId, state)
+    }
+    return state
   }
 
   /**
@@ -622,10 +686,13 @@ export class SupervisorRuntime {
    * would be worse than the extra turn, because the supervisor has already told the user
    * 「已派发」 and that sentence would quietly become false.
    */
-  private async drainActivations(supervisorSessionId: string | undefined): Promise<void> {
-    const queued = this.turnState.queuedActivations.splice(0)
+  private async drainActivations(supervisorSessionId: string): Promise<void> {
+    const queued = this.turnStateFor(supervisorSessionId).queuedActivations.splice(0)
     for (const action of queued) {
       try {
+        this.deps.logDispatch?.(
+          `${supervisorSessionId} starting queued: ${describeActivation(action)}`,
+        )
         if (action.kind === 'send') {
           await this.deps.sendToSession(action.sessionId, action.message)
         } else {
@@ -641,7 +708,6 @@ export class SupervisorRuntime {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         log.warn('[supervisor] queued dispatch failed', { error: message })
-        if (!supervisorSessionId) continue
         try {
           await this.deps.sendToSession(
             supervisorSessionId,
@@ -708,14 +774,27 @@ export class SupervisorRuntime {
     return this.dispatchQueue.snapshot();
   }
 
-  get dispatchesThisTurn(): number {
-    return this.turnState.dispatchesThisTurn;
+  /** Dispatches this supervisor has made in its current turn. */
+  dispatchesThisTurn(supervisorSessionId: string): number {
+    return this.turnStateFor(supervisorSessionId).dispatchesThisTurn;
   }
 
-  /** Reset the per-turn counters (called when a supervisor turn starts). */
-  beginTurn(): void {
-    this.turnState = newTurnState();
+  /**
+   * A supervisor turn is starting: its per-turn counters go back to zero.
+   *
+   * Called by the session layer on the idle → processing edge. Guard state is deliberately left
+   * alone — see `guardStates`.
+   */
+  beginTurn(supervisorSessionId: string): void {
+    this.turnStates.set(supervisorSessionId, newTurnState());
   }
+}
+
+/** One line about a queued action, for the log. */
+function describeActivation(action: QueuedActivation): string {
+  return action.kind === 'send'
+    ? `send to ${action.sessionId}`
+    : `spawn ${action.name ?? 'worker'}${action.taskId ? ` for ${action.taskId}` : ''} (depth ${action.spawnDepth})`;
 }
 
 export { DispatchRefused, MAX_DISPATCHES_PER_TURN };

@@ -65,10 +65,28 @@ export type QueuedActivation =
       spawnDepth: number;
     };
 
+/**
+ * What is true only while one turn is running.
+ *
+ * Disposed when the turn ends: a fan-out count that survived the turn would be a cap on the
+ * supervisor's whole life, and a queue that survived it would start work nobody asked for any
+ * more.
+ */
 export interface SupervisorTurnState {
   dispatchesThisTurn: number;
   /** Actions this turn asked for, in order; drained once when the turn ends. */
   queuedActivations: QueuedActivation[];
+}
+
+/**
+ * What outlives the turn, because the loop it detects spans turns.
+ *
+ * Two sessions ping-ponging the same instruction is not visible inside a single turn — each
+ * turn looks reasonable on its own. Resetting this with the turn state would have retired the
+ * guard silently, which is exactly why `beginTurn` had no callers: calling it would have made
+ * a real protection stop working.
+ */
+export interface SupervisorGuardState {
   /** sessionId → normalized instruction of the last thing we sent it. */
   lastInstructionBySession: Map<string, string>;
   /** sessionId → how many consecutive times we sent it near-identical text. */
@@ -79,6 +97,11 @@ export function newTurnState(): SupervisorTurnState {
   return {
     dispatchesThisTurn: 0,
     queuedActivations: [],
+  };
+}
+
+export function newGuardState(): SupervisorGuardState {
+  return {
     lastInstructionBySession: new Map(),
     repeatedSendCount: new Map(),
   };
@@ -112,13 +135,16 @@ export function similarity(a: string, b: string): number {
  * @throws DispatchRefused with a message the supervisor can act on.
  */
 export function assertDispatchAllowed(params: {
+  /** Per-turn counters, reset when a turn starts. */
   state: SupervisorTurnState;
+  /** Cross-turn memory for the ping-pong guard; must survive `beginTurn`. */
+  guard: SupervisorGuardState;
   spawnDepth: number;
   targetKey: string;
   instruction: string;
   parallel: boolean;
 }): void {
-  const { state, spawnDepth, targetKey, instruction, parallel } = params;
+  const { state, guard, spawnDepth, targetKey, instruction, parallel } = params;
 
   if (spawnDepth >= MAX_SPAWN_DEPTH) {
     throw new DispatchRefused(
@@ -133,12 +159,12 @@ export function assertDispatchAllowed(params: {
   }
 
   const normalized = normalizeInstruction(instruction);
-  const previous = state.lastInstructionBySession.get(targetKey);
+  const previous = guard.lastInstructionBySession.get(targetKey);
   if (previous) {
     const score = similarity(previous, normalized);
     if (score >= PING_PONG_SIMILARITY) {
-      const count = (state.repeatedSendCount.get(targetKey) ?? 0) + 1;
-      state.repeatedSendCount.set(targetKey, count);
+      const count = (guard.repeatedSendCount.get(targetKey) ?? 0) + 1;
+      guard.repeatedSendCount.set(targetKey, count);
       if (count >= PING_PONG_LIMIT) {
         throw new DispatchRefused(
           `Refusing to send the same instruction to ${targetKey} again (${count}×). Escalate to the user or change the approach.`,
@@ -146,10 +172,10 @@ export function assertDispatchAllowed(params: {
       }
     } else {
       // Different work: reset the streak, then count this send as the first.
-      state.repeatedSendCount.set(targetKey, 1);
+      guard.repeatedSendCount.set(targetKey, 1);
     }
   }
-  state.lastInstructionBySession.set(targetKey, normalized);
+  guard.lastInstructionBySession.set(targetKey, normalized);
   state.dispatchesThisTurn += 1;
 }
 

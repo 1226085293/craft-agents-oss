@@ -93,7 +93,16 @@ describe('handoff gate', () => {
     expect(result.passed).toBe(false);
     expect(result.task.status).toBe('running');
     expect(result.reasons.length).toBeGreaterThan(0);
-    expect(wakes[0]?.text).toContain('交接未通过');
+    /**
+     * The refusal is feedback to the worker, not news for the supervisor.
+     *
+     * This used to assert a 「交接未通过」 wake, and a live run showed what that costs: 1.2 was
+     * refused at 11:10:38 for a missing `artifacts` list, retried and accepted at 11:10:44, and
+     * the supervisor was woken twice for one step — the first time to be told about a problem
+     * the worker fixed six seconds later without help. The reasons reach the caller in this
+     * same response; a supervisor is only owed a change of state.
+     */
+    expect(wakes).toHaveLength(0);
   });
 
   it('passes when artifacts exist and verification ran', async () => {

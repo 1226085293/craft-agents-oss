@@ -1343,8 +1343,21 @@ export class TaskService {
     if (!plan?.length || planProgress(plan).complete) return false;
     const lock = task.stats?.lockSessionId;
     if (lock && this.deps.sessionExists(lock)) return false;
+    /**
+     * Only an accepted report parks the task here.
+     *
+     * A refused hand-off means the slice was not delivered — the worker still owes it and
+     * retries within the same turn. Treating that attempt as 「the run is over」 parked the
+     * task as `awaiting_dispatch` six seconds before the retry landed, which is a state
+     * change the supervisor had to be told about for no reason.
+     */
     const last = task.handoffs.at(-1);
-    return Boolean(last && last.outcome !== 'needs_decision' && last.outcome !== 'delivered');
+    return Boolean(
+      last &&
+        last.passed !== false &&
+        last.outcome !== 'needs_decision' &&
+        last.outcome !== 'delivered',
+    );
   }
 
   /**
@@ -1660,7 +1673,9 @@ export class TaskService {
 
     let next: Task = {
       ...task,
-      handoffs: [...task.handoffs, handoff],
+      // The gate's verdict travels with the attempt: `handoffs` is the log, `passed` is
+      // what makes 「filed a report」 different from 「tried and was refused」.
+      handoffs: [...task.handoffs, { ...handoff, passed: accepted }],
       updatedAt: now,
       lifecycle: recordRunResult(task.lifecycle, accepted, now, accepted ? undefined : reasons.join('; ')),
       verify: {
@@ -1817,7 +1832,19 @@ export class TaskService {
       handoff.outcome === 'needs_decision' ||
       next.status !== task.status ||
       compactionPending ||
-      Boolean(nextLegOwner && nextLegOwner !== next.assigneeAgentId)
+      /**
+       * A named owner that differs from the current one — `sameAgent`, and only when the task
+       * has an assignee to compare with.
+       *
+       * `nextLegOwner !== undefined` was always true for a task the scheduler dispatched
+       * without a named agent, so every hand-off looked like 「someone else took over」 and
+       * every refusal became a milestone the supervisor had to be woken for.
+       */
+      Boolean(
+        nextLegOwner &&
+          next.assigneeAgentId &&
+          !sameAgent(nextLegOwner, next.assigneeAgentId),
+      )
     const lastIndex = next.handoffs.length - 1
     if (lastIndex >= 0) {
       next = {
@@ -1918,14 +1945,38 @@ export class TaskService {
     /**
      * Only the supervisor decides what the user sees; the worker never does.
      *
-     * The nudge goes out either way. It used to be skipped when the next leg started
-     * on its own — 「the supervisor has nothing to route」 — and that assumption was wrong
-     * twice over: the person had asked to be told at that boundary, and a next leg that
-     * started by mistake was the one fact nobody was told. Observed live: 1.1 passed,
-     * 1.2 was opened automatically against the user's instruction, and the supervisor
-     * heard nothing until it happened to look.
+     * The nudge follows `milestone` — the record's own answer to 「did this hand-off change
+     * anything a person needs to see」. It is not "every call to report_result":
+     *
+     *   accepted                  → the step landed            → tell
+     *   refused, task still running → the worker will retry     → do not tell
+     *   refused, but it paused the task / tripped the fuse / spun in place → tell
+     *
+     * Observed live: 1.2 was refused at 11:10:38 for a missing `artifacts` list, retried
+     * and accepted at 11:10:44. The supervisor was woken twice for one step and had to
+     * re-read the task to find out that nothing was wrong. The refusal is feedback to the
+     * worker — it arrives in the same turn, with the reason — not news for the supervisor.
+     *
+     * A worker that gives up after a refusal is still covered: its rejected attempt no
+     * longer counts as 「filed this run」 (`Handoff.passed`), so the watchdog's
+     * 「stopped and never filed」 rule wakes the supervisor the moment the turn ends.
+     *
+     * The nudge is never skipped when a next leg started, which used to be the rule —
+     * 「the supervisor has nothing to route」 — and left a leg started by mistake unheard.
      */
-    {
+    /**
+     * Tell the supervisor when the task's state changed, or when the slice landed.
+     *
+     * Three answers, one predicate:
+     *   accepted                    → the step landed             → tell
+     *   refused, state unchanged    → the worker will retry        → do not tell
+     *   refused, state changed      → paused / fuse / spinning     → tell
+     *
+     * `milestone` alone is not enough: it answers 「does this belong on the timeline」, and a
+     * plain accepted hand-off that keeps the task running with the same owner is not a
+     * milestone — but it is exactly the news the supervisor is waiting for.
+     */
+    if (accepted || milestone || startedNextLeg) {
       /**
        * A pending decision must be named in the nudge.
        *

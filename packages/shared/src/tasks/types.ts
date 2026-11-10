@@ -288,6 +288,18 @@ export interface Handoff {
   fromSessionId: string;
   outcome: HandoffOutcome;
   /**
+   * Did the acceptance gate take it?
+   *
+   * Every `report_result` is recorded — the looping detector needs the attempts — but an
+   * attempt the gate refused is not a report. Without this the watchdog's 「stopped and
+   * never filed」 rule treated a rejected attempt as a filed one, so a worker that gave up
+   * after a rejection went silent: nothing to resume, nothing owed, nobody told.
+   *
+   * Optional so records written before this field still load; absent means "unknown", and
+   * unknown is treated as accepted, which is what those records in fact were.
+   */
+  passed?: boolean;
+  /**
    * Did this hand-off change anything a person needs to see?
    *
    * The timeline used to show every `report_result` call, which is not a history

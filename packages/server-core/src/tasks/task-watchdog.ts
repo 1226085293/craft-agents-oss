@@ -238,6 +238,9 @@ function hasFiledThisRun(task: Task): boolean {
   return task.handoffs.some(
     (handoff) =>
       handoff.outcome !== 'needs_decision' &&
+      // An attempt the gate refused is not a report: the worker still owes one, and
+      // treating it as filed is how a worker that gave up after a rejection went silent.
+      handoff.passed !== false &&
       handoff.fromSessionId === task.currentSessionId &&
       (!runStartedAt || handoff.at >= runStartedAt),
   );

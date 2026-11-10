@@ -106,7 +106,16 @@ describe('acceptance gate', () => {
     expect(text).toContain('a2');
     expect(text).toContain('未通过');
     expect(result.task.status).not.toBe('completed');
-    expect(wakes[0]?.text).toContain('交接未通过');
+    /**
+     * A failed acceptance command that leaves the task running is the worker's to fix.
+     *
+     * The reasons already say which item and which command failed, in this same response, and
+     * the worker retries within the turn. Waking the supervisor for it is what produced two
+     * 「交接」 notices for one step on a live run (refused 11:10:38, accepted 11:10:44). If the
+     * worker gives up instead, its rejected attempt no longer counts as filed, so the watchdog's
+     * 「stopped and never filed」 rule tells the supervisor — once, when it is actually stuck.
+     */
+    expect(wakes).toHaveLength(0);
   });
 
   it('accepts when every acceptance command exits zero', async () => {

@@ -211,3 +211,55 @@ describe('two rules answered "may work continue"', () => {
     rmSync(h.root, { recursive: true, force: true })
   })
 })
+
+describe('a refusal is feedback, not news', () => {
+  it('does not wake the supervisor when the gate refuses and the task keeps running', async () => {
+    /**
+     * Observed live: 1.2 refused at 11:10:38 for a missing `artifacts` list, retried and
+     * accepted at 11:10:44. The supervisor was woken twice for one step — the first time to
+     * be told about a problem that the worker fixed six seconds later without help.
+     *
+     * The refusal already reaches the worker, in the same turn, with the reason. Waking the
+     * supervisor for it makes a self-correction look like an incident.
+     */
+    const h = harness()
+    seed(
+      h,
+      [
+        { id: '1', title: '写文件', status: 'doing' },
+        { id: '1.1', title: '创建', status: 'doing', agent: 'builtin-default' },
+      ],
+      undefined,
+    )
+    // No artifacts, no verify: the rules refuse it, and nothing about the task changes.
+    const result = await h.service.reportHandoff('T-1', { outcome: 'handoff', summary: '做完了' } as never, 'sess-1')
+    expect(result.passed).toBe(false)
+    expect(result.reasons.length).toBeGreaterThan(0)
+    expect(h.woken).toHaveLength(0)
+    expect(h.service.get('T-1')?.status).toBe('running')
+    rmSync(h.root, { recursive: true, force: true })
+  })
+
+  it('still wakes the supervisor when the refusal changes the task', async () => {
+    /**
+     * A refusal that pauses the task (fuse, spinning in place) is a milestone: the task has
+     * stopped and a person or the supervisor has to act. Silence there would strand it.
+     */
+    const h = harness()
+    seed(
+      h,
+      [
+        { id: '1', title: '写文件', status: 'doing' },
+        { id: '1.1', title: '创建', status: 'doing', agent: 'builtin-default' },
+      ],
+      undefined,
+    )
+    for (let i = 0; i < 3; i += 1) {
+      await h.service.reportHandoff('T-1', { outcome: 'handoff', summary: '做完了' } as never, 'sess-1')
+    }
+    // The failure fuse pauses it, which is a fact the supervisor has to hear.
+    expect(h.service.get('T-1')?.status).toBe('paused')
+    expect(h.woken.length).toBeGreaterThan(0)
+    rmSync(h.root, { recursive: true, force: true })
+  })
+})

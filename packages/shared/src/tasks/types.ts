@@ -247,7 +247,20 @@ export type TaskPauseReason =
    * Same plan model rule as everywhere else: a state that will not move on its own is not the
    * same as a state that is waiting for an answer, and one field cannot carry both.
    */
-  | 'awaiting_release';
+  | 'awaiting_release'
+  /**
+   * The executor reported and stopped, the plan still has work, and nobody took it.
+   *
+   * Distinct from `awaiting_release`, which says a person's instruction already covered what to do
+   * next. Here nothing is decided: the worker did its slice, handed back, and the next leg never
+   * started — so the run is over while the work is not. The task stayed `running` in that gap, and
+   * 「进行中」 with nobody working is the state a person waits on forever.
+   *
+   * Observed live: the hand-off passed at 09:01:53 and the record said 进行中 until the supervisor
+   * finally asked something at 09:09:04. Nobody was running the task for those seven minutes, and
+   * nothing in the record said so.
+   */
+  | 'awaiting_dispatch';
 
 /** What a worker reports when it finishes a turn. */
 export type HandoffOutcome = 'delivered' | 'handoff' | 'needs_decision';

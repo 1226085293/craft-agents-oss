@@ -787,7 +787,15 @@ describe('scope delivered, plan still open', () => {
     );
 
     expect(passed).toBe(true);
-    expect(after.status).toBe('running');
+    /**
+     * Not `awaiting_release` — nothing said what this run was for — but not `running` either.
+     *
+     * The old assertion pinned `running`, and that is the state the user saw as 进行中 with
+     * nobody working: the hand-off ended the run, the plan still has steps, and nothing owns
+     * them. `awaiting_dispatch` says exactly that without claiming an instruction.
+     */
+    expect(after.status).toBe('paused');
+    expect(after.pauseReason).toBe('awaiting_dispatch');
     expect(after.decision).toBeUndefined();
   });
 

@@ -409,3 +409,60 @@ describe('a question ends the run it interrupts', () => {
     expect(resumed.task.stats?.runs).toBe(2);
   });
 });
+
+describe('a hand-off that leaves work behind', () => {
+  it('parks the task instead of claiming it is still running', async () => {
+    /**
+     * The state a live run sat in for seven minutes (09:01:53 → 09:09:04).
+     *
+     * The worker did its slice, passed the gate, and stopped as instructed; the next leg never
+     * started because the next step belonged to the same agent and its own run still held the
+     * lock. The board said 进行中 the whole time, with no session, no wake owed, and nothing
+     * that would ever look at it again until the supervisor happened to ask something.
+     */
+    const { svc, task } = harness({ alive: ['sess_worker'] });
+    const artifact = `${svc['root'] as unknown as string}/out.txt`;
+    writeFileSync(artifact, 'ok', 'utf-8');
+    svc.updateSpec(task.id, {
+      plan: [
+        { id: '1', title: '写文件', status: 'doing' },
+        { id: '1.1', title: '创建', status: 'done', agent: 'builtin-default' },
+        { id: '1.2', title: '读回', status: 'todo', agent: 'builtin-default' },
+      ],
+    } as never);
+    expect(svc.startRun(task.id, 'sess_worker').ok).toBe(true);
+
+    const handoff = {
+      summary: '1.1 完成，剩下 1.2',
+      artifacts: [{ path: artifact }],
+      verify: { ran: ['test -s out.txt'], passed: true },
+    };
+    const result = await svc.reportHandoff(
+      task.id,
+      { outcome: 'handoff', ...handoff },
+      'sess_worker',
+    );
+
+    expect(result.passed).toBe(true);
+    expect(result.task.status).toBe('paused');
+    expect(result.task.pauseReason).toBe('awaiting_dispatch');
+    // The lock is gone, so 「继续」 is a legal move for whoever picks it up.
+    expect(locked(result.task)).toBeUndefined();
+
+    // A supervisor that takes it clears the label by starting the next run.
+    const resumed = svc.startRun(task.id, 'sess_worker');
+    expect(resumed.ok).toBe(true);
+    if (!resumed.ok) return;
+    expect(resumed.task.status).toBe('running');
+    expect(resumed.task.pauseReason).toBeNull();
+
+    // And finishing the plan takes it out of this state without a pause at all.
+    svc.updatePlan(task.id, { id: '1.2', status: 'done' });
+    const done = await svc.reportHandoff(
+      task.id,
+      { outcome: 'delivered', ...handoff, summary: '1.2 读回确认，全部完成' },
+      'sess_worker',
+    );
+    expect(done.task.status).toBe('completed');
+  });
+});

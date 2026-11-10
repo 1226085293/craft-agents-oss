@@ -163,7 +163,14 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
   canceled: '已取消',
 }
 
-const PAUSE_REASON_LABEL: Record<string, string> = {
+/**
+ * The one place a pause reason becomes words.
+ *
+ * The detail pane kept its own copy, and the copies drifted — one said 「督导正在写出问题」, the
+ * other 「等问句」 — so the same task read differently in the list and one click later. A new
+ * reason added here only reached whichever surface happened to be edited.
+ */
+export const PAUSE_REASON_LABEL: Record<string, string> = {
   failures: '连续失败',
   budget: '预算用尽',
   process_lost: '工作进程中断',
@@ -173,9 +180,12 @@ const PAUSE_REASON_LABEL: Record<string, string> = {
   // Stopped on instruction with the plan unfinished: the plan has more work, but nobody is
   // asking anything. Without this the list printed the raw enum value.
   awaiting_release: '已按指示停止',
+  // The executor reported and stopped, the plan still has work, and no run owns it: nobody is
+  // asking anything, and nobody is working either.
+  awaiting_dispatch: '等待派活',
 }
 
-function pauseReasonLabel(reason: string): string {
+export function pauseReasonLabel(reason: string): string {
   return PAUSE_REASON_LABEL[reason] ?? reason
 }
 

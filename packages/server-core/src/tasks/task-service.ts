@@ -1241,6 +1241,20 @@ export class TaskService {
       return { ...task, status: 'paused', pauseReason: worded ? 'needs_decision' : 'asking' }
     }
 
+    /**
+     * Nobody is running it, and the work is not finished.
+     *
+     * A worker can hand back its slice, pass the gate, and leave the plan with steps nobody
+     * started — the next leg belongs to another agent, or the run simply ended. The record then
+     * said `running` with no lock, no session, and no wake owed, which the board drew as 进行中.
+     * Observed live: hand-off at 09:01:53, 「进行中」 until 09:09:04, nothing running in between.
+     *
+     * A state that cannot move by itself is a pause with a name, not a run in progress.
+     */
+    if (task.status === 'running' && this.awaitingDispatch(task)) {
+      return { ...task, status: 'paused', pauseReason: 'awaiting_dispatch' }
+    }
+
     if (task.status !== 'paused') return task;
 
     /**
@@ -1317,6 +1331,22 @@ export class TaskService {
   }
 
   /**
+   * Work is owed, and no run owns it.
+   *
+   * Two facts, both on the record: the plan has unfinished steps, and the last thing the task heard
+   * was a work report rather than a question or a delivery. The lock is checked live because a
+   * run that still owns the task is not waiting for anybody — that is what the lock means.
+   */
+  private awaitingDispatch(task: Task): boolean {
+    const plan = task.spec?.plan;
+    if (!plan?.length || planProgress(plan).complete) return false;
+    const lock = task.stats?.lockSessionId;
+    if (lock && this.deps.sessionExists(lock)) return false;
+    const last = task.handoffs.at(-1);
+    return Boolean(last && last.outcome !== 'needs_decision' && last.outcome !== 'delivered');
+  }
+
+  /**
    * Why a pause would refuse to resume — read from the record, not from the writer.
    *
    * The reasons a writer passed were true when it wrote them and stayed written after they stopped
@@ -1341,7 +1371,13 @@ export class TaskService {
       getTask: (id) => this.get(id),
       now: this.now(),
     });
-    const derived = refusal?.pauseReason ?? null;
+    /**
+     * No refusal, but nothing is running either: the pause is 「waiting for someone to take it」.
+     *
+     * Derived the same way as the gate reasons so the label cannot be wiped by the next write —
+     * the condition is read off the record, not remembered from the moment it was written.
+     */
+    const derived = refusal?.pauseReason ?? (this.awaitingDispatch(task) ? 'awaiting_dispatch' : null);
     if ((task.pauseReason ?? null) === derived) return task;
     return { ...task, pauseReason: derived };
   }

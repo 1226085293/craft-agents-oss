@@ -463,6 +463,13 @@ describe('the trigger is editable from the page', () => {
     expect(html).toContain('aria-expanded')
   })
 
+  it('names the pause a hand-off leaves behind', () => {
+    // A paused task with work left and no owner must not fall through to the raw enum.
+    const html = renderDetail({ ...detail, status: 'paused', pauseReason: 'awaiting_dispatch' })
+    expect(html).toContain('等待派活')
+    expect(html).not.toContain('awaiting_dispatch')
+  })
+
   it('says so when the schedule is switched off', () => {
     // A stopped timer must not look like a running one: 「定时 · 0 9 * * *」 with no marker reads as
     // "this will fire at nine", and the task would sit waiting for a run that never comes.

@@ -342,6 +342,24 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
       continue
     }
 
+    /**
+     * A task waiting for someone to take it still needs the plan-stall rule.
+     *
+     * `awaiting_dispatch` is derived, so this task is `paused` and every rule below skips it —
+     * which would leave 「等待派活」 invisible: nothing runs, nothing is owed, and nobody is told
+     * if no one ever picks it up. The rule that applies is the one about the plan not moving.
+     */
+    if (task.status === 'paused' && task.pauseReason === 'awaiting_dispatch') {
+      const plan = task.spec?.plan;
+      if (plan?.length && !planProgress(plan).complete) {
+        const lastChange = Math.max(lastPlanChangeAt(plan), task.updatedAt);
+        if (planStalled(plan, lastChange, now, OFF_TRACK_MS)) {
+          findings.push({ kind: 'off_track', task });
+        }
+      }
+      continue;
+    }
+
     if (task.status !== 'running') continue;
 
     /**

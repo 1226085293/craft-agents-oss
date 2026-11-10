@@ -30,6 +30,7 @@ import { useAtomValue } from 'jotai'
 import { cn } from '@/lib/utils'
 import { sessionMetaMapAtom } from '@/atoms/sessions'
 import { agentLabelMap } from './agent-label'
+import { pauseReasonLabel } from './TaskBoardPanel'
 import type { TaskDetailView, TaskHandoffView, TaskStatus } from './TaskBoardPanel'
 import type { PlanJumpTarget } from '@/lib/plan-jump'
 
@@ -63,19 +64,6 @@ const STATUS_TONE: Record<TaskStatus, string> = {
 // TaskService pauses after three consecutive failures (see shared task state rules).
 const FAILURE_FUSE = 3
 
-const PAUSE_REASON_LABEL: Record<string, string> = {
-  failures: '连续失败',
-  budget: '预算用尽',
-  process_lost: '工作进程中断',
-  waiting: '等待中',
-  needs_decision: '等待你决定',
-  // Stopped on instruction: the plan has steps left, but nobody is asking anything.
-  awaiting_release: '已按你的指示停在这里',
-  // The pause before the words exist; it has its own 「等问句」 notice above, so this label
-  // is only a fallback — without it the notice printed the raw enum value.
-  asking: '督导正在写出问题',
-}
-
 const HANDOFF_OUTCOME_LABEL: Record<TaskHandoffView['outcome'], string> = {
   delivered: '已交付',
   handoff: '继续交接',
@@ -90,10 +78,6 @@ function formatTimestamp(ts: number): string {
     hour: '2-digit',
     minute: '2-digit',
   }).format(ts)
-}
-
-function pauseReasonLabel(reason: string): string {
-  return PAUSE_REASON_LABEL[reason] ?? reason
 }
 
 export interface TaskDetailPanelViewProps {

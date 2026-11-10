@@ -1858,12 +1858,25 @@ export class TaskService {
     // `needs_decision` means it is waiting on a person. Starting work in either
     // case would be acting on a decision nobody made.
     let startedNextLeg = false;
+    let startedStepId: string | undefined;
     if (accepted && handoff.outcome === 'handoff' && this.deps.startNextLeg) {
       const leg = nextLeg(next.spec?.plan);
       const startedStep = leg?.kind === 'step' ? leg : undefined;
-      const current = next.assigneeAgentId;
+      /**
+       * The owner of the step just closed is the comparison, not the task's assignee.
+       *
+       * `assigneeAgentId` is blank for a task the scheduler dispatched without a named
+       * agent (`attachSession` writes only the session), so `1.2.agent !== undefined`
+       * was always true: every same-agent hand-off looked like a boundary and started
+       * the next leg on its own. Observed live: the user said 「只做 1.1，做完就停」, the
+       * worker obeyed, and the system opened 1.2 in a fresh session anyway.
+       */
+      const justFinished = [...(next.spec?.plan ?? [])]
+        .filter((step) => step.status === 'done')
+        .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))[0];
+      const current = justFinished?.agent ?? next.assigneeAgentId;
       const nextAgent = startedStep?.agent ?? current;
-      const belongsElsewhere = Boolean(startedStep?.agent && startedStep.agent !== current);
+      const belongsElsewhere = Boolean(startedStep?.agent && current && startedStep.agent !== current);
       if (startedStep && belongsElsewhere) {
         try {
           startedNextLeg = await this.deps.startNextLeg(next, nextAgent);
@@ -1872,6 +1885,7 @@ export class TaskService {
           log.warn(`[tasks] could not start the next leg of ${id}`, { error: String(error) });
         }
         if (startedNextLeg) {
+          startedStepId = startedStep.step.id;
           appendJournal(this.root, id, {
             type: 'next_leg_started',
             at: now,
@@ -1881,11 +1895,17 @@ export class TaskService {
       }
     }
 
-    // Only the supervisor decides what the user sees; the worker never does.
-    // Skip the nudge when the next leg already started: the supervisor has
-    // nothing to route, and waking it would queue a message in front of the
-    // user's next sentence for no decision.
-    if (!startedNextLeg) {
+    /**
+     * Only the supervisor decides what the user sees; the worker never does.
+     *
+     * The nudge goes out either way. It used to be skipped when the next leg started
+     * on its own — 「the supervisor has nothing to route」 — and that assumption was wrong
+     * twice over: the person had asked to be told at that boundary, and a next leg that
+     * started by mistake was the one fact nobody was told. Observed live: 1.1 passed,
+     * 1.2 was opened automatically against the user's instruction, and the supervisor
+     * heard nothing until it happened to look.
+     */
+    {
       /**
        * A pending decision must be named in the nudge.
        *
@@ -1901,7 +1921,9 @@ export class TaskService {
         pending
           ? `${id} 现在需要用户拍板（${pending.label}）：${pending.reason} 请用 report_to_user 带 kind=decision 告知用户。`
           : accepted
-            ? `${id} 交接通过：${handoff.summary}`
+            ? startedNextLeg
+              ? `${id} 交接通过，已自动开始下一节（${startedStepId ?? '?'}）：${handoff.summary}`
+              : `${id} 交接通过：${handoff.summary}`
             : `${id} 交接未通过（${reasons.join('；') || handoff.outcome}）：${handoff.summary}`,
         // One subject per task and outcome: a second failure notice about the same task is the same
         // fact restated, and a queue that stacks them makes the supervisor act twice.

@@ -91,8 +91,16 @@ describe('starting the next section', () => {
     )
     await h.service.reportHandoff('T-1', handoff, 'sess-1')
     expect(h.started).toEqual([{ taskId: 'T-1', agent: 'agent-qa' }])
-    // The supervisor is not woken when the next leg already started.
-    expect(h.woken).toHaveLength(0)
+    /**
+     * The supervisor is told even though it has nothing to route.
+     *
+     * Skipping the notice was justified as 「nothing to route」, and it left the person who
+     * had asked to be told at this boundary hearing nothing at all. Observed live: 1.1
+     * passed, 1.2 opened automatically against the user's instruction, and the supervisor
+     * only found out when it happened to look at the task.
+     */
+    expect(h.woken.length).toBeGreaterThan(0)
+    expect(h.woken.join(String.fromCharCode(10))).toContain('已自动开始下一节')
     rmSync(h.root, { recursive: true, force: true })
   })
 

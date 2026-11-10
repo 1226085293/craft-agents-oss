@@ -110,6 +110,14 @@ export interface ToolStartEvent {
   toolInput?: Record<string, unknown>
   /** Timestamp from main process for consistent ordering */
   timestamp?: number
+  /**
+   * Write this row as an assistant bubble rather than a notice line.
+   *
+   * `report_to_user` is persisted with `role: 'assistant'` — it is an agent telling a person
+   * something — but it arrived here as a plain `info` event, so the live row was drawn as grey
+   * system chrome and only looked right after a reload. The event carries the record's own
+   * answer now; a status notice leaves it unset.
+   */
   /** Existing tool message to update, used when restart recovery resumes a visible process row. */
   messageId?: string
   turnId?: string
@@ -314,6 +322,17 @@ export interface InfoEvent {
   level?: 'info' | 'warning' | 'error' | 'success'
   /** Timestamp from main process for consistent ordering */
   timestamp?: number
+  /**
+   * Write this row as an assistant bubble rather than a notice line.
+   *
+   * `report_to_user` is persisted with `role: 'assistant'` — an agent telling a person
+   * something — but it arrived here as a plain `info` event, so the live row was drawn as grey
+   * system chrome and only looked right after a reload. The event carries the record's own
+   * answer now; a status notice leaves it unset.
+   */
+  asAssistantBubble?: boolean
+  /** The persisted row's id, so a reload cannot show the same message twice. */
+  messageId?: string
   /** Verified final reply to replay as THE final bubble (verification_passed) */
   finalText?: string
   /**

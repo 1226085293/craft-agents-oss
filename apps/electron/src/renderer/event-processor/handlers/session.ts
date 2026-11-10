@@ -355,6 +355,29 @@ export function handleInfo(
     }
   }
 
+  /**
+   * A row the main process persisted as an assistant message must render as one.
+   *
+   * `report_to_user` is written to the record with `role: 'assistant'` and `isRelayed: true` —
+   * an agent telling a person something. The live event was a plain `info`, so the bubble became
+   * a grey status line and only looked right after switching sessions and reading the record.
+   * `isRelayed` travels with it so nothing mistakes a relayed report for this session's reply.
+   */
+  if (event.asAssistantBubble) {
+    const relayed: Message = {
+      id: event.messageId ?? generateMessageId(),
+      role: 'assistant',
+      content: event.message,
+      timestamp: event.timestamp ?? Date.now(),
+      isRelayed: true,
+      ...(event.level ? { infoLevel: event.level } : {}),
+    }
+    return {
+      state: { session: { ...session, messages: [...session.messages, relayed] }, streaming },
+      effects: [],
+    }
+  }
+
   // Otherwise, add as new info message
   const infoMessage: Message = {
     id: generateMessageId(),

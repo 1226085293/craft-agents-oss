@@ -8622,6 +8622,15 @@ ${request.prompt}`;
         ...(row.infoLevel ? { level: row.infoLevel } : {}),
         timestamp: message.timestamp,
         ...(row.decisionRequest ? { decisionRequest: row.decisionRequest } : {}),
+        /**
+         * The live event has to say what the persisted row says.
+         *
+         * This row is `role: 'assistant'` on disk and was pushed as a plain `info` event, so the
+         * renderer built an info line: the same message read as a grey status row while you were
+         * looking at it and as an agent bubble after switching sessions. `report_to_user` is an
+         * agent telling a person something; only the event forgot.
+         */
+        ...(row.asAssistantBubble ? { asAssistantBubble: true, messageId: message.id } : {}),
       },
       managed.workspace.id,
     )

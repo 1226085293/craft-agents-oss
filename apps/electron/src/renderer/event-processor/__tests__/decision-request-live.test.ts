@@ -60,3 +60,40 @@ describe('a decision request arriving live', () => {
     expect(appended?.decisionRequest).toBeUndefined()
   })
 })
+
+/**
+ * The same drift, one row over: a report to the person rendered as system chrome.
+ *
+ * `report_to_user` is persisted with `role: 'assistant'` and `isRelayed: true` — an agent
+ * telling a person something — but it was pushed as a plain `info` event, so the live row was
+ * a grey status line and only read as a bubble after reopening the session. The event now
+ * carries the record's answer.
+ */
+describe('a report meant for the person', () => {
+  it('is pushed as an assistant bubble, not a notice line', () => {
+    const result = handleInfo(emptyState, {
+      type: 'info',
+      sessionId: 'sess-1',
+      message: 'T-1 本轮范围（仅 1.1）已交付并验收通过。',
+      level: 'success',
+      asAssistantBubble: true,
+      messageId: 'msg-relayed-1',
+    } as InfoEvent)
+
+    const [row] = result.state.session.messages
+    expect(row.role).toBe('assistant')
+    // Relayed, so nothing mistakes it for this session's own reply.
+    expect(row.isRelayed).toBe(true)
+    // The persisted id travels with it: a reload must not add a second copy.
+    expect(row.id).toBe('msg-relayed-1')
+  })
+
+  it('leaves an ordinary notice as an info row', () => {
+    const result = handleInfo(emptyState, {
+      type: 'info',
+      sessionId: 'sess-1',
+      message: '已压缩上下文',
+    } as InfoEvent)
+    expect(result.state.session.messages[0]!.role).toBe('info')
+  })
+})

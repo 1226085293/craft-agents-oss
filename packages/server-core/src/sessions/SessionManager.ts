@@ -7873,13 +7873,10 @@ ${request.prompt}`;
           }
         },
         pause: (id, reason, note) => {
-          const before = service.get(id)
+          // `setStatus` away from `running` releases the run lock and disposes the
+          // run (its disposers stop the worker session) — see TaskService. The
+          // session stop that used to live here had two owners for one resource.
           service.setStatus(id, 'paused', { pauseReason: reason, error: note })
-          // The task stopped expecting work; the session must stop producing it.
-          const sessionId = before?.currentSessionId
-          if (sessionId) {
-            void this.cancelProcessing(sessionId, true).catch(() => undefined)
-          }
         },
         denyDecision: (id, note) => service.denyDecision(id, note),
         recordUnwordedRetry: (id, attempts) => service.recordUnwordedRetry(id, attempts),

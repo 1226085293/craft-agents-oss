@@ -176,6 +176,18 @@ export type StartRunResult =
   | { ok: false; reason: string };
 
 /**
+ * A live run's runtime resources, held outside the task record.
+ *
+ * The record persists across restarts (and `recoverAfterRestart` depends on its
+ * `lockSessionId`), but sessions, timers and shells do not. This handle is what
+ * a run owns while it is alive; `disposeRun` releases it all when the run ends.
+ */
+export interface RunHandle {
+  sessionId?: string;
+  disposers: Array<(mode: 'suspended' | 'ended') => void>;
+}
+
+/**
  * Keep the legacy `decision` slot pointing at the newest open question.
  *
  * Every reader that asks 「is a question open?」 — the card, the pause label, the resume gate, the
@@ -329,8 +341,29 @@ export class TaskService {
     });
     if (!result.changed) return result.task;
 
-    const classified = this.classifyPauseReason(result.task);
+    /**
+     * Every transition away from `running` ends the run it came from.
+     *
+     * `applyTransition` only moves the status: the lock stays where it was, so a task
+     * paused (or canceled) out of a run kept `lockSessionId` pointed at a live session
+     * and `isRunLocked` refused to resume it until that session died — the task was
+     * stranded in `paused` forever. This is the one place a write can end a run, so it
+     * must release it here; the gate-blocked branch above is exempt on purpose: its
+     * pause means "another run already owns this task" and releasing there would steal
+     * that run's lock.
+     */
+    let next = result.task;
+    const wasLocked = Boolean(task.stats?.lockSessionId);
+    if (status !== 'running' && wasLocked) {
+      next = this.releaseRunRecord(next, now);
+    }
+
+    const classified = this.classifyPauseReason(next);
     this.save(classified);
+    if (status !== 'running' && wasLocked) {
+      // The run this write ended owns a live session; it must stop producing work.
+      this.disposeRun(id, 'suspended');
+    }
     appendJournal(this.root, id, {
       type: 'status',
       at: now,
@@ -395,6 +428,18 @@ export class TaskService {
     // (and in `currentSessionId`) for good, because the real id is attached afterwards.
     const isPlaceholder = sessionId.startsWith('pending:');
 
+    /**
+     * Claim → bind is two calls of one run, not two runs.
+     *
+     * Scheduler and spawn both claim with `pending:…` and bind the real session id
+     * once it exists. Counting both calls made `runs` grow by 2 per spawn and the
+     * budget (`runs > maxRuns`) exhaust at half the runs it promised. The bind call
+     * hands the placeholder lock over to the real session; the run was already
+     * counted when it was claimed.
+     */
+    const heldLock = task.stats?.lockSessionId;
+    const isBind = !isPlaceholder && Boolean(heldLock && heldLock.startsWith('pending:'));
+
     let next: Task = {
       ...task,
       status: 'running',
@@ -404,7 +449,7 @@ export class TaskService {
         ? task.sessionIds
         : [...task.sessionIds, sessionId],
       stats: {
-        runs: (task.stats?.runs ?? 0) + 1,
+        runs: (task.stats?.runs ?? 0) + (isBind ? 0 : 1),
         activeMs: task.stats?.activeMs ?? 0,
         lastHeartbeatAt: now,
         lockSessionId: sessionId,
@@ -417,7 +462,12 @@ export class TaskService {
       next = { ...next, lifecycle: { ...task.lifecycle, lastRecoveredAt: now } };
     }
     this.save(next);
-    appendJournal(this.root, id, { type: 'run_started', at: now, data: { sessionId } });
+    this.registerRun(id, sessionId);
+    appendJournal(this.root, id, {
+      type: isBind ? 'run_bound' : 'run_started',
+      at: now,
+      data: { sessionId },
+    });
     return { ok: true, task: next };
   }
 
@@ -649,52 +699,18 @@ export class TaskService {
   }
 
   /**
-   * Release the run lock after a pause or cancel, without counting a failure.
+   * The one shape of "the run is over": release the lock, bank the active time.
    *
-   * `endRun` records an outcome, and a pause is not a failure — counting it
-   * would let three pauses trip the fuse and strand the task in a state nobody
-   * asked for. What a pause does have to do is give the lock back: `isRunLocked`
-   * holds it while `lockSessionId` points at a live session, so a paused task
-   * would refuse to resume until that session died.
+   * Pure on the record — the side effects (stopping the session, disposing the
+   * run's resources) are applied by the callers through `disposeRun`, because a
+   * handoff ends a run without stopping the worker that just reported it. Every
+   * exit goes through here: the four scattered inline `lockSessionId: undefined`
+   * sites were how a path forgot, and the lock leaked until the session died.
    */
-  suspendRun(id: string): Task {
-    const task = this.require(id);
-    const now = this.now();
+  private releaseRunRecord(task: Task, now: number): Task {
     const stats = task.stats ?? { runs: 0, activeMs: 0 };
     const elapsed = stats.runStartedAt ? Math.max(0, now - stats.runStartedAt) : 0;
-    const next: Task = {
-      ...task,
-      stats: {
-        ...stats,
-        activeMs: stats.activeMs + elapsed,
-        lockSessionId: undefined,
-        runStartedAt: undefined,
-        lastHeartbeatAt: now,
-      },
-      updatedAt: now,
-    };
-    this.save(next);
-    appendJournal(this.root, id, {
-      type: 'run_ended',
-      at: now,
-      data: { ok: true, suspended: true, activeMs: elapsed },
-    });
-    return next;
-  }
-
-  /**
-   * Release the lock and bank the active time.
-   *
-   * Called when a run ends for any reason — handoff, failure, or the session
-   * disappearing. Without this the lock leaks and the task can never restart.
-   */
-  endRun(id: string, outcome: { ok: boolean; error?: string; sessionId?: string }): Task {
-    const task = this.require(id);
-    const now = this.now();
-    const stats = task.stats ?? { runs: 0, activeMs: 0 };
-    const elapsed = stats.runStartedAt ? Math.max(0, now - stats.runStartedAt) : 0;
-
-    const next: Task = {
+    return {
       ...task,
       stats: {
         ...stats,
@@ -704,10 +720,56 @@ export class TaskService {
         lastHeartbeatAt: now,
       },
       lastHeartbeatAt: now,
-      lifecycle: recordRunResult(task.lifecycle, outcome.ok, now, outcome.error),
       updatedAt: now,
     };
+  }
+
+  /**
+   * Release the run lock after a pause or cancel, without counting a failure.
+   *
+   * `endRun` records an outcome, and a pause is not a failure — counting it
+   * would let three pauses trip the fuse and strand the task in a state nobody
+   * asked for. What a pause does have to do is give the lock back and stop the
+   * session that owned it: `isRunLocked` holds it while `lockSessionId` points
+   * at a live session, so a paused task would refuse to resume until that
+   * session died, and a session left running would keep producing work for a
+   * task nobody owns.
+   */
+  suspendRun(id: string): Task {
+    const task = this.require(id);
+    const now = this.now();
+    const stats = task.stats ?? { runs: 0, activeMs: 0 };
+    const elapsed = stats.runStartedAt ? Math.max(0, now - stats.runStartedAt) : 0;
+    const next = this.releaseRunRecord(task, now);
     this.save(next);
+    this.disposeRun(id, 'suspended');
+    appendJournal(this.root, id, {
+      type: 'run_ended',
+      at: now,
+      data: { ok: true, suspended: true, activeMs: elapsed },
+    });
+    return next;
+  }
+
+  /**
+   * Release the lock, bank the active time, and record the run's outcome.
+   *
+   * Called when a run ends for any reason that is not a pause — handoff verdicts
+   * go through `reportHandoff`, which composes this with the hand-off bookkeeping;
+   * a failed spawn or a lost leg ends here.
+   */
+  endRun(id: string, outcome: { ok: boolean; error?: string; sessionId?: string }): Task {
+    const task = this.require(id);
+    const now = this.now();
+    const stats = task.stats ?? { runs: 0, activeMs: 0 };
+    const elapsed = stats.runStartedAt ? Math.max(0, now - stats.runStartedAt) : 0;
+    const released = this.releaseRunRecord(task, now);
+    const next: Task = {
+      ...released,
+      lifecycle: recordRunResult(task.lifecycle, outcome.ok, now, outcome.error),
+    };
+    this.save(next);
+    this.disposeRun(id, 'ended');
     appendJournal(this.root, id, {
       type: 'run_ended',
       at: now,
@@ -1037,8 +1099,14 @@ export class TaskService {
 
   /** Heartbeat by session — the worker knows its session id, not its task id. */
   heartbeatForSession(sessionId: string): Task | null {
+    /**
+     * The run's session is the lock holder — `currentSessionId` is history, and a
+     * task that is `running` while locked by nobody is exactly the anomaly the
+     * watchdog exists to catch, so a heartbeat from an unlocked session must not
+     * make it look alive.
+     */
     const task = listTasks(this.root).find(
-      (t) => t.status === 'running' && (t.stats?.lockSessionId === sessionId || t.currentSessionId === sessionId),
+      (t) => t.status === 'running' && t.stats?.lockSessionId === sessionId,
     );
     if (!task) return null;
     return this.heartbeat(task.id);
@@ -1439,21 +1507,10 @@ export class TaskService {
       handoff.outcome === 'handoff' &&
       contextUtilization >= ROTATE_CONTEXT_THRESHOLD;
 
-    const stats = task.stats ?? { runs: 0, activeMs: 0 };
-    const elapsed = stats.runStartedAt ? Math.max(0, now - stats.runStartedAt) : 0;
-
     let next: Task = {
       ...task,
       handoffs: [...task.handoffs, handoff],
-      lastHeartbeatAt: now,
       updatedAt: now,
-      stats: {
-        ...stats,
-        activeMs: stats.activeMs + elapsed,
-        lockSessionId: undefined,
-        runStartedAt: undefined,
-        lastHeartbeatAt: now,
-      },
       lifecycle: recordRunResult(task.lifecycle, accepted, now, accepted ? undefined : reasons.join('; ')),
       verify: {
         ...task.verify,
@@ -1467,6 +1524,11 @@ export class TaskService {
         ? 1
         : (task.verifyRounds ?? 0) + 1,
     };
+    // A handoff ends the worker's run no matter what the verdict decides next:
+    // the lock is released and the active time banked here, through the one
+    // release shape, before any branch below re-parks the task.
+    next = this.releaseRunRecord(next, now);
+    this.disposeRun(task.id, 'ended');
 
     if (handoff.outcome === 'needs_decision') {
       // Not every request deserves the user's attention. The gate is a closed
@@ -1755,6 +1817,70 @@ export class TaskService {
     }
   }
 
+  /**
+   * Runtime resources of a live run, keyed by task.
+   *
+   * The run owns things the task record must not carry: the session it drives, timers,
+   * background shells registered by the host. They are disposed when the run ends —
+   * reverse order, each failure logged, never thrown into the write path. This is the
+   * smallest version of a scope: `startRun` creates the handle, every release path
+   * destroys it, and a leaked run can never leave its resources behind.
+   */
+  private readonly runRegistry = new Map<string, RunHandle>();
+
+  private registerRun(taskId: string, sessionId: string): RunHandle {
+    let handle = this.runRegistry.get(taskId);
+    if (!handle) {
+      handle = { sessionId: undefined, disposers: [] };
+      this.runRegistry.set(taskId, handle);
+    }
+    handle.sessionId = sessionId;
+    return handle;
+  }
+
+  /**
+   * Register a resource for the current run, disposed when it ends.
+   *
+   * `mode` tells the disposer how the run ended: `suspended` (paused/canceled/
+   * process lost — the session must stop producing work) or `ended` (handoff,
+   * verdict, failed spawn — the session may be finishing its report, leave it).
+   */
+  onRunDispose(taskId: string, dispose: (mode: 'suspended' | 'ended') => void): void {
+    let handle = this.runRegistry.get(taskId);
+    if (!handle) {
+      handle = { sessionId: undefined, disposers: [] };
+      this.runRegistry.set(taskId, handle);
+    }
+    handle.disposers.push(dispose);
+  }
+
+  /**
+   * Tear down a finished run: registered disposers first, then — for a run that
+   * was interrupted rather than finished — stop the session it owned. A session
+   * left running after a pause kept producing work for a task nobody owns.
+   */
+  private disposeRun(taskId: string, mode: 'suspended' | 'ended'): void {
+    const handle = this.runRegistry.get(taskId);
+    if (!handle) return;
+    this.runRegistry.delete(taskId);
+    for (const dispose of [...handle.disposers].reverse()) {
+      try {
+        dispose(mode);
+      } catch (error) {
+        log.warn(`[tasks] run disposer failed for ${taskId}`, { error: String(error) });
+      }
+    }
+    if (mode === 'suspended' && handle.sessionId && !handle.sessionId.startsWith('pending:')) {
+      if (this.deps.stopSession) {
+        try {
+          this.deps.stopSession(handle.sessionId);
+        } catch (error) {
+          log.warn(`[tasks] could not stop the worker of ${taskId}`, { error: String(error) });
+        }
+      }
+    }
+  }
+
   /** Existence + readability + non-emptiness, in one probe. */
   private probe(path: string): ArtifactProbe {
     try {
@@ -1838,6 +1964,12 @@ export class TaskService {
     for (const task of listTasks(this.root)) {
       if (task.status !== 'running') continue;
       const lockId = task.stats?.lockSessionId ?? task.currentSessionId;
+      /**
+       * A recovered run re-enters the registry: it is as much a run as a fresh
+       * one, and its disposers (including the session stop on a later pause) are
+       * owed the same as a run claimed by `startRun`.
+       */
+      if (lockId) this.registerRun(task.id, lockId);
       const alive = lockId ? this.deps.sessionExists(lockId) : false;
       if (alive) {
         if (isHeartbeatMissing(task, now)) {
@@ -1852,19 +1984,10 @@ export class TaskService {
   }
 
   private pauseAfterLoss(task: Task, now: number, reason: string, lockId?: string): Task {
-    const stats = task.stats ?? { runs: 0, activeMs: 0 };
-    const elapsed = stats.runStartedAt ? Math.max(0, now - stats.runStartedAt) : 0;
-    const base: Task = {
-      ...task,
-      stats: {
-        ...stats,
-        activeMs: stats.activeMs + elapsed,
-        lockSessionId: undefined,
-        runStartedAt: undefined,
-      },
-    };
-    const paused = applyTransition(base, 'paused', { now, pauseReason: 'process_lost' }).task;
+    const released = this.releaseRunRecord(task, now);
+    const paused = applyTransition(released, 'paused', { now, pauseReason: 'process_lost' }).task;
     this.save(paused);
+    this.disposeRun(task.id, 'suspended');
     appendJournal(this.root, task.id, {
       type: 'paused',
       at: now,

@@ -342,9 +342,9 @@ export function checkDependencies(
   const reasons: string[] = [];
   for (const depId of task.dependsOn ?? []) {
     const dep = lookup(depId);
-    if (!dep) reasons.push(`dependency ${depId} not found`);
+    if (!dep) reasons.push(`依赖 ${depId} 不存在`);
     else if (dep.status !== 'completed') {
-      reasons.push(`dependency ${dep.name} (${dep.id}) is ${dep.status}`);
+      reasons.push(`依赖「${dep.name}」（${dep.id}）尚未完成，当前 ${dep.status}`);
     }
   }
   return { ok: reasons.length === 0, reasons };
@@ -381,7 +381,7 @@ export function isRunLocked(task: Task, sessionExists: (id: string) => boolean):
 export interface ResumeRefusal {
   /** The label the board shows, in the same vocabulary as `pauseReason`. */
   pauseReason: TaskPauseReason;
-  /** The sentence a refusal reports — ``runs 12/12``, ``run already owned by sess_x``. */
+  /** The sentence a refusal reports — 「运行次数 12/12」「运行已经由 sess_x 持有」. */
   reason: string;
 }
 
@@ -396,7 +396,7 @@ export interface ResumeRefusal {
  * Order is the order the gate enforces, which is also the order that says the most: a lock held by
  * a live run, then an unfinished dependency, then the budget, then the failure fuse. The label a
  * pause derives and the reason a refusal reports come out of this one function, so they cannot
- * disagree — 「等预算」 on the card is 「runs 12/12」 in the refusal.
+ * disagree — 「等预算」 on the card is 「运行次数 12/12」 in the refusal.
  */
 export function resumeRefusal(
   task: Task,
@@ -409,7 +409,10 @@ export function resumeRefusal(
   const now = context.now ?? Date.now();
 
   if (isRunLocked(task, context.sessionExists)) {
-    return { pauseReason: 'waiting', reason: `run already owned by ${task.stats?.lockSessionId}` };
+    return {
+      pauseReason: 'waiting',
+      reason: `运行已经由 ${task.stats?.lockSessionId} 持有，不能重复启动`,
+    };
   }
 
   const deps = checkDependencies(task, context.getTask);
@@ -426,7 +429,12 @@ export function resumeRefusal(
   );
   if (budget.exceeded) return { pauseReason: 'budget', reason: budget.reason };
 
-  if (shouldTripFuse(task.lifecycle)) return { pauseReason: 'failures', reason: 'consecutive failures' };
+  if (shouldTripFuse(task.lifecycle)) {
+    return {
+      pauseReason: 'failures',
+      reason: `连续失败 ${task.lifecycle.consecutiveFailures} 次，已熔断`,
+    };
+  }
 
   return null;
 }
@@ -445,16 +453,16 @@ export type BudgetVerdict = { exceeded: false } | { exceeded: true; reason: stri
 
 export function checkBudget(budget: TaskBudget, usage: BudgetUsage, now: number): BudgetVerdict {
   if (usage.sessions > budget.maxSessions) {
-    return { exceeded: true, reason: `sessions ${usage.sessions}/${budget.maxSessions}` };
+    return { exceeded: true, reason: `会话数 ${usage.sessions}/${budget.maxSessions}` };
   }
   if (usage.runs > budget.maxRuns) {
-    return { exceeded: true, reason: `runs ${usage.runs}/${budget.maxRuns}` };
+    return { exceeded: true, reason: `运行次数 ${usage.runs}/${budget.maxRuns}` };
   }
   if (usage.activeMinutes > budget.activeMinutes) {
-    return { exceeded: true, reason: `active minutes ${usage.activeMinutes}/${budget.activeMinutes}` };
+    return { exceeded: true, reason: `活跃时长 ${usage.activeMinutes}/${budget.activeMinutes} 分钟` };
   }
   if (budget.deadline && now > budget.deadline) {
-    return { exceeded: true, reason: 'deadline passed' };
+    return { exceeded: true, reason: '已过截止时间' };
   }
   return { exceeded: false };
 }

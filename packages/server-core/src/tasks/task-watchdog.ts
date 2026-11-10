@@ -538,14 +538,14 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         break;
       case 'off_track': {
         const progress = planProgress(finding.task.spec?.plan);
-        deps.pause(finding.task.id, null, 'plan stopped moving');
+        deps.pause(finding.task.id, null, '计划长时间没有推进');
         notify(`${finding.task.id} 的计划已 ${Math.round(OFF_TRACK_MS / 60_000)} 分钟没有推进（完成 ${progress.done}/${progress.total}），任务已暂停，需要确认它是否偏离目标。`,
         );
         acted += 1;
         break;
       }
       case 'looping':
-        deps.pause(finding.task.id, null, 'repeated identical handoffs');
+        deps.pause(finding.task.id, null, '连续多次交接内容相同');
         notify(`${finding.task.id} 连续 ${MAX_REPEATED_HANDOFFS} 次交接内容相同，Worker 在原地打转，任务已暂停。`,
         );
         acted += 1;
@@ -575,7 +575,7 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         break
       }
       case 'orphaned':
-        deps.pause(finding.task.id, 'process_lost', 'session disappeared');
+        deps.pause(finding.task.id, 'process_lost', '会话已消失');
         notify(`${finding.task.id} 的会话已消失，任务已暂停（可续跑）。`,
         );
         acted += 1;
@@ -595,7 +595,7 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
             `${finding.task.id} 的执行者已停止且没有交接，唤醒失败——任务卡在这里，需要你确认下一步。`,
           )
         } else {
-          deps.pause(finding.task.id, null, 'stopped without filing a hand-off')
+          deps.pause(finding.task.id, null, '执行者已停止且没有交接')
           notify(`${finding.task.id} 没有交接且会话也不在了，任务已暂停。`,
           )
         }
@@ -609,7 +609,7 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
           // Out of attempts (or nobody to wake with): stop pretending the task is
           // running. A task that says 进行中 while nothing is working on it is
           // worse than a paused one, because the user waits instead of looking.
-          deps.pause(finding.task.id, 'process_lost', 'session idle with no progress');
+          deps.pause(finding.task.id, 'process_lost', '会话空闲且没有进展');
           notify(`${finding.task.id} 的会话已空闲 ${Math.round(IDLE_SESSION_MS / 60_000)} 分钟以上，唤醒失败 ${attempts} 次仍未推进，任务已暂停，需要你确认下一步。`,
           );
         } else {
@@ -627,19 +627,19 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         break;
       }
       case 'stalled':
-        deps.pause(finding.task.id, 'process_lost', 'heartbeat stalled');
+        deps.pause(finding.task.id, 'process_lost', '心跳已停滞');
         notify(`${finding.task.id} 超过两个心跳没有动静，任务已暂停。`,
         );
         acted += 1;
         break;
       case 'failing':
-        deps.pause(finding.task.id, null, 'consecutive failures');
+        deps.pause(finding.task.id, null, '连续失败');
         notify(`${finding.task.id} 连续失败，任务已暂停，需要你决定是否重试。`,
         );
         acted += 1;
         break;
       case 'overdue':
-        deps.pause(finding.task.id, null, 'deadline passed');
+        deps.pause(finding.task.id, null, '已过截止时间');
         notify(`${finding.task.id} 已过截止时间，任务已暂停。`);
         acted += 1;
         break;

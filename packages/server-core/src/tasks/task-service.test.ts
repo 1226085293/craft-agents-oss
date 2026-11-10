@@ -1047,9 +1047,8 @@ describe('an open question stops the task', () => {
 
     svc.recordDecisionAnswer(task.id, '继续', open.id)
     svc.resolveDecision(task.id, 'approved')
-    // The run that asked is still holding the lock; a pause is not the end of it. Ending it is
-    // what a real hand-off does, and only then may the next leg start.
-    svc.suspendRun(task.id)
+    // Asking ends the run it interrupted (`setDecisionWording`), so the record is already park-
+    // ed and unlocked here; `endRun` is what the real path does when the worker reports back.
     svc.endRun(task.id, { ok: true })
     svc.setStatus(task.id, 'running', {})
 

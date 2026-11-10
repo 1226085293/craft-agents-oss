@@ -463,6 +463,17 @@ describe('the trigger is editable from the page', () => {
     expect(html).toContain('aria-expanded')
   })
 
+  it('says so when the schedule is switched off', () => {
+    // A stopped timer must not look like a running one: 「定时 · 0 9 * * *」 with no marker reads as
+    // "this will fire at nine", and the task would sit waiting for a run that never comes.
+    const html = renderDetail(
+      { ...scheduled, trigger: { ...scheduled.trigger!, enabled: false } },
+      undefined,
+      () => {},
+    )
+    expect(html).toContain('已停用')
+  })
+
   it('renders it as plain text when nobody can save a change', () => {
     // No handler means no affordance: a button that cannot write is worse than a label.
     const html = renderDetail(scheduled)

@@ -172,7 +172,7 @@ describe('run lifecycle', () => {
 
     const second = svc.startRun(task.id, 'sess_b');
     expect(second.ok).toBe(false);
-    expect((second as { reason: string }).reason).toContain('already owned');
+    expect((second as { reason: string }).reason).toContain('已经由 sess_a 持有');
   });
 
   it('blocks a task whose dependency is not completed', () => {
@@ -188,7 +188,7 @@ describe('run lifecycle', () => {
 
     const blocked = svc.startRun(dependent.id, 'sess_b');
     expect(blocked.ok).toBe(false);
-    expect((blocked as { reason: string }).reason).toContain('is backlog');
+    expect((blocked as { reason: string }).reason).toContain('尚未完成');
 
     svc.setStatus(dep.id, 'running');
     svc.setStatus(dep.id, 'completed');

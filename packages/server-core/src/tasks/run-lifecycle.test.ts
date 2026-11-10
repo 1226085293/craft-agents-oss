@@ -111,10 +111,10 @@ describe('every exit gives the lock back', () => {
     expect(locked(canceled)).toBeUndefined();
   });
 
-  it('releases it on suspendRun and endRun', () => {
+  it('releases it on a pause and on endRun', () => {
     const first = harness();
     first.svc.startRun(first.task.id, 'sess_worker');
-    expect(locked(first.svc.suspendRun(first.task.id))).toBeUndefined();
+    expect(locked(first.svc.setStatus(first.task.id, 'paused'))).toBeUndefined();
 
     const second = harness();
     second.svc.startRun(second.task.id, 'sess_worker');
@@ -191,11 +191,11 @@ describe('a run that ends takes its session with it', () => {
     expect(stopped).toEqual(['sess_worker']);
   });
 
-  it('stops the worker when the task is suspended', () => {
+  it('stops the worker when the task is paused', () => {
     const { svc, task, stopped } = harness();
     svc.startRun(task.id, 'sess_worker');
 
-    svc.suspendRun(task.id);
+    svc.setStatus(task.id, 'paused');
     expect(stopped).toEqual(['sess_worker']);
   });
 
@@ -252,7 +252,7 @@ describe('a run that ends takes its session with it', () => {
     svc.onRunDispose(task.id, (mode) => order.push(`first:${mode}`));
     svc.onRunDispose(task.id, (mode) => order.push(`second:${mode}`));
 
-    svc.suspendRun(task.id);
+    svc.setStatus(task.id, 'paused');
     expect(order).toEqual(['second:suspended', 'first:suspended']);
 
     // A new run starts with a clean slate: the old handle is gone.
@@ -295,7 +295,7 @@ describe('the heartbeat belongs to the run, not to history', () => {
   it('does not credit a heartbeat while the task is not running', () => {
     const { svc, task } = harness();
     svc.startRun(task.id, 'sess_worker');
-    svc.suspendRun(task.id);
+    svc.setStatus(task.id, 'paused');
 
     expect(svc.heartbeatForSession('sess_worker')).toBeNull();
   });
@@ -370,7 +370,7 @@ describe('an answer belongs to the record, not to the run', () => {
     const started = svc.startRun(task.id, 'sess_next');
     expect(started.ok).toBe(false);
     if (started.ok) return;
-    expect(started.reason).toContain('waiting for a person');
+    expect(started.reason).toContain('等待你的决定');
     expect(svc.get(task.id)?.stats?.lockSessionId).toBeUndefined();
 
     // The words are still recorded: the question belongs to the task, not to a session.

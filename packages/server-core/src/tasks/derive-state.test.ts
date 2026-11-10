@@ -111,7 +111,7 @@ describe('a pause reason the record can prove', () => {
     const refused = svc.startRun(task.id, 'pending:scheduled');
     expect(refused.ok).toBe(false);
     if (refused.ok) return;
-    expect(refused.reason).toContain('sessions 9/8');
+    expect(refused.reason).toContain('会话数 9/8');
   });
 });
 

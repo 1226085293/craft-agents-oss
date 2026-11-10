@@ -408,7 +408,9 @@ export class TaskService {
       const worded = open.some((entry) => entry.question?.trim())
       return {
         pauseReason: worded ? 'needs_decision' : 'asking',
-        reason: worded ? `waiting for a person: ${open.find((e) => e.question?.trim())?.question}` : 'waiting for the question to be worded',
+        reason: worded
+          ? `等待你的决定：${open.find((e) => e.question?.trim())?.question}`
+          : '等待督导把问题写清楚',
       }
     }
 
@@ -741,33 +743,6 @@ export class TaskService {
   }
 
   /**
-   * Release the run lock after a pause or cancel, without counting a failure.
-   *
-   * `endRun` records an outcome, and a pause is not a failure — counting it
-   * would let three pauses trip the fuse and strand the task in a state nobody
-   * asked for. What a pause does have to do is give the lock back and stop the
-   * session that owned it: `isRunLocked` holds it while `lockSessionId` points
-   * at a live session, so a paused task would refuse to resume until that
-   * session died, and a session left running would keep producing work for a
-   * task nobody owns.
-   */
-  suspendRun(id: string): Task {
-    const task = this.require(id);
-    const now = this.now();
-    const stats = task.stats ?? { runs: 0, activeMs: 0 };
-    const elapsed = stats.runStartedAt ? Math.max(0, now - stats.runStartedAt) : 0;
-    const next = this.releaseRunRecord(task, now);
-    this.save(next);
-    this.disposeRun(id, 'suspended');
-    appendJournal(this.root, id, {
-      type: 'run_ended',
-      at: now,
-      data: { ok: true, suspended: true, activeMs: elapsed },
-    });
-    return next;
-  }
-
-  /**
    * Release the lock, bank the active time, and record the run's outcome.
    *
    * Called when a run ends for any reason that is not a pause — handoff verdicts
@@ -938,7 +913,7 @@ export class TaskService {
      * ended it. Mid-slice there is, and parking the record without ending the run left a task that
      * was `paused` while a live session held its lock. Observed on a real run: the answer arrived,
      * `resumeRefusal` read the live lock, and the task could not resume until that session died —
-     * 「run already owned by sess_worker」, on a task nobody was working on.
+     * 「运行已经由 sess_worker 持有」, on a task nobody was working on.
      *
      * `suspended` is the honest mode: the worker must stop producing work behind a question that
      * asks whether to continue. The record is released first so the same write cannot derive a

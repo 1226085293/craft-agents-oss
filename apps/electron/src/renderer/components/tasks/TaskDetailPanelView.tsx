@@ -163,6 +163,10 @@ export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun
       ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto">
         <TaskDetailContent
+          // Remount per task: the trigger editor (and every other piece of local state) is a draft
+          // about one task, and carrying it across a switch showed the previous task's expression
+          // in the next task's editor.
+          key={detail.id}
           detail={detail}
           onResume={onResume}
           onCancel={onCancel}
@@ -454,6 +458,16 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
   )
   const [triggerError, setTriggerError] = React.useState<string | null>(null)
   const [triggerSaving, setTriggerSaving] = React.useState(false)
+  /**
+   * Whether the schedule runs at all.
+   *
+   * `enabled` was written `true` on every save, so the only way to stop a schedule was to delete
+   * it or edit the JSON — the page could start a timer nobody could turn off. Manual has no switch:
+   * it never fires by itself.
+   */
+  const [triggerEnabled, setTriggerEnabled] = React.useState<boolean>(
+    detail.trigger?.enabled !== false,
+  )
   const saveTrigger = async (): Promise<void> => {
     if (!onUpdateTrigger) return
     setTriggerError(null)
@@ -480,13 +494,13 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
                 kind: 'cron',
                 expr: cronExpr.trim(),
                 ...(cronTimezone.trim() ? { timezone: cronTimezone.trim() } : {}),
-                enabled: true,
+                enabled: triggerEnabled,
               }
             : {
                 kind: 'event',
                 source: eventSource.trim(),
                 ...(types.length ? { types } : {}),
-                enabled: true,
+                enabled: triggerEnabled,
               },
       )
       setEditingTrigger(false)
@@ -496,11 +510,12 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
       setTriggerSaving(false)
     }
   }
-  const triggerLabel = detail.trigger?.kind === 'cron'
+  const triggerOff = detail.trigger?.enabled === false && detail.trigger.kind !== 'manual'
+  const triggerLabel = (detail.trigger?.kind === 'cron'
     ? `定时 · ${detail.trigger.expr}${detail.trigger.timezone ? ` (${detail.trigger.timezone})` : ''}`
     : detail.trigger?.kind === 'event'
       ? `事件 · ${detail.trigger.source ?? ''}${detail.trigger.types?.length ? `/${detail.trigger.types.join(',')}` : ''}`
-      : '手动'
+      : '手动') + (triggerOff ? '（已停用）' : '')
   // Placeholders hold the run lock before a session exists; they are not sessions.
   const realSessions = detail.sessionIds.filter((id) => !id.startsWith('pending:'))
   /**
@@ -678,7 +693,20 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
                 </button>
                 {triggerKind === 'manual' ? (
                   <span className="text-xs text-muted-foreground">只有手动或督导触发才启动</span>
-                ) : null}
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setTriggerEnabled((on) => !on)}
+                    aria-pressed={triggerEnabled}
+                    className={
+                      triggerEnabled
+                        ? 'inline-flex min-h-8 items-center rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2.5 text-xs text-emerald-300'
+                        : 'inline-flex min-h-8 items-center rounded-md border border-border/70 px-2.5 text-xs text-muted-foreground'
+                    }
+                  >
+                    {triggerEnabled ? '已启用 · 点击停用' : '已停用 · 点击启用'}
+                  </button>
+                )}
               </div>
             </div>
           ) : null}

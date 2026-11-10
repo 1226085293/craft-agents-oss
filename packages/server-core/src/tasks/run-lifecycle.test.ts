@@ -183,20 +183,24 @@ describe('every exit gives the lock back', () => {
 });
 
 describe('a run that ends takes its session with it', () => {
-  it('stops the worker when the task is paused', () => {
-    const { svc, task, stopped } = harness();
-    svc.startRun(task.id, 'sess_worker');
+  /**
+   * One entry, two reasons — and both must stop the session.
+   *
+   * These were two tests with the same name after `suspendRun` was folded into `setStatus`:
+   * one paused on `budget`, one with no reason at all. A named-with-reason pause and a bare
+   * pause reach the same release path, and the duplicate name was the only sign they were
+   * the same assertion written twice.
+   */
+  it('stops the worker when the task is paused, with or without a reason', () => {
+    const withReason = harness();
+    withReason.svc.startRun(withReason.task.id, 'sess_worker');
+    withReason.svc.setStatus(withReason.task.id, 'paused', { pauseReason: 'budget' });
+    expect(withReason.stopped).toEqual(['sess_worker']);
 
-    svc.setStatus(task.id, 'paused', { pauseReason: 'budget' });
-    expect(stopped).toEqual(['sess_worker']);
-  });
-
-  it('stops the worker when the task is paused', () => {
-    const { svc, task, stopped } = harness();
-    svc.startRun(task.id, 'sess_worker');
-
-    svc.setStatus(task.id, 'paused');
-    expect(stopped).toEqual(['sess_worker']);
+    const bare = harness();
+    bare.svc.startRun(bare.task.id, 'sess_worker');
+    bare.svc.setStatus(bare.task.id, 'paused');
+    expect(bare.stopped).toEqual(['sess_worker']);
   });
 
   it('stops the worker when a running task lost its process is paused', () => {

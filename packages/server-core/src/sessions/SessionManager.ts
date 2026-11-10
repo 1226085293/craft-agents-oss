@@ -7700,6 +7700,16 @@ ${request.prompt}`;
       // Acceptance commands run here, not inside the worker: a task must not be
       // able to certify itself. cwd is resolved against the workspace root so a
       // spec can stay portable.
+      /**
+       * Every task write asks the watchdog to look now.
+       *
+       * The loop's sleep is derived from deadlines, which is right for 「when is
+       * this overdue」 and wrong for 「this just changed」: an answered decision, a
+       * moved plan step, a filed hand-off are facts the rules read, and they used
+       * to wait for the derived wake-up. The loop replaces a pending timer rather
+       * than queueing, so a burst of writes costs one pass.
+       */
+      pokeWatchdog: () => this.watchdogLoops.get(workspace.id)?.wake(),
       stopSession: (sessionId) => {
         // Fire and forget: pausing must not wait on an abort handshake, and the
         // session may already be gone.

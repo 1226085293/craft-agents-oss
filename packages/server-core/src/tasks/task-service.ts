@@ -118,6 +118,18 @@ export interface TaskServiceDeps {
    * every write passes through.
    */
   onChanged?: () => void;
+  /**
+   * Ask the watchdog for a pass now instead of at its next deadline.
+   *
+   * The loop's sleep is derived from state, so it is due at the moment a deadline
+   * passes — not at the moment a fact changes. A decision answered, a plan step
+   * moved, a hand-off filed: each is a fact the rules read, and each used to wait
+   * for the derived deadline. Poking is the event, the loop stays the fallback.
+   *
+   * Safe to call on every write: the loop replaces a pending timer rather than
+   * queueing a second pass, so a burst of writes costs one pass.
+   */
+  pokeWatchdog?: () => void;
   now?: () => number;
   /** Id generator (tests inject a stable one). */
   newId?: () => string;
@@ -1068,7 +1080,9 @@ export class TaskService {
       stats: { ...stats, lastHeartbeatAt: now },
       updatedAt: now,
     };
-    this.save(next);
+    // A heartbeat only makes the task look more alive: no rule can start matching
+    // because of it, so it does not ask for a pass.
+    this.save(next, { poke: false });
     return next;
   }
 
@@ -2024,10 +2038,18 @@ export class TaskService {
    * record, and the record is what gets stored. Callers still see the derived value because they
    * are handed the same object they saved — see the `save` result threading below.
    */
-  private save(task: Task): Task {
+  private save(task: Task, options?: { poke?: boolean }): Task {
     const derived = this.classifyPauseReason(syncDecisionMirror(task));
     saveTask(this.root, derived);
     this.notifyChanged();
+    /**
+     * Every write is a fact the watchdog reads, so every write asks it to look.
+     *
+     * The one exception is a heartbeat: it can only make a task look more alive, so
+     * the pass would find strictly less than the one before it, and heartbeats are
+     * the only write frequent enough for the passes to be visible in the log.
+     */
+    if (options?.poke !== false) this.deps.pokeWatchdog?.();
     return derived;
   }
 

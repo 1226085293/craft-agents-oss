@@ -59,3 +59,33 @@ describe('withToolExecutionTimeout', () => {
     await new Promise((resolve) => setTimeout(resolve, 40));
   });
 });
+
+/**
+ * A control-plane call is not a data-plane call.
+ *
+ * `report_result` runs the acceptance gate on the other side: a judge session is spawned and a
+ * model reads the hand-off. The generic 120s budget cut that off after the write had already
+ * landed — the caller was told 「timed out … may not have completed」, retried, and one completion
+ * produced three 「交接通过」 notices and three 「已全部完成」 reports.
+ */
+describe('the task control plane', () => {
+  it('gives report_result a budget that fits a judge turn', () => {
+    const budget = resolveToolTimeoutMs('mcp__session__call_tool', { name: 'report_result' })
+    expect(budget).toBeGreaterThanOrEqual(600_000)
+  })
+
+  it('covers the tools that start or rewrite work', () => {
+    for (const name of ['report_result', 'task_plan', 'dispatch', 'task_handoff', 'task_update']) {
+      expect(resolveToolTimeoutMs('mcp__session__call_tool', { name })).toBeGreaterThanOrEqual(600_000)
+    }
+  })
+
+  it('leaves ordinary proxy calls on the default budget', () => {
+    expect(resolveToolTimeoutMs('mcp__session__call_tool', { name: 'task_get' })).toBe(120_000)
+  })
+
+  it('still honours a timeout the caller declares', () => {
+    // An explicit budget wins, with the 60s host grace — the long default is not a cap.
+    expect(resolveToolTimeoutMs('mcp__session__call_tool', { name: 'report_result', timeout: 30 })).toBe(90_000)
+  })
+})

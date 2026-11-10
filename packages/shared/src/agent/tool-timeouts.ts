@@ -33,6 +33,29 @@ function parseMs(raw: string | undefined, fallback: number): number {
 }
 
 const DEFAULT_TOOL_TIMEOUT_MS = parseMs(process.env.CRAFT_PI_TOOL_TIMEOUT_MS, 120_000);
+/**
+ * The task control-plane tools, which are not data-plane calls.
+ *
+ * `report_result` runs the acceptance gate: a read-only judge session is spawned, a model
+ * reads the hand-off and answers. That is a whole turn, and the generic 120s budget cut it
+ * off mid-flight — the write had already landed (hand-off recorded, task completed, supervisor
+ * woken) while the caller was told 「timed out … may not have completed」. The worker did the only
+ * sensible thing and retried, the retry was accepted, and one completion produced three
+ * 「交接通过」 notices and three 「已全部完成」 reports.
+ *
+ * A control-plane call is allowed to take as long as the work it governs. The timeout stays,
+ * because a hung gate must not hang the turn forever.
+ */
+const TASK_CONTROL_TIMEOUT_MS = parseMs(process.env.CRAFT_PI_TASK_TOOL_TIMEOUT_MS, 600_000);
+
+/** Session tools whose server side runs a model turn or starts one. */
+const TASK_CONTROL_TOOLS = new Set([
+  'report_result',
+  'task_plan',
+  'task_handoff',
+  'dispatch',
+  'task_update',
+]);
 const BROWSER_TOOL_TIMEOUT_MS = parseMs(process.env.CRAFT_PI_BROWSER_TOOL_TIMEOUT_MS, 60_000);
 const BASH_TOOL_TIMEOUT_MS = parseMs(process.env.CRAFT_PI_BASH_TOOL_TIMEOUT_MS, 600_000);
 const CALL_LLM_TIMEOUT_MS = parseMs(process.env.CRAFT_PI_CALL_LLM_TIMEOUT_MS, 300_000);
@@ -61,6 +84,14 @@ export function resolveToolTimeoutMs(toolName: string, args: Record<string, unkn
   if (toolName === 'mcp__session__call_tool' || toolName === 'call_tool') {
     const inner = typeof args.name === 'string' ? args.name : '';
     if (inner === 'browser_tool') return explicit ?? BROWSER_TOOL_TIMEOUT_MS;
+    /**
+     * The tools that run a model on the other side of the call.
+     *
+     * `report_result` may spawn a judge and wait for a full turn; `dispatch` and `task_plan`
+     * start sessions and rewrite the plan. Judging them by the same clock as a data-plane proxy
+     * call is what turned one completion into three notices.
+     */
+    if (TASK_CONTROL_TOOLS.has(inner)) return explicit ?? TASK_CONTROL_TIMEOUT_MS;
     return explicit ?? DEFAULT_TOOL_TIMEOUT_MS;
   }
   return explicit ?? DEFAULT_TOOL_TIMEOUT_MS;

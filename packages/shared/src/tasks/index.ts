@@ -68,6 +68,8 @@ export { matchesCron } from './cron.ts';
 
 export {
   applyPlanPatch,
+  normalizeAgentId,
+  sameAgent,
   childrenOf,
   currentOutline,
   currentStep,

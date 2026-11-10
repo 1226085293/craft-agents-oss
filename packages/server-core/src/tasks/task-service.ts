@@ -38,6 +38,7 @@ import {
   assessDecisionRequest,
   applyPlanPatch,
   planProgress,
+  sameAgent,
   childrenOf,
   DECISION_TIMEOUT_MS,
   TERMINAL_STATUSES,
@@ -1859,7 +1860,21 @@ export class TaskService {
     // case would be acting on a decision nobody made.
     let startedNextLeg = false;
     let startedStepId: string | undefined;
-    if (accepted && handoff.outcome === 'handoff' && this.deps.startNextLeg) {
+    /**
+     * The authorisation boundary outranks the ownership boundary.
+     *
+     * Two rules answered 「may work continue」 and neither knew about the other: `sliceDeliveredButPlanOpen`
+     * paused the task (「已按指示停止」) at the same instant this block opened the next step in a fresh
+     * session. Observed live twice — 10:21:18 and 10:32:24 — both times against an explicit
+     * 「只做 1.1，做完就停」, and the second time the person found a session doing 1.2 while the board
+     * said the task had stopped as instructed.
+     *
+     * A directive that says "stop after this slice" is not an opinion about who owns the next step.
+     * If the slice is delivered and the plan is still open, nobody starts the next leg — the pause
+     * says so, and this is the same function the pause reads.
+     */
+    const boundarySaysStop = this.sliceDeliveredButPlanOpen(next);
+    if (accepted && handoff.outcome === 'handoff' && this.deps.startNextLeg && !boundarySaysStop) {
       const leg = nextLeg(next.spec?.plan);
       const startedStep = leg?.kind === 'step' ? leg : undefined;
       /**
@@ -1876,7 +1891,12 @@ export class TaskService {
         .sort((left, right) => (right.updatedAt ?? 0) - (left.updatedAt ?? 0))[0];
       const current = justFinished?.agent ?? next.assigneeAgentId;
       const nextAgent = startedStep?.agent ?? current;
-      const belongsElsewhere = Boolean(startedStep?.agent && current && startedStep.agent !== current);
+      /**
+       * `sameAgent`, not `!==`: a worker wrote `@builtin-default` where the roster said
+       * `builtin-default`, and the mismatch read as 「a different agent owns the next step」 —
+       * which is what started 1.2 on its own at 10:32:24.
+       */
+      const belongsElsewhere = Boolean(startedStep?.agent && current && !sameAgent(startedStep.agent, current));
       if (startedStep && belongsElsewhere) {
         try {
           startedNextLeg = await this.deps.startNextLeg(next, nextAgent);

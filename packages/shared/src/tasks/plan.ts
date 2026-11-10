@@ -17,6 +17,30 @@
 
 export type PlanStepStatus = 'todo' | 'doing' | 'done' | 'blocked';
 
+/**
+ * The one spelling of an agent id.
+ *
+ * A worker wrote `@builtin-default` where the roster said `builtin-default` — a mention
+ * habit, not a different agent — and the identity comparison downstream read that as
+ * 「someone else owns the next step」. It started the next leg against the user's
+ * 「做完 1.1 就停」, in a fresh session, twice.
+ *
+ * Normalizing at the two places an id is stored and compared is the difference between
+ * "one agent" and "two agents that look almost the same".
+ */
+export function normalizeAgentId(value: string | undefined): string | undefined {
+  const trimmed = value?.trim().replace(/^@+/, '').trim();
+  return trimmed ? trimmed.slice(0, 60) : undefined;
+}
+
+/** Whether two ids name the same agent, whatever decoration they arrived with. */
+export function sameAgent(left: string | undefined, right: string | undefined): boolean {
+  const a = normalizeAgentId(left);
+  const b = normalizeAgentId(right);
+  if (!a || !b) return false;
+  return a.toLowerCase() === b.toLowerCase();
+}
+
 export interface PlanStep {
   /** Stable id (`1.0`, `1.1`, `2.0`): parents are the prefix before the last dot. */
   id: string;
@@ -277,8 +301,8 @@ export function normalizePlan(raw: unknown, now = Date.now()): PlanStep[] | unde
       id,
       title: title.slice(0, 200),
       status: isPlanStepStatus(value.status) ? value.status : 'todo',
-      ...(typeof value.agent === 'string' && value.agent.trim()
-        ? { agent: value.agent.trim().slice(0, 60) }
+      ...(typeof value.agent === 'string' && normalizeAgentId(value.agent)
+        ? { agent: normalizeAgentId(value.agent)! }
         : {}),
       ...(typeof value.note === 'string' && value.note.trim()
         ? { note: value.note.trim().slice(0, 300) }
@@ -515,7 +539,7 @@ export function applyPlanPatch(
       id: patch.id,
       title: patch.title.slice(0, 200),
       status: patch.status ?? 'todo',
-      ...(patch.agent ? { agent: patch.agent.slice(0, 60) } : {}),
+      ...(normalizeAgentId(patch.agent) ? { agent: normalizeAgentId(patch.agent)! } : {}),
       ...(patch.note ? { note: patch.note.slice(0, 300) } : {}),
       ...(patch.status === 'doing' ? { startedAt: now } : {}),
       updatedAt: now,
@@ -540,7 +564,7 @@ export function applyPlanPatch(
     if (patch.title && patch.title.trim() !== previous.title) {
       return { plan: steps, changed: false, error: `${previous.id} 已完成并冻结，标题不能再改` };
     }
-    if (patch.agent && patch.agent !== previous.agent) {
+    if (patch.agent && !sameAgent(patch.agent, previous.agent)) {
       return { plan: steps, changed: false, error: `${previous.id} 已完成并冻结，负责的 agent 不能再改` };
     }
     if (patch.note !== undefined && !patch.note.trim()) {
@@ -611,7 +635,7 @@ export function applyPlanPatch(
     ...previous,
     ...(patch.title ? { title: patch.title.slice(0, 200) } : {}),
     ...(patch.status ? { status: patch.status } : {}),
-    ...(patch.agent ? { agent: patch.agent.slice(0, 60) } : {}),
+    ...(normalizeAgentId(patch.agent) ? { agent: normalizeAgentId(patch.agent)! } : {}),
     ...(patch.note !== undefined ? { note: patch.note.slice(0, 300) } : {}),
     // First time only: later `doing` writes must not move the line that says
     // "this step is history now".

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { TaskService } from './task-service.ts'
-import { createTask, saveTask } from '@craft-agent/shared/tasks'
+import { applyPlanPatch, createTask, saveTask } from '@craft-agent/shared/tasks'
 import type { Task } from '@craft-agent/shared/tasks'
 
 interface Harness {
@@ -42,7 +42,12 @@ function harness(overrides: { startResult?: boolean; startNextLeg?: boolean } = 
   return h
 }
 
-function seed(h: Harness, plan: Array<{ id: string; title: string; status: string; agent?: string }>, assignee?: string): Task {
+function seed(
+  h: Harness,
+  plan: Array<{ id: string; title: string; status: string; agent?: string }>,
+  assignee?: string,
+  directive?: string,
+): Task {
   const task = createTask({
     id: 'T-1',
     name: '接口改造',
@@ -51,7 +56,10 @@ function seed(h: Harness, plan: Array<{ id: string; title: string; status: strin
     toolCallId: 'tc-1',
     now: 1,
     ...(assignee ? { assigneeAgentId: assignee } : {}),
-    spec: { plan: plan as Task['spec'] extends undefined ? never : NonNullable<Task['spec']>['plan'] },
+    spec: {
+      plan: plan as Task['spec'] extends undefined ? never : NonNullable<Task['spec']>['plan'],
+      ...(directive ? { directive: { text: directive, at: 1 } } : {}),
+    } as Task['spec'],
   }) as Task
   // A run has to be under way for a hand-off to be a legal transition.
   const running = { ...task, status: 'running' as const, currentSessionId: 'sess-1', sessionIds: ['sess-1'] }
@@ -139,6 +147,67 @@ describe('starting the next section', () => {
     expect(h.started).toHaveLength(1)
     // Refused by the gate — this is exactly when a human should hear about it.
     expect(h.woken.length).toBeGreaterThan(0)
+    rmSync(h.root, { recursive: true, force: true })
+  })
+})
+
+describe('two rules answered "may work continue"', () => {
+  it('does not start the next leg when the directive says the slice was the whole job', async () => {
+    /**
+     * Observed live twice, at 10:21:18 and 10:32:24. The same hand-off paused the task as
+     * 「已按指示停止」 and opened 1.2 in a fresh session in the same instant: `sliceDeliveredButPlanOpen`
+     * paused, the ownership rule started, and neither knew about the other. The second time the
+     * person found a session working on 1.2 while the board said the task had stopped.
+     */
+    const h = harness()
+    seed(
+      h,
+      [
+        { id: '1', title: '写文件', status: 'doing' },
+        { id: '1.1', title: '创建', status: 'done', agent: 'agent-a' },
+        { id: '2', title: '收尾', status: 'todo' },
+        { id: '2.1', title: '核对', status: 'todo', agent: 'agent-b' },
+      ],
+      'agent-a',
+      // The authorisation boundary: this slice is all the person allowed.
+      '只做 1.1，做完就停',
+    )
+    await h.service.reportHandoff('T-1', handoff, 'sess-1')
+    // A different owner IS a boundary — but the directive says stop, and it wins.
+    expect(h.started).toHaveLength(0)
+    expect(h.service.get('T-1')?.pauseReason).toBe('awaiting_release')
+    rmSync(h.root, { recursive: true, force: true })
+  })
+
+  it('stores an agent id the same way the roster spells it', async () => {
+    /**
+     * A worker wrote `@builtin-default` where the roster said `builtin-default` — a mention habit,
+     * not a different agent — and the identity comparison read the mismatch as 「someone else owns
+     * the next step」, which is what started 1.2 on its own at 10:32:24.
+     *
+     * The id is normalized where it is stored, so no reader has to know about the decoration.
+     */
+    const h = harness()
+    const task = seed(
+      h,
+      [
+        { id: '1', title: '写文件', status: 'doing' },
+        { id: '1.1', title: '创建', status: 'doing', agent: 'builtin-default' },
+        { id: '1.2', title: '读回', status: 'todo', agent: 'builtin-default' },
+      ],
+      undefined,
+    )
+    /**
+     * Asked of the writer directly, not of the record it wrote: `loadTask` normalizes on read as
+     * well, so a check through `get()` would pass even with the writer reverted — it would be
+     * testing the loader twice.
+     */
+    const patched = applyPlanPatch(
+      task.spec?.plan,
+      { id: '1.1', status: 'done', agent: '@builtin-default' },
+      10,
+    )
+    expect(patched.plan?.find((step) => step.id === '1.1')?.agent).toBe('builtin-default')
     rmSync(h.root, { recursive: true, force: true })
   })
 })

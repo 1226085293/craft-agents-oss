@@ -263,3 +263,53 @@ describe('a refusal is feedback, not news', () => {
     rmSync(h.root, { recursive: true, force: true })
   })
 })
+
+describe('a finished task stays finished', () => {
+  it('refuses to start a run once it is completed', async () => {
+    /**
+     * Live: the supervisor set T-1 to `completed` at 11:52:21 and to `running` at 11:52:29.
+     * `applyTransition` refuses `completed → running`, but `startRun` builds its record
+     * directly and `updateTask({status:'running'})` goes straight to `runTask` — so the task
+     * came back to life after the person had been told it was done, the worker filed three
+     * `delivered` hand-offs, and the user lane read 「任务已全部完成」 three times.
+     */
+    const h = harness()
+    seed(
+      h,
+      [
+        { id: '1', title: '写文件', status: 'doing' },
+        { id: '1.1', title: '创建', status: 'done', agent: 'builtin-default' },
+      ],
+      undefined,
+    )
+    h.service.setStatus('T-1', 'completed')
+    const result = h.service.startRun('T-1', 'sess-1')
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toContain('已经完成')
+    expect(h.service.get('T-1')?.status).toBe('completed')
+    rmSync(h.root, { recursive: true, force: true })
+  })
+
+  it('ignores a hand-off filed after completion', async () => {
+    // The report is answered — a worker mid-turn must not get an exception — but it changes
+    // nothing and wakes nobody: the task ended when it ended.
+    const h = harness()
+    seed(
+      h,
+      [
+        { id: '1', title: '写文件', status: 'doing' },
+        { id: '1.1', title: '创建', status: 'done', agent: 'builtin-default' },
+      ],
+      undefined,
+    )
+    h.service.setStatus('T-1', 'completed')
+    const before = h.service.get('T-1')!.handoffs.length
+    const result = await h.service.reportHandoff('T-1', handoff, 'sess-1')
+    expect(result.passed).toBe(false)
+    expect(result.reasons.join(' ')).toContain('已经完成')
+    expect(h.service.get('T-1')!.handoffs.length).toBe(before)
+    expect(h.woken).toHaveLength(0)
+    rmSync(h.root, { recursive: true, force: true })
+  })
+})

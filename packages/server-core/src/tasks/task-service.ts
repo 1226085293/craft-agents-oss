@@ -397,6 +397,23 @@ export class TaskService {
    */
   private startGate(task: Task, now: number): { pauseReason: Task['pauseReason']; reason: string } | null {
     /**
+     * A finished task has no work left to start, whoever asks.
+     *
+     * `applyTransition` refuses `completed → running`, but `startRun` builds its record
+     * directly and never asked it — and `updateTask({status:'running'})` goes straight to
+     * `runTask`. Observed live: the supervisor set T-1 to `completed` at 11:52:21 and to
+     * `running` at 11:52:29, which resumed the worker into a task that had already been
+     * reported to the user as finished; it then filed three `delivered` hand-offs and the
+     * person got three copies of 「任务已全部完成」.
+     */
+    if (TERMINAL_STATUSES.includes(task.status)) {
+      return {
+        pauseReason: null,
+        reason: `${task.id} 已经${task.status === 'completed' ? '完成' : '取消'}了，不能再启动。要接着做就新建一条任务。`,
+      }
+    }
+
+    /**
      * A question for a person is not a step the executor may skip.
      *
      * `applyTransition` already refuses `→ running` while a question is open; `startRun` builds its
@@ -1592,6 +1609,29 @@ export class TaskService {
     const task = existing;
     const now = this.now();
     const handoff = normalizeHandoff(raw, fromSessionId, now);
+
+    /**
+     * A finished task does not take another report.
+     *
+     * `completed` and `canceled` are terminal everywhere else — `setAcceptance` refuses to edit
+     * one, `remove` refuses to delete a live one — but this path accepted anything: a completed
+     * task took a second and third `delivered`, appended them to `handoffs`, and woke the
+     * supervisor each time. A live run showed three 「交接通过」 for one completion, and the user
+     * lane read three copies of 「T-1 已全部完成」.
+     *
+     * The report is still answered (a worker mid-turn must not get an exception for reporting
+     * correctly), but it changes nothing and tells nobody: the task ended when it ended.
+     */
+    if (TERMINAL_STATUSES.includes(task.status)) {
+      log.info(`[tasks] handoff for ${task.status} task ${id} from ${fromSessionId} ignored`)
+      return {
+        task,
+        handoff,
+        passed: false,
+        reasons: [`${id} 已经${task.status === 'completed' ? '完成' : '取消'}了，这次交接不再处理`],
+        compactionPending: false,
+      }
+    }
 
     const acceptance = await this.runAcceptance(task);
     const verdict = checkHandoffRules(handoff, (path) => this.probe(this.resolveArtifactPath(task, path)), {

@@ -87,6 +87,21 @@ export const DispatchSchema = z.object({
     .describe('What this session is responsible for. Required for new sessions so later dispatches can be matched.'),
   instruction: z.string().describe('The work itself: goal, acceptance criteria, where the deliverable goes.'),
   attachTaskId: z.string().optional().describe('Attach the session to this task.'),
+  /**
+   * Which plan step this dispatch is for.
+   *
+   * The plan is the record of what is left, so a dispatch that names its step can be checked
+   * against it. Observed live: the supervisor dispatched 1.2 thirty-four seconds after the worker
+   * had marked 1.2 done, the worker re-read the same file and filed a second hand-off, and the
+   * person was told 「交接通过」 twice for one step. Without the id there was nothing to check
+   * against — an instruction is prose, and prose cannot be compared with a plan.
+   */
+  stepId: z
+    .string()
+    .optional()
+    .describe(
+      'The plan step this work is for, e.g. "1.2". Required when the task has a plan: a step that is already done is refused, so naming it is how you find out before spending a turn.',
+    ),
   parallel: z
     .boolean()
     .optional()

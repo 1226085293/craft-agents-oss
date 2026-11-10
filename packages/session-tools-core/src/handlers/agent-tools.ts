@@ -108,6 +108,7 @@ export async function handleDispatch(
       scope: args.scope.trim(),
       instruction: args.instruction.trim(),
       attachTaskId: args.attachTaskId,
+      ...(args.stepId ? { stepId: args.stepId.trim() } : {}),
       parallel: args.parallel === true,
     });
     return successResponse(result.message);

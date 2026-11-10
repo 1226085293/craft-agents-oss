@@ -328,8 +328,31 @@ export class SupervisorRuntime {
       };
       handoffs?: Array<{ outcome?: string }>;
     },
-    params: { userApproved?: boolean },
+    params: { userApproved?: boolean; stepId?: string },
   ): void {
+    /**
+     * The step this dispatch names must still be open.
+     *
+     * This is the check the plan makes possible: the plan is the record of what is left, so a
+     * dispatch that says which step it is for can be answered instead of guessed. Observed live:
+     * 「执行步骤 1.2（读回确认）」 was dispatched thirty-four seconds after 1.2 was marked done; the
+     * worker re-read the same file, filed a second hand-off, and the person was told 「交接通过」
+     * twice for one step.
+     */
+    const planned = task.spec?.plan ?? [];
+    if (params.stepId && planned.length) {
+      const step = planned.find((candidate) => candidate.id === params.stepId);
+      if (!step) {
+        throw new DispatchRefused(
+          `${task.id} 的计划里没有 ${params.stepId} 这一步。先 task_get 看当前计划，再派真实存在的小节。`,
+        );
+      }
+      if (step.status === 'done') {
+        throw new DispatchRefused(
+          `${task.id} 的 ${params.stepId} 已经完成了，不要重复派。要收尾就结束任务，要返工就用 task_plan 新开一节。`,
+        );
+      }
+    }
     if (task.status === 'paused' && !params.userApproved) {
       throw new DispatchRefused(
         `${task.id} 现在是暂停状态（可能正在等用户拍板）。不要往暂停的任务里派活：先让用户确认，恢复这个任务再继续。`,
@@ -337,8 +360,28 @@ export class SupervisorRuntime {
     }
     if (params.userApproved) return;
     const handedOff = (task.handoffs ?? []).some((h) => h.outcome !== 'needs_decision');
-    const planOpen = Boolean(task.spec?.plan?.some((step) => step.status !== 'done'));
-    if (!handedOff || !planOpen) return;
+
+    /**
+     * Work that the plan already records as done must not be dispatched again.
+     *
+     * Observed live: the supervisor dispatched 1.2 at 10:50:47 with
+     * 「执行步骤 1.2（读回确认）」, thirty-four seconds after the worker had marked 1.2 done
+     * at 10:50:13. The task was not `paused` at that instant (the delivery had just been
+     * parked as `awaiting_dispatch`), so the pause gate above let it through, a worker
+     * re-read the same file, filed a second hand-off, and the supervisor reported
+     * 「交接通过」 twice — for one step.
+     *
+     * The plan is the record of what is left. If nothing in it is open, there is nothing
+     * to dispatch, whatever the instruction says.
+     */
+    const openSteps = (task.spec?.plan ?? []).filter((step) => step.status !== 'done');
+    if (task.spec?.plan?.length && openSteps.length === 0) {
+      throw new DispatchRefused(
+        `${task.id} 的计划已经全部完成，没有可派的步骤。不要重复派已经做完的活：` +
+          '要收尾就直接把任务结束，要返工就先用 task_plan 新开一节。',
+      );
+    }
+    if (!handedOff || openSteps.length > 0) return;
     /**
      * There used to be a boundary check here, and removing it is the point.
      *
@@ -366,6 +409,8 @@ export class SupervisorRuntime {
     scope: string;
     instruction: string;
     attachTaskId?: string;
+    /** Which plan step this work is for; checked against the plan before anything spawns. */
+    stepId?: string;
     parallel: boolean;
     /**
      * The user explicitly authorised work beyond the task's recorded scope.

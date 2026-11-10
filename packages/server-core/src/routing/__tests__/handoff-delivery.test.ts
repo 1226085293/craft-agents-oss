@@ -68,3 +68,84 @@ describe('handing work to an existing session', () => {
     rmSync(h.dir, { recursive: true, force: true })
   })
 })
+
+/**
+ * The plan is how a dispatch knows which step it is for.
+ *
+ * Live run: 「执行步骤 1.2（读回确认）」 was dispatched at 10:50:47, thirty-four seconds after the
+ * worker had marked 1.2 done at 10:50:13. The task was not `paused` at that instant, so the pause
+ * gate passed it; the worker re-read the same file, filed a second hand-off, and the supervisor
+ * told the person 「交接通过」 twice for one step. The instruction is prose and could not be checked
+ * against anything — `stepId` makes it checkable.
+ */
+describe('dispatching a step the plan already records as done', () => {
+  function taskWithPlan(steps: Array<{ id: string; status: string }>) {
+    const dir = mkdtempSync(join(tmpdir(), 'craft-stepgate-'))
+    const supervisor: SupervisorSessionInfo = { id: 'sup', role: 'supervisor', spawnDepth: 0, isProcessing: false }
+    const sessions = new Map([['sup', supervisor]])
+    const runtime = new SupervisorRuntime({
+      workspaceRoot: dir,
+      ensureSupervisorSession: async () => supervisor,
+      getSession: (id) => sessions.get(id) ?? null,
+      spawnWorker: async () => ({ sessionId: 'w2' }),
+      sendToSession: async () => {},
+      writeToSupervisor: async () => {},
+      askUser: async () => {},
+      getTask: (taskId) => ({
+        id: taskId,
+        spec: { plan: steps },
+        handoffs: [{ outcome: 'handoff' }],
+      }),
+      handoffContext: () => undefined,
+    })
+    return { runtime, dir }
+  }
+
+  it('refuses a step that is already done', async () => {
+    const { runtime, dir } = taskWithPlan([
+      { id: '1.1', status: 'done' },
+      { id: '1.2', status: 'done' },
+      { id: '2', status: 'todo' },
+    ])
+    await expect(
+      runtime.dispatch({
+        fromSessionId: 'sup',
+        target: { kind: 'task', taskId: 'T-1' },
+        stepId: '1.2',
+        scope: '读回确认',
+        instruction: '读回 docs/a.md',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/1\.2 已经完成/)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('refuses a step that is not in the plan', async () => {
+    const { runtime, dir } = taskWithPlan([{ id: '1.1', status: 'todo' }])
+    await expect(
+      runtime.dispatch({
+        fromSessionId: 'sup',
+        target: { kind: 'task', taskId: 'T-1' },
+        stepId: '9.9',
+        scope: '不存在的一节',
+        instruction: '做点什么',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/没有 9\.9/)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('lets an open step through', async () => {
+    const { runtime, dir } = taskWithPlan([{ id: '1.1', status: 'done' }, { id: '1.2', status: 'todo' }])
+    const result = await runtime.dispatch({
+      fromSessionId: 'sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      stepId: '1.2',
+      scope: '读回确认',
+      instruction: '读回 docs/a.md',
+      parallel: false,
+    })
+    expect(result.sessionId).toBe('w2')
+    rmSync(dir, { recursive: true, force: true })
+  })
+})

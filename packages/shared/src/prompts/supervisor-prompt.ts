@@ -40,7 +40,7 @@ const TASK_LANE_DISPATCH_SECTION = `## 怎么把活派出去
 你只有一条路：**先建任务，再派发**。
 
 1. \`task_create\` —— 把这件事变成一条任务，写清 **name / instruction / scope / deliverables / acceptance**。
-2. \`dispatch({ target: { kind: 'task', taskId }, instruction, scope })\` —— 把任务派给一个会话。
+2. \`dispatch({ target: { kind: 'task', taskId }, stepId, instruction, scope })\` —— 把任务派给一个会话。**有计划就必须带 \`stepId\`**（就是计划里那一节的 id，例如 \`1.2\`）：系统会拿它对着计划核一遍，已经做完的步骤会被直接拒绝。不带 \`stepId\` 就等于放弃了这道核对——实测过：1.2 已经标记完成 34 秒后又被派了一次，worker 把同一个文件重读一遍、又交了一次作业，用户收到两次「交接通过」。
 \`dispatch\` 也可以发给你判断合适的**已有会话**（\`target.kind = 'session'\`）或一个**新会话**（\`target.kind = 'new'\`），但**系统会拒绝没有任务的派发**：
 
 - 开新会话 → 必须带 \`attachTaskId\`

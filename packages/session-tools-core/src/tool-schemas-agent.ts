@@ -158,8 +158,23 @@ export const AskUserSchema = z.object({
         options: z.array(z.string()).optional().describe('Up to 3 concrete choices.'),
       }),
     )
-    .max(2)
-    .describe('At most two questions. More than that means the supervisor should decide itself.'),
+    .min(1)
+    /**
+     * No cap — but not a licence to ask more.
+     *
+     * This was `.max(2)` with a note saying a third question meant the supervisor should decide
+     * for itself, and a supervisor obeyed it literally: asked to raise three things, it sent the
+     * first two and wrote 「第 3 个因为工具单次最多承载 2 个，我默认按不加处理」. The limit was ours,
+     * the decision became the model's, and the person was told about a question they were never
+     * asked. A count is not a reason to decide on someone's behalf; picking what genuinely needs
+     * a person is.
+     *
+     * Answers are collected and delivered together, so several questions are one interruption,
+     * not several.
+     */
+    .describe(
+      'Every question that genuinely needs a person, asked together in one call — as many as there are. Do not drop one because of a count, and do not decide it yourself instead: ask it, or leave it out of the list entirely and say why.',
+    ),
 });
 
 export type AskUserInput = z.infer<typeof AskUserSchema>;

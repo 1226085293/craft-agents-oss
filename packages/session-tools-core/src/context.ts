@@ -408,6 +408,14 @@ export interface SessionToolContext {
       ok: boolean;
       error?: string;
       handedOffTo?: string;
+      /**
+       * Whether the session for that owner actually started.
+       *
+       * A boundary that could not be crossed still ends this worker's authority, but a
+       * worker told 「已经为它开了一个新会话」 when none exists repeats it in its hand-off
+       * and the lie reaches the person.
+       */
+      legStarted?: boolean;
       /** The plan as it stands after the write, so the caller can show it back. */
       plan?: Array<{ id: string; title?: string; status?: string }>;
     }>;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TaskService } from './task-service.ts'
@@ -95,3 +95,89 @@ describe('closing a section that was never split', () => {
     expect(svc.get(task.id)?.spec?.plan?.find((step) => step.id === '2')?.status).toBe('done')
   })
 })
+
+describe('crossing an ownership boundary', () => {
+  it('does not claim a new owner when the next leg cannot start', () => {
+    /**
+     * Observed live on T-1: the worker closed 1.1, the boundary fired, `startRun`
+     * refused because that same worker still held the lock, and the tool told the
+     * worker 「已经为它开了一个新会话」 anyway. The hand-off summary repeated it and the
+     * supervisor passed it to the person — a session that never existed, described as
+     * the one continuing the work.
+     */
+    const root = mkdtempSync(join(tmpdir(), 'craft-boundary-'))
+    let started = 0
+    const svc = new TaskService({
+      workspaceRoot: root,
+      sessionExists: () => true,
+      wakeSupervisor: () => {},
+      startNextLeg: async () => {
+        started += 1
+        return true
+      },
+    })
+    const task = svc.create({
+      name: '边界',
+      instruction: '做 1.1',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_boundary',
+      spec: {
+        cwd: '/tmp',
+        plan: [
+          { id: '1', title: '写文件', status: 'doing' },
+          { id: '1.1', title: '创建', status: 'doing', agent: 'agent-a' },
+          { id: '2', title: '收尾', status: 'todo' },
+          // The next leg is a sub-step: `nextLeg` answers `expand` for an outline that
+          // has none, and an expansion is not a boundary to cross.
+          { id: '2.1', title: '核对', status: 'todo', agent: 'agent-b' },
+        ],
+      } as never,
+    })
+    // The worker's own run holds the task: no second run can start.
+    expect(svc.startRun(task.id, 'sess_worker').ok).toBe(true)
+
+    const result = svc.updatePlan(task.id, { id: '1.1', status: 'done' })
+
+    expect(result.legStarted).toBe(false)
+    expect(started).toBe(0)
+    // No new owner exists, so the record must not name one.
+    expect(svc.get(task.id)?.assigneeAgentId).toBeUndefined()
+    const journal = readFileSync(join(root, 'tasks', `${task.id}.journal.jsonl`), 'utf8')
+    expect(journal).not.toContain('next_leg_started')
+  })
+
+  it('is not a boundary when the same agent owns the next step', () => {
+    // `assigneeAgentId` is blank for a scheduler-dispatched task; comparing the next
+    // step against it made every such task cross a boundary on its first done step.
+    const root = mkdtempSync(join(tmpdir(), 'craft-boundary-same-'))
+    let started = 0
+    const svc = new TaskService({
+      workspaceRoot: root,
+      sessionExists: () => true,
+      wakeSupervisor: () => {},
+      startNextLeg: async () => {
+        started += 1
+        return true
+      },
+    })
+    const task = svc.create({
+      name: '同一个人',
+      instruction: '做 1.1',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_same',
+      spec: {
+        cwd: '/tmp',
+        plan: [
+          { id: '1', title: '写文件', status: 'doing' },
+          { id: '1.1', title: '创建', status: 'doing', agent: 'builtin-default' },
+          { id: '1.2', title: '读回', status: 'todo', agent: 'builtin-default' },
+        ],
+      } as never,
+    })
+
+    const result = svc.updatePlan(task.id, { id: '1.1', status: 'done' })
+
+    expect(result.handedOffTo).toBeUndefined()
+    expect(started).toBe(0)
+  })
+});

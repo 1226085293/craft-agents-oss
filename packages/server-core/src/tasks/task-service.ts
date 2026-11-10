@@ -621,6 +621,13 @@ export class TaskService {
      * ownership boundary. The caller tells the reporting worker to stop.
      */
     handedOffTo?: string;
+    /**
+     * Whether that session actually started.
+     *
+     * A boundary that could not be crossed is still a boundary: the caller must
+     * stop either way, but it must not be told a worker exists when none does.
+     */
+    legStarted?: boolean;
   } {
     const task = this.require(id);
     const now = this.now();
@@ -647,10 +654,23 @@ export class TaskService {
      * gets its own session and the current one is told to stop, which is the
      * difference between a plan that assigns work and a plan that pretends to.
      */
+    /**
+     * The comparison is between the two steps, not against the task's assignee.
+     *
+     * `assigneeAgentId` is unset for a task that was dispatched by the scheduler
+     * without a named agent, and comparing the next step's owner against
+     * `undefined` made every such task cross a boundary on its first completed
+     * step — a boundary that only existed because the field was blank. The owner
+     * of the step just closed is the fact: when the next step names the same
+     * agent, the worker keeps its authority and no session is owed.
+     */
+    const closedStep = result.plan.find((step) => step.id === patch.id);
+    const currentOwner = closedStep?.agent ?? next.assigneeAgentId;
     let handedOffTo: string | undefined;
-    if (patch.status === 'done') {
+    const previousAssignee = next.assigneeAgentId;
+    if (patch.status === 'done' && currentOwner) {
       const leg = nextLeg(result.plan);
-      if (leg?.kind === 'step' && leg.agent && leg.agent !== next.assigneeAgentId && this.deps.startNextLeg) {
+      if (leg?.kind === 'step' && leg.agent && leg.agent !== currentOwner && this.deps.startNextLeg) {
         handedOffTo = leg.agent;
         // Record the hand-off on the task before starting it: the new session's
         // own write path reads `assigneeAgentId` to decide whether it is the
@@ -667,24 +687,66 @@ export class TaskService {
       data: { step: patch.id, status: patch.status, agent: patch.agent, removed: patch.remove === true },
     });
 
+    /**
+     * Awaited, because the answer changes what the worker is told.
+     *
+     * This used to be fire-and-forget with the failure logged and the caller told
+     * 「已经为它开了一个新会话」 regardless. Observed live: the start was refused
+     * (the worker's own run still held the task), the log said so, the worker was
+     * told a session existed, and both the hand-off summary and the supervisor's
+     * report to the user repeated it — a session that was never created was
+     * described to the person as the one continuing the work.
+     *
+     * The refusal path returns synchronously (`claim.ok` is checked before any
+     * session is created), so waiting costs nothing in the case that needs the
+     * truth most.
+     */
+    let legStarted = false;
     if (handedOffTo) {
       const agent = handedOffTo;
-      appendJournal(this.root, id, {
-        type: 'next_leg_started',
-        at: now,
-        data: { step: patch.id, agent },
-      });
-      void this.deps
-        .startNextLeg!(next, agent)
-        .then((started) => {
-          if (!started) log.warn(`[tasks] ownership boundary of ${id} not started for ${agent}`);
-        })
-        .catch((error) => {
-          log.warn(`[tasks] could not start ${agent} at the ${id} boundary`, { error: String(error) });
+      /**
+       * Asked before started, because the answer is knowable and the worker is told it.
+       *
+       * The start cannot succeed while this run owns the task — `startRun` refuses a
+       * second lock, which is exactly what a worker crossing a boundary in its own
+       * turn asks for. The refusal used to be logged and swallowed while the record
+       * and the tool result both said a session existed; the hand-off summary repeated
+       * it and the supervisor passed it to the person. `startGate` is the same
+       * predicate `startRun` uses, and it answers synchronously.
+       */
+      const refusal = this.startGate({ ...next, status: 'running' }, now);
+      legStarted = refusal === null;
+      if (legStarted) {
+        appendJournal(this.root, id, {
+          type: 'next_leg_started',
+          at: now,
+          data: { step: patch.id, agent },
         });
+        try {
+          this.deps.startNextLeg!(next, agent).catch((error: unknown) => {
+            log.warn(`[tasks] could not start ${agent} at the ${id} boundary`, {
+              error: String(error),
+            });
+          });
+        } catch (error) {
+          log.warn(`[tasks] could not start ${agent} at the ${id} boundary`, { error: String(error) });
+        }
+      } else {
+        // No new owner exists, so the record must not name one: leaving the flip
+        // behind made the task claim an assignee that never worked on it, and the
+        // hand-off after it compared against the wrong owner.
+        log.warn(
+          `[tasks] ownership boundary of ${id} not started for ${agent}: ${refusal?.reason ?? 'unknown'}`,
+        );
+        this.save({ ...next, assigneeAgentId: previousAssignee });
+      }
     }
 
-    return { ok: true, plan: result.plan, ...(handedOffTo ? { handedOffTo } : {}) };
+    return {
+      ok: true,
+      plan: result.plan,
+      ...(handedOffTo ? { handedOffTo, legStarted } : {}),
+    };
   }
 
   /**

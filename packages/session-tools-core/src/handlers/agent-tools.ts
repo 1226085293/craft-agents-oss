@@ -411,6 +411,7 @@ export async function handleTaskPlan(
   if (args.steps?.length) {
     let applied = 0;
     let handedOffTo: string | undefined;
+    let legStarted = false;
     let lastPlan: Array<{ id: string; title?: string; status?: string }> | undefined;
     for (const step of args.steps) {
       if (!step.id?.trim()) return errorResponse(`steps[${applied}].id is required.`);
@@ -433,12 +434,13 @@ export async function handleTaskPlan(
       // more steps after it would edit work that now belongs to someone else.
       if (result.handedOffTo) {
         handedOffTo = result.handedOffTo;
+        legStarted = result.legStarted === true;
         break;
       }
     }
     return successResponse(
       handedOffTo
-        ? boundaryNotice(applied, handedOffTo)
+        ? boundaryNotice(applied, handedOffTo, legStarted)
         : `Plan updated: ${applied} step(s).${renderPlan(lastPlan)}`,
     );
   }
@@ -478,7 +480,9 @@ export async function handleTaskPlan(
       ...(args.remove !== undefined ? { remove: args.remove } : {}),
     });
     if (!result.ok) return errorResponse(result.error ?? 'the plan was not updated.');
-    if (result.handedOffTo) return successResponse(boundaryNotice(1, result.handedOffTo));
+    if (result.handedOffTo) {
+      return successResponse(boundaryNotice(1, result.handedOffTo, result.legStarted === true));
+    }
     return successResponse(`Plan step ${args.id} updated.${renderPlan(result.plan)}`);
   } catch (error) {
     return errorResponse(
@@ -492,16 +496,21 @@ export async function handleTaskPlan(
  *
  * Written as an instruction, not a status line, because the failure mode is a
  * worker that reads "step updated" and keeps going into someone else's section.
- * The new session already exists by the time this is returned, so the only thing
- * left to prevent duplicate work is stopping this one.
+ *
+ * Whether a session was opened is the caller's answer, not an assumption: this used
+ * to say 「已经为它开了一个新会话」 unconditionally, and when the start was refused the
+ * worker repeated it in its hand-off, the supervisor repeated it to the user, and a
+ * session that never existed was described as the one continuing the work.
  */
-function boundaryNotice(applied: number, agent: string): string {
+function boundaryNotice(applied: number, agent: string, started: boolean): string {
   return [
     `Plan updated: ${applied} step(s).`,
     '',
-    `本节已完成，下一节归 ${agent}。已经为它开了一个新会话并交代了上下文。`,
+    started
+      ? `本节已完成，下一节归 ${agent}。已经为它开了一个新会话并交代了上下文。`
+      : `本节已完成，下一节归 ${agent}。**新会话还没开起来**（这一轮仍持有任务，或启动被拒绝），交接后由督导安排。`,
     '**到此为止：不要继续做下一节，也不要再改这份计划。** 用 report_result 交接你这一段的工作即可。',
-  ].join('\n');
+  ].join(String.fromCharCode(10));
 }
 
 /** Record a handoff produced by another session (the rule gate still applies). */

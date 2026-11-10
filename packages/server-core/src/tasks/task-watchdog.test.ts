@@ -103,15 +103,42 @@ describe('idle sessions', () => {
     expect(woken).toBe(1);
   });
 
+  it('does not wake a session that already filed its report', () => {
+    /**
+     * A worker that handed off and stopped is not idle, it is done.
+     *
+     * This used to fire — 「continue」 to a session whose last act was a hand-off — and
+     * the supervisor read the nudge as work that needed resuming. Observed live on a
+     * scope-limited task: hand-off at 09:01:53, idle wake at 09:08:19, and the
+     * supervisor asked the person whether to continue because of it.
+     */
+    const pauses: string[] = [];
+    let woken = 0;
+    const filed = task({
+      updatedAt: idleSince,
+      stats: { runs: 1, activeMs: 0, lastHeartbeatAt: idleSince, wakeAttempts: 0 },
+      handoffs: [{ outcome: 'handoff', fromSessionId: 'sess-1', at: NOW, summary: 'x' }] as never,
+    });
+    runWatchdogPass(
+      deps([filed], {
+        sessionWorking: () => false,
+        wakeSession: () => {
+          woken += 1;
+        },
+        pause: (id) => pauses.push(id),
+      }),
+    );
+    expect({ woken, pauses }).toEqual({ woken: 0, pauses: [] });
+  });
+
   it('pauses the task once the wakes are spent', () => {
     // A wake that keeps not working is a loop paying for a model turn each time.
     const pauses: string[] = [];
-    // Already filed this run, so the remaining complaint is 「nothing is moving」 —
-    // that is the idle rule, and it is the one with the wake budget.
+    // No hand-off for this run, so the complaint stands and the idle budget applies.
     const idle = task({
       updatedAt: idleSince,
       stats: { runs: 1, activeMs: 0, lastHeartbeatAt: idleSince, wakeAttempts: 2 },
-      handoffs: [{ outcome: 'handoff', fromSessionId: 'sess-1', at: NOW, summary: 'x' }] as never,
+      handoffs: [],
     });
     runWatchdogPass(
       deps([idle], {

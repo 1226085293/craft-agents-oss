@@ -404,7 +404,17 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
     // Liveness is not the same as progress: the session object outlives the turn.
     // A running task whose session is sitting idle (and has been for a while) is
     // the state the user sees as "进行中 but nothing is happening".
-    if (deps.sessionWorking && task.currentSessionId && !waiting) {
+    /**
+     * A session that already filed its report is not idle, it is done.
+     *
+     * `unreported` has always excluded this run's hand-off; `idle` did not, so a task
+     * whose worker handed off and stopped — correctly, the report says so — was woken
+     * six minutes later with 「继续」, and the supervisor read that as work that needed
+     * resuming. Observed live: hand-off at 09:01:53, idle wake at 09:08:19, and a
+     * supervisor that then asked the person whether to continue on the strength of a
+     * nudge to a session with nothing left to do.
+     */
+    if (deps.sessionWorking && task.currentSessionId && !waiting && !filedThisRun) {
       const working = deps.sessionWorking(task.currentSessionId);
       if (working === false && now - lastActivityOf(task) >= IDLE_SESSION_MS) {
         findings.push({ kind: 'idle', task });
@@ -582,6 +592,23 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
         break;
       case 'unreported': {
         const sessionId = finding.task.currentSessionId
+        /**
+         * The same budget as 「idle」, because it is the same loop.
+         *
+         * A worker that stops without filing is woken to file; one that never files was
+         * being woken forever, one model turn at a time, while the idle path next door
+         * gave up after two tries. The budget is about what a wake can achieve, and it
+         * cannot achieve more here.
+         */
+        const unreportedAttempts = finding.task.stats?.wakeAttempts ?? 0
+        if (sessionId && deps.wakeSession && unreportedAttempts >= MAX_IDLE_WAKES) {
+          deps.pause(finding.task.id, null, '执行者多次提醒后仍未交接')
+          notify(
+            `${finding.task.id} 的执行者已停止且多次提醒仍未交作业，任务已暂停，需要你确认下一步。`,
+          )
+          acted += 1
+          break
+        }
         if (sessionId && deps.wakeSession) {
           // The nudge text adapts to whether the plan is finished; see
           // formatUnreportedBrief. The wake itself does not depend on it.

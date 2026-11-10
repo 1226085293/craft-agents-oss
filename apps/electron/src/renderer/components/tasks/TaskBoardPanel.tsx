@@ -64,6 +64,14 @@ export interface TaskDetailView {
   instruction: string
   status: TaskStatus
   pauseReason?: string | null
+  /**
+   * The watchdog is about to retry this task by itself.
+   *
+   * Computed on the server with the same function the loop uses, so the card cannot offer a
+   * manual 「继续」 for a retry that is already on its way — the click used to land on a gate that
+   * refused because a run already owned the task.
+   */
+  willRetry?: boolean
   sessionIds: string[]
   currentSessionId?: string
   handoffs: TaskHandoffView[]

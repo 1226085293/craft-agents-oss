@@ -123,10 +123,25 @@ export interface TaskDetailPanelViewProps {
    * ids) when the roster has not loaded yet.
    */
   agents?: ReadonlyArray<{ id: string; name: string }>
+  /**
+   * Change what starts this task.
+   *
+   * `updateTaskTrigger` existed and had no caller: the page could show 「定时 · 0 9 * * *」 and
+   * nothing could change it, so a scheduled task's schedule was only editable by editing files.
+   * Manual / cron / event are the three the scheduler understands, and the editor offers exactly
+   * those — a free-form JSON box would let the page save a trigger the loop silently ignores.
+   */
+  onUpdateTrigger?: (
+    id: string,
+    trigger:
+      | { kind: 'manual' }
+      | { kind: 'cron'; expr: string; timezone?: string; enabled: boolean }
+      | { kind: 'event'; source: string; types?: string[]; enabled: boolean },
+  ) => void | Promise<void>
 }
 
 /** Full-width task detail for the content panel, with an optional navigator back action. */
-export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onAnswer, onOpenSession, planJumps, onJumpToStep, agents }: TaskDetailPanelViewProps): React.JSX.Element {
+export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun, onAnswer, onOpenSession, planJumps, onJumpToStep, agents, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
   const { t } = useTranslation()
 
   return (
@@ -161,6 +176,10 @@ export function TaskDetailPanelView({ detail, onClose, onResume, onCancel, onRun
           planJumps={planJumps}
           onJumpToStep={onJumpToStep}
           agents={agents}
+          // Editing a trigger needs the same wrapper pass-through `onAnswer` needed: the field is
+          // drawn in the content component, and a callback that stops at this wrapper renders the
+          // control as absent.
+          onUpdateTrigger={onUpdateTrigger}
         />
       </div>
     </div>
@@ -372,7 +391,7 @@ function TaskDecisionAnswer({
   )
 }
 
-function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpenSession, planJumps, onJumpToStep, agents }: TaskDetailPanelViewProps): React.JSX.Element {
+function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpenSession, planJumps, onJumpToStep, agents, onUpdateTrigger }: TaskDetailPanelViewProps): React.JSX.Element {
   /**
    * The questions still waiting for an answer, in the order they were asked.
    *
@@ -408,7 +427,75 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
 
   const { t } = useTranslation()
   const isPaused = detail.status === 'paused'
-  const isStartable = detail.status === 'backlog' || isPaused
+  /**
+   * No 「继续」 for a retry that is already on its way.
+   *
+   * `willRetry` comes from the same predicate the watchdog's retry rule uses; before it, the card
+   * offered the button and the click was refused by the run gate with a sentence the page had never
+   * shown. The button that cannot work is worse than no button.
+   */
+  const isStartable = (detail.status === 'backlog' || isPaused) && !detail.willRetry
+  const trigger = detail.trigger
+  const [editingTrigger, setEditingTrigger] = React.useState(false)
+  const [triggerKind, setTriggerKind] = React.useState<'manual' | 'cron' | 'event'>(
+    trigger?.kind === 'cron' ? 'cron' : trigger?.kind === 'event' ? 'event' : 'manual',
+  )
+  const [cronExpr, setCronExpr] = React.useState<string>(
+    trigger?.kind === 'cron' ? (trigger.expr ?? '') : '',
+  )
+  const [cronTimezone, setCronTimezone] = React.useState(
+    trigger?.kind === 'cron' ? (trigger.timezone ?? '') : '',
+  )
+  const [eventSource, setEventSource] = React.useState<string>(
+    trigger?.kind === 'event' ? (trigger.source ?? '') : '',
+  )
+  const [eventTypes, setEventTypes] = React.useState<string>(
+    trigger?.kind === 'event' ? (trigger.types ?? []).join(', ') : '',
+  )
+  const [triggerError, setTriggerError] = React.useState<string | null>(null)
+  const [triggerSaving, setTriggerSaving] = React.useState(false)
+  const saveTrigger = async (): Promise<void> => {
+    if (!onUpdateTrigger) return
+    setTriggerError(null)
+    const types = eventTypes
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+    if (triggerKind === 'cron' && !cronExpr.trim()) {
+      setTriggerError('定时触发需要一个 cron 表达式，例如 0 9 * * *')
+      return
+    }
+    if (triggerKind === 'event' && !eventSource.trim()) {
+      setTriggerError('事件触发需要一个来源，例如 git')
+      return
+    }
+    setTriggerSaving(true)
+    try {
+      await onUpdateTrigger(
+        detail.id,
+        triggerKind === 'manual'
+          ? { kind: 'manual' }
+          : triggerKind === 'cron'
+            ? {
+                kind: 'cron',
+                expr: cronExpr.trim(),
+                ...(cronTimezone.trim() ? { timezone: cronTimezone.trim() } : {}),
+                enabled: true,
+              }
+            : {
+                kind: 'event',
+                source: eventSource.trim(),
+                ...(types.length ? { types } : {}),
+                enabled: true,
+              },
+      )
+      setEditingTrigger(false)
+    } catch (error) {
+      setTriggerError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setTriggerSaving(false)
+    }
+  }
   const triggerLabel = detail.trigger?.kind === 'cron'
     ? `定时 · ${detail.trigger.expr}${detail.trigger.timezone ? ` (${detail.trigger.timezone})` : ''}`
     : detail.trigger?.kind === 'event'
@@ -496,8 +583,105 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
               * heading between the title and the instruction for a single word.
               */}
             <span className="mx-1 text-border">·</span>
-            <span>触发方式 {triggerLabel}</span>
+            {onUpdateTrigger ? (
+              <button
+                type="button"
+                className="rounded px-1 text-muted-foreground underline decoration-dotted underline-offset-2 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                onClick={() => setEditingTrigger((open) => !open)}
+                aria-expanded={editingTrigger}
+              >
+                触发方式 {triggerLabel}
+              </button>
+            ) : (
+              <span>触发方式 {triggerLabel}</span>
+            )}
           </p>
+          {editingTrigger && onUpdateTrigger ? (
+            <div className="mt-3 rounded-lg border border-border/70 bg-foreground/[0.03] p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                {(
+                  [
+                    ['manual', '手动'],
+                    ['cron', '定时'],
+                    ['event', '事件'],
+                  ] as const
+                ).map(([kind, label]) => (
+                  <button
+                    key={kind}
+                    type="button"
+                    onClick={() => setTriggerKind(kind)}
+                    className={
+                      triggerKind === kind
+                        ? 'rounded-md border border-primary/60 bg-primary/15 px-2.5 py-1 text-xs font-medium text-foreground'
+                        : 'rounded-md border border-border/70 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:bg-foreground/5'
+                    }
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {triggerKind === 'cron' ? (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <input
+                    value={cronExpr}
+                    onChange={(event) => setCronExpr(event.target.value)}
+                    placeholder="0 9 * * * （分 时 日 月 周）"
+                    className="min-h-8 w-48 rounded-md border border-border/70 bg-background px-2 text-xs text-foreground placeholder:text-muted-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label="cron 表达式"
+                  />
+                  <input
+                    value={cronTimezone}
+                    onChange={(event) => setCronTimezone(event.target.value)}
+                    placeholder="时区（可选，如 Asia/Shanghai）"
+                    className="min-h-8 w-52 rounded-md border border-border/70 bg-background px-2 text-xs text-foreground placeholder:text-muted-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label="时区"
+                  />
+                </div>
+              ) : null}
+              {triggerKind === 'event' ? (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <input
+                    value={eventSource}
+                    onChange={(event) => setEventSource(event.target.value)}
+                    placeholder="来源（如 git、qqmail-idle）"
+                    className="min-h-8 w-44 rounded-md border border-border/70 bg-background px-2 text-xs text-foreground placeholder:text-muted-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label="事件来源"
+                  />
+                  <input
+                    value={eventTypes}
+                    onChange={(event) => setEventTypes(event.target.value)}
+                    placeholder="事件类型（逗号分隔，可选）"
+                    className="min-h-8 w-56 rounded-md border border-border/70 bg-background px-2 text-xs text-foreground placeholder:text-muted-foreground/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    aria-label="事件类型"
+                  />
+                </div>
+              ) : null}
+              {triggerError ? <p className="mt-2 text-xs text-destructive">{triggerError}</p> : null}
+              <div className="mt-3 flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={triggerSaving}
+                  onClick={() => void saveTrigger()}
+                  className="inline-flex min-h-8 items-center rounded-md border border-border/70 bg-foreground/5 px-3 text-xs font-medium text-foreground transition-colors hover:bg-foreground/10 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                >
+                  {triggerSaving ? '保存中…' : '保存触发方式'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingTrigger(false)
+                    setTriggerError(null)
+                  }}
+                  className="inline-flex min-h-8 items-center rounded-md px-2.5 text-xs text-muted-foreground transition-colors hover:bg-foreground/5"
+                >
+                  取消
+                </button>
+                {triggerKind === 'manual' ? (
+                  <span className="text-xs text-muted-foreground">只有手动或督导触发才启动</span>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <span className="font-mono text-xs text-muted-foreground/80">任务id：{detail.id}</span>
@@ -656,6 +840,11 @@ function TaskDetailContent({ detail, onResume, onCancel, onRun, onAnswer, onOpen
           <div className="min-w-0">
             <div className="text-xs font-semibold text-amber-300">暂停原因</div>
             <p className="td-body mt-1 text-foreground/85">{pauseReasonLabel(detail.pauseReason)}</p>
+            {detail.willRetry ? (
+              <p className="td-meta mt-1 text-amber-300/90">
+                巡检会自动重试一次，不需要手动继续；再失败会停下来等你决定。
+              </p>
+            ) : null}
           </div>
         </div>
       ) : null}

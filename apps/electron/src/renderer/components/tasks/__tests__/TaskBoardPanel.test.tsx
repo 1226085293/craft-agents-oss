@@ -74,12 +74,14 @@ function renderList(tasks: TaskListItem[], selectedId?: string): string {
 function renderDetail(
   task: TaskDetailView,
   agents?: ReadonlyArray<{ id: string; name: string }>,
+  onUpdateTrigger?: (id: string, trigger: unknown) => void,
 ): string {
   return renderToStaticMarkup(createElement(TaskDetailPanelView, {
     detail: task,
     ...(agents ? { agents } : {}),
     onResume: () => {},
     onCancel: () => {},
+    ...(onUpdateTrigger ? { onUpdateTrigger } : {}),
   }))
 }
 
@@ -441,3 +443,30 @@ describe('task detail presentation', () => {
 
     expect(html.indexOf('等问句')).toBeLessThan(html.indexOf('task-plan-heading'))
   })
+
+/**
+ * A schedule the page shows and cannot change is a schedule edited in files.
+ *
+ * `updateTaskTrigger` existed with zero callers: 「定时 · 0 9 * * *」 rendered as plain text, so the
+ * only way to move a task's schedule was to edit its JSON. The entry point is what this pins — the
+ * editor's own fields are covered by rendering, which is all a static-markup test can see.
+ */
+describe('the trigger is editable from the page', () => {
+  const scheduled: TaskDetailView = {
+    ...detail,
+    trigger: { kind: 'cron', expr: '0 9 * * *', timezone: 'Asia/Shanghai', enabled: true },
+  }
+
+  it('renders the trigger as an interactive entry when a handler is provided', () => {
+    const html = renderDetail(scheduled, undefined, () => {})
+    expect(html).toContain('触发方式')
+    expect(html).toContain('aria-expanded')
+  })
+
+  it('renders it as plain text when nobody can save a change', () => {
+    // No handler means no affordance: a button that cannot write is worse than a label.
+    const html = renderDetail(scheduled)
+    expect(html).toContain('触发方式')
+    expect(html).not.toContain('aria-expanded')
+  })
+})

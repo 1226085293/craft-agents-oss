@@ -161,6 +161,24 @@ export function TaskDetailPanel({
           }).tasksRun?.(workspaceId, id)
         }}
         agents={agents}
+        onUpdateTrigger={(id, trigger) => {
+          /**
+           * The write goes through the same RPC the tool uses, and reports what it returned.
+           *
+           * `normalizeTrigger` on the server is the validator; a rejected expression has to reach
+           * the editor as an error instead of closing the panel and leaving the old schedule in
+           * place.
+           */
+          const api = window.electronAPI as unknown as {
+            tasksUpdateTrigger?: (
+              workspaceId: string,
+              id: string,
+              trigger: unknown,
+            ) => Promise<unknown>
+          }
+          if (!api.tasksUpdateTrigger) throw new Error('这个版本不支持修改触发方式')
+          return api.tasksUpdateTrigger(workspaceId, id, trigger).then(() => undefined)
+        }}
         onAnswer={(id, text, decisionId) => {
           /**
            * The answer is delivered, and nothing else.

@@ -37,7 +37,7 @@ import {
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
 import type { Task } from '@craft-agent/shared/tasks'
-import { checkAgreedPlanAppend, readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatUnreportedBrief, formatNextLegBrief, formatDispatchTaskContext, nextLeg, stepParent, normalizeSpec, normalizeTrigger, undeliveredQuestions } from '@craft-agent/shared/tasks'
+import { checkAgreedPlanAppend, readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatPauseBrief, formatUnreportedBrief, formatNextLegBrief, formatDispatchTaskContext, nextLeg, stepParent, normalizeSpec, normalizeTrigger, undeliveredQuestions } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -7416,13 +7416,30 @@ ${request.prompt}`;
             if (builtAttachments.length > 0) fileAttachments = builtAttachments
           }
 
-          // Capture the target's busy state BEFORE delivery so the sender gets a
-          // truthful ack. A busy (mid-turn) target queues the message and replays
-          // it after the current turn (anthropic defaults to 'queue'); an idle
-          // target starts processing immediately. sendMessage throws for an
-          // unknown session — that rejection propagates to the handler's catch.
+          /**
+           * Deliver and return — do not hold the sender's turn for the target's whole turn.
+           *
+           * `sendMessage` resolves only after the target finishes its entire turn, because it runs
+           * the chat loop to completion. Awaiting it here made one `send_agent_message` block for
+           * the full length of someone else's reasoning: observed at 79 seconds on a real run, with
+           * the caller's process block spinning the whole time and the person watching it.
+           *
+           * Routing a message is not a request for its answer. `dispatch` already avoids this with
+           * `void this.sendMessage(...)` — the comment there says exactly why — and this path was
+           * the one that never got the same treatment.
+           *
+           * The ack stays honest: the busy state is read before delivery, and the reply says
+           * 「queued」 or 「delivered」 rather than claiming the target has acted.
+           */
           const targetBusy = this.sessions.get(sessionId)?.isProcessing === true
-          await this.sendMessage(sessionId, message, fileAttachments)
+          const session = this.sessions.get(sessionId)
+          if (!session) {
+            // Report a real failure synchronously: a queued promise would hide it behind the turn.
+            throw new Error(`Session ${sessionId} not found`)
+          }
+          void this.sendMessage(sessionId, message, fileAttachments).catch((error) => {
+            sessionLog.warn('send_agent_message delivery failed', { sessionId, error })
+          })
           return {
             delivery: targetBusy ? ('queued' as const) : ('delivered' as const),
             targetBusy,
@@ -7987,6 +8004,23 @@ ${request.prompt}`;
           service.noteWake(task.id)
           const managed = this.sessions.get(sessionId)
           if (!managed) return false
+          if (reason === 'pause') {
+            /**
+             * A message, not `resumeTurn()`.
+             *
+             * `resumeTurn` re-issues the existing transcript — right for a worker that stopped
+             * mid-task, wrong here: the supervisor's transcript has no instruction to tell the
+             * person anything, so continuing it makes the model guess and, observed on real runs,
+             * resume work the person had frozen. The brief is the instruction.
+             */
+            try {
+              await this.sendMessage(sessionId, formatPauseBrief(task))
+              return true
+            } catch (error) {
+              sessionLog.warn(`[tasks] could not ask ${task.id}'s supervisor to explain the pause`, { error })
+              return false
+            }
+          }
           if (reason === 'unreported') {
             // This one genuinely needs words: a worker that stopped without filing does
             // not know that finishing without `report_result` leaves the task open, and
@@ -8046,6 +8080,7 @@ ${request.prompt}`;
           service.setStatus(id, 'paused', { pauseReason: reason, error: note })
         },
         denyDecision: (id, note) => service.denyDecision(id, note),
+        markPauseAnnounced: (id) => service.markPauseAnnounced(id),
         recordUnwordedRetry: (id, attempts) => service.recordUnwordedRetry(id, attempts),
         /**
          * Between turns, or not there at all.

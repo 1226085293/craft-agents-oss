@@ -19,6 +19,7 @@ import {
   type TaskDeliverable,
   type TaskPauseReason,
   type TaskSpec,
+  type TaskStats,
   type TaskStatus,
   type TaskTrigger,
   type TaskVerifyConfig,
@@ -123,6 +124,22 @@ function assertPlanSettled(task: Task, to: TaskStatus): void {
   );
 }
 
+/**
+ * Clear the「已告知」mark so a fresh pause gets its own announcement.
+ *
+ * Separate from the transition itself because it is the one piece of that write which exists only
+ * for the watchdog's benefit: the board does not care whether the person was told, and a reader of
+ * `applyTransition` should not have to know what wakes what.
+ */
+function resetPauseAnnouncement(stats: TaskStats | undefined): TaskStats {
+  return {
+    ...stats,
+    runs: stats?.runs ?? 0,
+    activeMs: stats?.activeMs ?? 0,
+    announcedPauseAt: undefined,
+  };
+}
+
 export function applyTransition(
   task: Task,
   to: TaskStatus,
@@ -144,6 +161,17 @@ export function applyTransition(
       lastPausedAt: options.now,
       ...(options.error ? { lastError: options.error } : {}),
     };
+    /**
+     * A new pause starts unannounced.
+     *
+     * `announcedPauseAt` is what stops the watchdog telling the person about the same pause on
+     * every pass — which means it must also be what a *new* pause clears. Without this, the flag
+     * from the first pause outlived it: a task paused, was explained, resumed, and then paused
+     * again would never be announced a second time, because the record still said「已告知」 from
+     * the last time. The pause that nobody hears about is the exact failure this flag exists to
+     * prevent, so it cannot also be the thing that causes it.
+     */
+    next.stats = resetPauseAnnouncement(task.stats);
   } else if (to === 'running') {
     next.pauseReason = null;
     if (task.status === 'paused') {

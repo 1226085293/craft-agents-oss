@@ -507,6 +507,41 @@ export function formatNextLegBrief(task: Task, step: { id: string; title: string
  * unfinished, this is a continuation rather than a new instruction, and the plan
  * is the source of truth for what is left.
  */
+/**
+ * Tell the supervisor that a pause is waiting to be explained.
+ *
+ * Deliberately not `formatIdleWakeBrief`: that one says 「继续任务」 and is addressed to a worker.
+ * This pause is a stop the person has to release, and the only thing missing is the sentence — so
+ * the brief names the state, what is left, and that speaking to the user is the whole job. Waking
+ * the supervisor without saying this makes it guess, and a supervisor that guesses resumes work
+ * the person had frozen.
+ */
+export function formatPauseBrief(task: Task): string {
+  const remaining = openSteps(task.spec?.plan);
+  const lines = [
+    `任务 ${task.id}（${task.name}）已经暂停，等你把结论告诉用户。`,
+    '',
+    `任务目标：${task.instruction}`,
+  ];
+  const directive = task.spec?.directive?.text?.trim();
+  if (directive) lines.push('', `用户当时给的授权边界：${directive}`);
+  if (remaining.length > 0) {
+    lines.push(
+      '',
+      '计划里还没做的步骤（现在不要做）：',
+      ...remaining.slice(0, 12).map((step) => `- ${step.id} ${step.title}（${step.status}）`),
+    );
+  }
+  lines.push(
+    '',
+    '## 你现在要做的',
+    '',
+    '用 `report_to_user` 告诉用户：这一段做完了、按他的指示停在这里、还差哪些步骤、要不要放行。',
+    '**不要派活，不要继续执行，也不要用 ask_user 再问一遍已经问过的事** —— 这一轮只负责说明。',
+  );
+  return lines.join('\n');
+}
+
 export function formatIdleWakeBrief(task: Task): string {
   const remaining = openSteps(task.spec?.plan);
   const lines = [

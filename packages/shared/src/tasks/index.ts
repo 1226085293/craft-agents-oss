@@ -122,6 +122,7 @@ export {
   formatDispatchTaskContext,
   formatHandoffContext,
   formatIdleWakeBrief,
+  formatPauseBrief,
   formatUnreportedBrief,
   formatNextLegBrief,
   formatPlanRuleBlock,

@@ -181,6 +181,16 @@ export interface TaskStats {
    */
   wakeAttempts?: number;
   lastWakeAt?: number;
+  /**
+   * When the supervisor was woken to tell the person this task had paused.
+   *
+   * The supervisor is the only voice the user hears, and the wake is a model turn — which can die.
+   * On a real run the pause landed, the wake hit a 60-second upstream silence, the retry was
+   * exhausted, and the turn ended in an error: the task sat paused with nobody told and every
+   * watchdog rule skipped it. This is what tells 「announced」 from 「still owed a sentence」, and
+   * it lives on the record so a restart does not forget that it was said.
+   */
+  announcedPauseAt?: number;
   /** When the current run started (epoch ms). */
   runStartedAt?: number;
   /**

@@ -38,7 +38,9 @@ export type WatchdogFinding =
   | { kind: 'looping'; task: Task }
   | { kind: 'off_track'; task: Task }
   | { kind: 'resume_lost'; task: Task }
-  | { kind: 'unworded_question'; task: Task };
+  | { kind: 'unworded_question'; task: Task }
+  /** Paused with nobody told — the relay that owed the person a sentence died. */
+  | { kind: 'unannounced_pause'; task: Task };
 
 export interface WatchdogDeps {
   /** Tasks to inspect (already filtered to the workspace). */
@@ -86,8 +88,15 @@ export interface WatchdogDeps {
   wakeSession?: (
     task: Task,
     sessionId: string,
-    reason: 'idle' | 'unreported',
+    reason: 'idle' | 'unreported' | 'pause',
   ) => void | boolean | Promise<boolean>;
+  /**
+   * Record that the person has been told this task paused.
+   *
+   * The guard against telling them twice: without it, a pause nobody acknowledges would be
+   * announced on every pass.
+   */
+  markPauseAnnounced?: (id: string) => void;
   /** Pause a task with a reason. */
   /**
    * Park a task, declaring only what a record cannot later prove.
@@ -202,6 +211,14 @@ export const UNREPORTED_GRACE_MS = 90_000;
  * is to notice, not to interrupt.
  */
 export const UNWORDED_QUESTION_GRACE_MS = 2 * 60_000;
+
+/**
+ * How long a pause may sit unannounced before the relay is woken again.
+ *
+ * Long enough that the wake which caused the pause has time to finish — a pause is written first
+ * and the sentence second, and interrupting that gap would double every pause notification.
+ */
+export const UNANNOUNCED_PAUSE_GRACE_MS = 90_000;
 
 /**
  * How long to wait when this run has already done something and then stopped.
@@ -360,6 +377,36 @@ export function inspectTasks(deps: WatchdogDeps): WatchdogFinding[] {
           findings.push({ kind: 'off_track', task });
         }
       }
+      continue;
+    }
+
+    /**
+     * A pause the person was never told about.
+     *
+     * The supervisor is the only one who speaks to the user, and it is woken to do it — but that
+     * wake is one turn, and a turn can die. Observed on a real run: T-1's hand-off landed at
+     * 16:53:29 and parked the task as `awaiting_release`; the supervisor was woken at 16:53:46,
+     * the upstream stream went silent for 60 seconds, the retry was exhausted, and the turn ended
+     * in an error. The task then sat paused with a correct board and no sentence anywhere saying
+     * 「按你的指示停了，要放行吗」 — and every rule below skipped it, because they all inspect
+     * `running` tasks. The watchdog reported 「0 finding(s)」 for the next twelve minutes.
+     *
+     * `awaiting_release` is a legitimate state; the defect is that nobody was told. The test is
+     * the record, not the wording: the pause happened after the last announced activity. Woken
+     * once — a pause that was announced and then left alone is a person's decision to make, not a
+     * loop for this loop to enter.
+     *
+     * No `sessionWorking` check, deliberately: the thing being repaired is a turn that *ended*, so
+     * by the time the grace has passed the supervisor is idle in the normal case, and in the busy
+     * case `sendMessage` queues the brief behind the running turn rather than steering it.
+     */
+    if (
+      task.status === 'paused' &&
+      task.pauseReason === 'awaiting_release' &&
+      !task.stats?.announcedPauseAt &&
+      now - (task.lifecycle?.lastPausedAt ?? task.updatedAt ?? now) >= UNANNOUNCED_PAUSE_GRACE_MS
+    ) {
+      findings.push({ kind: 'unannounced_pause', task });
       continue;
     }
 
@@ -523,6 +570,34 @@ export function applyFindings(deps: WatchdogDeps, findings: WatchdogFinding[]): 
     const notify = (text: string) =>
       deps.notify(finding.task.supervisorSessionId, text, `${finding.task.id}:${finding.kind}`)
     switch (finding.kind) {
+      case 'unannounced_pause': {
+        /**
+         * The task paused and nobody said so — the sentence is owed by the supervisor, not by this
+         * loop. Marked before the wake is attempted, deliberately: the wake is what died last time,
+         * and retrying it every pass would turn one failed turn into a stream of them.
+         *
+         * If the wake fails, `announceWake` notifies the supervisor again through the same session,
+         * which is the right second attempt: the failure was one turn, not the whole session. If
+         * that session is gone, the notice is dropped — the board still shows the pause, and this
+         * loop has no way to reach the person without a supervisor to speak through.
+         */
+        deps.markPauseAnnounced?.(finding.task.id)
+        if (deps.wakeSession && finding.task.supervisorSessionId) {
+          const result = deps.wakeSession(finding.task, finding.task.supervisorSessionId, 'pause')
+          announceWake(
+            deps,
+            finding.task,
+            'pause',
+            result,
+            `${finding.task.id} 已暂停（等你放行），已提醒督导向你说明。`,
+            `${finding.task.id} 已暂停但督导没能说明——任务卡在这里，需要你看一眼。`,
+          )
+        } else {
+          notify(`${finding.task.id} 已暂停，但没有人能替你总结它，需要你看一眼。`, )
+        }
+        acted += 1
+        break;
+      }
       case 'unworded_question': {
         /**
          * Ask the supervisor to finish the sentence it started.

@@ -1074,6 +1074,26 @@ export class TaskService {
    * between the reply and the delivery would silently drop what the person said.
    */
   /**
+   * Record that the person was told this task paused.
+   *
+   * Written before the wake is attempted, because the wake is the part that can die: a failed turn
+   * must not turn into a stream of them. The wake is retried once through the supervisor's own
+   * session; if that session is gone the notice is dropped, since the board still shows the pause.
+   */
+  markPauseAnnounced(id: string): Task {
+    const task = this.require(id);
+    const now = this.now();
+    const next: Task = {
+      ...task,
+      stats: { ...task.stats, runs: task.stats?.runs ?? 0, activeMs: task.stats?.activeMs ?? 0, announcedPauseAt: now },
+      updatedAt: now,
+    };
+    this.save(next);
+    appendJournal(this.root, id, { type: 'pause_announced', at: now, data: {} });
+    return next;
+  }
+
+  /**
    * Mark questions as shown to the person.
    *
    * The mirror of `markAnswersDelivered`, and it exists for the same two reasons. Questions are

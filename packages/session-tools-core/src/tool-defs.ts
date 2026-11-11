@@ -38,6 +38,7 @@ import { handleGetSessionInfo } from './handlers/get-session-info.ts';
 import { handleListSessions } from './handlers/list-sessions.ts';
 import {
   handleAskUser,
+  handleListQuestions,
   handleDispatch,
   handleReportResult,
   handleReportToUser,
@@ -50,6 +51,7 @@ import {
 } from './handlers/agent-tools.ts';
 import {
   AskUserSchema,
+  ListQuestionsSchema,
   DispatchSchema,
   ReportResultSchema,
   ReportToUserSchema,
@@ -430,6 +432,7 @@ export const TOOL_DESCRIPTIONS = {
   report_result: `Report the outcome of this turn to the supervisor: what you did (summary, max ~200 chars), what you found, what the next session should do, where the deliverables are, and how you verified it. Choose the outcome by what finished, not by how well you did it: 'handoff' (default) when your assigned part is done and the plan still has steps left — the task continues with the next session; 'delivered' only when the whole plan is finished and this is the final answer for the user; 'needs_decision' when a human must choose. Reporting 'delivered' with steps still open fails the gate — use 'handoff' instead, do not remove the remaining steps. The supervisor's rule gate fails a handoff with no artifacts or no verification command.`,
   dispatch: `Supervisor-only: send work to an existing session, an existing task, or a brand new session. Requires instruction (the work: goal, acceptance criteria, where the deliverable goes) and scope (one sentence describing what that session is responsible for, used to match later dispatches). A brand new session runs as whatever role you name in target.agentId — pick from the roster by what the work actually is, not by rank; omit it only when the workspace default is genuinely the right fit. Pass stepId (e.g. "1.2") whenever the task has a plan: work that is already done is refused, so naming the step is how you find out before spending a turn — dispatching 1.2 after the worker had marked it done re-ran the same file and reported 「交接通过」 twice. At most 3 dispatches per turn; end the turn after dispatching instead of polling.`,
   report_to_user: `Supervisor-only: the single channel to the user. Keep it under ~100 words — conclusions plus a session link for detail. Do not paste worker logs. With kind=decision, pass taskId (e.g. "T-1") so the answer lands on the right task, and put the answers in the 'options' array (max 4) so each becomes a button; never enumerate them inside the text field, because the reader then has to retype a choice you already listed. The user answers by clicking, and their answer reaches you as a normal message.`,
+  list_questions: `Supervisor-only: the questions already waiting for an answer. Call it before asking again: it lists the questions this turn will send. The list is cleared when the turn ends and they go out, so an empty list means nothing new to ask — what the person already has lives on the task (\`task_get\`). A question shows up here from \`ask_user\` and from report_to_user with kind=decision; both are one queue, so re-wording goes through the same place.`,
   ask_user: `Supervisor-only: ask the user every question that genuinely cannot be decided without them (delete data, spend money, send something external, change direction) — in one call, all of them at once. Several questions cost the person one interruption: answers are collected and handed back together, so do not ration them and do not answer one on their behalf to save a slot. Ask only what a person must decide; everything else you decide yourself. When the question is about a task, create the task first and pass its id in report_to_user: a question asked before any task exists has nowhere to be recorded, so the task page cannot show it and the answer has no decision to close.`,
   send_developer_feedback: `Send freeform feedback to the Craft Agent development team: issues, improvement ideas, patterns found. Write in markdown with as much detail as possible.`,
   archive_session: `Archive or purely unarchive ANOTHER session by ID: removes it from active list/unread counts (does not delete). Requires explicit sessionId; you cannot archive your own. Find ids via list_sessions.`,
@@ -538,6 +541,7 @@ export const SESSION_TOOL_DEFS: SessionToolDef[] = [
   { name: 'report_result', description: TOOL_DESCRIPTIONS.report_result, inputSchema: ReportResultSchema, executionMode: 'registry', safeMode: 'block', handler: handleReportResult },
   { name: 'dispatch', description: TOOL_DESCRIPTIONS.dispatch, inputSchema: DispatchSchema, executionMode: 'registry', safeMode: 'block', handler: handleDispatch },
   { name: 'report_to_user', description: TOOL_DESCRIPTIONS.report_to_user, inputSchema: ReportToUserSchema, executionMode: 'registry', safeMode: 'allow', handler: handleReportToUser },
+  { name: 'list_questions', description: TOOL_DESCRIPTIONS.list_questions, inputSchema: ListQuestionsSchema, executionMode: 'registry', safeMode: 'allow', handler: handleListQuestions },
   { name: 'ask_user', description: TOOL_DESCRIPTIONS.ask_user, inputSchema: AskUserSchema, executionMode: 'registry', safeMode: 'block', handler: handleAskUser },
   { name: 'task_create', description: TOOL_DESCRIPTIONS.task_create, inputSchema: TaskCreateSchema, executionMode: 'registry', safeMode: 'block', handler: handleTaskCreate },
   { name: 'task_list', description: TOOL_DESCRIPTIONS.task_list, inputSchema: TaskListSchema, executionMode: 'registry', safeMode: 'allow', readOnly: true, handler: handleTaskList },
@@ -648,6 +652,7 @@ export const SUPERVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
   'dispatch',
   'report_to_user',
   'ask_user',
+  'list_questions',
   'task_create',
   'task_list',
   'task_get',
@@ -673,6 +678,7 @@ export const SUPERVISOR_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   'dispatch',
   'report_to_user',
   'ask_user',
+  'list_questions',
   'task_create',
   'task_update',
   'task_handoff',

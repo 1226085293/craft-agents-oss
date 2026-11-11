@@ -192,7 +192,15 @@ export const AskUserSchema = z.object({
     ),
 });
 
+export const ListQuestionsSchema = z.object({
+  taskId: z
+    .string()
+    .optional()
+    .describe('Limit to one task. Omit to see every question still open in this workspace.'),
+});
+
 export type AskUserInput = z.infer<typeof AskUserSchema>;
+export type ListQuestionsInput = z.infer<typeof ListQuestionsSchema>;
 
 /** Task tools (supervisor only). */
 export const TaskCreateSchema = z.object({

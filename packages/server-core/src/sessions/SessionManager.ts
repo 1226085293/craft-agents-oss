@@ -37,7 +37,7 @@ import {
 import { listEnabledStrategyIds } from '@craft-agent/shared/config/strategy-ids.ts'
 import { TaskService } from '../tasks/task-service.ts'
 import type { Task } from '@craft-agent/shared/tasks'
-import { checkAgreedPlanAppend, readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatUnreportedBrief, formatNextLegBrief, formatDispatchTaskContext, nextLeg, stepParent, normalizeSpec, normalizeTrigger, normalizeQuestion } from '@craft-agent/shared/tasks'
+import { checkAgreedPlanAppend, readJournal, formatTaskBrief, formatResumeBrief, formatHandoffContext, formatIdleWakeBrief, formatUnreportedBrief, formatNextLegBrief, formatDispatchTaskContext, nextLeg, stepParent, normalizeSpec, normalizeTrigger, undeliveredQuestions } from '@craft-agent/shared/tasks'
 import { getRoutesPath, loadRoutes } from '@craft-agent/shared/routing'
 import { WorkspaceScopes } from '../runtime/workspace-scope.ts'
 import { activateInOrder } from '../runtime/activation.ts'
@@ -2200,6 +2200,22 @@ export class SessionManager implements ISessionManager {
       // the loop is cheap — one rules-only pass, no model call.
       this.watchdogLoops.get(managed.workspace.id)?.wake()
       if (managed.role === 'supervisor') {
+        /**
+         * Questions collected during this turn go out now, as one card.
+         *
+         * Every termination path reaches here — complete, interrupted, error — which is why this
+         * belongs at the turn boundary rather than in the completion handler: a question the person
+         * was asked must not depend on the turn finishing cleanly.
+         *
+         * `undeliveredQuestions` reads the record, so there is nothing in memory to clear: once the
+         * mark is written the set is empty, and a crash before it re-delivers instead of forgetting.
+         */
+        void this.flushPendingQuestions(managed).catch((error) => {
+          sessionLog.warn('[supervisor] failed to deliver collected questions', {
+            sessionId: managed.id,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
         // Notices that arrived while this turn was running go out first: they are the reason the
         // supervisor may need to act, and the backlog below can wait one more message.
         const queued = this.supervisorNotices.take(managed.id)
@@ -6052,17 +6068,59 @@ export class SessionManager implements ISessionManager {
                 }
               }
               /**
-               * The id travels with the card.
+               * Written now, shown when the turn ends — the same shape `ask_user` uses.
                *
-               * `targetId` was resolved and used for the wording write, then dropped on the
-               * next line — so the card row carried no `taskIdentifier` even when the asker
-               * named one, and answering it fell back to a lookup that could not see the task.
-               * One question, two surfaces, and only one of them knew which task it was about.
+               * Two entries for one question was the defect: `kind: 'decision'` and `ask_user` are
+               * two spellings of 「a person must answer this」, and giving them different delivery
+               * timing would make the duplicate depend on which spelling the model picked. Both now
+               * write the record and let the turn-end flush draw one card.
                */
-              await this.deliverToUserLane(managed, text, kind, options, targetId)
+              void targetId
               return
             }
             await this.deliverToUserLane(managed, text, kind, options)
+          },
+          listQuestions: async (params) => {
+            const tasks = this.getTasks(managed.workspace.id)
+            const wanted = params.taskId?.trim()
+            const rows: Array<{
+              taskId: string
+              id: string
+              question: string
+              options?: string[]
+              label?: string
+              askedAt: number
+            }> = []
+            for (const task of tasks.list()) {
+              if (wanted && task.id !== wanted) continue
+              // Only the tasks this session is accountable for: a supervisor that can see every
+              // question in the workspace would start answering other lanes' work.
+              if (task.supervisorSessionId !== managed.id) continue
+              for (const entry of task.decisions ?? []) {
+                if (entry.resolvedAt) continue
+                /**
+                 * Only what is still waiting to be sent.
+                 *
+                 * The list is cleared by the turn-end flush: once a question has gone out it
+                 * leaves this list, so the next turn starts empty and cannot ask it again. The
+                 * question itself stays on the task record, which is what makes the task stay
+                 * paused and keeps it answerable from the card.
+                 */
+                if (entry.questionDeliveredAt) continue
+                const question = String(entry.question ?? '').trim()
+                if (!question) continue
+                rows.push({
+                  taskId: task.id,
+                  // An entry written before ids existed still has to be answerable by name.
+                  id: entry.id ?? `${task.id}:${entry.askedAt}`,
+                  question,
+                  ...(entry.options?.length ? { options: [...entry.options] } : {}),
+                  ...(entry.label ? { label: entry.label } : {}),
+                  askedAt: entry.askedAt,
+                })
+              }
+            }
+            return rows
           },
           askUser: async (questions) => {
             /**
@@ -6088,7 +6146,19 @@ export class SessionManager implements ISessionManager {
                 }
               }
             }
-            await this.deliverQuestionToUserLane(managed, questions, targetId)
+            /**
+             * Recorded, not delivered.
+             *
+             * The card goes out when the turn ends. A supervisor asks several things in one turn —
+             * re-reading the task, finding a second boundary, rewording the first — and delivering
+             * each call drew one card per ask. One real turn produced two cards for a single
+             * unresolved situation, with different buttons, and the person had to dismiss one to
+             * answer the other. Collecting them also means one interruption instead of three.
+             *
+             * The question itself is on the record already, so nothing is lost if the turn dies:
+             * `undeliveredQuestions` finds it on the next flush.
+             */
+            void targetId
           },
           dispatchViaSupervisor: async (params) => {
             const runtime = this.getSupervisorRuntime(managed.workspace.id)
@@ -8869,6 +8939,54 @@ ${request.prompt}`;
     })
   }
 
+  /**
+   * Show the person every question this turn collected, and mark them shown.
+   *
+   * One card per task rather than per question: the queue exists so a person can answer several
+   * things before anybody acts, and N cards is the same interruption N times. The mark is written
+   * after the row exists, so a failure here leaves the questions pending rather than lost.
+   */
+  private async flushPendingQuestions(managed: ManagedSession): Promise<void> {
+    const tasks = this.getTasks(managed.workspace.id)
+    let targets: string[]
+    try {
+      targets = tasks
+        .list()
+        .map((task) => task.id)
+        .filter((id) => {
+          const task = tasks.get(id)
+          if (!task || task.supervisorSessionId !== managed.id) return false
+          return undeliveredQuestions(task).length > 0
+        })
+    } catch (error) {
+      sessionLog.warn('[supervisor] could not read pending questions', { error })
+      return
+    }
+
+    for (const taskId of targets) {
+      const task = tasks.get(taskId)
+      const pending = task ? undeliveredQuestions(task) : []
+      if (!pending.length) continue
+
+      const questions = pending.map((entry) => ({
+        question: entry.question!.trim(),
+        ...(entry.options?.length ? { options: [...entry.options] } : {}),
+      }))
+      try {
+        await this.deliverQuestionToUserLane(managed, questions, taskId)
+      } catch (error) {
+        // The mark below would be a lie, so it is not written: the next flush retries.
+        sessionLog.warn('[supervisor] could not deliver collected questions', { taskId, error })
+        continue
+      }
+      try {
+        tasks.markQuestionsDelivered(taskId)
+      } catch (error) {
+        sessionLog.warn('[supervisor] delivered questions but could not mark them', { taskId, error })
+      }
+    }
+  }
+
   /** A supervisor's question to the user. */
   private async deliverQuestionToUserLane(
     managed: ManagedSession,
@@ -8923,8 +9041,16 @@ ${request.prompt}`;
     try {
       const task = this.getTasks(workspaceId).get?.(taskId)
       const open = (task?.decisions ?? []).filter((entry) => !entry.resolvedAt)
-      const match = open.find((entry) => normalizeQuestion(entry.question) === normalizeQuestion(question))
-      return (match ?? open.at(-1))?.id
+      /**
+       * The newest open question, matched by wording only as a tie-break.
+       *
+       * Identity is not decided by comparing text — two phrasings of one question share no literal
+       * form, which is what made the old match miss and both surfaces disagree. The caller has just
+       * written this question, so the entry it belongs to is the newest open one; the wording check
+       * stays only so an older exact match is not passed over.
+       */
+      const exact = open.filter((entry) => entry.question?.trim() === question.trim())
+      return (exact.at(-1) ?? open.at(-1))?.id
     } catch {
       return undefined
     }

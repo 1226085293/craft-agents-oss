@@ -5,10 +5,11 @@
  * These helpers read the queue (`Task.decisions`) and keep the old slot pointing at the newest
  * open entry, so every reader that only asks 「is something open?」 keeps working unchanged.
  *
- * No wording is compared here except to spot a literal repeat: 「同一个问题不能问两次」 is judged by
- * the text a person would see, normalized for whitespace and punctuation-free equality. That is
- * identity, not interpretation — deciding whether two differently-worded questions mean the same
- * thing is the supervisor's judgement, and code that guessed at it would be wrong silently.
+ * No wording is compared here. 「同一个问题不能问两次」 was once decided by comparing the text a person
+ * would read, normalized for whitespace and punctuation — which can only catch a literal repeat, so
+ * a supervisor that re-read the task and reworded its question produced two entries for one
+ * unresolved situation. Identity is not a string property; the asker reads the queue back
+ * (`list_questions`) and decides, which is the only place that judgement can actually be made.
  */
 import type { Task, TaskDecision } from './types.ts';
 
@@ -30,6 +31,19 @@ export function undeliveredAnswers(task: Task): TaskDecision[] {
 }
 
 /**
+ * Questions the person has been asked but not yet shown.
+ *
+ * The other direction of `undeliveredAnswers`, and batched for the same reason: asking three
+ * things should cost one interruption. A supervisor writes the question while its turn runs and
+ * the card goes out when the turn ends.
+ */
+export function undeliveredQuestions(task: Task): TaskDecision[] {
+  return allDecisions(task).filter(
+    (entry) => !entry.resolvedAt && entry.question?.trim() && !entry.questionDeliveredAt,
+  );
+}
+
+/**
  * The entry the legacy `decision` slot should show.
  *
  * Newest open question wins, because that is what every existing reader was built around: a card,
@@ -42,23 +56,3 @@ export function decisionMirror(task: Task): TaskDecision | undefined {
   return open.at(-1) ?? all.at(-1);
 }
 
-/**
- * Two questions a person would read as one.
- *
- * Whitespace and full-width/half-width punctuation differ across relays while the sentence does
- * not, so they are normalized away. Nothing else is — 「要不要做 2」 and 「要不要做 2？」 are the
- * same question; 「做 2 吗」 and 「做 3 吗」 are not.
- */
-export function normalizeQuestion(text: string | undefined): string {
-  return (text ?? '')
-    .replace(/\s+/g, '')
-    .replace(/[，。、；：！？,.;:!?~～"'“”‘’()（）\[\]【】]/g, '')
-    .toLowerCase();
-}
-
-/** Whether an identical question is already on the task and still unanswered. */
-export function findDuplicateOpen(task: Task, question: string): TaskDecision | undefined {
-  const wanted = normalizeQuestion(question);
-  if (!wanted) return undefined;
-  return openDecisions(task).find((entry) => normalizeQuestion(entry.question) === wanted);
-}

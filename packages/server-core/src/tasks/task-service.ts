@@ -45,8 +45,6 @@ import {
   allDecisions,
   answeredWithoutProgress,
   decisionMirror,
-  findDuplicateOpen,
-  normalizeQuestion,
   openDecisions,
   unownedSubSteps,
   type PlanStepStatus,
@@ -884,31 +882,6 @@ export class TaskService {
       .slice(0, 4);
 
     /**
-     * One question, however many times it is relayed.
-     *
-     * 「同一个问题不能问两次」 is judged on what the person would read: a question already open on this
-     * task with the same text, after normalising whitespace and punctuation, is the same question.
-     * Asking it again adds nothing to answer and a second card to dismiss. Only *open* entries
-     * count — the same sentence legitimately reappears after the state it was about has moved on.
-     *
-     * Distinct wording is left alone: whether 「要不要做 2」 and 「继续吗」 are one question is the
-     * supervisor's judgement, and a code that guessed would be wrong without saying so.
-     */
-    const duplicate = wording.question?.trim() ? findDuplicateOpen(task, wording.question!) : undefined
-    if (duplicate) {
-      /**
-       * The card may still need its buttons: the same question relayed twice can carry different
-       * options (the first attempt may have had none). Wording is updated in place, and nothing new
-       * is added — one open entry, one answer.
-       */
-      if (!options.length || duplicate.options?.length === options.length) return task
-      const all = allDecisions(task).map((entry) =>
-        entry === duplicate ? { ...entry, options } : entry,
-      )
-      return this.save({ ...task, decisions: all, updatedAt: now })
-    }
-
-    /**
      * A question asked before the last answer was acted on is the same question again.
      *
      * Nothing in the wording separates 「是否继续？」 from a genuine follow-up, so the test is the
@@ -961,17 +934,20 @@ export class TaskService {
      * boundary opens in two directions, and the person answers both before anybody acts on the first.
      */
     /**
-     * The entry this wording belongs to.
+     * The entry this wording belongs to — an unworded one, and nothing else.
      *
-     * Two cases, and they are the same intent from different directions： a worker's `needs_decision`
-     * hand-off creates a record with no words in it (the rule knows that something must be asked, not
-     * what), and the supervisor then says it — those belong on the existing entry, not beside it.
-     * Otherwise only an identical question is matched.
+     * A worker's `needs_decision` hand-off creates a record with no words in it (the rule knows that
+     * something must be asked, not what) and the supervisor then says it; those are one question and
+     * belong on the existing entry.
+     *
+     * Beyond that, no wording is compared. Comparing it by text was tried and could not work: the
+     * supervisor re-reads the task, rewrites the question with better options, and the two sentences
+     * share no literal form — one real turn produced two cards for one unresolved situation, with
+     * different buttons. Judging whether two phrasings are one question is interpretation, and the
+     * place to answer it is a list the asker can see (`list_questions`), not a string comparison
+     * that silently guesses.
      */
-    const unworded = open.length === 1 && !open[0]!.question?.trim() ? open[0] : undefined
-    const sameQuestion =
-      unworded ??
-      open.find((existing) => normalizeQuestion(existing.question) === normalizeQuestion(entry.question))
+    const sameQuestion = open.length === 1 && !open[0]!.question?.trim() ? open[0] : undefined
     const queue = sameQuestion
       ? all.map((existing) =>
           existing === sameQuestion
@@ -1097,6 +1073,36 @@ export class TaskService {
    * the record is what makes 「answered but not yet sent」 survive a restart — otherwise a crash
    * between the reply and the delivery would silently drop what the person said.
    */
+  /**
+   * Mark questions as shown to the person.
+   *
+   * The mirror of `markAnswersDelivered`, and it exists for the same two reasons. Questions are
+   * collected while the turn runs and delivered once when it ends — so 「shown」 must survive a
+   * restart (a crash between turn end and delivery must not lose the question) and must not be
+   * repeated (a restart must not draw the same card twice).
+   *
+   * Clearing an in-memory list would satisfy the second and fail the first. The mark lives on the
+   * record instead, and the pending set is what is left over: nothing to clear, because 「sent」 is
+   * a fact about the entry.
+   */
+  markQuestionsDelivered(id: string): Task {
+    const task = this.require(id);
+    const now = this.now();
+    const queue = allDecisions(task).map((entry) =>
+      !entry.resolvedAt && entry.question?.trim() && !entry.questionDeliveredAt
+        ? { ...entry, questionDeliveredAt: now }
+        : entry,
+    );
+    const next: Task = { ...task, decisions: queue, updatedAt: now };
+    this.save(next);
+    appendJournal(this.root, id, {
+      type: 'questions_delivered',
+      at: now,
+      data: { count: queue.filter((e) => e.questionDeliveredAt === now).length },
+    });
+    return next;
+  }
+
   markAnswersDelivered(id: string): Task {
     const task = this.require(id);
     const now = this.now();

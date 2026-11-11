@@ -391,6 +391,23 @@ export interface AgentBackend {
       sessionId?: string;
     }): Promise<void>;
     askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;
+    /**
+     * The questions already waiting for an answer, newest last.
+     *
+     * The reader for the queue `ask_user` writes into. Judging whether two phrasings are one
+     * question is interpretation, so the asker is shown the list instead of the code comparing
+     * strings and guessing wrong.
+     */
+    listQuestions?(payload: { taskId?: string }): Promise<
+      Array<{
+        taskId: string;
+        id: string;
+        question: string;
+        options?: string[];
+        label?: string;
+        askedAt: number;
+      }>
+    >;
   } | null;
 
   /** Task-board surface (supervisor only). */

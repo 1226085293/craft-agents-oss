@@ -441,6 +441,21 @@ export interface TaskDecision {
    */
   deliveredAt?: number;
   /**
+   * When this QUESTION was shown to the person.
+   *
+   * The mirror of `deliveredAt`, which marks the answer going the other way. A supervisor asks
+   * several things in one turn — re-reading the task, finding a second boundary, rewording the
+   * first — and each `ask_user` used to draw its own card. One turn produced two cards for one
+   * unresolved situation, with different buttons, and the person had to dismiss one to answer the
+   * other.
+   *
+   * Questions are now collected during the turn and delivered once when it ends, so 「already
+   * shown」 has to survive a restart for the same reason answers do: a crash between the turn
+   * ending and the delivery must not lose the question, and a restart must not ask it twice.
+   * On the record, not in memory, is the only place that can promise both.
+   */
+  questionDeliveredAt?: number;
+  /**
    * How the question closed.
    *
    * `obsolete` is the third case and the one that used to masquerade as `approved`: the thing

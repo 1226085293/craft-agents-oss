@@ -13,9 +13,13 @@ import { errorResponse, successResponse } from '../response.ts';
 import type {
   AskUserInput,
   DispatchInput,
+  ListQuestionsInput,
   ReportResultInput,
   ReportToUserInput,
 } from '../tool-schemas-agent.ts';
+
+/** Line separator for the human-readable list; kept out of a template literal. */
+const NEWLINE = String.fromCharCode(10);
 
 /** Same cap as `normalizeHandoff`, applied before it ever leaves the worker. */
 const MAX_SUMMARY = 200;
@@ -164,6 +168,45 @@ export async function handleReportToUser(
 }
 
 /** Supervisor → user, only when a decision genuinely cannot be made. */
+/**
+ * What has already been asked, and what is still waiting for an answer.
+ *
+ * This is the reader for the question queue, and it replaces a string comparison that could not
+ * work: deciding whether two phrasings are one question is interpretation, so the asker is given
+ * the list instead of the code guessing. `ask_user` returns the same list for the same reason —
+ * one round trip, and no need to remember what was said two tool calls ago.
+ *
+ * The list is cleared when the turn ends and the questions go out. An empty list therefore means
+ * 「nothing new to ask」, not 「nothing was ever asked」 — what is already with the person lives on
+ * the task record, where `task_get` shows it and where the pause it justifies is decided.
+ */
+export async function handleListQuestions(
+  ctx: SessionToolContext,
+  args: ListQuestionsInput,
+): Promise<ToolResult> {
+  if (!ctx.agentTools?.listQuestions) {
+    return errorResponse('list_questions is only available to a supervisor session.');
+  }
+  try {
+    const rows = await ctx.agentTools.listQuestions({ ...(args.taskId?.trim() ? { taskId: args.taskId.trim() } : {}) });
+    if (!rows.length) return successResponse('The question list is empty — nothing is waiting to be sent.');
+    return successResponse(
+      rows
+        .map((row, index) => {
+          const head = `${index + 1}. [${row.taskId}] ${row.question}`;
+          const options = row.options?.length ? ` 选项：${row.options.join(' / ')}` : '';
+          // Everything listed here is still waiting to be sent: the turn-end flush clears it.
+          return `${head}${options} ${row.label ?? ''}（本轮结束时发出）`;
+        })
+        .join(NEWLINE),
+    );
+  } catch (error) {
+    return errorResponse(
+      `Failed to read the question list: ${error instanceof Error ? error.message : 'unknown error'}`,
+    );
+  }
+}
+
 export async function handleAskUser(
   ctx: SessionToolContext,
   args: AskUserInput,

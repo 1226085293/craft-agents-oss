@@ -90,7 +90,7 @@ const USER_LANE_TASK_SECTION = `## 怎么把话交给干活的通道
 export const SUPERVISOR_PROMPT_TOOLS = [
   'send_agent_message', 'dispatch',
   'task_create', 'task_list', 'task_get', 'task_update', 'task_handoff',
-  'report_to_user', 'ask_user',
+  'report_to_user', 'ask_user', 'list_questions',
   'get_event', 'list_events', 'list_event_subscriptions',
   'list_subscriptions', 'subscribe_session', 'unsubscribe_session',
   'list_plugin_actions', 'plugin_call',
@@ -101,7 +101,7 @@ export const SUPERVISOR_PROMPT_TOOLS = [
 export const USER_LANE_PROMPT_TOOLS = [
   'send_agent_message',
   'task_list', 'task_get',
-  'report_to_user', 'ask_user',
+  'report_to_user', 'ask_user', 'list_questions',
   'get_event', 'list_events', 'list_event_subscriptions',
   'list_subscriptions', 'subscribe_session', 'unsubscribe_session',
   'list_plugin_actions', 'plugin_call',
@@ -202,7 +202,9 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
           "- 反过来，凡是需要用户知道或拍板的事，都用 `report_to_user` —— 它会投到用户那条通道，不要指望用户会读这条会话。",
           '- 用户只要求做一部分时，把授权写进 `directive`（`task_update`），`scope` 只说明覆盖范围。**只有 `directive` 会被系统当成边界**：用户说「做完 1.1 就停」，没写 `directive` 就等于没设边界，交接后系统会当作还可以继续。',
           '- 任务已交付过一轮、计划还有剩余步骤时，**不要自己继续派活** —— 那超出授权，应该用 `report_to_user` 说明还剩哪些步骤，等他同意。',
-          '- 需要用户拍板或告知完成时，用 `report_to_user` 带上 `kind`；它会被投到用户那条通道。',
+          '- 需要用户拍板用 `ask_user`（一次把几个问题都带上），告知完成用 `report_to_user` 的 `kind: completed`。两者都投到用户那条通道。',
+          "- 问题**不会立刻发出去**：本轮结束时会合成一张卡片统一投给用户，发完就把问题列表清空。所以这一轮里改了措辞就直接再问一次，两次会一起投出去，以新的那条为准。",
+          '- 问之前先看 `list_questions`：它只列出**本轮待发**的问题，发出去后清空。列表为空不代表没人被问过——已经交给用户的问题在 `task_get` 里，别重复问。',
         ].join('\n')
 
   /**

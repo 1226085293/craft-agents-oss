@@ -59,13 +59,42 @@ describe('a task can hold several questions at once', () => {
     rmSync(root, { recursive: true, force: true })
   })
 
-  it('refuses the same question twice, whatever the whitespace', () => {
+  /**
+   * Wording is not identity, and the old test asserted that it was.
+   *
+   * `normalizeQuestion` compared the sentences a person would read, punctuation and spaces
+   * stripped. It could only catch a literal repeat: a supervisor that re-read the task and
+   * rewrote the question with better options produced two entries for one unresolved situation —
+   * two cards, different buttons, one thing to answer. Judging 「are these one question」 is
+   * interpretation, which is why the asker now reads the queue back (`list_questions`) instead of
+   * the code guessing.
+   *
+   * What remains here is identity by record: an unworded entry — a worker's rule-generated
+   * `needs_decision` — is the one a relayed question fills in, because that hand-off knows
+   * something must be asked but not what.
+   */
+  it('fills in an unworded question instead of adding a second one', () => {
+    const { svc, task, root } = service()
+    // A worker filed the shape of a decision with no words on it.
+    svc.setDecisionWording(task.id, { label: '需要拍板' })
+    expect(openDecisions(svc.get(task.id)!)[0]?.question).toBeUndefined()
+
+    svc.setDecisionWording(task.id, { question: '要不要做 2？' })
+
+    const open = openDecisions(svc.get(task.id)!)
+    expect(open).toHaveLength(1)
+    expect(open[0]?.question).toBe('要不要做 2？')
+
+    rmSync(root, { recursive: true, force: true })
+  })
+
+  it('keeps a re-worded question as a second entry — the asker dedupes by reading the queue', () => {
     const { svc, task, root } = service()
     svc.setDecisionWording(task.id, { question: '要不要做 2？' })
-    svc.setDecisionWording(task.id, { question: '要不要做 2 ?' })
-    svc.setDecisionWording(task.id, { question: ' 要不要做2？ ' })
+    svc.setDecisionWording(task.id, { question: '要不要做 2？我的建议是做' })
 
-    expect(openDecisions(svc.get(task.id)!).length).toBe(1)
+    // Both are recorded: the code no longer decides they mean the same thing.
+    expect(openDecisions(svc.get(task.id)!).length).toBe(2)
 
     rmSync(root, { recursive: true, force: true })
   })

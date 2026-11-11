@@ -34,6 +34,17 @@ export interface AgentToolBindingsDeps {
   ) => Promise<void>;
   /** Surface a question to the user (rendered as an ask card / message). */
   askUser: (questions: { question: string; options?: string[] }[]) => Promise<void>;
+  /** The questions still waiting for an answer, for the asker to read back. */
+  listQuestions?: (params: { taskId?: string }) => Promise<
+    Array<{
+      taskId: string;
+      id: string;
+      question: string;
+      options?: string[];
+      label?: string;
+      askedAt: number;
+    }>
+  >;
   /** Supervisor runtime, for dispatch guards. */
   dispatchViaSupervisor?: (params: {
     target:
@@ -147,6 +158,11 @@ export function buildAgentToolBindings(deps: AgentToolBindingsDeps) {
       taskId?: string;
     }): Promise<void> {
       await deps.writeUserVisible(payload.text, payload.kind, payload.options, payload.taskId);
+    },
+
+    async listQuestions(payload: { taskId?: string }) {
+      if (!deps.listQuestions) return [];
+      return deps.listQuestions(payload);
     },
 
     async askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void> {

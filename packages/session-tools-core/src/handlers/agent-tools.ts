@@ -319,7 +319,33 @@ export async function handleTaskUpdate(
       ...(args.directive?.trim() ? { directive: args.directive.trim() } : {}),
       ...(args.acceptance?.length ? { acceptance: args.acceptance } : {}),
     });
-    return successResponse(`Task ${args.identifier} → ${result.status}.`);
+    /**
+     * Say what was written AND whether the status moved.
+     *
+     * `Task T-1 → paused.` was the whole answer, and it reads as 「you just paused it」. A
+     * supervisor that had only written a directive concluded it had stopped the task itself and
+     * told the user so. The two facts are separate and both cheap to state.
+     */
+    const wrote: string[] = []
+    if (args.status) wrote.push(`状态 ${result.previousStatus} → ${result.status}`)
+    if (args.directive?.trim()) wrote.push('授权指令')
+    if (args.scope?.trim()) wrote.push('范围')
+    if (args.pauseReason) wrote.push(`暂停原因 ${args.pauseReason}`)
+    if (args.acceptance?.length) wrote.push('验收项')
+    if (args.assigneeAgentId) wrote.push('执行 Agent')
+    if (args.error) wrote.push('错误记录')
+
+    const changed = result.previousStatus !== result.status
+    const what = wrote.length ? `已写入${wrote.join('、')}` : '没有可写入的字段'
+    const state = changed
+      ? `状态 ${result.previousStatus} → ${result.status}。`
+      : `状态未变，仍是 ${result.status}。`
+    return successResponse(
+      `${args.identifier}：${what}。${state}` +
+        (!args.status && result.status === 'paused'
+          ? '要让它开工必须用 dispatch 派活——改状态不能启动任务。'
+          : ''),
+    );
   } catch (error) {
     return errorResponse(`Failed to update the task: ${error instanceof Error ? error.message : 'unknown error'}`);
   }

@@ -444,7 +444,7 @@ export const TOOL_DESCRIPTIONS = {
   list_background_tasks: `List background agents/tasks tracked for a session: running, finished, or orphaned (terminated when the turn launched them ended). Authoritative answer for 'what is running / what's the status?'. Omit sessionId for the current session.`,
   get_background_task_output: `Read the tail of a background task's output by taskId. Use after list_background_tasks or a completion notice; tailLines defaults to 100 (max 1000).`,
   stop_background_task: `Stop a running background shell/agent and record the source (model or user). The stop notice is delivered before its record is removed; use list_background_tasks to verify remaining work.`,
-  send_agent_message: `Send a message to another session; the target receives it with your session ID so it can reply. Use to coordinate spawned sessions, follow-up instructions, or relay information. Get the id from a task (\`task_get\` reports the session running it) — a supervisor has no session list to browse, and work without a task has no session to point at. Send exactly "/stop" (with no other text) to abort that session's running turn — the receipt reports whether a turn was actually stopped or the session was already idle.`,
+  send_agent_message: `Send a message to another session; the target receives it with your session ID so it can reply. Use to coordinate spawned sessions, follow-up instructions, or relay information. Get the id from a task (\`task_get\` reports the session running it) — a supervisor has no session list to browse, and work without a task has no session to point at. **\`sessionId: 'lane:task'\` addresses 「督导 · 任务」 directly** — that is how the user-facing lane hands work over, since it owns no task and cannot dispatch. Send exactly "/stop" (with no other text) to abort that session's running turn — the receipt reports whether a turn was actually stopped or the session was already idle.`,
   subscribe_session: `Follow another session in this workspace: every finished turn is posted here as a message and wakes you. Workers started by a dispatch are already followed by default. Use list_subscriptions to see what you follow.`,
   unsubscribe_session: `Stop following a session (idempotent). You will stop receiving its finished turns.`,
   list_subscriptions: `List the sessions this session currently follows.` ,
@@ -653,7 +653,6 @@ export const SUPERVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
   'task_get',
   'task_update',
   'task_handoff',
-  'task_verify',
   'SubmitPlan',
   // Tier 3 of the event funnel delivers "有一条未处理的事件（id: …）" to this
   // session, so it must be able to read what it was handed. Denying the read
@@ -677,30 +676,35 @@ export const SUPERVISOR_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
   'task_create',
   'task_update',
   'task_handoff',
-  'task_verify',
 ]);
 
 /**
  * Tools the user-facing lane must not have.
  *
- * The user lane is the conversation a person reads and types into. Its job is 「把话变成任务」
- * and 「回答他问的事」 — it does not run work and does not hand work out. Everything removed
- * here is removed for that one reason, not because the lane is untrusted:
+ * The user lane is the conversation a person reads and types into. Its job is 「把话听懂、把话
+ * 转达、把状态查清楚」 — it does not own a task and does not move work.
  *
- * - `dispatch` / `task_handoff` / `send_agent_message`: three ways to route work away from a
- *   task. The task lane owns routing; a second entrance is how the same job gets done twice or
- *   once with no record — the argument that retired `spawn_session`.
- * - `SubmitPlan` / `task_verify`: both edit a task's plan and its acceptance. A lane that owns
- *   no task can only do that by reaching into somebody else's.
+ * **Every write to a task belongs to one lane, and that lane is the task lane.** `task_update` and
+ * `task_create` used to stay here, on the argument that 「这个任务不做了」 is a scope change the
+ * lane must be able to write down. The cost of that argument showed up on a real run: the user
+ * lane created a task, dispatched it, later wrote a directive releasing the remaining work — and
+ * then had no tool to make any of it happen, because it cannot dispatch. The task sat `paused`
+ * while its plan was fully done, and the worker's `delivered` hand-off was refused as
+ * `paused → completed`. Two lanes writing one record with no hand-off between them is how a task
+ * ends up in a state neither lane can move.
  *
- * `task_update` stays: the person's words arrive here, and 「这个任务不做了」 is a scope change
- * the lane must be able to write down.
+ * What it keeps is read-only: `task_list` / `task_get`. The person asks 「那个任务怎么样了」
+ * here, and answering that must not cost a round trip through the other lane.
+ *
+ * `send_agent_message` is allowed on purpose — it is the relay. The user lane has no other way to
+ * hand work over, and `sessionId: 'lane:task'` resolves to the working-lane supervisor without the
+ * model having to discover an id.
  */
 export const USER_LANE_DENIED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'dispatch',
+  'task_create',
+  'task_update',
   'task_handoff',
-  'task_verify',
-  'send_agent_message',
   'SubmitPlan',
 ]);
 

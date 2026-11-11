@@ -1,0 +1,110 @@
+import { describe, expect, it } from 'bun:test';
+
+import { getSessionToolNames, USER_LANE_DENIED_TOOL_NAMES } from './tool-defs.ts';
+import {
+  SUPERVISOR_PROMPT_TOOLS,
+  USER_LANE_PROMPT_TOOLS,
+} from '../../shared/src/prompts/supervisor-prompt.ts';
+
+/**
+ * Path A: one lane writes a task, the other reads it and relays.
+ *
+ * The lane filter existed but never received the lane: `SessionManager` built the agent config
+ * without `supervisorLane`, so `isToolVisibleToLane(name, undefined)` answered as the working lane
+ * and the user-facing supervisor was handed `dispatch` and `task_create`.
+ *
+ * Worse, layering hid it from the flat check: the *registered* tools were filtered (10 top-level),
+ * but the `call_tool` registry was built from the same unfiltered list, so 48 tools stayed callable
+ * by name. A real run proved it — the user lane created T-1, dispatched step 1.1, and later
+ * dispatched step 2, all of which its own prompt forbids.
+ *
+ * These cases pin the contract that made that possible to miss.
+ */
+describe('supervisor lanes: one writer, one reader', () => {
+  const userTools = () => getSessionToolNames({ role: 'supervisor', supervisorLane: 'user' });
+  const taskTools = () => getSessionToolNames({ role: 'supervisor', supervisorLane: 'task' });
+
+  it('gives the user lane no way to write a task', () => {
+    const tools = userTools();
+    for (const denied of ['task_create', 'task_update', 'task_handoff', 'SubmitPlan']) {
+      expect(tools.has(denied)).toBe(false);
+    }
+  });
+
+  it('leaves the task lane every write', () => {
+    const tools = taskTools();
+    for (const name of ['task_create', 'task_update', 'task_handoff', 'dispatch', 'SubmitPlan']) {
+      expect(tools.has(name)).toBe(true);
+    }
+  });
+
+  /**
+   * `task_verify` used to be named in three allowlists and defined nowhere.
+   *
+   * It survived because a name in a list reads like a capability: the prompt advertised it, both
+   * lanes denied it, and nothing implemented it. Removed rather than implemented — a list entry is
+   * not a specification, and inventing a tool to keep a list happy is how a name becomes a promise
+   * nobody can keep.
+   */
+  it('no longer names task_verify anywhere, since nothing implemented it', () => {
+    for (const tools of [userTools(), taskTools()]) {
+      expect(tools.has('task_verify')).toBe(false);
+    }
+    expect((USER_LANE_DENIED_TOOL_NAMES as ReadonlySet<string>).has('task_verify')).toBe(false);
+    expect(SUPERVISOR_PROMPT_TOOLS.includes('task_verify' as never)).toBe(false);
+  });
+
+  it('keeps the read tools on both lanes, so 「进度如何」 never needs a relay', () => {
+    for (const tools of [userTools(), taskTools()]) {
+      expect(tools.has('task_list')).toBe(true);
+      expect(tools.has('task_get')).toBe(true);
+    }
+  });
+
+  /**
+   * The relay has to exist, or Path A is a lane that can neither write nor hand over.
+   *
+   * It is the one "routing" tool allowed back in, precisely because removing every route left the
+   * user lane able to write a directive — and then unable to make anything happen.
+   */
+  it('gives the user lane exactly one way to hand work over', () => {
+    const tools = userTools();
+    expect(tools.has('send_agent_message')).toBe(true);
+    expect(tools.has('dispatch')).toBe(false);
+  });
+
+  it('declares a user-lane prompt list that matches the real table', () => {
+    const tools = userTools();
+    for (const name of USER_LANE_PROMPT_TOOLS) {
+      expect(tools.has(name)).toBe(true);
+    }
+  });
+
+  it('keeps the declared denial set in step with the real table', () => {
+    const tools = userTools();
+    for (const denied of USER_LANE_DENIED_TOOL_NAMES) {
+      expect(tools.has(denied)).toBe(false);
+    }
+  });
+
+  it('still lets a supervisor written before lanes keep the whole table', () => {
+    // Absent lane = the working lane. Defaulting the other way would disarm every old supervisor.
+    expect(getSessionToolNames({ role: 'supervisor' }).has('dispatch')).toBe(true);
+  });
+
+  it('gives workers neither lane table, and keeps SubmitPlan', () => {
+    const worker = getSessionToolNames({ role: 'worker' });
+    expect(worker.has('SubmitPlan')).toBe(true);
+    expect(worker.has('dispatch')).toBe(false);
+    expect(worker.has('task_create')).toBe(false);
+  });
+
+  it('names every supervisor tool the prompt advertises', () => {
+    // A prompt that promises a tool the table lacks is the same defect one layer up. No exceptions
+    // now that `task_verify` is gone.
+    const tools = taskTools();
+    for (const name of SUPERVISOR_PROMPT_TOOLS) {
+      expect(tools.has(name)).toBe(true);
+    }
+  });
+});

@@ -27,6 +27,7 @@ import {
 } from '@craft-agent/shared/agents/supervisor';
 import { loadRoutes, matchRoute, formatRouteInstruction, formatRouteRuleIssue, ruleParallelism } from '@craft-agent/shared/routing';
 import { readAgentRoster } from '@craft-agent/shared/agents';
+import { isTerminal } from '@craft-agent/shared/tasks';
 import { DispatchQueue } from './dispatch-queue.ts';
 
 const log = createLogger('supervisor');
@@ -68,6 +69,15 @@ export interface SupervisorRuntimeDeps {
   }) => Promise<{ sessionId: string }>;
   /** Send a message into an existing session (wakes it if idle). */
   sendToSession: (sessionId: string, text: string) => Promise<void>;
+  /**
+   * Mark the task as running in `sessionId`, exactly as the spawn path does.
+   *
+   * Send-to-existing-session was the one dispatch shape that claimed nothing, so a task could be
+   * `paused` while its worker did the work: the run was never recorded, and the hand-off that
+   * followed was refused as `paused → completed`. The refusals are the task service's to make —
+   * `claimTaskRun` only reports them.
+   */
+  claimRun?: (taskId: string, sessionId: string) => void;
   /** Diagnostics for routing decisions that change who runs the work. */
   logDispatch?: (message: string) => void;
   /**
@@ -400,6 +410,25 @@ export class SupervisorRuntime {
      * worker re-read the same file, filed a second hand-off, and the person was told 「交接通过」
      * twice for one step.
      */
+    /**
+     * A finished task takes no more work — not even from a human's 「继续」.
+     *
+     * Every other door already says this: `startGate` refuses a terminal task, `applyTransition`
+     * has no `completed → running`, and `updateTask({status:'running'})` is refused outright. This
+     * one did not, so a dispatch into a completed task still sent an instruction: the worker was
+     * briefed for work nobody could record, the claim was refused, and the task stayed finished —
+     * the board said done while a session did something under its name.
+     *
+     * Deliberately above the `userApproved` escape: approval widens a boundary, it does not
+     * resurrect a task. Starting again is a new task, which is also what the person is told.
+     */
+    if (task.status && isTerminal(task.status as never)) {
+      throw new DispatchRefused(
+        `${task.id} 已经${task.status === 'completed' ? '完成' : '取消'}了，不能再派活。` +
+          '要继续做就新建一条任务（task_create）；要接着这条做，先把任务重新打开。',
+      )
+    }
+
     const planned = task.spec?.plan ?? [];
     if (params.stepId && planned.length) {
       const step = planned.find((candidate) => candidate.id === params.stepId);
@@ -626,6 +655,13 @@ export class SupervisorRuntime {
           kind: 'send',
           sessionId: existingSessionId,
           message,
+          /**
+           * The run is claimed when this is actually sent, and only for a task that exists.
+           *
+           * Without it the task's status stayed whatever it was while the work happened — the
+           * record and the session disagreeing at exactly the moment a person looks at the board.
+           */
+          ...(taskId ? { taskId } : {}),
         }),
       }
     }
@@ -694,6 +730,13 @@ export class SupervisorRuntime {
           `${supervisorSessionId} starting queued: ${describeActivation(action)}`,
         )
         if (action.kind === 'send') {
+          /**
+           * Claim first, then send — the same order the spawn path uses.
+           *
+           * Claiming after the send would leave the original hole open on a send that throws:
+           * the worker would still be told to work, and the task would still say `paused`.
+           */
+          if (action.taskId) this.deps.claimRun?.(action.taskId, action.sessionId)
           await this.deps.sendToSession(action.sessionId, action.message)
         } else {
           await this.deps.spawnWorker({
@@ -793,7 +836,7 @@ export class SupervisorRuntime {
 /** One line about a queued action, for the log. */
 function describeActivation(action: QueuedActivation): string {
   return action.kind === 'send'
-    ? `send to ${action.sessionId}`
+    ? `send to ${action.sessionId}${action.taskId ? ` for ${action.taskId}` : ''}`
     : `spawn ${action.name ?? 'worker'}${action.taskId ? ` for ${action.taskId}` : ''} (depth ${action.spawnDepth})`;
 }
 

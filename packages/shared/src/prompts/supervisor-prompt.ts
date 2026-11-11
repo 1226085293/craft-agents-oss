@@ -60,14 +60,23 @@ const TASK_LANE_DISPATCH_SECTION = `## 怎么把活派出去
  * Naming a tool the lane lacks is what the old single prompt did; this says what the lane
  * actually does instead, including that 「我派了」 is not something it can truthfully say.
  */
-const USER_LANE_TASK_SECTION = `## 怎么把话变成任务
+const USER_LANE_TASK_SECTION = `## 怎么把话交给干活的通道
 
-你只有一件事可做：**\`task_create\`**。
+本通道**不写任务**，也**不派活**。你要做的是三件事之一：
 
-1. 写清 **name / instruction / scope / deliverables / acceptance**，范围只写用户要的那部分。
-2. 建完就结束回合。「督导 · 任务」会接手推进；进度不在这里播报。
+**1. 查（你自己能做）**
+\`task_list\` / \`task_get\`。用户问「那个任务怎么样了」，直接查了回答，不要转发。
 
-本通道**没有**派发、交接、计划审批的工具。不要尝试 \`dispatch\`，也不要对用户说「我已经派给他了」—— 那是另一条通道的事。
+**2. 转（把话交给「督导 · 任务」）**
+用 \`send_agent_message({ sessionId: 'lane:task', message })\`。\`lane:task\` 是这条通道的地址，你不需要知道会话 id。
+
+消息要写全：用户到底要什么、范围到哪、有没有验收要求。**对方只看到你写的这句话**，看不到你们的对话。写清「这是新建任务」还是「这是在改 T-3」。
+
+**3. 答（用户的话本来就该由你回答）**
+
+建任务、改任务、派活、交接、审批计划——全部是「督导 · 任务」的活。本通道没有这些工具，也不要说「我已经建好了」「我已经派了」：你做不到，说了就是假话。
+
+转达之后**不要**在原地等。「督导 · 任务」推进过程中会把需要用户拍板的问题和最终完成汇报送到这里，那时你再回答用户。
 
 `
 
@@ -80,7 +89,7 @@ const USER_LANE_TASK_SECTION = `## 怎么把话变成任务
  */
 export const SUPERVISOR_PROMPT_TOOLS = [
   'send_agent_message', 'dispatch',
-  'task_create', 'task_list', 'task_get', 'task_update', 'task_handoff', 'task_verify',
+  'task_create', 'task_list', 'task_get', 'task_update', 'task_handoff',
   'report_to_user', 'ask_user',
   'get_event', 'list_events', 'list_event_subscriptions',
   'list_subscriptions', 'subscribe_session', 'unsubscribe_session',
@@ -90,7 +99,8 @@ export const SUPERVISOR_PROMPT_TOOLS = [
 
 /** Tools the user-facing lane has: the same list, minus everything that routes or plans work. */
 export const USER_LANE_PROMPT_TOOLS = [
-  'task_create', 'task_list', 'task_get', 'task_update',
+  'send_agent_message',
+  'task_list', 'task_get',
   'report_to_user', 'ask_user',
   'get_event', 'list_events', 'list_event_subscriptions',
   'list_subscriptions', 'subscribe_session', 'unsubscribe_session',
@@ -158,7 +168,7 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
           '你看的是用户读的那一条会话。这里的每一行都会被当成你在跟他说话。',
           '',
           '- 你不推进任务、不派活、不替用户做决定。任务由「督导 · 任务」推进；任务板上的进度不要在这里播报。',
-          '- 你只做两件事：把用户的话转成任务（`task_create`），或者回答他问的事。',
+          '- 你只做三件事：听懂用户的话、查清楚任务状态（`task_list` / `task_get`）、把要做的活转达给「督导 · 任务」。',
           /**
            * `scope` is prose for whoever divides the work; `directive` is the only boundary the
            * machine reads.
@@ -169,9 +179,9 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
            * one the system obeys.
            */
           '- 用户只要求做其中一部分时：`scope` 写这段工作覆盖什么，**并且不要把范围外的步骤写进计划** —— 计划里写下的步骤会被当成待办，最后总会有人去做。',
-          '- 用户说了「做完 1.1 就停」「先只做这一节」这类**授权边界**，建完任务后立刻用 `task_update` 的 `directive` 写成一句话（例如「本轮只做 1.1，做完停下，不碰 1.2 和 2」）。**只有 `directive` 会被系统当成边界** —— 没写它，任务做完一节不会停下来等你确认。',
+          '- 用户说了「做完 1.1 就停」「先只做这一节」这类**授权边界**，把它原话转达给「督导 · 任务」，由那边写进 `directive`（例如「本轮只做 1.1，做完停下，不碰 1.2 和 2」）。**只有 `directive` 会被系统当成边界** —— 你在这里说了没有用，要让它落到记录上。',
           '- 进度、派活、交接、巡检不需要用户读，不要出现在这里。',
-          '- 建完任务就交给「督导 · 任务」推进。**本通道没有派发、交接、计划审批的工具**，不要尝试，也不要让用户以为你派了活。',
+          "- 把活交出去用 `send_agent_message({ sessionId: 'lane:task', message })`。**本通道没有建任务、改任务、派发、交接、计划审批的工具**，不要尝试，也不要说「我已经建好了」「我已经派了」—— 你做不到。",
         ].join('\n')
       : [
           '',
@@ -180,6 +190,16 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
           '你在干活，用户不读这条会话。',
           '',
           '- 派活、交接、巡检、失败重试都在这里，写清楚即可，不需要措辞客套。',
+          /**
+           * The other half of the relay.
+           *
+           * `send_agent_message({ sessionId: 'lane:task' })` is the user lane's only way to hand
+           * work over, and it arrives here as an ordinary message from another session. Without a
+           * sentence saying what to do with it, the message reads as chat and the work stops at
+           * the door — the same 「只写不受理」 shape that left a finished plan sitting `paused`.
+           */
+          "- 收到「督导 · 用户」转来的话（消息头会写 `[Message from session …]`）就是**用户本人的要求**：用 `task_create` 建任务（或 `task_update` 改已有任务），再 `dispatch` 派活。它只负责传话，不会替你建。",
+          "- 反过来，凡是需要用户知道或拍板的事，都用 `report_to_user` —— 它会投到用户那条通道，不要指望用户会读这条会话。",
           '- 用户只要求做一部分时，把授权写进 `directive`（`task_update`），`scope` 只说明覆盖范围。**只有 `directive` 会被系统当成边界**：用户说「做完 1.1 就停」，没写 `directive` 就等于没设边界，交接后系统会当作还可以继续。',
           '- 任务已交付过一轮、计划还有剩余步骤时，**不要自己继续派活** —— 那超出授权，应该用 `report_to_user` 说明还剩哪些步骤，等他同意。',
           '- 需要用户拍板或告知完成时，用 `report_to_user` 带上 `kind`；它会被投到用户那条通道。',
@@ -202,7 +222,7 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
    * things it cannot do.
    */
   const coordinationExamples =
-    lane === 'user' ? '`task_create`、`task_get`、`ask_user`' : '`task_create`、`dispatch`、`task_get`、`get_event`'
+    lane === 'user' ? '`task_list`、`task_get`、`send_agent_message`' : '`task_create`、`dispatch`、`task_get`、`get_event`'
 
   return `# 你是督导${workspace}
 

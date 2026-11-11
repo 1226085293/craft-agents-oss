@@ -21,8 +21,7 @@ const taskLaneTools = () => getSessionToolNames({ role: 'supervisor', supervisor
 describe('supervisor lanes', () => {
   it('keeps the dispatcher on the working lane', () => {
     const tools = taskLaneTools()
-    // The four that route or approve work, and nothing else: `task_verify` is not in this
-    // table at all, so asserting on it here would only pin the test to a name that never ships.
+    // The four that route or approve work, and nothing else.
     for (const name of ['dispatch', 'task_handoff', 'SubmitPlan', 'send_agent_message']) {
       expect(tools.has(name)).toBe(true)
     }
@@ -37,8 +36,31 @@ describe('supervisor lanes', () => {
 
   it('leaves the user lane able to do its own job', () => {
     const tools = userLaneTools()
-    // Turning the person's words into a task, and asking/telling them things.
-    for (const name of ['task_create', 'task_list', 'task_get', 'task_update', 'report_to_user', 'ask_user']) {
+    // Read the board, answer the person, and relay work to the lane that owns it.
+    for (const name of ['task_list', 'task_get', 'report_to_user', 'ask_user', 'send_agent_message']) {
+      expect(tools.has(name)).toBe(true)
+    }
+  })
+
+  /**
+   * One lane writes a task, and it is not this one.
+   *
+   * `task_create` / `task_update` were allowed here on the argument that 「这个任务不做了」 is a
+   * scope change the lane must be able to record. A real run showed the price: this lane created
+   * T-1, dispatched it, later wrote a directive releasing the rest — and had no way to make any of
+   * it happen, because it cannot dispatch. The task sat `paused` with a fully done plan and the
+   * worker's `delivered` was refused as `paused → completed`.
+   */
+  it('owns no task write, because it cannot dispatch', () => {
+    const tools = userLaneTools()
+    for (const name of ['task_create', 'task_update', 'task_handoff', 'SubmitPlan', 'dispatch']) {
+      expect(tools.has(name)).toBe(false)
+    }
+  })
+
+  it('keeps the read tools, so answering 「进度如何」 costs no relay', () => {
+    const tools = userLaneTools()
+    for (const name of ['task_list', 'task_get']) {
       expect(tools.has(name)).toBe(true)
     }
   })

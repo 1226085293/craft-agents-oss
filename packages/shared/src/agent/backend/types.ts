@@ -423,7 +423,7 @@ export interface AgentBackend {
         /** The machine-checked boundary a model derived from the user's reply. */
         directive?: string;
       },
-    ): Promise<{ status: string }>;
+    ): Promise<{ status: string; previousStatus: string }>;
     handoff(
       identifier: string,
       handoff: Record<string, unknown>,

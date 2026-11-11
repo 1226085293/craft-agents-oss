@@ -133,7 +133,7 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       },
     ) => {
       const manager = deps.sessionManager as unknown as {
-        updateTask?: (workspaceId: string, identifier: string, patch: Record<string, unknown>) => Promise<{ status: string }>
+        updateTask?: (workspaceId: string, identifier: string, patch: Record<string, unknown>) => Promise<{ status: string; previousStatus?: string }>
         cancelProcessing?: (sessionId: string, silent?: boolean) => Promise<void>
       }
       if (!manager.updateTask) throw new Error('Task updater is not available in this build.')

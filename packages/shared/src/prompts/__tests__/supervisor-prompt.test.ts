@@ -222,7 +222,7 @@ describe('lane prompts match their tool tables', () => {
   it('declares a user-lane tool list that matches the real user-lane table', () => {
     const laneTools = getSessionToolNames({ role: 'supervisor', supervisorLane: 'user' })
     for (const name of USER_LANE_PROMPT_TOOLS) {
-      // `task_verify` and friends are declared where they exist; this list must stay truthful.
+      // Every name here must be a real supervisor tool; this list must stay truthful.
       expect(SUPERVISOR_TOOL_NAMES.has(name)).toBe(true)
       expect(laneTools.has(name)).toBe(true)
     }

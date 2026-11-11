@@ -54,7 +54,15 @@ export class DispatchRefused extends Error {
  * lives on the turn state, which is disposed exactly when the turn is.
  */
 export type QueuedActivation =
-  | { kind: 'send'; sessionId: string; message: string }
+  /**
+   * `taskId` is what makes the record agree with the work.
+   *
+   * A dispatch into a live session used to send the instruction and claim nothing, so a task that
+   * was `paused` when the work went out stayed `paused` while the worker did it — and the worker's
+   * `delivered` hand-off was then refused as `paused → completed`. The spawn path never had this
+   * gap because it claims the run as it creates the session.
+   */
+  | { kind: 'send'; sessionId: string; message: string; taskId?: string }
   | {
       kind: 'spawn';
       name?: string;

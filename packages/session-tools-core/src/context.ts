@@ -394,7 +394,7 @@ export interface SessionToolContext {
         /** What the person's last reply means, in the supervisor's words. */
         directive?: string;
       },
-    ): Promise<{ status: string }>;
+    ): Promise<{ status: string; previousStatus: string }>;
     handoff(
       identifier: string,
       handoff: Record<string, unknown>,

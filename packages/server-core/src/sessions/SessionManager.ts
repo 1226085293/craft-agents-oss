@@ -5757,6 +5757,19 @@ export class SessionManager implements ISessionManager {
         agentId: managed.agentId,
         agentSnapshot: managed.agentSnapshot,
         role: managed.role,
+        /**
+         * The lane reaches the agent, or the tool table cannot narrow by it.
+         *
+         * `supervisorLane` was stored on the session and read by `isToolVisibleToLane`, but this
+         * config — the one the agent actually builds its table from — dropped it. The filter then
+         * received `undefined`, which means 「the working lane」, so the user-facing supervisor was
+         * handed `dispatch` and `task_create` in its registry: 48 callable tools instead of 20,
+         * reachable through `call_tool` because layering only checks the registry, not the lane.
+         * Observed on a real run: the user lane created T-1 itself, dispatched step 1.1 and later
+         * step 2, and wrote its own directives — all of it the task lane's job, none of it checked
+         * against that lane's rules.
+         */
+        ...(managed.supervisorLane ? { supervisorLane: managed.supervisorLane } : {}),
         taskId: managed.taskId,
         ...(managed.toolScope ? { toolScope: managed.toolScope } : {}),
         // Assembled here, once, for this session: the tool table is part of the
@@ -7250,6 +7263,29 @@ ${request.prompt}`;
         unsubscribeSessionFn: (sessionId: string) => this.unsubscribeSession(managed.id, sessionId),
         listSubscriptionsFn: () => this.listSubscriptions(managed.id),
         sendAgentMessageFn: async (sessionId: string, message: string, attachments?: Array<{ path: string; name?: string }>) => {
+          /**
+           * `lane:task` / `lane:user` — address the lane, not a session id.
+           *
+           * The user-facing supervisor has no session list and, since it no longer owns any task,
+           * no `task_get` result to read an id out of. Making it discover an id would either be
+           * impossible or be done by guessing at UUIDs; both fail in a way the model cannot repair.
+           *
+           * The lane is the thing it actually means: 「把这件事交给干活的那条通道」.
+           */
+          const laneMatch = /^lane:(task|user)$/.exec(sessionId.trim())
+          if (laneMatch) {
+            const lane = laneMatch[1] as 'task' | 'user'
+            const target = await this.ensureSupervisorSession(managed.workspace.id, lane)
+            if (target.id === managed.id) {
+              // Thrown, not returned: the handler turns a throw into an error the model must read.
+              // Returning a `delivery` would report this as 「已送达」 and the model would believe it.
+              throw new Error(
+                `你就在「督导 · ${lane === 'user' ? '用户' : '任务'}」这条通道里，不能给自己发消息。`,
+              )
+            }
+            sessionId = target.id
+          }
+
           // `/stop` acts on the target session instead of holding a turn for it.
           // The tool handler strips the sender envelope for commands, so this
           // sees the raw command text ("[Message from ...]" would hide it).
@@ -8100,7 +8136,20 @@ ${request.prompt}`;
    * The `restructure` comment below is the same story a third time — the RPC and the tool must
    * not each decide what an update means.
    */
-  async updateTask(workspaceId: string, identifier: string, patch: TaskUpdatePatch): Promise<{ status: string }> {
+  async updateTask(
+    workspaceId: string,
+    identifier: string,
+    patch: TaskUpdatePatch,
+  ): Promise<{ status: string; previousStatus: string }> {
+    /**
+     * Both ends of the write, because one end cannot be read correctly on its own.
+     *
+     * `task_update({directive})` answers `paused` when it merely stored the instruction on an
+     * already-paused task — and a supervisor reading that concludes it just stopped the task
+     * itself. Observed live: the supervisor wrote the user's authorisation, read 「Task T-1 →
+     * paused.」, and reported to the user that it had paused the task.
+     */
+    const statusBefore = this.getTasks(workspaceId).get(identifier)?.status ?? 'backlog'
     /**
      * Widening the boundary answers the question that was waiting on it.
      *
@@ -8180,12 +8229,12 @@ ${request.prompt}`;
            */
           const verdict = resumeDecisionFor(service.get(identifier)!)
           if (!verdict.allowed) {
-            return { status: service.get(identifier)?.status ?? 'paused' }
+            return { status: service.get(identifier)?.status ?? 'paused', previousStatus: statusBefore }
           }
           const started = await this.runTask(workspaceId, identifier, 'scope')
-          return { status: started.started ? 'running' : 'paused' }
+          return { status: started.started ? 'running' : 'paused', previousStatus: statusBefore }
         }
-        return { status: current?.status ?? 'backlog' }
+        return { status: current?.status ?? 'backlog', previousStatus: statusBefore }
       }
     }
     /**
@@ -8224,14 +8273,17 @@ ${request.prompt}`;
      * it starts a run. Reaching here with `running` was dead code that only the default could hit.
      */
     if (!patch.status) {
-      return { status: this.getTasks(workspaceId).get(identifier)?.status ?? 'backlog' }
+      return {
+        status: this.getTasks(workspaceId).get(identifier)?.status ?? 'backlog',
+        previousStatus: statusBefore,
+      }
     }
     const task = this.getTasks(workspaceId).setStatus(
       identifier,
       patch.status as never,
       { pauseReason: patch.pauseReason as never, error: patch.error },
     )
-    return { status: task.status }
+    return { status: task.status, previousStatus: statusBefore }
   }
 
   /**
@@ -8413,6 +8465,7 @@ ${request.prompt}`;
         return { sessionId: created.id }
       },
       sendToSession: (sessionId, text) => this.sendSystemMessage(sessionId, text),
+      claimRun: (taskId, sessionId) => this.claimTaskRun(workspaceId, taskId, sessionId),
       logDispatch: (message) => sessionLog.info(`[dispatch] ${message}`),
       handoffContext: (taskId) => {
         const task = this.getTasks(workspaceId).get(taskId)

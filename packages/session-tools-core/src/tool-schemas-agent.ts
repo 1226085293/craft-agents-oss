@@ -408,12 +408,6 @@ export const TaskHandoffSchema = z.object({
   fromSessionId: z.string().optional(),
 });
 
-export const TaskVerifySchema = z.object({
-  identifier: z.string(),
-  requirement: z.string().optional(),
-  enabled: z.boolean().optional(),
-});
-
 export type TaskCreateInput = z.infer<typeof TaskCreateSchema>;
 export type TaskUpdateInput = z.infer<typeof TaskUpdateSchema>;
 export type TaskHandoffInput = z.infer<typeof TaskHandoffSchema>;

@@ -19,6 +19,8 @@ afterEach(() => {
 interface Harness {
   runtime: SupervisorRuntime;
   sent: Array<{ sessionId: string; text: string }>;
+  /** (taskId, sessionId) pairs the runtime asked the task service to claim. */
+  claimed: Array<{ taskId: string; sessionId: string }>;
   spawned: Array<{ scope: string; instruction: string; spawnDepth: number; agentId?: string; taskId?: string }>;
   written: string[];
   asked: Array<{ question: string }[]>;
@@ -47,6 +49,7 @@ function harness(
   } = {},
 ): Harness {
   const sent: Harness['sent'] = [];
+  const claimed: Harness['claimed'] = [];
   const spawned: Harness['spawned'] = [];
   const written: string[] = [];
   const asked: Harness['asked'] = [];
@@ -77,6 +80,9 @@ function harness(
     sendToSession: async (sessionId, text) => {
       sent.push({ sessionId, text });
     },
+    claimRun: (taskId, sessionId) => {
+      claimed.push({ taskId, sessionId });
+    },
     writeToSupervisor: async (_sessionId, text) => {
       written.push(text);
     },
@@ -86,7 +92,7 @@ function harness(
     getTask: (taskId) => opts.tasks?.get(taskId) ?? null,
   });
 
-  return { runtime, sent, spawned, written, asked, supervisor, sessions };
+  return { runtime, sent, claimed, spawned, written, asked, supervisor, sessions };
 }
 
 const event = (overrides: Partial<Parameters<SupervisorRuntime['routeUnclaimed']>[0]> = {}) => ({
@@ -863,5 +869,193 @@ describe('each supervisor lane owns its own turn', () => {
     // The guard is a different matter: repetition is still remembered, and this is the third
     // time in a row, so it is refused rather than counted into the new turn.
     await expect(h.runtime.dispatch(one)).rejects.toThrow(/again|重复|3/)
+  })
+})
+
+/**
+ * A dispatch into a live session is still the start of a run.
+ *
+ * Observed on T-1: the task was `paused`, the supervisor dispatched step 1.2 into the session that
+ * already owned it, the worker did 2.1 and 2.2 — and the task stayed `paused`, because this path
+ * was the one dispatch shape that claimed nothing. The worker's `delivered` hand-off was then
+ * refused as `paused → completed`, and since neither lane may set `running` by hand, the task could
+ * never finish. The spawn path never had this gap: 5947 / 7710 / 8397 all claim.
+ */
+describe('a dispatch into an existing session claims the run', () => {
+  const sessionTask = () =>
+    new Map([
+      ['T-1', { id: 'T-1', currentSessionId: 'sess_worker_live', assigneeAgentId: 'builtin-default' } as never],
+    ]);
+
+  function withLiveSession(h: Harness, taskId = 'T-1') {
+    h.sessions.set('sess_worker_live', {
+      id: 'sess_worker_live',
+      role: 'worker',
+      isProcessing: false,
+      taskId,
+    } as never);
+  }
+
+  it('claims the task when the instruction goes out', async () => {
+    const h = harness(workspace(), { tasks: sessionTask() });
+    withLiveSession(h)
+
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      scope: '读回确认',
+      instruction: '执行 1.2',
+      stepId: '1.2',
+      parallel: false,
+    })
+    // Queued, not sent: nothing is claimed while the supervisor is still reasoning.
+    expect(h.claimed).toEqual([])
+
+    await drain(h)
+    expect(h.sent).toHaveLength(1)
+    expect(h.claimed).toEqual([{ taskId: 'T-1', sessionId: 'sess_worker_live' }])
+  })
+
+  it('claims before sending, so a failed send cannot leave the task behind', async () => {
+    const h = harness(workspace(), { tasks: sessionTask() });
+    withLiveSession(h)
+    const order: string[] = []
+    const originalSend = h.runtime['deps'].sendToSession
+    h.runtime['deps'].sendToSession = async (sessionId, text) => {
+      order.push(`send:${sessionId}`)
+      await originalSend(sessionId, text)
+    }
+    h.runtime['deps'].claimRun = (taskId, sessionId) => {
+      order.push(`claim:${taskId}`)
+      h.claimed.push({ taskId, sessionId })
+    }
+
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-1' },
+      scope: '读回确认',
+      instruction: '执行 1.2',
+      stepId: '1.2',
+      parallel: false,
+    })
+    await drain(h)
+
+    expect(order).toEqual(['claim:T-1', 'send:sess_worker_live'])
+  })
+
+  it('claims nothing when the dispatch carries no task', async () => {
+    const h = harness(workspace())
+    h.sessions.set('sess_plain', { id: 'sess_plain', role: 'worker', isProcessing: false } as never)
+
+    // A session with no task cannot be dispatched to at all — that rule is older and separate.
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'session', sessionId: 'sess_plain' },
+        scope: '杂活',
+        instruction: '做点什么',
+        parallel: false,
+      }),
+    ).rejects.toThrow(/没有挂任务/)
+    await drain(h)
+    expect(h.claimed).toEqual([])
+  })
+})
+
+/**
+ * A finished task takes no more work.
+ *
+ * Every other door already refuses one: `startGate` checks `TERMINAL_STATUSES`, `applyTransition`
+ * has no `completed → running`, and `updateTask({status:'running'})` throws. Dispatch did not, so
+ * an instruction went out for a task that could never record it — the worker was briefed, the
+ * claim was refused, and the board said 「已完成」 while a session worked under its name.
+ */
+describe('a finished task accepts no dispatch', () => {
+  const finished = (status: 'completed' | 'canceled') =>
+    new Map([[`T-9`, { id: 'T-9', status, assigneeAgentId: 'builtin-default' } as never]])
+
+  for (const status of ['completed', 'canceled'] as const) {
+    it(`refuses a ${status} task by name, whichever target shape is used`, async () => {
+      const h = harness(workspace(), { tasks: finished(status) })
+
+      // task target
+      await expect(
+        h.runtime.dispatch({
+          fromSessionId: 'sess_sup',
+          target: { kind: 'task', taskId: 'T-9' },
+          scope: '返工',
+          instruction: '再做一次',
+          parallel: false,
+        }),
+      ).rejects.toThrow(new RegExp(`T-9 已经${status === 'completed' ? '完成' : '取消'}`))
+
+      // new-session target carrying the same task id — the door that bypassed the paused rule once
+      await expect(
+        h.runtime.dispatch({
+          fromSessionId: 'sess_sup',
+          target: { kind: 'new' },
+          scope: '返工',
+          instruction: '再做一次',
+          attachTaskId: 'T-9',
+          parallel: false,
+        }),
+      ).rejects.toThrow(/不能再派活/)
+
+      await drain(h)
+      expect(h.spawned).toEqual([])
+      expect(h.claimed).toEqual([])
+    })
+  }
+
+  it('does not let user approval resurrect a finished task', async () => {
+    const h = harness(workspace(), { tasks: finished('completed') })
+
+    await expect(
+      h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-9' },
+        scope: '返工',
+        instruction: '用户说继续',
+        parallel: false,
+        // The escape hatch for the paused rule must not double as a way past completion.
+        userApproved: true,
+      } as never),
+    ).rejects.toThrow(/已经完成了/)
+
+    await drain(h)
+    expect(h.claimed).toEqual([])
+  })
+
+  it('still accepts a paused task whose authorisation is newer than the last hand-off', async () => {
+    const h = harness(workspace(), {
+      tasks: new Map([
+        [
+          'T-5',
+          {
+            id: 'T-5',
+            status: 'paused',
+            assigneeAgentId: 'builtin-default',
+            spec: { directive: { text: '做完剩下的', at: 2000 } },
+            handoffs: [{ outcome: 'handoff', at: 1000 }],
+            // A live session makes this a send-to-existing-session dispatch, which is the shape
+            // that carries `claimRun` — the one this file's first suite is about.
+            currentSessionId: 'sess_live5',
+          } as never,
+        ],
+      ]),
+    })
+    h.sessions.set('sess_live5', { id: 'sess_live5', role: 'worker', isProcessing: false, taskId: 'T-5' } as never)
+
+    await h.runtime.dispatch({
+      fromSessionId: 'sess_sup',
+      target: { kind: 'task', taskId: 'T-5' },
+      scope: '收尾',
+      instruction: '继续做完',
+      parallel: false,
+    })
+    await drain(h)
+    // The terminal check must not swallow the legitimate 「authorised continue」 case.
+    expect(h.sent).toHaveLength(1)
+    expect(h.claimed).toEqual([{ taskId: 'T-5', sessionId: 'sess_live5' }])
   })
 })

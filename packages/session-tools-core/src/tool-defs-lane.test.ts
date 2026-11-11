@@ -37,7 +37,7 @@ describe('supervisor lanes', () => {
   it('leaves the user lane able to do its own job', () => {
     const tools = userLaneTools()
     // Read the board, answer the person, and relay work to the lane that owns it.
-    for (const name of ['task_list', 'task_get', 'report_to_user', 'ask_user', 'send_agent_message']) {
+    for (const name of ['task_list', 'task_get', 'ask_user', 'send_agent_message']) {
       expect(tools.has(name)).toBe(true)
     }
   })

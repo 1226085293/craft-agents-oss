@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import type { SessionToolContext } from '../context.ts';
-import { handleReportToUser, handleTaskPlan } from './agent-tools.ts';
+import { handleAskUser, handleTaskPlan } from './agent-tools.ts';
 
 function textOf(result: { content?: Array<{ text?: string }> }): string {
   return (result.content ?? []).map((part) => part.text ?? '').join(' ');
@@ -18,90 +18,111 @@ function ctx(seen: Array<{ text: string; kind?: string }>): SessionToolContext {
   } as unknown as SessionToolContext;
 }
 
-describe('report_to_user', () => {
+type Payload = { entries: Array<{ kind: string; text: string; options?: string[] }>; taskId?: string };
+
+function askCtx(seen: Payload[]): SessionToolContext {
+  return {
+    sessionId: 'sess-1',
+    agentTools: {
+      askUser: async (payload: Payload) => {
+        seen.push(payload);
+      },
+    },
+  } as unknown as SessionToolContext;
+}
+
+describe('ask_user is the one channel to the person', () => {
   /**
-   * The gate exists because a length limit could not answer "should I speak now".
+   * There used to be two tools and the code called them 「two spellings of one thing」.
    *
-   * A supervisor used its only user-facing tool for progress narration — "1.1 is
-   * done, I dispatched the rest to mr-crystal, I will tell you when it finishes" —
-   * and those rows pushed the decisions that actually needed a person off screen.
+   * A supervisor picked the one whose shape read like 「汇报」 and called it twice in one turn for
+   * one unresolved situation — 17:25:17 with prose and no options, 17:25:23 with three buttons —
+   * and the person got two cards for one question, the first with nothing to click.
    */
-  it('refuses a report without a reason', async () => {
-    const seen: Array<{ text: string; kind?: string }> = [];
-    const result = await handleReportToUser(ctx(seen), { text: 'progress: still working' } as never);
-    expect(seen).toHaveLength(0);
-    expect(textOf(result)).toContain('kind is required');
-  });
+  it('takes the whole turn as one list', async () => {
+    const seen: Payload[] = [];
+    const result = await handleAskUser(askCtx(seen), {
+      entries: [
+        { kind: 'completed', text: '1.1 做完了' },
+        { kind: 'decision', text: '下一步？', options: ['放行 1.2', '收尾'] },
+      ],
+      taskId: 'T-1',
+    } as never);
 
-  it('accepts the three reasons that justify an interruption', async () => {
-    for (const kind of ['completed', 'decision', 'blocked'] as const) {
-      const seen: Array<{ text: string; kind?: string }> = [];
-      const result = await handleReportToUser(ctx(seen), { text: 'conclusion', kind } as never);
-      expect(seen).toHaveLength(1);
-      expect(seen[0]!.kind).toBe(kind);
-      expect(textOf(result)).toContain('Reported to the user');
-    }
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.entries).toHaveLength(2);
+    expect(seen[0]!.taskId).toBe('T-1');
+    expect(textOf(result)).toContain('1 条问题');
+    expect(textOf(result)).toContain('1 条汇报');
   });
 
   /**
-   * A decision reported as prose forces the reader to retype a choice the asker already
-   * enumerated. The card renders `options` as buttons, so they have to reach it.
+   * A decision with no buttons is a question waiting to be misread — it is what makes the model
+   * come back a second time with the answers it had not thought of yet.
    */
-  it('carries the answers as options, so the card can render buttons', async () => {
-    const seen: Array<{ text: string; kind?: string; options?: string[] }> = [];
-    const result = await handleReportToUser(
-      {
-        sessionId: 'sess-1',
-        agentTools: { reportToUser: async (p: { text: string; kind?: string }) => void seen.push(p) },
-      } as unknown as SessionToolContext,
-      {
-        text: '步骤 1.1 已完成并验收通过，剩余 1.2、2 未授权。',
-        kind: 'decision',
-        options: ['放行剩余步骤，把任务做完', '到此为止，结束任务'],
-      } as never,
-    );
+  it('refuses a decision with nothing to click', async () => {
+    const seen: Payload[] = [];
+    const result = await handleAskUser(askCtx(seen), {
+      entries: [{ kind: 'decision', text: '请拍板下一步。' }],
+    } as never);
 
-    expect(seen[0]?.options).toEqual(['放行剩余步骤，把任务做完', '到此为止，结束任务']);
-    // The receipt names them, so a model that got the wording wrong can see it.
-    expect(textOf(result)).toContain('放行剩余步骤');
+    expect(seen).toHaveLength(0);
+    expect(textOf(result)).toContain('needs `options`');
   });
 
-  it('drops options on a report that is not a decision', async () => {
-    const seen: Array<{ text: string; kind?: string; options?: string[] }> = [];
-    await handleReportToUser(
-      {
-        sessionId: 'sess-1',
-        agentTools: { reportToUser: async (p: { text: string; kind?: string }) => void seen.push(p) },
-      } as unknown as SessionToolContext,
-      { text: 'done', kind: 'completed', options: ['a', 'b'] } as never,
-    );
+  it('refuses options on a statement', async () => {
+    const seen: Payload[] = [];
+    const result = await handleAskUser(askCtx(seen), {
+      entries: [{ kind: 'completed', text: 'done', options: ['a'] }],
+    } as never);
 
-    // A completion notice has nothing to choose, so a button on it would be a dead end.
-    expect(seen[0]?.options).toBeUndefined();
+    expect(seen).toHaveLength(0);
+    expect(textOf(result)).toContain('take no options');
   });
 
   it('refuses to say the same thing twice, once as prose and once as a button', async () => {
-    const seen: Array<{ text: string; kind?: string }> = [];
-    const result = await handleReportToUser(
-      ctx(seen),
-      {
-        text: '请拍板：放行剩余步骤，把任务做完，或者到此为止。',
-        kind: 'decision',
-        options: ['放行剩余步骤，把任务做完', '到此为止，结束任务'],
-      } as never,
-    );
+    const seen: Payload[] = [];
+    const result = await handleAskUser(askCtx(seen), {
+      entries: [
+        {
+          kind: 'decision',
+          text: '请拍板：放行剩余步骤，把任务做完，或者到此为止。',
+          options: ['放行剩余步骤，把任务做完', '到此为止，结束任务'],
+        },
+      ],
+    } as never);
 
     expect(seen).toHaveLength(0);
     expect(textOf(result)).toContain('Do not repeat the options inside');
   });
 
-  it('rejects a reason outside the enum', async () => {
-    const seen: Array<{ text: string; kind?: string }> = [];
-    await handleReportToUser(ctx(seen), { text: 'x', kind: 'progress' } as never);
-    // The handler forwards what it was given; the schema is the real gate. What
-    // matters here is that the payload carries the reason, so routing can refuse
-    // it — see deliverToUserLane.
-    expect(seen[0]?.kind).toBe('progress');
+  /**
+   * The count refusal outlived the schema's own `max(2)` by accident, and a supervisor that hit it
+   * wrote 「第 3 个因为工具单次最多承载 2 个，我默认按不加处理」 — a decision taken on the person's
+   * behalf because of our limit. No cap means no cap anywhere.
+   */
+  it('takes more entries than the old limit of two', async () => {
+    const seen: Payload[] = [];
+    const result = await handleAskUser(askCtx(seen), {
+      entries: [
+        { kind: 'decision', text: '第一个？', options: ['a', 'b'] },
+        { kind: 'decision', text: '第二个？', options: ['c', 'd'] },
+        { kind: 'decision', text: '第三个？', options: ['e', 'f'] },
+        { kind: 'blocked', text: '账号过期，需要你重登' },
+      ],
+    } as never);
+
+    expect(seen[0]!.entries).toHaveLength(4);
+    expect(textOf(result)).toContain('3 条问题');
+  });
+
+  it('rejects an empty list and blank text', async () => {
+    const seen: Payload[] = [];
+    expect(textOf(await handleAskUser(askCtx(seen), { entries: [] } as never))).toContain('at least one');
+    expect(
+      textOf(await handleAskUser(askCtx(seen), { entries: [{ kind: 'completed', text: '  ' }] } as never)),
+    ).toContain('non-empty');
+    expect(seen).toHaveLength(0);
   });
 });
 

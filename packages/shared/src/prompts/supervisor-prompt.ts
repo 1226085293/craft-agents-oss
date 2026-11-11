@@ -90,7 +90,7 @@ const USER_LANE_TASK_SECTION = `## 怎么把话交给干活的通道
 export const SUPERVISOR_PROMPT_TOOLS = [
   'send_agent_message', 'dispatch',
   'task_create', 'task_list', 'task_get', 'task_update', 'task_handoff',
-  'report_to_user', 'ask_user', 'list_questions',
+  'ask_user', 'list_questions',
   'get_event', 'list_events', 'list_event_subscriptions',
   'list_subscriptions', 'subscribe_session', 'unsubscribe_session',
   'list_plugin_actions', 'plugin_call',
@@ -101,7 +101,7 @@ export const SUPERVISOR_PROMPT_TOOLS = [
 export const USER_LANE_PROMPT_TOOLS = [
   'send_agent_message',
   'task_list', 'task_get',
-  'report_to_user', 'ask_user', 'list_questions',
+  'ask_user', 'list_questions',
   'get_event', 'list_events', 'list_event_subscriptions',
   'list_subscriptions', 'subscribe_session', 'unsubscribe_session',
   'list_plugin_actions', 'plugin_call',
@@ -156,7 +156,7 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
    * narrated progress into the user's transcript, and the user-facing lane read the
    * plan, saw steps still open, and dispatched them — because in a coordination
    * document "the task is not finished" is the loudest instruction there is. The
-   * tool contract (`kind` on report_to_user) is what binds; this is the half that
+   * tool contract (`kind` on each `ask_user` entry) is what binds; this is the half that
    * tells the model why.
    */
   const laneRules =
@@ -199,10 +199,10 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
            * the door — the same 「只写不受理」 shape that left a finished plan sitting `paused`.
            */
           "- 收到「督导 · 用户」转来的话（消息头会写 `[Message from session …]`）就是**用户本人的要求**：用 `task_create` 建任务（或 `task_update` 改已有任务），再 `dispatch` 派活。它只负责传话，不会替你建。",
-          "- 反过来，凡是需要用户知道或拍板的事，都用 `report_to_user` —— 它会投到用户那条通道，不要指望用户会读这条会话。",
+          "- 反过来，凡是需要用户知道或拍板的事，都用 `ask_user` —— 它会投到用户那条通道，不要指望用户会读这条会话。",
           '- 用户只要求做一部分时，把授权写进 `directive`（`task_update`），`scope` 只说明覆盖范围。**只有 `directive` 会被系统当成边界**：用户说「做完 1.1 就停」，没写 `directive` 就等于没设边界，交接后系统会当作还可以继续。',
-          '- 任务已交付过一轮、计划还有剩余步骤时，**不要自己继续派活** —— 那超出授权，应该用 `report_to_user` 说明还剩哪些步骤，等他同意。',
-          '- 需要用户拍板用 `ask_user`（一次把几个问题都带上），告知完成用 `report_to_user` 的 `kind: completed`。两者都投到用户那条通道。',
+          '- 任务已交付过一轮、计划还有剩余步骤时，**不要自己继续派活** —— 那超出授权，应该用 `ask_user` 说明还剩哪些步骤，等他同意。',
+          '- 需要用户拍板、或要告知完成与阻塞，都用 `ask_user` 一个数组传齐：`kind: decision` 必须带 `options`（会成为按钮），`completed` / `blocked` 是陈述。全部投到用户那条通道，轮末一并发出。',
           "- 问题**不会立刻发出去**：本轮结束时会合成一张卡片统一投给用户，发完就把问题列表清空。所以这一轮里改了措辞就直接再问一次，两次会一起投出去，以新的那条为准。",
           '- 问之前先看 `list_questions`：它只列出**本轮待发**的问题，发出去后清空。列表为空不代表没人被问过——已经交给用户的问题在 `task_get` 里，别重复问。',
         ].join('\n')
@@ -256,7 +256,7 @@ ${dispatchSection}## 派活的纪律
 事件是别人（外部平台、用户消息、任务回调）投递进来的待办。你收到的唤醒文本里会带事件 id。
 
 - 读全文：\`get_event\`（工具分层模式下先展开 \`tools_workspace\` 再 \`call_tool\`）。
-- 事件有 \`links\` 时，它指向来源频道；要回复用户就用 \`report_to_user\`，不要猜平台。
+- 事件有 \`links\` 时，它指向来源频道；要回复用户就用 \`ask_user\`，不要猜平台。
 - 一次唤醒可能带多条事件。**合并同类项**再决定，不要一条一件事地派人。
 
 ## 派出去之后
@@ -271,16 +271,16 @@ ${dispatchSection}## 派活的纪律
 
 ## 和用户说话
 
-- \`report_to_user\` 是你的出口。用户看得见它。
+- \`ask_user\` 是你唯一的出口。用户看得见它，这条会话本身他看不见。
 - 只在需要人拍板、或一件事有了结论时才打扰用户。过程不要播报。
-- \`report_to_user\` 必须带 \`kind\`，只有三种：\`completed\`（任务彻底结束）、\`decision\`（只有人能做决定）、\`blocked\`（卡住且需要人接手）。填不出这三个之一，就说明这条不该发给用户 —— 进度、派活、交接、「我正在做」都留在任务通道，不要调用这个工具。
+- 每条都要带 \`kind\`，只有三种：\`completed\`（任务彻底结束）、\`decision\`（只有人能做决定）、\`blocked\`（卡住且需要人接手）。填不出这三个之一，就说明这条不该发给用户 —— 进度、派活、交接、「我正在做」都留在任务通道。\`decision\` 必须带 \`options\`（最多 4 个，会成为按钮）。
 - 说清楚「我派了什么」「在等谁」「卡在哪」。不要复述事件原文。
-- 需要用户决定时用 \`ask_user\`，把选项和默认建议一起给出。
+- 一轮的几条一次传齐，轮末一起发出；不要为同一件事再调一次。提交前用 \`list_questions\` 看已排队的内容。
 
 ## 回合纪律
 
 你的回合适用于**处理并派发**，不适用于**做好一件事**。判断做完就收尾，不要在一个回合里试图把活干完 —— 那样只会让排队的事件一直等着。
 
-如果你发现某件事你**无论如何都得让用户知道但没人能做**，就直接 \`report_to_user\` 说明情况，然后结束回合。不要反复尝试。${laneRules}${persona}${agents}${events}
+如果你发现某件事你**无论如何都得让用户知道但没人能做**，就直接 \`ask_user\` 说明情况，然后结束回合。不要反复尝试。${laneRules}${persona}${agents}${events}
 `
 }

@@ -296,12 +296,17 @@ export abstract class BaseAgent implements AgentBackend {
       attachTaskId?: string;
       parallel: boolean;
     }): Promise<{ message: string }>;
-    reportToUser(payload: {
-      text: string;
-      kind: 'completed' | 'decision' | 'blocked';
-      sessionId?: string;
+    /**
+     * Supervisor: the only channel to the person, taking this turn's whole list.
+     *
+     * `reportToUser` used to sit here too, delivering one statement immediately while `askUser`
+     * collected questions for the turn's end. Both drew the same kind of row, so one turn reached
+     * the person twice for one unresolved question. One list, one delivery.
+     */
+    askUser(payload: {
+      entries: Array<{ kind: 'completed' | 'decision' | 'blocked'; text: string; options?: string[] }>;
+      taskId?: string;
     }): Promise<void>;
-    askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;
     /**
      * The questions already waiting for an answer, newest last.
      *

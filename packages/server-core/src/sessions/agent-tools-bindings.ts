@@ -25,15 +25,17 @@ export interface AgentToolBindingsDeps {
   }) => Promise<{ sessionId: string; queued?: boolean; position?: number }>;
   /** Send into an existing session (wakes it when idle). */
   sendToSession: (sessionId: string, text: string) => Promise<void>;
-  /** Append a user-visible assistant message to the caller's own transcript. */
-  writeUserVisible: (
-    text: string,
-    kind: 'completed' | 'decision' | 'blocked',
-    options?: string[],
-    taskId?: string,
-  ) => Promise<void>;
-  /** Surface a question to the user (rendered as an ask card / message). */
-  askUser: (questions: { question: string; options?: string[] }[]) => Promise<void>;
+  /**
+   * Everything this turn has to say to the person, in order, delivered when the turn ends.
+   *
+   * Two methods used to sit here — `writeUserVisible` (one statement, delivered immediately) and
+   * `askUser` (questions, delivered at turn end) — and both drew the same kind of row. Two doors to
+   * one room is how one turn produced two cards for one question.
+   */
+  askUser: (payload: {
+    entries: Array<{ kind: 'completed' | 'decision' | 'blocked'; text: string; options?: string[] }>;
+    taskId?: string;
+  }) => Promise<void>;
   /** The questions still waiting for an answer, for the asker to read back. */
   listQuestions?: (params: { taskId?: string }) => Promise<
     Array<{
@@ -150,23 +152,16 @@ export function buildAgentToolBindings(deps: AgentToolBindingsDeps) {
       return { message: `Dispatched to ${created.sessionId}. End your turn; you will be woken when it reports.` };
     },
 
-    async reportToUser(payload: {
-      text: string;
-      kind: 'completed' | 'decision' | 'blocked';
-      sessionId?: string;
-      options?: string[];
-      taskId?: string;
-    }): Promise<void> {
-      await deps.writeUserVisible(payload.text, payload.kind, payload.options, payload.taskId);
-    },
-
     async listQuestions(payload: { taskId?: string }) {
       if (!deps.listQuestions) return [];
       return deps.listQuestions(payload);
     },
 
-    async askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void> {
-      await deps.askUser(payload.questions);
+    async askUser(payload: {
+      entries: Array<{ kind: 'completed' | 'decision' | 'blocked'; text: string; options?: string[] }>;
+      taskId?: string;
+    }): Promise<void> {
+      await deps.askUser(payload);
     },
   };
 }

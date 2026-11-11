@@ -110,86 +110,78 @@ export const DispatchSchema = z.object({
 
 export type DispatchInput = z.infer<typeof DispatchSchema>;
 
-/** Supervisor → user, short by contract. */
-export const ReportToUserSchema = z.object({
-  /**
-   * Why the user is being interrupted. Required, and the only three answers.
-   *
-   * Length was the only thing this tool used to constrain ("at most ~100 words"),
-   * which said nothing about *when* to speak — so a supervisor used its "single
-   * channel to the user" for progress narration: "1.1 is done by the previous
-   * session, I dispatched the rest to mr-crystal, I will tell you when it
-   * finishes." True, useful to nobody, and it pushed the next real decision off
-   * the screen — the exact complaint that the user channel was unusable.
-   *
-   * Making the reason a required enum turns "should I interrupt?" into a choice
-   * with three legal answers instead of a judgement call: finished, blocked, or a
-   * decision. Anything in progress belongs on the task lane, silently.
-   */
-  kind: z
-    .enum(['completed', 'decision', 'blocked'])
-    .describe(
-      'Why the user is being told. completed = the task is finished. decision = you cannot proceed without a choice only a person can make. blocked = a failure needing human hands. Work in progress is NOT reportable.',
-    ),
-  text: z.string().describe('At most ~100 words. Conclusions only; link the session for detail.'),
-  sessionId: z.string().optional().describe('Session the user can open for the full process.'),
-  /**
-   * The task this report is about, when it is about one.
-   *
-   * Without it the card's task was guessed from "which paused task has an open decision",
-   * and the guess was wrong twice in one run: a card about T-1 for a task that had not
-   * paused yet carried no id at all, and a later card about T-1 was stamped T-2 because
-   * that was the most recent one waiting. The asker knows which task it means.
-   */
-  taskId: z
-    .string()
-    .optional()
-    .describe('The task id this report concerns, e.g. "T-1". Give it for kind=decision when the question is about a task.'),
-  /**
-   * The answers, as answers — not as prose.
-   *
-   * A decision was being reported as 「请拍板：(a) 放行，我继续派活…(b) 到此为止，结束任务。」
-   * and rendered as one paragraph: the reader had to retype a choice the asker had already
-   * enumerated. Options given here become the card's buttons, and are matched byte for
-   * byte when an answer comes back, so phrase each as the answer itself, not a label.
-   */
-  options: z
-    .array(z.string())
-    .max(4)
-    .optional()
-    .describe(
-      'Only with kind=decision: the answers a person can choose, at most 4, e.g. ["放行剩余步骤，把任务做完", "到此为止，结束任务"]. Each is rendered as a button and sent back verbatim. Do not also enumerate them inside `text`.',
-    ),
-});
-
-export type ReportToUserInput = z.infer<typeof ReportToUserSchema>;
-
-/** Supervisor → user, when a decision is genuinely needed. */
+/**
+ * Supervisor → user: one list, three kinds of entry.
+ *
+ * There used to be two tools for this — `report_to_user` (one statement, delivered immediately) and
+ * `ask_user` (a list of questions, delivered at turn end) — and the code called them 「two
+ * spellings of one thing」 in a comment while both stayed in the table. A supervisor picked the one
+ * whose shape read like 「汇报」, called it twice in one turn for one unresolved situation, and the
+ * person got two cards for one question. Two doors to the same room is how that happens.
+ *
+ * So there is one door, and it takes a list: this turn's words for the person, in order. `decision`
+ * entries become cards with buttons and are recorded on the task, because a task cannot start while
+ * a person is still deciding. `completed` and `blocked` are statements and are only statements.
+ */
 export const AskUserSchema = z.object({
-  questions: z
+  /**
+   * Everything this turn has to say to the person, in the order it should be read.
+   *
+   * The list is the unit, not the call: a supervisor that calls this twice appends to the same
+   * turn's list, and the whole list goes out once when the turn ends. That is what makes 「this turn
+   * asked one thing」 true no matter how many times the model reached for the tool.
+   */
+  entries: z
     .array(
       z.object({
-        question: z.string(),
-        options: z.array(z.string()).optional().describe('Up to 3 concrete choices.'),
+        /**
+         * Why the person is being told. Required, and the only three answers.
+         *
+         * Length was the only thing this used to constrain (「at most ~100 words」), which said
+         * nothing about *when* to speak — so a supervisor narrated progress into the user's
+         * transcript and pushed the next real decision off the screen.
+         */
+        kind: z
+          .enum(['completed', 'decision', 'blocked'])
+          .describe(
+            'completed = the task is finished. decision = you cannot proceed without a choice only a person can make. blocked = a failure needing human hands. Work in progress is NOT reportable.',
+          ),
+        text: z
+          .string()
+          .describe('At most ~100 words. Conclusions only; link the session for detail.'),
+        /**
+         * The answers, as answers — not as prose.
+         *
+         * A decision reported as 「请拍板：(a) 放行，我继续派活…(b) 到此为止」 rendered as one
+         * paragraph: the reader had to retype a choice the asker had already enumerated. Options
+         * become buttons and are matched byte for byte when an answer comes back.
+         */
+        options: z
+          .array(z.string())
+          .max(4)
+          .optional()
+          .describe(
+            'Only with kind=decision: the answers a person can choose, at most 4, e.g. ["放行剩余步骤，把任务做完", "到此为止，结束任务"]. Each is rendered as a button and sent back verbatim. Do not also enumerate them inside `text`.',
+          ),
       }),
     )
     .min(1)
     /**
-     * No cap — but not a licence to ask more.
+     * No cap — and now no cap anywhere.
      *
-     * This was `.max(2)` with a note saying a third question meant the supervisor should decide
-     * for itself, and a supervisor obeyed it literally: asked to raise three things, it sent the
-     * first two and wrote 「第 3 个因为工具单次最多承载 2 个，我默认按不加处理」. The limit was ours,
-     * the decision became the model's, and the person was told about a question they were never
-     * asked. A count is not a reason to decide on someone's behalf; picking what genuinely needs
-     * a person is.
-     *
-     * Answers are collected and delivered together, so several questions are one interruption,
-     * not several.
+     * The schema dropped `.max(2)` and explained why, but the handler kept its own `> 2` refusal:
+     * the refusal outlived the rule, so a supervisor asking three things got a tool error and
+     * learned to avoid the tool rather than to trust it. A count is not a reason to decide on
+     * someone's behalf; picking what genuinely needs a person is.
      */
     .describe(
-      'Every question that genuinely needs a person, asked together in one call — as many as there are. Do not drop one because of a count, and do not decide it yourself instead: ask it, or leave it out of the list entirely and say why.',
+      'Everything to tell the person this turn, in order — as many entries as there are. Do not drop one because of a count, and do not decide it yourself instead: ask it, or leave it out entirely and say why.',
     ),
+  taskId: z
+    .string()
+    .optional()
+    .describe('The task these entries concern, e.g. "T-1". Give it for kind=decision when the question is about a task.'),
+  sessionId: z.string().optional().describe('Session the person can open for the full process.'),
 });
 
 export const ListQuestionsSchema = z.object({

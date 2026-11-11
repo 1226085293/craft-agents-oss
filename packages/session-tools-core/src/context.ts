@@ -350,18 +350,24 @@ export interface SessionToolContext {
       attachTaskId?: string;
       parallel: boolean;
     }): Promise<{ message: string }>;
-    /** Supervisor: the only channel to the user. */
-    reportToUser(payload: {
-      text: string;
-      kind: 'completed' | 'decision' | 'blocked';
-      sessionId?: string;
-      /** kind=decision only: the answers, rendered as buttons. */
-      options?: string[];
-      /** The task this report is about; the card carries it so an answer lands on it. */
+    /**
+     * Supervisor: the only channel to the user, and it takes a list.
+     *
+     * Two methods used to sit here — `reportToUser` for one statement delivered immediately, and
+     * `askUser` for questions delivered at turn end. Both wrote to the same record and drew the
+     * same cards, which is why one turn could produce two cards for one question: the caller had
+     * no way to know the two doors led to the same room. One list, delivered once.
+     */
+    askUser(payload: {
+      entries: Array<{
+        kind: 'completed' | 'decision' | 'blocked';
+        text: string;
+        /** kind=decision only: the answers, rendered as buttons. */
+        options?: string[];
+      }>;
+      /** The task these entries concern; a card carries it so an answer lands on it. */
       taskId?: string;
     }): Promise<void>;
-    /** Supervisor: ask a question when no decision can be made alone. */
-    askUser(payload: { questions: { question: string; options?: string[] }[] }): Promise<void>;
     /**
      * The questions already waiting for an answer, newest last.
      *

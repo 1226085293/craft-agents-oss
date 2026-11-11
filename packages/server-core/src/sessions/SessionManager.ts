@@ -1794,6 +1794,23 @@ export interface ManagedSession {
    * Capped at PI_SDK_MESSAGE_ID_CACHE_LIMIT to bound memory in long sessions.
    */
   piSdkMessageToCraftMessage?: Map<string, string>
+  /**
+   * What this turn has to say to the person, in order, delivered when the turn ends.
+   *
+   * In memory on purpose: the unit is one turn, and a turn that dies has nothing to say. The half
+   * that must survive a crash is the decision record — a task cannot be started while a question is
+   * open — and that is written to the task the moment the question is made, not held here.
+   *
+   * Without this list, delivery happened per call: `report_to_user` sent immediately and `ask_user`
+   * collected, so the same turn reached the person through two paths at two moments and one
+   * unresolved question produced two cards.
+   */
+  pendingUserEntries?: Array<{
+    kind: 'completed' | 'decision' | 'blocked';
+    text: string;
+    options?: string[];
+    taskId?: string;
+  }>
 }
 
 const PI_SDK_MESSAGE_ID_CACHE_LIMIT = 256
@@ -2210,16 +2227,21 @@ export class SessionManager implements ISessionManager {
       this.watchdogLoops.get(managed.workspace.id)?.wake()
       if (managed.role === 'supervisor') {
         /**
-         * Questions collected during this turn go out now, as one card.
+         * Everything this turn collected goes out now, in the order it was said.
          *
          * Every termination path reaches here — complete, interrupted, error — which is why this
-         * belongs at the turn boundary rather than in the completion handler: a question the person
-         * was asked must not depend on the turn finishing cleanly.
+         * belongs at the turn boundary rather than in the completion handler: what the person was
+         * owed must not depend on the turn finishing cleanly.
          *
-         * `undeliveredQuestions` reads the record, so there is nothing in memory to clear: once the
-         * mark is written the set is empty, and a crash before it re-delivers instead of forgetting.
+         * The turn's own list is memory only, and it is the only thing that delivers this turn's
+         * entries. The record-based flush runs second and finds nothing pending for them, because
+         * drawing a card marks its question delivered — that flush exists for a turn that died
+         * before reaching here, where the mark was never written and the question would otherwise
+         * be lost. Running it second is what keeps that recovery from re-sending what was just sent.
          */
-        void this.flushPendingQuestions(managed).catch((error) => {
+        void this.flushPendingUserEntries(managed)
+          .then(() => this.flushPendingQuestions(managed))
+          .catch((error) => {
           sessionLog.warn('[supervisor] failed to deliver collected questions', {
             sessionId: managed.id,
             error: error instanceof Error ? error.message : String(error),
@@ -6007,183 +6029,44 @@ export class SessionManager implements ISessionManager {
             return { sessionId: created.id }
           },
           sendToSession: (sessionId, text) => this.sendSystemMessage(sessionId, text),
-          writeUserVisible: async (text, kind, options, taskId) => {
+          askUser: async (payload) => {
             /**
-             * One question, two surfaces.
+             * One list per turn, delivered once when the turn ends.
              *
-             * The task card renders `task.decision`, which the task service writes from
-             * a closed list of six categories — so its wording is generic, and it has no
-             * options unless a worker passed them. The chat card is this call, where the
-             * supervisor says the real question and lists the real answers. Observed on
-             * a real run: the same decision appeared as 「仅放行 1.2 / 放行 1.2 和 2 / 到此
-             * 为止」 in the conversation and as 「同意，继续跑 / 否，取消任务」 on the task —
-             * neither button was one of the three.
+             * `report_to_user` used to deliver immediately and `ask_user` at turn end, so one turn
+             * could reach the person twice — observed as two decision cards six seconds apart for
+             * one unresolved situation, the first with no buttons because the model had not decided
+             * what the answers were yet. Two doors, two moments, one question.
              *
-             * So the relayed words go back onto the record the task card reads. Wording
-             * only: status, deadline and the answer guard are untouched.
-             */
-            if (kind === 'decision') {
-              /**
-               * Find the task by asking who is SUPPOSED to be asked, not by what this
-               * session is working on.
-               *
-               * The first version keyed on `managed.taskId`, which a supervisor does not
-               * have — it is the session that relays questions, not the one that does the
-               * work. Observed on a real run: the write-back silently did nothing, the task
-               * card kept the rule-generated text and no options, and the same decision
-               * still read as 「同意，继续跑 / 否，取消任务」 on one surface and as two real
-               * answers on the other.
-               *
-               * A supervisor can relay for more than one task, so every paused task whose
-               * question is still open is a candidate; the handoff it just read is what
-               * makes one of them the right one.
-               */
-              const tasks = this.getTasks(managed.workspace.id)
-              /**
-               * The task the asker named wins over the lookup.
-               *
-               * The lookup only considers decisions that are still open, so a card raised
-               * after one was resolved found nothing and the task kept the rule-generated
-               * text — the two surfaces disagreed again, for the third time and for the
-               * third different reason.
-               */
-              const targetId =
-                taskId ??
-                this.pickOpenQuestionTask(managed)
-              if (targetId) {
-                const before = tasks.get(targetId)
-                const wrote = tasks.setDecisionWording(targetId, {
-                  question: text,
-                  ...(options?.length ? { options: [...options] } : {}),
-                })
-                /**
-                 * The question was refused because the last answer is still the newest thing on
-                 * the task — so there is nothing new to ask, and drawing a card would ask it twice.
-                 *
-                 * `setDecisionWording` returns the task untouched in that case (it is the only door
-                 * to a reopen). The person still gets told; what they do not get is a second set of
-                 * buttons for a question they just answered.
-                 */
-                const refused =
-                  Boolean(before) &&
-                  wrote?.decision?.askedAt === before!.decision?.askedAt &&
-                  Boolean(before!.decision?.answer) &&
-                  Boolean(before!.decision?.resolvedAt)
-                if (refused) {
-                  // Delivered as a report, not a card: the words still reach the person, the
-                  // buttons do not.
-                  await this.deliverToUserLane(managed, text, 'completed')
-                  return
-                }
-              }
-              /**
-               * Written now, shown when the turn ends — the same shape `ask_user` uses, with one
-               * exception: a question with nowhere to be recorded still has to be delivered.
-               *
-               * Two entries for one question was the defect: `kind: 'decision'` and `ask_user` are
-               * two spellings of 「a person must answer this」, and giving them different delivery
-               * timing would make the duplicate depend on which spelling the model picked. Both
-               * write the record and let the turn-end flush draw one card.
-               *
-               * But the flush reads questions off a task. With no task — `taskId` missing and no
-               * paused task to attribute it to — nothing is recorded, so nothing would be flushed
-               * and the question would simply vanish. Delivered here, it at least reaches the
-               * person; there is no record to double-send from.
-               */
-              if (this.questionRoute(targetId) === 'deliver-now') {
-                await this.deliverToUserLane(managed, text, kind, options)
-              }
-              return
-            }
-            await this.deliverToUserLane(managed, text, kind, options)
-          },
-          listQuestions: async (params) => {
-            const wanted = params.taskId?.trim()
-            const rows: Array<{
-              taskId: string
-              id: string
-              question: string
-              options?: string[]
-              label?: string
-              askedAt: number
-            }> = []
-            /**
-             * The same candidates the flush delivers for.
-             *
-             * A narrower rule here would show the asker an empty list for questions that are about
-             * to be sent, and a wider one would leak another lane's work into its reading. The two
-             * must agree, so both call `questionTaskCandidates`: the tasks this session owns, or
-             * every task when it owns none — which is exactly the user lane's position.
-             */
-            for (const task of this.questionTaskCandidates(managed)) {
-              if (wanted && task.id !== wanted) continue
-              for (const entry of task.decisions ?? []) {
-                if (entry.resolvedAt) continue
-                /**
-                 * Only what is still waiting to be sent.
-                 *
-                 * The list is cleared by the turn-end flush: once a question has gone out it
-                 * leaves this list, so the next turn starts empty and cannot ask it again. The
-                 * question itself stays on the task record, which is what makes the task stay
-                 * paused and keeps it answerable from the card.
-                 */
-                if (entry.questionDeliveredAt) continue
-                const question = String(entry.question ?? '').trim()
-                if (!question) continue
-                rows.push({
-                  taskId: task.id,
-                  // An entry written before ids existed still has to be answerable by name.
-                  id: entry.id ?? `${task.id}:${entry.askedAt}`,
-                  question,
-                  ...(entry.options?.length ? { options: [...entry.options] } : {}),
-                  ...(entry.label ? { label: entry.label } : {}),
-                  askedAt: entry.askedAt,
-                })
-              }
-            }
-            return rows
-          },
-          askUser: async (questions) => {
-            /**
-             * The same questions, written to the task as well as to the card.
-             *
-             * `ask_user` drew cards and nothing else: the words reached the conversation while
-             * the task kept no record of them, so the task page showed fewer questions than the
-             * chat did and an answer sent from the card could not find its decision. Both tools
-             * now go through one path — wording onto the task, then the row onto the lane that
-             * shows it.
+             * Now every entry joins the turn's list. A decision is also written to the task
+             * immediately, because a task must not be startable while a person is still deciding —
+             * that has to be true from the moment the question exists, not from the moment a card
+             * appears.
              */
             const tasks = this.getTasks(managed.workspace.id)
-            const targetId = this.pickOpenQuestionTask(managed)
-            if (targetId) {
-              for (const q of questions) {
-                try {
-                  tasks.setDecisionWording(targetId, {
-                    question: q.question,
-                    ...(q.options?.length ? { options: [...q.options] } : {}),
-                  })
-                } catch (error) {
-                  sessionLog.warn('[supervisor] could not record the question on its task', { error })
-                }
+            const named = payload.taskId?.trim()
+            const targetId = named || this.pickOpenQuestionTask(managed)
+            for (const entry of payload.entries) {
+              if (entry.kind !== 'decision') continue
+              if (!targetId) continue
+              try {
+                tasks.setDecisionWording(targetId, {
+                  question: entry.text,
+                  ...(entry.options?.length ? { options: [...entry.options] } : {}),
+                })
+              } catch (error) {
+                sessionLog.warn('[supervisor] could not record the question on its task', { error })
               }
             }
-            /**
-             * Recorded, not delivered — unless there is no record to record it on.
-             *
-             * The card goes out when the turn ends. A supervisor asks several things in one turn —
-             * re-reading the task, finding a second boundary, rewording the first — and delivering
-             * each call drew one card per ask. One real turn produced two cards for a single
-             * unresolved situation, with different buttons, and the person had to dismiss one to
-             * answer the other. Collecting them also means one interruption instead of three.
-             *
-             * The question itself is on the record already, so nothing is lost if the turn dies:
-             * `undeliveredQuestions` finds it on the next flush. That only holds when there IS a
-             * task; with none, the flush has nothing to read, so the question is delivered now
-             * rather than dropped.
-             */
-            if (this.questionRoute(targetId) === 'deliver-now') {
-              await this.deliverQuestionToUserLane(managed, questions, undefined)
-            }
+            managed.pendingUserEntries = [
+              ...(managed.pendingUserEntries ?? []),
+              ...payload.entries.map((entry) => ({
+                kind: entry.kind,
+                text: entry.text,
+                ...(entry.options?.length ? { options: [...entry.options] } : {}),
+                ...(targetId ? { taskId: targetId } : {}),
+              })),
+            ]
           },
           dispatchViaSupervisor: async (params) => {
             const runtime = this.getSupervisorRuntime(managed.workspace.id)
@@ -8989,6 +8872,21 @@ ${request.prompt}`;
           askedAt: Date.now(),
         },
       })
+      /**
+       * Marked here, because the card exists now.
+       *
+       * The mark used to be written only by the record-based flush, so a card drawn by this path
+       * left the question 「pending」 on the task — and the flush, which runs immediately after this
+       * one, drew the same card a second time. The person got two cards for one question, which is
+       * the whole defect this shape is meant to end.
+       */
+      if (taskId && decisionId) {
+        try {
+          this.getTasks(managed.workspace.id).markQuestionsDelivered(taskId)
+        } catch (error) {
+          sessionLog.warn('[supervisor] drew a card but could not mark its question', { error })
+        }
+      }
       return
     }
     this.appendReadOnlyRow(target, {
@@ -9019,7 +8917,45 @@ ${request.prompt}`;
    * things before anybody acts, and N cards is the same interruption N times. The mark is written
    * after the row exists, so a failure here leaves the questions pending rather than lost.
    */
+  /**
+   * Deliver what this turn collected, in the order it was said.
+   *
+   * The list is taken before delivery and cleared, because delivery is async: a second flush racing
+   * this one would send the same entry twice. Taking it first also means a failed delivery loses
+   * the row rather than repeating it — the right trade here, since these are statements about a
+   * turn the person just watched happen, not questions the task is blocked on. Questions are
+   * recorded on the task and flushed separately for exactly that reason.
+   */
+  private async flushPendingUserEntries(managed: ManagedSession): Promise<void> {
+    const entries = managed.pendingUserEntries ?? []
+    if (!entries.length) return
+    managed.pendingUserEntries = []
+    for (const entry of entries) {
+      try {
+        await this.deliverToUserLane(managed, entry.text, entry.kind, entry.options, entry.taskId)
+      } catch (error) {
+        sessionLog.warn('[supervisor] could not deliver a collected entry', {
+          kind: entry.kind,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+  }
+
   private async flushPendingQuestions(managed: ManagedSession): Promise<void> {
+    if (this.questionsFlushing.has(managed.id)) return
+    this.questionsFlushing.add(managed.id)
+    try {
+      await this.deliverPendingQuestions(managed)
+    } finally {
+      this.questionsFlushing.delete(managed.id)
+    }
+  }
+
+  /**
+   * Old body kept below for the record — see `deliverPendingQuestions`.
+   */
+  private async flushPendingQuestionsLegacy(managed: ManagedSession): Promise<void> {
     if (this.questionsFlushing.has(managed.id)) return
     this.questionsFlushing.add(managed.id)
     try {

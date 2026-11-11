@@ -15,7 +15,6 @@ import type {
   DispatchInput,
   ListQuestionsInput,
   ReportResultInput,
-  ReportToUserInput,
 } from '../tool-schemas-agent.ts';
 
 /** Line separator for the human-readable list; kept out of a template literal. */
@@ -123,51 +122,96 @@ export async function handleDispatch(
   }
 }
 
-/** Supervisor → user. Short by contract, not by convention. */
-export async function handleReportToUser(
+/**
+ * Everything this turn has to say to the person, in one list.
+ *
+ * This replaced two handlers — `handleReportToUser` for one statement, `handleAskUser` for a list
+ * of questions — writing to two paths that delivered at two different moments. The code called them
+ * 「two spellings of one thing」 in a comment while both stayed in the table. One real turn used the
+ * statement path twice for one unresolved situation and drew two cards; the model had no reason to
+ * prefer the other door, and the list that exists to prevent exactly that sat behind it.
+ *
+ * The count refusal went with the second door. It outlived the schema's own `.max(2)` by accident,
+ * and a supervisor that hit it learned to stop trusting the tool — observed as 「第 3 个因为工具单次
+ * 最多承载 2 个，我默认按不加处理」: a decision taken on the person's behalf because of our limit.
+ */
+export async function handleAskUser(
   ctx: SessionToolContext,
-  args: ReportToUserInput,
+  args: AskUserInput,
 ): Promise<ToolResult> {
-  if (!ctx.agentTools?.reportToUser) {
-    return errorResponse('report_to_user is only available to a supervisor session.');
+  if (!ctx.agentTools?.askUser) {
+    return errorResponse('ask_user is only available to a supervisor session.');
   }
-  const text = args.text?.trim();
-  if (!text) return errorResponse('text is required.');
-  if (!args.kind) {
-    return errorResponse(
-      'kind is required: completed (the task is finished), decision (only a person can decide), or blocked (needs human hands). Progress updates are not reportable — the task lane already records them.',
-    );
+  const entries = args.entries ?? [];
+  if (!entries.length) return errorResponse('entries must contain at least one entry.');
+
+  const cleaned = entries.map((entry) => ({
+    kind: entry.kind,
+    text: entry.text?.trim() ?? '',
+    options: entry.options?.map((option) => option.trim()).filter(Boolean) ?? [],
+  }));
+  if (cleaned.some((entry) => !entry.text)) {
+    return errorResponse('Every entry needs a non-empty `text`.');
   }
 
-  try {
-    const options = args.kind === 'decision' ? args.options?.filter((o) => o.trim()) : undefined;
-    if (options?.length && text.includes(options[0] as string)) {
+  for (const entry of cleaned) {
+    /**
+     * A decision with no buttons is a question waiting to be misread.
+     *
+     * Observed on a real run: the first call passed `kind: 'decision'` with prose and no options,
+     * the second passed the same situation with three buttons six seconds later, and the person
+     * got two cards for one question — the first with nothing to click. Saying it without answers
+     * is what makes the model reach for the tool again, so the refusal happens before a card is
+     * drawn.
+     */
+    if (entry.kind === 'decision' && !entry.options.length) {
+      return errorResponse(
+        'A decision needs `options` — the answers the person can choose, at most 4. To report a conclusion use kind: completed; if work cannot continue without a person acting, use kind: blocked.',
+      );
+    }
+    if (entry.kind !== 'decision' && entry.options.length) {
+      return errorResponse(`${entry.kind} entries take no options; they are statements, not questions.`);
+    }
+    if (entry.options.length && entry.text.includes(entry.options[0] as string)) {
       // The same sentence twice: once as a paragraph, once as a button. The card then
       // shows the choice in two shapes and the reader cannot tell which one answers.
       return errorResponse(
         'Do not repeat the options inside `text`. Describe the situation in `text`; put the answers in `options`.',
       );
     }
-    await ctx.agentTools.reportToUser({
-      text: clip(text, 600) ?? text,
-      kind: args.kind,
-      sessionId: args.sessionId,
+  }
+
+  try {
+    await ctx.agentTools.askUser({
+      entries: cleaned.map((entry) => ({
+        kind: entry.kind,
+        text: clip(entry.text, 600) ?? entry.text,
+        ...(entry.options.length ? { options: entry.options } : {}),
+      })),
       ...(args.taskId?.trim() ? { taskId: args.taskId.trim() } : {}),
-      ...(options?.length ? { options } : {}),
     });
+    /**
+     * The reply says what is now waiting, not just what was written.
+     *
+     * The old tool answered 「Reported to the user.」 and nothing else, so a supervisor that had
+     * already queued a question could not tell from the result that it was about to ask twice. The
+     * list is the fact it can check — `list_questions` shows the same thing at any time.
+     */
+    const decisions = cleaned.filter((entry) => entry.kind === 'decision').length;
+    const statements = cleaned.length - decisions;
+    const parts: string[] = [];
+    if (decisions) parts.push(`${decisions} 条问题（对方可点选项）`);
+    if (statements) parts.push(`${statements} 条汇报`);
     return successResponse(
-      options?.length
-        ? `Reported to the user with ${options.length} button(s): ${options.join(' / ')}`
-        : 'Reported to the user.',
+      `已记下${parts.join('、')}，本轮结束时一并发出。重复提交前请先用 list_questions 查看已排队的内容。`,
     );
   } catch (error) {
     return errorResponse(
-      `Failed to report to the user: ${error instanceof Error ? error.message : 'unknown error'}`,
+      `Failed to reach the user: ${error instanceof Error ? error.message : 'unknown error'}`,
     );
   }
 }
 
-/** Supervisor → user, only when a decision genuinely cannot be made. */
 /**
  * What has already been asked, and what is still waiting for an answer.
  *
@@ -203,28 +247,6 @@ export async function handleListQuestions(
   } catch (error) {
     return errorResponse(
       `Failed to read the question list: ${error instanceof Error ? error.message : 'unknown error'}`,
-    );
-  }
-}
-
-export async function handleAskUser(
-  ctx: SessionToolContext,
-  args: AskUserInput,
-): Promise<ToolResult> {
-  if (!ctx.agentTools?.askUser) {
-    return errorResponse('ask_user is only available to a supervisor session.');
-  }
-  if (!args.questions?.length) return errorResponse('questions must contain at least one question.');
-  if (args.questions.length > 2) {
-    return errorResponse('Ask at most two questions; decide the rest yourself.');
-  }
-
-  try {
-    await ctx.agentTools.askUser({ questions: args.questions });
-    return successResponse('Question sent to the user.');
-  } catch (error) {
-    return errorResponse(
-      `Failed to ask the user: ${error instanceof Error ? error.message : 'unknown error'}`,
     );
   }
 }

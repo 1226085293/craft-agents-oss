@@ -2146,6 +2146,24 @@ export class SessionManager implements ISessionManager {
    * `key` is the subject, not the text — `T-1:failures` twice is one notice about the same fact, and
    * delivering both would ask the reader to act on it twice.
    */
+  /**
+   * System text addressed to a session — a hand-off, a nudge, a dispatch.
+   *
+   * Always queued behind a running turn, never steered into it. `sendMessage` defaults to
+   * whatever the connection prefers, and that default (steer) exists for a person typing a
+   * follow-up: their sentence is guidance for the turn already in flight. A system message is
+   * not guidance. It announces something that happened elsewhere — 「交接通过」、「上一轮排队的
+   * 派发执行失败」 — and injecting it mid-reasoning makes the target answer for work it has not
+   * finished yet.
+   *
+   * The concrete race this closes: a worker reports, the supervisor is woken while that worker
+   * is still writing its closing lines, and the follow-up dispatch lands inside the very turn
+   * it was meant to follow.
+   */
+  private async sendSystemMessage(sessionId: string, text: string): Promise<void> {
+    await this.sendMessage(sessionId, text, undefined, undefined, { midStreamBehavior: 'queue' })
+  }
+
   private notifySupervisor(sessionId: string, key: string, text: string): void {
     const managed = this.sessions.get(sessionId)
     if (!managed) return
@@ -5950,9 +5968,7 @@ export class SessionManager implements ISessionManager {
             })
             return { sessionId: created.id }
           },
-          sendToSession: async (sessionId, text) => {
-            await this.sendMessage(sessionId, text)
-          },
+          sendToSession: (sessionId, text) => this.sendSystemMessage(sessionId, text),
           writeUserVisible: async (text, kind, options, taskId) => {
             /**
              * One question, two surfaces.
@@ -8396,9 +8412,7 @@ ${request.prompt}`;
         })
         return { sessionId: created.id }
       },
-      sendToSession: async (sessionId, text) => {
-        await this.sendMessage(sessionId, text)
-      },
+      sendToSession: (sessionId, text) => this.sendSystemMessage(sessionId, text),
       logDispatch: (message) => sessionLog.info(`[dispatch] ${message}`),
       handoffContext: (taskId) => {
         const task = this.getTasks(workspaceId).get(taskId)

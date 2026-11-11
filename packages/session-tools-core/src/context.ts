@@ -811,6 +811,8 @@ export interface SessionInfo {
   createdAt: number;
   updatedAt?: number;
   workingDirectory?: string;
+  /** Which supervisor conversation this is, when the session is a supervisor. */
+  supervisorLane?: 'user' | 'task';
   /** Present only when the session does not route through a strategy group. */
   llmConnection?: string;
   /**

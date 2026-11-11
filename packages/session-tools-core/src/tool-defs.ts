@@ -861,17 +861,11 @@ export interface JsonSchemaToolDef {
  * @param opts.includeDeveloperFeedback - Include experimental feedback tool in output
  * @returns Array of tool definitions with JSON Schema inputSchema
  */
-export function getToolDefsAsJsonSchema(opts?: {
+export function getToolDefsAsJsonSchema(opts?: SessionToolFilterOptions & {
   prefix?: string;
-  includeDeveloperFeedback?: boolean;
-  /** Session role: prunes the table so a supervisor has no execution tools. */
-  role?: SessionRole;
 }): JsonSchemaToolDef[] {
-  const prefix = opts?.prefix || '';
-  const defs = getSessionToolDefs({
-    includeDeveloperFeedback: opts?.includeDeveloperFeedback,
-    ...(opts?.role ? { role: opts.role } : {}),
-  });
+  const { prefix = '', ...filterOpts } = opts ?? {};
+  const defs = getSessionToolDefs(filterOpts);
 
   return defs.map(def => {
     // Explicit `as any` avoids TS2589 ("type instantiation is excessively deep")

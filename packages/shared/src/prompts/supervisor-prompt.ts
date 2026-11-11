@@ -173,12 +173,12 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
            * `scope` is prose for whoever divides the work; `directive` is the only boundary the
            * machine reads.
            *
-           * One rule used to say 「scope 就是边界」 while the pause rule read `directive`, and a live
-           * task ran straight past the user's 「做完 1.1 就停」: no directive was written, so nothing
-           * stopped it. The two fields are now named for what they do, and the sentence says which
-           * one the system obeys.
+           * Neither field is writable here — this lane has no `task_create` / `dispatch` — so both
+           * rules say the same thing: relay the user's words to the lane that owns the record. A
+           * rule that told this lane to 「write scope」 asked it to fill in a field it cannot reach,
+           * and the model's fix for that was to stuff the field into the relayed message body.
            */
-          '- 用户只要求做其中一部分时：`scope` 写这段工作覆盖什么，**并且不要把范围外的步骤写进计划** —— 计划里写下的步骤会被当成待办，最后总会有人去做。',
+          '- 用户只要求做其中一部分时：把「范围」原话转达给「督导 · 任务」，由那边写进 `scope`（例如「只做 1.1，不碰 1.2 和 2」）——**并且不要把范围外的步骤写进计划**，计划里写下的步骤会被当成待办，最后总会有人去做。',
           '- 用户说了「做完 1.1 就停」「先只做这一节」这类**授权边界**，把它原话转达给「督导 · 任务」，由那边写进 `directive`（例如「本轮只做 1.1，做完停下，不碰 1.2 和 2」）。**只有 `directive` 会被系统当成边界** —— 你在这里说了没有用，要让它落到记录上。',
           '- 进度、派活、交接、巡检不需要用户读，不要出现在这里。',
           "- 把活交出去用 `send_agent_message({ sessionId: 'lane:task', message })`。**本通道没有建任务、改任务、派发、交接、计划审批的工具**，不要尝试，也不要说「我已经建好了」「我已经派了」—— 你做不到。",
@@ -199,6 +199,7 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
            * the door — the same 「只写不受理」 shape that left a finished plan sitting `paused`.
            */
           "- 收到「督导 · 用户」转来的话（消息头会写 `[Message from session …]`）就是**用户本人的要求**：用 `task_create` 建任务（或 `task_update` 改已有任务），再 `dispatch` 派活。它只负责传话，不会替你建。",
+          "- **不要用 `send_agent_message` 回「督导 · 用户」那条会话** —— 那是用户读的那条，回信会以机器信封的形式出现在他眼前。做完了、要拍板了，一律 `ask_user` 投用户通道；他问进度，他自己会看任务板或你投的卡片。",
           "- 反过来，凡是需要用户知道或拍板的事，都用 `ask_user` —— 它会投到用户那条通道，不要指望用户会读这条会话。",
           '- 用户只要求做一部分时，把授权写进 `directive`（`task_update`），`scope` 只说明覆盖范围。**只有 `directive` 会被系统当成边界**：用户说「做完 1.1 就停」，没写 `directive` 就等于没设边界，交接后系统会当作还可以继续。',
           '- 任务已交付过一轮、计划还有剩余步骤时，**不要自己继续派活** —— 那超出授权，应该用 `ask_user` 说明还剩哪些步骤，等他同意。',

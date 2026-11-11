@@ -7074,6 +7074,7 @@ ${request.prompt}`;
             isActive: session.agent != null,
             ...(session.taskId ? { taskId: session.taskId } : {}),
             ...(session.role === 'supervisor' ? { role: 'supervisor' } : {}),
+            ...(session.supervisorLane ? { supervisorLane: session.supervisorLane } : {}),
             ...scopeFieldFor(managed.workspace.id, session.taskId, (id) => this.getTasks(id)),
           }
         },

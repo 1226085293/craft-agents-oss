@@ -4,12 +4,14 @@ import type { SessionToolContext, SendAgentMessageResult } from '../context.ts';
 
 function createCtx(
   result: SendAgentMessageResult,
-  opts?: { name?: string },
+  opts?: { name?: string; supervisorLane?: 'user' | 'task' },
 ): { ctx: SessionToolContext; calls: Array<{ sessionId: string; message: string }> } {
   const calls: Array<{ sessionId: string; message: string }> = [];
   const ctx = {
     sessionId: 'sender-1',
-    getSessionInfo: () => (opts?.name ? ({ name: opts.name } as never) : null),
+    getSessionInfo: () => (opts?.name || opts?.supervisorLane
+      ? ({ name: opts.name, supervisorLane: opts.supervisorLane } as never)
+      : null),
     sendAgentMessage: async (sessionId: string, message: string) => {
       calls.push({ sessionId, message });
       return result;
@@ -94,5 +96,28 @@ describe('handleSendAgentMessage session commands', () => {
 
     expect(res.isError).toBeFalsy();
     expect(calls[0]!.message).toContain('Message from session');
+  });
+
+  it('does not invite a send_agent_message reply when the sender is the user lane', async () => {
+    const { ctx, calls } = createCtx(
+      { delivery: 'delivered', targetBusy: false },
+      { name: '督导 · 用户', supervisorLane: 'user' },
+    );
+    const res = await handleSendAgentMessage(ctx, { sessionId: 'lane:task', message: '建个任务' });
+
+    expect(res.isError).toBeFalsy();
+    // The reply must not be routed back into the conversation the person reads.
+    expect(calls[0]!.message).not.toContain('Use send_agent_message with sessionId');
+    expect(calls[0]!.message).toContain('ask_user');
+  });
+
+  it('keeps the reply invitation for machine-to-machine senders', async () => {
+    const { ctx, calls } = createCtx(
+      { delivery: 'delivered', targetBusy: false },
+      { name: '督导 · 任务', supervisorLane: 'task' },
+    );
+    await handleSendAgentMessage(ctx, { sessionId: 'worker-9', message: '交接完成' });
+
+    expect(calls[0]!.message).toContain('Use send_agent_message with sessionId "sender-1" to reply.');
   });
 });

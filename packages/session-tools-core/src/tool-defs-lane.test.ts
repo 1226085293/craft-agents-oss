@@ -10,6 +10,7 @@ import { describe, expect, it } from 'bun:test'
 
 import {
   getSessionToolNames,
+  getToolDefsAsJsonSchema,
   isToolVisibleToLane,
   SUPERVISOR_TOOL_NAMES,
   USER_LANE_DENIED_TOOL_NAMES,
@@ -39,6 +40,21 @@ describe('supervisor lanes', () => {
     // Read the board, answer the person, and relay work to the lane that owns it.
     for (const name of ['task_list', 'task_get', 'ask_user', 'send_agent_message']) {
       expect(tools.has(name)).toBe(true)
+    }
+  })
+
+  it('narrows the JSON-schema path the Pi proxy defs use', () => {
+    // The layered registry is built from getToolDefsAsJsonSchema output; a lane
+    // dropped here hands the user-facing supervisor dispatch through call_tool.
+    const names = new Set(
+      getToolDefsAsJsonSchema({ prefix: 'mcp__session__', role: 'supervisor', supervisorLane: 'user' })
+        .map((def) => def.name.replace('mcp__session__', '')),
+    )
+    for (const name of USER_LANE_DENIED_TOOL_NAMES) {
+      expect(names.has(name)).toBe(false)
+    }
+    for (const name of ['task_list', 'task_get', 'ask_user', 'send_agent_message']) {
+      expect(names.has(name)).toBe(true)
     }
   })
 

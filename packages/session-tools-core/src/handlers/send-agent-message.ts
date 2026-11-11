@@ -38,11 +38,19 @@ export async function handleSendAgentMessage(
 
     // Build sender envelope so the target session knows who sent the message
     const senderName = ctx.getSessionInfo?.()?.name ?? ctx.sessionId;
+    const senderLane = ctx.getSessionInfo?.()?.supervisorLane;
+    // A message from the user lane is the person's own words. The recipient must
+    // not reply with send_agent_message: that would route its answer into the
+    // conversation the user reads, wrapped in a machine envelope. User-visible
+    // answers go through ask_user instead.
+    const replyHint = senderLane === 'user'
+      ? 'This is the user\'s own words. Do the work; tell the user via ask_user — do not reply with send_agent_message.'
+      : `Use send_agent_message with sessionId "${ctx.sessionId}" to reply.`;
     const wrappedMessage = isCommand
       ? args.message.trim()
       : [
           `[Message from session "${ctx.sessionId}" (${senderName})]`,
-          `Use send_agent_message with sessionId "${ctx.sessionId}" to reply.`,
+          replyHint,
           '',
           '---',
           '',

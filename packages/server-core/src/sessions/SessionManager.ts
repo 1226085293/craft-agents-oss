@@ -2139,6 +2139,15 @@ export class SessionManager implements ISessionManager {
    */
   /** Notices waiting for a supervisor that is mid-turn; see `SupervisorNoticeQueue`. */
   private readonly supervisorNotices = new SupervisorNoticeQueue()
+  /**
+   * Sessions whose collected questions are being delivered right now.
+   *
+   * The flush is asynchronous and the next turn can start before it finishes, so two flushes can
+   * read the same undelivered questions and each draw a card — the duplicate this whole change
+   * exists to remove, reintroduced by timing. One flush per session at a time; the next turn's
+   * flush picks up whatever this one has not marked yet.
+   */
+  private readonly questionsFlushing = new Set<string>()
 
   /**
    * Hand a notice to a supervisor: now if it is between turns, otherwise when it is.
@@ -6068,20 +6077,27 @@ export class SessionManager implements ISessionManager {
                 }
               }
               /**
-               * Written now, shown when the turn ends — the same shape `ask_user` uses.
+               * Written now, shown when the turn ends — the same shape `ask_user` uses, with one
+               * exception: a question with nowhere to be recorded still has to be delivered.
                *
                * Two entries for one question was the defect: `kind: 'decision'` and `ask_user` are
                * two spellings of 「a person must answer this」, and giving them different delivery
-               * timing would make the duplicate depend on which spelling the model picked. Both now
+               * timing would make the duplicate depend on which spelling the model picked. Both
                * write the record and let the turn-end flush draw one card.
+               *
+               * But the flush reads questions off a task. With no task — `taskId` missing and no
+               * paused task to attribute it to — nothing is recorded, so nothing would be flushed
+               * and the question would simply vanish. Delivered here, it at least reaches the
+               * person; there is no record to double-send from.
                */
-              void targetId
+              if (this.questionRoute(targetId) === 'deliver-now') {
+                await this.deliverToUserLane(managed, text, kind, options)
+              }
               return
             }
             await this.deliverToUserLane(managed, text, kind, options)
           },
           listQuestions: async (params) => {
-            const tasks = this.getTasks(managed.workspace.id)
             const wanted = params.taskId?.trim()
             const rows: Array<{
               taskId: string
@@ -6091,11 +6107,16 @@ export class SessionManager implements ISessionManager {
               label?: string
               askedAt: number
             }> = []
-            for (const task of tasks.list()) {
+            /**
+             * The same candidates the flush delivers for.
+             *
+             * A narrower rule here would show the asker an empty list for questions that are about
+             * to be sent, and a wider one would leak another lane's work into its reading. The two
+             * must agree, so both call `questionTaskCandidates`: the tasks this session owns, or
+             * every task when it owns none — which is exactly the user lane's position.
+             */
+            for (const task of this.questionTaskCandidates(managed)) {
               if (wanted && task.id !== wanted) continue
-              // Only the tasks this session is accountable for: a supervisor that can see every
-              // question in the workspace would start answering other lanes' work.
-              if (task.supervisorSessionId !== managed.id) continue
               for (const entry of task.decisions ?? []) {
                 if (entry.resolvedAt) continue
                 /**
@@ -6147,7 +6168,7 @@ export class SessionManager implements ISessionManager {
               }
             }
             /**
-             * Recorded, not delivered.
+             * Recorded, not delivered — unless there is no record to record it on.
              *
              * The card goes out when the turn ends. A supervisor asks several things in one turn —
              * re-reading the task, finding a second boundary, rewording the first — and delivering
@@ -6156,9 +6177,13 @@ export class SessionManager implements ISessionManager {
              * answer the other. Collecting them also means one interruption instead of three.
              *
              * The question itself is on the record already, so nothing is lost if the turn dies:
-             * `undeliveredQuestions` finds it on the next flush.
+             * `undeliveredQuestions` finds it on the next flush. That only holds when there IS a
+             * task; with none, the flush has nothing to read, so the question is delivered now
+             * rather than dropped.
              */
-            void targetId
+            if (this.questionRoute(targetId) === 'deliver-now') {
+              await this.deliverQuestionToUserLane(managed, questions, undefined)
+            }
           },
           dispatchViaSupervisor: async (params) => {
             const runtime = this.getSupervisorRuntime(managed.workspace.id)
@@ -8940,6 +8965,19 @@ ${request.prompt}`;
   }
 
   /**
+   * Where an asked question goes: to the record for the turn-end flush, or straight to the person.
+   *
+   * A question with a task is collected — the flush reads it back off the record, batches it with
+   * the turn's other questions, and marks it sent. A question with no task has nowhere to be
+   * recorded, so the flush would never see it and it would be silently dropped; it is delivered
+   * immediately instead. Naming the choice in one place is what lets it be tested: the binding
+   * that used to hold this logic inline could only be reached through a whole session build.
+   */
+  private questionRoute(taskId: string | undefined): 'collect' | 'deliver-now' {
+    return taskId ? 'collect' : 'deliver-now'
+  }
+
+  /**
    * Show the person every question this turn collected, and mark them shown.
    *
    * One card per task rather than per question: the queue exists so a person can answer several
@@ -8947,17 +8985,31 @@ ${request.prompt}`;
    * after the row exists, so a failure here leaves the questions pending rather than lost.
    */
   private async flushPendingQuestions(managed: ManagedSession): Promise<void> {
+    if (this.questionsFlushing.has(managed.id)) return
+    this.questionsFlushing.add(managed.id)
+    try {
+      await this.deliverPendingQuestions(managed)
+    } finally {
+      this.questionsFlushing.delete(managed.id)
+    }
+  }
+
+  private async deliverPendingQuestions(managed: ManagedSession): Promise<void> {
     const tasks = this.getTasks(managed.workspace.id)
     let targets: string[]
     try {
-      targets = tasks
-        .list()
+      /**
+       * The same candidate rule `ask_user` used to write the question.
+       *
+       * Keying on `supervisorSessionId === managed.id` dropped the user lane's questions on the
+       * floor: that lane asks about tasks the *task* lane owns, so every question it queued failed
+       * this filter and was never sent — while the record said it was open, so the task stayed
+       * paused on a card nobody had. `questionTaskCandidates` is the two-lane answer: the tasks this
+       * session owns, or every task when it owns none.
+       */
+      targets = this.questionTaskCandidates(managed)
+        .filter((task) => undeliveredQuestions(task).length > 0)
         .map((task) => task.id)
-        .filter((id) => {
-          const task = tasks.get(id)
-          if (!task || task.supervisorSessionId !== managed.id) return false
-          return undeliveredQuestions(task).length > 0
-        })
     } catch (error) {
       sessionLog.warn('[supervisor] could not read pending questions', { error })
       return
@@ -8998,11 +9050,21 @@ ${request.prompt}`;
       target = await this.resolveReaderLane(managed)
     } catch (error) {
       sessionLog.warn('[supervisor] could not open the reader lane', { error })
-      // Falling back to a wake would recreate the very defect this path avoids: a report
-      // meant for a person must stay unread rather than become model input.
-      return
+      /**
+       * Thrown, not returned, because the caller marks what it delivered.
+       *
+       * A silent `return` here looked like success: `flushPendingQuestions` wrote
+       * `questionDeliveredAt` on questions nobody saw, and the next turn's list was empty — so the
+       * question was lost, not retried. The distinction the caller needs is 「the card exists」.
+       *
+       * Falling back to a wake would recreate the very defect this path avoids: a report meant for
+       * a person must stay unread rather than become model input.
+       */
+      throw new Error(`cannot open the reader lane: ${error instanceof Error ? error.message : String(error)}`)
     }
-    if (!target) return
+    if (!target) {
+      throw new Error('no reader lane available for this workspace')
+    }
 
     const taskId = namedTaskId ?? this.taskIdentifierFor(managed)
 

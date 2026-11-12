@@ -89,7 +89,7 @@ const USER_LANE_TASK_SECTION = `## 怎么把用户的话交给系统
  */
 export const SUPERVISOR_PROMPT_TOOLS = [
   'send_agent_message', 'dispatch',
-  'task_create', 'task_list', 'task_get', 'task_update', 'task_handoff',
+  'task_create', 'task_list', 'task_get', 'task_update', 'task_handoff', 'task_plan',
   'ask_user', 'list_questions',
   'get_event', 'list_events', 'list_event_subscriptions',
   'list_subscriptions', 'subscribe_session', 'unsubscribe_session',
@@ -197,8 +197,8 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
            * message reads as chat and the work stops at the door — the same 「只写不受理」 shape
            * that left a finished plan sitting `paused`.
            */
-          '- 收到以「【新任务 …已登记】」开头的消息，就是**用户本人的要求**：消息里是用户原话，**逐字分析它**，确定任务的 `name` 含义、`scope`（覆盖范围）、`directive`（授权边界，如「只做 1.1，做完就停」）、验收标准与计划，然后 `dispatch` 派活。原话是任务的唯一依据；消息末尾的指引是系统加的，照做即可。',
-          '- 收到「【用户对任务 …的补充要求】」开头的消息：先 `task_get` 读该任务，再分析原话写 `directive` / `scope` / 计划并派活。',
+          '- 收到以「【新任务 …已登记】」开头的消息，就是**用户本人的要求**：消息头里就是这个任务的编号，**记录已建好——绝对不要再用 `task_create` 新建**（那会产生第二条重复任务，且会被系统拒绝）。你要做的是：**逐字分析**消息里的用户原话，用 `task_update` 把 `scope`（覆盖范围）与 `directive`（授权边界，如「只做 1.1，做完就停」）写到该任务上，用 `task_plan` 写计划（验收标准写进计划/交付物），然后 `dispatch` 派活。原话是任务的唯一依据；消息末尾的指引是系统加的，照做即可。',
+          '- 收到「【用户对任务 …的补充要求】」开头的消息：该任务的记录已存在（补充原话也已记入它的 journal），**不要 `task_create`**。先 `task_get` 读该任务（可带 journal 看原话），再分析原话更新 `directive` / `scope` / 计划并派活。',
           '- 需要用户知道或拍板的事，都用 `ask_user` —— 它会投到用户那条通道，不要指望用户会读这条会话。',
           '- 用户只要求做一部分时，把授权写进 `directive`（`task_update`），`scope` 只说明覆盖范围。**只有 `directive` 会被系统当成边界**：用户说「做完 1.1 就停」，没写 `directive` 就等于没设边界，交接后系统会当作还可以继续。',
           '- 任务已交付过一轮、计划还有剩余步骤时，**不要自己继续派活** —— 那超出授权，应该用 `ask_user` 说明还剩哪些步骤，等他同意。',

@@ -658,6 +658,17 @@ export const SUPERVISOR_TOOL_NAMES: ReadonlySet<string> = new Set([
   'task_get',
   'task_update',
   'task_handoff',
+  /**
+   * Planning is part of the flow the working lane owns.
+   *
+   * `task_plan` started as a worker tool (a worker keeps its own task's plan current), and the
+   * supervisor wrote its outline through `task_create`'s `spec.plan` — the only path that
+   * existed. The relay flow retired that path: the user lane registers the record and the
+   * working lane must draw the plan out of the person's words *without creating a task*, so
+   * the outline write needs its own tool. Ownership still gates it (see `updatePlan`): a
+   * supervisor may plan a task it supervises; a worker may plan the task it runs.
+   */
+  'task_plan',
   'SubmitPlan',
   // Tier 3 of the event funnel delivers "有一条未处理的事件（id: …）" to this
   // session, so it must be able to read what it was handed. Denying the read
@@ -710,6 +721,7 @@ export const USER_LANE_DENIED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'task_create',
   'task_update',
   'task_handoff',
+  'task_plan',
   'SubmitPlan',
   'send_agent_message',
 ]);

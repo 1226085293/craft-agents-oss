@@ -953,6 +953,18 @@ export class TaskService {
           existing === sameQuestion
             ? {
                 ...existing,
+                /**
+                 * Identity must survive the wording, not just the journal.
+                 *
+                 * Records raised before ids existed at birth (and hand-written ones) reach
+                 * this branch with none, and the journal alone does not make the entry
+                 * answerable by id: `openDecisionIdFor` reads the record, so a worded entry
+                 * without an id breaks the 「question was shown」 mark and the record-side
+                 * flush draws the same card twice. `entry.id` is the id this wording would
+                 * have been born with; adopting it here repairs the record without changing
+                 * anything an id-bearing entry would have done.
+                 */
+                ...(existing.id ? {} : { id: entry.id }),
                 ...(wording.label?.trim() ? { label: wording.label.trim() } : {}),
                 ...(wording.question?.trim() ? { question: wording.question.trim() } : {}),
                 ...(options.length ? { options } : {}),
@@ -984,7 +996,19 @@ export class TaskService {
     appendJournal(this.root, id, {
       type: 'decision_asked',
       at: now,
-      data: { source: 'supervisor', question: wording.question, decisionId: entry.id, open: open.length },
+      /**
+       * The id the record actually carries, not the one the journal would invent.
+       *
+       * In the update-in-place branch the stored identity is the existing entry's —
+       * the id it was born with — so the journal must say that one, or the trail
+       * and the record disagree about which question was asked.
+       */
+      data: {
+        source: 'supervisor',
+        question: wording.question,
+        decisionId: sameQuestion ? (sameQuestion.id ?? entry.id) : entry.id,
+        open: open.length,
+      },
     });
     return saved;
   }
@@ -1811,6 +1835,18 @@ export class TaskService {
         next = {
           ...next,
           decision: {
+            /**
+             * Born with an identity.
+             *
+             * These machine-raised entries are wordless by design — the supervisor says the
+             * words later, in `setDecisionWording`. That later write only updates the existing
+             * entry in place, so an id missing at birth stays missing forever — and the card
+             * identity lookup (`openDecisionIdFor`) then fails, which skips the
+             * 「this question was shown」 mark and lets the record-side flush draw the same
+             * card a second time. One question, two cards, no identity — the identity has to
+             * exist before the wording does.
+             */
+            id: newDecisionId(now, allDecisions(next).length),
             category: assessment.category ?? 'unspecified',
             label: assessment.label ?? '需要拍板',
             reason: assessment.reason,
@@ -1853,6 +1889,8 @@ export class TaskService {
       next = {
         ...next,
         decision: {
+          // Identity at birth — same reason as the needs_decision hand-off above.
+          id: newDecisionId(now, allDecisions(next).length),
           category: 'direction',
           label: '原地打转',
           reason:

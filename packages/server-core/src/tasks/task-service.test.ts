@@ -830,8 +830,17 @@ describe('scope delivered, plan still open', () => {
      * One state was answering two questions: 「有人在问你」 and 「按你的话停了」.
      */
     expect(passed).toBe(true);
+    /**
+     * Paused, but on 「等派发」 rather than 「按你的话停了」.
+     *
+     * `awaiting_release` claims the person ended the run here, and `deriveGateReason` exempts it
+     * from re-derivation on exactly that ground — 「a person declared it, the record cannot prove
+     * otherwise」. This branch wrote it after *every* accepted hand-off, so the exemption was
+     * doing the opposite of its job: the system declared a stop nobody declared, and the dispatch
+     * of the next step was then refused for lack of authorisation. Live twice on 2026-11-13.
+     */
     expect(after.status).toBe('paused');
-    expect(after.pauseReason).toBe('awaiting_release');
+    expect(after.pauseReason).toBe('awaiting_dispatch');
     // No decision record means no card, and nothing for the watchdog to chase.
     expect(after.decision).toBeUndefined();
   });
@@ -930,10 +939,10 @@ describe('a stopped slice asks nothing', () => {
     expect(svc.get(task.id)?.decision).toBeUndefined()
   })
 
-  it('parks the task once, on instruction', async () => {
+  it('parks the task once, without claiming the person stopped it', async () => {
     const { svc, task } = await parked()
     expect(svc.get(task.id)?.status).toBe('paused')
-    expect(svc.get(task.id)?.pauseReason).toBe('awaiting_release')
+    expect(svc.get(task.id)?.pauseReason).toBe('awaiting_dispatch')
   })
 
   /**

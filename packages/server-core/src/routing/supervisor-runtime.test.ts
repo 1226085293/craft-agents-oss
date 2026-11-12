@@ -55,6 +55,9 @@ function harness(
         assigneeAgentId?: string;
         /** The run lock, so a case can prove a held lock refuses the dispatch inline. */
         stats?: { lockSessionId?: string };
+        /** Why it is paused; `awaiting_release` is the pause the person owns. */
+        pauseReason?: string;
+        lifecycle?: { lastPausedAt?: number };
         spec?: { plan?: Array<{ id: string; status?: string; agent?: string; updatedAt?: number; executedBy?: string }> };
       }
     >;
@@ -1237,9 +1240,44 @@ describe('a paused task does not take new work', () => {
       expect(h.spawned.length).toBeGreaterThan(0)
     })
 
-    it('refuses when the directive predates the slice that stopped it', async () => {
+    it('keeps the authorisation across a slice hand-over', async () => {
+      // Live on T-1 (2026-11-13): directive at 06:17:05 covering 1.1/2.1/3.1, hand-off at
+      // 06:18:04, and dispatch of 2.1 refused at 06:18:08 with 「没有覆盖这次继续的授权」. The
+      // person had already said 「全部做完」; the gate read the hand-over as a withdrawal.
       const h = harness(workspace(), {
         tasks: tasks({
+          pauseReason: 'awaiting_dispatch',
+          lifecycle: { lastPausedAt: 200 },
+          handoffs: [{ outcome: 'handoff', at: 200, passed: true, stepId: '1.1' }],
+          spec: {
+            scope: '三条大纲',
+            plan: [
+              { id: '1.1', status: 'done', agent: 'builtin-default', updatedAt: 150 },
+              { id: '2.1', status: 'todo', agent: 'agent-ui' },
+            ],
+            directive: { text: '按原话完成 1.1、2.1、3.1，全部完成即结束', at: 100 },
+          },
+        }),
+      })
+      const result = await h.runtime.dispatch({
+        fromSessionId: 'sess_sup',
+        target: { kind: 'task', taskId: 'T-1' },
+        stepId: '2.1',
+        scope: '界面',
+        instruction: '写 docs/ui.md',
+        parallel: false,
+      })
+      expect(result.queued).toBe(true)
+    })
+
+    it("refuses when the person's boundary was reached and the directive predates it", async () => {
+      // 「做完 1.1 就停」 is a stop the person owns: `awaiting_release`, not a plain hand-off.
+      // (A plain `handoff` means 「this slice is done, the plan continues」 and must NOT end the
+      // authorisation — that distinction is what the previous version of this case got wrong.)
+      const h = harness(workspace(), {
+        tasks: tasks({
+          pauseReason: 'awaiting_release',
+          lifecycle: { lastPausedAt: 300 },
           handoffs: [{ outcome: 'handoff', at: 300 }],
           spec: {
             scope: '只做 1.1',

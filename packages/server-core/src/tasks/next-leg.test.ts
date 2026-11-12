@@ -89,7 +89,13 @@ describe('after a hand-off, the supervisor decides', () => {
     expect(text).toContain('交接通过')
     expect(text).toContain('2.1')
     expect(text).toContain('agent-qa')
-    expect(text).toContain('请决定')
+    /**
+     * The nudge still names the next step and leaves the move to the supervisor — but it no
+     * longer offers 「ask the user」 as a peer of 「dispatch」. That phrasing, read next to a pause
+     * that claimed 「按你的话停了」, is what made two live runs ask whether to continue on tasks
+     * whose instruction already said to keep going.
+     */
+    expect(text).toContain('否则直接 dispatch')
     rmSync(h.root, { recursive: true, force: true })
   })
 
@@ -111,7 +117,7 @@ describe('after a hand-off, the supervisor decides', () => {
     const text = h.woken.join(String.fromCharCode(10))
     expect(text).toContain('1.2')
     expect(text).toContain('agent-api')
-    expect(text).toContain('请决定')
+    expect(text).toContain('否则直接 dispatch')
     rmSync(h.root, { recursive: true, force: true })
   })
 
@@ -158,8 +164,15 @@ describe('two rules answered "may work continue"', () => {
       '只做 1.1，做完就停',
     )
     await h.service.reportHandoff('T-1', handoff, 'sess-1')
-    // The directive says stop, and it wins: the task pauses and nothing is started.
-    expect(h.service.get('T-1')?.pauseReason).toBe('awaiting_release')
+    /**
+     * The invariant this case exists for is 「nothing is started by the hand-off」 — the old
+     * assertion turned it into 「the pause says the person stopped it」, which the record cannot
+     * know: every multi-step hand-off parked the task that way, including directives that said
+     * 「继续下一节」. The state is now the one the record can defend — the slice landed, the plan
+     * is open, nobody took the next leg — and the supervisor reads 「只做 1.1」 and stops.
+     */
+    expect(h.service.get('T-1')?.status).toBe('paused')
+    expect(h.service.get('T-1')?.pauseReason).toBe('awaiting_dispatch')
     rmSync(h.root, { recursive: true, force: true })
   })
 

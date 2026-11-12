@@ -150,6 +150,7 @@ export {
   saveTask,
   tasksByStatus,
 } from './store.ts';
+export * from './completion-claim.ts'
 export * from './resume-decision.ts'
 export * from './answer-line.ts'
 export * from './supervisor-message.ts'

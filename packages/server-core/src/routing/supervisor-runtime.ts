@@ -431,6 +431,10 @@ export class SupervisorRuntime {
     task: {
       id: string;
       status?: string;
+      /** Why the task is paused; `awaiting_release` is the only pause the person owns. */
+      pauseReason?: string;
+      /** `lastPausedAt` is when the current pause began — the line a directive must be newer than. */
+      lifecycle?: { lastPausedAt?: number };
       spec?: {
         scope?: string;
         plan?: Array<{ id: string; status?: string }>;
@@ -509,9 +513,36 @@ export class SupervisorRuntime {
        * Too loose is worse than too strict: 「paused」 with no new instruction means the person
        * asked for a stop, and a supervisor dispatching into it is doing the thing they stopped.
        */
-      const lastHandoffAt = Math.max(0, ...(task.handoffs ?? []).map((h) => h.at ?? 0));
+      /**
+       * A slice hand-over is not a withdrawal of authority.
+       *
+       * The comparison used to read every hand-off (`directive.at > lastHandoffAt`), so a run
+       * authorised to finish the whole plan lost that authorisation the moment its first slice
+       * landed. Live on T-1: directive written 06:17:05 covering 1.1/2.1/3.1, slice handed off
+       * 06:18:04, dispatch of 2.1 refused at 06:18:08 with 「没有覆盖这次继续的授权」 — and the
+       * person was asked to confirm exactly what they had already said in one sentence.
+       *
+       * What ends an authorisation is a stop the person owns, and the record already names it:
+       *   - `needs_decision` / `asking` — a question is open; the answer (and a directive written
+       *     from it) is the new authority. `resumeDecisionFor` below enforces that part.
+       *   - `awaiting_release` — 「按你的话停了」: the instruction's own boundary was reached.
+       * `handoff` itself is 「this slice is done, the plan continues」 — the work it authorised is
+       * the work still being done, so it must not invalidate anything.
+       */
+      const stoppedByInstruction =
+        task.pauseReason === 'awaiting_release' ||
+        task.pauseReason === 'needs_decision' ||
+        task.pauseReason === 'asking';
+      const lastStopAt = Math.max(
+        0,
+        ...(task.handoffs ?? [])
+          .filter((handoff) => handoff.outcome === 'delivered')
+          .map((handoff) => handoff.at ?? 0),
+      );
       const directiveAt = task.spec?.directive?.at ?? 0;
-      const authorised = directiveAt > lastHandoffAt;
+      const currentForStop =
+        !stoppedByInstruction || directiveAt > (task.lifecycle?.lastPausedAt ?? 0);
+      const authorised = directiveAt > lastStopAt && currentForStop;
       if (!authorised) {
         throw new DispatchRefused(
           `${task.id} 现在是暂停状态，而且没有覆盖这次继续的授权。` +

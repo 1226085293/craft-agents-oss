@@ -106,7 +106,7 @@ import { startPageRefreshScheduler } from '../pages/page-refresh-scheduler.ts'
 import { migrateAutomationCronTasks } from '../tasks/automation-migration.ts'
 import { buildJudgePrompt, parseJudgeVerdict } from '../tasks/task-judge.ts'
 import { SupervisorRuntime } from '../routing/supervisor-runtime.ts'
-import { resumeDecisionFor, formatSupervisorMessage } from '@craft-agent/shared/tasks'
+import { completedClaimRefusal, resumeDecisionFor, formatSupervisorMessage } from '@craft-agent/shared/tasks'
 import { buildAgentToolBindings } from './agent-tools-bindings.ts'
 import { unclaimedRelayedTaskRefusal } from './relayed-task-guard.ts'
 import {
@@ -6091,6 +6091,24 @@ export class SessionManager implements ISessionManager {
             const tasks = this.getTasks(managed.workspace.id)
             const named = payload.taskId?.trim()
             const targetId = named || this.pickOpenQuestionTask(managed)
+            /**
+             * `completed` is a claim about the plan, so the plan gets to answer it.
+             *
+             * Observed live: six seconds after a task was created — plan written, first step
+             * queued — the user lane sent `kind: completed` 「任务 T-1「分工验证」已建，3 条大纲及
+             * 各自负责人已写入，系统正在分析范围并派活」. The person reads 「completed」 as 「done」
+             * and gets a message for something that had just started.
+             *
+             * `applyTransition` already refuses to store that claim while steps are open, but this
+             * path never writes a status — it only sends words, so the record guard never runs.
+             * The rule itself lives in `completedClaimRefusal`, beside the plan it reads, so the
+             * sentence the person receives and the refusal the file would give are one predicate.
+             */
+            const claimsDone = payload.entries.some((entry) => entry.kind === 'completed')
+            if (claimsDone) {
+              const refusal = completedClaimRefusal(targetId ? (tasks.get(targetId) ?? undefined) : undefined)
+              if (refusal) throw new Error(refusal)
+            }
             const hasDecision = payload.entries.some((entry) => entry.kind === 'decision')
             if (targetId && hasDecision) {
               const task = tasks.get(targetId)
@@ -8815,6 +8833,14 @@ ${request.prompt}`;
            * forgets every session except the most recent one.
            */
           sessionIds: task.sessionIds ?? [],
+          /**
+           * The pause the dispatch gate reads: `awaiting_release` means the person's own
+           * boundary was reached, and `lastPausedAt` is when that pause began. Without these two
+           * the gate cannot tell 「the instruction ended」 from 「a slice was handed over」, and a
+           * task authorised to finish the plan asked for confirmation after every section.
+           */
+          pauseReason: task.pauseReason ?? undefined,
+          lifecycle: { lastPausedAt: task.lifecycle?.lastPausedAt },
           /**
            * The run lock travels with the lookup so `dispatch` can refuse a second run in
            * the same turn instead of queueing a spawn that can only be refused at the

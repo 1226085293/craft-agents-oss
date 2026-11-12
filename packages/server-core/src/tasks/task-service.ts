@@ -1365,6 +1365,10 @@ export class TaskService {
    * `process_lost` is exempt: it says 「the process that was running this is gone」, which is an
    * event, not a condition, and the record no longer carries the evidence once the lock is released.
    * `awaiting_release` is exempt for the same reason — a person declared it, the record cannot.
+   * Nothing in this service writes it any more: it used to be written by every accepted hand-off
+   * (`sliceDeliveredButPlanOpen`), which made the exemption protect a stop no person declared.
+   * It stays here so tasks recorded before that fix keep their label instead of silently turning
+   * into `awaiting_dispatch` on the next write.
    *
    * The label comes from `resumeRefusal`, which is also what the start gate asks, so what the card
    * shows and what a refusal says can no longer be two different answers.
@@ -1894,59 +1898,38 @@ export class TaskService {
           deadlineAt: now + DECISION_TIMEOUT_MS,
         },
       };
-    } else if (accepted && handoff.outcome === 'handoff' && this.sliceDeliveredButPlanOpen(next)) {
+    } else if (accepted && handoff.outcome === 'handoff' && openSteps(next.spec?.plan ?? []).length > 0) {
       /**
-       * Ask once, not once per hand-off.
+       * A delivered slice with the plan still open is not a stop by the person.
        *
-       * The branch fires on every accepted hand-off, so a task that was already parked
-       * on an unanswered decision produced another identical decision the next time the
-       * worker reported — and the supervisor relayed each one. A real run asked the
-       * same A/B question three times. An outstanding decision is the whole point: it
-       * is already waiting, so there is nothing new to say.
+       * This branch used to park the task as `paused / awaiting_release`, on the reading that
+       * 「the authorised slice is delivered and the rest is nobody's call」. It cannot know that:
+       * the only test was `openSteps(plan).length > 0`, so *every* hand-off of a multi-step plan
+       * parked the task, and every such pause claimed 「按你的话停了」 about an instruction that
+       * said the opposite (「每节完成交接后继续下一节，全部完成即结束」).
        *
-       * Still checked here, and now it guards something narrower: a question that is genuinely
-       * open stays where it is. Overwriting that pause with 「stopped on instruction」 would leave
-       * an open decision behind a pause reason that draws no card — the question would be
-       * unanswerable from the screen that was asking it.
+       * Live cost, twice in one day: T-1 handed off 1.1, the supervisor dispatched 2.1, and the
+       * dispatch was refused — 「T-1 现在是暂停状态，而且没有覆盖这次继续的授权」 — because the
+       * pause it had just written looked like the person's decision. The supervisor then did the
+       * only thing left and asked the user whether to continue, on a task that was never stuck.
+       * The person's own words were already 「继续下一节」.
+       *
+       * `deriveGateReason` keeps `awaiting_release` untouched for the documented reason — 「a person
+       * declared it, the record cannot disprove it」 — which only holds if a person is the one who
+       * declares it. A system that writes it on its own makes that exemption a lie, and every
+       * ordinary hand-off inherits it.
+       *
+       * What the record actually says here is 「the slice landed, the plan is open, nobody took the
+       * next leg」 — which is a state this codebase already has a name for, derived rather than
+       * stored: `awaiting_dispatch`. Leaving the transition out is enough; `classifyPauseReason`
+       * derives it on the next save, and the watchdog already skips that state because the next
+       * move there belongs to the supervisor, not to a person.
        */
-      const outstanding = next.decision && !next.decision.resolvedAt
-      if (outstanding) {
-        // Nothing to add: the task stays paused on the question it already asked.
-      } else {
-      /**
-       * The authorised slice is delivered and the rest is nobody's call.
-       *
-       * Observed on a real run: the user said 「只做 1.1，完成就停下，不要碰 1.2 和 2」,
-       * the worker did exactly that, its hand-off passed — and the task then sat on
-       * 进行中 forever. Nothing was wrong with the supervisor: it stopped as instructed
-       * and correctly declined to report, because none of the three reasons to interrupt
-       * applied. The gap was that this state existed at all and had no name. A task that
-       * will not move again is not "running"; it is waiting for a person to release it.
-       *
-       * Not treated as failure: nothing went wrong. Not treated as completion: the plan is
-       * not finished. Paused, with the reason saying exactly that.
-       *
-       * This used to pause on `needs_decision` and write a decision record with the label
-       * 「这一段做完了，等你决定」 but no question — because the question was left for the
-       * supervisor to word. That made one value mean two things, and the contradiction was
-       * visible on a live run: the supervisor reported 「本轮授权范围完成、任务已停」, the board
-       * said 「等你决定」, and the watchdog chased the supervisor for the question it had not
-       * written. The supervisor obeyed and asked 「第 2 步收尾怎么走」 — a question the person had
-       * already answered with 「做完 1.2 就暂停」.
-       *
-       * The instruction covered what to do next, so there is no question. Pausing on
-       * `awaiting_release` and writing no decision is what makes the three surfaces agree:
-       * the supervisor reports a stop, the board shows a stop, and the watchdog stays quiet
-       * because nobody is owed an answer.
-       */
-      next = applyTransition(next, 'paused', { now, pauseReason: 'awaiting_release' }).task;
-      const remaining = openSteps(next.spec?.plan);
       appendJournal(this.root, id, {
         type: 'slice_delivered',
         at: now,
-        data: { remaining: remaining.map((step) => step.id) },
+        data: { remaining: openSteps(next.spec?.plan ?? []).map((step) => step.id) },
       });
-      }
     }
 
     /**
@@ -2070,8 +2053,20 @@ export class TaskService {
        */
       const pending = next.decision && !next.decision.resolvedAt ? next.decision : undefined
       const openSteps = (next.spec?.plan ?? []).filter((step) => step.status !== 'done')
+      /**
+       * The next move is a dispatch, unless the person's own words say otherwise.
+       *
+       * This used to read 「请决定：dispatch 派发该步 / 询问用户 / 结束任务」, which offers
+       * 「ask the person」 as a peer of the obvious next action. Combined with the pause that
+       * used to be written beside it (`awaiting_release`, 「按你的话停了」), the supervisor read the
+       * two together as 「the run stopped and the person must release it」 and asked — on tasks
+       * whose instruction already said 「每节完成交接后继续下一节」. Two live runs, same question.
+       *
+       * Phrased as the default instead: continue, and interrupt only for the two reasons that are
+       * actually the person's — his own stated boundary, or a decision only he can make.
+       */
       const nextHint = suggestedStep
-        ? `。计划还剩 ${openSteps.length} 步，下一步 ${suggestedStep.step.id}（${suggestedStep.agent ?? '未指定 owner'}），请决定：dispatch 派发该步 / 询问用户 / 结束任务。`
+        ? `。计划还剩 ${openSteps.length} 步，下一步 ${suggestedStep.step.id}（${suggestedStep.agent ?? '未指定 owner'}）——除非用户的话把边界划在这里，否则直接 dispatch 派发它；只有用户的边界已到、或必须他拍板时才问他。`
         : ''
       this.deps.wakeSupervisor(
         next.supervisorSessionId,
@@ -2130,11 +2125,6 @@ export class TaskService {
    * an outline's stored status lags its sub-steps, so the flat scan counted a finished section as
    * outstanding and asked the person about work that was already done.
    */
-  private sliceDeliveredButPlanOpen(task: Task): boolean {
-    if (!task.spec?.directive?.text) return false;
-    return openSteps(task.spec.plan).length > 0;
-  }
-
   /** Silence the session that was working, after the task stops expecting it. */
   private stopWorker(task: Task): void {
     const sessionId = task.currentSessionId;

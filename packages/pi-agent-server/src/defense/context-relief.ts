@@ -23,7 +23,7 @@
  * the turn-log archiver; this module only reads those files.
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   estimateTokens as sdkEstimateTokens,
@@ -65,8 +65,10 @@ export interface ContextReliefDeps {
   /**
    * Compaction boundary computed during `session_before_compact` and written
    * to disk on `session_compact` (i.e. only after the compaction actually
-   * succeeded). Both relief and LLM paths set this; the value is the max
-   * turnIndex whose content is now fully covered by a checkpoint/summary.
+   * succeeded). Both relief and LLM paths set this; the value is the START
+   * TIME (epoch ms) of the newest turn whose content is now fully covered by
+   * a checkpoint/summary — see COMPACTION_BOUNDARY_FILE for why it is a time
+   * and not a turn index.
    */
   pendingCompactionBoundary?: number;
 }
@@ -89,12 +91,25 @@ const TURN_PREFIX_MAX_CHARS = 1_500;
 
 /**
  * Sidecar that records how far relief/LLM compaction has already consumed the
- * turn archive: the max 1-based turnIndex already folded into a checkpoint.
- * The next compaction only indexes turn files NEWER than this boundary, so no
- * char budget is needed — the boundary IS the budget (see buildReliefSummary).
- * Stored under {sessionPath}/meta/ next to the other compaction sidecars.
+ * turn archive. The next compaction only indexes turn files NEWER than this
+ * boundary, so no char budget is needed — the boundary IS the budget (see
+ * buildReliefSummary). Stored under {sessionPath}/meta/.
+ *
+ * The boundary is a TIME WATERMARK (epoch ms of the newest fully-consumed
+ * turn's start), NOT a turn index. Turn file names carry a window-relative
+ * ordinal — `buildTurnLogs` assigns `turns.length + 1` to turns extracted from
+ * the ROTATING progress.jsonl window (progress-journal.ts trims to 1024
+ * records / 1MB), so the same index names several different turns across the
+ * archive and the sequence WRAPS BACK to 1 whenever the ledger rotates. A
+ * monotonic integer watermark compared with `>` then never matches again: once
+ * it reaches the highest index the window can produce, relief sees zero fresh
+ * turns forever and every compaction silently falls back to the LLM path
+ * (2026-11-12 261110-brave-titanium: 326 turn files, 12 consecutive LLM
+ * compactions, log `no turn files newer than boundary 30`). The compact ISO
+ * prefix of the file name is real turn-start time and is globally ordered, so
+ * a millisecond watermark is both unambiguous and monotonic.
  */
-const COMPACTION_BOUNDARY_VERSION = 1;
+const COMPACTION_BOUNDARY_VERSION = 2;
 const COMPACTION_BOUNDARY_FILE = 'context-relief-boundary.json';
 
 export interface TurnFileRef {
@@ -151,38 +166,101 @@ function toMs(ts: string | number | undefined): number | null {
   return null;
 }
 
+function mtimeOf(path: string): number {
+  try { return statSync(path).mtimeMs; } catch { return 0; }
+}
+
 /**
- * Load the persisted compaction boundary: the max turnIndex already folded
- * into a checkpoint (relief or LLM). Returns 0 when absent (fresh session).
+ * One entry per TURN START (newest written copy wins).
+ *
+ * Historical archives can hold several copies of the SAME turn: the archiver
+ * used to key idempotency on the full file name, whose trailing index is a
+ * recycled ordinal (see turn-log.ts), so every time the ledger window shifted
+ * the turn was written again under a new index (261110-brave-titanium: 169
+ * files for 64 real turns). Without this, each copy becomes its own checkpoint
+ * entry — the same turn indexed 2-3 times, wasting the budget and reading as
+ * repeated work to a resumed agent. The newest copy is the one rebuilt against
+ * the most complete ledger.
+ */
+function dedupeByTurnStart(turns: TurnFileRef[]): TurnFileRef[] {
+  const byStart = new Map<number, TurnFileRef>();
+  for (const turn of turns) {
+    const startMs = parseTurnFileStartMs(turn.fileName);
+    if (startMs == null) continue;
+    const existing = byStart.get(startMs);
+    if (!existing || mtimeOf(turn.path) >= mtimeOf(existing.path)) byStart.set(startMs, turn);
+  }
+  return [...byStart.values()].sort((a, b) => a.fileName.localeCompare(b.fileName));
+}
+
+/**
+ * Load the persisted compaction boundary: the turn-start time (epoch ms) of
+ * the newest turn already folded into a checkpoint (relief or LLM). Returns 0
+ * when absent (fresh session).
+ *
+ * v1 sidecars stored `compactedThroughTurnIndex` (a window-relative ordinal,
+ * see COMPACTION_BOUNDARY_FILE). They are migrated on read, in memory only —
+ * the v2 value is written by the next successful compaction, so a failed
+ * compaction can never silently rewrite the sidecar.
  */
 export function loadCompactionBoundary(sessionPath: string | undefined): number {
   if (!sessionPath) return 0;
   try {
     const raw = readFileSync(join(sessionPath, 'meta', COMPACTION_BOUNDARY_FILE), 'utf-8');
-    const parsed = JSON.parse(raw) as { compactedThroughTurnIndex?: unknown };
-    const n = Number(parsed?.compactedThroughTurnIndex);
-    return Number.isInteger(n) && n > 0 ? n : 0;
+    const parsed = JSON.parse(raw) as {
+      compactedThroughTurnStartMs?: unknown;
+      compactedThroughTurnIndex?: unknown;
+    };
+    const startMs = Number(parsed?.compactedThroughTurnStartMs);
+    if (Number.isFinite(startMs) && startMs > 0) return startMs;
+    const legacyIndex = Number(parsed?.compactedThroughTurnIndex);
+    if (Number.isInteger(legacyIndex) && legacyIndex > 0) {
+      return migrateV1Boundary(sessionPath, legacyIndex);
+    }
+    return 0;
   } catch {
     return 0;
   }
 }
 
 /**
+ * v1 → v2 migration. v1 stored "the max turnIndex folded into the checkpoint",
+ * an integer that a wrapped archive cannot disambiguate (the same index names
+ * several turns). The closest lower bound that keeps the checkpoint useful is
+ * the NEWEST turn file carrying that index: every turn older than it is at
+ * most as new as the boundary, so at worst a few turns get re-indexed once
+ * (harmless — the summary is bounded and the ceiling check still applies).
+ * Returns 0 when the index matches no file, i.e. re-index everything once.
+ */
+function migrateV1Boundary(sessionPath: string, turnIndex: number): number {
+  let newest = 0;
+  for (const turn of listTurnFiles(sessionPath)) {
+    if (parseTurnFileIndex(turn.fileName) !== turnIndex) continue;
+    const startMs = parseTurnFileStartMs(turn.fileName);
+    if (startMs != null && startMs > newest) newest = startMs;
+  }
+  return newest;
+}
+
+/**
  * Persist the compaction boundary. Best-effort: a failed write must never
  * fail the compaction (the worst case is a redundant re-index next time).
+ *
+ * @param turnStartMs  Turn-start time (epoch ms) of the newest fully-consumed
+ *                     turn — see COMPACTION_BOUNDARY_FILE.
  */
-export function saveCompactionBoundary(sessionPath: string | undefined, turnIndex: number): void {
-  if (!sessionPath || !Number.isInteger(turnIndex) || turnIndex <= 0) return;
+export function saveCompactionBoundary(sessionPath: string | undefined, turnStartMs: number): void {
+  if (!sessionPath || !Number.isInteger(turnStartMs) || turnStartMs <= 0) return;
   try {
     // Monotonic: the boundary only advances. A backwards value (e.g. an LLM
     // cut point that landed before an already-consumed turn) must never shrink
     // it — shrinking would re-open already-checkpointed turns to re-indexing.
     const current = loadCompactionBoundary(sessionPath);
-    if (turnIndex <= current) return;
+    if (turnStartMs <= current) return;
     mkdirSync(join(sessionPath, 'meta'), { recursive: true });
     writeFileSync(
       join(sessionPath, 'meta', COMPACTION_BOUNDARY_FILE),
-      JSON.stringify({ version: COMPACTION_BOUNDARY_VERSION, compactedThroughTurnIndex: turnIndex }),
+      JSON.stringify({ version: COMPACTION_BOUNDARY_VERSION, compactedThroughTurnStartMs: turnStartMs }),
       'utf-8',
     );
   } catch {
@@ -191,11 +269,11 @@ export function saveCompactionBoundary(sessionPath: string | undefined, turnInde
 }
 
 /**
- * LLM-path boundary: the max turnIndex whose turn is FULLY consumed by the
- * SDK's own summarization. `messagesToSummarize` covers everything before the
- * cut point, but a split turn only contributes its prefix — its suffix stays
- * in the kept region, so it must NOT be marked fully consumed (its turn file
- * still needs a pointer on the next relief pass).
+ * LLM-path boundary: the turn-start time (epoch ms) of the newest turn FULLY
+ * consumed by the SDK's own summarization. `messagesToSummarize` covers
+ * everything before the cut point, but a split turn only contributes its
+ * prefix — its suffix stays in the kept region, so it must NOT be marked fully
+ * consumed (its turn file still needs a pointer on the next relief pass).
  */
 function computeLlmBoundary(
   branchEntries: SessionEntry[],
@@ -226,11 +304,14 @@ function computeLlmBoundary(
   }
   if (cutTurnStartMs == null) return 0;
 
+  // Only turns that STARTED strictly before the cut turn are fully consumed;
+  // the cut turn's own file stays fresh (split turn = prefix only) and so does
+  // everything newer. Time is the ordered key here — turn indexes repeat.
   let boundary = 0;
   for (const t of turns) {
     const startMs = parseTurnFileStartMs(t.fileName);
     if (startMs != null && startMs < cutTurnStartMs) {
-      boundary = Math.max(boundary, parseTurnFileIndex(t.fileName));
+      boundary = Math.max(boundary, startMs);
     }
   }
   return boundary;
@@ -579,16 +660,25 @@ export function handleSessionBeforeCompact(
   if (turns.length === 0) return undefined;
 
   // Only index turn files NEWER than the last compaction boundary. The
-  // boundary is the checkpoint's budget: turns before it are already folded
-  // into a prior checkpoint, so re-indexing them is a no-op (and would waste
-  // the space the still-unconsumed turns need). No char budget — the boundary
-  // (not SUMMARY_MAX_CHARS) bounds the checkpoint (see buildReliefSummary).
-  const boundary = loadCompactionBoundary(deps.sessionPath);
-  const freshTurns = turns.filter((t) => parseTurnFileIndex(t.fileName) > boundary);
+  // boundary is a turn-START time watermark (see COMPACTION_BOUNDARY_FILE) and
+  // doubles as the checkpoint's budget: turns at or before it are already
+  // folded into a prior checkpoint, so re-indexing them is a no-op (and would
+  // waste the space the still-unconsumed turns need). It must never be compared
+  // against the file name's trailing index — that ordinal repeats. No char
+  // budget either — the boundary (not SUMMARY_MAX_CHARS) bounds the checkpoint
+  // (see buildReliefSummary).
+  const boundaryMs = loadCompactionBoundary(deps.sessionPath);
+  const freshTurns = dedupeByTurnStart(turns.filter((t) => {
+    const startMs = parseTurnFileStartMs(t.fileName);
+    // Unparseable names are never relief material: they cannot be ordered
+    // against the boundary, so indexing them would repeat on every pass.
+    return startMs != null && startMs > boundaryMs;
+  }));
   if (freshTurns.length === 0) {
     // Everything on disk is already checkpointed — nothing new to index.
     // Hand to the LLM path (it can consolidate the existing checkpoints).
-    debug(deps, `no turn files newer than boundary ${boundary} — handing to the LLM path`);
+    const boundaryLabel = boundaryMs > 0 ? new Date(boundaryMs).toISOString() : '(none)';
+    debug(deps, `no turn files newer than boundary ${boundaryLabel} — handing to the LLM path`);
     return undefined;
   }
 
@@ -654,7 +744,7 @@ export function handleSessionBeforeCompact(
     // is simply the newest indexed turn. Written to disk only AFTER the
     // compaction succeeds (on `session_compact`) — never here.
     deps.pendingCompactionBoundary = freshTurns.reduce(
-      (max, t) => Math.max(max, parseTurnFileIndex(t.fileName)),
+      (max, t) => Math.max(max, parseTurnFileStartMs(t.fileName) ?? 0),
       0,
     );
     // Relief replaces everything before the cut point with the checkpoint, so
@@ -710,7 +800,7 @@ export function handleSessionCompact(_event: SessionCompactEvent, deps: ContextR
   const boundary = deps.pendingCompactionBoundary;
   if (boundary != null && boundary > 0) {
     saveCompactionBoundary(deps.sessionPath, boundary);
-    debug(deps, `compaction boundary advanced to turn ${boundary}`);
+    debug(deps, `compaction boundary advanced to ${new Date(boundary).toISOString()}`);
   }
   deps.pendingCompactionBoundary = undefined;
 }

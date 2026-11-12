@@ -130,6 +130,8 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
         scope?: string
         /** The supervisor's reading of the person's reply; see `TaskSpec.directive`. */
         directive?: string
+        /** Short board label; the tool can write it, so the board must be able to as well. */
+        name?: string
       },
     ) => {
       const manager = deps.sessionManager as unknown as {
@@ -145,6 +147,7 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
         ...(options?.error ? { error: options.error } : {}),
         ...(options?.scope?.trim() ? { scope: options.scope.trim() } : {}),
         ...(options?.directive?.trim() ? { directive: options.directive.trim() } : {}),
+        ...(options?.name?.trim() ? { name: options.name.trim() } : {}),
       })
       // Stopping a task has to stop the work: a label that changes while the worker keeps
       // writing is the same lie in the other direction.

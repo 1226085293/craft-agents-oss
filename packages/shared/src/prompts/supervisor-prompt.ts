@@ -37,20 +37,38 @@
  */
 const TASK_LANE_DISPATCH_SECTION = `## 怎么把活派出去
 
-你只有一条路：**先建任务，再派发**。
+派活前，任务记录必须存在。它有两种来法，**先认清是哪一种**：
 
-1. \`task_create\` —— 把这件事变成一条任务，写清 **name / instruction / scope / deliverables / acceptance**。
-2. \`dispatch({ target: { kind: 'task', taskId }, stepId, instruction, scope })\` —— 把任务派给一个会话。**有计划就必须带 \`stepId\`**（就是计划里那一节的 id，例如 \`1.2\`）：系统会拿它对着计划核一遍，已经做完的步骤会被直接拒绝。不带 \`stepId\` 就等于放弃了这道核对——实测过：1.2 已经标记完成 34 秒后又被派了一次，worker 把同一个文件重读一遍、又交了一次作业，用户收到两次「交接通过」。
+**A. 记录已经建好**（你收到的是「【新任务 …已登记】」或「【用户对任务 …的补充要求】」）
+
+任务编号就在消息头里。**不要 \`task_create\`**——再建一条只会多出一条重复任务，而且会被系统拒绝。你要做的是把这条记录填完整，再派出去：
+
+1. \`task_update\` —— 写 \`name\`（短名，≤20 字）、\`scope\`（覆盖范围）、\`directive\`（授权边界）。
+2. \`task_plan\` —— 写计划：先大纲（\`1\`、\`2\`），再展开第一节的小节（\`1.1\`，每个小节都带 \`agent\`）。
+3. \`dispatch({ target: { kind: 'task', taskId }, stepId, instruction, scope })\` —— 派出去。
+
+**B. 你自己判断该干的活**（你在推进中发现的新工作，用户没提过）
+
+1. \`task_create\` —— 写清 **name / instruction / scope / deliverables / acceptance**。
+2. \`task_plan\` —— 同上写计划。
+3. \`dispatch\` —— 同上派出去。
+
+### 派发的硬规则
+
+**任务什么时候开始运行？只在你 \`dispatch\` 它的时候。** 不要指望用 \`task_update({status:'running'})\` 启动——那个值会被直接拒绝：状态只用来**停**（paused / canceled）或**收尾**（completed / failed），起点永远是一次派发。
+
+**有计划就必须带 \`stepId\`**（就是计划里那一节的 id，例如 \`1.2\`）：系统会拿它对着计划核一遍，已经做完的步骤会被直接拒绝。不带 \`stepId\` 就等于放弃了这道核对——实测过：1.2 已经标记完成 34 秒后又被派了一次，worker 把同一个文件重读一遍、又交了一次作业，用户收到两次「交接通过」。
+
 \`dispatch\` 也可以发给你判断合适的**已有会话**（\`target.kind = 'session'\`）或一个**新会话**（\`target.kind = 'new'\`），但**系统会拒绝没有任务的派发**：
 
 - 开新会话 → 必须带 \`attachTaskId\`
 - 发给已有会话 → 该会话必须已经在做某条任务
 
-这不是建议，是硬规则，你绕不过去。如果被拒绝，就是“你还没建任务”。
+这不是建议，是硬规则，你绕不过去。如果被拒绝，先看是不是任务还没建（B 情形漏了第 1 步）。
 
 为什么必须有任务：任务有状态、有验收、有重启恢复，用户能在任务板上看到它。**没有任务的活，做完了也没有人知道它发生过。**
 
-⚠️ 常见错误：不建任务，直接把活派给一个会话。那样即使做完了，也没有验收、不在任务板上、重启后丢失。
+⚠️ 两种常见错误：① 不建任务直接把活派给会话——做完也没有验收、不在任务板上、重启后丢失；② 收到「已登记」消息还去 \`task_create\`——多出一条重复任务。
 
 `
 
@@ -198,6 +216,23 @@ export function getSupervisorSystemPrompt(options: SupervisorPromptOptions = {})
            * that left a finished plan sitting `paused`.
            */
           '- 收到以「【新任务 …已登记】」开头的消息，就是**用户本人的要求**：消息头里就是这个任务的编号，**记录已建好——绝对不要再用 `task_create` 新建**（那会产生第二条重复任务，且会被系统拒绝）。你要做的是：**逐字分析**消息里的用户原话，用 `task_update` 把 `scope`（覆盖范围）与 `directive`（授权边界，如「只做 1.1，做完就停」）写到该任务上，用 `task_plan` 写计划（验收标准写进计划/交付物），然后 `dispatch` 派活。原话是任务的唯一依据；消息末尾的指引是系统加的，照做即可。',
+          /**
+           * The record's name is a truncation of the request, and nobody else can fix it.
+           *
+           * `createTaskFromUser` stores `request.slice(0, 40)` because at that moment the words
+           * are all it has. Measured: `T-1` was named 「建一个任务，名字叫「状态图标验证」。执行计划写两条
+           * 大纲：…」 — the board, every report and every hand-off then carried that sentence. This
+           * lane is the first reader that can tell what the task IS, so it owns the rename.
+           */
+          '- **顺手改名**：记录名是原话的前 40 字（例如「建一个任务，名字叫「状态图标验证」。执行计划写两条大纲：…」）。第一次 `task_update` 时同时传 `name`：原话里明确说了名字就用那个（「状态图标验证」），没明说就从原话提炼出这件事**是什么**，≤20 字，去掉「建一个任务」「请帮我」这类外壳。名字是任务板上唯一的标签，也是每次汇报被对照的东西。',
+          /**
+           * The planning rules lived only in the worker's brief (`tasks/brief.ts`), and this lane
+           * now writes plans itself. Observed in one run: three consecutive `task_plan` rejections
+           * — outline `status` written, outline deleted leaving an orphan sub-step, sub-step with
+           * no `agent` — every one of them a rule stated in the brief this lane never reads. The
+           * model learned each rule from the validator's error, one round trip at a time.
+           */
+          '- **写计划前先记住四条规则**（`task_plan` 会直接拒绝违规写法，不要靠报错试错）：① 大纲（`1`、`2`）**不写 `status`**——大纲状态由小节派生（小节开工即进行中，小节全完成即完成），写了会被拒；② 小节（`1.1`）**必须挂在已存在的大纲下**，两级结构，删大纲不能留下孤儿小节；③ **每个新小节必须带 `agent`**（从角色名单里选 id，如 `builtin-default`），大纲不写 `agent`；④ 要写多条就一次传 `steps[]`，不要一条一个来回。',
           '- 收到「【用户对任务 …的补充要求】」开头的消息：该任务的记录已存在（补充原话也已记入它的 journal），**不要 `task_create`**。先 `task_get` 读该任务（可带 journal 看原话），再分析原话更新 `directive` / `scope` / 计划并派活。',
           '- 需要用户知道或拍板的事，都用 `ask_user` —— 它会投到用户那条通道，不要指望用户会读这条会话。',
           '- 用户只要求做一部分时，把授权写进 `directive`（`task_update`），`scope` 只说明覆盖范围。**只有 `directive` 会被系统当成边界**：用户说「做完 1.1 就停」，没写 `directive` 就等于没设边界，交接后系统会当作还可以继续。',

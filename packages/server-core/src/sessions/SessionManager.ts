@@ -52,6 +52,14 @@ export interface TaskUpdatePatch {
   error?: string;
   scope?: string;
   /**
+   * The task's short name, as the lane that read the person's words understood it.
+   *
+   * A relayed task starts life named after the first 40 characters of the request — measured:
+   * `T-1` was called 「建一个任务，名字叫「状态图标验证」。执行计划写两条大纲：…」. The name is what the
+   * board shows and what every report is read against, so the reader has to be able to fix it.
+   */
+  name?: string;
+  /**
    * What the person's last reply means, as the supervisor understood it.
    *
    * One sentence, written by a model. Replaces `authorizedUpTo` / `authorizedSteps`, which tried
@@ -8320,6 +8328,9 @@ ${request.prompt}`;
     if (patch.directive?.trim()) {
       const service = this.getTasks(workspaceId)
       service.setDirective(identifier, patch.directive.trim())
+    }
+    if (patch.name?.trim()) {
+      this.getTasks(workspaceId).setName(identifier, patch.name.trim())
     }
     if (patch.acceptance?.length) {
       this.getTasks(workspaceId).setAcceptance(identifier, patch.acceptance)

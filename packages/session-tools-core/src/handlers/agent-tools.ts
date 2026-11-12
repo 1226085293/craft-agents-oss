@@ -396,6 +396,7 @@ export async function handleTaskUpdate(
     assigneeAgentId?: string;
     error?: string;
     scope?: string;
+    name?: string;
     directive?: string;
     agents?: string[];
     acceptance?: Array<{ id?: string; check: string; command?: string }>;
@@ -410,6 +411,7 @@ export async function handleTaskUpdate(
       assigneeAgentId: args.assigneeAgentId,
       error: args.error,
       ...(args.scope?.trim() ? { scope: args.scope.trim() } : {}),
+      ...(args.name?.trim() ? { name: args.name.trim() } : {}),
       ...(args.directive?.trim() ? { directive: args.directive.trim() } : {}),
       ...(args.acceptance?.length ? { acceptance: args.acceptance } : {}),
     });
@@ -424,6 +426,7 @@ export async function handleTaskUpdate(
     if (args.status) wrote.push(`状态 ${result.previousStatus} → ${result.status}`)
     if (args.directive?.trim()) wrote.push('授权指令')
     if (args.scope?.trim()) wrote.push('范围')
+    if (args.name?.trim()) wrote.push('任务名')
     if (args.pauseReason) wrote.push(`暂停原因 ${args.pauseReason}`)
     if (args.acceptance?.length) wrote.push('验收项')
     if (args.assigneeAgentId) wrote.push('执行 Agent')

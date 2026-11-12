@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { TaskService } from './task-service.ts';
+import { readJournal } from '@craft-agent/shared/tasks';
 
 const dirs: string[] = [];
 function workspace(): string {
@@ -475,6 +476,60 @@ describe('task scope', () => {
     svc.setScope(task.id, 'kept')
     svc.setScope(task.id, '   ')
     expect(svc.get(task.id)?.spec?.scope).toBe('kept')
+  })
+})
+
+/**
+ * A relayed task is named after the first 40 characters of the person's request, because at
+ * creation those words are all the system has: the record read 「建一个任务，名字叫「状态图标验证」。
+ * 执行计划写两条大纲：…」. The lane that reads the words knows what the task IS, and the name is
+ * the field every board row and every report is read against.
+ */
+describe('task name', () => {
+  it('replaces the truncation the record was created with', () => {
+    const root = workspace();
+    const { svc } = service(root);
+    const task = svc.create({
+      name: '建一个任务，名字叫「状态图标验证」。执行计划写两条大纲：…',
+      instruction: '状态图标验证',
+      supervisorSessionId: 'sess_sup',
+      toolCallId: 'call_name',
+    });
+    expect(svc.get(task.id)?.name).toContain('建一个任务');
+    svc.setName(task.id, '状态图标验证');
+    expect(svc.get(task.id)?.name).toBe('状态图标验证')
+  })
+
+  it('ignores a blank name instead of erasing the existing one', () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.setName(task.id, 'kept')
+    svc.setName(task.id, '   ')
+    expect(svc.get(task.id)?.name).toBe('kept')
+  })
+
+  it('keeps the previous name in the journal, because a silent rename is a lost trail', () => {
+    const root = workspace();
+    const { svc } = service(root);
+    const task = create(svc);
+    svc.setName(task.id, 'first')
+    svc.setName(task.id, 'second')
+    const renamed = readJournal(root, task.id).filter((entry) => entry.type === 'spec_updated')
+    expect(renamed.length).toBe(2)
+    expect(JSON.stringify(renamed[1]?.data)).toContain('first')
+    expect(JSON.stringify(renamed[1]?.data)).toContain('second')
+  })
+
+  it('does not touch the rest of the record', () => {
+    const { svc } = service(workspace());
+    const task = create(svc);
+    svc.setScope(task.id, 'scope kept')
+    svc.setDirective(task.id, '只做 1.1')
+    svc.setName(task.id, 'renamed')
+    const after = svc.get(task.id)
+    expect(after?.name).toBe('renamed')
+    expect(after?.spec?.scope).toBe('scope kept')
+    expect(after?.spec?.directive?.text).toBe('只做 1.1')
   })
 })
 

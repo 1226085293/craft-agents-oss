@@ -1502,6 +1502,34 @@ export class TaskService {
   }
 
   /**
+   * Rename a task.
+   *
+   * A relayed task is created from the person's words, so the only name available at creation
+   * is a truncation of the request — `T-1` was literally 「建一个任务，名字叫「状态图标验证」。
+   * 执行计划写两条大纲：…」. The lane that reads those words can see what the task IS; it needs
+   * a way to write that down. Nothing else may edit the name: it is the board's label and the
+   * one field a worker reports against.
+   */
+  setName(id: string, name: string | undefined): Task {
+    const task = this.require(id)
+    const trimmed = name?.trim()
+    if (!trimmed) return task
+    const next: Task = {
+      ...task,
+      name: trimmed.slice(0, 120),
+      updatedAt: this.now(),
+    }
+    if (next.name === task.name) return task
+    this.save(next)
+    appendJournal(this.root, id, {
+      type: 'spec_updated',
+      at: next.updatedAt,
+      data: { name: next.name, previousName: task.name },
+    })
+    return next
+  }
+
+  /**
    * Replace the outlines that have not started yet.
    *
    * The journal keeps the titles it replaced, because a plan that changes silently is

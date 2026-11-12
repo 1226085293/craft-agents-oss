@@ -71,14 +71,37 @@ describe('supervisor prompt', () => {
     expect(text).toContain('文件读写')
   })
 
-  it('tells it to create a task before dispatching', () => {
-    // It never created tasks; nothing had told it to. And the tool table no
-    // longer offers a way to create a session without one, so the prompt must
-    // describe the only path that exists.
+  it('describes both ways a task comes to exist, and never says to re-create a relayed one', () => {
+    // Two entrances exist and the prompt must not collapse them into one. The old text said
+    // 「先建任务，再派发」 unconditionally — read after a 「【新任务 …已登记】」 message it says the
+    // record does not exist yet, and the lane that believed it created a second task.
     const text = prompt()
     expect(text).toContain('task_create')
-    expect(text).toContain('先建任务，再派发')
+    expect(text).toContain('记录已经建好')
+    expect(text).toContain('不要')
     expect(text).toContain('验收')
+    // The unconditional instruction is the bug; it must not come back.
+    expect(text).not.toContain('先建任务，再派发')
+  })
+
+  it('says a task starts by dispatching, not by setting status running', () => {
+    // Observed: `task_update({status:'running'})` was refused, and the lane had been told by the
+    // tool description that "advance a task (running / ...)" was a legal move.
+    const text = prompt()
+    expect(text).toContain('dispatch')
+    expect(text).toMatch(/状态只用来\*\*停\*\*|只用来停/)
+  })
+
+  it('carries the renaming rule and the plan rules the lane now needs', () => {
+    const text = prompt()
+    // The record name is a truncation of the request; the lane that reads the words renames it.
+    expect(text).toContain('40 字')
+    expect(text).toContain('`name`')
+    // Plan rules that previously lived only in the worker brief (`tasks/brief.ts`), each one
+    // learned the hard way from a validator rejection in a real run.
+    expect(text).toContain('不写 `status`')
+    expect(text).toContain('必须挂在已存在的大纲下')
+    expect(text).toMatch(/必须带 `agent`/)
   })
 
   it('never mentions spawn_session', () => {

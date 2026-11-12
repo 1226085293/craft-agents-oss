@@ -431,6 +431,10 @@ export interface SessionToolContext {
         scope?: string;
         /** What the person's last reply means, in the supervisor's words. */
         directive?: string;
+        /** The task's short name, when the current one is a truncation of the request. */
+        name?: string;
+        /** Replace the acceptance list (see TaskUpdatePatch). */
+        acceptance?: Array<{ id?: string; check: string; command?: string }>;
       },
     ): Promise<{ status: string; previousStatus: string }>;
     handoff(

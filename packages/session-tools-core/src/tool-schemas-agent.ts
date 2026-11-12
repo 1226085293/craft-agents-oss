@@ -326,6 +326,13 @@ export const TaskUpdateSchema = z.object({
     .string()
     .optional()
     .describe('New scope sentence. Use when the user authorises work beyond the current boundary.'),
+  name: z
+    .string()
+    .max(120)
+    .optional()
+    .describe(
+      'Short name for the task (how it appears on the board). Use on first contact when the current name is a truncation of the person\'s request — e.g. 「建一个任务，名字叫「状态图标验证」。执行计划写两条…」 should be named 「状态图标验证」. Keep it under ~20 characters: what the task IS, not the words that asked for it.',
+    ),
   /**
    * What the person's last reply means, written by the model that read it.
    *
@@ -377,7 +384,7 @@ export const TaskPlanSchema = z.object({
     .string()
     .optional()
     .describe(
-      'Role id that owns this step. Only set one you were actually given a roster for — a worker cannot see the roster, and a guessed id is replaced by the section owner. Omitting it is safe: the section owner assigns a real role.',
+      'Role id that owns this step, copied from the role list in your instructions (e.g. "builtin-default"). REQUIRED on every new sub-step (a sub-step without an owner is refused — a unit of work with nobody doing it is not a unit of work). On an update that only changes status/title, omitted means "keep the current owner". Outlines have no owner: the sub-steps under them do.',
     ),
   note: z.string().optional().describe('What proves it is done, or why it is blocked.'),
   remove: z.boolean().optional().describe('Drop an unfinished step (a finished step stays as record).'),

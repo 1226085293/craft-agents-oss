@@ -530,7 +530,7 @@ export function applyPlanPatch(
           plan: steps,
           changed: false,
           error:
-            `小节 ${patch.id} 要写明谁做（agent）。可用的分工写在这份简报的「可用分工」一节里；` +
+            `小节 ${patch.id} 要写明谁做（agent）：从你收到的角色名单里选一个 id（例如 builtin-default）。` +
             '小节是派活的单位，没有负责人的小节等于没有派出去。',
         };
       }

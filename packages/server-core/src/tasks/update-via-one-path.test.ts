@@ -39,6 +39,9 @@ describe('the task board update', () => {
     const body = source.slice(at, source.indexOf('RPC_CHANNELS.taskboard.UPDATE_TRIGGER,', at))
     expect(body).toContain('directive')
     expect(body).toContain('scope')
+    // `name` was added to the tool so the lane that reads the person's words can replace the
+    // 40-character truncation the record was created with; the board has to keep pace.
+    expect(body).toContain('name')
   })
 
   it('reports the refusal reason the gate produced', () => {
